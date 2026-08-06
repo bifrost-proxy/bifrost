@@ -32,6 +32,10 @@ pub struct SearchArgs {
     pub max_scan: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_results: Option<usize>,
+    /// Internal bounded refresh scope used by the WebUI to re-evaluate only
+    /// records changed by realtime traffic pushes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_range: Option<TimeRange>,
     #[serde(default, skip_serializing_if = "SearchInclude::is_default")]
@@ -126,6 +130,8 @@ pub struct SearchFilters {
     #[serde(default)]
     pub client_apps: Vec<String>,
     #[serde(default)]
+    pub account_names: Vec<String>,
+    #[serde(default)]
     pub domains: Vec<String>,
 }
 
@@ -138,6 +144,7 @@ impl SearchFilters {
             || !self.conditions.is_empty()
             || !self.client_ips.is_empty()
             || !self.client_apps.is_empty()
+            || !self.account_names.is_empty()
             || !self.domains.is_empty()
     }
 }

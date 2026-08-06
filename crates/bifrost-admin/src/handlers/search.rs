@@ -9,7 +9,7 @@ use tracing::warn;
 
 use super::{error_response, json_response, method_not_allowed, BoxBody};
 use crate::query_service::AdminQueryService;
-use crate::search::{SearchProgress, SearchRequest, SearchedRange};
+use crate::search::{SearchProgress, SearchRequest, SearchedRange, MAX_TARGET_RECORD_IDS};
 use crate::state::SharedAdminState;
 
 const SEARCH_HANDLER_TIMEOUT: Duration = Duration::from_secs(310);
@@ -57,6 +57,10 @@ async fn execute_search(req: Request<Incoming>, state: SharedAdminState) -> Resp
             );
         }
     };
+
+    if let Some(response) = validate_target_record_ids(&search_request) {
+        return response;
+    }
 
     if search_request.keyword.trim().is_empty() && !search_request.filters.has_constraints() {
         return error_response(
@@ -135,6 +139,10 @@ async fn execute_search_stream(
             );
         }
     };
+
+    if let Some(response) = validate_target_record_ids(&search_request) {
+        return response;
+    }
 
     if search_request.keyword.trim().is_empty() && !search_request.filters.has_constraints() {
         return error_response(
@@ -288,12 +296,14 @@ fn command_search_args_from_request(request: &SearchRequest) -> SearchArgs {
                 .collect(),
             client_ips: request.filters.client_ips.clone(),
             client_apps: request.filters.client_apps.clone(),
+            account_names: request.filters.account_names.clone(),
             domains: request.filters.domains.clone(),
         },
         cursor: request.cursor,
         limit: request.limit,
         max_scan: request.max_scan,
         max_results: request.max_results,
+        record_ids: request.record_ids.clone(),
         time_range: request
             .time_range
             .as_ref()
@@ -308,5 +318,85 @@ fn command_search_args_from_request(request: &SearchRequest) -> SearchArgs {
             response_headers: request.include.response_headers,
             max_body_bytes: request.include.max_body_bytes,
         },
+    }
+}
+
+fn validate_target_record_ids(request: &SearchRequest) -> Option<Response<BoxBody>> {
+    if request.record_ids.len() > MAX_TARGET_RECORD_IDS {
+        return Some(error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("record_ids cannot contain more than {MAX_TARGET_RECORD_IDS} entries"),
+        ));
+    }
+
+    if request
+        .record_ids
+        .iter()
+        .any(|id| id.is_empty() || id.len() > 128)
+    {
+        return Some(error_response(
+            StatusCode::BAD_REQUEST,
+            "record_ids must contain non-empty IDs no longer than 128 bytes",
+        ));
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_record_ids_are_bounded_and_validated() {
+        let too_many = SearchRequest {
+            keyword: "marker".to_string(),
+            record_ids: (0..=MAX_TARGET_RECORD_IDS)
+                .map(|index| format!("id-{index}"))
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_target_record_ids(&too_many)
+                .expect("too many IDs must fail")
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let invalid = SearchRequest {
+            keyword: "marker".to_string(),
+            record_ids: vec![String::new()],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_target_record_ids(&invalid)
+                .expect("empty ID must fail")
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let valid = SearchRequest {
+            keyword: "marker".to_string(),
+            record_ids: vec!["id-a".to_string(), "id-b".to_string()],
+            ..Default::default()
+        };
+        assert!(validate_target_record_ids(&valid).is_none());
+    }
+
+    #[test]
+    fn web_search_conversion_preserves_account_names_and_record_ids() {
+        let request = SearchRequest {
+            keyword: "marker".to_string(),
+            filters: crate::search::SearchFilters {
+                account_names: vec!["alice".to_string()],
+                ..Default::default()
+            },
+            record_ids: vec!["id-a".to_string()],
+            ..Default::default()
+        };
+
+        let converted = command_search_args_from_request(&request);
+        assert_eq!(converted.filters.account_names, vec!["alice"]);
+        assert_eq!(converted.record_ids, vec!["id-a"]);
     }
 }

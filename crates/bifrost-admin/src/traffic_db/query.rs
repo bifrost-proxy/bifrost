@@ -57,6 +57,7 @@ pub struct QueryParams {
     pub since_ms: Option<i64>,
     pub until_ms: Option<i64>,
 
+    pub record_ids: Option<Vec<String>>,
     pub pending_ids: Option<Vec<String>>,
 }
 
@@ -85,6 +86,7 @@ impl QueryParams {
             || self.content_type.is_some()
             || self.since_ms.is_some()
             || self.until_ms.is_some()
+            || self.record_ids.as_ref().is_some_and(|ids| !ids.is_empty())
     }
 
     pub fn build_where_clause(&self) -> (String, Vec<QueryValue>) {
@@ -244,6 +246,16 @@ impl QueryParams {
             params.push(QueryValue::Int(until_ms));
         }
 
+        if let Some(record_ids) = self.record_ids.as_ref().filter(|ids| !ids.is_empty()) {
+            conditions.push(format!(
+                "id IN ({})",
+                std::iter::repeat_n("?", record_ids.len())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            params.extend(record_ids.iter().cloned().map(QueryValue::Text));
+        }
+
         let where_clause = if conditions.is_empty() {
             String::new()
         } else {
@@ -377,5 +389,20 @@ mod tests {
         assert!(where_clause.contains("timestamp <= ?"));
         assert!(matches!(values.first(), Some(QueryValue::Int(v)) if *v == 1_700_000_000_000));
         assert!(matches!(values.get(1), Some(QueryValue::Int(v)) if *v == 1_700_000_060_000));
+    }
+
+    #[test]
+    fn build_where_clause_supports_record_id_filter_with_other_conditions() {
+        let params = QueryParams {
+            method: Some("post".to_string()),
+            record_ids: Some(vec!["id-a".to_string(), "id-b".to_string()]),
+            ..Default::default()
+        };
+
+        let (where_clause, values) = params.build_where_clause();
+        assert!(where_clause.contains("method = ?"));
+        assert!(where_clause.contains("id IN (?, ?)"));
+        assert_eq!(values.len(), 3);
+        assert!(params.has_filters());
     }
 }

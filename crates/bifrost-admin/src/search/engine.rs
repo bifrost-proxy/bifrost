@@ -37,6 +37,7 @@ const SEARCH_BATCH_SIZE: usize = 1000;
 const DEFAULT_MAX_SCAN: usize = 100_000;
 const DEFAULT_STREAM_MAX_RESULTS: usize = 100;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(300);
+pub const MAX_TARGET_RECORD_IDS: usize = 500;
 
 pub struct SearchEngine {
     traffic_db: SharedTrafficDbStore,
@@ -427,6 +428,7 @@ impl SearchEngine {
             cursor,
             limit: Some(SEARCH_BATCH_SIZE),
             direction: crate::traffic_db::Direction::Backward,
+            record_ids: (!request.record_ids.is_empty()).then(|| request.record_ids.clone()),
             ..Default::default()
         };
 
@@ -1351,6 +1353,61 @@ mod tests {
     use crate::traffic_db::TrafficDbStore;
 
     #[test]
+    fn targeted_record_ids_preserve_keyword_and_filter_intersection() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = Arc::new(
+            TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+                .expect("traffic db"),
+        );
+
+        for (id, method, path) in [
+            ("target-post", "POST", "/live-search-marker/target"),
+            ("target-get", "GET", "/live-search-marker/wrong-method"),
+            (
+                "outside-post",
+                "POST",
+                "/live-search-marker/outside-id-scope",
+            ),
+        ] {
+            db.record(TrafficRecord::new(
+                id.to_string(),
+                method.to_string(),
+                format!("https://example.com{path}"),
+            ));
+        }
+
+        let engine = SearchEngine::new(db, None);
+        let response = engine.search(&SearchRequest {
+            keyword: "live-search-marker".to_string(),
+            scope: SearchScope {
+                all: false,
+                url: true,
+                ..Default::default()
+            },
+            filters: SearchFilters {
+                conditions: vec![FilterCondition {
+                    field: "method".to_string(),
+                    operator: "equals".to_string(),
+                    value: "POST".to_string(),
+                }],
+                ..Default::default()
+            },
+            record_ids: vec!["target-post".to_string(), "target-get".to_string()],
+            limit: Some(500),
+            max_scan: Some(500),
+            max_results: Some(500),
+            ..Default::default()
+        });
+
+        assert_eq!(response.total_matched, 1);
+        assert_eq!(response.results[0].record.id, "target-post");
+        assert!(response
+            .results
+            .iter()
+            .all(|item| item.record.id != "outside-post"));
+    }
+
+    #[test]
     fn response_body_search_prefers_derived_sse_body() {
         let dir = TempDir::new().expect("temp dir");
         let db = Arc::new(
@@ -1450,6 +1507,7 @@ mod tests {
             limit: Some(20),
             max_scan: None,
             max_results: None,
+            record_ids: Vec::new(),
             include: Default::default(),
             time_range: None,
         });
@@ -1503,6 +1561,7 @@ mod tests {
             limit: Some(20),
             max_scan: None,
             max_results: None,
+            record_ids: Vec::new(),
             include: Default::default(),
             time_range: None,
         });
@@ -1753,6 +1812,7 @@ mod tests {
             limit: Some(20),
             max_scan: None,
             max_results: None,
+            record_ids: Vec::new(),
             time_range: None,
             include: SearchInclude {
                 response_body: true,
@@ -1807,6 +1867,7 @@ mod tests {
             limit: Some(20),
             max_scan: None,
             max_results: None,
+            record_ids: Vec::new(),
             time_range: None,
             include: SearchInclude {
                 response_body: true,

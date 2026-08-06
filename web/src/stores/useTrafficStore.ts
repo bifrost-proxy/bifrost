@@ -18,6 +18,7 @@ export interface TrafficRecordsMutation {
   updated: TrafficSummary[];
   deletedIds: string[];
   oldestSequenceFloor?: number | null;
+  incomplete?: boolean;
 }
 
 interface TrafficState {
@@ -123,6 +124,7 @@ interface BatchedUpdate {
   serverSequence: number;
   oldestSequence: number | null;
   sourceNewRecordCount: number;
+  sourceUpdatedRecordCount: number;
   hasMore: boolean;
 }
 
@@ -1091,6 +1093,7 @@ export const useTrafficStore = create<TrafficState>()(
             );
           }
           pendingBatch.sourceNewRecordCount += preprocessedNew.length;
+          pendingBatch.sourceUpdatedRecordCount += preprocessedUpdated.length;
           pendingBatch.hasMore = data.has_more;
         } else {
           pendingBatch = {
@@ -1100,6 +1103,7 @@ export const useTrafficStore = create<TrafficState>()(
             serverSequence: data.server_sequence ?? state.serverSequence,
             oldestSequence: data.oldest_sequence ?? state.serverOldestSequence,
             sourceNewRecordCount: preprocessedNew.length,
+            sourceUpdatedRecordCount: preprocessedUpdated.length,
             hasMore: data.has_more,
           };
         }
@@ -1264,6 +1268,9 @@ export const useTrafficStore = create<TrafficState>()(
                     updated: replacedRecords,
                     deletedIds: [],
                     oldestSequenceFloor: serverOldestSequence,
+                    incomplete: batch.hasMore ||
+                      batch.sourceNewRecordCount > batch.newRecords.length ||
+                      batch.sourceUpdatedRecordCount > batch.updatedRecords.length,
                   })
                   : prevState.recordsMutation,
               };

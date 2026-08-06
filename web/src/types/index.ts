@@ -808,6 +808,7 @@ export interface SearchRequest {
   limit?: number;
   max_scan?: number;
   max_results?: number;
+  record_ids?: string[];
 }
 
 export interface MatchLocation {

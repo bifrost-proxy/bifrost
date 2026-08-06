@@ -17,6 +17,12 @@ pub struct SearchRequest {
     pub max_scan: Option<usize>,
     pub max_results: Option<usize>,
 
+    /// Optional bounded set of record IDs to re-evaluate. This keeps live
+    /// Search refresh proportional to the changed records instead of scanning
+    /// the retained traffic history every second.
+    #[serde(default)]
+    pub record_ids: Vec<String>,
+
     #[serde(default)]
     pub time_range: Option<TimeRange>,
 
@@ -261,10 +267,12 @@ mod include_serde_tests {
             "limit": 10,
             "max_scan": null,
             "max_results": null,
+            "record_ids": [],
             "time_range": null
         });
         let req: SearchRequest = serde_json::from_value(json).expect("deserialize");
         assert!(!req.include.any());
+        assert!(req.record_ids.is_empty());
         assert_eq!(
             req.include.body_limit(),
             SearchInclude::DEFAULT_MAX_BODY_BYTES
