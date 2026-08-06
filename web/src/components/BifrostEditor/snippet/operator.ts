@@ -74,7 +74,33 @@ const genSnippetFilenameAndVar = (operator: string) => {
   ];
 };
 
-function getSnippetsForProtocol(
+const genInlineScriptSnippet = (operator: string): string | null => {
+  if (operator === 'reqScript') {
+    return `reqScript://{\${1:request_script}}
+\`\`\`\${1:request_script}
+\${2:request.headers["X-Modified-By"] = "bifrost";}
+\`\`\`
+`;
+  }
+  if (operator === 'resScript') {
+    return `resScript://{\${1:response_script}}
+\`\`\`\${1:response_script}
+\${2:response.headers["X-Modified-By"] = "bifrost";}
+\`\`\`
+`;
+  }
+  if (operator === 'resStreamScript') {
+    return `resStreamScript://{\${1:stream_script}}
+\`\`\`\${1:stream_script}
+stream.mode = "transform";
+stream.onEvent = (event) => \${2:({ event: event.event, data: event.data })};
+\`\`\`
+`;
+  }
+  return null;
+};
+
+export function getSnippetsForProtocol(
   protocol: ProtocolInfo,
   syntaxInfo: UnifiedSyntaxInfo
 ): string[] {
@@ -107,10 +133,11 @@ function getSnippetsForProtocol(
     case 'file_path':
       return genSnippetFilenameAndVar(name);
     case 'script_name': {
+      const inlineSnippet = genInlineScriptSnippet(name);
       const scripts =
         name === 'reqScript'
           ? syntaxInfo.scripts.request_scripts
-          : name === 'resScript'
+          : name === 'resScript' || name === 'resStreamScript'
             ? syntaxInfo.scripts.response_scripts
             : name === 'bp'
               ? syntaxInfo.scripts.parser_scripts
@@ -121,9 +148,14 @@ function getSnippetsForProtocol(
       }
 
       if (scripts.length > 0) {
-        return scripts.map((s) => `${name}://${s.name}`);
+        return [
+          ...(inlineSnippet ? [inlineSnippet] : []),
+          ...scripts.map((s) => `${name}://${s.name}`),
+        ];
       }
-      return [`${name}://\${1:script_name}`];
+      return inlineSnippet
+        ? [inlineSnippet, `${name}://\${1:script_name}`]
+        : [`${name}://\${1:script_name}`];
     }
     case 'content':
       return genSnippetFilenameAndVar(name);
@@ -327,7 +359,9 @@ async function loadDynamicData(options?: { force?: boolean }): Promise<void> {
 loadDynamicData();
 
 function isScriptValueProtocol(protocol: string): boolean {
-  return ['bp', 'decode', 'reqscript', 'resscript'].includes(protocol.toLowerCase());
+  return ['bp', 'decode', 'reqscript', 'resscript', 'resstreamscript'].includes(
+    protocol.toLowerCase()
+  );
 }
 
 function getOperators(): Operator[] {

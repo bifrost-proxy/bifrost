@@ -64,8 +64,9 @@ use super::handler::{
     ConnectionErrorInfo,
 };
 use super::scripts::{
-    apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
-    execute_response_scripts, header_map_to_hashmap, header_pairs_to_hashmap, parse_url_parts,
+    apply_script_headers_to_header_map, body_to_script_string, create_response_stream_script_body,
+    execute_request_scripts, execute_response_scripts, header_map_to_hashmap,
+    header_pairs_to_hashmap, initialize_response_stream_script, parse_url_parts,
     script_string_to_body,
 };
 use super::ws_handshake::{
@@ -413,6 +414,7 @@ pub fn requires_tls_interception_for_rules(resolved_rules: &ResolvedRules) -> bo
         || !resolved_rules.header_replace.is_empty()
         || !resolved_rules.req_scripts.is_empty()
         || !resolved_rules.res_scripts.is_empty()
+        || !resolved_rules.res_stream_scripts.is_empty()
         || !resolved_rules.decode_scripts.is_empty()
         || resolved_rules.html_append.is_some()
         || resolved_rules.html_prepend.is_some()
@@ -496,6 +498,7 @@ fn protocol_requires_tls_interception(protocol: Protocol) -> bool {
             | Protocol::CssBody
             | Protocol::ReqScript
             | Protocol::ResScript
+            | Protocol::ResStreamScript
             | Protocol::Decode
             | Protocol::File
             | Protocol::Tpl
@@ -2402,6 +2405,7 @@ async fn handle_intercepted_request_with_protocol(
     let has_req_body_override = resolved_rules.req_body.is_some();
     let has_req_scripts = !resolved_rules.req_scripts.is_empty();
     let has_res_scripts = !resolved_rules.res_scripts.is_empty();
+    let has_res_stream_scripts = !resolved_rules.res_stream_scripts.is_empty();
     let has_decode_scripts = !resolved_rules.decode_scripts.is_empty();
     let needs_req_body_read = !has_req_body_override
         && (needs_req_processing
@@ -2589,7 +2593,7 @@ async fn handle_intercepted_request_with_protocol(
         body_bytes = processed.body.to_vec();
     }
     let mut values = HashMap::new();
-    if has_req_scripts || has_res_scripts || has_decode_scripts {
+    if has_req_scripts || has_res_scripts || has_res_stream_scripts || has_decode_scripts {
         values = resolved_rules.values.clone();
         let state_values = get_values_from_state(&admin_state).await;
         for (key, value) in state_values {
@@ -3247,6 +3251,7 @@ async fn handle_intercepted_request_with_protocol(
     #[cfg(feature = "http3")]
     let should_try_http3_upstream = !actual_use_http
         && resolved_rules.upstream_http3
+        && resolved_rules.res_stream_scripts.is_empty()
         && !request_body_is_streaming
         && resolved_rules.proxy.is_none()
         && !ProtocolDetector::is_websocket_upgrade(&req_headers_for_h3)
@@ -4326,7 +4331,44 @@ async fn handle_intercepted_request_with_protocol(
                 }
             }
 
-            let res_body = res_body_incoming.take().unwrap();
+            let res_body = res_body_incoming.take().unwrap().boxed();
+            let res_body = if resolved_rules.res_stream_scripts.is_empty() {
+                res_body
+            } else {
+                let worker = match initialize_response_stream_script(
+                    &admin_state,
+                    &resolved_rules.res_stream_scripts,
+                    &ctx,
+                    &resolved_rules,
+                    &original_uri,
+                    &method_str,
+                    &header_pairs_to_hashmap(&final_req_headers),
+                    res_parts.status.as_u16(),
+                    res_parts
+                        .status
+                        .canonical_reason()
+                        .unwrap_or("OK")
+                        .to_string(),
+                    header_map_to_hashmap(&res_parts.headers),
+                    &values,
+                )
+                .await
+                {
+                    Ok(worker) => worker,
+                    Err(error) => {
+                        return Ok(Response::builder()
+                            .status(hyper::StatusCode::BAD_GATEWAY)
+                            .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                            .body(full_body(format!(
+                                "stream script initialization failed: {error}"
+                            )))
+                            .unwrap());
+                    }
+                };
+                res_parts.headers.remove(hyper::header::CONTENT_LENGTH);
+                res_parts.headers.remove(hyper::header::CONTENT_ENCODING);
+                create_response_stream_script_body(Some(res_body), worker)
+            };
             let tee_body = create_sse_tee_body(
                 res_body,
                 admin_state.clone(),
@@ -11046,7 +11088,7 @@ mod coverage_90_wave {
         assert_eq!(response.status().as_u16(), 207);
         assert_eq!(
             body_bytes(response).await,
-            Bytes::from_static(b"data: script-response\\n\\ndata: [DONE]\\n\\n")
+            Bytes::from_static(b"data: script-response\n\ndata: [DONE]\n\n")
         );
 
         let record = harness
@@ -11069,7 +11111,7 @@ mod coverage_90_wave {
             .decode_res_script_results
             .as_ref()
             .is_some_and(|items| !items.is_empty()));
-        assert_eq!(record.frame_count, 1);
+        assert_eq!(record.frame_count, 2);
 
         let direct_rules = ResolvedRules {
             status_code: Some(202),
@@ -11096,7 +11138,7 @@ mod coverage_90_wave {
         assert_eq!(direct_response.status().as_u16(), 207);
         assert_eq!(
             body_bytes(direct_response).await,
-            Bytes::from_static(b"data: script-response\\n\\ndata: [DONE]\\n\\n")
+            Bytes::from_static(b"data: script-response\n\ndata: [DONE]\n\n")
         );
     }
 

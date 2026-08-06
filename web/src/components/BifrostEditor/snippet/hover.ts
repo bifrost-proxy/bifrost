@@ -18,6 +18,7 @@ interface ProtocolMatch {
 const VALUE_REF_PATTERN = /\{([\w-]+)\}/g;
 const REQ_SCRIPT_PATTERN = /reqScript:\/\/([\w\-.]+)/g;
 const RES_SCRIPT_PATTERN = /resScript:\/\/([\w\-.]+)/g;
+const RES_STREAM_SCRIPT_PATTERN = /resStreamScript:\/\/([\w\-.]+)/g;
 const BP_SCRIPT_PATTERN = /bp:\/\/([^\s]+)/g;
 
 export function localBpParserScriptName(rawValue: string): string | null {
@@ -60,6 +61,7 @@ function findReferenceAtPosition(
     { pattern: VALUE_REF_PATTERN, type: 'value' },
     { pattern: REQ_SCRIPT_PATTERN, type: 'requestScript' },
     { pattern: RES_SCRIPT_PATTERN, type: 'responseScript' },
+    { pattern: RES_STREAM_SCRIPT_PATTERN, type: 'responseStreamScript' },
     { pattern: BP_SCRIPT_PATTERN, type: 'parserScript' },
   ];
 
@@ -169,6 +171,13 @@ export function getReferenceLocation(
         navigationType: 'page',
         uri: `/scripts?type=response&name=${encodeURIComponent(name)}`,
       };
+    case 'responseStreamScript':
+      return {
+        name,
+        type: 'responseStreamScript',
+        navigationType: 'page',
+        uri: `/scripts?type=response&name=${encodeURIComponent(name)}`,
+      };
     case 'parserScript':
       return {
         name,
@@ -207,6 +216,8 @@ function getTypeLabel(type: ReferenceType): string {
       return 'Request Script';
     case 'responseScript':
       return 'Response Script';
+    case 'responseStreamScript':
+      return 'Response Stream Script';
     case 'parserScript':
       return 'Parser Script';
     case 'rule':

@@ -1,6 +1,210 @@
 use super::*;
 use tempfile::TempDir;
 
+fn stream_test_response() -> ResponseData {
+    ResponseData {
+        status: 200,
+        status_text: "OK".to_string(),
+        headers: HashMap::new(),
+        body: None,
+        request: RequestData::default(),
+    }
+}
+
+fn stream_test_context() -> ScriptContext {
+    ScriptContext {
+        request_id: "stream-test".to_string(),
+        script_name: "inline-stream".to_string(),
+        script_type: ScriptType::Response,
+        values: HashMap::new(),
+        matched_rules: vec![],
+    }
+}
+
+#[tokio::test]
+async fn response_stream_worker_mock_is_incremental_and_persistent() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = ScriptEngine::new(ScriptEngineConfig {
+        scripts_dir: temp_dir.path().to_path_buf(),
+        ..Default::default()
+    });
+    let script = r#"
+        stream.mode = "mock";
+        let index = 0;
+        stream.next = () => {
+            index += 1;
+            return { output: "data: part-" + index + "\n\n", done: index === 2 };
+        };
+    "#;
+    let worker = engine
+        .create_response_stream_worker(
+            "inline-stream",
+            Some(script),
+            &stream_test_response(),
+            &stream_test_context(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(worker.mode(), StreamScriptMode::Mock);
+    assert_eq!(
+        worker.next().await.unwrap().outputs,
+        vec![StreamScriptOutput::Raw("data: part-1\n\n".to_string())]
+    );
+    let second = worker.next().await.unwrap();
+    assert_eq!(
+        second.outputs,
+        vec![StreamScriptOutput::Raw("data: part-2\n\n".to_string())]
+    );
+    assert!(second.done);
+}
+
+#[tokio::test]
+async fn response_stream_worker_transforms_each_event_with_shared_state() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = ScriptEngine::new(ScriptEngineConfig {
+        scripts_dir: temp_dir.path().to_path_buf(),
+        ..Default::default()
+    });
+    let script = r#"
+        stream.mode = "transform";
+        let count = 0;
+        stream.onEvent = (event) => {
+            count += 1;
+            return { event: "delta", data: count + ":" + event.data };
+        };
+        stream.onEnd = () => "data: finished\n\n";
+    "#;
+    let worker = engine
+        .create_response_stream_worker(
+            "inline-stream",
+            Some(script),
+            &stream_test_response(),
+            &stream_test_context(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(worker.mode(), StreamScriptMode::Transform);
+    let first = worker
+        .event(StreamScriptEvent {
+            data: "a".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let second = worker
+        .event(StreamScriptEvent {
+            data: "b".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        first.outputs,
+        vec![StreamScriptOutput::Event {
+            id: None,
+            event: Some("delta".to_string()),
+            data: "1:a".to_string(),
+            retry: None,
+        }]
+    );
+    assert_eq!(
+        second.outputs,
+        vec![StreamScriptOutput::Event {
+            id: None,
+            event: Some("delta".to_string()),
+            data: "2:b".to_string(),
+            retry: None,
+        }]
+    );
+    assert_eq!(
+        worker.end().await.unwrap().outputs,
+        vec![StreamScriptOutput::Raw("data: finished\n\n".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn response_stream_worker_accepts_undefined_callback_result() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = ScriptEngine::new(ScriptEngineConfig {
+        scripts_dir: temp_dir.path().to_path_buf(),
+        ..Default::default()
+    });
+    let script = r#"
+        stream.mode = "transform";
+        stream.onEvent = () => undefined;
+    "#;
+    let worker = engine
+        .create_response_stream_worker(
+            "inline-stream",
+            Some(script),
+            &stream_test_response(),
+            &stream_test_context(),
+        )
+        .await
+        .unwrap();
+
+    let step = worker
+        .event(StreamScriptEvent {
+            data: "ignored".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(step.outputs.is_empty());
+    assert!(!step.done);
+}
+
+#[tokio::test]
+async fn response_stream_worker_timeout_is_per_callback_not_stream_lifetime() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = ScriptEngine::new(ScriptEngineConfig {
+        scripts_dir: temp_dir.path().to_path_buf(),
+        timeout_ms: 25,
+        ..Default::default()
+    });
+    let script = r#"
+        stream.mode = "transform";
+        let count = 0;
+        stream.onEvent = (event) => ({ data: (++count) + ":" + event.data });
+    "#;
+    let worker = engine
+        .create_response_stream_worker(
+            "inline-stream",
+            Some(script),
+            &stream_test_response(),
+            &stream_test_context(),
+        )
+        .await
+        .unwrap();
+
+    let first = worker
+        .event(StreamScriptEvent {
+            data: "first".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let second = worker
+        .event(StreamScriptEvent {
+            data: "second".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        &first.outputs[0],
+        StreamScriptOutput::Event { data, .. } if data == "1:first"
+    ));
+    assert!(matches!(
+        &second.outputs[0],
+        StreamScriptOutput::Event { data, .. } if data == "2:second"
+    ));
+}
+
 #[tokio::test]
 async fn test_engine_init() {
     let temp_dir = TempDir::new().unwrap();

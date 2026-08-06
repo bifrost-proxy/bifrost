@@ -529,6 +529,7 @@ pub struct ResolvedRules {
 
     pub req_scripts: Vec<String>,
     pub res_scripts: Vec<String>,
+    pub res_stream_scripts: Vec<String>,
     pub decode_scripts: Vec<String>,
     pub bp_scripts: Vec<String>,
 

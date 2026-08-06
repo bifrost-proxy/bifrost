@@ -137,6 +137,7 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::UrlReplace => "Replace URL path",
         Protocol::ReqScript => "Execute request script",
         Protocol::ResScript => "Execute response script",
+        Protocol::ResStreamScript => "Transform response SSE events as they stream",
         Protocol::Decode => "Execute decode script (for request/response decode)",
         Protocol::Bp => "Bind a bp parser script for decode://bp",
         Protocol::Dns => "Custom DNS resolution",
@@ -165,9 +166,11 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
             "url"
         }
         Protocol::File | Protocol::Tpl | Protocol::RawFile => "file_path",
-        Protocol::ReqScript | Protocol::ResScript | Protocol::Decode | Protocol::Bp => {
-            "script_name"
-        }
+        Protocol::ReqScript
+        | Protocol::ResScript
+        | Protocol::ResStreamScript
+        | Protocol::Decode
+        | Protocol::Bp => "script_name",
         Protocol::ReqHeaders
         | Protocol::ResHeaders
         | Protocol::ReqCookies
@@ -286,6 +289,7 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::UrlReplace => "urlReplace://old-path=new-path",
         Protocol::ReqScript => "reqScript:///path/to/script.js",
         Protocol::ResScript => "resScript:///path/to/script.js",
+        Protocol::ResStreamScript => "resStreamScript://my-stream-script",
         Protocol::Decode => "decode://my-decode-script",
         Protocol::Bp => "bp://my-parser-script",
         Protocol::Dns => "dns://8.8.8.8",
@@ -373,6 +377,7 @@ pub fn get_all_protocols() -> Vec<ProtocolInfo> {
         Protocol::UrlReplace,
         Protocol::ReqScript,
         Protocol::ResScript,
+        Protocol::ResStreamScript,
         Protocol::Dns,
         Protocol::TlsIntercept,
         Protocol::TlsPassthrough,
