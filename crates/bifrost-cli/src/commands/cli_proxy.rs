@@ -148,15 +148,24 @@ fn detect_parent_process_shell() -> bifrost_core::Result<Option<CliProxyShell>> 
             return Ok(None);
         };
         let process_name = process.name().to_string_lossy();
-        if let Some(shell) = shell_from_process_name(&process_name) {
+        if let Some(shell) = classify_parent_process_shell(&process_name)? {
             return Ok(Some(shell));
         }
-        if is_known_unsupported_shell(&process_name) {
-            return Err(BifrostError::Config(format!(
-                "Current shell {process_name:?} is not supported for automatic profile editing. Use --shell bash|zsh|fish|powershell if one of those profiles is appropriate"
-            )));
-        }
         pid = process.parent();
+    }
+    Ok(None)
+}
+
+fn classify_parent_process_shell(
+    process_name: &str,
+) -> bifrost_core::Result<Option<CliProxyShell>> {
+    if let Some(shell) = shell_from_process_name(process_name) {
+        return Ok(Some(shell));
+    }
+    if is_known_unsupported_shell(process_name) {
+        return Err(BifrostError::Config(format!(
+            "Current shell {process_name:?} is not supported for automatic profile editing. Use --shell bash|zsh|fish|powershell if one of those profiles is appropriate"
+        )));
     }
     Ok(None)
 }
@@ -358,7 +367,13 @@ fn print_manual_disable_fallback(requested_shell: Option<CliProxyShellArg>, erro
 }
 
 fn manual_shell_candidates(requested_shell: Option<CliProxyShellArg>) -> Vec<CliProxyShell> {
-    if let Ok(shell) = resolve_shell(requested_shell) {
+    manual_shell_candidates_from_resolution(resolve_shell(requested_shell))
+}
+
+fn manual_shell_candidates_from_resolution(
+    resolved_shell: bifrost_core::Result<CliProxyShell>,
+) -> Vec<CliProxyShell> {
+    if let Ok(shell) = resolved_shell {
         return vec![shell];
     }
     vec![
@@ -438,6 +453,19 @@ mod tests {
     }
 
     #[test]
+    fn parent_process_classification_covers_supported_unsupported_and_wrapper_processes() {
+        assert_eq!(
+            classify_parent_process_shell("/bin/bash").unwrap(),
+            Some(CliProxyShell::Bash)
+        );
+        assert!(classify_parent_process_shell("/usr/bin/nu")
+            .unwrap_err()
+            .to_string()
+            .contains("not supported"));
+        assert_eq!(classify_parent_process_shell("cargo").unwrap(), None);
+    }
+
+    #[test]
     fn canonical_path_helpers_cover_files_directories_and_errors() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("ca.pem");
@@ -500,6 +528,25 @@ mod tests {
             Some(PathBuf::from("/missing/bifrost-ca.pem")),
             Some(PathBuf::from("/missing/certs")),
             &error,
+        );
+    }
+
+    #[test]
+    fn manual_shell_candidates_fall_back_to_every_supported_profile() {
+        assert_eq!(
+            manual_shell_candidates_from_resolution(Ok(CliProxyShell::Bash)),
+            vec![CliProxyShell::Bash]
+        );
+        assert_eq!(
+            manual_shell_candidates_from_resolution(Err(BifrostError::Config(
+                "shell detection failed".into(),
+            ))),
+            vec![
+                CliProxyShell::Bash,
+                CliProxyShell::Zsh,
+                CliProxyShell::Fish,
+                CliProxyShell::PowerShell,
+            ]
         );
     }
 }

@@ -5288,6 +5288,73 @@ mod tests {
             temp_dir.path()
         ));
     }
+
+    #[test]
+    fn standalone_cli_proxy_cleanup_executes_normal_preserve_and_error_branches() {
+        let _lock = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_value = home.to_string_lossy().into_owned();
+        let _home = ScopedEnvVar::set("HOME", &home_value);
+        let profile = home.join(".zshrc");
+        let managed = "# >>> Bifrost CLI proxy environment start >>>\nmanaged\n# <<< Bifrost CLI proxy environment end <<<\n";
+
+        std::fs::write(&profile, managed).unwrap();
+        cleanup_standalone_cli_proxy_on_shutdown(temp_dir.path());
+        assert_eq!(std::fs::read_to_string(&profile).unwrap(), "");
+
+        std::fs::write(&profile, managed).unwrap();
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .unwrap();
+        cleanup_standalone_cli_proxy_on_shutdown(temp_dir.path());
+        assert_eq!(std::fs::read_to_string(&profile).unwrap(), managed);
+
+        bifrost_core::consume_system_proxy_shutdown_mode(temp_dir.path()).unwrap();
+        std::fs::remove_file(&profile).unwrap();
+        let invalid_profile = bifrost_core::CliProxyShell::PowerShell
+            .config_paths_for_home(&home)
+            .into_iter()
+            .next()
+            .unwrap();
+        std::fs::create_dir_all(&invalid_profile).unwrap();
+        cleanup_standalone_cli_proxy_on_shutdown(temp_dir.path());
+        assert!(invalid_profile.is_dir());
+    }
+
+    #[test]
+    fn restart_handoff_guard_cleans_cli_proxy_when_adoption_aborts() {
+        let _lock = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_value = home.to_string_lossy().into_owned();
+        let _home = ScopedEnvVar::set("HOME", &home_value);
+        let invalid_profile = bifrost_core::CliProxyShell::PowerShell
+            .config_paths_for_home(&home)
+            .into_iter()
+            .next()
+            .unwrap();
+        std::fs::create_dir_all(&invalid_profile).unwrap();
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .unwrap();
+
+        drop(RestartHandoffStartupGuard::new(
+            temp_dir.path().to_path_buf(),
+        ));
+
+        assert_eq!(
+            bifrost_core::read_system_proxy_shutdown_mode(temp_dir.path()),
+            None
+        );
+        assert!(invalid_profile.is_dir());
+    }
 }
 
 #[cfg(test)]

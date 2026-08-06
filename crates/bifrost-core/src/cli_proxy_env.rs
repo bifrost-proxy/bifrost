@@ -897,22 +897,26 @@ mod tests {
             "# >>> Bifrost proxy start >>>\nexport HTTP_PROXY=old\n# <<< Bifrost proxy end <<<";
         let bash = home.join(".bashrc");
         let fish = home.join(".config/fish/config.fish");
-        let powershell = home.join(".config/powershell/Microsoft.PowerShell_profile.ps1");
+        let powershell = CliProxyShell::PowerShell.config_paths_for_home(home);
         std::fs::create_dir_all(fish.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(powershell.parent().unwrap()).unwrap();
         std::fs::write(&bash, format!("bash-before\n{standalone}\n{lifecycle}\n")).unwrap();
         std::fs::write(&fish, format!("fish-before\n{standalone}\n")).unwrap();
-        std::fs::write(&powershell, format!("pwsh-before\n{standalone}\n")).unwrap();
+        for path in &powershell {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("pwsh-before\n{standalone}\n")).unwrap();
+        }
 
         let changed = CliProxyEnvironmentManager::disable_all_managed_for_home(home).unwrap();
 
-        assert_eq!(changed.len(), 3);
+        assert_eq!(changed.len(), 2 + powershell.len());
         assert_eq!(
             std::fs::read_to_string(&bash).unwrap(),
             format!("bash-before\n{lifecycle}\n")
         );
         assert_eq!(std::fs::read_to_string(&fish).unwrap(), "fish-before");
-        assert_eq!(std::fs::read_to_string(&powershell).unwrap(), "pwsh-before");
+        for path in powershell {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "pwsh-before");
+        }
     }
 
     #[test]
@@ -922,7 +926,11 @@ mod tests {
         let bash = home.join(".bashrc");
         let original = format!("before\n{START_MARKER}\nmanaged\n{END_MARKER}\nafter\n");
         std::fs::write(&bash, &original).unwrap();
-        let invalid_profile = home.join(".config/powershell/Microsoft.PowerShell_profile.ps1");
+        let invalid_profile = CliProxyShell::PowerShell
+            .config_paths_for_home(home)
+            .into_iter()
+            .next()
+            .unwrap();
         std::fs::create_dir_all(&invalid_profile).unwrap();
 
         let error = CliProxyEnvironmentManager::disable_all_managed_for_home(home)
