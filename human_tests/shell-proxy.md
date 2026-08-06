@@ -227,6 +227,19 @@
 - Enable 追加且仅追加一个真实管理块，Disable 后普通 `echo`/文档内容逐字保留。
 - 生成或替换后的管理块以换行结束；后续追加的用户配置不会拼进 end marker 注释行，也不会产生双空行。
 
+### TC-SP-17: 官方中英文文档与本机 Skill 覆盖专用命令
+
+**操作步骤：**
+1. 检查 `docs/cli.md`、`docs/cli-quick-start.md`、`docs-en/cli.md`、`docs-en/cli-quick-start.md` 中的 `cli-proxy enable/disable` 用法。
+2. 检查四种 shell、代理变量、Node/Python/Go 等 CA 变量、失败时手工回退、当前 shell reload 提示和退出/重启生命周期是否在中英文文档一致表达。
+3. 检查根目录 `SKILL.md` 是否把 `cli-proxy enable/disable` 标记为需用户授权的 shell 环境修改，并给出完整操作与失败回退原则。
+4. 执行站点文档同步验证和 shell 语法/静态契约。
+
+**预期结果：**
+- 中英文官方文档都以专用 `cli-proxy enable/disable` 为新用法，并说明 `start --cli-proxy` 仅作兼容路径。
+- 文档包含 Bash/Zsh/Fish/PowerShell、常见代理/CA 环境变量、合并 CA bundle、reload、手工回退和退出/重启清理语义。
+- `SKILL.md` 能指导本机 Agent 在获得授权后安装/卸载，且失败时保留 CLI 给出的完整手工信息。
+
 ## 执行记录
 
 | 日期 | 用例 | 执行记录 | 结果 |
@@ -236,6 +249,7 @@
 | 2026-08-06 | TC-SP-14 | 使用 release binary 执行 `PROXY_PORT=19891 bash e2e-tests/tests/test_cli_proxy_environment_e2e.sh`，在隔离 HOME/BIFROST_DATA_DIR 中先启动 daemon 后 Enable，真实执行 restart、stop，再以前台模式启动并对主进程发送 `SIGKILL`。 | 通过。restart 期间 marker 保留，stop 后 marker 删除；强杀主进程后独立 lifecycle helper 在轮询窗口内删除 marker。测试未启用系统代理，证明 Linux/无系统代理路径同样受保护；所有进程和临时目录均由测试清理。 |
 | 2026-08-06 | TC-SP-15 | 执行 `cargo test -p bifrost-core bash_ -- --nocapture`，使用临时 HOME 验证 `.profile` 回归和三种 Bash 登录 profile 的优先级。 | 通过。3/3 Bash 相关用例通过；仅存在 `.profile` 时没有创建 `.bash_profile`，Enable/Disable 后原有登录配置保留。 |
 | 2026-08-06 | TC-SP-16 | 执行 marker 完整行与生成块换行的两个 `bifrost-core` 精准单元回归。 | 通过。普通行 marker 文本保持不变，真实管理块可独立启停；空文件与替换路径都以单个换行结束。 |
+| 2026-08-06 | TC-SP-17 | 执行 `node site/scripts/verify-docs-sync.mjs`、`bash e2e-tests/tests/test_site_docs_sync.sh` 和中英文/`SKILL.md` 关键词契约；脚本会动态生成中英文 probe、构建 VitePress 站点并检查链接，最后自动清理 probe。 | 通过。61/61 官方文档目标同步验证通过，动态 probe 阶段 63/63 通过，VitePress 构建、首页与链接校验全部通过；四份中英文 CLI 文档和根 `SKILL.md` 都包含专用 Enable/Disable、四种 shell、CA 与失败回退/生命周期说明，probe 文件无残留。 |
 
 ## 清理步骤
 

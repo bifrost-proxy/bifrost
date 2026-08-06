@@ -15,6 +15,7 @@ This directory contains the English documentation set for Bifrost. It mirrors th
 
 - [Project overview](../getting-started/overview)
 - [Installation and startup](../getting-started/installation)
+- [Connect a mobile device to Bifrost](../getting-started/mobile-proxy)
 - [CLI quick start](../getting-started/cli-quick-start)
 - [CLI command reference](./cli)
 - [Desktop installation and build](../getting-started/desktop)

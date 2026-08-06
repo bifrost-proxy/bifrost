@@ -84,11 +84,16 @@ bifrost system-proxy disable
 
 `--no-system-proxy` 是测试/诊断选项，例如 CI、沙箱、只想用 `curl -x` 或应用内代理配置时才使用，不作为默认上手命令。
 
-`--cli-proxy` 是另一条路径：它会写入 shell rc 文件，让终端命令继承 `http_proxy` / `https_proxy` 等环境变量。它不是系统代理，适合只影响命令行工具：
+`cli-proxy` 是另一条路径：它会向当前 shell profile 幂等安装代理与 CA 环境变量，让 Node.js、Python、Go/cURL、Git、Cargo、Deno 等终端工具通过 Bifrost 并信任其 CA。它不是系统代理：
 
 ```bash
-bifrost start --cli-proxy --cli-proxy-no-proxy "localhost,127.0.0.1,*.local"
+bifrost cli-proxy enable
+bifrost cli-proxy enable --shell zsh --no-proxy "localhost,127.0.0.1,::1,*.local"
+# 新开 shell 或 reload CLI 输出列出的 profile
+bifrost cli-proxy disable
 ```
+
+未指定 `--shell` 时自动识别 Bash、Zsh、Fish 或 PowerShell；无法识别时显式传入 `--shell`。写入或移除失败时，CLI 会给出完整可复制块、profile 路径和手工删除指引。Bifrost 正常退出或崩溃后会自动清理所有受管 profile；`restart` 交接期间保留它们。`start --cli-proxy` 仅作为旧用法兼容保留，新配置优先使用专用子命令。
 
 ## 场景 3：把某个域名转发到本地服务
 

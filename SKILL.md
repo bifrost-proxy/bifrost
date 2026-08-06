@@ -90,7 +90,7 @@ bifrost install-skill -y
 
 1. 先确认目标是"运行代理"还是"管理已有代理"。
 2. 先用 `bifrost --help` 或 `bifrost <command> --help` 补充具体参数，再执行高影响命令。
-3. 会改本机网络环境的命令必须谨慎：`system-proxy enable/disable`、`start --system-proxy`、`start --cli-proxy`。
+3. 会改本机网络环境的命令必须谨慎：`system-proxy enable/disable`、`cli-proxy enable/disable`、`start --system-proxy`、`start --cli-proxy`。
 
 ## 关键约束
 
@@ -99,6 +99,7 @@ bifrost install-skill -y
 - `rule`、`value`、`script`、`ca` 主要操作本地数据目录，不一定要求代理正在运行
 - `im` 通过当前运行中的 Bifrost Admin API 管理 IM Gateway provider、target、route、schedule 和消息；配置飞书/微信通道时优先走 CLI 交互式授权/扫码流程，不要直接改 provider 配置文件
 - `system-proxy` 会修改操作系统代理设置；除非用户明确要求，不要主动启用
+- `cli-proxy enable/disable` 会写入或移除当前 shell profile 中的代理和 CA 环境块；执行前先确认用户希望影响的 shell，不要代替用户无授权修改 profile
 
 ## 命令能力映射
 
@@ -399,6 +400,24 @@ bifrost system-proxy disable
 
 - 这是高影响命令，可能触发管理员权限
 - 没有用户明确授权时，不要主动修改系统代理
+
+### 10.1 CLI 代理与 CA 环境
+
+```bash
+bifrost cli-proxy enable
+bifrost cli-proxy enable --shell zsh  # 可选：bash、zsh、fish、powershell
+bifrost cli-proxy enable --host 127.0.0.1 --port 9900 --no-proxy 'localhost,127.0.0.1,::1,*.local'
+bifrost cli-proxy enable --ca-file /path/to/custom.pem --ca-dir /path/to/certs
+bifrost cli-proxy disable
+bifrost cli-proxy disable --shell zsh
+```
+
+- 未指定 `--shell` 时优先识别当前 Bash、Zsh、Fish 或 PowerShell；识别失败时显式传 `--shell`
+- Bash 复用已存在的首个登录 profile（`.bash_profile` → `.bash_login` → `.profile`），不得新建更高优先级文件遮蔽用户现有配置
+- Enable 会写入大小写代理变量和 Node/Python/Go/cURL/Git/Cargo/Deno/AWS/gRPC 等 CA 变量；覆盖型 CA 变量指向系统 root + Bifrost CA 合并 bundle，不关闭 TLS 校验
+- 成功后提醒用户新开 shell 或 reload CLI 列出的 profile；Disable 不能修改已启动的当前父 shell 环境
+- 自动操作失败时，把 CLI 输出的完整复制块、profile 路径或 marker 删除指引原样交给用户，不要自行缩减环境变量集
+- Bifrost 正常退出、崩溃后会自动清理所有受管 shell profile；`restart` 保留配置给新进程接管
 
 ### 11. 运行时配置
 
@@ -917,7 +936,7 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 ## Agent 行为建议
 
 - 优先通过 CLI 完成任务，不要直接手改底层数据文件
-- 如果用户没有要求修改系统环境，不要开启 `--system-proxy`、`--cli-proxy`
+- 如果用户没有要求修改系统或 shell 环境，不要开启 `--system-proxy`、`--cli-proxy`，也不要执行 `system-proxy enable`、`cli-proxy enable/disable`
 - **TLS 拦截默认关闭**，不要主动全局开启 `--intercept`（详见 §3 TLS/CA）
 - 如果用户只想验证规则，不必启用 TLS 拦截
 - 当用户提供一个少于 6 位的纯数字（如 57544、12345），且上下文含有「详情」「内容」「请求」「查看」等关键词时，应识别为 `bifrost traffic get <ID> --request-body --response-body` 操作；如果用户给了 ≥2 个 ID 应直接走 `bifrost traffic get --ids ID1,ID2,...` 批量

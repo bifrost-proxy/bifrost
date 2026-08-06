@@ -40,6 +40,7 @@ bifrost <command> <subcommand> --help
 | `ca` | 生成、安装、导出、查看 Bifrost CA | [CA 证书管理](#ca-证书管理) |
 | `whitelist` | 管理本机代理访问控制、待审批请求和临时放行 | [白名单管理](#白名单管理) |
 | `system-proxy` | 启用、禁用、查看操作系统代理 | [系统代理管理](#系统代理管理) |
+| `cli-proxy` | 向 shell profile 安装或移除 CLI 代理与 CA 环境变量 | [CLI 代理与 CA 环境](#cli-代理与-ca-环境) |
 | `value` | 管理 `{VALUE_NAME}` 规则变量 | [Values 管理](#values-管理) |
 | `script` | 管理请求、响应、decode 脚本 | [Scripts 管理](#scripts-管理) |
 | `upgrade` / `update` / `version-check` | 检查新版本、升级二进制；`update` 是 `upgrade` 的别名 | [升级与版本检查](#升级与版本检查upgrade--update--version-check) |
@@ -98,7 +99,7 @@ bifrost [OPTIONS] [COMMAND]
 
 容易混淆的边界：
 
-- `--system-proxy` 修改操作系统代理配置；`--cli-proxy` 写入 shell rc 文件中的代理环境变量；`HTTP_PROXY` / `HTTPS_PROXY` 是当前进程继承到的环境变量。
+- `--system-proxy` 修改操作系统代理配置；`cli-proxy enable/disable` 持久管理 shell profile 中的代理和 CA 环境变量；`start --cli-proxy` 是兼容旧路径；`HTTP_PROXY` / `HTTPS_PROXY` 是当前进程继承到的环境变量。
 - `BIFROST_DATA_DIR` 不只是配置目录，也决定当前 CLI 连接的 rules、values、scripts、certs、traffic DB 等状态来源。
 - `RUST_LOG` 优先级高于命令行 `-l/--log-level`。如果你设置了 `RUST_LOG`，再改 `--log-level` 可能看起来“不生效”。
 
@@ -543,6 +544,34 @@ bifrost system-proxy enable --host 127.0.0.1 --port 9900
 bifrost system-proxy enable --bypass "localhost,127.0.0.1,*.local"
 bifrost system-proxy disable
 ```
+
+### CLI 代理与 CA 环境
+
+`cli-proxy` 用于只让终端程序通过 Bifrost，并让 Node.js、Python、Go/cURL、Git、Cargo、Deno、AWS SDK、gRPC 等工具信任 Bifrost CA，不修改操作系统代理：
+
+```bash
+bifrost cli-proxy enable
+bifrost cli-proxy enable --shell zsh --host 127.0.0.1 --port 9900
+bifrost cli-proxy enable --no-proxy "localhost,127.0.0.1,::1,*.local"
+bifrost cli-proxy enable --ca-file /path/to/company-and-bifrost.pem --ca-dir /path/to/certs
+bifrost cli-proxy disable
+bifrost cli-proxy disable --shell zsh
+```
+
+未指定 `--shell` 时，命令优先识别当前 Bash、Zsh、Fish 或 PowerShell；无法识别时使用 `--shell bash|zsh|fish|powershell`。配置文件如下：
+
+| Shell | 管理的 profile |
+| --- | --- |
+| Bash | `~/.bashrc` 和 Bash 实际读取的首个登录 profile：`.bash_profile` → `.bash_login` → `.profile`；都不存在时才创建 `.bash_profile` |
+| Zsh | `~/.zshrc`、`~/.zprofile` |
+| Fish | `~/.config/fish/config.fish` |
+| PowerShell | Unix 的 `~/.config/powershell/Microsoft.PowerShell_profile.ps1`；Windows Documents 下的 Windows PowerShell 与 PowerShell profile |
+
+安装内容包含大小写 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`，以及 `NODE_EXTRA_CA_CERTS`、`SSL_CERT_FILE`、`SSL_CERT_DIR`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`PIP_CERT`、`NPM_CONFIG_CAFILE`、`GIT_SSL_CAINFO`、`AWS_CA_BUNDLE`、`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`、`CARGO_HTTP_CAINFO`、`CARGO_HTTP_PROXY_CAINFO`、`COMPOSER_CAFILE`、`DENO_CERT` 等 CA 变量。`SSL_CERT_FILE` 等覆盖型变量指向“系统 root + Bifrost CA”合并 bundle，不会用单个 Bifrost CA 替换系统信任。命令不写入关闭 TLS 校验的变量。
+
+Enable/Disable 幂等地只管理完整 marker 块，不删除其他用户配置。执行后需新开 shell 或 reload 输出中列出的 profile；Disable 不能反向修改已经启动的当前 shell 进程环境。自动写入/移除失败时，CLI 会打印完整可复制的环境变量块、目标 profile 和手工删除 marker 指引。
+
+Bifrost 正常 `stop`、前台退出或崩溃后，lifecycle helper 会幂等移除所有支持 shell 的管理块，避免新终端继续指向已停止的代理。`restart` 交接期间保留配置，由新进程接管；如新进程启动失败，退出保护仍会清理。
 
 ### 配置项管理
 
