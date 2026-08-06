@@ -1,38 +1,35 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-    configure_backend_restart_stop_command, configure_backend_stop_command,
-    configure_desktop_backend_environment, deferred_desktop_install_version_error,
-    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
-    desktop_shutdown_backend_action, desktop_sidecar_rust_log, desktop_startup_deadline,
-    desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    configure_backend_stop_command, configure_desktop_backend_environment,
+    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
+    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
+    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
     ensure_backend_running, ensure_backend_running_with_cli_wait,
     existing_backend_candidate_matches_runtime, external_cli_backend_matches_handoff,
     external_cli_handoff_wait, failed_cli_handoff_can_retry_immediately,
     host_window_close_behavior_for_platform, is_server_config_response,
     is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
-    mark_backend_unavailable_for_manual_start, open_backend_recovery_circuit,
-    parse_port_update_response, persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
+    mark_backend_unavailable_for_manual_start, parse_port_update_response,
+    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
     probe_backend_health_with_timeout, publish_startup_ready, read_active_upgrade_relaunch_marker,
     read_pending_desktop_install, record_startup_deadline_error, relaunch_command_for_target,
     resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
     resolve_external_cli_backend_handoff, runtime_marker_matches_active_backend,
-    runtime_markers_belong_to_exited_pid, sanitize_desktop_upgrade_relaunch_command,
-    save_desktop_config, should_allow_multiple_instances, should_handoff_to_main,
-    should_retry_backend_candidate, startup_deadline_disposition, stop_backend_before_restart,
-    terminate_managed_backend, upgrade_handoff_requires_backend_release,
-    upgrade_relaunch_uses_external_cli_backend, uses_borderless_desktop_chrome_for_platform,
-    wait_for_backend, wait_for_backend_stop_helper, wait_for_child_exit,
-    wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
+    sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
+    should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
+    startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
+    upgrade_handoff_requires_backend_release, upgrade_relaunch_uses_external_cli_backend,
+    uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_backend_stop_helper,
+    wait_for_child_exit, wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
     write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendRecoveryBudget,
     BackendState, BackendSystemIdentity, BackendWaitFailureKind, BackendWatchdogHealth,
     DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
     DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
     PendingDesktopInstall, StartupDeadlineDisposition, SustainedReadinessAction,
-    WatchdogProbeDisposition, BACKEND_STOP_TIMEOUT, BACKEND_WATCHDOG_MAX_RECOVERIES,
-    BACKEND_WATCHDOG_RECOVERY_WINDOW, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV,
-    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    WatchdogProbeDisposition, BACKEND_WATCHDOG_MAX_RECOVERIES, BACKEND_WATCHDOG_RECOVERY_WINDOW,
+    DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
+    DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 #[cfg(target_os = "macos")]
 use super::{macos_menu_action, MacosMenuAction, MACOS_APP_QUIT_MENU_ID};
@@ -52,6 +49,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 mod backend_wait;
 mod cli_handoff_recovery;
+mod recovery_ownership;
 mod traffic_detail_window;
 mod watchdog;
 
@@ -119,92 +117,6 @@ fn desktop_backend_stop_command_is_authorized_for_owned_runtime() {
     assert!(env.iter().any(|(name, value)| {
         *name == OsStr::new("BIFROST_TRAY_INVOKED_STOP") && value.is_none()
     }));
-}
-
-#[test]
-fn desktop_backend_restart_stop_preserves_system_proxy_handoff() {
-    let data_dir = Path::new("/tmp/bifrost-desktop-restart");
-    let mut command = Command::new("bifrost");
-    configure_backend_restart_stop_command(&mut command, data_dir);
-
-    let env = command.get_envs().collect::<Vec<_>>();
-    assert!(env.iter().any(|(name, value)| {
-        *name == OsStr::new("BIFROST_DESKTOP_RESTART_STOP_INTERNAL")
-            && *value == Some(OsStr::new("1"))
-    }));
-}
-
-#[test]
-fn synchronous_stop_timeout_covers_cli_termination_budget() {
-    assert!(BACKEND_STOP_TIMEOUT >= Duration::from_secs(30));
-}
-
-#[test]
-fn recovery_circuit_marks_backend_unavailable_for_manual_recovery() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let state = test_backend_state(temp_dir.path().to_path_buf(), 19900, false, None);
-    state.startup_ready.store(true, Ordering::SeqCst);
-
-    open_backend_recovery_circuit(&state, "recovery circuit open".to_string());
-
-    assert!(!state.startup_ready.load(Ordering::SeqCst));
-    assert_eq!(
-        state
-            .startup_error
-            .lock()
-            .expect("startup error")
-            .as_deref(),
-        Some("recovery circuit open")
-    );
-    let log = fs::read_to_string(temp_dir.path().join("logs/desktop-bootstrap.log"))
-        .expect("bootstrap log");
-    assert!(log.contains("desktop backend bootstrap failed: recovery circuit open"));
-}
-
-#[test]
-fn exited_managed_runtime_markers_require_exact_pid_match() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    fs::write(
-        temp_dir.path().join("runtime.json"),
-        r#"{"pid":4321,"port":19900,"runtime_start_mode":"desktop"}"#,
-    )
-    .expect("runtime marker");
-    fs::write(temp_dir.path().join("bifrost.pid"), "4321").expect("pid marker");
-
-    assert!(runtime_markers_belong_to_exited_pid(temp_dir.path(), 4321).expect("matching markers"));
-    let error = runtime_markers_belong_to_exited_pid(temp_dir.path(), 9876)
-        .expect_err("mismatched marker must block recovery");
-    assert!(error
-        .to_string()
-        .contains("instead of confirmed exited pid"));
-
-    fs::write(
-        temp_dir.path().join("runtime.json"),
-        r#"{"pid":4321,"port":19900,"runtime_start_mode":"desktop"}"#,
-    )
-    .expect("runtime marker reset");
-    fs::write(temp_dir.path().join("bifrost.pid"), "9876").expect("mismatched pid marker");
-    let error = runtime_markers_belong_to_exited_pid(temp_dir.path(), 4321)
-        .expect_err("mismatched pid marker must block recovery");
-    assert!(error.to_string().contains("pid marker belongs to pid=9876"));
-
-    fs::write(temp_dir.path().join("runtime.json"), "not-json").expect("invalid runtime marker");
-    let error = runtime_markers_belong_to_exited_pid(temp_dir.path(), 4321)
-        .expect_err("invalid runtime marker must block recovery");
-    assert!(error.to_string().contains("failed to parse runtime marker"));
-
-    fs::remove_file(temp_dir.path().join("runtime.json")).expect("remove runtime marker");
-    fs::write(temp_dir.path().join("bifrost.pid"), "not-a-pid").expect("invalid pid marker");
-    let error = runtime_markers_belong_to_exited_pid(temp_dir.path(), 4321)
-        .expect_err("invalid pid marker must block recovery");
-    assert!(error.to_string().contains("failed to parse pid marker"));
-}
-
-#[test]
-fn exited_managed_runtime_cleanup_accepts_absent_markers() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    assert!(!runtime_markers_belong_to_exited_pid(temp_dir.path(), 4321)
-        .expect("absent markers are already clean"));
 }
 
 fn test_backend_state(
