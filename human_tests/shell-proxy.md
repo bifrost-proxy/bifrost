@@ -186,12 +186,29 @@
 - Linux、macOS 和 Windows 构建都会解析到父进程 shell 检测所需的 `sysinfo`。
 - `bifrost-cli` 全 target、全 feature 编译通过。
 
+### TC-SP-14: 主程序退出时自动卸载独立 CLI proxy 配置
+
+**操作步骤：**
+1. 使用隔离 HOME 和 `BIFROST_DATA_DIR` 启动未启用系统代理的 daemon，再执行 `bifrost cli-proxy enable --shell zsh`；确认服务启动后再 Enable 的管理块已经写入。
+2. 执行 `bifrost restart`，等待新 listener 就绪并检查管理块。
+3. 执行 `bifrost stop`，轮询检查管理块是否移除。
+4. 再次 Enable，并以前台模式启动服务；确认 listener 就绪后对主进程发送 `SIGKILL`。
+5. 最长等待 20 秒，轮询检查 `.zshrc` 中独立环境管理块；同时确认旧 `# >>> Bifrost proxy start >>>` 块不受独立卸载逻辑影响。
+
+**预期结果：**
+- lifecycle helper 在服务启动时创建，因此服务运行后再 Enable 也受退出清理保护；Linux 未启用系统代理时同样有效。
+- restart 交接期间独立环境管理块持续存在，不出现代理/CA 环境配置空窗。
+- 正常 stop 在终止服务前移除独立环境管理块。
+- 前台主进程被强制终止后，独立 helper 确认父进程消失并自动移除 Bash、Zsh、Fish、PowerShell 所有支持 profile 中的独立管理块。
+- 清理幂等且仅删除 `Bifrost CLI proxy environment` 块；用户内容和旧运行期 marker 保持不变。
+
 ## 执行记录
 
 | 日期 | 用例 | 执行记录 | 结果 |
 | --- | --- | --- | --- |
 | 2026-06-21 | TC-SP-01 ~ TC-SP-05 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`，覆盖启用、禁用、restore、crash recovery、旧 backup 兼容和无 marker 文件 no-op。 | 通过。24 个 shell_proxy 单元/文件系统回归全部通过；测试全部使用临时目录 rc 文件，没有修改真实用户 shell 配置。 |
 | 2026-08-06 | TC-SP-01 ~ TC-SP-13 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`（24/24）、`cargo test -p bifrost-core cli_proxy_env --lib -- --nocapture`（17/17）、CLI parse/help 与父进程 shell 单测，以及 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_proxy_environment_e2e.sh`；执行 startup UI 静态守卫和 coverage pipeline contract；通过 `cargo metadata` 断言 `sysinfo` 为跨平台依赖并执行 `cargo check -p bifrost-cli --all-targets --all-features`；最后执行完整 unit + proxy E2E 覆盖率门禁并以 `origin/main` 为基准运行 95% 增量覆盖率检查。 | 通过。真实 CLI 在隔离 HOME/BIFROST_DATA_DIR 中覆盖四种 shell、161 证书合并 bundle、当前父 shell优先、幂等、旧 marker 隔离、字面量转义、Deno/Node/Python/Go/Cargo 等 CA 变量、残缺 marker 拒绝、写入回滚、回滚失败诊断和自动失败后的完整手工指引；新 shell 用例显式禁止 Sync 自动登录弹窗和 Tray，proxy coverage manifest 15 项契约一致；`sysinfo` 依赖 target 为 `null` 且 CLI 全 target/all-features 编译通过；rules 68/68、shell 15/15、runner 373/373、绝对覆盖率门禁通过，变更生产 Rust 行覆盖率 `95.08% (618/650)`；临时 profile 仅位于测试沙箱，没有修改真实用户配置。 |
+| 2026-08-06 | TC-SP-14 | 使用 release binary 执行 `PROXY_PORT=19891 bash e2e-tests/tests/test_cli_proxy_environment_e2e.sh`，在隔离 HOME/BIFROST_DATA_DIR 中先启动 daemon 后 Enable，真实执行 restart、stop，再以前台模式启动并对主进程发送 `SIGKILL`。 | 通过。restart 期间 marker 保留，stop 后 marker 删除；强杀主进程后独立 lifecycle helper 在轮询窗口内删除 marker。测试未启用系统代理，证明 Linux/无系统代理路径同样受保护；所有进程和临时目录均由测试清理。 |
 
 ## 清理步骤
 

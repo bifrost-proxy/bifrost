@@ -155,7 +155,7 @@ impl SystemProxyLifecycleHelperState {
         }
     }
 
-    pub fn ensure_started_after_startup_enable(&self) {
+    pub fn ensure_started_after_startup(&self) {
         self.ensure_started(SystemProxyLifecycleHelperStartReason::Startup);
     }
 
@@ -164,27 +164,8 @@ impl SystemProxyLifecycleHelperState {
     }
 
     fn ensure_started(&self, reason: SystemProxyLifecycleHelperStartReason) {
-        // The lifecycle helper is intentionally limited to macOS and Windows: those
-        // are the only platforms where Bifrost actually manages an OS-level system
-        // proxy that needs an external watchdog if the parent crashes. On Linux
-        // (and any other targets) we skip the helper entirely instead of spawning
-        // a subprocess that has nothing to do.
-        if !cfg!(any(target_os = "macos", target_os = "windows")) {
-            tracing::debug!(
-                target: "bifrost_admin::proxy",
-                reason = reason.as_str(),
-                "system proxy lifecycle helper is only supported on macOS and Windows; skipping"
-            );
-            return;
-        }
-        if !bifrost_core::SystemProxyManager::is_supported() {
-            tracing::debug!(
-                target: "bifrost_admin::proxy",
-                reason = reason.as_str(),
-                "system proxy not supported on this platform; lifecycle helper not started"
-            );
-            return;
-        }
+        // The helper also owns standalone CLI proxy environment cleanup, so it must run on every
+        // supported Bifrost platform even where there is no OS-level system proxy integration.
         if std::env::var(SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV)
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
@@ -235,31 +216,6 @@ impl SystemProxyLifecycleHelperState {
         }
     }
 
-    /// Stops the helper child and waits for it. Used after Admin API disable confirmed cleanup.
-    pub fn stop(&self) {
-        if let Some(mut child) = self.child.lock().take() {
-            if let Err(error) = child.kill() {
-                tracing::debug!(
-                    target: "bifrost_admin::proxy",
-                    error = %error,
-                    "failed to stop system proxy lifecycle helper after Admin API disable"
-                );
-            } else {
-                tracing::info!(
-                    target: "bifrost_admin::proxy",
-                    "system proxy lifecycle helper stopped after Admin API disable"
-                );
-            }
-            if let Err(error) = child.wait() {
-                tracing::debug!(
-                    target: "bifrost_admin::proxy",
-                    error = %error,
-                    "failed to reap system proxy lifecycle helper after Admin API disable"
-                );
-            }
-        }
-    }
-
     /// Detaches the helper child without killing it, leaving the watchdog process alive.
     /// Used during AdminState drop so that an abnormal Bifrost shutdown still benefits from
     /// the lifecycle helper observing the parent exit and cleaning up.
@@ -285,6 +241,8 @@ impl SystemProxyLifecycleHelperStartReason {
 
     fn started_message(self) -> &'static str {
         match self {
+            // Keep the established log phrase for dashboards and diagnostics even though the
+            // helper now also removes standalone CLI proxy environment blocks.
             Self::Startup => "system proxy lifecycle cleanup helper started",
             Self::AdminApiEnable => "system proxy lifecycle helper started after Admin API enable",
         }
@@ -399,8 +357,7 @@ fn resolve_system_proxy_lifecycle_helper_program_from_candidates(
 impl Drop for SystemProxyLifecycleHelperState {
     fn drop(&mut self) {
         // Detach (do not kill): if Bifrost is exiting abnormally, the helper must
-        // outlive the parent so it can observe parent exit and clean up the system proxy.
-        // Cooperative shutdowns call stop() explicitly before drop.
+        // outlive the parent so it can observe parent exit and clean up every managed proxy form.
         self.detach();
     }
 }

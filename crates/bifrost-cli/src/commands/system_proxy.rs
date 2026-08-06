@@ -526,7 +526,7 @@ fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Resul
         "system proxy cleanup helper restore starting"
     );
     let started_at = std::time::Instant::now();
-    bifrost_core::retry_with_policy(
+    let system_proxy_result = bifrost_core::retry_with_policy(
         bifrost_core::RECOVERY_RETRY_WINDOW,
         bifrost_core::RECOVERY_RETRY_INTERVAL,
         |attempt| {
@@ -537,14 +537,34 @@ fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Resul
             );
             bifrost_core::SystemProxyManager::recover_from_crash(data_dir)
         },
-    )?;
+    );
+    // CLI profile removal is independent from OS proxy recovery. Always attempt both so a
+    // temporary networksetup/WinINET failure cannot leave shell proxy variables behind.
+    let cli_proxy_result = bifrost_core::CliProxyEnvironmentManager::disable_all_managed();
+    let cli_proxy_profile_count =
+        combine_proxy_cleanup_results(system_proxy_result, cli_proxy_result)?;
     tracing::info!(
         target: "bifrost_cli::shutdown",
         data_dir = %data_dir.display(),
+        cli_proxy_profiles = cli_proxy_profile_count,
         elapsed_ms = started_at.elapsed().as_millis() as u64,
-        "system proxy cleanup helper restore completed"
+        "proxy cleanup helper restore completed"
     );
     Ok(())
+}
+
+fn combine_proxy_cleanup_results(
+    system_proxy_result: bifrost_core::Result<()>,
+    cli_proxy_result: bifrost_core::Result<Vec<std::path::PathBuf>>,
+) -> bifrost_core::Result<usize> {
+    match (system_proxy_result, cli_proxy_result) {
+        (Ok(()), Ok(paths)) => Ok(paths.len()),
+        (Err(system_error), Ok(_)) => Err(system_error),
+        (Ok(()), Err(cli_error)) => Err(cli_error),
+        (Err(system_error), Err(cli_error)) => Err(bifrost_core::BifrostError::Config(format!(
+            "System proxy cleanup failed: {system_error}; CLI proxy environment cleanup failed: {cli_error}"
+        ))),
+    }
 }
 
 fn should_try_managed_runtime_restart(runtime: &RuntimeInfo) -> bool {
@@ -1153,6 +1173,44 @@ mod tests {
     use super::*;
     use crate::process::RuntimeStartMode;
     use std::path::PathBuf;
+
+    fn cleanup_error(message: &str) -> bifrost_core::BifrostError {
+        bifrost_core::BifrostError::Config(message.to_string())
+    }
+
+    #[test]
+    fn combined_proxy_cleanup_reports_success_and_each_failure_shape() {
+        assert_eq!(
+            combine_proxy_cleanup_results(
+                Ok(()),
+                Ok(vec![PathBuf::from(".zshrc"), PathBuf::from(".bashrc")])
+            )
+            .unwrap(),
+            2
+        );
+
+        let system_only =
+            combine_proxy_cleanup_results(Err(cleanup_error("system failed")), Ok(Vec::new()))
+                .unwrap_err()
+                .to_string();
+        assert!(system_only.contains("system failed"));
+
+        let cli_only = combine_proxy_cleanup_results(Ok(()), Err(cleanup_error("profile failed")))
+            .unwrap_err()
+            .to_string();
+        assert!(cli_only.contains("profile failed"));
+
+        let both = combine_proxy_cleanup_results(
+            Err(cleanup_error("system failed")),
+            Err(cleanup_error("profile failed")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(both.contains("System proxy cleanup failed"));
+        assert!(both.contains("system failed"));
+        assert!(both.contains("CLI proxy environment cleanup failed"));
+        assert!(both.contains("profile failed"));
+    }
 
     #[test]
     fn pid_reuse_detected_when_start_time_mismatches_current_process() {

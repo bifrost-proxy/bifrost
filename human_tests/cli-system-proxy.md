@@ -634,7 +634,7 @@
 ### TC-CSP-20：PID 复用场景下 lifecycle helper 应执行受保护恢复（macOS + Windows）
 
 **前置条件**：
-- macOS 或 Windows 任一支持系统代理的环境（Windows 启用 WinINET）。Bifrost 不在 Linux 上写系统代理，因此 Linux 不在本用例覆盖范围内；helper 行为本身由 `bifrost-core` 单元测试在 Linux runner 上做编译/解析层面回归。
+- macOS 或 Windows 任一支持系统代理的环境（Windows 启用 WinINET）。Bifrost 不在 Linux 上写系统代理，因此 Linux 不覆盖本用例的 OS proxy 断言；通用 helper 本身会在 Linux 启动，并由 CLI proxy 生命周期 E2E 覆盖。
 - 使用临时数据目录：
   ```bash
   TEST_DATA_DIR="$(mktemp -d)"
@@ -661,7 +661,7 @@
 - helper 启动日志包含 `parent_started_at_ms=<u64>` 字段。
 - 当 helper 观测到 `parent pid` 仍存活但 `start_time` 不再匹配 `parent_started_at_ms`（容差 2000ms 内），日志输出 `pid_reuse_check=mismatch` 与 `running guarded cleanup`，并进入 `recover_from_crash`。
 - 如果当前系统代理仍指向旧 Bifrost target，则恢复原始代理或禁用残留代理；如果已经被外部代理接管，则 guarded recovery 保留外部代理不变。
-- 跨平台一致：macOS 通过 `proc_pidinfo`+`PROC_PIDTBSDINFO` 取 start_time；Windows 通过 `GetProcessTimes`。Linux 不启动 helper，不在本用例覆盖范围；`bifrost-core` 在 Linux runner 上仍会执行 `process_start_time` 单元测试，确保 `/proc/<pid>/stat` 解析逻辑回归。
+- 跨平台一致：macOS 通过 `proc_pidinfo`+`PROC_PIDTBSDINFO`、Windows 通过 `GetProcessTimes`、Linux 通过 `/proc/<pid>/stat` 取 start_time。Linux helper 不写 OS proxy，但使用相同 PID + start_time 判定保护 CLI proxy 环境清理。
 
 ---
 
@@ -701,7 +701,7 @@
 ### TC-CSP-22：lifecycle helper recover_from_crash 应在 60 秒内有限重试
 
 **前置条件**：
-- macOS 或 Windows（运行期 helper 平台）。Linux 不启动 helper，不在本用例覆盖范围；`bifrost-core` 单元测试仍会在 Linux runner 上执行重试策略测试。
+- macOS 或 Windows（本用例验证 OS proxy recovery）。Linux 也启动 helper，但 `SystemProxyManager::recover_from_crash` 为 no-op，随后仍执行 CLI proxy 环境清理；重试策略单元测试继续跨平台执行。
 - 临时数据目录：`TEST_DATA_DIR="$(mktemp -d)"`。
 
 **操作步骤**：
@@ -718,14 +718,14 @@
 - `RECOVERY_RETRY_WINDOW = 60s`、`RECOVERY_RETRY_INTERVAL = 5s`，重试期间 helper 不立即退出。
 - 区分可重试错误（`is_retryable_recovery_error`：networksetup 暂不可用、网络服务枚举为空、临时 IO 错误）与不可重试错误（解析失败、状态文件损坏）。
 - 60 秒窗口超时仍未恢复时记录最后一次错误并退出，避免 helper 永远阻塞。
-- Rust 单元测试 `system_proxy_recovery::tests::*` 在 macOS / Linux / Windows 上均编译通过；运行期 helper 行为只在 macOS / Windows 验证。
+- Rust 单元测试 `system_proxy_recovery::tests::*` 在 macOS / Linux / Windows 上均编译通过；macOS/Windows 验证 OS proxy recovery，Linux 的运行期 helper 由 CLI proxy 退出清理 E2E 验证。
 
 ---
 
 ### TC-CSP-23：lifecycle helper 在 Windows 上同样能在主进程崩溃后清理系统代理（macOS + Windows 范围）
 
 **前置条件**：
-- 仅适用于 macOS / Windows。Bifrost 不对 Linux 提供系统代理写入能力，因此 Linux 上不会启动 lifecycle helper，本用例不在 Linux 平台执行。
+- OS proxy 清理断言仅适用于 macOS / Windows。Bifrost 不对 Linux 提供系统代理写入能力，但 Linux 仍启动通用 lifecycle helper 负责 CLI proxy 环境清理。
 - macOS：参考 TC-CSP-15 已覆盖。
 - Windows：Windows 10+，临时数据目录，PowerShell。
 
@@ -742,12 +742,12 @@
    ```
 
 **Linux 行为说明**：
-- Bifrost 当前不在 Linux 上写系统代理，因此 lifecycle helper 在 Linux 也直接 short-circuit 返回，日志输出 `system proxy lifecycle helper is only supported on macOS and Windows; skipping`。CI Linux 矩阵只验证 `cargo test --workspace --all-features` 通过，不验证 helper 行为。
+- Bifrost 当前不在 Linux 上写系统代理；通用 lifecycle helper 仍启动，但 OS proxy recovery 为 no-op，并继续清理 `bifrost cli-proxy enable` 安装的 profile 管理块。Linux CI 通过 CLI proxy 生命周期 E2E 验证该行为。
 
 **预期结果**：
 - Windows：`ProxyEnable` 为 `0`，`ProxyServer` 不再指向 `127.0.0.1:18889`，且通知 `WinINET` 设置生效。
 - macOS：参见 TC-CSP-15。
-- Linux：helper 不被启动；`SystemProxyLifecycleHelperState::ensure_started` short-circuit；CI 矩阵 (`ubuntu-latest` / `windows-latest` / `macos-latest`) 均执行 `cargo test --workspace --all-features` 通过。
+- Linux：helper 被启动但不写 OS proxy；CLI proxy 生命周期 E2E 验证主进程异常退出后的 profile 清理；CI 矩阵 (`ubuntu-latest` / `windows-latest` / `macos-latest`) 均执行 `cargo test --workspace --all-features`。
 
 ---
 
@@ -1289,7 +1289,7 @@
 - fresh `start --system-proxy` 在 marker 与旧 runtime 同时存在时跳过启动前 crash recovery；无 runtime 或不启用系统代理时必须执行普通 recovery。进入新 runtime 前失败时由 startup guard 兜底 recovery。
 - restart handoff 在进入新 runtime 前失败时，启动期 guard 会执行 crash recovery，避免 system proxy 挂在已停旧 listener。
 - restart handoff 在 exec fresh daemon 前不重复 re-apply 系统代理；旧 daemon 和 helper 已通过 `preserve_for_restart` 保持当前 host/port，orphan 必须尽快 exec fresh daemon，避免 `networksetup` 写入阻塞新 listener 接管。fresh daemon 启动前 recovery 与 system proxy reconcile 线程的初始 recovery 都要识别并跳过同一 handoff 窗口；core `SystemProxyManager::Drop` 也要在 `preserve_for_restart` / `foreground_cleanup` marker 下跳过 restore，之后再按 `--system-proxy` reconcile。
-- Linux 暂不支持 Bifrost 托管系统代理写入，`SystemProxyManager::is_supported()` 必须返回 false；Linux CI 只验证无系统代理 restart/stop 等平台一致路径，不启动 lifecycle helper，也不写 shutdown marker。
+- Linux 暂不支持 Bifrost 托管系统代理写入，`SystemProxyManager::is_supported()` 必须返回 false；但 Linux 与其它平台一致启动 lifecycle helper、写 restart/stop shutdown marker，以保护 CLI proxy 环境的 restart 保留与退出清理，且始终不修改 OS proxy。
 - macOS 普通 `networksetup` 与 sudo 写入/恢复/disable 路径按 network service 有界并行；单个 service 内 HTTP/HTTPS/bypass 配置顺序保持不变；GUI 授权路径不并行弹窗。
 - `.system_proxy.lock` 仍然覆盖并行写入外层，跨进程不会同时修改同一批系统代理配置。
 

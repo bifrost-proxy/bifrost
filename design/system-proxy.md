@@ -19,7 +19,7 @@ Bifrost 的 System Proxy 只应管理自己写入的系统代理配置。用户�
 - `SystemProxyManager::enable` 使用两阶段 `applied` 标记写入 `proxy_state.json`；`proxy_backup.json` 兼容旧恢复。
 - 关闭/恢复路径先判断归属，`OwnedByOther` 时保持外部代理不变。
 - `bifrost start` 在证书/端口冲突检查之前同步执行 `SystemProxyManager::recover_from_crash`。
-- macOS 启用系统代理时启动跨平台 lifecycle helper（独立进程组/DETACHED_PROCESS）+ 后台异步安装 cleanup LaunchDaemon（用户取消授权不阻塞主服务）。
+- 每个 Bifrost runtime 都启动跨平台 lifecycle helper（独立进程组/DETACHED_PROCESS），统一负责系统代理与独立 CLI proxy 环境的退出清理；macOS 启用系统代理时再后台异步安装 cleanup LaunchDaemon（用户取消授权不阻塞主服务）。
 - Windows lifecycle helper 使用 `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`；父进程崩溃时 helper `Drop::detach()` 继续兜底。
 - helper 身份判定使用 PID + start_time 双因子（容差 2000ms），避免 PID 复用误清理。
 - 所有 macOS 系统代理写入通过 `data_dir/.system_proxy.lock`（`O_NOFOLLOW` + fd `fchmod(0666)`）跨进程串行化。
@@ -29,8 +29,8 @@ Bifrost 的 System Proxy 只应管理自己写入的系统代理配置。用户�
 
 ### 必须不破坏
 
-- 用户从未启用系统代理时，Bifrost 不应写入 OS 代理，也不启动 helper/LaunchDaemon。
-- Linux 不支持系统代理（`SystemProxyManager::is_supported()` 返回 false），不写 shutdown marker、不启动 helper、不装 LaunchDaemon。
+- 用户从未启用系统代理时，Bifrost 不应写入 OS 代理或安装 LaunchDaemon；通用 lifecycle helper 仍启动，以保护运行中可能随后安装的独立 CLI proxy 环境。
+- Linux 不支持系统代理（`SystemProxyManager::is_supported()` 返回 false），不写 OS 代理、不装 LaunchDaemon；仍写跨平台 restart/stop shutdown marker，并启动通用 helper 负责 CLI proxy 环境清理。
 - 外部代理（Surge/Clash/系统 VPN）在 Bifrost 任何清理路径下都不能被关闭；`disable` 请求成功且 `managed_by_bifrost=false` 时不报错 `System proxy is still enabled`。
 - `bifrost restart` 期间 OS 代理不能出现 disable→enable 的可感断网。
 - 已启用 helper 时 `bifrost stop` 必须先前台清理系统代理，只有 cleanup 成功才发送 SIGTERM。

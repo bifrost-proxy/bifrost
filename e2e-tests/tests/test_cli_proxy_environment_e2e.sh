@@ -10,8 +10,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
 TEST_ROOT="$(mktemp -d)"
+PROXY_PID=""
 
 cleanup() {
+  local runtime_pid_file="$TEST_ROOT/data-lifecycle/bifrost.pid"
+  if [[ -f "$runtime_pid_file" ]]; then
+    local runtime_pid
+    runtime_pid="$(tr -cd '0-9' < "$runtime_pid_file")"
+    if [[ -n "$runtime_pid" ]] && kill -0 "$runtime_pid" 2>/dev/null; then
+      kill "$runtime_pid" 2>/dev/null || true
+    fi
+  fi
+  if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
+    kill -9 "$PROXY_PID" 2>/dev/null || true
+    wait "$PROXY_PID" 2>/dev/null || true
+  fi
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -39,6 +52,35 @@ assert_not_contains() {
   if [[ -f "$file" ]] && grep -Fq -- "$unexpected" "$file"; then
     fail "$file unexpectedly contains: $unexpected"
   fi
+}
+
+wait_for_listener() {
+  local port="$1"
+  local attempts=60
+  while (( attempts > 0 )); do
+    # The shared port also accepts proxy traffic, so an HTTP status code is not a stable readiness
+    # contract across access modes. A successful TCP handshake is the listener contract we need.
+    if (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+    attempts=$((attempts - 1))
+  done
+  return 1
+}
+
+wait_for_marker_removal() {
+  local profile="$1"
+  local attempts=40
+  while (( attempts > 0 )); do
+    if [[ ! -f "$profile" ]] || ! grep -Fq \
+      '# >>> Bifrost CLI proxy environment start >>>' "$profile"; then
+      return 0
+    fi
+    sleep 0.5
+    attempts=$((attempts - 1))
+  done
+  return 1
 }
 
 profile_paths() {
@@ -215,6 +257,56 @@ test_incomplete_marker_is_not_overwritten() {
   [[ ! -e "$unsafe_home/.bashrc" ]] || fail "unsafe value created a shell profile"
 }
 
+test_runtime_lifecycle_cleanup() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo "SKIP: Unix process-signal lifecycle assertion is covered by platform-specific Windows lifecycle tests"
+      return
+      ;;
+  esac
+
+  local home="$TEST_ROOT/home-lifecycle"
+  local data_dir="$TEST_ROOT/data-lifecycle"
+  local profile="$home/.zshrc"
+  local port="${PROXY_PORT:-18891}"
+  local log_file="$TEST_ROOT/lifecycle.log"
+  mkdir -p "$home" "$data_dir"
+
+  # The helper is started with the service, before a user may install the standalone block.
+  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" start \
+    --daemon --port "$port" --yes --skip-cert-check --unsafe-ssl \
+    --no-system-proxy --no-tray >"$log_file" 2>&1
+  wait_for_listener "$port" || fail "daemon did not become ready: $(tail -n 80 "$log_file")"
+
+  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" cli-proxy enable \
+    --shell zsh --port "$port"
+  assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
+
+  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" restart \
+    >"$TEST_ROOT/restart.log" 2>&1
+  wait_for_listener "$port" || fail "daemon did not become ready after restart"
+  assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
+
+  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" stop \
+    >"$TEST_ROOT/stop.log" 2>&1
+  wait_for_marker_removal "$profile" || fail "normal stop did not remove managed CLI proxy block"
+
+  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" cli-proxy enable \
+    --shell zsh --port "$port"
+  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" start \
+    --port "$port" --yes --skip-cert-check --unsafe-ssl \
+    --no-system-proxy --no-tray >"$TEST_ROOT/crash.log" 2>&1 &
+  PROXY_PID=$!
+  wait_for_listener "$port" || fail "foreground proxy did not become ready before crash test"
+  assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
+
+  kill -9 "$PROXY_PID"
+  wait "$PROXY_PID" 2>/dev/null || true
+  PROXY_PID=""
+  wait_for_marker_removal "$profile" \
+    || fail "lifecycle helper did not remove managed CLI proxy block after parent crash"
+}
+
 for shell in bash zsh fish powershell; do
   test_shell "$shell"
 done
@@ -223,6 +315,7 @@ test_old_lifecycle_marker_is_preserved
 test_shell_literal_escaping
 test_manual_fallback_output
 test_incomplete_marker_is_not_overwritten
+test_runtime_lifecycle_cleanup
 
 bundle="$BIFROST_DATA_DIR/certs/cli-proxy-ca-bundle.pem"
 [[ -f "$bundle" ]] || fail "combined CA bundle was not generated"
@@ -230,4 +323,4 @@ certificate_count="$(grep -Fc -- '-----BEGIN CERTIFICATE-----' "$bundle")"
 [[ "$certificate_count" -ge 2 ]] || fail "combined CA bundle lacks system roots"
 assert_contains "$bundle" "$(sed -n '2p' "$BIFROST_DATA_DIR/certs/ca.crt")"
 
-echo "PASS: cli-proxy environment enable/disable covers bash, zsh, fish, powershell, CA bundle, detection, idempotency, escaping, lifecycle isolation, and manual failure recovery"
+echo "PASS: cli-proxy environment covers shells, CA bundle, detection, idempotency, escaping, manual recovery, restart preservation, normal-stop cleanup, and crash cleanup"

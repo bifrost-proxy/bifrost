@@ -480,9 +480,10 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                         start_system_proxy_lifecycle_helper_after_runtime_enable(&state);
                         spawn_system_proxy_launchd_install_task_from_config(config_manager);
                     } else if !request.enabled {
-                        // The user disabled Bifrost system proxy ownership. A different
-                        // external proxy may still be live, but this runtime no longer owns it.
-                        stop_system_proxy_lifecycle_helper_after_runtime_disable(&state);
+                        // Keep the lifecycle helper alive: standalone `cli-proxy enable` can be
+                        // installed while this runtime is already running, and the same helper
+                        // must remove that managed shell block when the runtime exits.
+                        keep_proxy_lifecycle_helper_after_runtime_system_proxy_disable(&state);
                     } else {
                         tracing::warn!(
                             target: "bifrost_admin::proxy",
@@ -724,9 +725,9 @@ fn start_system_proxy_lifecycle_helper_after_runtime_enable(state: &SharedAdminS
     }
 }
 
-fn stop_system_proxy_lifecycle_helper_after_runtime_disable(state: &SharedAdminState) {
+fn keep_proxy_lifecycle_helper_after_runtime_system_proxy_disable(state: &SharedAdminState) {
     if let Some(helper) = &state.system_proxy_lifecycle_helper {
-        helper.stop();
+        helper.ensure_started_after_admin_api_enable();
     }
 }
 

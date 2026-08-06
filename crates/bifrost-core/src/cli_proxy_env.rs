@@ -155,7 +155,6 @@ impl CliProxyEnvironmentManager {
         })
     }
 
-    #[cfg(test)]
     fn with_paths(shell: CliProxyShell, config_paths: Vec<PathBuf>) -> Self {
         Self {
             shell,
@@ -189,6 +188,44 @@ impl CliProxyEnvironmentManager {
 
     pub fn environment_markers() -> (&'static str, &'static str) {
         (START_MARKER, END_MARKER)
+    }
+
+    /// Remove every standalone `bifrost cli-proxy enable` block for the current user.
+    ///
+    /// The lifecycle cleanup daemon cannot assume it was launched from the same shell that ran
+    /// `enable`, so cleanup must cover every supported profile instead of only the daemon's
+    /// current shell. All paths are prepared before any write, preserving the same transactional
+    /// rollback behavior as a single-shell disable.
+    pub fn disable_all_managed() -> Result<Vec<PathBuf>> {
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+            .ok_or_else(|| BifrostError::Config("Could not determine home directory".into()))?;
+        Self::disable_all_managed_for_home(&home)
+    }
+
+    fn all_supported_paths_for_home(home: &Path) -> Vec<PathBuf> {
+        let mut paths = [
+            CliProxyShell::Bash,
+            CliProxyShell::Zsh,
+            CliProxyShell::Fish,
+            CliProxyShell::PowerShell,
+        ]
+        .into_iter()
+        .flat_map(|shell| shell.config_paths_for_home(home))
+        .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn disable_all_managed_for_home(home: &Path) -> Result<Vec<PathBuf>> {
+        let manager = Self::with_paths(
+            CliProxyShell::Bash,
+            Self::all_supported_paths_for_home(home),
+        );
+        Ok(manager.disable()?.changed_paths)
     }
 
     pub fn disable(&self) -> Result<CliProxyEnvironmentResult> {
@@ -849,6 +886,51 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Combined CA bundle"));
+    }
+
+    #[test]
+    fn disable_all_managed_covers_every_shell_and_preserves_lifecycle_blocks() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let standalone = format!("{START_MARKER}\nmanaged\n{END_MARKER}");
+        let lifecycle =
+            "# >>> Bifrost proxy start >>>\nexport HTTP_PROXY=old\n# <<< Bifrost proxy end <<<";
+        let bash = home.join(".bashrc");
+        let fish = home.join(".config/fish/config.fish");
+        let powershell = home.join(".config/powershell/Microsoft.PowerShell_profile.ps1");
+        std::fs::create_dir_all(fish.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(powershell.parent().unwrap()).unwrap();
+        std::fs::write(&bash, format!("bash-before\n{standalone}\n{lifecycle}\n")).unwrap();
+        std::fs::write(&fish, format!("fish-before\n{standalone}\n")).unwrap();
+        std::fs::write(&powershell, format!("pwsh-before\n{standalone}\n")).unwrap();
+
+        let changed = CliProxyEnvironmentManager::disable_all_managed_for_home(home).unwrap();
+
+        assert_eq!(changed.len(), 3);
+        assert_eq!(
+            std::fs::read_to_string(&bash).unwrap(),
+            format!("bash-before\n{lifecycle}\n")
+        );
+        assert_eq!(std::fs::read_to_string(&fish).unwrap(), "fish-before");
+        assert_eq!(std::fs::read_to_string(&powershell).unwrap(), "pwsh-before");
+    }
+
+    #[test]
+    fn disable_all_managed_preflights_every_profile_before_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let bash = home.join(".bashrc");
+        let original = format!("before\n{START_MARKER}\nmanaged\n{END_MARKER}\nafter\n");
+        std::fs::write(&bash, &original).unwrap();
+        let invalid_profile = home.join(".config/powershell/Microsoft.PowerShell_profile.ps1");
+        std::fs::create_dir_all(&invalid_profile).unwrap();
+
+        let error = CliProxyEnvironmentManager::disable_all_managed_for_home(home)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not a regular file"));
+        assert_eq!(std::fs::read_to_string(bash).unwrap(), original);
     }
 
     #[cfg(unix)]

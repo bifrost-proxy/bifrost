@@ -11,7 +11,7 @@ bifrost cli-proxy enable
 bifrost cli-proxy disable
 ```
 
-该命令负责持久化当前 shell 的代理与 CA 环境配置，不依赖 Bifrost 服务生命周期。
+该命令负责把代理与 CA 环境配置安装到当前 shell profile。配置在 Bifrost 主程序运行期间持续有效；主程序正常退出或异常消失后，由独立 lifecycle helper 自动移除。用户也可以提前执行 `disable` 手动卸载。
 
 ## 用户目标
 
@@ -21,6 +21,7 @@ bifrost cli-proxy disable
 - 支持 Bash、Zsh、Fish、PowerShell；无法识别的 shell 明确报错。
 - 重复执行 `enable` 只替换现有管理块，不重复追加。
 - 与 `start --cli-proxy` 的运行期管理块完全隔离，互不删除。
+- 主程序退出时自动清理独立管理块；`restart` 交接期间保留，避免新进程接管前出现配置空窗。
 - CA bundle 保留系统根证书，避免覆盖型 CA 变量破坏普通 HTTPS 信任。
 
 ## 命令语义
@@ -55,7 +56,16 @@ bifrost cli-proxy disable [--shell bash|zsh|fish|powershell]
 # <<< Bifrost CLI proxy environment end <<<
 ```
 
-旧 `start --cli-proxy` 继续使用 `# >>> Bifrost proxy start >>>`，因此服务停止或崩溃恢复只清理运行期块，不触碰独立安装块。
+旧 `start --cli-proxy` 继续使用 `# >>> Bifrost proxy start >>>`，两个管理块仍保持隔离：`disable` 只移除独立安装块，旧运行期清理只移除运行期块；主程序退出的统一清理流程会分别移除两者。
+
+## 生命周期与异常退出
+
+- Bifrost 主程序在每次启动时创建独立 lifecycle helper，helper 以主进程 PID 和启动时间双因子识别父进程，并位于独立进程组中。
+- 正常 `stop` 会在终止服务前移除独立 CLI proxy 管理块；直接前台退出也会在 shutdown 阶段清理。
+- 主程序崩溃、被强制终止或 PID 被复用时，helper 确认父进程消失后遍历 Bash、Zsh、Fish、PowerShell 的所有支持 profile，移除独立管理块。因此清理不依赖 helper 自己运行在哪一种 shell 中。
+- `restart` 写入 `PreserveForRestart` marker，旧主进程和旧 helper 跳过清理；新主进程接管后创建新的 helper。若新进程最终不能继续运行，新的退出路径仍会执行清理。
+- 手动 `bifrost cli-proxy disable` 始终可用，并且只提前移除当前选择 shell 的独立管理块；helper 后续再次清理是幂等操作。
+- 为了让“服务运行中再执行 enable”也获得退出保护，helper 在 Bifrost 启动时始终创建，不要求当时已经启用系统代理或 CLI proxy；Linux 等没有系统代理集成的平台也会创建。
 
 ## 环境变量覆盖
 
@@ -105,6 +115,6 @@ bifrost cli-proxy disable [--shell bash|zsh|fish|powershell]
 ## 验证计划
 
 - 单元测试：shell 路径、shell 语法转义、变量矩阵、bundle 含系统根和 Bifrost CA、幂等替换、精确卸载、与旧 marker 隔离。
-- E2E：临时 HOME 和 `BIFROST_DATA_DIR` 中运行真实 CLI，覆盖 Bash/Zsh/Fish/PowerShell、自动生成 CA、重复 enable、disable 和旧 marker 共存。
+- E2E：临时 HOME 和 `BIFROST_DATA_DIR` 中运行真实 CLI，覆盖 Bash/Zsh/Fish/PowerShell、自动生成 CA、重复 enable、disable、旧 marker 共存，以及主进程异常退出后的 helper 自动清理。
 - human_tests：按真实用户命令逐条检查帮助、启用结果、CA 变量、卸载保留用户配置。
 - 远端 CI 执行 workspace 测试、E2E 和 90% coverage gate。
