@@ -202,6 +202,31 @@
 - 前台主进程被强制终止后，独立 helper 确认父进程消失并自动移除 Bash、Zsh、Fish、PowerShell 所有支持 profile 中的独立管理块。
 - 清理幂等且仅删除 `Bifrost CLI proxy environment` 块；用户内容和旧运行期 marker 保持不变。
 
+### TC-SP-15: Bash 不创建会遮蔽现有 `.profile` 的登录配置
+
+**操作步骤：**
+1. 创建隔离 HOME，只写入包含 `export ORIGINAL_PATH=/example` 的 `.profile`，确保 `.bash_profile` 和 `.bash_login` 不存在。
+2. 对该 HOME 执行 Bash profile 选择与 Enable 回归测试。
+3. 检查独立管理块写入位置，然后执行 Disable。
+4. 再分别创建 `.bash_login`、`.bash_profile`，验证选择顺序。
+
+**预期结果：**
+- 只有 `.profile` 时，Enable 写入 `.bashrc` 和现有 `.profile`，绝不创建 `.bash_profile`。
+- Disable 后 `.profile` 中原有登录环境保持不变，且仍不产生 `.bash_profile`。
+- 多个登录文件存在时严格匹配 Bash 的 `.bash_profile` → `.bash_login` → `.profile` 优先级。
+
+### TC-SP-16: Marker 只按完整行识别且生成块保留末尾换行
+
+**操作步骤：**
+1. 在隔离 profile 中写入包含起止 marker 文本的普通 `echo` 和文档行，但不写 marker-only 行。
+2. 执行 Enable 后检查普通文本与新管理块，再执行 Disable。
+3. 对空 profile 和已有管理块的 profile 分别执行 Enable，并在结果末尾模拟追加一行用户配置。
+
+**预期结果：**
+- 普通行中的 marker 子串不被识别、替换或删除，只有 marker-only 行界定管理块。
+- Enable 追加且仅追加一个真实管理块，Disable 后普通 `echo`/文档内容逐字保留。
+- 生成或替换后的管理块以换行结束；后续追加的用户配置不会拼进 end marker 注释行，也不会产生双空行。
+
 ## 执行记录
 
 | 日期 | 用例 | 执行记录 | 结果 |
@@ -209,6 +234,8 @@
 | 2026-06-21 | TC-SP-01 ~ TC-SP-05 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`，覆盖启用、禁用、restore、crash recovery、旧 backup 兼容和无 marker 文件 no-op。 | 通过。24 个 shell_proxy 单元/文件系统回归全部通过；测试全部使用临时目录 rc 文件，没有修改真实用户 shell 配置。 |
 | 2026-08-06 | TC-SP-01 ~ TC-SP-13 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`（24/24）、`cargo test -p bifrost-core cli_proxy_env --lib -- --nocapture`（17/17）、CLI parse/help 与父进程 shell 单测，以及 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_proxy_environment_e2e.sh`；执行 startup UI 静态守卫和 coverage pipeline contract；通过 `cargo metadata` 断言 `sysinfo` 为跨平台依赖并执行 `cargo check -p bifrost-cli --all-targets --all-features`；最后执行完整 unit + proxy E2E 覆盖率门禁并以 `origin/main` 为基准运行 95% 增量覆盖率检查。 | 通过。真实 CLI 在隔离 HOME/BIFROST_DATA_DIR 中覆盖四种 shell、161 证书合并 bundle、当前父 shell优先、幂等、旧 marker 隔离、字面量转义、Deno/Node/Python/Go/Cargo 等 CA 变量、残缺 marker 拒绝、写入回滚、回滚失败诊断和自动失败后的完整手工指引；新 shell 用例显式禁止 Sync 自动登录弹窗和 Tray，proxy coverage manifest 15 项契约一致；`sysinfo` 依赖 target 为 `null` 且 CLI 全 target/all-features 编译通过；rules 68/68、shell 15/15、runner 373/373、绝对覆盖率门禁通过，变更生产 Rust 行覆盖率 `95.08% (618/650)`；临时 profile 仅位于测试沙箱，没有修改真实用户配置。 |
 | 2026-08-06 | TC-SP-14 | 使用 release binary 执行 `PROXY_PORT=19891 bash e2e-tests/tests/test_cli_proxy_environment_e2e.sh`，在隔离 HOME/BIFROST_DATA_DIR 中先启动 daemon 后 Enable，真实执行 restart、stop，再以前台模式启动并对主进程发送 `SIGKILL`。 | 通过。restart 期间 marker 保留，stop 后 marker 删除；强杀主进程后独立 lifecycle helper 在轮询窗口内删除 marker。测试未启用系统代理，证明 Linux/无系统代理路径同样受保护；所有进程和临时目录均由测试清理。 |
+| 2026-08-06 | TC-SP-15 | 执行 `cargo test -p bifrost-core bash_ -- --nocapture`，使用临时 HOME 验证 `.profile` 回归和三种 Bash 登录 profile 的优先级。 | 通过。3/3 Bash 相关用例通过；仅存在 `.profile` 时没有创建 `.bash_profile`，Enable/Disable 后原有登录配置保留。 |
+| 2026-08-06 | TC-SP-16 | 执行 marker 完整行与生成块换行的两个 `bifrost-core` 精准单元回归。 | 通过。普通行 marker 文本保持不变，真实管理块可独立启停；空文件与替换路径都以单个换行结束。 |
 
 ## 清理步骤
 

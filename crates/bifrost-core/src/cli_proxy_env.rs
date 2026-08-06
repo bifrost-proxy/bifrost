@@ -101,12 +101,23 @@ impl CliProxyShell {
 
     pub fn config_paths_for_home(self, home: &Path) -> Vec<PathBuf> {
         match self {
-            Self::Bash => vec![home.join(".bashrc"), home.join(".bash_profile")],
+            Self::Bash => vec![home.join(".bashrc"), bash_login_profile_path(home)],
             Self::Zsh => vec![home.join(".zshrc"), home.join(".zprofile")],
             Self::Fish => vec![home.join(".config/fish/config.fish")],
             Self::PowerShell => powershell_profile_paths(home),
         }
     }
+}
+
+fn bash_login_profile_path(home: &Path) -> PathBuf {
+    // Bash reads only the first available login profile in this order. Creating
+    // ~/.bash_profile when ~/.profile already exists would shadow the user's existing login
+    // setup (commonly PATH initialization), so write to the profile Bash already loads.
+    [".bash_profile", ".bash_login", ".profile"]
+        .into_iter()
+        .map(|name| home.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| home.join(".bash_profile"))
 }
 
 #[cfg(windows)]
@@ -466,7 +477,7 @@ fn generate_config_block(
             .map(|(name, value)| format_assignment(shell, name, value)),
     );
     lines.push(END_MARKER.to_string());
-    Ok(lines.join("\n"))
+    Ok(format!("{}\n", lines.join("\n")))
 }
 
 fn format_assignment(shell: CliProxyShell, name: &str, value: &str) -> String {
@@ -495,7 +506,10 @@ fn replace_or_add_marked_block(content: &str, block: &str) -> Result<String> {
     match marker_bounds(content)? {
         (Some(start), Some(end)) if start < end => {
             let before = &content[..start];
-            let after = &content[end + END_MARKER.len()..];
+            let after = content[end + END_MARKER.len()..]
+                .strip_prefix("\r\n")
+                .or_else(|| content[end + END_MARKER.len()..].strip_prefix('\n'))
+                .unwrap_or(&content[end + END_MARKER.len()..]);
             Ok(format!("{before}{block}{after}"))
         }
         (None, None) if content.is_empty() => Ok(block.to_string()),
@@ -522,15 +536,31 @@ fn remove_marked_block(content: &str) -> Result<String> {
 }
 
 fn marker_bounds(content: &str) -> Result<(Option<usize>, Option<usize>)> {
-    let starts = content.match_indices(START_MARKER).collect::<Vec<_>>();
-    let ends = content.match_indices(END_MARKER).collect::<Vec<_>>();
+    let starts = complete_marker_line_offsets(content, START_MARKER);
+    let ends = complete_marker_line_offsets(content, END_MARKER);
     match (starts.as_slice(), ends.as_slice()) {
         ([], []) => Ok((None, None)),
-        ([(start, _)], [(end, _)]) if start < end => Ok((Some(*start), Some(*end))),
+        ([start], [end]) if start < end => Ok((Some(*start), Some(*end))),
         _ => Err(BifrostError::Config(format!(
             "Shell profile contains an incomplete, reversed, or duplicate Bifrost CLI proxy marker block; remove every range from {START_MARKER:?} through {END_MARKER:?} manually"
         ))),
     }
+}
+
+fn complete_marker_line_offsets(content: &str, marker: &str) -> Vec<usize> {
+    let bytes = content.as_bytes();
+    content
+        .match_indices(marker)
+        .filter_map(|(offset, _)| {
+            let starts_line = offset == 0 || bytes.get(offset.wrapping_sub(1)) == Some(&b'\n');
+            let after = offset + marker.len();
+            let ends_line = after == bytes.len()
+                || bytes.get(after) == Some(&b'\n')
+                || (bytes.get(after) == Some(&b'\r')
+                    && matches!(bytes.get(after + 1), None | Some(b'\n')));
+            (starts_line && ends_line).then_some(offset)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -603,6 +633,45 @@ mod tests {
         assert!(!CliProxyShell::PowerShell
             .config_paths_for_home(home)
             .is_empty());
+    }
+
+    #[test]
+    fn bash_uses_existing_login_profile_without_shadowing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let profile = home.join(".profile");
+        std::fs::write(&profile, "export ORIGINAL_PATH=/example\n").unwrap();
+
+        let paths = CliProxyShell::Bash.config_paths_for_home(home);
+        assert_eq!(paths, vec![home.join(".bashrc"), profile.clone()]);
+        let manager = CliProxyEnvironmentManager::with_paths(CliProxyShell::Bash, paths);
+        manager.enable(&test_config(&temp)).unwrap();
+
+        assert!(!home.join(".bash_profile").exists());
+        assert!(std::fs::read_to_string(&profile)
+            .unwrap()
+            .contains("export ORIGINAL_PATH=/example"));
+
+        manager.disable().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&profile).unwrap(),
+            "export ORIGINAL_PATH=/example"
+        );
+        assert!(!home.join(".bash_profile").exists());
+    }
+
+    #[test]
+    fn bash_login_profile_selection_matches_bash_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::write(home.join(".profile"), "profile").unwrap();
+        assert_eq!(bash_login_profile_path(home), home.join(".profile"));
+
+        std::fs::write(home.join(".bash_login"), "bash login").unwrap();
+        assert_eq!(bash_login_profile_path(home), home.join(".bash_login"));
+
+        std::fs::write(home.join(".bash_profile"), "bash profile").unwrap();
+        assert_eq!(bash_login_profile_path(home), home.join(".bash_profile"));
     }
 
     #[test]
@@ -735,6 +804,40 @@ mod tests {
             std::fs::read_to_string(path).unwrap(),
             format!("user setting\n{START_MARKER}\n")
         );
+    }
+
+    #[test]
+    fn marker_text_inside_user_lines_is_not_managed_content() {
+        let content = format!(
+            "echo '{START_MARKER}'\n# documentation: {END_MARKER}\nexport USER_SETTING=kept\n"
+        );
+        assert_eq!(marker_bounds(&content).unwrap(), (None, None));
+        assert_eq!(remove_marked_block(&content).unwrap(), content);
+
+        let temp = tempfile::tempdir().unwrap();
+        let block = generate_config_block(CliProxyShell::Bash, &test_config(&temp)).unwrap();
+        let updated = replace_or_add_marked_block(&content, &block).unwrap();
+        assert!(updated.starts_with(content.trim_end()));
+        assert_eq!(
+            complete_marker_line_offsets(&updated, START_MARKER).len(),
+            1
+        );
+        assert_eq!(complete_marker_line_offsets(&updated, END_MARKER).len(), 1);
+    }
+
+    #[test]
+    fn generated_and_replaced_blocks_end_with_exactly_one_line_break() {
+        let temp = tempfile::tempdir().unwrap();
+        let block = generate_config_block(CliProxyShell::Bash, &test_config(&temp)).unwrap();
+        assert!(block.ends_with(&format!("{END_MARKER}\n")));
+
+        assert!(replace_or_add_marked_block("", &block)
+            .unwrap()
+            .ends_with(&format!("{END_MARKER}\n")));
+        let original = format!("before\n{START_MARKER}\nold\n{END_MARKER}\nafter\n");
+        let replaced = replace_or_add_marked_block(&original, &block).unwrap();
+        assert!(replaced.contains(&format!("{END_MARKER}\nafter\n")));
+        assert!(!replaced.contains(&format!("{END_MARKER}\n\nafter\n")));
     }
 
     #[test]

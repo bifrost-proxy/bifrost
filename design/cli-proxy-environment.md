@@ -44,7 +44,7 @@ bifrost cli-proxy disable [--shell bash|zsh|fish|powershell]
 
 | Shell | 配置文件 |
 | --- | --- |
-| Bash | `~/.bashrc`、`~/.bash_profile` |
+| Bash | `~/.bashrc`，以及 Bash 已使用的首个登录 profile（按 `.bash_profile`、`.bash_login`、`.profile` 优先级；均不存在时才创建 `.bash_profile`） |
 | Zsh | `~/.zshrc`、`~/.zprofile` |
 | Fish | `~/.config/fish/config.fish` |
 | PowerShell | Unix: `~/.config/powershell/Microsoft.PowerShell_profile.ps1`；Windows: Documents 下 PowerShell profile |
@@ -56,6 +56,8 @@ bifrost cli-proxy disable [--shell bash|zsh|fish|powershell]
 # <<< Bifrost CLI proxy environment end <<<
 ```
 
+marker 只有独占完整行时才视为管理边界；普通 `echo`、注释或文档行中出现相同子串不会被替换或删除。生成块始终以换行结束，避免用户后续追加配置时被 end marker 注释吞掉。
+
 旧 `start --cli-proxy` 继续使用 `# >>> Bifrost proxy start >>>`，两个管理块仍保持隔离：`disable` 只移除独立安装块，旧运行期清理只移除运行期块；主程序退出的统一清理流程会分别移除两者。
 
 ## 生命周期与异常退出
@@ -63,7 +65,7 @@ bifrost cli-proxy disable [--shell bash|zsh|fish|powershell]
 - Bifrost 主程序在每次启动时创建独立 lifecycle helper，helper 以主进程 PID 和启动时间双因子识别父进程，并位于独立进程组中。
 - 正常 `stop` 会在终止服务前移除独立 CLI proxy 管理块；直接前台退出也会在 shutdown 阶段清理。
 - 主程序崩溃、被强制终止或 PID 被复用时，helper 确认父进程消失后遍历 Bash、Zsh、Fish、PowerShell 的所有支持 profile，移除独立管理块。因此清理不依赖 helper 自己运行在哪一种 shell 中。
-- `restart` 写入 `PreserveForRestart` marker，旧主进程和旧 helper 跳过清理；新主进程接管后创建新的 helper。若新进程最终不能继续运行，新的退出路径仍会执行清理。
+- `restart` 写入 `PreserveForRestart` marker，旧主进程和旧 helper 跳过清理；新主进程接管后创建新的 helper。若新进程最终不能继续运行，新的退出路径仍会执行清理。E2E 必须观察 runtime PID 发生变化后再断言，不能把旧 listener 仍可连接误判为新进程接管成功。
 - 手动 `bifrost cli-proxy disable` 始终可用，并且只提前移除当前选择 shell 的独立管理块；helper 后续再次清理是幂等操作。
 - 为了让“服务运行中再执行 enable”也获得退出保护，helper 在 Bifrost 启动时始终创建，不要求当时已经启用系统代理或 CLI proxy；Linux 等没有系统代理集成的平台也会创建。
 
@@ -106,7 +108,7 @@ bifrost cli-proxy disable [--shell bash|zsh|fish|powershell]
 - 所有写入值按目标 shell 做字面量引用，路径、空格和 shell 元字符不得转化为命令执行。
 - `enable` 校验自定义 CA 文件和目录真实存在且类型正确。
 - 写入前先检查所有目标 profile；多文件写入中途失败时回滚已经写入的文件，避免只安装一半。
-- profile 中已有残缺、逆序或重复 marker 时拒绝自动覆盖，并输出精准手工处理指引；环境变量值中的换行或 marker 文本同样拒绝写入，避免配置块边界注入。
+- profile 中已有残缺、逆序或重复的 marker-only 行时拒绝自动覆盖，并输出精准手工处理指引；普通行内 marker 子串按用户内容保留；环境变量值中的换行或 marker 文本同样拒绝写入，避免配置块边界注入。
 - `disable` 只移除管理块，不删除卸载后为空的 profile，避免误删启用前就存在的空文件。
 - 不设置 `*_NO_VERIFY`、`NODE_TLS_REJECT_UNAUTHORIZED=0` 等关闭校验变量。
 - Java truststore、Docker registry CA、浏览器 NSS DB 等不能安全地通过单个 PEM 环境变量统一配置，本命令不静默改写这些独立信任库；系统层继续使用 `bifrost ca install`。

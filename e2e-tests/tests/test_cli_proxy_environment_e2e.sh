@@ -11,6 +11,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
 TEST_ROOT="$(mktemp -d)"
 PROXY_PID=""
+REPLACEMENT_PID=""
 
 cleanup() {
   local runtime_pid_file="$TEST_ROOT/data-lifecycle/bifrost.pid"
@@ -78,6 +79,26 @@ wait_for_marker_removal() {
       return 0
     fi
     sleep 0.5
+    attempts=$((attempts - 1))
+  done
+  return 1
+}
+
+wait_for_runtime_pid_change() {
+  local pid_file="$1"
+  local previous_pid="$2"
+  local attempts=80
+  while (( attempts > 0 )); do
+    local current_pid=""
+    if [[ -f "$pid_file" ]]; then
+      current_pid="$(tr -cd '0-9' < "$pid_file")"
+    fi
+    if [[ -n "$current_pid" && "$current_pid" != "$previous_pid" ]] \
+      && kill -0 "$current_pid" 2>/dev/null; then
+      REPLACEMENT_PID="$current_pid"
+      return 0
+    fi
+    sleep 0.25
     attempts=$((attempts - 1))
   done
   return 1
@@ -300,9 +321,13 @@ test_runtime_lifecycle_cleanup() {
   assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
 
   if [[ "$instrumented_linux" == false ]]; then
+    local old_pid
+    old_pid="$(tr -cd '0-9' < "$data_dir/bifrost.pid")"
     HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" restart \
       >"$TEST_ROOT/restart.log" 2>&1
-    wait_for_listener "$port" || fail "daemon did not become ready after restart"
+    wait_for_runtime_pid_change "$data_dir/bifrost.pid" "$old_pid" \
+      || fail "replacement daemon PID did not take ownership after restart: $(tail -n 80 "$TEST_ROOT/restart.log")"
+    wait_for_listener "$port" || fail "replacement daemon did not become ready after restart"
     assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
   else
     echo "SKIP: daemon restart handoff is covered by the non-instrumented Linux shell job"
