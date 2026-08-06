@@ -62,6 +62,7 @@ zstd = "0.13"
 uuid.workspace = true
 fs2 = "0.4"
 unicode-normalization = "0.1"
+sysinfo = "0.31"
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -76,7 +77,6 @@ libc = "0.2"
 bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["full-local-asr"] }
 
 [target.'cfg(windows)'.dependencies]
-sysinfo = "0.31"
 windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_Foundation",
@@ -96,7 +96,6 @@ tracing-appender.workspace = true
 tray-icon = "0.19"
 muda = "0.15"
 tao = { version = "0.31", default-features = false }
-sysinfo = "0.31"
 image = { version = "0.25", default-features = false, features = ["png"] }
 fontdue = "0.9"
 core-foundation = "0.10"

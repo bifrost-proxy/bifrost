@@ -175,12 +175,23 @@
 - 第二个 profile 写入失败后，第一个 profile 恢复为执行前原文，不留下半安装状态。
 - 含换行/marker 的值被拒绝，手工回退也不渲染可注入的配置块，目标 profile 不创建。
 
+### TC-SP-13: 父进程 shell 检测依赖在所有平台可用
+
+**操作步骤：**
+1. 执行 `cargo metadata --no-deps --format-version 1`，读取 `bifrost-cli` 的 `sysinfo` 依赖声明。
+2. 确认该依赖的 `target` 为 `null`，而不是仅限 macOS 或 Windows。
+3. 执行 `cargo check -p bifrost-cli --all-targets --all-features`。
+
+**预期结果：**
+- Linux、macOS 和 Windows 构建都会解析到父进程 shell 检测所需的 `sysinfo`。
+- `bifrost-cli` 全 target、全 feature 编译通过。
+
 ## 执行记录
 
 | 日期 | 用例 | 执行记录 | 结果 |
 | --- | --- | --- | --- |
 | 2026-06-21 | TC-SP-01 ~ TC-SP-05 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`，覆盖启用、禁用、restore、crash recovery、旧 backup 兼容和无 marker 文件 no-op。 | 通过。24 个 shell_proxy 单元/文件系统回归全部通过；测试全部使用临时目录 rc 文件，没有修改真实用户 shell 配置。 |
-| 2026-08-06 | TC-SP-01 ~ TC-SP-12 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`（24/24）、`cargo test -p bifrost-core cli_proxy_env --lib -- --nocapture`（11/11）、CLI parse/help 与父进程 shell 单测，以及 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_proxy_environment_e2e.sh`。 | 通过。真实 CLI 在隔离 HOME/BIFROST_DATA_DIR 中覆盖四种 shell、161 证书合并 bundle、当前父 shell 优先、幂等、旧 marker 隔离、字面量转义、Deno/Node/Python/Go/Cargo 等 CA 变量、残缺 marker 拒绝、写入回滚和自动失败后的完整手工指引；临时目录由脚本 trap 清理，未修改真实用户 profile。 |
+| 2026-08-06 | TC-SP-01 ~ TC-SP-13 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`（24/24）、`cargo test -p bifrost-core cli_proxy_env --lib -- --nocapture`（11/11）、CLI parse/help 与父进程 shell 单测，以及 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_proxy_environment_e2e.sh`；通过 `cargo metadata` 断言 `sysinfo` 为跨平台依赖并执行 `cargo check -p bifrost-cli --all-targets --all-features`。 | 通过。真实 CLI 在隔离 HOME/BIFROST_DATA_DIR 中覆盖四种 shell、161 证书合并 bundle、当前父 shell 优先、幂等、旧 marker 隔离、字面量转义、Deno/Node/Python/Go/Cargo 等 CA 变量、残缺 marker 拒绝、写入回滚和自动失败后的完整手工指引；`sysinfo` 依赖 target 为 `null` 且 CLI 全 target/all-features 编译通过；临时目录由脚本 trap 清理，未修改真实用户 profile。 |
 
 ## 清理步骤
 
