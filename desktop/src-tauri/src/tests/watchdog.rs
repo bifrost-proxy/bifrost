@@ -1,4 +1,5 @@
 use super::*;
+use crate::sustained_readiness_failure_action;
 
 #[test]
 fn desktop_watchdog_short_health_failures_stay_degraded_and_recover() {
@@ -78,6 +79,59 @@ fn desktop_watchdog_requires_failure_count_and_grace_window() {
             degraded_for: Duration::from_secs(15),
         }
     );
+}
+
+#[test]
+fn desktop_watchdog_sustained_readiness_failure_preserves_managed_child() {
+    assert_eq!(
+        sustained_readiness_failure_action(true),
+        SustainedReadinessAction::PreserveManagedChild
+    );
+    assert_eq!(
+        sustained_readiness_failure_action(false),
+        SustainedReadinessAction::MarkExternalUnavailable
+    );
+}
+
+#[test]
+fn desktop_watchdog_preserved_degradation_closes_with_recovery_log_state() {
+    let started = Instant::now();
+    let mut health = BackendWatchdogHealth::default();
+
+    for offset in [0, 5, 10] {
+        assert!(matches!(
+            health.observe_failure(started + Duration::from_secs(offset)),
+            WatchdogProbeDisposition::Degraded { .. }
+        ));
+    }
+    assert!(matches!(
+        health.observe_failure(started + Duration::from_secs(15)),
+        WatchdogProbeDisposition::ConfirmRecovery { .. }
+    ));
+    health.preserve_managed_child();
+    assert_eq!(
+        health.observe_failure(started + Duration::from_secs(20)),
+        WatchdogProbeDisposition::Preserved
+    );
+    assert_eq!(
+        health.observe_success(started + Duration::from_secs(25)),
+        WatchdogProbeDisposition::Recovered {
+            failures: 5,
+            degraded_for: Duration::from_secs(25),
+        }
+    );
+}
+
+#[test]
+fn desktop_watchdog_recovery_budget_opens_circuit_after_repeated_exits() {
+    let started = Instant::now();
+    let mut budget = BackendRecoveryBudget::default();
+
+    for offset in 0..BACKEND_WATCHDOG_MAX_RECOVERIES {
+        assert!(budget.try_acquire(started + Duration::from_secs(offset as u64)));
+    }
+    assert!(!budget.try_acquire(started + Duration::from_secs(10)));
+    assert!(budget.try_acquire(started + BACKEND_WATCHDOG_RECOVERY_WINDOW));
 }
 
 #[test]

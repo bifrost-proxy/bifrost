@@ -48,7 +48,7 @@
   - 主 WebView 已加载后必须执行 failure handoff，移除 native launcher；
   - 前端通过 `get_desktop_runtime` invoke 读到 `startupError` 并展示重试界面。
 - 任一未知启动阶段阻塞超过 30 秒时，launcher deadline 必须写入当时的 backend/WebView 状态并强制 handoff；用户可以看到恢复界面，不能永远停在原生 loading 页。
-- 停止 stale backend 的同步子进程最多等待 5 秒；超时后杀掉 helper 并把失败原因写入日志，不能让首次启动初始化无限卡住。
+- 停止 stale backend 的同步子进程最多等待 35 秒，覆盖 CLI 自身最多 30 秒的终止预算；超时后杀掉 helper 并把失败原因写入日志，不能让首次启动初始化无限卡住。replacement 路径使用 restart-preserving stop，跳过系统代理恢复再重设的慢路径。
 - macOS 发布包必须校验桌面主程序与内置 `resources/bin/bifrost` 的 Mach-O 架构都包含发布 target；允许 universal binary，但禁止 Apple Silicon 包夹带 Intel-only sidecar、反之亦然。
 - 桌面日志按 `DESKTOP_LOG_RETENTION_DAYS = DEFAULT_LOG_RETENTION_DAYS` 自动清理（复用 `bifrost_core::cleanup_bifrost_log_dir`）。
 - 每个 `data_dir` 每进程只做一次清理，避免每次写日志都扫目录。
@@ -248,7 +248,7 @@ $BIFROST_DATA_DIR/
 - 可用端口上的新 sidecar 一旦退出或超时，立即结束本次启动；端口顺延只用于跳过启动前已经被占用的端口。
 - `try_start_native_handoff` 在 WebView 已 loaded 且 backend ready **或** `startup_error` 已记录时允许 handoff。
 - `schedule_desktop_startup_deadline` 在 30 秒后记录状态并强制 handoff，覆盖 child 未退出但也永不 ready、WebView load event 丢失等未知阻塞。
-- stale backend stop helper 使用 5 秒有界等待；超时后 kill + wait，避免 `.status()` 永久卡住 bootstrap。
+- 同步 backend stop helper 使用 35 秒有界等待，覆盖 CLI 自身最多 30 秒的终止预算；超时后仍 kill + wait，避免 `.status()` 永久卡住 bootstrap。replacement 路径通过 Desktop 内部 restart stop 跳过慢速系统代理恢复，普通 stop/quit 仍保留完整恢复语义。
 - kill 后只再等待 2 秒；stop 失败会记录可恢复错误并阻断新 core，避免同一数据目录双实例。
 - watchdog、手动重试和端口切换回退在 managed child 终止失败时同样 fail-closed；端口切换只有在 stop helper 成功且旧端口已确认不健康后才允许拉起 replacement core。
 - managed child mutex poison 也视为无法证明旧进程已停止，禁止继续启动 replacement core。

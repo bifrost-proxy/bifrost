@@ -4,7 +4,16 @@ mod watchdog;
 
 pub(super) use watchdog::monitor_desktop_backend;
 #[cfg(test)]
-pub(super) use watchdog::{BackendWatchdogHealth, WatchdogProbeDisposition};
+pub(super) use watchdog::{
+    open_backend_recovery_circuit, sustained_readiness_failure_action, BackendRecoveryBudget,
+    BackendWatchdogHealth, SustainedReadinessAction, WatchdogProbeDisposition,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ManagedBackendExit {
+    pub(super) pid: u32,
+    pub(super) detail: String,
+}
 
 pub(super) fn ensure_backend_running(
     binary_path: &Path,
@@ -340,30 +349,37 @@ pub(super) fn begin_backend_recovery(state: &BackendState) -> Option<BackendReco
     })
 }
 
-pub(super) fn poll_managed_backend_exit(state: &BackendState) -> Option<String> {
-    let mut child_guard = state.child.lock().ok()?;
-    let child = child_guard.as_mut()?;
+pub(super) fn poll_managed_backend_exit(
+    state: &BackendState,
+) -> Result<Option<ManagedBackendExit>, String> {
+    let mut child_guard = state
+        .child
+        .lock()
+        .map_err(|_| "failed to access managed backend child".to_string())?;
+    let Some(child) = child_guard.as_mut() else {
+        return Ok(None);
+    };
 
     match child.try_wait() {
         Ok(Some(status)) => {
             let pid = child.id();
             let _ = child_guard.take();
-            Some(format!(
-                "managed backend child pid={pid} exited with status {status}"
-            ))
+            Ok(Some(ManagedBackendExit {
+                pid,
+                detail: format!("managed backend child pid={pid} exited with status {status}"),
+            }))
         }
-        Ok(None) => None,
+        Ok(None) => Ok(None),
         Err(error) => {
             let pid = child.id();
-            let _ = child_guard.take();
-            Some(format!(
+            Err(format!(
                 "failed to poll managed backend child pid={pid}: {error}"
             ))
         }
     }
 }
 
-pub(super) fn attempt_backend_recovery(app: &AppHandle, reason: &str) {
+pub(super) fn attempt_backend_recovery(app: &AppHandle, exited: &ManagedBackendExit) {
     let Some(state) = app.try_state::<BackendState>() else {
         return;
     };
@@ -378,7 +394,10 @@ pub(super) fn attempt_backend_recovery(app: &AppHandle, reason: &str) {
 
     append_desktop_bootstrap_log(
         &state.data_dir,
-        format!("desktop backend watchdog triggering recovery; reason={reason}"),
+        format!(
+            "desktop backend watchdog triggering recovery for confirmed child exit; {}",
+            exited.detail
+        ),
     );
     state.startup_ready.store(false, Ordering::SeqCst);
 
@@ -386,9 +405,11 @@ pub(super) fn attempt_backend_recovery(app: &AppHandle, reason: &str) {
         *startup_error = None;
     }
 
-    if let Err(error) = terminate_managed_backend(&state, "during watchdog recovery") {
+    if let Err(error) =
+        cleanup_exited_managed_backend(&state.binary_path, &state.data_dir, exited.pid)
+    {
         let message = format!(
-            "failed to terminate managed backend child during recovery; refusing to start a replacement: {error}"
+            "failed to consume exited managed backend runtime during recovery; refusing to start a replacement: {error}"
         );
         record_startup_error(&state, message);
         try_start_native_handoff(app, "backend recovery failed");
@@ -434,13 +455,37 @@ pub(super) fn attempt_backend_recovery(app: &AppHandle, reason: &str) {
             append_desktop_bootstrap_log(
                 &state.data_dir,
                 format!(
-                    "desktop backend watchdog recovery failed; will retry after {:?}",
+                    "desktop backend watchdog recovery failed; automatic attempt stopped and manual recovery remains available after {:?}",
                     BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY
                 ),
             );
             std::thread::sleep(BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY);
         }
     }
+}
+
+fn cleanup_exited_managed_backend(
+    binary_path: &Path,
+    data_dir: &Path,
+    exited_pid: u32,
+) -> tauri::Result<()> {
+    if !runtime_markers_belong_to_exited_pid(data_dir, exited_pid)? {
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "confirmed managed backend pid={exited_pid} exited without remaining runtime markers"
+            ),
+        );
+        return Ok(());
+    }
+
+    append_desktop_bootstrap_log(
+        data_dir,
+        format!(
+            "consuming runtime markers for confirmed exited managed backend pid={exited_pid} with restart-preserving stop"
+        ),
+    );
+    stop_backend_for_restart_with_binary(binary_path, data_dir)
 }
 
 pub(super) fn schedule_desktop_cert_ready(data_dir: &Path) {
@@ -793,7 +838,7 @@ pub(super) fn stop_backend_before_restart(
     current_port: u16,
     shutdown_timeout: Duration,
 ) -> tauri::Result<()> {
-    if let Err(error) = stop_backend_with_binary(binary_path, data_dir) {
+    if let Err(error) = stop_backend_for_restart_with_binary(binary_path, data_dir) {
         append_desktop_bootstrap_log(
             data_dir,
             format!(
@@ -821,16 +866,35 @@ pub(super) fn stop_backend_before_restart(
 }
 
 pub(super) fn stop_backend_with_binary(binary_path: &Path, data_dir: &Path) -> tauri::Result<()> {
+    run_backend_stop_command(binary_path, data_dir, false)
+}
+
+pub(super) fn stop_backend_for_restart_with_binary(
+    binary_path: &Path,
+    data_dir: &Path,
+) -> tauri::Result<()> {
+    run_backend_stop_command(binary_path, data_dir, true)
+}
+
+fn run_backend_stop_command(
+    binary_path: &Path,
+    data_dir: &Path,
+    preserve_for_restart: bool,
+) -> tauri::Result<()> {
     append_desktop_bootstrap_log(
         data_dir,
         format!(
-            "running synchronous backend stop; binary_path={} data_dir={}",
+            "running synchronous backend stop; binary_path={} data_dir={} preserve_for_restart={preserve_for_restart}",
             binary_path.display(),
             data_dir.display()
         ),
     );
     let mut command = Command::new(binary_path);
-    configure_backend_stop_command(&mut command, data_dir);
+    if preserve_for_restart {
+        configure_backend_restart_stop_command(&mut command, data_dir);
+    } else {
+        configure_backend_stop_command(&mut command, data_dir);
+    }
     command.stdout(Stdio::null()).stderr(Stdio::null());
     hide_windows_child_console(&mut command);
     let mut child = command
@@ -949,7 +1013,13 @@ pub(super) fn configure_backend_stop_command(command: &mut Command, data_dir: &P
         .arg("stop")
         .env("BIFROST_DATA_DIR", data_dir)
         .env_remove("BIFROST_TRAY_INVOKED_STOP")
+        .env_remove(DESKTOP_RESTART_STOP_ENV)
         .env("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL", "1");
+}
+
+pub(super) fn configure_backend_restart_stop_command(command: &mut Command, data_dir: &Path) {
+    configure_backend_stop_command(command, data_dir);
+    command.env(DESKTOP_RESTART_STOP_ENV, "1");
 }
 
 pub(super) fn hide_windows_child_console(command: &mut Command) {

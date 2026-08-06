@@ -376,26 +376,39 @@ if ! wait_for_log_line \
   exit 1
 fi
 kill -STOP "$CORE_PID"
-sleep 12
+if ! wait_for_log_line \
+  "$desktop_bootstrap_log" \
+  "preserving live managed child"; then
+  kill -CONT "$CORE_PID" >/dev/null 2>&1 || true
+  echo "FAIL: sustained readiness degradation did not preserve the live managed Service"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
 if ! process_is_running "$CORE_PID"; then
-  echo "FAIL: short backend stall terminated the Desktop-owned Service"
+  echo "FAIL: sustained backend stall terminated the Desktop-owned Service"
   exit 1
 fi
 if ! grep -Fq "desktop backend health degraded" "$desktop_bootstrap_log"; then
   kill -CONT "$CORE_PID" >/dev/null 2>&1 || true
-  echo "FAIL: short backend stall did not exercise the degraded watchdog path"
+  echo "FAIL: sustained backend stall did not exercise the degraded watchdog path"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
+if grep -Fq "triggering recovery for confirmed child exit" "$desktop_bootstrap_log"; then
+  kill -CONT "$CORE_PID" >/dev/null 2>&1 || true
+  echo "FAIL: readiness degradation incorrectly triggered child-exit recovery"
   cat "$desktop_bootstrap_log" || true
   exit 1
 fi
 kill -CONT "$CORE_PID"
 if ! wait_for_runtime "$desktop_data_dir" "$desktop_port"; then
-  echo "FAIL: Desktop-owned Service did not recover after a short stall"
+  echo "FAIL: Desktop-owned Service did not recover after the sustained stall"
   cat "$desktop_bootstrap_log" || true
   exit 1
 fi
 runtime_pid_after_stall="$(runtime_pid "$desktop_data_dir")"
 if [[ "$runtime_pid_after_stall" != "$CORE_PID" ]]; then
-  echo "FAIL: Desktop watchdog restarted Service after a short stall"
+  echo "FAIL: Desktop watchdog restarted Service after the sustained stall"
   cat "$desktop_bootstrap_log" || true
   exit 1
 fi
@@ -423,6 +436,13 @@ if ! grep -Fq \
   "managed backend child pid=$exited_core_pid exited" \
   "$desktop_bootstrap_log"; then
   echo "FAIL: Desktop watchdog did not record the real child exit"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
+if ! grep -Fq \
+  "consuming runtime markers for confirmed exited managed backend pid=$exited_core_pid with restart-preserving stop" \
+  "$desktop_bootstrap_log"; then
+  echo "FAIL: confirmed child exit did not use restart-preserving marker cleanup"
   cat "$desktop_bootstrap_log" || true
   exit 1
 fi
