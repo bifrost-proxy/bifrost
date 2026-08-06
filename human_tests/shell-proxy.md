@@ -2,13 +2,14 @@
 
 ## 功能模块说明
 
-验证 `ShellProxyManager` 对 `.zshrc`、`.zprofile`、`.bashrc`、`.bash_profile` 等 shell rc 文件的持久化代理配置只操作 Bifrost 管理块，不使用整文件备份覆盖恢复，避免清空或覆盖用户在代理启用期间新增的配置。
+验证 `ShellProxyManager` 的运行期配置以及 `bifrost cli-proxy enable/disable` 的独立环境安装只操作各自的 Bifrost 管理块，不使用整文件备份覆盖恢复；同时验证 Bash、Zsh、Fish、PowerShell 的代理变量和常见工具链 CA 变量完整、可卸载且不破坏系统根证书信任。
 
 ## 前置条件
 
 - 在仓库根目录执行。
 - 使用临时目录模拟用户 HOME 和 Bifrost 数据目录，禁止直接修改真实 `~/.zshrc`、`~/.zprofile`、`~/.bashrc` 或 `~/.bash_profile`。
 - Bifrost 管理块以 `# >>> Bifrost proxy start >>>` 和 `# <<< Bifrost proxy end <<<` 为边界；测试只能断言这两个 marker 内的内容被新增、替换或删除。
+- 独立 `cli-proxy` 命令使用 `# >>> Bifrost CLI proxy environment start >>>` 和对应 end marker；两个管理块必须互相隔离。
 
 ## 测试用例列表
 
@@ -80,11 +81,106 @@
 - `STALE BACKUP` 不会写回 `.zshrc`。
 - 恢复完成后旧 `shell_proxy_backup.json` 被清理。
 
+### TC-SP-06: Enable 按当前或指定 shell 安装完整代理与 CA 环境
+
+**操作步骤：**
+1. 创建临时 HOME 和 `BIFROST_DATA_DIR`。
+2. 依次执行 `bifrost cli-proxy enable --shell bash|zsh|fish|powershell --port 18888`。
+3. 检查 Bash/Zsh/Fish/PowerShell 对应 profile 文件和语法。
+4. 从 Bash 测试脚本中设置一个过期的 `SHELL=/bin/zsh`，不传 `--shell` 再执行一次 Enable。
+
+**预期结果：**
+- 父进程识别出的实际当前 Bash 优先于过期的 `SHELL=/bin/zsh`；只写入当前或显式指定 shell 的 profile，不修改其它 shell 文件。
+- profile 包含大小写代理变量以及 `NO_PROXY`。
+- profile 包含 Node、Python/Requests/pip、npm、Git、AWS、gRPC、Cargo、Composer、OpenSSL/Go/Bifrost 的 CA 文件或目录变量。
+- `--shell` 可用值为 `bash`、`zsh`、`fish`、`powershell`，无法探测时明确提示显式指定。
+
+### TC-SP-07: 覆盖型 CA 变量使用系统根证书与 Bifrost CA 合并 bundle
+
+**操作步骤：**
+1. 在临时数据目录执行 `bifrost cli-proxy enable --shell zsh`。
+2. 读取 `<BIFROST_DATA_DIR>/certs/cli-proxy-ca-bundle.pem`。
+3. 对比 profile 中 `NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`DENO_CERT` 和 `SSL_CERT_FILE` 的路径。
+
+**预期结果：**
+- 合并 bundle 至少包含一个系统根证书和 Bifrost CA。
+- `NODE_EXTRA_CA_CERTS` 指向原始 Bifrost CA，保持 Node 的追加信任语义。
+- `REQUESTS_CA_BUNDLE`、`SSL_CERT_FILE` 等覆盖型变量指向合并 bundle，不会只保留 Bifrost CA 而破坏普通 HTTPS 信任。
+- 不写入任何关闭证书校验的变量。
+
+### TC-SP-08: Enable 幂等且与 start --cli-proxy 生命周期块隔离
+
+**操作步骤：**
+1. 在模拟 profile 中预置旧 `# >>> Bifrost proxy start >>>` 管理块。
+2. 连续两次执行 `bifrost cli-proxy enable --shell zsh`。
+3. 执行 `bifrost cli-proxy disable --shell zsh`。
+
+**预期结果：**
+- 独立环境管理块始终只有一个。
+- Disable 只删除 `Bifrost CLI proxy environment` 块。
+- 旧 `Bifrost proxy start` 块及其内容完整保留。
+
+### TC-SP-09: Disable 精准卸载并保留用户配置
+
+**操作步骤：**
+1. 在目标 profile 写入用户 alias/PATH 注释。
+2. 执行 Enable 后再执行 `bifrost cli-proxy disable --shell <shell>`。
+3. 对 Bash、Zsh、Fish、PowerShell 分别检查目标文件。
+
+**预期结果：**
+- 所有 Bifrost 独立代理和 CA 变量随管理块移除。
+- 用户原有内容逐字保留。
+- 卸载后为空的 profile 保留为空文件，避免误删启用前已存在的空文件。
+- 重复 Disable 返回成功并提示已经禁用。
+
+### TC-SP-10: Shell 元字符按字面量写入而不执行
+
+**操作步骤：**
+1. 把包含单引号、分号和 `touch <sentinel>` 的字符串作为 `--no-proxy` 传给 Bash Enable。
+2. 在隔离 HOME 中 source 生成的 `.bashrc`。
+3. 检查 sentinel 文件。
+
+**预期结果：**
+- profile 可以成功 source。
+- `NO_PROXY` 保留原始字面值。
+- sentinel 不存在，参数内容没有被当作 shell 命令执行。
+
+### TC-SP-11: 自动安装或卸载失败时输出完整手工恢复信息
+
+**操作步骤：**
+1. 把 HOME 指向不可创建 profile 的路径，执行 `bifrost cli-proxy enable --shell bash`。
+2. 检查失败输出和退出码。
+3. 把 `.bashrc` 构造成目录以触发读取失败，执行 `bifrost cli-proxy disable --shell bash`。
+4. 检查失败输出和退出码。
+
+**预期结果：**
+- 两条命令均保持非零退出码并显示原始失败原因。
+- Enable 输出目标 profile、可直接复制的完整管理块、代理变量和全部 CA 文件/目录变量。
+- 合并 bundle 未生成时明确告警，不把只含 Bifrost CA 的替代路径伪装成完整系统信任。
+- Disable 输出需要检查的 profile，以及包含起止 marker 的精准手工删除范围。
+- 手工指引不会声称自动操作已经成功。
+
+### TC-SP-12: 残缺 marker 和多 profile 写入失败不会破坏既有配置
+
+**操作步骤：**
+1. 在 `.bashrc` 中写入用户配置和独立环境块 start marker，但不写 end marker，再执行 Enable。
+2. 检查失败输出与 `.bashrc` 内容。
+3. 在单元测试临时目录中准备可写 `.bashrc`，并让第二个 profile 的父路径是普通文件以触发写入失败。
+4. 检查第一个 profile 是否回滚。
+5. 把换行和管理 marker 作为 `--no-proxy` 值传入，检查退出码、手工回退输出和目标 profile。
+
+**预期结果：**
+- 残缺 marker 导致非零退出，输出明确提示 marker 不完整并给出手工删除范围。
+- Enable 不追加第二个管理块，用户配置逐字保留。
+- 第二个 profile 写入失败后，第一个 profile 恢复为执行前原文，不留下半安装状态。
+- 含换行/marker 的值被拒绝，手工回退也不渲染可注入的配置块，目标 profile 不创建。
+
 ## 执行记录
 
 | 日期 | 用例 | 执行记录 | 结果 |
 | --- | --- | --- | --- |
 | 2026-06-21 | TC-SP-01 ~ TC-SP-05 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`，覆盖启用、禁用、restore、crash recovery、旧 backup 兼容和无 marker 文件 no-op。 | 通过。24 个 shell_proxy 单元/文件系统回归全部通过；测试全部使用临时目录 rc 文件，没有修改真实用户 shell 配置。 |
+| 2026-08-06 | TC-SP-01 ~ TC-SP-12 | 执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture`（24/24）、`cargo test -p bifrost-core cli_proxy_env --lib -- --nocapture`（11/11）、CLI parse/help 与父进程 shell 单测，以及 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_proxy_environment_e2e.sh`。 | 通过。真实 CLI 在隔离 HOME/BIFROST_DATA_DIR 中覆盖四种 shell、161 证书合并 bundle、当前父 shell 优先、幂等、旧 marker 隔离、字面量转义、Deno/Node/Python/Go/Cargo 等 CA 变量、残缺 marker 拒绝、写入回滚和自动失败后的完整手工指引；临时目录由脚本 trap 清理，未修改真实用户 profile。 |
 
 ## 清理步骤
 

@@ -1,5 +1,6 @@
 pub mod access_control;
 pub mod bifrost_file;
+mod cli_proxy_env;
 pub mod error;
 pub mod file_access;
 pub mod http_client;
@@ -28,6 +29,10 @@ pub use access_control::{
     AccessControlConfig, AccessDecision, AccessMode, ClientAccessControl, PendingAuth,
     ProxyAuthRateLimiter, UserPassAccountConfig, UserPassAccountStatus, UserPassAuthConfig,
     UserPassAuthStatus,
+};
+pub use cli_proxy_env::{
+    create_combined_ca_bundle, CliProxyEnvironmentConfig, CliProxyEnvironmentManager,
+    CliProxyEnvironmentResult, CliProxyShell,
 };
 pub use error::{BifrostError, Result};
 pub use http_client::{
