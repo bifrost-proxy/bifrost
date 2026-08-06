@@ -281,7 +281,7 @@ test_runtime_lifecycle_cleanup() {
     instrumented_linux=true
     HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" start \
       --port "$port" --yes --skip-cert-check --unsafe-ssl \
-      --no-system-proxy --no-tray >"$log_file" 2>&1 &
+      --no-system-proxy >"$log_file" 2>&1 &
     PROXY_PID=$!
     wait_for_listener "$port" \
       || fail "instrumented foreground proxy did not become ready: $(tail -n 80 "$log_file")"
@@ -289,7 +289,7 @@ test_runtime_lifecycle_cleanup() {
     # The helper is started with the service, before a user may install the standalone block.
     if ! HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" start \
       --daemon --port "$port" --yes --skip-cert-check --unsafe-ssl \
-      --no-system-proxy --no-tray >"$log_file" 2>&1; then
+      --no-system-proxy >"$log_file" 2>&1; then
       fail "daemon start failed: $(tail -n 80 "$log_file")"
     fi
     wait_for_listener "$port" || fail "daemon did not become ready: $(tail -n 80 "$log_file")"
@@ -320,7 +320,7 @@ test_runtime_lifecycle_cleanup() {
     --shell zsh --port "$port"
   HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" start \
     --port "$port" --yes --skip-cert-check --unsafe-ssl \
-    --no-system-proxy --no-tray >"$TEST_ROOT/crash.log" 2>&1 &
+    --no-system-proxy >"$TEST_ROOT/crash.log" 2>&1 &
   PROXY_PID=$!
   wait_for_listener "$port" || fail "foreground proxy did not become ready before crash test"
   assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
