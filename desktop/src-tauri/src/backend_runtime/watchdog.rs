@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatchdogProbeDisposition {
@@ -11,20 +12,67 @@ pub(crate) enum WatchdogProbeDisposition {
         failures: u32,
         degraded_for: Duration,
     },
+    Preserved,
     ConfirmRecovery {
         failures: u32,
         degraded_for: Duration,
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SustainedReadinessAction {
+    PreserveManagedChild,
+    MarkExternalUnavailable,
+}
+
+pub(crate) fn sustained_readiness_failure_action(
+    has_managed_child: bool,
+) -> SustainedReadinessAction {
+    if has_managed_child {
+        SustainedReadinessAction::PreserveManagedChild
+    } else {
+        SustainedReadinessAction::MarkExternalUnavailable
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BackendRecoveryBudget {
+    attempts: VecDeque<Instant>,
+}
+
+impl BackendRecoveryBudget {
+    pub(crate) fn try_acquire(&mut self, now: Instant) -> bool {
+        while self.attempts.front().is_some_and(|started_at| {
+            now.checked_duration_since(*started_at)
+                .is_some_and(|elapsed| elapsed >= BACKEND_WATCHDOG_RECOVERY_WINDOW)
+        }) {
+            self.attempts.pop_front();
+        }
+
+        if self.attempts.len() >= BACKEND_WATCHDOG_MAX_RECOVERIES {
+            return false;
+        }
+
+        self.attempts.push_back(now);
+        true
+    }
+}
+
+pub(crate) fn open_backend_recovery_circuit(state: &BackendState, message: String) {
+    state.startup_ready.store(false, Ordering::SeqCst);
+    record_startup_error(state, message);
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct BackendWatchdogHealth {
     first_failure_at: Option<Instant>,
     consecutive_failures: u32,
+    managed_child_preserved: bool,
 }
 
 impl BackendWatchdogHealth {
     pub(crate) fn observe_success(&mut self, now: Instant) -> WatchdogProbeDisposition {
+        self.managed_child_preserved = false;
         let Some(first_failure_at) = self.first_failure_at.take() else {
             self.consecutive_failures = 0;
             return WatchdogProbeDisposition::Healthy;
@@ -46,6 +94,10 @@ impl BackendWatchdogHealth {
             .unwrap_or_default();
         let failures = self.consecutive_failures;
 
+        if self.managed_child_preserved {
+            return WatchdogProbeDisposition::Preserved;
+        }
+
         if failures >= BACKEND_WATCHDOG_MIN_FAILURES
             && degraded_for >= BACKEND_WATCHDOG_UNHEALTHY_GRACE
         {
@@ -64,6 +116,11 @@ impl BackendWatchdogHealth {
     pub(super) fn reset(&mut self) {
         self.first_failure_at = None;
         self.consecutive_failures = 0;
+        self.managed_child_preserved = false;
+    }
+
+    pub(crate) fn preserve_managed_child(&mut self) {
+        self.managed_child_preserved = true;
     }
 }
 
@@ -75,6 +132,7 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
     append_desktop_bootstrap_log(&state.data_dir, "desktop backend watchdog started");
 
     let mut watchdog_health = BackendWatchdogHealth::default();
+    let mut recovery_budget = BackendRecoveryBudget::default();
     let mut shutdown_paused = false;
     loop {
         std::thread::sleep(BACKEND_WATCHDOG_POLL_INTERVAL);
@@ -113,10 +171,34 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
             continue;
         }
 
-        if let Some(reason) = poll_managed_backend_exit(&state) {
-            watchdog_health.reset();
-            attempt_backend_recovery(app, &reason);
-            continue;
+        match poll_managed_backend_exit(&state) {
+            Ok(Some(exited)) => {
+                watchdog_health.reset();
+                if recovery_budget.try_acquire(Instant::now()) {
+                    attempt_backend_recovery(app, &exited);
+                } else {
+                    let message = format!(
+                        "desktop backend exited repeatedly; automatic recovery circuit opened after {} attempts in {}s; last_exit={}",
+                        BACKEND_WATCHDOG_MAX_RECOVERIES,
+                        BACKEND_WATCHDOG_RECOVERY_WINDOW.as_secs(),
+                        exited.detail
+                    );
+                    open_backend_recovery_circuit(&state, message);
+                    try_start_native_handoff(app, "backend recovery circuit open");
+                }
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                watchdog_health.reset();
+                append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    format!(
+                        "desktop backend child inspection failed; preserving managed child and refusing replacement: {error}"
+                    ),
+                );
+                continue;
+            }
         }
 
         let current_port = match state.port.lock() {
@@ -177,6 +259,7 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                     ),
                 );
             }
+            WatchdogProbeDisposition::Preserved => {}
             WatchdogProbeDisposition::ConfirmRecovery {
                 failures,
                 degraded_for,
@@ -203,7 +286,6 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                     continue;
                 }
 
-                watchdog_health.reset();
                 let reason = format!(
                     "backend health remained unavailable after grace window on port {current_port}; consecutive_failures={failures} degraded_ms={} last_error={} confirmation_error={}",
                     degraded_for.as_millis(),
@@ -218,10 +300,20 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                     .lock()
                     .map(|child| child.is_some())
                     .unwrap_or(false);
-                if managed_backend {
-                    attempt_backend_recovery(app, &reason);
-                } else {
-                    mark_backend_unavailable_for_manual_start(&state, &reason);
+                match sustained_readiness_failure_action(managed_backend) {
+                    SustainedReadinessAction::PreserveManagedChild => {
+                        append_desktop_bootstrap_log(
+                            &state.data_dir,
+                            format!(
+                                "desktop backend readiness remained degraded; preserving live managed child because readiness failure is not process-exit proof; {reason}"
+                            ),
+                        );
+                        watchdog_health.preserve_managed_child();
+                    }
+                    SustainedReadinessAction::MarkExternalUnavailable => {
+                        mark_backend_unavailable_for_manual_start(&state, &reason);
+                        watchdog_health.reset();
+                    }
                 }
             }
         }

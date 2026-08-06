@@ -5,6 +5,7 @@ use crate::process::{is_process_running, read_pid, read_runtime_info, remove_pid
 
 pub(crate) const STOP_INVOKED_BY_TRAY_ENV: &str = "BIFROST_TRAY_INVOKED_STOP";
 pub(crate) const DESKTOP_AUTHORIZED_STOP_ENV: &str = "BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL";
+pub(crate) const DESKTOP_RESTART_STOP_ENV: &str = "BIFROST_DESKTOP_RESTART_STOP_INTERNAL";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopSystemProxyMode {
@@ -202,11 +203,27 @@ fn should_reject_desktop_owned_runtime(
 }
 
 pub fn run_stop() -> bifrost_core::Result<()> {
-    run_stop_with_system_proxy_mode(StopSystemProxyMode::ForegroundCleanupBeforeStop)
+    let desktop_restart_stop = std::env::var(DESKTOP_RESTART_STOP_ENV).ok();
+    let desktop_authorized_stop = std::env::var(DESKTOP_AUTHORIZED_STOP_ENV).ok();
+    run_stop_with_system_proxy_mode(stop_system_proxy_mode_for_desktop_request(
+        desktop_restart_stop.as_deref(),
+        desktop_authorized_stop.as_deref(),
+    ))
 }
 
 pub fn run_stop_for_restart() -> bifrost_core::Result<()> {
     run_stop_with_system_proxy_mode(StopSystemProxyMode::PreserveForRestart)
+}
+
+fn stop_system_proxy_mode_for_desktop_request(
+    restart_value: Option<&str>,
+    authorized_value: Option<&str>,
+) -> StopSystemProxyMode {
+    if restart_value == Some("1") && authorized_value == Some("1") {
+        StopSystemProxyMode::PreserveForRestart
+    } else {
+        StopSystemProxyMode::ForegroundCleanupBeforeStop
+    }
 }
 
 fn run_stop_with_system_proxy_mode(
@@ -220,6 +237,14 @@ fn run_stop_with_system_proxy_mode(
         bifrost_core::BifrostError::NotFound("No PID file found. Is the proxy running?".to_string())
     })?;
 
+    // A confirmed crash still needs an explicit restart handoff marker. Without
+    // it, the replacement process can interpret the abrupt exit as a terminal
+    // shutdown and restore the system proxy before immediately applying it
+    // again.
+    if system_proxy_mode.marker_write_must_succeed() {
+        write_shutdown_marker_for_stop(&bifrost_dir, system_proxy_mode)?;
+    }
+
     if !is_process_running(pid) {
         if system_proxy_mode.should_cleanup_in_stop_process() {
             let _ = cleanup_proxy_state(&bifrost_dir);
@@ -230,7 +255,9 @@ fn run_stop_with_system_proxy_mode(
         return Ok(());
     }
 
-    write_shutdown_marker_for_stop(&bifrost_dir, system_proxy_mode)?;
+    if !system_proxy_mode.marker_write_must_succeed() {
+        write_shutdown_marker_for_stop(&bifrost_dir, system_proxy_mode)?;
+    }
 
     if system_proxy_mode.should_cleanup_in_stop_process() {
         println!("Cleaning managed proxy settings before stopping Bifrost proxy...");
@@ -360,6 +387,24 @@ mod tests {
             runtime_system_proxy_host(Some("192.168.1.2")),
             "192.168.1.2"
         );
+    }
+
+    #[test]
+    fn desktop_restart_stop_selects_preserve_for_restart_mode() {
+        assert_eq!(
+            stop_system_proxy_mode_for_desktop_request(Some("1"), Some("1")),
+            StopSystemProxyMode::PreserveForRestart
+        );
+        assert_eq!(
+            stop_system_proxy_mode_for_desktop_request(Some("1"), None),
+            StopSystemProxyMode::ForegroundCleanupBeforeStop
+        );
+        assert_eq!(
+            stop_system_proxy_mode_for_desktop_request(None, Some("1")),
+            StopSystemProxyMode::ForegroundCleanupBeforeStop
+        );
+        assert!(StopSystemProxyMode::PreserveForRestart.marker_write_must_succeed());
+        assert!(!StopSystemProxyMode::ForegroundCleanupBeforeStop.marker_write_must_succeed());
     }
 
     #[test]

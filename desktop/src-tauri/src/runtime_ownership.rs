@@ -177,6 +177,60 @@ pub(super) fn has_runtime_marker(data_dir: &Path) -> bool {
     data_dir.join("bifrost.pid").exists() || data_dir.join("runtime.json").exists()
 }
 
+pub(super) fn runtime_markers_belong_to_exited_pid(
+    data_dir: &Path,
+    exited_pid: u32,
+) -> tauri::Result<bool> {
+    let runtime_path = data_dir.join("runtime.json");
+    let pid_path = data_dir.join("bifrost.pid");
+    let mut found_marker = false;
+
+    if runtime_path.exists() {
+        found_marker = true;
+        let content = fs::read_to_string(&runtime_path).map_err(|error| {
+            anyhow(format!(
+                "failed to read runtime marker {}: {error}",
+                runtime_path.display()
+            ))
+        })?;
+        let marker: DesktopRuntimeMarker = serde_json::from_str(&content).map_err(|error| {
+            anyhow(format!(
+                "failed to parse runtime marker {}: {error}",
+                runtime_path.display()
+            ))
+        })?;
+        if marker.pid != exited_pid {
+            return Err(anyhow(format!(
+                "runtime marker belongs to pid={} instead of confirmed exited pid={exited_pid}",
+                marker.pid
+            )));
+        }
+    }
+
+    if pid_path.exists() {
+        found_marker = true;
+        let content = fs::read_to_string(&pid_path).map_err(|error| {
+            anyhow(format!(
+                "failed to read pid marker {}: {error}",
+                pid_path.display()
+            ))
+        })?;
+        let marker_pid = content.trim().parse::<u32>().map_err(|error| {
+            anyhow(format!(
+                "failed to parse pid marker {}: {error}",
+                pid_path.display()
+            ))
+        })?;
+        if marker_pid != exited_pid {
+            return Err(anyhow(format!(
+                "pid marker belongs to pid={marker_pid} instead of confirmed exited pid={exited_pid}"
+            )));
+        }
+    }
+
+    Ok(found_marker)
+}
+
 pub(super) fn cleanup_existing_backend(binary_path: &Path, data_dir: &Path) -> tauri::Result<()> {
     if has_runtime_marker(data_dir) {
         append_desktop_bootstrap_log(

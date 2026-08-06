@@ -22,11 +22,12 @@ use super::{
     upgrade_handoff_requires_backend_release, upgrade_relaunch_uses_external_cli_backend,
     uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_backend_stop_helper,
     wait_for_child_exit, wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
-    write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendState,
-    BackendSystemIdentity, BackendWaitFailureKind, BackendWatchdogHealth, DesktopConfig,
-    DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
+    write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendRecoveryBudget,
+    BackendState, BackendSystemIdentity, BackendWaitFailureKind, BackendWatchdogHealth,
+    DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
     DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
-    PendingDesktopInstall, StartupDeadlineDisposition, WatchdogProbeDisposition,
+    PendingDesktopInstall, StartupDeadlineDisposition, SustainedReadinessAction,
+    WatchdogProbeDisposition, BACKEND_WATCHDOG_MAX_RECOVERIES, BACKEND_WATCHDOG_RECOVERY_WINDOW,
     DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
     DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
@@ -48,6 +49,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 mod backend_wait;
 mod cli_handoff_recovery;
+mod recovery_ownership;
 mod traffic_detail_window;
 mod watchdog;
 

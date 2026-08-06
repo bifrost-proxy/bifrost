@@ -119,8 +119,11 @@ fn poll_managed_backend_exit_reports_exited_child() {
         let _ = child.wait();
     }
 
-    let reason = poll_managed_backend_exit(&state).expect("exited child reason");
-    assert!(reason.contains("exited with status"));
+    let exited = poll_managed_backend_exit(&state)
+        .expect("managed child inspection")
+        .expect("exited child reason");
+    assert!(exited.detail.contains("exited with status"));
+    assert_ne!(exited.pid, 0);
     assert!(state.child.lock().expect("child lock").is_none());
     assert!(!state.backend_recovery_in_progress.load(Ordering::SeqCst));
 }

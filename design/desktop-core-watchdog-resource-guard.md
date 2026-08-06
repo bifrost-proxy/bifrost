@@ -15,15 +15,16 @@ Bifrost 桌面端以“Tauri 壳 + 内嵌 CLI sidecar”方式运行。上线后
 ### 必须实现
 
 - 桌面端启动完成后自动 spawn `monitor_desktop_backend` watchdog 线程，按 `BACKEND_WATCHDOG_POLL_INTERVAL`（2s）周期巡检。
-- watchdog 每轮：`poll_managed_backend_exit()` 检测 child 是否退出；`probe_backend_health(port)` 检测健康端点是否 200。
+- watchdog 每轮把存活性与就绪性分开：`poll_managed_backend_exit()` 是 Desktop-owned child 的存活性证据；`probe_backend_health(port)` 只代表 Admin HTTP 就绪性。
 - watchdog 若曾因外部 core 健康失败进入“Start Bifrost Service”手动启动状态，后续在同一端口重新探测到 healthy backend 时必须自动清空 `startup_error` 并置 `startup_ready=true`，让桌面 UI 自动关闭启动遮罩。
-- 检测到异常时进入 `attempt_backend_recovery()`：
+- 只有 managed child 被 `try_wait()` 明确观察为退出时才进入 `attempt_backend_recovery()`；Admin HTTP 持续超时只记录 degraded，不允许终止仍存活的 child：
   - 用 `begin_backend_recovery()` 获取 `BackendRecoveryGuard`（基于 `BackendState.backend_recovery_in_progress` 原子位），避免并发。
   - 标记 `startup_ready=false`。
-  - 必要时 `terminate_child()` 清理僵尸 child。
-  - 复用 `ensure_backend_running()` 拉起或接管 healthy backend。
+  - recovery 携带强类型的旧 PID/退出状态，不再接受模糊字符串原因。
+  - 通过 restart-preserving stop helper 精确消费已退出实例的 runtime marker；该 helper 不恢复系统代理，也不再次终止已经退出的 Core。
+  - 复用 `ensure_backend_running()` 拉起或接管 healthy backend，禁止 `terminate child -> generic bifrost stop` 双重停止。
   - 成功后更新 port、清空 `startup_error`、调用 `try_start_native_handoff()`、写日志。
-  - 失败后按 `BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY`（3s）退避重试。
+  - 失败后按 `BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY`（3s）退避，记录错误并进入人工恢复门禁；不能在所有权不明时循环创建 replacement。
 - 显式端口切换重启与 watchdog 恢复共用同一互斥标记，不并发。
 - `AppIconCache` 新增 `extract_lock: Mutex<()>`，进入 `extract_app_icon()` 前先获取锁，获取后重新查内存/磁盘缓存，避免并发提取重复放大 fd。
 - `BodyStore` 与 `WsPayloadStore` 各自维护 `active_writers` 计数与硬上限；打开新 stream writer 超上限时拒绝并记 warning。
@@ -35,6 +36,8 @@ Bifrost 桌面端以“Tauri 壳 + 内嵌 CLI sidecar”方式运行。上线后
 ### 必须不破坏
 
 - 正常运行时 watchdog 无副作用，不影响启动、handoff、native menu。
+- Admin HTTP 即使持续不可用并超过 15 秒门槛，只要 managed child 未明确退出，watchdog 也不得 stop/kill Core；恢复响应后保留原 PID 并自动回到 healthy。
+- restart-preserving stop 只用于即将拉起 replacement 的路径；普通退出仍执行完整系统代理恢复。
 - CLI 升级或外部 `bifrost` 进程自行重启时，短暂断连可以触发手动启动遮罩，但 core 恢复健康后不要求用户再点击 Start。
 - app icon 提取锁串行化只作用在“真正提取”前；命中缓存路径无锁竞争。
 - BodyStore/WsPayloadStore 的已有磁盘上限、retention、cleanup 逻辑不变。
@@ -42,9 +45,9 @@ Bifrost 桌面端以“Tauri 壳 + 内嵌 CLI sidecar”方式运行。上线后
 
 ### 必须真实验证
 
-- 手动 `kill -9 <sidecar pid>` 后，2~5 秒内 watchdog 恢复；`ps aux | grep bifrost` 出现新 pid；`curl 127.0.0.1:<port>/_bifrost/health` 返回 200。
+- 手动 `kill -9 <sidecar pid>` 后，watchdog 在下一轮 child 存活检查中恢复；出现新 PID，且 Admin readiness API 返回 200。
 - 模拟 CLI 升级重启：先让桌面 runtime 进入 `startup_error=Some(...)`、`startup_ready=false`，再在同一端口恢复 healthy backend；`get_desktop_runtime` 下一次返回 `startupReady=true` 且 `startupError=null`，前端 Start Bifrost Service 遮罩自动关闭。
-- 构造 backend 健康探针失败（例如手工停响应）后，日志出现 `desktop backend watchdog triggering recovery; reason=...`。
+- 将 managed child 暂停超过原 15 秒门槛后，日志出现持续 degraded 与 `preserving live managed child`，PID 保持不变；恢复 child 后日志出现 `recovered without restart`。
 - 压测 traffic 列表快速滚动 100+ 个不同应用，fd 消耗趋于稳定不飙升。
 - 构造 200 路 SSE 长连接，`BodyStore.active_stream_writers` 到达上限，后续新流拒开、日志出现 `active writers 200/200 rejected new`。
 - Performance tab 在 `active/limit >= 80%` 时出现黄色 badge，`>= 95%` 出现红色。
@@ -84,13 +87,15 @@ fn monitor_desktop_backend(app: &AppHandle) {
         std::thread::sleep(BACKEND_WATCHDOG_POLL_INTERVAL);
         if state.shutdown_in_progress.load(Ordering::SeqCst) { break; }
 
-        if let Some(reason) = poll_managed_backend_exit(&state) {
-            attempt_backend_recovery(app, &reason);
+        if let Some(exited) = poll_managed_backend_exit(&state)? {
+            attempt_backend_recovery(app, &exited);
             continue;
         }
         let port = state.proxy_port.load(Ordering::SeqCst);
         if port != 0 && !probe_backend_health(port) {
-            attempt_backend_recovery(app, &format!("health probe failed on port {port}"));
+            // Readiness degradation is observable, but it is not proof that the
+            // managed process died. Preserve the child and keep probing.
+            record_backend_degraded(port);
         }
     }
 }
@@ -128,10 +133,17 @@ fn clear_backend_unavailable_after_healthy_probe(
 
 1. `let _guard = match begin_backend_recovery(&state) { Some(g) => g, None => return };`
 2. `state.startup_ready.store(false, ...)`
-3. `terminate_child(...)` 清理旧 child
-4. `ensure_backend_running(&binary_path, &data_dir, preferred_port)` 拉起或接管
-5. 成功：更新 `proxy_port`、清 `startup_error`、`try_start_native_handoff("backend watchdog recovery")`、写日志
-6. 失败：`record_startup_error`、写日志、`sleep(BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY)`
+3. 接收 `ManagedBackendExit { pid, status }`，只处理 `try_wait()` 已确认退出的 child
+4. 运行带 `BIFROST_DESKTOP_RESTART_STOP_INTERNAL=1` 的内部 stop helper；CLI 使用 `PreserveForRestart`，跳过慢速系统代理恢复并消费旧 PID/runtime marker
+5. `ensure_backend_running(&binary_path, &data_dir, preferred_port)` 拉起或接管；marker 已被上一步消费，不再进入 generic stale stop
+6. 成功：更新 `proxy_port`、清 `startup_error`、`try_start_native_handoff("backend watchdog recovery")`、写日志
+7. 失败：`record_startup_error`、写日志、`sleep(BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY)`，随后保留人工恢复入口，不盲目循环 replacement
+
+`bifrost stop` 的系统代理语义按调用目的拆分：
+
+- 普通用户 stop / Desktop Quit：`ForegroundCleanupBeforeStop`，完整恢复系统代理。
+- Desktop replacement / watchdog child-exit recovery：`PreserveForRestart`，先写 restart shutdown marker，再终止旧实例；新实例接管同一代理端口。
+- Desktop 同步 stop helper 的等待预算不得短于 CLI 自身的 30 秒终止预算；超时仍 fail-closed，不能边清理边启动第二实例。
 
 ### App icon 提取锁
 
@@ -252,6 +264,9 @@ pub struct ResourceAlerts { pub overall_level: ResourceAlertLevel, pub items: Ve
 - 常量 + `monitor_desktop_backend` + `attempt_backend_recovery` + `begin_backend_recovery` + `BackendRecoveryGuard`。
 - 与端口切换 restart 路径合并到同一 recovery 互斥。
 - 日志覆盖启动、检测、恢复成功/失败。
+- 存活性与就绪性分层：managed child 只有明确 exit 才触发 recovery；持续 readiness 失败保留原 PID。
+- recovery 使用 restart-preserving stop 消费旧 marker，禁止 direct kill 后再次 generic stop。
+- recovery 增加时间窗预算，连续 crash 超限后进入人工恢复，避免 restart storm。
 
 ### Phase 2：writer 上限 + app icon 锁
 
@@ -289,8 +304,11 @@ pub struct ResourceAlerts { pub overall_level: ResourceAlertLevel, pub items: Ve
 
 ### E2E 测试
 
-- `e2e-tests/tests/test_desktop_watchdog_recovery.sh`（需桌面二进制）：
-  - 启动桌面端 → 记录 sidecar pid → `kill -9` → 等 6s → 检查新 pid 且 admin 端 200。
+- `e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`（需 macOS 桌面二进制）：
+  - 暂停 Desktop-owned sidecar 超过旧 15 秒门槛 → readiness degraded → 原 PID 保持。
+  - 恢复 sidecar → readiness 恢复且不重启。
+  - `kill -9` → watchdog 获取明确 child exit → restart-preserving marker cleanup → 新 PID readiness 200。
+  - CLI-owned/其他 data-dir Service 全程不被停止。
 - `e2e-tests/tests/test_body_store_active_writer_limit.sh`：并发打开 N+1 流，第 N+1 失败。
 - `e2e-tests/tests/test_resource_alerts_api.sh`：mock stats → 校验 `/api/system/memory.resource_alerts.overall_level`。
 
@@ -300,8 +318,9 @@ pub struct ResourceAlerts { pub overall_level: ResourceAlertLevel, pub items: Ve
 
 - TC-WD-01：桌面端启动、正常运行、无 watchdog 恢复日志。
 - TC-WD-02：`kill -9` sidecar，2~5s 内自动恢复，日志有 `recovery succeeded`。
-- TC-WD-03：手工阻塞健康端口，watchdog 触发 recovery。
-- TC-WD-04：端口切换重启 + `kill` 并发，只有一个 recovery 生效。
+- TC-WD-03：手工暂停 managed Core 超过旧门槛，watchdog 只降级、不 recovery，恢复后 PID 不变。
+- TC-WD-04：真实终止 managed Core，watchdog 仅执行一次 restart-preserving recovery 并出现新 PID。
+- TC-WD-05：端口切换重启 + `kill` 并发，只有一个 recovery 生效。
 - TC-RG-05：并发滚动 traffic 触发 100+ app icon 提取，fd 平稳。
 - TC-RG-06：200 路 SSE，第 201 路被拒绝并写日志。
 - TC-RG-07：Performance tab 在 80% / 95% 阈值分别显示黄/红。
