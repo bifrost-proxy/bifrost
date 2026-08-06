@@ -2,7 +2,13 @@ import { languages, editor, Position } from 'monaco-editor';
 import type { IRange } from 'monaco-editor';
 import { getRuleReferenceCompletionContext } from './ruleReference';
 
-export type ReferenceType = 'value' | 'requestScript' | 'responseScript' | 'parserScript' | 'rule';
+export type ReferenceType =
+  | 'value'
+  | 'requestScript'
+  | 'responseScript'
+  | 'responseStreamScript'
+  | 'parserScript'
+  | 'rule';
 export type NavigationType = 'page' | 'editor';
 
 export interface ReferenceLocation {
@@ -136,6 +142,7 @@ export const dynamicProvider: languages.CompletionItemProvider = {
 
     const reqScriptMatch = textBeforeCursor.match(/reqScript:\/\/([^\s]*)$/);
     const resScriptMatch = textBeforeCursor.match(/resScript:\/\/([^\s]*)$/);
+    const resStreamScriptMatch = textBeforeCursor.match(/resStreamScript:\/\/([^\s]*)$/);
     const ruleReferenceContext = getRuleReferenceCompletionContext(
       textBeforeCursor,
       position.column,
@@ -205,6 +212,30 @@ export const dynamicProvider: languages.CompletionItemProvider = {
           insertText: name,
           range: scriptRange,
           sortText: `0_${name}`,
+        })),
+      };
+    }
+
+    if (resStreamScriptMatch) {
+      const typedText = resStreamScriptMatch[1];
+      const scriptRange: IRange = {
+        ...range,
+        startColumn: position.column - typedText.length,
+      };
+      const filteredScripts = typedText
+        ? dynamicData.responseScripts.filter((name) =>
+            name.toLowerCase().includes(typedText.toLowerCase())
+          )
+        : dynamicData.responseScripts;
+      return {
+        suggestions: filteredScripts.map((name) => ({
+          label: name,
+          kind: languages.CompletionItemKind.Reference,
+          detail: `Response Stream Script: ${name}`,
+          documentation: `Transform SSE events with response script "${name}"`,
+          insertText: name,
+          range: scriptRange,
+          sortText: `1_${name}`,
         })),
       };
     }

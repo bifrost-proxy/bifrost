@@ -152,6 +152,50 @@ pub struct ResponseModifications {
     pub body: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamScriptMode {
+    Mock,
+    Transform,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum StreamScriptOutput {
+    Raw(String),
+    Event {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        event: Option<String>,
+        #[serde(default)]
+        data: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct StreamScriptStep {
+    #[serde(default)]
+    pub outputs: Vec<StreamScriptOutput>,
+    #[serde(default, rename = "delayMs")]
+    pub delay_ms: u64,
+    #[serde(default)]
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct StreamScriptEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    pub data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptInfo {
     pub name: String,

@@ -5,15 +5,19 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use bifrost_storage::UnifiedConfig;
 
 const MAX_SCRIPT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LIVE_STREAM_SCRIPT_WORKERS: usize = 128;
+static STREAM_SCRIPT_WORKER_LIMIT: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_LIVE_STREAM_SCRIPT_WORKERS)));
 
 pub struct ScriptEngineConfig {
     pub scripts_dir: PathBuf,
@@ -34,6 +38,60 @@ impl Default for ScriptEngineConfig {
 pub struct ScriptEngine {
     config: ScriptEngineConfig,
     script_cache: Arc<RwLock<HashMap<String, String>>>,
+}
+
+enum StreamWorkerCommand {
+    Next(oneshot::Sender<Result<StreamScriptStep>>),
+    Event(StreamScriptEvent, oneshot::Sender<Result<StreamScriptStep>>),
+    End(oneshot::Sender<Result<StreamScriptStep>>),
+    Shutdown,
+}
+
+pub struct StreamScriptWorker {
+    mode: StreamScriptMode,
+    initial_step: Option<StreamScriptStep>,
+    tx: mpsc::Sender<StreamWorkerCommand>,
+}
+
+impl StreamScriptWorker {
+    pub fn mode(&self) -> StreamScriptMode {
+        self.mode
+    }
+
+    pub fn take_initial_step(&mut self) -> StreamScriptStep {
+        self.initial_step.take().unwrap_or_default()
+    }
+
+    async fn call(
+        &self,
+        command: impl FnOnce(oneshot::Sender<Result<StreamScriptStep>>) -> StreamWorkerCommand,
+    ) -> Result<StreamScriptStep> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(command(tx)).await.map_err(|_| {
+            ScriptError::ExecutionFailed("stream script worker stopped".to_string())
+        })?;
+        rx.await
+            .map_err(|_| ScriptError::ExecutionFailed("stream script worker stopped".to_string()))?
+    }
+
+    pub async fn next(&self) -> Result<StreamScriptStep> {
+        self.call(StreamWorkerCommand::Next).await
+    }
+
+    pub async fn event(&self, event: StreamScriptEvent) -> Result<StreamScriptStep> {
+        self.call(|reply| StreamWorkerCommand::Event(event, reply))
+            .await
+    }
+
+    pub async fn end(&self) -> Result<StreamScriptStep> {
+        self.call(StreamWorkerCommand::End).await
+    }
+}
+
+impl Drop for StreamScriptWorker {
+    fn drop(&mut self) {
+        let _ = self.tx.try_send(StreamWorkerCommand::Shutdown);
+    }
 }
 
 impl ScriptEngine {
@@ -93,6 +151,135 @@ impl ScriptEngine {
             max_net_request_bytes: cfg.sandbox.net.max_request_bytes,
             max_net_response_bytes: cfg.sandbox.net.max_response_bytes,
         }
+    }
+
+    pub async fn create_response_stream_worker_with_config(
+        &self,
+        script_name: &str,
+        inline_content: Option<&str>,
+        response: &ResponseData,
+        ctx: &ScriptContext,
+        cfg: &UnifiedConfig,
+    ) -> Result<StreamScriptWorker> {
+        let sandbox = self.sandbox_config_from_unified(cfg);
+        self.create_response_stream_worker_with_sandbox(
+            script_name,
+            inline_content,
+            response,
+            ctx,
+            sandbox,
+        )
+        .await
+    }
+
+    pub async fn create_response_stream_worker(
+        &self,
+        script_name: &str,
+        inline_content: Option<&str>,
+        response: &ResponseData,
+        ctx: &ScriptContext,
+    ) -> Result<StreamScriptWorker> {
+        let sandbox = self.default_sandbox_config();
+        self.create_response_stream_worker_with_sandbox(
+            script_name,
+            inline_content,
+            response,
+            ctx,
+            sandbox,
+        )
+        .await
+    }
+
+    async fn create_response_stream_worker_with_sandbox(
+        &self,
+        script_name: &str,
+        inline_content: Option<&str>,
+        response: &ResponseData,
+        ctx: &ScriptContext,
+        sandbox_config: crate::sandbox::SandboxConfig,
+    ) -> Result<StreamScriptWorker> {
+        let script = match inline_content {
+            Some(content) => content.to_string(),
+            None => self.load_script(ScriptType::Response, script_name).await?,
+        };
+        let response = response.clone();
+        let mut ctx = ctx.clone();
+        ctx.script_name = script_name.to_string();
+        ctx.script_type = ScriptType::Response;
+        let (tx, mut rx) = mpsc::channel(8);
+        let (init_tx, init_rx) = oneshot::channel();
+        // QuickJS contexts are thread-affine, so each live context needs one
+        // owner thread. Acquire before spawning to keep the OS-thread count
+        // bounded rather than creating an unbounded thread per SSE response.
+        let worker_permit = STREAM_SCRIPT_WORKER_LIMIT
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                ScriptError::ExecutionFailed("stream script worker pool is unavailable".to_string())
+            })?;
+
+        std::thread::Builder::new()
+            .name(format!("bifrost-stream-{script_name}"))
+            .spawn(move || {
+                let _worker_permit = worker_permit;
+                let mut sandbox = match Sandbox::new(sandbox_config) {
+                    Ok(sandbox) => sandbox,
+                    Err(error) => {
+                        let _ = init_tx.send(Err(error));
+                        return;
+                    }
+                };
+                let (mode, initial_step) =
+                    match sandbox.initialize_response_stream_script(&script, &response, &ctx) {
+                        Ok(initialized) => initialized,
+                        Err(error) => {
+                            let _ = init_tx.send(Err(error));
+                            return;
+                        }
+                    };
+                if init_tx.send(Ok((mode, initial_step))).is_err() {
+                    return;
+                }
+
+                while let Some(command) = rx.blocking_recv() {
+                    match command {
+                        StreamWorkerCommand::Next(reply) => {
+                            let _ = reply.send(sandbox.execute_response_stream_callback(
+                                "next",
+                                "stream_mock_next",
+                                None,
+                            ));
+                        }
+                        StreamWorkerCommand::Event(event, reply) => {
+                            let _ = reply.send(sandbox.execute_response_stream_callback(
+                                "onEvent",
+                                "stream_event",
+                                Some(&event),
+                            ));
+                        }
+                        StreamWorkerCommand::End(reply) => {
+                            let _ = reply.send(sandbox.execute_response_stream_callback(
+                                "onEnd",
+                                "stream_end",
+                                None,
+                            ));
+                            break;
+                        }
+                        StreamWorkerCommand::Shutdown => break,
+                    }
+                }
+            })
+            .map_err(ScriptError::IoError)?;
+
+        let (mode, initial_step) = init_rx.await.map_err(|_| {
+            ScriptError::ExecutionFailed("stream script worker failed to initialize".to_string())
+        })??;
+        Ok(StreamScriptWorker {
+            mode,
+            initial_step: Some(initial_step),
+            tx,
+        })
     }
 
     pub async fn execute_request_script_with_config(

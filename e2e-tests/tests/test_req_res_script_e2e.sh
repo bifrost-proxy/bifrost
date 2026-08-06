@@ -21,7 +21,10 @@ ECHO_HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}"
 TEST_ID="${TEST_ID:-req_res_script}"
 export TEST_ID
 
-TEST_DATA_DIR="$PROJECT_DIR/.bifrost-test-req-res-script"
+# The suite runner provides a per-test BIFROST_DATA_DIR. Reuse it so scripts,
+# rules, traffic and the launched proxy cannot diverge into two data roots.
+TEST_DATA_DIR="${BIFROST_DATA_DIR:-$PROJECT_DIR/.bifrost-test-req-res-script}"
+export BIFROST_DATA_DIR="$TEST_DATA_DIR"
 PROXY_LOG_FILE="$TEST_DATA_DIR/proxy.log"
 MOCK_LOG_FILE="$TEST_DATA_DIR/mock.log"
 RULE_FIXTURE="$E2E_DIR/rules/request_modify/req_res_script.txt"
@@ -346,9 +349,9 @@ test_req_script() {
     http_post "$url" "origin-body"
     assert_status_2xx "$HTTP_STATUS" "reqScript should allow proxy request"
 
-    assert_body_contains_ci "\\\"x-reqscript\\\": \\\"enabled\\\"" "$HTTP_BODY" "reqScript should inject request header"
-    assert_body_contains_ci "\\\"x-reqscript-protocol\\\": \\\"http\\\"" "$HTTP_BODY" "reqScript should expose protocol"
-    assert_body_contains "\\\"body\\\": \\\"body-from-reqscript\\\"" "$HTTP_BODY" "reqScript should update request body"
+    assert_body_contains_ci '"x-reqscript": "enabled"' "$HTTP_BODY" "reqScript should inject request header"
+    assert_body_contains_ci '"x-reqscript-protocol": "http"' "$HTTP_BODY" "reqScript should expose protocol"
+    assert_body_contains '"body": "body-from-reqscript"' "$HTTP_BODY" "reqScript should update request body"
 
     assert_header_value "X-ResScript" "enabled" "$HTTP_HEADERS" "resScript should add response header"
 }

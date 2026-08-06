@@ -9,7 +9,7 @@ const syntaxMocks = vi.hoisted(() => ({
 
 vi.mock('./syntaxApi', () => syntaxMocks);
 
-import operatorProvider from './operator';
+import operatorProvider, { getSnippetsForProtocol } from './operator';
 
 const syntaxInfo = {
   protocols: [
@@ -53,6 +53,31 @@ beforeAll(async () => {
 });
 
 describe('Bifrost operator completion recovery', () => {
+  it('puts the portable inline block first for response stream scripts', () => {
+    const snippets = getSnippetsForProtocol(
+      {
+        name: 'resStreamScript',
+        category: 'response',
+        description: 'Transform an SSE stream',
+        value_type: 'script_name',
+        example: 'example.test resStreamScript://{stream_bridge}',
+        aliases: [],
+      },
+      {
+        ...syntaxInfo,
+        scripts: {
+          ...syntaxInfo.scripts,
+          response_scripts: [{ name: 'saved-stream' }],
+        },
+      },
+    );
+
+    expect(snippets[0]).toContain('resStreamScript://{${1:stream_script}}');
+    expect(snippets[0]).toContain('```');
+    expect(snippets[0]).toContain('stream.onEvent');
+    expect(snippets[1]).toBe('resStreamScript://saved-stream');
+  });
+
   it('reloads syntax data when the startup preload failed', async () => {
     syntaxMocks.fetchSyntaxInfo.mockReset().mockResolvedValue(syntaxInfo);
 

@@ -25,6 +25,17 @@ describe('rule protocol documentation', () => {
     expect(hover).toContain('bp://build_in_bp');
   });
 
+  it('documents true SSE streaming and recommends portable inline blocks', () => {
+    const result = getProtocolDoc('resStreamScript');
+    const hover = formatProtocolHover(result!);
+
+    expect(result).toBeDefined();
+    expect(result?.doc.examples[0]).toContain('resStreamScript://{');
+    expect(result?.doc.valueSyntax).toContain('stream.next()');
+    expect(result?.doc.valueSyntax).toContain('stream.onEvent(event)');
+    expect(hover).toContain('true incremental SSE stream');
+  });
+
   it('documents breakpoint rule phases and the global gate', () => {
     const result = getProtocolDoc('breakpoint');
     const hover = formatProtocolHover(result!);

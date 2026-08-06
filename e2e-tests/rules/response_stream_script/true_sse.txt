@@ -1,0 +1,25 @@
+# 验证 resStreamScript 的真实逐事件转发、mock 节奏和大事件无损处理。
+# 端口占位符由配套的 test_response_stream_script.sh 在运行时替换。
+sse-transform.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
+sse-mock.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{mock_stream}
+
+``` transform_stream
+stream.mode = "transform";
+stream.onEvent = (event) => ({ event: event.event, data: event.data });
+```
+
+``` mock_stream
+stream.mode = "mock";
+let step = 0;
+stream.next = () => {
+  step += 1;
+  if (step <= 3) {
+    return {
+      output: { event: "mock", data: String(step) },
+      delayMs: 250,
+      done: step === 3,
+    };
+  }
+  return { done: true };
+};
+```

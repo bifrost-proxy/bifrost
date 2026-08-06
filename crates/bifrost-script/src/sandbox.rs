@@ -2,7 +2,7 @@ use crate::error::{Result, ScriptError};
 use crate::types::*;
 use base64::Engine as _;
 use rquickjs::function::Rest;
-use rquickjs::{Context, Ctx, Function, Object, Runtime, Value};
+use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,7 +18,119 @@ const DEFAULT_NETWORK_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_MAX_FILE_BYTES: usize = 1024 * 1024; // 1MiB
 const DEFAULT_MAX_NET_REQUEST_BYTES: usize = 256 * 1024; // 256KiB
 const DEFAULT_MAX_NET_RESPONSE_BYTES: usize = 1024 * 1024; // 1MiB
+const MAX_STREAM_OUTPUTS_PER_CALLBACK: usize = 1024;
+const MAX_STREAM_OUTPUT_BYTES_PER_CALLBACK: usize = 16 * 1024 * 1024;
+const MAX_RETAINED_SCRIPT_LOG_ENTRIES: usize = 1024;
 
+fn stream_js_error(error: rquickjs::Error) -> ScriptError {
+    ScriptError::ExecutionFailed(error.to_string())
+}
+
+fn parse_stream_js_output(value: Value<'_>) -> Result<StreamScriptOutput> {
+    if let Some(string) = value.as_string() {
+        return string
+            .to_string()
+            .map(StreamScriptOutput::Raw)
+            .map_err(stream_js_error);
+    }
+    let object: Object = value.get().map_err(stream_js_error)?;
+    Ok(StreamScriptOutput::Event {
+        id: object.get("id").map_err(stream_js_error)?,
+        event: object.get("event").map_err(stream_js_error)?,
+        data: object.get("data").map_err(stream_js_error)?,
+        retry: object.get("retry").map_err(stream_js_error)?,
+    })
+}
+
+fn parse_stream_js_outputs(value: Value<'_>) -> Result<Vec<StreamScriptOutput>> {
+    if value.is_null() || value.is_undefined() {
+        return Ok(Vec::new());
+    }
+    if value.is_array() {
+        let array: Array = value.get().map_err(stream_js_error)?;
+        if array.len() > MAX_STREAM_OUTPUTS_PER_CALLBACK {
+            return Err(ScriptError::ExecutionFailed(format!(
+                "stream callback output count exceeds {MAX_STREAM_OUTPUTS_PER_CALLBACK}"
+            )));
+        }
+        let outputs: Vec<_> = array
+            .iter::<Value>()
+            .map(|value| parse_stream_js_output(value.map_err(stream_js_error)?))
+            .collect::<Result<_>>()?;
+        validate_stream_outputs(&outputs)?;
+        return Ok(outputs);
+    }
+    let outputs = vec![parse_stream_js_output(value)?];
+    validate_stream_outputs(&outputs)?;
+    Ok(outputs)
+}
+
+fn validate_stream_outputs(outputs: &[StreamScriptOutput]) -> Result<()> {
+    let bytes = outputs.iter().try_fold(0usize, |total, output| {
+        let size = match output {
+            StreamScriptOutput::Raw(raw) => raw.len(),
+            StreamScriptOutput::Event {
+                id, event, data, ..
+            } => {
+                id.as_ref().map_or(0, String::len)
+                    + event.as_ref().map_or(0, String::len)
+                    + data.len()
+                    + 64
+            }
+        };
+        total.checked_add(size).ok_or_else(|| {
+            ScriptError::ExecutionFailed("stream callback output size overflow".to_string())
+        })
+    })?;
+    if bytes > MAX_STREAM_OUTPUT_BYTES_PER_CALLBACK {
+        return Err(ScriptError::ExecutionFailed(format!(
+            "stream callback output exceeds {MAX_STREAM_OUTPUT_BYTES_PER_CALLBACK} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_stream_js_step(value: Value<'_>) -> Result<StreamScriptStep> {
+    if value.is_null() || value.is_undefined() || value.is_string() || value.is_array() {
+        return Ok(StreamScriptStep {
+            outputs: parse_stream_js_outputs(value)?,
+            ..Default::default()
+        });
+    }
+
+    let object: Object = value.get().map_err(stream_js_error)?;
+    let is_step = object.contains_key("output").map_err(stream_js_error)?
+        || object.contains_key("outputs").map_err(stream_js_error)?
+        || object.contains_key("done").map_err(stream_js_error)?
+        || object.contains_key("delayMs").map_err(stream_js_error)?;
+    if !is_step {
+        return Ok(StreamScriptStep {
+            outputs: vec![parse_stream_js_output(object.into_value())?],
+            ..Default::default()
+        });
+    }
+
+    let outputs_value: Value = if object.contains_key("outputs").map_err(stream_js_error)? {
+        object.get("outputs").map_err(stream_js_error)?
+    } else if object.contains_key("output").map_err(stream_js_error)? {
+        object.get("output").map_err(stream_js_error)?
+    } else {
+        Value::new_null(object.ctx().clone())
+    };
+    Ok(StreamScriptStep {
+        outputs: parse_stream_js_outputs(outputs_value)?,
+        delay_ms: object
+            .get::<_, Option<u64>>("delayMs")
+            .map_err(stream_js_error)?
+            .unwrap_or(0),
+        done: object
+            .get::<_, Option<bool>>("done")
+            .map_err(stream_js_error)?
+            .unwrap_or(false),
+    })
+}
+
+#[derive(Clone)]
 pub struct SandboxConfig {
     pub timeout_ms: u64,
     pub max_memory: usize,
@@ -304,8 +416,12 @@ impl Sandbox {
                             *request_body.borrow_mut() = None;
                         }
                         Some(value) => {
-                            *request_body.borrow_mut() =
-                                Some(value.to_string().trim_matches('"').to_string());
+                            *request_body.borrow_mut() = Some(
+                                value
+                                    .as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| value.to_string()),
+                            );
                         }
                     }
                     if let Some(headers) = obj.get("headers").and_then(|v| v.as_object()) {
@@ -438,8 +554,12 @@ impl Sandbox {
                             *response_body.borrow_mut() = None;
                         }
                         Some(value) => {
-                            *response_body.borrow_mut() =
-                                Some(value.to_string().trim_matches('"').to_string());
+                            *response_body.borrow_mut() = Some(
+                                value
+                                    .as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| value.to_string()),
+                            );
                         }
                     }
                     if let Some(headers) = obj.get("headers").and_then(|v| v.as_object()) {
@@ -494,6 +614,125 @@ impl Sandbox {
         let mods_result = mods.clone();
 
         Ok((mods_result, logs_result))
+    }
+
+    pub fn initialize_response_stream_script(
+        &mut self,
+        script: &str,
+        response: &ResponseData,
+        ctx: &ScriptContext,
+    ) -> Result<(StreamScriptMode, StreamScriptStep)> {
+        self.reset_interrupt_state();
+        let logs = Rc::new(RefCell::new(Vec::new()));
+        self.context.with(|js_ctx| {
+            self.setup_log_object(
+                &js_ctx,
+                logs,
+                ctx.script_name.clone(),
+                ctx.request_id.clone(),
+            )?;
+            self.setup_ctx_object(&js_ctx, ctx, "stream_start")?;
+            self.setup_response_object(
+                &js_ctx,
+                response,
+                Rc::new(RefCell::new(response.headers.clone())),
+                Rc::new(RefCell::new(response.body.clone())),
+                Rc::new(RefCell::new(response.status)),
+                Rc::new(RefCell::new(response.status_text.clone())),
+            )?;
+            let stream = Object::new(js_ctx.clone())
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+            stream
+                .set("mode", "transform")
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+            js_ctx
+                .globals()
+                .set("stream", stream)
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+            self.remove_dangerous_globals(&js_ctx)?;
+            js_ctx
+                .eval::<(), _>(script)
+                .map_err(|e| ScriptError::ExecutionFailed(e.to_string()))?;
+            let mode: String = js_ctx
+                .eval("String(stream.mode || 'transform')")
+                .map_err(|e| ScriptError::ExecutionFailed(e.to_string()))?;
+            let initial: Value = js_ctx
+                .eval("stream.output")
+                .map_err(|e| ScriptError::ExecutionFailed(e.to_string()))?;
+            match mode.as_str() {
+                "mock" => {
+                    let has_next: bool = js_ctx
+                        .eval("typeof stream.next === 'function'")
+                        .map_err(|e| ScriptError::ExecutionFailed(e.to_string()))?;
+                    if !has_next {
+                        return Err(ScriptError::ExecutionFailed(
+                            "mock stream requires stream.next callback".to_string(),
+                        ));
+                    }
+                    Ok((StreamScriptMode::Mock, normalize_stream_js_step(initial)?))
+                }
+                "transform" => Ok((
+                    StreamScriptMode::Transform,
+                    normalize_stream_js_step(initial)?,
+                )),
+                _ => Err(ScriptError::ExecutionFailed(format!(
+                    "unsupported stream.mode '{mode}'"
+                ))),
+            }
+        })
+    }
+
+    pub fn execute_response_stream_callback(
+        &mut self,
+        callback: &str,
+        phase: &str,
+        event: Option<&StreamScriptEvent>,
+    ) -> Result<StreamScriptStep> {
+        self.reset_interrupt_state();
+        self.context.with(|js_ctx| {
+            let globals = js_ctx.globals();
+            let ctx_obj: Object = globals
+                .get("ctx")
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+            ctx_obj
+                .set("phase", phase)
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+            let stream: Object = globals
+                .get("stream")
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+            let function: Option<Function> = stream
+                .get(callback)
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+            let Some(function) = function else {
+                return Ok(StreamScriptStep::default());
+            };
+            let value: Value = if let Some(event) = event {
+                let event_object = Object::new(js_ctx.clone()).map_err(stream_js_error)?;
+                event_object
+                    .set("id", event.id.clone())
+                    .map_err(stream_js_error)?;
+                event_object
+                    .set("event", event.event.clone())
+                    .map_err(stream_js_error)?;
+                event_object
+                    .set("data", event.data.clone())
+                    .map_err(stream_js_error)?;
+                event_object
+                    .set("retry", event.retry)
+                    .map_err(stream_js_error)?;
+                stream
+                    .set("event", event_object.clone())
+                    .map_err(stream_js_error)?;
+                let result = function.call((event_object,)).map_err(stream_js_error);
+                stream
+                    .set("event", Value::new_undefined(js_ctx.clone()))
+                    .map_err(stream_js_error)?;
+                result?
+            } else {
+                function.call(()).map_err(stream_js_error)?
+            };
+            normalize_stream_js_step(value)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -679,12 +918,15 @@ impl Sandbox {
                     }
                 }
 
-                logs_clone.borrow_mut().push(ScriptLogEntry {
-                    timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                    level: level_enum,
-                    message,
-                    args: None,
-                });
+                let mut logs = logs_clone.borrow_mut();
+                if logs.len() < MAX_RETAINED_SCRIPT_LOG_ENTRIES {
+                    logs.push(ScriptLogEntry {
+                        timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                        level: level_enum,
+                        message,
+                        args: None,
+                    });
+                }
             })
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
 
@@ -1624,6 +1866,147 @@ mod tests {
     fn test_sandbox_creation() {
         let sandbox = Sandbox::new(SandboxConfig::default());
         assert!(sandbox.is_ok());
+    }
+
+    fn stream_test_response() -> ResponseData {
+        ResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: HashMap::new(),
+            body: None,
+            request: RequestData::default(),
+        }
+    }
+
+    fn stream_test_context() -> ScriptContext {
+        ScriptContext {
+            request_id: "sandbox-stream".to_string(),
+            script_name: "sandbox-stream".to_string(),
+            script_type: ScriptType::Response,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        }
+    }
+
+    #[test]
+    fn stream_step_normalization_covers_raw_event_array_and_metadata() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+        let (mode, initial) = sandbox
+            .initialize_response_stream_script(
+                r#"
+                    stream.mode = "transform";
+                    stream.output = {
+                        outputs: ["data: raw\\n\\n", { id: "1", event: "delta", data: "x", retry: 10 }],
+                        delayMs: 12,
+                        done: true
+                    };
+                    stream.onEnd = () => ({ data: "finished" });
+                "#,
+                &stream_test_response(),
+                &stream_test_context(),
+            )
+            .unwrap();
+        assert_eq!(mode, StreamScriptMode::Transform);
+        assert_eq!(initial.outputs.len(), 2);
+        assert_eq!(initial.delay_ms, 12);
+        assert!(initial.done);
+        assert_eq!(
+            sandbox
+                .execute_response_stream_callback("missing", "stream_end", None)
+                .unwrap(),
+            StreamScriptStep::default()
+        );
+        assert_eq!(
+            sandbox
+                .execute_response_stream_callback("onEnd", "stream_end", None)
+                .unwrap()
+                .outputs
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn stream_initialization_rejects_bad_modes_and_unproductive_mock() {
+        for (script, expected) in [
+            ("stream.mode = 'invalid';", "unsupported stream.mode"),
+            ("stream.mode = 'mock';", "requires stream.next"),
+        ] {
+            let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+            let error = sandbox
+                .initialize_response_stream_script(
+                    script,
+                    &stream_test_response(),
+                    &stream_test_context(),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn stream_outputs_enforce_count_and_byte_limits() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+        sandbox
+            .initialize_response_stream_script(
+                r#"
+                    stream.mode = "transform";
+                    stream.onEvent = event => {
+                        if (event.data === "count") return Array(1025).fill("x");
+                        return "x".repeat(16 * 1024 * 1024 + 1);
+                    };
+                "#,
+                &stream_test_response(),
+                &stream_test_context(),
+            )
+            .unwrap();
+        for (data, expected) in [("count", "output count"), ("bytes", "output exceeds")] {
+            let error = sandbox
+                .execute_response_stream_callback(
+                    "onEvent",
+                    "stream_event",
+                    Some(&StreamScriptEvent {
+                        data: data.to_string(),
+                        ..Default::default()
+                    }),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn stream_event_global_is_available_and_cleared() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+        sandbox
+            .initialize_response_stream_script(
+                r#"
+                    stream.onEvent = event => ({ data: stream.event.data + ":" + event.data });
+                    stream.onEnd = () => ({ data: String(stream.event) });
+                "#,
+                &stream_test_response(),
+                &stream_test_context(),
+            )
+            .unwrap();
+        let step = sandbox
+            .execute_response_stream_callback(
+                "onEvent",
+                "stream_event",
+                Some(&StreamScriptEvent {
+                    data: "value".to_string(),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        assert!(
+            matches!(&step.outputs[0], StreamScriptOutput::Event { data, .. } if data == "value:value")
+        );
+        let end = sandbox
+            .execute_response_stream_callback("onEnd", "stream_end", None)
+            .unwrap();
+        assert!(
+            matches!(&end.outputs[0], StreamScriptOutput::Event { data, .. } if data == "undefined")
+        );
     }
 
     #[test]

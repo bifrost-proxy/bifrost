@@ -49,7 +49,7 @@ SUPPORTED_PROTOCOL_NAMES=(
     resHeaders resBody resPrepend resAppend resCookies resCors resDelay resSpeed resType
     resCharset resReplace responseFor replaceStatus statusCode cache attachment trailers resMerge
     headerReplace htmlAppend htmlPrepend htmlBody jsAppend jsPrepend jsBody cssAppend
-    cssPrepend cssBody urlReplace reqScript resScript decode bp dns tlsIntercept
+    cssPrepend cssBody urlReplace reqScript resScript resStreamScript decode bp dns tlsIntercept
     tlsPassthrough passthrough tlsOptions sniCallback devtools
 )
 
@@ -2558,6 +2558,8 @@ detect_rule_type() {
         echo "line_block"
     elif [[ "$line" == *"reqScript://"* ]]; then
         echo "reqScript"
+    elif [[ "$line" == *"resStreamScript://"* ]]; then
+        echo "resStreamScript"
     elif [[ "$line" == *"resScript://"* ]]; then
         echo "resScript"
     elif [[ "$line" == *"redirect://"* ]] || [[ "$line" == *"locationHref://"* ]]; then
@@ -4009,7 +4011,7 @@ run_tests() {
                     _log_pass "规则语法正确 ($rule_type)"
                 fi
                 ;;
-            tlsIntercept|tlsPassthrough|dns|reqScript|resScript|decode|bp)
+            tlsIntercept|tlsPassthrough|dns|reqScript|resScript|resStreamScript|decode|bp)
                 _log_pass "规则语法正确 ($rule_type)"
                 ;;
             *)

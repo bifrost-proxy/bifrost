@@ -405,10 +405,14 @@ fn validate_filter_values(line: &str, line_num: usize, result: &mut ValidationRe
 fn extract_script_references(line: &str, line_num: usize, result: &mut ValidationResult) {
     let req_script_pattern = regex::Regex::new(r"reqScript://([^\s]+)").unwrap();
     let res_script_pattern = regex::Regex::new(r"resScript://([^\s]+)").unwrap();
+    let res_stream_script_pattern = regex::Regex::new(r"resStreamScript://([^\s]+)").unwrap();
     let decode_script_pattern = regex::Regex::new(r"decode://([^\s]+)").unwrap();
 
     for cap in req_script_pattern.captures_iter(line) {
         let script_name = cap[1].to_string();
+        if script_name.starts_with('{') && script_name.ends_with('}') {
+            continue;
+        }
         result.script_references.push(ScriptReference {
             name: script_name,
             script_type: "request".to_string(),
@@ -418,6 +422,21 @@ fn extract_script_references(line: &str, line_num: usize, result: &mut Validatio
 
     for cap in res_script_pattern.captures_iter(line) {
         let script_name = cap[1].to_string();
+        if script_name.starts_with('{') && script_name.ends_with('}') {
+            continue;
+        }
+        result.script_references.push(ScriptReference {
+            name: script_name,
+            script_type: "response".to_string(),
+            line: line_num,
+        });
+    }
+
+    for cap in res_stream_script_pattern.captures_iter(line) {
+        let script_name = cap[1].to_string();
+        if script_name.starts_with('{') && script_name.ends_with('}') {
+            continue;
+        }
         result.script_references.push(ScriptReference {
             name: script_name,
             script_type: "response".to_string(),
@@ -1965,6 +1984,17 @@ fn expand_inline_values(line: &str, values: &HashMap<String, String>) -> String 
                 continue;
             }
 
+            // Script block references must survive parsing so the runtime can
+            // distinguish inline source from a script filename. The resolver
+            // still resolves the value for matching/debug information.
+            let prefix = &current[..match_start];
+            if ["reqScript://", "resScript://", "resStreamScript://"]
+                .iter()
+                .any(|protocol| prefix.ends_with(protocol))
+            {
+                continue;
+            }
+
             let key = caps.get(1).unwrap().as_str();
 
             if let Some(value) = values.get(key) {
@@ -3050,6 +3080,42 @@ second content
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].value, "first content");
         assert_eq!(rules[1].value, "second content");
+    }
+
+    #[test]
+    fn test_inline_script_blocks_validate_without_missing_file_references() {
+        let text = r#"
+example.com reqScript://{request_inline} resScript://{response_inline} resStreamScript://{stream_inline}
+```request_inline
+request.headers["X-Test"] = "1";
+```
+```response_inline
+response.headers["X-Test"] = "1";
+```
+```stream_inline
+stream.mode = "transform";
+stream.onEvent = event => ({ data: event.data });
+```
+"#;
+        let result = validate_rules_with_context(text, &HashMap::new());
+
+        assert!(result.valid, "{:?}", result.errors);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert!(result.script_references.is_empty());
+        assert_eq!(result.defined_variables.len(), 3);
+    }
+
+    #[test]
+    fn test_named_response_stream_script_is_reported_for_editor_navigation() {
+        let result = validate_rules_with_context(
+            "example.com resStreamScript://stream-adapter",
+            &HashMap::new(),
+        );
+
+        assert!(result.valid, "{:?}", result.errors);
+        assert_eq!(result.script_references.len(), 1);
+        assert_eq!(result.script_references[0].name, "stream-adapter");
+        assert_eq!(result.script_references[0].script_type, "response");
     }
 
     #[test]

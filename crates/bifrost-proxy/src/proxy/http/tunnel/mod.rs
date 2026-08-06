@@ -58,14 +58,15 @@ use super::handler::{
     apply_immediate_response_body_rules, apply_websocket_request_header_rules,
     apply_websocket_response_header_rules, build_connection_error_body,
     build_connection_error_response_from_body, build_overridden_error_response_from_body,
-    connect_via_upstream_http_proxy_tunnel, merge_websocket_header_rule_candidates,
-    needs_body_processing, needs_request_body_processing, needs_response_override,
-    needs_response_phase_resolve, parse_and_record_sse_events, request_explicitly_accepts_html,
-    ConnectionErrorInfo,
+    configure_stream_script_response_headers, connect_via_upstream_http_proxy_tunnel,
+    merge_websocket_header_rule_candidates, needs_body_processing, needs_request_body_processing,
+    needs_response_override, needs_response_phase_resolve, parse_and_record_sse_events,
+    request_explicitly_accepts_html, ConnectionErrorInfo,
 };
 use super::scripts::{
-    apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
-    execute_response_scripts, header_map_to_hashmap, header_pairs_to_hashmap, parse_url_parts,
+    apply_script_headers_to_header_map, body_to_script_string, create_response_stream_script_body,
+    execute_request_scripts, execute_response_scripts, header_map_to_hashmap,
+    header_pairs_to_hashmap, initialize_response_stream_script, parse_url_parts,
     script_string_to_body,
 };
 use super::ws_handshake::{
@@ -413,6 +414,7 @@ pub fn requires_tls_interception_for_rules(resolved_rules: &ResolvedRules) -> bo
         || !resolved_rules.header_replace.is_empty()
         || !resolved_rules.req_scripts.is_empty()
         || !resolved_rules.res_scripts.is_empty()
+        || !resolved_rules.res_stream_scripts.is_empty()
         || !resolved_rules.decode_scripts.is_empty()
         || resolved_rules.html_append.is_some()
         || resolved_rules.html_prepend.is_some()
@@ -496,6 +498,7 @@ fn protocol_requires_tls_interception(protocol: Protocol) -> bool {
             | Protocol::CssBody
             | Protocol::ReqScript
             | Protocol::ResScript
+            | Protocol::ResStreamScript
             | Protocol::Decode
             | Protocol::File
             | Protocol::Tpl
@@ -2402,6 +2405,7 @@ async fn handle_intercepted_request_with_protocol(
     let has_req_body_override = resolved_rules.req_body.is_some();
     let has_req_scripts = !resolved_rules.req_scripts.is_empty();
     let has_res_scripts = !resolved_rules.res_scripts.is_empty();
+    let has_res_stream_scripts = !resolved_rules.res_stream_scripts.is_empty();
     let has_decode_scripts = !resolved_rules.decode_scripts.is_empty();
     let needs_req_body_read = !has_req_body_override
         && (needs_req_processing
@@ -2589,7 +2593,7 @@ async fn handle_intercepted_request_with_protocol(
         body_bytes = processed.body.to_vec();
     }
     let mut values = HashMap::new();
-    if has_req_scripts || has_res_scripts || has_decode_scripts {
+    if has_req_scripts || has_res_scripts || has_res_stream_scripts || has_decode_scripts {
         values = resolved_rules.values.clone();
         let state_values = get_values_from_state(&admin_state).await;
         for (key, value) in state_values {
@@ -3236,6 +3240,12 @@ async fn handle_intercepted_request_with_protocol(
     upstream_parts.uri = upstream_uri.clone();
     upstream_parts.headers.remove(hyper::header::HOST);
     sanitize_upstream_headers(&mut upstream_parts.headers);
+    if !resolved_rules.res_stream_scripts.is_empty() {
+        upstream_parts.headers.insert(
+            hyper::header::ACCEPT_ENCODING,
+            hyper::header::HeaderValue::from_static("identity"),
+        );
+    }
 
     #[cfg(feature = "http3")]
     let req_headers_for_h3: Vec<(String, String)> =
@@ -3247,6 +3257,7 @@ async fn handle_intercepted_request_with_protocol(
     #[cfg(feature = "http3")]
     let should_try_http3_upstream = !actual_use_http
         && resolved_rules.upstream_http3
+        && resolved_rules.res_stream_scripts.is_empty()
         && !request_body_is_streaming
         && resolved_rules.proxy.is_none()
         && !ProtocolDetector::is_websocket_upgrade(&req_headers_for_h3)
@@ -3729,6 +3740,15 @@ async fn handle_intercepted_request_with_protocol(
     } else {
         resolved_rules.clone()
     };
+    if !response_resolved.res_stream_scripts.is_empty() {
+        let state_values = get_values_from_state(&admin_state).await;
+        for (key, value) in state_values {
+            values.entry(key).or_insert(value);
+        }
+        for (key, value) in &response_resolved.values {
+            values.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
     apply_res_rules(
         &mut res_parts,
         &response_resolved,
@@ -3744,7 +3764,7 @@ async fn handle_intercepted_request_with_protocol(
         .collect();
     let output_res_content_encoding = get_content_encoding(&res_headers);
 
-    let needs_body_rules_processing = needs_body_processing(&resolved_rules);
+    let needs_body_rules_processing = needs_body_processing(&response_resolved);
     let res_content_type_str = res_parts
         .headers
         .get(hyper::header::CONTENT_TYPE)
@@ -3781,6 +3801,37 @@ async fn handle_intercepted_request_with_protocol(
         .and_then(|v| v.to_str().ok())
         .map(|v| v.to_lowercase().starts_with("text/event-stream"))
         .unwrap_or(false);
+    if !response_resolved.res_stream_scripts.is_empty() {
+        if !response_resolved.res_scripts.is_empty() {
+            return Ok(Response::builder()
+                .status(hyper::StatusCode::BAD_GATEWAY)
+                .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(
+                    "resScript and resStreamScript cannot be combined on one response",
+                ))
+                .unwrap());
+        }
+        if !is_sse {
+            return Ok(Response::builder()
+                .status(hyper::StatusCode::BAD_GATEWAY)
+                .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(
+                    "resStreamScript requires a text/event-stream response",
+                ))
+                .unwrap());
+        }
+        if response_content_encoding(&res_parts)
+            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+        {
+            return Ok(Response::builder()
+                .status(hyper::StatusCode::BAD_GATEWAY)
+                .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(
+                    "resStreamScript does not support encoded upstream SSE responses",
+                ))
+                .unwrap());
+        }
+    }
     let binary_traffic_performance_mode = admin_state
         .as_ref()
         .map(|state| state.get_binary_traffic_performance_mode())
@@ -4326,7 +4377,49 @@ async fn handle_intercepted_request_with_protocol(
                 }
             }
 
-            let res_body = res_body_incoming.take().unwrap();
+            let res_body = res_body_incoming.take().unwrap().boxed();
+            let res_body = if response_resolved.res_stream_scripts.is_empty() {
+                res_body
+            } else {
+                let worker = match initialize_response_stream_script(
+                    &admin_state,
+                    &response_resolved.res_stream_scripts,
+                    &ctx,
+                    &response_resolved,
+                    &original_uri,
+                    &method_str,
+                    &header_pairs_to_hashmap(&final_req_headers),
+                    res_parts.status.as_u16(),
+                    res_parts
+                        .status
+                        .canonical_reason()
+                        .unwrap_or("OK")
+                        .to_string(),
+                    header_map_to_hashmap(&res_parts.headers),
+                    &values,
+                )
+                .await
+                {
+                    Ok(worker) => worker,
+                    Err(error) => {
+                        if let Some(ref state) = admin_state {
+                            state.sse_hub.unregister(&record_id);
+                            state.update_traffic_by_id(&record_id, |record| {
+                                record.status = hyper::StatusCode::BAD_GATEWAY.as_u16();
+                            });
+                        }
+                        return Ok(Response::builder()
+                            .status(hyper::StatusCode::BAD_GATEWAY)
+                            .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                            .body(full_body(format!(
+                                "stream script initialization failed: {error}"
+                            )))
+                            .unwrap());
+                    }
+                };
+                configure_stream_script_response_headers(&mut res_parts.headers);
+                create_response_stream_script_body(Some(res_body), worker)
+            };
             let tee_body = create_sse_tee_body(
                 res_body,
                 admin_state.clone(),
@@ -11046,7 +11139,7 @@ mod coverage_90_wave {
         assert_eq!(response.status().as_u16(), 207);
         assert_eq!(
             body_bytes(response).await,
-            Bytes::from_static(b"data: script-response\\n\\ndata: [DONE]\\n\\n")
+            Bytes::from_static(b"data: script-response\n\ndata: [DONE]\n\n")
         );
 
         let record = harness
@@ -11069,7 +11162,7 @@ mod coverage_90_wave {
             .decode_res_script_results
             .as_ref()
             .is_some_and(|items| !items.is_empty()));
-        assert_eq!(record.frame_count, 1);
+        assert_eq!(record.frame_count, 2);
 
         let direct_rules = ResolvedRules {
             status_code: Some(202),
@@ -11096,7 +11189,7 @@ mod coverage_90_wave {
         assert_eq!(direct_response.status().as_u16(), 207);
         assert_eq!(
             body_bytes(direct_response).await,
-            Bytes::from_static(b"data: script-response\\n\\ndata: [DONE]\\n\\n")
+            Bytes::from_static(b"data: script-response\n\ndata: [DONE]\n\n")
         );
     }
 
