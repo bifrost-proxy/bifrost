@@ -155,6 +155,7 @@
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [group-cache-admin-stability.md](./group-cache-admin-stability.md) | Group 缓存与 Admin 稳定性 | 3 | 远端失败 single-flight/指数退避/generation、本地规则降级、active-summary 文件 I/O 隔离和 Admin readiness 回归 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |
+| [traffic-bounded-window.md](./traffic-bounded-window.md) | Network 有界窗口、权威统计与实时 Search | 5 | 1,000 条前端窗口、全历史筛选、服务端内存统计、1 秒合并推送、Search 定向增量重算、滚动淘汰与三轮稳定性 |
 | [api-auth.md](./api-auth.md) | Auth API | 12 | 鉴权状态查询、登录、密码管理、远程访问开关、JWT 会话吊销 |
 | [admin-write-origin-guard.md](./admin-write-origin-guard.md) | Admin 写接口 Origin Guard 回归 | 8 | Mac 桌面壳可信 Origin 被 `Sec-Fetch-Site: cross-site` 误判导致写接口整体 403 的回归，覆盖外部跨站拦截、可信桌面 Origin 放行、CSRF 继续强制、WebSocket guard、真实 9900 写接口、Pending Authorization 弹窗关闭不依赖服务端成功、stale CSRF 次级恢复，以及 Runner/IM Channel 保存 PATCH 预检、写入和回读 |
 | [admin-cross-site-security.md](./admin-cross-site-security.md) | Admin Cross-Site Security | 10 | Admin API 跨站写请求、DNS rebinding Host、代理 absolute-form 伪造、代理 Admin Push WebSocket 伪造拒绝、DevTools page bridge 窄例外、Rule Share 确认页和 CSRF 防护回归 |

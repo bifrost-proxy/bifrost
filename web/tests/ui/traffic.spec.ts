@@ -469,7 +469,7 @@ const queryTraffic = async (baseApiUrl: string, params: Record<string, string>) 
   const response = await fetch(`${baseApiUrl}/traffic?${searchParams.toString()}`);
   expect(response.ok).toBeTruthy();
   return (await response.json()) as {
-    records: Array<{ p?: string; lp?: number; capp?: string | null; seq?: number }>;
+    records: Array<{ id: string; p?: string; lp?: number; capp?: string | null; seq?: number }>;
     total: number;
     server_sequence: number;
   };
@@ -1530,6 +1530,116 @@ test("Traffic 统计通过 WebSocket 按变化推送且突发流量每秒最多�
 
     await page.waitForTimeout(1_100);
     expect(await readTrafficStatisticsFrames(page)).toHaveLength(burstFrames.length);
+  } finally {
+    await backend.close();
+    await server.close();
+  }
+});
+
+test("Search 在组合条件下按 WebSocket 变更实时增量重算且定向查询有界", async ({ page }) => {
+  const server = await startMockServer();
+  const backend = await startIsolatedBackend();
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const initialPath = `/live-search-${token}-initial`;
+  const livePath = `/live-search-${token}-pushed`;
+  const nonMatchingPath = `/unrelated-${Date.now()}`;
+
+  try {
+    await seedTrafficBatch(
+      [initialPath, nonMatchingPath],
+      server.port,
+      backend.proxyUrl,
+    );
+    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await page.getByRole("button", { name: "Fuzzy Search" }).click();
+    const input = page.getByPlaceholder("Enter keyword to search all content...");
+    await input.fill(`live-search-${token}`);
+    await page.getByTestId("search-mode-submit").click();
+    await expect(page.getByText(initialPath, { exact: false }).first()).toBeVisible();
+
+    await seedTrafficBatch(
+      [livePath, `/unrelated-live-${token}`],
+      server.port,
+      backend.proxyUrl,
+    );
+    await expect(page.getByText(livePath, { exact: false }).first()).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(page.getByText(`/unrelated-live-${token}`, { exact: false })).toHaveCount(0);
+
+    const records = await queryTraffic(backend.baseApi, {
+      limit: "100",
+      direction: "backward",
+    });
+    const initialId = records.records.find((record) => record.p === initialPath)?.id;
+    const liveId = records.records.find((record) => record.p === livePath)?.id;
+    const unrelatedId = records.records.find(
+      (record) => record.p === `/unrelated-live-${token}`,
+    )?.id;
+    expect(initialId).toBeTruthy();
+    expect(liveId).toBeTruthy();
+    expect(unrelatedId).toBeTruthy();
+
+    const csrfResponse = await fetch(`${backend.baseApi}/security/csrf`);
+    const csrf = (await csrfResponse.json()) as {
+      csrf_token: string;
+      header_name?: string;
+    };
+    const targetedResponse = await fetch(`${backend.baseApi}/search`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [csrf.header_name || "X-Bifrost-CSRF"]: csrf.csrf_token,
+      },
+      body: JSON.stringify({
+        keyword: `live-search-${token}`,
+        scope: { all: false, url: true },
+        filters: {
+          protocols: ["HTTP"],
+          status_ranges: ["2xx"],
+          content_types: ["application/json"],
+          conditions: [
+            { field: "method", operator: "equals", value: "GET" },
+            { field: "path", operator: "contains", value: `/live-search-${token}` },
+          ],
+          client_ips: ["127.0.0.1"],
+          client_apps: [],
+          account_names: [],
+          domains: ["127.0.0.1"],
+        },
+        record_ids: [initialId, liveId, unrelatedId],
+        limit: 500,
+        max_scan: 500,
+        max_results: 500,
+      }),
+    });
+    const targetedBody = await targetedResponse.text();
+    expect(
+      targetedResponse.ok,
+      `targeted search failed (${targetedResponse.status}): ${targetedBody}`,
+    ).toBeTruthy();
+    const targeted = JSON.parse(targetedBody) as {
+      results: Array<{ record: { id: string; p: string } }>;
+    };
+    expect(targeted.results.map((item) => item.record.id).sort()).toEqual(
+      [initialId!, liveId!].sort(),
+    );
+
+    const oversizedResponse = await fetch(`${backend.baseApi}/search`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [csrf.header_name || "X-Bifrost-CSRF"]: csrf.csrf_token,
+      },
+      body: JSON.stringify({
+        keyword: token,
+        scope: { all: true },
+        filters: {},
+        record_ids: Array.from({ length: 501 }, (_, index) => `id-${index}`),
+      }),
+    });
+    expect(oversizedResponse.status).toBe(400);
   } finally {
     await backend.close();
     await server.close();

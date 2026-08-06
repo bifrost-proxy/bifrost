@@ -37,6 +37,125 @@ type SearchStreamEvent =
 
 let currentSearchAbort: AbortController | null = null;
 let currentLoadMoreAbort: AbortController | null = null;
+let liveSearchGeneration = 0;
+
+export const MAX_LIVE_SEARCH_RECORD_IDS = 500;
+const MAX_SEARCH_RESULTS = 1000;
+
+export interface LiveSearchMutation {
+  reset: boolean;
+  insertedIds: string[];
+  updatedIds: string[];
+  deletedIds: string[];
+  oldestSequenceFloor?: number | null;
+  incomplete?: boolean;
+}
+
+export interface LiveSearchMutationAccumulator {
+  reset: boolean;
+  changedIds: Set<string>;
+  deletedIds: Set<string>;
+  oldestSequenceFloor?: number | null;
+  incomplete: boolean;
+}
+
+export function createLiveSearchMutationAccumulator(): LiveSearchMutationAccumulator {
+  return {
+    reset: false,
+    changedIds: new Set<string>(),
+    deletedIds: new Set<string>(),
+    oldestSequenceFloor: undefined,
+    incomplete: false,
+  };
+}
+
+export function coalesceLiveSearchMutation(
+  accumulator: LiveSearchMutationAccumulator,
+  mutation: LiveSearchMutation,
+): LiveSearchMutationAccumulator {
+  accumulator.reset ||= mutation.reset;
+  accumulator.incomplete ||= mutation.incomplete === true;
+
+  const addBounded = (id: string, target: Set<string>) => {
+    if (accumulator.changedIds.has(id) || accumulator.deletedIds.has(id)) return;
+    if (
+      accumulator.changedIds.size + accumulator.deletedIds.size >=
+      MAX_LIVE_SEARCH_RECORD_IDS
+    ) {
+      accumulator.incomplete = true;
+      return;
+    }
+    target.add(id);
+  };
+
+  for (const id of mutation.insertedIds) addBounded(id, accumulator.changedIds);
+  for (const id of mutation.updatedIds) addBounded(id, accumulator.changedIds);
+  for (const id of mutation.deletedIds) addBounded(id, accumulator.deletedIds);
+
+  if (mutation.oldestSequenceFloor !== undefined) {
+    accumulator.oldestSequenceFloor =
+      Math.max(
+        accumulator.oldestSequenceFloor ?? 0,
+        mutation.oldestSequenceFloor ?? 0,
+      ) || null;
+  }
+  return accumulator;
+}
+
+export function mergeLiveSearchResults(
+  current: SearchResultItem[],
+  changedIds: Iterable<string>,
+  replacements: SearchResultItem[],
+  deletedIds: Iterable<string>,
+  oldestSequenceFloor?: number | null,
+): { results: SearchResultItem[]; knownMatchDelta: number } {
+  const changed = new Set(changedIds);
+  const deleted = new Set(deletedIds);
+  const removedKnownIds = new Set<string>();
+  const replacementIds = new Set<string>();
+  const merged = new Map<string, SearchResultItem>();
+
+  for (const item of current) {
+    const belowFloor = oldestSequenceFloor !== undefined &&
+      oldestSequenceFloor !== null &&
+      item.record.seq < oldestSequenceFloor;
+    if (changed.has(item.record.id) || deleted.has(item.record.id) || belowFloor) {
+      removedKnownIds.add(item.record.id);
+      continue;
+    }
+    merged.set(item.record.id, item);
+  }
+
+  for (const item of replacements) {
+    if (deleted.has(item.record.id)) continue;
+    if (
+      oldestSequenceFloor !== undefined &&
+      oldestSequenceFloor !== null &&
+      item.record.seq < oldestSequenceFloor
+    ) {
+      continue;
+    }
+    replacementIds.add(item.record.id);
+    merged.set(item.record.id, item);
+  }
+
+  const results = Array.from(merged.values())
+    .sort((a, b) => b.record.seq - a.record.seq)
+    .slice(0, MAX_SEARCH_RESULTS);
+
+  return {
+    results,
+    knownMatchDelta: replacementIds.size - removedKnownIds.size,
+  };
+}
+
+function buildSearchKey(
+  keyword: string,
+  scope: SearchScope,
+  filters: SearchFilters,
+): string {
+  return JSON.stringify({ keyword: keyword.trim(), scope, filters });
+}
 
 async function* parseSseStream(
   body: ReadableStream<Uint8Array>,
@@ -144,12 +263,17 @@ interface SearchState {
   isSearching: boolean;
   isLoadingMore: boolean;
   searchId: string | null;
+  activeSearchKey: string | null;
 
   setMode: (mode: 'normal' | 'search') => void;
   setKeyword: (keyword: string) => void;
   setScope: (scope: Partial<SearchScope>) => void;
   search: (filters: SearchFilters) => Promise<void>;
   loadMore: (filters: SearchFilters) => Promise<void>;
+  refreshChangedRecords: (
+    filters: SearchFilters,
+    mutation: LiveSearchMutation,
+  ) => Promise<'updated' | 'full_refresh' | 'busy' | 'skipped'>;
   cancelSearch: () => void;
   reset: () => void;
 }
@@ -181,8 +305,10 @@ export const useSearchStore = create<SearchState>()(
   isSearching: false,
   isLoadingMore: false,
   searchId: null,
+  activeSearchKey: null,
 
   setMode: (mode) => {
+    liveSearchGeneration += 1;
     if (mode === 'normal') {
       abortSearch();
       abortLoadMore();
@@ -194,6 +320,7 @@ export const useSearchStore = create<SearchState>()(
         hasMore: false,
         nextCursor: null,
         searchId: null,
+        activeSearchKey: null,
         isSearching: false,
         isLoadingMore: false,
       });
@@ -202,9 +329,22 @@ export const useSearchStore = create<SearchState>()(
     }
   },
 
-  setKeyword: (keyword) => set({ keyword }),
+  setKeyword: (keyword) => {
+    liveSearchGeneration += 1;
+    abortSearch();
+    abortLoadMore();
+    set({
+      keyword,
+      activeSearchKey: null,
+      isSearching: false,
+      isLoadingMore: false,
+    });
+  },
 
   setScope: (scopeUpdate) => {
+    liveSearchGeneration += 1;
+    abortSearch();
+    abortLoadMore();
     const { scope } = get();
     if (scopeUpdate.all === true) {
       set({
@@ -219,6 +359,9 @@ export const useSearchStore = create<SearchState>()(
           sse_events: false,
           all: true,
         },
+        activeSearchKey: null,
+        isSearching: false,
+        isLoadingMore: false,
       });
     } else {
       const newScope = { ...scope, ...scopeUpdate, all: false };
@@ -228,7 +371,12 @@ export const useSearchStore = create<SearchState>()(
       if (!hasAny) {
         newScope.all = true;
       }
-      set({ scope: newScope });
+      set({
+        scope: newScope,
+        activeSearchKey: null,
+        isSearching: false,
+        isLoadingMore: false,
+      });
     }
   },
 
@@ -241,6 +389,8 @@ export const useSearchStore = create<SearchState>()(
     // abort previous search or loadMore immediately to keep UI responsive
     abortSearch();
     abortLoadMore();
+    const generation = ++liveSearchGeneration;
+    const activeSearchKey = buildSearchKey(keyword, scope, filters);
 
     currentSearchAbort = new AbortController();
 
@@ -252,6 +402,7 @@ export const useSearchStore = create<SearchState>()(
       totalMatched: 0,
       hasMore: false,
       nextCursor: null,
+      activeSearchKey,
     });
 
     try {
@@ -276,6 +427,7 @@ export const useSearchStore = create<SearchState>()(
         let accResults: SearchResultItem[] = [];
 
         for await (const ev of parseSseStream(streamResp.body)) {
+          if (generation !== liveSearchGeneration) return;
           if (ev.event === 'result') {
             accResults = [...accResults, ev.data];
             set({ results: accResults });
@@ -287,6 +439,7 @@ export const useSearchStore = create<SearchState>()(
               hasMore: ev.data.has_more_hint,
             });
           } else if (ev.event === 'done') {
+            if (generation !== liveSearchGeneration) return;
             set({
               totalSearched: ev.data.total_searched,
               totalMatched: ev.data.total_matched,
@@ -300,7 +453,7 @@ export const useSearchStore = create<SearchState>()(
         }
 
         // stream ended unexpectedly
-        set({ isSearching: false });
+        if (generation === liveSearchGeneration) set({ isSearching: false });
         return;
       }
 
@@ -318,6 +471,8 @@ export const useSearchStore = create<SearchState>()(
 
       const data: SearchResponse = await response.json();
 
+      if (generation !== liveSearchGeneration) return;
+
       set({
         results: data.results,
         totalSearched: data.total_searched,
@@ -330,11 +485,11 @@ export const useSearchStore = create<SearchState>()(
     } catch (error) {
       if (isAbortError(error)) {
         // aborted by user or replaced by a new search
-        set({ isSearching: false });
+        if (generation === liveSearchGeneration) set({ isSearching: false });
         return;
       }
       console.error('[SearchStore] Search failed:', error);
-      set({ isSearching: false });
+      if (generation === liveSearchGeneration) set({ isSearching: false });
     }
   },
 
@@ -435,15 +590,105 @@ export const useSearchStore = create<SearchState>()(
     }
   },
 
+  refreshChangedRecords: async (filters, mutation) => {
+    const state = get();
+    const expectedKey = buildSearchKey(state.keyword, state.scope, filters);
+    if (
+      state.mode !== 'search' ||
+      state.activeSearchKey !== expectedKey
+    ) {
+      return 'skipped';
+    }
+    if (state.isSearching || state.isLoadingMore) return 'busy';
+
+    const changedIds = Array.from(new Set([
+      ...mutation.insertedIds,
+      ...mutation.updatedIds,
+    ]));
+
+    if (
+      mutation.reset ||
+      mutation.incomplete ||
+      changedIds.length > MAX_LIVE_SEARCH_RECORD_IDS
+    ) {
+      await get().search(filters);
+      return 'full_refresh';
+    }
+
+    const generation = liveSearchGeneration;
+    let replacements: SearchResultItem[] = [];
+    if (changedIds.length > 0) {
+      const request: SearchRequest = {
+        keyword: state.keyword.trim(),
+        scope: state.scope,
+        filters,
+        record_ids: changedIds,
+        limit: MAX_LIVE_SEARCH_RECORD_IDS,
+        max_scan: MAX_LIVE_SEARCH_RECORD_IDS,
+        max_results: MAX_LIVE_SEARCH_RECORD_IDS,
+      };
+      try {
+        const response = await apiFetch('/_bifrost/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(request),
+        });
+        if (!response.ok) {
+          throw new Error(`Live search refresh failed: ${response.statusText}`);
+        }
+        const data: SearchResponse = await response.json();
+        replacements = data.results;
+      } catch (error) {
+        console.error('[SearchStore] Live refresh failed, running full search:', error);
+        if (generation === liveSearchGeneration) {
+          await get().search(filters);
+          return 'full_refresh';
+        }
+        return 'skipped';
+      }
+    }
+
+    const latest = get();
+    if (
+      generation !== liveSearchGeneration ||
+      latest.activeSearchKey !== expectedKey ||
+      latest.mode !== 'search'
+    ) {
+      return 'skipped';
+    }
+
+    const merged = mergeLiveSearchResults(
+      latest.results,
+      changedIds,
+      replacements,
+      mutation.deletedIds,
+      mutation.oldestSequenceFloor,
+    );
+    set({
+      results: merged.results,
+      totalMatched: Math.max(
+        merged.results.length,
+        latest.totalMatched + merged.knownMatchDelta,
+      ),
+    });
+    return 'updated';
+  },
+
       cancelSearch: () => {
+        liveSearchGeneration += 1;
         abortSearch();
         abortLoadMore();
-        set({ isSearching: false, isLoadingMore: false });
+        set({
+          isSearching: false,
+          isLoadingMore: false,
+          activeSearchKey: null,
+        });
       },
 
       reset: () => {
         abortSearch();
         abortLoadMore();
+        liveSearchGeneration += 1;
         set({
           mode: 'normal',
           keyword: '',
@@ -456,6 +701,7 @@ export const useSearchStore = create<SearchState>()(
           isSearching: false,
           isLoadingMore: false,
           searchId: null,
+          activeSearchKey: null,
         });
       },
     }),

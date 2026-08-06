@@ -1,4 +1,10 @@
-import { useCallback, useMemo, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type CSSProperties,
+} from "react";
 import {
   Input,
   Button,
@@ -15,7 +21,13 @@ import {
   LoadingOutlined,
   StopOutlined,
 } from "@ant-design/icons";
-import { useSearchStore, compactToSummary } from "../../stores/useSearchStore";
+import {
+  coalesceLiveSearchMutation,
+  compactToSummary,
+  createLiveSearchMutationAccumulator,
+  useSearchStore,
+  type LiveSearchMutationAccumulator,
+} from "../../stores/useSearchStore";
 import {
   isFilterConditionApplicable,
   useTrafficStore,
@@ -56,11 +68,13 @@ export default function SearchMode({
     setScope,
     search,
     loadMore,
+    refreshChangedRecords,
     cancelSearch,
     setMode,
   } = useSearchStore();
 
   const toolbarFilters = useTrafficStore((state) => state.toolbarFilters);
+  const recordsMutation = useTrafficStore((state) => state.recordsMutation);
   const filterConditions = useTrafficStore((state) => state.filterConditions);
   const selectedClientIps = useFilterPanelStore(
     (state) => state.selectedClientIps,
@@ -105,6 +119,75 @@ export default function SearchMode({
     selectedAccountNames,
     selectedDomains,
   ]);
+
+  const appliedMutationVersionRef = useRef(recordsMutation.version);
+  const liveRefreshTimerRef = useRef<number | null>(null);
+  const liveRefreshInFlightRef = useRef(false);
+  const pendingMutationRef = useRef<LiveSearchMutationAccumulator | null>(null);
+  const buildFiltersRef = useRef(buildFilters);
+  buildFiltersRef.current = buildFilters;
+
+  const scheduleLiveRefresh = useCallback(() => {
+    if (liveRefreshInFlightRef.current || liveRefreshTimerRef.current !== null) {
+      return;
+    }
+    liveRefreshTimerRef.current = window.setTimeout(async () => {
+      liveRefreshTimerRef.current = null;
+      const pending = pendingMutationRef.current;
+      if (!pending) return;
+      pendingMutationRef.current = null;
+      liveRefreshInFlightRef.current = true;
+      try {
+        const outcome = await refreshChangedRecords(buildFiltersRef.current(), {
+          reset: pending.reset,
+          insertedIds: Array.from(pending.changedIds),
+          updatedIds: [],
+          deletedIds: Array.from(pending.deletedIds),
+          oldestSequenceFloor: pending.oldestSequenceFloor,
+          incomplete: pending.incomplete,
+        });
+        if (outcome === "busy") {
+          pendingMutationRef.current = coalesceLiveSearchMutation(
+            pendingMutationRef.current ?? createLiveSearchMutationAccumulator(),
+            {
+              reset: pending.reset,
+              insertedIds: Array.from(pending.changedIds),
+              updatedIds: [],
+              deletedIds: Array.from(pending.deletedIds),
+              oldestSequenceFloor: pending.oldestSequenceFloor,
+              incomplete: pending.incomplete,
+            },
+          );
+        }
+      } finally {
+        liveRefreshInFlightRef.current = false;
+        if (pendingMutationRef.current) scheduleLiveRefresh();
+      }
+    }, 1000);
+  }, [refreshChangedRecords]);
+
+  useEffect(() => {
+    if (recordsMutation.version === appliedMutationVersionRef.current) return;
+    appliedMutationVersionRef.current = recordsMutation.version;
+    pendingMutationRef.current = coalesceLiveSearchMutation(
+      pendingMutationRef.current ?? createLiveSearchMutationAccumulator(),
+      {
+        reset: recordsMutation.reset,
+        insertedIds: recordsMutation.inserted.map((record) => record.id),
+        updatedIds: recordsMutation.updated.map((record) => record.id),
+        deletedIds: recordsMutation.deletedIds,
+        oldestSequenceFloor: recordsMutation.oldestSequenceFloor,
+        incomplete: recordsMutation.incomplete,
+      },
+    );
+    scheduleLiveRefresh();
+  }, [recordsMutation, scheduleLiveRefresh]);
+
+  useEffect(() => () => {
+    if (liveRefreshTimerRef.current !== null) {
+      window.clearTimeout(liveRefreshTimerRef.current);
+    }
+  }, []);
 
   const handleSearch = useCallback(() => {
     if (
@@ -269,6 +352,7 @@ export default function SearchMode({
             style={{ flex: 1 }}
           />
           <Button
+            data-testid="search-mode-submit"
             type="primary"
             onClick={handleSearch}
             icon={<SearchOutlined />}
