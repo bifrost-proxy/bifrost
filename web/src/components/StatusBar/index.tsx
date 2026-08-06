@@ -188,7 +188,7 @@ const StatusBar = memo(function StatusBar() {
 
   const totalTraffic = useMemo(() => {
     if (!metrics) return "0 B";
-    return formatBytes(metrics.bytes_sent + metrics.bytes_received);
+    return formatBytes(metrics.total_traffic_bytes);
   }, [metrics]);
 
   const uploadRate = useMemo(() => {
@@ -547,7 +547,7 @@ const StatusBar = memo(function StatusBar() {
 
   return (
     <>
-      <div style={styles.container}>
+      <div style={styles.container} data-testid="status-bar">
         <Popover
           content={proxyPopoverContent}
           trigger="hover"

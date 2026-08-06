@@ -69,8 +69,10 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
       if (globalState.trafficEnabled) {
         const currentTrafficStore = useTrafficStore.getState();
         if (currentTrafficStore.polling && currentTrafficStore.usePush) {
+          // Reconnect carries the monotonic last_sequence and the server sends
+          // the backlog as initial deltas. A parallel HTTP catch-up duplicates
+          // deserialization and merge work exactly when the backlog is largest.
           currentTrafficStore.enablePush();
-          void currentTrafficStore.catchUpUpdates();
         }
       }
       useMetricsStore.getState().enablePush({
@@ -167,18 +169,6 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
         message.success(data.message || data.title);
       }
     });
-    const unsubscribePushConnection = pushService.onConnectionChange(({ connected }) => {
-      if (!connected || globalState.visibilityPaused || globalState.forceRefresh) {
-        return;
-      }
-      if (!globalState.trafficEnabled) {
-        return;
-      }
-      const currentTrafficStore = useTrafficStore.getState();
-      if (currentTrafficStore.polling && currentTrafficStore.usePush) {
-        void currentTrafficStore.catchUpUpdates();
-      }
-    });
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -186,7 +176,6 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
       window.removeEventListener('pageshow', onPageShow);
       unsubscribeForceRefresh();
       unsubscribeNotification();
-      unsubscribePushConnection();
 
       stopAllPolling();
 

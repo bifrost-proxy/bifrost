@@ -45,8 +45,11 @@ interface VirtualTrafficTableProps {
   selectedId?: string;
   selectedIds?: string[];
   onSelectedIdsChange?: SetSelectedIds;
-  onLoadMore?: () => void;
-  hasMore?: boolean;
+  onLoadOlder?: () => void;
+  hasOlder?: boolean;
+  onLoadNewer?: () => void;
+  hasNewer?: boolean;
+  loadingMore?: boolean;
   autoScroll?: boolean;
   onScrollPositionChange?: (isAtBottom: boolean) => void;
   newRecordsCount?: number;
@@ -514,6 +517,7 @@ const TableRow = memo(function TableRow({
       data-index={rowIndex}
       data-testid="traffic-row"
       data-record-id={record.id}
+      data-sequence={record.sequence}
       data-request-size={record.request_size}
       data-response-size={record.response_size}
       data-frame-count={record.frame_count}
@@ -605,8 +609,11 @@ export default function VirtualTrafficTable({
   selectedId,
   selectedIds = [],
   onSelectedIdsChange,
-  onLoadMore,
-  hasMore,
+  onLoadOlder,
+  hasOlder,
+  onLoadNewer,
+  hasNewer,
+  loadingMore = false,
   autoScroll = true,
   onScrollPositionChange,
   newRecordsCount = 0,
@@ -630,6 +637,17 @@ export default function VirtualTrafficTable({
   const [isAtTop, setIsAtTop] = useState(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const lastSelectedIndexRef = useRef<number | null>(null);
+  const pendingScrollAnchorRef = useRef<{
+    id: string;
+    offset: number;
+  } | null>(null);
+  const currentScrollAnchorRef = useRef<{
+    id: string;
+    offset: number;
+  } | null>(null);
+  const previousWindowFirstIdRef = useRef<string | undefined>(data[0]?.id);
+  const hasLeftTopRef = useRef(false);
+  const loadRequestPendingRef = useRef(false);
 
   const [contextMenu, setContextMenu] = useState<{
     visible: boolean;
@@ -728,9 +746,21 @@ export default function VirtualTrafficTable({
     const atTopNow = scrollTop < SCROLL_THRESHOLD;
     const atBottomNow =
       scrollHeight - scrollTop - clientHeight < SCROLL_THRESHOLD;
+    const firstVisible = rowVirtualizer.getVirtualItems()[0];
+    const visibleRecord = firstVisible ? data[firstVisible.index] : data[0];
+    if (visibleRecord) {
+      const rowStart = ROW_HEIGHT + (firstVisible?.start ?? 0);
+      currentScrollAnchorRef.current = {
+        id: visibleRecord.id,
+        offset: scrollTop - rowStart,
+      };
+    }
 
     setIsAtTop(atTopNow);
     setIsAtBottom(atBottomNow);
+    if (!atTopNow) {
+      hasLeftTopRef.current = true;
+    }
 
     if (isAtBottomRef.current !== atBottomNow) {
       isAtBottomRef.current = atBottomNow;
@@ -741,12 +771,73 @@ export default function VirtualTrafficTable({
       }
     }
 
-    if (onLoadMore && hasMore) {
-      if (scrollHeight - scrollTop - clientHeight < 200) {
-        onLoadMore();
-      }
+    if (
+      !loadingMore &&
+      !loadRequestPendingRef.current &&
+      atTopNow &&
+      hasLeftTopRef.current &&
+      onLoadOlder &&
+      hasOlder
+    ) {
+      pendingScrollAnchorRef.current = currentScrollAnchorRef.current;
+      loadRequestPendingRef.current = true;
+      onLoadOlder();
+    } else if (
+      !loadingMore &&
+      !loadRequestPendingRef.current &&
+      atBottomNow &&
+      onLoadNewer &&
+      hasNewer
+    ) {
+      loadRequestPendingRef.current = true;
+      onLoadNewer();
     }
-  }, [onScrollPositionChange, onLoadMore, hasMore, onScrollTopChange]);
+  }, [
+    data,
+    hasNewer,
+    hasOlder,
+    loadingMore,
+    onLoadNewer,
+    onLoadOlder,
+    onScrollPositionChange,
+    onScrollTopChange,
+    rowVirtualizer,
+  ]);
+
+  const dataWindowKey = `${data[0]?.id ?? "empty"}:${data.at(-1)?.id ?? "empty"}:${data.length}`;
+
+  useEffect(() => {
+    if (!loadingMore) {
+      loadRequestPendingRef.current = false;
+    }
+  }, [loadingMore]);
+
+  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (
+      event.deltaY >= 0 ||
+      !parentRef.current ||
+      parentRef.current.scrollTop >= SCROLL_THRESHOLD ||
+      loadingMore ||
+      loadRequestPendingRef.current ||
+      !onLoadOlder ||
+      !hasOlder
+    ) {
+      return;
+    }
+
+    const firstVisible = rowVirtualizer.getVirtualItems()[0];
+    const anchor = firstVisible ? data[firstVisible.index] : data[0];
+    if (anchor) {
+      const rowStart = ROW_HEIGHT + (firstVisible?.start ?? 0);
+      pendingScrollAnchorRef.current = {
+        id: anchor.id,
+        offset: parentRef.current.scrollTop - rowStart,
+      };
+    }
+    hasLeftTopRef.current = true;
+    loadRequestPendingRef.current = true;
+    onLoadOlder();
+  }, [data, hasOlder, loadingMore, onLoadOlder, rowVirtualizer]);
 
   useEffect(() => {
     if (
@@ -761,6 +852,32 @@ export default function VirtualTrafficTable({
       }
       prevDataLengthRef.current = data.length;
       return;
+    }
+
+    const pendingAnchor = pendingScrollAnchorRef.current;
+    if (pendingAnchor && parentRef.current) {
+      const anchorIndex = data.findIndex((record) => record.id === pendingAnchor.id);
+      pendingScrollAnchorRef.current = null;
+      if (anchorIndex >= 0) {
+        parentRef.current.scrollTop =
+          ROW_HEIGHT + anchorIndex * ROW_HEIGHT + pendingAnchor.offset;
+        prevDataLengthRef.current = data.length;
+        previousWindowFirstIdRef.current = data[0]?.id;
+        return;
+      }
+    }
+
+    const windowFirstChanged = previousWindowFirstIdRef.current !== data[0]?.id;
+    const currentAnchor = currentScrollAnchorRef.current;
+    previousWindowFirstIdRef.current = data[0]?.id;
+    if (windowFirstChanged && !isAtBottomRef.current && currentAnchor && parentRef.current) {
+      const anchorIndex = data.findIndex((record) => record.id === currentAnchor.id);
+      if (anchorIndex >= 0) {
+        parentRef.current.scrollTop =
+          ROW_HEIGHT + anchorIndex * ROW_HEIGHT + currentAnchor.offset;
+        prevDataLengthRef.current = data.length;
+        return;
+      }
     }
 
     const prevLength = prevDataLengthRef.current;
@@ -779,7 +896,8 @@ export default function VirtualTrafficTable({
 
     prevDataLengthRef.current = currLength;
   }, [
-    data.length,
+    data,
+    dataWindowKey,
     autoScroll,
     rowVirtualizer,
     initialScrollTop,
@@ -1047,12 +1165,14 @@ export default function VirtualTrafficTable({
       style={styles.container}
       tabIndex={0}
       data-testid="traffic-table"
+      data-loaded-count={data.length}
     >
       <style>{keyframesStyle}</style>
       <div
         ref={parentRef}
         style={styles.scrollContainer}
         onScroll={handleScroll}
+        onWheel={handleWheel}
         data-testid="traffic-table-scroll"
       >
         <div style={styles.tableInner}>

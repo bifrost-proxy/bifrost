@@ -1,5 +1,5 @@
 import { get, del, post } from './client';
-import type { TrafficListResponse, TrafficRecord, TrafficFilter, TrafficUpdatesFilter, TrafficUpdatesResponseCompact, ApiResponse, TrafficQueryRequest, TrafficQueryResponse } from '../types';
+import type { TrafficListResponse, TrafficRecord, TrafficFilter, TrafficUpdatesFilter, TrafficUpdatesResponseCompact, TrafficStatistics, ApiResponse, TrafficQueryRequest, TrafficQueryResponse } from '../types';
 import { buildApiUrl } from '../runtime';
 
 export async function queryTraffic(request: TrafficQueryRequest): Promise<TrafficQueryResponse> {
@@ -43,6 +43,10 @@ export async function getTrafficUpdates(filter?: TrafficUpdatesFilter): Promise<
   }
   const query = params.toString();
   return get<TrafficUpdatesResponseCompact>(`/traffic/updates${query ? `?${query}` : ''}`);
+}
+
+export async function getTrafficStatistics(): Promise<TrafficStatistics> {
+  return get<TrafficStatistics>('/traffic/statistics');
 }
 
 export async function getTrafficDetail(id: string): Promise<TrafficRecord> {

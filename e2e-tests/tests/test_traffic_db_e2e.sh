@@ -289,6 +289,41 @@ test_traffic_updates_api() {
     return 0
 }
 
+test_traffic_statistics_api() {
+    log_info "Testing authoritative in-memory traffic statistics API..."
+
+    generate_traffic 3
+
+    local list_response statistics_response
+    list_response=$(admin_curl "${ADMIN_BASE_URL}/api/traffic?limit=100")
+    statistics_response=$(admin_curl "${ADMIN_BASE_URL}/api/traffic/statistics")
+
+    local list_total statistics_total local_count domain_count
+    list_total=$(echo "$list_response" | jq -r '.total // 0')
+    statistics_total=$(echo "$statistics_response" | jq -r '.total_requests // 0')
+    local_count=$(echo "$statistics_response" | jq -r '.client_ips["127.0.0.1"] // 0')
+    domain_count=$(echo "$statistics_response" | jq -r '.domains["127.0.0.1"] // 0')
+
+    assert_equals "$list_total" "$statistics_total" "Statistics total should match retained server traffic" || return 1
+    assert_greater_than "$local_count" 2 "Client IP statistics should include all generated traffic" || return 1
+    assert_greater_than "$domain_count" 2 "Domain statistics should include all generated traffic" || return 1
+
+    local first_id
+    first_id=$(echo "$list_response" | jq -r '.records[0].id // empty')
+    if [[ -n "$first_id" ]]; then
+        admin_curl -X DELETE "${ADMIN_BASE_URL}/api/traffic" \
+            -H "Content-Type: application/json" \
+            -d "{\"ids\":[\"${first_id}\"]}" >/dev/null
+        local after_delete
+        after_delete=$(admin_curl "${ADMIN_BASE_URL}/api/traffic/statistics")
+        assert_equals "$((statistics_total - 1))" \
+            "$(echo "$after_delete" | jq -r '.total_requests // 0')" \
+            "Statistics should update after deleting a retained record" || return 1
+    fi
+
+    return 0
+}
+
 test_traffic_pending_updates() {
     log_info "Testing pending records update tracking..."
     
@@ -467,6 +502,13 @@ PY
         return 1
     fi
 
+    local after_statistics_count
+    after_statistics_count=$(admin_curl "${ADMIN_BASE_URL}/api/traffic/statistics" | jq -r '.total_requests // 0')
+    if [[ "$after_statistics_count" -gt 1 ]]; then
+        log_fail "After clear, statistics total should be 0 or 1, got ${after_statistics_count}"
+        return 1
+    fi
+
     local after_config
     after_config=$(admin_get "/api/config/performance")
     local after_body_files
@@ -637,6 +679,7 @@ main() {
 
     run_test "Traffic Query API" test_traffic_query_api
     run_test "Traffic Updates API" test_traffic_updates_api
+    run_test "Traffic Statistics API" test_traffic_statistics_api
     run_test "Traffic Pending Updates" test_traffic_pending_updates
     run_test "Traffic Detail API" test_traffic_detail_api
     run_test "Compact Format" test_compact_format

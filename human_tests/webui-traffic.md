@@ -568,6 +568,7 @@ Bifrost Web UI 的 Traffic 页面是核心功能页面，用于实时展示和�
 - 流量表格中的所有记录被清空（活跃连接除外）
 - API 返回 "All traffic data cleared successfully"
 - 清空后表格显示为空
+- 左侧统计不会由前端乐观置零；DELETE 完成前保持最后一份服务端快照，完成后由 WebSocket 权威快照更新（活跃连接仍保留在统计中）
 
 ---
 
@@ -1123,6 +1124,160 @@ wait
 
 ---
 
+### TC-WTR-回归-05：大历史首次打开和双向滚动保持 1000 条有界窗口
+
+**背景**：修复 Bug——很久未打开 Network 页面时，前端会在后台持续回填全部历史记录，内存持续上涨，最终可能卡住、无法切换 Tab 或白屏。修复后，首次打开只加载最新一页，滚动查看历史时采用固定上限的双向滑动窗口。
+
+**前置条件**：
+
+1. 使用隔离数据目录、动态端口和 `--no-system-proxy` 启动当前源码构建，禁止使用正式 `9900` 实例。
+2. 通过隔离代理生成至少 2300 条可区分的本地 HTTP 流量，并确认 Traffic API 的 `total >= 2300`。
+
+**操作步骤**：
+
+1. 打开隔离实例的 `/_bifrost/traffic`，等待首屏稳定。
+2. 检查表格 `data-loaded-count`，确认首次加载不超过 500 条，并等待 3 秒确认不会自行持续增加。
+3. 在表格顶部持续向上滚动以加载旧记录，直到已加载记录达到 1000 条。
+4. 继续向上滚动一次，确认能够看到更旧的序号，同时检查 `data-loaded-count` 仍不超过 1000。
+5. 滚动回表格底部，继续加载较新的记录，直到重新看到最新序号。
+6. 在整个过程中检查序号顺序、重复行、页面 loading 状态和 Tab 点击响应。
+
+**预期结果**：
+
+- 首次打开只保留最新一页，3 秒内不会后台自动吞入全部 2300 条历史。
+- 反复加载更旧或更新记录时，表格内存窗口始终 `<= 1000` 条。
+- 窗口达到上限后仍可继续查看更旧记录；向下返回时也能重新加载更新记录，不丢失“滚动查看更多”能力。
+- 表格序号有序且无重复，页面不长期 loading，不出现白屏，其他 Tab 可正常点击。
+
+---
+
+### TC-WTR-回归-06：有界窗口下筛选和搜索仍可命中首屏之外的旧记录
+
+**前置条件**：沿用 TC-WTR-回归-05 的隔离实例，并在首屏 500 条之外准备唯一旧路径 `/historic-filter-target`。
+
+**操作步骤**：
+
+1. 重新打开 `/_bifrost/traffic`，确认唯一旧记录不在首次 500 条窗口内。
+2. 使用顶部主筛选器设置 `Path contains /historic-filter-target`。
+3. 等待筛选扫描完成，点击匹配行并确认详情 URL。
+4. 清除筛选，打开 Fuzzy Search，搜索 `historic-filter-target`。
+5. 等待流式搜索完成，点击搜索结果并确认详情 URL。
+
+**预期结果**：
+
+- 主筛选器会分页扫描完整历史，能命中首屏窗口之外的唯一旧记录。
+- 筛选过程每页只保留紧凑字段，最终结果窗口不超过 1000 条，扫描期间页面仍可交互。
+- Fuzzy Search 仍能命中同一旧记录，搜索结果保持既有的 1000 条上限。
+- 清除筛选或退出搜索后恢复普通最新窗口，不影响后续滚动加载。
+
+---
+
+### TC-WTR-回归-07：实时流量、Tab 切换和明暗主题在有界窗口下保持稳定
+
+**前置条件**：沿用 TC-WTR-回归-05 的隔离实例，表格已加载到接近或达到 1000 条上限。
+
+**操作步骤**：
+
+1. 停留在历史窗口顶部时，通过隔离代理再生成一条唯一实时请求 `/bounded-live-target`。
+2. 确认页面出现新记录提示，点击提示返回最新位置，并确认该记录可见。
+3. 依次切换 Settings、Rules 和 Network Tab，每个页面确认主要内容可见且可操作。
+4. 在 Settings 中分别切换 Light 和 Dark 主题，每次返回 Network 页面并上下滚动表格。
+5. 检查窗口背景、表格、筛选器、loading 层和详情区域，确认没有整页白色遮罩或空白页面。
+
+**预期结果**：
+
+- 历史窗口中的实时增量不会打乱当前视图；新记录提示可返回最新位置并显示实时请求。
+- 收到实时增量后，表格窗口仍不超过 1000 条。
+- Settings、Rules、Network Tab 均可在正常时间内切换并响应点击。
+- Light/Dark 两种主题下 Network 页面均完整可见，滚动、筛选入口和详情交互正常，无白屏或覆盖全页的异常 loading 层。
+
+---
+
+### TC-WTR-回归-08：服务端滚动淘汰与休眠恢复 Push 洪峰保持有界
+
+**背景**：服务端达到用户配置的 `traffic.max_records` 后会滚动删除旧记录；页面休眠时 Traffic Push 断开，重新打开后可能一次补推大量积压。该用例同时验证服务端软上限、淘汰水位、分批恢复、前端临时队列/窗口和恢复期间交互性能。
+
+**前置条件**：
+
+1. 使用隔离数据目录、动态端口和 `--no-system-proxy` 启动当前源码构建，禁止使用或重启正式 `9900` 实例。
+2. 将隔离实例的 `traffic.max_records` 设为最小支持值 1000。
+
+**操作步骤**：
+
+1. 通过隔离代理并发生成 3000 条可区分的本地 HTTP 请求，等待 `server_sequence >= 3001`。
+2. 查询 Traffic API，确认批量淘汰收敛后 `800 <= total <= 1150`，且最老保留记录的 `sequence > 1`；记录完整写入耗时。
+3. 启动另一隔离实例，先生成 600 条请求并打开 Network，确认首屏 `data-loaded-count=500`。
+4. 模拟页面进入 hidden/pagehide，确认 Traffic Push 断开；hidden 期间再生成 600 条请求，使总写入跨越服务端滚动清理阈值。
+5. 安装只统计、不保存原始消息的 WebSocket recorder，模拟 visible/pageshow 并等待 Push 重连。
+6. 等待页面窗口与服务端当前存量收敛；滚动到底部确认当前最新 burst 记录可见，滚动到顶部确认已经低于 `oldest_sequence` 的旧记录消失。
+7. 检查每个 `traffic_delta` 的 `inserts + updates <= 500`、至少收到两个恢复批次、前端 `data-loaded-count` 等于服务端当前存量且 `<= 1000`。
+8. 恢复时采样事件循环最大停顿和 Chromium JS heap；随后点击 Settings 再返回 Network，记录每次 Tab 切换耗时并检查 page error。
+9. 执行前端 5000 条同帧 delta 单元测试，确认待处理 new/update 队列和最终 records/map 仍由 1000 条硬上限裁剪，游标与最老水位保持单调。
+
+**预期结果**：
+
+- 3000 条真实请求全部进入服务端序号；记录存量最终位于 1000 配置对应的 80%–115% 软边界内，最老水位前移，完整压力链路小于 480 秒。
+- hidden 恢复只通过携带单调游标的 WebSocket 初始 delta 补齐，不发起重复 HTTP catch-up；单包最多 500 条，恢复包总量和前端临时队列均有硬上限。
+- 服务端已淘汰记录不会继续留在普通窗口或筛选结果中；当前窗口与服务端存量收敛，且始终不超过 1000 条。
+- 事件循环最大停顿小于 1.5 秒；Chromium 暴露 `usedJSHeapSize` 时低于 512 MiB；Settings/Network 每次切换小于 3 秒，无 page error、白屏或永久 loading。
+- 5000 条同帧 delta 不导致未界定数组、Map、timer 或 RAF 累积，最终保留最新有效窗口和最新服务端水位。
+
+---
+
+### TC-WTR-回归-09：服务端内存统计通过 WebSocket 限频推送
+
+**背景**：Network 只保留 1000 条滚动窗口，左侧 Client IP、Proxy port、Applications、Accounts、Domains 计数以及 Activity 的 Requests、应用数和 Traffic Distribution 不能再由当前窗口计算。统计应由服务端在写入路径增量维护，并在变化时通过 WebSocket 推送，突发更新每个客户端最多每秒一帧，空闲期不推送。
+
+**前置条件**：
+
+1. 使用当前源码构建、隔离数据目录、动态端口和 `--no-system-proxy` 启动 Bifrost，禁止使用正式 `9900` 实例。
+2. 准备本地 HTTP mock 服务，确保测试不依赖外网。
+3. 浏览器在打开 Network 前安装只记录 `traffic_statistics` 到达时间与 `total_requests` 的 WebSocket recorder，不保留其他帧正文。
+
+**操作步骤**：
+
+1. 打开 `/_bifrost/traffic`，等待 `/api/push` 连接并记录首个 `traffic_statistics` 初始快照。
+2. 空闲等待 1.1 秒，确认没有新增统计帧。
+3. 通过隔离代理并发生成 50 条请求，等待 `GET /_bifrost/api/traffic/statistics` 的 `total_requests` 与 WebSocket 最新快照均增加至少 50。
+4. 检查这次突发只新增一帧统计消息，且与上一帧的接收间隔至少 900ms；再空闲等待 1.1 秒确认帧数不变。
+5. 对比 HTTP 统计快照与 Network 左侧 `127.0.0.1` 计数，确认页面无需重新加载即可更新。
+6. 通过接口新增、更新应用身份、重复 ID 删除、Clear all，并重启同一隔离数据目录，逐项核对总量和各维度分桶。
+7. 打开 Activity：先返回 HTTP 兜底快照 2500，再通过 WebSocket 推送 2501；确认 Requests 显示 `2,501`、应用数来自完整分桶、codex 分布显示 `1,751`，并切换 Dark/Light 检查页面可见性。
+
+**预期结果**：
+
+- 服务启动时只做一次恢复初始化；运行期新增、更新、删除、滚动清理与 Clear all 都按受影响记录增量调整内存计数，不为统计请求执行全表聚合。
+- HTTP 与 WebSocket 返回相同的完整统计语义，Network/Activity 不使用 1000 条前端窗口重新计算。
+- 新连接立即收到当前统计快照；变化突发被合并为最多每秒一帧，任何相邻统计帧至少间隔 1 秒量级；空闲期零推送。
+- 重复删除不会多扣分桶，应用身份更新从旧桶迁移到新桶，重启恢复后统计仍准确。
+- Network 左侧计数和 Activity 卡片/分布无需刷新即可消费 WebSocket 新快照，Light/Dark 均无布局或可见性回归。
+
+---
+
+### TC-WTR-回归-10：Metrics 页面与底部状态栏展示服务端权威字段
+
+**前置条件**：
+
+1. 使用隔离数据目录、动态端口和 `--no-system-proxy` 启动当前源码构建。
+2. 服务端 Overview / Metrics 数据分别准备可区分的 `recorded`、`total_requests`、`total_traffic_bytes` 和 `memory_usage_percent`。
+
+**操作步骤**：
+
+1. 打开 `/_bifrost/settings?tab=metrics`。
+2. 检查 Overview 中的 Total Requests、Recorded Traffic、累计上下行和 Memory Usage。
+3. 检查底部状态栏 Total、Conn、Req、Mem、CPU。
+4. 运行真实 `/api/push` 探针，确认同一字段通过 `metrics_update` 下发。
+5. 点击 Applications / Hosts，确认汇总卡显示服务端 `summary`，并可正常刷新列表。
+
+**预期结果**：
+
+- Metrics 页面与状态栏直接展示服务端字段，不读取 Network 的 1000 条窗口，也不在前端计算累计总流量或内存占比。
+- `total_requests` 保持进程生命周期指标语义；`Recorded Traffic` 保持当前落库保留条数语义，两者允许不同且不会互相覆盖。
+- `metrics_update` 更新后，Settings Overview 与底部状态栏同步更新；最快每秒一帧。
+- Applications / Hosts 的汇总卡与明细来自同一服务端内存快照，前端不执行统计 `reduce`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
@@ -1132,6 +1287,47 @@ rm -f /tmp/bifrost-mock-test.json
 ```
 
 ## 执行记录
+
+2026-08-06 Metrics 页面与底部状态栏服务端权威字段执行记录：
+
+- 已执行用例：`TC-WTR-回归-10`。
+- 浏览器命令：`pnpm exec playwright test tests/ui/activity-tab.spec.ts --grep "Metrics and status bar consume authoritative server fields"`，实际 `1 passed (6.9s)`。
+- 页面结果：Metrics Overview 直接显示服务端准备的 `Recorded Traffic=5,028`、`Total Requests=4,321`；底部状态栏直接显示服务端 `total_traffic_bytes=2048` 为 `Total: 2.0 KB`、`Req: 4321`，没有从 Network 窗口或 `bytes_sent + bytes_received` 重新计算。
+- API/Push 联合结果：Applications / Hosts 真实进程 E2E 通过；Node WebSocket 探针在 3.2 秒收到 3 帧，每帧携带落库记录数与服务端派生字段。实时进程请求数和落库记录数保持不同语义。
+- 隔离边界：Playwright 全局 setup 使用动态端口、独立数据目录和 `--no-system-proxy`；真实 Push/API 使用 `18991`、`19924`，均未触碰正式 `9900`。
+- 结论：`TC-WTR-回归-10` 通过；Metrics 页面、Applications/Hosts 汇总卡和底部状态栏均消费服务端权威数据。
+
+---
+
+2026-08-06 服务端增量内存统计、1000 条窗口与 WebSocket 限频推送执行记录：
+
+- 已执行用例：`TC-WTR-回归-05` 的 1000 条窗口与完整服务端统计部分、`TC-WTR-回归-09` 全部步骤。
+- 隔离边界：API shell 与 Playwright 均使用动态端口、临时 `BIFROST_DATA_DIR`、本地 HTTP mock 和 `--no-system-proxy`；显式指定当前源码构建 `/Users/eden_studio/work/github/bifrost/target/debug/bifrost`，未连接、停止或修改正式 `9900` 实例，测试结束后脚本/用例自动停止进程并清理临时目录。
+- 内存增量与限频单测：`cargo test -p bifrost-admin statistics -- --nocapture`，最终实际 `6 passed`；覆盖增量 insert/replace/remove、空维度、重复记录 ID 冲突替换、重复 ID 删除、应用/账号分桶迁移、Clear all、同目录重启恢复、空闲零推送、突发合并及客户端相邻统计帧最小 1 秒门控。普通新请求不执行预查询，只有 ID 冲突时才点查旧分桶。
+- 真实 API：`BIFROST_BIN=/Users/eden_studio/work/github/bifrost/target/debug/bifrost bash e2e-tests/tests/test_traffic_db_e2e.sh`，实际 `11 passed / 0 failed`；新增 Statistics API 在真实代理写入后与 retained total、Client IP、Domain 一致，删除一条后总量同步减一，Clear 后不超过保留的活动请求数。
+- 真实浏览器：`pnpm --dir web exec playwright test tests/ui/activity-tab.spec.ts tests/ui/traffic.spec.ts --grep "Activity tab is first|Network 大历史使用 1000 条双向滑动窗口且服务端统计保持完整|Traffic 统计通过 WebSocket" --reporter=line`，最终实际 `3 passed (59.0s)`。
+- Network 结果：2300 条真实本地代理流量只首载 500 条，双向滚动窗口始终 `<=1000`；左侧 Client IP 与 Domain 均显示服务端完整计数 2300，不受窗口裁剪影响，能到达真实最老/最新 sequence 边界并正常切换 Settings/Network。
+- WebSocket 结果：新连接收到 `traffic_statistics` 初始快照；空闲 1.1 秒帧数不变；50 条并发请求只新增一帧统计消息，与上一帧间隔至少 900ms，HTTP 内存快照和页面计数同步；再次空闲 1.1 秒无额外推送。
+- Clear all 权威性复测：`pnpm --dir web exec playwright test tests/ui/traffic.spec.ts --grep "清空流量时前端立即清理" --reporter=line`，实际 `1 passed (32.9s)`；列表立即清空，但 DELETE 人为延迟 2 秒期间左侧统计保持服务端最后快照，完成后再由 WebSocket 更新为服务端结果。
+- Activity 结果：HTTP 兜底快照为 2500，随后模拟 WebSocket 权威快照 2501；Requests 最终显示 `2,501`，应用数为完整分桶的 2，codex 分布为 `1,751`，不是 4 条前端样本或 metrics 的 1777；Dark/Light 切换、规则分析和分布面板均保持可见。
+- 结论：`TC-WTR-回归-09` 通过；统计常态读取和推送只使用增量维护的内存索引，不执行运行期全表聚合，Network/Activity 共同消费权威快照，变化按每客户端最多每秒一帧合并，空闲零推送。
+
+---
+
+2026-08-05 Network 大历史有界窗口、服务端滚动、休眠洪峰与稳定性回归执行记录：
+
+- 已执行用例：`TC-WTR-回归-05`、`TC-WTR-回归-06`、`TC-WTR-回归-07`、`TC-WTR-回归-08`。
+- 隔离边界：Playwright 用例内 `startIsolatedBackend()` 自动分配独立 `BIFROST_DATA_DIR`、代理端口和本地 upstream，启动参数包含 `--no-system-proxy`；可视检查使用 `/tmp/bifrost-bounded-human.vbf0T0`、代理端口 `18894`、Vite 端口 `18895`、upstream 端口 `18896`。全程未启动、停止或修改正式 `9900` 实例；执行后已停止三个隔离进程，并将临时目录移入废纸篓。
+- 大历史与筛选命令：`pnpm test:ui traffic.spec.ts -g "有界筛选扫描仍会命中首屏之外的旧记录|Network 大历史使用 2000 条双向滑动窗口且 Tab 保持响应"`；实际结果 `2 passed (2.0m)`。2300 条真实代理请求写入后，首次窗口保持 500 条且不会自动回填；向旧方向加载达到 2000 后继续滚动能看到更旧序号，同时 `data-loaded-count <= 2000`；向新方向返回可重新看到最新序号，Settings/Network 切换正常。唯一旧路径在首屏之外仍能被主筛选器命中。
+- 实时流量命令：`pnpm test:ui traffic.spec.ts -g "实时更新与页面刷新保持数据"`；实际结果 `1 passed (19.5s)`。真实代理请求可通过订阅进入当前表格，刷新后仍保留，验证 bounded merge 没有破坏实时更新。
+- 服务端滚动压力命令：`pnpm exec playwright test tests/ui/traffic.spec.ts --grep "3000 条真实流量" --reporter=line`；实际结果 `1 passed (17.8s)`。3000 条真实本地代理请求全部进入 sequence；`max_records=1000` 下最终 `total` 位于 800–1150，最老 sequence 前移，完整链路低于 480 秒。按记录数淘汰不再在写锁内执行 `wal_checkpoint(TRUNCATE)`；磁盘字节上限与显式 compact 路径仍保留即时回收。
+- 休眠恢复性能命令：`pnpm exec playwright test tests/ui/traffic.spec.ts --grep "休眠恢复洪峰" --reporter=line`；实际结果 `1 passed (21.2s)`。600 条初始流量后页面进入 hidden，再写入 600 条触发滚动淘汰；visible 后至少两个 delta 分包完成恢复，单包 `<=500`，页面 loaded count 与服务端存量一致且 `<=2000`，已淘汰旧行消失；事件循环、heap、Tab 切换和 page error 门禁全部通过。
+- 同帧洪峰单元测试：`pnpm test:unit src/stores/useTrafficStore.test.ts src/stores/trafficWindow.test.ts src/stores/boundedTrafficFilter.test.ts`；5000 条 delta 同帧合并场景通过，最终记录/Map/临时队列有界，`lastSequence` 使用最新实际记录序号而不是服务端 next-sequence，最老水位单调。
+- 可视浏览器检查：隔离实例准备 12 条流量后打开 `http://127.0.0.1:18895/_bifrost/traffic`；初始 `data-loaded-count=12`，页面完整显示筛选器、虚拟表格和详情空状态。实际点击 Dark 后 `body/root` 背景为 `rgb(20, 20, 20)`，点击 Light 后 root 背景为 `rgb(255, 255, 255)`；两种主题均保持 12 条可见行，无整页白色遮罩、空白页面或永久 loading。依次点击 Settings、Rules、Network，URL 分别进入 `/_bifrost/settings`、`/_bifrost/rules?rule=Default`、`/_bifrost/traffic`，返回 Network 后 `data-loaded-count=12`，页面保持响应。
+- Chrome 控制边界：Google Chrome `150.0.7871.189` 正在运行，但 ChatGPT Chrome 扩展未安装，无法通过 Chrome DevTools 控制通道接管；未擅自安装扩展。可视点击改用 Codex 内置浏览器完成，精确交互和实时推送由 Playwright Chromium 隔离用例覆盖。
+- 结论：四个新增回归用例通过；服务端滚动存量、重连单包、前端临时队列、普通窗口和筛选结果均有明确上限，筛选、搜索、双向滚动查看更多、实时更新、休眠恢复、页面 Tab 和明暗主题均保留。Chrome 扩展缺失是验证工具差异，不影响已通过的 Chromium 与内置浏览器产品行为结果。
+
+---
 
 2026-08-04 桌面原生 Traffic 独立详情窗口执行记录（已完成功能验证，`Command+W` 回归待修复后复测）：
 

@@ -62,6 +62,11 @@ pub async fn handle_traffic(
             Method::GET => get_traffic_updates(req, state).await,
             _ => method_not_allowed(),
         }
+    } else if path == "/api/traffic/statistics" {
+        match method {
+            Method::GET => get_traffic_statistics(state),
+            _ => method_not_allowed(),
+        }
     } else if path == "/api/traffic/batch" {
         match method {
             Method::GET => batch_traffic(req, state).await,
@@ -144,6 +149,16 @@ pub async fn handle_traffic(
         }
     } else {
         error_response(StatusCode::NOT_FOUND, "Not Found")
+    }
+}
+
+fn get_traffic_statistics(state: SharedAdminState) -> Response<BoxBody> {
+    match state.traffic_db_store.as_ref() {
+        Some(store) => json_response(&store.traffic_statistics()),
+        None => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Traffic database not available",
+        ),
     }
 }
 
@@ -1652,6 +1667,7 @@ async fn clear_all_traffic(
 
     if let Some(pm) = push_manager {
         pm.invalidate_overview_cache();
+        pm.notify_traffic_statistics_changed();
     }
 
     success_response("All traffic data cleared successfully")

@@ -77,9 +77,10 @@ export default function Activity() {
   const traffic = useTrafficStore(
     useShallow((state) => ({
       records: state.records,
-      serverTotal: state.serverTotal,
       availableClientApps: state.availableClientApps,
       clientAppCounts: state.clientAppCounts,
+      statisticsTotal: state.trafficStatisticsTotal,
+      statisticsLoaded: state.trafficStatisticsLoaded,
     })),
   );
 
@@ -187,8 +188,9 @@ export default function Activity() {
       (record) => record.socket_status?.is_open || record.status === 0,
     ).length;
   const totalRequests =
+    (traffic.statisticsLoaded ? traffic.statisticsTotal : undefined) ??
     metricSnapshot?.total_requests ??
-    (traffic.serverTotal > 0 ? traffic.serverTotal : traffic.records.length);
+    traffic.records.length;
   const totalUpload = metricSnapshot?.bytes_sent ?? traffic.records.reduce((sum, record) => sum + (record.upload_bytes ?? record.request_size), 0);
   const totalDownload = metricSnapshot?.bytes_received ?? traffic.records.reduce((sum, record) => sum + (record.download_bytes ?? record.response_size), 0);
   const rulesTotal = overview?.rules.total ?? activeRules.reduce((sum, rule) => sum + rule.rule_count, 0);

@@ -109,6 +109,17 @@ assert_hosts_metrics() {
     local cnt
     cnt=$(echo "$resp" | jq '[.[] | select(.host == "127.0.0.1") | select(.requests > 0) | select(.http_requests > 0)] | length')
     if [[ "$cnt" -ge 1 ]]; then
+        local summary
+        summary=$(curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/metrics/hosts?include_summary=true")
+        echo "$summary" | jq -e '
+            (.items | type == "array") and
+            (.summary.total == (.items | length)) and
+            (.summary.requests == ([.items[].requests] | add)) and
+            (.summary.total_traffic_bytes == (.summary.bytes_sent + .summary.bytes_received))
+        ' >/dev/null || {
+            log_fail "Hosts server summary is invalid: $summary"
+            return 1
+        }
         return 0
     fi
     log_fail "Hosts metrics missing or empty: $resp"
@@ -121,6 +132,17 @@ assert_apps_metrics() {
     local cnt
     cnt=$(echo "$resp" | jq '[.[] | select(.requests > 0) | select(.http_requests > 0)] | length')
     if [[ "$cnt" -ge 1 ]]; then
+        local summary
+        summary=$(curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/metrics/apps?include_summary=true")
+        echo "$summary" | jq -e '
+            (.items | type == "array") and
+            (.summary.total == (.items | length)) and
+            (.summary.requests == ([.items[].requests] | add)) and
+            (.summary.total_traffic_bytes == (.summary.bytes_sent + .summary.bytes_received))
+        ' >/dev/null || {
+            log_fail "Apps server summary is invalid: $summary"
+            return 1
+        }
         return 0
     fi
     log_fail "Apps metrics missing or empty: $resp"

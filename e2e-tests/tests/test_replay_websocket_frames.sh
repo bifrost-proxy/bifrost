@@ -476,15 +476,30 @@ test_ws_replay_rule_headers_applied() {
     fi
 
     local record request_header response_header
-    record=$(get_traffic_detail "$traffic_id")
-    request_header=$(echo "$record" | jq -r '[.request_headers[]? | select((.[0] | ascii_downcase) == "x-replay-ws-request") | .[1]][0] // ""')
-    response_header=$(echo "$record" | jq -r '[.response_headers[]? | select((.[0] | ascii_downcase) == "x-replay-ws-response") | .[1]][0] // ""')
+    request_header=""
+    response_header=""
+    # Handshake headers are persisted before the 101 response is returned, but
+    # detail reads can still briefly race SQLite read-pool visibility and other
+    # asynchronous stream-field reconciliation. Use a bounded poll instead of
+    # relying on one fixed sleep.
+    for _ in {1..50}; do
+        record=$(get_traffic_detail "$traffic_id")
+        request_header=$(echo "$record" | jq -r '[.request_headers[]? | select((.[0] | ascii_downcase) == "x-replay-ws-request") | .[1]][0] // ""')
+        response_header=$(echo "$record" | jq -r '[.response_headers[]? | select((.[0] | ascii_downcase) == "x-replay-ws-response") | .[1]][0] // ""')
+        if [[ "$request_header" == "injected" && "$response_header" == "injected" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
 
     if [[ "$request_header" != "injected" ]]; then
+        echo "$record" | jq '{matched_rules, request_headers, original_response_headers, response_headers}' || true
         fail "Replay WebSocket upstream request header rule missing in Traffic record, got '${request_header}'"
         return 1
     fi
     if [[ "$response_header" != "injected" ]]; then
+        echo "$record" | jq '{matched_rules, request_headers, original_response_headers, response_headers}' || true
+        tail_server_log "Bifrost replay proxy" "$BIFROST_LOG_FILE"
         fail "Replay WebSocket response header rule missing in Traffic record, got '${response_header}'"
         return 1
     fi

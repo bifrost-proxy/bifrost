@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
-import type { APIRequestContext } from "@playwright/test";
-import { createServer, request as httpRequest } from "node:http";
+import type { APIRequestContext, Page } from "@playwright/test";
+import { Agent as HttpAgent, createServer, request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import net from "node:net";
 import os from "node:os";
@@ -420,10 +420,17 @@ const searchTraffic = async (
   baseApiUrl: string,
   conditions: Array<{ field: string; operator: string; value: string }>,
 ) => {
+  const csrfResponse = await fetch(`${baseApiUrl}/security/csrf`);
+  expect(csrfResponse.ok).toBeTruthy();
+  const csrf = (await csrfResponse.json()) as {
+    csrf_token: string;
+    header_name?: string;
+  };
   const response = await fetch(`${baseApiUrl}/search`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
+      [csrf.header_name || "X-Bifrost-CSRF"]: csrf.csrf_token,
     },
     body: JSON.stringify({
       keyword: "",
@@ -449,8 +456,9 @@ const searchTraffic = async (
       limit: 50,
     }),
   });
-  expect(response.ok).toBeTruthy();
-  return (await response.json()) as {
+  const body = await response.text();
+  expect(response.ok, `search failed (${response.status}): ${body}`).toBeTruthy();
+  return JSON.parse(body) as {
     results: Array<{ record: { p?: string } }>;
     total_matched: number;
   };
@@ -461,10 +469,186 @@ const queryTraffic = async (baseApiUrl: string, params: Record<string, string>) 
   const response = await fetch(`${baseApiUrl}/traffic?${searchParams.toString()}`);
   expect(response.ok).toBeTruthy();
   return (await response.json()) as {
-    records: Array<{ p?: string; lp?: number; capp?: string | null }>;
+    records: Array<{ p?: string; lp?: number; capp?: string | null; seq?: number }>;
     total: number;
+    server_sequence: number;
   };
 };
+
+const getTrafficStatistics = async (baseApiUrl: string) => {
+  const response = await fetch(`${baseApiUrl}/traffic/statistics`);
+  if (!response.ok) {
+    throw new Error(`traffic statistics failed: ${response.status}`);
+  }
+  return response.json() as Promise<{
+    total_requests: number;
+    client_ips: Record<string, number>;
+    proxy_ports: Record<string, number>;
+    applications: Record<string, number>;
+    account_names: Record<string, number>;
+    domains: Record<string, number>;
+  }>;
+};
+
+const updateTrafficMaxRecords = async (baseApiUrl: string, maxRecords: number) => {
+  const csrfResponse = await fetch(`${baseApiUrl}/security/csrf`);
+  expect(csrfResponse.ok).toBeTruthy();
+  const csrf = (await csrfResponse.json()) as {
+    csrf_token: string;
+    header_name?: string;
+  };
+  const response = await fetch(`${baseApiUrl}/config/performance`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      [csrf.header_name || "X-Bifrost-CSRF"]: csrf.csrf_token,
+    },
+    body: JSON.stringify({ max_records: maxRecords }),
+  });
+  const body = await response.text();
+  expect(response.ok, `performance config update failed (${response.status}): ${body}`).toBeTruthy();
+};
+
+async function setDocumentVisibility(page: Page, state: "hidden" | "visible") {
+  await page.evaluate((nextState) => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => nextState,
+    });
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => nextState === "hidden",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event(nextState === "hidden" ? "pagehide" : "pageshow"));
+  }, state);
+}
+
+type TrafficBurstStats = {
+  deltaCount: number;
+  maxBatch: number;
+  totalInserts: number;
+  latestOldestSequence: number;
+  latestServerTotal: number;
+};
+
+async function installTrafficBurstRecorder(page: Page) {
+  await page.addInitScript(() => {
+    const nativeWebSocket = window.WebSocket;
+    const stats: TrafficBurstStats = {
+      deltaCount: 0,
+      maxBatch: 0,
+      totalInserts: 0,
+      latestOldestSequence: 0,
+      latestServerTotal: 0,
+    };
+
+    class InstrumentedWebSocket extends nativeWebSocket {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        if (!String(url).includes("/api/push")) return;
+        this.addEventListener("message", (event) => {
+          if (typeof event.data !== "string") return;
+          try {
+            const message = JSON.parse(event.data) as {
+              type?: string;
+              data?: {
+                inserts?: unknown[];
+                updates?: unknown[];
+                oldest_sequence?: number;
+                server_total?: number;
+              };
+            };
+            if (message.type !== "traffic_delta" || !message.data) return;
+            const batchSize =
+              (message.data.inserts?.length ?? 0) +
+              (message.data.updates?.length ?? 0);
+            stats.deltaCount += 1;
+            stats.maxBatch = Math.max(stats.maxBatch, batchSize);
+            stats.totalInserts += message.data.inserts?.length ?? 0;
+            stats.latestOldestSequence = Math.max(
+              stats.latestOldestSequence,
+              message.data.oldest_sequence ?? 0,
+            );
+            stats.latestServerTotal = message.data.server_total ?? stats.latestServerTotal;
+          } catch {
+            // Ignore non-JSON and unrelated push frames without retaining them.
+          }
+        });
+      }
+    }
+
+    Object.setPrototypeOf(InstrumentedWebSocket, nativeWebSocket);
+    Object.defineProperty(window, "__trafficBurstStats", {
+      configurable: true,
+      value: stats,
+      writable: false,
+    });
+    window.WebSocket = InstrumentedWebSocket as typeof WebSocket;
+  });
+}
+
+async function readTrafficBurstStats(page: Page): Promise<TrafficBurstStats> {
+  return page.evaluate(() => ({
+    ...(window as typeof window & { __trafficBurstStats: TrafficBurstStats })
+      .__trafficBurstStats,
+  }));
+}
+
+type TrafficStatisticsFrame = {
+  receivedAt: number;
+  totalRequests: number;
+};
+
+async function installTrafficStatisticsRecorder(page: Page) {
+  await page.addInitScript(() => {
+    const nativeWebSocket = window.WebSocket;
+    const frames: TrafficStatisticsFrame[] = [];
+
+    class StatisticsInstrumentedWebSocket extends nativeWebSocket {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        if (!String(url).includes("/api/push")) return;
+        this.addEventListener("message", (event) => {
+          if (typeof event.data !== "string") return;
+          try {
+            const message = JSON.parse(event.data) as {
+              type?: string;
+              data?: { total_requests?: number };
+            };
+            if (
+              message.type === "traffic_statistics" &&
+              typeof message.data?.total_requests === "number"
+            ) {
+              frames.push({
+                receivedAt: performance.now(),
+                totalRequests: message.data.total_requests,
+              });
+            }
+          } catch {
+            // Ignore unrelated or malformed push frames without retaining payloads.
+          }
+        });
+      }
+    }
+
+    Object.setPrototypeOf(StatisticsInstrumentedWebSocket, nativeWebSocket);
+    Object.defineProperty(window, "__trafficStatisticsFrames", {
+      configurable: true,
+      value: frames,
+      writable: false,
+    });
+    window.WebSocket = StatisticsInstrumentedWebSocket as typeof WebSocket;
+  });
+}
+
+async function readTrafficStatisticsFrames(page: Page): Promise<TrafficStatisticsFrame[]> {
+  return page.evaluate(() => [
+    ...(window as typeof window & {
+      __trafficStatisticsFrames: TrafficStatisticsFrame[];
+    }).__trafficStatisticsFrames,
+  ]);
+}
 
 const streamSseViaProxy = async (url: string) => {
   const target = new URL(url);
@@ -773,6 +957,8 @@ test("清空流量时前端立即清理", async ({ page, request }) => {
   await sendProxyRequest(`http://127.0.0.1:${server.port}${path}`);
   const row = page.getByTestId("traffic-row").filter({ hasText: path }).first();
   await expect(row).toBeVisible();
+  const localClientCount = page.getByLabel("Local (127.0.0.1) count");
+  await expect(localClientCount).toHaveText("1");
 
   let deleteSeen = false;
   await page.route("**/_bifrost/api/traffic", async (route, req) => {
@@ -786,7 +972,9 @@ test("清空流量时前端立即清理", async ({ page, request }) => {
   await page.getByTestId("toolbar-clear-all").click();
 
   await expect(row).toHaveCount(0, { timeout: 500 });
+  await expect(localClientCount).toHaveText("1", { timeout: 500 });
   expect(deleteSeen).toBeTruthy();
+  await expect(localClientCount).toHaveCount(0, { timeout: 5000 });
 
   await server.close();
 });
@@ -1030,14 +1218,20 @@ test("主筛选器支持临时停用单条条件", async ({ page }) => {
   }
 });
 
-async function sendHttpViaProxy(url: string) {
+async function sendHttpViaProxy(
+  url: string,
+  targetProxyUrl = proxyUrl,
+  agent?: HttpAgent,
+) {
+  const targetProxy = new URL(targetProxyUrl);
   await new Promise<void>((resolve, reject) => {
     const req = httpRequest(
       {
-        host: proxyHost.hostname,
-        port: proxyHost.port || 80,
+        host: targetProxy.hostname,
+        port: targetProxy.port || 80,
         method: "GET",
         path: url,
+        agent,
         headers: {
           Host: new URL(url).host,
         },
@@ -1052,15 +1246,31 @@ async function sendHttpViaProxy(url: string) {
   });
 }
 
-async function seedTrafficBatch(paths: string[], serverPort: number) {
-  const batchSize = 40;
-  for (let i = 0; i < paths.length; i += batchSize) {
-    const batch = paths.slice(i, i + batchSize);
+async function seedTrafficBatch(
+  paths: string[],
+  serverPort: number,
+  targetProxyUrl = proxyUrl,
+  batchSize = 40,
+) {
+  let nextIndex = 0;
+  const agent = new HttpAgent({ keepAlive: true, maxSockets: batchSize });
+  const worker = async () => {
+    while (nextIndex < paths.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      await sendHttpViaProxy(
+        `http://127.0.0.1:${serverPort}${paths[currentIndex]}`,
+        targetProxyUrl,
+        agent,
+      );
+    }
+  };
+  try {
     await Promise.all(
-      batch.map((path) =>
-        sendHttpViaProxy(`http://127.0.0.1:${serverPort}${path}`),
-      ),
+      Array.from({ length: Math.min(batchSize, paths.length) }, () => worker()),
     );
+  } finally {
+    agent.destroy();
   }
 }
 
@@ -1135,7 +1345,7 @@ test("刷新时首屏仍能保留最新窗口中的筛选结果", async ({ page,
   }
 });
 
-test("后台历史回填会自动补齐首屏之外的旧记录", async ({ page, request }) => {
+test("有界筛选扫描仍会命中首屏之外的旧记录", async ({ page, request }) => {
   await clearTraffic(request);
   const server = await startMockServer();
   const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -1166,6 +1376,358 @@ test("后台历史回填会自动补齐首屏之外的旧记录", async ({ page,
       page.getByTestId("traffic-row").filter({ hasText: `${targetPrefix}-b` }).first(),
     ).toBeVisible({ timeout: 15000 });
   } finally {
+    await server.close();
+  }
+});
+
+test("Network 大历史使用 1000 条双向滑动窗口且服务端统计保持完整", async ({ page }) => {
+  const server = await startMockServer();
+  const backend = await startIsolatedBackend();
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const paths = Array.from(
+    { length: 2300 },
+    (_, index) => `/bounded-window-${token}-${index}`,
+  );
+
+  try {
+    await seedTrafficBatch(paths, server.port, backend.proxyUrl);
+    await expect
+      .poll(async () => (
+        await queryTraffic(backend.baseApi, { limit: "1" })
+      ).total)
+      .toBeGreaterThanOrEqual(paths.length);
+    const oldestPath = (
+      await queryTraffic(backend.baseApi, { direction: "forward", limit: "1" })
+    ).records[0]?.p;
+    const newestPath = (
+      await queryTraffic(backend.baseApi, { direction: "backward", limit: "1" })
+    ).records[0]?.p;
+    expect(oldestPath).toBeTruthy();
+    expect(newestPath).toBeTruthy();
+    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+
+    const table = page.getByTestId("traffic-table");
+    const scroll = page.getByTestId("traffic-table-scroll");
+    await expect(table).toBeVisible();
+    await expect(table).toHaveAttribute("data-loaded-count", "500");
+    await page.waitForTimeout(750);
+    await expect(table).toHaveAttribute("data-loaded-count", "500");
+
+    const statistics = await getTrafficStatistics(backend.baseApi);
+    expect(statistics.total_requests).toBeGreaterThanOrEqual(paths.length);
+    const localCount = statistics.client_ips["127.0.0.1"];
+    expect(localCount).toBeGreaterThanOrEqual(paths.length);
+    await expect(
+      page.locator('[data-testid="filter-item-client_ip"][data-filter-value="127.0.0.1"]'),
+    ).toContainText(localCount.toLocaleString());
+    const domainCount = statistics.domains["127.0.0.1"];
+    expect(domainCount).toBeGreaterThanOrEqual(paths.length);
+    await expect(
+      page.locator('[data-testid="filter-item-domain"][data-filter-value="127.0.0.1"]'),
+    ).toContainText(domainCount.toLocaleString());
+
+    for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+      await scroll.evaluate((element) => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await scroll.hover();
+      await page.mouse.wheel(0, -600);
+      await expect(table).toHaveAttribute(
+        "data-loaded-count",
+        "1000",
+      );
+    }
+
+    await scroll.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: oldestPath! }).first(),
+    ).toBeVisible();
+
+    for (let pageIndex = 0; pageIndex < 3; pageIndex += 1) {
+      await scroll.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await scroll.hover();
+      await page.mouse.wheel(0, 600);
+      await expect(table).toHaveAttribute("data-loaded-count", "1000");
+    }
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: newestPath! }).first(),
+    ).toBeVisible();
+    await expect(table).toHaveAttribute("data-loaded-count", "1000");
+
+    await page
+      .locator('[data-testid="app-sidebar-nav-item"][data-nav-label="Settings"]')
+      .click();
+    await expect(page).toHaveURL(/\/settings/);
+    await page
+      .locator('[data-testid="app-sidebar-nav-item"][data-nav-label="Network"]')
+      .click();
+    await expect(page).toHaveURL(/\/traffic/);
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await expect
+      .poll(async () =>
+        Number(
+          (await page
+            .getByTestId("traffic-table")
+            .getAttribute("data-loaded-count")) ?? "0",
+        ),
+      )
+      .toBeLessThanOrEqual(1000);
+  } finally {
+    await backend.close();
+    await server.close();
+  }
+});
+
+test("Traffic 统计通过 WebSocket 按变化推送且突发流量每秒最多一帧", async ({ page }) => {
+  const server = await startMockServer();
+  const backend = await startIsolatedBackend();
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const paths = Array.from(
+    { length: 50 },
+    (_, index) => `/statistics-push-${token}-${index}`,
+  );
+
+  try {
+    await installTrafficStatisticsRecorder(page);
+    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await expect
+      .poll(async () => (await readTrafficStatisticsFrames(page)).length)
+      .toBeGreaterThanOrEqual(1);
+
+    const initialFrames = await readTrafficStatisticsFrames(page);
+    await page.waitForTimeout(1_100);
+    expect(await readTrafficStatisticsFrames(page)).toHaveLength(initialFrames.length);
+
+    await seedTrafficBatch(paths, server.port, backend.proxyUrl, paths.length);
+    await expect
+      .poll(async () => (await getTrafficStatistics(backend.baseApi)).total_requests)
+      .toBeGreaterThanOrEqual(paths.length);
+    await expect
+      .poll(async () => {
+        const frames = await readTrafficStatisticsFrames(page);
+        return frames.at(-1)?.totalRequests ?? 0;
+      })
+      .toBeGreaterThanOrEqual(paths.length);
+
+    const burstFrames = await readTrafficStatisticsFrames(page);
+    expect(burstFrames).toHaveLength(initialFrames.length + 1);
+    expect(
+      burstFrames.at(-1)!.receivedAt - initialFrames.at(-1)!.receivedAt,
+    ).toBeGreaterThanOrEqual(900);
+
+    const statistics = await getTrafficStatistics(backend.baseApi);
+    await expect(
+      page.locator('[data-testid="filter-item-client_ip"][data-filter-value="127.0.0.1"]'),
+    ).toContainText(statistics.client_ips["127.0.0.1"].toLocaleString());
+
+    await page.waitForTimeout(1_100);
+    expect(await readTrafficStatisticsFrames(page)).toHaveLength(burstFrames.length);
+  } finally {
+    await backend.close();
+    await server.close();
+  }
+});
+
+test("服务端 3000 条真实流量压力下按配置滚动淘汰", async () => {
+  test.setTimeout(600_000);
+  const server = await startMockServer();
+  const backend = await startIsolatedBackend();
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const paths = Array.from(
+    { length: 3_000 },
+    (_, index) => `/rolling-storage-stress-${token}-${index}`,
+  );
+
+  try {
+    await updateTrafficMaxRecords(backend.baseApi, 1_000);
+    const startedAt = Date.now();
+    await seedTrafficBatch(paths, server.port, backend.proxyUrl);
+    await expect
+      .poll(async () => {
+        const snapshot = await queryTraffic(backend.baseApi, {
+          limit: "1",
+          direction: "forward",
+        });
+        return (
+          snapshot.server_sequence >= paths.length + 1 &&
+          snapshot.total <= 1_150
+        );
+      }, { timeout: 30_000 })
+      .toBe(true);
+
+    const snapshot = await queryTraffic(backend.baseApi, {
+      limit: "1",
+      direction: "forward",
+    });
+    expect(snapshot.total).toBeGreaterThanOrEqual(800);
+    expect(snapshot.total).toBeLessThanOrEqual(1_150);
+    expect(snapshot.records[0]?.seq).toBeGreaterThan(1);
+    expect(Date.now() - startedAt).toBeLessThan(480_000);
+  } finally {
+    await backend.close();
+    await server.close();
+  }
+});
+
+test("服务端滚动淘汰后休眠恢复洪峰仍保持有界且可交互", async ({ page }) => {
+  test.setTimeout(300_000);
+  const server = await startMockServer();
+  const backend = await startIsolatedBackend();
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const initialPaths = Array.from(
+    { length: 600 },
+    (_, index) => `/rolling-initial-${token}-${index}`,
+  );
+  const burstPaths = Array.from(
+    { length: 600 },
+    (_, index) => `/rolling-burst-${token}-${index}`,
+  );
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  try {
+    await updateTrafficMaxRecords(backend.baseApi, 1_000);
+    await seedTrafficBatch(initialPaths, server.port, backend.proxyUrl);
+    await installTrafficBurstRecorder(page);
+
+    const initialPush = page.waitForEvent("websocket", (socket) =>
+      socket.url().includes("/api/push"),
+    );
+    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await initialPush;
+    const table = page.getByTestId("traffic-table");
+    await expect(table).toBeVisible();
+    await expect(table).toHaveAttribute("data-loaded-count", "500");
+
+    await setDocumentVisibility(page, "hidden");
+    await page.waitForTimeout(500);
+    await seedTrafficBatch(burstPaths, server.port, backend.proxyUrl);
+
+    await expect
+      .poll(async () => {
+        const snapshot = await queryTraffic(backend.baseApi, { limit: "1" });
+        return (
+          snapshot.server_sequence >= initialPaths.length + burstPaths.length + 1 &&
+          snapshot.total <= 1_150
+        );
+      }, { timeout: 30_000 })
+      .toBe(true);
+    const serverSnapshot = await queryTraffic(backend.baseApi, { limit: "1" });
+    expect(serverSnapshot.total).toBeGreaterThanOrEqual(800);
+    expect(serverSnapshot.total).toBeLessThanOrEqual(1_150);
+    const newestBurstPath = serverSnapshot.records[0]?.p;
+    expect(newestBurstPath).toMatch(new RegExp(`^/rolling-burst-${token}-`));
+
+    await page.evaluate(() => {
+      const state = {
+        last: performance.now(),
+        maxGap: 0,
+        ticks: 0,
+        timer: 0,
+      };
+      state.timer = window.setInterval(() => {
+        const now = performance.now();
+        state.maxGap = Math.max(state.maxGap, now - state.last);
+        state.last = now;
+        state.ticks += 1;
+      }, 16);
+      Object.defineProperty(window, "__trafficEventLoopProbe", {
+        configurable: true,
+        value: state,
+      });
+    });
+
+    const resumedPush = page.waitForEvent("websocket", (socket) =>
+      socket.url().includes("/api/push"),
+    );
+    await setDocumentVisibility(page, "visible");
+    await resumedPush;
+
+    await expect
+      .poll(async () =>
+        Number((await table.getAttribute("data-loaded-count")) ?? "0"),
+      { timeout: 30_000 })
+      .toBe(serverSnapshot.total);
+    const scroll = page.getByTestId("traffic-table-scroll");
+    await scroll.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: newestBurstPath! }).first(),
+    ).toBeVisible();
+
+    await scroll.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: initialPaths[200] }).first(),
+    ).toHaveCount(0);
+
+    await expect
+      .poll(async () => (await readTrafficBurstStats(page)).deltaCount)
+      .toBeGreaterThanOrEqual(2);
+    const burstStats = await readTrafficBurstStats(page);
+    expect(burstStats.maxBatch).toBeLessThanOrEqual(500);
+    expect(burstStats.totalInserts).toBeLessThanOrEqual(2_500);
+    expect(burstStats.latestOldestSequence).toBeGreaterThan(1);
+    expect(burstStats.latestServerTotal).toBe(serverSnapshot.total);
+
+    await page.waitForTimeout(500);
+    const browserMetrics = await page.evaluate(() => {
+      const probe = (
+        window as typeof window & {
+          __trafficEventLoopProbe: {
+            maxGap: number;
+            ticks: number;
+            timer: number;
+          };
+        }
+      ).__trafficEventLoopProbe;
+      window.clearInterval(probe.timer);
+      const memory = (
+        performance as Performance & {
+          memory?: { usedJSHeapSize?: number };
+        }
+      ).memory;
+      return {
+        maxEventLoopGapMs: probe.maxGap,
+        eventLoopTicks: probe.ticks,
+        usedJsHeapBytes: memory?.usedJSHeapSize ?? 0,
+      };
+    });
+    expect(browserMetrics.eventLoopTicks).toBeGreaterThan(5);
+    expect(browserMetrics.maxEventLoopGapMs).toBeLessThan(1_500);
+    if (browserMetrics.usedJsHeapBytes > 0) {
+      expect(browserMetrics.usedJsHeapBytes).toBeLessThan(512 * 1024 * 1024);
+    }
+
+    const settingsStartedAt = Date.now();
+    await page
+      .locator('[data-testid="app-sidebar-nav-item"][data-nav-label="Settings"]')
+      .click();
+    await expect(page).toHaveURL(/\/settings/);
+    expect(Date.now() - settingsStartedAt).toBeLessThan(3_000);
+
+    const networkStartedAt = Date.now();
+    await page
+      .locator('[data-testid="app-sidebar-nav-item"][data-nav-label="Network"]')
+      .click();
+    await expect(page).toHaveURL(/\/traffic/);
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    expect(Date.now() - networkStartedAt).toBeLessThan(3_000);
+    expect(pageErrors).toEqual([]);
+  } finally {
+    await backend.close();
     await server.close();
   }
 });

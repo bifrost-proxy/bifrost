@@ -8,6 +8,7 @@ import type {
   ReplayGroup,
   ReplayRequestSummary,
   WhitelistStatus,
+  TrafficStatistics,
 } from '../types';
 import type { ScriptInfo } from '../api/scripts';
 import type { ValueItem } from '../api/values';
@@ -30,6 +31,8 @@ export interface TrafficUpdatesData {
   updated_records: TrafficSummary[];
   has_more: boolean;
   server_total: number;
+  server_sequence?: number;
+  oldest_sequence?: number | null;
 }
 
 export interface TrafficUpdatesDataCompact {
@@ -60,6 +63,7 @@ export interface OverviewData {
 
 export interface MetricsData {
   metrics: MetricsSnapshot;
+  recorded_traffic: number;
 }
 
 export interface HistoryData {
@@ -180,6 +184,7 @@ export type PushMessageType =
   | 'traffic_updates'
   | 'traffic_delta'
   | 'traffic_deleted'
+  | 'traffic_statistics'
   | 'overview_update'
   | 'metrics_update'
   | 'history_update'
@@ -204,6 +209,7 @@ export interface PushMessage {
   | TrafficUpdatesData
   | TrafficDeltaData
   | TrafficDeletedData
+  | TrafficStatistics
   | OverviewData
   | MetricsData
   | HistoryData
@@ -240,9 +246,9 @@ export interface ClientSubscription {
   metrics_interval_ms?: number;
 }
 
-export const METRICS_INTERVAL_MIN_MS = 200;
+export const METRICS_INTERVAL_MIN_MS = 1000;
 export const METRICS_INTERVAL_MAX_MS = 5000;
-export const METRICS_INTERVAL_DEFAULT_MS = 2000;
+export const METRICS_INTERVAL_DEFAULT_MS = 1000;
 export const METRICS_INTERVAL_FAST_MS = 250;
 
 type MessageHandler<T> = (data: T) => void;
@@ -291,6 +297,7 @@ class PushService {
   private trafficHandlers: Set<MessageHandler<TrafficUpdatesData>> = new Set();
   private trafficDeltaHandlers: Set<MessageHandler<TrafficDeltaData>> = new Set();
   private trafficDeletedHandlers: Set<MessageHandler<TrafficDeletedData>> = new Set();
+  private trafficStatisticsHandlers: Set<MessageHandler<TrafficStatistics>> = new Set();
   private overviewHandlers: Set<MessageHandler<OverviewData>> = new Set();
   private metricsHandlers: Set<MessageHandler<MetricsData>> = new Set();
   private historyHandlers: Set<MessageHandler<HistoryData>> = new Set();
@@ -492,6 +499,11 @@ class PushService {
         this.trafficDeletedHandlers.forEach((handler) => handler(data));
         break;
       }
+      case 'traffic_statistics': {
+        const data = message.data as TrafficStatistics;
+        this.trafficStatisticsHandlers.forEach((handler) => handler(data));
+        break;
+      }
       case 'overview_update': {
         const data = message.data as OverviewData;
         this.overviewHandlers.forEach((handler) => handler(data));
@@ -619,6 +631,7 @@ class PushService {
     const hasHandlers =
       this.trafficHandlers.size > 0 ||
       this.trafficDeltaHandlers.size > 0 ||
+      this.trafficStatisticsHandlers.size > 0 ||
       this.overviewHandlers.size > 0 ||
       this.metricsHandlers.size > 0 ||
       this.historyHandlers.size > 0 ||
@@ -680,6 +693,11 @@ class PushService {
   onTrafficDeleted(handler: MessageHandler<TrafficDeletedData>): () => void {
     this.trafficDeletedHandlers.add(handler);
     return () => this.trafficDeletedHandlers.delete(handler);
+  }
+
+  onTrafficStatistics(handler: MessageHandler<TrafficStatistics>): () => void {
+    this.trafficStatisticsHandlers.add(handler);
+    return () => this.trafficStatisticsHandlers.delete(handler);
   }
 
   onOverviewUpdate(handler: MessageHandler<OverviewData>): () => void {

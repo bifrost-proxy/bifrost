@@ -158,6 +158,29 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 pub fn get_insert_sql() -> &'static str {
     r#"
+    INSERT INTO traffic_records (
+        sequence, id, timestamp, host, method, status, protocol,
+        url, path, content_type, request_content_type,
+        request_size, response_size, upload_bytes, download_bytes, duration_ms,
+        listener_port, client_ip, client_app, client_pid, client_path, account_name,
+        flags, frame_count, last_frame_id,
+        socket_is_open, socket_send_count, socket_receive_count,
+        socket_send_bytes, socket_receive_bytes, socket_frame_count,
+        rule_count, rule_protocols, devtools_client_req_id
+    ) VALUES (
+        ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+        ?8, ?9, ?10, ?11,
+        ?12, ?13, ?14, ?15, ?16,
+        ?17, ?18, ?19, ?20, ?21, ?22,
+        ?23, ?24, ?25,
+        ?26, ?27, ?28, ?29, ?30, ?31,
+        ?32, ?33, ?34
+    )
+    "#
+}
+
+pub fn get_replace_sql() -> &'static str {
+    r#"
     INSERT OR REPLACE INTO traffic_records (
         sequence, id, timestamp, host, method, status, protocol,
         url, path, content_type, request_content_type,

@@ -1776,17 +1776,16 @@ async fn execute_replay_websocket(
         &resolved_rules,
         original_upstream_headers.clone(),
     );
-    {
-        let original_headers_for_record = original_upstream_headers.clone();
-        let final_headers_for_record = upstream_headers.clone();
-        state.update_traffic_by_id(&traffic_id, move |record| {
-            record.original_response_headers = Some(original_headers_for_record.clone());
-            if final_headers_for_record != original_headers_for_record {
-                record.response_headers = Some(final_headers_for_record.clone());
-            } else {
-                record.response_headers = None;
-            }
-        });
+    if !persist_replay_websocket_response_headers(
+        &state,
+        &traffic_id,
+        original_upstream_headers.clone(),
+        upstream_headers.clone(),
+    ) {
+        warn!(
+            traffic_id = %traffic_id,
+            "Failed to persist Replay WebSocket handshake response headers"
+        );
     }
 
     let replay_id_for_task = replay_id.clone();
@@ -2732,6 +2731,33 @@ fn record_traffic_for_stream(
     traffic_id
 }
 
+fn persist_replay_websocket_response_headers(
+    state: &SharedAdminState,
+    traffic_id: &str,
+    original_headers: Vec<(String, String)>,
+    final_headers: Vec<(String, String)>,
+) -> bool {
+    if let Some(ref traffic_db) = state.traffic_db_store {
+        return traffic_db.update_by_id(traffic_id, |record| {
+            apply_replay_websocket_response_headers(record, &original_headers, &final_headers);
+        });
+    }
+
+    state.update_traffic_by_id(traffic_id, move |record| {
+        apply_replay_websocket_response_headers(record, &original_headers, &final_headers);
+    });
+    true
+}
+
+fn apply_replay_websocket_response_headers(
+    record: &mut TrafficRecord,
+    original_headers: &[(String, String)],
+    final_headers: &[(String, String)],
+) {
+    record.original_response_headers = Some(original_headers.to_vec());
+    record.response_headers = (final_headers != original_headers).then(|| final_headers.to_vec());
+}
+
 fn record_sse_event(
     state: &SharedAdminState,
     replay_id: &str,
@@ -3185,6 +3211,55 @@ mod coverage_boost {
 
         let stats = state.traffic_db_store.as_ref().unwrap().stats();
         assert!(stats.record_count >= 1);
+    }
+
+    #[test]
+    fn replay_websocket_response_headers_are_persisted_before_upgrade_returns() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let applied = AppliedRequest {
+            url: "ws://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![("X-Replay-WS-Request".to_string(), "injected".to_string())],
+            body: None,
+        };
+        let traffic_id = record_traffic_for_stream(&state, "replay-headers", &applied, &[], false);
+        let original = vec![("X-Upstream".to_string(), "seen".to_string())];
+        let final_headers = vec![
+            ("X-Upstream".to_string(), "seen".to_string()),
+            ("X-Replay-WS-Response".to_string(), "injected".to_string()),
+        ];
+
+        assert!(persist_replay_websocket_response_headers(
+            &state,
+            &traffic_id,
+            original.clone(),
+            final_headers.clone(),
+        ));
+
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .unwrap()
+            .get_by_id(&traffic_id)
+            .expect("Replay WebSocket record should exist");
+        assert_eq!(record.original_response_headers, Some(original));
+        assert_eq!(record.response_headers, Some(final_headers));
+    }
+
+    #[test]
+    fn replay_websocket_unchanged_response_headers_are_not_duplicated() {
+        let mut record = TrafficRecord::new(
+            "replay-headers-unchanged".to_string(),
+            "GET".to_string(),
+            "ws://example.test/ws".to_string(),
+        );
+        let headers = vec![("X-Upstream".to_string(), "seen".to_string())];
+
+        apply_replay_websocket_response_headers(&mut record, &headers, &headers);
+
+        assert_eq!(record.original_response_headers, Some(headers));
+        assert!(record.response_headers.is_none());
     }
 
     #[tokio::test]

@@ -276,9 +276,72 @@
 
 ---
 
+### TC-AME-16：实时指标包含服务端派生字段
+
+**操作步骤**：
+1. 在隔离端口启动当前源码构建并生成至少一条本地代理流量。
+2. 执行：
+   ```bash
+   curl -s http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/metrics | jq -e '
+     .total_traffic_bytes == (.bytes_sent + .bytes_received) and
+     (.memory_usage_percent | type == "number")
+   '
+   ```
+
+**预期结果**：
+- `total_traffic_bytes` 由服务端给出并等于累计上下行之和。
+- `memory_usage_percent` 由服务端给出；前端不需要相除计算。
+
+---
+
+### TC-AME-17：Applications / Hosts 返回服务端汇总且兼容旧响应
+
+**操作步骤**：
+1. 通过隔离代理生成访问本地 HTTP mock 的流量。
+2. 分别请求 `/api/metrics/apps`、`/api/metrics/hosts`，确认旧接口仍是数组。
+3. 分别追加 `?include_summary=true`，执行：
+   ```bash
+   jq -e '
+     (.items | type == "array") and
+     (.summary.total == (.items | length)) and
+     (.summary.requests == ([.items[].requests] | add)) and
+     (.summary.total_traffic_bytes == (.summary.bytes_sent + .summary.bytes_received))
+   '
+   ```
+
+**预期结果**：
+- 旧数组响应保持兼容。
+- 新响应中的应用/主机数、请求数和总流量由服务端汇总，页面无需 `length` 或 `reduce`。
+- 运行期读取内存增量桶，不执行全表 `GROUP BY`。
+
+---
+
+### TC-AME-18：Metrics WebSocket 最快每秒推送并携带落库记录数
+
+**操作步骤**：
+1. 使用 `metrics_interval_ms=500` 订阅隔离实例的 `/api/push`，持续记录 3.2 秒。
+2. 检查每条 `metrics_update.data`。
+
+**预期结果**：
+- 初始快照之外，单客户端最快每秒一帧；3.2 秒窗口总帧数为 1–4。
+- 每帧包含数字类型 `recorded_traffic`，其语义是当前落库保留记录数。
+- 每帧 `metrics.total_traffic_bytes == bytes_sent + bytes_received`，并包含数字类型 `memory_usage_percent`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
 ```bash
 rm -rf .bifrost-test
 ```
+
+## 执行记录
+
+2026-08-06 服务端 Metrics 派生字段、内存汇总与 WebSocket 推送执行记录：
+
+- 已执行用例：`TC-AME-16`、`TC-AME-17`、`TC-AME-18`。
+- 隔离边界：真实进程分别使用代理/管理端口 `18991`、`19924`，本地 mock 端口 `33001`、`33202`，临时 `BIFROST_DATA_DIR` 与 `--no-system-proxy`；未连接、停止或修改正式 `9900` 实例，脚本结束后已停止进程并清理临时目录。
+- Applications / Hosts：`PROXY_PORT=18991 ADMIN_PORT=18991 ECHO_HTTP_PORT=33001 bash e2e-tests/tests/test_metrics_hosts_apps_admin_api.sh` 通过；旧接口保持数组，`include_summary=true` 的 `total`、`requests`、`bytes_sent`、`bytes_received`、`total_traffic_bytes` 与 items 一致。
+- WebSocket：最终复测 `ADMIN_PORT=19926 PROXY_PORT=19926 MOCK_HTTP_PORT=33204 bash e2e-tests/tests/test_traffic_push_e2e.sh` 通过 `4/4`。本机无 `websocat` 时自动使用 Node 22 原生 WebSocket 探针；3.2 秒收到 2 帧，且任意相邻 Metrics 快照的服务端时间戳间隔均不小于 900ms，符合“初始帧 + 最快每秒一帧”边界；每帧均包含 `recorded_traffic`、`memory_usage_percent`，且 `total_traffic_bytes` 等于累计上下行之和。
+- 结论：三个新增用例全部通过；Metrics API/Push 的派生与汇总字段均由服务端提供，Applications / Hosts 常态读取内存增量桶，前端无需统计计算。
