@@ -347,6 +347,44 @@ fn validate_target_record_ids(request: &SearchRequest) -> Option<Response<BoxBod
 mod tests {
     use super::*;
 
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio::net::TcpListener;
+
+    use crate::state::AdminState;
+
+    async fn spawn_search_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind search test listener");
+        let addr = listener.local_addr().expect("search listener addr");
+        let state = std::sync::Arc::new(AdminState::new(0));
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            let response = handle_search(req, state, &path).await;
+                            Ok::<_, hyper::Error>(response)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        (format!("http://{addr}"), handle)
+    }
+
     #[test]
     fn target_record_ids_are_bounded_and_validated() {
         let too_many = SearchRequest {
@@ -398,5 +436,34 @@ mod tests {
         let converted = command_search_args_from_request(&request);
         assert_eq!(converted.filters.account_names, vec!["alice"]);
         assert_eq!(converted.record_ids, vec!["id-a"]);
+    }
+
+    #[tokio::test]
+    async fn regular_and_stream_search_reject_oversized_target_record_ids() {
+        let (base, handle) = spawn_search_server().await;
+        let request = serde_json::json!({
+            "keyword": "marker",
+            "record_ids": (0..=MAX_TARGET_RECORD_IDS)
+                .map(|index| format!("id-{index}"))
+                .collect::<Vec<_>>(),
+        });
+        let client = reqwest::Client::new();
+
+        for path in ["/api/search", "/api/search/stream"] {
+            let response = client
+                .post(format!("{base}{path}"))
+                .json(&request)
+                .send()
+                .await
+                .expect("send oversized targeted search");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(response
+                .text()
+                .await
+                .expect("read validation response")
+                .contains("record_ids cannot contain more than"));
+        }
+
+        handle.abort();
     }
 }
