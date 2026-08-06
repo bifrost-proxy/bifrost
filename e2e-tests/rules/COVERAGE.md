@@ -148,7 +148,7 @@
 - `web/tests/ui/admin-rules-values.spec.ts`：中断 Rules 编辑器首次 syntax 请求，随后模拟继续输入，断言请求重试、建议框自动出现、`Ctrl+Space` 仍可触发，并可选中 `reqHeaders://`。
 - `tests/test_tls_intercept_e2e.sh`：配置 Domain Passthrough 与 curl App Force Intercept 的冲突场景，验证 `Rules > Domain > App` 中的域名优先级；HTTPS HTML 保持原始响应、不含 `__bifrost_badge__`，流量仅有 CONNECT 外层记录而没有解包后的内层请求。
 - `tests/test_upstream_connection_stability.sh`：通过本地短连接 upstream 验证跨 pool partition 全局背压、CONNECT 突发请求语义、普通 ConnectionRefused 不触发资源恢复退避，以及 cooldown 后不出现 `EADDRNOTAVAIL` / `ENOBUFS` / FD 耗尽错误。
-- `tests/test_desktop_service_ownership_lifecycle.sh`：在 macOS 临时 data-dir 和动态端口中暂停 Desktop-owned Service 模拟短时高负载卡顿，断言健康探针降级但 PID 不变；随后真实终止子进程，断言 watchdog 在下一轮存活检查中拉起新 PID，同时保留 Desktop/CLI ownership 边界。
+- `tests/test_desktop_service_ownership_lifecycle.sh`：在 macOS 临时 data-dir 和动态端口中暂停 Desktop-owned Service，并保持暂停直到 watchdog 完成旧 15 秒恢复门槛与最终确认、写出 preserve 决策（最多等待 30 秒），断言 readiness 持续降级但 PID 不变；随后真实终止子进程，断言 watchdog 仅在明确 child exit 后通过 restart-preserving marker cleanup 拉起新 PID，同时保留 Desktop/CLI ownership 边界。
 - `tests/test_desktop_traffic_detail_window_contract.sh`：验证 Traffic 独立详情在桌面端通过异步 Tauri command 创建固定标签原生窗口，详情参数安全编码、窗口 capability、`Command+W`/系统关闭的 `Destroyed` 事件只通知 `main` WebView（不误投 `host` 壳）以及浏览器 popup 兼容分支均有自动化回归。
 - `tests/test_system_proxy_reconcile_stability.sh`：在 macOS 快照并恢复逐服务代理状态，验证已收敛代理跨两个高频周期只执行一次 full reconcile，且 ownership 与退出恢复不变。
 - `tests/test_websocket_rejection_logging.sh`：本地 upstream 连续 6 次拒绝 WebSocket 握手，验证客户端仍收到 502、同 host/status 只记录一条结构化 warning，并保留正常 WebSocket 回归。

@@ -235,7 +235,8 @@
 
 - 测试仅使用临时 data-dir、动态端口、`BIFROST_DESKTOP_NO_SYSTEM_PROXY=1` 和
   `BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1`，不读取或修改正式 `9900` Service、系统代理或证书。
-- 对 Desktop-owned Service 发送 `SIGSTOP` 并保持 12 秒后再 `SIGCONT`，健康日志记录
+- 对 Desktop-owned Service 发送 `SIGSTOP` 并保持暂停，直到 watchdog 在最多 30 秒内完成
+  15 秒宽限和最终确认、记录 `preserving live managed child` 后再 `SIGCONT`；健康日志记录
   `desktop backend health degraded` 和 `desktop backend health recovered without restart`，
   `runtime.json` 中 PID 始终不变。
 - 随后使用 `SIGKILL` 真实终止该子进程；Desktop watchdog 在下一轮 2 秒存活检查中记录
@@ -291,6 +292,37 @@
 - 测试仅使用临时 data-dir 和动态端口；如果检测到正式 Desktop 进程则安全跳过真实
   单实例 E2E，禁止向正式 App 投递退出请求。
 
+### TC-DCDR-11（事故回归）：readiness 异常不得 stop，确认退出才执行保留代理的有界恢复
+
+操作步骤：
+
+1. 执行 watchdog、runtime marker 和 stop helper focused 单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog_ -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml exited_managed_runtime_ -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_backend_restart_stop_preserves_system_proxy_handoff -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml synchronous_stop_timeout_covers_cli_termination_budget -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli commands::stop::tests --lib -- --nocapture
+   ```
+2. 在无正式 `bifrost-desktop` 进程的 macOS WindowServer 会话执行真实生命周期脚本：
+   ```bash
+   SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh
+   ```
+3. 确认脚本输出 PASS；确认执行前后的正式 `9900` PID 和系统代理状态未变化。
+
+预期结果：
+
+- readiness 持续异常只记录 degraded/preserve，不运行 `bifrost stop`、不终止受管 Core，恢复后
+  记录 `recovered without restart` 且 runtime PID 不变。
+- 只有 `Child::try_wait` 返回确定退出状态时才进入 recovery；runtime marker 必须与退出 PID
+  精确一致，损坏或不一致时 fail-closed，不能清理或覆盖未知实例。
+- 确认退出后的内部 stop 同时携带 Desktop 授权与 restart-preserving 标记，先写 restart
+  shutdown handoff，再清理已退出 PID 的 marker；不会在替换 Core 前恢复系统代理。
+- stop helper 等待预算不短于 CLI 的 30 秒进程终止预算；同一 5 分钟窗口最多自动恢复 3 次，
+  超限后打开 circuit，避免 stop/start 风暴。
+- E2E 仅使用临时 data-dir、动态端口并设置 `BIFROST_DESKTOP_NO_SYSTEM_PROXY=1`；不停止、
+  重启或修改正式 `9900` Service 与真实系统代理。
+
 ## 清理步骤
 
 ```bash
@@ -318,3 +350,4 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-29 | TC-DCDR-10 回归（本地完整复跑） | 正式 Desktop 退出后确认系统中无 `bifrost-desktop` 进程，执行 `bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`；脚本重新构建当前 WebUI、CLI sidecar 和 Desktop，并检查 `desktop-bootstrap.log` 中 owned stop helper 完成早于 Desktop 最终退出。 | 通过：真实 Desktop-owned App/Core/Tray 按组退出且未被 watchdog 恢复，普通 CLI stop/restart 继续拒绝 App-owned Service；CLI-owned daemon 在 Desktop 退出后 PID 与健康端点保持可用。脚本退出码 0，全部使用临时 data-dir、动态端口并禁用系统代理，未触碰正式 9900 Service。 |
 | 2026-07-29 | TC-DCDR-10 原生 App Quit 回归 | 用户在已安装 App 点击原生 Quit 后真实复现 Desktop 消失但 Core/Tray 残留；统一日志证明 `PredefinedMenuItem::quit` 直接进入 AppKit `terminate:`，且没有 `desktop shutdown requested`。改为自定义 `app-quit` 后，立即执行 Tray owner tests、macOS menu action tests、Desktop Quit helper/授权 tests 和 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`；随后重建 release bundle 并安装到 `/Applications/Bifrost.app`，确认 build bundle、release binary 与安装 App 主程序哈希相同且均包含 `app-quit`。 | 通过：Tray `3/3`、macOS menu mapping `2/2`、Desktop Quit helper/授权 `3/3`；E2E 静态门禁拒绝原生 predefined Quit，并以真实临时 Desktop/Core 进程验证 stop helper 完成早于 Desktop 最终退出、CLI/App owner 隔离不变。用户从新 release App 复测菜单退出/`Cmd+Q` 后确认体验无问题；本轮未由 Agent 主动停止正式 9900 Service。 |
 | 2026-07-29 | TC-DCDR-10 bounded-modules 回归 | CI run `30444924113` 的 `test_upgrade_restart_e2e.sh` 发现 `desktop/src-tauri/src/main.rs` 为 1503 行，超过 1500 行静态门禁；将 macOS 菜单动作纯映射拆入 `macos_menu.rs` 后，立即执行 `SKIP_BUILD=true bash e2e-tests/tests/test_upgrade_restart_e2e.sh` 与 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。 | 通过：upgrade restart `21/21`（含 bounded modules）通过；真实临时 Desktop/Core ownership lifecycle 再次通过，菜单 Quit 路由和 CLI/App owner 隔离不变。 |
+| 2026-08-06 | TC-DCDR-11 事故回归 | 更新用例后立即执行 watchdog `7/7`、退出 marker `2/2`、restart-preserving stop `1/1`、stop timeout `1/1`、CLI stop `5/5` focused tests，并执行 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。E2E 首轮发现固定 22 秒等待与最终确认边界竞态，改为保持 `SIGSTOP` 并最多等待 30 秒的明确 preserve 日志；次轮发现 preserve 后过早清空 degraded 状态会漏记恢复，保留状态至下一次健康探测后再次完整复跑。 | 通过：持续 readiness 异常记录 degraded/preserve，受管 Core 原 PID 不变且恢复后记录 `recovered without restart`；真实 `SIGKILL` 后才记录确定 child exit，以精确 PID marker 和 restart-preserving stop 拉起新 PID；CLI/Desktop ownership 全链路通过。测试仅使用临时 data-dir、动态端口并禁用系统代理；执行后正式 Service 仍为 PID `60213`、端口 `9900`、system proxy enabled。 |
