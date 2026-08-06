@@ -166,7 +166,7 @@ TS-VAD 可以直接消费已确认模板；在没有真实 DER/FAR/RTF 证据前
 - E2E：隔离服务生成真实 WAV 与 timeline，完整调用 assisted API，并验证临时文件清理。
 - Playwright：任务/文件选择、试听跳转、标签状态、完成门禁、Profile 详情和样本删除。
 - human_tests：真实录音、亮暗主题、追加既有 Profile、误选撤销、删除和旧实时录入回归。
-- proxy coverage shell manifest 新增本功能 API E2E 后保持 14 项契约一致；数量漂移时输出
+- proxy coverage shell manifest 保持与当前 15 项契约一致；数量漂移时输出
   expected/actual 诊断并失败，避免只留下前一条成功日志。
 - 本地先执行相关测试，再执行 `cargo test --workspace --all-features`；远端 CI 执行
   `bash scripts/ci/coverage-all.sh --json --gate` 和 changed-lines 95% 门禁。
