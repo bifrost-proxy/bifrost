@@ -270,25 +270,50 @@ test_runtime_lifecycle_cleanup() {
   local profile="$home/.zshrc"
   local port="${PROXY_PORT:-18891}"
   local log_file="$TEST_ROOT/lifecycle.log"
+  local instrumented_linux=false
   mkdir -p "$home" "$data_dir"
 
-  # The helper is started with the service, before a user may install the standalone block.
-  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" start \
-    --daemon --port "$port" --yes --skip-cert-check --unsafe-ssl \
-    --no-system-proxy --no-tray >"$log_file" 2>&1
-  wait_for_listener "$port" || fail "daemon did not become ready: $(tail -n 80 "$log_file")"
+  if [[ "$(uname -s)" == "Linux" && -n "${LLVM_PROFILE_FILE:-}" ]]; then
+    # LLVM's Linux coverage runtime is not fork-safe for the CLI's daemon path. The ordinary
+    # Linux shell job still exercises daemon -> restart -> stop with the release binary; keep
+    # the coverage job on the foreground path so it can collect valid profiles and verify the
+    # same normal-stop lifecycle contract.
+    instrumented_linux=true
+    HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" start \
+      --port "$port" --yes --skip-cert-check --unsafe-ssl \
+      --no-system-proxy --no-tray >"$log_file" 2>&1 &
+    PROXY_PID=$!
+    wait_for_listener "$port" \
+      || fail "instrumented foreground proxy did not become ready: $(tail -n 80 "$log_file")"
+  else
+    # The helper is started with the service, before a user may install the standalone block.
+    if ! HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" start \
+      --daemon --port "$port" --yes --skip-cert-check --unsafe-ssl \
+      --no-system-proxy --no-tray >"$log_file" 2>&1; then
+      fail "daemon start failed: $(tail -n 80 "$log_file")"
+    fi
+    wait_for_listener "$port" || fail "daemon did not become ready: $(tail -n 80 "$log_file")"
+  fi
 
   HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" cli-proxy enable \
     --shell zsh --port "$port"
   assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
 
-  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" restart \
-    >"$TEST_ROOT/restart.log" 2>&1
-  wait_for_listener "$port" || fail "daemon did not become ready after restart"
-  assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
+  if [[ "$instrumented_linux" == false ]]; then
+    HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" restart \
+      >"$TEST_ROOT/restart.log" 2>&1
+    wait_for_listener "$port" || fail "daemon did not become ready after restart"
+    assert_contains "$profile" "# >>> Bifrost CLI proxy environment start >>>"
+  else
+    echo "SKIP: daemon restart handoff is covered by the non-instrumented Linux shell job"
+  fi
 
   HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" stop \
     >"$TEST_ROOT/stop.log" 2>&1
+  if [[ -n "$PROXY_PID" ]]; then
+    wait "$PROXY_PID" 2>/dev/null || true
+    PROXY_PID=""
+  fi
   wait_for_marker_removal "$profile" || fail "normal stop did not remove managed CLI proxy block"
 
   HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" cli-proxy enable \
