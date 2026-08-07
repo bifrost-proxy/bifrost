@@ -19,10 +19,16 @@ Bifrost 早期覆盖率工具链分散：
 
 - 提供 `scripts/ci/coverage-all.sh`：一次性跑 unit + integration，`--with-e2e` 时合并 E2E instrumented profraw，输出 text / html / json / lcov。
 - 提供 `scripts/ci/coverage-crate.sh`：按 crate 度量，本地迭代补测时快速反馈。
+- 提供 `scripts/ci/coverage-changed.py`：自动识别当前工作区变更的生产 Rust crate，
+  复用独立插桩编译缓存，只运行相关 crate 测试，并按 CI 同源 changed-lines 95% 算法
+  在推送前给出快速反馈。
 - 提供 `scripts/ci/coverage-gate.py`：解析 `coverage.json`，按棘轮下限 + 工作区聚合下限校验，支持 `--gaps` 输出最需要补测的文件列表。
 - 提供 `scripts/ci/coverage-thresholds.toml`：per-crate 棘轮下限、工作区聚合下限、`default` 目标 90%、`enforce_ratchet_up` 与 `ratchet_slack` 配置。
-- Makefile 增加 `coverage`（= `coverage-gate`）、`coverage-unit`、`coverage-e2e`、`coverage-html`、`coverage-json`、`coverage-crate CRATE=<name>`、`coverage-gate` 六个入口。
-- AGENTS.md 增加 90% 门禁执行心法：任何改业务代码的任务必须通过 CI 覆盖率门禁；本地默认不跑全量 coverage，除非用户明确要求或专项排查覆盖率失败。
+- Makefile 增加 `coverage`（= `coverage-gate`）、`coverage-unit`、`coverage-e2e`、
+  `coverage-html`、`coverage-json`、`coverage-crate CRATE=<name>`、`coverage-gate`、
+  `coverage-changed` 八个入口。
+- AGENTS.md 增加 90% 门禁执行心法：任何改业务代码的任务必须通过 CI 覆盖率门禁；
+  本地默认不跑全量 coverage，但生产 Rust 改动必须先跑低成本 `make coverage-changed`。
 - `human_tests/coverage-mechanism.md` 覆盖机制本身的真实场景验证用例。
 - 覆盖报告必须区分 `unit + integration`、`E2E` 与 union，不能用未插桩
   不同 codegen profile 的二进制产生“看似合并、实际只有单测”的报告。
@@ -44,6 +50,8 @@ Bifrost 早期覆盖率工具链分散：
 - 故意让某个 crate 覆盖率跌破 min → gate 报错、exit 非 0、GitHub Actions 阻断合入。
 - `--with-e2e` 时 E2E profraw 与 unit profraw 合并成一份报告，text/html/json 里能看到 E2E 覆盖到的独占行。
 - `make coverage-crate CRATE=bifrost-command` 本地能只跑目标 crate 并输出 text 报告。
+- `make coverage-changed` 能覆盖已提交、暂存、未暂存与未跟踪生产 Rust 文件；
+  有覆盖的新行通过，无覆盖的新行在本地直接失败，未进入 LCOV 的文件不得以 0/0 假通过。
 
 ## 产品语义
 
@@ -83,7 +91,13 @@ profraw、使用的二进制不可执行、数据目录落在 `~/.bifrost` 下�
 写入 AGENTS.md：
 
 - 任何改业务代码的任务，最终必须通过 CI 中的 `coverage-all.sh --json --gate` 门禁，否则任务不能视为完成。
-- 默认情况下不要在本机运行 `make coverage` / `coverage-all.sh --gate`，因为全量覆盖率成本很高且 CI 已有明确阈值；只有用户明确要求、本地专项排查 coverage 失败、或需要提前确认某个高风险覆盖率缺口时才运行。
+- 默认情况下不要在本机运行全 workspace `make coverage` / `coverage-all.sh --gate`，
+  因为全量覆盖率成本很高且 CI 已有明确阈值。
+- 修改生产 Rust 时，推送前必须运行 `make coverage-changed`。这个快速入口不是全量
+  coverage：只插桩变更 crate，保留 `target/coverage-changed/cargo-target` 中的编译产物，
+  每次仅删除旧 `.profraw`，再对当前工作区执行 changed-lines 95% 检查。
+- `FAIL` 必须本地补测；`INCOMPLETE` 必须纳入 test-host package 或说明平台/E2E-only
+  原因，禁止把未测文件和 0/0 当通过。远端完整 union coverage 始终是最终权威门禁。
 - 某个 crate 因为客观原因（macOS API、桌面 API、依赖硬件、依赖网络）达不到 90%，必须在本文档的 **不适用清单** 里写明理由，并在 `coverage-thresholds.toml` 维护对应 crate 的 min 例外。
 - 本地专项排查时如 E2E 无法在当前环境跑通（无网络 / 无 Tauri / 无 macOS keychain），允许退化为 `make coverage-unit` 或单 crate coverage，但必须在交付报告里说明 E2E 跳过原因。
 
@@ -97,6 +111,7 @@ scripts/ci/
 ├── coverage-e2e.sh             既有：E2E instrumented
 ├── coverage-all.sh             新增：合并入口 + --with-e2e + --gate
 ├── coverage-crate.sh           新增：单 crate 度量
+├── coverage-changed.py         本地快速 changed-lines 预检 + 变更 crate 自动选择
 ├── coverage-gate.py            新增：棘轮 + 工作区聚合下限校验
 └── coverage-thresholds.toml    新增：per-crate 棘轮下限
 
@@ -107,6 +122,7 @@ Makefile
 ├── coverage-gate        = coverage-all.sh --json --gate --gaps
 ├── coverage-html        = coverage-all.sh --html --fail-under 0
 ├── coverage-json        = coverage-all.sh --json --fail-under 0
+├── coverage-changed     = coverage-changed.py（当前工作区、自动选变更 crate）
 └── coverage-crate CRATE = coverage-crate.sh <CRATE> --text --fail-under 90
 
 human_tests/
@@ -131,6 +147,26 @@ design/
       → 输出 union `coverage.json`
 8. (--gate) python3 scripts/ci/coverage-gate.py target/coverage/coverage.json
 ```
+
+### coverage-changed.py 快速管线
+
+```text
+1. 解析 origin/main（可用 --base-ref 覆盖）与 merge-base
+2. 收集 merge-base 到当前 working tree 的生产 Rust 变化
+   → committed + staged + unstaged + untracked
+3. cargo metadata --no-deps 自动映射变更文件到 workspace package
+4. 清理 target/coverage-changed/cargo-target/**/*.profraw
+   → 不删除已编译插桩 artifacts
+5. cargo llvm-cov --no-clean -p <changed packages> --all-features --lcov
+6. coverage-diff.py --worktree 使用同一 changed_lines_min=95.0 计算
+7. changed file 不在 LCOV 时返回 INCOMPLETE，而不是 0/0 PASS
+```
+
+局部写测试时可传
+`COVERAGE_CHANGED_ARGS="--test-filter <test_name>" make coverage-changed`；最终推送前
+必须去掉 filter，覆盖变更 crate 的全部测试。跨 crate integration test 是主要覆盖来源时，
+用 `--include-package <test-host-crate>` 纳入该测试宿主。`--allow-unmeasured` 只用于已经
+记录平台 cfg / E2E-only 原因的例外，不是常规绿色通道。
 
 关键约束：
 
@@ -201,8 +237,12 @@ design/
 
 ### 本地开发
 
-- 迭代：`make coverage-crate CRATE=<changed-crate>` 快速看单 crate。
-- 提交前默认不跑全量 `make coverage`；覆盖率棘轮由远端 CI `coverage-all.sh --json --gate` 兜底。
+- 生产 Rust 迭代：`make coverage-changed` 自动选变更 crate 并执行 95% changed-lines 预检。
+- 聚焦单测迭代：`COVERAGE_CHANGED_ARGS="--test-filter <name>" make coverage-changed`；
+  推送前去掉 filter 再跑一次。
+- 跨 crate 测试宿主：`COVERAGE_CHANGED_ARGS="--include-package bifrost-tests" make coverage-changed`。
+- 提交前默认不跑全量 `make coverage`；绝对 crate/workspace 棘轮由远端
+  `coverage-all.sh --json --gate` 兜底。
 - 用户明确要求或专项排查 coverage 失败时：`make coverage`（= `coverage-gate`）确认棘轮不破。
 - 需要浏览：`make coverage-html` 生成 `target/coverage/html/index.html`。
 - 需要给 CI 上报：`make coverage-json`。
@@ -211,6 +251,9 @@ design/
 
 - GitHub Actions workflow 必须运行 `bash scripts/ci/coverage-all.sh --json --gate` 并作为合入门禁。
 - `local-ci.sh` 默认不运行全量 coverage；仅在用户明确要求或专项排查 coverage 失败时提供显式 coverage 入口，避免本机默认校验成本过高。
+- `local-ci.sh` 默认执行 `make coverage-changed`；无生产 Rust 变更时快速 skip，存在
+  变更时先完成相关 crate 95% 预检。只有已记录的平台/E2E-only 例外才使用
+  `--skip-changed-coverage`，该选项不会豁免远端 coverage job。
 - 需要合并 E2E 覆盖率时显式追加 `--with-e2e`。
 - 失败时 GitHub Actions 会在 job log 里打印违规 crate 与 gap 分析。
 
@@ -292,6 +335,10 @@ design/
   行数，避免用 copy detection 静默稀释门禁。
 - changed-lines 最低门禁为 95%，高于 workspace 和 crate 历史棘轮，避免大型 crate
   依靠既有已覆盖代码吸收未测试新增逻辑。
+- 本地 `coverage-changed.py` 复用该计算器的 `--worktree` 模式，在 commit/push 前覆盖
+  暂存、未暂存和未跟踪生产文件；它自动缩小到变更 crate，避免为了提前发现几行缺测
+  而运行全 workspace + E2E。独立 target 只清 profraw、不清编译产物，从第二轮开始复用
+  插桩构建缓存。
 - `e2e-tests/capabilities.json` 维护 P0/P1 代理能力的 owner、测试层、平台、失败模式和
   证据文件。P0 必须同时具备 unit、integration、E2E 与 Linux/macOS/Windows 证据。
 - `scripts/run_all_e2e.sh` 每次结束生成 `summary.json`，固定记录 selected suite 的
@@ -320,6 +367,9 @@ design/
 - `python3 scripts/ci/coverage-gate.py target/coverage/coverage.json --gaps`：打印 gap 报告。
 - 故意把 `[crates.bifrost-command].min` 调到 99.9 → gate 失败并给出 diff。
 - `make coverage-crate CRATE=bifrost-command`：单 crate 覆盖率通过 90 目标。
+- `python3 -m unittest scripts.ci.tests.test_coverage_changed scripts.ci.tests.test_coverage_diff -v`：
+  验证 crate 映射、命令收敛、缓存保留、worktree/untracked diff 与阈值解析。
+- `make coverage-changed`：生产 Rust 有变化时只跑变更 crate；当前仅文档/脚本变化时快速 skip。
 
 ### E2E
 
@@ -328,7 +378,8 @@ design/
   Rules / Shell / Runner，产出三层 JSON、LCOV 和 `production-coverage.json`；
   `bifrost-proxy` production 低于 90% 或任一 E2E 失败时最终退出非 0。
 - `bash e2e-tests/tests/test_coverage_pipeline_contract.sh`：验证插桩二进制注入、
-  分层 profile、生产目录拒绝、9900 protected port 与失败传播契约。
+  分层 profile、生产目录拒绝、9900 protected port 与失败传播契约；最小临时 workspace
+  真实执行本地增量 coverage 的 PASS 与新增未覆盖函数 FAIL 两条路径。
 - CI workflow 内 `coverage-all.sh --json --gate` 步骤：绿灯 = 门禁生效。
 
 ### 真实场景测试（human_tests/coverage-mechanism.md）
@@ -338,13 +389,17 @@ design/
 - TC-COV-03：`make coverage-html` 生成可打开的 html 报告。
 - TC-COV-04：手动把某个 crate 的 min 调高一档，验证 gate 报错、exit 非 0。
 - TC-COV-05：`--with-e2e` 合并报告，验证 E2E 独占行进入 covered 集合。
+- TC-COV-22：临时最小 Rust workspace 真实执行 `coverage-changed.py`，全覆盖改动通过，
+  追加未覆盖生产函数后同一命令在本地失败并打印缺口。
+- TC-COV-23：无生产 Rust 变化时 `make coverage-changed` 在启动 llvm-cov 前快速 skip。
 
 ### 校验清单
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - 远端 CI：`bash scripts/ci/coverage-all.sh --json --gate`
-- 本地专项排查（非默认）：按需运行 `bash scripts/ci/coverage-all.sh --json --gate` 或单 crate coverage
+- 本地生产 Rust 增量预检：`make coverage-changed`
+- 本地全量专项排查（非默认）：按需运行 `bash scripts/ci/coverage-all.sh --json --gate`
 - `bash scripts/ci/local-ci.sh --skip-e2e`（本地无 e2e 环境时）
 - `rust-project-validate`
 

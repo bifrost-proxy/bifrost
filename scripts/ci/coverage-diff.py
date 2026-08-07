@@ -260,13 +260,75 @@ def evaluate_changed_coverage(
     return {"covered": covered, "total": total, "percent": percent, "files": files}
 
 
-def git_diff(base_ref: str) -> str:
+def unmeasured_changed_files(
+    changed: dict[str, set[int]], coverage: dict[str, dict[int, int]]
+) -> list[str]:
+    return sorted(
+        path
+        for path in changed
+        if PRODUCTION_RUST_RE.match(path) and path not in coverage
+    )
+
+
+def untracked_production_diff(repo_root: Path | None = None) -> str:
+    repo_root = repo_root or REPO_ROOT
+    names = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "crates/*/src/*.rs",
+            "crates/*/src/**/*.rs",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if names.returncode != 0:
+        raise RuntimeError(names.stderr.strip() or "git ls-files failed")
+
+    diffs: list[str] = []
+    for path in names.stdout.splitlines():
+        normalized = normalize_path(path, repo_root)
+        if not PRODUCTION_RUST_RE.match(normalized):
+            continue
+        result = subprocess.run(
+            ["git", "diff", "--no-index", "--unified=0", "/dev/null", normalized],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode not in (0, 1):
+            raise RuntimeError(result.stderr.strip() or f"git diff failed for {path}")
+        diffs.append(result.stdout)
+    return "".join(diffs)
+
+
+def git_diff(base_ref: str, *, worktree: bool = False) -> str:
+    revision = f"{base_ref}...HEAD"
+    if worktree:
+        merge_base = subprocess.run(
+            ["git", "merge-base", base_ref, "HEAD"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if merge_base.returncode != 0:
+            raise RuntimeError(
+                merge_base.stderr.strip() or f"git merge-base failed for {base_ref}"
+            )
+        revision = merge_base.stdout.strip()
     command = [
         "git",
         "diff",
         "--unified=0",
         "--diff-filter=AM",
-        f"{base_ref}...HEAD",
+        revision,
         "--",
         "crates/*/src/*.rs",
         "crates/*/src/**/*.rs",
@@ -276,10 +338,15 @@ def git_diff(base_ref: str) -> str:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"git diff failed for {base_ref}")
-    return result.stdout
+    diff = result.stdout
+    if worktree:
+        diff += untracked_production_diff(REPO_ROOT)
+    return diff
 
 
-def changed_base_sources(base_ref: str) -> list[tuple[str, str, str]]:
+def changed_base_sources(
+    base_ref: str, *, worktree: bool = False
+) -> list[tuple[str, str, str]]:
     merge_base = subprocess.run(
         ["git", "merge-base", base_ref, "HEAD"],
         cwd=REPO_ROOT,
@@ -292,13 +359,14 @@ def changed_base_sources(base_ref: str) -> list[tuple[str, str, str]]:
             merge_base.stderr.strip() or f"git merge-base failed for {base_ref}"
         )
     base_commit = merge_base.stdout.strip()
+    revisions = [base_commit] if worktree else [base_commit, "HEAD"]
     names = subprocess.run(
         [
             "git",
             "diff",
             "--name-only",
             "--diff-filter=DM",
-            base_commit,
+            *revisions,
             "--",
             "crates/*/src/*.rs",
             "crates/*/src/**/*.rs",
@@ -341,6 +409,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threshold", type=float, default=95.0)
     parser.add_argument("--json-output")
     parser.add_argument("--no-gate", action="store_true")
+    parser.add_argument(
+        "--worktree",
+        action="store_true",
+        help="include staged, unstaged, and untracked files instead of base...HEAD only",
+    )
     args = parser.parse_args(argv)
 
     lcov_path = Path(args.lcov)
@@ -348,9 +421,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: LCOV report not found: {lcov_path}", file=sys.stderr)
         return 2
     try:
-        changed = parse_diff(git_diff(args.base_ref))
+        changed = parse_diff(git_diff(args.base_ref, worktree=args.worktree))
         changed, moved_lines_excluded = exclude_unchanged_moved_blocks(
-            changed, changed_base_sources(args.base_ref)
+            changed, changed_base_sources(args.base_ref, worktree=args.worktree)
         )
         changed = exclude_inline_test_modules(changed)
         coverage = parse_lcov(lcov_path.read_text(encoding="utf-8"))
@@ -359,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     report = evaluate_changed_coverage(changed, coverage)
+    production_files = sorted(path for path in changed if PRODUCTION_RUST_RE.match(path))
+    report["changed_production_files"] = production_files
+    report["unmeasured_files"] = unmeasured_changed_files(changed, coverage)
     report["unchanged_moved_lines_excluded"] = moved_lines_excluded
     if args.json_output:
         output = Path(args.json_output)

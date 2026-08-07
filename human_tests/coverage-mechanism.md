@@ -8,8 +8,10 @@
 > - `scripts/ci/coverage-e2e.sh`（E2E instrumented，原有）
 > - `scripts/ci/coverage-all.sh`（unit + integration，传 `--with-e2e` 时合并 E2E，默认 90% 门禁）
 > - `scripts/ci/coverage-crate.sh`（按 crate，新增）
+> - `scripts/ci/coverage-changed.py`（本地 working-tree changed-lines 快速预检）
 > - Makefile target：`coverage` / `coverage-unit` / `coverage-e2e` /
->   `coverage-html` / `coverage-json` / `coverage-crate CRATE=<name>`
+>   `coverage-html` / `coverage-json` / `coverage-crate CRATE=<name>` /
+>   `coverage-changed`
 
 ## 前置条件
 
@@ -27,7 +29,7 @@
 | TC-COV-04 | `bash scripts/ci/coverage-all.sh --text --fail-under 9999` 因门禁失败而退出非 0 | gate |
 | TC-COV-05 | `make coverage-html` 生成 HTML 报告并可在浏览器查看 | smoke |
 | TC-COV-06 | `coverage-e2e.sh` 产出 E2E JSON 且不掩盖失败 | resilience |
-| TC-COV-07 | AGENTS.md 已注明 90% CI 门禁且本地 coverage 默认不跑 | doc |
+| TC-COV-07 | AGENTS.md 区分本地全量禁令与 changed-lines 必跑预检 | doc |
 | TC-COV-08 | 设计文档 `design/coverage-90.md` 列出 mechanism + 不适用清单 | doc |
 | TC-COV-09 | 覆盖 E2E 与生产数据目录、HOME/XDG、9900 端口硬隔离 | safety |
 | TC-COV-10 | 覆盖管线与全仓 Shell 语法契约通过 | regression |
@@ -42,6 +44,8 @@
 | TC-COV-19 | 仓库移除 Go 工具链且测试能力不降级 | regression |
 | TC-COV-20 | 最终 PR 功能影响与测试辅助代码边界 | regression |
 | TC-COV-21 | QUIC/SOCKS5 测试仅保留 Rust/Shell 有效实现 | regression |
+| TC-COV-22 | 低成本 working-tree changed-lines PASS / FAIL 真实链路 | gate |
+| TC-COV-23 | 无生产 Rust 变更时快速跳过本地增量 coverage | performance |
 
 ## 用例细节
 
@@ -138,15 +142,18 @@ bash scripts/ci/coverage-e2e.sh --json --suite rules
 
 ```bash
 grep -n "coverage 90% CI 门禁" AGENTS.md
-grep -n "默认情况下不要在本机运行" AGENTS.md
+grep -n "make coverage-changed" AGENTS.md
+grep -n "默认仍不在本机运行全 workspace" AGENTS.md
 grep -n "coverage-all.sh --json --gate" AGENTS.md
 ```
 
 **预期**：
 
 - 能命中 90% 覆盖率门禁段落。
-- AGENTS.md 明确覆盖率默认由远端 CI 门禁兜底。
-- AGENTS.md 明确默认不在本机运行 `make coverage` / `coverage-all.sh --gate`，除非用户明确要求、专项排查覆盖率失败或需要提前确认高风险覆盖率缺口。
+- AGENTS.md 明确最终绝对门禁仍由远端 CI 的 unit + proxy E2E union 兜底。
+- AGENTS.md 只禁止默认执行本地全 workspace coverage，不再禁止低成本增量预检。
+- 修改生产 Rust 时推送前必须执行 `make coverage-changed`；FAIL 要本地补测，
+  `unmeasured_files` 不得 0/0 假通过或无说明绕过。
 
 ### TC-COV-08 设计文档对齐
 
@@ -436,6 +443,37 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy --lib --all-features \
 QUIC/SOCKS5 演示脚本；HTTP/3 由 Rust 本地 QUIC/H3 origin 集成测试验证，SOCKS5 UDP 由
 Rust 正常、边界、错误和 relay 测试验证；覆盖率契约禁止这些遗留文件回流。
 
+### TC-COV-22 低成本 working-tree changed-lines PASS / FAIL 真实链路
+
+**步骤**：
+
+```bash
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+```
+
+契约测试会在 `mktemp -d` 创建只含一个 `coverage-demo` crate 的真实 Git workspace：
+
+1. 基线提交后修改生产函数，并为所有新分支补测试。
+2. 运行 `coverage-changed.py --base-ref main`，断言自动选择 `coverage-demo` 且 95% 门禁通过。
+3. 在未提交 worktree 追加没有测试的生产函数。
+4. 原命令再次运行，断言本地直接失败并打印 `crates/demo/src/lib.rs` 缺口。
+5. trap 删除临时 workspace，不触碰正式 `~/.bifrost`、9900 服务或当前仓库生产代码。
+
+**预期**：PASS/FAIL 两条真实 `cargo llvm-cov` 链路都被验证；第二次复用独立
+`cargo-target` 编译产物，只重置 `.profraw`；未覆盖生产行在 push/CI 前即可定位。
+
+### TC-COV-23 无生产 Rust 变更时快速跳过
+
+**步骤**：
+
+```bash
+make coverage-changed
+```
+
+**预期**：当前 diff 只有 coverage 工具、设计和流程文档，没有
+`crates/*/src/**/*.rs` 生产变化；命令在执行 `cargo metadata` / `cargo llvm-cov` 前退出 0，
+输出 `No changed production Rust files ... coverage preflight skipped.`，不产生高成本编译。
+
 ## 执行记录
 
 | 用例 ID | 执行人 | 结果 | 备注 |
@@ -451,6 +489,8 @@ Rust 正常、边界、错误和 relay 测试验证；覆盖率契约禁止这�
 | TC-COV-19 | Codex | ✅ | 2026-07-13：仓库源码（排除依赖安装目录和通用构建产物）无 `.go`/`go.mod`/`go.sum`/`go.work`，旧客户端目录也无 tracked ARM64 编译产物；workflow 无 `setup-go`/`go install`；`shfmt` v3.12.0 固定下载地址与 SHA-256 均命中；coverage pipeline contract 通过（253 个 Shell 语法、24 个工具单测、10 个 capability）；Rust 本地 HTTP/3 origin 真链路 1/1、SOCKS5 UDP 正常/边界/错误/真实 relay 9/9 通过。首次执行发现 human test 扫描了契约自身的禁用字面量而误报，已收窄到 workflow 执行面后从头复跑通过；第 2 轮 review 发现并删除无扩展名的旧 Go 客户端 Mach-O 产物，再次从头复跑通过。 |
 | TC-COV-20 | Codex | ✅ | 2026-07-13：最终全 PR review 发现普通 tunnel 泛型 helper 在移除生产调用后仍以 `allow(dead_code)` 进入 release 构建；改为 `#[cfg(test)]` 后，双向转发、字节统计、取消、断连与错误路径 6/6 通过，`cargo build -p bifrost-proxy --all-features` 通过。同步补齐此前遗漏的 TC-COV-18/19/20 用例索引，避免 human_tests 详情与索引漂移。 |
 | TC-COV-21 | Codex | ✅ | 2026-07-13：删除未接入测试入口且未完成 QUIC transport 的历史 Python 演示脚本；确认仓库无 Go 文件/模块、无有效入口引用；coverage pipeline contract 通过（254 个 Shell 语法、24 个工具单测、10 个 capability）；Rust HTTP/3 本地 QUIC/H3 真链路 1/1、Rust SOCKS5 UDP 正常/边界/错误/真实 relay 9/9 通过。首轮执行发现契约用 `git ls-files --error-unmatch` 会把工作区已删除但尚未暂存的文件误判为回流，已改为同时要求文件实际存在并从头复跑通过。 |
+| TC-COV-22 | Codex | ✅ | 2026-08-07：`test_coverage_pipeline_contract.sh` 在临时单 crate Git workspace 真实运行快速预检；有测试的 worktree 改动为 `100.00% (4/4)` 并通过 95% 门禁，随后追加未覆盖生产函数时原命令非零退出、打印源文件缺口；第二轮日志确认旧 profraw 被清理而编译 artifacts 保留。完整契约同时通过 272 个 Shell 语法、40 个 coverage/CI 工具单测、10 个 capability 和三分片平衡检查。 |
+| TC-COV-23 | Codex | ✅ | 2026-08-07：当前任务没有 `crates/*/src/**/*.rs` 生产 Rust 变化；执行 `make coverage-changed` 在 0.2 秒内退出 0，输出 `No changed production Rust files in working tree; coverage preflight skipped.`，未启动 cargo metadata、编译或测试。 |
 | TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% CI 门禁段落，并明确本地默认不跑全量 coverage |
 | TC-COV-08 | Codex | ✅ | design/coverage-90.md 已落地 |
 
