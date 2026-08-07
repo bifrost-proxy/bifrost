@@ -90,9 +90,18 @@
 
 预期：直接状态路径无需上游即可持续输出 mock event；Scripts 页面普通 Run 按钮禁用并说明需要通过规则与真实 SSE source 测试，避免误用普通 response sandbox。
 
+## TC-RSS-12：生产覆盖率任务执行真实 SSE 链路
+
+1. 检查 `scripts/ci/proxy-coverage-shell-tests.txt` 已包含 `test_response_stream_script.sh`。
+2. 使用当前 PR head 构建 `bifrost`，执行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_response_stream_script.sh`。
+3. 确认 Transform、Mock、接近 16 MiB event 与超限错误四条真实链路全部完成。
+
+预期：真实 SSE 用例输出 `response stream script E2E passed`；coverage proxy suite 会执行同一用例并把 `resStreamScript` 生产路径纳入 90% 门禁统计，而不是只在普通 E2E job 中验证。
+
 ## 本次执行记录（2026-08-07）
 
 - TC-RSS-01 至 TC-RSS-05：执行 `BIFROST_BIN=target/release/bifrost bash e2e-tests/tests/test_response_stream_script.sh`，真实独立数据目录、代理与 fixture 全部通过。
 - TC-RSS-06：`bifrost-admin` 构建脚本完成 Web production build；编辑器相关既有测试由后续 Web 测试和远端 CI 继续兜底。
 - TC-RSS-07 至 TC-RSS-10：对应 Rust 单元/集成测试通过，且 `cargo clippy -p bifrost-script -p bifrost-proxy --all-targets --all-features -- -D warnings` 通过。
 - TC-RSS-11：直接状态 mock 路径已在实现级检查和编译中验证；页面 Run 边界通过 Web build 验证。完整真实链路随扩展后的规则 E2E 与远端 CI 继续验证。
+- TC-RSS-12：确认 `scripts/ci/proxy-coverage-shell-tests.txt` 已纳入 `test_response_stream_script.sh`；执行 `cargo build --bin bifrost` 后运行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_response_stream_script.sh`，Transform、Mock、接近 16 MiB event 与超限错误四条链路全部通过，输出 `response stream script E2E passed`。

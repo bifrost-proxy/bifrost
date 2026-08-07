@@ -89,3 +89,4 @@ mock 模式不读取上游 body。host 调用 `stream.next()`，将本轮输出�
 - HTTP/1.1 与 HTTP/2 均不产生 `Content-Length`，事件边界正确。
 - Chat text delta、tool call name/arguments delta、finish、usage、`[DONE]` 能转换成合法 Responses SSE。
 - Codex CLI 完成聊天、真实 shell/tool、代码写入和图片理解。
+- `test_response_stream_script.sh` 必须进入 `scripts/ci/proxy-coverage-shell-tests.txt`，确保真实 SSE 链路同时贡献 `bifrost-proxy` production 90% coverage gate，而不是只在普通 E2E job 中运行。
