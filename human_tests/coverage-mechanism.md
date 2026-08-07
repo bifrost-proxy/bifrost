@@ -46,6 +46,7 @@
 | TC-COV-21 | QUIC/SOCKS5 测试仅保留 Rust/Shell 有效实现 | regression |
 | TC-COV-22 | 低成本 working-tree changed-lines PASS / FAIL 真实链路 | gate |
 | TC-COV-23 | 无生产 Rust 变更时快速跳过本地增量 coverage | performance |
+| TC-COV-24 | 通用 Shell runner 未安装 cargo-llvm-cov 时明确跳过真实 fixture | regression |
 
 ## 用例细节
 
@@ -474,6 +475,22 @@ make coverage-changed
 `crates/*/src/**/*.rs` 生产变化；命令在执行 `cargo metadata` / `cargo llvm-cov` 前退出 0，
 输出 `No changed production Rust files ... coverage preflight skipped.`，不产生高成本编译。
 
+### TC-COV-24 通用 Shell runner 未安装 cargo-llvm-cov 时明确跳过真实 fixture
+
+**步骤**：
+
+```bash
+fixture_path="$(mktemp -d)"
+ln -s "$(rustup which cargo)" "$fixture_path/cargo"
+PATH="$fixture_path:/usr/bin:/bin:/usr/sbin:/sbin" \
+  bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+```
+
+**预期**：静态覆盖率契约、40 个 Python 单测、capability 和 shell shard 检查都执行；
+脚本输出 `Coverage changed-lines runtime fixture: SKIP (cargo-llvm-cov unavailable)` 后退出 0，
+不会要求普通 Shell E2E runner 重复安装插桩工具。真实 fixture 仍在已安装工具的本地环境
+执行，完整 Coverage job 仍执行 90% 门禁。
+
 ## 执行记录
 
 | 用例 ID | 执行人 | 结果 | 备注 |
@@ -491,6 +508,7 @@ make coverage-changed
 | TC-COV-21 | Codex | ✅ | 2026-07-13：删除未接入测试入口且未完成 QUIC transport 的历史 Python 演示脚本；确认仓库无 Go 文件/模块、无有效入口引用；coverage pipeline contract 通过（254 个 Shell 语法、24 个工具单测、10 个 capability）；Rust HTTP/3 本地 QUIC/H3 真链路 1/1、Rust SOCKS5 UDP 正常/边界/错误/真实 relay 9/9 通过。首轮执行发现契约用 `git ls-files --error-unmatch` 会把工作区已删除但尚未暂存的文件误判为回流，已改为同时要求文件实际存在并从头复跑通过。 |
 | TC-COV-22 | Codex | ✅ | 2026-08-07：`test_coverage_pipeline_contract.sh` 在临时单 crate Git workspace 真实运行快速预检；有测试的 worktree 改动为 `100.00% (4/4)` 并通过 95% 门禁，随后追加未覆盖生产函数时原命令非零退出、打印源文件缺口；第二轮日志确认旧 profraw 被清理而编译 artifacts 保留。完整契约同时通过 272 个 Shell 语法、40 个 coverage/CI 工具单测、10 个 capability 和三分片平衡检查。 |
 | TC-COV-23 | Codex | ✅ | 2026-08-07：当前任务没有 `crates/*/src/**/*.rs` 生产 Rust 变化；执行 `make coverage-changed` 在 0.2 秒内退出 0，输出 `No changed production Rust files in working tree; coverage preflight skipped.`，未启动 cargo metadata、编译或测试。 |
+| TC-COV-24 | Codex | ✅ | 2026-08-07：首轮 CI 精确日志发现普通 Linux Shell runner 未安装 `cargo-llvm-cov`，导致真实 fixture 被误报为 E2E 失败；用仅暴露 toolchain `cargo`、不暴露插件的隔离 PATH 复现后，静态/Python/capability/shard 契约全部执行，输出明确 SKIP 并退出 0。已安装插件的正常本地链路仍真实执行 PASS/FAIL fixture，远端完整 Coverage job 90% 门禁已成功。 |
 | TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% CI 门禁段落，并明确本地默认不跑全量 coverage |
 | TC-COV-08 | Codex | ✅ | design/coverage-90.md 已落地 |
 

@@ -370,6 +370,9 @@ design/
 - `python3 -m unittest scripts.ci.tests.test_coverage_changed scripts.ci.tests.test_coverage_diff -v`：
   验证 crate 映射、命令收敛、缓存保留、worktree/untracked diff 与阈值解析。
 - `make coverage-changed`：生产 Rust 有变化时只跑变更 crate；当前仅文档/脚本变化时快速 skip。
+- `test_coverage_pipeline_contract.sh` 始终执行静态契约和 Python 单测；真实最小 workspace
+  fixture 仅在 runner 已安装 `cargo-llvm-cov` 时执行，否则输出明确 SKIP。普通 Shell E2E
+  runner 不为这一项重复安装工具，完整 Coverage job 继续负责真实插桩与 90% 门禁。
 
 ### E2E
 
@@ -392,6 +395,8 @@ design/
 - TC-COV-22：临时最小 Rust workspace 真实执行 `coverage-changed.py`，全覆盖改动通过，
   追加未覆盖生产函数后同一命令在本地失败并打印缺口。
 - TC-COV-23：无生产 Rust 变化时 `make coverage-changed` 在启动 llvm-cov 前快速 skip。
+- TC-COV-24：未安装 `cargo-llvm-cov` 的通用 Shell runner 仍完成静态/Python 契约并明确
+  跳过真实 fixture，不把工具缺失误报为产品 E2E 失败。
 
 ### 校验清单
 

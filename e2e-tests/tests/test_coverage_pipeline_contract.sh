@@ -373,6 +373,10 @@ EOF
   grep -Eq 'Reset [1-9][0-9]* stale coverage profile' "$fixture_dir/fail.log"
 )
 
-run_changed_coverage_fixture
+if command -v cargo-llvm-cov >/dev/null 2>&1; then
+  run_changed_coverage_fixture
+else
+  echo "Coverage changed-lines runtime fixture: SKIP (cargo-llvm-cov unavailable)"
+fi
 
 echo "Coverage pipeline contract: PASS"
