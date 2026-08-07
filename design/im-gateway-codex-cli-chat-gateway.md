@@ -224,6 +224,8 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 监听：stdout 原样落盘再交 adapter parser，未识别行落盘不阻断；stderr 落盘并节流摘要；parser 转 canonical event；final response 优先 `last_message.md`，为空时用最后一个 assistant/final event 兜底；进度事件进入 `ImAgentProgressRegistry` 与 Chat Gateway stream。
 
+飞书 progress card 会在 Runner/Adapter 状态行追加目标 Runner 创建的 `Session ID`。Codex/Trae 的 `thread_id`/`threadId` 与 Claude Code 的 `session_id`/`sessionId` 必须在启动事件到达时立即合并进运行中 metadata 并刷新卡片，不能等整个 run 完成后才显示；目标 Runner 尚未返回 ID 时不展示该字段。原“外部会话”详情行继续保留，用于显示带 adapter 语义的 conversation reference。
+
 ### 会话状态持久化与默认续接
 
 `session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。运行中收到的普通后续消息默认进入 FIFO queue，当前 turn 完成后作为独立下一轮执行；`/q` 继续提供显式排队与序号管理。只有显式 `/g` 才尝试运行中引导：Codex/Traex app-server 通过 `turn/steer` 接收 Guide，Claude Code 与自定义/exec transport 先请求 active worker capability，无法注入时完整降级 queue。ChatGPT Web 不提供 `/g`；`/stop` 映射到 active runner 进程并终止其独立进程组。

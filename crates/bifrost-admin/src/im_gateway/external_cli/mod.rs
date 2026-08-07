@@ -2160,6 +2160,20 @@ pub fn merge_external_cli_progress_metadata(
         return false;
     }
     let before = metadata.clone();
+    if !metadata.contains_key("threadId") {
+        if let Some(thread_id) = event
+            .raw
+            .get("thread_id")
+            .or_else(|| event.raw.get("threadId"))
+            .or_else(|| event.raw.get("session_id"))
+            .or_else(|| event.raw.get("sessionId"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            metadata.insert("threadId".to_string(), thread_id.to_string());
+        }
+    }
     if let Some(usage) = event
         .raw
         .get("usage")
