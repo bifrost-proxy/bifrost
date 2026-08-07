@@ -11,6 +11,13 @@ ASR 能力当前同时服务三类入口：Directory Tasks（定时目录任务�
 
 同时 ASR Server 是本机唯一常驻共享资源：一个模型对应一个 `asr-server` 进程，加载后需要大量显存/统一内存。多入口同时启动会导致资源竞争、模型误替换、任务被误停用。V1 通过给每个入口分配"owner_module + owner_id"租约字段实现互斥，让不同模块请求同模型时复用同一服务，请求不同模型时按停止权限规则协调。
 
+## 安装后惰性激活边界
+
+- Bifrost 安装或启动后，首页、Traffic、Settings 及其它普通管理 API 的轮询不得启动 ASR Directory Task scheduler，不得执行中断任务恢复，不得启动外接设备监听，也不得由恢复任务间接下载或初始化 ASR 模型。
+- `GET /api/asr/status`、`GET /api/asr/moss/status` 与 capabilities 等只读模型状态接口也不得激活 Directory Task scheduler；它们只能检查已有资产和进程状态。
+- 只有用户进入 ASR 任务工作流后发出的 `/api/asr/tasks*`、`/api/asr/diarization*`、`/api/asr/speaker-profiles*` 或 `/api/asr/external-volumes` 请求才激活 scheduler。创建、运行、恢复已配置任务及其既有首次使用资源策略仍属于用户已经启用的 ASR 工作流。
+- 激活判定集中在 Admin Router 的鉴权和浏览器写保护之后；被拒绝的远端或跨站请求不能激活 ASR。具体 ASR handler 不再因一次只读或内部调用隐式启动 scheduler，避免未来新增普通 API 时重新引入全局副作用。
+
 ## 用户目标验证清单
 
 ### 必须实现
@@ -37,6 +44,7 @@ ASR 能力当前同时服务三类入口：Directory Tasks（定时目录任务�
 - 模型管理板块启动模型只做健康探测，不占用其它 owner 的服务租约。
 - 实时麦克风 owner 活跃时 Directory Task 让步。
 - E2E `test_asr_model_autonomy.sh` 通过。
+- E2E `test_asr_task_startup_recovery.sh` 先证明普通 Admin ready/API 请求不改变 ASR 状态或创建模型目录，再证明显式访问 ASR Tasks 后才执行恢复。
 - human_tests 三模块自治、租约、CLI 参数场景通过。
 
 ## 产品语义

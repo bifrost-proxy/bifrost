@@ -76,6 +76,20 @@ fn should_apply_cors(admin_path: &str) -> bool {
     admin_path != "/share-env/exit"
 }
 
+fn should_activate_asr_scheduler(admin_path: &str) -> bool {
+    admin_path == "/api/asr/external-volumes"
+        || path_is_or_below(admin_path, "/api/asr/tasks")
+        || path_is_or_below(admin_path, "/api/asr/diarization")
+        || path_is_or_below(admin_path, "/api/asr/speaker-profiles")
+}
+
+fn path_is_or_below(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn apply_share_env_exit_cors(resp: &mut Response<BoxBody>, origin: Option<&str>) {
     let headers = resp.headers_mut();
     headers.insert(
@@ -192,9 +206,6 @@ impl AdminRouter {
         } else if admin_path.starts_with("/share/rule") {
             handle_rule_share_confirm_page(req, state).await
         } else if admin_path.starts_with("/api/") {
-            // Ensure the ASR scheduled-task scheduler is running on first API
-            // request so tasks execute even if the ASR page is never visited.
-            crate::handlers::asr_jobs::ensure_scheduler_started().await;
             Self::handle_api(req, state, push_manager, &admin_path, peer_addr).await
         } else {
             serve_static_file(&admin_path, req.headers())
@@ -222,6 +233,14 @@ impl AdminRouter {
 
         if let Some(resp) = Self::check_browser_write_guard(&req, &state, path) {
             return resp;
+        }
+
+        // ASR is deliberately lazy: ordinary admin polling after a fresh
+        // install must not recover tasks, start watchers, or prepare model
+        // assets. Activation also belongs after auth/write checks so rejected
+        // requests cannot initialize the subsystem.
+        if should_activate_asr_scheduler(path) {
+            crate::handlers::asr_jobs::ensure_scheduler_started().await;
         }
 
         if path == "/api/security/csrf" {
@@ -544,6 +563,7 @@ mod tests {
     use super::*;
     use crate::admin_auth_db::AuthDb;
     use crate::state::AdminState;
+    use crate::test_support::TestAdminState;
 
     fn new_state_remote_enabled() -> (SharedAdminState, tempfile::TempDir) {
         let (state, tmp) = new_state_remote_disabled();
@@ -668,6 +688,84 @@ mod tests {
 
         assert!(resp.headers().get("X-Frame-Options").is_none());
         assert!(resp.headers().get("Content-Security-Policy").is_none());
+    }
+
+    #[test]
+    fn asr_scheduler_activation_requires_asr_task_workflow() {
+        for path in [
+            "/api/system/overview",
+            "/api/proxy/address",
+            "/api/asr/capabilities",
+            "/api/asr/status",
+            "/api/asr/moss/status",
+            "/api/asr/init-stream",
+            "/api/asr/service/start",
+            "/api/asr/tasksmith",
+            "/api/asr/diarization-preview",
+            "/api/asr/speaker-profiles-backup",
+        ] {
+            assert!(
+                !should_activate_asr_scheduler(path),
+                "read-only or unrelated path must not activate ASR tasks: {path}"
+            );
+        }
+
+        for path in [
+            "/api/asr/tasks",
+            "/api/asr/tasks/task-1",
+            "/api/asr/tasks/-/watch",
+            "/api/asr/external-volumes",
+            "/api/asr/diarization/status",
+            "/api/asr/speaker-profiles",
+        ] {
+            assert!(
+                should_activate_asr_scheduler(path),
+                "ASR task workflow should activate its scheduler: {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_asr_task_route_reaches_lazy_scheduler_activation() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let previous = crate::handlers::asr_jobs::set_scheduler_started_for_test(true).await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind router test listener");
+        let addr = listener.local_addr().expect("router test listener addr");
+
+        let server = tokio::spawn(async move {
+            let (stream, peer_addr) = listener.accept().await.expect("accept router request");
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req: Request<Incoming>| {
+                let state = state.clone();
+                async move {
+                    Ok::<_, hyper::Error>(
+                        AdminRouter::handle(req, state, None, Some(peer_addr)).await,
+                    )
+                }
+            });
+            http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+                .expect("serve router request");
+        });
+
+        let response = reqwest::get(format!(
+            "http://{addr}{ADMIN_PATH_PREFIX}/api/asr/tasks/missing-task"
+        ))
+        .await
+        .expect("request ASR task route");
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+        server.abort();
+        crate::handlers::asr_jobs::set_scheduler_started_for_test(previous).await;
     }
 
     #[test]

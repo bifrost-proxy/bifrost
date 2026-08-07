@@ -731,9 +731,11 @@ mod tests {
                     .join("sessions/2026/08/07")
                     .join(format!("rollout-{id}.jsonl")),
                 &[serde_json::json!({
-                    "timestamp": format!("2026-08-07T12:{index:02}:00Z"),
+                    // Keep fixture timestamps ahead of the file mtime so the
+                    // index timestamp remains the deterministic winner.
+                    "timestamp": format!("2099-08-07T12:{index:02}:00Z"),
                     "type": "session_meta",
-                    "payload": {"id": id, "timestamp": format!("2026-08-07T12:{index:02}:00Z")}
+                    "payload": {"id": id, "timestamp": format!("2099-08-07T12:{index:02}:00Z")}
                 })],
             );
         }
@@ -742,7 +744,7 @@ mod tests {
                 serde_json::json!({
                     "id": format!("00000000-0000-0000-0000-{index:012}"),
                     "thread_name": format!("Title {index}\nwith whitespace"),
-                    "updated_at": format!("2026-08-07T12:{index:02}:30Z")
+                    "updated_at": format!("2099-08-07T12:{index:02}:30Z")
                 })
             })
             .collect::<Vec<_>>();
@@ -752,7 +754,7 @@ mod tests {
         assert_eq!(sessions.len(), 20);
         assert_eq!(sessions[0].id, "00000000-0000-0000-0000-000000000021");
         assert_eq!(sessions[0].title, "Title 21 with whitespace");
-        assert_eq!(sessions[0].datetime, "2026-08-07T12:21:30Z");
+        assert_eq!(sessions[0].datetime, "2099-08-07T12:21:30Z");
     }
 
     #[test]

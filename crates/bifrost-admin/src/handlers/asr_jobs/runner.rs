@@ -1,6 +1,5 @@
 /// Start the ASR task scheduler if not already running.
-/// This is called from the router at server startup so that scheduled tasks
-/// execute even if no one visits the ASR Tasks page.
+/// The router calls this only after an authenticated ASR task-workflow request.
 pub(crate) async fn ensure_scheduler_started() {
     let mut started = ASR_SCHEDULER_STARTED.lock().await;
     if *started {
@@ -78,6 +77,12 @@ pub(crate) async fn ensure_scheduler_started() {
             }
         }
     });
+}
+
+#[cfg(test)]
+pub(crate) async fn set_scheduler_started_for_test(started: bool) -> bool {
+    let mut current = ASR_SCHEDULER_STARTED.lock().await;
+    std::mem::replace(&mut *current, started)
 }
 
 #[cfg(target_os = "macos")]

@@ -738,6 +738,29 @@
 - 后端不信任前端确认状态：缺少或错误 `confirm_name` 的清理 API 返回 HTTP 400 且源文件保留，只有 URL 编码后的精确任务名称匹配才执行清理。
 - 所有真实场景只使用临时数据目录、临时音频目录和临时服务，不触碰默认 `~/audio`、运行中的 9900 服务或系统代理。
 
+### TC-QASR-28 安装后普通管理访问不激活 ASR
+
+操作步骤：
+
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`，确保测试使用当前源码二进制。
+2. 执行：
+   ```bash
+   SKIP_BUILD=true \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   BIFROST_ASR_TASK_RECOVERY_E2E_PORT=18983 \
+   bash e2e-tests/tests/test_asr_task_startup_recovery.sh
+   ```
+3. 观察脚本在临时 `HOME`、临时 `BIFROST_DATA_DIR` 和非 9900 端口启动服务；依次请求普通 `/_bifrost/api/proxy/address`、`system/overview`，以及只读的 ASR `capabilities`、Qwen `status`、MOSS `status`。
+4. 确认上述普通和只读状态 API 探测后，预置的 ASR `processing` 记录和 stale `run.lock` 均未改变，临时 `HOME/.bifrost/asr` 不存在，日志不包含 scheduler recovery、Directory Task run 或模型 initializer。
+5. 继续观察脚本显式请求 `/_bifrost/api/asr/tasks/<task_id>` 后，stale lock 被删除且中断记录恢复为 pending。
+
+预期结果：
+
+- 安装/启动以及首页、Traffic、Settings 等普通管理 API 轮询不会初始化 ASR task scheduler、恢复任务、启动模型下载或创建模型目录。
+- 只读的 ASR capability、Qwen status 和 MOSS status 路由同样不会激活 Directory Task scheduler。
+- 用户明确进入 ASR 任务工作流后才激活 scheduler；既有任务恢复能力保持可用。
+- 测试仅使用临时目录、临时端口和定向 PID 清理，不影响默认 9900 服务、系统代理或真实 `~/.bifrost/asr` 模型。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。
@@ -800,3 +823,4 @@
 | 2026-05-26 | TC-QASR-24 / Daily Agent 大 prompt 原生剪贴板投递 | `cargo build --bin bifrost`；`BIFROST_DATA_DIR=$HOME/.bifrost ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon`；`./target/debug/bifrost -p 9900 agent run --runner web --session chatgpt-web-native-clipboard-no-sample-20260526 --json "$(cat /Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/.daily/2026-05-19.md)"`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin composer_text_injection --lib`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin native_clipboard_paste_uses_platform_modifier --lib` | PASS：阈值保持 120 字符，120 以内走 `Input.insertText`，121 及以上走 `NativeClipboardPaste`；macOS 粘贴 modifier 为 Meta。真实默认目录 ChatGPT Web live run 使用 2026-05-19 daily Markdown 生成 457840 字节 prompt，run `1779727870753-c7feafc8-3173-43c8-8462-014e2b7409b1` 成功，日志 `/tmp/bifrost-chatgpt-web-no-sample-20260526005110.log` 返回 `收到文件《粘贴的文本 (1)(3).txt》`；这验证了粘贴完成后 ChatGPT 文件化且 composer 无正文时不再采样文本，adapter 通过轮询发送按钮可用状态完成发送与最终回复。 |
 | 2026-08-04 | TC-QASR-26 / 转录完成后无损压缩源 WAV | `bash e2e-tests/tests/test_asr_source_compression.sh`；`pnpm --dir web exec playwright test --grep "ASR task detail starts lossless source compression"` | PASS：隔离后端真实 API 场景中正常 success WAV 转为更小 FLAC，前后解码 PCM SHA-256 一致；坏 WAV 保留并记失败，partial_success 不入队，无 `.part`/backup 残留；记录主键迁移后仍 success 且 `pending=0`。聚焦 Playwright 验证 Compress WAVs 确认操作、完成状态和 Saved 2.44 KB 展示。 |
 | 2026-08-05 | TC-QASR-27 / 文件页逐个压缩进度与原文件清理二次确认 | `cargo test -p bifrost-admin source_compression_eligibility --lib`；`cargo test -p bifrost-admin cleanup_source_audio --lib`；`bash e2e-tests/tests/test_asr_source_compression.sh`；`bash e2e-tests/tests/test_asr_task_cli.sh`；聚焦 Playwright 两场景 | PASS：后端仅将成功且产物完整的普通 WAV 标记为可压缩；真实 FFmpeg 顺序压缩与 PCM 校验通过。Files tab 在亮/暗主题下展示已压缩、未压缩且符合资格、不可压缩逐文件状态及整体进度。Clean originals 先确认、再输入完整任务名称，缺失或错误 `confirm_name` 返回 400 且不删除，精确匹配后才执行清理。 |
+| 2026-08-07 | TC-QASR-28 / 安装后 ASR 惰性激活 | `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_ASR_TASK_RECOVERY_E2E_PORT=18983 bash e2e-tests/tests/test_asr_task_startup_recovery.sh` | PASS：普通 proxy/system API 与只读 ASR capabilities/Qwen status/MOSS status 探测后预置 processing 记录与 stale lock 保持不变，临时模型目录不存在且日志无 scheduler/task/model initializer；显式访问 ASR task 后才执行恢复并删除 stale lock。 |

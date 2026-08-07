@@ -12,6 +12,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 
+// Both tests reserve ephemeral TCP/UDP ports before their servers bind them.
+// Keep the scenarios serial so Windows cannot hand the released proxy port to
+// the sibling test during that gap.
+static UPSTREAM_HTTP3_E2E_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Default)]
 struct StaticRulesResolver {
     enable_upstream_http3: bool,
@@ -175,6 +180,7 @@ async fn direct_h3_preflight(origin_port: u16) {
 
 #[tokio::test]
 async fn test_http_proxy_to_h3_origin_disabled_by_default() {
+    let _guard = UPSTREAM_HTTP3_E2E_LOCK.lock().await;
     let test_future = async {
         init_crypto_provider();
 
@@ -217,6 +223,7 @@ async fn test_http_proxy_to_h3_origin_disabled_by_default() {
 
 #[tokio::test]
 async fn test_http_proxy_to_h3_origin_enabled_by_rule() {
+    let _guard = UPSTREAM_HTTP3_E2E_LOCK.lock().await;
     let test_future = async {
         init_crypto_provider();
 

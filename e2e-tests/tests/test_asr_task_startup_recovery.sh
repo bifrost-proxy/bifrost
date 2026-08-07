@@ -8,6 +8,7 @@ export BIFROST_DISABLE_TRAY
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT="${BIFROST_ASR_TASK_RECOVERY_E2E_PORT:-18883}"
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-task-recovery.XXXXXX")"
+HOME_DIR="$DATA_DIR/home"
 AUDIO_DIR="$DATA_DIR/audio"
 LOG_FILE="$DATA_DIR/bifrost.log"
 PID=""
@@ -56,7 +57,7 @@ wait_http() {
   fail "timed out waiting for $url"
 }
 
-mkdir -p "$AUDIO_DIR" "$DATA_DIR/asr/tasks/stale-paused-task" "$DATA_DIR/asr/tasks/retryable-active-task"
+mkdir -p "$HOME_DIR" "$AUDIO_DIR" "$DATA_DIR/asr/tasks/stale-paused-task" "$DATA_DIR/asr/tasks/retryable-active-task"
 printf 'not real audio\n' > "$AUDIO_DIR/stale.wav"
 printf 'not real audio\n' > "$AUDIO_DIR/retryable.wav"
 
@@ -191,7 +192,7 @@ fi
 BIFROST_BIN="$(resolve_bifrost_bin)"
 
 echo "[asr-task-startup-recovery] start bifrost on ${PORT}"
-BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" start \
+HOME="$HOME_DIR" BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" start \
   -p "$PORT" \
   --unsafe-ssl \
   --skip-cert-check \
@@ -200,7 +201,33 @@ BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" start \
 PID="$!"
 wait_http "http://127.0.0.1:${PORT}/_bifrost/api/proxy/address"
 
-echo "[asr-task-startup-recovery] trigger ASR scheduler startup and inspect task"
+curl -fsS "http://127.0.0.1:${PORT}/_bifrost/api/system/overview" >"$DATA_DIR/system-overview.json"
+curl -fsS "http://127.0.0.1:${PORT}/_bifrost/api/asr/capabilities" >"$DATA_DIR/asr-capabilities.json"
+curl -fsS "http://127.0.0.1:${PORT}/_bifrost/api/asr/status?model=Qwen3-ASR-0.6B" >"$DATA_DIR/asr-status.json"
+curl -fsS "http://127.0.0.1:${PORT}/_bifrost/api/asr/moss/status" >"$DATA_DIR/moss-status.json"
+
+echo "[asr-task-startup-recovery] ordinary and read-only ASR status APIs stay ASR-lazy"
+python3 - "$DATA_DIR/asr/tasks/stale-paused-task/files.json" "$DATA_DIR/asr/tasks/stale-paused-task/run.lock" "$HOME_DIR/.bifrost/asr" "$LOG_FILE" <<'PY'
+import json
+import pathlib
+import sys
+
+files_path = pathlib.Path(sys.argv[1])
+lock_path = pathlib.Path(sys.argv[2])
+model_home = pathlib.Path(sys.argv[3])
+log_path = pathlib.Path(sys.argv[4])
+store = json.loads(files_path.read_text(encoding="utf-8"))
+record = next(iter(store["files"].values()))
+assert record["status"] == "processing", record
+assert lock_path.exists(), lock_path
+assert not model_home.exists(), model_home
+log = log_path.read_text(encoding="utf-8")
+assert "scheduler startup" not in log, log
+assert "starting ASR directory task run" not in log, log
+assert "starting qwen3-asr rust initializer" not in log, log
+PY
+
+echo "[asr-task-startup-recovery] explicit ASR task access activates scheduler and recovery"
 DETAIL_JSON="$DATA_DIR/detail.json"
 curl -fsS "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks/stale-paused-task" >"$DETAIL_JSON"
 

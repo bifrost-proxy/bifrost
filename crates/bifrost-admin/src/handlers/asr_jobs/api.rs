@@ -1,6 +1,4 @@
 pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
-    ensure_scheduler_started().await;
-
     if path.starts_with("/api/asr/diarization")
         || path.starts_with("/api/asr/speaker-profiles")
         || (path.starts_with("/api/asr/tasks/")
