@@ -349,7 +349,10 @@ pub(super) fn build_online_notification_message_with_context(
             adapter: "codex".to_string(),
         });
     message.push_str("\n\n");
-    message.push_str(&build_im_startup_help_for_runner(&runner_kind));
+    message.push_str(&build_im_startup_help_for_runner(
+        &runner_kind,
+        provider.provider_type,
+    ));
     message
 }
 

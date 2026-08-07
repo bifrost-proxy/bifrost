@@ -202,6 +202,15 @@
 
 预期结果：测试在任意 CI 调度速度下都先验证活跃态再释放 Runner；重复 `/status` 只有一条 inbound 审计且不添加 reaction，普通背景消息只进入群上下文、不产生 inbound trigger 审计。断言不靠增加固定 sleep 或放宽日志数量来通过。
 
+### TC-FGS-24：Provider owner 使用 `/new` 创建私有群并保持消息幂等
+
+1. 使用临时数据目录启动 Bifrost、假飞书 OpenAPI 和 enabled Feishu Provider，将 `owner_open_id` 配置为 `ou_owner`。
+2. 由 `ou_owner` 发送 `/new 发布 项目群`，再以相同 `message_id` 重投一次。
+3. 由普通成员在群聊发送 `/new 越权群`，并由 owner 发送 `/help`。
+4. 检查假 OpenAPI 请求、SQLite `im_feishu_new_groups`、消息日志及帮助文本。
+
+预期结果：只发起一次 `POST /im/v1/chats`；请求设置 `user_id_type=open_id`、`set_bot_manager=true`、私有群、owner=`ou_owner` 和稳定 uuid，群名完整保留空格。当前应用机器人自动加入并成为管理员，命令发送者成为群主；新群收到欢迎消息。相同消息重投返回已创建结果但不重复建群；非 owner 被明确拒绝；`/help` 展示 `/new <群名>` 及仅 Provider owner 可用的限制。生产配置仍只接受飞书/Lark 官方 API 域名，loopback 仅在显式 E2E 开关下可用。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -305,6 +314,15 @@ TC-FGS-23 的确定性并发审计时序执行：
 CONCURRENT_INJECT_DELAY_SECONDS=3 SKIP_BUILD=true \
   bash e2e-tests/tests/test_feishu_group_session_context.sh
 ```
+
+TC-FGS-24 的建群、owner 权限、幂等、欢迎消息与 help 路径执行：
+
+```bash
+SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+  bash e2e-tests/tests/test_feishu_new_group_command.sh
+```
+
+执行记录：2026-08-07 PASS。真实启动最新 debug 二进制与假飞书 OpenAPI，验证一次建群、同 `message_id` 重投、非 owner 群聊命令、欢迎消息、SQLite 幂等记录和 `/help` 文案；脚本输出 `[feishu-new-group-command] PASS`，退出后自动清理临时进程与目录。CI 广域 Shell 矩阵复用 release 二进制时，脚本明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不可为了假服务放宽生产飞书域名白名单；请求形状与错误矩阵继续由 release 同源单元测试覆盖。
 
 ## 清理步骤
 

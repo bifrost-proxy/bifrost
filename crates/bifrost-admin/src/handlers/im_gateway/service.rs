@@ -68,6 +68,25 @@ pub(super) enum ImProviderClient {
 }
 
 impl ImProviderClient {
+    pub(super) async fn create_feishu_group_chat(
+        &self,
+        config: &ImProviderConfig,
+        name: &str,
+        owner_open_id: &str,
+        uuid: &str,
+    ) -> bifrost_core::Result<crate::im_gateway::feishu::FeishuCreatedChat> {
+        match self {
+            Self::Feishu(provider) => {
+                provider
+                    .create_group_chat(config, name, owner_open_id, uuid)
+                    .await
+            }
+            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
+                "/new is only supported by Feishu providers".to_string(),
+            )),
+        }
+    }
+
     pub(super) fn feishu(&self) -> Option<Arc<crate::im_gateway::feishu::FeishuProvider>> {
         match self {
             Self::Feishu(provider) => Some(provider.clone()),

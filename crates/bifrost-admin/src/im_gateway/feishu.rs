@@ -142,6 +142,12 @@ pub struct FeishuBotIdentity {
     pub name: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeishuCreatedChat {
+    pub chat_id: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct TokenCacheKey {
     base_url: String,
@@ -174,6 +180,89 @@ impl FeishuProvider {
             token_cache: RwLock::new(HashMap::new()),
             bot_identity_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub async fn create_group_chat(
+        &self,
+        config: &ImProviderConfig,
+        name: &str,
+        owner_open_id: &str,
+        uuid: &str,
+    ) -> Result<FeishuCreatedChat> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!(
+            "{base_url}/im/v1/chats?user_id_type=open_id&set_bot_manager=true&uuid={}",
+            urlencoding::encode(uuid)
+        );
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&serde_json::json!({
+                "name": name,
+                "owner_id": owner_open_id,
+                "chat_mode": "group",
+                "chat_type": "private"
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                bifrost_core::BifrostError::Network(format!(
+                    "Feishu create group request failed: {error}"
+                ))
+            })?;
+        let request_id = response
+            .headers()
+            .get("x-tt-logid")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let value: serde_json::Value = response.json().await.map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "Feishu create group response parse failed: {error}"
+            ))
+        })?;
+        let code = value
+            .get("code")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+        if code != 0 {
+            let message = value
+                .get("msg")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error");
+            let request_suffix = request_id
+                .as_deref()
+                .map(|id| format!(", request_id={id}"))
+                .unwrap_or_default();
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "Feishu create group failed: code={code}, msg={message}{request_suffix}"
+            )));
+        }
+        let data = value.get("data").unwrap_or(&value);
+        let chat_id = data
+            .get("chat_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Network(
+                    "Feishu create group response missing chat_id".to_string(),
+                )
+            })?
+            .to_string();
+        let response_name = data
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(name)
+            .to_string();
+        Ok(FeishuCreatedChat {
+            chat_id,
+            name: response_name,
+        })
     }
 
     /// Get the base URL from config, falling back to the default Feishu API URL.
@@ -2643,12 +2732,14 @@ fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use http_body_util::Full;
+    use http_body_util::{BodyExt, Full};
     use hyper::body::Incoming;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response, StatusCode};
     use hyper_util::rt::TokioIo;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     async fn spawn_feishu_api_server(
         bot_body: &'static str,
@@ -2697,6 +2788,179 @@ mod tests {
             }
         });
         (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn create_group_chat_sends_private_owner_managed_idempotent_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind create group fixture");
+        let address = listener.local_addr().unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_server = Arc::clone(&captured);
+        let task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let captured = Arc::clone(&captured_server);
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let captured = Arc::clone(&captured);
+                        async move {
+                            let path = request.uri().path().to_string();
+                            let query = request.uri().query().unwrap_or_default().to_string();
+                            let body = request.into_body().collect().await.unwrap().to_bytes();
+                            let response = if path
+                                .ends_with("/auth/v3/tenant_access_token/internal")
+                            {
+                                r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+                            } else {
+                                *captured.lock().await = Some((path, query, body.to_vec()));
+                                r#"{"code":0,"data":{"chat_id":"oc_created","name":"发布 项目群"}}"#
+                            };
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from_static(response.as_bytes())))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let provider = FeishuProvider::new();
+        let mut config = provider_with_base_url(Some(&format!("http://{address}/open-apis")));
+        config.secret_ref = Some("secret".to_string());
+        let created = provider
+            .create_group_chat(&config, "发布 项目群", "ou_owner", "stable uuid")
+            .await
+            .unwrap();
+        assert_eq!(created.chat_id, "oc_created");
+        assert_eq!(created.name, "发布 项目群");
+        let (path, query, body) = captured.lock().await.clone().expect("create request");
+        assert_eq!(path, "/open-apis/im/v1/chats");
+        let query: std::collections::HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(
+            query.get("user_id_type").map(String::as_str),
+            Some("open_id")
+        );
+        assert_eq!(
+            query.get("set_bot_manager").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(query.get("uuid").map(String::as_str), Some("stable uuid"));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["name"], "发布 项目群");
+        assert_eq!(body["owner_id"], "ou_owner");
+        assert_eq!(body["chat_mode"], "group");
+        assert_eq!(body["chat_type"], "private");
+        assert!(body.get("bot_id_list").is_none());
+        task.abort();
+    }
+
+    async fn create_group_error_fixture(
+        body: &'static str,
+        request_id: Option<&'static str>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind create group error fixture");
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(move |_request: Request<Incoming>| async move {
+                let mut response = Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/json");
+                if let Some(request_id) = request_id {
+                    response = response.header("x-tt-logid", request_id);
+                }
+                Ok::<_, hyper::Error>(
+                    response
+                        .body(Full::new(Bytes::from_static(body.as_bytes())))
+                        .unwrap(),
+                )
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+        (format!("http://{address}/open-apis"), task)
+    }
+
+    fn cache_create_group_token(provider: &FeishuProvider, config: &ImProviderConfig) {
+        let base_url = FeishuProvider::base_url(config);
+        let cache_key = FeishuProvider::token_cache_key(
+            base_url,
+            config.app_id.as_deref().unwrap_or_default(),
+            config.secret_ref.as_deref().unwrap_or_default(),
+        );
+        provider.token_cache.write().insert(
+            cache_key,
+            TokenCache {
+                token: "cached".to_string(),
+                expires_at: u64::MAX,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn new_group_chat_reports_api_parse_shape_and_network_errors() {
+        for (body, request_id, expected) in [
+            ("not-json", None, "response parse failed"),
+            (
+                r#"{"code":999,"msg":"denied"}"#,
+                Some("log-create-1"),
+                "code=999, msg=denied, request_id=log-create-1",
+            ),
+            (r#"{"code":0,"data":{}}"#, None, "missing chat_id"),
+        ] {
+            let (base_url, server) = create_group_error_fixture(body, request_id).await;
+            let mut config = provider_with_base_url(Some(&base_url));
+            config.secret_ref = Some("secret".to_string());
+            let provider = FeishuProvider::new();
+            cache_create_group_token(&provider, &config);
+            let error = provider
+                .create_group_chat(&config, "发布群", "ou_owner", "uuid")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "unexpected error: {error}");
+            server.abort();
+        }
+
+        let (base_url, server) = create_group_error_fixture(
+            r#"{"code":0,"data":{"chat_id":"oc_created","name":" "}}"#,
+            None,
+        )
+        .await;
+        let mut config = provider_with_base_url(Some(&base_url));
+        config.secret_ref = Some("secret".to_string());
+        let provider = FeishuProvider::new();
+        cache_create_group_token(&provider, &config);
+        let created = provider
+            .create_group_chat(&config, "回退群名", "ou_owner", "uuid")
+            .await
+            .unwrap();
+        assert_eq!(created.name, "回退群名");
+        server.abort();
+
+        let mut unreachable = provider_with_base_url(Some("http://127.0.0.1:9/open-apis"));
+        unreachable.secret_ref = Some("secret".to_string());
+        let provider = FeishuProvider::new();
+        cache_create_group_token(&provider, &unreachable);
+        assert!(provider
+            .create_group_chat(&unreachable, "失败群", "ou_owner", "uuid")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("request failed"));
     }
 
     #[test]

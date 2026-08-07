@@ -1,5 +1,330 @@
 use super::*;
 
+async fn spawn_new_group_feishu_server() -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake Feishu server");
+    let address = listener.local_addr().expect("fake Feishu address");
+    let creates = Arc::new(AtomicUsize::new(0));
+    let server_creates = Arc::clone(&creates);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let creates = Arc::clone(&server_creates);
+            tokio::spawn(async move {
+                let handler = service_fn(move |request: Request<Incoming>| {
+                    let creates = Arc::clone(&creates);
+                    async move {
+                        let path = request.uri().path();
+                        let body = if path.ends_with("/auth/v3/tenant_access_token/internal") {
+                            r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+                        } else if path.ends_with("/im/v1/chats") {
+                            creates.fetch_add(1, Ordering::SeqCst);
+                            r#"{"code":0,"data":{"chat_id":"oc_created","name":"发布群"}}"#
+                        } else {
+                            r#"{"code":0,"data":{"message_id":"om_reply"}}"#
+                        };
+                        Ok::<_, std::convert::Infallible>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header("content-type", "application/json")
+                                .body(Full::new(Bytes::from_static(body.as_bytes())))
+                                .unwrap(),
+                        )
+                    }
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), handler)
+                    .await;
+            });
+        }
+    });
+    (format!("http://{address}/open-apis"), creates, task)
+}
+
+async fn spawn_new_group_feishu_response_server(
+    create_body: &'static str,
+    message_body: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake Feishu response server");
+    let address = listener.local_addr().expect("fake Feishu address");
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let handler = service_fn(move |request: Request<Incoming>| async move {
+                    let path = request.uri().path();
+                    let body = if path.ends_with("/auth/v3/tenant_access_token/internal") {
+                        r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+                    } else if path.ends_with("/im/v1/chats") {
+                        create_body
+                    } else {
+                        message_body
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Full::new(Bytes::from_static(body.as_bytes())))
+                            .unwrap(),
+                    )
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), handler)
+                    .await;
+            });
+        }
+    });
+    (format!("http://{address}/open-apis"), task)
+}
+
+fn new_group_event(
+    provider: &ImProviderConfig,
+    user_id: Option<&str>,
+    message_id: &str,
+) -> ImEvent {
+    ImEvent {
+        event_id: format!("event-{message_id}"),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("oc_source".to_string()),
+            user_id: user_id.map(str::to_string),
+            message_id: Some(message_id.to_string()),
+            ..Default::default()
+        },
+        message: Some(crate::im_gateway::types::ImEventMessage {
+            text: "/new 发布群".to_string(),
+            ..Default::default()
+        }),
+        received_at: now_ms(),
+        raw_digest: None,
+    }
+}
+
+#[tokio::test]
+pub(super) async fn im_new_group_handler_enforces_owner_and_persists_success_for_replay() {
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().expect("temp data dir");
+    let service = ImGatewayService::new(temp.path());
+    let (base_url, creates, server) = spawn_new_group_feishu_server().await;
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("ou_owner".to_string());
+    provider.base_url = Some(base_url);
+    provider.secret_ref = Some("secret".to_string());
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let owner_event = new_group_event(&provider, Some("ou_owner"), "om-new");
+
+    assert!(
+        handle_im_new_group_command(
+            "/new 发布群",
+            &client,
+            &provider,
+            &owner_event,
+            &service.group_context_store,
+            &service.message_log_store,
+        )
+        .await
+    );
+    assert!(
+        handle_im_new_group_command(
+            "/new 发布群",
+            &client,
+            &provider,
+            &owner_event,
+            &service.group_context_store,
+            &service.message_log_store,
+        )
+        .await
+    );
+    assert_eq!(creates.load(Ordering::SeqCst), 1);
+    assert!(service.message_log_store.list().iter().any(|log| log
+        .content
+        .as_deref()
+        .is_some_and(|text| text.contains("未重复创建"))));
+
+    let denied = new_group_event(&provider, Some("ou_other"), "om-denied");
+    assert!(
+        handle_im_new_group_command(
+            "/new 越权群",
+            &client,
+            &provider,
+            &denied,
+            &service.group_context_store,
+            &service.message_log_store,
+        )
+        .await
+    );
+    let missing_sender = new_group_event(&provider, None, "om-missing-sender");
+    assert!(
+        handle_im_new_group_command(
+            "/new 缺发送者",
+            &client,
+            &provider,
+            &missing_sender,
+            &service.group_context_store,
+            &service.message_log_store,
+        )
+        .await
+    );
+    let mut no_owner = provider.clone();
+    no_owner.owner_open_id = None;
+    assert!(
+        handle_im_new_group_command(
+            "/new 无 owner",
+            &client,
+            &no_owner,
+            &owner_event,
+            &service.group_context_store,
+            &service.message_log_store,
+        )
+        .await
+    );
+    assert!(
+        handle_im_new_group_command(
+            "/new",
+            &client,
+            &provider,
+            &owner_event,
+            &service.group_context_store,
+            &service.message_log_store,
+        )
+        .await
+    );
+    let mut weixin = provider.clone();
+    weixin.provider_type = ImProviderType::Weixin;
+    assert!(
+        !handle_im_new_group_command(
+            "/new ignored",
+            &client,
+            &weixin,
+            &owner_event,
+            &service.group_context_store,
+            &service.message_log_store,
+        )
+        .await
+    );
+    server.abort();
+}
+
+#[tokio::test]
+pub(super) async fn im_new_group_handler_reports_storage_api_and_welcome_failures() {
+    async fn run_case(
+        create_body: &'static str,
+        message_body: &'static str,
+        mutate_store: impl FnOnce(&ImGroupContextStore),
+        expected: &str,
+        blank_message_id: bool,
+    ) {
+        let temp = tempfile::tempdir().expect("temp data dir");
+        let service = ImGatewayService::new(temp.path());
+        mutate_store(&service.group_context_store);
+        let (base_url, server) =
+            spawn_new_group_feishu_response_server(create_body, message_body).await;
+        let mut provider = test_provider();
+        provider.owner_open_id = Some("ou_owner".to_string());
+        provider.base_url = Some(base_url);
+        provider.secret_ref = Some("secret".to_string());
+        let client =
+            ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+        let mut event = new_group_event(&provider, Some("ou_owner"), "om-error");
+        if blank_message_id {
+            event.source.message_id = Some(" ".to_string());
+        }
+
+        assert!(
+            handle_im_new_group_command(
+                "/new 失败路径群",
+                &client,
+                &provider,
+                &event,
+                &service.group_context_store,
+                &service.message_log_store,
+            )
+            .await
+        );
+        assert!(
+            service.message_log_store.list().iter().any(|log| log
+                .content
+                .as_deref()
+                .is_some_and(|text| text.contains(expected))),
+            "missing expected reply fragment: {expected}"
+        );
+        server.abort();
+    }
+
+    run_case(
+        r#"{"code":0,"data":{"chat_id":"oc_created","name":"失败路径群"}}"#,
+        r#"{"code":0,"data":{"message_id":"om_reply"}}"#,
+        |store| {
+            let connection = rusqlite::Connection::open(store.file_path()).unwrap();
+            connection
+                .execute("DROP TABLE im_feishu_new_groups", [])
+                .unwrap();
+        },
+        "读取建群幂等记录失败",
+        false,
+    )
+    .await;
+
+    run_case(
+        r#"{"code":999,"msg":"forbidden"}"#,
+        r#"{"code":0,"data":{"message_id":"om_reply"}}"#,
+        |_| {},
+        "创建飞书群失败",
+        true,
+    )
+    .await;
+
+    run_case(
+        r#"{"code":0,"data":{"chat_id":"oc_created","name":"失败路径群"}}"#,
+        r#"{"code":0,"data":{"message_id":"om_reply"}}"#,
+        |store| {
+            let connection = rusqlite::Connection::open(store.file_path()).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER reject_new_group_insert
+                     BEFORE INSERT ON im_feishu_new_groups
+                     BEGIN SELECT RAISE(ABORT, 'reject insert'); END;",
+                )
+                .unwrap();
+        },
+        "保存幂等记录失败",
+        false,
+    )
+    .await;
+
+    run_case(
+        r#"{"code":0,"data":{"chat_id":"oc_created","name":"失败路径群"}}"#,
+        r#"{"code":999,"msg":"send denied"}"#,
+        |_| {},
+        "欢迎消息发送失败",
+        false,
+    )
+    .await;
+
+    let weixin = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+    let error = weixin
+        .create_feishu_group_chat(&test_provider(), "群", "ou_owner", "uuid")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("only supported by Feishu"));
+}
+
 #[test]
 pub(super) fn provider_agent_config_patch_sets_and_clears_overrides() {
     let mut provider = test_provider();
@@ -532,16 +857,47 @@ pub(super) fn im_cwd_command_rejects_invalid_paths() {
 }
 
 #[test]
+pub(super) fn im_new_group_command_parses_name_and_rejects_invalid_forms() {
+    assert_eq!(
+        parse_im_new_group_command(" /new 发布 项目群 "),
+        Some(Ok("发布 项目群".to_string()))
+    );
+    assert_eq!(
+        parse_im_new_group_command("/new"),
+        Some(Err("用法: /new <群名>".to_string()))
+    );
+    assert_eq!(
+        parse_im_new_group_command("/new   "),
+        Some(Err("用法: /new <群名>".to_string()))
+    );
+    assert_eq!(
+        parse_im_new_group_command(&format!("/new {}", "群".repeat(61))),
+        Some(Err("群名不能超过 60 个字符。".to_string()))
+    );
+    assert_eq!(
+        parse_im_new_group_command(&format!("/new {}", "群".repeat(60))),
+        Some(Ok("群".repeat(60)))
+    );
+    assert!(parse_im_new_group_command("/new-project").is_none());
+    assert!(parse_im_new_group_command("请 /new 新群").is_none());
+}
+
+#[test]
 pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
-    let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
-        adapter: crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string(),
-    });
+    let help = build_im_startup_help_for_runner(
+        &ImHelpRunnerKind::External {
+            adapter: crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string(),
+        },
+        ImProviderType::Feishu,
+    );
 
     assert!(help.contains("IM 通道命令（所有 Runner）:"));
     assert!(help.contains("/help"));
     assert!(help.contains("/status"));
     assert!(help.contains("/cwd <绝对路径>"));
     assert!(help.contains("/runner [Runner]"));
+    assert!(help.contains("/new <群名>"));
+    assert!(help.contains("仅 Provider owner"));
     assert!(help.contains("/clear"));
     assert!(help.contains("/reset"));
     assert!(help.contains("/q <消息>"));
@@ -563,9 +919,12 @@ pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
 
 #[test]
 pub(super) fn im_help_for_codex_runner_lists_fast_command() {
-    let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
-        adapter: "codex".to_string(),
-    });
+    let help = build_im_startup_help_for_runner(
+        &ImHelpRunnerKind::External {
+            adapter: "codex".to_string(),
+        },
+        ImProviderType::Feishu,
+    );
 
     assert!(help.contains("Codex Runner 命令:"));
     assert!(help.contains("/fast [on|off|status]"));
@@ -573,13 +932,17 @@ pub(super) fn im_help_for_codex_runner_lists_fast_command() {
 
 #[test]
 pub(super) fn im_help_for_unsupported_external_runner_omits_unsupported_commands() {
-    let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
-        adapter: "chatgpt_web".to_string(),
-    });
+    let help = build_im_startup_help_for_runner(
+        &ImHelpRunnerKind::External {
+            adapter: "chatgpt_web".to_string(),
+        },
+        ImProviderType::Weixin,
+    );
 
     assert!(help.contains("IM 通道命令（所有 Runner）:"));
     assert!(!help.contains("/models"));
     assert!(!help.contains("/model [模型]"));
+    assert!(!help.contains("/new <群名>"));
     assert!(!help.contains("/efforts"));
     assert!(!help.contains("/effort [级别]"));
     assert!(!help.contains("/fast [on|off|status]"));

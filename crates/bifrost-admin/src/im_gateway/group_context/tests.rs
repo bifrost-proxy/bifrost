@@ -310,6 +310,35 @@ fn same_group_multiple_bots_only_trigger_the_matching_provider_identity() {
 }
 
 #[test]
+fn created_feishu_group_results_are_persisted_by_source_message() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let record = super::CreatedFeishuGroupRecord {
+        provider_id: "feishu-main".to_string(),
+        source_message_id: "om_new_group".to_string(),
+        group_name: "发布讨论".to_string(),
+        chat_id: "oc_created".to_string(),
+        owner_open_id: "ou_owner".to_string(),
+        created_at: 42,
+    };
+    store.save_created_feishu_group(&record).unwrap();
+
+    let reloaded = ImGroupContextStore::new(temp.path());
+    assert_eq!(
+        reloaded
+            .created_feishu_group("feishu-main", "om_new_group")
+            .unwrap(),
+        Some(record)
+    );
+    assert_eq!(
+        reloaded
+            .created_feishu_group("other", "om_new_group")
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn feishu_sender_at_uses_empty_label_fallback_and_escapes_markup() {
     assert_eq!(
         feishu_sender_at("ou_alice", Some("Alice")),
