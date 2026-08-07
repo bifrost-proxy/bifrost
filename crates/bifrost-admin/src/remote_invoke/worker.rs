@@ -57,6 +57,7 @@ use super::types::{
 use crate::state::SharedAdminState;
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 25;
+const SSE_IDLE_TIMEOUT_MULTIPLIER: u64 = 3;
 const INITIAL_RECONNECT_DELAY_MS: u64 = 1000;
 const MAX_RECONNECT_DELAY_MS: u64 = 60000;
 const PAIR_CODE_DIGITS: u32 = 6;
@@ -1343,6 +1344,11 @@ impl RemoteInvokeWorker {
     }
 
     async fn run_sse_session(&self) -> Result<()> {
+        let idle_timeout = Duration::from_millis(
+            self.config
+                .sse_keepalive_ms
+                .saturating_mul(SSE_IDLE_TIMEOUT_MULTIPLIER),
+        );
         let stream_id = uuid::Uuid::new_v4().to_string();
         *self.current_stream_id.write() = Some(stream_id.clone());
 
@@ -1483,9 +1489,17 @@ impl RemoteInvokeWorker {
         use futures_util::StreamExt;
 
         let mut partial_line = String::new();
+        let idle_deadline = tokio::time::sleep(idle_timeout);
+        tokio::pin!(idle_deadline);
 
         loop {
             tokio::select! {
+                _ = &mut idle_deadline => {
+                    return Err(BifrostError::Network(format!(
+                        "SSE stream idle timeout after {} ms; reconnecting (stream_id={stream_id})",
+                        idle_timeout.as_millis()
+                    )));
+                }
                 _ = heartbeat_ticker.tick() => {
                     if self.shutdown.load(Ordering::SeqCst) {
                         return Ok(());
@@ -1517,6 +1531,9 @@ impl RemoteInvokeWorker {
                 chunk = stream.next() => {
                     match chunk {
                         Some(Ok(bytes)) => {
+                            idle_deadline
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + idle_timeout);
                             let text = String::from_utf8_lossy(&bytes);
                             debug!(
                                 bytes_len = bytes.len(),
@@ -6613,6 +6630,176 @@ mod coverage_boost {
     use serde_json::{json, Value};
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[derive(Clone, Copy)]
+    enum TestSseBehavior {
+        Silent,
+        PingThenClose,
+    }
+
+    async fn spawn_test_sse_relay(
+        behavior: TestSseBehavior,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test SSE relay");
+        let addr = listener.local_addr().expect("test SSE relay address");
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+                    loop {
+                        let Ok(read) = socket.read(&mut buffer).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buffer[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request);
+                    if request.contains("/v4/remote-invoke/client/stream?") {
+                        socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n",
+                            )
+                            .await
+                            .expect("write SSE headers");
+                        match behavior {
+                            TestSseBehavior::Silent => {
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                            }
+                            TestSseBehavior::PingThenClose => {
+                                for _ in 0..3 {
+                                    tokio::time::sleep(Duration::from_millis(20)).await;
+                                    let payload = "event: ping\ndata: {}\n\n";
+                                    let chunk = format!("{:x}\r\n{}\r\n", payload.len(), payload);
+                                    socket
+                                        .write_all(chunk.as_bytes())
+                                        .await
+                                        .expect("write SSE ping");
+                                }
+                                socket
+                                    .write_all(b"0\r\n\r\n")
+                                    .await
+                                    .expect("finish SSE stream");
+                            }
+                        }
+                    } else if request.contains("/v4/remote-invoke/client/active-grants?") {
+                        let body = r#"{"code":0,"message":null,"data":[]}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body,
+                        );
+                        socket
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("write active grants response");
+                    } else {
+                        socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                            )
+                            .await
+                            .expect("write not found response");
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    fn make_test_worker_for_relay(
+        relay_url: &str,
+        sse_keepalive_ms: u64,
+    ) -> (TestAdminState, Arc<RemoteInvokeWorker>) {
+        let harness = TestAdminState::builder().build();
+        let data_dir = harness.data_dir().to_path_buf();
+        let identity = Identity::load_or_create(&data_dir).expect("identity");
+        let config = RemoteInvokeConfig {
+            enabled: true,
+            relay_url: relay_url.to_string(),
+            sse_keepalive_ms,
+            ..Default::default()
+        };
+        let relay_client = Arc::new(RelayClient::new(
+            relay_url,
+            &identity.instance_id,
+            &identity.device_name,
+            &identity.platform,
+        ));
+        relay_client.set_auth_token("test-token".to_string());
+        let worker = Arc::new(RemoteInvokeWorker {
+            config,
+            identity,
+            sync_manager: None,
+            relay_client,
+            executor: Arc::new(RemoteInvokeExecutor::new_with_state(
+                "127.0.0.1",
+                0,
+                harness.state(),
+            )),
+            state: Arc::new(RwLock::new(WorkerState::Disconnected)),
+            pending_pairings: Arc::new(RwLock::new(HashMap::new())),
+            active_calls: Arc::new(RwLock::new(HashMap::new())),
+            early_call_frames: Arc::new(RwLock::new(HashMap::new())),
+            early_call_frame_saturated_until: Arc::new(AtomicU64::new(0)),
+            call_history_store: Arc::new(CallHistoryStore::new(&data_dir)),
+            local_grants: Arc::new(RwLock::new(HashMap::new())),
+            grant_crypto: Arc::new(RwLock::new(HashMap::new())),
+            grant_crypto_store: Arc::new(GrantCryptoStore::new(&data_dir)),
+            grant_policy_store: Arc::new(GrantPolicyStore::new(&data_dir)),
+            grant_info_store: Arc::new(GrantInfoStore::new(&data_dir)),
+            grant_policy: Arc::new(RwLock::new(HashMap::new())),
+            discovery_session: Arc::new(RwLock::new(None)),
+            ssh_key_store: Arc::new(SshKeyStore::new(&data_dir)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            current_stream_id: Arc::new(RwLock::new(None)),
+            reconnect_notify: Arc::new(Notify::new()),
+        });
+        (harness, worker)
+    }
+
+    #[tokio::test]
+    async fn sse_idle_stream_returns_reconnectable_error() {
+        let (relay_url, relay_task) = spawn_test_sse_relay(TestSseBehavior::Silent).await;
+        let (_harness, worker) = make_test_worker_for_relay(&relay_url, 20);
+
+        let error = tokio::time::timeout(Duration::from_secs(2), worker.run_sse_session())
+            .await
+            .expect("silent SSE watchdog test must remain bounded")
+            .expect_err("silent SSE must hit the idle watchdog");
+
+        relay_task.abort();
+        let message = error.to_string();
+        assert!(message.contains("SSE stream idle timeout"), "{message}");
+        assert!(message.contains("stream_id="), "{message}");
+    }
+
+    #[tokio::test]
+    async fn sse_idle_deadline_resets_for_each_received_ping() {
+        let (relay_url, relay_task) = spawn_test_sse_relay(TestSseBehavior::PingThenClose).await;
+        let (_harness, worker) = make_test_worker_for_relay(&relay_url, 15);
+        let started = tokio::time::Instant::now();
+
+        tokio::time::timeout(Duration::from_secs(2), worker.run_sse_session())
+            .await
+            .expect("SSE ping reset test must remain bounded")
+            .expect("periodic SSE pings must keep the stream alive until normal close");
+
+        relay_task.abort();
+        assert!(started.elapsed() >= Duration::from_millis(60));
+    }
 
     /// Helper: build a worker whose storage-backed components (SSH key store,
     /// grant stores, call history) are wired directly to the harness data dir
