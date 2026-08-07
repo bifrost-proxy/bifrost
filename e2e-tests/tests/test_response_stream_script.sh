@@ -61,7 +61,7 @@ done
 kill -0 "$UPSTREAM_PID"
 
 BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" --port "$PROXY_PORT" start \
-    --skip-cert-check --unsafe-ssl --no-system-proxy --rules-file "$RULES_FILE" \
+    --skip-cert-check --unsafe-ssl --intercept --no-system-proxy --rules-file "$RULES_FILE" \
     >"$TEST_DATA_DIR/proxy.log" 2>&1 &
 PROXY_PID=$!
 
@@ -79,6 +79,7 @@ done
 python3 - "$PROXY_PORT" <<'PY'
 import hashlib
 import http.client
+import subprocess
 import sys
 import time
 
@@ -86,14 +87,67 @@ proxy_port = int(sys.argv[1])
 limit = 16 * 1024 * 1024
 
 
-def response(host, path, timeout=10):
+def raw_response(host, path, timeout=10):
     connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=timeout)
     connection.request("GET", f"http://{host}{path}", headers={"Host": host})
     result = connection.getresponse()
+    return connection, result
+
+
+def secure_request(host, path, timeout=10):
+    marker = b"\n__BIFROST_STATUS__:"
+    completed = subprocess.run(
+        [
+            "curl",
+            "-ksS",
+            "--http1.1",
+            "--max-time",
+            str(timeout),
+            "--proxy",
+            f"http://127.0.0.1:{proxy_port}",
+            "--write-out",
+            "\n__BIFROST_STATUS__:%{http_code}\n",
+            f"https://{host}{path}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert marker in completed.stdout, (host, completed.returncode, completed.stderr)
+    body, status_text = completed.stdout.rsplit(marker, 1)
+    status = int(status_text.strip())
+    assert completed.returncode == 0, (host, status, completed.stderr, body[:1024])
+    return status, body
+
+
+def response(host, path, timeout=10):
+    connection, result = raw_response(host, path, timeout=timeout)
     assert result.status == 200, (result.status, result.read(1024))
     assert result.getheader("Content-Length") is None
     assert result.getheader("Content-Type").startswith("text/event-stream")
     return connection, result
+
+
+def expect_bad_gateway(host, path, expected, secure=False):
+    if secure:
+        status, body = secure_request(host, path)
+        assert status == 502, (host, status, body)
+        assert expected in body, (host, expected, body)
+        return
+
+    connection, result = raw_response(host, path)
+    body = result.read(16 * 1024)
+    assert result.status == 502, (host, result.status, body)
+    assert expected in body, (host, expected, body)
+    connection.close()
+
+
+def expect_sse_error(host, path, expected):
+    connection, result = response(host, path)
+    body = result.read(64 * 1024)
+    assert b"event: error" in body, (host, body)
+    assert expected in body, (host, expected, body)
+    connection.close()
 
 
 # Both transformed events must arrive well before the upstream's 3-second EOF hold.
@@ -110,6 +164,15 @@ assert second == b"data: second\n", second
 assert first_at < 1.0, first_at
 assert second_at < 1.5, second_at
 conn.close()
+
+
+# HTTPS intercepted traffic follows the tunnel implementation and preserves
+# transformed events plus the onEnd output.
+tunnel_status, tunnel_body = secure_request("sse-tunnel.local", "/stream")
+assert tunnel_status == 200, (tunnel_status, tunnel_body)
+assert b"data: first\n\n" in tunnel_body, tunnel_body
+assert b"data: second\n\n" in tunnel_body, tunnel_body
+assert b"event: done\ndata: end\n\n" in tunnel_body, tunnel_body
 
 
 # Mock events are produced one callback at a time, not buffered and replayed at EOF.
@@ -147,6 +210,111 @@ assert direct_values == [
     (b"event: mock\n", b"data: 2\n"),
     (b"event: mock\n", b"data: 3\n"),
 ], direct_values
+conn.close()
+
+
+# An upstream close without an SSE delimiter still flushes the final event and
+# then emits the stream onEnd result.
+conn, stream = response("sse-tail.local", "/tail")
+assert stream.readline() == b"data: tail\n"
+assert stream.readline() == b"\n"
+assert stream.readline() == b"event: done\n"
+assert stream.readline() == b"data: end\n"
+assert stream.readline() == b"\n"
+conn.close()
+
+
+# Callback failures after response commit are serialized as SSE errors.
+expect_sse_error("sse-event-error.local", "/stream", b"bifrost_stream_script_error")
+conn, stream = response("sse-tail-end-error.local", "/tail")
+assert stream.readline() == b"data: tail\n"
+assert stream.readline() == b"\n"
+tail_error = stream.read(64 * 1024)
+assert b"event: error" in tail_error, tail_error
+assert b"bifrost_stream_script_error" in tail_error, tail_error
+conn.close()
+expect_sse_error("sse-direct-next-error.local", "/no-upstream", b"bifrost_stream_script_error")
+
+
+# HTTP response validation and initialization errors are explicit 502s.
+expect_bad_gateway(
+    "sse-conflict.local",
+    "/stream",
+    b"resScript and resStreamScript cannot be combined",
+)
+expect_bad_gateway(
+    "sse-json.local",
+    "/json",
+    b"resStreamScript requires a text/event-stream response",
+)
+expect_bad_gateway(
+    "sse-encoded.local",
+    "/encoded",
+    b"resStreamScript does not support encoded upstream SSE responses",
+)
+expect_bad_gateway(
+    "sse-init-error.local",
+    "/stream",
+    b"stream script initialization failed",
+)
+expect_bad_gateway(
+    "sse-multiple.local",
+    "/stream",
+    b"currently requires exactly one script",
+)
+expect_bad_gateway(
+    "sse-direct-conflict.local",
+    "/no-upstream",
+    b"resScript and resStreamScript cannot be combined",
+)
+expect_bad_gateway(
+    "sse-direct-transform.local",
+    "/no-upstream",
+    b"direct status resStreamScript requires stream.mode",
+)
+expect_bad_gateway(
+    "sse-direct-init-error.local",
+    "/no-upstream",
+    b"stream script initialization failed",
+)
+
+
+# The same validation and initialization failures are enforced on intercepted
+# HTTPS traffic by the tunnel implementation.
+expect_bad_gateway(
+    "sse-tunnel-conflict.local",
+    "/stream",
+    b"resScript and resStreamScript cannot be combined",
+    secure=True,
+)
+expect_bad_gateway(
+    "sse-tunnel-json.local",
+    "/json",
+    b"resStreamScript requires a text/event-stream response",
+    secure=True,
+)
+expect_bad_gateway(
+    "sse-tunnel-encoded.local",
+    "/encoded",
+    b"resStreamScript does not support encoded upstream SSE responses",
+    secure=True,
+)
+expect_bad_gateway(
+    "sse-tunnel-init-error.local",
+    "/stream",
+    b"stream script initialization failed",
+    secure=True,
+)
+
+
+# Inline request and response scripts execute with the live config and apply
+# every mutation class surfaced by ScriptManager.
+conn, inline = raw_response("inline-script.local", "/json")
+inline_body = inline.read()
+assert inline.status == 202, (inline.status, inline_body)
+assert inline.reason == "Accepted", inline.reason
+assert inline.getheader("x-inline-response") == "applied", inline.getheaders()
+assert inline_body == b"inline-response-body", inline_body
 conn.close()
 
 

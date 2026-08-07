@@ -15,9 +15,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-    def _headers(self):
+    def _headers(self, content_type="text/event-stream", content_encoding=None):
         self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Type", content_type)
+        if content_encoding is not None:
+            self.send_header("Content-Encoding", content_encoding)
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
@@ -28,8 +30,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
     def do_GET(self):
-        self._headers()
         try:
+            if self.path == "/json":
+                self._headers("application/json")
+                self._write(b'{"kind":"not-sse"}')
+            elif self.path == "/encoded":
+                self._headers(content_encoding="gzip")
+                self._write(b"data: encoded\n\n")
+            else:
+                self._headers()
+
             if self.path == "/stream":
                 self._write(b"data: first\n\n")
                 time.sleep(0.4)
@@ -42,10 +52,17 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/oversize":
                 payload = b"z" * (MAX_EVENT_BYTES + 1)
                 self._write(b"data: " + payload + b"\n\n")
+            elif self.path == "/tail":
+                self._write(b"data: tail")
+            elif self.path in {"/json", "/encoded"}:
+                pass
             else:
                 self._write(b"data: ready\n\n")
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def do_POST(self):
+        self.do_GET()
 
 
 def main():

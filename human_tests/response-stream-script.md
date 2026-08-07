@@ -98,6 +98,15 @@
 
 预期：真实 SSE 用例输出 `response stream script E2E passed`；coverage proxy suite 会执行同一用例并把 `resStreamScript` 生产路径纳入 90% 门禁统计，而不是只在普通 E2E job 中验证。
 
+## TC-RSS-13：HTTP 与 HTTPS intercepted 错误边界矩阵
+
+1. 在 HTTP 和 HTTPS intercepted 两条链路分别请求正常 Transform、`resScript` 冲突、非 SSE、带 `Content-Encoding: gzip` 的 SSE、缺失 stream script。
+2. 请求 direct status 的冲突、Transform 模式、缺失脚本和 `stream.next` 抛错场景。
+3. 让上游以无空行结尾的 `data: tail` 关闭，并分别验证正常 `onEnd` 与 `onEnd` 抛错。
+4. 通过 inline `reqScript`/`resScript` 修改 method、请求体、响应 status/statusText/header/body 并检查最终响应。
+
+预期：HTTP 正常 Transform 在上游 EOF 前输出，HTTPS intercepted 链路保留 Transform 与 onEnd 结果；所有配置错误明确返回 502；流开始后的回调错误编码为 SSE error；尾部 event 不丢失；inline request/response 修改全部生效。
+
 ## 本次执行记录（2026-08-07）
 
 - TC-RSS-01 至 TC-RSS-05：执行 `BIFROST_BIN=target/release/bifrost bash e2e-tests/tests/test_response_stream_script.sh`，真实独立数据目录、代理与 fixture 全部通过。
@@ -105,3 +114,4 @@
 - TC-RSS-07 至 TC-RSS-10：对应 Rust 单元/集成测试通过，且 `cargo clippy -p bifrost-script -p bifrost-proxy --all-targets --all-features -- -D warnings` 通过。
 - TC-RSS-11：在规则中配置 `statusCode://200 resHeaders://{sse_headers} resStreamScript://{mock_stream}`，真实请求 `sse-direct-mock.local/no-upstream`；无需上游即可返回 200、SSE headers 与三步 Mock event。页面 Run 边界继续由 Web build 验证。
 - TC-RSS-12：确认 `scripts/ci/proxy-coverage-shell-tests.txt` 已纳入 `test_response_stream_script.sh`；执行 `cargo build --bin bifrost` 后运行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_response_stream_script.sh`，Transform、上游 Mock、直接状态 Mock、接近 16 MiB event 与超限错误五条链路全部通过，输出 `response stream script E2E passed`。
+- TC-RSS-13：执行同一真实 E2E，覆盖 HTTP 与 HTTPS intercepted 的成功/冲突/非 SSE/编码/初始化失败，direct status 错误，尾部 event 与回调异常，以及 inline req/res 修改；所有断言通过。

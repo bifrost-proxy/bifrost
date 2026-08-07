@@ -1,8 +1,32 @@
-# 验证 resStreamScript 的真实逐事件转发、mock 节奏和大事件无损处理。
+# 验证 resStreamScript 的 HTTP/TLS 逐事件转发、错误边界、mock 节奏和大事件无损处理。
 # 端口占位符由配套的 test_response_stream_script.sh 在运行时替换。
 sse-transform.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
 sse-mock.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{mock_stream}
 sse-direct-mock.local statusCode://200 resHeaders://{sse_headers} resStreamScript://{mock_stream}
+sse-tail.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
+sse-event-error.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{event_error_stream}
+sse-tail-end-error.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{end_error_stream}
+sse-conflict.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resScript://missing-response resStreamScript://{transform_stream}
+sse-json.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
+sse-encoded.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
+sse-init-error.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://missing-stream
+sse-multiple.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream} resStreamScript://{event_error_stream}
+sse-direct-conflict.local statusCode://200 resScript://missing-response resStreamScript://{mock_stream}
+sse-direct-transform.local statusCode://200 resStreamScript://{transform_stream}
+sse-direct-init-error.local statusCode://200 resStreamScript://missing-stream
+sse-direct-next-error.local statusCode://200 resStreamScript://{mock_error_stream}
+inline-script.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ reqScript://{inline_request} resScript://{inline_response}
+
+sse-tunnel.local tlsIntercept://
+https://sse-tunnel.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resStreamScript://{transform_stream}
+sse-tunnel-conflict.local tlsIntercept://
+https://sse-tunnel-conflict.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resScript://missing-response resStreamScript://{transform_stream}
+sse-tunnel-json.local tlsIntercept://
+https://sse-tunnel-json.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resStreamScript://{transform_stream}
+sse-tunnel-encoded.local tlsIntercept://
+https://sse-tunnel-encoded.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resStreamScript://{transform_stream}
+sse-tunnel-init-error.local tlsIntercept://
+https://sse-tunnel-init-error.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resStreamScript://missing-stream
 
 ``` sse_headers
 Content-Type: text/event-stream
@@ -11,6 +35,7 @@ Content-Type: text/event-stream
 ``` transform_stream
 stream.mode = "transform";
 stream.onEvent = (event) => ({ event: event.event, data: event.data });
+stream.onEnd = () => ({ event: "done", data: "end" });
 ```
 
 ``` mock_stream
@@ -27,4 +52,33 @@ stream.next = () => {
   }
   return { done: true };
 };
+```
+
+``` event_error_stream
+stream.mode = "transform";
+stream.onEvent = () => { throw new Error("event boom"); };
+```
+
+``` end_error_stream
+stream.mode = "transform";
+stream.onEvent = (event) => ({ event: event.event, data: event.data });
+stream.onEnd = () => { throw new Error("end boom"); };
+```
+
+``` mock_error_stream
+stream.mode = "mock";
+stream.next = () => { throw new Error("next boom"); };
+```
+
+``` inline_request
+request.method = "POST";
+request.headers["x-inline-request"] = "applied";
+request.body = "inline-request-body";
+```
+
+``` inline_response
+response.status = 202;
+response.statusText = "Accepted";
+response.headers["x-inline-response"] = "applied";
+response.body = "inline-response-body";
 ```
