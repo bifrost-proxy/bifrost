@@ -2141,11 +2141,47 @@ async fn maybe_external_cli_slash_response(
     stream: bool,
 ) -> Option<Response<BoxBody>> {
     if let Some(response) =
+        maybe_external_cli_resume_slash_response(request, effective, stream).await
+    {
+        return Some(response);
+    }
+    if let Some(response) =
         maybe_external_cli_model_slash_response(request, effective, stream).await
     {
         return Some(response);
     }
     maybe_external_cli_effort_slash_response(request, effective, stream).await
+}
+
+async fn maybe_external_cli_resume_slash_response(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
+    stream: bool,
+) -> Option<Response<BoxBody>> {
+    let command =
+        crate::im_gateway::external_cli::parse_external_cli_resume_slash_command(&request.message)?;
+    let command = match command {
+        Ok(command) => command,
+        Err(error) => return Some(model_slash_error_response(&error, stream)),
+    };
+    let selection = request.session_key.as_ref().map(|session_key| {
+        crate::im_gateway::external_cli::LocalSessionSelectionContext {
+            session_key: session_key.clone(),
+            runner_id: effective.runner_id.clone(),
+        }
+    });
+    let response = match crate::im_gateway::external_cli::execute_local_session_resume_command(
+        request.adapter.clone(),
+        command,
+        selection,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => return Some(model_slash_error_response(&error, stream)),
+    };
+    remember_model_slash_result_state(request, &effective.runner_id, &response);
+    Some(model_slash_success_response(&response, stream))
 }
 
 async fn maybe_external_cli_effort_slash_response(
@@ -4867,6 +4903,119 @@ mod tests {
         )
         .expect("take after consume")
         .is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_resume_slash_lists_selects_and_reports_request_errors() {
+        struct VarGuard(Option<std::ffi::OsString>);
+        impl Drop for VarGuard {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("CODEX_HOME", value);
+                } else {
+                    std::env::remove_var("CODEX_HOME");
+                }
+            }
+        }
+
+        let _env_lock = crate::im_gateway::external_cli::local_session_test_env_lock()
+            .lock()
+            .await;
+        let home = tempfile::tempdir().expect("codex home");
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let _data_guard =
+            crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(data_dir.path());
+        let _home_guard = VarGuard(std::env::var_os("CODEX_HOME"));
+        std::env::set_var("CODEX_HOME", home.path());
+        let id = "dddddddd-0000-0000-0000-000000000005";
+        let session_path = home.path().join("sessions/resume.jsonl");
+        std::fs::create_dir_all(session_path.parent().expect("parent")).expect("create sessions");
+        std::fs::write(
+            &session_path,
+            format!(
+                "{{\"timestamp\":\"2026-08-07T04:05:06Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n"
+            ),
+        )
+        .expect("write session");
+
+        let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+        let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+            &config,
+            None,
+            Some(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID),
+        );
+        let request = |message: &str, adapter: &str, session_key: Option<&str>| {
+            crate::im_gateway::external_cli::ExternalCliRunRequest {
+                message: message.to_string(),
+                images: Vec::new(),
+                files: Vec::new(),
+                operation: "chat".to_string(),
+                params: serde_json::Value::Null,
+                provider_id: None,
+                runner_id: Some(effective.runner_id.clone()),
+                session_key: session_key.map(str::to_string),
+                runtime: "external_cli".to_string(),
+                adapter: adapter.to_string(),
+                work_dir: None,
+                instructions: None,
+                adapter_config: Default::default(),
+                allow_work_dirs: Vec::new(),
+                inject_bifrost_tools: false,
+                skill_paths: Vec::new(),
+            }
+        };
+        async fn body_text(response: Response<BoxBody>) -> String {
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("collect response")
+                .to_bytes();
+            String::from_utf8(bytes.to_vec()).expect("utf8 response")
+        }
+
+        let listed = maybe_external_cli_slash_response(
+            &request("/resume", "codex", Some("web:resume-handler")),
+            &effective,
+            false,
+        )
+        .await
+        .expect("list response");
+        assert!(body_text(listed).await.contains(id));
+
+        let picked = maybe_external_cli_resume_slash_response(
+            &request("/resume dddddddd", "codex", Some("web:resume-handler")),
+            &effective,
+            false,
+        )
+        .await
+        .expect("pick response");
+        assert!(body_text(picked).await.contains("已选择本地 session"));
+        let state = crate::im_gateway::session_state::load_session_state(
+            "web:resume-handler",
+            "codex",
+            Some(&effective.runner_id),
+        )
+        .expect("selected state");
+        assert_eq!(state.external_thread_id.as_deref(), Some(id));
+
+        for invalid in [
+            request("/resume too many", "codex", Some("web:resume-handler")),
+            request("/resume dddddddd", "mock", Some("web:resume-handler")),
+            request("/resume dddddddd", "codex", None),
+        ] {
+            let response = maybe_external_cli_resume_slash_response(&invalid, &effective, false)
+                .await
+                .expect("error response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(maybe_external_cli_resume_slash_response(
+            &request("hello", "codex", Some("web:resume-handler")),
+            &effective,
+            false,
+        )
+        .await
+        .is_none());
     }
 }
 

@@ -16,6 +16,16 @@ use tokio::time::{sleep, timeout};
 use bifrost_agent::{PlanStep, PlanStepStatus};
 use bifrost_core::EXTERNAL_CLI_WORKER_ENV;
 
+mod local_sessions;
+#[cfg(test)]
+pub(crate) use local_sessions::local_session_test_env_lock;
+pub use local_sessions::{
+    discover_local_sessions, execute_local_session_resume_command, format_local_session_list,
+    parse_external_cli_resume_slash_command, persist_local_session_selection,
+    resolve_local_session, supports_external_cli_resume_slash, ExternalCliResumeSlashCommand,
+    LocalExternalSession, LocalSessionSelectionContext,
+};
+
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
 pub const CODEX_FAST_SERVICE_TIER: &str = "fast";

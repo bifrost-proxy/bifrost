@@ -164,6 +164,24 @@ pub(super) async fn handle_idle_im_command(
         return true;
     }
 
+    if handle_im_resume_command(
+        trimmed,
+        session_key,
+        agent_config,
+        ImModelCommandContext {
+            client: ctx.client,
+            provider: ctx.provider,
+            external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
+            event: ctx.event,
+            message_log_store: ctx.message_log_store,
+        },
+    )
+    .await
+    {
+        return true;
+    }
+
     if handle_im_model_command(
         trimmed,
         session_key,
@@ -300,6 +318,11 @@ pub(super) fn build_im_channel_help_sections(runner_kind: &ImHelpRunnerKind) -> 
                     .push("/models        查看当前 Codex/Traex/Claude Code Runner 可选模型");
                 runner_lines.push(
                     "/model [模型]   查看或切换当前 Codex/Traex/Claude Code Runner 的 session 模型；/model clear 清除",
+                );
+            }
+            if crate::im_gateway::external_cli::supports_external_cli_resume_slash(adapter) {
+                runner_lines.push(
+                    "/resume [session-id]  查看最近 20 个本地会话，或选择一个会话在下一条消息恢复",
                 );
             }
             if !crate::im_gateway::external_cli::external_cli_effort_options(adapter).is_empty() {
@@ -537,6 +560,83 @@ pub(super) fn configured_runner_id_for_im_session(
                 .and_then(|runner| runner.custom_runner_id())
                 .map(ToString::to_string)
         })
+}
+
+async fn handle_im_resume_command(
+    message: &str,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    ctx: ImModelCommandContext<'_>,
+) -> bool {
+    let Some(command) =
+        crate::im_gateway::external_cli::parse_external_cli_resume_slash_command(message)
+    else {
+        return false;
+    };
+    let command = match command {
+        Ok(command) => command,
+        Err(reason) => {
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("❌ {reason}"),
+                ctx.message_log_store,
+            )
+            .await;
+            return true;
+        }
+    };
+    let config = ctx.external_cli_config_store.load();
+    let Some(configured_runner_id) =
+        configured_runner_id_for_im_session(ctx.group_context_store, session_key, agent_config)
+    else {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            "/resume 当前仅支持 Codex、Traex 或 Claude Code Runner。请先用 `/runner` 切换。",
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    };
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &config,
+        Some(ctx.provider.id.as_str()),
+        Some(configured_runner_id.as_str()),
+    );
+    let adapter = effective.settings.adapter.clone();
+    let picked = matches!(
+        &command,
+        crate::im_gateway::external_cli::ExternalCliResumeSlashCommand::Pick(_)
+    );
+    let selection = crate::im_gateway::external_cli::LocalSessionSelectionContext {
+        session_key: session_key.to_string(),
+        runner_id: effective.runner_id.clone(),
+    };
+    let reply = match crate::im_gateway::external_cli::execute_local_session_resume_command(
+        adapter.clone(),
+        command,
+        Some(selection),
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(error) => format!("❌ {error}"),
+    };
+    if picked && !reply.starts_with('❌') {
+        persist_im_model_system_message(session_key, &adapter, &effective.runner_id, &reply);
+    }
+    send_agent_reply(
+        ctx.client,
+        ctx.provider,
+        ctx.event,
+        &reply,
+        ctx.message_log_store,
+    )
+    .await;
+    true
 }
 
 async fn handle_im_model_command(
@@ -1552,6 +1652,18 @@ pub(super) async fn handle_busy_message(
         return;
     }
 
+    if crate::im_gateway::external_cli::parse_external_cli_resume_slash_command(trimmed).is_some() {
+        send_agent_reply(
+            client,
+            provider,
+            event,
+            "当前任务正在处理中，请等待任务结束后再切换本地 session。",
+            message_log_store,
+        )
+        .await;
+        return;
+    }
+
     if handle_im_effort_command(
         trimmed,
         session_key,
@@ -1813,4 +1925,175 @@ pub(super) async fn handle_busy_message(
 
     // External runners try live guide except ChatGPT Web, which keeps queue semantics.
     handle_busy_default_message(trimmed, session_key, &ctx).await;
+}
+
+#[cfg(test)]
+mod local_resume_tests {
+    use super::*;
+
+    struct CodexHomeGuard(Option<std::ffi::OsString>);
+
+    impl Drop for CodexHomeGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                std::env::set_var("CODEX_HOME", value);
+            } else {
+                std::env::remove_var("CODEX_HOME");
+            }
+        }
+    }
+
+    fn resume_event(provider: &ImProviderConfig, command: &str) -> ImEvent {
+        ImEvent {
+            event_id: format!("evt-resume-{}", uuid_short()),
+            provider_id: provider.id.clone(),
+            provider_type: provider.provider_type,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("resume-chat".to_string()),
+                user_id: Some("resume-user".to_string()),
+                message_id: Some(format!("om-resume-{}", uuid_short())),
+                ..Default::default()
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: command.to_string(),
+                ..Default::default()
+            }),
+            received_at: now_ms(),
+            raw_digest: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_resume_commands_cover_idle_selection_errors_and_busy_rejection() {
+        let _local_session_lock = crate::im_gateway::external_cli::local_session_test_env_lock()
+            .lock()
+            .await;
+        let temp_dir = tempfile::tempdir().expect("temp data dir");
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let _data_guard =
+            crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let _home_guard = CodexHomeGuard(std::env::var_os("CODEX_HOME"));
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        let id = "eeeeeeee-0000-0000-0000-000000000006";
+        let session_path = codex_home.path().join("sessions/resume.jsonl");
+        std::fs::create_dir_all(session_path.parent().expect("parent")).expect("create sessions");
+        std::fs::write(
+            &session_path,
+            format!(
+                "{{\"timestamp\":\"2026-08-07T05:06:07Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n"
+            ),
+        )
+        .expect("write session");
+
+        let service = ImGatewayService::new(temp_dir.path());
+        let mut provider = crate::handlers::im_gateway::tests::test_provider();
+        provider.id = "weixin-resume".to_string();
+        provider.provider_type = ImProviderType::Weixin;
+        provider.secret_ref = None;
+        let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+        let agent_config = service.agent_config_store.load();
+        let session_key = build_session_key(&provider.id, Some("resume-user"));
+
+        for command in ["/resume", "/resume eeeeeeee", "/resume too many"] {
+            let event = resume_event(&provider, command);
+            assert!(
+                handle_idle_im_command(
+                    command,
+                    &session_key,
+                    &agent_config,
+                    IdleImCommandContext {
+                        client: &client,
+                        provider: &provider,
+                        provider_store: &service.provider_store,
+                        group_context_store: &service.group_context_store,
+                        external_cli_config_store: &service.external_cli_config_store,
+                        event: &event,
+                        message_log_store: &service.message_log_store,
+                        agent_session_manager: &service.agent_session_manager,
+                    },
+                )
+                .await
+            );
+        }
+        let state = crate::im_gateway::session_state::load_session_state(
+            &session_key,
+            "codex",
+            Some(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID),
+        )
+        .expect("selected state");
+        assert_eq!(state.external_thread_id.as_deref(), Some(id));
+
+        let event = resume_event(&provider, "/resume");
+        let no_runner = crate::im_gateway::agent::ImAgentConfig {
+            runner: None,
+            ..agent_config.clone()
+        };
+        assert!(
+            handle_im_resume_command(
+                "/resume",
+                "resume-no-runner",
+                &no_runner,
+                ImModelCommandContext {
+                    client: &client,
+                    provider: &provider,
+                    external_cli_config_store: &service.external_cli_config_store,
+                    group_context_store: &service.group_context_store,
+                    event: &event,
+                    message_log_store: &service.message_log_store,
+                },
+            )
+            .await
+        );
+
+        let busy_event = resume_event(&provider, "/resume eeeeeeee");
+        handle_busy_message(
+            "/resume eeeeeeee",
+            &session_key,
+            BusyMessageContext {
+                queue_manager: &service.queue_manager,
+                client: &client,
+                provider: &provider,
+                event: &busy_event,
+                message_log_store: &service.message_log_store,
+                agent_session_manager: &service.agent_session_manager,
+                progress_registry: &service.progress_registry,
+                external_cli_config_store: &service.external_cli_config_store,
+                agent_config: &agent_config,
+                group_context_store: &service.group_context_store,
+                group_turn_id: None,
+                default_mode: BusyMessageDefaultMode::Queue,
+                status_context: Default::default(),
+                default_work_dir: None,
+            },
+        )
+        .await;
+
+        let replies = service.message_log_store.list();
+        for expected in [
+            id,
+            "已选择本地 session",
+            "用法: /resume",
+            "请先用 `/runner`",
+            "任务正在处理中",
+        ] {
+            assert!(
+                replies.iter().any(|log| {
+                    log.content
+                        .as_deref()
+                        .is_some_and(|content| content.contains(expected))
+                }),
+                "missing reply containing {expected}"
+            );
+        }
+
+        let help = build_im_channel_help_sections(&ImHelpRunnerKind::External {
+            adapter: "codex".to_string(),
+        });
+        assert!(help.contains("/resume"));
+        let unsupported = build_im_channel_help_sections(&ImHelpRunnerKind::External {
+            adapter: "mock".to_string(),
+        });
+        assert!(!unsupported.contains("/resume"));
+    }
 }
