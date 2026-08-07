@@ -663,6 +663,7 @@ mod tests {
     use super::*;
     use bifrost_script::{ScriptEngine, ScriptEngineConfig};
     use futures_util::stream;
+    use http_body_util::Full;
     use std::convert::Infallible;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -848,6 +849,77 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(300), upstream_tx.closed())
             .await
             .expect("idle upstream must be dropped when the downstream disconnects");
+    }
+
+    #[tokio::test]
+    async fn transform_stream_without_upstream_emits_explicit_error() {
+        let worker = test_stream_worker(
+            r#"
+                stream.mode = "transform";
+                stream.onEvent = (event) => event;
+            "#,
+        )
+        .await;
+        let mut body = create_response_stream_script_body(None, worker);
+
+        let frame = body
+            .frame()
+            .await
+            .expect("missing upstream must emit an error frame")
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let text = String::from_utf8(frame.to_vec()).unwrap();
+        assert!(text.starts_with("event: error\n"));
+        assert!(text.contains("transform stream requires an upstream body"));
+    }
+
+    #[tokio::test]
+    async fn mock_stream_end_callback_failure_emits_explicit_error() {
+        let worker = test_stream_worker(
+            r#"
+                stream.mode = "mock";
+                stream.next = () => ({ done: true });
+                stream.onEnd = () => { throw new Error("end boom"); };
+            "#,
+        )
+        .await;
+        let mut body = create_response_stream_script_body(None, worker);
+
+        let frame = body
+            .frame()
+            .await
+            .expect("onEnd failure must emit an error frame")
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let text = String::from_utf8(frame.to_vec()).unwrap();
+        assert!(text.starts_with("event: error\n"));
+        assert!(text.contains("bifrost_stream_script_error"));
+    }
+
+    #[tokio::test]
+    async fn transform_stream_skips_unparseable_event_and_keeps_following_event() {
+        let worker = test_stream_worker(
+            r#"
+                stream.mode = "transform";
+                stream.onEvent = (event) => event;
+            "#,
+        )
+        .await;
+        let upstream = Full::new(Bytes::from_static(b"not-an-event\n\ndata: valid\n\n"))
+            .map_err(|never| match never {})
+            .boxed();
+        let mut body = create_response_stream_script_body(Some(upstream), worker);
+
+        let frame = body
+            .frame()
+            .await
+            .expect("valid event after invalid input must be emitted")
+            .unwrap()
+            .into_data()
+            .unwrap();
+        assert_eq!(frame, Bytes::from_static(b"data: valid\n\n"));
     }
 
     #[tokio::test]
