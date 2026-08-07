@@ -55,6 +55,7 @@ import {
 import { openTrafficDetailWindow } from "./detailWindow";
 import pushService from "../../services/pushService";
 import { usePerformanceModeStore } from "../../stores/usePerformanceModeStore";
+import { getTlsConfig } from "../../api/config";
 import type {
   TrafficSummary,
   FilterCondition,
@@ -211,6 +212,35 @@ export default function Traffic() {
   const breakpointLoading = useBreakpointStore((state) => state.loading);
   const toggleBreakpoint = useBreakpointStore(
     (state) => state.toggleEnabled,
+  );
+  const pausedRequests = useBreakpointStore((state) => state.pausedRequests);
+  const pausedResponses = useBreakpointStore((state) => state.pausedResponses);
+  const breakpointPhases = useMemo(() => {
+    const phases = new Map<string, "request" | "response">();
+    for (const requestId of pausedRequests.keys()) phases.set(requestId, "request");
+    for (const requestId of pausedResponses.keys()) phases.set(requestId, "response");
+    return phases;
+  }, [pausedRequests, pausedResponses]);
+
+  const handleBreakpointToggle = useCallback(
+    async (enabled: boolean) => {
+      try {
+        await toggleBreakpoint(enabled);
+        if (!enabled) return;
+        const tls = await getTlsConfig();
+        if (!tls.enable_tls_interception) {
+          message.info(
+            "Matched HTTPS Breakpoint rules trigger scoped TLS interception automatically. The client must trust the Bifrost CA certificate.",
+            7,
+          );
+        }
+      } catch (error) {
+        message.error(
+          error instanceof Error ? error.message : "Failed to update Breakpoint",
+        );
+      }
+    },
+    [toggleBreakpoint],
   );
 
   useEffect(() => {
@@ -1085,6 +1115,7 @@ export default function Traffic() {
         ) : (
           <VirtualTrafficTable
             data={displayedRecords}
+            breakpointPhases={breakpointPhases}
             onSelect={handleSelect}
             onDoubleClick={handleDoubleClick}
             selectedId={selectedId}
@@ -1176,7 +1207,7 @@ export default function Traffic() {
         onAttachDetailWindow={handleAttachDetailWindow}
         breakpointEnabled={breakpointEnabled}
         breakpointLoading={breakpointLoading}
-        onBreakpointToggle={toggleBreakpoint}
+        onBreakpointToggle={handleBreakpointToggle}
       />
 
       <div style={styles.mainContent}>

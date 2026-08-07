@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react";
-import { Table, Typography, theme, ConfigProvider, Space, Radio, Tag, Tooltip } from "antd";
+import { Button, Input, Table, Typography, theme, ConfigProvider, Space, Radio, Tag, Tooltip } from "antd";
+import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type { SessionTargetSearchState } from "../../../../types";
 import { useThemeStore } from "../../../../stores/useThemeStore";
@@ -21,6 +22,8 @@ interface HeaderViewProps {
   host?: string;
   clientApp?: string;
   clientIp?: string;
+  editable?: boolean;
+  onHeadersChange?: (headers: [string, string][]) => void;
 }
 
 export const HeaderView = ({
@@ -34,6 +37,8 @@ export const HeaderView = ({
   host,
   clientApp,
   clientIp,
+  editable = false,
+  onHeadersChange,
 }: HeaderViewProps) => {
   const { token } = theme.useToken();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -89,8 +94,6 @@ export const HeaderView = ({
     );
   }, [dataSource, searchValue.value]);
 
-  useMarkSearch(searchValue, () => tableRef.current, onSearch);
-
   const protocolToken = useMemo(() => theme.getDesignToken({
     algorithm: resolvedTheme === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
   }), [resolvedTheme]);
@@ -100,6 +103,65 @@ export const HeaderView = ({
     deleted: { bg: token.colorErrorBg, text: token.colorError },
     protocol: { bg: protocolToken.colorInfoBg, text: protocolToken.colorInfo },
   }), [protocolToken, token]);
+
+  useMarkSearch(searchValue, () => tableRef.current, onSearch);
+
+  if (editable) {
+    const editableHeaders = headers ?? [];
+    const updateHeader = (index: number, field: 0 | 1, value: string) => {
+      const next = editableHeaders.map(([name, headerValue]) => [name, headerValue] as [string, string]);
+      next[index][field] = value;
+      onHeadersChange?.(next);
+    };
+    return (
+      <div ref={tableRef} data-testid={`${testIdPrefix}-editor`}>
+        <Space direction="vertical" size={4} style={{ width: "100%" }}>
+          {editableHeaders.map(([name, value], index) => {
+            const nameValid = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name);
+            return (
+              <Space.Compact key={index} style={{ width: "100%" }}>
+                <Input
+                  value={name}
+                  status={nameValid ? undefined : "error"}
+                  aria-label={`Header ${index + 1} name`}
+                  data-testid={`${testIdPrefix}-name-${index}`}
+                  onChange={(event) => updateHeader(index, 0, event.target.value)}
+                  placeholder="Header name"
+                  style={{ width: 190, fontFamily: "monospace", fontSize: 12 }}
+                />
+                <Input
+                  value={value}
+                  aria-label={`Header ${index + 1} value`}
+                  data-testid={`${testIdPrefix}-value-${index}`}
+                  onChange={(event) => updateHeader(index, 1, event.target.value)}
+                  placeholder="Header value"
+                  style={{ flex: 1, fontFamily: "monospace", fontSize: 12 }}
+                />
+                <Tooltip title="Delete header">
+                  <Button
+                    aria-label={`Delete header ${index + 1}`}
+                    data-testid={`${testIdPrefix}-delete-${index}`}
+                    icon={<DeleteOutlined />}
+                    onClick={() =>
+                      onHeadersChange?.(editableHeaders.filter((_, itemIndex) => itemIndex !== index))
+                    }
+                  />
+                </Tooltip>
+              </Space.Compact>
+            );
+          })}
+          <Button
+            size="small"
+            icon={<PlusOutlined />}
+            data-testid={`${testIdPrefix}-add`}
+            onClick={() => onHeadersChange?.([...editableHeaders, ["", ""]])}
+          >
+            Add header
+          </Button>
+        </Space>
+      </div>
+    );
+  }
 
   const configuredChange = (record: HeaderDiffItem) =>
     !!record.changeSource && record.changeSource === "configured";

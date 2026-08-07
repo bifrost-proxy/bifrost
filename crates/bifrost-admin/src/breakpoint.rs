@@ -22,17 +22,33 @@ pub struct BreakpointSettings {
     pub max_body_bytes: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BreakpointEdit {
-    pub headers: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<(String, String)>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
 }
 
+pub type PendingBreakpoint = crate::push::BreakpointPausedPushData;
+
 struct BreakpointHandle {
-    request: Option<oneshot::Sender<BreakpointEdit>>,
-    request_body_editable: bool,
-    response: Option<oneshot::Sender<BreakpointEdit>>,
-    response_body_editable: bool,
+    sender: Option<oneshot::Sender<BreakpointEdit>>,
+    body_editable: bool,
+    snapshot: PendingBreakpoint,
+}
+
+type BreakpointReceiver = oneshot::Receiver<BreakpointEdit>;
+
+pub enum BreakpointResumeError {
+    NotFound,
+    PhaseMismatch,
 }
 
 pub struct BreakpointManager {
@@ -93,83 +109,75 @@ impl BreakpointManager {
         len <= self.max_body_bytes()
     }
 
-    pub fn pause_request(
-        &self,
-        request_id: String,
-        body_editable: bool,
-    ) -> oneshot::Receiver<BreakpointEdit> {
+    pub fn pause(&self, snapshot: PendingBreakpoint, body_editable: bool) -> BreakpointReceiver {
         let (tx, rx) = oneshot::channel();
         let handle = BreakpointHandle {
-            request: Some(tx),
-            request_body_editable: body_editable,
-            response: None,
-            response_body_editable: false,
+            sender: Some(tx),
+            body_editable,
+            snapshot: snapshot.clone(),
         };
-        self.pending.insert(request_id, handle);
+        self.pending.insert(snapshot.request_id.clone(), handle);
         rx
     }
 
-    pub fn pause_response(
+    pub fn resume(
         &self,
-        request_id: String,
-        body_editable: bool,
-    ) -> oneshot::Receiver<BreakpointEdit> {
-        let (tx, rx) = oneshot::channel();
-
-        if let Some(mut entry) = self.pending.get_mut(&request_id) {
-            entry.response = Some(tx);
-            entry.response_body_editable = body_editable;
-        } else {
-            self.pending.insert(
-                request_id,
-                BreakpointHandle {
-                    request: None,
-                    request_body_editable: false,
-                    response: Some(tx),
-                    response_body_editable: body_editable,
-                },
-            );
+        request_id: &str,
+        phase: &str,
+        mut edit: BreakpointEdit,
+    ) -> Result<(), BreakpointResumeError> {
+        let mut entry = self
+            .pending
+            .get_mut(request_id)
+            .ok_or(BreakpointResumeError::NotFound)?;
+        if entry.snapshot.phase != phase {
+            return Err(BreakpointResumeError::PhaseMismatch);
         }
-
-        rx
+        if edit
+            .body
+            .as_ref()
+            .map(|body| !entry.body_editable || !self.body_within_capture_limit(body.len()))
+            .unwrap_or(false)
+        {
+            edit.body = None;
+        }
+        let sender = entry.sender.take();
+        drop(entry);
+        self.pending.remove(request_id);
+        sender
+            .ok_or(BreakpointResumeError::NotFound)?
+            .send(edit)
+            .map_err(|_| BreakpointResumeError::NotFound)
     }
 
-    pub fn resume(&self, request_id: &str, phase: &str, mut edit: BreakpointEdit) -> bool {
-        if let Some((_, handle)) = self.pending.remove(request_id) {
-            let (tx, body_editable) = match phase {
-                "request" => (handle.request, handle.request_body_editable),
-                "response" => (handle.response, handle.response_body_editable),
-                _ => (
-                    handle.request.or(handle.response),
-                    handle.request_body_editable || handle.response_body_editable,
-                ),
-            };
-            if let Some(tx) = tx {
-                if edit
-                    .body
-                    .as_ref()
-                    .map(|body| !body_editable || !self.body_within_capture_limit(body.len()))
-                    .unwrap_or(false)
-                {
-                    edit.body = None;
-                }
-                let _ = tx.send(edit);
-                return true;
-            }
+    pub fn cancel(&self, request_id: &str, phase: &str) -> bool {
+        let phase_matches = self
+            .pending
+            .get(request_id)
+            .is_some_and(|entry| entry.snapshot.phase == phase);
+        if phase_matches {
+            self.pending.remove(request_id);
+            return true;
         }
         false
     }
 
-    pub fn cancel_request(&self, request_id: &str) {
-        self.pending.remove(request_id);
-    }
-
-    fn cancel_all(&self) {
+    pub fn cancel_all(&self) {
         self.pending.clear();
     }
 
     pub fn has_pending(&self, request_id: &str) -> bool {
         self.pending.contains_key(request_id)
+    }
+
+    pub fn pending(&self) -> Vec<PendingBreakpoint> {
+        let mut pending = self
+            .pending
+            .iter()
+            .map(|entry| entry.snapshot.clone())
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|item| (item.paused_at_ms, item.request_id.clone()));
+        pending
     }
 }
 
@@ -220,19 +228,171 @@ mod tests {
     #[tokio::test]
     async fn resume_drops_body_when_pause_was_header_only() {
         let manager = BreakpointManager::new();
-        let rx = manager.pause_request("req-1".to_string(), false);
+        let rx = manager.pause(pending("req-1", "request"), false);
 
-        assert!(manager.resume(
-            "req-1",
-            "request",
-            BreakpointEdit {
-                headers: vec![("x-test".to_string(), "1".to_string())],
-                body: Some("blocked body edit".to_string()),
-            },
-        ));
+        assert!(manager
+            .resume(
+                "req-1",
+                "request",
+                BreakpointEdit {
+                    headers: Some(vec![("x-test".to_string(), "1".to_string())]),
+                    body: Some("blocked body edit".to_string()),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
 
         let edit = rx.await.unwrap();
-        assert_eq!(edit.headers, vec![("x-test".to_string(), "1".to_string())]);
+        assert_eq!(
+            edit.headers,
+            Some(vec![("x-test".to_string(), "1".to_string())])
+        );
         assert!(edit.body.is_none());
+    }
+
+    fn pending(id: &str, phase: &str) -> PendingBreakpoint {
+        PendingBreakpoint {
+            request_id: id.to_string(),
+            phase: phase.to_string(),
+            method: Some("GET".to_string()),
+            url: Some("http://example.test/".to_string()),
+            status: None,
+            headers: Vec::new(),
+            body: None,
+            body_omitted: false,
+            body_size: Some(0),
+            max_body_bytes: DEFAULT_BREAKPOINT_MAX_BODY_BYTES,
+            content_encoding: None,
+            paused_at_ms: 10,
+            deadline_at_ms: 20,
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_snapshot_is_available_before_resume_and_phase_is_strict() {
+        let manager = BreakpointManager::new();
+        let rx = manager.pause(pending("req-2", "request"), true);
+
+        assert_eq!(manager.pending(), vec![pending("req-2", "request")]);
+        assert!(matches!(
+            manager.resume("req-2", "response", BreakpointEdit::default()),
+            Err(BreakpointResumeError::PhaseMismatch)
+        ));
+        assert!(manager.has_pending("req-2"));
+        assert!(manager
+            .resume("req-2", "request", BreakpointEdit::default())
+            .is_ok());
+        assert_eq!(rx.await.unwrap(), BreakpointEdit::default());
+        assert!(manager.pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_and_response_snapshots_replace_each_other_sequentially() {
+        let manager = BreakpointManager::new();
+        let request_rx = manager.pause(pending("req-3", "request"), true);
+        assert!(manager
+            .resume("req-3", "request", BreakpointEdit::default())
+            .is_ok());
+        request_rx.await.unwrap();
+
+        let response_rx = manager.pause(pending("req-3", "response"), true);
+        assert_eq!(manager.pending()[0].phase, "response");
+        assert!(manager
+            .resume("req-3", "response", BreakpointEdit::default())
+            .is_ok());
+        response_rx.await.unwrap();
+        assert!(manager.pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn manager_rejects_missing_sender_and_oversized_body_edits() {
+        let manager = BreakpointManager::new();
+        manager.update_settings(BreakpointSettings {
+            enabled: true,
+            max_body_bytes: 3,
+        });
+        assert!(matches!(
+            manager.resume("missing", "request", BreakpointEdit::default()),
+            Err(BreakpointResumeError::NotFound)
+        ));
+
+        let rx = manager.pause(pending("oversized", "request"), true);
+        assert!(manager
+            .resume(
+                "oversized",
+                "request",
+                BreakpointEdit {
+                    body: Some("four".to_string()),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
+        assert!(rx.await.unwrap().body.is_none());
+
+        let dropped = manager.pause(pending("dropped", "request"), true);
+        drop(dropped);
+        assert!(matches!(
+            manager.resume("dropped", "request", BreakpointEdit::default()),
+            Err(BreakpointResumeError::NotFound)
+        ));
+
+        let _missing_sender = manager.pause(pending("senderless", "request"), true);
+        manager.pending.get_mut("senderless").unwrap().sender.take();
+        assert!(matches!(
+            manager.resume("senderless", "request", BreakpointEdit::default()),
+            Err(BreakpointResumeError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn cancel_is_phase_strict_and_disable_cancels_all() {
+        let manager = BreakpointManager::new();
+        let _first = manager.pause(pending("first", "request"), true);
+        let _second = manager.pause(pending("second", "response"), true);
+        assert!(!manager.cancel("first", "response"));
+        assert!(manager.has_pending("first"));
+        assert!(manager.cancel("first", "request"));
+        assert!(!manager.cancel("missing", "request"));
+
+        manager.update_settings(BreakpointSettings {
+            enabled: false,
+            max_body_bytes: 9,
+        });
+        assert!(manager.pending().is_empty());
+    }
+
+    #[test]
+    fn breakpoint_payloads_round_trip_through_json() {
+        let snapshot = PendingBreakpoint {
+            method: None,
+            url: None,
+            status: Some(418),
+            headers: vec![("set-cookie".to_string(), "a=1".to_string())],
+            body: Some("teapot".to_string()),
+            body_omitted: false,
+            body_size: Some(6),
+            max_body_bytes: 10,
+            content_encoding: Some("gzip".to_string()),
+            ..pending("serde", "response")
+        };
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PendingBreakpoint>(&encoded).unwrap(),
+            snapshot
+        );
+        assert!(format!("{snapshot:?}").contains("serde"));
+
+        let edit = BreakpointEdit {
+            method: Some("PUT".to_string()),
+            url: Some("https://example.test/".to_string()),
+            status: Some(201),
+            headers: Some(vec![("x-test".to_string(), "yes".to_string())]),
+            body: Some("body".to_string()),
+        };
+        let encoded = serde_json::to_string(&edit).unwrap();
+        assert_eq!(
+            serde_json::from_str::<BreakpointEdit>(&encoded).unwrap(),
+            edit
+        );
     }
 }

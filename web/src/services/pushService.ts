@@ -159,7 +159,7 @@ export interface ReplayHistoryUpdatedData {
 }
 
 export interface BreakpointPausedPushData {
-  phase: string;
+  phase: "request" | "response";
   request_id: string;
   method?: string;
   url?: string;
@@ -169,6 +169,9 @@ export interface BreakpointPausedPushData {
   body_omitted?: boolean;
   body_size?: number;
   max_body_bytes?: number;
+  content_encoding?: string;
+  paused_at_ms: number;
+  deadline_at_ms: number;
 }
 
 export interface BreakpointSettingsPushData {
@@ -178,6 +181,8 @@ export interface BreakpointSettingsPushData {
 
 export interface BreakpointResumedPushData {
   request_id: string;
+  phase: "request" | "response";
+  reason: "resumed" | "timeout" | "disabled";
 }
 
 export type PushMessageType =

@@ -270,6 +270,26 @@ impl RulesResolver {
         false
     }
 
+    pub fn has_breakpoint_rules_for_host(&self, host: &str) -> bool {
+        let url_https = format!("https://{}", host);
+        let url_http = format!("http://{}", host);
+        for rule in &self.rules {
+            if rule.is_disabled()
+                || rule.is_negated()
+                || rule.protocol != Protocol::Breakpoint
+                || !rule.matcher.can_trigger_tls_auto_intercept()
+            {
+                continue;
+            }
+            if rule.matcher.matches_host_scope(&url_https, host)
+                || rule.matcher.matches_host_scope(&url_http, host)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn has_tls_auto_intercept_route_rules_for_host(&self, host: &str) -> bool {
         let url_https = format!("https://{}", host);
         let url_wss = format!("wss://{}", host);

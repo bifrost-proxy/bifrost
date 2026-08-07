@@ -48,6 +48,8 @@ use super::body_metadata::{
     buffered_res_body_mode, normalize_req_headers, normalize_res_headers,
     response_content_encoding, set_content_encoding_header, streaming_res_body_mode, BodyMode,
 };
+use super::breakpoint::breakpoint_tls_interception_required as bp_tls;
+use super::breakpoint::{apply_edited_status, body_limit, body_read_error_response};
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
     maybe_inject_devtools_bridge_html, take_devtools_client_req_id,
@@ -368,6 +370,19 @@ pub fn get_tls_client_config_without_alpn(unsafe_ssl: bool) -> Arc<ClientConfig>
 
 fn is_standard_tls_intercept_port(port: u16) -> bool {
     matches!(port, 443 | 8443)
+}
+
+fn tls_authority(host: &str, port: u16, include_default_port: bool) -> String {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if port == 443 && !include_default_port {
+        host.to_string()
+    } else {
+        super::handler::format_connection_endpoint(host, port)
+    }
+}
+
+fn tls_request_url(scheme: &str, host: &str, port: u16, path: &str) -> String {
+    format!("{scheme}://{}{path}", tls_authority(host, port, false))
 }
 
 fn is_explicit_tls_intercept_override(
@@ -801,8 +816,9 @@ pub(crate) async fn handle_connect_with_process_state(
         debug!("CONNECT tunnel to {}:{}", host, port);
     }
 
-    let url = format!("https://{}:{}", host, port);
-    let tunnel_url = format!("tunnel://{}:{}", host, port);
+    let authority = tls_authority(&host, port, true);
+    let url = format!("https://{authority}");
+    let tunnel_url = format!("tunnel://{authority}");
     let mut resolved_rules = rules.resolve(&url, "CONNECT");
     let tunnel_rules = rules.resolve(&tunnel_url, "CONNECT");
     if tunnel_rules.host.is_some()
@@ -896,6 +912,23 @@ pub(crate) async fn handle_connect_with_process_state(
         }
     }
 
+    let state = &admin_state;
+    let resolved = &resolved_rules;
+    let scoped_rules = Some(rules.as_ref());
+    let bp = bp_tls(state, resolved, scoped_rules, &host, port);
+    debug!(
+        req_id = ctx.id_str(),
+        host,
+        port,
+        breakpoint_tls_required = bp,
+        breakpoint_enabled = state
+            .as_ref()
+            .is_some_and(|state| state.breakpoint_manager.is_enabled()),
+        ca_available = tls_config.ca_cert.is_some(),
+        explicit_tls_passthrough = matches!(resolved_rules.tls_intercept, Some(false)),
+        force_trust_probe_passthrough,
+        "CONNECT scoped TLS interception decision"
+    );
     if !intercept
         && !force_trust_probe_passthrough
         && is_local_client
@@ -908,6 +941,15 @@ pub(crate) async fn handle_connect_with_process_state(
             ctx.id_str(),
             host
         );
+    }
+
+    if !intercept
+        && !force_trust_probe_passthrough
+        && tls_config.ca_cert.is_some()
+        && !matches!(resolved_rules.tls_intercept, Some(false))
+        && bp
+    {
+        intercept = true;
     }
 
     if !intercept
@@ -1445,7 +1487,11 @@ async fn tls_intercept_tunnel_with_cancel(
         }
     };
     let client_alpn = client_tls.get_ref().1.alpn_protocol().map(|p| p.to_vec());
-    let should_sniff_payload = !is_standard_tls_intercept_port(original_port);
+    // HTTP/1.1 clients are allowed to omit ALPN. Windows Schannel commonly
+    // does so for IP-address targets, so sniff the first decrypted payload
+    // before deciding that an ALPN-less connection is non-HTTP.
+    let should_sniff_payload =
+        client_alpn.is_none() || !is_standard_tls_intercept_port(original_port);
 
     if verbose_logging {
         debug!(
@@ -1461,9 +1507,11 @@ async fn tls_intercept_tunnel_with_cancel(
         BytesMut::new()
     };
 
-    if !is_http_alpn(client_alpn.as_deref())
-        || (should_sniff_payload && !looks_like_http_payload(&initial_payload))
-    {
+    if !should_serve_intercepted_http(
+        client_alpn.as_deref(),
+        should_sniff_payload,
+        &initial_payload,
+    ) {
         return tunnel_intercepted_non_http_tls_with_cancel(
             client_tls,
             initial_payload,
@@ -1572,6 +1620,20 @@ async fn tls_intercept_tunnel_with_cancel(
 
 fn is_http_alpn(alpn: Option<&[u8]>) -> bool {
     matches!(alpn, Some(b"h2") | Some(b"http/1.1"))
+}
+
+fn should_serve_intercepted_http(
+    alpn: Option<&[u8]>,
+    payload_was_sniffed: bool,
+    initial_payload: &BytesMut,
+) -> bool {
+    match alpn {
+        Some(protocol) if is_http_alpn(Some(protocol)) => {
+            !payload_was_sniffed || looks_like_http_payload(initial_payload)
+        }
+        None => payload_was_sniffed && looks_like_http_payload(initial_payload),
+        Some(_) => false,
+    }
 }
 
 fn format_tls_alpn(alpn: Option<&[u8]>) -> String {
@@ -1949,6 +2011,19 @@ fn should_use_binary_performance_mode(
     has_attachment || is_likely_binary_content_type(&content_type_lower)
 }
 
+fn breakpoint_upstream_target(uri: &hyper::Uri) -> Option<(bool, String, u16, String, String)> {
+    let use_http = uri.scheme_str() == Some("http");
+    let host = uri.host()?.to_string();
+    let default_port = if use_http { 80 } else { 443 };
+    let port = uri.port_u16().unwrap_or(default_port);
+    let path = uri
+        .path_and_query()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let authority = uri.authority()?.as_str().to_string();
+    Some((use_http, host, port, path, authority))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_intercepted_request_with_protocol(
     mut req: Request<Incoming>,
@@ -2025,7 +2100,7 @@ async fn handle_intercepted_request_with_protocol(
         take_devtools_client_req_id(req.headers_mut()).or(devtools_client_req_id_from_uri);
     let start_time = Instant::now();
     let method = req.method().clone();
-    let method_str = method.to_string();
+    let mut method_str = method.to_string();
     let uri = req.uri().clone();
     let path = uri
         .path_and_query()
@@ -2033,7 +2108,7 @@ async fn handle_intercepted_request_with_protocol(
         .unwrap_or_else(|| "/".to_string());
     let query_string = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
 
-    let original_uri = format!("https://{}{}", original_host, path);
+    let mut original_uri = tls_request_url("https", original_host, original_port, &path);
     match handle_intercepted_rule_share_query(
         &mut req,
         &original_uri,
@@ -2172,6 +2247,10 @@ async fn handle_intercepted_request_with_protocol(
                 path.clone(),
             )
         };
+    let mut actual_target_host = actual_target_host;
+    let mut actual_target_port = actual_target_port;
+    let mut actual_use_http = actual_use_http;
+    let mut actual_target_path = actual_target_path;
 
     let target_uri = if actual_use_http {
         if actual_target_port == 80 {
@@ -2205,7 +2284,7 @@ async fn handle_intercepted_request_with_protocol(
         .with_query_params(query_params.clone())
         .with_port(listener_port);
 
-    let upstream_uri: hyper::Uri = match target_uri.parse() {
+    let mut upstream_uri: hyper::Uri = match target_uri.parse() {
         Ok(uri) => apply_url_rules(&uri, &resolved_rules, verbose_logging, &rule_ctx),
         Err(e) => {
             error!("[{}] Failed to parse upstream URI: {}", req_id, e);
@@ -2660,7 +2739,7 @@ async fn handle_intercepted_request_with_protocol(
     } else {
         Vec::new()
     };
-    let host_header_value = if actual_use_http {
+    let mut host_header_value = if actual_use_http {
         if actual_target_port == 80 {
             actual_target_host.clone()
         } else {
@@ -2672,7 +2751,6 @@ async fn handle_intercepted_request_with_protocol(
         format!("{}:{}", actual_target_host, actual_target_port)
     };
 
-    let request_body_is_streaming = streaming_body.is_some();
     let request_hook_enabled = admin_state
         .as_ref()
         .map(|state| {
@@ -2688,10 +2766,21 @@ async fn handle_intercepted_request_with_protocol(
                 if let Some(body) = streaming_body.take() {
                     let should_collect = req_content_length
                         .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
-                        .unwrap_or(false);
+                        .unwrap_or(true);
                     if should_collect {
-                        if let Ok(collected) = body.collect().await {
-                            body_bytes = collected.to_bytes().to_vec();
+                        match read_body_bounded(body, state.breakpoint_manager.max_body_bytes())
+                            .await
+                        {
+                            Ok(BoundedBody::Complete(bytes)) => {
+                                body_bytes = bytes.to_vec();
+                            }
+                            Ok(BoundedBody::Exceeded(replay_body)) => {
+                                request_body_omitted_for_breakpoint = true;
+                                streaming_body = Some(replay_body.boxed());
+                            }
+                            Err(error) => {
+                                return Ok(body_read_error_response(error));
+                            }
                         }
                     } else {
                         request_body_omitted_for_breakpoint = true;
@@ -2757,8 +2846,8 @@ async fn handle_intercepted_request_with_protocol(
             &admin_state,
             &push_manager,
             req_id,
-            &method_str,
-            &original_uri,
+            actual_method.as_str(),
+            &upstream_uri.to_string(),
             &mut parts.headers,
             hook_body,
             req_content_length,
@@ -2766,6 +2855,26 @@ async fn handle_intercepted_request_with_protocol(
             &mut edited_body,
         )
         .await;
+        if let Some(edited_method) = outcome.method.as_deref() {
+            actual_method =
+                hyper::Method::from_bytes(edited_method.as_bytes()).unwrap_or(actual_method);
+            method_str = actual_method.to_string();
+        }
+        if let Some(edited_url) = outcome.url.as_deref() {
+            if let Ok(uri) = edited_url.parse::<hyper::Uri>() {
+                if let Some((use_http, host, port, path, authority)) =
+                    breakpoint_upstream_target(&uri)
+                {
+                    upstream_uri = uri;
+                    actual_use_http = use_http;
+                    actual_target_host = host;
+                    actual_target_port = port;
+                    actual_target_path = path;
+                    host_header_value = authority;
+                    original_uri = edited_url.to_string();
+                }
+            }
+        }
         if outcome.body_replaced {
             body_bytes = edited_body.to_vec();
         }
@@ -2780,6 +2889,7 @@ async fn handle_intercepted_request_with_protocol(
         BodyMode::Known(body_bytes.len())
     };
     normalize_req_headers(&mut parts, req_body_mode, req_content_length.is_some());
+    let request_body_is_streaming = streaming_body.is_some();
     let request_body_size = if !body_bytes.is_empty() {
         body_bytes.len()
     } else {
@@ -3847,15 +3957,19 @@ async fn handle_intercepted_request_with_protocol(
                 && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
         })
         .unwrap_or(false);
+    let enabled = response_breakpoint_enabled;
+    let limit = body_limit(&admin_state, enabled, max_body_buffer_size);
+    let max_body_buffer_size = limit;
     let response_breakpoint_can_buffer_body = response_breakpoint_enabled
         && !is_websocket
         && !is_sse
         && !skip_binary_recording
         && admin_state
             .as_ref()
-            .and_then(|state| {
+            .map(|state| {
                 res_content_length
                     .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
+                    .unwrap_or(true)
             })
             .unwrap_or(false);
     let response_breakpoint_header_only = response_breakpoint_enabled
@@ -3957,6 +4071,8 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
+    let response_breakpoint_header_only = response_breakpoint_header_only
+        || (response_breakpoint_enabled && res_body_too_large && !is_websocket && !is_sse);
     let skip_body_processing = skip_binary_recording
         || is_sse
         || !needs_processing
@@ -4155,7 +4271,7 @@ async fn handle_intercepted_request_with_protocol(
 
         if response_breakpoint_header_only {
             let mut ignored_body = Bytes::new();
-            super::breakpoint::breakpoint_response_hook(
+            let outcome = super::breakpoint::breakpoint_response_hook(
                 &admin_state,
                 &push_manager,
                 req_id,
@@ -4169,6 +4285,7 @@ async fn handle_intercepted_request_with_protocol(
                 &mut ignored_body,
             )
             .await;
+            apply_edited_status(&mut res_parts.status, outcome.status);
         }
 
         if is_sse {
@@ -4270,6 +4387,8 @@ async fn handle_intercepted_request_with_protocol(
                         &mut final_body,
                     )
                     .await;
+
+                    apply_edited_status(&mut res_parts.status, outcome.status);
 
                     if outcome.body_replaced {
                         normalize_res_headers(
@@ -4941,7 +5060,7 @@ async fn handle_intercepted_request_with_protocol(
 
     let response_hook_enabled = response_breakpoint_enabled;
     if response_hook_enabled {
-        super::breakpoint::breakpoint_response_hook(
+        let outcome = super::breakpoint::breakpoint_response_hook(
             &admin_state,
             &push_manager,
             req_id,
@@ -4955,6 +5074,7 @@ async fn handle_intercepted_request_with_protocol(
             &mut final_body,
         )
         .await;
+        apply_edited_status(&mut res_parts.status, outcome.status);
     }
 
     normalize_res_headers(
@@ -6664,6 +6784,28 @@ mod tests {
     }
 
     #[test]
+    fn test_alpn_less_http1_payload_is_served_by_interceptor() {
+        let http1 = BytesMut::from(&b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"[..]);
+        assert!(should_serve_intercepted_http(None, true, &http1));
+        assert!(!should_serve_intercepted_http(
+            None,
+            true,
+            &BytesMut::from(&b"\x01\x02\x03"[..])
+        ));
+        assert!(!should_serve_intercepted_http(None, false, &http1));
+        assert!(should_serve_intercepted_http(
+            Some(b"http/1.1"),
+            false,
+            &BytesMut::new()
+        ));
+        assert!(!should_serve_intercepted_http(
+            Some(b"stun.turn"),
+            true,
+            &http1
+        ));
+    }
+
+    #[test]
     fn test_looks_like_http_payload_detects_http_preface() {
         assert!(looks_like_http_payload(&BytesMut::from(
             &b"GET / HTTP/1.1\r\nHost: example.com\r\n"[..]
@@ -8031,6 +8173,23 @@ mod coverage_boost {
         assert!(is_standard_tls_intercept_port(8443));
         assert!(!is_standard_tls_intercept_port(80));
         assert!(!is_standard_tls_intercept_port(0));
+    }
+
+    #[test]
+    fn breakpoint_tls_request_url_preserves_non_default_port_and_ipv6_authority() {
+        assert_eq!(
+            tls_request_url("https", "example.com", 443, "/api?q=1"),
+            "https://example.com/api?q=1"
+        );
+        assert_eq!(
+            tls_request_url("https", "127.0.0.1", 8443, "/api"),
+            "https://127.0.0.1:8443/api"
+        );
+        assert_eq!(
+            tls_request_url("wss", "::1", 9443, "/socket"),
+            "wss://[::1]:9443/socket"
+        );
+        assert_eq!(tls_authority("::1", 443, true), "[::1]:443");
     }
 
     #[test]
@@ -10363,7 +10522,7 @@ mod coverage_boost_v4 {
 mod coverage_90_wave {
     use super::*;
     use crate::server::{HeaderReplaceRule, HeaderReplaceTarget};
-    use http_body_util::{BodyExt, Full, StreamBody};
+    use http_body_util::{BodyExt, Empty, Full, StreamBody};
     use hyper::client::conn::http1 as client_http1;
     use hyper::server::conn::http1 as server_http1;
     use hyper::service::service_fn;
@@ -10371,6 +10530,7 @@ mod coverage_90_wave {
     use hyper_util::rt::TokioIo;
     use std::collections::HashMap;
     use std::convert::Infallible;
+    use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -10387,6 +10547,15 @@ mod coverage_90_wave {
             _req_cookies: &HashMap<String, String>,
         ) -> ResolvedRules {
             self.0.clone()
+        }
+
+        fn has_breakpoint_rules_for_host(&self, host: &str) -> bool {
+            host.starts_with("source.test")
+                && self
+                    .0
+                    .rules
+                    .iter()
+                    .any(|rule| rule.protocol == Protocol::Breakpoint)
         }
     }
 
@@ -10441,6 +10610,37 @@ mod coverage_90_wave {
         B: hyper::body::Body<Data = Bytes> + Send + 'static,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
+        run_intercepted_request_config_result(
+            rules,
+            admin_state,
+            request,
+            max_body_buffer_size,
+            max_body_probe_size,
+            verbose,
+            original_host,
+            original_port,
+            inject_badge,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_intercepted_request_config_result<B>(
+        rules: ResolvedRules,
+        admin_state: Option<Arc<AdminState>>,
+        request: Request<B>,
+        max_body_buffer_size: usize,
+        max_body_probe_size: usize,
+        verbose: bool,
+        original_host: &str,
+        original_port: u16,
+        inject_badge: bool,
+    ) -> std::result::Result<Response<Incoming>, hyper::Error>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         let (client_io, server_io) = tokio::io::duplex(128 * 1024);
         let (mut sender, client_conn) = client_http1::handshake(TokioIo::new(client_io))
             .await
@@ -10484,11 +10684,82 @@ mod coverage_90_wave {
                 .serve_connection(TokioIo::new(server_io), service)
                 .await;
         });
-        sender.send_request(request).await.unwrap()
+        sender.send_request(request).await
     }
 
     async fn body_bytes(response: Response<Incoming>) -> Bytes {
         response.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    #[tokio::test]
+    async fn connect_breakpoint_rule_enables_scoped_tls_interception() {
+        use bifrost_admin::breakpoint::BreakpointSettings;
+
+        let state = Arc::new(AdminState::new(19443));
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 1024,
+            });
+        let resolver: Arc<dyn RulesResolver> = Arc::new(StaticResolver(ResolvedRules {
+            rules: vec![breakpoint_rule("request")],
+            ..Default::default()
+        }));
+        let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+        let service = service_fn(move |request: Request<Incoming>| {
+            let state = state.clone();
+            let resolver = resolver.clone();
+            async move {
+                let proxy_config = ProxyConfig::default();
+                let tls_intercept_config = TlsInterceptConfig::from_proxy_config(&proxy_config);
+                handle_connect(
+                    request,
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 12348)),
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 9900)),
+                    resolver,
+                    Arc::new(TlsConfig {
+                        ca_cert: Some(vec![1]),
+                        ca_key: Some(vec![2]),
+                        cert_generator: None,
+                        sni_resolver: None,
+                    }),
+                    &tls_intercept_config,
+                    &proxy_config,
+                    false,
+                    &RequestContext::new(),
+                    Some(state),
+                    None,
+                    None,
+                )
+                .await
+            }
+        });
+        let server = tokio::spawn(async move {
+            let _ = server_http1::Builder::new()
+                .serve_connection(TokioIo::new(server_io), service)
+                .with_upgrades()
+                .await;
+        });
+        let (mut sender, connection) = client_http1::handshake(TokioIo::new(client_io))
+            .await
+            .unwrap();
+        let client = tokio::spawn(connection.with_upgrades());
+        let response = sender
+            .send_request(
+                Request::builder()
+                    .method(Method::CONNECT)
+                    .uri("source.test:443")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await;
+        assert!(
+            response.is_err(),
+            "missing cert generator proves the TLS interception path ran"
+        );
+        server.abort();
+        client.abort();
     }
 
     fn breakpoint_rule(value: &str) -> crate::server::RuleValue {
@@ -11306,26 +11577,35 @@ mod coverage_90_wave {
         });
 
         wait_for_breakpoint(&state).await;
-        assert!(state.breakpoint_manager.resume(
-            "REQ-tunnel-coverage",
-            "request",
-            BreakpointEdit {
-                headers: vec![("x-breakpoint-request".into(), "yes".into())],
-                body: Some("edited-request".into()),
-            },
-        ));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-tunnel-coverage",
+                "request",
+                BreakpointEdit {
+                    headers: Some(vec![("x-breakpoint-request".into(), "yes".into())]),
+                    body: Some("edited-request".into()),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
         wait_for_breakpoint(&state).await;
-        assert!(state.breakpoint_manager.resume(
-            "REQ-tunnel-coverage",
-            "response",
-            BreakpointEdit {
-                headers: vec![("x-breakpoint-response".into(), "yes".into())],
-                body: Some("data: edited\n\ndata: [DONE]\n\n".into()),
-            },
-        ));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-tunnel-coverage",
+                "response",
+                BreakpointEdit {
+                    headers: Some(vec![("x-breakpoint-response".into(), "yes".into())]),
+                    body: Some("data: edited\n\ndata: [DONE]\n\n".into()),
+                    status: Some(220),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
 
         let response = task.await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status().as_u16(), 220);
         assert_eq!(response.headers()["x-breakpoint-response"], "yes");
         assert_eq!(
             body_bytes(response).await,
@@ -11335,7 +11615,7 @@ mod coverage_90_wave {
             .traffic_db
             .get_by_id("REQ-tunnel-coverage")
             .expect("breakpoint traffic record");
-        assert_eq!(record.status, 200);
+        assert_eq!(record.status, 220);
         assert!(record.request_body_ref.is_some());
         assert!(record.response_body_ref.is_some());
     }
@@ -11355,8 +11635,8 @@ mod coverage_90_wave {
                 max_body_bytes: 4096,
             });
         let upstream = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/breakpoint-regular"))
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path("/breakpoint-regular-edited"))
             .and(wiremock::matchers::body_string("regular-edited-request"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
@@ -11371,13 +11651,16 @@ mod coverage_90_wave {
             rules: vec![breakpoint_rule("both")],
             ..Default::default()
         };
+        let frames = futures_util::stream::iter(vec![
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"orig"))),
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"inal"))),
+        ]);
         let request = Request::builder()
             .method(Method::POST)
             .uri("/breakpoint-regular")
             .header(header::HOST, "source.test")
             .header(header::CONTENT_TYPE, "text/plain")
-            .header(header::CONTENT_LENGTH, "8")
-            .body(Full::new(Bytes::from_static(b"original")))
+            .body(StreamBody::new(frames))
             .unwrap();
         let task_state = state.clone();
         let task = tokio::spawn(async move {
@@ -11385,24 +11668,36 @@ mod coverage_90_wave {
         });
 
         wait_for_breakpoint(&state).await;
-        assert!(state.breakpoint_manager.resume(
-            "REQ-tunnel-coverage",
-            "request",
-            BreakpointEdit {
-                headers: vec![("x-regular-request".into(), "yes".into())],
-                body: Some("regular-edited-request".into()),
-            },
-        ));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-tunnel-coverage",
+                "request",
+                BreakpointEdit {
+                    headers: Some(vec![("x-regular-request".into(), "yes".into())]),
+                    body: Some("regular-edited-request".into()),
+                    method: Some("PUT".into()),
+                    url: Some(format!("{}/breakpoint-regular-edited", upstream.uri())),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
         wait_for_breakpoint(&state).await;
-        assert!(state.breakpoint_manager.resume(
-            "REQ-tunnel-coverage",
-            "response",
-            BreakpointEdit {
-                headers: vec![("x-regular-response".into(), "yes".into())],
-                body: Some("regular-edited-response".into()),
-            },
-        ));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-tunnel-coverage",
+                "response",
+                BreakpointEdit {
+                    headers: Some(vec![("x-regular-response".into(), "yes".into())]),
+                    body: Some("regular-edited-response".into()),
+                    status: Some(218),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
         let response = task.await.unwrap();
+        assert_eq!(response.status().as_u16(), 218);
         assert_eq!(response.headers()["x-regular-response"], "yes");
         assert_eq!(
             body_bytes(response).await,
@@ -11412,7 +11707,9 @@ mod coverage_90_wave {
             .traffic_db
             .get_by_id("REQ-tunnel-coverage")
             .expect("regular breakpoint traffic record");
-        assert_eq!(record.status, 200);
+        assert_eq!(record.status, 218);
+        assert_eq!(record.method, "PUT");
+        assert_eq!(record.path, "/breakpoint-regular-edited");
         assert!(record.response_body_ref.is_some());
     }
 
@@ -11822,6 +12119,176 @@ mod coverage_90_wave {
     }
 
     #[tokio::test]
+    async fn intercepted_request_breakpoint_header_only_preserves_large_chunked_body() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19459)
+            .build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 8,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/large-request-breakpoint"))
+            .and(wiremock::matchers::body_string("tunnel-large-request-body"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("request")],
+            ..Default::default()
+        };
+        let frames = futures_util::stream::iter(vec![
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(
+                b"tunnel-large-",
+            ))),
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(
+                b"request-body",
+            ))),
+        ]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/large-request-breakpoint")
+            .header(header::HOST, "source.test")
+            .body(StreamBody::new(frames))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_intercepted_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+        wait_for_breakpoint(&state).await;
+        let pending = state.breakpoint_manager.pending();
+        assert!(pending[0].body_omitted);
+        assert!(state
+            .breakpoint_manager
+            .resume("REQ-tunnel-coverage", "request", BreakpointEdit::default(),)
+            .is_ok());
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn intercepted_breakpoint_request_url_routes_to_edited_upstream() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder().build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 1024,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/edited-upstream"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("edited"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            rules: vec![breakpoint_rule("request")],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("/default-port")
+            .header(header::HOST, "source.test")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_intercepted_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+        wait_for_breakpoint(&state).await;
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-tunnel-coverage",
+                "request",
+                BreakpointEdit {
+                    url: Some(format!("{}/edited-upstream", upstream.uri())),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn breakpoint_upstream_target_uses_scheme_defaults_and_preserves_authority() {
+        let http = "http://example.test/path?value=1".parse().unwrap();
+        assert_eq!(
+            breakpoint_upstream_target(&http),
+            Some((
+                true,
+                "example.test".into(),
+                80,
+                "/path?value=1".into(),
+                "example.test".into(),
+            ))
+        );
+
+        let https = "https://[::1]:9443".parse().unwrap();
+        assert_eq!(
+            breakpoint_upstream_target(&https),
+            Some((false, "[::1]".into(), 9443, "/".into(), "[::1]:9443".into(),))
+        );
+        assert!(breakpoint_upstream_target(&"/relative".parse().unwrap()).is_none());
+    }
+
+    #[tokio::test]
+    async fn intercepted_request_breakpoint_reports_stream_read_errors() {
+        use bifrost_admin::breakpoint::BreakpointSettings;
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder().build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 8,
+            });
+        let rules = ResolvedRules {
+            rules: vec![breakpoint_rule("request")],
+            ..Default::default()
+        };
+        let frames = futures_util::stream::iter(vec![Err::<hyper::body::Frame<Bytes>, _>(
+            std::io::Error::other("broken breakpoint body"),
+        )]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/broken-breakpoint")
+            .header(header::HOST, "source.test")
+            .body(StreamBody::new(frames))
+            .unwrap();
+        let response = run_intercepted_request_config_result(
+            rules,
+            Some(state),
+            request,
+            4096,
+            64,
+            true,
+            "source.test",
+            443,
+            false,
+        )
+        .await;
+        assert!(
+            response.is_err(),
+            "broken body must terminate the client transport"
+        );
+    }
+
+    #[tokio::test]
     async fn intercepted_response_breakpoint_header_only_preserves_large_body() {
         use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
 
@@ -11861,15 +12328,21 @@ mod coverage_90_wave {
             run_intercepted_request(rules, Some(task_state), request, 4096, 64, true).await
         });
         wait_for_breakpoint(&state).await;
-        assert!(state.breakpoint_manager.resume(
-            "REQ-tunnel-coverage",
-            "response",
-            BreakpointEdit {
-                headers: vec![("x-header-only".into(), "yes".into())],
-                body: None,
-            },
-        ));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-tunnel-coverage",
+                "response",
+                BreakpointEdit {
+                    headers: Some(vec![("x-header-only".into(), "yes".into())]),
+                    status: Some(219),
+                    body: None,
+                    ..Default::default()
+                },
+            )
+            .is_ok());
         let response = task.await.unwrap();
+        assert_eq!(response.status().as_u16(), 219);
         assert_eq!(response.headers()["x-header-only"], "yes");
         assert_eq!(body_bytes(response).await, Bytes::from(large_body));
     }

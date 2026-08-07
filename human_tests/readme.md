@@ -77,7 +77,7 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [node-security-frontend.md](./node-security-frontend.md) | Node.js 安全依赖修复 | 5 | Dependabot npm 告警和本地 audit 清零，Web 前端 lint/build/unit/UI E2E、UI 修改点逐项覆盖、Docs site 构建、Sync Server 构建测试、Puppeteer 脚本 audit 回归 |
-| [breakpoint-hook.md](./breakpoint-hook.md) | Breakpoint Rule Gating | 15 | Toolbar 单一全局开关、`breakpoint://request` / `breakpoint://response` 规则应用、pause/resume、暂停期间关闭 breakpoint、breakpoint OFF 回归、large body 默认关闭性能回归、oversized body header-only pause、response timeout 自动放行、request/response 小 body 与 headers 编辑、规则编辑器智能提示、OpenAPI 与 UI 分工、侧边栏 OpenAPI 入口、协议 registry 同步 |
+| [breakpoint-hook.md](./breakpoint-hook.md) | Breakpoint Rule Gating | 22 | Toolbar 单一全局开关、规则驱动 request/response 暂停、pending 查询与刷新恢复、Network 暂停行浅色/深色主题警示背景和倒计时、request method/URL/query/重复 headers/body 编辑、response status/重复 headers/body 编辑、严格 phase 冲突、关闭与 timeout 清理、未知长度与 oversized body 防护、HTTPS 目标范围自动 TLS 解密、Web/Desktop Origin CORS 与 CSRF、规则编辑器提示、OpenAPI 与协议 registry 同步 |
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
 | [videos-tool.md](./videos-tool.md) | Videos Tool 下线 | 4 | AI 导航移除、旧深链回退 New Chat、旧 Admin API 返回 404、专用实现清零与其它 AI 入口回归 |

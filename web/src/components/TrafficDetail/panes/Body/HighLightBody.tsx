@@ -248,7 +248,7 @@ export const HighLightBody = ({
             height={editorHeight}
             language={monacoLang}
             theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}
-            defaultValue={formattedInitial}
+            value={rawText}
             onChange={(value) => onBodyChange?.(value ?? '')}
             options={{
               minimap: { enabled: false },
