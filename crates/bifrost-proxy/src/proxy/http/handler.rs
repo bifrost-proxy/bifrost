@@ -92,9 +92,9 @@ use super::devtools::{
     take_devtools_client_req_id, take_devtools_client_req_id_from_uri,
 };
 use super::scripts::{
-    apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
-    execute_response_scripts, header_map_to_hashmap, headers_to_hashmap, parse_url_parts,
-    script_string_to_body,
+    apply_script_headers_to_header_map, body_to_script_string, create_response_stream_script_body,
+    execute_request_scripts, execute_response_scripts, header_map_to_hashmap, headers_to_hashmap,
+    initialize_response_stream_script, parse_url_parts, script_string_to_body,
 };
 
 fn apply_request_context(record: &mut TrafficRecord, ctx: &RequestContext) {
@@ -773,6 +773,26 @@ pub fn needs_response_phase_resolve(rules: &ResolvedRules) -> bool {
         || rules.attachment.is_some()
         || rules.response_for.is_some()
         || rules.res_cors.is_enabled()
+        || !rules.res_stream_scripts.is_empty()
+}
+
+pub(in crate::proxy::http) fn configure_stream_script_response_headers(
+    headers: &mut hyper::HeaderMap,
+) {
+    headers.remove(hyper::header::CONTENT_LENGTH);
+    headers.remove(hyper::header::CONTENT_ENCODING);
+    headers.insert(
+        hyper::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    headers.insert(
+        hyper::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
 }
 
 pub(in crate::proxy::http) async fn apply_immediate_response_body_rules(
@@ -1704,6 +1724,81 @@ pub async fn handle_http_request(
         .await?;
         let status = resolved_rules.status_code.unwrap_or(200);
         let mut mock_response = crate::utils::mock::build_status_response(status, &resolved_rules);
+        if !resolved_rules.res_stream_scripts.is_empty() {
+            if !resolved_rules.res_scripts.is_empty() {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .body(full_body(
+                        "resScript and resStreamScript cannot be combined on one response",
+                    ))
+                    .unwrap());
+            }
+            let mut values = resolved_rules.values.clone();
+            for (key, value) in get_values_from_state(&admin_state).await {
+                values.entry(key).or_insert(value);
+            }
+            let worker = match initialize_response_stream_script(
+                &admin_state,
+                &resolved_rules.res_stream_scripts,
+                ctx,
+                &resolved_rules,
+                &record_url,
+                &request_snapshot.method,
+                &headers_to_hashmap(&request_snapshot.headers),
+                mock_response.status().as_u16(),
+                mock_response
+                    .status()
+                    .canonical_reason()
+                    .unwrap_or("OK")
+                    .to_string(),
+                header_map_to_hashmap(mock_response.headers()),
+                &values,
+            )
+            .await
+            {
+                Ok(worker) => worker,
+                Err(error) => {
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(full_body(format!(
+                            "stream script initialization failed: {error}"
+                        )))
+                        .unwrap());
+                }
+            };
+            if worker.mode() != bifrost_script::StreamScriptMode::Mock {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .body(full_body(
+                        "direct status resStreamScript requires stream.mode = \"mock\"",
+                    ))
+                    .unwrap());
+            }
+            let (mut parts, _body) = mock_response.into_parts();
+            configure_stream_script_response_headers(&mut parts.headers);
+            let body = create_response_stream_script_body(None, worker);
+            let response = Response::from_parts(parts, body);
+            if let Some(ref state) = admin_state {
+                record_direct_status_traffic(
+                    state,
+                    ctx,
+                    &record_url,
+                    &uri,
+                    &start_time,
+                    has_rules,
+                    &resolved_rules,
+                    &response,
+                    &request_snapshot,
+                    Some(Bytes::new()),
+                    &[],
+                    &devtools_client_req_id,
+                );
+            }
+            return Ok(response);
+        }
         let mut transformed_mock_body = if needs_body_processing(&resolved_rules) {
             let (response, body) = apply_immediate_response_body_rules(
                 mock_response,
@@ -2364,9 +2459,10 @@ pub async fn handle_http_request(
         (Bytes::new(), Bytes::new())
     };
     let has_res_scripts = !resolved_rules.res_scripts.is_empty();
+    let has_res_stream_scripts = !resolved_rules.res_stream_scripts.is_empty();
     let has_decode_scripts = !resolved_rules.decode_scripts.is_empty();
     let mut values = HashMap::new();
-    if has_req_scripts || has_res_scripts || has_decode_scripts {
+    if has_req_scripts || has_res_scripts || has_res_stream_scripts || has_decode_scripts {
         values = resolved_rules.values.clone();
         let state_values = get_values_from_state(&admin_state).await;
         for (k, v) in state_values {
@@ -2792,6 +2888,12 @@ pub async fn handle_http_request(
 
     parts.uri = upstream_uri.clone();
     sanitize_upstream_headers(&mut parts.headers);
+    if !resolved_rules.res_stream_scripts.is_empty() {
+        parts.headers.insert(
+            hyper::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+    }
     parts.headers.remove(hyper::header::HOST);
     let retry_blueprint =
         if use_tls && matches!(method.as_str(), "GET" | "HEAD") && !request_body_is_streaming {
@@ -2813,6 +2915,7 @@ pub async fn handle_http_request(
 
     let should_try_http3_upstream = use_tls
         && resolved_rules.upstream_http3
+        && resolved_rules.res_stream_scripts.is_empty()
         && !request_body_is_streaming
         && dns_resolver.is_some()
         && !use_upstream_proxy
@@ -3265,6 +3368,15 @@ pub async fn handle_http_request(
     } else {
         resolved_rules.clone()
     };
+    if !response_resolved.res_stream_scripts.is_empty() {
+        let state_values = get_values_from_state(&admin_state).await;
+        for (key, value) in state_values {
+            values.entry(key).or_insert(value);
+        }
+        for (key, value) in &response_resolved.values {
+            values.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
     apply_res_rules(
         &mut res_parts,
         &response_resolved,
@@ -3279,7 +3391,7 @@ pub async fn handle_http_request(
         inject_bifrost_badge && res_content_type.starts_with("text/html");
     let force_body_processing_for_devtools =
         devtools_bridge_requested(&resolved_rules) && res_content_type.starts_with("text/html");
-    let base_needs_processing = needs_body_processing(&resolved_rules)
+    let base_needs_processing = needs_body_processing(&response_resolved)
         || force_body_processing_for_badge
         || force_body_processing_for_devtools;
 
@@ -3298,6 +3410,37 @@ pub async fn handle_http_request(
         .and_then(|s| s.parse::<usize>().ok());
 
     let is_sse = is_sse_response(&res_parts);
+    if !response_resolved.res_stream_scripts.is_empty() {
+        if !response_resolved.res_scripts.is_empty() {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(
+                    "resScript and resStreamScript cannot be combined on one response",
+                ))
+                .unwrap());
+        }
+        if !is_sse {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(
+                    "resStreamScript requires a text/event-stream response",
+                ))
+                .unwrap());
+        }
+        if response_content_encoding(&res_parts)
+            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+        {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(
+                    "resStreamScript does not support encoded upstream SSE responses",
+                ))
+                .unwrap());
+        }
+    }
     let binary_traffic_performance_mode = admin_state
         .as_ref()
         .map(|state| state.get_binary_traffic_performance_mode())
@@ -3620,7 +3763,49 @@ pub async fn handle_http_request(
         }
 
         if is_sse {
-            let res_body = res_body_incoming.take().unwrap();
+            let res_body = res_body_incoming.take().unwrap().boxed();
+            let res_body = if response_resolved.res_stream_scripts.is_empty() {
+                res_body
+            } else {
+                let worker = match initialize_response_stream_script(
+                    &admin_state,
+                    &response_resolved.res_stream_scripts,
+                    ctx,
+                    &response_resolved,
+                    &record_url,
+                    &method,
+                    &headers_to_hashmap(&req_headers),
+                    res_parts.status.as_u16(),
+                    res_parts
+                        .status
+                        .canonical_reason()
+                        .unwrap_or("OK")
+                        .to_string(),
+                    header_map_to_hashmap(&res_parts.headers),
+                    &values,
+                )
+                .await
+                {
+                    Ok(worker) => worker,
+                    Err(error) => {
+                        if let Some(ref state) = admin_state {
+                            state.sse_hub.unregister(record_id);
+                            state.update_traffic_by_id(record_id, |record| {
+                                record.status = StatusCode::BAD_GATEWAY.as_u16();
+                            });
+                        }
+                        return Ok(Response::builder()
+                            .status(StatusCode::BAD_GATEWAY)
+                            .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                            .body(full_body(format!(
+                                "stream script initialization failed: {error}"
+                            )))
+                            .unwrap());
+                    }
+                };
+                configure_stream_script_response_headers(&mut res_parts.headers);
+                create_response_stream_script_body(Some(res_body), worker)
+            };
             let tee_body = create_sse_tee_body(
                 res_body,
                 admin_state.clone(),
@@ -8739,7 +8924,7 @@ mod coverage_90_wave {
         assert_eq!(response.status().as_u16(), 208);
         assert_eq!(
             response_body(response).await,
-            Bytes::from_static(b"data: handler-script-response\\n\\ndata: [DONE]\\n\\n")
+            Bytes::from_static(b"data: handler-script-response\n\ndata: [DONE]\n\n")
         );
 
         assert!(harness.traffic_db.count() >= 1);
@@ -8747,7 +8932,7 @@ mod coverage_90_wave {
             .traffic_db
             .get_by_id("REQ-handler-coverage")
             .expect("scripted handler traffic record");
-        assert_eq!(record.frame_count, 1);
+        assert_eq!(record.frame_count, 2);
     }
 
     #[tokio::test]

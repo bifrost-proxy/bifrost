@@ -78,6 +78,7 @@ pub enum Protocol {
     // 脚本插件
     ReqScript,
     ResScript,
+    ResStreamScript,
     Decode,
     Bp,
 
@@ -138,6 +139,7 @@ pub const MULTI_MATCH_PROTOCOLS: &[Protocol] = &[
     Protocol::CssPrepend,
     Protocol::ReqScript,
     Protocol::ResScript,
+    Protocol::ResStreamScript,
     Protocol::Decode,
     Protocol::Bp,
     Protocol::Delete,
@@ -315,6 +317,7 @@ impl Protocol {
             "attachment" => Some(Protocol::Attachment),
             "reqScript" => Some(Protocol::ReqScript),
             "resScript" => Some(Protocol::ResScript),
+            "resStreamScript" => Some(Protocol::ResStreamScript),
             "decode" => Some(Protocol::Decode),
             "bp" => Some(Protocol::Bp),
             "reqDelay" => Some(Protocol::ReqDelay),
@@ -397,6 +400,7 @@ impl Protocol {
             Protocol::Attachment => "attachment",
             Protocol::ReqScript => "reqScript",
             Protocol::ResScript => "resScript",
+            Protocol::ResStreamScript => "resStreamScript",
             Protocol::Decode => "decode",
             Protocol::Bp => "bp",
             Protocol::ReqDelay => "reqDelay",
@@ -488,7 +492,8 @@ impl Protocol {
             | Protocol::CssPrepend
             | Protocol::HtmlPrepend
             | Protocol::JsPrepend
-            | Protocol::ResScript => ProtocolCategory::Response,
+            | Protocol::ResScript
+            | Protocol::ResStreamScript => ProtocolCategory::Response,
 
             Protocol::ReqHeaders
             | Protocol::ReqBody
@@ -567,7 +572,7 @@ impl std::fmt::Display for Protocol {
     }
 }
 
-pub const ALL_PROTOCOLS: [Protocol; 76] = [
+pub const ALL_PROTOCOLS: [Protocol; 77] = [
     Protocol::Host,
     Protocol::XHost,
     Protocol::Http,
@@ -596,6 +601,7 @@ pub const ALL_PROTOCOLS: [Protocol; 76] = [
     Protocol::Attachment,
     Protocol::ReqScript,
     Protocol::ResScript,
+    Protocol::ResStreamScript,
     Protocol::Decode,
     Protocol::Bp,
     Protocol::ReqDelay,
@@ -652,7 +658,7 @@ mod tests {
 
     #[test]
     fn test_protocol_count() {
-        assert_eq!(ALL_PROTOCOLS.len(), 76);
+        assert_eq!(ALL_PROTOCOLS.len(), 77);
     }
 
     #[test]
@@ -686,6 +692,7 @@ mod tests {
             "attachment",
             "reqScript",
             "resScript",
+            "resStreamScript",
             "decode",
             "bp",
             "reqDelay",
@@ -741,7 +748,7 @@ mod tests {
             assert!(result.is_some(), "Failed to parse protocol: {}", name);
         }
 
-        assert_eq!(protocol_names.len(), 76);
+        assert_eq!(protocol_names.len(), 77);
     }
 
     #[test]

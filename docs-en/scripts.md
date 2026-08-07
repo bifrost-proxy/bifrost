@@ -2,14 +2,15 @@
 
 # Scripts Management and Development Guide
 
-The Admin UI Scripts module manages request, response, decode, and parser scripts. Scripts are stored on disk and executed by the QuickJS sandbox.
+The Admin UI Scripts module manages request, response, streaming response, decode, and parser scripts. Scripts are stored on disk and executed by the QuickJS sandbox. For rules generated or shared through a CLI or AI, prefer inline script blocks in the rule itself; the Scripts page is intended primarily for interactive tests, manual editing, and reusable local named scripts.
 
 ## Script Types
 
 1. Request Script: runs before forwarding to upstream and can modify method, headers, or body.
 2. Response Script: runs after receiving upstream response and can modify status, headers, or body.
-3. Decode Script: decodes, redacts, or formats body content before display and persistence.
-4. Parser Script: used with `bp://...` and `decode://bp` for binary protocol parsing. It affects stored and displayed traffic, not the actual client/upstream stream.
+3. Streaming Response Script: runs through `resStreamScript://` and incrementally transforms or mocks true SSE output without collecting the response.
+4. Decode Script: decodes, redacts, or formats body content before display and persistence.
+5. Parser Script: used with `bp://...` and `decode://bp` for binary protocol parsing. It affects stored and displayed traffic, not the actual client/upstream stream.
 
 ## Naming
 

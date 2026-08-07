@@ -459,6 +459,11 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
         let protocol = resolved_rule.rule.protocol;
         let value = &resolved_rule.resolved_value;
         let pattern = &resolved_rule.rule.pattern;
+        let script_reference = resolved_rule
+            .rule
+            .value_source
+            .as_value_ref()
+            .map(|name| format!("{{{name}}}"));
 
         result.rules.push(RuleValue {
             pattern: pattern.clone(),
@@ -737,10 +742,25 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 result.host_protocol = Some(Protocol::Tunnel);
             }
             Protocol::ReqScript => {
-                result.req_scripts.push(value.to_string());
+                result.req_scripts.push(
+                    script_reference
+                        .clone()
+                        .unwrap_or_else(|| value.to_string()),
+                );
             }
             Protocol::ResScript => {
-                result.res_scripts.push(value.to_string());
+                result.res_scripts.push(
+                    script_reference
+                        .clone()
+                        .unwrap_or_else(|| value.to_string()),
+                );
+            }
+            Protocol::ResStreamScript => {
+                result.res_stream_scripts.push(
+                    script_reference
+                        .clone()
+                        .unwrap_or_else(|| value.to_string()),
+                );
             }
             Protocol::Decode => {
                 result.decode_scripts.push(value.to_string());
@@ -2450,6 +2470,41 @@ wss://app.example.test/ ws://localhost:8000/
         assert_eq!(resolved.res_scripts.len(), 2);
         assert_eq!(resolved.res_scripts[0], "script1.js");
         assert_eq!(resolved.res_scripts[1], "script2.js");
+    }
+
+    #[test]
+    fn test_inline_block_script_references_are_preserved_for_runtime_execution() {
+        let rules_text = r#"
+example.com reqScript://{request_bridge} resScript://{response_bridge} resStreamScript://{stream_bridge}
+
+```request_bridge
+request.headers["X-Inline"] = "request";
+```
+```response_bridge
+response.headers["X-Inline"] = "response";
+```
+```stream_bridge
+stream.mode = "transform";
+stream.onEvent = event => ({ data: event.data });
+```
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values.clone());
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "POST",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.req_scripts, vec!["{request_bridge}"]);
+        assert_eq!(resolved.res_scripts, vec!["{response_bridge}"]);
+        assert_eq!(resolved.res_stream_scripts, vec!["{stream_bridge}"]);
+        assert!(resolved.values["request_bridge"].contains("X-Inline"));
+        assert!(resolved.values["response_bridge"].contains("X-Inline"));
+        assert!(resolved.values["stream_bridge"].contains("stream.onEvent"));
     }
 
     #[test]

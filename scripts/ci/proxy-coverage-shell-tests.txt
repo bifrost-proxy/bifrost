@@ -10,6 +10,7 @@ test_breakpoint_performance_guard.sh
 test_body_replace.sh
 test_header_replace.sh
 test_req_res_script_e2e.sh
+test_response_stream_script.sh
 test_websocket_frames.sh
 test_trustworthy_traffic_metrics.sh
 test_asr_assisted_voiceprint_api.sh

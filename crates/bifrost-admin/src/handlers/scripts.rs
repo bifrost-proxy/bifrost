@@ -34,6 +34,59 @@ pub struct ScriptManager {
 }
 
 impl ScriptManager {
+    fn inline_script<'a>(
+        script_ref: &str,
+        ctx: &'a bifrost_script::ScriptContext,
+    ) -> Option<(&'a str, String)> {
+        let name = script_ref.strip_prefix('{')?.strip_suffix('}')?;
+        ctx.values
+            .get(name)
+            .map(|content| (content.as_str(), name.to_string()))
+    }
+
+    fn apply_request_test_result(
+        request: &mut bifrost_script::RequestData,
+        result: &bifrost_script::ScriptExecutionResult,
+    ) {
+        if !result.success {
+            return;
+        }
+        if let Some(mods) = &result.request_modifications {
+            if let Some(method) = &mods.method {
+                request.method = method.clone();
+            }
+            if let Some(headers) = &mods.headers {
+                request.headers = headers.clone();
+            }
+            if mods.body.is_some() {
+                request.body = mods.body.clone();
+            }
+        }
+    }
+
+    fn apply_response_test_result(
+        response: &mut bifrost_script::ResponseData,
+        result: &bifrost_script::ScriptExecutionResult,
+    ) {
+        if !result.success {
+            return;
+        }
+        if let Some(mods) = &result.response_modifications {
+            if let Some(status) = mods.status {
+                response.status = status;
+            }
+            if let Some(status_text) = &mods.status_text {
+                response.status_text = status_text.clone();
+            }
+            if let Some(headers) = &mods.headers {
+                response.headers = headers.clone();
+            }
+            if mods.body.is_some() {
+                response.body = mods.body.clone();
+            }
+        }
+    }
+
     pub fn new(scripts_dir: PathBuf) -> Self {
         Self {
             engine: ScriptEngine::new(ScriptEngineConfig {
@@ -60,10 +113,20 @@ impl ScriptManager {
     ) -> Vec<bifrost_script::ScriptExecutionResult> {
         let mut results = Vec::new();
         for script_name in script_names {
-            let result = self
-                .engine
-                .execute_request_script(script_name, request, ctx)
-                .await;
+            let mut result = if let Some((content, name)) = Self::inline_script(script_name, ctx) {
+                let mut result = self
+                    .engine
+                    .test_script(ScriptType::Request, content, Some(request), None, ctx)
+                    .await;
+                result.script_name = format!("{{{name}}}");
+                Self::apply_request_test_result(request, &result);
+                result
+            } else {
+                self.engine
+                    .execute_request_script(script_name, request, ctx)
+                    .await
+            };
+            result.script_type = ScriptType::Request;
             results.push(result);
         }
         results
@@ -78,10 +141,27 @@ impl ScriptManager {
     ) -> Vec<bifrost_script::ScriptExecutionResult> {
         let mut results = Vec::new();
         for script_name in script_names {
-            let result = self
-                .engine
-                .execute_request_script_with_config(script_name, request, ctx, cfg)
-                .await;
+            let mut result = if let Some((content, name)) = Self::inline_script(script_name, ctx) {
+                let mut result = self
+                    .engine
+                    .test_script_with_config(
+                        ScriptType::Request,
+                        content,
+                        Some(request),
+                        None,
+                        ctx,
+                        cfg,
+                    )
+                    .await;
+                result.script_name = format!("{{{name}}}");
+                Self::apply_request_test_result(request, &result);
+                result
+            } else {
+                self.engine
+                    .execute_request_script_with_config(script_name, request, ctx, cfg)
+                    .await
+            };
+            result.script_type = ScriptType::Request;
             results.push(result);
         }
         results
@@ -95,10 +175,20 @@ impl ScriptManager {
     ) -> Vec<bifrost_script::ScriptExecutionResult> {
         let mut results = Vec::new();
         for script_name in script_names {
-            let result = self
-                .engine
-                .execute_response_script(script_name, response, ctx)
-                .await;
+            let mut result = if let Some((content, name)) = Self::inline_script(script_name, ctx) {
+                let mut result = self
+                    .engine
+                    .test_script(ScriptType::Response, content, None, Some(response), ctx)
+                    .await;
+                result.script_name = format!("{{{name}}}");
+                Self::apply_response_test_result(response, &result);
+                result
+            } else {
+                self.engine
+                    .execute_response_script(script_name, response, ctx)
+                    .await
+            };
+            result.script_type = ScriptType::Response;
             results.push(result);
         }
         results
@@ -113,10 +203,27 @@ impl ScriptManager {
     ) -> Vec<bifrost_script::ScriptExecutionResult> {
         let mut results = Vec::new();
         for script_name in script_names {
-            let result = self
-                .engine
-                .execute_response_script_with_config(script_name, response, ctx, cfg)
-                .await;
+            let mut result = if let Some((content, name)) = Self::inline_script(script_name, ctx) {
+                let mut result = self
+                    .engine
+                    .test_script_with_config(
+                        ScriptType::Response,
+                        content,
+                        None,
+                        Some(response),
+                        ctx,
+                        cfg,
+                    )
+                    .await;
+                result.script_name = format!("{{{name}}}");
+                Self::apply_response_test_result(response, &result);
+                result
+            } else {
+                self.engine
+                    .execute_response_script_with_config(script_name, response, ctx, cfg)
+                    .await
+            };
+            result.script_type = ScriptType::Response;
             results.push(result);
         }
         results
@@ -746,7 +853,9 @@ async fn handle_rename(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bifrost_script::{RequestData, ResponseData, ScriptContext};
     use http_body_util::BodyExt;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -779,5 +888,79 @@ mod tests {
         assert_eq!(detail.info.name, "utf8");
         assert_eq!(detail.info.script_type, ScriptType::Decode);
         assert!(detail.content.contains("decode://utf8"));
+    }
+
+    #[tokio::test]
+    async fn inline_request_script_executes_block_and_preserves_string_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ScriptManager::new(dir.path().to_path_buf());
+        let expected = "quoted: \"yes\"\npath: C:\\tmp";
+        let mut values = HashMap::new();
+        values.insert(
+            "request_bridge".to_string(),
+            r#"
+                request.headers["X-Inline"] = "yes";
+                request.body = "quoted: \"yes\"\npath: C:\\tmp";
+            "#
+            .to_string(),
+        );
+        let ctx = ScriptContext {
+            request_id: "inline-request-test".to_string(),
+            script_name: "{request_bridge}".to_string(),
+            script_type: ScriptType::Request,
+            values,
+            matched_rules: vec![],
+        };
+        let mut request = RequestData::default();
+
+        let results = manager
+            .execute_request_scripts(&["{request_bridge}".to_string()], &mut request, &ctx)
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success, "{:?}", results[0].error);
+        assert_eq!(results[0].script_name, "{request_bridge}");
+        assert_eq!(
+            request.headers.get("X-Inline").map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(request.body.as_deref(), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn inline_response_script_executes_block_and_preserves_sse_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ScriptManager::new(dir.path().to_path_buf());
+        let expected = "event: delta\ndata: {\"text\":\"a\\\\b\"}\n\n";
+        let mut values = HashMap::new();
+        values.insert(
+            "response_bridge".to_string(),
+            r#"
+                response.headers["Content-Type"] = "text/event-stream";
+                response.body = "event: delta\ndata: {\"text\":\"a\\\\b\"}\n\n";
+            "#
+            .to_string(),
+        );
+        let ctx = ScriptContext {
+            request_id: "inline-response-test".to_string(),
+            script_name: "{response_bridge}".to_string(),
+            script_type: ScriptType::Response,
+            values,
+            matched_rules: vec![],
+        };
+        let mut response = ResponseData::default();
+
+        let results = manager
+            .execute_response_scripts(&["{response_bridge}".to_string()], &mut response, &ctx)
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success, "{:?}", results[0].error);
+        assert_eq!(results[0].script_name, "{response_bridge}");
+        assert_eq!(
+            response.headers.get("Content-Type").map(String::as_str),
+            Some("text/event-stream")
+        );
+        assert_eq!(response.body.as_deref(), Some(expected));
     }
 }

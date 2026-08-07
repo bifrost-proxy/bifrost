@@ -2,7 +2,7 @@
 
 本篇文档介绍 Bifrost 管理端 **Scripts** 模块的使用方式（创建/保存/测试/组织脚本），并给出常见应用场景与示例代码。
 
-> 规则侧如何引用脚本（`reqScript://` / `resScript://` / `decode://` / `bp://`）请参考：`docs/rules/scripts.md`。
+> 规则侧如何引用脚本（`reqScript://` / `resScript://` / `resStreamScript://` / `decode://` / `bp://`）请参考：`docs/rules/scripts.md`。通过 CLI 或 AI 生成、分享规则时，默认推荐把脚本写成规则文件内的 inline block；Scripts 页面主要用于交互式测试、试跑和人工维护命名脚本。
 
 ---
 

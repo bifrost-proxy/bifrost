@@ -1191,6 +1191,8 @@ function EditorPanel({
   testing: boolean;
 }) {
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
+  const isStreamScript =
+    selectedType === "response" && /\bstream\s*\./.test(editorContent);
   const saveRef = useRef(onSave);
 
   useEffect(() => {
@@ -1260,6 +1262,15 @@ function EditorPanel({
               </li>
               <li style={{ marginBottom: 8 }}>
                 <Text type="secondary">
+                  Response scripts can also be used by{" "}
+                  <code>resStreamScript://</code> to generate or transform a
+                  true incremental SSE stream. Stream scripts must be tested
+                  through a rule and live SSE source; the ordinary Run action
+                  is disabled for stream code.
+                </Text>
+              </li>
+              <li style={{ marginBottom: 8 }}>
+                <Text type="secondary">
                   Use <code>log.info()</code>, <code>log.warn()</code> to debug
                   your scripts
                 </Text>
@@ -1280,8 +1291,9 @@ function EditorPanel({
               type="secondary"
               style={{ display: "block", marginBottom: 8 }}
             >
-              In the <b>Rules</b> page, use <code>reqScript://</code> or{" "}
-              <code>resScript://</code> protocol:
+              For CLI, AI-generated, or shared rules, prefer an inline block so
+              the rule is self-contained. This page is useful for interactive
+              testing and manually maintained named scripts:
             </Text>
             <pre
               style={{
@@ -1293,11 +1305,16 @@ function EditorPanel({
                 color: resolvedTheme === "dark" ? "#d9d9d9" : "#434343",
                 overflow: "auto",
               }}
-            >{`# Add auth header to API requests
-api.example.com reqScript://add-auth-header
+            >{`api.example.com reqScript://{add_auth} resStreamScript://{map_sse}
 
-# Modify response for testing
-*.example.com resScript://mock-response`}</pre>
+\`\`\`add_auth
+request.headers["Authorization"] = "Bearer " + ctx.values.token;
+\`\`\`
+
+\`\`\`map_sse
+stream.mode = "transform";
+stream.onEvent = (event) => ({ event: event.event, data: event.data });
+\`\`\``}</pre>
           </div>
         </div>
       </div>
@@ -1341,6 +1358,12 @@ api.example.com reqScript://add-auth-header
             onClick={onTest}
             loading={testing}
             data-testid="scripts-test-button"
+            disabled={isStreamScript}
+            title={
+              isStreamScript
+                ? "Stream scripts are tested through a resStreamScript rule with a live SSE source"
+                : undefined
+            }
           >
             Run
           </Button>

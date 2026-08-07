@@ -76,6 +76,7 @@
 | `resCharset`    | ✅   | `advanced/content_type.txt`                                                                         | 已覆盖                                   |
 | `resMerge`      | ✅   | `advanced/body_size_strategy.txt`                                                                   | 已覆盖                                   |
 | `resScript`     | ✅   | `request_modify/req_res_script.txt`                                                                 | 已有专项脚本驱动                         |
+| `resStreamScript` | ✅ | `response_stream_script/true_sse.txt`                                                               | 覆盖上游未结束前逐事件输出、mock 节奏、接近 16 MiB 无损与超限显式错误 |
 | `responseFor`   | 🔄   | `response_modify/response_for.txt`                                                                  | 本轮补 `x-bifrost-response-for` 语义     |
 | `statusCode`    | ✅   | `response_modify/status.txt`                                                                        | 已覆盖                                   |
 | `replaceStatus` | ✅   | `response_modify/status.txt`                                                                        | 已覆盖                                   |

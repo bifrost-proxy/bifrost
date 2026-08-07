@@ -60,7 +60,12 @@ impl SseEvent {
             buf.extend_from_slice(b"\n");
         }
 
-        for line in self.data.lines() {
+        // `str::lines` drops the final empty segment and yields no item for an
+        // empty string. SSE needs an explicit data field in both cases so an
+        // EventSource client dispatches the event and preserves trailing data
+        // newlines.
+        for line in self.data.split('\n') {
+            let line = line.strip_suffix('\r').unwrap_or(line);
             buf.extend_from_slice(b"data: ");
             buf.extend_from_slice(line.as_bytes());
             buf.extend_from_slice(b"\n");
@@ -76,19 +81,19 @@ impl SseEvent {
         let mut data_lines = Vec::new();
         let mut retry = None;
 
-        for line in raw.lines() {
+        for line in raw.split_terminator(['\r', '\n']) {
             if line.is_empty() {
                 continue;
             }
 
             if let Some(value) = line.strip_prefix("id:") {
-                id = Some(value.trim().to_string());
+                id = Some(value.strip_prefix(' ').unwrap_or(value).to_string());
             } else if let Some(value) = line.strip_prefix("event:") {
-                event = Some(value.trim().to_string());
+                event = Some(value.strip_prefix(' ').unwrap_or(value).to_string());
             } else if let Some(value) = line.strip_prefix("data:") {
-                data_lines.push(value.trim().to_string());
+                data_lines.push(value.strip_prefix(' ').unwrap_or(value).to_string());
             } else if let Some(value) = line.strip_prefix("retry:") {
-                retry = value.trim().parse().ok();
+                retry = value.strip_prefix(' ').unwrap_or(value).parse().ok();
             } else if line.starts_with(':') {
             }
         }
@@ -326,6 +331,18 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_event_preserves_empty_and_trailing_data_lines() {
+        assert_eq!(
+            SseEvent::new("").encode(),
+            Bytes::from_static(b"data: \n\n")
+        );
+        assert_eq!(
+            SseEvent::new("line\n").encode(),
+            Bytes::from_static(b"data: line\ndata: \n\n")
+        );
+    }
+
+    #[test]
     fn test_sse_event_encode_with_retry() {
         let event = SseEvent::new("data").with_retry(5000);
 
@@ -350,6 +367,12 @@ mod tests {
         let event = SseEvent::parse(raw).unwrap();
 
         assert_eq!(event.data, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn test_sse_event_parse_preserves_significant_whitespace() {
+        let event = SseEvent::parse("data:  padded \ndata:tail  \n\n").unwrap();
+        assert_eq!(event.data, " padded \ntail  ");
     }
 
     #[test]
