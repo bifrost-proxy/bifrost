@@ -67,9 +67,31 @@ pub fn normalize_provider_base_url(provider: &mut ImProviderConfig) {
 }
 
 fn normalize_feishu_base_url(base_url: Option<&str>) -> String {
+    normalize_feishu_base_url_with_loopback(
+        base_url,
+        cfg!(debug_assertions)
+            && std::env::var("BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL").as_deref() == Ok("1"),
+    )
+}
+
+fn normalize_feishu_base_url_with_loopback(base_url: Option<&str>, allow_loopback: bool) -> String {
     let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) else {
         return FEISHU_BASE_URL.to_string();
     };
+
+    // Black-box E2E tests need to exercise the real Feishu HTTP client without
+    // contacting Feishu. Keep the production allowlist closed unless the test
+    // harness explicitly opts into a loopback-only endpoint in a debug build.
+    if allow_loopback
+        && url::Url::parse(base_url).is_ok_and(|url| {
+            url.scheme() == "http"
+                && url
+                    .host_str()
+                    .is_some_and(|host| host == "127.0.0.1" || host == "localhost")
+        })
+    {
+        return base_url.trim_end_matches('/').to_string();
+    }
 
     if is_feishu_base_url(base_url, "open.larksuite.com") {
         return LARK_BASE_URL.to_string();
@@ -1069,6 +1091,23 @@ mod tests {
         normalize_provider_base_url(&mut provider);
 
         assert_eq!(provider.base_url.as_deref(), Some("http://127.0.0.1:12345"));
+    }
+
+    #[test]
+    fn feishu_loopback_base_url_requires_explicit_debug_test_opt_in() {
+        let loopback = "http://127.0.0.1:12345/open-apis/";
+        assert_eq!(
+            normalize_feishu_base_url_with_loopback(Some(loopback), false),
+            FEISHU_BASE_URL
+        );
+        assert_eq!(
+            normalize_feishu_base_url_with_loopback(Some(loopback), true),
+            "http://127.0.0.1:12345/open-apis"
+        );
+        assert_eq!(
+            normalize_feishu_base_url_with_loopback(Some("http://example.com/open-apis"), true),
+            FEISHU_BASE_URL
+        );
     }
 
     #[test]

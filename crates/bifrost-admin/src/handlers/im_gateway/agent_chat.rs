@@ -57,6 +57,195 @@ pub(super) struct ImRunnerSelection {
     pub(super) adapter: Option<String>,
 }
 
+pub(super) fn parse_im_new_group_command(message: &str) -> Option<Result<String, String>> {
+    let trimmed = message.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    if parts.next()? != "/new" {
+        return None;
+    }
+    let name = parts.next().unwrap_or_default().trim();
+    if name.is_empty() {
+        return Some(Err("用法: /new <群名>".to_string()));
+    }
+    if name.chars().count() > 60 {
+        return Some(Err("群名不能超过 60 个字符。".to_string()));
+    }
+    Some(Ok(name.to_string()))
+}
+
+pub(super) async fn handle_im_new_group_command(
+    message: &str,
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    group_context_store: &ImGroupContextStore,
+    message_log_store: &Arc<ImMessageLogStore>,
+) -> bool {
+    if provider.provider_type != ImProviderType::Feishu {
+        return false;
+    }
+    let Some(parsed) = parse_im_new_group_command(message) else {
+        return false;
+    };
+    let group_name = match parsed {
+        Ok(name) => name,
+        Err(error) => {
+            send_agent_reply(client, provider, event, &error, message_log_store).await;
+            return true;
+        }
+    };
+    let Some(configured_owner) = provider
+        .owner_open_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        send_agent_reply(
+            client,
+            provider,
+            event,
+            "当前飞书 Provider 未配置 owner，已拒绝创建群。",
+            message_log_store,
+        )
+        .await;
+        return true;
+    };
+    let Some(sender_open_id) = event
+        .source
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        send_agent_reply(
+            client,
+            provider,
+            event,
+            "无法识别命令发送者，已拒绝创建群。",
+            message_log_store,
+        )
+        .await;
+        return true;
+    };
+    if sender_open_id != configured_owner {
+        send_agent_reply(
+            client,
+            provider,
+            event,
+            "只有当前飞书 Provider 的 owner 可以使用 /new 创建群。",
+            message_log_store,
+        )
+        .await;
+        return true;
+    }
+    let source_message_id = event
+        .source
+        .message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(event.event_id.as_str());
+    match group_context_store.created_feishu_group(&provider.id, source_message_id) {
+        Ok(Some(record)) => {
+            send_agent_reply(
+                client,
+                provider,
+                event,
+                &format!(
+                    "群已创建：{}\n群 ID：{}\n（本次消息已处理，未重复创建）",
+                    record.group_name, record.chat_id
+                ),
+                message_log_store,
+            )
+            .await;
+            return true;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            send_agent_reply(
+                client,
+                provider,
+                event,
+                &format!("读取建群幂等记录失败：{error}"),
+                message_log_store,
+            )
+            .await;
+            return true;
+        }
+    }
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(format!("{}:{source_message_id}", provider.id));
+    let uuid = format!("bifrost-{}", &format!("{digest:x}")[..32]);
+    let created = match client
+        .create_feishu_group_chat(provider, &group_name, sender_open_id, &uuid)
+        .await
+    {
+        Ok(created) => created,
+        Err(error) => {
+            send_agent_reply(
+                client,
+                provider,
+                event,
+                &format!("创建飞书群失败：{error}"),
+                message_log_store,
+            )
+            .await;
+            return true;
+        }
+    };
+    let record = crate::im_gateway::group_context::CreatedFeishuGroupRecord {
+        provider_id: provider.id.clone(),
+        source_message_id: source_message_id.to_string(),
+        group_name: created.name.clone(),
+        chat_id: created.chat_id.clone(),
+        owner_open_id: sender_open_id.to_string(),
+        created_at: now_ms(),
+    };
+    if let Err(error) = group_context_store.save_created_feishu_group(&record) {
+        send_agent_reply(
+            client,
+            provider,
+            event,
+            &format!(
+                "群已创建：{}（{}），但保存幂等记录失败：{}。请勿重复发送原命令。",
+                created.name, created.chat_id, error
+            ),
+            message_log_store,
+        )
+        .await;
+        return true;
+    }
+    let now = now_ms();
+    let welcome_target = ImTarget {
+        id: format!("new-group:{}", created.chat_id),
+        provider_id: provider.id.clone(),
+        display_name: created.name.clone(),
+        receive_id_type: "chat_id".to_string(),
+        receive_id: created.chat_id.clone(),
+        default_msg_type: "interactive".to_string(),
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+    };
+    let welcome_error = client
+        .send_text(
+            provider,
+            &welcome_target,
+            &format!("群「{}」已创建，Bifrost 机器人已加入。", created.name),
+        )
+        .await
+        .err();
+    let reply = match welcome_error {
+        None => format!("群已创建：{}\n群 ID：{}", created.name, created.chat_id),
+        Some(error) => format!(
+            "群已创建：{}\n群 ID：{}\n但欢迎消息发送失败：{}",
+            created.name, created.chat_id, error
+        ),
+    };
+    send_agent_reply(client, provider, event, &reply, message_log_store).await;
+    true
+}
+
 pub(super) async fn handle_idle_im_command(
     msg_text: &str,
     session_key: &str,
@@ -70,6 +259,7 @@ pub(super) async fn handle_idle_im_command(
             agent_config,
             &config,
             Some(ctx.provider.id.as_str()),
+            ctx.provider.provider_type,
         );
         send_agent_reply(
             ctx.client,
@@ -276,36 +466,50 @@ pub(super) fn build_im_help_text_for_agent_config(
     agent_config: &crate::im_gateway::agent::ImAgentConfig,
     external_cli_config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
     provider_id: Option<&str>,
+    provider_type: ImProviderType,
 ) -> String {
     let runner_kind =
         im_help_runner_kind_for_agent_config(agent_config, external_cli_config, provider_id);
     format!(
         "可用命令:\n\n{}",
-        build_im_channel_help_sections(&runner_kind)
+        build_im_channel_help_sections(&runner_kind, provider_type)
     )
 }
 
-pub(super) fn build_im_startup_help_for_runner(runner_kind: &ImHelpRunnerKind) -> String {
+pub(super) fn build_im_startup_help_for_runner(
+    runner_kind: &ImHelpRunnerKind,
+    provider_type: ImProviderType,
+) -> String {
     format!(
         "可用命令:\n\n{}",
-        build_im_channel_help_sections(runner_kind)
+        build_im_channel_help_sections(runner_kind, provider_type)
     )
 }
 
-pub(super) fn build_im_channel_help_sections(runner_kind: &ImHelpRunnerKind) -> String {
-    let mut sections = vec![
-        "IM 通道命令（所有 Runner）:\n\
+pub(super) fn build_im_channel_help_sections(
+    runner_kind: &ImHelpRunnerKind,
+    provider_type: ImProviderType,
+) -> String {
+    let mut channel_commands = "IM 通道命令（所有 Runner）:\n\
          /help           显示此帮助信息\n\
          /status         查看当前 IM 会话状态、Runner、模型和排队情况\n\
          /cwd <绝对路径>  切换当前 IM 通道绑定的工作目录；路径必须存在且是目录，运行中会排队到当前任务结束后执行\n\
-         /runner [Runner]  查看或切换当前 IM 通道绑定的 Runner\n\
+         /runner [Runner]  查看或切换当前 IM 通道绑定的 Runner"
+        .to_string();
+    if provider_type == ImProviderType::Feishu {
+        channel_commands.push_str(
+            "\n/new <群名>      创建同名飞书私有群，将命令发送者设为群主，并自动加入当前机器人（仅 Provider owner）",
+        );
+    }
+    channel_commands.push_str(
+        "\n\
          /clear          重置当前 IM 会话上下文\n\
          /reset          重置当前 IM 会话上下文\n\
          /q <消息>       将消息加入队列，当前任务结束后自动继续处理\n\
          /rq <序号>      取消一条排队消息\n\
-         /stop           停止当前正在执行的任务"
-            .to_string(),
-    ];
+         /stop           停止当前正在执行的任务",
+    );
+    let mut sections = vec![channel_commands];
 
     match runner_kind {
         ImHelpRunnerKind::External { adapter } => {
@@ -2087,13 +2291,20 @@ mod local_resume_tests {
             );
         }
 
-        let help = build_im_channel_help_sections(&ImHelpRunnerKind::External {
-            adapter: "codex".to_string(),
-        });
+        let help = build_im_channel_help_sections(
+            &ImHelpRunnerKind::External {
+                adapter: "codex".to_string(),
+            },
+            ImProviderType::Feishu,
+        );
         assert!(help.contains("/resume"));
-        let unsupported = build_im_channel_help_sections(&ImHelpRunnerKind::External {
-            adapter: "mock".to_string(),
-        });
+        let unsupported = build_im_channel_help_sections(
+            &ImHelpRunnerKind::External {
+                adapter: "mock".to_string(),
+            },
+            ImProviderType::Weixin,
+        );
         assert!(!unsupported.contains("/resume"));
+        assert!(!unsupported.contains("/new <群名>"));
     }
 }

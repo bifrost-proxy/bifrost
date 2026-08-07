@@ -87,9 +87,22 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - 外部 Runner 只展示通用命令和对应适配器支持的命令。
 - 未知命令 `/foobar` 仍返回 `未知命令: /foobar`，不会被启动帮助逻辑吞掉。
 
+### TC-IH-09: 飞书 `/help` 展示 `/new` 建群命令
+
+**操作步骤**：
+1. 创建带 `owner_open_id` 的 Feishu Provider，并由 owner 通过 IM 发送 `/help`。
+2. 检查返回的通用 IM 通道命令区。
+3. 执行 `/new`、`/new 测试群` 和超过 60 个字符的群名，检查用法与边界反馈。
+
+**预期结果**：
+- 帮助区包含 `/new <群名>`，说明会创建同名飞书私有群、命令发送者成为群主、当前机器人自动加入，并标注仅 Provider owner 可用。
+- `/new` 返回 `用法: /new <群名>`；合法名称被接受；超过 60 个字符返回明确错误。
+- 非飞书 Provider 不展示 `/new`，也不把它截获为飞书建群操作。
+
 ## 执行记录
 
 - 2026-07-13：PASS — 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_help_ --lib -- --nocapture` 和 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin online_notification_message_ --lib -- --nocapture`，确认外部 Runner 的主动 `/help`、上线通知均不再展示冗余 `/g`，同时保留 `/q`、runner-specific 模型与 effort 命令。
+- 2026-08-07：PASS — 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_new_group_command --lib -- --nocapture` 与 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_new_group_command.sh`，确认解析边界、帮助文案、owner 限制与真实 IM 回复路径。
 
 ## 清理步骤
 

@@ -105,6 +105,16 @@ pub struct GroupSessionBinding {
     pub chat_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedFeishuGroupRecord {
+    pub provider_id: String,
+    pub source_message_id: String,
+    pub group_name: String,
+    pub chat_id: String,
+    pub owner_open_id: String,
+    pub created_at: u64,
+}
+
 impl PreparedGroupTurn {
     pub fn delivery_message(&self, command_prefix: Option<&str>) -> String {
         command_prefix
@@ -657,6 +667,61 @@ impl ImGroupContextStore {
             .map_err(|error| format!("count group messages: {error}"))
     }
 
+    pub fn created_feishu_group(
+        &self,
+        provider_id: &str,
+        source_message_id: &str,
+    ) -> Result<Option<CreatedFeishuGroupRecord>, String> {
+        let connection = self.connection.lock();
+        connection
+            .query_row(
+                "SELECT provider_id, source_message_id, group_name, chat_id, owner_open_id, created_at
+                 FROM im_feishu_new_groups
+                 WHERE provider_id = ?1 AND source_message_id = ?2",
+                params![provider_id, source_message_id],
+                |row| {
+                    Ok(CreatedFeishuGroupRecord {
+                        provider_id: row.get(0)?,
+                        source_message_id: row.get(1)?,
+                        group_name: row.get(2)?,
+                        chat_id: row.get(3)?,
+                        owner_open_id: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("read Feishu new-group command result: {error}"))
+    }
+
+    pub fn save_created_feishu_group(
+        &self,
+        record: &CreatedFeishuGroupRecord,
+    ) -> Result<(), String> {
+        let connection = self.connection.lock();
+        connection
+            .execute(
+                "INSERT INTO im_feishu_new_groups (
+                    provider_id, source_message_id, group_name, chat_id, owner_open_id, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(provider_id, source_message_id) DO UPDATE SET
+                    group_name = excluded.group_name,
+                    chat_id = excluded.chat_id,
+                    owner_open_id = excluded.owner_open_id,
+                    created_at = excluded.created_at",
+                params![
+                    record.provider_id,
+                    record.source_message_id,
+                    record.group_name,
+                    record.chat_id,
+                    record.owner_open_id,
+                    record.created_at
+                ],
+            )
+            .map_err(|error| format!("save Feishu new-group command result: {error}"))?;
+        Ok(())
+    }
+
     fn update_turn_status(
         &self,
         turn_id: &str,
@@ -792,6 +857,10 @@ fn classify_slash(message: &str, session_busy: bool) -> GroupMessageDisposition 
                 reset_context: false,
             }
         }
+        "/new" => GroupMessageDisposition::SystemCommand {
+            command: message.to_string(),
+            reset_context: false,
+        },
         "/cwd" if message == "/cwd" || message.starts_with("/cwd ") => {
             GroupMessageDisposition::SystemCommand {
                 command: message.to_string(),
@@ -937,6 +1006,15 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE(provider_id, trigger_message_id)
+             );
+             CREATE TABLE IF NOT EXISTS im_feishu_new_groups (
+                provider_id TEXT NOT NULL,
+                source_message_id TEXT NOT NULL,
+                group_name TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                owner_open_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(provider_id, source_message_id)
              );",
         )
         .map_err(|error| format!("initialize group context schema: {error}"))?;

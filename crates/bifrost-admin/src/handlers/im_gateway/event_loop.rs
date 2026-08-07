@@ -288,13 +288,34 @@ pub(super) async fn run_event_loop_with_options(
         // ("如有幂等需求请使用 message_id 去重，不要依赖 event_id").
         // Falls back to event_id for non-message events.
         let dedup_key = event_dedup_key(&event).to_string();
-        if !dedup_key.is_empty() && dedup.contains(&dedup_key) {
+        let new_group_command = feishu_new_group_command_text(&client, &provider, &event).await;
+        let is_new_group_command = new_group_command.is_some();
+        if !is_new_group_command && !dedup_key.is_empty() && dedup.contains(&dedup_key) {
             debug!(
                 provider_id = %event.provider_id,
                 event_id = %event.event_id,
                 message_id = ?event.source.message_id,
                 "dropping duplicate event"
             );
+            continue;
+        }
+
+        if is_new_group_command {
+            if !dedup_key.is_empty() {
+                dedup.record(&dedup_key);
+            }
+            if let Err(error) = event_store.add(event.clone()) {
+                error!(error = %error, "failed to store /new event");
+            }
+            handle_im_new_group_command(
+                new_group_command.as_deref().unwrap_or_default(),
+                &client,
+                &provider,
+                &event,
+                &group_context_store,
+                &message_log_store,
+            )
+            .await;
             continue;
         }
 
@@ -853,6 +874,38 @@ pub(super) async fn run_event_loop_with_options(
         provider_id = %provider.id,
         "event processing loop ended"
     );
+}
+
+async fn feishu_new_group_command_text(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+) -> Option<String> {
+    if provider.provider_type != ImProviderType::Feishu {
+        return None;
+    }
+    let message = event.message.as_ref()?;
+    if !crate::im_gateway::group_context::is_feishu_group_event(event) {
+        return parse_im_new_group_command(&message.text)
+            .is_some()
+            .then(|| message.text.trim().to_string());
+    }
+    let bot_identity = if message.mentions.is_empty() {
+        None
+    } else {
+        client.feishu()?.fetch_bot_identity(provider).await.ok()
+    };
+    match crate::im_gateway::group_context::classify_group_message(
+        message,
+        bot_identity.as_ref(),
+        false,
+    ) {
+        crate::im_gateway::group_context::GroupMessageDisposition::SystemCommand {
+            command,
+            ..
+        } if parse_im_new_group_command(&command).is_some() => Some(command),
+        _ => None,
+    }
 }
 
 fn event_dedup_key(event: &ImEvent) -> &str {

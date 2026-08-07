@@ -135,9 +135,12 @@ pub(super) async fn run_external_cli_agent_chat(
     // happens to share the same IM session key.
     let trimmed_msg = input.message_text.trim();
     if trimmed_msg == "/help" {
-        let response = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
-            adapter: settings.adapter.clone(),
-        });
+        let response = build_im_startup_help_for_runner(
+            &ImHelpRunnerKind::External {
+                adapter: settings.adapter.clone(),
+            },
+            ctx.provider.provider_type,
+        );
         send_agent_reply(
             ctx.client,
             ctx.provider,

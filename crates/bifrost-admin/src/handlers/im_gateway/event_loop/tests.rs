@@ -113,6 +113,56 @@ async fn spawn_group_lookup_server() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{address}"), task)
 }
 
+async fn spawn_new_group_event_loop_server() -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let creates = Arc::new(AtomicUsize::new(0));
+    let server_creates = Arc::clone(&creates);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let creates = Arc::clone(&server_creates);
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(
+                    move |request: hyper::Request<hyper::body::Incoming>| {
+                        let creates = Arc::clone(&creates);
+                        async move {
+                            let path = request.uri().path();
+                            let body = if path.ends_with("/auth/v3/tenant_access_token/internal") {
+                                r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+                            } else if path.ends_with("/im/v1/chats") {
+                                creates.fetch_add(1, Ordering::SeqCst);
+                                r#"{"code":0,"data":{"chat_id":"oc_new_loop","name":"事件循环群"}}"#
+                            } else {
+                                r#"{"code":0,"data":{"message_id":"om_sent"}}"#
+                            };
+                            Ok::<_, hyper::Error>(
+                                hyper::Response::builder()
+                                    .header("Content-Type", "application/json")
+                                    .body(http_body_util::Full::new(bytes::Bytes::from_static(
+                                        body.as_bytes(),
+                                    )))
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (format!("http://{address}"), creates, task)
+}
+
 fn group_test_event(
     provider_id: &str,
     message_id: &str,
@@ -162,6 +212,58 @@ fn group_test_event(
         received_at,
         raw_digest: None,
     }
+}
+
+#[tokio::test]
+async fn feishu_new_group_command_text_accepts_direct_and_group_commands_only() {
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-new-command-routing".to_string();
+    provider.provider_type = crate::im_gateway::types::ImProviderType::Feishu;
+
+    let mut direct = group_test_event(&provider.id, "direct", " /new 发布群 ", false, 1);
+    direct.source.chat_type = Some("p2p".to_string());
+    assert_eq!(
+        feishu_new_group_command_text(&client, &provider, &direct).await,
+        Some("/new 发布群".to_string())
+    );
+
+    let group = group_test_event(&provider.id, "group", "/new 项目 群", false, 2);
+    assert_eq!(
+        feishu_new_group_command_text(&client, &provider, &group).await,
+        Some("/new 项目 群".to_string())
+    );
+
+    let (base_url, identity_server) = spawn_group_lookup_server().await;
+    provider.base_url = Some(base_url);
+    provider.app_id = Some("cli_test".to_string());
+    provider.secret_ref = Some("secret".to_string());
+    let mentioned = group_test_event(&provider.id, "mentioned", "@_user_1 /new 讨论群", true, 3);
+    assert_eq!(
+        feishu_new_group_command_text(&client, &provider, &mentioned).await,
+        Some("/new 讨论群".to_string())
+    );
+    identity_server.abort();
+
+    let ordinary = group_test_event(&provider.id, "ordinary", "hello", false, 4);
+    assert!(feishu_new_group_command_text(&client, &provider, &ordinary)
+        .await
+        .is_none());
+
+    let mut empty = direct.clone();
+    empty.message = None;
+    assert!(feishu_new_group_command_text(&client, &provider, &empty)
+        .await
+        .is_none());
+
+    let mut weixin_provider = provider.clone();
+    weixin_provider.provider_type = crate::im_gateway::types::ImProviderType::Weixin;
+    assert!(
+        feishu_new_group_command_text(&client, &weixin_provider, &direct)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -494,6 +596,61 @@ async fn group_event_loop_records_ambient_and_releases_turn_when_agent_is_disabl
         )
         .unwrap();
     assert_eq!(turn.message_count, 3);
+}
+
+#[tokio::test]
+async fn new_group_command_event_loop_runs_before_dedup_and_runner_dispatch() {
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let (base_url, creates, server) = spawn_new_group_event_loop_server().await;
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-new-group-loop".to_string();
+    provider.base_url = Some(base_url);
+    provider.app_id = Some("cli_test".to_string());
+    provider.secret_ref = Some("secret".to_string());
+    provider.owner_open_id = Some("ou_sender".to_string());
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(run_event_loop_with_options(
+        rx,
+        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+        provider.clone(),
+        Arc::clone(&service.event_store),
+        Arc::clone(&service.message_log_store),
+        Arc::clone(&service.group_context_store),
+        Arc::clone(&service.route_store),
+        Arc::clone(&service.provider_store),
+        Arc::clone(&service.agent_config_store),
+        Arc::clone(&service.schedule_store),
+        Arc::clone(&service.scheduler),
+        Arc::clone(&service.target_store),
+        Arc::clone(&service.connection_manager),
+        Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
+        Arc::clone(&service.queue_manager),
+        Arc::clone(&service.progress_registry),
+        EventLoopOptions {
+            send_online_notification: false,
+        },
+    ));
+    let event = group_test_event(&provider.id, "new-loop", "/new 事件循环群", false, 1);
+    tx.send(event.clone()).unwrap();
+    tx.send(event).unwrap();
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(20), handle)
+        .await
+        .expect("new group event loop timed out")
+        .expect("new group event loop panicked");
+
+    assert_eq!(creates.load(Ordering::SeqCst), 1);
+    assert_eq!(service.event_store.list().len(), 2);
+    assert!(service.message_log_store.list().iter().any(|log| log
+        .content
+        .as_deref()
+        .is_some_and(|text| text.contains("未重复创建"))));
+    server.abort();
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -76,13 +76,23 @@ SQLite Turn 仍保存完整的消息 ID、序号、时间、mentions、游标和
 
 群聊不新增 `/bind` 等别名。路径仍使用 `/cwd <绝对路径>`，Runner、模型、推理强度、队列、Guide、停止和重置均使用现有单聊命令：
 
-`/help`、`/status`、`/cwd`、`/runner`、`/models`、`/model`、`/efforts`、`/effort`、`/clear`、`/reset`、`/q`、`/rq`、`/stop`、`/g`。
+`/help`、`/status`、`/cwd`、`/runner`、`/new`、`/models`、`/model`、`/efforts`、`/effort`、`/clear`、`/reset`、`/q`、`/rq`、`/stop`、`/g`。
 
 群聊 `/cwd` 和 `/runner` 只更新当前群 binding；单聊仍保持 provider 级兼容行为。模型与推理强度继续使用已有的 session state，并因群 Session Key 天然隔离。
 
 Runner 回复中的相对图片和文件链接同样以当前群 binding 的工作目录为基准解析；只有群没有绑定工作目录时才回退到 Provider 默认目录，避免从其他项目读取或上传同名资产。
 
 分类边界复用单聊解析器的精确语义：例如 `/help` 是系统命令，`/help extra` 会像单聊一样回落到模型；`/rq <序号>` 只在 Session 忙碌时作为队列管理命令，空闲时按单聊行为进入模型。群聊仅在回落到模型时增加结构化多人上下文，不改变命令本身的可用时机和响应。
+
+### `/new <群名>` 创建飞书群
+
+- `/new <群名>` 是 Feishu Provider 级快速命令，不依赖 Agent 是否启用，也不进入 Runner、Route、Guide 或 Queue。即使当前单聊或群聊 Session 正忙，仍立即执行建群请求。
+- 命令只接受精确的 `/new` token；`/new-project`、`/newer` 等继续按普通消息处理。`/new` 或仅空白参数返回用法，群名按 Unicode 字符计数不得超过 60 个字符。
+- 命令在单聊和群聊都只允许当前 Provider 的 `owner_open_id` 执行。群聊仍允许普通成员触发 Agent，但建群属于外部写操作，必须单独 fail-closed；Provider 未配置 owner、事件缺少发送者 open_id 或发送者不匹配时拒绝创建。
+- 创建请求固定为普通私有群：`chat_mode=group`、`chat_type=private`；命令发送者的 `open_id` 写入 `owner_id`，因此发送者作为群主和成员进入新群。调用接口的当前应用机器人由飞书自动加入，并通过 `set_bot_manager=true` 设为群管理员，无需把自身 App ID 重复写入 `bot_id_list`。
+- 以 `provider_id + source message_id` 生成稳定的 Feishu `uuid`。飞书在 `uuid + owner_id` 维度提供 10 小时创建去重；Bifrost 同时把成功结果持久化到本地命令账本，重投或重启后重放同一消息只返回原 `chat_id`，不再次创建群。
+- 创建成功后先向新群发送一条欢迎消息，确认机器人已入群且可发送；随后在原会话回复群名和 `chat_id`。欢迎消息失败不回滚已经创建的群，但原会话必须明确提示该部分失败。
+- 飞书应用必须开通机器人身份的 `im:chat:create`（或包含该能力的 `im:chat`）以及 `im:message:send_as_bot`，权限变更后重新发布应用版本。权限不足、用户不可见、租户边界或网络错误必须原样归因为可行动错误，不能回落到模型猜测。
 
 ## 飞书能力与权限前提
 

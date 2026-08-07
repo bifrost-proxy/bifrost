@@ -114,6 +114,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 &agent_config,
                 &config,
                 Some(provider.id.as_str()),
+                provider.provider_type,
             );
             send_agent_reply(client, &provider, event, &response, message_log_store).await;
             return;
