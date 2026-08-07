@@ -1475,7 +1475,6 @@ test("AI Agent Chat shows model slash commands for Claude Code runner", async ({
         defaultRunnerId: "Claude-Code",
         runners: {
           "Claude-Code": { enabled: true, adapter: "claude_code" },
-          codex: { enabled: true, adapter: "codex" },
         },
         channels: {},
       }),
@@ -1490,8 +1489,12 @@ test("AI Agent Chat shows model slash commands for Claude Code runner", async ({
   await expect(
     slashOptions.filter({ hasText: "/models" }),
   ).toContainText("列出当前 Runner 可用模型");
-  await expect(slashOptions.nth(1)).toContainText("/model");
-  await expect(slashOptions.nth(1)).toContainText("查看或切换当前 Runner 的 session 模型");
+  await expect(
+    slashOptions.filter({ hasText: "/resume" }),
+  ).toContainText("列出最近 20 个本地会话");
+  await expect(slashOptions.filter({ hasText: "/model" }).last()).toContainText(
+    "查看或切换当前 Runner 的 session 模型",
+  );
 });
 
 test("AI Agent Chat selects the first thread on initial entry", async ({ page }) => {

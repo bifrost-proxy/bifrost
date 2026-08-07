@@ -37,6 +37,13 @@ export type SlashCommandOption = {
 
 const MODEL_SLASH_COMMAND_OPTIONS: SlashCommandOption[] = [
   {
+    command: "/resume",
+    label: "Resume local session",
+    description: "列出最近 20 个本地会话；也可输入 /resume <id> 直接选择",
+    value: "runner-resume",
+    action: "send",
+  },
+  {
     command: "/models",
     label: "Runner models",
     description: "列出当前 Runner 可用模型",

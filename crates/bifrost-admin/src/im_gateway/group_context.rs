@@ -806,6 +806,10 @@ fn classify_slash(message: &str, session_busy: bool) -> GroupMessageDisposition 
         }
         _ if crate::im_gateway::external_cli::parse_external_cli_model_slash_command(message)
             .is_some()
+            || crate::im_gateway::external_cli::parse_external_cli_resume_slash_command(
+                message,
+            )
+            .is_some()
             || crate::im_gateway::external_cli::parse_external_cli_effort_slash_command(
                 message,
             )
