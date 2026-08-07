@@ -316,6 +316,8 @@ Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中
 - IM `/help` / `/cwd` / `/runner` / `/q` / `/rq` 快路径，以及隐藏兼容 `/g` 解析。
 - Provider 删除/禁用立即停止长连接；auto-connect / supervisor 尊重 `enabled && event_connection_enabled && secret_ref`。
 - Provider/IM `/status` 展示 `resolved_work_dir`；重启上线通知补 Runner + 最近轮次。
+- 所有 IM Provider 共用同一套 `/status` 概览，不在 Feishu、Weixin 或后续 Provider 内分别拼装。概览固定展示 Provider、Device、Workspace、Runner Type / ID、Model / provider、Reasoning Effort / Summary、Bound Session、External Session ID、Completed User Turns、Queue 与 Status；已有会话继续追加 token、history、compaction 等诊断信息，新会话也必须展示完整概览，不能退化为只有“消息数: 0 / 新会话”。
+- `/status` 运行时信息按“当前 active/session detail → 持久化 external runner session state → Provider/群会话生效 Runner 配置”的优先级解析。外部 Session ID 优先使用 runner 的 thread ID，缺失时使用 conversation ID；两者都缺失时诚实显示 `N/A`，不得伪造。
 - Outbound message log `trigger` 区分 `schedule:<id>` / `manual_run:<id>` / `route:<id>` / `remote:<caller>`。
 
 ## 测试方案
@@ -336,6 +338,7 @@ Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中
 - `im_cwd_command_parses_existing_absolute_directory` / `im_cwd_command_rejects_invalid_paths` / `im_cwd_command_persists_provider_and_reinitializes_idle_session`。
 - `im_help_includes_im_only_commands_without_dropping_builtins`、`im_runner_command_*`。
 - `online_notification_message_uses_provider_work_dir_override` / `online_notification_message_falls_back_to_process_work_dir`。
+- `im_status_text_formats_metrics_and_runner_metadata` / `im_status_text_keeps_complete_overview_for_new_non_feishu_session` / `im_status_runtime_context_reads_persisted_runner_overrides_and_session_id` / `idle_weixin_status_reply_uses_shared_complete_overview`，覆盖已有会话、新会话、非 Feishu Provider、持久化外部 Session ID 和真实 idle command 回执入口。
 - `provider_create_payload_maps_app_secret_without_exposing_it`。
 
 ### E2E 测试
