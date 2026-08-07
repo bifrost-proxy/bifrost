@@ -1,7 +1,7 @@
 # Breakpoint Rule Gating 真实场景测试
 
 ## 功能模块说明
-验证 Breakpoint 的真实用户链路：打开/关闭全局 breakpoint、通过 `breakpoint://request` / `breakpoint://response` 规则选择暂停阶段、pause/resume、编辑 headers/body、规则编辑器智能提示、OpenAPI 描述，以及性能防护边界。
+验证 Breakpoint 的真实用户链路：打开/关闭全局 breakpoint、通过 `breakpoint://request` / `breakpoint://response` 规则选择暂停阶段、暂停状态持久恢复、在 Network 详情中编辑请求或响应、严格按阶段恢复、HTTPS 规则按目标自动解密、规则编辑器智能提示、OpenAPI 描述，以及性能防护边界。
 
 ## 前置条件
 - Bifrost 使用临时数据目录启动，并携带 `--no-system-proxy`。
@@ -321,7 +321,7 @@
 
 ---
 
-### TC-BP-15: 协议 registry 覆盖 breakpoint
+### TC-BP-16: 协议 registry 覆盖 breakpoint
 **目标：** 验证 `breakpoint` 已包含在核心规则协议 registry 测试清单中，避免新增协议后 workspace 全量测试因测试常量漏同步失败。
 
 **步骤：**
@@ -340,6 +340,125 @@
 - 完整 `rules_test` 通过。
 
 **实际结果：** 2026-06-04 执行 `cargo test -p bifrost-tests --test rules_test test_all_protocols -- --nocapture`，单用例通过；执行 `cargo test -p bifrost-tests --test rules_test`，35 个规则协议测试全部通过。
+
+---
+
+### TC-BP-17: Network 刷新后恢复 pending 状态并直接定位编辑区
+**目标：** 验证请求暂停后，刷新 WebUI 或重连 push 不会丢失断点，Network 列表和详情仍能恢复正确阶段及剩余时间。
+
+**步骤：**
+1. 打开 Breakpoint 并配置 request breakpoint 规则。
+2. 通过代理发起请求，等待 Network 列表出现 request 暂停标识和整行淡黄色背景。
+3. 选择该请求并刷新页面。
+4. 确认页面通过 `GET /api/breakpoint/pending` 恢复暂停状态。
+5. 检查详情自动打开 Request 编辑区，并显示阶段、倒计时和 `Resume unchanged` / `Apply & Resume`。
+6. 分别切换浅色、深色主题，确认警示背景可辨识；恢复请求后确认背景立即消失。
+
+**预期结果：**
+- 刷新与 WebSocket 重连不释放也不隐藏 pending 请求。
+- Network 行展示当前暂停阶段，详情自动定位到对应 request/response 编辑区。
+- 暂停行在浅色和深色主题下均使用主题 token 生成的淡黄色背景；恢复、关闭或 timeout 后背景消失。
+- 倒计时来自服务端 `deadline_at_ms`，不会因页面刷新重新计时。
+
+**实际结果：** 2026-08-07 执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts`，5 个用例全部通过；补充后聚焦真实 Network 用例再次 `1/1` 通过。request/response 暂停刷新后状态、详情 tab 和倒计时均恢复；浅色/深色 warning 背景颜色不同且均非透明，resume 与 timeout 后 `data-breakpoint-phase` 和警示背景均消失。
+
+---
+
+### TC-BP-18: Request 阶段编辑 method、URL/query、重复 headers 与 body
+**目标：** 验证 request breakpoint 的编辑内容真实作用于 upstream，而非只改页面展示。
+
+**步骤：**
+1. 发起一个没有 `Content-Length` 的 chunked POST，使其命中 request breakpoint。
+2. 在 Network 详情把 method 改为 `PUT`，URL/query 改到同一 mock server 的新路径。
+3. 新增 `X-Breakpoint-Request: edited`，保留 headers 的顺序与重复项能力，并把 body 改为 `edited-request-body`。
+4. 点击 `Apply & Resume`，等待请求完成。
+5. 检查 mock server 实际收到的 method、path/query、header 与 body。
+
+**预期结果：**
+- 未知长度但小于捕获上限的 request body 可以完整编辑。
+- upstream 收到 `PUT`、新 path/query、编辑后的 header/body。
+- `Resume unchanged` 不提交编辑；`Apply & Resume` 才应用当前编辑。
+
+**实际结果：** 2026-08-07 执行完整 Breakpoint Playwright 与 `SKIP_BUILD=true bash e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。Playwright 使用真实 chunked POST，经页面把 method/URL/query/header/body 编辑后恢复，mock server 实际收到 `PUT`、新路径与编辑内容；API E2E 复核相同 upstream 结果。
+
+---
+
+### TC-BP-19: Response 阶段编辑 status、重复 headers 与 body
+**目标：** 验证 response breakpoint 可直接修改最终返回给 client 的状态码、重复响应头和 body。
+
+**步骤：**
+1. 发起命中 response breakpoint 的请求。
+2. 在 Network 详情刷新页面后重新选中该请求。
+3. 把 status 改为 `418`，新增响应 header 和两个同名 `Set-Cookie`，并编辑响应 body。
+4. 点击 `Apply & Resume`。
+5. 检查真实 client 收到的状态码、两个 `Set-Cookie` 与新 body。
+
+**预期结果：**
+- client 收到 HTTP 418 和编辑后的 body。
+- 两个 `Set-Cookie` 均保留，不因 map 化而丢失重复 header。
+- TrafficDetail 刷新为最终应用后的响应内容。
+
+**实际结果：** 2026-08-07 执行完整 Breakpoint Playwright 与代理 E2E，通过。UI 真实 client 收到 HTTP 418、`X-UI-Breakpoint-Response: response-edited` 与 `edited-response-body`；API E2E 另验证两个独立 `Set-Cookie` 未丢失；刷新后的 Network 详情仍能编辑并恢复该 response。
+
+---
+
+### TC-BP-20: phase 冲突、超时与 pending 清理
+**目标：** 验证恢复 API 不会误放行另一个阶段，并且关闭/超时不会遗留僵尸 pending。
+
+**步骤：**
+1. 创建 `breakpoint://request,response` 规则并发起请求。
+2. request 暂停时，使用同一 request id 但 `phase=response` 调用 resume。
+3. 确认 API 返回 409，随后查询 pending 仍是 request。
+4. 使用正确 request phase 恢复，等待 response 再次暂停并正确恢复。
+5. 另发一条 response breakpoint 请求，不调用 resume，等待 timeout。
+6. 查询 pending 列表并关闭 Breakpoint。
+
+**预期结果：**
+- 错误 phase 返回 409，不消费当前 pending，也不误恢复请求。
+- 两阶段按 request -> response 顺序分别恢复。
+- timeout 或关闭全局开关后 pending 列表为空，业务请求被安全放行。
+
+**实际结果：** 2026-08-07 执行代理 E2E 与聚焦真实 Network Playwright，均通过。错误 phase 返回 409 且 pending 未被消费；正确恢复后按 request -> response 顺序暂停；5 秒 timeout 与关闭开关均放行业务请求并把 pending 清为 0，UI timeout 行警示背景同步消失。
+
+---
+
+### TC-BP-21: HTTPS Breakpoint 按目标自动启用 TLS 解密
+**目标：** 验证全局 TLS interception 关闭时，具体 HTTPS breakpoint 规则仍能暂停并编辑目标请求，同时不扩大为全局解密。
+
+**步骤：**
+1. 保持全局 TLS interception 关闭并确认临时 CA 已生成。
+2. 在本地 `8443` 启动自签名 HTTPS mock server。
+3. 配置 `127.0.0.1:8443 breakpoint://response` 并打开 Breakpoint。
+4. 使用信任测试 CA/`curl -k` 的 client 通过 Bifrost 访问 `https://127.0.0.1:8443/https-breakpoint`。
+5. 确认 response 暂停，把 status/body 改为 `202` / `edited-https-response` 后恢复。
+6. 检查 client 实际响应，并确认宽泛 `* breakpoint://response` 不作为自动 TLS 解密触发器。
+
+**预期结果：**
+- 仅具体 host 范围的 breakpoint 规则触发该 CONNECT 的 TLS 解密。
+- HTTPS response 在 client 收到前暂停，恢复后 client 收到 202 和新 body。
+- 显式 `tlsPassthrough://` 仍优先；未信任 CA 的 client 会按 TLS 安全语义失败，不会静默绕过。
+
+**实际结果：** 2026-08-07 在全局 TLS interception 关闭的隔离实例中执行代理 E2E，通过。`127.0.0.1:8443 breakpoint://response` 自动触发该 CONNECT 的 TLS 解密，response 暂停后 client 实际收到 HTTP/2 202 与 `edited-https-response`；具体 host/port、非默认端口 URL 保留和宽泛规则拒绝路径另有 Rust 单测覆盖。
+
+---
+
+### TC-BP-22: Web 与 Desktop Origin 的 Breakpoint API CORS
+**目标：** 验证新增 pending/resume 接口沿用管理端统一 CORS、CSRF 和桌面 WebView Origin 策略，不出现 Web 可用但 Desktop 不可用。
+
+**步骤：**
+1. 对 `GET /api/breakpoint/pending` 分别使用 `Origin: http://localhost:3000` 和 `Origin: tauri://localhost` 发起 OPTIONS 预检与实际 GET。
+2. 对 `POST /api/breakpoint/resume` 使用上述两个 Origin 发起 OPTIONS，声明 `Content-Type, X-Client-Id, X-Bifrost-CSRF`。
+3. 请求进入 request pause 后，获取 `/api/security/csrf` token。
+4. 使用 `Origin: tauri://localhost`、`Sec-Fetch-Site: cross-site`、有效 CSRF 调用 resume 的错误 phase 路径。
+5. 检查 409 业务响应仍带正确 `Access-Control-Allow-Origin`，pending 未被消费。
+
+**预期结果：**
+- Web 本地 Origin 与 Tauri Origin 的预检均为 204，并回显对应 allow-origin。
+- allow-methods 包含 GET/POST/OPTIONS，allow-headers 包含桌面 client id 与 CSRF header。
+- Desktop 实际 POST 通过跨站 Origin guard 和 CSRF 校验，进入 Breakpoint 自身的 409 phase 校验，而不是被 CORS/安全层拦截。
+- 非信任外部 Origin 仍不获得 CORS 许可。
+
+**实际结果：** 2026-08-07 执行 `SKIP_BUILD=true bash e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。localhost Web Origin 与 `tauri://localhost` 对 pending GET、resume POST 的 OPTIONS 均返回 204 和正确 allow-origin/allow-headers；带 Tauri Origin、cross-site fetch metadata 与有效 CSRF 的实际 resume 请求进入业务 409 phase mismatch，响应保留 Tauri allow-origin 且 pending 未被消费。
 
 ## 清理步骤
 - 结束测试脚本后确认临时 Bifrost 进程、mock server、WebSocket probe 均已退出。

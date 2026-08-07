@@ -293,7 +293,7 @@ pub struct NotificationPushData {
     pub unread_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BreakpointPausedPushData {
     pub phase: String, // "request" or "response"
     pub request_id: String,
@@ -305,6 +305,9 @@ pub struct BreakpointPausedPushData {
     pub body_omitted: bool,
     pub body_size: Option<usize>,
     pub max_body_bytes: usize,
+    pub content_encoding: Option<String>,
+    pub paused_at_ms: u64,
+    pub deadline_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +319,8 @@ pub struct BreakpointSettingsPushData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BreakpointResumedPushData {
     pub request_id: String,
+    pub phase: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1759,8 +1764,12 @@ impl PushManager {
         }
     }
 
-    pub fn broadcast_breakpoint_resumed(&self, request_id: String) {
-        let msg = PushMessage::BreakpointResumed(BreakpointResumedPushData { request_id });
+    pub fn broadcast_breakpoint_resumed(&self, request_id: String, phase: String, reason: String) {
+        let msg = PushMessage::BreakpointResumed(BreakpointResumedPushData {
+            request_id,
+            phase,
+            reason,
+        });
         let mut clients_to_remove = Vec::new();
         for client_ref in self.clients.iter() {
             let client = client_ref.value();
@@ -3846,6 +3855,9 @@ mod coverage_boost {
             body_omitted: false,
             body_size: None,
             max_body_bytes: 0,
+            content_encoding: None,
+            paused_at_ms: 10,
+            deadline_at_ms: 20,
         });
 
         manager.broadcast_breakpoint_settings_updated(BreakpointSettingsPushData {
@@ -3853,7 +3865,11 @@ mod coverage_boost {
             max_body_bytes: 1024,
         });
 
-        manager.broadcast_breakpoint_resumed("r1".to_string());
+        manager.broadcast_breakpoint_resumed(
+            "r1".to_string(),
+            "request".to_string(),
+            "resumed".to_string(),
+        );
 
         let mut got_paused = false;
         let mut got_settings = false;

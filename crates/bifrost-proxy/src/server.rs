@@ -604,6 +604,10 @@ pub trait RulesResolver: Send + Sync {
         false
     }
 
+    fn has_breakpoint_rules_for_host(&self, _host: &str) -> bool {
+        false
+    }
+
     fn has_tls_auto_intercept_route_rules_for_host(&self, _host: &str) -> bool {
         false
     }

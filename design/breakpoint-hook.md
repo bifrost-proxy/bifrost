@@ -20,9 +20,10 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 - 全局开关 `enabled=false` 时零开销，业务流量不产生 body clone、body collect、oneshot 等待或 breakpoint push。
 - 全局开关开启但当前请求未命中 `breakpoint://request` / `breakpoint://response` 规则时，不发生 pause，也不做 body collect。
 - 命中 `breakpoint://request` 时暂停 request（editable 或 header-only）；命中 `breakpoint://response` 时暂停 response；`breakpoint://request,response` 顺序触发两次。
-- 已在内存中的 body 在 `len <= max_body_bytes` 且为 UTF-8 时允许 body 编辑；否则只允许 header-only pause。
+- 已在内存中的 body，或可在 `max_body_bytes` 内完整读取的未知长度 body，在解压后大小不超限且为 UTF-8 时允许 body 编辑；否则只允许 header-only pause。
 - SSE response 仅在明确 `Content-Length` 且长度不超过 `max_body_bytes` 时允许缓存并进入 response breakpoint；未知长度或超过限制时保持原始 streaming。
-- 不修改 response status code，只允许修改 headers 和 body。
+- Request 阶段允许修改 method、absolute URL（含 query）、有序重复 headers 和 body；response 阶段允许修改 status、headers 和 body。
+- `GET /api/breakpoint/pending` 暴露权威内存快照，WebUI 在首次连接、重连或刷新后恢复暂停状态，不依赖单次 push 是否送达。
 - Breakpoint Auto-Resume Timeout 在 Settings -> Performance 中配置，默认 30s，服务端固定安全范围 `5000..=300000`；超时后自动继续，不应用编辑。
 - `max_body_bytes` 默认 1 MiB，最大 10 MiB；超过限制或非 UTF-8 body 只允许 header-only pause。
 
@@ -30,7 +31,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 
 - 默认关闭时 HTTP handler、HTTPS MITM handler、tunnel、mock、immediate response 的原有 fast path 不引入 body clone / body collect / oneshot。
 - WebSocket body 编辑不在本能力范围内；WebSocket 帧继续按现有链路 stream/push。
-- Content-Length 明确的普通 response 才可能进入 body editable pause；未知长度、超过上限、二进制性能模式命中的 response 保持 streaming 或走 header-only pause。
+- 普通 response 只在有界读取能于 `max_body_bytes` 内完整结束时进入 body editable pause；超过上限、持续 streaming 或二进制性能模式命中的 response 保持 streaming 或走 header-only pause。
 - 已存在的 UI 用例 TC-BP-01..06 保留，用于后续 UI 回归。
 - Breakpoint 相关配置越界（`max_body_bytes`、`breakpoint_timeout_ms`）时返回 `400` / clamp 到安全范围，不导致 admin API 崩溃。
 - 协议注册表 `tests/rules_test.rs::test_all_protocols` 必须覆盖 `breakpoint`，并与 `ALL_PROTOCOLS` 当前数量保持一致，避免 workspace 全量测试因漏同步失败。
@@ -87,7 +88,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 - `MIN_BREAKPOINT_TIMEOUT_MS = 5_000`
 - `MAX_BREAKPOINT_TIMEOUT_MS = 300_000`
 
-`BreakpointHandle` 同时记录 request/response sender 以及 body 是否可编辑。header-only pause 的 resume body 会在服务端被忽略。
+`BreakpointHandle` 记录当前阶段 sender、完整暂停快照以及 body 是否可编辑。一个 request id 在任一时刻只允许一个阶段 pending；resume 必须提交匹配的 phase，错误阶段返回 `409`。header-only pause 的 resume body 会在服务端被忽略。
 
 ### Request Hook
 
@@ -95,7 +96,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 
 1. 默认关闭、全局开关关闭或未命中 `breakpoint://request` 规则时，直接走原有快路径，不构造 breakpoint payload，不等待 oneshot。
 2. 已在内存中的 body 在 `len <= max_body_bytes` 且为 UTF-8 时允许编辑。
-3. streaming body 只有在 `Content-Length <= max_body_bytes` 时才 collect；未知长度或超过限制时保持 streaming，并发送 header-only pause。
+3. streaming body 在有界读取不超过 `max_body_bytes` 时允许编辑；超过限制后使用可重放流保持原始 streaming，并发送 header-only pause。
 4. header-only pause 的 `body_omitted=true`，`body_size` 尽量使用 `Content-Length` 或已知大小。
 5. resume 时仅当 pause 阶段标记 body editable 且新 body 未超过上限，才替换 body。
 6. 等待 resume 使用 `timeout_ms`，超时后 cancel pending 并继续原始请求。
@@ -105,8 +106,8 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 同样位于 `crates/bifrost-proxy/src/proxy/http/breakpoint.rs` 与 handler / tunnel 之间的钩子：
 
 1. 默认关闭、全局开关关闭或未命中 `breakpoint://response` 规则时，保持原有 response streaming/tee 快路径。
-2. 普通 response 只有在明确 `Content-Length <= max_body_bytes` 时才为 breakpoint 读取完整 body 并允许编辑。
-3. 未知长度、超过限制或二进制性能模式命中的 response 不强制缓存；进入 header-only pause 或保持 streaming。
+2. 普通 response 不论是否声明 `Content-Length`，都只做 `max_body_bytes` 内的有界读取；完整读完则允许编辑，超过限制则进入 header-only pause 并重放原始流。
+3. gzip / deflate / br 等受支持的压缩正文以解压后的文本呈现，Apply 后按最终 `Content-Encoding` 重新编码；解压失败、解压后超限或二进制正文进入 header-only。
 4. SSE 只在明确长度且不超过上限时缓存；否则跳过 body breakpoint 继续 streaming。
 5. response breakpoint 同样使用 `timeout_ms` 自动放行。
 6. body 被替换后才重新计算 `Content-Length`，否则保留原路径行为。
@@ -117,7 +118,8 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 | --- | --- | --- |
 | `GET` | `/api/breakpoint/settings` | 获取当前 breakpoint 设置 |
 | `POST` | `/api/breakpoint/settings` | 更新 `{enabled, max_body_bytes}`，返回有效值 |
-| `POST` | `/api/breakpoint/resume` | 提交 edited headers / body 并继续 request 或 response |
+| `GET` | `/api/breakpoint/pending` | 获取当前权威暂停快照，用于刷新/重连恢复 |
+| `POST` | `/api/breakpoint/resume` | 提交 request method/URL 或 response status，以及 ordered headers/body，并继续严格匹配的 phase |
 | `GET` | `/api/config/performance` | 返回 Performance 配置中的 `breakpoint.timeout_ms`、`timeout_min_ms`、`timeout_max_ms` |
 | `PUT` | `/api/config/performance` | 使用 `{breakpoint_timeout_ms}` 持久化并立即应用 auto-resume timeout |
 
@@ -131,33 +133,33 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 | Type | Data |
 | --- | --- |
 | `breakpoint_paused` | `{phase, request_id, method, url, status, headers, body, body_omitted, body_size, max_body_bytes}`，`phase` 为 `"request"` 或 `"response"`；`method` / `url` 仅 request 阶段填充，`status` 仅 response 阶段填充 |
-| `breakpoint_resumed` | `{request_id}` |
+| `breakpoint_resumed` | `{request_id, phase, reason}`，`reason` 为 `resumed` 或 `timeout` |
 | `breakpoint_settings_updated` | `{enabled, max_body_bytes}` |
 | `settings_update(performance_config)` | 包含 `breakpoint.timeout_ms`、`timeout_min_ms`、`timeout_max_ms` |
 
-## CLI 交互
+## CLI / 自动化边界
 
-- `bifrost breakpoint status`：返回 `enabled` / `max_body_bytes` / `timeout_ms` / `pending count`。
-- `bifrost breakpoint enable` / `bifrost breakpoint disable`：切换全局开关，等价于 `POST /api/breakpoint/settings`。
-- `bifrost breakpoint pending`：列出当前 pending 请求，用于诊断“为什么请求卡住了”。
-- `bifrost breakpoint resume <request_id> [--file body.json] [--header 'X: Y']`：CLI 端 resume。
-- `bifrost breakpoint config --timeout 30s --max-body 1MiB`：更新 auto-resume timeout 与 body 上限；越界返回错误码。
+当前没有独立的 `bifrost breakpoint ...` 子命令。脚本化使用统一走 Admin API：settings、pending、resume 与 Performance timeout 都有稳定 OpenAPI 契约，避免文档暴露不存在的 CLI。
 
 ## Web / Admin
 
 ### Web UI
 
 - Settings -> Performance 提供 Breakpoint Auto-Resume Timeout，说明无人 resume 时自动放行的应用场景，并使用后端返回的 min/max 渲染滑块。
-- `useBreakpointStore` 保存 `maxBodyBytes`、paused request/response，以及 `bodyOmitted`。
+- `useBreakpointStore` 保存 `maxBodyBytes`、phase-specific paused snapshot、原始值/编辑值和 deadline；首次连接、重连及 resume 冲突后都会重新拉取 pending，并用 revision 避免旧 pending HTTP 响应覆盖更新的 push 状态。
 - `pushService` 消费 `breakpoint_paused` payload：`body_omitted=true` 时不回退读取 TrafficDetail 里已有 body，避免把未捕获 body 误显示为可编辑。
-- TrafficDetail 在 header-only pause 时禁用 body 编辑和 Body Tab。
+- Network 行显示 request/response 阶段暂停标识并整行使用 `colorWarningBg`；主题切换时虚拟列表 memo 因 token 变化重绘，resume/disabled/timeout 移除 pending 后背景同步消失，选中态使用 primary inset 而不覆盖警示背景。
+- TrafficDetail 顶部显示阶段、倒计时、压缩编码和明确的 `Resume unchanged` / `Apply & Resume`；headers、query、request method/URL、response status 与可编辑 body 均在原详情内编辑。
+- TrafficDetail 在 header-only pause 时禁用 body 编辑，但保留 metadata 与 headers 编辑。
+- 全局 Breakpoint 开启且 CONNECT 命中 Breakpoint 规则时，在标准 TLS 端口自动触发 scoped TLS interception；显式 `tlsIntercept://false` 仍优先，UI 同时提示客户端必须信任 Bifrost CA。
+- `/api/breakpoint/pending` 与 `/api/breakpoint/resume` 继续经过 AdminRouter 统一 CORS、Origin guard 与 CSRF 层，兼容 localhost Web Origin 和 `tauri://localhost` Desktop WebView Origin。
 - Monaco body editor 使用 lazy import，仅在可编辑 paused body 场景加载，避免默认 TrafficDetail 打开时引入重型 editor chunk。
 
 ### 后端保护
 
 - 默认 `enabled=false`；仅打开全局开关但没有命中规则时也不会暂停任何流量。
 - 默认热路径不 clone 大 body、不 collect streaming body、不创建 pending pause。
-- 大 body 或未知长度 body 不进入 UI 编辑器。
+- 大 body、无法在上限内完整读取的 streaming body 或非文本 body 不进入 UI 编辑器。
 - 超时自动放行，避免业务请求无限挂起。
 - SSE 和二进制响应优先保持 streaming。
 - Breakpoint timeout 配置越界时返回错误；min/max 是服务端固定安全边界，UI 只展示同一份后端常量。

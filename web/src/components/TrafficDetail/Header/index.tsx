@@ -7,13 +7,11 @@ import {
   ExpandAltOutlined,
   ShrinkOutlined,
   SearchOutlined,
-  CaretRightOutlined,
 } from "@ant-design/icons";
 import type { TrafficRecord, TrafficSummary } from "../../../types";
 import { generateCurl } from "../../../utils/curl";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { useTrafficStore } from "../../../stores/useTrafficStore";
-import { useBreakpointStore } from "../../../stores/useBreakpointStore";
 
 const { Text } = Typography;
 
@@ -217,23 +215,6 @@ const HeaderContent = memo(function HeaderContent({
   const statusLabel = statusText ? `${status} ${statusText}` : String(status);
   const statusColor = getStatusColor(status);
 
-  const pausedRequest = useBreakpointStore((state) =>
-    state.pausedRequests.get(record.id),
-  );
-  const pausedResponse = useBreakpointStore((state) =>
-    state.pausedResponses.get(record.id),
-  );
-  const isPaused = !!pausedRequest || !!pausedResponse;
-  const pausedData = pausedRequest || pausedResponse;
-  const resume = useBreakpointStore((state) => state.resume);
-
-  const handleResume = useCallback(() => {
-    const data = pausedData;
-    if (!data) return;
-    const phase = pausedRequest ? "request" : "response";
-    resume(record.id, phase, data.headers, data.body ?? undefined);
-  }, [pausedData, pausedRequest, record.id, resume]);
-
   const [expanded, setExpanded] = useState(false);
   const [isOverflow, setIsOverflow] = useState(false);
   const urlRef = useRef<HTMLSpanElement>(null);
@@ -361,20 +342,6 @@ const HeaderContent = memo(function HeaderContent({
                 }}
               />
             )}
-          </Tooltip>
-        )}
-        {isPaused && (
-          <Tooltip title="Resume">
-            <CaretRightOutlined
-              onClick={handleResume}
-              data-testid="traffic-detail-resume"
-              style={{
-                fontSize: 16,
-                padding: 4,
-                cursor: "pointer",
-                color: "#52c41a",
-              }}
-            />
           </Tooltip>
         )}
         {onOpenInNewWindow ? (

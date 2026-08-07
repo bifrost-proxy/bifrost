@@ -365,6 +365,11 @@ impl ProxyRulesResolverTrait for DynamicRulesResolver {
         inner.has_response_rules_for_host(host)
     }
 
+    fn has_breakpoint_rules_for_host(&self, host: &str) -> bool {
+        let inner = self.inner.read();
+        inner.has_breakpoint_rules_for_host(host)
+    }
+
     fn has_tls_auto_intercept_route_rules_for_host(&self, host: &str) -> bool {
         let inner = self.inner.read();
         inner.has_tls_auto_intercept_route_rules_for_host(host)
@@ -1125,6 +1130,23 @@ pub type SharedDynamicRulesResolver = Arc<DynamicRulesResolver>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_resolver_exposes_host_scoped_breakpoint_rules() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.test breakpoint://request")
+            .unwrap();
+        let resolver = DynamicRulesResolver::new(rules, vec![], HashMap::new());
+        assert!(ProxyRulesResolverTrait::has_breakpoint_rules_for_host(
+            &resolver,
+            "example.test:443"
+        ));
+        assert!(!ProxyRulesResolverTrait::has_breakpoint_rules_for_host(
+            &resolver,
+            "other.test:443"
+        ));
+    }
 
     #[test]
     fn test_http3_rule_enables_upstream_http3_flag() {

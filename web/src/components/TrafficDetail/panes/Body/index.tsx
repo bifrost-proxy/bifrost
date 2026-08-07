@@ -129,6 +129,19 @@ export const Body = ({
     );
   }
 
+  if (editable) {
+    return (
+      <HighLightBody
+        data={displayData}
+        contentType={contentType}
+        searchValue={searchValue}
+        onSearch={onSearch}
+        editable
+        onBodyChange={onBodyChange}
+      />
+    );
+  }
+
   if (displayFormat === DF.Hex) {
     return (
       <>

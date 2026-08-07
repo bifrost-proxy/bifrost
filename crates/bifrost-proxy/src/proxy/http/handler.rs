@@ -86,6 +86,7 @@ use super::body_metadata::{
     normalize_res_headers, response_content_encoding, set_content_encoding_header,
     streaming_res_body_mode, BodyMode,
 };
+use super::breakpoint::{apply_edited_status, body_limit};
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
     maybe_inject_devtools_bridge_html, strip_devtools_client_req_id_from_url,
@@ -1642,14 +1643,14 @@ pub async fn handle_http_request(
     let devtools_client_req_id =
         take_devtools_client_req_id(req.headers_mut()).or(devtools_client_req_id_from_uri);
     let uri = req.uri().clone();
-    let method = req.method().to_string();
+    let mut method = req.method().to_string();
     let url = uri.to_string();
     let record_url = if ctx.url.is_empty() {
         url.clone()
     } else {
         ctx.url.clone()
     };
-    let record_url = strip_devtools_client_req_id_from_url(&record_url);
+    let mut record_url = strip_devtools_client_req_id_from_url(&record_url);
     let start_time = std::time::Instant::now();
     let incoming_headers: HashMap<String, String> = req
         .headers()
@@ -2166,13 +2167,13 @@ pub async fn handle_http_request(
         return Ok(response);
     }
 
-    let processed_uri = apply_url_rules(&uri, &resolved_rules, verbose_logging, ctx);
+    let mut processed_uri = apply_url_rules(&uri, &resolved_rules, verbose_logging, ctx);
 
     let original_host = uri.host().unwrap_or("unknown").to_string();
     let is_https = uri.scheme_str() == Some("https") || uri.scheme_str() == Some("wss");
     let default_port = if is_https { 443 } else { 80 };
     let original_port = uri.port_u16().unwrap_or(default_port);
-    let (host, port) = extract_host_port(&processed_uri, &resolved_rules, is_https)?;
+    let (mut host, mut port) = extract_host_port(&processed_uri, &resolved_rules, is_https)?;
 
     if verbose_logging {
         if resolved_rules.host.is_some() {
@@ -2545,15 +2546,21 @@ pub async fn handle_http_request(
         if let Some(body) = streaming_body.take() {
             let should_collect = admin_state
                 .as_ref()
-                .and_then(|state| {
+                .map(|state| {
                     content_length
                         .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
+                        .unwrap_or(true)
                 })
                 .unwrap_or(false);
             if should_collect {
-                match body.collect().await {
-                    Ok(collected) => {
-                        final_body = collected.to_bytes();
+                let limit = body_limit(&admin_state, request_hook_enabled, max_body_buffer_size);
+                match read_body_bounded(body, limit).await {
+                    Ok(BoundedBody::Complete(bytes)) => {
+                        final_body = bytes;
+                    }
+                    Ok(BoundedBody::Exceeded(replay_body)) => {
+                        request_body_omitted_for_breakpoint = true;
+                        streaming_body = Some(replay_body.boxed());
                     }
                     Err(e) => {
                         return Err(BifrostError::Network(format!(
@@ -2562,11 +2569,13 @@ pub async fn handle_http_request(
                         )));
                     }
                 }
-                normalize_req_headers(
-                    &mut parts,
-                    BodyMode::Known(final_body.len()),
-                    content_length.is_some(),
-                );
+                if streaming_body.is_none() {
+                    normalize_req_headers(
+                        &mut parts,
+                        BodyMode::Known(final_body.len()),
+                        content_length.is_some(),
+                    );
+                }
             } else {
                 request_body_omitted_for_breakpoint = true;
                 streaming_body = Some(body);
@@ -2620,12 +2629,13 @@ pub async fn handle_http_request(
     }
 
     if request_hook_enabled {
+        let breakpoint_method = parts.method.to_string();
         let outcome = super::breakpoint::breakpoint_request_hook(
             &admin_state,
             &push_manager,
             ctx.id_str(),
-            &method,
-            &url,
+            &breakpoint_method,
+            &processed_uri.to_string(),
             &mut parts.headers,
             final_body.clone(),
             content_length,
@@ -2633,6 +2643,23 @@ pub async fn handle_http_request(
             &mut final_body,
         )
         .await;
+        if let Some(edited_method) = outcome.method.as_deref() {
+            parts.method =
+                hyper::Method::from_bytes(edited_method.as_bytes()).map_err(|error| {
+                    BifrostError::Network(format!("Invalid breakpoint request method: {error}"))
+                })?;
+            method = parts.method.to_string();
+        }
+        if let Some(edited_url) = outcome.url.as_deref() {
+            processed_uri = edited_url.parse::<Uri>().map_err(|error| {
+                BifrostError::Network(format!("Invalid breakpoint request URL: {error}"))
+            })?;
+            let https = processed_uri
+                .scheme_str()
+                .is_some_and(|scheme| scheme == "https");
+            (host, port) = extract_host_port(&processed_uri, &resolved_rules, https)?;
+            record_url = strip_devtools_client_req_id_from_url(edited_url);
+        }
         if outcome.body_replaced {
             normalize_req_headers(
                 &mut parts,
@@ -2659,14 +2686,15 @@ pub async fn handle_http_request(
 
     let dns_ms = None;
 
+    let effective_is_https = matches!(processed_uri.scheme_str(), Some("https" | "wss"));
     let use_tls = if resolved_rules.ignored.host {
-        is_https
+        effective_is_https
     } else {
         match resolved_rules.host_protocol {
             Some(Protocol::Http) | Some(Protocol::Ws) => false,
             Some(Protocol::Https) | Some(Protocol::Wss) => true,
             Some(Protocol::Host) | Some(Protocol::XHost) => port == 443 || port == 8443,
-            _ => is_https,
+            _ => effective_is_https,
         }
     };
     let error_badge_rules_json = if inject_bifrost_badge && accepts_html_error {
@@ -3457,15 +3485,19 @@ pub async fn handle_http_request(
                 && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
         })
         .unwrap_or(false);
+    let enabled = response_breakpoint_enabled;
+    let limit = body_limit(&admin_state, enabled, max_body_buffer_size);
+    let max_body_buffer_size = limit;
     let response_breakpoint_can_buffer_body = response_breakpoint_enabled
         && !is_websocket
         && !is_sse
         && !skip_binary_recording
         && admin_state
             .as_ref()
-            .and_then(|state| {
+            .map(|state| {
                 res_content_length
                     .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
+                    .unwrap_or(true)
             })
             .unwrap_or(false);
     let response_breakpoint_header_only = response_breakpoint_enabled
@@ -3562,6 +3594,8 @@ pub async fn handle_http_request(
         }
     }
 
+    let response_breakpoint_header_only = response_breakpoint_header_only
+        || (response_breakpoint_enabled && res_body_too_large && !is_websocket && !is_sse);
     let skip_body_processing = skip_binary_recording
         || is_sse
         || !needs_processing
@@ -3746,7 +3780,7 @@ pub async fn handle_http_request(
 
         if response_breakpoint_header_only {
             let mut ignored_body = Bytes::new();
-            super::breakpoint::breakpoint_response_hook(
+            let outcome = super::breakpoint::breakpoint_response_hook(
                 &admin_state,
                 &push_manager,
                 ctx.id_str(),
@@ -3760,6 +3794,7 @@ pub async fn handle_http_request(
                 &mut ignored_body,
             )
             .await;
+            apply_edited_status(&mut res_parts.status, outcome.status);
         }
 
         if is_sse {
@@ -4246,6 +4281,8 @@ pub async fn handle_http_request(
             &mut final_res_body,
         )
         .await;
+
+        apply_edited_status(&mut res_parts.status, outcome.status);
 
         if outcome.body_replaced {
             normalize_res_headers(
@@ -8983,8 +9020,8 @@ mod coverage_90_wave {
             });
 
         let upstream = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/breakpoint"))
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path("/breakpoint-edited"))
             .and(wiremock::matchers::body_string("handler-edited-request"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
@@ -9000,13 +9037,16 @@ mod coverage_90_wave {
             rules: vec![breakpoint_rule("both")],
             ..Default::default()
         };
+        let frames = futures_util::stream::iter(vec![
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"orig"))),
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"inal"))),
+        ]);
         let request = Request::builder()
             .method(Method::POST)
             .uri("http://source.test/breakpoint")
             .header(header::HOST, "source.test")
             .header(header::CONTENT_TYPE, "text/plain")
-            .header(header::CONTENT_LENGTH, "8")
-            .body(Full::new(Bytes::from_static(b"original")))
+            .body(StreamBody::new(frames))
             .unwrap();
         let task_state = state.clone();
         let task = tokio::spawn(async move {
@@ -9014,26 +9054,37 @@ mod coverage_90_wave {
         });
 
         wait_for_breakpoint(&state).await;
-        assert!(state.breakpoint_manager.resume(
-            "REQ-handler-coverage",
-            "request",
-            BreakpointEdit {
-                headers: vec![("x-handler-request-breakpoint".into(), "yes".into())],
-                body: Some("handler-edited-request".into()),
-            },
-        ));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-handler-coverage",
+                "request",
+                BreakpointEdit {
+                    headers: Some(vec![("x-handler-request-breakpoint".into(), "yes".into())]),
+                    body: Some("handler-edited-request".into()),
+                    method: Some("PUT".into()),
+                    url: Some(format!("{}/breakpoint-edited", upstream.uri())),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
         wait_for_breakpoint(&state).await;
-        assert!(state.breakpoint_manager.resume(
-            "REQ-handler-coverage",
-            "response",
-            BreakpointEdit {
-                headers: vec![("x-handler-response-breakpoint".into(), "yes".into())],
-                body: Some("handler-edited-response".into()),
-            },
-        ));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-handler-coverage",
+                "response",
+                BreakpointEdit {
+                    headers: Some(vec![("x-handler-response-breakpoint".into(), "yes".into())]),
+                    body: Some("handler-edited-response".into()),
+                    status: Some(218),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
 
         let response = task.await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status().as_u16(), 218);
         assert_eq!(response.headers()["x-handler-response-breakpoint"], "yes");
         assert_eq!(
             response_body(response).await,
@@ -9043,7 +9094,9 @@ mod coverage_90_wave {
             .traffic_db
             .get_by_id("REQ-handler-coverage")
             .expect("handler breakpoint traffic record");
-        assert_eq!(record.status, 200);
+        assert_eq!(record.status, 218);
+        assert_eq!(record.method, "PUT");
+        assert_eq!(record.path, "/breakpoint-edited");
         assert!(record.request_body_ref.is_some());
         assert!(record.response_body_ref.is_some());
     }
@@ -9330,6 +9383,128 @@ mod coverage_90_wave {
     }
 
     #[tokio::test]
+    async fn plaintext_request_breakpoint_header_only_preserves_large_chunked_body() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19100)
+            .build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 8,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/large-request-breakpoint"))
+            .and(wiremock::matchers::body_string(
+                "handler-large-request-body",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("request")],
+            ..Default::default()
+        };
+        let frames = futures_util::stream::iter(vec![
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(
+                b"handler-large-",
+            ))),
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(
+                b"request-body",
+            ))),
+        ]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("http://source.test/large-request-breakpoint")
+            .header(header::HOST, "source.test")
+            .body(StreamBody::new(frames))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_full_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+        wait_for_breakpoint(&state).await;
+        let pending = state.breakpoint_manager.pending();
+        assert!(pending[0].body_omitted);
+        assert!(state
+            .breakpoint_manager
+            .resume("REQ-handler-coverage", "request", BreakpointEdit::default(),)
+            .is_ok());
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn plaintext_breakpoint_rejects_invalid_internal_request_edits() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        for (edit, expected) in [
+            (
+                BreakpointEdit {
+                    method: Some("bad method".into()),
+                    ..Default::default()
+                },
+                "Invalid breakpoint request method",
+            ),
+            (
+                BreakpointEdit {
+                    url: Some("not an absolute uri".into()),
+                    ..Default::default()
+                },
+                "Invalid breakpoint request URL",
+            ),
+            (
+                BreakpointEdit {
+                    url: Some("https://127.0.0.1:9/unreachable".into()),
+                    ..Default::default()
+                },
+                "tcp connect error",
+            ),
+        ] {
+            let state = Arc::new(AdminState::new(19101));
+            state
+                .breakpoint_manager
+                .update_settings(BreakpointSettings {
+                    enabled: true,
+                    max_body_bytes: 1024,
+                });
+            let rules = ResolvedRules {
+                rules: vec![breakpoint_rule("request")],
+                ..Default::default()
+            };
+            let request = Request::builder()
+                .uri("http://source.test/internal-edit")
+                .header(header::HOST, "source.test")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let task_state = state.clone();
+            let task = tokio::spawn(async move {
+                run_full_request(rules, Some(task_state), request, 4096, 64, true).await
+            });
+            wait_for_breakpoint(&state).await;
+            state
+                .breakpoint_manager
+                .resume("REQ-handler-coverage", "request", edit)
+                .unwrap();
+            let response = task.await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let actual = response_body(response).await;
+            assert!(
+                String::from_utf8_lossy(&actual).contains(expected),
+                "expected {expected:?} in {:?}",
+                String::from_utf8_lossy(&actual)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn plaintext_response_breakpoint_header_only_preserves_large_body() {
         use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
 
@@ -9369,15 +9544,21 @@ mod coverage_90_wave {
             run_full_request(rules, Some(task_state), request, 4096, 64, true).await
         });
         wait_for_breakpoint(&state).await;
-        assert!(state.breakpoint_manager.resume(
-            "REQ-handler-coverage",
-            "response",
-            BreakpointEdit {
-                headers: vec![("x-header-only".into(), "yes".into())],
-                body: None,
-            },
-        ));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-handler-coverage",
+                "response",
+                BreakpointEdit {
+                    headers: Some(vec![("x-header-only".into(), "yes".into())]),
+                    status: Some(219),
+                    body: None,
+                    ..Default::default()
+                },
+            )
+            .is_ok());
         let response = task.await.unwrap();
+        assert_eq!(response.status().as_u16(), 219);
         assert_eq!(response.headers()["x-header-only"], "yes");
         assert_eq!(response_body(response).await, Bytes::from(large_body));
     }

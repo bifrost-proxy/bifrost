@@ -1,0 +1,9 @@
+# Breakpoint production-readiness E2E rules.
+# The test replaces {{MOCK_PORT}} with its isolated local upstream port.
+127.0.0.1:{{MOCK_PORT}}/disable-release breakpoint://request
+127.0.0.1:{{MOCK_PORT}}/request-edit breakpoint://request
+127.0.0.1:{{MOCK_PORT}}/oversized breakpoint://request
+127.0.0.1:{{MOCK_PORT}}/response-edit breakpoint://response
+127.0.0.1:{{MOCK_PORT}}/both-phase breakpoint://request,response
+127.0.0.1:{{MOCK_PORT}}/timeout breakpoint://response
+127.0.0.1:{{TLS_PORT}} breakpoint://response

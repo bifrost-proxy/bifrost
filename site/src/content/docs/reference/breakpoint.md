@@ -35,8 +35,11 @@ Breakpoint 有双重门禁：
 3. 进入 Rules 页面，为目标流量增加一条尽量精确的规则。
 4. 发送命中该规则的请求。
 5. 回到 Traffic 页面，打开对应请求的 TrafficDetail。
-6. 在暂停面板中查看或修改 headers/body。
-7. 点击 `Resume` 继续 request 或 response。
+6. Network 行会显示 request/response 暂停标识；选中后详情自动打开对应阶段。
+7. Request 可编辑 method、URL/query、headers 和可编辑 body；Response 可编辑 status、headers 和可编辑 body。
+8. 点击 `Resume unchanged` 原样放行，或点击 `Apply & Resume` 应用编辑后放行。
+
+pending 的 Network 行整行使用主题自适应的淡黄色警示背景；恢复、关闭 Breakpoint 或 timeout 自动放行后，背景立即消失。浅色和深色主题分别使用各自的 warning token，不使用固定浅色值。
 
 Breakpoint 关闭后，新流量不会再暂停；已经 pending 的 breakpoint 会被释放。
 
@@ -67,7 +70,7 @@ api.example.com/v1/users breakpoint://request,response
 - 修改 body 后再发送给上游。
 - 验证客户端请求是否符合预期。
 
-Resume 后，上游会收到修改后的 request。若 body 因过大、非文本或流式内容无法编辑，页面会提示 body 被省略，此时只能修改 headers，Resume 时不会替换原始 body。
+Resume 后，上游会收到修改后的 method、URL/query、headers/body。若 body 因过大、非文本或无法在安全上限内完整读取，页面会提示 body 被省略，此时仍可修改 method、URL/query 和 headers，Resume 时不会替换原始 body。
 
 ## Response Breakpoint
 
@@ -78,7 +81,7 @@ Resume 后，上游会收到修改后的 request。若 body 因过大、非文�
 - 修改响应 body，验证客户端展示或错误处理。
 - 模拟特殊状态或特殊响应内容。
 
-Resume 后，客户端会收到修改后的 response。对未知长度的流式响应或过大的 body，Bifrost 会尽量保持原始 streaming 行为，避免为了调试而完整缓存大响应。
+Resume 后，客户端会收到修改后的 status、headers/body。普通未知长度正文会在安全上限内有界读取后允许编辑；超限或持续流式响应保留原始 streaming。受支持的压缩正文会以解压文本编辑，并在放行前按最终 `Content-Encoding` 重新编码。
 
 ## Timeout 配置
 
@@ -134,11 +137,19 @@ curl -sS -X POST http://127.0.0.1:8800/_bifrost/api/breakpoint/resume \
 
 完整 API 描述可在 WebUI 的 Swagger 页面查看，或通过 `/_bifrost/api/openapi.json` 获取。
 
+页面刷新或 push 重连后可查询当前暂停项：
+
+```bash
+curl -sS http://127.0.0.1:8800/_bifrost/api/breakpoint/pending
+```
+
 ## 常见问题
 
 **打开 Breakpoint 后为什么没有暂停？**
 
 确认目标流量命中了包含 `breakpoint://request` 或 `breakpoint://response` 的规则。Toolbar 开关只是全局门禁，不会单独暂停流量。
+
+标准 TLS 端口上的 HTTPS 请求命中 Breakpoint 规则且全局开关开启时，会自动触发该连接的 scoped TLS interception；显式 `tlsIntercept://false` 仍优先。客户端必须信任 Bifrost CA，Toolbar 在全局 TLS interception 关闭时会提示这一点。
 
 **为什么 body 不能编辑？**
 

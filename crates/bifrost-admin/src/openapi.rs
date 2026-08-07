@@ -160,19 +160,51 @@ fn generate_components() -> serde_json::Value {
             },
             "BreakpointEdit": {
                 "type": "object",
+                "required": ["request_id", "phase"],
                 "properties": {
                     "request_id": {"type": "string", "description": "ID of the request currently paused by breakpoint"},
                     "phase": {"type": "string", "enum": ["request", "response"], "description": "Breakpoint phase"},
+                    "method": {"type": "string", "nullable": true, "description": "Edited request method; accepted only for request phase"},
+                    "url": {"type": "string", "format": "uri", "nullable": true, "description": "Edited absolute HTTP(S) request URL; accepted only for request phase"},
+                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "nullable": true, "description": "Edited response status; accepted only for response phase"},
                     "headers": {
-                        "type": "object",
-                        "description": "Edited headers (key-value)",
-                        "additionalProperties": {"type": "string"}
+                        "type": "array",
+                        "nullable": true,
+                        "description": "Edited ordered header pairs. Duplicate names are preserved. Omit to keep the original headers.",
+                        "items": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "items": {"type": "string"}
+                        }
                     },
                     "body": {
                         "type": "string",
                         "nullable": true,
                         "description": "Edited body. null keeps the original body"
                     }
+                }
+            },
+            "PendingBreakpoint": {
+                "type": "object",
+                "required": ["request_id", "phase", "headers", "body_omitted", "max_body_bytes", "paused_at_ms", "deadline_at_ms"],
+                "properties": {
+                    "request_id": {"type": "string"},
+                    "phase": {"type": "string", "enum": ["request", "response"]},
+                    "method": {"type": "string", "nullable": true},
+                    "url": {"type": "string", "nullable": true},
+                    "status": {"type": "integer", "nullable": true},
+                    "headers": {
+                        "type": "array",
+                        "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "string"}}
+                    },
+                    "body": {"type": "string", "nullable": true},
+                    "body_omitted": {"type": "boolean"},
+                    "body_size": {"type": "integer", "nullable": true},
+                    "max_body_bytes": {"type": "integer"},
+                    "content_encoding": {"type": "string", "nullable": true},
+                    "paused_at_ms": {"type": "integer", "format": "int64"},
+                    "deadline_at_ms": {"type": "integer", "format": "int64"}
                 }
             },
             "ErrorResponse": {
@@ -334,6 +366,20 @@ fn generate_paths() -> serde_json::Value {
                 }
             }
         },
+        "/api/breakpoint/pending": {
+            "get": {
+                "tags": ["Breakpoint"],
+                "summary": "List currently paused breakpoint requests/responses",
+                "description": "Returns authoritative pause snapshots so the UI can recover after a reload or missed push event.",
+                "operationId": "getPendingBreakpoints",
+                "responses": {
+                    "200": {
+                        "description": "Pending breakpoints ordered by pause time",
+                        "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/PendingBreakpoint"}}}}
+                    }
+                }
+            }
+        },
         "/api/breakpoint/resume": {
             "post": {
                 "tags": ["Breakpoint"],
@@ -346,7 +392,8 @@ fn generate_paths() -> serde_json::Value {
                 },
                 "responses": {
                     "200": {"description": "Resumed"},
-                    "404": {"description": "Pending request not found"}
+                    "404": {"description": "Pending request not found"},
+                    "409": {"description": "The request is paused at a different phase"}
                 }
             }
         },
@@ -1460,6 +1507,7 @@ mod tests {
         let spec = generate_openapi_spec();
 
         assert!(spec.paths.get("/api/breakpoint/settings").is_some());
+        assert!(spec.paths.get("/api/breakpoint/pending").is_some());
         assert!(spec.paths.get("/api/breakpoint/resume").is_some());
         assert!(spec.paths.get("/api/rules").is_some());
         assert!(spec.paths.get("/api/config/tray").is_some());
@@ -1471,6 +1519,16 @@ mod tests {
         assert!(settings.get("hook_request").is_none());
         assert!(settings.get("hook_response").is_none());
         assert!(settings.get("timeout_ms").is_none());
+
+        let edit = &schema(&spec, "BreakpointEdit")["properties"];
+        assert!(edit.get("method").is_some());
+        assert!(edit.get("url").is_some());
+        assert!(edit.get("status").is_some());
+        assert_eq!(edit["headers"]["type"], "array");
+
+        let pending = &schema(&spec, "PendingBreakpoint")["properties"];
+        assert!(pending.get("deadline_at_ms").is_some());
+        assert!(pending.get("body_omitted").is_some());
 
         let performance = &schema(&spec, "PerformanceBreakpointConfig")["properties"];
         assert!(performance.get("timeout_ms").is_some());

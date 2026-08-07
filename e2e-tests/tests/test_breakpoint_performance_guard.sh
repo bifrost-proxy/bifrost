@@ -11,8 +11,10 @@ ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 export ADMIN_HOST ADMIN_PORT ADMIN_PATH_PREFIX
 
 MOCK_PORT="${MOCK_PORT:-$(allocate_free_port)}"
+TLS_PORT="${TLS_PORT:-8443}"
 TMP_DIR="$(mktemp -d)"
 MOCK_PID=""
+TLS_PID=""
 WS_PID=""
 CURL_PID=""
 
@@ -38,6 +40,9 @@ cleanup() {
     fi
     if [[ -n "${MOCK_PID:-}" ]] && kill -0 "$MOCK_PID" 2>/dev/null; then
         kill "$MOCK_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${TLS_PID:-}" ]] && kill -0 "$TLS_PID" 2>/dev/null; then
+        kill "$TLS_PID" 2>/dev/null || true
     fi
     admin_cleanup_bifrost
     rm -rf "$TMP_DIR"
@@ -69,6 +74,10 @@ resume_url() {
     echo "$(admin_base_url)/api/breakpoint/resume"
 }
 
+pending_url() {
+    echo "$(admin_base_url)/api/breakpoint/pending"
+}
+
 rules_url() {
     echo "$(admin_base_url)/api/rules"
 }
@@ -88,6 +97,7 @@ start_mock_server() {
     cat >"$script" <<'PY'
 import hashlib
 import json
+import ssl
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -106,12 +116,17 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
         payload = {
+            "method": self.command,
+            "path": self.path,
             "len": len(body),
             "sha256": hashlib.sha256(body).hexdigest(),
             "prefix": body[:16].decode("utf-8", "replace"),
             "breakpoint_header": self.headers.get("X-Breakpoint-Request", ""),
         }
         self._send(200, json.dumps(payload))
+
+    def do_PUT(self):
+        self.do_POST()
 
     def do_GET(self):
         self._send(200, b"hello-breakpoint-timeout", "text/plain")
@@ -120,7 +135,12 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 port = int(sys.argv[1])
-ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+if len(sys.argv) == 4:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(sys.argv[2], sys.argv[3])
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
 PY
     python3 "$script" "$MOCK_PORT" >"$TMP_DIR/mock.log" 2>&1 &
     MOCK_PID=$!
@@ -131,6 +151,22 @@ PY
         sleep 0.1
     done
     fail "mock server did not start; log=$(cat "$TMP_DIR/mock.log" 2>/dev/null || true)"
+}
+
+start_tls_mock_server() {
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -subj '/CN=127.0.0.1' \
+        -keyout "$TMP_DIR/tls.key" -out "$TMP_DIR/tls.crt" >/dev/null 2>&1
+    python3 "$TMP_DIR/mock_server.py" "$TLS_PORT" "$TMP_DIR/tls.crt" "$TMP_DIR/tls.key" \
+        >"$TMP_DIR/tls-mock.log" 2>&1 &
+    TLS_PID=$!
+    for _ in $(seq 1 50); do
+        if curl -kfsS "https://127.0.0.1:$TLS_PORT/ready" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    fail "TLS mock server did not start; log=$(cat "$TMP_DIR/tls-mock.log" 2>/dev/null || true)"
 }
 
 write_ws_probe() {
@@ -188,6 +224,14 @@ assert_json_value() {
     [[ "$actual" == "$expected" ]] || fail "expected $expr to be '$expected', got '$actual' in $json"
 }
 
+assert_cors_origin() {
+    local headers_file="$1"
+    local expected_origin="$2"
+    local actual
+    actual="$(tr -d '\r' <"$headers_file" | awk -F': ' 'tolower($1) == "access-control-allow-origin" { print $2 }' | tail -1)"
+    [[ "$actual" == "$expected_origin" ]] || fail "expected CORS origin '$expected_origin', got '$actual': $(cat "$headers_file")"
+}
+
 resolve_bifrost_bin() {
     local candidate="${BIFROST_BIN:-}"
     if [[ -n "$candidate" && -x "$candidate" ]]; then
@@ -225,6 +269,7 @@ fi
 export BIFROST_BIN
 
 start_mock_server
+start_tls_mock_server
 admin_ensure_bifrost
 write_ws_probe
 
@@ -236,6 +281,29 @@ performance="$(curl -fsS "$(performance_url)")"
 assert_json_value "$performance" ".breakpoint.timeout_ms" "30000"
 assert_json_value "$performance" ".breakpoint.timeout_min_ms" "5000"
 assert_json_value "$performance" ".breakpoint.timeout_max_ms" "300000"
+
+log "Breakpoint APIs support browser and desktop CORS"
+for origin in "http://localhost:3000" "tauri://localhost"; do
+    cors_headers="$TMP_DIR/cors-$(echo "$origin" | tr -c 'A-Za-z0-9' '_').headers"
+    curl -sS -o /dev/null -D "$cors_headers" -X OPTIONS "$(pending_url)" \
+        -H "Origin: $origin" \
+        -H 'Access-Control-Request-Method: GET' \
+        -H 'Access-Control-Request-Headers: X-Client-Id' \
+        -w '%{http_code}' | grep -q '^204$' || fail "pending CORS preflight failed for $origin"
+    assert_cors_origin "$cors_headers" "$origin"
+    curl -fsS -o "$TMP_DIR/cors-pending.json" -D "$cors_headers" "$(pending_url)" \
+        -H "Origin: $origin"
+    assert_cors_origin "$cors_headers" "$origin"
+
+    curl -sS -o /dev/null -D "$cors_headers" -X OPTIONS "$(resume_url)" \
+        -H "Origin: $origin" \
+        -H 'Access-Control-Request-Method: POST' \
+        -H 'Access-Control-Request-Headers: Content-Type, X-Client-Id, X-Bifrost-CSRF' \
+        -w '%{http_code}' | grep -q '^204$' || fail "resume CORS preflight failed for $origin"
+    assert_cors_origin "$cors_headers" "$origin"
+    tr -d '\r' <"$cors_headers" | grep -qi '^Access-Control-Allow-Headers:.*X-Bifrost-CSRF' \
+        || fail "resume CORS preflight omitted X-Bifrost-CSRF for $origin"
+done
 
 log "default-off large body request completes without breakpoint pause"
 BODY_2M="$TMP_DIR/body-2m.bin"
@@ -268,7 +336,9 @@ wait "$WS_PID" 2>/dev/null || true
 WS_PID=""
 
 log "turning breakpoint off releases pending request"
-create_rule "breakpoint-disable-release-e2e" "127.0.0.1:${MOCK_PORT}/disable-release breakpoint://request"
+BREAKPOINT_RULE_FILE="$REPO_DIR/e2e-tests/rules/breakpoint/production-ready.txt"
+breakpoint_rules="$(sed -e "s/{{MOCK_PORT}}/$MOCK_PORT/g" -e "s/{{TLS_PORT}}/$TLS_PORT/g" "$BREAKPOINT_RULE_FILE")"
+create_rule "breakpoint-production-ready-e2e" "$breakpoint_rules"
 curl -fsS -X POST "$(settings_url)" \
     -H 'Content-Type: application/json' \
     --data '{"enabled":true,"max_body_bytes":1048576}' >/dev/null
@@ -289,6 +359,10 @@ CURL_PID=$!
 wait_for_file "$DISABLE_EVENT_FILE" 5 || fail "did not receive disable-release breakpoint event"
 disable_event="$(cat "$DISABLE_EVENT_FILE")"
 assert_json_value "$disable_event" ".phase" "request"
+pending="$(curl -fsS "$(pending_url)")"
+assert_json_value "$pending" ".[0].request_id" "$(echo "$disable_event" | jq -r '.request_id')"
+assert_json_value "$pending" ".[0].phase" "request"
+assert_json_value "$pending" ".[0].body" "disable-release-body"
 curl -fsS -X POST "$(settings_url)" \
     -H 'Content-Type: application/json' \
     --data '{"enabled":false,"max_body_bytes":1048576}' >/dev/null
@@ -301,7 +375,6 @@ assert_json_value "$disable_response" ".len" "20"
 assert_json_value "$disable_response" ".prefix" "disable-release-"
 
 log "editable request breakpoint can modify small body and headers"
-create_rule "breakpoint-request-e2e" "127.0.0.1:${MOCK_PORT}/request-edit breakpoint://request"
 curl -fsS -X POST "$(settings_url)" \
     -H 'Content-Type: application/json' \
     --data '{"enabled":true,"max_body_bytes":1048576}' >/dev/null
@@ -325,7 +398,19 @@ assert_json_value "$request_edit_event" ".phase" "request"
 assert_json_value "$request_edit_event" ".body_omitted" "false"
 assert_json_value "$request_edit_event" ".body" "original-request-body"
 
-request_edit_resume_payload="$(jq -c '.headers += [["X-Breakpoint-Request","edited"]] | {request_id: .request_id, phase: .phase, headers: .headers, body: "edited-request-body"}' "$REQ_EDIT_EVENT_FILE")"
+phase_mismatch_payload="$(jq -c '{request_id: .request_id, phase: "response"}' "$REQ_EDIT_EVENT_FILE")"
+csrf_token="$(curl -fsS "$(admin_base_url)/api/security/csrf" | jq -r '.csrf_token')"
+phase_mismatch_status="$(curl -sS -o "$TMP_DIR/phase-mismatch.json" -D "$TMP_DIR/phase-mismatch.headers" -w '%{http_code}' -X POST "$(resume_url)" \
+    -H 'Origin: tauri://localhost' \
+    -H 'Sec-Fetch-Site: cross-site' \
+    -H "X-Bifrost-CSRF: $csrf_token" \
+    -H 'Content-Type: application/json' \
+    --data "$phase_mismatch_payload")"
+[[ "$phase_mismatch_status" == "409" ]] || fail "wrong-phase resume should return 409, got $phase_mismatch_status"
+assert_cors_origin "$TMP_DIR/phase-mismatch.headers" "tauri://localhost"
+assert_json_value "$(curl -fsS "$(pending_url)")" ".[0].phase" "request"
+
+request_edit_resume_payload="$(jq -c --arg url "http://127.0.0.1:${MOCK_PORT}/request-edited?mode=e2e" '.headers += [["X-Breakpoint-Request","edited"],["X-Duplicate","one"],["X-Duplicate","two"]] | {request_id: .request_id, phase: .phase, method: "PUT", url: $url, headers: .headers, body: "edited-request-body"}' "$REQ_EDIT_EVENT_FILE")"
 curl -fsS -X POST "$(resume_url)" -H 'Content-Type: application/json' --data "$request_edit_resume_payload" >/dev/null
 wait "$CURL_PID"
 CURL_PID=""
@@ -335,9 +420,10 @@ request_edit_response="$(cat "$REQ_EDIT_OUT")"
 assert_json_value "$request_edit_response" ".len" "19"
 assert_json_value "$request_edit_response" ".prefix" "edited-request-b"
 assert_json_value "$request_edit_response" ".breakpoint_header" "edited"
+assert_json_value "$request_edit_response" ".method" "PUT"
+assert_json_value "$request_edit_response" ".path" "/request-edited?mode=e2e"
 
 log "oversized request body is header-only paused and cannot be overwritten"
-create_rule "breakpoint-request-oversized-e2e" "127.0.0.1:${MOCK_PORT}/oversized breakpoint://request"
 curl -fsS -X POST "$(settings_url)" \
     -H 'Content-Type: application/json' \
     --data '{"enabled":true,"max_body_bytes":1024}' >/dev/null
@@ -375,7 +461,6 @@ assert_json_value "$oversized_response" ".len" "4096"
 assert_json_value "$oversized_response" ".prefix" "bbbbbbbbbbbbbbbb"
 
 log "editable response breakpoint can modify small body and headers"
-create_rule "breakpoint-response-e2e" "127.0.0.1:${MOCK_PORT}/response-edit breakpoint://response"
 curl -fsS -X POST "$(settings_url)" \
     -H 'Content-Type: application/json' \
     --data '{"enabled":true,"max_body_bytes":1048576}' >/dev/null
@@ -388,7 +473,7 @@ wait_for_file "$RES_EDIT_READY_FILE" 5 || fail "response edit push websocket did
 
 RES_EDIT_OUT="$TMP_DIR/response-edit-body.txt"
 RES_EDIT_HEADERS="$TMP_DIR/response-edit-headers.txt"
-curl --noproxy "" -fsS -D "$RES_EDIT_HEADERS" -x "http://127.0.0.1:$ADMIN_PORT" \
+curl --noproxy "" -sS -D "$RES_EDIT_HEADERS" -x "http://127.0.0.1:$ADMIN_PORT" \
     "http://127.0.0.1:$MOCK_PORT/response-edit" >"$RES_EDIT_OUT" &
 CURL_PID=$!
 
@@ -398,7 +483,7 @@ assert_json_value "$response_edit_event" ".phase" "response"
 assert_json_value "$response_edit_event" ".body_omitted" "false"
 assert_json_value "$response_edit_event" ".body" "hello-breakpoint-timeout"
 
-response_edit_resume_payload="$(jq -c '.headers += [["X-Breakpoint-Response","edited"]] | {request_id: .request_id, phase: .phase, headers: .headers, body: "edited-response-body"}' "$RES_EDIT_EVENT_FILE")"
+response_edit_resume_payload="$(jq -c '.headers += [["X-Breakpoint-Response","edited"],["Set-Cookie","first=1"],["Set-Cookie","second=2"]] | {request_id: .request_id, phase: .phase, status: 418, headers: .headers, body: "edited-response-body"}' "$RES_EDIT_EVENT_FILE")"
 curl -fsS -X POST "$(resume_url)" -H 'Content-Type: application/json' --data "$response_edit_resume_payload" >/dev/null
 wait "$CURL_PID"
 CURL_PID=""
@@ -406,9 +491,34 @@ wait "$WS_PID"
 WS_PID=""
 [[ "$(cat "$RES_EDIT_OUT")" == "edited-response-body" ]] || fail "response body was not edited: $(cat "$RES_EDIT_OUT")"
 grep -qi '^x-breakpoint-response: edited' "$RES_EDIT_HEADERS" || fail "response header was not edited: $(cat "$RES_EDIT_HEADERS")"
+grep -q '^HTTP/1.1 418' "$RES_EDIT_HEADERS" || fail "response status was not edited: $(cat "$RES_EDIT_HEADERS")"
+[[ "$(grep -ci '^set-cookie:' "$RES_EDIT_HEADERS")" == "2" ]] || fail "duplicate response headers were not preserved: $(cat "$RES_EDIT_HEADERS")"
+
+log "HTTPS breakpoint rule automatically enables scoped TLS interception"
+TLS_READY_FILE="$TMP_DIR/ws-tls.ready"
+TLS_EVENT_FILE="$TMP_DIR/breakpoint-tls-event.json"
+node "$TMP_DIR/wait_breakpoint_push.js" "ws://127.0.0.1:$ADMIN_PORT${ADMIN_PATH_PREFIX}/api/push" "$TLS_READY_FILE" "$TLS_EVENT_FILE" &
+WS_PID=$!
+wait_for_file "$TLS_READY_FILE" 5 || fail "TLS push websocket did not become ready"
+TLS_OUT="$TMP_DIR/tls-response-body.txt"
+TLS_HEADERS="$TMP_DIR/tls-response-headers.txt"
+curl --noproxy "" -kfsS -D "$TLS_HEADERS" -x "http://127.0.0.1:$ADMIN_PORT" \
+    "https://127.0.0.1:$TLS_PORT/https-breakpoint" >"$TLS_OUT" &
+CURL_PID=$!
+wait_for_file "$TLS_EVENT_FILE" 5 || fail "HTTPS breakpoint did not pause"
+tls_event="$(cat "$TLS_EVENT_FILE")"
+assert_json_value "$tls_event" ".phase" "response"
+assert_json_value "$tls_event" ".body" "hello-breakpoint-timeout"
+tls_resume="$(jq -c '{request_id: .request_id, phase: .phase, status: 202, headers: .headers, body: "edited-https-response"}' "$TLS_EVENT_FILE")"
+curl -fsS -X POST "$(resume_url)" -H 'Content-Type: application/json' --data "$tls_resume" >/dev/null
+wait "$CURL_PID"
+CURL_PID=""
+wait "$WS_PID"
+WS_PID=""
+[[ "$(cat "$TLS_OUT")" == "edited-https-response" ]] || fail "HTTPS response body was not edited: $(cat "$TLS_OUT")"
+grep -Eq '^HTTP/(1\.[01]|2) 202' "$TLS_HEADERS" || fail "HTTPS response status was not edited: $(cat "$TLS_HEADERS")"
 
 log "combined breakpoint rule pauses request and response phases in order"
-create_rule "breakpoint-both-e2e" "127.0.0.1:${MOCK_PORT}/both-phase breakpoint://request,response"
 curl -fsS -X POST "$(settings_url)" \
     -H 'Content-Type: application/json' \
     --data '{"enabled":true,"max_body_bytes":1048576}' >/dev/null
@@ -446,7 +556,6 @@ CURL_PID=""
 grep -qi '^x-breakpoint-response: both' "$BOTH_HEADERS" || fail "combined response header was not edited: $(cat "$BOTH_HEADERS")"
 
 log "response breakpoint timeout releases traffic"
-create_rule "breakpoint-response-timeout-e2e" "127.0.0.1:${MOCK_PORT}/timeout breakpoint://response"
 curl -fsS -X POST "$(settings_url)" \
     -H 'Content-Type: application/json' \
     --data '{"enabled":true,"max_body_bytes":1048576}' >/dev/null
@@ -483,5 +592,6 @@ WS_PID=""
 if (( elapsed_ms < 4500 || elapsed_ms > 12000 )); then
     fail "response timeout elapsed ${elapsed_ms}ms outside expected range"
 fi
+assert_json_value "$(curl -fsS "$(pending_url)")" ". | length" "0"
 
 log "all breakpoint performance guard tests passed"
