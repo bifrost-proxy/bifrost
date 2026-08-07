@@ -322,7 +322,7 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
   bash e2e-tests/tests/test_feishu_new_group_command.sh
 ```
 
-执行记录：2026-08-07 PASS。真实启动最新 debug 二进制与假飞书 OpenAPI，验证一次建群、同 `message_id` 重投、非 owner 群聊命令、欢迎消息、SQLite 幂等记录和 `/help` 文案；脚本输出 `[feishu-new-group-command] PASS`，退出后自动清理临时进程与目录。
+执行记录：2026-08-07 PASS。真实启动最新 debug 二进制与假飞书 OpenAPI，验证一次建群、同 `message_id` 重投、非 owner 群聊命令、欢迎消息、SQLite 幂等记录和 `/help` 文案；脚本输出 `[feishu-new-group-command] PASS`，退出后自动清理临时进程与目录。CI 广域 Shell 矩阵复用 release 二进制时，脚本明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不可为了假服务放宽生产飞书域名白名单；请求形状与错误矩阵继续由 release 同源单元测试覆盖。
 
 ## 清理步骤
 
