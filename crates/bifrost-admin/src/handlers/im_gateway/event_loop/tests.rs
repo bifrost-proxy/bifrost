@@ -1471,6 +1471,35 @@ fn external_cli_progress_runner_summary_reads_weekly_usage_metadata() {
     assert!(external_cli_weekly_usage_from_metadata(&metadata).is_none());
 }
 
+#[test]
+fn external_cli_progress_session_id_flows_from_live_event_to_feishu_card() {
+    let request = recorder_test_request("feishu-main:owner-open-id");
+    let event = crate::im_gateway::external_cli::parse_progress_events(
+        r#"{"type":"thread.started","thread_id":"thread-live-card"}"#,
+    )
+    .pop()
+    .expect("thread started event");
+    let mut metadata = std::collections::BTreeMap::new();
+    assert!(
+        crate::im_gateway::external_cli::merge_external_cli_progress_metadata(
+            "codex",
+            &event,
+            &mut metadata,
+        )
+    );
+    let runner = external_cli_progress_runner_summary("codex", "codex", &request, Some(&metadata));
+    let mut snapshot =
+        crate::im_gateway::progress_card::ImAgentProgressSnapshot::new("s1", "codex task");
+    snapshot.runner = Some(runner);
+
+    let card = crate::im_gateway::progress_card::build_feishu_progress_card(&snapshot, true);
+    let serialized = serde_json::to_string(&card).expect("serialize progress card");
+
+    assert!(
+        serialized.contains("Runner：`codex` · Adapter：`codex` · Session ID：`thread-live-card`")
+    );
+}
+
 fn external_cli_result_with_status(
     status: crate::im_gateway::external_cli::ExternalCliRunStatus,
 ) -> crate::im_gateway::external_cli::ExternalCliRunResult {

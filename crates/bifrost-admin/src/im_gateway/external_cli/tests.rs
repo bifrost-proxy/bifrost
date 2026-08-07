@@ -3362,6 +3362,42 @@ fn codex_progress_metadata_ignores_short_windows_and_non_codex_adapters() {
 }
 
 #[test]
+fn codex_like_progress_metadata_captures_target_runner_session_id_immediately() {
+    for (adapter, raw, expected) in [
+        (
+            DEFAULT_ADAPTER,
+            serde_json::json!({"type":"thread.started","thread_id":"codex-thread-live"}),
+            "codex-thread-live",
+        ),
+        (
+            TRAEX_ADAPTER,
+            serde_json::json!({"type":"thread.started","threadId":"traex-thread-live"}),
+            "traex-thread-live",
+        ),
+        (
+            CLAUDE_CODE_ADAPTER,
+            serde_json::json!({"type":"system","subtype":"init","session_id":"claude-session-live"}),
+            "claude-session-live",
+        ),
+    ] {
+        let event = ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::RunStarted,
+            content: expected.to_string(),
+            title: Some("runner session".to_string()),
+            raw,
+        };
+        let mut metadata = std::collections::BTreeMap::new();
+
+        assert!(merge_external_cli_progress_metadata(
+            adapter,
+            &event,
+            &mut metadata
+        ));
+        assert_eq!(metadata.get("threadId").map(String::as_str), Some(expected));
+    }
+}
+
+#[test]
 fn codex_and_traex_metadata_include_runner_observability() {
     for adapter in [DEFAULT_ADAPTER, TRAEX_ADAPTER] {
         let request = ExternalCliRunRequest {

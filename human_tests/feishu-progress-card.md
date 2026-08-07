@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；最终正文只在卡片底部出现一次。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Codex 顶部状态还需展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
+本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；最终正文只在卡片底部出现一次。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
 
 ## 前置条件
 
@@ -142,12 +142,38 @@
 - mock CardKit 返回 `200860` 或 `300305` 后，先在同一 card entity 使用收缩预算重试；连续两次限制错误后改用精简卡片，精简卡也被限额拒绝才 rollover；精简阶段的普通错误不创建重复消息。
 - 非限制错误不进入裁剪重试；E2E 最终 CardKit JSON 不超过 24KB。
 
+### TC-FPC-09：Runner 行实时展示目标 Runner Session ID
+
+**操作步骤**：
+1. 执行增量 metadata 和卡片 renderer 单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib codex_like_progress_metadata_captures_target_runner_session_id_immediately -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_runner_footer_hides_machine_status_line -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_runner_footer_bounds_and_escapes_session_id -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_cli_progress_session_id_flows_from_live_event_to_feishu_card -- --nocapture
+   ```
+2. 执行最终 CardKit renderer E2E：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_progress_card_budget_and_codex_resources --jobs 1 --timeout 120
+   ```
+
+**预期结果**：
+- Codex `thread_id`、Trae `threadId` 和 Claude Code `session_id` 启动事件到达时立即写入运行中 metadata，无需等待 run 完成。
+- 已创建目标 session 时，卡片包含 `Runner：codex · Adapter：codex · Session ID：thread-resource-e2e`，并继续保留“外部会话”详情行。
+- 目标 Runner 尚未返回 session ID 时，Runner/Adapter 行不显示空值或 `N/A` Session ID。
+- 超长或包含 Markdown backtick 的异常 ID 会被限制长度并安全转义，不能破坏卡片其余布局。
+- E2E CardKit payload 在既有 24KB 预算内，原 Token、额度、耗时和过程信息不丢失。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-07：PASS — 新增 TC-FPC-09 后立即逐条执行。`codex_like_progress_metadata_captures_target_runner_session_id_immediately`、`external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics`、`external_runner_footer_hides_machine_status_line` 三项 focused 单测全部通过，覆盖 Codex `thread_id`、Trae `threadId`、Claude Code `session_id` 的运行中 metadata 合并，以及 Session ID 存在/缺失两种 Runner 行渲染。第一轮 Review/Fix/Test 发现异常 Session ID 可能过长或含 backtick，并补充 `external_runner_footer_bounds_and_escapes_session_id` 与 `external_cli_progress_session_id_flows_from_live_event_to_feishu_card`；首次链路测试因引用私有测试常量编译失败，改用公开协议值 `codex` 后两项均通过，完整验证 live event → metadata → runner summary → CardKit payload。`im_gateway_progress_card_budget_and_codex_resources` E2E 1 项通过，完整 CardKit JSON 在 24KB 预算内包含 `Runner：codex · Adapter：codex · Session ID：thread-resource-e2e`，并保留 Token、周额度、耗时和执行过程。当前未向真实飞书租户发送测试卡片；本轮真实场景证据来自当前源码生成的完整 CardKit payload。
+- 2026-08-07：PASS — 第二轮 Review/Fix/Test 基于第一轮最新 diff 重新执行 `git status --short`、本需求 `git diff --check` 和 staged 检查；确认 9 个本需求文件与当前分支既有 breakpoint 改动边界清晰、暂存区为空。随后 `progress_card` 69 项、既有 `codex_progress_metadata` 2 项、live-event 链路 1 项和 CardKit E2E 1 项全部通过；未发现新的功能、布局、预算、文档或测试缺口，无需第三轮。
 
 - 2026-07-23：PASS — 更新 TC-FPC-08 后立即逐条执行，并在 Review/Fix/Test 修复纯状态/思考退化边界及 CI 变更行覆盖率缺口后再次执行。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib progress_card -- --nocapture` 共 64 项全部通过，覆盖旧工具步骤摘要的完成/失败/执行中三态、最近 5 次工具可展开详情、旧思考/状态与对应工具按完整执行段裁剪、无工具时先删状态并保留最近 5 轮思考、30 工具窗口、UTF-8 字节/组件预算和限制错误降级；`im_gateway_progress_card_budget_and_codex_resources` E2E 1 项通过，最终 CardKit JSON 小于 24KB，至少保留一条无参数/输出详情的旧工具步骤及其对应思考，首个保留段之前不残留孤立思考或工具，最近 5 次工具输入/输出详情完整。专项 `coverage-diff.py` 验证变更生产 Rust 行覆盖率为 100%（71/71），通过 95% 门禁。当前未使用用户另一台设备的运行数据，也未向真实飞书租户发送测试卡片；本轮真实场景证据来自当前源码生成的完整 CardKit payload。
 

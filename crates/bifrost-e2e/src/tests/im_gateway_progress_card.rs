@@ -164,6 +164,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 "本次：12.3K Token",
                 "周余额：37%",
                 "耗时：2 分 05 秒",
+                "Runner：`codex` · Adapter：`codex` · Session ID：`thread-resource-e2e`",
                 "Codex 周额度：剩余 37%",
                 "LATEST_MARKER",
                 "THINKING_ROUND_35",
