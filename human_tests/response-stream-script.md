@@ -107,6 +107,15 @@
 
 预期：HTTP 正常 Transform 在上游 EOF 前输出，HTTPS intercepted 链路保留 Transform 与 onEnd 结果；所有配置错误明确返回 502；流开始后的回调错误编码为 SSE error；尾部 event 不丢失；inline request/response 修改全部生效。
 
+## TC-RSS-14：文档站脚本入口包含流式响应说明
+
+1. 执行 `bash e2e-tests/tests/test_site_docs_sync.sh`，让同步器从 `docs/scripts.md` 与 `docs-en/scripts.md` 生成站点源文件并完成真实 VitePress 构建。
+2. 使用根站参数执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`。
+3. 检查 `site/dist/reference/scripting.html` 与 `site/dist/en/reference/scripting.html`，确认两页都包含 `resStreamScript`、Transform、Mock、逐事件立即输出、回调超时与组合限制。
+4. 检查两页分别链接到 `/reference/rules/scripts` 与 `/en/reference/rules/scripts`，并确认对应规则参考页面仍包含完整流式契约。
+
+预期：用户直接打开中英文 scripting 入口即可理解如何处理或生成流式 SSE；站点构建产物包含完整内容与有效的规则参考链接，不依赖尚未部署的仓库源码或另一篇页面才能发现该能力。
+
 ## 本次执行记录（2026-08-07）
 
 - TC-RSS-01 至 TC-RSS-05：执行 `BIFROST_BIN=target/release/bifrost bash e2e-tests/tests/test_response_stream_script.sh`，真实独立数据目录、代理与 fixture 全部通过。
@@ -115,3 +124,4 @@
 - TC-RSS-11：在规则中配置 `statusCode://200 resHeaders://{sse_headers} resStreamScript://{mock_stream}`，真实请求 `sse-direct-mock.local/no-upstream`；无需上游即可返回 200、SSE headers 与三步 Mock event。页面 Run 边界继续由 Web build 验证。
 - TC-RSS-12：确认 `scripts/ci/proxy-coverage-shell-tests.txt` 已纳入 `test_response_stream_script.sh`；执行 `cargo build --bin bifrost` 后运行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_response_stream_script.sh`，Transform、上游 Mock、直接状态 Mock、接近 16 MiB event 与超限错误五条链路全部通过，输出 `response stream script E2E passed`。
 - TC-RSS-13：执行同一真实 E2E，覆盖 HTTP 与 HTTPS intercepted 的成功/冲突/非 SSE/编码/初始化失败，direct status 错误，尾部 event 与回调异常，以及 inline req/res 修改；所有断言通过。
+- TC-RSS-14：执行 `bash e2e-tests/tests/test_site_docs_sync.sh` 通过；随后执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`，逐项检查中英文 `scripting.html` 与 `rules/scripts.html`，确认 `resStreamScript`、Transform、Mock、逐事件语义、`timeout_ms` 和根路径规则参考链接全部存在，结果通过。

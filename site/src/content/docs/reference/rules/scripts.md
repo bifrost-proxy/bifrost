@@ -11,10 +11,32 @@ editLink: false
 
 - `reqScript://{script_name}`：请求阶段脚本（转发到上游前执行）
 - `resScript://{script_name}`：响应阶段脚本（收到上游响应后执行）
+- `resStreamScript://{script_name}`：SSE 响应流脚本（逐事件处理并立即下发）
 - `decode://{script_name}`：body decode 脚本（请求/响应落库前执行，用于解码/脱敏/格式化）
 - `bp://{parser_script}` + `decode://bp`：二进制协议 parser 脚本（请求/响应落库前解析，用于 Traffic 详情与搜索）
 
-> 说明：脚本名称对应 `~/.bifrost/scripts/<dir>/<script_name>.js`，协议前缀与目录的映射为：reqScript → `scripts/request/`，resScript → `scripts/response/`，decode → `scripts/decode/`，bp(parser) → `scripts/parser/`。例如 `reqScript://audit_req` 对应 `~/.bifrost/scripts/request/audit_req.js`。
+> 推荐：通过 CLI 或 AI 生成、保存、分享规则时，优先使用同一规则文件内的 inline block。这样规则和脚本不会分离，复制一份规则即可复现完整行为。Scripts 管理页更适合交互式试跑、人工编辑和复用本机脚本。
+
+命名脚本仍然受支持。脚本名称对应 `~/.bifrost/scripts/<dir>/<script_name>.js`，协议前缀与目录的映射为：reqScript → `scripts/request/`，resScript / resStreamScript → `scripts/response/`，decode → `scripts/decode/`，bp(parser) → `scripts/parser/`。例如 `reqScript://audit_req` 对应 `~/.bifrost/scripts/request/audit_req.js`。
+
+## 推荐的 inline block 写法
+
+`reqScript`、`resScript` 和 `resStreamScript` 都可以引用当前规则文件中的代码块：
+
+````text
+api.example.com reqScript://{add_trace} resStreamScript://{map_sse}
+
+```add_trace
+request.headers["X-Trace-Id"] = ctx.requestId;
+```
+
+```map_sse
+stream.mode = "transform";
+stream.onEvent = (event) => ({ event: event.event, data: event.data });
+```
+````
+
+编辑器会识别这些 block 变量，提供协议补全、变量跳转、hover 说明和语法检查。已定义的 inline 脚本不会被误报为“命名脚本文件不存在”。
 
 ---
 
@@ -70,6 +92,81 @@ pattern resScript://my-script
 // 给响应加调试头
 response.headers["X-Processed-By"] = "bifrost";
 ```
+
+---
+
+## resStreamScript：真 SSE 流式脚本
+
+`resStreamScript` 为每条 HTTP 响应流创建一个独立、持久的 QuickJS 上下文。闭包和顶层变量会在同一条流的多个事件之间保留；不同请求之间完全隔离。
+
+stream worker 的生命周期与该 HTTP 响应一致，不受普通脚本单次执行超时影响。沙箱的 `timeout_ms` 会在每一次 `stream.next()`、`stream.onEvent()`、`stream.onEnd()` 调用开始时重新计时，只限制单次 JavaScript 回调的 CPU 执行时间；等待上游下一条 SSE event 的 10 分钟或 20 分钟不会累计到这个超时中。
+
+它有两种模式，两种都不会先收集完整响应再回放。
+
+### Transform：逐事件变换上游 SSE
+
+```javascript
+stream.mode = "transform";
+let index = 0;
+
+stream.onEvent = (event) => {
+  index += 1;
+  return {
+    event: "mapped.delta",
+    data: JSON.stringify({ index, upstream: event.data }),
+  };
+};
+
+stream.onEnd = () => "data: [DONE]\n\n";
+```
+
+Bifrost 只缓存尚未组成完整 SSE event 的少量字节。一旦读到 `\n\n` 或 `\r\n\r\n`，立即调用一次 `stream.onEvent(event)`，并在回调返回后立即向客户端发送输出；不会等待上游 EOF 或 `[DONE]`。
+
+传入的 `event` 字段为：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string / null | 上游 SSE `id:` |
+| `event` | string / null | 上游 SSE `event:` |
+| `data` | string | 合并后的上游 SSE `data:` |
+| `retry` | number / null | 上游 SSE `retry:` |
+
+### Mock：脚本主动逐步生成 SSE
+
+```javascript
+stream.mode = "mock";
+let index = 0;
+
+stream.next = () => {
+  index += 1;
+  return {
+    output: { event: "mock.delta", data: String(index) },
+    delayMs: 100,
+    done: index === 3,
+  };
+};
+```
+
+Bifrost 每次只调用一次 `stream.next()`，把本次返回的输出发给客户端后才进入下一步。`delayMs` 是本次输出发出后的等待时间；它不会触发预生成或整段缓存。
+
+### 回调返回值
+
+`stream.next()`、`stream.onEvent(event)`、`stream.onEnd()` 可以返回：
+
+- 原始字符串，例如 `"data: hello\\n\\n"`。
+- SSE event 对象：`{ id?, event?, data, retry? }`。
+- 上述值的数组，数组元素按顺序立即下发。
+- step 对象：`{ output }` 或 `{ outputs: [...] }`，并可带 `delayMs`、`done`。
+- `null` / `undefined`，表示本次不输出。
+
+输出经过容量为 8 的有界队列传播下游背压。客户端断开后，接收端关闭，流任务停止读取上游并释放该请求的脚本 worker。网络 body frame 可以任意拆分，不会被脚本层截断；Bifrost 会拼到完整 SSE event 后再调用脚本。单个完整 event 的安全上限为 16 MiB，超限会返回明确的 SSE error 并终止该流，绝不会静默截断或丢弃部分数据。
+
+### 响应头与组合限制
+
+- Transform 模式要求上游响应为 `Content-Type: text/event-stream`。
+- Mock 模式可配合 `resHeaders://Content-Type=text/event-stream` 把普通上游响应替换为脚本生成的流。
+- 当前一条匹配结果只允许一个 `resStreamScript`，避免多个有状态流转换器的顺序语义不清。
+- `resScript` 用于完整 body 修改，会收集响应；实时 SSE 处理应使用 `resStreamScript`。
 
 ---
 

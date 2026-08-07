@@ -90,3 +90,10 @@ mock 模式不读取上游 body。host 调用 `stream.next()`，将本轮输出�
 - Chat text delta、tool call name/arguments delta、finish、usage、`[DONE]` 能转换成合法 Responses SSE。
 - Codex CLI 完成聊天、真实 shell/tool、代码写入和图片理解。
 - `test_response_stream_script.sh` 必须进入 `scripts/ci/proxy-coverage-shell-tests.txt`，确保真实 SSE 链路同时贡献 `bifrost-proxy` production 90% coverage gate，而不是只在普通 E2E job 中运行。
+
+## 文档站交付边界
+
+- `docs/scripts.md` 与 `docs-en/scripts.md` 是用户常用的脚本能力入口，构建后分别对应 `/reference/scripting` 与 `/en/reference/scripting`。两页必须能独立说明 `resStreamScript` 的 Transform、Mock、逐事件立即输出、回调超时和组合限制，不能只依赖另一个页面的一行链接。
+- `docs/rules/scripts.md` 与 `docs-en/rules/scripts.md` 继续作为完整规则契约，维护 inline block、event 字段、返回值、背压、响应头与 16 MiB 边界。入口页链接到规则参考，但不复制所有底层实现细节。
+- `site/scripts/sync-docs.mjs` 在构建前把上述源文档同步到 `site/src/content/docs/`；自动化 E2E 必须检查最终 `site/dist`，避免只检查源文件却漏掉路由映射或静态构建问题。
+- 主仓库 `Site` workflow 只做构建校验。正式发布必须使用 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`，再把 `site/dist/` 原样同步到 `bifrost-proxy/bifrost-proxy.github.io` 并等待两条 Pages workflow 成功。
