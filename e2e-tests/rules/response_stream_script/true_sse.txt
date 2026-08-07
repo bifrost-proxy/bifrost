@@ -2,6 +2,11 @@
 # 端口占位符由配套的 test_response_stream_script.sh 在运行时替换。
 sse-transform.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
 sse-mock.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{mock_stream}
+sse-direct-mock.local statusCode://200 resHeaders://{sse_headers} resStreamScript://{mock_stream}
+
+``` sse_headers
+Content-Type: text/event-stream
+```
 
 ``` transform_stream
 stream.mode = "transform";

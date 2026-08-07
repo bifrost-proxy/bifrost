@@ -134,6 +134,22 @@ assert times[2] - times[1] >= 0.18, times
 conn.close()
 
 
+# Direct-status mock streaming must not require or contact an upstream server.
+conn, stream = response("sse-direct-mock.local", "/no-upstream")
+direct_values = []
+for _ in range(3):
+    event_line = stream.readline()
+    data_line = stream.readline()
+    stream.readline()
+    direct_values.append((event_line, data_line))
+assert direct_values == [
+    (b"event: mock\n", b"data: 1\n"),
+    (b"event: mock\n", b"data: 2\n"),
+    (b"event: mock\n", b"data: 3\n"),
+], direct_values
+conn.close()
+
+
 # A near-limit event is preserved byte-for-byte despite arbitrary upstream frames.
 conn, stream = response("sse-transform.local", "/large", timeout=60)
 large_line = stream.readline(limit + 64)
