@@ -71,15 +71,17 @@ Bifrost 的公开入口站点与文档站涉及两个仓库。任何首页、文
 
 ## ⛔ 绝对禁令：单元 + E2E 代码覆盖率 90% 门禁
 
-**所有会改动业务代码的开发任务，最终必须通过 CI 中的 `bash scripts/ci/coverage-all.sh --json --gate` 覆盖率门禁，并通过 `scripts/ci/coverage-thresholds.toml` 中各 crate 的覆盖率下限（棘轮门禁，目标 90%）与工作区聚合下限校验，否则任务不能视为完成。默认情况下不要在本机运行 `make coverage` / `coverage-all.sh --gate`，因为本地全量覆盖率成本很高且 CI 已有明确阈值；只有用户明确要求、本地专项排查覆盖率失败、或需要提前确认某个高风险覆盖率缺口时，才在本机执行覆盖率命令。** 详细机制见 `design/coverage-90.md`。
+**所有会改动业务代码的开发任务，最终必须通过 CI 中的 `bash scripts/ci/coverage-all.sh --json --gate` 覆盖率门禁，并通过 `scripts/ci/coverage-thresholds.toml` 中各 crate 的覆盖率下限（棘轮门禁，目标 90%）与工作区聚合下限校验，否则任务不能视为完成。本地只禁止默认执行高成本的全 workspace `make coverage` / `coverage-all.sh --gate`；凡修改 `crates/*/src/**/*.rs` 生产代码，推送前必须执行低成本 `make coverage-changed`，自动仅插桩变更 crate，并按 CI 同源算法检查当前工作区 changed-lines 95% 门禁。** 详细机制见 `design/coverage-90.md`。
 
 强制规则：
 
 1. 任务规划阶段（TodoWrite）必须出现“coverage 90% CI 门禁”项；缺失视为规划不合格。
-2. 开发过程中默认依赖远端 CI 覆盖率门禁；若用户明确要求或正在排查 coverage 失败，可按需使用 `bash scripts/ci/coverage-all.sh -p <changed-crate> --json --gaps` 取得快速反馈，缺口报告会指出该 crate 距目标 90% 最远的文件。
-3. 收尾时默认不在本机运行 `make coverage`；必须在交付报告中写明覆盖率由远端 CI 门禁兜底，或写明本地覆盖率命令的用户要求/专项排查原因、命令和结果。
-4. 当某个 crate 因为外部依赖（硬件、桌面 API、平台特定能力等）天然无法达到 90%，必须在 `design/coverage-90.md` 「不适用清单」中写明原因并维护例外冻结值，禁止悄悄绕过门禁。
-5. CI 必须把 `bash scripts/ci/coverage-all.sh --json --gate` 作为必跑步骤，任一 crate 跌破其在 `coverage-thresholds.toml` 中的棘轮下限、或工作区聚合低于下限，直接阻断合入；需要合并 E2E 覆盖率时显式追加 `--with-e2e`。
+2. 修改生产 Rust 后先补对应测试，再运行 `make coverage-changed`。该命令默认以 `origin/main` 为基线，包含已提交、暂存、未暂存和未跟踪生产 Rust 文件；自动从 `cargo metadata` 找到变更 crate，只清理独立目录中的旧 `.profraw`，保留插桩编译缓存。没有生产 Rust 变更时必须快速退出，不得为了“完成 coverage”去跑全 workspace。
+3. 增量预检返回 changed-lines `FAIL` 时，必须在本地补测试并重跑，禁止先推到 CI 碰运气。局部迭代可用 `COVERAGE_CHANGED_ARGS="--test-filter <name>" make coverage-changed`；最终推送前必须再执行不带 test filter 的完整变更 crate 预检。
+4. 增量预检报告 `unmeasured_files` / `INCOMPLETE` 时，禁止把“0 个可插桩行”误报为通过，也不得无说明使用 `--allow-unmeasured`。应优先用 `--include-package <test-host-crate>` 纳入跨 crate 测试；只有平台 cfg 或仅真实 E2E 可达且无法低成本插桩的路径，才可带具体文件、原因和对应专项测试证据继续，并在交付报告中标注 CI coverage 风险。
+5. 默认仍不在本机运行全 workspace `make coverage`；它只用于用户明确要求、专项排查绝对 crate/workspace 门禁，或本地复现 CI coverage 失败。`make coverage-changed` 不属于此禁令，不能以“no-local-coverage”为由跳过。
+6. 当某个 crate 因为外部依赖（硬件、桌面 API、平台特定能力等）天然无法达到 90%，必须在 `design/coverage-90.md` 「不适用清单」中写明原因并维护例外冻结值，禁止悄悄绕过门禁。
+7. CI 必须把 `bash scripts/ci/coverage-all.sh --json --gate` 作为必跑步骤，任一 crate 跌破其在 `coverage-thresholds.toml` 中的棘轮下限、或工作区聚合低于下限，直接阻断合入；需要合并 E2E 覆盖率时显式追加 `--with-e2e`。本地 changed-lines 通过是提前反馈，不替代远端 unit + proxy E2E union、per-crate 和 workspace 门禁。
 
 **违反此规则的任务视为未完成，禁止标记为 completed。**
 

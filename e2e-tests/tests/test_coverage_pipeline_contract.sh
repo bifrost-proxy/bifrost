@@ -20,6 +20,7 @@ ci_workflow=".github/workflows/ci.yml"
 layered_workflow=".github/workflows/coverage-e2e.yml"
 ui_full_workflow=".github/workflows/ui-e2e-full.yml"
 coverage_diff="scripts/ci/coverage-diff.py"
+coverage_changed="scripts/ci/coverage-changed.py"
 coverage_production="scripts/ci/coverage-production.py"
 proxy_coverage_shell_manifest="scripts/ci/proxy-coverage-shell-tests.txt"
 shell_quality="scripts/ci/check-shell-quality.sh"
@@ -38,7 +39,8 @@ bash -n "$ui_critical"
 bash -n "$desktop_traffic_detail"
 bash -n "$im_online_notification"
 bash scripts/ci/check-shell-syntax.sh
-python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
 
 grep -Fq 'cargo llvm-cov show-env --sh' "$coverage_all"
 grep -Fq 'unit-integration.json' "$coverage_all"
@@ -60,6 +62,12 @@ grep -Fq 'REFUSING: coverage E2E data directory is under production data' "$cove
 grep -Fq 'BIFROST_E2E_PROTECTED_PORTS' "$coverage_all"
 grep -Fq 'One or more instrumented E2E suites failed' "$coverage_all"
 grep -Fq 'Changed production Rust line coverage' "$coverage_diff"
+grep -Fq 'including staged, unstaged, and untracked files' "$coverage_changed"
+grep -Fq 'CARGO_LLVM_COV_TARGET_DIR' "$coverage_changed"
+grep -Fq 'clear_profiles(target_dir)' "$coverage_changed"
+grep -Fq -- '--worktree' "$coverage_changed"
+grep -Fq 'coverage-changed' Makefile
+grep -Fq 'Changed production Rust coverage (95%)' scripts/ci/local-ci.sh
 grep -Fq 'all exact #[cfg(test)] items excluded' "$coverage_production"
 grep -Fq 'changed_lines_min = 95.0' scripts/ci/coverage-thresholds.toml
 grep -Fq 'coverage-diff.py target/coverage/lcov.info' "$ci_workflow"
@@ -274,6 +282,101 @@ fi
 if grep -Fq 'Some E2E suites had failures, but coverage data was still collected' "$coverage_e2e"; then
   echo "coverage-e2e still masks E2E failures" >&2
   exit 1
+fi
+
+run_changed_coverage_fixture() (
+  fixture_dir="$(mktemp -d)"
+  trap 'rm -rf "$fixture_dir"' EXIT
+  mkdir -p "$fixture_dir/crates/demo/src" "$fixture_dir/scripts/ci"
+  cp "$coverage_changed" "$coverage_diff" "$fixture_dir/scripts/ci/"
+
+  cat >"$fixture_dir/Cargo.toml" <<'EOF'
+[workspace]
+members = ["crates/demo"]
+resolver = "2"
+EOF
+  cat >"$fixture_dir/crates/demo/Cargo.toml" <<'EOF'
+[package]
+name = "coverage-demo"
+version = "0.1.0"
+edition = "2021"
+EOF
+  cat >"$fixture_dir/crates/demo/src/lib.rs" <<'EOF'
+pub fn classify(value: i32) -> &'static str {
+    if value > 0 { "positive" } else { "non-positive" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_values() {
+        assert_eq!(classify(1), "positive");
+        assert_eq!(classify(0), "non-positive");
+    }
+}
+EOF
+  cat >"$fixture_dir/scripts/ci/coverage-thresholds.toml" <<'EOF'
+[settings]
+changed_lines_min = 95.0
+EOF
+
+  git -C "$fixture_dir" init -b main >/dev/null
+  git -C "$fixture_dir" config user.email coverage@example.com
+  git -C "$fixture_dir" config user.name "Coverage Contract"
+  git -C "$fixture_dir" add .
+  git -C "$fixture_dir" commit -m base >/dev/null
+
+  cat >"$fixture_dir/crates/demo/src/lib.rs" <<'EOF'
+pub fn classify(value: i32) -> &'static str {
+    match value {
+        1.. => "positive",
+        0 => "zero",
+        _ => "negative",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_values() {
+        assert_eq!(classify(1), "positive");
+        assert_eq!(classify(0), "zero");
+        assert_eq!(classify(-1), "negative");
+    }
+}
+EOF
+  (
+    cd "$fixture_dir"
+    python3 scripts/ci/coverage-changed.py --base-ref main --jobs 2
+  ) | tee "$fixture_dir/pass.log"
+  grep -Fq 'CHANGED-LINES GATE: PASS' "$fixture_dir/pass.log"
+
+  cat >>"$fixture_dir/crates/demo/src/lib.rs" <<'EOF'
+
+pub fn uncovered_branch(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+EOF
+  if (
+    cd "$fixture_dir"
+    python3 scripts/ci/coverage-changed.py --base-ref main --jobs 2
+  ) >"$fixture_dir/fail.log" 2>&1; then
+    echo "changed coverage fixture must fail when new production lines are uncovered" >&2
+    exit 1
+  fi
+  grep -Fq 'CHANGED-LINES GATE: FAIL' "$fixture_dir/fail.log"
+  grep -Fq 'crates/demo/src/lib.rs' "$fixture_dir/fail.log"
+  grep -Eq 'Reset [1-9][0-9]* stale coverage profile' "$fixture_dir/fail.log"
+)
+
+if command -v cargo-llvm-cov >/dev/null 2>&1; then
+  run_changed_coverage_fixture
+else
+  echo "Coverage changed-lines runtime fixture: SKIP (cargo-llvm-cov unavailable)"
 fi
 
 echo "Coverage pipeline contract: PASS"

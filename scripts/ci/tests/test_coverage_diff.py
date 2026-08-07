@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,15 @@ SPEC.loader.exec_module(coverage_diff)
 
 
 class CoverageDiffTests(unittest.TestCase):
+    def git(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
     def test_parse_diff_tracks_only_added_ranges(self) -> None:
         diff = """diff --git a/crates/a/src/lib.rs b/crates/a/src/lib.rs
 +++ b/crates/a/src/lib.rs
@@ -57,6 +67,69 @@ class CoverageDiffTests(unittest.TestCase):
         )
         self.assertEqual(result["total"], 0)
         self.assertEqual(result["percent"], 100.0)
+
+    def test_unmeasured_changed_files_prevent_silent_zero_over_zero(self) -> None:
+        self.assertEqual(
+            coverage_diff.unmeasured_changed_files(
+                {
+                    "crates/a/src/platform.rs": {4, 5},
+                    "crates/a/tests/integration.rs": {1},
+                },
+                {},
+            ),
+            ["crates/a/src/platform.rs"],
+        )
+
+    def test_worktree_diff_includes_tracked_and_untracked_rust_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tracked = root / "crates/a/src/lib.rs"
+            untracked = root / "crates/a/src/new.rs"
+            tracked.parent.mkdir(parents=True)
+            tracked.write_text("pub fn existing() {}\n", encoding="utf-8")
+            self.git(root, "init", "-b", "main")
+            self.git(root, "config", "user.email", "coverage@example.com")
+            self.git(root, "config", "user.name", "Coverage Test")
+            self.git(root, "add", ".")
+            self.git(root, "commit", "-m", "base")
+            tracked.write_text(
+                "pub fn existing() {\n    println!(\"changed\");\n}\n",
+                encoding="utf-8",
+            )
+            untracked.write_text("pub fn added() {}\n", encoding="utf-8")
+
+            original_root = coverage_diff.REPO_ROOT
+            coverage_diff.REPO_ROOT = root
+            try:
+                diff = coverage_diff.git_diff("main", worktree=True)
+            finally:
+                coverage_diff.REPO_ROOT = original_root
+
+        changed = coverage_diff.parse_diff(diff)
+        self.assertIn("crates/a/src/lib.rs", changed)
+        self.assertIn("crates/a/src/new.rs", changed)
+
+    def test_committed_diff_does_not_include_uncommitted_worktree_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "crates/a/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("pub fn existing() {}\n", encoding="utf-8")
+            self.git(root, "init", "-b", "main")
+            self.git(root, "config", "user.email", "coverage@example.com")
+            self.git(root, "config", "user.name", "Coverage Test")
+            self.git(root, "add", ".")
+            self.git(root, "commit", "-m", "base")
+            source.write_text("pub fn changed() {}\n", encoding="utf-8")
+
+            original_root = coverage_diff.REPO_ROOT
+            coverage_diff.REPO_ROOT = root
+            try:
+                diff = coverage_diff.git_diff("main")
+            finally:
+                coverage_diff.REPO_ROOT = original_root
+
+        self.assertEqual(diff, "")
 
     def test_inline_cfg_test_module_lines_are_excluded(self) -> None:
         source = """pub fn production() {\n    println!(\"live\");\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn production_works() {\n        super::production();\n    }\n}\n"""

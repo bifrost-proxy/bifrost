@@ -1,6 +1,6 @@
 .PHONY: all build build-release clean test lint fmt install-deps dev help setup build-cli \
         coverage coverage-unit coverage-e2e coverage-html coverage-json coverage-crate \
-	coverage-gate coverage-diff
+	coverage-gate coverage-diff coverage-changed
 
 # Development servers must never adopt the installed service's ~/.bifrost
 # runtime/PID files or its production-like 9900 listener. Override these only
@@ -90,6 +90,12 @@ coverage-diff:
 	@test -n "$(BASE_REF)" || { echo "Usage: make coverage-diff BASE_REF=<git-ref>" >&2; exit 2; }
 	python3 scripts/ci/coverage-diff.py target/coverage/lcov.info --base-ref "$(BASE_REF)" --threshold 95
 
+# Fast local preflight: auto-detect crates with changed production Rust files,
+# reuse instrumented build artifacts, and apply the CI changed-lines threshold
+# to staged, unstaged, committed, and untracked worktree changes.
+coverage-changed:
+	python3 scripts/ci/coverage-changed.py $(COVERAGE_CHANGED_ARGS)
+
 # HTML report (output: target/coverage/html/index.html). Skips the gate
 # so a low-coverage report is still browsable.
 coverage-html:
@@ -164,6 +170,7 @@ help:
 	@echo "  coverage-e2e   E2E coverage (instrumented bifrost + bifrost-e2e)"
 	@echo "  coverage-html  Generate HTML coverage report"
 	@echo "  coverage-json  Generate JSON coverage summary"
+	@echo "  coverage-changed Fast 95% coverage preflight for changed production Rust"
 	@echo "  coverage-crate Coverage for a single crate (CRATE=<name>)"
 	@echo "  lint           Run linter on all code"
 	@echo "  fmt            Format all code"
