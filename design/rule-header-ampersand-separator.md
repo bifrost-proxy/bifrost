@@ -23,7 +23,7 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 ### 必须不破坏
 
 - 单 Header、逗号分隔 Header、JSON 对象和多行 Values 继续可用。
-- JSON 或多行 Value 内 Header 值中的字面 `&` 不被拆分。
+- JSON、多行 Value 或单行引用 Value 内 Header 值中的字面 `&` 不被拆分。
 - `reqCookies` / `resCookies` 不改变分隔语义。
 - malformed JSON Header 对象不能回退成部分生效的非法 Header。
 
@@ -40,10 +40,10 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 
 - 先剥离可选的最外层小括号。
 - 先识别并解析 JSON 对象，JSON 字符串值原样保留。
-- 多行内容仅按换行拆分，每行解析第一个 `:` 或 `=`；因此
-  `X-Query: a=1&b=2` 保持一个 Header。
-- 单行 `reqHeaders` / `resHeaders` 内容按 `&` 或逗号拆分，每段解析第一个
-  `:` 或 `=`。
+- 多行及引用内容仅按换行拆分，每行解析最先出现的 `:` 或 `=`；因此单行引用
+  Value `X-Query: a=1&b=2` 也保持一个 Header。
+- 只有 `ValueSource::Inline`、`InlineParams` 和 `ParenContent` 单行内容按 `&` 或逗号
+  拆分；文件、远程 URL 和 `{name}` 引用内容保留字面 `&`。
 - Cookie、CORS、URL 参数继续走各自现有 parser，不共享 Header 的 `&` 分隔规则。
 
 ## 测试方案
@@ -53,6 +53,45 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - E2E runner：`req_headers_ampersand_separated` 真实启动代理和 mock upstream。
 - 规则夹具：`e2e-tests/rules/request_modify/headers.txt` 的 R-05。
 - human test：`human_tests/rule-merge-headers.md` 的 TC-RMH-08。
+
+## 依赖与影响面
+
+- 依赖 `bifrost-core::ValueSource` 区分规则原始值来源；不新增第三方 crate。
+- 共享 parser 的调用面包括 Admin 请求规则、Replay 请求/响应规则、CLI resolver 与
+  `bifrost-e2e` adapter，必须同步传递 `ResolvedRule.rule.value_source`。
+- Cookie、CORS、URL 参数 parser 不在变更范围内。
+
+## Review/Fix/Test 计划
+
+### 第 1 轮
+
+- 对照用户配置与全部 MR comments，检查 parser 是否只对真实内联来源拆分 `&`。
+- 检查 `git status --short`、`git diff` 和新增文件，复跑 core、Admin、CLI 相关测试，
+  以及请求/响应 Header E2E。
+- 修复文档、human_tests、规则夹具中与真实执行不一致的内容。
+
+### 第 2 轮
+
+- 基于第 1 轮最新 diff 复查引用 Value、JSON、多行、Referer URL、Cookie 不变性与清理边界。
+- 复跑受影响测试、human_tests 与 `make coverage-changed`，确认没有遗漏的文档镜像和
+  CI shell 收录问题。
+
+## rust-project-validate 计划
+
+完成 E2E 与 human_tests 后依次执行 workspace/desktop fmt、all-target/all-feature Clippy、
+相关 crate 测试、all-target/all-feature build，以及清除桌面继承环境变量后的
+`cargo test --workspace --all-features`。
+
+## 文档更新清单
+
+- `README.md`
+- `docs/rules/request-modification.md`
+- `docs/rules/response-modification.md`
+- `site/src/content/docs/reference/rules/request-modification.md`
+- `site/src/content/docs/reference/rules/response-modification.md`
+- `human_tests/rule-merge-headers.md`
+- `human_tests/readme.md`
+- `e2e-tests/rules/COVERAGE.md`
 
 ## Coverage 90% 门禁
 

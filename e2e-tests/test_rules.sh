@@ -838,12 +838,26 @@ test_req_headers_add() {
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
-    if command -v jq &> /dev/null && [[ -n "$HTTP_BODY" ]]; then
-        local header_key_lower=$(echo "$header_name" | tr '[:upper:]' '[:lower:]')
-        local actual_value=$(echo "$HTTP_BODY" | jq -r ".request.headers[\"$header_name\"] // .request.headers[\"$header_key_lower\"]" 2>/dev/null)
-
-        assert_equals "$header_value" "$actual_value" "后端应收到添加的请求头 $header_name=$header_value"
+    if [[ -z "$HTTP_BODY" ]]; then
+        _log_fail "后端未返回请求详情" "非空 JSON 响应体" "空响应体"
+        return
     fi
+
+    local actual_value
+    actual_value=$(HEADER_NAME="$header_name" python3 -c '
+import json, os, sys
+payload = json.load(sys.stdin)
+headers = payload.get("request", {}).get("headers", {})
+name = os.environ["HEADER_NAME"]
+value = headers.get(name)
+if value is None:
+    value = headers.get(name.lower())
+if value is None:
+    sys.exit(2)
+print(value, end="")
+' <<< "$HTTP_BODY" 2>/dev/null) || actual_value="__BIFROST_HEADER_MISSING__"
+
+    assert_equals "$header_value" "$actual_value" "后端应收到添加的请求头 $header_name=$header_value"
 }
 
 test_req_headers_delete() {

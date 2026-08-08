@@ -298,7 +298,9 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                     result.host_protocol = Some(Protocol::Host);
                 }
                 Protocol::ReqHeaders => {
-                    if let Some(headers) = parse_rule_header_pairs(value) {
+                    if let Some(headers) =
+                        parse_rule_header_pairs(value, &resolved_rule.rule.value_source)
+                    {
                         for (k, v) in headers {
                             result.req_headers.push((k, v));
                         }
@@ -306,7 +308,9 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                 }
                 Protocol::ResHeaders => {
                     tracing::debug!("Parsing ResHeaders value: {}", value);
-                    if let Some(headers) = parse_rule_header_pairs(value) {
+                    if let Some(headers) =
+                        parse_rule_header_pairs(value, &resolved_rule.rule.value_source)
+                    {
                         for (k, v) in &headers {
                             tracing::debug!("Adding res header: {} = {}", k, v);
                         }

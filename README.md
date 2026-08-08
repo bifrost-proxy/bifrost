@@ -186,10 +186,12 @@ bifrost rule update Default --content "internal.example.test dns://10.0.0.53"
 
 ```txt
 example.com host://127.0.0.1:3000
-api.example.com reqHeaders://x-debug=1
+api.example.com reqHeaders://x-debug=1&x-env=ppe&x-use-ppe=1
 chatgpt.com http3://
 internal-api.example.test https://10.37.102.138:8080 upstreamUnsafeSsl://true
 ```
+
+`reqHeaders://` 与 `resHeaders://` 的单行内联值可用 `&` 分隔多个 Header；若 Header 值本身包含字面 `&`，请使用 JSON 对象或 Values 块的每行一个 Header 写法。
 
 `Default` 是 Bifrost 自动创建的全局默认规则，始终启用且列表置顶。它不能删除、停用、重命名或同步到远端，但内容可以编辑；适合放统一 DNS、通用 header、TLS 兜底等所有端口都需要共享的配置。详见 [`docs/rule.md`](docs/rule.md#10-全局默认规则-default)。
 

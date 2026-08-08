@@ -397,7 +397,9 @@ impl ReplayExecutor {
                     body = Some(content);
                 }
                 Protocol::ResHeaders => {
-                    if let Some(parsed) = parse_headers(&rule.resolved_value) {
+                    if let Some(parsed) =
+                        parse_rule_header_pairs(&rule.resolved_value, &rule.rule.value_source)
+                    {
                         headers.extend(parsed);
                     }
                 }
@@ -1282,10 +1284,6 @@ fn extract_inline_content(value: &str) -> String {
     }
 }
 
-fn parse_headers(value: &str) -> Option<Vec<(String, String)>> {
-    parse_rule_header_pairs(value)
-}
-
 fn get_tls_client_config(unsafe_ssl: bool) -> rustls::ClientConfig {
     use rustls::{ClientConfig, RootCertStore};
 
@@ -1358,7 +1356,9 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bifrost_core::{matcher::WildcardMatcher, Protocol, ResolvedRule, ResolvedRules, Rule};
+    use bifrost_core::{
+        matcher::WildcardMatcher, rule::ValueSource, Protocol, ResolvedRule, ResolvedRules, Rule,
+    };
     use serde_json::json;
     use std::sync::Arc;
 
@@ -1397,7 +1397,7 @@ mod tests {
     #[test]
     fn parse_headers_supports_parens_and_colon_and_equals() {
         let value = "(X-One: a, X-Two: b)";
-        let headers = parse_headers(value).unwrap();
+        let headers = parse_rule_header_pairs(value, &ValueSource::parse(value)).unwrap();
         assert_eq!(
             headers,
             vec![
@@ -1407,13 +1407,14 @@ mod tests {
         );
 
         let value2 = "X-One=a,X-Two=b";
-        let headers2 = parse_headers(value2).unwrap();
+        let headers2 = parse_rule_header_pairs(value2, &ValueSource::parse(value2)).unwrap();
         assert_eq!(headers2, headers);
     }
 
     #[test]
     fn parse_headers_supports_ampersand_separated_values() {
-        let headers = parse_headers("(X-One=a&X-Two=b)").expect("headers");
+        let value = "(X-One=a&X-Two=b)";
+        let headers = parse_rule_header_pairs(value, &ValueSource::parse(value)).expect("headers");
         assert_eq!(
             headers,
             vec![
@@ -1425,10 +1426,11 @@ mod tests {
 
     #[test]
     fn parse_headers_ignores_empty_and_invalid_parts() {
-        assert!(parse_headers("   ").is_none());
-        assert!(parse_headers(", , ").is_none());
+        assert!(parse_rule_header_pairs("   ", &ValueSource::parse("   ")).is_none());
+        assert!(parse_rule_header_pairs(", , ", &ValueSource::parse(", , ")).is_none());
 
-        let headers = parse_headers("X-Ok=1,missing,Y-Ok=2").unwrap();
+        let value = "X-Ok=1,missing,Y-Ok=2";
+        let headers = parse_rule_header_pairs(value, &ValueSource::parse(value)).unwrap();
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0], ("X-Ok".to_string(), "1".to_string()));
         assert_eq!(headers[1], ("Y-Ok".to_string(), "2".to_string()));
@@ -1598,11 +1600,13 @@ mod tests {
 #[cfg(test)]
 mod replay_executor_helper_tests {
     use super::*;
+    use bifrost_core::rule::ValueSource;
     use rustls::client::danger::ServerCertVerifier;
 
     #[test]
     fn parse_headers_supports_newline_delimited_format() {
-        let headers = parse_headers("X-One: a\nX-Two: b").expect("headers");
+        let value = "X-One: a\nX-Two: b";
+        let headers = parse_rule_header_pairs(value, &ValueSource::parse(value)).expect("headers");
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0], ("X-One".to_string(), "a".to_string()));
         assert_eq!(headers[1], ("X-Two".to_string(), "b".to_string()));

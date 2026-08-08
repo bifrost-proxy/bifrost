@@ -499,7 +499,9 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 result.redirect_status = status;
             }
             Protocol::ReqHeaders => {
-                if let Some(headers) = parse_rule_header_pairs(value) {
+                if let Some(headers) =
+                    parse_rule_header_pairs(value, &resolved_rule.rule.value_source)
+                {
                     for (k, v) in headers {
                         let key_lower = k.to_lowercase();
                         if !result
@@ -513,7 +515,9 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::ResHeaders => {
-                if let Some(headers) = parse_rule_header_pairs(value) {
+                if let Some(headers) =
+                    parse_rule_header_pairs(value, &resolved_rule.rule.value_source)
+                {
                     for (k, v) in headers {
                         let key_lower = k.to_lowercase();
                         if !result

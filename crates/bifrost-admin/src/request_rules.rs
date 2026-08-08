@@ -130,9 +130,10 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                 applied.auth = Some(rule.resolved_value.clone());
             }
             Protocol::ReqHeaders => {
-                applied
-                    .req_headers
-                    .extend(parse_rule_header_pairs(&rule.resolved_value).unwrap_or_default());
+                applied.req_headers.extend(
+                    parse_rule_header_pairs(&rule.resolved_value, &rule.rule.value_source)
+                        .unwrap_or_default(),
+                );
             }
             Protocol::ReqCookies => {
                 applied
