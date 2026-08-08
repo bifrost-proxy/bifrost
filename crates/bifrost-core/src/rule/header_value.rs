@@ -71,9 +71,9 @@ fn parse_key_value_pairs(value: &str, split_ampersands: bool) -> Option<Vec<Pars
     let parts: Box<dyn Iterator<Item = &str>> = if content.contains('\n') {
         Box::new(content.lines())
     } else if split_ampersands {
-        Box::new(content.split([',', '&']))
+        Box::new(split_inline_entries(content, true).into_iter())
     } else {
-        Box::new(content.split(','))
+        Box::new(split_inline_entries(content, false).into_iter())
     };
 
     let headers = parts
@@ -87,6 +87,41 @@ fn parse_key_value_pairs(value: &str, split_ampersands: bool) -> Option<Vec<Pars
     } else {
         Some(headers)
     }
+}
+
+fn split_inline_entries(value: &str, split_ampersands: bool) -> Vec<&str> {
+    let mut entries = Vec::new();
+    let mut entry_start = 0;
+    let mut template_brace_depth = 0usize;
+    let mut chars = value.char_indices().peekable();
+
+    while let Some((index, character)) = chars.next() {
+        if template_brace_depth == 0
+            && character == '$'
+            && chars.peek().is_some_and(|(_, next)| *next == '{')
+        {
+            template_brace_depth = 1;
+            chars.next();
+            continue;
+        }
+
+        if template_brace_depth > 0 {
+            match character {
+                '{' => template_brace_depth += 1,
+                '}' => template_brace_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+
+        if character == ',' || (split_ampersands && character == '&') {
+            entries.push(&value[entry_start..index]);
+            entry_start = index + character.len_utf8();
+        }
+    }
+
+    entries.push(&value[entry_start..]);
+    entries
 }
 
 fn strip_wrapping_parens(value: &str) -> &str {
@@ -244,6 +279,48 @@ mod tests {
         assert_eq!(
             parse("Referer=https://example.test/"),
             Some(vec![("Referer".into(), "https://example.test/".into())])
+        );
+    }
+
+    #[test]
+    fn rule_headers_keep_delimiters_inside_template_expressions() {
+        assert_eq!(
+            parse("X-Host=${hostname.replace(example,test)}&X-Mode=active"),
+            Some(vec![
+                ("X-Host".into(), "${hostname.replace(example,test)}".into(),),
+                ("X-Mode".into(), "active".into()),
+            ])
+        );
+        assert_eq!(
+            parse("X-Host=${hostname.replace(example&,test)}&X-Mode=active"),
+            Some(vec![
+                ("X-Host".into(), "${hostname.replace(example&,test)}".into(),),
+                ("X-Mode".into(), "active".into()),
+            ])
+        );
+        assert_eq!(
+            parse("X-Host=$${hostname.replace(example,test)}&X-Mode=active"),
+            Some(vec![
+                ("X-Host".into(), "$${hostname.replace(example,test)}".into(),),
+                ("X-Mode".into(), "active".into()),
+            ])
+        );
+        assert_eq!(
+            parse("X-Host=${{hostname.replace(example,test)}}&X-Mode=active"),
+            Some(vec![
+                (
+                    "X-Host".into(),
+                    "${{hostname.replace(example,test)}}".into(),
+                ),
+                ("X-Mode".into(), "active".into()),
+            ])
+        );
+        assert_eq!(
+            parse("X-Host=${hostname.replace(example,test)&X-Mode=active"),
+            Some(vec![(
+                "X-Host".into(),
+                "${hostname.replace(example,test)&X-Mode=active".into(),
+            )])
         );
     }
 

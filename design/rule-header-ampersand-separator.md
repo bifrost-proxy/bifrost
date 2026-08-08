@@ -27,6 +27,8 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - 单 Header、逗号分隔 Header、JSON 对象和多行 Values 继续可用。
 - JSON、多行 Value 或单行引用 Value 内 Header 值中的字面 `&` 不被拆分。
 - `${url}` / `${reqHeaders.*}` 等模板展开结果中的 `&` 保持为 Header 值数据，不能注入额外 Header。
+- `${hostname.replace(example,test)}` 等模板表达式内部的 `,` / `&` 不作为字段分隔符。
+- JSON map 的无引号标量模板既能在 resolver 展开，也能通过保存规则前的语法校验。
 - `resCookies` 的 JSON 属性对象（`path`、`domain`、`maxAge`、`secure`、`httpOnly`、
   `sameSite`）继续按结构化 Cookie 解析，不被降级为简单键值。
 - Cookie/Trailer 的 JSON、多行、Values 引用、文件和远程内容中的字面 `&` 不被拆分。
@@ -49,7 +51,8 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - 多行及引用内容仅按换行拆分，每行解析最先出现的 `:` 或 `=`；因此单行引用
   Value `X-Query: a=1&b=2` 也保持一个 Header。
 - 只有 `ValueSource::Inline`、`InlineParams` 和 `ParenContent` 单行内容按 `&` 或逗号
-  拆分；文件、远程 URL 和 `{name}` 引用内容保留字面 `&`。
+  拆分；分隔扫描跳过 `${...}` 表达式内部内容。文件、远程 URL 和 `{name}` 引用内容
+  保留字面 `&`。
 - 规则 parser 的单行 Values 展开会显式跳过 Header、Cookie 与 Trailer 协议，确保
   `{name}` 以 `ValueSource::ValueRef` 进入 resolver；否则来源信息会在共享 parser 前丢失。
 - 对 `reqHeaders` / `resHeaders`，`ResolvedRule` 先按规则作者写下的源文本解析 Header
@@ -59,6 +62,8 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
   运行时消费者统一使用；CORS、URL 参数仍走各自 parser。
 - `resCookies` 若检测到 JSON 对象值为属性对象，则不生成简单 pairs，而是保留给专用
   response-cookie parser，以继续输出 `Path`、`Max-Age`、`HttpOnly` 等属性。
+- 语法校验只把 JSON 字符串外、完整闭合的 `${...}` 标量临时替换为合法 JSON 字符串；
+  malformed JSON 与未闭合模板仍返回 E021。
 
 ## 测试方案
 

@@ -747,7 +747,8 @@ fn validate_header_json_value(
         return None;
     }
 
-    let parsed = match serde_json::from_str::<serde_json::Value>(value) {
+    let json_for_validation = mask_unquoted_json_templates(value);
+    let parsed = match serde_json::from_str::<serde_json::Value>(&json_for_validation) {
         Ok(parsed) => parsed,
         Err(error) => {
             return Some(
@@ -826,6 +827,63 @@ fn validate_header_json_value(
     }
 
     None
+}
+
+fn mask_unquoted_json_templates(value: &str) -> String {
+    const TEMPLATE_PLACEHOLDER: &str = "\"__BIFROST_TEMPLATE__\"";
+
+    let mut output = String::with_capacity(value.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut chars = value.char_indices().peekable();
+
+    while let Some((index, character)) = chars.next() {
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+            output.push(character);
+            continue;
+        }
+
+        if character == '$' && chars.peek().is_some_and(|(_, next)| *next == '{') {
+            chars.next();
+            let mut brace_depth = 1usize;
+            for (_, template_character) in chars.by_ref() {
+                match template_character {
+                    '{' => brace_depth += 1,
+                    '}' => {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if brace_depth == 0 {
+                output.push_str(TEMPLATE_PLACEHOLDER);
+            } else {
+                output.push_str(&value[index..]);
+                break;
+            }
+            continue;
+        }
+
+        output.push(character);
+    }
+
+    output
 }
 
 fn looks_like_json_object_value(value: &str) -> bool {
@@ -4792,6 +4850,18 @@ x-custom: value
             "parenthesized header JSON object should not warn"
         );
 
+        let scalar_templates = [
+            r#"example.com reqHeaders://{"X-Now":${now}}"#,
+            r#"example.com resHeaders://({"X-Method":${method},"X-Flag":true})"#,
+            r#"example.com trailers://{"X-Encoded":${{method}},"X-Quoted":"${now}"}"#,
+        ];
+        for input in scalar_templates {
+            assert!(
+                validate_rules(input).is_empty(),
+                "scalar JSON templates should validate: {input}"
+            );
+        }
+
         let value_ref = "example.com reqHeaders://{header_block}";
         assert!(
             validate_rules(value_ref).is_empty(),
@@ -4803,6 +4873,8 @@ x-custom: value
     fn test_invalid_header_json_object_reports_e021() {
         for input in [
             r#"example.com reqHeaders://{"x-tt-env":}"#,
+            r#"example.com reqHeaders://{"x-tt-env":${now}"#,
+            r#"example.com reqHeaders://{"x-tt-env":$${now}}"#,
             r#"example.com resHeaders://{"X-Nested":{"bad":true}}"#,
             r#"example.com trailers://{}"#,
         ] {

@@ -248,8 +248,10 @@ cargo run -p bifrost-e2e -- --test req_headers_json_scalar_template
 - `${url}` 展开出的 `?a=1&b=2` 完整保留在 `X-Full-Url` 中；客户端
   `X-Source: safe&X-Injected=yes` 经 `${reqHeaders.x-source}` 复制后仍只有 `X-Copied`
   一个规则生成的 Header，不会额外生成 `X-Injected`。
+- `${hostname.replace(test,example)}` 与 `${hostname.replace(no&match,replaced)}` 表达式内部的
+  `,` / `&` 不作为 Header 分隔符，真实 upstream 分别收到 `example.local` / `test.local`。
 - JSON map 中未加引号的标量模板会在解析字段前展开，真实 upstream 收到
-  `x-now: 42`；JSON 字符串模板输出会被安全转义，不能注入额外 Header 字段。
+  `x-now: 42`，且同一写法通过规则语法校验；JSON 字符串模板输出会被安全转义，不能注入额外 Header 字段。
 
 ### TC-RMH-09: WebUI 有效性分析识别 `&` 分隔 Header
 
@@ -320,7 +322,9 @@ cargo run -p bifrost-e2e -- --test trailers_ampersand_separated
   `X-Full-Url=http://test.local/api?a=1&b=2` 和
   `X-Copied=safe&X-Injected=yes`，且不存在额外 `X-Injected` Header。请求 Header
   夹具复跑结果 `20/20 passed`，Values 夹具复跑结果 `69/69 passed`；JSON 标量模板
-  真实 E2E `1/1 passed`，core 防字段注入回归同时通过。
+  真实 E2E `1/1 passed`；`${hostname.replace(test,example)}` 和包含 `&` 的 replace
+  表达式真实 E2E `1/1 passed`，upstream 分别收到 `example.local` / `test.local`，core
+  防字段注入与 malformed template 回归同时通过。
 - TC-RMH-09：AUTOMATION PASS / CHROME BLOCKED。effectiveness Vitest 结果 `12/12 passed`；
   Chromium Playwright 真实页面回归 `1/1 passed`，在 `/_bifrost/traffic` 展开 Dynamic Island
   后第一条 `&` 分隔规则为 partial、文本保留 `x-stable=keep`，悬浮提示确认 `x-env` 由

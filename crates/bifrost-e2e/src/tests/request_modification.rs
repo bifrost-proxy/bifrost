@@ -318,7 +318,7 @@ async fn test_req_headers_ampersand_separated() -> Result<(), String> {
 
     let (port, _proxy) = start_proxy_with_rules(vec![
         format!("test.local host://127.0.0.1:{}", mock.port),
-        "test.local reqHeaders://(x-tt-env:ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)".to_string(),
+        "test.local reqHeaders://(x-tt-env:ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1&x-template-comma=${hostname.replace(test,example)}&x-template-amp=${hostname.replace(no&match,replaced)})".to_string(),
     ])
     .await?;
 
@@ -336,6 +336,8 @@ async fn test_req_headers_ampersand_separated() -> Result<(), String> {
     mock.assert_header_received("x-tt-env", "ppe_doubao_connect_lark")?;
     mock.assert_header_received("x-flow-env", "ppe_doubao_connect_lark")?;
     mock.assert_header_received("x-use-ppe", "1")?;
+    mock.assert_header_received("x-template-comma", "example.local")?;
+    mock.assert_header_received("x-template-amp", "test.local")?;
 
     Ok(())
 }
