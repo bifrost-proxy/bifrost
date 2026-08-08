@@ -5,6 +5,18 @@ unset BIFROST_DETACHED_DAEMON_CHILD
 unset BIFROST_EXTERNAL_CLI_WORKER
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
 
+# Hard fail closed for network access: this scenario must only reach the two
+# loopback Feishu fixtures and the loopback Bifrost API. Any accidental public
+# request is routed to a closed local port instead of becoming a flaky CI call.
+export HTTP_PROXY=http://127.0.0.1:9
+export HTTPS_PROXY=http://127.0.0.1:9
+export ALL_PROXY=http://127.0.0.1:9
+export NO_PROXY=127.0.0.1,localhost
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export all_proxy="$ALL_PROXY"
+export no_proxy="$NO_PROXY"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
@@ -37,6 +49,13 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
     print(sock.getsockname()[1])
 PY
 )"
+FEISHU_MOCK_B_PORT="$(python3 - <<'PY'
+import socket
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -53,6 +72,10 @@ cleanup() {
   if [[ -n "${FEISHU_MOCK_PID:-}" ]]; then
     kill "$FEISHU_MOCK_PID" >/dev/null 2>&1 || true
     wait "$FEISHU_MOCK_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${FEISHU_MOCK_B_PID:-}" ]]; then
+    kill "$FEISHU_MOCK_B_PID" >/dev/null 2>&1 || true
+    wait "$FEISHU_MOCK_B_PID" >/dev/null 2>&1 || true
   fi
   if [[ -n "${BIFROST_PID:-}" ]]; then
     kill "$BIFROST_PID" >/dev/null 2>&1 || true
@@ -104,6 +127,20 @@ class Handler(BaseHTTPRequestHandler):
             }]}})
         elif path.endswith("/im/v1/messages/invisible-parent"):
             self.send_json({"code": 230027, "msg": "Lack of necessary permissions"})
+        elif path.endswith("/im/v1/messages/card-parent"):
+            content = json.dumps({
+                "schema": "2.0",
+                "header": {"title": {"tag": "plain_text", "content": "另一机器人结论"}},
+                "body": {"elements": [
+                    {"tag": "markdown", "content": "卡片正文：选择方案 A"},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "不应读取"}, "url": "https://example.invalid/action"},
+                ]},
+            }, ensure_ascii=False)
+            self.send_json({"code": 0, "data": {"items": [{
+                "message_id": "card-parent", "chat_id": "chat-alpha", "msg_type": "interactive",
+                "sender": {"id": "ou_other_bot", "sender_type": "app"},
+                "body": {"content": content}, "create_time": "2"
+            }]}})
         elif "/im/v1/chats/" in path:
             self.send_json({"code": 0, "data": {"name": "Alpha 发布群"}})
         else:
@@ -112,6 +149,38 @@ class Handler(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
 FEISHU_MOCK_PID=$!
+python3 - "$FEISHU_MOCK_B_PORT" <<'PY' &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+    def send_json(self, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_POST(self):
+        if self.path.endswith("/auth/v3/tenant_access_token/internal"):
+            self.send_json({"code": 0, "tenant_access_token": "e2e-token-b", "expire": 7200})
+        else:
+            self.send_json({"code": 0})
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path.endswith("/bot/v3/info"):
+            self.send_json({"code": 0, "bot": {"open_id": "ou_bot_b", "app_name": "Bifrost B"}})
+        elif "/im/v1/chats/" in path:
+            self.send_json({"code": 0, "data": {"name": "共享多机器人群"}})
+        else:
+            self.send_json({"code": 404, "msg": "not found"})
+
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+PY
+FEISHU_MOCK_B_PID=$!
 export BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1
 
 
@@ -251,12 +320,12 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
 BIFROST_PID=$!
 wait_http
 
-python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" "$RUN_LOG" "$CONCURRENT_RELEASE" "$FEISHU_MOCK_PORT" <<'PY'
+python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" "$RUN_LOG" "$CONCURRENT_RELEASE" "$FEISHU_MOCK_PORT" "$FEISHU_MOCK_B_PORT" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, repo_dir, prompt_log, run_log, concurrent_release, feishu_mock_port = sys.argv[1:7]
+port, repo_dir, prompt_log, run_log, concurrent_release, feishu_mock_port, feishu_mock_b_port = sys.argv[1:8]
 base = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway"
 
 def request(path, payload, method="POST"):
@@ -329,6 +398,17 @@ request("/providers", {
     "owner_open_id": "owner-only-in-p2p",
     "event_connection_enabled": False,
 })
+request("/providers", {
+    "id": "feishu-group-e2e-b",
+    "provider_type": "feishu",
+    "display_name": "Feishu Group E2E B",
+    "enabled": True,
+    "base_url": f"http://127.0.0.1:{feishu_mock_b_port}/open-apis",
+    "app_id": "cli_group_e2e_b",
+    "app_secret": "group-e2e-secret-b",
+    "owner_open_id": "owner-b",
+    "event_connection_enabled": False,
+})
 PY
 
 inject() {
@@ -340,14 +420,16 @@ inject() {
   local mention_bot="${6:-false}"
   local chat_type="${7:-group}"
   local parent_id="${8:-}"
-  python3 - "$BIFROST_PORT" "$chat_id" "$user_id" "$user_name" "$message_id" "$text" "$mention_bot" "$chat_type" "$parent_id" <<'PY'
+  local provider_id="${9:-feishu-group-e2e}"
+  local mentioned_bot_open_id="${10:-}"
+  python3 - "$BIFROST_PORT" "$chat_id" "$user_id" "$user_name" "$message_id" "$text" "$mention_bot" "$chat_type" "$parent_id" "$provider_id" "$mentioned_bot_open_id" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, chat_id, user_id, user_name, message_id, text, mention_bot, chat_type, parent_id = sys.argv[1:10]
+port, chat_id, user_id, user_name, message_id, text, mention_bot, chat_type, parent_id, provider_id, mentioned_bot_open_id = sys.argv[1:12]
 payload = {
-    "providerId": "feishu-group-e2e",
+    "providerId": provider_id,
     "chatId": chat_id,
     "chatType": chat_type,
     "chatName": {"chat-alpha": "Alpha 发布群", "chat-beta": "Beta 讨论群"}.get(chat_id),
@@ -358,6 +440,8 @@ payload = {
     "text": text,
     "mentionBot": mention_bot == "true",
 }
+if mentioned_bot_open_id:
+    payload["mentionedBotOpenId"] = mentioned_bot_open_id
 if parent_id:
     payload["parentId"] = parent_id
 req = urllib.request.Request(
@@ -411,8 +495,10 @@ wait_prompt_count 4
 inject chat-beta user-dave Dave b3 "忙时补充：保留这条背景"
 inject chat-beta user-carol Carol b4 "/clear"
 inject chat-beta user-carol Carol b5 "/q 排队后的结论"
-wait_prompt_count 5
-wait_run_count 10
+inject chat-beta user-carol Carol b5two "/q 第二条排队任务"
+inject chat-beta user-carol Carol b5query "/q"
+wait_prompt_count 6
+wait_run_count 12
 wait_session_idle "im:feishu-group-e2e:group:chat-beta"
 
 # A long-running group task must not own the provider receiver. Two groups and
@@ -421,7 +507,7 @@ wait_session_idle "im:feishu-group-e2e:group:chat-beta"
 inject chat-alpha user-alice Alice a10 "@_user_1 并发检查 Alpha" true
 inject chat-beta user-carol Carol b6 "@_user_1 并发检查 Beta" true
 inject direct-owner owner-only-in-p2p Owner p1 "并发检查私聊" false p2p
-wait_prompt_count 8
+wait_prompt_count 9
 if [[ -n "${CONCURRENT_INJECT_DELAY_SECONDS:-}" ]]; then
   sleep "$CONCURRENT_INJECT_DELAY_SECONDS"
 fi
@@ -434,32 +520,81 @@ inject chat-alpha user-bob Bob a12 "并发期间的普通背景消息"
 wait_group_message_recorded a12
 touch "$CONCURRENT_RELEASE"
 for _ in $(seq 1 160); do
-  if [[ -f "$RUN_LOG" ]] && [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]; then
+  if [[ -f "$RUN_LOG" ]] && [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "18" ]]; then
     break
   fi
   sleep 0.25
 done
 [[ -f "$RUN_LOG" ]]
-[[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]
+[[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "18" ]]
 wait_group_turn_completed a10
 wait_group_turn_completed b6
+
+# Replying to an older message with only an @ mention is still a valid Agent
+# turn. Inject as soon as the durable turn is complete, before waiting for the
+# session/progress/history cleanup, to cover the mailbox completion boundary.
+inject chat-alpha user-alice Alice a13 "@_user_1" true group a1
+wait_prompt_count 10
+wait_run_count 20
 wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 wait_session_idle "im:feishu-group-e2e:group:chat-beta"
 wait_session_idle "feishu-group-e2e:owner-only-in-p2p"
 
-# Replying to an older message with only an @ mention is still a valid Agent
-# turn. The quoted message becomes the main input even though it is before the
-# current group cursor, and the trigger must not fall back to /help.
-inject chat-alpha user-alice Alice a13 "@_user_1" true group a1
-wait_prompt_count 9
-wait_run_count 18
+# A card sent by another bot is read through the authoritative loopback Feishu
+# message API. Only visible text reaches the prompt; actions and URLs do not.
+inject chat-alpha user-alice Alice a13card "@_user_1" true group card-parent
+wait_prompt_count 11
+wait_run_count 22
 wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 
 # If Feishu denies reading the parent, return actionable permission guidance
 # without starting a Runner or pretending that the quoted content was read.
 inject chat-alpha user-alice Alice a14 "@_user_1" true group invisible-parent
-wait_prompt_count 9
-wait_run_count 18
+wait_prompt_count 11
+wait_run_count 22
+
+wait_permission_reply() {
+  for _ in $(seq 1 160); do
+    if curl -fsS --noproxy '*' \
+      "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/providers/feishu-group-e2e/messages" \
+      | python3 -c '
+import json, sys
+messages = json.load(sys.stdin)
+visible = "\n".join(
+    (entry.get("content") or "") + "\n" + (entry.get("content_preview") or "")
+    for entry in messages if entry.get("direction") == "outbound"
+)
+raise SystemExit(0 if "im:message:readonly" in visible and "im:message.group_msg" in visible else 1)
+'
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "permission guidance was not written to the message log" >&2
+  return 1
+}
+wait_permission_reply
+
+# Two independent Provider loops receive the same group traffic. Unmentioned
+# slash commands are consumed by both; an explicit Bot B command is retained
+# only by Provider B and must not enter Provider A's SQLite/event/audit stores.
+inject shared-multi user-alice Alice mb-a-broadcast "/status"
+inject shared-multi user-alice Alice mb-b-broadcast "/status" false group "" feishu-group-e2e-b
+inject shared-multi user-alice Alice mb-a-directed "@_user_1 /status" true group "" feishu-group-e2e ou_bot_b
+inject shared-multi user-alice Alice mb-b-directed "@_user_1 /status" true group "" feishu-group-e2e-b ou_bot_b
+for _ in $(seq 1 160); do
+  if python3 - "$TEST_DIR/admin/im_group_context.db" <<'PY'
+import pathlib, sqlite3, sys
+path = pathlib.Path(sys.argv[1])
+if not path.exists(): raise SystemExit(1)
+c = sqlite3.connect(path)
+ids = {row[0] for row in c.execute("SELECT message_id FROM im_group_messages WHERE chat_id='shared-multi'")}
+raise SystemExit(0 if {"mb-a-broadcast", "mb-b-broadcast", "mb-b-directed"} <= ids else 1)
+PY
+  then break; fi
+  sleep 0.25
+done
 
 python3 - "$PROMPT_LOG" "$RUN_LOG" "$TEST_DIR/admin/im_group_context.db" "$REPO_DIR" "$TEST_DIR/admin/im_gateway_message_logs.json" <<'PY'
 import json
@@ -469,10 +604,12 @@ import sys
 
 prompt_path, run_path, db_path, repo_dir, message_log_path = sys.argv[1:6]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
-assert len(prompts) == 9, prompts
+assert len(prompts) == 11, prompts
 first, second, slash_fallback, third, queued = prompts[:5]
-concurrent_prompts = prompts[5:8]
-quoted_prompt = prompts[8]
+queued_second = prompts[5]
+concurrent_prompts = prompts[6:9]
+quoted_prompt = prompts[9]
+quoted_card_prompt = prompts[10]
 
 assert "群名称：Alpha 发布群" in first, first
 assert "群 ID：chat-alpha" in first, first
@@ -506,6 +643,7 @@ assert "忙时补充：保留这条背景" in queued, queued
 assert "<at id=user-carol>Carol</at>：排队后的结论" in queued, queued
 assert "/clear" not in queued, queued
 assert "群名称：" not in queued and "群 ID：" not in queued, queued
+assert "第二条排队任务" in queued_second, queued_second
 
 for expected in ("并发检查 Alpha", "并发检查 Beta", "并发检查私聊"):
     assert sum(expected in prompt for prompt in concurrent_prompts) == 1, concurrent_prompts
@@ -515,10 +653,13 @@ assert "<at id=user-alice>Alice</at>：先讨论发布窗口" in quoted_prompt, 
 assert quoted_prompt.count("先讨论发布窗口") == 1, quoted_prompt
 assert "当前用户未附加文字；请直接理解并回应上述被引用消息" in quoted_prompt, quoted_prompt
 assert "/help" not in quoted_prompt, quoted_prompt
+assert "另一机器人结论" in quoted_card_prompt, quoted_card_prompt
+assert "卡片正文：选择方案 A" in quoted_card_prompt, quoted_card_prompt
+assert "example.invalid" not in quoted_card_prompt and "不应读取" not in quoted_card_prompt, quoted_card_prompt
 
 runner_events = [json.loads(line) for line in open(run_path, encoding="utf-8") if line.strip()]
-assert len(runner_events) == 18, runner_events
-concurrent_events = runner_events[10:16]
+assert len(runner_events) == 22, runner_events
+concurrent_events = runner_events[12:18]
 assert [event["phase"] for event in concurrent_events[:3]] == ["start"] * 3, concurrent_events
 assert len({event["pid"] for event in concurrent_events[:3]}) == 3, concurrent_events
 assert all(event["phase"] == "finish" for event in concurrent_events[3:]), concurrent_events
@@ -526,7 +667,8 @@ assert all(event["phase"] == "finish" for event in concurrent_events[3:]), concu
 connection = sqlite3.connect(db_path)
 bindings = connection.execute(
     "SELECT chat_id, session_key, last_assigned_seq, chat_name, work_dir, runner_id "
-    "FROM im_group_bindings ORDER BY chat_id"
+    "FROM im_group_bindings WHERE provider_id = 'feishu-group-e2e' "
+    "AND chat_id IN ('chat-alpha', 'chat-beta') ORDER BY chat_id"
 ).fetchall()
 assert len(bindings) == 2, bindings
 assert bindings[0][0] == "chat-alpha" and bindings[1][0] == "chat-beta", bindings
@@ -535,9 +677,10 @@ assert bindings[0][3] == "Alpha 发布群" and bindings[1][3] == "Beta 讨论群
 assert bindings[0][4] == str(pathlib.Path(repo_dir).resolve()), bindings
 assert bindings[0][5] == "group-mock", bindings
 messages = connection.execute(
-    "SELECT chat_id, COUNT(*) FROM im_group_messages GROUP BY chat_id ORDER BY chat_id"
+    "SELECT chat_id, COUNT(*) FROM im_group_messages WHERE provider_id = 'feishu-group-e2e' "
+    "AND chat_id IN ('chat-alpha', 'chat-beta') GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 16), ("chat-beta", 6)], messages
+assert messages == [("chat-alpha", 18), ("chat-beta", 8)], messages
 permission_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE trigger_message_id = 'a14'"
 ).fetchall()
@@ -545,7 +688,7 @@ assert permission_turns == [], permission_turns
 beta_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE chat_id = 'chat-beta' ORDER BY created_at"
 ).fetchall()
-assert beta_turns == [("completed",), ("completed",), ("completed",)], beta_turns
+assert beta_turns == [("completed",)] * 4, beta_turns
 
 message_logs = json.load(open(message_log_path, encoding="utf-8"))["messages"]
 status_logs = [
@@ -574,6 +717,13 @@ outbound_text = "\n".join(
 assert "当前线程排队消息" in outbound_text and "排队已清空" in outbound_text, outbound_text
 assert "当前线程工作目录" in outbound_text and str(pathlib.Path(repo_dir).resolve()) in outbound_text, outbound_text
 assert "当前 Runner：`group-mock`" in outbound_text, outbound_text
+shared_rows = connection.execute(
+    "SELECT provider_id, message_id FROM im_group_messages WHERE chat_id = 'shared-multi' ORDER BY provider_id, message_id"
+).fetchall()
+assert ("feishu-group-e2e", "mb-a-broadcast") in shared_rows, shared_rows
+assert ("feishu-group-e2e-b", "mb-b-broadcast") in shared_rows, shared_rows
+assert ("feishu-group-e2e-b", "mb-b-directed") in shared_rows, shared_rows
+assert ("feishu-group-e2e", "mb-a-directed") not in shared_rows, shared_rows
 PY
 
 echo "[feishu-group-session] PASS"

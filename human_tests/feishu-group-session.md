@@ -9,6 +9,7 @@
 - macOS 或 Linux，已安装 Rust、Python 3、curl。
 - 在仓库根目录执行。
 - 测试使用临时 `BIFROST_DATA_DIR`、mock Feishu provider 和本地 mock Runner，不需要真实飞书凭证。
+- 自动化测试与 CI 禁止直连飞书或其他公网域名：假 OpenAPI 仅绑定 `127.0.0.1`，并将 HTTP(S)/ALL proxy 指向关闭的 `127.0.0.1:9`；只有真实人工体验步骤才允许使用测试者明确配置的真实飞书环境。
 
 ## 测试用例列表
 
@@ -200,7 +201,7 @@
 2. 确认三个 Runner 已启动后，向仍活跃的 `chat-alpha` 重投两次相同 `/status`，再发送普通背景消息 `a12`。
 3. 等待 `a12` 已进入 SQLite 群消息账本后释放三个 Runner，再检查 inbound 审计日志。
 
-预期结果：测试在任意 CI 调度速度下都先验证活跃态再释放 Runner；重复 `/status` 只有一条 inbound 审计且不添加 reaction，普通背景消息只进入群上下文、不产生 inbound trigger 审计。断言不靠增加固定 sleep 或放宽日志数量来通过。
+预期结果：测试在任意 CI 调度速度下都先验证活跃态再释放 Runner；重复 `/status` 只有一条 inbound 审计，并且对这条已接受触发只添加一次 `OK` reaction；普通背景消息只进入群上下文、不产生 inbound trigger 审计。断言不靠增加固定 sleep 或放宽日志数量来通过。
 
 ### TC-FGS-24：Provider owner 使用 `/new` 创建私有群并保持消息幂等
 
@@ -218,7 +219,7 @@
 3. 发送 `@Bot A /status`、`@Bot B /q 后续任务` 和 `@Bot A /review`。
 4. 检查未被提及的 Provider 是否读取引用、创建 Turn 或修改本地账本。
 
-预期结果：没有 @ 的 slash 由两个机器人各自消费；有 @ 时只有被提及机器人消费，其他机器人返回 Ambient，不读取引用、不创建 Turn、不修改状态。该能力不依赖两个 Bifrost 实例共享内存、JSON 或 SQLite。
+预期结果：没有 @ 的 slash 由两个机器人各自消费；有 @ 时只有被提及机器人消费，其他机器人返回 AddressedElsewhere，不读取引用、不创建 Turn、不写 event history、inbound audit 或本地群账本。普通 `@群成员` 对话仍作为 Ambient 保存。该能力不依赖两个 Bifrost 实例共享内存、JSON 或 SQLite。
 
 ### TC-FGS-26：引用其他机器人卡片并处理读取权限
 
@@ -305,8 +306,11 @@ cargo test -p bifrost-admin test_normalize_feishu_post_restores_stable_mention_p
 cargo test -p bifrost-admin live_guide_group_turns_follow_the_external_run_outcome -- --nocapture
 cargo test -p bifrost-admin prepare_group_dispatch_recovers_nonterminal_turn_after_restart -- --nocapture
 test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs)" -le 1500
+test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat_thread_commands.rs)" -le 1500
+test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat_model_commands.rs)" -le 1500
 test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat_concurrent.rs)" -le 1500
 test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat_progress.rs)" -le 1500
+test "$(wc -l < crates/bifrost-admin/src/im_gateway/feishu/message_read.rs)" -le 1500
 cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 ```
 
@@ -357,7 +361,7 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
   bash e2e-tests/tests/test_feishu_new_group_command.sh
 ```
 
-TC-FGS-25 至 TC-FGS-27 的多机器人路由、卡片读取、权限指引与线程查询执行：
+TC-FGS-25 至 TC-FGS-27 的多机器人路由、卡片读取、权限指引与线程查询执行（所有 HTTP 仅连接 `127.0.0.1` 假 OpenAPI，不访问公网）：
 
 ```bash
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin addressed_slash --lib -- --nocapture
@@ -365,6 +369,7 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin thread_query_commands --lib --
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin fetch_message_ --lib -- --nocapture
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin card_text_extraction_keeps_visible_content_and_skips_actions --lib -- --nocapture
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin prepare_group_dispatch --lib -- --nocapture
+SKIP_BUILD=true bash e2e-tests/tests/test_feishu_group_session_context.sh
 ```
 
 TC-FGS-28 的 Runner 收尾 mailbox 回放和真实引用触发执行：
@@ -376,7 +381,7 @@ SKIP_BUILD=true bash e2e-tests/tests/test_feishu_group_session_context.sh
 
 执行记录：2026-08-08 PASS。确定性单元测试同时覆盖关闭前已送达事件和关闭后 sender 失败事件，completion 按原顺序回放且清除已送达事件的 dedup；最新 debug 二进制连续执行 5 次 `test_feishu_group_session_context.sh` 均输出 `[feishu-group-session] PASS`，每次引用触发都生成第九个 Prompt 和第 18 个 Runner 生命周期事件。CI production release 会明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不能用测试凭证误连官方飞书接口；URL 规范化、引用读取和权限错误矩阵由 release-safe 单元测试覆盖。
 
-执行记录：2026-08-08 PASS。上述定向测试验证广播/定向消费、未被 @ 的机器人不读取引用且不写本地账本、跨群引用拒绝、无参线程查询分类与空闲/忙碌输出、有效工作目录与 Runner 输出、原始 interactive 卡片、CardKit 二次读取、`230027` 权限指引和群分发读取失败路径；所有命令退出码为 0。随后用最新 `target/debug/bifrost`、临时数据目录和假飞书 OpenAPI 执行 `test_feishu_group_session_context.sh`，输出 `[feishu-group-session] PASS`，确认三个无参查询不启动 Runner，引用读取与权限错误均走真实服务链路。
+执行记录：2026-08-08 PASS。使用最新 debug 二进制、两个独立 Provider、两个 `127.0.0.1` 假飞书 OpenAPI 和本地 mock Runner 真实执行，脚本输出 `[feishu-group-session] PASS`。测试进程同时设置 HTTP(S)/ALL proxy=`127.0.0.1:9`、NO_PROXY=`127.0.0.1,localhost`，未直连任何公网域名；验证无 @ slash 广播、有 @ 定向隔离且未提及 Provider 零入账、普通成员 mention 入账、另一个机器人卡片只提取可见正文、权限错误、忙时两条队列及裸 `/q` 查询、`/pwd`/`/runner`，并在 durable Turn 完成后、不等待 Session idle 就注入引用消息以覆盖 Runner 收尾 mailbox 回放。
 
 执行记录：2026-08-07 PASS。真实启动最新 debug 二进制与假飞书 OpenAPI，验证一次建群、同 `message_id` 重投、非 owner 群聊命令、欢迎消息、SQLite 幂等记录和 `/help` 文案；脚本输出 `[feishu-new-group-command] PASS`，退出后自动清理临时进程与目录。CI 广域 Shell 矩阵复用 release 二进制时，脚本明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不可为了假服务放宽生产飞书域名白名单；请求形状与错误矩阵继续由 release 同源单元测试覆盖。
 

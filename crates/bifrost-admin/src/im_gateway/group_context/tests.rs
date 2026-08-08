@@ -112,6 +112,34 @@ fn group_trigger_classifier_only_accepts_current_bot_or_slash() {
 }
 
 #[test]
+fn ordinary_human_mentions_remain_ambient_context() {
+    let bot = FeishuBotIdentity {
+        open_id: "ou_bot".to_string(),
+        name: Some("Bifrost".to_string()),
+    };
+    let human_mention = ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_alice".to_string()),
+        name: Some("Alice".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    };
+    let event = group_event(
+        "human-mention",
+        "group",
+        "sender",
+        "@_user_1 please review",
+        vec![human_mention],
+        1,
+    );
+
+    assert_eq!(
+        classify_group_message(event.message.as_ref().unwrap(), Some(&bot), false),
+        GroupMessageDisposition::Ambient
+    );
+}
+
+#[test]
 fn addressed_slash_only_runs_for_the_mentioned_bot_while_unmentioned_is_broadcast() {
     let bot_a = FeishuBotIdentity {
         open_id: "ou_bot_a".to_string(),
@@ -146,11 +174,11 @@ fn addressed_slash_only_runs_for_the_mentioned_bot_while_unmentioned_is_broadcas
     );
     assert_eq!(
         classify_group_message(addressed.message.as_ref().unwrap(), Some(&bot_b), false),
-        GroupMessageDisposition::Ambient
+        GroupMessageDisposition::AddressedElsewhere
     );
     assert_eq!(
         classify_group_message(addressed.message.as_ref().unwrap(), None, false),
-        GroupMessageDisposition::Ambient,
+        GroupMessageDisposition::AddressedElsewhere,
         "an unresolved real Feishu mention must not execute a slash command"
     );
 
@@ -202,7 +230,7 @@ fn addressed_agent_slashes_do_not_leak_to_unmentioned_bots() {
         );
         assert_eq!(
             classify_group_message(event.message.as_ref().unwrap(), Some(&bot_a), false),
-            GroupMessageDisposition::Ambient,
+            GroupMessageDisposition::AddressedElsewhere,
             "{command} must not be consumed by an unmentioned bot"
         );
         assert!(matches!(
@@ -428,7 +456,7 @@ fn same_group_multiple_bots_only_trigger_the_matching_provider_identity() {
 
     assert_eq!(
         classify_group_message(event.message.as_ref().unwrap(), Some(&bot_a), false),
-        GroupMessageDisposition::Ambient
+        GroupMessageDisposition::AddressedElsewhere
     );
     assert_eq!(
         classify_group_message(event.message.as_ref().unwrap(), Some(&bot_b), false),

@@ -19,6 +19,7 @@ const QUOTED_MESSAGE_MISSING_PROMPT: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupMessageDisposition {
     Ambient,
+    AddressedElsewhere,
     SystemCommand {
         command: String,
         reset_context: bool,
@@ -244,7 +245,7 @@ impl ImGroupContextStore {
             },
             message: Some(ImEventMessage {
                 text: message.text.clone(),
-                mentions: Vec::new(),
+                mentions: message.mentions.clone(),
                 images: Vec::new(),
                 files: Vec::new(),
                 reply_to: None,
@@ -425,6 +426,15 @@ impl ImGroupContextStore {
             duplicate: false,
             quoted_message_missing,
         })
+    }
+
+    pub fn existing_turn(
+        &self,
+        provider_id: &str,
+        trigger_message_id: &str,
+    ) -> Result<Option<PreparedGroupTurn>, String> {
+        let connection = self.connection.lock();
+        load_existing_turn(&connection, provider_id, trigger_message_id)
     }
 
     pub fn mark_turn_dispatched(&self, turn_id: &str, now: u64) -> Result<(), String> {
@@ -807,15 +817,23 @@ pub fn classify_group_message(
         .mentions
         .iter()
         .any(|mention| mention_matches_current_bot(mention, bot_identity));
-    // A slash command without mentions is a broadcast command and every bot in
-    // the group may consume it. Once the message contains an explicit mention,
-    // it becomes addressed: only a provider whose own bot identity is present
-    // may continue. This check must happen before slash parsing so `/status`,
-    // `/new`, runner commands, and unknown Agent slashes share the same routing
-    // semantics. It also deliberately fails closed when a real Feishu mention
-    // cannot be resolved to this provider's bot identity.
+    // A slash command without mentions is broadcast. A slash/reference whose
+    // mentions do not include this provider is explicitly addressed elsewhere.
+    // Ordinary prose may mention human members, so it remains ambient unless
+    // synthetic/debug metadata positively identifies another bot.
     if has_mentions && !mentions_bot {
-        return GroupMessageDisposition::Ambient;
+        let without_mentions = strip_all_mentions(&message.text, &message.mentions);
+        let explicitly_addressed = without_mentions.trim_start().starts_with('/')
+            || message
+                .parent_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || message.mentions.iter().any(|mention| mention.is_bot);
+        return if explicitly_addressed {
+            GroupMessageDisposition::AddressedElsewhere
+        } else {
+            GroupMessageDisposition::Ambient
+        };
     }
     let text = strip_current_bot_mentions(&message.text, &message.mentions, bot_identity);
     let trimmed = text.trim();
@@ -855,6 +873,15 @@ pub fn classify_group_message(
         };
     }
     GroupMessageDisposition::Ambient
+}
+
+fn strip_all_mentions(text: &str, mentions: &[ImMention]) -> String {
+    mentions_by_descending_key_len(mentions)
+        .into_iter()
+        .filter(|mention| !mention.key.is_empty())
+        .fold(text.to_string(), |text, mention| {
+            text.replace(&mention.key, " ")
+        })
 }
 
 fn mention_matches_current_bot(
@@ -1121,11 +1148,11 @@ fn ensure_binding(
 }
 
 fn load_existing_turn(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     provider_id: &str,
     trigger_message_id: &str,
 ) -> Result<Option<PreparedGroupTurn>, String> {
-    transaction
+    connection
         .query_row(
             "SELECT turn_id, session_key, trigger_message_id, from_exclusive_seq,
                     to_inclusive_seq, context_count, context_json, status

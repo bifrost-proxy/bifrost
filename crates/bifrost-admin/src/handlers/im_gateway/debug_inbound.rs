@@ -21,6 +21,10 @@ struct MockInboundRequest {
     #[serde(default)]
     mention_bot: bool,
     #[serde(default)]
+    mentioned_bot_open_id: Option<String>,
+    #[serde(default)]
+    mentioned_bot_name: Option<String>,
+    #[serde(default)]
     message_id: Option<String>,
     #[serde(default)]
     event_id: Option<String>,
@@ -164,10 +168,24 @@ async fn inject_mock_inbound(
             mentions: if body.mention_bot {
                 vec![crate::im_gateway::types::ImMention {
                     key: "@_user_1".to_string(),
-                    open_id: Some("mock-bot".to_string()),
-                    name: Some("Bifrost".to_string()),
+                    open_id: body
+                        .mentioned_bot_open_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("mock-bot")
+                        .to_string()
+                        .into(),
+                    name: body
+                        .mentioned_bot_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("Bifrost")
+                        .to_string()
+                        .into(),
                     tenant_key: None,
-                    is_bot: true,
+                    is_bot: body.mentioned_bot_open_id.is_none(),
                 }]
             } else {
                 Vec::new()
@@ -316,6 +334,8 @@ mod tests {
             chat_name: Some(" Engineering ".to_string()),
             user_name: Some("Alice".to_string()),
             mention_bot: true,
+            mentioned_bot_open_id: None,
+            mentioned_bot_name: None,
             message_id: Some(" om_debug ".to_string()),
             event_id: Some(" evt_debug ".to_string()),
             root_id: Some("om_root".to_string()),

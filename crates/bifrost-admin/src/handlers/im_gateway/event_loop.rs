@@ -382,11 +382,6 @@ pub(super) async fn run_event_loop_with_options(
             "received inbound event from owner"
         );
 
-        // Store the event in history
-        if let Err(e) = event_store.add(event.clone()) {
-            error!(error = %e, "failed to store event");
-        }
-
         let inbound_dispatch = if is_group_event {
             let session_busy = event.source.chat_id.as_deref().is_some_and(|chat_id| {
                 agent_session_manager.is_session_active(
@@ -405,8 +400,11 @@ pub(super) async fn run_event_loop_with_options(
             )
             .await
             {
-                Ok(Some(dispatch)) => dispatch,
-                Ok(None) => {
+                Ok(GroupInboundDispatch::Dispatch(dispatch)) => dispatch,
+                Ok(GroupInboundDispatch::Ambient) => {
+                    if let Err(error) = event_store.add(event.clone()) {
+                        error!(error = %error, "failed to store ambient group event");
+                    }
                     let log = ImMessageLog {
                         id: uuid_short(),
                         provider_id: event.provider_id.clone(),
@@ -428,7 +426,11 @@ pub(super) async fn run_event_loop_with_options(
                     let _ = message_log_store.add(log);
                     continue;
                 }
+                Ok(GroupInboundDispatch::AddressedElsewhere) => continue,
                 Err(error) => {
+                    if let Err(store_error) = event_store.add(event.clone()) {
+                        error!(error = %store_error, "failed to store rejected group trigger");
+                    }
                     error!(
                         provider_id = %event.provider_id,
                         event_id = %event.event_id,
@@ -447,6 +449,9 @@ pub(super) async fn run_event_loop_with_options(
                 }
             }
         } else {
+            if let Err(error) = event_store.add(event.clone()) {
+                error!(error = %error, "failed to store event");
+            }
             PreparedInboundDispatch {
                 message_text: event
                     .message
@@ -467,6 +472,12 @@ pub(super) async fn run_event_loop_with_options(
                 direct_reply: None,
             }
         };
+
+        if is_group_event {
+            if let Err(error) = event_store.add(event.clone()) {
+                error!(error = %error, "failed to store accepted group event");
+            }
+        }
 
         acknowledge_and_log_inbound_event(&client, &provider, &event, &message_log_store).await;
         if let Some(reply) = inbound_dispatch.direct_reply.as_deref() {
@@ -802,7 +813,9 @@ pub(super) async fn run_event_loop_with_options(
                 };
                 let session_key = inbound_dispatch.session_key.clone();
 
-                if parse_im_runner_command(&message_text).is_some() {
+                if matches!(message_text.trim(), "/q" | "/pwd")
+                    || parse_im_runner_command(&message_text).is_some()
+                {
                     let agent_config =
                         effective_agent_config_for_provider(&agent_config_store.load(), &provider);
                     if handle_idle_im_command(
@@ -1024,13 +1037,43 @@ pub(super) struct PreparedInboundDispatch {
     pub(super) direct_reply: Option<String>,
 }
 
+pub(super) enum GroupInboundDispatch {
+    Dispatch(PreparedInboundDispatch),
+    Ambient,
+    AddressedElsewhere,
+}
+
+#[cfg(test)]
+impl GroupInboundDispatch {
+    fn is_none(&self) -> bool {
+        !matches!(self, Self::Dispatch(_))
+    }
+
+    fn unwrap(self) -> PreparedInboundDispatch {
+        match self {
+            Self::Dispatch(dispatch) => dispatch,
+            Self::Ambient => panic!("expected dispatch, got ambient message"),
+            Self::AddressedElsewhere => {
+                panic!("expected dispatch, got addressed-elsewhere message")
+            }
+        }
+    }
+
+    fn expect(self, message: &str) -> PreparedInboundDispatch {
+        match self {
+            Self::Dispatch(dispatch) => dispatch,
+            _ => panic!("{message}"),
+        }
+    }
+}
+
 pub(super) async fn prepare_group_inbound_dispatch(
     client: &ImProviderClient,
     provider: &ImProviderConfig,
     event: &ImEvent,
     store: &ImGroupContextStore,
     session_busy: bool,
-) -> Result<Option<PreparedInboundDispatch>, String> {
+) -> Result<GroupInboundDispatch, String> {
     use crate::im_gateway::group_context::{classify_group_message, GroupMessageDisposition};
 
     let message = event
@@ -1063,17 +1106,25 @@ pub(super) async fn prepare_group_inbound_dispatch(
         None
     };
     let disposition = classify_group_message(message, bot_identity.as_ref(), session_busy);
-    if !message.mentions.is_empty() && matches!(disposition, GroupMessageDisposition::Ambient) {
-        // An explicitly addressed message for another bot is not ambient
-        // context for this provider. Return before reference reads and before
-        // recording anything locally so independently deployed bots neither
-        // consume nor persist one another's addressed traffic.
-        return Ok(None);
+    if matches!(disposition, GroupMessageDisposition::AddressedElsewhere) {
+        return Ok(GroupInboundDispatch::AddressedElsewhere);
     }
     // Only the addressed bot resolves a referenced message. Every provider may
     // run on a different machine, so the Feishu message API is authoritative;
     // the local group ledger is only a per-provider cache for prompt assembly.
-    if matches!(disposition, GroupMessageDisposition::AgentTrigger { .. }) {
+    let existing_turn = if matches!(disposition, GroupMessageDisposition::AgentTrigger { .. }) {
+        let trigger_message_id = event
+            .source
+            .message_id
+            .as_deref()
+            .ok_or_else(|| "group event is missing message_id".to_string())?;
+        store.existing_turn(&event.provider_id, trigger_message_id)?
+    } else {
+        None
+    };
+    if existing_turn.is_none()
+        && matches!(disposition, GroupMessageDisposition::AgentTrigger { .. })
+    {
         if let Some(parent_id) = message
             .parent_id
             .as_deref()
@@ -1139,11 +1190,12 @@ pub(super) async fn prepare_group_inbound_dispatch(
         }
     }
     match disposition {
-        GroupMessageDisposition::Ambient => Ok(None),
+        GroupMessageDisposition::Ambient => Ok(GroupInboundDispatch::Ambient),
+        GroupMessageDisposition::AddressedElsewhere => Ok(GroupInboundDispatch::AddressedElsewhere),
         GroupMessageDisposition::SystemCommand {
             command,
             reset_context,
-        } => Ok(Some(PreparedInboundDispatch {
+        } => Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
             message_text: command,
             session_key: crate::im_gateway::group_context::build_group_session_key(
                 &event.provider_id,
@@ -1158,11 +1210,17 @@ pub(super) async fn prepare_group_inbound_dispatch(
             active_request,
             command_prefix,
         } => {
-            let prepared = store.prepare_turn(event, kind, &active_request)?;
+            let prepared = match existing_turn {
+                Some(mut existing) => {
+                    existing.duplicate = true;
+                    existing
+                }
+                None => store.prepare_turn(event, kind, &active_request)?,
+            };
             if prepared.duplicate {
                 let recoverable = matches!(prepared.status.as_str(), "prepared" | "dispatched");
                 if session_busy || !recoverable {
-                    return Ok(None);
+                    return Ok(GroupInboundDispatch::Ambient);
                 }
                 warn!(
                     turn_id = %prepared.turn_id,
@@ -1171,7 +1229,7 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 );
             }
             store.mark_turn_dispatched(&prepared.turn_id, now_ms())?;
-            Ok(Some(PreparedInboundDispatch {
+            Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
                 message_text: prepared.delivery_message(command_prefix),
                 session_key: prepared.session_key,
                 group_turn_id: Some(prepared.turn_id),
