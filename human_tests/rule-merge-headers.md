@@ -259,13 +259,43 @@ pnpm --dir web exec vitest run src/utils/ruleEffectiveness.test.ts
 - 后续同 matcher 的 `reqHeaders://x-env=two` 只覆盖 `x-env`，第一条规则显示 partial，
   `x-stable` 仍保持有效。
 
+### TC-RMH-10: reqCookies、resCookies 与 trailers 使用 `&` 拆分多个字段
+
+**操作步骤**：
+1. 运行 source-aware KV parser 与三个协议的 resolver 单元测试：
+```bash
+cargo test -p bifrost-core rule_key_values_split_inline_ampersands_but_not_referenced_values
+cargo test -p bifrost-core cookie_and_trailer_templates_expand_after_authored_separators_are_parsed
+cargo test -p bifrost-core response_cookie_json_with_attributes_stays_structured
+cargo test -p bifrost-cli test_req_cookies_ampersand_separated
+cargo test -p bifrost-cli test_res_cookies_ampersand_and_json_attributes
+cargo test -p bifrost-cli test_trailers_ampersand_separated
+```
+2. 逐个运行真实代理 E2E：
+```bash
+cargo run -p bifrost-e2e -- --test req_cookies_ampersand_separated
+cargo run -p bifrost-e2e -- --test req_cookies_value_ref_literal_ampersand
+cargo run -p bifrost-e2e -- --test req_cookies_template_literal_ampersand
+cargo run -p bifrost-e2e -- --test res_cookies_ampersand_separated
+cargo run -p bifrost-e2e -- --test res_cookies_with_attrs
+cargo run -p bifrost-e2e -- --test trailers_ampersand_separated
+```
+
+**预期结果**：
+- `reqCookies://(sessionid=xxx&a=c&b=two=parts)` 生成三个请求 Cookie，`b` 的值保留第二个 `=`。
+- `resCookies://(sid=xxx&theme=dark)` 生成两条独立 `Set-Cookie`。
+- `resCookies` JSON 属性对象继续产生 `Max-Age`、`Secure`、`HttpOnly` 等属性。
+- `trailers://(X-Trace=abc&X-Checksum=xyz)` 宣告两个独立 Trailer 名。
+- Values 引用中的 `session=safe&injected=yes` 保持为一个 Cookie 值，不生成 `injected` Cookie。
+- 模板展开产生的 `&` 同样只属于当前字段值，不能注入新 Cookie 或 Trailer。
+
 ## 清理步骤
 
 1. 停止本地 HTTPS 回显服务
 2. 停止测试服务：`cargo run --bin bifrost -- stop -p 8800`
 3. 删除临时数据目录：`rm -rf ./.bifrost-test ./.bifrost-test-rmh e2e-tests/.bifrost-e2e-header-ampersand e2e-tests/.bifrost-e2e-header-values`
 
-## 本次执行记录（2026-08-08）
+## 本次执行记录（2026-08-09）
 
 - TC-RMH-08：PASS。四个独立真实代理 E2E 全部 `1/1 passed`；模板边界用例确认
   `X-Full-Url=http://test.local/api?a=1&b=2` 和
@@ -274,3 +304,8 @@ pnpm --dir web exec vitest run src/utils/ruleEffectiveness.test.ts
 - TC-RMH-09：PASS。`pnpm --dir web exec vitest run src/utils/ruleEffectiveness.test.ts`
   结果 `12/12 passed`，`&` 分隔的 `x-env` 被后续规则覆盖时首条规则为 partial，
   `x-stable` 继续有效。
+- TC-RMH-10：PASS。core、CLI 和 Admin 的 8 条定向单测全部通过；6 条真实代理
+  E2E 均为 `1/1 passed`。代理日志确认请求 Cookie 为 `sessionid=xxx`、`a=c`、
+  `b=two=parts`，Values 引用只生成 `session=safe&injected=yes` 一个 Cookie；响应输出
+  `sid=xxx`、`theme=dark` 两条 Set-Cookie，JSON 属性 Cookie 保留 Max-Age/Secure/HttpOnly，
+  Trailer 为 `X-Trace, X-Checksum`。

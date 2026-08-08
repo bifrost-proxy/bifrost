@@ -3937,15 +3937,23 @@ run_tests() {
             reqCookies)
                 local req_cookie_raw=$(extract_value "$protocols" "reqCookies")
                 req_cookie_raw=$(resolve_code_block_var "$req_cookie_raw" "$RULE_FILE")
-                local cookie_name=$(echo "$req_cookie_raw" | cut -d'=' -f1)
-                local cookie_value=$(echo "$req_cookie_raw" | cut -d'=' -f2-)
-                test_req_cookies "$pattern" "$cookie_name" "$cookie_value"
+                req_cookie_raw="${req_cookie_raw#(}"
+                req_cookie_raw="${req_cookie_raw%)}"
+                while IFS= read -r cookie_pair || [[ -n "$cookie_pair" ]]; do
+                    local cookie_name="${cookie_pair%%=*}"
+                    local cookie_value="${cookie_pair#*=}"
+                    test_req_cookies "$pattern" "$cookie_name" "$cookie_value"
+                done < <(printf '%s' "$req_cookie_raw" | tr '&' '\n')
                 ;;
             resCookies)
                 local res_cookie_raw=$(extract_value "$protocols" "resCookies")
                 res_cookie_raw=$(resolve_code_block_var "$res_cookie_raw" "$RULE_FILE")
-                local cookie_name=$(echo "$res_cookie_raw" | cut -d'=' -f1)
-                test_res_cookies "$pattern" "$cookie_name"
+                res_cookie_raw="${res_cookie_raw#(}"
+                res_cookie_raw="${res_cookie_raw%)}"
+                while IFS= read -r cookie_pair || [[ -n "$cookie_pair" ]]; do
+                    local cookie_name="${cookie_pair%%=*}"
+                    test_res_cookies "$pattern" "$cookie_name"
+                done < <(printf '%s' "$res_cookie_raw" | tr '&' '\n')
                 ;;
             websocket|websocket_secure)
                 test_websocket_forward "$pattern" "$target"
@@ -4084,7 +4092,13 @@ run_tests() {
                 ;;
             trailers)
                 local trailers_value=$(extract_value "$protocols" "trailers")
-                local trailer_header=$(echo "$trailers_value" | cut -d':' -f1)
+                trailers_value="${trailers_value#(}"
+                trailers_value="${trailers_value%)}"
+                local trailer_header=""
+                while IFS= read -r trailer_pair || [[ -n "$trailer_pair" ]]; do
+                    local trailer_name="${trailer_pair%%[=:]*}"
+                    trailer_header="${trailer_header:+${trailer_header}, }${trailer_name}"
+                done < <(printf '%s' "$trailers_value" | tr '&' '\n')
                 test_trailers_rule "$pattern" "$trailer_header"
                 ;;
             pac|proxy)

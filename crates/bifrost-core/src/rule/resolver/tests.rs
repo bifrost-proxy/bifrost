@@ -121,6 +121,53 @@ fn header_template_value_cannot_inject_an_extra_header() {
 }
 
 #[test]
+fn cookie_and_trailer_templates_expand_after_authored_separators_are_parsed() {
+    let mut ctx = create_test_context("http://example.com/path", "example.com", "/path");
+    ctx.req_headers
+        .insert("source".to_string(), "safe&injected=yes".to_string());
+
+    for protocol in [
+        Protocol::ReqCookies,
+        Protocol::ResCookies,
+        Protocol::Trailers,
+    ] {
+        let rule = create_test_rule(
+            "example.com",
+            protocol,
+            "first=${reqHeaders.source}&second=two",
+        );
+        let resolved = ResolvedRule::new(rule, None, &ctx, &HashMap::new());
+        assert_eq!(
+            resolved.key_value_pairs(),
+            Some(
+                [
+                    ("first".to_string(), "safe&injected=yes".to_string()),
+                    ("second".to_string(), "two".to_string()),
+                ]
+                .as_slice()
+            ),
+            "protocol {protocol:?}"
+        );
+    }
+}
+
+#[test]
+fn response_cookie_json_with_attributes_stays_structured() {
+    let value = r#"{"sid":{"value":"abc","path":"/","httpOnly":true}}"#;
+    let rule = create_test_rule("example.com", Protocol::ResCookies, value);
+    let resolved = ResolvedRule::new_simple(rule, None, &HashMap::new());
+
+    assert_eq!(resolved.resolved_value, value);
+    assert_eq!(resolved.key_value_pairs(), None);
+    assert_eq!(resolved.header_pairs(), None);
+
+    let parenthesized = format!("({value})");
+    let rule = create_test_rule("example.com", Protocol::ResCookies, &parenthesized);
+    let resolved = ResolvedRule::new_simple(rule, None, &HashMap::new());
+    assert_eq!(resolved.key_value_pairs(), None);
+}
+
+#[test]
 fn test_resolved_rules_get_by_protocol() {
     let mut result = ResolvedRules::new();
 

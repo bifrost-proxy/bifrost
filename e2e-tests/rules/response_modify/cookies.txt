@@ -1,5 +1,5 @@
+# 测试目标: 验证 resCookies 单个、多个、属性及 `&` 分隔的响应 Cookie
 # S-05: 响应 Cookie 设置测试
-# 需求: 代理应能设置响应 Cookie (Set-Cookie 头)
 
 # 设置单个 Cookie
 res-cookie-single.local 127.0.0.1:3000 resCookies://{single_cookie}
@@ -36,3 +36,5 @@ user=testuser
 ```cookie_with_attrs
 secure_session=value123; HttpOnly; Secure; SameSite=Strict; Max-Age=3600
 ```
+
+test-res-cookies.local http://127.0.0.1:3000 resCookies://(session=abc123&theme=dark)

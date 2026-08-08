@@ -1,5 +1,5 @@
+# 测试目标: 验证 reqCookies 添加、修改以及 `&` 分隔多个请求 Cookie
 # R-07: 请求 Cookie 修改测试
-# 需求: 代理应能添加、修改请求 Cookie
 
 # 添加 Cookie (单个)
 req-cookie-add.local 127.0.0.1:3000 reqCookies://{add_session}
@@ -29,3 +29,5 @@ user=test
 ```modify_session
 session=new_session
 ```
+
+test-cookies.local http://127.0.0.1:3000 reqCookies://(session=abc123&theme=dark)

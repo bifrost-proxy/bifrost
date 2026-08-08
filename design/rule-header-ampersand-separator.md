@@ -1,4 +1,4 @@
-# Header 规则 `&` 分隔兼容
+# Header、Cookie 与 Trailer 规则 `&` 分隔兼容
 
 ## 背景
 
@@ -18,6 +18,8 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 
 - `reqHeaders` 单行内联值支持用 `&` 分隔多个 Header。
 - `resHeaders` 使用同一 Header 语法，避免请求/响应规则行为不一致。
+- `reqCookies://(sessionid=xxx&a=c&b=...)`、`resCookies://(sid=xxx&theme=dark)` 和
+  `trailers://(X-Trace=abc&X-Checksum=xyz)` 使用同一安全的 `&` 多键语法。
 - 普通代理、HTTPS tunnel、Replay 与 E2E resolver 使用同一解析契约。
 
 ### 必须不破坏
@@ -25,7 +27,10 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - 单 Header、逗号分隔 Header、JSON 对象和多行 Values 继续可用。
 - JSON、多行 Value 或单行引用 Value 内 Header 值中的字面 `&` 不被拆分。
 - `${url}` / `${reqHeaders.*}` 等模板展开结果中的 `&` 保持为 Header 值数据，不能注入额外 Header。
-- `reqCookies` / `resCookies` 不改变分隔语义。
+- `resCookies` 的 JSON 属性对象（`path`、`domain`、`maxAge`、`secure`、`httpOnly`、
+  `sameSite`）继续按结构化 Cookie 解析，不被降级为简单键值。
+- Cookie/Trailer 的 JSON、多行、Values 引用、文件和远程内容中的字面 `&` 不被拆分。
+- Cookie/Trailer 模板展开生成的 `&` 保持为数据，不能注入额外字段。
 - malformed JSON Header 对象不能回退成部分生效的非法 Header。
 
 ### 必须真实验证
@@ -48,7 +53,10 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - 对 `reqHeaders` / `resHeaders`，`ResolvedRule` 先按规则作者写下的源文本解析 Header
   边界，再逐个展开 Header 名和值中的模板；不再对已经展开的整串文本重新按 `&` 拆分。
   因此 URL 查询串和复制的请求 Header 即使含 `&X-Injected=...` 也只属于原 Header 值。
-- Cookie、CORS、URL 参数继续走各自现有 parser，不共享 Header 的 `&` 分隔规则。
+- `ResolvedRule` 暴露共享的 source-aware key/value pairs，Header、Cookie 与 Trailer 的
+  运行时消费者统一使用；CORS、URL 参数仍走各自 parser。
+- `resCookies` 若检测到 JSON 对象值为属性对象，则不生成简单 pairs，而是保留给专用
+  response-cookie parser，以继续输出 `Path`、`Max-Age`、`HttpOnly` 等属性。
 
 ## 测试方案
 
@@ -57,6 +65,9 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - E2E runner：`req_headers_ampersand_separated` 真实启动代理和 mock upstream。
 - E2E runner：`req_headers_template_literal_ampersand` 验证 `${url}` 查询串和
   `${reqHeaders.*}` 中的 `&` 不会改变 Header 边界。
+- E2E runner：`req_cookies_ampersand_separated`、
+  `req_cookies_value_ref_literal_ampersand`、`res_cookies_ampersand_separated`、
+  `trailers_ampersand_separated` 覆盖三个新增场景和引用边界。
 - 规则夹具：`e2e-tests/rules/request_modify/headers.txt` 的 R-05。
 - human test：`human_tests/rule-merge-headers.md` 的 TC-RMH-08。
 
@@ -65,7 +76,8 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - 依赖 `bifrost-core::ValueSource` 区分规则原始值来源；不新增第三方 crate。
 - 共享 parser 的调用面包括 Admin 请求规则、Replay 请求/响应规则、CLI resolver 与
   `bifrost-e2e` adapter，必须同步传递 `ResolvedRule.rule.value_source`。
-- Cookie、CORS、URL 参数 parser 不在变更范围内。
+- Admin、CLI、Replay 和 E2E resolver 都消费同一组已解析 pairs，避免各层重复解析后
+  出现行为分叉。
 
 ## Review/Fix/Test 计划
 

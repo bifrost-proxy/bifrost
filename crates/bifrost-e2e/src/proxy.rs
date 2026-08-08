@@ -322,15 +322,20 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                     }
                 }
                 Protocol::ReqCookies => {
-                    if let Some(cookies) = parse_header_value(value) {
-                        for (k, v) in cookies {
-                            result.req_cookies.push((k, v));
-                        }
+                    if let Some(cookies) = resolved_rule.key_value_pairs() {
+                        result.req_cookies.extend(cookies.iter().cloned());
                     }
                 }
                 Protocol::ResCookies => {
-                    let parsed_cookies = parse_res_cookies_value(value);
-                    result.res_cookies.extend(parsed_cookies);
+                    if let Some(cookies) = resolved_rule.key_value_pairs() {
+                        result
+                            .res_cookies
+                            .extend(cookies.iter().cloned().map(|(name, value)| {
+                                (name, bifrost_proxy::ResCookieValue::simple(value))
+                            }));
+                    } else {
+                        result.res_cookies.extend(parse_res_cookies_value(value));
+                    }
                 }
                 Protocol::StatusCode => {
                     if let Ok(code) = value.parse::<u16>() {
@@ -469,6 +474,11 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                 Protocol::ResSpeed => {
                     if let Ok(speed) = value.parse::<u64>() {
                         result.res_speed = Some(speed.saturating_mul(1024));
+                    }
+                }
+                Protocol::Trailers => {
+                    if let Some(trailers) = resolved_rule.key_value_pairs() {
+                        result.trailers.extend(trailers.iter().cloned());
                     }
                 }
                 Protocol::Redirect => {
@@ -1738,7 +1748,66 @@ impl Drop for ProxyInstance {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_stale_e2e_data_dir, parse_cors_config, parse_replace_value};
+    use super::{
+        clean_stale_e2e_data_dir, parse_cors_config, parse_replace_value, CoreRulesResolver,
+        ProxyRulesResolverTrait, RulesResolverAdapter,
+    };
+
+    fn resolve_rules(rules: &str) -> bifrost_proxy::ResolvedRules {
+        let parsed = bifrost_core::parse_rules(rules).expect("parse rules");
+        let resolver = RulesResolverAdapter {
+            inner: CoreRulesResolver::new(parsed).disable_cache(),
+        };
+        resolver.resolve_with_context(
+            "http://example.com/path",
+            "GET",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn adapter_maps_source_aware_cookie_and_trailer_pairs() {
+        let result = resolve_rules(
+            "example.com reqCookies://(sessionid=xxx&a=c&b=two=parts)\n\
+             example.com resCookies://(sid=xxx&theme=dark)\n\
+             example.com trailers://(X-Trace=abc&X-Checksum=xyz)",
+        );
+
+        assert_eq!(
+            result.req_cookies,
+            vec![
+                ("sessionid".into(), "xxx".into()),
+                ("a".into(), "c".into()),
+                ("b".into(), "two=parts".into()),
+            ]
+        );
+        assert_eq!(result.res_cookies.len(), 2);
+        assert_eq!(result.res_cookies[0].0, "sid");
+        assert_eq!(result.res_cookies[0].1.value, "xxx");
+        assert_eq!(result.res_cookies[1].0, "theme");
+        assert_eq!(result.res_cookies[1].1.value, "dark");
+        assert_eq!(
+            result.trailers,
+            vec![
+                ("X-Trace".into(), "abc".into()),
+                ("X-Checksum".into(), "xyz".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_keeps_response_cookie_attribute_json_on_structured_parser() {
+        let result = resolve_rules(
+            r#"example.com resCookies://({"sid":{"value":"abc","path":"/","httpOnly":true}})"#,
+        );
+
+        assert_eq!(result.res_cookies.len(), 1);
+        assert_eq!(result.res_cookies[0].0, "sid");
+        assert_eq!(result.res_cookies[0].1.value, "abc");
+        assert_eq!(result.res_cookies[0].1.path.as_deref(), Some("/"));
+        assert!(result.res_cookies[0].1.http_only);
+    }
 
     #[test]
     fn parse_replace_value_supports_json_object_and_regex_keys() {

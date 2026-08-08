@@ -1,1 +1,3 @@
-test-trailers.local http://127.0.0.1:3000 trailers://X-Trace:trace-1
+# 测试目标: 验证 trailers 使用 `&` 写入多个响应 Trailer
+
+test-trailers.local http://127.0.0.1:3000 trailers://(X-Trace=trace-1&X-Checksum=checksum-1)

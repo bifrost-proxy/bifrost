@@ -74,13 +74,13 @@ pub use protocol::*;
 pub use rule::{
     create_shared_store, expand_rule_references, expand_rule_references_strict,
     expand_rule_references_to_result, extract_inline_variables, parse_json_replace_pairs,
-    parse_line, parse_rule_header_pairs, parse_rules, parse_rules_tolerant, rule_reference_name,
-    validate_rule_syntax_report, validate_rules, validate_rules_with_context, CodeFix,
-    CompositeValueStore, MemoryValueStore, ParseError, ParseErrorSeverity, ParseResult,
-    RequestContext, RequestContextBuilder, ResolvedRule, ResolvedRules, Rule, RuleGroup,
-    RuleGroupManager, RuleParser, RuleReferenceError, RuleSyntaxGuidance, RuleSyntaxReport,
-    RulesResolver, ScriptReference, SharedValueStore, TemplateEngine, ValidationResult, ValueStore,
-    VariableInfo,
+    parse_line, parse_rule_header_pairs, parse_rule_key_value_pairs, parse_rules,
+    parse_rules_tolerant, rule_reference_name, validate_rule_syntax_report, validate_rules,
+    validate_rules_with_context, CodeFix, CompositeValueStore, MemoryValueStore, ParseError,
+    ParseErrorSeverity, ParseResult, RequestContext, RequestContextBuilder, ResolvedRule,
+    ResolvedRules, Rule, RuleGroup, RuleGroupManager, RuleParser, RuleReferenceError,
+    RuleSyntaxGuidance, RuleSyntaxReport, RulesResolver, ScriptReference, SharedValueStore,
+    TemplateEngine, ValidationResult, ValueStore, VariableInfo,
 };
 pub use shell_proxy::{ShellProxyManager, ShellProxyStatus, ShellType};
 pub use syntax::{

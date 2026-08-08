@@ -82,11 +82,12 @@ www.example.com resHeaders://X-Debug-Info=proxy-enabled
 
 ```
 pattern resCookies://name=value              # 内联格式
+pattern resCookies://(a=1&b=2)              # `&` 分隔多个 Cookie
 pattern resCookies://(name: value)           # 小括号格式（可包含空格）
 pattern resCookies://{varName}               # 引用内嵌值（推荐）
 ```
 
-> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多个 Cookie 或带属性的复杂值建议使用块变量
+> 单行内联或小括号值可用 `&` 分隔多个简单 Cookie。Cookie 属性仍必须使用下方 JSON 对象。Values 引用、多行内容、文件、远程内容及模板展开结果中的 `&` 保持为 Cookie 值数据。
 
 ### 基础示例
 
@@ -96,6 +97,9 @@ www.example.com resCookies://session=abc123
 
 # 小括号格式
 www.example.com resCookies://(token: xyz789)
+
+# 一条规则设置多个简单 Cookie
+www.example.com resCookies://(session=abc123&theme=dark)
 
 # 引用内嵌值（多个 Cookie，推荐）
 www.example.com resCookies://{my-cookies}
@@ -124,6 +128,7 @@ www.example.com resCookies://{auth-cookie}
 | ---------- | ----------------------------------- | --------------------------- |
 | 内联格式   | `test.com resCookies://session=abc` | Set-Cookie 包含 session=abc |
 | 小括号格式 | `test.com resCookies://(a: 1)`      | 响应包含 Set-Cookie         |
+| 多 Cookie  | `test.com resCookies://(a=1&b=2)`  | 响应包含两条 Set-Cookie     |
 
 ---
 
@@ -284,6 +289,7 @@ www.example.com resCharset://iso-8859-1
 
 ```txt
 pattern responseFor://value
+pattern trailers://(X-Trace=abc&X-Checksum=xyz)
 pattern trailers://{trailer-headers}
 ```
 
@@ -295,6 +301,9 @@ api.example.com responseFor://mock
 
 # 设置响应 trailers（使用内嵌值）
 api.example.com trailers://{debug-trailers}
+
+# 单行设置多个 trailers
+api.example.com trailers://(X-Trace=abc&X-Checksum=xyz)
 ```
 
 内嵌值定义：

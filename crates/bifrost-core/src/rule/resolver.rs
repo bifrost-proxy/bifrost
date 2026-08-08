@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::context::RequestContext;
 use super::template::TemplateEngine;
 use super::types::Rule;
-use super::{parse_rule_header_pairs, MemoryValueStore, ValueSource, ValueStore};
+use super::{parse_rule_key_value_pairs, MemoryValueStore, ValueSource, ValueStore};
 
 const DEFAULT_CACHE_CAPACITY: usize = 1000;
 
@@ -18,7 +18,7 @@ pub struct ResolvedRule {
     pub rule: Rule,
     pub captures: Option<Vec<String>>,
     pub resolved_value: String,
-    resolved_header_pairs: Option<Vec<(String, String)>>,
+    resolved_key_value_pairs: Option<Vec<(String, String)>>,
 }
 
 impl ResolvedRule {
@@ -56,32 +56,45 @@ impl ResolvedRule {
             let store = MemoryValueStore::from_hashmap(values.clone());
             rule.value_source.resolve_with_fallback(&store)
         };
-        // Header separators are syntax in the authored source, not in template
-        // output. Parse first, then expand each field independently.
-        let resolved_header_pairs = if matches!(
+        // Key/value separators are syntax in the authored source, not in
+        // template output. Parse first, then expand each field independently.
+        let resolved_key_value_pairs = if matches!(
             rule.protocol,
-            crate::protocol::Protocol::ReqHeaders | crate::protocol::Protocol::ResHeaders
+            crate::protocol::Protocol::ReqHeaders
+                | crate::protocol::Protocol::ResHeaders
+                | crate::protocol::Protocol::ReqCookies
+                | crate::protocol::Protocol::ResCookies
+                | crate::protocol::Protocol::Trailers
         ) {
-            parse_rule_header_pairs(&base_value, &rule.value_source).map(|pairs| {
-                pairs
-                    .into_iter()
-                    .map(|(name, value)| {
-                        (
-                            TemplateEngine::expand_with_context(
-                                &name,
-                                ctx,
-                                captures.as_deref(),
-                                values,
-                            ),
-                            TemplateEngine::expand_with_context(
-                                &value,
-                                ctx,
-                                captures.as_deref(),
-                                values,
-                            ),
-                        )
-                    })
-                    .collect()
+            parse_rule_key_value_pairs(&base_value, &rule.value_source).and_then(|pairs| {
+                // Attribute-bearing response cookies are structured JSON and
+                // must continue through the dedicated response-cookie parser.
+                if rule.protocol == crate::protocol::Protocol::ResCookies
+                    && response_cookie_json_has_attributes(&base_value)
+                {
+                    return None;
+                }
+                Some(
+                    pairs
+                        .into_iter()
+                        .map(|(name, value)| {
+                            (
+                                TemplateEngine::expand_with_context(
+                                    &name,
+                                    ctx,
+                                    captures.as_deref(),
+                                    values,
+                                ),
+                                TemplateEngine::expand_with_context(
+                                    &value,
+                                    ctx,
+                                    captures.as_deref(),
+                                    values,
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
             })
         } else {
             None
@@ -93,7 +106,7 @@ impl ResolvedRule {
             rule,
             captures,
             resolved_value,
-            resolved_header_pairs,
+            resolved_key_value_pairs,
         }
     }
 
@@ -102,7 +115,17 @@ impl ResolvedRule {
     /// Expanding each parsed name/value independently ensures an `&` produced by
     /// `${url}` or `${reqHeaders.*}` remains data and cannot become a separator.
     pub fn header_pairs(&self) -> Option<&[(String, String)]> {
-        self.resolved_header_pairs.as_deref()
+        matches!(
+            self.rule.protocol,
+            crate::protocol::Protocol::ReqHeaders | crate::protocol::Protocol::ResHeaders
+        )
+        .then_some(self.resolved_key_value_pairs.as_deref())
+        .flatten()
+    }
+
+    /// Return source-aware pairs for headers, cookies and trailers.
+    pub fn key_value_pairs(&self) -> Option<&[(String, String)]> {
+        self.resolved_key_value_pairs.as_deref()
     }
 
     pub fn new_simple(
@@ -113,6 +136,22 @@ impl ResolvedRule {
         let ctx = RequestContext::new();
         Self::new(rule, captures, &ctx, values)
     }
+}
+
+fn response_cookie_json_has_attributes(value: &str) -> bool {
+    let trimmed = value.trim();
+    let content = if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .as_object()
+                .is_some_and(|object| object.values().any(serde_json::Value::is_object))
+        })
 }
 
 #[derive(Debug, Clone, Default)]

@@ -43,7 +43,7 @@
 | `reqPrepend`   | ✅   | `request_modify/body.txt`, `advanced/body_size_strategy.txt`                   | 已覆盖                                         |
 | `reqAppend`    | ✅   | `request_modify/body.txt`, `advanced/body_size_strategy.txt`                   | 已覆盖                                         |
 | `reqReplace`   | ✅   | `request_modify/body.txt`, `advanced/body_size_strategy.txt`                   | 已覆盖                                         |
-| `reqCookies`   | ⚠️   | `request_modify/cookies.txt`                                                   | 已有基础夹具，边界断言仍偏少                   |
+| `reqCookies`   | ✅   | `request_modify/cookies.txt`                                                   | 基础写法、`&` 多 Cookie、Values 字面 `&` 边界已覆盖 |
 | `reqCors`      | 🔄   | `request_modify/req_cors.txt`                                                  | 本轮新增快捷模式与详细模式                     |
 | `reqDelay`     | ✅   | `response_modify/delay.txt`                                                    | 与响应延迟共用场景                             |
 | `reqSpeed`     | ✅   | `advanced/speed.txt`                                                           | 已覆盖                                         |
@@ -68,7 +68,7 @@
 | `resPrepend`    | ✅   | `response_modify/body.txt`, `advanced/body_size_strategy.txt`                                       | 已覆盖                                   |
 | `resAppend`     | ✅   | `response_modify/body.txt`, `advanced/body_size_strategy.txt`                                       | 已覆盖                                   |
 | `resReplace`    | ✅   | `response_modify/body.txt`, `response_modify/res_replace_json_object.txt`, `advanced/body_size_strategy.txt` | 已覆盖传统语法、Values JSON 对象与 `*/path` 匹配 |
-| `resCookies`    | ⚠️   | `response_modify/cookies.txt`                                                                       | 基础覆盖已有，组合断言仍偏少             |
+| `resCookies`    | ✅   | `response_modify/cookies.txt`                                                                       | 基础写法、`&` 多 Cookie 与 JSON 属性对象已覆盖 |
 | `resCors`       | ⚠️   | `response_modify/cors.txt`                                                                          | 已有基础夹具，详细字段与预检场景仍可加强 |
 | `resDelay`      | ✅   | `response_modify/delay.txt`                                                                         | 已覆盖                                   |
 | `resSpeed`      | ✅   | `advanced/speed.txt`                                                                                | 已覆盖                                   |
@@ -80,7 +80,7 @@
 | `responseFor`   | 🔄   | `response_modify/response_for.txt`                                                                  | 本轮补 `x-bifrost-response-for` 语义     |
 | `statusCode`    | ✅   | `response_modify/status.txt`                                                                        | 已覆盖                                   |
 | `replaceStatus` | ✅   | `response_modify/status.txt`                                                                        | 已覆盖                                   |
-| `trailers`      | ✅   | `response_modify/trailers.txt`                                                                      | 已覆盖                                   |
+| `trailers`      | ✅   | `response_modify/trailers.txt`                                                                      | 基础写法与 `&` 多 Trailer 已覆盖          |
 | `headerReplace` | ✅   | `advanced/header_replace.txt`                                                                       | 已覆盖                                   |
 | `cache`         | ✅   | `advanced/cache.txt`                                                                                | 已覆盖                                   |
 | `attachment`    | ✅   | `advanced/cache.txt`                                                                                | 已覆盖                                   |

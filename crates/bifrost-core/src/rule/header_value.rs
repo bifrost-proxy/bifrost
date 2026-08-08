@@ -12,7 +12,19 @@ pub fn parse_rule_header_pairs(
     value: &str,
     value_source: &ValueSource,
 ) -> Option<Vec<(String, String)>> {
-    parse_header_pairs(value, permits_ampersand_separator(value_source))
+    parse_rule_key_value_pairs(value, value_source)
+}
+
+/// Parse a source-aware key/value rule value.
+///
+/// `&` is syntax only for authored inline/parenthesized values. Resolved
+/// Values, files, remote content and multiline blocks retain literal `&`
+/// characters in their values.
+pub fn parse_rule_key_value_pairs(
+    value: &str,
+    value_source: &ValueSource,
+) -> Option<Vec<(String, String)>> {
+    parse_key_value_pairs(value, permits_ampersand_separator(value_source))
 }
 
 fn permits_ampersand_separator(value_source: &ValueSource) -> bool {
@@ -22,7 +34,7 @@ fn permits_ampersand_separator(value_source: &ValueSource) -> bool {
     )
 }
 
-fn parse_header_pairs(value: &str, split_ampersands: bool) -> Option<Vec<(String, String)>> {
+fn parse_key_value_pairs(value: &str, split_ampersands: bool) -> Option<Vec<(String, String)>> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -113,7 +125,7 @@ fn json_scalar_to_header_value(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rule_header_pairs;
+    use super::{parse_rule_header_pairs, parse_rule_key_value_pairs};
     use crate::rule::ValueSource;
 
     fn parse(value: &str) -> Option<Vec<(String, String)>> {
@@ -198,6 +210,48 @@ mod tests {
         assert_eq!(
             parse("Referer=https://example.test/"),
             Some(vec![("Referer".into(), "https://example.test/".into())])
+        );
+    }
+
+    #[test]
+    fn rule_key_values_split_inline_ampersands_but_not_referenced_values() {
+        assert_eq!(
+            parse_rule_key_value_pairs(
+                "sessionid=xxx&a=c&b=two=parts",
+                &ValueSource::parse("sessionid=xxx&a=c&b=two=parts"),
+            ),
+            Some(vec![
+                ("sessionid".into(), "xxx".into()),
+                ("a".into(), "c".into()),
+                ("b".into(), "two=parts".into()),
+            ])
+        );
+        assert_eq!(
+            parse_rule_key_value_pairs(
+                "sessionid=xxx&a=c",
+                &ValueSource::ValueRef("cookies".into()),
+            ),
+            Some(vec![("sessionid".into(), "xxx&a=c".into())])
+        );
+        for source in [
+            ValueSource::FilePath("/tmp/cookies.txt".into()),
+            ValueSource::RemoteUrl("https://example.test/cookies".into()),
+        ] {
+            assert_eq!(
+                parse_rule_key_value_pairs("sessionid=xxx&a=c", &source),
+                Some(vec![("sessionid".into(), "xxx&a=c".into())]),
+                "source {source:?}"
+            );
+        }
+        assert_eq!(
+            parse_rule_key_value_pairs(
+                "sessionid=xxx&a=c\nmode=test&literal=yes",
+                &ValueSource::Inline("multiline".into()),
+            ),
+            Some(vec![
+                ("sessionid".into(), "xxx&a=c".into()),
+                ("mode".into(), "test&literal=yes".into()),
+            ])
         );
     }
 }
