@@ -87,7 +87,8 @@ use super::body_metadata::{
     streaming_res_body_mode, BodyMode,
 };
 use super::breakpoint::{
-    apply_edited_response_status, body_limit, response_breakpoint_can_buffer_body,
+    apply_edited_response_status, apply_edited_response_status_and_body, body_limit,
+    response_breakpoint_can_buffer_body,
 };
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
@@ -2871,32 +2872,28 @@ pub async fn handle_http_request(
             .map(|pq| pq.as_str())
             .unwrap_or("/");
 
-        if !breakpoint_url_edited {
-            if let Some(ref host_rule) = resolved_rules.host {
-                if let Some(target_path) =
-                    crate::utils::url::extract_target_path_from_host_rule(host_rule)
-                {
-                    let host_protocol = resolved_rules.host_protocol.unwrap_or(Protocol::Host);
-                    if crate::utils::url::host_rule_uses_exact_target_path(
+        if let Some(ref host_rule) = resolved_rules.host {
+            if let Some(target_path) =
+                crate::utils::url::extract_target_path_from_host_rule(host_rule)
+            {
+                let host_protocol = resolved_rules.host_protocol.unwrap_or(Protocol::Host);
+                if crate::utils::url::host_rule_uses_exact_target_path(
+                    &resolved_rules.rules,
+                    host_protocol,
+                    host_rule,
+                ) {
+                    target_path
+                } else {
+                    let source_path = crate::utils::url::find_host_rule_source_path(
                         &resolved_rules.rules,
                         host_protocol,
                         host_rule,
-                    ) {
-                        target_path
-                    } else {
-                        let source_path = crate::utils::url::find_host_rule_source_path(
-                            &resolved_rules.rules,
-                            host_protocol,
-                            host_rule,
-                        );
-                        crate::utils::url::rewrite_path_with_prefix(
-                            original_path,
-                            source_path.as_deref(),
-                            &target_path,
-                        )
-                    }
-                } else {
-                    original_path.to_string()
+                    );
+                    crate::utils::url::rewrite_path_with_prefix(
+                        original_path,
+                        source_path.as_deref(),
+                        &target_path,
+                    )
                 }
             } else {
                 original_path.to_string()
@@ -2905,6 +2902,7 @@ pub async fn handle_http_request(
             original_path.to_string()
         }
     };
+    #[rustfmt::skip] let path = if breakpoint_url_edited { processed_uri.path_and_query().map_or_else(|| "/".to_string(), |value| value.as_str().to_string()) } else { path };
 
     let upstream_authority = if (use_tls && port == 443) || (!use_tls && port == 80) {
         host.clone()
@@ -3491,18 +3489,8 @@ pub async fn handle_http_request(
                 && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
         })
         .unwrap_or(false);
-    let breakpoint_max_body_bytes = admin_state
-        .as_ref()
-        .map(|state| state.breakpoint_manager.max_body_bytes())
-        .unwrap_or(0);
-    let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(
-        response_breakpoint_enabled,
-        is_websocket,
-        is_sse,
-        skip_binary_recording,
-        res_content_length,
-        breakpoint_max_body_bytes,
-    );
+    #[rustfmt::skip] let breakpoint_max_body_bytes = admin_state.as_ref().map_or(0, |state| state.breakpoint_manager.max_body_bytes());
+    #[rustfmt::skip] let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(response_breakpoint_enabled, is_websocket, is_sse, skip_binary_recording, res_content_length, breakpoint_max_body_bytes);
     let response_breakpoint_header_only = response_breakpoint_enabled
         && !is_websocket
         && !is_sse
@@ -3806,16 +3794,8 @@ pub async fn handle_http_request(
                     .get(hyper::header::CONTENT_TYPE)
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string);
-                state.update_traffic_by_id(record_id, move |record| {
-                    record.status = final_status;
-                    record.content_type = final_content_type.clone();
-                    record.response_headers = Some(final_headers.clone());
-                    if no_body {
-                        record.response_size = 0;
-                        record.download_bytes = 0;
-                        record.response_body_ref = None;
-                    }
-                });
+                #[rustfmt::skip] let update_record = move |record: &mut TrafficRecord| super::breakpoint::apply_response_breakpoint_record_state(record, final_status, final_content_type.clone(), final_headers.clone(), no_body);
+                state.update_traffic_by_id(record_id, update_record);
             }
             if no_body {
                 return Ok(Response::from_parts(res_parts, full_body(Bytes::new())));
@@ -4307,10 +4287,8 @@ pub async fn handle_http_request(
         )
         .await;
 
-        let no_body = apply_edited_response_status(&mut res_parts, &method, outcome.status);
-        if no_body {
-            final_res_body = Bytes::new();
-        } else if outcome.body_replaced {
+        #[rustfmt::skip] let no_body = apply_edited_response_status_and_body(&mut res_parts, &method, outcome.status, &mut final_res_body);
+        if !no_body && outcome.body_replaced {
             normalize_res_headers(
                 &mut res_parts,
                 buffered_res_body_mode(final_res_body.len(), !resolved_rules.trailers.is_empty()),
@@ -4349,15 +4327,7 @@ pub async fn handle_http_request(
         record.request_size =
             calculate_request_size(&method, &record_url, &req_headers, request_body_size);
         record.upload_bytes = request_body_size;
-        let final_response_size = if is_no_body_response(res_parts.status, &method) {
-            0
-        } else {
-            calculate_response_size(
-                res_parts.status.as_u16(),
-                &res_headers,
-                final_res_body.len(),
-            )
-        };
+        #[rustfmt::skip] let final_response_size = if is_no_body_response(res_parts.status, &method) { 0 } else { calculate_response_size(res_parts.status.as_u16(), &res_headers, final_res_body.len()) };
         record.response_size = final_response_size;
         record.download_bytes = final_res_body.len();
         record.duration_ms = total_ms;
@@ -4691,14 +4661,7 @@ fn extract_host_port(uri: &Uri, rules: &ResolvedRules, is_https: bool) -> Result
     extract_uri_host_port(uri, is_https)
 }
 
-fn extract_uri_host_port(uri: &Uri, is_https: bool) -> Result<(String, u16)> {
-    let host = uri
-        .host()
-        .ok_or_else(|| BifrostError::Network("Missing host in URI".to_string()))?
-        .to_string();
-    let port = uri.port_u16().unwrap_or(if is_https { 443 } else { 80 });
-    Ok((host, port))
-}
+#[rustfmt::skip] fn extract_uri_host_port(uri: &Uri, is_https: bool) -> Result<(String, u16)> { let host = uri.host().ok_or_else(|| BifrostError::Network("Missing host in URI".to_string()))?.to_string(); let port = uri.port_u16().unwrap_or(if is_https { 443 } else { 80 }); Ok((host, port)) }
 
 fn should_use_upstream_proxy(rules: &ResolvedRules) -> bool {
     rules.proxy.is_some() && (rules.ignored.host || rules.host.is_none())

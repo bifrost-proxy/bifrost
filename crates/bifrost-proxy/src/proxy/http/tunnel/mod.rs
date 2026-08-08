@@ -50,7 +50,8 @@ use super::body_metadata::{
 };
 use super::breakpoint::breakpoint_tls_interception_required as bp_tls;
 use super::breakpoint::{
-    apply_edited_response_status, body_read_error_response, response_breakpoint_can_buffer_body,
+    apply_edited_response_status, apply_edited_response_status_and_body, body_read_error_response,
+    response_breakpoint_can_buffer_body,
 };
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
@@ -372,6 +373,10 @@ pub fn get_tls_client_config_without_alpn(unsafe_ssl: bool) -> Arc<ClientConfig>
 
 fn is_standard_tls_intercept_port(port: u16) -> bool {
     matches!(port, 443 | 8443)
+}
+
+fn should_sniff_tls_payload(client_alpn: Option<&[u8]>, port: u16) -> bool {
+    client_alpn.is_none() || !is_standard_tls_intercept_port(port)
 }
 
 fn tls_authority(host: &str, port: u16, include_default_port: bool) -> String {
@@ -1488,9 +1493,7 @@ async fn tls_intercept_tunnel_with_cancel(
             return Err(BifrostError::Tls(format!("TLS accept failed: {e}")));
         }
     };
-    let client_alpn = client_tls.get_ref().1.alpn_protocol().map(|p| p.to_vec()); // HTTP/1.1 may omit ALPN, notably Schannel for IP targets.
-    let should_sniff_payload =
-        client_alpn.is_none() || !is_standard_tls_intercept_port(original_port);
+    #[rustfmt::skip] let (client_alpn, should_sniff_payload) = { let alpn = client_tls.get_ref().1.alpn_protocol().map(|p| p.to_vec()); let sniff = should_sniff_tls_payload(alpn.as_deref(), original_port); (alpn, sniff) }; // HTTP/1.1 may omit ALPN, notably Schannel for IP targets.
 
     if verbose_logging {
         debug!(
@@ -3957,14 +3960,7 @@ async fn handle_intercepted_request_with_protocol(
     let breakpoint_max_body_bytes = admin_state
         .as_ref()
         .map_or(0, |state| state.breakpoint_manager.max_body_bytes());
-    let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(
-        response_breakpoint_enabled,
-        is_websocket,
-        is_sse,
-        skip_binary_recording,
-        res_content_length,
-        breakpoint_max_body_bytes,
-    );
+    #[rustfmt::skip] let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(response_breakpoint_enabled, is_websocket, is_sse, skip_binary_recording, res_content_length, breakpoint_max_body_bytes);
     let response_breakpoint_header_only = response_breakpoint_enabled
         && !is_websocket
         && !is_sse
@@ -4287,16 +4283,8 @@ async fn handle_intercepted_request_with_protocol(
                     .get(hyper::header::CONTENT_TYPE)
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string);
-                state.update_traffic_by_id(&record_id, move |record| {
-                    record.status = final_status;
-                    record.content_type = final_content_type.clone();
-                    record.response_headers = Some(final_headers.clone());
-                    if no_body {
-                        record.response_size = 0;
-                        record.download_bytes = 0;
-                        record.response_body_ref = None;
-                    }
-                });
+                #[rustfmt::skip] let update_record = move |record: &mut TrafficRecord| super::breakpoint::apply_response_breakpoint_record_state(record, final_status, final_content_type.clone(), final_headers.clone(), no_body);
+                state.update_traffic_by_id(&record_id, update_record);
             }
             if no_body {
                 return Ok(Response::from_parts(res_parts, full_body(Bytes::new())));
@@ -4403,11 +4391,8 @@ async fn handle_intercepted_request_with_protocol(
                     )
                     .await;
 
-                    let no_body =
-                        apply_edited_response_status(&mut res_parts, &method_str, outcome.status);
-                    if no_body {
-                        final_body = Bytes::new();
-                    } else if outcome.body_replaced {
+                    #[rustfmt::skip] let no_body = apply_edited_response_status_and_body(&mut res_parts, &method_str, outcome.status, &mut final_body);
+                    if !no_body && outcome.body_replaced {
                         normalize_res_headers(
                             &mut res_parts,
                             buffered_res_body_mode(
@@ -5091,9 +5076,7 @@ async fn handle_intercepted_request_with_protocol(
             &mut final_body,
         )
         .await;
-        if apply_edited_response_status(&mut res_parts, &method_str, outcome.status) {
-            final_body = Bytes::new();
-        }
+        #[rustfmt::skip] apply_edited_response_status_and_body(&mut res_parts, &method_str, outcome.status, &mut final_body);
     }
 
     normalize_res_headers(
@@ -8192,6 +8175,9 @@ mod coverage_boost {
         assert!(is_standard_tls_intercept_port(8443));
         assert!(!is_standard_tls_intercept_port(80));
         assert!(!is_standard_tls_intercept_port(0));
+        assert!(should_sniff_tls_payload(None, 443));
+        assert!(!should_sniff_tls_payload(Some(b"h2"), 443));
+        assert!(should_sniff_tls_payload(Some(b"http/1.1"), 9443));
     }
 
     #[test]
