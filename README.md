@@ -17,6 +17,8 @@
 
 Bifrost 是一个用 Rust 编写的高性能，AI 友好的代理服务器，灵感来源于 Whistle。它提供请求拦截、规则修改、TLS 拦截、脚本扩展、流量查看、请求重放以及 Web UI 管理能力。
 
+飞书 IM Gateway 支持在同一群聊中运行多个独立机器人/Agent 线程：无 `@` 的 slash 命令广播给群内各机器人，`@` 指定机器人后仅目标机器人消费；引用历史文本、交互卡片或 CardKit 输出时会通过飞书消息读取能力恢复可见内容。`/q`、`/pwd`、`/runner` 不带参数时分别查询当前线程队列、工作目录和有效 Runner。群会话、上下文游标和绑定持久化在 SQLite，不依赖单进程内存共享。完整权限与命令说明见 [`docs/cli.md`](docs/cli.md#im-gatewayim)。
+
 ## 快速开始
 
 安装 CLI；在 macOS 和 Windows 上同时自动安装桌面 App：

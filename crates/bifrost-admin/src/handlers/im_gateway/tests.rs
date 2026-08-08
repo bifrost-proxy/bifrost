@@ -1176,6 +1176,7 @@ pub(super) async fn codex_fast_commands_cover_busy_idle_modes_and_rejections() {
                 event: &idle_event,
                 message_log_store: &service.message_log_store,
                 agent_session_manager: &service.agent_session_manager,
+                queue_manager: &service.queue_manager,
             },
         )
         .await
@@ -2308,6 +2309,8 @@ pub(super) async fn rich_card_builder_uses_image_key_and_markdown() {
 }
 
 mod provider_agent_tests;
+mod status_query_tests;
+mod thread_query_tests;
 
 #[tokio::test(flavor = "current_thread")]
 pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled_default_flag() {

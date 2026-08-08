@@ -20,6 +20,9 @@ use crate::im_gateway::types::{
     ProviderValidation, SendOptions, SendResult, UploadedImage,
 };
 
+mod message_read;
+pub use message_read::FeishuFetchedMessage;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -2270,33 +2273,7 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         .and_then(|content_str| serde_json::from_str::<serde_json::Value>(content_str).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let mentions = message
-        .get("mentions")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|mention| ImMention {
-            key: mention
-                .get("key")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            open_id: mention
-                .get("id")
-                .and_then(|id| id.get("open_id"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            name: mention
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            tenant_key: mention
-                .get("tenant_key")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            is_bot: false,
-        })
-        .collect::<Vec<_>>();
+    let mentions = parse_feishu_mentions(message.get("mentions"));
 
     // Extract text content from message.content. Feishu rich text (`post`)
     // stores plain text in nested `content` arrays rather than top-level text.
@@ -2427,6 +2404,37 @@ fn json_u64_from_string_or_number(value: &serde_json::Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn parse_feishu_mentions(value: Option<&serde_json::Value>) -> Vec<ImMention> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|mention| ImMention {
+            key: mention
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            open_id: mention
+                .get("id")
+                .and_then(|id| {
+                    id.as_str()
+                        .or_else(|| id.get("open_id").and_then(serde_json::Value::as_str))
+                })
+                .map(str::to_string),
+            name: mention
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            tenant_key: mention
+                .get("tenant_key")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            is_bot: false,
+        })
+        .collect()
 }
 
 fn json_non_empty_string(value: Option<&serde_json::Value>) -> Option<String> {

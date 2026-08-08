@@ -47,6 +47,7 @@
 | TC-COV-22 | 低成本 working-tree changed-lines PASS / FAIL 真实链路 | gate |
 | TC-COV-23 | 无生产 Rust 变更时快速跳过本地增量 coverage | performance |
 | TC-COV-24 | 通用 Shell runner 未安装 cargo-llvm-cov 时明确跳过真实 fixture | regression |
+| TC-COV-25 | 拆分 test module 不污染生产 changed-lines 分类 | regression |
 
 ## 用例细节
 
@@ -491,6 +492,26 @@ PATH="$fixture_path:/usr/bin:/bin:/usr/sbin:/sbin" \
 不会要求普通 Shell E2E runner 重复安装插桩工具。真实 fixture 仍在已安装工具的本地环境
 执行，完整 Coverage job 仍执行 90% 门禁。
 
+### TC-COV-25 仅排除真实 `#[cfg(test)]` 拆分模块
+
+**步骤**：
+
+```bash
+python3 -m unittest \
+  scripts.ci.tests.test_coverage_changed \
+  scripts.ci.tests.test_coverage_diff -v
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+make coverage-changed
+```
+
+**预期**：两个 coverage 工具只把被父文件以精确 `#[cfg(test)] mod tests;` 声明的
+`crates/a/src/tests.rs` 与 `crates/a/src/feature/tests/nested.rs` 识别为仅测试模块并排除；
+由普通 `mod runtime_tests;` 引入的同名运行时模块仍识别为生产 Rust；带
+`#[path = "support/suite.rs"]` 的测试模块按显式相对路径排除该文件及其子模块树。静态与 Python
+契约通过；当前真实业务生产改动的 changed-lines 覆盖率不少于 95%，且拆分 test
+module 不出现在 `unmeasured_files`，最终结果不是 `INCOMPLETE`。所有测试只使用本机临时
+Git workspace、Cargo 缓存与 `127.0.0.1` fixture，不连接飞书或任何公网业务域名。
+
 ## 执行记录
 
 | 用例 ID | 执行人 | 结果 | 备注 |
@@ -509,6 +530,7 @@ PATH="$fixture_path:/usr/bin:/bin:/usr/sbin:/sbin" \
 | TC-COV-22 | Codex | ✅ | 2026-08-07：`test_coverage_pipeline_contract.sh` 在临时单 crate Git workspace 真实运行快速预检；有测试的 worktree 改动为 `100.00% (4/4)` 并通过 95% 门禁，随后追加未覆盖生产函数时原命令非零退出、打印源文件缺口；第二轮日志确认旧 profraw 被清理而编译 artifacts 保留。完整契约同时通过 272 个 Shell 语法、40 个 coverage/CI 工具单测、10 个 capability 和三分片平衡检查。 |
 | TC-COV-23 | Codex | ✅ | 2026-08-07：当前任务没有 `crates/*/src/**/*.rs` 生产 Rust 变化；执行 `make coverage-changed` 在 0.2 秒内退出 0，输出 `No changed production Rust files in working tree; coverage preflight skipped.`，未启动 cargo metadata、编译或测试。 |
 | TC-COV-24 | Codex | ✅ | 2026-08-07：首轮 CI 精确日志发现普通 Linux Shell runner 未安装 `cargo-llvm-cov`，导致真实 fixture 被误报为 E2E 失败；用仅暴露 toolchain `cargo`、不暴露插件的隔离 PATH 复现后，静态/Python/capability/shard 契约全部执行，输出明确 SKIP 并退出 0。已安装插件的正常本地链路仍真实执行 PASS/FAIL fixture，远端完整 Coverage job 90% 门禁已成功。 |
+| TC-COV-25 | Codex | ✅ | 2026-08-08：在 `CARGO_NET_OFFLINE=true`、公网代理固定为不可达 `127.0.0.1:9`、仅放行 loopback 的环境中执行。专项工具测试确认普通 `mod runtime_tests;` 下的 `runtime_tests.rs` 即使名称含 tests 仍保持生产分类，精确 `#[cfg(test)] mod tests;` 与 `#[path = "support/suite.rs"] mod explicit_tests;` 都只排除真实测试文件及子模块树；完整 pipeline contract 同步验证分类规则。正式业务 `make coverage-changed` 为 96.02%（507/528）且无拆分 test module `unmeasured_files`。测试未连接飞书或任何公网业务域名。 |
 | TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% CI 门禁段落，并明确本地默认不跑全量 coverage |
 | TC-COV-08 | Codex | ✅ | design/coverage-90.md 已落地 |
 

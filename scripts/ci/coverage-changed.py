@@ -16,12 +16,19 @@ import re
 import shutil
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
+EXTERNAL_TEST_MODULE_RE = re.compile(
+    r"#\[cfg\(test\)\](?P<attrs>(?:\s*#\[[^\]]+\])*)\s*"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
+    re.MULTILINE,
+)
+PATH_ATTR_RE = re.compile(r'#\[path\s*=\s*"([^"]+)"\]')
 CHANGED_LINES_MIN_RE = re.compile(
     r"^\s*changed_lines_min\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$"
 )
@@ -29,6 +36,50 @@ CHANGED_LINES_MIN_RE = re.compile(
 
 class PreflightError(RuntimeError):
     """A user-actionable local preflight configuration error."""
+
+
+@lru_cache(maxsize=None)
+def external_test_module_roots(repo_root: Path) -> tuple[Path, ...]:
+    """Resolve only modules actually declared behind exact ``#[cfg(test)]``."""
+    roots: set[Path] = set()
+    crates_root = repo_root / "crates"
+    if not crates_root.is_dir():
+        return ()
+    for source_path in crates_root.glob("*/src/**/*.rs"):
+        source = source_path.read_text(encoding="utf-8")
+        module_dir = (
+            source_path.parent
+            if source_path.stem in {"lib", "main", "mod"}
+            else source_path.parent / source_path.stem
+        )
+        for declaration in EXTERNAL_TEST_MODULE_RE.finditer(source):
+            explicit_path = PATH_ATTR_RE.search(declaration.group("attrs"))
+            if explicit_path is not None:
+                module_file = (source_path.parent / explicit_path.group(1)).resolve()
+                roots.add(module_file)
+                if module_file.suffix == ".rs":
+                    roots.add(module_file.with_suffix(""))
+                continue
+            module_name = declaration.group("name")
+            roots.add((module_dir / f"{module_name}.rs").resolve())
+            roots.add((module_dir / module_name).resolve())
+    return tuple(sorted(roots))
+
+
+def is_production_rust_path(path: str, repo_root: Path = REPO_ROOT) -> bool:
+    """Return whether a Rust source path belongs to production code.
+
+    A directory named ``tests`` is not sufficient evidence: Rust permits normal
+    runtime modules with that name. Exclude a file tree only when a source file
+    actually declares its external module behind exact ``#[cfg(test)]``.
+    """
+    if not PRODUCTION_RUST_RE.match(path):
+        return False
+    absolute = (repo_root / path).resolve()
+    return not any(
+        absolute == root or root in absolute.parents
+        for root in external_test_module_roots(repo_root.resolve())
+    )
 
 
 def run(
@@ -115,7 +166,7 @@ def changed_production_paths(
         if untracked.returncode != 0:
             raise PreflightError(untracked.stderr.strip() or "git ls-files failed")
         paths.update(untracked.stdout.splitlines())
-    return sorted(path for path in paths if PRODUCTION_RUST_RE.match(path))
+    return sorted(path for path in paths if is_production_rust_path(path, repo_root))
 
 
 def load_metadata(repo_root: Path) -> dict[str, Any]:

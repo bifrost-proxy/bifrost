@@ -51,8 +51,10 @@ Provider 长连接只负责接收事件，不把全局接收器借给任何一�
 - Provider 主循环始终继续接收新事件；启动 Runner 只注册 mailbox 并派生 Session 任务，不在主循环内等待 Runner 完成。
 - Session 任务完成通知携带单调 generation。旧任务延迟完成时只能移除同 generation 的 mailbox，不能误删已经重建的新任务。
 - Provider 输入通道正常关闭时停止接收新消息，但等待已启动的 Session 任务完成并排空收尾消息；event-loop 被显式取消时才终止仍活跃的任务。异常取消或 panic 会释放 Session active 标记，避免永久 busy。
+- Runner 完成最后一次 Guide/Queue 检查、确认没有下一条消息后，必须立即关闭 mailbox receiver，再执行进度卡、历史和 Session 的异步收尾。关闭前已经送达但尚未消费的事件由 task wrapper 按顺序 drain；关闭后 sender 失败的事件由 registry 暂存，两类事件都在 completion 时交回 Provider 主循环。
 - mailbox receiver 关闭后的消息暂存在同 generation 的收尾队列；completion 先回放 receiver 中更早的缓冲消息，再回放关闭后消息并创建替代任务，不能因完成通知竞态而丢失或打乱同 Session 顺序。
 - 并发 E2E 使用显式 release 文件保持 mock Runner 活跃，并在释放前等待同 Session 的最后一条背景消息进入 SQLite 账本。测试不得依赖固定 sleep 恰好覆盖 CI 调度延迟，否则会把 Runner 已结束后的合法空闲态行为误报为活跃态审计回归。
+- 飞书假 OpenAPI 只允许 debug 构建在显式 `BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1` 时访问。CI shell 矩阵复用的 production release 必须跳过该假服务场景，不能为了黑盒测试放宽生产 host allowlist，也不能把测试凭证发到官方接口。E2E pipeline contract 会扫描全部使用该开关的 shell 脚本，强制它们声明 release guard 和统一的 skip 标记。完整群会话链路由 focused debug E2E 覆盖；release-safe 单元测试继续覆盖 URL 规范化、引用卡片读取、CardKit 回退和权限错误矩阵。
 
 ## 模型输入
 
@@ -63,10 +65,10 @@ SQLite Turn 仍保存完整的消息 ID、序号、时间、mentions、游标和
 - 已经由 Bifrost 处理过的 `/status`、`/help`、`/cwd`、`/runner` 等管理命令不进入模型背景；
 - 如果没有收到有效的累积消息，完全省略背景区域；这既可能代表群内没有新聊天，也可能代表应用没有 `im:message.group_msg` 权限、飞书未投递普通群消息；
 - 最后一条触发消息只出现一次，格式同样是 `<at id=发送者 open_id>显示名</at>：消息内容`。
-- 回复消息带有 `parent_id` 时，使用 `(provider_id, chat_id, parent_id)` 从本地账本精确读取被引用消息，并以“本轮主要处理对象”单独提供给模型；它可以早于当前增量游标。若它同时位于当前增量区间，则从普通背景中排除，避免重复注入。
+- 回复消息带有 `parent_id` 且当前 Provider 确认该消息应由自己消费时，通过飞书 `GET /im/v1/messages/{parent_id}` 读取权威消息内容，再以当前 Provider 的本地账本作为 Prompt 组装缓存；不同机器人可以部署在不同机器上，不依赖共享进程内存、本地 JSON 或共享 SQLite。返回的 `chat_id` 必须与当前群一致，跨群引用直接拒绝。若它同时位于当前增量区间，则从普通背景中排除，避免重复注入。
 - `回复某条消息 + 只 @机器人` 是有效 Agent 输入。此时被引用消息本身作为主消息，并明确告诉模型用户未附加文字、应直接理解和回应主消息；不能因去除 mention 后文本为空而发送帮助信息。
-- 如果 `parent_id` 在当前 Provider 的同一群账本中不存在，则不得跨群查询或泄露其他群消息，也不做隐式高权限补拉。网关直接回复“无法看到被引用消息内容，请重新发送或补充”，不启动 Runner、不让模型猜测；该系统提示对应的 Turn 正常完成，保证游标和重投幂等。
-- 被引用消息首版支持本地账本已有的文本、mentions 和附件数量占位；不会为历史图片、文件或音视频自动补拉二进制资源。完整引用附件解析属于后续显式能力扩展。
+- 飞书读取失败时不得让模型猜测。权限不足时直接告知用户在开放平台申请 `im:message:readonly` 与 `im:message.group_msg`，然后创建并发布新版本；网络或 API 错误也按真实原因返回。
+- 交互卡片会提取标题、Markdown、正文和折叠区等可见文本，忽略按钮、URL 和动作 value。CardKit 首次只返回 `card_id` 时再读取默认消息表示，获得用户当前可见内容。历史图片、文件或音视频不会自动补拉二进制资源。
 
 `<at>` 是模型后续准确 @ 原发送人的稳定标识。飞书消息事件不保证携带发送者显示名；有名称时使用 `<at id=open_id>名称</at>`，没有名称时使用飞书最简形式 `<at id=open_id></at>`，不把冗长 open_id 复制到可见文本中。标签的 `id` 始终保持发送者 open_id；id 和显示名在序列化前进行转义，避免破坏结构或注入伪造标签。
 
@@ -76,7 +78,9 @@ SQLite Turn 仍保存完整的消息 ID、序号、时间、mentions、游标和
 
 群聊不新增 `/bind` 等别名。路径仍使用 `/cwd <绝对路径>`，Runner、模型、推理强度、队列、Guide、停止和重置均使用现有单聊命令：
 
-`/help`、`/status`、`/cwd`、`/runner`、`/new`、`/models`、`/model`、`/efforts`、`/effort`、`/clear`、`/reset`、`/q`、`/rq`、`/stop`、`/g`。
+`/help`、`/status`、`/pwd`、`/cwd`、`/runner`、`/new`、`/models`、`/model`、`/efforts`、`/effort`、`/clear`、`/reset`、`/q`、`/rq`、`/stop`、`/g`。其中 `/q` 无参数列出当前线程队列，`/pwd` 输出当前线程工作目录，`/runner` 无参数输出当前有效 Runner。
+
+群里没有 `@` 的 slash 命令广播给所有机器人；一旦出现明确 `@`，只有被提及机器人才消费。这个判断先于命令分类和引用读取，因此未被提及的 Provider 不读取引用、不修改本地状态，也不执行命令。
 
 群聊 `/cwd` 和 `/runner` 只更新当前群 binding；单聊仍保持 provider 级兼容行为。模型与推理强度继续使用已有的 session state，并因群 Session Key 天然隔离。
 
@@ -101,13 +105,12 @@ Runner 回复中的相对图片和文件链接同样以当前群 binding 的工�
 - 回复群消息需要 `im:message:send_as_bot`（或包含发送能力的 `im:message`）；读取消息资源需要 `im:resource`。
 - `GET /open-apis/bot/v3/info` 用于解析当前机器人 `open_id`，从而区分“@机器人”和“@其他成员”。
 - @ 判定优先严格比较 mention `open_id` 与当前 Provider 的 bot `open_id`；即使两个机器人重名，也不能用名称覆盖不匹配的 `open_id`，避免同群多机器人串触发。
+- 未带 bot 前缀的 slash 始终广播；`/q ask @群成员 review` 中普通成员 mention 是参数而不是路由目标。只有 `@Bot /command` 的前缀形式或 adapter 明确标记的 bot mention 才抑制其他 Provider。
 - 接收事件中的 `sender_id.open_id` 是发送者身份主键；每条历史消息和主动请求都以飞书 `<at id=...>...</at>` 结构带入 Prompt。显示名不可用时使用空标签正文 `<at id=open_id></at>`，不因额外通讯录权限缺失阻断群 Session。
 - 消息事件只携带 `chat_id`；首次初始化群 Session 时调用 `GET /open-apis/im/v1/chats/{chat_id}` 解析群名称，写入 binding 并随每轮结构化输入提供给 Agent。应用需具备“获取群组信息”（如 `im:chat:readonly`）能力；机器人必须在目标群内。
 - 飞书提供 `GET /open-apis/im/v1/messages` 获取会话历史消息；如启用断线补偿，还需要 `im:message:readonly`，且只能读取应用有权访问的会话范围。
 
-默认模型输入仍只使用 Bifrost 本地增量账本。Bifrost 只在群 Session 首次启动对话的用户 Prompt 中提供群名称和群 ID；不注入 provider、Session Key、消息 ID、游标等内部字段，也不在业务 Prompt 中指定 Agent 应使用何种工具。运行环境安装的工具能力及规则由对应 Skill 独立注入 Context。
-
-引用消息同样默认只查本地账本，不主动调用消息查询 API。这样不增加 `im:message.group_msg` 等群消息读取权限，也不把一次 @ 触发绑定到额外网络请求、限流或历史消息可见性。机器人离线期间未收到、已经删除或未被当前应用授权接收的引用消息会收到确定性的不可见提示，不误判成空消息帮助请求，也不消耗 Runner。
+默认增量群背景仍使用每个 Provider 自己的本地账本；引用消息则以飞书消息读取 API 为权威来源，读取后只缓存到本 Provider 的账本做本轮 Prompt 组装。Bifrost 只在群 Session 首次启动对话的用户 Prompt 中提供群名称和群 ID；不注入 provider、Session Key、消息 ID、游标等内部字段，也不在业务 Prompt 中指定 Agent 应使用何种工具。运行环境安装的工具能力及规则由对应 Skill 独立注入 Context。
 
 ## 卡片响应样式
 

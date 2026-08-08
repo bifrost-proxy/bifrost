@@ -112,6 +112,199 @@ fn group_trigger_classifier_only_accepts_current_bot_or_slash() {
 }
 
 #[test]
+fn ordinary_human_mentions_remain_ambient_context() {
+    let bot = FeishuBotIdentity {
+        open_id: "ou_bot".to_string(),
+        name: Some("Bifrost".to_string()),
+    };
+    let human_mention = ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_alice".to_string()),
+        name: Some("Alice".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    };
+    let event = group_event(
+        "human-mention",
+        "group",
+        "sender",
+        "@_user_1 please review",
+        vec![human_mention],
+        1,
+    );
+
+    assert_eq!(
+        classify_group_message(event.message.as_ref().unwrap(), Some(&bot), false),
+        GroupMessageDisposition::Ambient
+    );
+}
+
+#[test]
+fn addressed_slash_only_runs_for_the_mentioned_bot_while_unmentioned_is_broadcast() {
+    let bot_a = FeishuBotIdentity {
+        open_id: "ou_bot_a".to_string(),
+        name: Some("Bot A".to_string()),
+    };
+    let bot_b = FeishuBotIdentity {
+        open_id: "ou_bot_b".to_string(),
+        name: Some("Bot B".to_string()),
+    };
+    let mention_a = ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_bot_a".to_string()),
+        name: Some("Bot A".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    };
+    let addressed = group_event(
+        "addressed-status",
+        "shared-chat",
+        "u1",
+        "@_user_1 /status",
+        vec![mention_a],
+        1,
+    );
+
+    assert_eq!(
+        classify_group_message(addressed.message.as_ref().unwrap(), Some(&bot_a), false),
+        GroupMessageDisposition::SystemCommand {
+            command: "/status".to_string(),
+            reset_context: false,
+        }
+    );
+    assert_eq!(
+        classify_group_message(addressed.message.as_ref().unwrap(), Some(&bot_b), false),
+        GroupMessageDisposition::AddressedElsewhere
+    );
+    assert_eq!(
+        classify_group_message(addressed.message.as_ref().unwrap(), None, false),
+        GroupMessageDisposition::AddressedElsewhere,
+        "an unresolved real Feishu mention must not execute a slash command"
+    );
+
+    let broadcast = group_event(
+        "broadcast-status",
+        "shared-chat",
+        "u1",
+        "/status",
+        Vec::new(),
+        2,
+    );
+    for identity in [&bot_a, &bot_b] {
+        assert_eq!(
+            classify_group_message(broadcast.message.as_ref().unwrap(), Some(identity), false),
+            GroupMessageDisposition::SystemCommand {
+                command: "/status".to_string(),
+                reset_context: false,
+            }
+        );
+    }
+
+    let human_mention = ImMention {
+        key: "@_user_2".to_string(),
+        open_id: Some("ou_human".to_string()),
+        name: Some("Alice".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    };
+    let broadcast_with_human = group_event(
+        "broadcast-queue-with-human",
+        "shared-chat",
+        "u1",
+        "/q ask @_user_2 to review",
+        vec![human_mention],
+        3,
+    );
+    for identity in [&bot_a, &bot_b] {
+        assert_eq!(
+            classify_group_message(
+                broadcast_with_human.message.as_ref().unwrap(),
+                Some(identity),
+                false,
+            ),
+            GroupMessageDisposition::AgentTrigger {
+                kind: GroupTriggerKind::Queue,
+                active_request: "ask @_user_2 to review".to_string(),
+                command_prefix: Some("/q"),
+            }
+        );
+    }
+}
+
+#[test]
+fn addressed_agent_slashes_do_not_leak_to_unmentioned_bots() {
+    let bot_a = FeishuBotIdentity {
+        open_id: "ou_bot_a".to_string(),
+        name: Some("Bot A".to_string()),
+    };
+    let bot_b = FeishuBotIdentity {
+        open_id: "ou_bot_b".to_string(),
+        name: Some("Bot B".to_string()),
+    };
+    let mention_b = ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_bot_b".to_string()),
+        name: Some("Bot B".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    };
+
+    for command in ["/g inspect this", "/q inspect later", "/review this"] {
+        let event = group_event(
+            command,
+            "shared-chat",
+            "u1",
+            &format!("@_user_1 {command}"),
+            vec![mention_b.clone()],
+            3,
+        );
+        assert_eq!(
+            classify_group_message(event.message.as_ref().unwrap(), Some(&bot_a), false),
+            GroupMessageDisposition::AddressedElsewhere,
+            "{command} must not be consumed by an unmentioned bot"
+        );
+        assert!(matches!(
+            classify_group_message(event.message.as_ref().unwrap(), Some(&bot_b), false),
+            GroupMessageDisposition::AgentTrigger { .. }
+        ));
+    }
+}
+
+#[test]
+fn thread_query_commands_are_system_commands_and_follow_mention_routing() {
+    let bot = FeishuBotIdentity {
+        open_id: "ou_bot".to_string(),
+        name: Some("Bot".to_string()),
+    };
+    for (index, command) in ["/q", "/pwd", "/runner"].into_iter().enumerate() {
+        let broadcast = group_event(
+            &format!("query-{index}"),
+            "shared-chat",
+            "u1",
+            command,
+            Vec::new(),
+            index as u64,
+        );
+        assert_eq!(
+            classify_group_message(broadcast.message.as_ref().unwrap(), Some(&bot), true),
+            GroupMessageDisposition::SystemCommand {
+                command: command.to_string(),
+                reset_context: false,
+            }
+        );
+    }
+
+    let queued = group_event("queue", "shared-chat", "u1", "/q later", Vec::new(), 4);
+    assert!(matches!(
+        classify_group_message(queued.message.as_ref().unwrap(), Some(&bot), true),
+        GroupMessageDisposition::AgentTrigger {
+            kind: GroupTriggerKind::Queue,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn image_only_bot_mention_triggers_agent_instead_of_help() {
     let bot = FeishuBotIdentity {
         open_id: "ou_bot".to_string(),
@@ -163,6 +356,35 @@ fn mention_only_reply_uses_quoted_message_instead_of_help() {
             command: "/help".to_string(),
             reset_context: false,
         }
+    );
+}
+
+#[test]
+fn reply_that_mentions_a_human_remains_ambient() {
+    let bot = FeishuBotIdentity {
+        open_id: "ou_bot".to_string(),
+        name: Some("Bifrost".to_string()),
+    };
+    let human_mention = ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_alice".to_string()),
+        name: Some("Alice".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    };
+    let mut event = group_event(
+        "human-reply",
+        "c1",
+        "u1",
+        "@_user_1 please review",
+        vec![human_mention],
+        1,
+    );
+    event.message.as_mut().unwrap().parent_id = Some("quoted".to_string());
+
+    assert_eq!(
+        classify_group_message(event.message.as_ref().unwrap(), Some(&bot), false),
+        GroupMessageDisposition::Ambient
     );
 }
 
@@ -293,7 +515,7 @@ fn same_group_multiple_bots_only_trigger_the_matching_provider_identity() {
 
     assert_eq!(
         classify_group_message(event.message.as_ref().unwrap(), Some(&bot_a), false),
-        GroupMessageDisposition::Ambient
+        GroupMessageDisposition::AddressedElsewhere
     );
     assert_eq!(
         classify_group_message(event.message.as_ref().unwrap(), Some(&bot_b), false),

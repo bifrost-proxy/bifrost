@@ -19,6 +19,7 @@ const QUOTED_MESSAGE_MISSING_PROMPT: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupMessageDisposition {
     Ambient,
+    AddressedElsewhere,
     SystemCommand {
         command: String,
         reset_context: bool,
@@ -222,6 +223,46 @@ impl ImGroupContextStore {
         Ok(seq)
     }
 
+    pub fn record_fetched_message(
+        &self,
+        provider_id: &str,
+        chat_id: &str,
+        message: &super::feishu::FeishuFetchedMessage,
+        received_at: u64,
+    ) -> Result<u64, String> {
+        let event = ImEvent {
+            event_id: format!("fetched:{}", message.message_id),
+            provider_id: provider_id.to_string(),
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.fetched".to_string(),
+            source: super::types::ImEventSource {
+                chat_id: Some(chat_id.to_string()),
+                chat_type: Some("group".to_string()),
+                user_id: Some(message.sender_id.clone()),
+                user_name: None,
+                sender_type: message.sender_type.clone(),
+                message_id: Some(message.message_id.clone()),
+            },
+            message: Some(ImEventMessage {
+                text: message.text.clone(),
+                mentions: message.mentions.clone(),
+                images: Vec::new(),
+                files: Vec::new(),
+                reply_to: None,
+                raw_type: Some(message.msg_type.clone()),
+                raw_content: Some(message.raw_content.clone()),
+                create_time: message.create_time,
+                update_time: message.update_time,
+                root_id: None,
+                parent_id: None,
+                thread_id: None,
+            }),
+            received_at,
+            raw_digest: None,
+        };
+        self.record_event(&event, "feishu_message_api")
+    }
+
     pub fn prepare_turn(
         &self,
         event: &ImEvent,
@@ -385,6 +426,15 @@ impl ImGroupContextStore {
             duplicate: false,
             quoted_message_missing,
         })
+    }
+
+    pub fn existing_turn(
+        &self,
+        provider_id: &str,
+        trigger_message_id: &str,
+    ) -> Result<Option<PreparedGroupTurn>, String> {
+        let connection = self.connection.lock();
+        load_existing_turn(&connection, provider_id, trigger_message_id)
     }
 
     pub fn mark_turn_dispatched(&self, turn_id: &str, now: u64) -> Result<(), String> {
@@ -762,10 +812,35 @@ pub fn classify_group_message(
     bot_identity: Option<&FeishuBotIdentity>,
     session_busy: bool,
 ) -> GroupMessageDisposition {
+    let has_mentions = !message.mentions.is_empty();
     let mentions_bot = message
         .mentions
         .iter()
         .any(|mention| mention_matches_current_bot(mention, bot_identity));
+    // A slash command beginning with `/` is broadcast even when its arguments
+    // mention human members. Feishu emits no user-vs-bot type for real mention
+    // items, so an unmatched real mention only addresses another provider when
+    // it prefixes the slash (`@Bot /command`). Synthetic/debug adapters can
+    // positively identify another bot with `is_bot` regardless of position.
+    if has_mentions && !mentions_bot {
+        let without_mentions = strip_all_mentions(&message.text, &message.mentions);
+        let original = message.text.trim_start();
+        if original.starts_with('/') {
+            return classify_slash(original, session_busy);
+        }
+        let leading_mention = message
+            .mentions
+            .iter()
+            .filter(|mention| !mention.key.is_empty())
+            .any(|mention| original.starts_with(&mention.key));
+        let explicitly_addressed = message.mentions.iter().any(|mention| mention.is_bot)
+            || (leading_mention && without_mentions.trim_start().starts_with('/'));
+        return if explicitly_addressed {
+            GroupMessageDisposition::AddressedElsewhere
+        } else {
+            GroupMessageDisposition::Ambient
+        };
+    }
     let text = strip_current_bot_mentions(&message.text, &message.mentions, bot_identity);
     let trimmed = text.trim();
     if trimmed.starts_with('/') {
@@ -804,6 +879,15 @@ pub fn classify_group_message(
         };
     }
     GroupMessageDisposition::Ambient
+}
+
+fn strip_all_mentions(text: &str, mentions: &[ImMention]) -> String {
+    mentions_by_descending_key_len(mentions)
+        .into_iter()
+        .filter(|mention| !mention.key.is_empty())
+        .fold(text.to_string(), |text, mention| {
+            text.replace(&mention.key, " ")
+        })
 }
 
 fn mention_matches_current_bot(
@@ -851,7 +935,7 @@ fn classify_slash(message: &str, session_busy: bool) -> GroupMessageDisposition 
             command: message.to_string(),
             reset_context: true,
         },
-        "/help" | "/status" | "/stop" if rest.is_empty() => {
+        "/help" | "/status" | "/stop" | "/q" | "/pwd" if rest.is_empty() => {
             GroupMessageDisposition::SystemCommand {
                 command: message.to_string(),
                 reset_context: false,
@@ -1070,11 +1154,11 @@ fn ensure_binding(
 }
 
 fn load_existing_turn(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     provider_id: &str,
     trigger_message_id: &str,
 ) -> Result<Option<PreparedGroupTurn>, String> {
-    transaction
+    connection
         .query_row(
             "SELECT turn_id, session_key, trigger_message_id, from_exclusive_seq,
                     to_inclusive_seq, context_count, context_json, status

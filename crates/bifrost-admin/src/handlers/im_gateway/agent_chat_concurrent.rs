@@ -32,9 +32,6 @@ pub(super) async fn handle_concurrent_event_during_chat(
             }
         }
     }
-    if let Err(error) = event_store.add(event.clone()) {
-        error!(error = %error, "failed to store concurrent event");
-    }
     let message = match event.message.as_ref() {
         Some(message)
             if !message.text.trim().is_empty()
@@ -60,9 +57,18 @@ pub(super) async fn handle_concurrent_event_during_chat(
         )
         .await
         {
-            Ok(Some(dispatch)) => dispatch,
-            Ok(None) => return,
+            Ok(GroupInboundDispatch::Dispatch(dispatch)) => dispatch,
+            Ok(GroupInboundDispatch::Ambient) => {
+                if let Err(error) = event_store.add(event.clone()) {
+                    error!(error = %error, "failed to store concurrent ambient group event");
+                }
+                return;
+            }
+            Ok(GroupInboundDispatch::AddressedElsewhere) => return,
             Err(error) => {
+                if let Err(store_error) = event_store.add(event.clone()) {
+                    error!(error = %store_error, "failed to store rejected concurrent group trigger");
+                }
                 send_agent_reply(
                     client,
                     &provider,
@@ -75,6 +81,9 @@ pub(super) async fn handle_concurrent_event_during_chat(
             }
         }
     } else {
+        if let Err(error) = event_store.add(event.clone()) {
+            error!(error = %error, "failed to store concurrent event");
+        }
         PreparedInboundDispatch {
             message_text: agent_message_text_with_reference(
                 message,
@@ -89,6 +98,11 @@ pub(super) async fn handle_concurrent_event_during_chat(
             direct_reply: None,
         }
     };
+    if is_group_event {
+        if let Err(error) = event_store.add(event.clone()) {
+            error!(error = %error, "failed to store accepted concurrent group event");
+        }
+    }
     let direct_reply = dispatch.direct_reply.clone();
     let message_text = dispatch.message_text;
     let session_key = dispatch.session_key;

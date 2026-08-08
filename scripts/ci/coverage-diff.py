@@ -16,14 +16,60 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
+EXTERNAL_TEST_MODULE_RE = re.compile(
+    r"#\[cfg\(test\)\](?P<attrs>(?:\s*#\[[^\]]+\])*)\s*"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
+    re.MULTILINE,
+)
+PATH_ATTR_RE = re.compile(r'#\[path\s*=\s*"([^"]+)"\]')
 MOVED_BLOCK_MIN_LINES = 8
 MOVED_BLOCK_MIN_SUBSTANTIVE_LINES = 4
+
+
+@lru_cache(maxsize=None)
+def external_test_module_roots(repo_root: Path) -> tuple[Path, ...]:
+    """Resolve only modules actually declared behind exact ``#[cfg(test)]``."""
+    roots: set[Path] = set()
+    crates_root = repo_root / "crates"
+    if not crates_root.is_dir():
+        return ()
+    for source_path in crates_root.glob("*/src/**/*.rs"):
+        source = source_path.read_text(encoding="utf-8")
+        module_dir = (
+            source_path.parent
+            if source_path.stem in {"lib", "main", "mod"}
+            else source_path.parent / source_path.stem
+        )
+        for declaration in EXTERNAL_TEST_MODULE_RE.finditer(source):
+            explicit_path = PATH_ATTR_RE.search(declaration.group("attrs"))
+            if explicit_path is not None:
+                module_file = (source_path.parent / explicit_path.group(1)).resolve()
+                roots.add(module_file)
+                if module_file.suffix == ".rs":
+                    roots.add(module_file.with_suffix(""))
+                continue
+            module_name = declaration.group("name")
+            roots.add((module_dir / f"{module_name}.rs").resolve())
+            roots.add((module_dir / module_name).resolve())
+    return tuple(sorted(roots))
+
+
+def is_production_rust_path(path: str, repo_root: Path = REPO_ROOT) -> bool:
+    """Exclude verified external ``#[cfg(test)]`` modules, not path names."""
+    if not PRODUCTION_RUST_RE.match(path):
+        return False
+    absolute = (repo_root / path).resolve()
+    return not any(
+        absolute == root or root in absolute.parents
+        for root in external_test_module_roots(repo_root.resolve())
+    )
 
 
 def normalize_path(path: str, repo_root: Path = REPO_ROOT) -> str:
@@ -238,7 +284,7 @@ def evaluate_changed_coverage(
     total = 0
     covered = 0
     for path in sorted(changed):
-        if not PRODUCTION_RUST_RE.match(path):
+        if not is_production_rust_path(path):
             continue
         instrumented = coverage.get(path, {})
         relevant = sorted(changed[path].intersection(instrumented))
@@ -266,7 +312,7 @@ def unmeasured_changed_files(
     return sorted(
         path
         for path in changed
-        if PRODUCTION_RUST_RE.match(path) and path not in coverage
+        if is_production_rust_path(path) and path not in coverage
     )
 
 
@@ -293,7 +339,7 @@ def untracked_production_diff(repo_root: Path | None = None) -> str:
     diffs: list[str] = []
     for path in names.stdout.splitlines():
         normalized = normalize_path(path, repo_root)
-        if not PRODUCTION_RUST_RE.match(normalized):
+        if not is_production_rust_path(normalized):
             continue
         result = subprocess.run(
             ["git", "diff", "--no-index", "--unified=0", "/dev/null", normalized],
@@ -382,7 +428,7 @@ def changed_base_sources(
     sources: list[tuple[str, str, str]] = []
     for path in names.stdout.splitlines():
         normalized = normalize_path(path)
-        if not PRODUCTION_RUST_RE.match(normalized):
+        if not is_production_rust_path(normalized):
             continue
         content = subprocess.run(
             ["git", "show", f"{base_commit}:{normalized}"],
@@ -432,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     report = evaluate_changed_coverage(changed, coverage)
-    production_files = sorted(path for path in changed if PRODUCTION_RUST_RE.match(path))
+    production_files = sorted(path for path in changed if is_production_rust_path(path))
     report["changed_production_files"] = production_files
     report["unmeasured_files"] = unmeasured_changed_files(changed, coverage)
     report["unchanged_moved_lines_excluded"] = moved_lines_excluded

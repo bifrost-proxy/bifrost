@@ -42,6 +42,20 @@ bash scripts/ci/check-shell-syntax.sh
 PYTHONDONTWRITEBYTECODE=1 \
   python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
 
+# A production release never permits Feishu loopback base URLs. Any shell E2E
+# that opts into the debug-only fake OpenAPI must exit before starting services
+# when the shared CI release binary is injected. This prevents CI from sending
+# test credentials or requests to the normalized public Feishu endpoint.
+while IFS= read -r feishu_loopback_test; do
+  grep -Fq 'target/release/bifrost' "$feishu_loopback_test"
+  grep -Fq 'target/release/bifrost.exe' "$feishu_loopback_test"
+  grep -Fq 'SKIP fake OpenAPI: release build rejects Feishu loopback by design' \
+    "$feishu_loopback_test"
+  grep -Fq 'CARGO_NET_OFFLINE' "$feishu_loopback_test"
+  grep -Fq 'HTTP_PROXY=http://127.0.0.1:9' "$feishu_loopback_test"
+  grep -Fq 'NO_PROXY=127.0.0.1,localhost' "$feishu_loopback_test"
+done < <(rg -l 'BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1' e2e-tests/tests --glob 'test_*.sh')
+
 grep -Fq 'cargo llvm-cov show-env --sh' "$coverage_all"
 grep -Fq 'unit-integration.json' "$coverage_all"
 grep -Fq 'e2e.json' "$coverage_all"
@@ -62,6 +76,10 @@ grep -Fq 'REFUSING: coverage E2E data directory is under production data' "$cove
 grep -Fq 'BIFROST_E2E_PROTECTED_PORTS' "$coverage_all"
 grep -Fq 'One or more instrumented E2E suites failed' "$coverage_all"
 grep -Fq 'Changed production Rust line coverage' "$coverage_diff"
+grep -Fq 'EXTERNAL_TEST_MODULE_RE' "$coverage_diff"
+grep -Fq 'external_test_module_roots' "$coverage_diff"
+grep -Fq 'EXTERNAL_TEST_MODULE_RE' "$coverage_changed"
+grep -Fq 'external_test_module_roots' "$coverage_changed"
 grep -Fq 'including staged, unstaged, and untracked files' "$coverage_changed"
 grep -Fq 'CARGO_LLVM_COV_TARGET_DIR' "$coverage_changed"
 grep -Fq 'clear_profiles(target_dir)' "$coverage_changed"

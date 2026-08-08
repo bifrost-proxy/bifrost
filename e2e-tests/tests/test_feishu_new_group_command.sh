@@ -3,12 +3,22 @@ set -euo pipefail
 
 unset BIFROST_DETACHED_DAEMON_CHILD BIFROST_EXTERNAL_CLI_WORKER
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+export CARGO_NET_OFFLINE="${CARGO_NET_OFFLINE:-true}"
+
+# Fail closed for network access. This scenario is self-contained and must only
+# reach its loopback Feishu fixture and loopback Bifrost API. Any accidental
+# public request is sent to a closed local port instead of reaching the network.
+export HTTP_PROXY=http://127.0.0.1:9
+export HTTPS_PROXY=http://127.0.0.1:9
+export ALL_PROXY=http://127.0.0.1:9
+export NO_PROXY=127.0.0.1,localhost
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export all_proxy="$ALL_PROXY"
+export no_proxy="$NO_PROXY"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TEST_DIR="$(mktemp -d)"
-BIFROST_LOG="$TEST_DIR/bifrost.log"
-REQUEST_LOG="$TEST_DIR/feishu-requests.jsonl"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 
 # CI's broad shell matrix intentionally reuses the release artifact. Release
@@ -17,11 +27,16 @@ BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 # The real black-box path runs with the debug binary in the focused E2E/human
 # test, while release CI still selects this script and records the security
 # boundary instead of waiting for a request that must never reach loopback.
-if [[ "$BIFROST_BIN" == */target/release/bifrost ]]; then
-  echo "[feishu-new-group-command] SKIP fake OpenAPI: release build rejects Feishu loopback by design"
-  exit 0
-fi
+case "${BIFROST_BIN//\\//}" in
+  target/release/bifrost|*/target/release/bifrost|target/release/bifrost.exe|*/target/release/bifrost.exe)
+    echo "[feishu-new-group-command] SKIP fake OpenAPI: release build rejects Feishu loopback by design"
+    exit 0
+    ;;
+esac
 
+TEST_DIR="$(mktemp -d)"
+BIFROST_LOG="$TEST_DIR/bifrost.log"
+REQUEST_LOG="$TEST_DIR/feishu-requests.jsonl"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
 with socket.socket() as sock:

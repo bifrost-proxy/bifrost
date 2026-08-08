@@ -186,6 +186,25 @@ fn apply_busy_message_default_queues_custom_runner_messages() {
     );
 }
 
+#[test]
+fn queue_query_formats_empty_and_busy_thread_contents() {
+    let manager = SessionQueueManager::new();
+    let empty = format_queue_status("📋 当前线程排队消息", &manager.queue_status("queue-query"));
+    assert!(empty.contains("当前线程排队消息"));
+    assert!(empty.contains("排队已清空"));
+
+    manager
+        .push_queue("queue-query", "第一条等待处理的消息".to_string())
+        .expect("queue first item");
+    manager
+        .push_queue("queue-query", "第二条等待处理的消息".to_string())
+        .expect("queue second item");
+    let busy = format_queue_status("📋 当前线程排队消息", &manager.queue_status("queue-query"));
+    assert!(busy.contains("当前排队（2条）"));
+    assert!(busy.contains("第一条等待处理的消息"));
+    assert!(busy.contains("第二条等待处理的消息"));
+}
+
 #[tokio::test]
 async fn busy_group_turns_complete_or_release_with_their_queue_outcome() {
     let temp = tempfile::tempdir().unwrap();
