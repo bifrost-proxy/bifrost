@@ -20,11 +20,18 @@ class CoverageDiffTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "crates/a/src"
             (source / "feature/tests").mkdir(parents=True)
+            (source / "support/suite").mkdir(parents=True)
             (source / "lib.rs").write_text(
-                "#[cfg(test)]\nmod tests;\nmod runtime_tests;\n",
+                '#[cfg(test)]\nmod tests;\n#[cfg(test)]\n#[path = "support/suite.rs"]\nmod explicit_tests;\nmod runtime_tests;\n',
                 encoding="utf-8",
             )
             (source / "tests.rs").write_text("fn helper() {}\n", encoding="utf-8")
+            (source / "support/suite.rs").write_text(
+                "fn explicit_helper() {}\n", encoding="utf-8"
+            )
+            (source / "support/suite/case.rs").write_text(
+                "fn nested_helper() {}\n", encoding="utf-8"
+            )
             (source / "runtime_tests.rs").write_text(
                 "pub fn live() {}\n", encoding="utf-8"
             )
@@ -43,6 +50,16 @@ class CoverageDiffTests(unittest.TestCase):
             )
             self.assertFalse(
                 coverage_diff.is_production_rust_path("crates/a/src/tests.rs", root)
+            )
+            self.assertFalse(
+                coverage_diff.is_production_rust_path(
+                    "crates/a/src/support/suite.rs", root
+                )
+            )
+            self.assertFalse(
+                coverage_diff.is_production_rust_path(
+                    "crates/a/src/support/suite/case.rs", root
+                )
             )
             self.assertFalse(
                 coverage_diff.is_production_rust_path(

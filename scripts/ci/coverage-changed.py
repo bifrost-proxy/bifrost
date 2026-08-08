@@ -24,10 +24,11 @@ from typing import Any, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
 EXTERNAL_TEST_MODULE_RE = re.compile(
-    r"#\[cfg\(test\)\](?:\s*#\[[^\]]+\])*\s*"
-    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+    r"#\[cfg\(test\)\](?P<attrs>(?:\s*#\[[^\]]+\])*)\s*"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
     re.MULTILINE,
 )
+PATH_ATTR_RE = re.compile(r'#\[path\s*=\s*"([^"]+)"\]')
 CHANGED_LINES_MIN_RE = re.compile(
     r"^\s*changed_lines_min\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$"
 )
@@ -51,7 +52,15 @@ def external_test_module_roots(repo_root: Path) -> tuple[Path, ...]:
             if source_path.stem in {"lib", "main", "mod"}
             else source_path.parent / source_path.stem
         )
-        for module_name in EXTERNAL_TEST_MODULE_RE.findall(source):
+        for declaration in EXTERNAL_TEST_MODULE_RE.finditer(source):
+            explicit_path = PATH_ATTR_RE.search(declaration.group("attrs"))
+            if explicit_path is not None:
+                module_file = (source_path.parent / explicit_path.group(1)).resolve()
+                roots.add(module_file)
+                if module_file.suffix == ".rs":
+                    roots.add(module_file.with_suffix(""))
+                continue
+            module_name = declaration.group("name")
             roots.add((module_dir / f"{module_name}.rs").resolve())
             roots.add((module_dir / module_name).resolve())
     return tuple(sorted(roots))
