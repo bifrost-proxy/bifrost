@@ -64,6 +64,8 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
   response-cookie parser，以继续输出 `Path`、`Max-Age`、`HttpOnly` 等属性。
 - 语法校验只把 JSON 字符串外、完整闭合的 `${...}` 标量临时替换为合法 JSON 字符串；
   malformed JSON 与未闭合模板仍返回 E021。
+- WebUI effectiveness 分析使用同样的 `${...}` 深度扫描，避免把模板表达式中的 `&` / `,`
+  误报成可被后续规则覆盖的 Header 字段。
 
 ## 测试方案
 

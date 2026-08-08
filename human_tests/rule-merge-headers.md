@@ -265,11 +265,15 @@ pnpm --dir web exec vitest run src/utils/ruleEffectiveness.test.ts
 ```text
 https://partial.example.test/api/ reqHeaders://(x-env=one&x-stable=keep)
 https://partial.example.test/api/ reqHeaders://x-env=two
+https://template.example.test/api/ reqHeaders://(x-host=${hostname.replace(no&x-fake=1,replaced)}&x-mode=active)
+https://template.example.test/api/ reqHeaders://x-fake=overridden
 ```
 3. 点击 Rules 状态胶囊，展开 `Merged Rules`，检查两行的状态、文本和悬浮提示。
 
 **预期结果**：
 - 第一条规则 `reqHeaders://(x-env=one&x-stable=keep)` 被识别为两个独立字段。
+- `${hostname.replace(no&x-fake=1,replaced)}` 表达式内的 `&` 不生成虚假的 `x-fake`
+  字段；模板规则与后续 `reqHeaders://x-fake=overridden` 在 Chrome 中均显示 active。
 - 后续同 matcher 的 `reqHeaders://x-env=two` 只覆盖 `x-env`，第一条规则显示 partial，
   `x-stable` 仍保持有效。
 - Chrome 中 Merged Rules 对第一行渲染 `data-effect-status="partial"`，行文本完整保留
@@ -325,10 +329,12 @@ cargo run -p bifrost-e2e -- --test trailers_ampersand_separated
   真实 E2E `1/1 passed`；`${hostname.replace(test,example)}` 和包含 `&` 的 replace
   表达式真实 E2E `1/1 passed`，upstream 分别收到 `example.local` / `test.local`，core
   防字段注入与 malformed template 回归同时通过。
-- TC-RMH-09：AUTOMATION PASS / CHROME BLOCKED。effectiveness Vitest 结果 `12/12 passed`；
+- TC-RMH-09：AUTOMATION PASS / CHROME BLOCKED。effectiveness Vitest 覆盖 `&` 字段拆分、
+  parenthesized JSON 和 `${...}` 内分隔符回归并全部通过；
   Chromium Playwright 真实页面回归 `1/1 passed`，在 `/_bifrost/traffic` 展开 Dynamic Island
   后第一条 `&` 分隔规则为 partial、文本保留 `x-stable=keep`，悬浮提示确认 `x-env` 由
-  后续同 matcher 规则写入。尝试连接用户 Chrome 时浏览器扩展不可用，因此尚不能把仓库
+  后续同 matcher 规则写入；模板规则完整显示 `hostname.replace(no&x-fake=1,replaced)`，且
+  模板规则与后续 `x-fake` 规则均为 active。尝试连接用户 Chrome 时浏览器扩展不可用，因此尚不能把仓库
   要求的 Chrome 人工执行标为 PASS；需启用 Settings → Computer use 的 Chrome 扩展后补跑。
 - TC-RMH-10：PASS。core、CLI 和 Admin 的 8 条定向单测全部通过；6 条真实代理
   E2E 均为 `1/1 passed`。代理日志确认请求 Cookie 为 `sessionid=xxx`、`a=c`、

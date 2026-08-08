@@ -132,6 +132,8 @@ async function mockAdminApi(page: Page) {
           "https://app.example.com/api/v1/oncall/ passthrough://",
           "https://partial.example.test/api/ reqHeaders://(x-env=one&x-stable=keep)",
           "https://partial.example.test/api/ reqHeaders://x-env=two",
+          "https://template.example.test/api/ reqHeaders://(x-host=${hostname.replace(no&x-fake=1,replaced)}&x-mode=active)",
+          "https://template.example.test/api/ reqHeaders://x-fake=overridden",
         ].join("\n"),
       });
       return;
@@ -285,11 +287,18 @@ test("Rules 状态胶囊在全局页面可见、可拖拽，并能跳转到 Rule
   await page.getByTestId("rules-dynamic-island-merged-toggle").click();
   const mergedPanel = page.getByTestId("rules-dynamic-island-merged-content");
   await expect(mergedPanel).toBeVisible();
-  await expect(mergedPanel.locator('[data-effect-status="active"]')).toHaveCount(3);
+  await expect(mergedPanel.locator('[data-effect-status="active"]')).toHaveCount(5);
   await expect(mergedPanel.locator('[data-effect-status="partial"]')).toHaveCount(1);
   await expect(mergedPanel.locator('[data-effect-status="shadowed"]')).toHaveCount(2);
   await expect(mergedPanel.locator('[data-line-number="1"] > [data-line-gutter="true"]')).toHaveText("1");
   await expect(mergedPanel.locator('[data-line-number="4"] > [data-line-gutter="true"]')).toHaveText("4");
+  const templateRule = mergedPanel.locator('[data-line-number="7"]');
+  await expect(templateRule).toHaveAttribute("data-effect-status", "active");
+  await expect(templateRule).toContainText("hostname.replace(no&x-fake=1,replaced)");
+  await expect(mergedPanel.locator('[data-line-number="8"]')).toHaveAttribute(
+    "data-effect-status",
+    "active",
+  );
   const wrapMetrics = await mergedPanel.evaluate((element) => ({
     scrollWidth: element.scrollWidth,
     clientWidth: element.clientWidth,

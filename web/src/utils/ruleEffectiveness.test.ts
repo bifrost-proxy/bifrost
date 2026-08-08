@@ -117,6 +117,19 @@ describe("analyzeRuleEffectiveness", () => {
     expect(effects[1]).toMatchObject({ status: "active" });
   });
 
+  test("keeps delimiters inside header template expressions", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        "https://example.test/api/ reqHeaders://(x-host=${hostname.replace(no&x-fake=1,replaced)}&x-mode=active)",
+        "https://example.test/api/ reqHeaders://x-fake=overridden",
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "active" });
+    expect(effects[0].details.join("\n")).not.toContain("x-fake");
+    expect(effects[1]).toMatchObject({ status: "active" });
+  });
+
   test("marks broader path request headers as partial when a narrower matcher wins one header", () => {
     const effects = analyzeRuleEffectiveness(
       [
