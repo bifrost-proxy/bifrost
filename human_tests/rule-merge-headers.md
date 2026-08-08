@@ -216,6 +216,7 @@ cargo run -p bifrost-e2e -- --test res_headers_ampersand_separated
 cargo run -p bifrost-e2e -- --test req_headers_value_ref_literal_ampersand
 cargo run -p bifrost-e2e -- --test req_headers_referer_equals_url
 cargo run -p bifrost-e2e -- --test req_headers_template_literal_ampersand
+cargo run -p bifrost-e2e -- --test req_headers_json_scalar_template
 ```
 3. 运行请求 Header 规则夹具：
 ```bash
@@ -246,18 +247,30 @@ cargo run -p bifrost-e2e -- --test req_headers_template_literal_ampersand
 - `${url}` 展开出的 `?a=1&b=2` 完整保留在 `X-Full-Url` 中；客户端
   `X-Source: safe&X-Injected=yes` 经 `${reqHeaders.x-source}` 复制后仍只有 `X-Copied`
   一个规则生成的 Header，不会额外生成 `X-Injected`。
+- JSON map 中未加引号的标量模板会在解析字段前展开，真实 upstream 收到
+  `x-now: 42`；JSON 字符串模板输出会被安全转义，不能注入额外 Header 字段。
 
 ### TC-RMH-09: WebUI 有效性分析识别 `&` 分隔 Header
 
 **操作步骤**：
+1. 先运行 effectiveness 单元回归：
 ```bash
 pnpm --dir web exec vitest run src/utils/ruleEffectiveness.test.ts
 ```
+2. 启动 WebUI 测试环境，在 Chrome 打开 `/_bifrost/traffic`。测试环境的
+   `/rules/active-summary` 返回以下合并规则：
+```text
+https://partial.example.test/api/ reqHeaders://(x-env=one&x-stable=keep)
+https://partial.example.test/api/ reqHeaders://x-env=two
+```
+3. 点击 Rules 状态胶囊，展开 `Merged Rules`，检查两行的状态、文本和悬浮提示。
 
 **预期结果**：
 - 第一条规则 `reqHeaders://(x-env=one&x-stable=keep)` 被识别为两个独立字段。
 - 后续同 matcher 的 `reqHeaders://x-env=two` 只覆盖 `x-env`，第一条规则显示 partial，
   `x-stable` 仍保持有效。
+- Chrome 中 Merged Rules 对第一行渲染 `data-effect-status="partial"`，行文本完整保留
+  `x-stable=keep`；悬浮提示说明 `x-env` 由后续同 matcher 规则写入。
 
 ### TC-RMH-10: reqCookies、resCookies 与 trailers 使用 `&` 拆分多个字段
 
@@ -288,6 +301,10 @@ cargo run -p bifrost-e2e -- --test trailers_ampersand_separated
 - `trailers://(X-Trace=abc&X-Checksum=xyz)` 宣告两个独立 Trailer 名。
 - Values 引用中的 `session=safe&injected=yes` 保持为一个 Cookie 值，不生成 `injected` Cookie。
 - 模板展开产生的 `&` 同样只属于当前字段值，不能注入新 Cookie 或 Trailer。
+- rules 文件中的单行 `{value}` 在 parser 阶段继续保留 Value 引用来源，不能在 resolver
+  之前被展平成可再次解释的内联语法。
+- 请求 Cookie fixture 在没有可选 `jq` 时仍通过已检测的 Python 3 执行值断言，不能只检查
+  HTTP 状态码后误报通过。
 
 ## 清理步骤
 
@@ -297,15 +314,21 @@ cargo run -p bifrost-e2e -- --test trailers_ampersand_separated
 
 ## 本次执行记录（2026-08-09）
 
-- TC-RMH-08：PASS。四个独立真实代理 E2E 全部 `1/1 passed`；模板边界用例确认
+- TC-RMH-08：PASS。相关独立真实代理 E2E 全部 `1/1 passed`；模板边界用例确认
   `X-Full-Url=http://test.local/api?a=1&b=2` 和
   `X-Copied=safe&X-Injected=yes`，且不存在额外 `X-Injected` Header。请求 Header
-  夹具复跑结果 `20/20 passed`，Values 夹具复跑结果 `69/69 passed`。
-- TC-RMH-09：PASS。`pnpm --dir web exec vitest run src/utils/ruleEffectiveness.test.ts`
-  结果 `12/12 passed`，`&` 分隔的 `x-env` 被后续规则覆盖时首条规则为 partial，
-  `x-stable` 继续有效。
+  夹具复跑结果 `20/20 passed`，Values 夹具复跑结果 `69/69 passed`；JSON 标量模板
+  真实 E2E `1/1 passed`，core 防字段注入回归同时通过。
+- TC-RMH-09：AUTOMATION PASS / CHROME BLOCKED。effectiveness Vitest 结果 `12/12 passed`；
+  Chromium Playwright 真实页面回归 `1/1 passed`，在 `/_bifrost/traffic` 展开 Dynamic Island
+  后第一条 `&` 分隔规则为 partial、文本保留 `x-stable=keep`，悬浮提示确认 `x-env` 由
+  后续同 matcher 规则写入。尝试连接用户 Chrome 时浏览器扩展不可用，因此尚不能把仓库
+  要求的 Chrome 人工执行标为 PASS；需启用 Settings → Computer use 的 Chrome 扩展后补跑。
 - TC-RMH-10：PASS。core、CLI 和 Admin 的 8 条定向单测全部通过；6 条真实代理
   E2E 均为 `1/1 passed`。代理日志确认请求 Cookie 为 `sessionid=xxx`、`a=c`、
   `b=two=parts`，Values 引用只生成 `session=safe&injected=yes` 一个 Cookie；响应输出
   `sid=xxx`、`theme=dark` 两条 Set-Cookie，JSON 属性 Cookie 保留 Max-Age/Secure/HttpOnly，
-  Trailer 为 `X-Trace, X-Checksum`。
+  Trailer 为 `X-Trace, X-Checksum`。review 后追加 parser/CLI 来源保留单测并通过；请求 Cookie、
+  响应 Cookie、Trailer 三组真实 fixture 分别为 `12/12`、`24/24`、`4/4`，引用值中的
+  `&` 均未生成额外字段。额外隐藏 `jq` 后，请求 Cookie fixture 明确提示 JSON 断言降级，
+  但 Python 3 Cookie 值断言仍全部执行并得到 `12/12`。

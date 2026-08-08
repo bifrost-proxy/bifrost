@@ -2725,6 +2725,32 @@ stream.onEvent = event => ({ data: event.data });
     }
 
     #[test]
+    fn test_req_cookies_value_reference_preserves_literal_ampersand() {
+        let mut values = HashMap::new();
+        values.insert(
+            "cookies".to_string(),
+            "session=safe&injected=yes".to_string(),
+        );
+        let parser = bifrost_core::RuleParser::with_values(values.clone());
+        let rules = parser
+            .parse_rules("example.com reqCookies://{cookies}")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            resolved.req_cookies,
+            vec![("session".to_string(), "safe&injected=yes".to_string())]
+        );
+    }
+
+    #[test]
     fn test_merge_res_cookies_accumulate() {
         let parser = bifrost_core::RuleParser::new();
         let rules = parser

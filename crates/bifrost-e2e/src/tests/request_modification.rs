@@ -26,6 +26,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_req_headers_json_object,
         ),
         TestCase::standalone(
+            "req_headers_json_scalar_template",
+            "ReqHeaders protocol: expand an unquoted scalar template before JSON parsing",
+            "request_modification",
+            test_req_headers_json_scalar_template,
+        ),
+        TestCase::standalone(
             "req_headers_ampersand_separated",
             "ReqHeaders protocol: ampersand-separated inline header map",
             "request_modification",
@@ -277,6 +283,32 @@ async fn test_req_headers_json_object() -> Result<(), String> {
     mock.assert_header_received("x-tt-env", "ppe_next_agent_new")?;
     mock.assert_header_received("x-use-ppe", "1")?;
     mock.assert_header_received("x-tt-env-fe", "dev")?;
+
+    Ok(())
+}
+
+async fn test_req_headers_json_scalar_template() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        r#"test.local reqHeaders://({"x-now":${reqHeaders.x-number}})"#.to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .header("X-Number", "42")
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("x-now", "42")?;
 
     Ok(())
 }
@@ -888,6 +920,12 @@ mod tests {
     #[tokio::test]
     async fn test_headers_ampersand_separated() {
         let result = test_req_headers_ampersand_separated().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_json_scalar_template() {
+        let result = test_req_headers_json_scalar_template().await;
         assert!(result.is_ok(), "Test failed: {:?}", result.err());
     }
 

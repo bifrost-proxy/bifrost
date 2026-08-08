@@ -130,8 +130,8 @@ async function mockAdminApi(page: Page) {
           "https://app.example.com/api/v1/oncall/ passthrough://",
           'https://app.example.com/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}',
           "https://app.example.com/api/v1/oncall/ passthrough://",
-          'https://partial.example.test/api/internal/ reqHeaders://{"x-env":"narrow"}',
-          'https://partial.example.test/api/ reqHeaders://{"x-env":"broad","x-stable":"keep"}',
+          "https://partial.example.test/api/ reqHeaders://(x-env=one&x-stable=keep)",
+          "https://partial.example.test/api/ reqHeaders://x-env=two",
         ].join("\n"),
       });
       return;
@@ -302,9 +302,9 @@ test("Rules 状态胶囊在全局页面可见、可拖拽，并能跳转到 Rule
   await expect(page.getByText(/reqHeaders fields are replaced by line/)).toBeVisible();
   await mergedPanel
     .locator('[data-effect-status="partial"]')
-    .filter({ hasText: "x-stable" })
+    .filter({ hasText: "x-stable=keep" })
     .hover();
-  await expect(page.getByText(/outside that narrower scope/)).toBeVisible();
+  await expect(page.getByText(/reqHeaders field x-env is written by/)).toBeVisible();
   const tooltipBox = await page.locator(".ant-tooltip").last().boundingBox();
   expect(tooltipBox?.width ?? 0).toBeGreaterThan(420);
 

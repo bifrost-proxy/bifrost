@@ -31,3 +31,10 @@ session=new_session
 ```
 
 test-cookies.local http://127.0.0.1:3000 reqCookies://(session=abc123&theme=dark)
+
+# Values 引用中的 `&` 是 Cookie 值数据，不能注入第二个 Cookie
+req-cookie-literal-ampersand.local 127.0.0.1:3000 reqCookies://{literal_ampersand_cookie}
+
+```literal_ampersand_cookie
+session=safe&injected=yes
+```

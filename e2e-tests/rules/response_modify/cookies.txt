@@ -38,3 +38,10 @@ secure_session=value123; HttpOnly; Secure; SameSite=Strict; Max-Age=3600
 ```
 
 test-res-cookies.local http://127.0.0.1:3000 resCookies://(session=abc123&theme=dark)
+
+# Values 引用中的 `&` 保留在一个 Cookie 值中
+res-cookie-literal-ampersand.local 127.0.0.1:3000 resCookies://{literal_ampersand_cookie}
+
+```literal_ampersand_cookie
+session=safe&injected=yes
+```

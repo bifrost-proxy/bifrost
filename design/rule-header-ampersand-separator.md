@@ -50,6 +50,8 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
   Value `X-Query: a=1&b=2` 也保持一个 Header。
 - 只有 `ValueSource::Inline`、`InlineParams` 和 `ParenContent` 单行内容按 `&` 或逗号
   拆分；文件、远程 URL 和 `{name}` 引用内容保留字面 `&`。
+- 规则 parser 的单行 Values 展开会显式跳过 Header、Cookie 与 Trailer 协议，确保
+  `{name}` 以 `ValueSource::ValueRef` 进入 resolver；否则来源信息会在共享 parser 前丢失。
 - 对 `reqHeaders` / `resHeaders`，`ResolvedRule` 先按规则作者写下的源文本解析 Header
   边界，再逐个展开 Header 名和值中的模板；不再对已经展开的整串文本重新按 `&` 拆分。
   因此 URL 查询串和复制的请求 Header 即使含 `&X-Injected=...` 也只属于原 Header 值。
@@ -65,11 +67,16 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - E2E runner：`req_headers_ampersand_separated` 真实启动代理和 mock upstream。
 - E2E runner：`req_headers_template_literal_ampersand` 验证 `${url}` 查询串和
   `${reqHeaders.*}` 中的 `&` 不会改变 Header 边界。
+- E2E runner：`req_headers_json_scalar_template` 验证 JSON map 的无引号标量模板在展开后
+  再解析，并确保真实 upstream 收到对应 Header。
 - E2E runner：`req_cookies_ampersand_separated`、
   `req_cookies_value_ref_literal_ampersand`、`res_cookies_ampersand_separated`、
   `trailers_ampersand_separated` 覆盖三个新增场景和引用边界。
 - 规则夹具：`e2e-tests/rules/request_modify/headers.txt` 的 R-05。
-- human test：`human_tests/rule-merge-headers.md` 的 TC-RMH-08。
+- 规则夹具：请求/响应 Cookie 与 Trailer 均覆盖直接 `&` 和 Values 字面 `&` 边界；
+  请求 Cookie 断言使用必需的 Python 3，在可选 `jq` 缺失时仍校验实际值。
+- human test：`human_tests/rule-merge-headers.md` 的 TC-RMH-08、TC-RMH-09、TC-RMH-10；
+  TC-RMH-09 同步包含 Dynamic Island Chromium 自动化与 Chrome 人工验证步骤。
 
 ## 依赖与影响面
 

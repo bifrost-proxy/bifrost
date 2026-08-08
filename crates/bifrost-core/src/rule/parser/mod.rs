@@ -1984,13 +1984,22 @@ fn expand_inline_values(line: &str, values: &HashMap<String, String>) -> String 
                 continue;
             }
 
-            // Script block references must survive parsing so the runtime can
-            // distinguish inline source from a script filename. The resolver
-            // still resolves the value for matching/debug information.
+            // Script and source-aware key/value references must survive parsing.
+            // The resolver needs the authored source kind to avoid treating an
+            // ampersand from a referenced value as inline separator syntax.
             let prefix = &current[..match_start];
-            if ["reqScript://", "resScript://", "resStreamScript://"]
-                .iter()
-                .any(|protocol| prefix.ends_with(protocol))
+            if [
+                "reqScript://",
+                "resScript://",
+                "resStreamScript://",
+                "reqHeaders://",
+                "resHeaders://",
+                "reqCookies://",
+                "resCookies://",
+                "trailers://",
+            ]
+            .iter()
+            .any(|protocol| prefix.ends_with(protocol))
             {
                 continue;
             }
@@ -2598,6 +2607,36 @@ reqHeaders://{test=1}"#;
         let values = HashMap::new();
         let result = expand_inline_values("test {unknown.json} end", &values);
         assert_eq!(result, "test {unknown.json} end");
+    }
+
+    #[test]
+    fn test_source_aware_key_value_references_survive_inline_expansion() {
+        let mut values = HashMap::new();
+        values.insert(
+            "literal_ampersand".to_string(),
+            "session=safe&injected=yes".to_string(),
+        );
+
+        for protocol in [
+            "reqHeaders",
+            "resHeaders",
+            "reqCookies",
+            "resCookies",
+            "trailers",
+        ] {
+            let rule_text = format!("example.com {protocol}://{{literal_ampersand}}");
+            let rules = RuleParser::with_values(values.clone())
+                .parse_rules(&rule_text)
+                .expect("source-aware rule should parse");
+
+            assert_eq!(rules.len(), 1, "protocol {protocol}");
+            assert_eq!(rules[0].value, "{literal_ampersand}", "protocol {protocol}");
+            assert_eq!(
+                rules[0].value_source,
+                crate::rule::ValueSource::ValueRef("literal_ampersand".to_string()),
+                "protocol {protocol}"
+            );
+        }
     }
 
     #[test]

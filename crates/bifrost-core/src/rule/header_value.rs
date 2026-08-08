@@ -2,6 +2,13 @@ use serde_json::Value;
 
 use super::ValueSource;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedKeyValuePair {
+    pub name: String,
+    pub value: String,
+    pub separator: String,
+}
+
 /// Parse a `reqHeaders://` or `resHeaders://` value into header pairs.
 ///
 /// Single-line inline values accept `&` and `,` between headers. Multi-line
@@ -24,7 +31,23 @@ pub fn parse_rule_key_value_pairs(
     value: &str,
     value_source: &ValueSource,
 ) -> Option<Vec<(String, String)>> {
+    parse_rule_key_value_entries(value, value_source).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| (entry.name, entry.value))
+            .collect()
+    })
+}
+
+pub(crate) fn parse_rule_key_value_entries(
+    value: &str,
+    value_source: &ValueSource,
+) -> Option<Vec<ParsedKeyValuePair>> {
     parse_key_value_pairs(value, permits_ampersand_separator(value_source))
+}
+
+pub(crate) fn is_json_object_syntax(value: &str) -> bool {
+    looks_like_json_header_object(strip_wrapping_parens(value.trim()))
 }
 
 fn permits_ampersand_separator(value_source: &ValueSource) -> bool {
@@ -34,7 +57,7 @@ fn permits_ampersand_separator(value_source: &ValueSource) -> bool {
     )
 }
 
-fn parse_key_value_pairs(value: &str, split_ampersands: bool) -> Option<Vec<(String, String)>> {
+fn parse_key_value_pairs(value: &str, split_ampersands: bool) -> Option<Vec<ParsedKeyValuePair>> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -74,7 +97,7 @@ fn strip_wrapping_parens(value: &str) -> &str {
     }
 }
 
-fn parse_header_pair(value: &str) -> Option<(String, String)> {
+fn parse_header_pair(value: &str) -> Option<ParsedKeyValuePair> {
     let split_pos = match (value.find('='), value.find(':')) {
         (Some(eq), Some(colon)) => eq.min(colon),
         (Some(eq), None) => eq,
@@ -85,10 +108,17 @@ fn parse_header_pair(value: &str) -> Option<(String, String)> {
     if key.is_empty() {
         return None;
     }
-    Some((key.to_string(), value[split_pos + 1..].trim().to_string()))
+    let value_start = value[split_pos + 1..]
+        .find(|character: char| !character.is_whitespace())
+        .map_or(value.len(), |offset| split_pos + 1 + offset);
+    Some(ParsedKeyValuePair {
+        name: key.to_string(),
+        value: value[value_start..].trim_end().to_string(),
+        separator: value[split_pos..value_start].to_string(),
+    })
 }
 
-fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
+fn parse_json_header_object(content: &str) -> Option<Vec<ParsedKeyValuePair>> {
     let json_value = serde_json::from_str::<Value>(content).ok()?;
     let object = json_value.as_object()?;
     Some(
@@ -98,7 +128,11 @@ fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
                 if key.trim().is_empty() {
                     return None;
                 }
-                json_scalar_to_header_value(value).map(|value| (key.clone(), value))
+                json_scalar_to_header_value(value).map(|value| ParsedKeyValuePair {
+                    name: key.clone(),
+                    value,
+                    separator: ":".to_string(),
+                })
             })
             .collect(),
     )

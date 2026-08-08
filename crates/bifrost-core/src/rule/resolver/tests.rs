@@ -168,6 +168,136 @@ fn response_cookie_json_with_attributes_stays_structured() {
 }
 
 #[test]
+fn json_scalar_templates_expand_before_key_value_parsing() {
+    let mut ctx = create_test_context("http://example.com/path", "example.com", "/path");
+    ctx.req_headers.insert("number".into(), "42".into());
+    ctx.req_headers.insert("secure".into(), "true".into());
+
+    let header_rule = create_test_rule(
+        "example.com",
+        Protocol::ReqHeaders,
+        r#"({"X-Now":${reqHeaders.number}})"#,
+    );
+    let resolved = ResolvedRule::new(header_rule, None, &ctx, &HashMap::new());
+    assert_eq!(
+        resolved.header_pairs(),
+        Some([("X-Now".to_string(), "42".to_string())].as_slice())
+    );
+    assert_eq!(resolved.resolved_value, r#"{"X-Now":42}"#);
+
+    let cookie_rule = create_test_rule(
+        "example.com",
+        Protocol::ResCookies,
+        r#"({"sid":{"value":"abc","secure":${reqHeaders.secure}}})"#,
+    );
+    let resolved = ResolvedRule::new(cookie_rule, None, &ctx, &HashMap::new());
+    assert_eq!(resolved.key_value_pairs(), None);
+    assert_eq!(
+        resolved.resolved_value,
+        r#"{"sid":{"value":"abc","secure":true}}"#
+    );
+}
+
+#[test]
+fn json_string_templates_cannot_inject_additional_fields() {
+    let mut ctx = create_test_context("http://example.com/path", "example.com", "/path");
+    ctx.req_headers
+        .insert("source".into(), r#"safe","X-Injected":"yes"#.into());
+    let rule = create_test_rule(
+        "example.com",
+        Protocol::ReqHeaders,
+        r#"({"X-Copied":"${reqHeaders.source}"})"#,
+    );
+    let resolved = ResolvedRule::new(rule, None, &ctx, &HashMap::new());
+
+    assert_eq!(
+        resolved.header_pairs(),
+        Some(
+            [(
+                "X-Copied".to_string(),
+                r#"safe","X-Injected":"yes"#.to_string(),
+            )]
+            .as_slice()
+        )
+    );
+    assert!(!resolved
+        .header_pairs()
+        .expect("header pairs")
+        .iter()
+        .any(|(name, _)| name == "X-Injected"));
+}
+
+#[test]
+fn nondeterministic_template_is_shared_by_applied_and_reported_values() {
+    let rule = create_test_rule(
+        "example.com",
+        Protocol::ReqHeaders,
+        "X-Request-Id=${randomUUID}",
+    );
+    let resolved = ResolvedRule::new_simple(rule, None, &HashMap::new());
+    let applied = &resolved.header_pairs().expect("header pair")[0].1;
+
+    assert_eq!(resolved.resolved_value, format!("X-Request-Id={applied}"));
+    assert!(uuid::Uuid::parse_str(applied).is_ok());
+}
+
+#[test]
+fn malformed_key_value_rules_keep_their_expanded_diagnostic_value() {
+    let mut ctx = create_test_context("http://example.com/path", "example.com", "/path");
+    ctx.req_headers.insert("source".into(), "expanded".into());
+    let rule = create_test_rule("example.com", Protocol::ReqHeaders, "${reqHeaders.source}");
+    let resolved = ResolvedRule::new(rule, None, &ctx, &HashMap::new());
+
+    assert_eq!(resolved.header_pairs(), None);
+    assert_eq!(resolved.resolved_value, "expanded");
+}
+
+#[test]
+fn referenced_ampersands_do_not_replace_authored_entry_delimiters_in_diagnostics() {
+    let mut values = HashMap::new();
+    values.insert(
+        "headers".to_string(),
+        "X-Query: a=1&b=2,X-Mode: test".to_string(),
+    );
+    let mut rule = create_test_rule("example.com", Protocol::ReqHeaders, "{headers}");
+    rule.value_source = ValueSource::ValueRef("headers".to_string());
+    let resolved = ResolvedRule::new_simple(rule, None, &values);
+
+    assert_eq!(
+        resolved.header_pairs(),
+        Some(
+            [
+                ("X-Query".to_string(), "a=1&b=2".to_string()),
+                ("X-Mode".to_string(), "test".to_string()),
+            ]
+            .as_slice()
+        )
+    );
+    assert_eq!(resolved.resolved_value, "X-Query: a=1&b=2,X-Mode: test");
+}
+
+#[test]
+fn parenthesized_response_cookie_attributes_are_detected_after_expansion() {
+    let mut ctx = create_test_context("http://example.com/path", "example.com", "/path");
+    ctx.req_headers.insert("secure".into(), "true".into());
+    let rule = create_test_rule(
+        "example.com",
+        Protocol::ResCookies,
+        r#"({"sid":{"value":"abc","secure":${reqHeaders.secure}}})"#,
+    );
+    let resolved = ResolvedRule::new(rule, None, &ctx, &HashMap::new());
+
+    assert_eq!(resolved.key_value_pairs(), None);
+    assert_eq!(
+        resolved.resolved_value,
+        r#"{"sid":{"value":"abc","secure":true}}"#
+    );
+    assert!(response_cookie_json_has_attributes(
+        r#"({"sid":{"value":"abc","secure":true}})"#
+    ));
+}
+
+#[test]
 fn test_resolved_rules_get_by_protocol() {
     let mut result = ResolvedRules::new();
 

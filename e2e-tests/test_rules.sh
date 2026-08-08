@@ -1136,10 +1136,23 @@ test_req_cookies() {
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
-    if command -v jq &> /dev/null && [[ -n "$HTTP_BODY" ]]; then
-        local actual_cookie=$(echo "$HTTP_BODY" | jq -r ".request.cookies[\"$cookie_name\"]" 2>/dev/null)
-        assert_equals "$cookie_value" "$actual_cookie" "后端应收到 Cookie $cookie_name=$cookie_value"
+    if [[ -z "$HTTP_BODY" ]]; then
+        _log_fail "后端未返回请求详情" "非空 JSON 响应体" "空响应体"
+        return
     fi
+
+    local actual_cookie
+    actual_cookie=$(COOKIE_NAME="$cookie_name" "$PYTHON_BIN" -c '
+import json, os, sys
+payload = json.load(sys.stdin)
+cookies = payload.get("request", {}).get("cookies", {})
+name = os.environ["COOKIE_NAME"]
+if name not in cookies:
+    sys.exit(2)
+print(cookies[name], end="")
+' <<< "$HTTP_BODY" 2>/dev/null) || actual_cookie="__BIFROST_COOKIE_MISSING__"
+
+    assert_equals "$cookie_value" "$actual_cookie" "后端应收到 Cookie $cookie_name=$cookie_value"
 }
 
 test_forwarded_for_rule() {
@@ -2473,7 +2486,7 @@ test_trailers_rule() {
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
     local actual_value=$(echo "$HTTP_HEADERS" | grep -i "^Trailer:" | head -1 | cut -d':' -f2- | sed 's/^[[:space:]]*//' | tr -d '\r')
-    if [[ "$actual_value" == *"$trailer_header"* ]]; then
+    if [[ "$actual_value" == "$trailer_header" ]]; then
         _log_pass "Trailer 头已设置: $actual_value"
     else
         _log_fail "Trailer 头不匹配" "$trailer_header" "${actual_value:-空}"
@@ -2895,6 +2908,58 @@ extract_headers_from_value() {
         header_name=$(printf '%s' "$header_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         header_value=$(printf '%s' "$header_value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [[ -n "$header_name" ]] && printf '%s|%s\n' "$header_name" "$header_value"
+    done <<< "$segments"
+}
+
+extract_key_values_from_value() {
+    local value="$1"
+    local value_source="${2:-$value}"
+    local split_ampersands=true
+
+    if [[ "$value_source" =~ ^\{([a-zA-Z_][a-zA-Z0-9_.-]*)\}$ ]]; then
+        split_ampersands=false
+        if [[ "$value" == "$value_source" ]]; then
+            value=$(resolve_value_reference "$value_source")
+        fi
+    fi
+
+    value="${value#\`}"
+    value="${value%\`}"
+    value="${value#(}"
+    value="${value%)}"
+
+    local segments="$value"
+    if [[ "$value" != *$'\n'* && "$split_ampersands" == true ]]; then
+        segments="${segments//&/$'\n'}"
+    fi
+
+    local part
+    while IFS= read -r part || [[ -n "$part" ]]; do
+        part=$(printf '%s' "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$part" || "$part" == \#* ]] && continue
+
+        local separator=""
+        local eq_prefix="${part%%=*}"
+        local colon_prefix="${part%%:*}"
+        if [[ "$part" == *"="* && "$part" == *":"* ]]; then
+            if (( ${#eq_prefix} < ${#colon_prefix} )); then
+                separator="="
+            else
+                separator=":"
+            fi
+        elif [[ "$part" == *"="* ]]; then
+            separator="="
+        elif [[ "$part" == *":"* ]]; then
+            separator=":"
+        else
+            continue
+        fi
+
+        local key="${part%%${separator}*}"
+        local item_value="${part#*${separator}}"
+        key=$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        item_value=$(printf '%s' "$item_value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -n "$key" ]] && printf '%s|%s\n' "$key" "$item_value"
     done <<< "$segments"
 }
 
@@ -3936,24 +4001,26 @@ run_tests() {
                 ;;
             reqCookies)
                 local req_cookie_raw=$(extract_value "$protocols" "reqCookies")
+                local req_cookie_source="$req_cookie_raw"
                 req_cookie_raw=$(resolve_code_block_var "$req_cookie_raw" "$RULE_FILE")
-                req_cookie_raw="${req_cookie_raw#(}"
-                req_cookie_raw="${req_cookie_raw%)}"
+                local req_cookie_pairs
+                req_cookie_pairs=$(extract_key_values_from_value "$req_cookie_raw" "$req_cookie_source")
                 while IFS= read -r cookie_pair || [[ -n "$cookie_pair" ]]; do
-                    local cookie_name="${cookie_pair%%=*}"
-                    local cookie_value="${cookie_pair#*=}"
+                    local cookie_name="${cookie_pair%%|*}"
+                    local cookie_value="${cookie_pair#*|}"
                     test_req_cookies "$pattern" "$cookie_name" "$cookie_value"
-                done < <(printf '%s' "$req_cookie_raw" | tr '&' '\n')
+                done <<< "$req_cookie_pairs"
                 ;;
             resCookies)
                 local res_cookie_raw=$(extract_value "$protocols" "resCookies")
+                local res_cookie_source="$res_cookie_raw"
                 res_cookie_raw=$(resolve_code_block_var "$res_cookie_raw" "$RULE_FILE")
-                res_cookie_raw="${res_cookie_raw#(}"
-                res_cookie_raw="${res_cookie_raw%)}"
+                local res_cookie_pairs
+                res_cookie_pairs=$(extract_key_values_from_value "$res_cookie_raw" "$res_cookie_source")
                 while IFS= read -r cookie_pair || [[ -n "$cookie_pair" ]]; do
-                    local cookie_name="${cookie_pair%%=*}"
+                    local cookie_name="${cookie_pair%%|*}"
                     test_res_cookies "$pattern" "$cookie_name"
-                done < <(printf '%s' "$res_cookie_raw" | tr '&' '\n')
+                done <<< "$res_cookie_pairs"
                 ;;
             websocket|websocket_secure)
                 test_websocket_forward "$pattern" "$target"
@@ -4092,13 +4159,15 @@ run_tests() {
                 ;;
             trailers)
                 local trailers_value=$(extract_value "$protocols" "trailers")
-                trailers_value="${trailers_value#(}"
-                trailers_value="${trailers_value%)}"
+                local trailers_source="$trailers_value"
+                trailers_value=$(resolve_code_block_var "$trailers_value" "$RULE_FILE")
+                local trailer_pairs
+                trailer_pairs=$(extract_key_values_from_value "$trailers_value" "$trailers_source")
                 local trailer_header=""
                 while IFS= read -r trailer_pair || [[ -n "$trailer_pair" ]]; do
-                    local trailer_name="${trailer_pair%%[=:]*}"
+                    local trailer_name="${trailer_pair%%|*}"
                     trailer_header="${trailer_header:+${trailer_header}, }${trailer_name}"
-                done < <(printf '%s' "$trailers_value" | tr '&' '\n')
+                done <<< "$trailer_pairs"
                 test_trailers_rule "$pattern" "$trailer_header"
                 ;;
             pac|proxy)
