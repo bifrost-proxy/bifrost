@@ -1,4 +1,4 @@
-use bifrost_core::{parse_rule_header_pairs, Protocol, ResolvedRules};
+use bifrost_core::{Protocol, ResolvedRules};
 
 pub(crate) fn apply_response_rules(
     resolved_rules: &ResolvedRules,
@@ -25,10 +25,7 @@ pub(crate) fn apply_response_rules(
                 delete_res_headers.extend(parse_delete_value(&rule.resolved_value).res_headers);
             }
             Protocol::ResHeaders => {
-                res_headers.extend(
-                    parse_rule_header_pairs(&rule.resolved_value, &rule.rule.value_source)
-                        .unwrap_or_default(),
-                );
+                res_headers.extend(rule.header_pairs().unwrap_or_default().iter().cloned());
             }
             Protocol::StatusCode | Protocol::ReplaceStatus => {
                 if let Ok(code) = rule.resolved_value.parse::<u16>() {
@@ -151,10 +148,7 @@ pub(crate) fn apply_websocket_response_header_rules(
                 delete_res_headers.extend(parse_delete_value(&rule.resolved_value).res_headers);
             }
             Protocol::ResHeaders => {
-                res_headers.extend(
-                    parse_rule_header_pairs(&rule.resolved_value, &rule.rule.value_source)
-                        .unwrap_or_default(),
-                );
+                res_headers.extend(rule.header_pairs().unwrap_or_default().iter().cloned());
             }
             Protocol::HeaderReplace => {
                 header_replace.extend(parse_header_replace_value(&rule.resolved_value));

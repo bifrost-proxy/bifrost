@@ -24,6 +24,7 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 
 - 单 Header、逗号分隔 Header、JSON 对象和多行 Values 继续可用。
 - JSON、多行 Value 或单行引用 Value 内 Header 值中的字面 `&` 不被拆分。
+- `${url}` / `${reqHeaders.*}` 等模板展开结果中的 `&` 保持为 Header 值数据，不能注入额外 Header。
 - `reqCookies` / `resCookies` 不改变分隔语义。
 - malformed JSON Header 对象不能回退成部分生效的非法 Header。
 
@@ -44,6 +45,9 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
   Value `X-Query: a=1&b=2` 也保持一个 Header。
 - 只有 `ValueSource::Inline`、`InlineParams` 和 `ParenContent` 单行内容按 `&` 或逗号
   拆分；文件、远程 URL 和 `{name}` 引用内容保留字面 `&`。
+- 对 `reqHeaders` / `resHeaders`，`ResolvedRule` 先按规则作者写下的源文本解析 Header
+  边界，再逐个展开 Header 名和值中的模板；不再对已经展开的整串文本重新按 `&` 拆分。
+  因此 URL 查询串和复制的请求 Header 即使含 `&X-Injected=...` 也只属于原 Header 值。
 - Cookie、CORS、URL 参数继续走各自现有 parser，不共享 Header 的 `&` 分隔规则。
 
 ## 测试方案
@@ -51,6 +55,8 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - core 单元测试：`rule::header_value::tests`。
 - Admin/CLI 针对性测试：验证旧 JSON、多行、注释和 Replay parser 兼容。
 - E2E runner：`req_headers_ampersand_separated` 真实启动代理和 mock upstream。
+- E2E runner：`req_headers_template_literal_ampersand` 验证 `${url}` 查询串和
+  `${reqHeaders.*}` 中的 `&` 不会改变 Header 边界。
 - 规则夹具：`e2e-tests/rules/request_modify/headers.txt` 的 R-05。
 - human test：`human_tests/rule-merge-headers.md` 的 TC-RMH-08。
 
@@ -89,6 +95,7 @@ reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lar
 - `docs/rules/response-modification.md`
 - `site/src/content/docs/reference/rules/request-modification.md`
 - `site/src/content/docs/reference/rules/response-modification.md`
+- `docs-en/operation.md`、`docs-en/pattern.md` 与英文 request/response rule 文档及 site 镜像
 - `human_tests/rule-merge-headers.md`
 - `human_tests/readme.md`
 - `e2e-tests/rules/COVERAGE.md`

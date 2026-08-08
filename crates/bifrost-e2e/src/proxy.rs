@@ -4,8 +4,8 @@ use bifrost_admin::{
     ImGatewayService, RuntimeConfig, WsPayloadStore,
 };
 use bifrost_core::{
-    normalize_rule_content, parse_rule_header_pairs, parse_rules, Protocol, RequestContext, Rule,
-    RuleParser, RulesResolver as CoreRulesResolver,
+    normalize_rule_content, parse_rules, Protocol, RequestContext, Rule, RuleParser,
+    RulesResolver as CoreRulesResolver,
 };
 use bifrost_proxy::{
     DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ProxyConfig, ProxyServer,
@@ -298,23 +298,19 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                     result.host_protocol = Some(Protocol::Host);
                 }
                 Protocol::ReqHeaders => {
-                    if let Some(headers) =
-                        parse_rule_header_pairs(value, &resolved_rule.rule.value_source)
-                    {
-                        for (k, v) in headers {
+                    if let Some(headers) = resolved_rule.header_pairs() {
+                        for (k, v) in headers.iter().cloned() {
                             result.req_headers.push((k, v));
                         }
                     }
                 }
                 Protocol::ResHeaders => {
                     tracing::debug!("Parsing ResHeaders value: {}", value);
-                    if let Some(headers) =
-                        parse_rule_header_pairs(value, &resolved_rule.rule.value_source)
-                    {
-                        for (k, v) in &headers {
+                    if let Some(headers) = resolved_rule.header_pairs() {
+                        for (k, v) in headers {
                             tracing::debug!("Adding res header: {} = {}", k, v);
                         }
-                        for (k, v) in headers {
+                        for (k, v) in headers.iter().cloned() {
                             if v.is_empty() {
                                 result.delete_res_headers.push(k);
                             } else {

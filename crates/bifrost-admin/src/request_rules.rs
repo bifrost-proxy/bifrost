@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use base64::Engine;
 use bifrost_core::{
-    matcher::factory::pattern_uses_exact_forward_target_path, parse_rule_header_pairs, Protocol,
+    matcher::factory::pattern_uses_exact_forward_target_path, Protocol,
     ResolvedRules as CoreResolvedRules,
 };
 use bytes::Bytes;
@@ -130,10 +130,9 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                 applied.auth = Some(rule.resolved_value.clone());
             }
             Protocol::ReqHeaders => {
-                applied.req_headers.extend(
-                    parse_rule_header_pairs(&rule.resolved_value, &rule.rule.value_source)
-                        .unwrap_or_default(),
-                );
+                applied
+                    .req_headers
+                    .extend(rule.header_pairs().unwrap_or_default().iter().cloned());
             }
             Protocol::ReqCookies => {
                 applied

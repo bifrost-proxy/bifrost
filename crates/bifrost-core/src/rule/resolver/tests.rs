@@ -78,6 +78,49 @@ fn test_resolved_rules_add() {
 }
 
 #[test]
+fn header_templates_expand_after_authored_separators_are_parsed() {
+    let ctx = create_test_context("http://example.com/path?a=1&b=2", "example.com", "/path");
+    let rule = create_test_rule(
+        "example.com",
+        Protocol::ReqHeaders,
+        "X-Full-Url=${url}&X-Mode=test",
+    );
+    let resolved = ResolvedRule::new(rule, None, &ctx, &HashMap::new());
+
+    assert_eq!(
+        resolved.header_pairs(),
+        Some(
+            [
+                (
+                    "X-Full-Url".to_string(),
+                    "http://example.com/path?a=1&b=2".to_string(),
+                ),
+                ("X-Mode".to_string(), "test".to_string()),
+            ]
+            .as_slice()
+        )
+    );
+}
+
+#[test]
+fn header_template_value_cannot_inject_an_extra_header() {
+    let mut ctx = create_test_context("http://example.com/path", "example.com", "/path");
+    ctx.req_headers
+        .insert("source".to_string(), "safe&X-Injected=yes".to_string());
+    let rule = create_test_rule(
+        "example.com",
+        Protocol::ReqHeaders,
+        "X-Copied=${reqHeaders.source}",
+    );
+    let resolved = ResolvedRule::new(rule, None, &ctx, &HashMap::new());
+
+    assert_eq!(
+        resolved.header_pairs(),
+        Some([("X-Copied".to_string(), "safe&X-Injected=yes".to_string())].as_slice())
+    );
+}
+
+#[test]
 fn test_resolved_rules_get_by_protocol() {
     let mut result = ResolvedRules::new();
 

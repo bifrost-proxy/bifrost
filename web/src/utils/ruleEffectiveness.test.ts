@@ -68,6 +68,19 @@ describe("analyzeRuleEffectiveness", () => {
     expect(laterHeaders).toMatchObject({ status: "active" });
   });
 
+  test("treats ampersand-separated request headers as independent override fields", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        "https://example.test/api/ reqHeaders://(x-env=one&x-stable=keep)",
+        "https://example.test/api/ reqHeaders://x-env=two",
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "partial", coveredByLine: 2 });
+    expect(effects[0].details.join("\n")).toContain("x-env");
+    expect(effects[1]).toMatchObject({ status: "active" });
+  });
+
   test("keeps different protocols on the same matcher active when they do not compete", () => {
     const effects = analyzeRuleEffectiveness(
       [

@@ -13,6 +13,12 @@ pattern resBody://{mock-response.json}    # {key} = an embedded block in this ru
 pattern urlParams://t=${now}&id=${randomUUID}
 ```
 
+Single-line inline `reqHeaders` / `resHeaders` values use `&` to separate
+multiple headers, for example `reqHeaders://(X-Env=test&X-Mode=debug)`. To keep
+a literal `&` inside a header value, use a JSON object or a multi-line/referenced
+Value with one `Header: value` entry per line. This separator rule does not
+change `reqCookies` / `resCookies` behavior.
+
 `reqReplace` and `resReplace` additionally accept a referenced strict JSON object, for example `pattern resReplace://{replaceMap}` where the Value is `{ "old": "new" }`. Legacy `old=new&foo=bar` values remain supported.
 
 Template variables (`${...}`) expand unconditionally inside any value — backticks do not enable template parsing and are not special syntax (they pass through into the output literally). Backticks are only useful to protect a value that contains spaces from the rule-line tokenizer. Note: request-context vars (`${host}`, `${reqHeaders.x}`, …) work, but response-phase vars `${statusCode}` / `${resHeaders.x}` / `${resCookies.x}` and `${realHost}` / `${realPort}` / `${realUrl}` currently expand to an empty string (verified).

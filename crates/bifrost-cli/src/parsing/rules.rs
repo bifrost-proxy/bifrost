@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bifrost_core::{
-    matcher::factory::pattern_uses_exact_forward_target_path, parse_rule_header_pairs, Protocol,
-    RequestContext, Rule, RulesResolver as CoreRulesResolver,
+    matcher::factory::pattern_uses_exact_forward_target_path, Protocol, RequestContext, Rule,
+    RulesResolver as CoreRulesResolver,
 };
 use bifrost_proxy::{
     DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ResolvedRules as ProxyResolvedRules, RuleValue,
@@ -499,10 +499,8 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 result.redirect_status = status;
             }
             Protocol::ReqHeaders => {
-                if let Some(headers) =
-                    parse_rule_header_pairs(value, &resolved_rule.rule.value_source)
-                {
-                    for (k, v) in headers {
+                if let Some(headers) = resolved_rule.header_pairs() {
+                    for (k, v) in headers.iter().cloned() {
                         let key_lower = k.to_lowercase();
                         if !result
                             .req_headers
@@ -515,10 +513,8 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::ResHeaders => {
-                if let Some(headers) =
-                    parse_rule_header_pairs(value, &resolved_rule.rule.value_source)
-                {
-                    for (k, v) in headers {
+                if let Some(headers) = resolved_rule.header_pairs() {
+                    for (k, v) in headers.iter().cloned() {
                         let key_lower = k.to_lowercase();
                         if !result
                             .res_headers

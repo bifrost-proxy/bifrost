@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::context::RequestContext;
 use super::template::TemplateEngine;
 use super::types::Rule;
-use super::{MemoryValueStore, ValueSource, ValueStore};
+use super::{parse_rule_header_pairs, MemoryValueStore, ValueSource, ValueStore};
 
 const DEFAULT_CACHE_CAPACITY: usize = 1000;
 
@@ -18,6 +18,7 @@ pub struct ResolvedRule {
     pub rule: Rule,
     pub captures: Option<Vec<String>>,
     pub resolved_value: String,
+    resolved_header_pairs: Option<Vec<(String, String)>>,
 }
 
 impl ResolvedRule {
@@ -55,6 +56,36 @@ impl ResolvedRule {
             let store = MemoryValueStore::from_hashmap(values.clone());
             rule.value_source.resolve_with_fallback(&store)
         };
+        // Header separators are syntax in the authored source, not in template
+        // output. Parse first, then expand each field independently.
+        let resolved_header_pairs = if matches!(
+            rule.protocol,
+            crate::protocol::Protocol::ReqHeaders | crate::protocol::Protocol::ResHeaders
+        ) {
+            parse_rule_header_pairs(&base_value, &rule.value_source).map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(name, value)| {
+                        (
+                            TemplateEngine::expand_with_context(
+                                &name,
+                                ctx,
+                                captures.as_deref(),
+                                values,
+                            ),
+                            TemplateEngine::expand_with_context(
+                                &value,
+                                ctx,
+                                captures.as_deref(),
+                                values,
+                            ),
+                        )
+                    })
+                    .collect()
+            })
+        } else {
+            None
+        };
         let resolved_value =
             TemplateEngine::expand_with_context(&base_value, ctx, captures.as_deref(), values);
 
@@ -62,7 +93,16 @@ impl ResolvedRule {
             rule,
             captures,
             resolved_value,
+            resolved_header_pairs,
         }
+    }
+
+    /// Return request/response headers parsed before template expansion.
+    ///
+    /// Expanding each parsed name/value independently ensures an `&` produced by
+    /// `${url}` or `${reqHeaders.*}` remains data and cannot become a separator.
+    pub fn header_pairs(&self) -> Option<&[(String, String)]> {
+        self.resolved_header_pairs.as_deref()
     }
 
     pub fn new_simple(

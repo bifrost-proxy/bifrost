@@ -1072,7 +1072,7 @@ function parseHeaderEntries(value: string): HeaderEntry[] {
     : trimmed;
 
   return inline
-    .split(/[,\n]/)
+    .split(/[,&\n]/)
     .map((part) => part.trim())
     .map((part) => {
       const match = part.match(/^([^:=]+)[:=](.*)$/s);

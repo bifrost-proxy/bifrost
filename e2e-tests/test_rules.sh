@@ -844,7 +844,7 @@ test_req_headers_add() {
     fi
 
     local actual_value
-    actual_value=$(HEADER_NAME="$header_name" python3 -c '
+    actual_value=$(HEADER_NAME="$header_name" "$PYTHON_BIN" -c '
 import json, os, sys
 payload = json.load(sys.stdin)
 headers = payload.get("request", {}).get("headers", {})
@@ -2828,8 +2828,15 @@ extract_header_from_value() {
 
 extract_headers_from_value() {
     local value="$1"
+    local value_source="${2:-$value}"
+    local split_ampersands=true
 
-    value=$(resolve_value_reference "$value")
+    if [[ "$value_source" =~ ^\{([a-zA-Z_][a-zA-Z0-9_.-]*)\}$ ]]; then
+        split_ampersands=false
+        if [[ "$value" == "$value_source" ]]; then
+            value=$(resolve_value_reference "$value_source")
+        fi
+    fi
 
     value="${value#\`}"
     value="${value%\`}"
@@ -2855,7 +2862,9 @@ extract_headers_from_value() {
 
     local segments="$value"
     if [[ "$value" != *$'\n'* ]]; then
-        segments="${segments//&/$'\n'}"
+        if [[ "$split_ampersands" == true ]]; then
+            segments="${segments//&/$'\n'}"
+        fi
         segments="${segments//,/$'\n'}"
     fi
 
@@ -3847,9 +3856,10 @@ run_tests() {
                 ;;
             reqHeaders)
                 local req_header_raw=$(extract_value "$protocols" "reqHeaders")
+                local req_header_source="$req_header_raw"
                 req_header_raw=$(resolve_code_block_var "$req_header_raw" "$RULE_FILE")
                 local req_header_infos
-                req_header_infos=$(extract_headers_from_value "$req_header_raw")
+                req_header_infos=$(extract_headers_from_value "$req_header_raw" "$req_header_source")
                 if [[ -n "$req_header_infos" ]]; then
                     while IFS= read -r req_header_info; do
                         local req_header_name=$(echo "$req_header_info" | cut -d'|' -f1)
@@ -3867,9 +3877,10 @@ run_tests() {
                 ;;
             resHeaders)
                 local res_header_raw=$(extract_value "$protocols" "resHeaders")
+                local res_header_source="$res_header_raw"
                 res_header_raw=$(resolve_code_block_var "$res_header_raw" "$RULE_FILE")
                 local res_header_infos
-                res_header_infos=$(extract_headers_from_value "$res_header_raw")
+                res_header_infos=$(extract_headers_from_value "$res_header_raw" "$res_header_source")
                 if [[ -n "$res_header_infos" ]]; then
                     while IFS= read -r res_header_info; do
                         local res_header_name=$(echo "$res_header_info" | cut -d'|' -f1)

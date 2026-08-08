@@ -215,6 +215,7 @@ cargo run -p bifrost-e2e -- --test req_headers_ampersand_separated
 cargo run -p bifrost-e2e -- --test res_headers_ampersand_separated
 cargo run -p bifrost-e2e -- --test req_headers_value_ref_literal_ampersand
 cargo run -p bifrost-e2e -- --test req_headers_referer_equals_url
+cargo run -p bifrost-e2e -- --test req_headers_template_literal_ampersand
 ```
 3. 运行请求 Header 规则夹具：
 ```bash
@@ -242,9 +243,34 @@ cargo run -p bifrost-e2e -- --test req_headers_referer_equals_url
 - 单行引用 Value `X-Query: a=1&b=2` 保持一个 Header，字面 `&` 不被拆分。
 - `reqHeaders://Referer=https://example.test/` 保留完整 URL 值。
 - Values 中 `X-Symbols: !@#$%^*()_+-[]{}|` 的尾部 `|` 被完整保留并由夹具准确断言。
+- `${url}` 展开出的 `?a=1&b=2` 完整保留在 `X-Full-Url` 中；客户端
+  `X-Source: safe&X-Injected=yes` 经 `${reqHeaders.x-source}` 复制后仍只有 `X-Copied`
+  一个规则生成的 Header，不会额外生成 `X-Injected`。
+
+### TC-RMH-09: WebUI 有效性分析识别 `&` 分隔 Header
+
+**操作步骤**：
+```bash
+pnpm --dir web exec vitest run src/utils/ruleEffectiveness.test.ts
+```
+
+**预期结果**：
+- 第一条规则 `reqHeaders://(x-env=one&x-stable=keep)` 被识别为两个独立字段。
+- 后续同 matcher 的 `reqHeaders://x-env=two` 只覆盖 `x-env`，第一条规则显示 partial，
+  `x-stable` 仍保持有效。
 
 ## 清理步骤
 
 1. 停止本地 HTTPS 回显服务
 2. 停止测试服务：`cargo run --bin bifrost -- stop -p 8800`
 3. 删除临时数据目录：`rm -rf ./.bifrost-test ./.bifrost-test-rmh e2e-tests/.bifrost-e2e-header-ampersand e2e-tests/.bifrost-e2e-header-values`
+
+## 本次执行记录（2026-08-08）
+
+- TC-RMH-08：PASS。四个独立真实代理 E2E 全部 `1/1 passed`；模板边界用例确认
+  `X-Full-Url=http://test.local/api?a=1&b=2` 和
+  `X-Copied=safe&X-Injected=yes`，且不存在额外 `X-Injected` Header。请求 Header
+  夹具复跑结果 `20/20 passed`，Values 夹具复跑结果 `69/69 passed`。
+- TC-RMH-09：PASS。`pnpm --dir web exec vitest run src/utils/ruleEffectiveness.test.ts`
+  结果 `12/12 passed`，`&` 分隔的 `x-env` 被后续规则覆盖时首条规则为 partial，
+  `x-stable` 继续有效。

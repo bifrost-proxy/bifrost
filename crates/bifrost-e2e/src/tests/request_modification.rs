@@ -56,6 +56,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_req_headers_value_ref_literal_ampersand,
         ),
         TestCase::standalone(
+            "req_headers_template_literal_ampersand",
+            "ReqHeaders protocol: template-produced ampersand remains inside one header",
+            "request_modification",
+            test_req_headers_template_literal_ampersand,
+        ),
+        TestCase::standalone(
             "req_headers_inline_markdown",
             "ReqHeaders protocol: inline markdown code block values",
             "request_modification",
@@ -396,6 +402,38 @@ async fn test_req_headers_value_ref_literal_ampersand() -> Result<(), String> {
 
     result.assert_success()?;
     mock.assert_header_received("x-query", "a=1&b=2")?;
+
+    Ok(())
+}
+
+async fn test_req_headers_template_literal_ampersand() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local reqHeaders://X-Full-Url=${url}".to_string(),
+        "test.local reqHeaders://X-Copied=${reqHeaders.x-source}".to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api?a=1&b=2",
+    )
+    .header("X-Source", "safe&X-Injected=yes")
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("x-full-url", "http://test.local/api?a=1&b=2")?;
+    mock.assert_header_received("x-copied", "safe&X-Injected=yes")?;
+    let request = mock.last_request().ok_or("No request received")?;
+    if request.headers.keys().any(|name| name == "x-injected") {
+        return Err("template output injected an unintended X-Injected header".to_string());
+    }
 
     Ok(())
 }
@@ -773,6 +811,12 @@ mod tests {
     #[tokio::test]
     async fn test_headers_value_ref_literal_ampersand() {
         let result = test_req_headers_value_ref_literal_ampersand().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_template_literal_ampersand() {
+        let result = test_req_headers_template_literal_ampersand().await;
         assert!(result.is_ok(), "Test failed: {:?}", result.err());
     }
 

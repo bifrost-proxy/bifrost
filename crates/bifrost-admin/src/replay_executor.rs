@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bifrost_core::{
-    parse_rule_header_pairs, Protocol, RequestContext, ResolvedRules, Rule, RuleParser,
-    RulesResolver, ValueStore,
+    Protocol, RequestContext, ResolvedRules, Rule, RuleParser, RulesResolver, ValueStore,
 };
 use bifrost_script::ResponseData;
 use bytes::Bytes;
@@ -397,11 +396,7 @@ impl ReplayExecutor {
                     body = Some(content);
                 }
                 Protocol::ResHeaders => {
-                    if let Some(parsed) =
-                        parse_rule_header_pairs(&rule.resolved_value, &rule.rule.value_source)
-                    {
-                        headers.extend(parsed);
-                    }
+                    headers.extend(rule.header_pairs().unwrap_or_default().iter().cloned());
                 }
                 Protocol::Host | Protocol::XHost => {}
                 _ => {}
@@ -1357,7 +1352,8 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 mod tests {
     use super::*;
     use bifrost_core::{
-        matcher::WildcardMatcher, rule::ValueSource, Protocol, ResolvedRule, ResolvedRules, Rule,
+        matcher::WildcardMatcher, parse_rule_header_pairs, rule::ValueSource, Protocol,
+        ResolvedRule, ResolvedRules, Rule,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -1372,11 +1368,7 @@ mod tests {
             resolved_value.to_string(),
             format!("* {}://{}", protocol.to_str(), resolved_value),
         );
-        ResolvedRule {
-            rule,
-            captures: None,
-            resolved_value: resolved_value.to_string(),
-        }
+        ResolvedRule::new_simple(rule, None, &HashMap::new())
     }
 
     fn build_resolved_rules(rules: &[(Protocol, &str)]) -> ResolvedRules {
@@ -1600,7 +1592,7 @@ mod tests {
 #[cfg(test)]
 mod replay_executor_helper_tests {
     use super::*;
-    use bifrost_core::rule::ValueSource;
+    use bifrost_core::{parse_rule_header_pairs, rule::ValueSource};
     use rustls::client::danger::ServerCertVerifier;
 
     #[test]
