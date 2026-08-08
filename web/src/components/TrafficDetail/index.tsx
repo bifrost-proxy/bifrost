@@ -25,6 +25,7 @@ import { CookieView } from "./panes/Cookie";
 import { QueryView } from "./panes/Query";
 import { Messages } from "./panes/Messages";
 import ScriptLogsPane from "./panes/ScriptLogs";
+import { BreakpointBanner } from "./BreakpointBanner";
 import { getResponseBodyContentUrl } from "../../api/traffic";
 import type { TrafficBodyContent } from "../../api/traffic";
 import { parseSseTextToEvents } from "../VirtualMessageViewer";
@@ -217,6 +218,17 @@ export default function TrafficDetail({
     record ? state.pausedResponses.get(record.id) : undefined,
   );
   const updatePausedBody = useBreakpointStore((state) => state.updatePausedBody);
+  const updatePausedHeaders = useBreakpointStore((state) => state.updatePausedHeaders);
+  const updatePausedMetadata = useBreakpointStore((state) => state.updatePausedMetadata);
+  const activeBreakpoint = pausedRequest ?? pausedResponse;
+  const pausedRequestKey = pausedRequest
+    ? `${pausedRequest.requestId}:request:${pausedRequest.bodyOmitted}`
+    : undefined;
+  const pausedResponseKey = pausedResponse
+    ? `${pausedResponse.requestId}:response:${pausedResponse.bodyOmitted}`
+    : undefined;
+  const pausedRequestBodyOmitted = pausedRequest?.bodyOmitted ?? false;
+  const pausedResponseBodyOmitted = pausedResponse?.bodyOmitted ?? false;
 
   useEffect(() => {
     reset();
@@ -232,6 +244,35 @@ export default function TrafficDetail({
     setRequestBodySource('decoded');
     setResponseBodySource('decoded');
   }, [record?.id]);
+
+  useEffect(() => {
+    if (pausedRequestKey) {
+      setRequestCollapsed(false);
+      const tab = pausedRequestBodyOmitted ? "Header" : "Body";
+      setRequestTab(tab);
+      setRequestPreferredTab(tab);
+      setRequestDisplayFormat("HighLight");
+    } else if (pausedResponseKey) {
+      setResponseCollapsed(false);
+      const tab = pausedResponseBodyOmitted ? "Header" : "Body";
+      setResponseTab(tab);
+      setResponsePreferredTab(tab);
+      setResponseDisplayFormat("HighLight");
+    }
+  }, [
+    pausedRequestKey,
+    pausedRequestBodyOmitted,
+    pausedResponseKey,
+    pausedResponseBodyOmitted,
+    setRequestCollapsed,
+    setRequestDisplayFormat,
+    setRequestPreferredTab,
+    setRequestTab,
+    setResponseCollapsed,
+    setResponseDisplayFormat,
+    setResponsePreferredTab,
+    setResponseTab,
+  ]);
 
   const responseContentType = useMemo<RecordContentType>(() => {
     return getContentTypeFromHeader(record?.content_type);
@@ -387,10 +428,7 @@ export default function TrafficDetail({
 
   const requestTabs = useMemo(() => {
     if (!record) return [];
-    const requestBodyForView =
-      pausedRequest
-        ? pausedRequest.body ?? pausedRequest.originalBody
-        : requestBody;
+    const requestBodyForView = pausedRequest ? pausedRequest.body : requestBody;
     const requestBodyEditable = !!pausedRequest && !pausedRequest.bodyOmitted;
 
     return [
@@ -410,12 +448,16 @@ export default function TrafficDetail({
         label: "Header",
         children: (
           <HeaderView
-            headers={record.request_headers}
+            headers={pausedRequest?.headers ?? record.request_headers}
             originalHeaders={record.original_request_headers}
             flow="request"
             testIdPrefix="request-header-view"
             searchValue={requestSearch}
             onSearch={setRequestSearch}
+            editable={!!pausedRequest}
+            onHeadersChange={(headers) =>
+              updatePausedHeaders(record.id, "request", headers)
+            }
           />
         ),
       },
@@ -435,12 +477,16 @@ export default function TrafficDetail({
       {
         key: "Query",
         label: "Query",
-        enable: hasQueryParams(record.url),
+        enable: hasQueryParams(pausedRequest?.url ?? record.url) || !!pausedRequest,
         children: (
           <QueryView
-            url={record.url}
+            url={pausedRequest?.url ?? record.url}
             searchValue={requestSearch}
             onSearch={setRequestSearch}
+            editable={!!pausedRequest}
+            onUrlChange={(url) =>
+              updatePausedMetadata(record.id, "request", { url })
+            }
           />
         ),
       },
@@ -509,6 +555,9 @@ export default function TrafficDetail({
     requestRawBody,
     requestBodySource,
     handleRequestBodySourceChange,
+    handleRequestBodyChange,
+    updatePausedHeaders,
+    updatePausedMetadata,
   ]);
 
   const openAiLikeAssembly = useMemo(() => {
@@ -583,10 +632,7 @@ export default function TrafficDetail({
 
   const responseTabs = useMemo(() => {
     if (!record) return [];
-    const responseBodyForView =
-      pausedResponse
-        ? pausedResponse.body ?? pausedResponse.originalBody
-        : responseBody;
+    const responseBodyForView = pausedResponse ? pausedResponse.body : responseBody;
     const responseBodyEditable = !!pausedResponse && !pausedResponse.bodyOmitted;
     const hasMessages = record.is_websocket || record.is_sse;
     const socketCount = record.socket_status?.frame_count ?? record.frame_count ?? 0;
@@ -595,7 +641,10 @@ export default function TrafficDetail({
       ? record.socket_status?.is_open ?? !record.end_time
       : false;
 
-    const effectiveResponseHeaders = record.response_headers ?? record.original_response_headers ?? null;
+    const effectiveResponseHeaders = pausedResponse?.headers
+      ?? record.response_headers
+      ?? record.original_response_headers
+      ?? null;
 
     return [
       {
@@ -603,12 +652,16 @@ export default function TrafficDetail({
         label: "Header",
         children: (
           <HeaderView
-            headers={record.response_headers}
+            headers={effectiveResponseHeaders}
             originalHeaders={record.original_response_headers}
             flow="response"
             testIdPrefix="response-header-view"
             searchValue={responseSearch}
             onSearch={setResponseSearch}
+            editable={!!pausedResponse}
+            onHeadersChange={(headers) =>
+              updatePausedHeaders(record.id, "response", headers)
+            }
             isTunnel={record.is_tunnel}
             host={record.host}
             clientApp={record.client_app}
@@ -748,6 +801,8 @@ export default function TrafficDetail({
     responseRawBody,
     responseBodySource,
     handleResponseBodySourceChange,
+    handleResponseBodyChange,
+    updatePausedHeaders,
   ]);
 
   useEffect(() => {
@@ -934,6 +989,7 @@ export default function TrafficDetail({
         onOpenInNewWindow={onOpenInNewWindow}
         onSelectById={onSelectById}
       />
+      {activeBreakpoint ? <BreakpointBanner paused={activeBreakpoint} /> : null}
       <div style={styles.splitterWrapper}>
         <Splitter
           layout="vertical"

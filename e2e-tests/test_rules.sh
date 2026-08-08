@@ -50,7 +50,7 @@ SUPPORTED_PROTOCOL_NAMES=(
     resCharset resReplace responseFor replaceStatus statusCode cache attachment trailers resMerge
     headerReplace htmlAppend htmlPrepend htmlBody jsAppend jsPrepend jsBody cssAppend
     cssPrepend cssBody urlReplace reqScript resScript resStreamScript decode bp dns tlsIntercept
-    tlsPassthrough passthrough tlsOptions sniCallback devtools
+    tlsPassthrough passthrough tlsOptions sniCallback devtools breakpoint
 )
 
 SUPPORTED_PROTOCOL_ALIASES=(
@@ -3563,6 +3563,40 @@ run_sni_callback_specialized_tests() {
     fi
 }
 
+run_breakpoint_specialized_tests() {
+    header "执行 Breakpoint 专项测试"
+
+    local bifrost_bin=""
+    local specialized_log="${TEST_DATA_DIR}/breakpoint-specialized.log"
+    local specialized_status=0
+    bifrost_bin=$(resolve_bifrost_release_bin 2>/dev/null || true)
+    if [[ -z "$bifrost_bin" ]]; then
+        _log_fail "Breakpoint 专项测试需要可执行的 Bifrost 二进制" "可执行文件" "未找到"
+        return 1
+    fi
+
+    env \
+        BIFROST_BIN="$bifrost_bin" \
+        BIFROST_DATA_DIR="${TEST_DATA_DIR}/breakpoint" \
+        SKIP_BUILD=true \
+        bash "${SCRIPT_DIR}/tests/test_breakpoint_performance_guard.sh" \
+        >"$specialized_log" 2>&1 || specialized_status=$?
+    cat "$specialized_log"
+
+    if [[ "$specialized_status" -eq 0 ]]; then
+        _log_pass "Breakpoint request/response 编辑、CORS、TLS、超时与释放链路通过"
+        return 0
+    fi
+
+    local failure_reason
+    failure_reason=$(grep -F '[breakpoint-perf-e2e][FAIL]' "$specialized_log" | head -1 || true)
+    _log_fail \
+        "Breakpoint 专项测试应通过" \
+        "退出码 0" \
+        "${failure_reason:-专项脚本失败（退出码 ${specialized_status}）}"
+    return 1
+}
+
 is_pattern_rule_file() {
     local file="$1"
     [[ "$file" == *"/pattern/"* ]] && return 0
@@ -3691,6 +3725,10 @@ run_standalone_specialized_tests() {
     category=$(basename "$(dirname "$rule_file")")
 
     case "$category/$basename" in
+        breakpoint/production-ready.txt)
+            run_breakpoint_specialized_tests
+            return $?
+            ;;
         forwarding/tunnel.txt)
             run_tunnel_specialized_tests
             return 0

@@ -40,6 +40,7 @@ type SetSelectedIds = (ids: string[] | ((prev: string[]) => string[])) => void;
 
 interface VirtualTrafficTableProps {
   data: TrafficSummary[];
+  breakpointPhases?: Map<string, "request" | "response">;
   onSelect?: (record: TrafficSummary) => void;
   onDoubleClick?: (record: TrafficSummary) => void;
   selectedId?: string;
@@ -81,6 +82,7 @@ interface ColumnDef {
     record: TrafficSummary,
     textSecondary: string,
     rowIndex: number,
+    breakpointPhase?: "request" | "response",
   ) => React.ReactNode;
 }
 
@@ -125,16 +127,31 @@ const columns: ColumnDef[] = [
     title: "",
     width: 24,
     align: "center",
-    render: (record) => (
-      <div
-        title={record.status === 0 ? "Pending" : `Status: ${record.status}`}
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          backgroundColor: record._statusDotColor || DEFAULT_STATUS_DOT_COLOR,
-        }}
-      />
+    render: (record, _textSecondary, _rowIndex, breakpointPhase) => (
+      <Tooltip
+        title={
+          breakpointPhase
+            ? `Breakpoint paused at ${breakpointPhase} phase`
+            : record.status === 0
+              ? "Pending"
+              : `Status: ${record.status}`
+        }
+      >
+        <div
+          data-testid={
+            breakpointPhase ? `breakpoint-${breakpointPhase}-indicator` : undefined
+          }
+          style={{
+            width: breakpointPhase ? 10 : 8,
+            height: breakpointPhase ? 10 : 8,
+            borderRadius: "50%",
+            backgroundColor: breakpointPhase
+              ? "#faad14"
+              : record._statusDotColor || DEFAULT_STATUS_DOT_COLOR,
+            boxShadow: breakpointPhase ? "0 0 0 3px rgba(250, 173, 20, 0.2)" : undefined,
+          }}
+        />
+      </Tooltip>
     ),
   },
   {
@@ -412,6 +429,7 @@ const baseCellStyle: CSSProperties = {
 
 interface TableRowProps {
   record: TrafficSummary;
+  breakpointPhase?: "request" | "response";
   liveNow: number;
   isSelected: boolean;
   isMultiSelected: boolean;
@@ -422,6 +440,8 @@ interface TableRowProps {
   selectedBg: string;
   multiSelectedBg: string;
   importedBg: string;
+  breakpointBg: string;
+  selectionAccent: string;
   evenBg: string;
   oddBg: string;
   textSecondary: string;
@@ -440,6 +460,16 @@ export const areTrafficRowPropsEqual = (
   if (prev.translateY !== next.translateY) return false;
   if (prev.rowIndex !== next.rowIndex) return false;
   if (prev.liveNow !== next.liveNow) return false;
+  if (prev.breakpointPhase !== next.breakpointPhase) return false;
+  if (prev.borderColor !== next.borderColor) return false;
+  if (prev.selectedBg !== next.selectedBg) return false;
+  if (prev.multiSelectedBg !== next.multiSelectedBg) return false;
+  if (prev.importedBg !== next.importedBg) return false;
+  if (prev.breakpointBg !== next.breakpointBg) return false;
+  if (prev.selectionAccent !== next.selectionAccent) return false;
+  if (prev.evenBg !== next.evenBg) return false;
+  if (prev.oddBg !== next.oddBg) return false;
+  if (prev.textSecondary !== next.textSecondary) return false;
 
   const prevRecord = prev.record;
   const nextRecord = next.record;
@@ -479,6 +509,7 @@ export const areTrafficRowPropsEqual = (
 
 const TableRow = memo(function TableRow({
   record,
+  breakpointPhase,
   liveNow,
   isSelected,
   isMultiSelected,
@@ -489,6 +520,8 @@ const TableRow = memo(function TableRow({
   selectedBg,
   multiSelectedBg,
   importedBg,
+  breakpointBg,
+  selectionAccent,
   evenBg,
   oddBg,
   textSecondary,
@@ -501,15 +534,21 @@ const TableRow = memo(function TableRow({
     ...baseRowStyle,
     borderBottom: `1px solid ${borderColor}`,
     transform: `translateY(${translateY}px)`,
-    backgroundColor: isMultiSelected
-      ? multiSelectedBg
-      : isSelected
-        ? selectedBg
-        : isImported
-          ? importedBg
-          : rowIndex % 2 === 0
-            ? evenBg
-            : oddBg,
+    backgroundColor: breakpointPhase
+      ? breakpointBg
+      : isMultiSelected
+        ? multiSelectedBg
+        : isSelected
+          ? selectedBg
+          : isImported
+            ? importedBg
+            : rowIndex % 2 === 0
+              ? evenBg
+              : oddBg,
+    boxShadow:
+      breakpointPhase && (isSelected || isMultiSelected)
+        ? `inset 3px 0 ${selectionAccent}`
+        : undefined,
   };
 
   return (
@@ -521,6 +560,7 @@ const TableRow = memo(function TableRow({
       data-request-size={record.request_size}
       data-response-size={record.response_size}
       data-frame-count={record.frame_count}
+      data-breakpoint-phase={breakpointPhase}
       style={rowStyle}
       onClick={onRowClick}
       onDoubleClick={onRowDoubleClick}
@@ -543,7 +583,7 @@ const TableRow = memo(function TableRow({
               </span>
             </Tooltip>
           ) : (
-            col.render(record, textSecondary, rowIndex)
+            col.render(record, textSecondary, rowIndex, breakpointPhase)
           )}
         </div>
       ))}
@@ -604,6 +644,7 @@ const keyframesStyle = `
 
 export default function VirtualTrafficTable({
   data,
+  breakpointPhases,
   onSelect,
   onDoubleClick,
   selectedId,
@@ -1196,6 +1237,7 @@ export default function VirtualTrafficTable({
                   <TableRow
                     key={virtualRow.key}
                     record={record}
+                    breakpointPhase={breakpointPhases?.get(record.id)}
                     liveNow={liveNow}
                     isSelected={record.id === selectedId}
                     isMultiSelected={selectedIds.includes(record.id)}
@@ -1206,6 +1248,8 @@ export default function VirtualTrafficTable({
                     selectedBg={token.colorPrimaryBg}
                     multiSelectedBg={token.colorInfoBg}
                     importedBg={token.colorWarningBg}
+                    breakpointBg={token.colorWarningBg}
+                    selectionAccent={token.colorPrimary}
                     evenBg={token.colorBgContainer}
                     oddBg={token.colorFillQuaternary}
                     textSecondary={token.colorTextSecondary}

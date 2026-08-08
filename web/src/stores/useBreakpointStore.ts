@@ -1,7 +1,11 @@
 import { create } from "zustand";
-import type { BreakpointSettings } from "../api/breakpoint";
+import type {
+  BreakpointSettings,
+  PendingBreakpoint,
+} from "../api/breakpoint";
 import {
   getBreakpointSettings,
+  getPendingBreakpoints,
   updateBreakpointSettings,
   resumeBreakpoint,
 } from "../api/breakpoint";
@@ -13,106 +17,162 @@ import type {
 } from "../services/pushService";
 import { useTrafficStore } from "./useTrafficStore";
 
-interface PausedBreakpoint {
+export interface PausedBreakpoint {
   requestId: string;
+  phase: "request" | "response";
   method?: string;
+  originalMethod?: string;
   url?: string;
+  originalUrl?: string;
   status?: number;
+  originalStatus?: number;
   headers: [string, string][];
-  body: string | null;
-  originalBody: string | null;
+  originalHeaders: [string, string][];
+  body: string;
+  originalBody: string;
   bodyOmitted: boolean;
   bodySize?: number;
-  maxBodyBytes?: number;
+  maxBodyBytes: number;
+  contentEncoding?: string;
+  pausedAtMs: number;
+  deadlineAtMs: number;
 }
+
+type BreakpointPhase = "request" | "response";
 
 interface BreakpointState {
   enabled: boolean;
   maxBodyBytes: number;
   loading: boolean;
+  pendingLoading: boolean;
   pausedRequests: Map<string, PausedBreakpoint>;
   pausedResponses: Map<string, PausedBreakpoint>;
+  pendingRevision: number;
   pushInitialized: boolean;
 
   fetchSettings: () => Promise<void>;
+  fetchPending: () => Promise<void>;
   toggleEnabled: (enabled: boolean) => Promise<void>;
   applySettings: (settings: BreakpointSettings) => void;
-
-  addPausedRequest: (data: PausedBreakpoint) => void;
-  addPausedResponse: (data: PausedBreakpoint) => void;
-  updatePausedBody: (
+  updatePausedBody: (requestId: string, phase: BreakpointPhase, body: string) => void;
+  updatePausedHeaders: (
     requestId: string,
-    phase: "request" | "response",
-    body: string,
+    phase: BreakpointPhase,
+    headers: [string, string][],
   ) => void;
-  removePaused: (requestId: string) => void;
+  updatePausedMetadata: (
+    requestId: string,
+    phase: BreakpointPhase,
+    patch: Partial<Pick<PausedBreakpoint, "method" | "url" | "status">>,
+  ) => void;
+  removePaused: (requestId: string, phase?: BreakpointPhase) => void;
   resume: (
     requestId: string,
-    phase: string,
-    headers: [string, string][],
-    body?: string,
+    phase: BreakpointPhase,
+    applyEdits: boolean,
   ) => Promise<boolean>;
   connectPush: () => void;
 }
 
-const applyResumeToTrafficDetail = (
-  requestId: string,
-  phase: string,
-  headers: [string, string][],
-  body?: string | null,
-  bodyOmitted = false,
-) => {
+type SnapshotLike = PendingBreakpoint | BreakpointPausedPushData;
+
+const fromSnapshot = (data: SnapshotLike): PausedBreakpoint => {
+  const headers = data.headers.map(([name, value]) => [name, value] as [string, string]);
+  const body = data.body ?? "";
+  return {
+    requestId: data.request_id,
+    phase: data.phase,
+    method: data.method,
+    originalMethod: data.method,
+    url: data.url,
+    originalUrl: data.url,
+    status: data.status,
+    originalStatus: data.status,
+    headers,
+    originalHeaders: headers.map(([name, value]) => [name, value]),
+    body,
+    originalBody: body,
+    bodyOmitted: !!data.body_omitted,
+    bodySize: data.body_size,
+    maxBodyBytes: data.max_body_bytes ?? 1024 * 1024,
+    contentEncoding: data.content_encoding,
+    pausedAtMs: data.paused_at_ms,
+    deadlineAtMs: data.deadline_at_ms,
+  };
+};
+
+const mapsFromSnapshots = (items: SnapshotLike[]) => {
+  const pausedRequests = new Map<string, PausedBreakpoint>();
+  const pausedResponses = new Map<string, PausedBreakpoint>();
+  for (const item of items) {
+    const paused = fromSnapshot(item);
+    (paused.phase === "request" ? pausedRequests : pausedResponses).set(
+      paused.requestId,
+      paused,
+    );
+  }
+  return { pausedRequests, pausedResponses };
+};
+
+const applyPausedToTrafficDetail = (paused: PausedBreakpoint) => {
   useTrafficStore.setState((state) => {
-    if (state.currentRecord?.id !== requestId) {
-      return {};
-    }
-
-    const fallbackBody =
-      bodyOmitted
-        ? (phase === "request" ? state.requestBody : state.responseBody) ?? null
-        : body ??
-          (phase === "request" ? state.requestBody : state.responseBody) ??
-          null;
-
-    if (phase === "request") {
+    if (state.currentRecord?.id !== paused.requestId) return {};
+    if (paused.phase === "request") {
       return {
         currentRecord: {
           ...state.currentRecord,
-          request_headers: headers,
+          method: paused.method ?? state.currentRecord.method,
+          url: paused.url ?? state.currentRecord.url,
+          request_headers: paused.headers,
         },
-        requestBody: fallbackBody,
+        requestBody: paused.bodyOmitted ? state.requestBody : paused.body,
       };
     }
-
     return {
       currentRecord: {
         ...state.currentRecord,
-        response_headers: headers,
+        status: paused.status ?? state.currentRecord.status,
+        response_headers: paused.headers,
         original_response_headers:
-          state.currentRecord.original_response_headers ?? headers,
+          state.currentRecord.original_response_headers ?? paused.originalHeaders,
       },
-      responseBody: fallbackBody,
+      responseBody: paused.bodyOmitted ? state.responseBody : paused.body,
     };
   });
 };
 
-const scheduleTrafficRefetch = (requestId: string, delay = 1000, retries = 5) => {
+const scheduleTrafficRefetch = (requestId: string, delay = 500, retries = 4) => {
   setTimeout(() => {
     const state = useTrafficStore.getState();
     if (state.currentRecord?.id !== requestId) return;
-    state.fetchTrafficDetail(requestId);
-    if (retries > 1) {
-      scheduleTrafficRefetch(requestId, delay * 2, retries - 1);
-    }
+    void state.fetchTrafficDetail(requestId);
+    if (retries > 1) scheduleTrafficRefetch(requestId, delay * 2, retries - 1);
   }, delay);
+};
+
+const updateMapItem = (
+  get: () => BreakpointState,
+  set: (patch: Partial<BreakpointState>) => void,
+  requestId: string,
+  phase: BreakpointPhase,
+  updater: (current: PausedBreakpoint) => PausedBreakpoint,
+) => {
+  const key = phase === "request" ? "pausedRequests" : "pausedResponses";
+  const next = new Map(get()[key]);
+  const current = next.get(requestId);
+  if (!current) return;
+  next.set(requestId, updater(current));
+  set({ [key]: next } as Partial<BreakpointState>);
 };
 
 export const useBreakpointStore = create<BreakpointState>((set, get) => ({
   enabled: false,
   maxBodyBytes: 1024 * 1024,
   loading: false,
+  pendingLoading: false,
   pausedRequests: new Map(),
   pausedResponses: new Map(),
+  pendingRevision: 0,
   pushInitialized: false,
 
   fetchSettings: async () => {
@@ -128,118 +188,123 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
     }
   },
 
-  toggleEnabled: async (enabled: boolean) => {
-    const state = get();
+  fetchPending: async () => {
+    const revision = get().pendingRevision;
+    set({ pendingLoading: true });
+    try {
+      const pending = await getPendingBreakpoints();
+      if (get().pendingRevision !== revision) {
+        set({ pendingLoading: false });
+        queueMicrotask(() => void get().fetchPending());
+        return;
+      }
+      set({ ...mapsFromSnapshots(pending), pendingLoading: false });
+      for (const item of pending) applyPausedToTrafficDetail(fromSnapshot(item));
+    } catch {
+      set({ pendingLoading: false });
+    }
+  },
+
+  toggleEnabled: async (enabled) => {
     set({ loading: true });
     try {
       const settings = await updateBreakpointSettings({
         enabled,
-        max_body_bytes: state.maxBodyBytes,
+        max_body_bytes: get().maxBodyBytes,
       });
       set({
         enabled: settings.enabled,
         maxBodyBytes: settings.max_body_bytes,
         loading: false,
+        ...(settings.enabled
+          ? {}
+          : {
+              pausedRequests: new Map(),
+              pausedResponses: new Map(),
+              pendingRevision: get().pendingRevision + 1,
+            }),
       });
-      if (!settings.enabled) {
-        set({ pausedRequests: new Map(), pausedResponses: new Map() });
-      }
-    } catch {
+    } catch (error) {
       set({ loading: false });
+      throw error;
     }
   },
 
-  applySettings: (settings: BreakpointSettings) => {
+  applySettings: (settings) => {
     set({
       enabled: settings.enabled,
       maxBodyBytes: settings.max_body_bytes,
+      ...(settings.enabled
+        ? {}
+        : {
+            pausedRequests: new Map(),
+            pausedResponses: new Map(),
+            pendingRevision: get().pendingRevision + 1,
+          }),
     });
-    if (!settings.enabled) {
-      set({ pausedRequests: new Map(), pausedResponses: new Map() });
-    }
-  },
-
-  addPausedRequest: (data: PausedBreakpoint) => {
-    const next = new Map(get().pausedRequests);
-    next.set(data.requestId, data);
-    set({ pausedRequests: next });
-  },
-
-  addPausedResponse: (data: PausedBreakpoint) => {
-    const next = new Map(get().pausedResponses);
-    next.set(data.requestId, data);
-    set({ pausedResponses: next });
   },
 
   updatePausedBody: (requestId, phase, body) => {
-    if (phase === "request") {
-      const next = new Map(get().pausedRequests);
-      const current = next.get(requestId);
-      if (!current) return;
-      if (current.bodyOmitted) return;
-      next.set(requestId, {
-        ...current,
-        body: body === (current.originalBody ?? "") ? null : body,
-      });
-      set({ pausedRequests: next });
-      return;
-    }
+    updateMapItem(get, set, requestId, phase, (current) =>
+      current.bodyOmitted ? current : { ...current, body },
+    );
+  },
 
-    const next = new Map(get().pausedResponses);
-    const current = next.get(requestId);
-    if (!current) return;
-    if (current.bodyOmitted) return;
-    next.set(requestId, {
+  updatePausedHeaders: (requestId, phase, headers) => {
+    updateMapItem(get, set, requestId, phase, (current) => ({
       ...current,
-      body: body === (current.originalBody ?? "") ? null : body,
-    });
-    set({ pausedResponses: next });
+      headers,
+    }));
   },
 
-  removePaused: (requestId: string) => {
-    const reqs = new Map(get().pausedRequests);
-    reqs.delete(requestId);
-    const resps = new Map(get().pausedResponses);
-    resps.delete(requestId);
-    set({ pausedRequests: reqs, pausedResponses: resps });
+  updatePausedMetadata: (requestId, phase, patch) => {
+    updateMapItem(get, set, requestId, phase, (current) => ({
+      ...current,
+      ...patch,
+    }));
   },
 
-  resume: async (
-    requestId: string,
-    phase: string,
-    headers: [string, string][],
-    body?: string,
-  ) => {
-    const pausedData =
+  removePaused: (requestId, phase) => {
+    const pendingRevision = get().pendingRevision + 1;
+    if (!phase || phase === "request") {
+      const requests = new Map(get().pausedRequests);
+      requests.delete(requestId);
+      set({ pausedRequests: requests, pendingRevision });
+    }
+    if (!phase || phase === "response") {
+      const responses = new Map(get().pausedResponses);
+      responses.delete(requestId);
+      set({ pausedResponses: responses, pendingRevision });
+    }
+  },
+
+  resume: async (requestId, phase, applyEdits) => {
+    const paused =
       phase === "request"
         ? get().pausedRequests.get(requestId)
         : get().pausedResponses.get(requestId);
+    if (!paused) return false;
     try {
-      const bodyToSend =
-        pausedData?.bodyOmitted
-          ? undefined
-          : body ?? (pausedData?.body == null ? pausedData?.originalBody : pausedData.body) ?? undefined;
       const result = await resumeBreakpoint({
         request_id: requestId,
         phase,
-        headers,
-        body: bodyToSend,
+        ...(applyEdits
+          ? {
+              method: phase === "request" ? paused.method : undefined,
+              url: phase === "request" ? paused.url : undefined,
+              status: phase === "response" ? paused.status : undefined,
+              headers: paused.headers,
+              body: paused.bodyOmitted ? undefined : paused.body,
+            }
+          : {}),
       });
-      if (result.resumed) {
-        (globalThis as { __bifrostLogNextHljsHtml?: boolean }).__bifrostLogNextHljsHtml = true;
-        applyResumeToTrafficDetail(
-          requestId,
-          phase,
-          headers,
-          pausedData?.bodyOmitted ? null : bodyToSend ?? pausedData?.originalBody ?? null,
-          !!pausedData?.bodyOmitted,
-        );
-        get().removePaused(requestId);
-        scheduleTrafficRefetch(requestId);
-        return true;
-      }
-      return false;
+      if (!result.resumed) return false;
+      if (applyEdits) applyPausedToTrafficDetail(paused);
+      get().removePaused(requestId, phase);
+      scheduleTrafficRefetch(requestId);
+      return true;
     } catch {
+      await get().fetchPending();
       return false;
     }
   },
@@ -248,65 +313,17 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
     if (get().pushInitialized) return;
     set({ pushInitialized: true });
 
-    const pendingRefetches = new Set<string>();
-
-    pushService.onBreakpointPaused((data: BreakpointPausedPushData) => {
-      const detailState = useTrafficStore.getState();
-      const bodyOmitted = !!data.body_omitted;
-      const fallbackBody =
-        data.body ??
-        (!bodyOmitted && data.phase === "request"
-          ? detailState.currentRecord?.id === data.request_id
-            ? detailState.requestBody
-            : null
-          : !bodyOmitted && detailState.currentRecord?.id === data.request_id
-            ? detailState.responseBody
-            : null) ??
-        null;
-      const paused: PausedBreakpoint = {
-        requestId: data.request_id,
-        method: data.method,
-        url: data.url,
-        status: data.status,
-        headers: data.headers,
-        body: null,
-        originalBody: fallbackBody,
-        bodyOmitted,
-        bodySize: data.body_size,
-        maxBodyBytes: data.max_body_bytes,
-      };
-      if (data.phase === "request") {
-        get().addPausedRequest(paused);
-      } else if (data.phase === "response") {
-        get().addPausedResponse(paused);
-      }
-
-      useTrafficStore.setState((state) => {
-        if (state.currentRecord?.id !== data.request_id) {
-          return {};
-        }
-
-        if (data.phase === "request") {
-          return {
-            currentRecord: {
-              ...state.currentRecord,
-              request_headers: data.headers,
-            },
-            requestBody: bodyOmitted ? state.requestBody : fallbackBody ?? state.requestBody,
-          };
-        }
-
-        return {
-          currentRecord: {
-            ...state.currentRecord,
-            status: data.status ?? state.currentRecord.status,
-            response_headers: data.headers,
-            original_response_headers:
-              state.currentRecord.original_response_headers ?? data.headers,
-          },
-          responseBody: bodyOmitted ? state.responseBody : fallbackBody ?? state.responseBody,
-        };
-      });
+    pushService.onBreakpointPaused((data) => {
+      const paused = fromSnapshot(data);
+      const key = paused.phase === "request" ? "pausedRequests" : "pausedResponses";
+      const next = new Map(get()[key]);
+      next.set(paused.requestId, paused);
+      set({
+        [key]: next,
+        pendingRevision: get().pendingRevision + 1,
+      } as Partial<BreakpointState>);
+      applyPausedToTrafficDetail(paused);
+      void useTrafficStore.getState().reloadRecords();
     });
 
     pushService.onBreakpointSettingsUpdated((data: BreakpointSettingsPushData) => {
@@ -317,42 +334,17 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
     });
 
     pushService.onBreakpointResumed((data: BreakpointResumedPushData) => {
-      get().removePaused(data.request_id);
-      pendingRefetches.add(data.request_id);
-      setTimeout(() => {
-        if (pendingRefetches.has(data.request_id)) {
-          pendingRefetches.delete(data.request_id);
-          useTrafficStore.getState().fetchTrafficDetail(data.request_id);
-        }
-      }, 3000);
+      get().removePaused(data.request_id, data.phase);
+      scheduleTrafficRefetch(data.request_id);
     });
 
-    pushService.onTrafficUpdates((update) => {
-      if (pendingRefetches.size === 0) return;
-      const all = [
-        ...(update.new_records || []),
-        ...(update.updated_records || []),
-      ];
-      for (const id of pendingRefetches) {
-        if (all.some((r) => r.id === id)) {
-          pendingRefetches.delete(id);
-          useTrafficStore.getState().fetchTrafficDetail(id);
-        }
+    pushService.onConnectionChange(({ connected }) => {
+      if (connected) {
+        void get().fetchSettings();
+        void get().fetchPending();
       }
     });
 
-    pushService.onTrafficDelta((delta) => {
-      if (pendingRefetches.size === 0) return;
-      const all = [
-        ...(delta.inserts || []),
-        ...(delta.updates || []),
-      ];
-      for (const id of pendingRefetches) {
-        if (all.some((r) => r.id === id)) {
-          pendingRefetches.delete(id);
-          useTrafficStore.getState().fetchTrafficDetail(id);
-        }
-      }
-    });
+    void get().fetchPending();
   },
 }));

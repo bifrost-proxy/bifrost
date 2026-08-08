@@ -1,0 +1,11 @@
+# Breakpoint production-readiness E2E rules.
+# The generic rules runner maps these canonical placeholders to its shared mock
+# ports. The Breakpoint specialized test maps the same placeholders to its
+# isolated HTTP/TLS upstream ports.
+127.0.0.1:__MOCK_HTTP_PORT__/disable-release breakpoint://request
+127.0.0.1:__MOCK_HTTP_PORT__/request-edit breakpoint://request
+127.0.0.1:__MOCK_HTTP_PORT__/oversized breakpoint://request
+127.0.0.1:__MOCK_HTTP_PORT__/response-edit breakpoint://response
+127.0.0.1:__MOCK_HTTP_PORT__/both-phase breakpoint://request,response
+127.0.0.1:__MOCK_HTTP_PORT__/timeout breakpoint://response
+127.0.0.1:__MOCK_HTTPS_PORT__ breakpoint://response

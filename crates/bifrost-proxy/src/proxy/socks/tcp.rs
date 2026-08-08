@@ -24,6 +24,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::dns::DnsResolver;
 use crate::protocol::ProtocolDetector;
+use crate::proxy::http::breakpoint::breakpoint_tls_interception_required as bp_tls;
 use crate::proxy::http::{
     connect_via_upstream_http_proxy_tunnel, requires_client_app_for_tls_decision,
     requires_tls_interception_for_connect_rules,
@@ -1394,6 +1395,13 @@ impl SocksHandler {
                                             original_host,
                                         )
                                 })));
+                            let state = &self.admin_state;
+                            let rules = self.rules.as_deref();
+                            let port = target_port;
+                            let bp = bp_tls(state, &tls_resolved_rules, rules, original_host, port);
+                            let cert = tls_config.ca_cert.is_some();
+                            let allowed = !matches!(tls_resolved_rules.tls_intercept, Some(false));
+                            let do_intercept = do_intercept || (cert && allowed && bp);
                             if do_intercept {
                                 debug!(
                                     "SOCKS5: TLS interception enabled for {}:{} (original_host={}, client_app={:?}, rule={:?}, global={})",
@@ -3223,6 +3231,8 @@ mod coverage_boost {
 #[cfg(test)]
 mod coverage_boost_v2 {
     use super::*;
+    use crate::server::ResolvedRules;
+    use bifrost_core::Protocol;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
 
@@ -3238,6 +3248,36 @@ mod coverage_boost_v2 {
         let client = TcpStream::connect(addr).await.unwrap();
         let (server, peer_addr) = listener.accept().await.unwrap();
         (server, client, peer_addr)
+    }
+
+    struct BreakpointResolver;
+
+    impl RulesResolver for BreakpointResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &std::collections::HashMap<String, String>,
+            _req_cookies: &std::collections::HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                rules: vec![crate::server::RuleValue {
+                    pattern: "127.0.0.1".into(),
+                    protocol: Protocol::Breakpoint,
+                    value: "request".into(),
+                    options: std::collections::HashMap::new(),
+                    rule_name: Some("socks-breakpoint".into()),
+                    raw: None,
+                    line: None,
+                    auto_tls_intercept: true,
+                }],
+                ..Default::default()
+            }
+        }
+
+        fn has_breakpoint_rules_for_host(&self, host: &str) -> bool {
+            host.starts_with("127.0.0.1")
+        }
     }
 
     async fn make_handler_with_opts(
@@ -3313,6 +3353,58 @@ mod coverage_boost_v2 {
         assert_eq!(reply[1], SocksReply::ConnectionRefused as u8);
         let error = server_task.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("Failed to connect"));
+    }
+
+    #[tokio::test]
+    async fn socks_breakpoint_rule_enables_tls_interception() {
+        use bifrost_admin::breakpoint::BreakpointSettings;
+
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_task = tokio::spawn(async move {
+            let _ = target.accept().await;
+        });
+        let (mut handler, mut client) = make_handler_with_opts(false, None, None, 30, None).await;
+        let state = Arc::new(AdminState::new(19458));
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 1024,
+            });
+        handler.admin_state = Some(state);
+        handler.rules = Some(Arc::new(BreakpointResolver));
+        handler.tls_config = Some(Arc::new(TlsConfig {
+            ca_cert: Some(vec![1]),
+            ca_key: Some(vec![2]),
+            cert_generator: None,
+            sni_resolver: None,
+        }));
+        handler.tls_intercept_config = Some(TlsInterceptConfig {
+            enable_tls_interception: false,
+            intercept_exclude: vec![],
+            intercept_include: vec![],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec![],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+        });
+        let server = tokio::spawn(async move {
+            handler
+                .connect_and_relay(
+                    SocksAddress::IPv4(Ipv4Addr::LOCALHOST),
+                    target_address.port(),
+                )
+                .await
+        });
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], SocksReply::Succeeded as u8);
+        client.write_all(&[0x16, 0x03, 0x03, 0, 0]).await.unwrap();
+        let error = server.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("cert generator not configured"));
+        target_task.abort();
     }
 
     #[tokio::test]

@@ -38,6 +38,8 @@ const createRowProps = (record: TrafficSummary) => ({
   selectedBg: "#fff",
   multiSelectedBg: "#fff",
   importedBg: "#fff",
+  breakpointBg: "#fffbe6",
+  selectionAccent: "#1677ff",
   evenBg: "#fff",
   oddBg: "#fafafa",
   textSecondary: "#999",
@@ -59,5 +61,14 @@ describe("areTrafficRowPropsEqual", () => {
     const next = createRowProps(createRecord());
 
     expect(areTrafficRowPropsEqual(prev, next)).toBe(true);
+  });
+
+  it("returns false when breakpoint phase or theme warning token changes", () => {
+    const prev = { ...createRowProps(createRecord()), breakpointPhase: "request" as const };
+    const resumed = createRowProps(createRecord());
+    const darkTheme = { ...prev, breakpointBg: "#2b2111" };
+
+    expect(areTrafficRowPropsEqual(prev, resumed)).toBe(false);
+    expect(areTrafficRowPropsEqual(prev, darkTheme)).toBe(false);
   });
 });

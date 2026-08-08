@@ -203,6 +203,53 @@ export async function sendProxyRequest(
   await execFileAsync("curl", args, { timeout: 15000 });
 }
 
+export interface ProxyResponse {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: string;
+}
+
+export async function sendProxyRequestWithResponse(
+  url: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  } = {},
+): Promise<ProxyResponse> {
+  const target = new URL(url);
+  return new Promise<ProxyResponse>((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: backendPort,
+        method: options.method || "GET",
+        path: url,
+        headers: {
+          Host: target.host,
+          Connection: "close",
+          ...options.headers,
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode || 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    req.on("error", reject);
+    req.setTimeout(45000, () => req.destroy(new Error("proxy request timed out")));
+    if (options.body !== undefined) req.write(options.body);
+    req.end();
+  });
+}
+
 export async function sendSseViaProxy(url: string): Promise<void> {
   const target = new URL(url);
   await new Promise<void>((resolve, reject) => {
@@ -255,12 +302,13 @@ export async function openPage(page: Page, path: string): Promise<void> {
 }
 
 export async function setMonacoEditor(page: Page, container: Locator, value: string): Promise<void> {
-  const input = container.locator("textarea").last();
-  await input.click({ force: true });
+  const editor = container.locator(".monaco-editor").last();
+  await expect(editor).toBeVisible({ timeout: 15000 });
+  await editor.locator(".view-lines").click({ position: { x: 20, y: 20 }, force: true });
   await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
   await page.keyboard.press("Backspace");
   if (value.length > 0) {
-    await input.type(value, { delay: 0 });
+    await page.keyboard.insertText(value);
   }
 }
 
@@ -364,10 +412,12 @@ export async function startMockHttpServer(
   return {
     port,
     requests,
-    close: () =>
-      new Promise<void>((resolve, reject) =>
+    close: () => {
+      server.closeAllConnections();
+      return new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
-      ),
+      );
+    },
   };
 }
 

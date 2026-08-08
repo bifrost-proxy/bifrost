@@ -62,38 +62,40 @@ def write_jsonl(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
-write_jsonl(root / "codex/sessions/2026/08/07/codex.jsonl", [{
-    "timestamp": "2026-08-07T03:01:00Z",
+write_jsonl(root / "codex/sessions/2099/08/07/codex.jsonl", [{
+    # Keep fixture timestamps ahead of the temporary file mtime so the
+    # provider timestamps remain the deterministic winners.
+    "timestamp": "2099-08-07T03:01:00Z",
     "type": "session_meta",
-    "payload": {"id": codex_id, "timestamp": "2026-08-07T03:01:00Z"},
+    "payload": {"id": codex_id, "timestamp": "2099-08-07T03:01:00Z"},
 }])
 write_jsonl(root / "codex/session_index.jsonl", [{
     "id": codex_id,
     "thread_name": "Codex local title",
-    "updated_at": "2026-08-07T03:02:00Z",
+    "updated_at": "2099-08-07T03:02:00Z",
 }])
-write_jsonl(root / "trae/cli/sessions/2026/08/07/traex.jsonl", [{
-    "timestamp": "2026-08-07T04:01:00Z",
+write_jsonl(root / "trae/cli/sessions/2099/08/07/traex.jsonl", [{
+    "timestamp": "2099-08-07T04:01:00Z",
     "type": "session_meta",
-    "payload": {"id": traex_id, "timestamp": "2026-08-07T04:01:00Z"},
+    "payload": {"id": traex_id, "timestamp": "2099-08-07T04:01:00Z"},
 }])
 write_jsonl(root / "trae/cli/history.jsonl", [{
     "session_id": traex_id,
-    "ts": 1786075380,
+    "ts": 4089758580,
     "text": "Traex local title",
 }])
 write_jsonl(root / "claude/projects/project/claude.jsonl", [
     {
         "type": "user",
         "sessionId": claude_id,
-        "timestamp": "2026-08-07T05:01:00Z",
+        "timestamp": "2099-08-07T05:01:00Z",
         "message": {"content": "Claude fallback title"},
     },
     {"type": "ai-title", "sessionId": claude_id, "aiTitle": "Claude local title"},
 ])
 write_jsonl(root / "claude/history.jsonl", [{
     "sessionId": claude_id,
-    "timestamp": 1786078920000,
+    "timestamp": 4089762120000,
     "display": "Claude history title",
 }])
 
@@ -240,7 +242,7 @@ for runner_id, adapter, session_id, title, expected in providers:
     listing = final(stream(runner_id, key, "/resume"))
     assert session_id in listing, listing
     assert title in listing, listing
-    assert "2026-08-07T" in listing, listing
+    assert "2099-08-07T" in listing, listing
     assert len(business_invocations()) == before, business_invocations()
 
     selected = final(stream(runner_id, key, f"/resume {session_id[:12]}"))
