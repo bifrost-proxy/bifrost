@@ -424,6 +424,8 @@ for _ in $(seq 1 160); do
 done
 [[ -f "$RUN_LOG" ]]
 [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]
+wait_group_turn_completed a10
+wait_group_turn_completed b6
 wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 wait_session_idle "im:feishu-group-e2e:group:chat-beta"
 wait_session_idle "feishu-group-e2e:owner-only-in-p2p"
