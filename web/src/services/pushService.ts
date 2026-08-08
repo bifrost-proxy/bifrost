@@ -172,6 +172,7 @@ export interface BreakpointPausedPushData {
   content_encoding?: string;
   paused_at_ms: number;
   deadline_at_ms: number;
+  server_now_ms: number;
 }
 
 export interface BreakpointSettingsPushData {

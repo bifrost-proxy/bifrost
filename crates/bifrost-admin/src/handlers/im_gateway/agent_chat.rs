@@ -246,7 +246,7 @@ pub(super) async fn handle_im_new_group_command(
     true
 }
 
-pub(super) async fn handle_idle_im_command(
+#[rustfmt::skip] pub(super) async fn handle_idle_im_command(
     msg_text: &str,
     session_key: &str,
     agent_config: &crate::im_gateway::agent::ImAgentConfig,
@@ -274,7 +274,8 @@ pub(super) async fn handle_idle_im_command(
 
     if trimmed == "/status" {
         let detail = ctx.agent_session_manager.get_session_detail(session_key);
-        let status_context = status_context_from_agent_config(agent_config);
+        let runner_id_override = ctx.group_context_store.runner_id_by_session(session_key).ok().flatten();
+        let status_context = resolve_im_status_runtime_context(agent_config, &ctx.external_cli_config_store.load(), &ctx.provider.id, session_key, runner_id_override.as_deref());
         let default_work_dir = ctx
             .group_context_store
             .work_dir_by_session(session_key)
@@ -283,10 +284,12 @@ pub(super) async fn handle_idle_im_command(
             .unwrap_or_else(|| agent_config.resolve_work_dir())
             .display()
             .to_string();
+        let device_name = current_device_name();
         let reply = build_im_status_text(
             detail.as_ref(),
             &status_context,
             Some(default_work_dir.as_str()),
+            &ImStatusChannelContext { provider: ctx.provider, device_name: &device_name, session_key, queue_info: "无排队消息", status: "Ready" },
         );
         send_agent_reply(
             ctx.client,
@@ -1755,7 +1758,9 @@ pub(super) fn inbound_message_preview(
     }
 }
 
-pub(super) async fn handle_busy_message(
+#[rustfmt::skip] fn fill_missing_status_context(target: &mut bifrost_agent::StatusRuntimeContext, fallback: &bifrost_agent::StatusRuntimeContext) { target.model = target.model.take().or_else(|| fallback.model.clone()); target.model_provider = target.model_provider.take().or_else(|| fallback.model_provider.clone()); target.external_thread_id = target.external_thread_id.take().or_else(|| fallback.external_thread_id.clone()); target.external_conversation_id = target.external_conversation_id.take().or_else(|| fallback.external_conversation_id.clone()); }
+#[rustfmt::skip] fn format_status_queue_info(len: usize) -> String { if len == 0 { "无排队消息".to_string() } else { format!("{len} 条排队消息") } }
+#[rustfmt::skip] pub(super) async fn handle_busy_message(
     msg_text: &str,
     session_key: &str,
     ctx: BusyMessageContext<'_>,
@@ -1771,12 +1776,19 @@ pub(super) async fn handle_busy_message(
 
     // /status — show session status or busy indicator
     if trimmed == "/status" {
+        let runner_id_override = ctx.group_context_store.runner_id_by_session(session_key).ok().flatten();
+        let mut status_context = resolve_im_status_runtime_context(ctx.agent_config, &ctx.external_cli_config_store.load(), &ctx.provider.id, session_key, runner_id_override.as_deref());
+        fill_missing_status_context(&mut status_context, &ctx.status_context);
+        let queue_items = queue_manager.queue_status(session_key);
+        let queue_info = format_status_queue_info(queue_items.len());
+        let device_name = current_device_name();
         // Try to get session detail from idle sessions
         if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
             let reply = build_im_status_text(
                 Some(&detail),
-                &ctx.status_context,
+                &status_context,
                 ctx.default_work_dir.as_deref(),
+                &ImStatusChannelContext { provider, device_name: &device_name, session_key, queue_info: &queue_info, status: "Ready" },
             );
             send_agent_reply(client, provider, event, &reply, message_log_store).await;
         } else if let Some(mut status) = agent_session_manager.get_active_turn_status(session_key) {
@@ -1784,34 +1796,24 @@ pub(super) async fn handle_busy_message(
                 &status.pending_guide_messages,
                 queue_manager.guide_status(session_key),
             );
-            let queue_items = queue_manager.queue_status(session_key);
-            let queue_info = if queue_items.is_empty() {
-                "无排队消息".to_string()
-            } else {
-                format!("{} 条排队消息", queue_items.len())
-            };
-            let reply = format!(
-                "{}\n- 排队: {}",
-                bifrost_agent::format_active_turn_status_text_with_context(
-                    &status,
-                    &ctx.status_context
-                ),
-                queue_info
-            );
+            let reply = build_active_im_status_text(&status, &status_context, ctx.default_work_dir.as_deref(), &ImStatusChannelContext { provider, device_name: &device_name, session_key, queue_info: &queue_info, status: "Running" });
             send_agent_reply(client, provider, event, &reply, message_log_store).await;
         } else {
             // Session is currently being processed (taken out of the pool)
-            let queue_items = queue_manager.queue_status(session_key);
-            let queue_info = if queue_items.is_empty() {
-                "无排队消息".to_string()
-            } else {
-                format!("{} 条排队消息", queue_items.len())
-            };
             let guide_info = format_pending_guide_status(&queue_manager.guide_status(session_key));
-            let reply = format!(
-                "会话状态:\n- 状态: 🔵 正在处理中\n- 排队: {}\n{}\n\n请等待当前任务完成后再查询详细状态。",
-                queue_info, guide_info
+            let mut reply = build_im_status_text(
+                None,
+                &status_context,
+                ctx.default_work_dir.as_deref(),
+                &ImStatusChannelContext {
+                    provider,
+                    device_name: &device_name,
+                    session_key,
+                    queue_info: &queue_info,
+                    status: "Running",
+                },
             );
+            reply.push_str(&format!("\n{guide_info}"));
             send_agent_reply(client, provider, event, &reply, message_log_store).await;
         }
         return;
@@ -2134,6 +2136,53 @@ pub(super) async fn handle_busy_message(
 #[cfg(test)]
 mod local_resume_tests {
     use super::*;
+
+    #[test]
+    fn status_context_fallback_fills_only_missing_external_metadata() {
+        assert_eq!(format_status_queue_info(0), "无排队消息");
+        assert_eq!(format_status_queue_info(2), "2 条排队消息");
+        let fallback = bifrost_agent::StatusRuntimeContext {
+            model: Some("fallback-model".into()),
+            model_provider: Some("fallback-provider".into()),
+            external_thread_id: Some("fallback-thread".into()),
+            external_conversation_id: Some("fallback-conversation".into()),
+            ..Default::default()
+        };
+        let mut missing = bifrost_agent::StatusRuntimeContext::default();
+        fill_missing_status_context(&mut missing, &fallback);
+        assert_eq!(missing.model.as_deref(), Some("fallback-model"));
+        assert_eq!(missing.model_provider.as_deref(), Some("fallback-provider"));
+        assert_eq!(
+            missing.external_thread_id.as_deref(),
+            Some("fallback-thread")
+        );
+        assert_eq!(
+            missing.external_conversation_id.as_deref(),
+            Some("fallback-conversation")
+        );
+
+        let mut existing = bifrost_agent::StatusRuntimeContext {
+            model: Some("existing-model".into()),
+            model_provider: Some("existing-provider".into()),
+            external_thread_id: Some("existing-thread".into()),
+            external_conversation_id: Some("existing-conversation".into()),
+            ..Default::default()
+        };
+        fill_missing_status_context(&mut existing, &fallback);
+        assert_eq!(existing.model.as_deref(), Some("existing-model"));
+        assert_eq!(
+            existing.model_provider.as_deref(),
+            Some("existing-provider")
+        );
+        assert_eq!(
+            existing.external_thread_id.as_deref(),
+            Some("existing-thread")
+        );
+        assert_eq!(
+            existing.external_conversation_id.as_deref(),
+            Some("existing-conversation")
+        );
+    }
 
     struct CodexHomeGuard(Option<std::ffi::OsString>);
 

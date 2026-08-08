@@ -211,11 +211,13 @@ test("Network detail edits and resumes real request and response breakpoints", a
   request,
 }) => {
   const mock = await startMockHttpServer((_req, res) => {
+    const responseBody = "original-response";
     res.writeHead(200, {
       "Content-Type": "text/plain",
+      "Content-Length": String(Buffer.byteLength(responseBody)),
       "X-Original-Response": "yes",
     });
-    res.end("original-response");
+    res.end(responseBody);
   });
   const originalSettings = (await (
     await request.get(`${apiBase}/breakpoint/settings`)
@@ -259,6 +261,10 @@ test("Network detail edits and resumes real request and response breakpoints", a
       })
       .toBe("request");
 
+    await page.addInitScript(() => {
+      const realNow = Date.now.bind(Date);
+      Date.now = () => realNow() + 60 * 60 * 1000;
+    });
     await page.reload();
     const requestRow = await waitForTrafficRow(page, "/ui-request");
     await expect(requestRow).toHaveAttribute("data-breakpoint-phase", "request");
@@ -276,10 +282,33 @@ test("Network detail edits and resumes real request and response breakpoints", a
     expect(darkBreakpointBg).not.toBe("rgba(0, 0, 0, 0)");
     await page.getByTestId("theme-toggle").click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+
+    await page.getByRole("button", { name: /Fuzzy Search/ }).click();
+    await page
+      .getByPlaceholder("Enter keyword to search all content...")
+      .fill("ui-request");
+    await page.getByTestId("search-mode-submit").click();
+    const searchRow = page
+      .getByTestId("search-result-row")
+      .filter({ hasText: "ui-request" })
+      .first();
+    await expect(searchRow).toHaveAttribute("data-breakpoint-phase", "request");
+    await expect(
+      searchRow.getByTestId("search-breakpoint-request-indicator"),
+    ).toBeVisible();
+    const searchBreakpointBg = await searchRow.evaluate(
+      (element) => getComputedStyle(element).backgroundColor,
+    );
+    expect(searchBreakpointBg).not.toBe("rgba(0, 0, 0, 0)");
+    await page.getByRole("button", { name: "Exit" }).click();
+
     await requestRow.click();
     await expect(page.getByTestId("breakpoint-editor-banner")).toHaveAttribute(
       "data-phase",
       "request",
+    );
+    await expect(page.getByTestId("breakpoint-countdown")).not.toContainText(
+      "0.0s",
     );
     await page.getByTestId("breakpoint-method-input").fill("PUT");
     await page

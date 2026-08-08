@@ -86,7 +86,10 @@ use super::body_metadata::{
     normalize_res_headers, response_content_encoding, set_content_encoding_header,
     streaming_res_body_mode, BodyMode,
 };
-use super::breakpoint::{apply_edited_status, body_limit};
+use super::breakpoint::{
+    apply_edited_response_status, apply_edited_response_status_and_body, body_limit,
+    response_breakpoint_can_buffer_body,
+};
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
     maybe_inject_devtools_bridge_html, strip_devtools_client_req_id_from_url,
@@ -2541,6 +2544,7 @@ pub async fn handle_http_request(
                 && super::breakpoint::breakpoint_request_rule_enabled(&resolved_rules)
         })
         .unwrap_or(false);
+    let mut breakpoint_url_edited = false;
     let mut request_body_omitted_for_breakpoint = false;
     if request_hook_enabled && final_body.is_empty() {
         if let Some(body) = streaming_body.take() {
@@ -2655,8 +2659,9 @@ pub async fn handle_http_request(
             let https = processed_uri
                 .scheme_str()
                 .is_some_and(|scheme| scheme == "https");
-            (host, port) = extract_host_port(&processed_uri, &resolved_rules, https)?;
+            (host, port) = extract_uri_host_port(&processed_uri, https)?;
             record_url = strip_devtools_client_req_id_from_url(edited_url);
+            breakpoint_url_edited = true;
         }
         if outcome.body_replaced {
             normalize_req_headers(
@@ -2685,7 +2690,7 @@ pub async fn handle_http_request(
     let dns_ms = None;
 
     let effective_is_https = matches!(processed_uri.scheme_str(), Some("https" | "wss"));
-    let use_tls = if resolved_rules.ignored.host {
+    let use_tls = if breakpoint_url_edited || resolved_rules.ignored.host {
         effective_is_https
     } else {
         match resolved_rules.host_protocol {
@@ -2897,6 +2902,7 @@ pub async fn handle_http_request(
             original_path.to_string()
         }
     };
+    #[rustfmt::skip] let path = if breakpoint_url_edited { processed_uri.path_and_query().map_or_else(|| "/".to_string(), |value| value.as_str().to_string()) } else { path };
 
     let upstream_authority = if (use_tls && port == 443) || (!use_tls && port == 80) {
         host.clone()
@@ -3483,21 +3489,8 @@ pub async fn handle_http_request(
                 && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
         })
         .unwrap_or(false);
-    let enabled = response_breakpoint_enabled;
-    let limit = body_limit(&admin_state, enabled, max_body_buffer_size);
-    let max_body_buffer_size = limit;
-    let response_breakpoint_can_buffer_body = response_breakpoint_enabled
-        && !is_websocket
-        && !is_sse
-        && !skip_binary_recording
-        && admin_state
-            .as_ref()
-            .map(|state| {
-                res_content_length
-                    .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
-                    .unwrap_or(true)
-            })
-            .unwrap_or(false);
+    #[rustfmt::skip] let breakpoint_max_body_bytes = admin_state.as_ref().map_or(0, |state| state.breakpoint_manager.max_body_bytes());
+    #[rustfmt::skip] let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(response_breakpoint_enabled, is_websocket, is_sse, skip_binary_recording, res_content_length, breakpoint_max_body_bytes);
     let response_breakpoint_header_only = response_breakpoint_enabled
         && !is_websocket
         && !is_sse
@@ -3792,7 +3785,21 @@ pub async fn handle_http_request(
                 &mut ignored_body,
             )
             .await;
-            apply_edited_status(&mut res_parts.status, outcome.status);
+            let no_body = apply_edited_response_status(&mut res_parts, &method, outcome.status);
+            if let Some(ref state) = admin_state {
+                let final_status = res_parts.status.as_u16();
+                let final_headers = headers_to_pairs(&res_parts.headers);
+                let final_content_type = res_parts
+                    .headers
+                    .get(hyper::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                #[rustfmt::skip] let update_record = move |record: &mut TrafficRecord| super::breakpoint::apply_response_breakpoint_record_state(record, final_status, final_content_type.clone(), final_headers.clone(), no_body);
+                state.update_traffic_by_id(record_id, update_record);
+            }
+            if no_body {
+                return Ok(Response::from_parts(res_parts, full_body(Bytes::new())));
+            }
         }
 
         if is_sse {
@@ -4280,9 +4287,8 @@ pub async fn handle_http_request(
         )
         .await;
 
-        apply_edited_status(&mut res_parts.status, outcome.status);
-
-        if outcome.body_replaced {
+        #[rustfmt::skip] let no_body = apply_edited_response_status_and_body(&mut res_parts, &method, outcome.status, &mut final_res_body);
+        if !no_body && outcome.body_replaced {
             normalize_res_headers(
                 &mut res_parts,
                 buffered_res_body_mode(final_res_body.len(), !resolved_rules.trailers.is_empty()),
@@ -4321,11 +4327,8 @@ pub async fn handle_http_request(
         record.request_size =
             calculate_request_size(&method, &record_url, &req_headers, request_body_size);
         record.upload_bytes = request_body_size;
-        record.response_size = calculate_response_size(
-            res_parts.status.as_u16(),
-            &res_headers,
-            final_res_body.len(),
-        );
+        #[rustfmt::skip] let final_response_size = if is_no_body_response(res_parts.status, &method) { 0 } else { calculate_response_size(res_parts.status.as_u16(), &res_headers, final_res_body.len()) };
+        record.response_size = final_response_size;
         record.download_bytes = final_res_body.len();
         record.duration_ms = total_ms;
         record.timing = Some(RequestTiming {
@@ -4655,15 +4658,10 @@ fn extract_host_port(uri: &Uri, rules: &ResolvedRules, is_https: bool) -> Result
         return Ok((host, port));
     }
 
-    let host = uri
-        .host()
-        .ok_or_else(|| BifrostError::Network("Missing host in URI".to_string()))?
-        .to_string();
-
-    let port = uri.port_u16().unwrap_or(default_port);
-
-    Ok((host, port))
+    extract_uri_host_port(uri, is_https)
 }
+
+#[rustfmt::skip] fn extract_uri_host_port(uri: &Uri, is_https: bool) -> Result<(String, u16)> { let host = uri.host().ok_or_else(|| BifrostError::Network("Missing host in URI".to_string()))?.to_string(); let port = uri.port_u16().unwrap_or(if is_https { 443 } else { 80 }); Ok((host, port)) }
 
 fn should_use_upstream_proxy(rules: &ResolvedRules) -> bool {
     rules.proxy.is_some() && (rules.ignored.host || rules.host.is_none())
@@ -9100,6 +9098,73 @@ mod coverage_90_wave {
     }
 
     #[tokio::test]
+    async fn plaintext_response_breakpoint_no_content_clears_body_and_traffic_sizes() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19099)
+            .build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 4096,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/breakpoint-no-content"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_string("must-be-removed")
+                    .insert_header("content-type", "text/plain")
+                    .insert_header("content-length", "15"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("response")],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("http://source.test/breakpoint-no-content")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_full_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+        wait_for_breakpoint(&state).await;
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-handler-coverage",
+                "response",
+                BreakpointEdit {
+                    status: Some(204),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        assert!(!response.headers().contains_key(header::TRANSFER_ENCODING));
+        assert!(response_body(response).await.is_empty());
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-handler-coverage")
+            .expect("handler no-content traffic record");
+        assert_eq!(record.status, 204);
+        assert_eq!(record.response_size, 0);
+        assert_eq!(record.download_bytes, 0);
+        assert!(record.response_body_ref.is_none());
+    }
+
+    #[tokio::test]
     async fn plaintext_html_devtools_covers_identity_gzip_and_invalid_encoding() {
         let harness = bifrost_admin::test_support::TestAdminState::builder()
             .port(19098)
@@ -9559,6 +9624,189 @@ mod coverage_90_wave {
         assert_eq!(response.status().as_u16(), 219);
         assert_eq!(response.headers()["x-header-only"], "yes");
         assert_eq!(response_body(response).await, Bytes::from(large_body));
+    }
+
+    #[tokio::test]
+    async fn plaintext_breakpoint_edited_url_ignores_stale_host_rule() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let state = Arc::new(AdminState::new(19102));
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 1024,
+            });
+        let original = wiremock::MockServer::start().await;
+        let edited = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/edited-target"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("edited-upstream"))
+            .expect(1)
+            .mount(&edited)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(original.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("request")],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("http://source.test/original-target")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_full_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+
+        wait_for_breakpoint(&state).await;
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-handler-coverage",
+                "request",
+                BreakpointEdit {
+                    url: Some(format!("{}/edited-target", edited.uri())),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
+        let response = task.await.unwrap();
+        assert_eq!(
+            response_body(response).await,
+            Bytes::from_static(b"edited-upstream")
+        );
+        assert!(original.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plaintext_unknown_length_response_pauses_before_stream_eof() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+        use futures_util::StreamExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|_request: Request<Incoming>| async move {
+                let first = futures_util::stream::once(async {
+                    Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"open")))
+                });
+                let never = futures_util::stream::pending::<
+                    std::result::Result<hyper::body::Frame<Bytes>, Infallible>,
+                >();
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .body(StreamBody::new(first.chain(never)))
+                        .unwrap(),
+                )
+            });
+            let _ = server_http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+
+        let state = Arc::new(AdminState::new(19103));
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 1024,
+            });
+        let rules = ResolvedRules {
+            host: Some(address.to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("response")],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("http://source.test/open-stream")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let task_state = state.clone();
+        let request_task = tokio::spawn(async move {
+            run_full_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+
+        wait_for_breakpoint(&state).await;
+        let pending = state.breakpoint_manager.pending();
+        assert!(pending[0].body_omitted);
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-handler-coverage",
+                "response",
+                BreakpointEdit {
+                    status: Some(204),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), request_task)
+            .await
+            .expect("header-only breakpoint should not wait for stream EOF")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        assert_eq!(response_body(response).await, Bytes::new());
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn breakpoint_capture_limit_does_not_reduce_response_rule_buffer_limit() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let state = Arc::new(AdminState::new(19104));
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 4,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/transform-with-breakpoint"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain")
+                    .set_body_string("original-response"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("response")],
+            res_replace: vec![("original".into(), "transformed".into())],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("http://source.test/transform-with-breakpoint")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_full_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+
+        wait_for_breakpoint(&state).await;
+        assert!(state.breakpoint_manager.pending()[0].body_omitted);
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-handler-coverage",
+                "response",
+                BreakpointEdit::default(),
+            )
+            .is_ok());
+        let response = task.await.unwrap();
+        assert_eq!(
+            response_body(response).await,
+            Bytes::from_static(b"transformed-response")
+        );
     }
 
     #[tokio::test]

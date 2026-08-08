@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 use tokio::sync::oneshot;
 
 pub use bifrost_storage::{
@@ -171,10 +172,15 @@ impl BreakpointManager {
     }
 
     pub fn pending(&self) -> Vec<PendingBreakpoint> {
+        let server_now_ms = UNIX_EPOCH.elapsed().unwrap_or_default().as_millis() as u64;
         let mut pending = self
             .pending
             .iter()
-            .map(|entry| entry.snapshot.clone())
+            .map(|entry| {
+                let mut snapshot = entry.snapshot.clone();
+                snapshot.server_now_ms = server_now_ms;
+                snapshot
+            })
             .collect::<Vec<_>>();
         pending.sort_by_key(|item| (item.paused_at_ms, item.request_id.clone()));
         pending
@@ -265,6 +271,7 @@ mod tests {
             content_encoding: None,
             paused_at_ms: 10,
             deadline_at_ms: 20,
+            server_now_ms: 10,
         }
     }
 
@@ -273,7 +280,11 @@ mod tests {
         let manager = BreakpointManager::new();
         let rx = manager.pause(pending("req-2", "request"), true);
 
-        assert_eq!(manager.pending(), vec![pending("req-2", "request")]);
+        let listed = manager.pending();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].request_id, "req-2");
+        assert_eq!(listed[0].phase, "request");
+        assert!(listed[0].server_now_ms >= listed[0].paused_at_ms);
         assert!(matches!(
             manager.resume("req-2", "response", BreakpointEdit::default()),
             Err(BreakpointResumeError::PhaseMismatch)

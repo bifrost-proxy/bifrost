@@ -32,7 +32,7 @@ Breakpoint 有双重门禁：
 7. Request 可编辑 method、URL/query、headers 和可编辑 body；Response 可编辑 status、headers 和可编辑 body。
 8. 点击 `Resume unchanged` 原样放行，或点击 `Apply & Resume` 应用编辑后放行。
 
-pending 的 Network 行整行使用主题自适应的淡黄色警示背景；恢复、关闭 Breakpoint 或 timeout 自动放行后，背景立即消失。浅色和深色主题分别使用各自的 warning token，不使用固定浅色值。
+pending 的 Network 行整行使用主题自适应的淡黄色警示背景；Fuzzy Search 结果保持相同的背景与 request/response 阶段标识。恢复、关闭 Breakpoint 或 timeout 自动放行后，背景立即消失。浅色和深色主题分别使用各自的 warning token，不使用固定浅色值。
 
 Breakpoint 关闭后，新流量不会再暂停；已经 pending 的 breakpoint 会被释放。
 
@@ -74,7 +74,7 @@ Resume 后，上游会收到修改后的 method、URL/query、headers/body。若
 - 修改响应 body，验证客户端展示或错误处理。
 - 模拟特殊状态或特殊响应内容。
 
-Resume 后，客户端会收到修改后的 status、headers/body。普通未知长度正文会在安全上限内有界读取后允许编辑；超限或持续流式响应保留原始 streaming。受支持的压缩正文会以解压文本编辑，并在放行前按最终 `Content-Encoding` 重新编码。
+Resume 后，客户端会收到修改后的 status、headers/body。只有明确声明 `Content-Length`、长度在安全上限内且可完整解码为文本的响应体才允许编辑；未知长度、超限或持续流式响应会立即在响应头阶段以 header-only 状态暂停，恢复后保留原始 streaming。受支持的压缩正文会以解压文本编辑，并在放行前按最终 `Content-Encoding` 重新编码。若把 status 改为 1xx、204 或 304，Bifrost 会清空响应体并移除 `Content-Length` / `Transfer-Encoding`，避免产生非法 framing。
 
 ## Timeout 配置
 
@@ -83,6 +83,8 @@ Breakpoint Auto-Resume Timeout 位于 `Settings -> Performance`。
 - 默认值：30 秒。
 - 可配置范围：5 秒到 5 分钟。
 - 超时后：Bifrost 自动继续原始 request/response，不应用未提交的编辑。
+
+页面倒计时使用代理返回的服务端当前时间与 deadline 计算剩余时长，因此 WebUI 与代理运行在不同机器、系统时钟有偏差时也不会提前显示超时。
 
 这个配置用于避免用户忘记点击 Resume 时请求无限等待。较低值能降低网络延迟和连接堆积风险；较高值适合需要较长时间手动检查 headers/body 的场景。超过 5 分钟会带来明显的连接占用和性能风险，因此不允许配置。
 

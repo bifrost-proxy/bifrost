@@ -372,11 +372,7 @@ pub(super) fn outbound_log_msg_type(
 /// Used by the plan listener task: first call creates a new card via send_card,
 /// subsequent calls update the same card via patch_card.
 /// Shows detailed status if session exists, otherwise shows a "new session" placeholder.
-pub(super) fn build_im_status_text(
-    detail: Option<&SessionDetail>,
-    context: &bifrost_agent::StatusRuntimeContext,
-    default_work_dir: Option<&str>,
-) -> String {
+#[rustfmt::skip] pub(super) fn build_im_status_text(detail: Option<&SessionDetail>, context: &bifrost_agent::StatusRuntimeContext, default_work_dir: Option<&str>, channel: &ImStatusChannelContext<'_>) -> String {
     match detail {
         Some(d) => {
             let real = d
@@ -401,38 +397,10 @@ pub(super) fn build_im_status_text(
                 .or(context.runner_id.as_ref())
                 .map(String::as_str)
                 .unwrap_or("N/A");
-            let model_text = bifrost_agent::format_model_ref(
-                d.model
-                    .as_ref()
-                    .or(context.model.as_ref())
-                    .map(String::as_str),
-                d.model_provider
-                    .as_ref()
-                    .or(context.model_provider.as_ref())
-                    .map(String::as_str),
-            );
-            let reasoning_effort_text = bifrost_agent::format_optional_status_text(
-                d.model_reasoning_effort
-                    .as_ref()
-                    .or(context.model_reasoning_effort.as_ref())
-                    .map(String::as_str),
-            );
-            let reasoning_summary_text = bifrost_agent::format_optional_status_text(
-                d.model_reasoning_summary
-                    .as_ref()
-                    .or(context.model_reasoning_summary.as_ref())
-                    .map(String::as_str),
-            );
-            let conversation_ref = bifrost_agent::format_conversation_ref(
-                d.external_thread_id
-                    .as_ref()
-                    .or(context.external_thread_id.as_ref())
-                    .map(String::as_str),
-                d.external_conversation_id
-                    .as_ref()
-                    .or(context.external_conversation_id.as_ref())
-                    .map(String::as_str),
-            );
+            let model_text = bifrost_agent::format_model_ref(d.model.as_ref().or(context.model.as_ref()).map(String::as_str), d.model_provider.as_ref().or(context.model_provider.as_ref()).map(String::as_str));
+            let reasoning_effort_text = bifrost_agent::format_optional_status_text(d.model_reasoning_effort.as_ref().or(context.model_reasoning_effort.as_ref()).map(String::as_str));
+            let reasoning_summary_text = bifrost_agent::format_optional_status_text(d.model_reasoning_summary.as_ref().or(context.model_reasoning_summary.as_ref()).map(String::as_str));
+            let conversation_ref = bifrost_agent::format_conversation_ref(d.external_thread_id.as_ref().or(context.external_thread_id.as_ref()).map(String::as_str), d.external_conversation_id.as_ref().or(context.external_conversation_id.as_ref()).map(String::as_str));
             let goal_info = match (&d.goal_status, &d.goal_objective) {
                 (Some(status), Some(objective)) => {
                     let obj_preview = truncate_str(objective, 80);
@@ -441,32 +409,81 @@ pub(super) fn build_im_status_text(
                 _ => String::new(),
             };
             let work_dir = d.work_dir.as_deref().or(default_work_dir).unwrap_or("N/A");
-            let context_management_text =
-                bifrost_agent::format_context_management_status(d.message_count);
-            format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 思考强度: {}\n- 思考摘要: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- 状态: 空闲{}",
-                work_dir,
-                agent_type,
-                runner_type,
-                runner_id,
-                model_text,
-                reasoning_effort_text,
-                reasoning_summary_text,
-                conversation_ref,
-                d.user_turn_count,
-                d.message_count,
-                bifrost_agent::format_status_metric_count(d.estimated_tokens.into()),
-                real,
-                d.compaction_count,
-                context_management_text,
-                d.history_version,
-                goal_info
-            )
+            let context_management_text = bifrost_agent::format_context_management_status(d.message_count);
+            let external_session_id = external_session_id(d.external_thread_id.as_deref().or(context.external_thread_id.as_deref()), d.external_conversation_id.as_deref().or(context.external_conversation_id.as_deref()));
+            let overview = build_im_status_overview(channel, &ImStatusOverview { work_dir, runner_type, runner_id, model_text: &model_text, reasoning_effort_text: &reasoning_effort_text, reasoning_summary_text: &reasoning_summary_text, external_session_id, user_turn_count: d.user_turn_count, status: channel.status });
+            format!("{overview}\n\n会话诊断:\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 思考强度: {}\n- 思考摘要: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}{}", agent_type, runner_type, runner_id, model_text, reasoning_effort_text, reasoning_summary_text, conversation_ref, d.user_turn_count, d.message_count, bifrost_agent::format_status_metric_count(d.estimated_tokens.into()), real, d.compaction_count, context_management_text, d.history_version, goal_info)
         }
         None => {
-            "会话状态:\n- 消息数: 0\n- 状态: 新会话\n\n提示: 发送消息即可开始对话。".to_string()
+            let work_dir = default_work_dir.unwrap_or("N/A");
+            let runner_type = context.runner_type.as_deref().unwrap_or("external");
+            let runner_id = context.runner_id.as_deref().unwrap_or("N/A");
+            let model_text = bifrost_agent::format_model_ref(context.model.as_deref(), context.model_provider.as_deref());
+            let reasoning_effort_text = bifrost_agent::format_optional_status_text(context.model_reasoning_effort.as_deref());
+            let reasoning_summary_text = bifrost_agent::format_optional_status_text(context.model_reasoning_summary.as_deref());
+            let overview = build_im_status_overview(channel, &ImStatusOverview { work_dir, runner_type, runner_id, model_text: &model_text, reasoning_effort_text: &reasoning_effort_text, reasoning_summary_text: &reasoning_summary_text, external_session_id: external_session_id(context.external_thread_id.as_deref(), context.external_conversation_id.as_deref()), user_turn_count: 0, status: if channel.status == "Ready" { "Ready（新会话）" } else { channel.status } });
+            overview + "\n\n会话诊断:\n- 消息数: 0\n- 上下文管理: 尚未创建本地会话历史\n\n提示: 发送消息即可开始对话。"
+        } } }
+#[rustfmt::skip] pub(super) struct ImStatusChannelContext<'a> { pub(super) provider: &'a ImProviderConfig, pub(super) device_name: &'a str, pub(super) session_key: &'a str, pub(super) queue_info: &'a str, pub(super) status: &'a str }
+#[rustfmt::skip] pub(super) fn build_active_im_status_text(status: &bifrost_agent::ActiveTurnStatus, context: &bifrost_agent::StatusRuntimeContext, default_work_dir: Option<&str>, channel: &ImStatusChannelContext<'_>) -> String {
+    let work_dir = status
+        .work_dir
+        .as_deref()
+        .or(default_work_dir)
+        .unwrap_or("N/A");
+    let runner_type = status
+        .runner_type
+        .as_deref()
+        .or(context.runner_type.as_deref())
+        .unwrap_or("external");
+    let runner_id = status
+        .runner_id
+        .as_deref()
+        .or(context.runner_id.as_deref())
+        .unwrap_or("N/A");
+    let model_text = bifrost_agent::format_model_ref(status.model.as_deref().or(context.model.as_deref()), status.model_provider.as_deref().or(context.model_provider.as_deref()));
+    let reasoning_effort_text = bifrost_agent::format_optional_status_text(status.model_reasoning_effort.as_deref().or(context.model_reasoning_effort.as_deref()));
+    let reasoning_summary_text = bifrost_agent::format_optional_status_text(status.model_reasoning_summary.as_deref().or(context.model_reasoning_summary.as_deref()));
+    let external_session_id = external_session_id(status.external_thread_id.as_deref().or(context.external_thread_id.as_deref()), status.external_conversation_id.as_deref().or(context.external_conversation_id.as_deref()));
+    let overview = build_im_status_overview(channel, &ImStatusOverview { work_dir, runner_type, runner_id, model_text: &model_text, reasoning_effort_text: &reasoning_effort_text, reasoning_summary_text: &reasoning_summary_text, external_session_id, user_turn_count: status.user_turn_count, status: channel.status });
+    let diagnostics = bifrost_agent::format_active_turn_status_text_with_context(status, context);
+    format!("{overview}\n\n{diagnostics}")
+}
+#[rustfmt::skip] struct ImStatusOverview<'a> { work_dir: &'a str, runner_type: &'a str, runner_id: &'a str, model_text: &'a str, reasoning_effort_text: &'a str, reasoning_summary_text: &'a str, external_session_id: &'a str, user_turn_count: usize, status: &'a str }
+#[rustfmt::skip] fn build_im_status_overview(channel: &ImStatusChannelContext<'_>, overview: &ImStatusOverview<'_>) -> String {
+    format!("**Bifrost status**\n\n- **Provider**: {} (`{}`)\n- **Device**: {}\n- **Workspace**: `{}`\n- **Runner Type**: `{}`\n- **Runner ID**: `{}`\n- **Model**: `{}`\n- **Reasoning Effort**: `{}`\n- **Reasoning Summary**: `{}`\n- **Bound Session**: `{}`\n- **External Session ID**: `{}`\n- **Completed User Turns**: {}\n- **Queue**: {}\n- **Status**: {}", inline_status_value(&channel.provider.display_name), inline_status_value(&channel.provider.id), inline_status_value(channel.device_name), inline_status_value(overview.work_dir), inline_status_value(overview.runner_type), inline_status_value(overview.runner_id), inline_status_value(overview.model_text), inline_status_value(overview.reasoning_effort_text), inline_status_value(overview.reasoning_summary_text), inline_status_value(channel.session_key), inline_status_value(overview.external_session_id), overview.user_turn_count, channel.queue_info, overview.status)
+}
+#[rustfmt::skip] fn external_session_id<'a>(external_thread_id: Option<&'a str>, external_conversation_id: Option<&'a str>) -> &'a str {
+    external_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            external_conversation_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or("N/A")
+}
+fn inline_status_value(value: &str) -> String {
+    let single_line = value.trim().replace(['\r', '\n'], " ");
+    bifrost_core::text::truncate_chars_with_ellipsis(&single_line, 160).replace('`', "\\`")
+}
+#[rustfmt::skip] pub(super) fn resolve_im_status_runtime_context(agent_config: &crate::im_gateway::agent::ImAgentConfig, external_cli_config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig, provider_id: &str, session_key: &str, runner_id_override: Option<&str>) -> bifrost_agent::StatusRuntimeContext {
+    let configured_runner_id = runner_id_override.or_else(|| agent_config.runner.as_ref().and_then(|runner| runner.custom_runner_id()));
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(external_cli_config, Some(provider_id), configured_runner_id);
+    let mut model_config = crate::im_gateway::external_cli::resolve_external_cli_status_model_config(&effective.settings.adapter, &effective.settings.adapter_config);
+    let state = crate::im_gateway::session_state::load_session_state(session_key, &effective.settings.adapter, Some(&effective.runner_id));
+    if let Some(state) = state.as_ref() {
+        if let Some(model) = state.model_override.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            model_config.model = Some(model.to_string());
+            model_config.model_provider = state.model_override_source.clone();
+        }
+        if let Some(effort) = state.reasoning_effort_override.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            model_config.reasoning_effort = Some(effort.to_string());
         }
     }
+    let status_context = bifrost_agent::StatusRuntimeContext { agent_type: Some("External Runner Agent".to_string()), runner_type: Some(effective.settings.adapter), runner_id: Some(effective.runner_id), model: model_config.model, model_provider: model_config.model_provider.or(model_config.model_source), model_reasoning_effort: model_config.reasoning_effort, model_reasoning_summary: model_config.reasoning_summary, external_conversation_id: state.as_ref().and_then(|state| state.external_conversation_id.clone()), external_thread_id: state.and_then(|state| state.external_thread_id) };
+    status_context
 }
 
 pub(super) fn status_context_from_agent_runner(

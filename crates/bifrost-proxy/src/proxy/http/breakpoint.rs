@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::body_metadata::{
-    header_content_encoding, normalize_req_headers, set_content_encoding_header, BodyMode,
+    header_content_encoding, is_no_body_response, normalize_req_headers, normalize_res_headers,
+    set_content_encoding_header, BodyMode,
 };
 use super::handler::headers_to_pairs;
 use crate::server::{full_body, BoxBody};
@@ -191,6 +192,7 @@ fn pending_snapshot(
         content_encoding: body.content_encoding.clone(),
         paused_at_ms,
         deadline_at_ms: paused_at_ms.saturating_add(state.breakpoint_manager.timeout_ms()),
+        server_now_ms: paused_at_ms,
     }
 }
 
@@ -226,6 +228,23 @@ pub fn apply_edited_status(target: &mut hyper::StatusCode, edited: Option<u16>) 
         *target = status;
     }
 }
+
+pub fn apply_edited_response_status(
+    parts: &mut hyper::http::response::Parts,
+    method: &str,
+    edited: Option<u16>,
+) -> bool {
+    apply_edited_status(&mut parts.status, edited);
+    let no_body = is_no_body_response(parts.status, method);
+    if no_body {
+        normalize_res_headers(parts, BodyMode::Known(0), method);
+    }
+    no_body
+}
+#[rustfmt::skip] pub fn apply_edited_response_status_and_body(parts: &mut hyper::http::response::Parts, method: &str, edited: Option<u16>, body: &mut Bytes) -> bool { let no_body = apply_edited_response_status(parts, method, edited); if no_body { *body = Bytes::new(); } no_body }
+
+#[rustfmt::skip] pub fn apply_response_breakpoint_record_state(record: &mut bifrost_admin::TrafficRecord, status: u16, content_type: Option<String>, headers: Vec<(String, String)>, no_body: bool) { record.status = status; record.content_type = content_type; record.response_headers = Some(headers); if no_body { record.response_size = 0; record.download_bytes = 0; record.response_body_ref = None; } }
+#[rustfmt::skip] pub fn response_breakpoint_can_buffer_body(enabled: bool, is_websocket: bool, is_sse: bool, skip_binary_recording: bool, content_length: Option<usize>, max_body_bytes: usize) -> bool { enabled && !is_websocket && !is_sse && !skip_binary_recording && content_length.is_some_and(|len| len <= max_body_bytes) }
 
 pub fn body_read_error_response(error: impl std::fmt::Display) -> hyper::Response<BoxBody> {
     hyper::Response::builder()
@@ -669,6 +688,132 @@ mod tests {
     }
 
     #[test]
+    fn response_breakpoint_buffers_only_known_safe_lengths() {
+        assert!(response_breakpoint_can_buffer_body(
+            true,
+            false,
+            false,
+            false,
+            Some(8),
+            8,
+        ));
+        assert!(!response_breakpoint_can_buffer_body(
+            true, false, false, false, None, 8,
+        ));
+        assert!(!response_breakpoint_can_buffer_body(
+            true,
+            false,
+            false,
+            false,
+            Some(9),
+            8,
+        ));
+        assert!(!response_breakpoint_can_buffer_body(
+            true,
+            false,
+            true,
+            false,
+            Some(1),
+            8,
+        ));
+        assert!(!response_breakpoint_can_buffer_body(
+            false,
+            false,
+            false,
+            false,
+            Some(1),
+            8,
+        ));
+        assert!(!response_breakpoint_can_buffer_body(
+            true,
+            true,
+            false,
+            false,
+            Some(1),
+            8,
+        ));
+        assert!(!response_breakpoint_can_buffer_body(
+            true,
+            false,
+            false,
+            true,
+            Some(1),
+            8,
+        ));
+    }
+
+    #[test]
+    fn no_body_status_edits_remove_response_framing() {
+        let response = hyper::Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_LENGTH, "12")
+            .header(hyper::header::TRANSFER_ENCODING, "chunked")
+            .body(())
+            .unwrap();
+        let (mut parts, ()) = response.into_parts();
+
+        let mut body = Bytes::from_static(b"must be removed");
+        assert!(apply_edited_response_status_and_body(
+            &mut parts,
+            "GET",
+            Some(204),
+            &mut body
+        ));
+        assert!(body.is_empty());
+        assert_eq!(parts.status, hyper::StatusCode::NO_CONTENT);
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+        assert!(!parts.headers.contains_key(hyper::header::TRANSFER_ENCODING));
+
+        for (method, edited) in [("GET", Some(101)), ("GET", Some(304)), ("HEAD", Some(200))] {
+            let response = hyper::Response::builder()
+                .status(200)
+                .header(hyper::header::CONTENT_LENGTH, "12")
+                .body(())
+                .unwrap();
+            let (mut parts, ()) = response.into_parts();
+            assert!(apply_edited_response_status(&mut parts, method, edited));
+            assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+        }
+
+        let response = hyper::Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_LENGTH, "12")
+            .body(())
+            .unwrap();
+        let (mut parts, ()) = response.into_parts();
+        assert!(!apply_edited_response_status(&mut parts, "GET", None));
+        assert_eq!(parts.status, hyper::StatusCode::OK);
+        assert_eq!(parts.headers[hyper::header::CONTENT_LENGTH], "12");
+
+        let mut record = bifrost_admin::TrafficRecord::new(
+            "response-breakpoint".to_string(),
+            "GET".to_string(),
+            "https://example.test/".to_string(),
+        );
+        record.response_size = 12;
+        record.download_bytes = 12;
+        apply_response_breakpoint_record_state(
+            &mut record,
+            204,
+            Some("text/plain".to_string()),
+            vec![("x-edited".to_string(), "yes".to_string())],
+            true,
+        );
+        assert_eq!(record.status, 204);
+        assert_eq!(record.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(
+            record.response_headers.as_deref(),
+            Some(&[("x-edited".to_string(), "yes".to_string())][..])
+        );
+        assert_eq!(record.response_size, 0);
+        assert_eq!(record.download_bytes, 0);
+
+        apply_response_breakpoint_record_state(&mut record, 200, None, Vec::new(), false);
+        assert_eq!(record.status, 200);
+        assert!(record.content_type.is_none());
+    }
+
+    #[test]
     fn breakpoint_body_payload_handles_empty_and_forced_omit() {
         let state = AdminState::new(0);
         let headers = HeaderMap::new();
@@ -736,6 +881,18 @@ mod tests {
         );
         assert!(invalid_gzip.body.is_none());
         assert!(invalid_gzip.body_omitted);
+
+        let compressed = Bytes::from(compress_body(b"zip", "gzip").unwrap());
+        let gzip = breakpoint_body_payload(
+            &state,
+            &gzip_headers,
+            &compressed,
+            Some(compressed.len()),
+            false,
+        );
+        assert_eq!(gzip.body.as_deref(), Some("zip"));
+        assert!(gzip.body_editable);
+        assert_eq!(gzip.content_encoding.as_deref(), Some("gzip"));
     }
 
     #[test]

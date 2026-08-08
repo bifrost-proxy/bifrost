@@ -2931,6 +2931,38 @@ fn external_runner_conversation_ref(snapshot: &ImAgentProgressSnapshot) -> Strin
     bifrost_agent::format_conversation_ref(thread_id, conversation_id)
 }
 
+fn external_runner_session_id(snapshot: &ImAgentProgressSnapshot) -> Option<&str> {
+    snapshot
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.external_thread_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.external_thread_id.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            snapshot
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.external_conversation_id.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.external_conversation_id.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+}
 fn format_external_tool_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
     let tool = snapshot.latest_tool.as_ref()?;
     let status = match tool.success {
@@ -2979,7 +3011,7 @@ fn format_tool_details_markdown(
     sections.join("\n\n")
 }
 
-fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
+#[rustfmt::skip] fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
     let phase = match snapshot.phase {
         ImProgressPhase::Running => "运行中",
         ImProgressPhase::Finished => "已完成",
@@ -3022,25 +3054,8 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
         let elapsed_line = progress_elapsed_line(snapshot)
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
-        return format!(
-            "{}状态：{}{}{}\nRunner：`{}` · Adapter：`{}`\n模型：{}{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
-            prefix,
-            phase,
-            state_line,
-            elapsed_line,
-            external_runner_id(snapshot),
-            external_runner_adapter(snapshot),
-            external_runner_model_label(snapshot),
-            reasoning_line,
-            token_line,
-            weekly_line,
-            context_line,
-            external_runner_conversation_ref(snapshot),
-            queue_text,
-            guide_text,
-            external_runner_work_dir(snapshot).unwrap_or("N/A"),
-            tool_line
-        );
+        let session_id = external_runner_session_id(snapshot).map(|session_id| truncate_one_line(session_id, 80)).map(|session_id| if session_id.contains('`') { format!(" · Session ID：{}", session_id.replace('`', "\\`")) } else { format!(" · Session ID：`{session_id}`") }).unwrap_or_default();
+        return format!("{}状态：{}{}{}\nRunner：`{}` · Adapter：`{}`{}\n模型：{}{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}", prefix, phase, state_line, elapsed_line, external_runner_id(snapshot), external_runner_adapter(snapshot), session_id, external_runner_model_label(snapshot), reasoning_line, token_line, weekly_line, context_line, external_runner_conversation_ref(snapshot), queue_text, guide_text, external_runner_work_dir(snapshot).unwrap_or("N/A"), tool_line);
     }
     match &snapshot.status {
         Some(status) => {

@@ -1014,7 +1014,7 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
     assert!(title.contains("本次：1.3K Token"));
     assert!(title.contains("周余额：37%"));
     assert!(footer.contains("状态：已完成"));
-    assert!(footer.contains("Runner：`codex` · Adapter：`codex`"));
+    assert!(footer.contains("Runner：`codex` · Adapter：`codex` · Session ID：`thread-123`"));
     assert!(footer.contains("模型：gpt-test（runner 配置）"));
     assert!(footer.contains("思考：high · 摘要：auto"));
     assert!(footer.contains("Token：总计 1.3K · 输入 1.2K · 输出 80"));
@@ -1057,7 +1057,25 @@ fn external_runner_footer_hides_machine_status_line() {
 
     let footer = format_footer_markdown(&snapshot);
     assert!(footer.contains("Runner：`codex` · Adapter：`codex`"));
+    assert!(!footer.contains("Session ID："));
     assert!(!footer.contains("当前状态：model_request"));
+}
+
+#[test]
+fn external_runner_footer_bounds_and_escapes_session_id() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "codex task");
+    snapshot.runner = Some(ProgressRunnerSummary {
+        runner_id: "codex".to_string(),
+        adapter: "codex".to_string(),
+        external_thread_id: Some(format!("unsafe`{}", "x".repeat(100))),
+        ..ProgressRunnerSummary::default()
+    });
+
+    let footer = format_footer_markdown(&snapshot);
+
+    assert!(footer.contains("Session ID：unsafe\\`"));
+    assert!(!footer.contains("Session ID：`unsafe`"));
+    assert!(!footer.contains(&"x".repeat(81)));
 }
 
 #[test]

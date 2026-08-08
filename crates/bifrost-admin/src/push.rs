@@ -308,6 +308,7 @@ pub struct BreakpointPausedPushData {
     pub content_encoding: Option<String>,
     pub paused_at_ms: u64,
     pub deadline_at_ms: u64,
+    pub server_now_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3858,6 +3859,7 @@ mod coverage_boost {
             content_encoding: None,
             paused_at_ms: 10,
             deadline_at_ms: 20,
+            server_now_ms: 10,
         });
 
         manager.broadcast_breakpoint_settings_updated(BreakpointSettingsPushData {

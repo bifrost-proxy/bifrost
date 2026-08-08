@@ -1138,16 +1138,534 @@ pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
     ));
     context.model = Some("trae-model".to_string());
     context.model_provider = Some("runner config".to_string());
-    let text = build_im_status_text(Some(&detail), &context, None);
+    let provider = test_provider();
+    let text = build_im_status_text(
+        Some(&detail),
+        &context,
+        None,
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "eden-work",
+            session_key: "status-runner-metadata",
+            queue_info: "无排队消息",
+            status: "Ready",
+        },
+    );
 
     assert!(text.contains("Agent 类型: External Runner Agent"));
     assert!(text.contains("Runner 类型: codex"));
     assert!(text.contains("Runner ID: codex"));
     assert!(text.contains("模型: trae-model（runner config）"));
+    assert!(text.contains("- **Provider**: Feishu Main (`feishu-main`)"));
+    assert!(text.contains("- **Device**: eden-work"));
+    assert!(text.contains("- **Bound Session**: `status-runner-metadata`"));
+    assert!(text.contains("- **External Session ID**: `thread-status-123`"));
+    assert!(text.contains("- **Completed User Turns**: 2"));
+    assert!(text.contains("- **Queue**: 无排队消息"));
+    assert!(text.contains("- **Status**: Ready"));
     assert!(text.contains("外部会话: Codex threadId=thread-status-123"));
     assert!(text.contains("历史对话轮次: 2"));
     assert!(text.contains("API 累计 token: 38.6K"));
     assert!(text.contains("显式压缩次数: 2"));
     assert!(text.contains("上下文管理: 按 token/context budget 与 compaction 管理"));
     assert!(text.contains("常规请求使用完整 history：3 条"));
+}
+
+#[test]
+pub(super) fn im_status_text_keeps_complete_overview_for_new_non_feishu_session() {
+    let mut provider = test_provider();
+    provider.id = "weixin-main".to_string();
+    provider.display_name = "Weixin Main".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    let context = bifrost_agent::StatusRuntimeContext {
+        agent_type: Some("External Runner Agent".to_string()),
+        runner_type: Some("codex".to_string()),
+        runner_id: Some("Codex".to_string()),
+        model: Some("gpt-5.6-sol".to_string()),
+        model_provider: Some("aidp_local".to_string()),
+        model_reasoning_effort: Some("high".to_string()),
+        model_reasoning_summary: None,
+        external_conversation_id: None,
+        external_thread_id: Some("thread-from-runner".to_string()),
+    };
+
+    let text = build_im_status_text(
+        None,
+        &context,
+        Some("/Users/eden/work/github/bifrost"),
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "eden-work",
+            session_key: "weixin-main:user-1",
+            queue_info: "无排队消息",
+            status: "Ready",
+        },
+    );
+
+    assert!(text.starts_with("**Bifrost status**"));
+    assert!(text.contains("- **Provider**: Weixin Main (`weixin-main`)"));
+    assert!(text.contains("- **Device**: eden-work"));
+    assert!(text.contains("- **Workspace**: `/Users/eden/work/github/bifrost`"));
+    assert!(text.contains("- **Runner Type**: `codex`"));
+    assert!(text.contains("- **Runner ID**: `Codex`"));
+    assert!(text.contains("- **Model**: `gpt-5.6-sol（aidp_local）`"));
+    assert!(text.contains("- **Reasoning Effort**: `high`"));
+    assert!(text.contains("- **Reasoning Summary**: `N/A`"));
+    assert!(text.contains("- **Bound Session**: `weixin-main:user-1`"));
+    assert!(text.contains("- **External Session ID**: `thread-from-runner`"));
+    assert!(text.contains("- **Completed User Turns**: 0"));
+    assert!(text.contains("- **Status**: Ready（新会话）"));
+    assert!(text.contains("会话诊断:"));
+    assert!(!text.starts_with("会话状态:\n- 消息数: 0"));
+}
+
+#[test]
+pub(super) fn im_status_overview_escapes_inline_provider_and_session_values() {
+    let mut provider = test_provider();
+    provider.id = "weixin-`main`".to_string();
+    provider.display_name = "Weixin `Main`\nStatus".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    let context = status_context_from_external_runner("Codex", "codex");
+
+    let text = build_im_status_text(
+        None,
+        &context,
+        Some("/tmp/`status`"),
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "eden-`work`",
+            session_key: "weixin-main:`user`",
+            queue_info: "无排队消息",
+            status: "Ready",
+        },
+    );
+
+    assert!(text.contains("Weixin \\`Main\\` Status (`weixin-\\`main\\``)"));
+    assert!(!text.contains("Weixin \\`Main\\`\nStatus"));
+    assert!(text.contains("- **Device**: eden-\\`work\\`"));
+    assert!(text.contains("- **Workspace**: `/tmp/\\`status\\``"));
+    assert!(text.contains("- **Bound Session**: `weixin-main:\\`user\\``"));
+}
+
+#[test]
+pub(super) fn active_im_status_text_keeps_complete_overview_and_live_session_id() {
+    let mut provider = test_provider();
+    provider.id = "weixin-running".to_string();
+    provider.display_name = "Weixin Running".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    let mut status = bifrost_agent::ActiveTurnStatus::new("weixin-running:user-1");
+    status.state = "running".to_string();
+    status.work_dir = Some("/tmp/weixin-running".to_string());
+    status.runner_type = Some("traex".to_string());
+    status.runner_id = Some("Traex".to_string());
+    status.model = Some("trae-status-model".to_string());
+    status.model_provider = Some("runner live event".to_string());
+    status.model_reasoning_effort = Some("high".to_string());
+    status.external_thread_id = Some("thread-live-running".to_string());
+    status.user_turn_count = 4;
+    let context = status_context_from_external_runner("Codex", "codex");
+
+    let text = build_active_im_status_text(
+        &status,
+        &context,
+        None,
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "eden-work",
+            session_key: "weixin-running:user-1",
+            queue_info: "2 条排队消息",
+            status: "Running",
+        },
+    );
+
+    assert!(text.contains("- **Provider**: Weixin Running (`weixin-running`)"));
+    assert!(text.contains("- **Workspace**: `/tmp/weixin-running`"));
+    assert!(text.contains("- **Runner Type**: `traex`"));
+    assert!(text.contains("- **Runner ID**: `Traex`"));
+    assert!(text.contains("- **Model**: `trae-status-model（runner live event）`"));
+    assert!(text.contains("- **External Session ID**: `thread-live-running`"));
+    assert!(text.contains("- **Completed User Turns**: 4"));
+    assert!(text.contains("- **Queue**: 2 条排队消息"));
+    assert!(text.contains("- **Status**: Running"));
+    assert!(text.contains("会话状态:"));
+}
+
+#[test]
+pub(super) fn im_status_text_covers_context_fallbacks_goal_and_conversation_session() {
+    let provider = test_provider();
+    let context = bifrost_agent::StatusRuntimeContext {
+        agent_type: Some("Context Agent".to_string()),
+        runner_type: Some("claude-code".to_string()),
+        runner_id: Some("Claude Code".to_string()),
+        model: Some("claude-context".to_string()),
+        model_provider: Some("context-provider".to_string()),
+        model_reasoning_effort: Some("medium".to_string()),
+        model_reasoning_summary: Some("auto".to_string()),
+        external_conversation_id: Some(" conversation-fallback ".to_string()),
+        external_thread_id: Some("   ".to_string()),
+    };
+    let detail = bifrost_agent::SessionDetail {
+        session_key: "fallback-detail".to_string(),
+        user_id: None,
+        message_count: 2,
+        user_turn_count: 1,
+        created_at: 1,
+        last_active_at: 2,
+        compaction_count: 0,
+        total_tokens_used: None,
+        estimated_tokens: 42,
+        history_version: 3,
+        work_dir: None,
+        source: "im".to_string(),
+        agent_type: None,
+        runner_type: None,
+        runner_id: None,
+        model: None,
+        model_provider: None,
+        model_reasoning_effort: None,
+        model_reasoning_summary: None,
+        external_conversation_id: None,
+        external_thread_id: None,
+        metadata: None,
+        title: None,
+        messages: Vec::new(),
+        goal_status: Some("active".to_string()),
+        goal_objective: Some("verify the complete status fallback path".to_string()),
+        history_path: None,
+        has_timeline: false,
+        timeline_event_count: 0,
+        run_state: "idle".to_string(),
+    };
+    let text = build_im_status_text(
+        Some(&detail),
+        &context,
+        Some("/tmp/fallback-workdir"),
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "fallback-device",
+            session_key: "fallback-detail",
+            queue_info: "1 条排队消息",
+            status: "Ready",
+        },
+    );
+    assert!(text.contains("Runner 类型: claude-code"));
+    assert!(text.contains("模型: claude-context（context-provider）"));
+    assert!(text.contains("External Session ID**: `conversation-fallback`"));
+    assert!(text.contains("目标状态: active"));
+    assert!(text.contains("目标: verify the complete status fallback path"));
+
+    let running_new_session = build_im_status_text(
+        None,
+        &context,
+        None,
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "fallback-device",
+            session_key: "fallback-running",
+            queue_info: "无排队消息",
+            status: "Running",
+        },
+    );
+    assert!(running_new_session.contains("- **Workspace**: `N/A`"));
+    assert!(running_new_session.contains("- **Status**: Running"));
+    assert!(!running_new_session.contains("Ready（新会话）"));
+
+    let mut active = bifrost_agent::ActiveTurnStatus::new("active-fallback");
+    active.user_turn_count = 2;
+    active.external_thread_id = Some(" ".to_string());
+    let active_text = build_active_im_status_text(
+        &active,
+        &context,
+        Some("/tmp/active-fallback"),
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "fallback-device",
+            session_key: "active-fallback",
+            queue_info: "无排队消息",
+            status: "Running",
+        },
+    );
+    assert!(active_text.contains("- **Runner Type**: `claude-code`"));
+    assert!(active_text.contains("- **Workspace**: `/tmp/active-fallback`"));
+    assert!(active_text.contains("- **External Session ID**: `conversation-fallback`"));
+}
+
+#[test]
+pub(super) fn im_status_runtime_context_reads_persisted_runner_overrides_and_session_id() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let agent_config = bifrost_agent::config::AgentConfig::default();
+    let external_config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    crate::im_gateway::session_state::upsert_session_state(
+        "feishu-main:owner",
+        "codex",
+        Some("Codex"),
+        |state| {
+            state.external_thread_id = Some("thread-persisted-status".to_string());
+            state.model_override = Some("gpt-status".to_string());
+            state.model_override_source = Some("session override".to_string());
+            state.reasoning_effort_override = Some("xhigh".to_string());
+        },
+    )
+    .expect("persist status state");
+
+    let context = resolve_im_status_runtime_context(
+        &agent_config,
+        &external_config,
+        "feishu-main",
+        "feishu-main:owner",
+        Some("Codex"),
+    );
+
+    assert_eq!(context.runner_type.as_deref(), Some("codex"));
+    assert_eq!(context.runner_id.as_deref(), Some("Codex"));
+    assert_eq!(context.model.as_deref(), Some("gpt-status"));
+    assert_eq!(context.model_provider.as_deref(), Some("session override"));
+    assert_eq!(context.model_reasoning_effort.as_deref(), Some("xhigh"));
+    assert_eq!(
+        context.external_thread_id.as_deref(),
+        Some("thread-persisted-status")
+    );
+}
+
+#[tokio::test]
+pub(super) async fn idle_weixin_status_reply_uses_shared_complete_overview() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut provider = test_provider();
+    provider.id = "weixin-main".to_string();
+    provider.display_name = "Weixin Main".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+    let session_key = "weixin-main:user-status";
+    let event = ImEvent {
+        event_id: "evt-weixin-status".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            user_id: Some("user-status".to_string()),
+            message_id: Some("msg-weixin-status".to_string()),
+            ..Default::default()
+        },
+        message: None,
+        received_at: now_ms(),
+        raw_digest: None,
+    };
+    crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        "codex",
+        Some("Codex"),
+        |state| {
+            state.external_thread_id = Some("thread-weixin-status".to_string());
+            state.model_override = Some("gpt-5.6-sol".to_string());
+            state.model_override_source = Some("aidp_local".to_string());
+            state.reasoning_effort_override = Some("high".to_string());
+        },
+    )
+    .expect("persist status state");
+
+    assert!(
+        handle_idle_im_command(
+            "/status",
+            session_key,
+            &service.agent_config_store.load(),
+            IdleImCommandContext {
+                client: &client,
+                provider: &provider,
+                provider_store: &service.provider_store,
+                group_context_store: &service.group_context_store,
+                external_cli_config_store: &service.external_cli_config_store,
+                event: &event,
+                message_log_store: &service.message_log_store,
+                agent_session_manager: &service.agent_session_manager,
+            },
+        )
+        .await
+    );
+
+    let reply = service
+        .message_log_store
+        .list()
+        .into_iter()
+        .find_map(|entry| entry.content)
+        .expect("status reply should be recorded");
+    assert!(reply.contains("- **Provider**: Weixin Main (`weixin-main`)"));
+    assert!(reply.contains("- **Runner Type**: `codex`"));
+    assert!(reply.contains("- **Runner ID**: `Codex`"));
+    assert!(reply.contains("- **Model**: `gpt-5.6-sol（aidp_local）`"));
+    assert!(reply.contains("- **Reasoning Effort**: `high`"));
+    assert!(reply.contains("- **Bound Session**: `weixin-main:user-status`"));
+    assert!(reply.contains("- **External Session ID**: `thread-weixin-status`"));
+    assert!(reply.contains("- **Completed User Turns**: 0"));
+    assert!(reply.contains("- **Queue**: 无排队消息"));
+    assert!(reply.contains("- **Status**: Ready（新会话）"));
+}
+
+#[tokio::test]
+pub(super) async fn busy_status_reply_covers_detail_live_and_processing_fallbacks() {
+    fn status_event(provider: &ImProviderConfig, suffix: &str) -> ImEvent {
+        ImEvent {
+            event_id: format!("evt-busy-status-{suffix}"),
+            provider_id: provider.id.clone(),
+            provider_type: provider.provider_type,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                user_id: Some(format!("user-{suffix}")),
+                message_id: Some(format!("msg-busy-status-{suffix}")),
+                ..Default::default()
+            },
+            message: None,
+            received_at: now_ms(),
+            raw_digest: None,
+        }
+    }
+
+    async fn invoke_status(
+        service: &ImGatewayService,
+        client: &ImProviderClient,
+        provider: &ImProviderConfig,
+        agent_config: &crate::im_gateway::agent::ImAgentConfig,
+        session_key: &str,
+        event: &ImEvent,
+        status_context: bifrost_agent::StatusRuntimeContext,
+    ) {
+        handle_busy_message(
+            "/status",
+            session_key,
+            BusyMessageContext {
+                queue_manager: &service.queue_manager,
+                client,
+                provider,
+                event,
+                message_log_store: &service.message_log_store,
+                agent_session_manager: &service.agent_session_manager,
+                progress_registry: &service.progress_registry,
+                external_cli_config_store: &service.external_cli_config_store,
+                agent_config,
+                group_context_store: &service.group_context_store,
+                group_turn_id: None,
+                default_mode: BusyMessageDefaultMode::Queue,
+                status_context,
+                default_work_dir: Some("/tmp/busy-status".to_string()),
+            },
+        )
+        .await;
+    }
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut provider = test_provider();
+    provider.id = "weixin-busy-status".to_string();
+    provider.display_name = "Weixin Busy Status".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.secret_ref = None;
+    let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+    let agent_config = service.agent_config_store.load();
+
+    let detail_key = "weixin-busy-status:user-detail";
+    let mut detail_session = service
+        .agent_session_manager
+        .take_session_with_work_dir(detail_key, Some("/tmp/detail-status".to_string()));
+    detail_session.mark_external_runner_runtime("codex", "Codex");
+    detail_session.remember_external_conversation_ref(None, Some("thread-busy-detail".to_string()));
+    service.agent_session_manager.return_session(detail_session);
+    invoke_status(
+        &service,
+        &client,
+        &provider,
+        &agent_config,
+        detail_key,
+        &status_event(&provider, "detail"),
+        Default::default(),
+    )
+    .await;
+
+    let live_key = "weixin-busy-status:user-live";
+    let _live_session = service
+        .agent_session_manager
+        .take_session_with_work_dir(live_key, Some("/tmp/live-status".to_string()));
+    let mut live_status = service
+        .agent_session_manager
+        .get_active_turn_status(live_key)
+        .expect("live status");
+    live_status.runner_type = Some("codex".to_string());
+    live_status.runner_id = Some("Codex".to_string());
+    live_status.model = Some("live-model".to_string());
+    live_status.model_provider = Some("live-provider".to_string());
+    live_status.external_thread_id = Some("thread-busy-live".to_string());
+    service
+        .agent_session_manager
+        .update_active_turn_status_from_worker(live_status);
+    service
+        .queue_manager
+        .push_queue(live_key, "queued after live status".to_string())
+        .expect("queue live message");
+    invoke_status(
+        &service,
+        &client,
+        &provider,
+        &agent_config,
+        live_key,
+        &status_event(&provider, "live"),
+        Default::default(),
+    )
+    .await;
+
+    let fallback_key = "weixin-busy-status:user-fallback";
+    assert!(service
+        .agent_session_manager
+        .try_start_external_session_preview(
+            fallback_key,
+            Some("fallback".to_string()),
+            Some("/tmp/fallback-status".to_string()),
+            Some("im".to_string()),
+            Some("codex".to_string()),
+            Some("Codex".to_string()),
+        ));
+    let fallback_context = bifrost_agent::StatusRuntimeContext {
+        model: Some("fallback-model".to_string()),
+        model_provider: Some("fallback-provider".to_string()),
+        external_thread_id: Some("thread-busy-fallback".to_string()),
+        external_conversation_id: Some("conversation-busy-fallback".to_string()),
+        ..Default::default()
+    };
+    invoke_status(
+        &service,
+        &client,
+        &provider,
+        &agent_config,
+        fallback_key,
+        &status_event(&provider, "fallback"),
+        fallback_context,
+    )
+    .await;
+
+    let replies: Vec<String> = service
+        .message_log_store
+        .list()
+        .into_iter()
+        .filter_map(|entry| entry.content)
+        .collect();
+    assert!(replies.iter().any(|reply| {
+        reply.contains(detail_key)
+            && reply.contains("thread-busy-detail")
+            && reply.contains("会话诊断:")
+    }));
+    assert!(replies.iter().any(|reply| {
+        reply.contains(live_key)
+            && reply.contains("thread-busy-live")
+            && reply.contains("1 条排队消息")
+            && reply.contains("Running")
+    }));
+    assert!(
+        replies.iter().any(|reply| {
+            reply.contains(fallback_key)
+                && reply.contains("thread-busy-fallback")
+                && reply.contains("Running")
+        }),
+        "fallback reply missing from {replies:#?}"
+    );
 }

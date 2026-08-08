@@ -187,7 +187,7 @@ fn generate_components() -> serde_json::Value {
             },
             "PendingBreakpoint": {
                 "type": "object",
-                "required": ["request_id", "phase", "headers", "body_omitted", "max_body_bytes", "paused_at_ms", "deadline_at_ms"],
+                "required": ["request_id", "phase", "headers", "body_omitted", "max_body_bytes", "paused_at_ms", "deadline_at_ms", "server_now_ms"],
                 "properties": {
                     "request_id": {"type": "string"},
                     "phase": {"type": "string", "enum": ["request", "response"]},
@@ -204,7 +204,8 @@ fn generate_components() -> serde_json::Value {
                     "max_body_bytes": {"type": "integer"},
                     "content_encoding": {"type": "string", "nullable": true},
                     "paused_at_ms": {"type": "integer", "format": "int64"},
-                    "deadline_at_ms": {"type": "integer", "format": "int64"}
+                    "deadline_at_ms": {"type": "integer", "format": "int64"},
+                    "server_now_ms": {"type": "integer", "format": "int64"}
                 }
             },
             "ErrorResponse": {
@@ -1528,6 +1529,7 @@ mod tests {
 
         let pending = &schema(&spec, "PendingBreakpoint")["properties"];
         assert!(pending.get("deadline_at_ms").is_some());
+        assert!(pending.get("server_now_ms").is_some());
         assert!(pending.get("body_omitted").is_some());
 
         let performance = &schema(&spec, "PerformanceBreakpointConfig")["properties"];

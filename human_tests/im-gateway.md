@@ -1175,3 +1175,29 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 如果第 2 步创建了测试 Provider，删除该 Provider。
 - **执行记录（2026-07-08）**: PASS — 修复 `render_terminal_qr_code` 使用 `Dense1x2` + `module_dimensions(1, 1)`，避免原先 `module_dimensions(2, 1)` 导致终端二维码宽度翻倍；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli terminal_qr_code_renders_with_square_terminal_ratio --lib -- --nocapture` 通过。
+
+### TC-IMG-75: 所有 IM Provider 的 `/status` 返回完整 Runner 与外部 Session 状态
+
+- **前置条件**:
+  - 工作目录为项目根目录。
+  - 使用独立临时 `BIFROST_DATA_DIR`，不读取或修改真实 IM Provider 配置。
+  - 准备 Feishu 与非 Feishu（Weixin）Provider 测试配置；external runner session state 中至少包含一个真实格式的 thread/session ID。
+- **操作步骤**:
+  1. 执行共享 `/status` 渲染与 idle command 回执回归：
+     ```bash
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib im_status_ -- --nocapture
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib idle_weixin_status_reply_uses_shared_complete_overview -- --nocapture
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib busy_status_reply_covers_detail_live_and_processing_fallbacks -- --nocapture
+     ```
+  2. 检查已有 Feishu session 的输出，确认保留 token、history、compaction 等会话诊断。
+  3. 检查未创建本地 history 的 Weixin session 输出，确认不会退化为只有“消息数: 0 / 新会话”。
+  4. 检查持久化 runner state 的 model、reasoning effort 和 external thread/session ID 被读取，并通过 Weixin idle `/status` 入口写入 outbound reply log。
+- **预期结果**:
+  - Feishu、Weixin 和其他 IM Provider 共用相同概览，均包含 Provider、Device、Workspace、Runner Type、Runner ID、Model、Reasoning Effort、Reasoning Summary、Bound Session、External Session ID、Completed User Turns、Queue 与 Status。
+  - 新会话仍显示完整概览，并以 `Ready（新会话）` 明确本地 history 尚未创建。
+  - External Session ID 优先展示 runner thread ID；缺失 thread ID 时可展示 conversation ID；都缺失时显示 `N/A`。
+  - 已有会话的详细诊断继续存在，兼容原有排障信息。
+  - Weixin idle command 真实经过共享 handler 和 outbound reply log，证明能力不是 Feishu 特判或仅测试 formatter。
+- **清理步骤**:
+  - 测试使用临时目录，测试结束自动删除；不创建、连接或删除真实 Provider。
+- **执行记录（2026-08-08）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib im_status_ -- --nocapture`，共享状态用例通过，覆盖已有 Feishu 会话完整诊断、新 Weixin 会话完整概览、运行中 live Runner/Model/External Session ID 优先级、Markdown inline 值转义以及持久化 runner model/effort/external thread ID；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib idle_weixin_status_reply_uses_shared_complete_overview -- --nocapture`，1 个真实 idle command handler 回执用例通过；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib busy_status_reply_covers_detail_live_and_processing_fallbacks -- --nocapture`，真实 busy handler 的 idle-detail、active-turn 与 external-preview fallback 三条 `/status` 分支均通过。outbound message log 包含 Weixin Provider、Codex Runner、模型、Reasoning Effort、Bound Session、External Session ID、Completed User Turns、Queue 与 Ready/Running 状态。测试使用临时数据目录和 mock Weixin client，未读取或修改真实 Provider。

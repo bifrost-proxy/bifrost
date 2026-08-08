@@ -1111,6 +1111,7 @@ export default function Traffic() {
             onSelect={handleSelect}
             onDoubleClick={handleDoubleClick}
             selectedId={selectedId}
+            breakpointPhases={breakpointPhases}
           />
         ) : (
           <VirtualTrafficTable
