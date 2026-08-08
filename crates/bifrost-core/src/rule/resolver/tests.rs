@@ -277,6 +277,25 @@ fn referenced_ampersands_do_not_replace_authored_entry_delimiters_in_diagnostics
 }
 
 #[test]
+fn mixed_inline_separators_are_parsed_from_authored_text() {
+    let rule = create_test_rule("example.com", Protocol::ReqHeaders, "X-One:one&X-Two=two");
+    assert!(matches!(rule.value_source, ValueSource::InlineParams(_)));
+
+    let resolved = ResolvedRule::new_simple(rule, None, &HashMap::new());
+    assert_eq!(
+        resolved.header_pairs(),
+        Some(
+            [
+                ("X-One".to_string(), "one".to_string()),
+                ("X-Two".to_string(), "two".to_string()),
+            ]
+            .as_slice()
+        )
+    );
+    assert_eq!(resolved.resolved_value, "X-One:one&X-Two=two");
+}
+
+#[test]
 fn parenthesized_response_cookie_attributes_are_detected_after_expansion() {
     let mut ctx = create_test_context("http://example.com/path", "example.com", "/path");
     ctx.req_headers.insert("secure".into(), "true".into());

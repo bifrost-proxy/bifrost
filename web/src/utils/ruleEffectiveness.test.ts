@@ -105,6 +105,18 @@ describe("analyzeRuleEffectiveness", () => {
     expect(effects[1]).toMatchObject({ status: "active" });
   });
 
+  test("keeps ampersands inside parenthesized JSON header values", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        `https://example.test/api/ reqHeaders://({"x-query":"a=1&stable=yes"})`,
+        `https://example.test/api/ reqHeaders://stable=overridden`,
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "active" });
+    expect(effects[1]).toMatchObject({ status: "active" });
+  });
+
   test("marks broader path request headers as partial when a narrower matcher wins one header", () => {
     const effects = analyzeRuleEffectiveness(
       [

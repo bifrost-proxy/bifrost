@@ -318,7 +318,7 @@ async fn test_req_headers_ampersand_separated() -> Result<(), String> {
 
     let (port, _proxy) = start_proxy_with_rules(vec![
         format!("test.local host://127.0.0.1:{}", mock.port),
-        "test.local reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)".to_string(),
+        "test.local reqHeaders://(x-tt-env:ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)".to_string(),
     ])
     .await?;
 

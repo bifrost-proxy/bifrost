@@ -1199,6 +1199,7 @@ test_response_for_rule() {
 test_res_cookies() {
     local pattern="$1"
     local cookie_name="$2"
+    local cookie_value="${3:-}"
     local test_url="https://${pattern}/test"
 
     echo ""
@@ -1211,6 +1212,10 @@ test_res_cookies() {
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
     assert_header_exists "Set-Cookie" "$HTTP_HEADERS" "响应应包含 Set-Cookie 头"
     assert_header_contains "Set-Cookie" "$cookie_name" "$HTTP_HEADERS" "Set-Cookie 应包含 $cookie_name"
+    if [[ -n "$cookie_value" && "$cookie_value" != *";"* ]]; then
+        assert_header_contains "Set-Cookie" "${cookie_name}=${cookie_value}" "$HTTP_HEADERS" \
+            "Set-Cookie 应保留完整值 ${cookie_name}=${cookie_value}"
+    fi
 }
 
 test_websocket_forward() {
@@ -4019,7 +4024,8 @@ run_tests() {
                 res_cookie_pairs=$(extract_key_values_from_value "$res_cookie_raw" "$res_cookie_source")
                 while IFS= read -r cookie_pair || [[ -n "$cookie_pair" ]]; do
                     local cookie_name="${cookie_pair%%|*}"
-                    test_res_cookies "$pattern" "$cookie_name"
+                    local cookie_value="${cookie_pair#*|}"
+                    test_res_cookies "$pattern" "$cookie_name" "$cookie_value"
                 done <<< "$res_cookie_pairs"
                 ;;
             websocket|websocket_secure)

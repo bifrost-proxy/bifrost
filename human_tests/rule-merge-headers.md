@@ -236,8 +236,9 @@ cargo run -p bifrost-e2e -- --test req_headers_json_scalar_template
 ```
 
 **预期结果**：
-- `reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)` 被解析为三个独立 Header。
-- mock upstream 分别收到 `x-tt-env: ppe_doubao_connect_lark`、`x-flow-env: ppe_doubao_connect_lark`、`x-use-ppe: 1`。
+- `reqHeaders://(x-tt-env:ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)`
+  混用 `:` 与 `=` 时被解析为三个独立 Header，mock upstream 分别收到 `x-tt-env: ppe_doubao_connect_lark`、
+  `x-flow-env: ppe_doubao_connect_lark`、`x-use-ppe: 1`。
 - `x-tt-env` 的值不包含 `&x-flow-env=...` 或 `&x-use-ppe=...`。
 - `resHeaders://(X-Header-A=value-a&X-Header-B=value-b)` 同样产生两个独立响应 Header。
 - JSON、多行 Values 和单 Header 旧写法继续通过同一组回归测试。
@@ -305,6 +306,7 @@ cargo run -p bifrost-e2e -- --test trailers_ampersand_separated
   之前被展平成可再次解释的内联语法。
 - 请求 Cookie fixture 在没有可选 `jq` 时仍通过已检测的 Python 3 执行值断言，不能只检查
   HTTP 状态码后误报通过。
+- 响应 Cookie fixture 断言完整 `name=value`，引用值中的 `&` 不得被截断或产生额外 Cookie。
 
 ## 清理步骤
 
@@ -329,6 +331,6 @@ cargo run -p bifrost-e2e -- --test trailers_ampersand_separated
   `b=two=parts`，Values 引用只生成 `session=safe&injected=yes` 一个 Cookie；响应输出
   `sid=xxx`、`theme=dark` 两条 Set-Cookie，JSON 属性 Cookie 保留 Max-Age/Secure/HttpOnly，
   Trailer 为 `X-Trace, X-Checksum`。review 后追加 parser/CLI 来源保留单测并通过；请求 Cookie、
-  响应 Cookie、Trailer 三组真实 fixture 分别为 `12/12`、`24/24`、`4/4`，引用值中的
+  响应 Cookie、Trailer 三组真实 fixture 分别为 `12/12`、`31/31`、`4/4`，引用值中的
   `&` 均未生成额外字段。额外隐藏 `jq` 后，请求 Cookie fixture 明确提示 JSON 断言降级，
   但 Python 3 Cookie 值断言仍全部执行并得到 `12/12`。

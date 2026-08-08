@@ -31,6 +31,14 @@ impl ResolvedRule {
         ctx: &RequestContext,
         values: &HashMap<String, String>,
     ) -> Self {
+        let is_key_value_protocol = matches!(
+            rule.protocol,
+            crate::protocol::Protocol::ReqHeaders
+                | crate::protocol::Protocol::ResHeaders
+                | crate::protocol::Protocol::ReqCookies
+                | crate::protocol::Protocol::ResCookies
+                | crate::protocol::Protocol::Trailers
+        );
         let base_value = if matches!(rule.protocol, crate::protocol::Protocol::Bp) {
             match &rule.value_source {
                 ValueSource::ValueRef(var_name) => values
@@ -55,18 +63,17 @@ impl ResolvedRule {
                 | crate::protocol::Protocol::Tpl
         ) {
             rule.value.clone()
+        } else if is_key_value_protocol && matches!(rule.value_source, ValueSource::InlineParams(_))
+        {
+            // InlineParams normalizes query-like values into `name=value`.
+            // Header/cookie/trailer maps allow each authored entry to choose
+            // either `:` or `=`, so parse the original text before that
+            // normalization can change a colon entry into `name:value=`.
+            rule.value.clone()
         } else {
             let store = MemoryValueStore::from_hashmap(values.clone());
             rule.value_source.resolve_with_fallback(&store)
         };
-        let is_key_value_protocol = matches!(
-            rule.protocol,
-            crate::protocol::Protocol::ReqHeaders
-                | crate::protocol::Protocol::ResHeaders
-                | crate::protocol::Protocol::ReqCookies
-                | crate::protocol::Protocol::ResCookies
-                | crate::protocol::Protocol::Trailers
-        );
 
         // JSON needs scalar templates expanded before it can be parsed (for
         // example `{"X-Now":${now}}`). JSON already provides field boundaries,

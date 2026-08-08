@@ -1053,9 +1053,13 @@ function parseHeaderEntries(value: string): HeaderEntry[] {
   const trimmed = value.trim();
   if (!trimmed) return [];
 
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+  const inline = trimmed.startsWith("(") && trimmed.endsWith(")")
+    ? trimmed.slice(1, -1).trim()
+    : trimmed;
+
+  if (inline.startsWith("{") && inline.endsWith("}")) {
     try {
-      const parsed = JSON.parse(trimmed) as unknown;
+      const parsed = JSON.parse(inline) as unknown;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         return Object.entries(parsed).map(([name, rawValue]) => ({
           name,
@@ -1066,10 +1070,6 @@ function parseHeaderEntries(value: string): HeaderEntry[] {
       return [];
     }
   }
-
-  const inline = trimmed.startsWith("(") && trimmed.endsWith(")")
-    ? trimmed.slice(1, -1)
-    : trimmed;
 
   return inline
     .split(/[,&\n]/)
