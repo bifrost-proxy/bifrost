@@ -154,6 +154,8 @@ design/
 1. 解析 origin/main（可用 --base-ref 覆盖）与 merge-base
 2. 收集 merge-base 到当前 working tree 的生产 Rust 变化
    → committed + staged + unstaged + untracked
+   → 排除 `src/**/tests.rs` 与 `src/**/tests/**/*.rs` 这类只由
+     `#[cfg(test)] mod tests` 编译的拆分测试模块；`tests_support.rs` 等普通源文件不排除
 3. cargo metadata --no-deps 自动映射变更文件到 workspace package
 4. 清理 target/coverage-changed/cargo-target/**/*.profraw
    → 不删除已编译插桩 artifacts
@@ -368,7 +370,8 @@ design/
 - 故意把 `[crates.bifrost-command].min` 调到 99.9 → gate 失败并给出 diff。
 - `make coverage-crate CRATE=bifrost-command`：单 crate 覆盖率通过 90 目标。
 - `python3 -m unittest scripts.ci.tests.test_coverage_changed scripts.ci.tests.test_coverage_diff -v`：
-  验证 crate 映射、命令收敛、缓存保留、worktree/untracked diff 与阈值解析。
+  验证 crate 映射、命令收敛、缓存保留、worktree/untracked diff、阈值解析，以及拆分
+  test module 与名称相近生产文件的分类边界。
 - `make coverage-changed`：生产 Rust 有变化时只跑变更 crate；当前仅文档/脚本变化时快速 skip。
 - `test_coverage_pipeline_contract.sh` 始终执行静态契约和 Python 单测；真实最小 workspace
   fixture 仅在 runner 已安装 `cargo-llvm-cov` 时执行，否则输出明确 SKIP。普通 Shell E2E
@@ -397,6 +400,9 @@ design/
 - TC-COV-23：无生产 Rust 变化时 `make coverage-changed` 在启动 llvm-cov 前快速 skip。
 - TC-COV-24：未安装 `cargo-llvm-cov` 的通用 Shell runner 仍完成静态/Python 契约并明确
   跳过真实 fixture，不把工具缺失误报为产品 E2E 失败。
+- TC-COV-25：`src/tests.rs` 与 `src/**/tests/**/*.rs` 不进入生产 changed-lines 分母，
+  `tests_support.rs` / `testsupport.rs` 仍被视为生产代码；契约测试与真实
+  `make coverage-changed` 都不得出现因拆分测试文件缺少 LCOV 条目产生的 `INCOMPLETE`。
 
 ### 校验清单
 

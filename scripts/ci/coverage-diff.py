@@ -22,8 +22,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
+TEST_MODULE_RUST_RE = re.compile(
+    r"^crates/[^/]+/src/(?:.*/)?tests(?:\.rs|/.+\.rs)$"
+)
 MOVED_BLOCK_MIN_LINES = 8
 MOVED_BLOCK_MIN_SUBSTANTIVE_LINES = 4
+
+
+def is_production_rust_path(path: str) -> bool:
+    """Exclude split ``#[cfg(test)] mod tests`` implementation files."""
+    return bool(PRODUCTION_RUST_RE.match(path) and not TEST_MODULE_RUST_RE.match(path))
 
 
 def normalize_path(path: str, repo_root: Path = REPO_ROOT) -> str:
@@ -238,7 +246,7 @@ def evaluate_changed_coverage(
     total = 0
     covered = 0
     for path in sorted(changed):
-        if not PRODUCTION_RUST_RE.match(path):
+        if not is_production_rust_path(path):
             continue
         instrumented = coverage.get(path, {})
         relevant = sorted(changed[path].intersection(instrumented))
@@ -266,7 +274,7 @@ def unmeasured_changed_files(
     return sorted(
         path
         for path in changed
-        if PRODUCTION_RUST_RE.match(path) and path not in coverage
+        if is_production_rust_path(path) and path not in coverage
     )
 
 
@@ -293,7 +301,7 @@ def untracked_production_diff(repo_root: Path | None = None) -> str:
     diffs: list[str] = []
     for path in names.stdout.splitlines():
         normalized = normalize_path(path, repo_root)
-        if not PRODUCTION_RUST_RE.match(normalized):
+        if not is_production_rust_path(normalized):
             continue
         result = subprocess.run(
             ["git", "diff", "--no-index", "--unified=0", "/dev/null", normalized],
@@ -382,7 +390,7 @@ def changed_base_sources(
     sources: list[tuple[str, str, str]] = []
     for path in names.stdout.splitlines():
         normalized = normalize_path(path)
-        if not PRODUCTION_RUST_RE.match(normalized):
+        if not is_production_rust_path(normalized):
             continue
         content = subprocess.run(
             ["git", "show", f"{base_commit}:{normalized}"],
@@ -432,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     report = evaluate_changed_coverage(changed, coverage)
-    production_files = sorted(path for path in changed if PRODUCTION_RUST_RE.match(path))
+    production_files = sorted(path for path in changed if is_production_rust_path(path))
     report["changed_production_files"] = production_files
     report["unmeasured_files"] = unmeasured_changed_files(changed, coverage)
     report["unchanged_moved_lines_excluded"] = moved_lines_excluded

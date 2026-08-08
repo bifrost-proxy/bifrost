@@ -22,6 +22,9 @@ from typing import Any, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
+TEST_MODULE_RUST_RE = re.compile(
+    r"^crates/[^/]+/src/(?:.*/)?tests(?:\.rs|/.+\.rs)$"
+)
 CHANGED_LINES_MIN_RE = re.compile(
     r"^\s*changed_lines_min\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$"
 )
@@ -29,6 +32,17 @@ CHANGED_LINES_MIN_RE = re.compile(
 
 class PreflightError(RuntimeError):
     """A user-actionable local preflight configuration error."""
+
+
+def is_production_rust_path(path: str) -> bool:
+    """Return whether a Rust source path belongs to production code.
+
+    Rust test modules split from an inline ``#[cfg(test)] mod tests`` convention
+    live under ``src/**/tests.rs`` or ``src/**/tests/**/*.rs``. Cargo compiles
+    them only for tests, so the changed-lines preflight must not require those
+    files to appear as production units in LCOV.
+    """
+    return bool(PRODUCTION_RUST_RE.match(path) and not TEST_MODULE_RUST_RE.match(path))
 
 
 def run(
@@ -115,7 +129,7 @@ def changed_production_paths(
         if untracked.returncode != 0:
             raise PreflightError(untracked.stderr.strip() or "git ls-files failed")
         paths.update(untracked.stdout.splitlines())
-    return sorted(path for path in paths if PRODUCTION_RUST_RE.match(path))
+    return sorted(path for path in paths if is_production_rust_path(path))
 
 
 def load_metadata(repo_root: Path) -> dict[str, Any]:

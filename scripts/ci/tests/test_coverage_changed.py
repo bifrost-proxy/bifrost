@@ -14,6 +14,22 @@ SPEC.loader.exec_module(coverage_changed)
 
 
 class CoverageChangedTests(unittest.TestCase):
+    def test_production_path_filter_excludes_split_test_modules(self) -> None:
+        self.assertTrue(
+            coverage_changed.is_production_rust_path("crates/a/src/feature.rs")
+        )
+        self.assertTrue(
+            coverage_changed.is_production_rust_path("crates/a/src/tests_support.rs")
+        )
+        self.assertFalse(
+            coverage_changed.is_production_rust_path("crates/a/src/tests.rs")
+        )
+        self.assertFalse(
+            coverage_changed.is_production_rust_path(
+                "crates/a/src/feature/tests/group_flow.rs"
+            )
+        )
+
     def test_packages_for_paths_uses_workspace_manifest_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

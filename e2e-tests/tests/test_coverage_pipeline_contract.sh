@@ -73,6 +73,8 @@ grep -Fq 'REFUSING: coverage E2E data directory is under production data' "$cove
 grep -Fq 'BIFROST_E2E_PROTECTED_PORTS' "$coverage_all"
 grep -Fq 'One or more instrumented E2E suites failed' "$coverage_all"
 grep -Fq 'Changed production Rust line coverage' "$coverage_diff"
+grep -Fq 'TEST_MODULE_RUST_RE' "$coverage_diff"
+grep -Fq 'TEST_MODULE_RUST_RE' "$coverage_changed"
 grep -Fq 'including staged, unstaged, and untracked files' "$coverage_changed"
 grep -Fq 'CARGO_LLVM_COV_TARGET_DIR' "$coverage_changed"
 grep -Fq 'clear_profiles(target_dir)' "$coverage_changed"

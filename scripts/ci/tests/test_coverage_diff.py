@@ -15,6 +15,20 @@ SPEC.loader.exec_module(coverage_diff)
 
 
 class CoverageDiffTests(unittest.TestCase):
+    def test_production_path_filter_excludes_split_test_modules(self) -> None:
+        self.assertTrue(coverage_diff.is_production_rust_path("crates/a/src/lib.rs"))
+        self.assertTrue(
+            coverage_diff.is_production_rust_path("crates/a/src/testsupport.rs")
+        )
+        self.assertFalse(
+            coverage_diff.is_production_rust_path("crates/a/src/tests.rs")
+        )
+        self.assertFalse(
+            coverage_diff.is_production_rust_path(
+                "crates/a/src/feature/tests/nested.rs"
+            )
+        )
+
     def git(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
