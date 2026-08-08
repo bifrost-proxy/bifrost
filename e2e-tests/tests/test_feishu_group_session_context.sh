@@ -619,6 +619,14 @@ wait_permission_reply
 # only by Provider B and must not enter Provider A's SQLite/event/audit stores.
 inject shared-multi user-alice Alice mb-a-broadcast "/status"
 inject shared-multi user-alice Alice mb-b-broadcast "/status" false group "" feishu-group-e2e-b
+# A human mention inside slash arguments is not a routing target. Both Provider
+# loops must consume it just like an unmentioned broadcast slash.
+inject shared-multi user-alice Alice mb-a-human-arg "/q ask @_user_1 to review" true group "" feishu-group-e2e ou_human
+inject shared-multi user-alice Alice mb-b-human-arg "/q ask @_user_1 to review" true group "" feishu-group-e2e-b ou_human
+wait_prompt_count 13
+wait_run_count 26
+wait_session_idle "im:feishu-group-e2e:group:shared-multi"
+wait_session_idle "im:feishu-group-e2e-b:group:shared-multi"
 inject shared-multi user-alice Alice mb-a-directed "@_user_1 /status" true group "" feishu-group-e2e ou_bot_b
 inject shared-multi user-alice Alice mb-b-directed "@_user_1 /status" true group "" feishu-group-e2e-b ou_bot_b
 for _ in $(seq 1 160); do
@@ -628,7 +636,7 @@ path = pathlib.Path(sys.argv[1])
 if not path.exists(): raise SystemExit(1)
 c = sqlite3.connect(path)
 ids = {row[0] for row in c.execute("SELECT message_id FROM im_group_messages WHERE chat_id='shared-multi'")}
-raise SystemExit(0 if {"mb-a-broadcast", "mb-b-broadcast", "mb-b-directed"} <= ids else 1)
+raise SystemExit(0 if {"mb-a-broadcast", "mb-b-broadcast", "mb-a-human-arg", "mb-b-human-arg", "mb-b-directed"} <= ids else 1)
 PY
   then break; fi
   sleep 0.25
@@ -642,12 +650,13 @@ import sys
 
 prompt_path, run_path, db_path, repo_dir, message_log_path = sys.argv[1:6]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
-assert len(prompts) == 11, prompts
+assert len(prompts) == 13, prompts
 first, second, slash_fallback, third, queued = prompts[:5]
 queued_second = prompts[5]
 concurrent_prompts = prompts[6:9]
 quoted_prompt = prompts[9]
 quoted_card_prompt = prompts[10]
+human_argument_prompts = prompts[11:13]
 
 assert "群名称：Alpha 发布群" in first, first
 assert "群 ID：chat-alpha" in first, first
@@ -694,9 +703,11 @@ assert "/help" not in quoted_prompt, quoted_prompt
 assert "另一机器人结论" in quoted_card_prompt, quoted_card_prompt
 assert "卡片正文：选择方案 A" in quoted_card_prompt, quoted_card_prompt
 assert "example.invalid" not in quoted_card_prompt and "不应读取" not in quoted_card_prompt, quoted_card_prompt
+assert len(human_argument_prompts) == 2, human_argument_prompts
+assert all("ask <at id=ou_human>" in prompt and "to review" in prompt for prompt in human_argument_prompts), human_argument_prompts
 
 runner_events = [json.loads(line) for line in open(run_path, encoding="utf-8") if line.strip()]
-assert len(runner_events) == 22, runner_events
+assert len(runner_events) == 26, runner_events
 concurrent_events = runner_events[12:18]
 assert [event["phase"] for event in concurrent_events[:3]] == ["start"] * 3, concurrent_events
 assert len({event["pid"] for event in concurrent_events[:3]}) == 3, concurrent_events
@@ -760,6 +771,8 @@ shared_rows = connection.execute(
 ).fetchall()
 assert ("feishu-group-e2e", "mb-a-broadcast") in shared_rows, shared_rows
 assert ("feishu-group-e2e-b", "mb-b-broadcast") in shared_rows, shared_rows
+assert ("feishu-group-e2e", "mb-a-human-arg") in shared_rows, shared_rows
+assert ("feishu-group-e2e-b", "mb-b-human-arg") in shared_rows, shared_rows
 assert ("feishu-group-e2e-b", "mb-b-directed") in shared_rows, shared_rows
 assert ("feishu-group-e2e", "mb-a-directed") not in shared_rows, shared_rows
 PY
