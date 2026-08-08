@@ -15,19 +15,40 @@ SPEC.loader.exec_module(coverage_diff)
 
 
 class CoverageDiffTests(unittest.TestCase):
-    def test_production_path_filter_excludes_split_test_modules(self) -> None:
-        self.assertTrue(coverage_diff.is_production_rust_path("crates/a/src/lib.rs"))
-        self.assertTrue(
-            coverage_diff.is_production_rust_path("crates/a/src/testsupport.rs")
-        )
-        self.assertFalse(
-            coverage_diff.is_production_rust_path("crates/a/src/tests.rs")
-        )
-        self.assertFalse(
-            coverage_diff.is_production_rust_path(
-                "crates/a/src/feature/tests/nested.rs"
+    def test_production_path_filter_verifies_split_test_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "crates/a/src"
+            (source / "feature/tests").mkdir(parents=True)
+            (source / "lib.rs").write_text(
+                "#[cfg(test)]\nmod tests;\nmod runtime_tests;\n",
+                encoding="utf-8",
             )
-        )
+            (source / "tests.rs").write_text("fn helper() {}\n", encoding="utf-8")
+            (source / "runtime_tests.rs").write_text(
+                "pub fn live() {}\n", encoding="utf-8"
+            )
+            (source / "feature.rs").write_text(
+                '#[cfg(test)]\n#[path = "feature/tests.rs"]\nmod tests;\n',
+                encoding="utf-8",
+            )
+            (source / "feature/tests/nested.rs").write_text(
+                "fn helper() {}\n", encoding="utf-8"
+            )
+
+            self.assertTrue(
+                coverage_diff.is_production_rust_path(
+                    "crates/a/src/runtime_tests.rs", root
+                )
+            )
+            self.assertFalse(
+                coverage_diff.is_production_rust_path("crates/a/src/tests.rs", root)
+            )
+            self.assertFalse(
+                coverage_diff.is_production_rust_path(
+                    "crates/a/src/feature/tests/nested.rs", root
+                )
+            )
 
     def git(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(

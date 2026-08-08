@@ -105,6 +105,7 @@ Runner 回复中的相对图片和文件链接同样以当前群 binding 的工�
 - 回复群消息需要 `im:message:send_as_bot`（或包含发送能力的 `im:message`）；读取消息资源需要 `im:resource`。
 - `GET /open-apis/bot/v3/info` 用于解析当前机器人 `open_id`，从而区分“@机器人”和“@其他成员”。
 - @ 判定优先严格比较 mention `open_id` 与当前 Provider 的 bot `open_id`；即使两个机器人重名，也不能用名称覆盖不匹配的 `open_id`，避免同群多机器人串触发。
+- 未带 bot 前缀的 slash 始终广播；`/q ask @群成员 review` 中普通成员 mention 是参数而不是路由目标。只有 `@Bot /command` 的前缀形式或 adapter 明确标记的 bot mention 才抑制其他 Provider。
 - 接收事件中的 `sender_id.open_id` 是发送者身份主键；每条历史消息和主动请求都以飞书 `<at id=...>...</at>` 结构带入 Prompt。显示名不可用时使用空标签正文 `<at id=open_id></at>`，不因额外通讯录权限缺失阻断群 Session。
 - 消息事件只携带 `chat_id`；首次初始化群 Session 时调用 `GET /open-apis/im/v1/chats/{chat_id}` 解析群名称，写入 binding 并随每轮结构化输入提供给 Agent。应用需具备“获取群组信息”（如 `im:chat:readonly`）能力；机器人必须在目标群内。
 - 飞书提供 `GET /open-apis/im/v1/messages` 获取会话历史消息；如启用断线补偿，还需要 `im:message:readonly`，且只能读取应用有权访问的会话范围。

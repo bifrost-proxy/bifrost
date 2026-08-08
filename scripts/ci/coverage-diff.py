@@ -16,22 +16,51 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
-TEST_MODULE_RUST_RE = re.compile(
-    r"^crates/[^/]+/src/(?:.*/)?tests(?:\.rs|/.+\.rs)$"
+EXTERNAL_TEST_MODULE_RE = re.compile(
+    r"#\[cfg\(test\)\](?:\s*#\[[^\]]+\])*\s*"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+    re.MULTILINE,
 )
 MOVED_BLOCK_MIN_LINES = 8
 MOVED_BLOCK_MIN_SUBSTANTIVE_LINES = 4
 
 
-def is_production_rust_path(path: str) -> bool:
-    """Exclude split ``#[cfg(test)] mod tests`` implementation files."""
-    return bool(PRODUCTION_RUST_RE.match(path) and not TEST_MODULE_RUST_RE.match(path))
+@lru_cache(maxsize=None)
+def external_test_module_roots(repo_root: Path) -> tuple[Path, ...]:
+    """Resolve only modules actually declared behind exact ``#[cfg(test)]``."""
+    roots: set[Path] = set()
+    crates_root = repo_root / "crates"
+    if not crates_root.is_dir():
+        return ()
+    for source_path in crates_root.glob("*/src/**/*.rs"):
+        source = source_path.read_text(encoding="utf-8")
+        module_dir = (
+            source_path.parent
+            if source_path.stem in {"lib", "main", "mod"}
+            else source_path.parent / source_path.stem
+        )
+        for module_name in EXTERNAL_TEST_MODULE_RE.findall(source):
+            roots.add((module_dir / f"{module_name}.rs").resolve())
+            roots.add((module_dir / module_name).resolve())
+    return tuple(sorted(roots))
+
+
+def is_production_rust_path(path: str, repo_root: Path = REPO_ROOT) -> bool:
+    """Exclude verified external ``#[cfg(test)]`` modules, not path names."""
+    if not PRODUCTION_RUST_RE.match(path):
+        return False
+    absolute = (repo_root / path).resolve()
+    return not any(
+        absolute == root or root in absolute.parents
+        for root in external_test_module_roots(repo_root.resolve())
+    )
 
 
 def normalize_path(path: str, repo_root: Path = REPO_ROOT) -> str:

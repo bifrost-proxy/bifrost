@@ -16,14 +16,17 @@ import re
 import shutil
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
-TEST_MODULE_RUST_RE = re.compile(
-    r"^crates/[^/]+/src/(?:.*/)?tests(?:\.rs|/.+\.rs)$"
+EXTERNAL_TEST_MODULE_RE = re.compile(
+    r"#\[cfg\(test\)\](?:\s*#\[[^\]]+\])*\s*"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+    re.MULTILINE,
 )
 CHANGED_LINES_MIN_RE = re.compile(
     r"^\s*changed_lines_min\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$"
@@ -34,15 +37,40 @@ class PreflightError(RuntimeError):
     """A user-actionable local preflight configuration error."""
 
 
-def is_production_rust_path(path: str) -> bool:
+@lru_cache(maxsize=None)
+def external_test_module_roots(repo_root: Path) -> tuple[Path, ...]:
+    """Resolve only modules actually declared behind exact ``#[cfg(test)]``."""
+    roots: set[Path] = set()
+    crates_root = repo_root / "crates"
+    if not crates_root.is_dir():
+        return ()
+    for source_path in crates_root.glob("*/src/**/*.rs"):
+        source = source_path.read_text(encoding="utf-8")
+        module_dir = (
+            source_path.parent
+            if source_path.stem in {"lib", "main", "mod"}
+            else source_path.parent / source_path.stem
+        )
+        for module_name in EXTERNAL_TEST_MODULE_RE.findall(source):
+            roots.add((module_dir / f"{module_name}.rs").resolve())
+            roots.add((module_dir / module_name).resolve())
+    return tuple(sorted(roots))
+
+
+def is_production_rust_path(path: str, repo_root: Path = REPO_ROOT) -> bool:
     """Return whether a Rust source path belongs to production code.
 
-    Rust test modules split from an inline ``#[cfg(test)] mod tests`` convention
-    live under ``src/**/tests.rs`` or ``src/**/tests/**/*.rs``. Cargo compiles
-    them only for tests, so the changed-lines preflight must not require those
-    files to appear as production units in LCOV.
+    A directory named ``tests`` is not sufficient evidence: Rust permits normal
+    runtime modules with that name. Exclude a file tree only when a source file
+    actually declares its external module behind exact ``#[cfg(test)]``.
     """
-    return bool(PRODUCTION_RUST_RE.match(path) and not TEST_MODULE_RUST_RE.match(path))
+    if not PRODUCTION_RUST_RE.match(path):
+        return False
+    absolute = (repo_root / path).resolve()
+    return not any(
+        absolute == root or root in absolute.parents
+        for root in external_test_module_roots(repo_root.resolve())
+    )
 
 
 def run(
@@ -129,7 +157,7 @@ def changed_production_paths(
         if untracked.returncode != 0:
             raise PreflightError(untracked.stderr.strip() or "git ls-files failed")
         paths.update(untracked.stdout.splitlines())
-    return sorted(path for path in paths if is_production_rust_path(path))
+    return sorted(path for path in paths if is_production_rust_path(path, repo_root))
 
 
 def load_metadata(repo_root: Path) -> dict[str, Any]:

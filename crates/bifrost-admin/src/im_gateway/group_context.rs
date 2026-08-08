@@ -817,14 +817,24 @@ pub fn classify_group_message(
         .mentions
         .iter()
         .any(|mention| mention_matches_current_bot(mention, bot_identity));
-    // A slash command without mentions is broadcast. A mentioned slash whose
-    // mentions do not include this provider is explicitly addressed elsewhere.
-    // Ordinary prose, including a reply that mentions human members, remains
-    // ambient unless synthetic/debug metadata positively identifies a bot.
+    // A slash command beginning with `/` is broadcast even when its arguments
+    // mention human members. Feishu emits no user-vs-bot type for real mention
+    // items, so an unmatched real mention only addresses another provider when
+    // it prefixes the slash (`@Bot /command`). Synthetic/debug adapters can
+    // positively identify another bot with `is_bot` regardless of position.
     if has_mentions && !mentions_bot {
         let without_mentions = strip_all_mentions(&message.text, &message.mentions);
-        let explicitly_addressed = without_mentions.trim_start().starts_with('/')
-            || message.mentions.iter().any(|mention| mention.is_bot);
+        let original = message.text.trim_start();
+        if original.starts_with('/') {
+            return classify_slash(original, session_busy);
+        }
+        let leading_mention = message
+            .mentions
+            .iter()
+            .filter(|mention| !mention.key.is_empty())
+            .any(|mention| original.starts_with(&mention.key));
+        let explicitly_addressed = message.mentions.iter().any(|mention| mention.is_bot)
+            || (leading_mention && without_mentions.trim_start().starts_with('/'));
         return if explicitly_addressed {
             GroupMessageDisposition::AddressedElsewhere
         } else {

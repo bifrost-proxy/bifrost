@@ -199,6 +199,36 @@ fn addressed_slash_only_runs_for_the_mentioned_bot_while_unmentioned_is_broadcas
             }
         );
     }
+
+    let human_mention = ImMention {
+        key: "@_user_2".to_string(),
+        open_id: Some("ou_human".to_string()),
+        name: Some("Alice".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    };
+    let broadcast_with_human = group_event(
+        "broadcast-queue-with-human",
+        "shared-chat",
+        "u1",
+        "/q ask @_user_2 to review",
+        vec![human_mention],
+        3,
+    );
+    for identity in [&bot_a, &bot_b] {
+        assert_eq!(
+            classify_group_message(
+                broadcast_with_human.message.as_ref().unwrap(),
+                Some(identity),
+                false,
+            ),
+            GroupMessageDisposition::AgentTrigger {
+                kind: GroupTriggerKind::Queue,
+                active_request: "ask @_user_2 to review".to_string(),
+                command_prefix: Some("/q"),
+            }
+        );
+    }
 }
 
 #[test]
