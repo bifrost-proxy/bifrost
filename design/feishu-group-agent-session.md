@@ -54,6 +54,7 @@ Provider 长连接只负责接收事件，不把全局接收器借给任何一�
 - Runner 完成最后一次 Guide/Queue 检查、确认没有下一条消息后，必须立即关闭 mailbox receiver，再执行进度卡、历史和 Session 的异步收尾。关闭前已经送达但尚未消费的事件由 task wrapper 按顺序 drain；关闭后 sender 失败的事件由 registry 暂存，两类事件都在 completion 时交回 Provider 主循环。
 - mailbox receiver 关闭后的消息暂存在同 generation 的收尾队列；completion 先回放 receiver 中更早的缓冲消息，再回放关闭后消息并创建替代任务，不能因完成通知竞态而丢失或打乱同 Session 顺序。
 - 并发 E2E 使用显式 release 文件保持 mock Runner 活跃，并在释放前等待同 Session 的最后一条背景消息进入 SQLite 账本。测试不得依赖固定 sleep 恰好覆盖 CI 调度延迟，否则会把 Runner 已结束后的合法空闲态行为误报为活跃态审计回归。
+- 飞书假 OpenAPI 只允许 debug 构建在显式 `BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1` 时访问。CI shell 矩阵复用的 production release 必须跳过该假服务场景，不能为了黑盒测试放宽生产 host allowlist，也不能把测试凭证发到官方接口。E2E pipeline contract 会扫描全部使用该开关的 shell 脚本，强制它们声明 release guard 和统一的 skip 标记。完整群会话链路由 focused debug E2E 覆盖；release-safe 单元测试继续覆盖 URL 规范化、引用卡片读取、CardKit 回退和权限错误矩阵。
 
 ## 模型输入
 

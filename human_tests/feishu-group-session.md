@@ -374,7 +374,7 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin completion_replay_removes_unco
 SKIP_BUILD=true bash e2e-tests/tests/test_feishu_group_session_context.sh
 ```
 
-执行记录：2026-08-08 PASS。确定性单元测试同时覆盖关闭前已送达事件和关闭后 sender 失败事件，completion 按原顺序回放且清除已送达事件的 dedup；最新 debug 二进制连续执行 5 次 `test_feishu_group_session_context.sh` 均输出 `[feishu-group-session] PASS`，每次引用触发都生成第九个 Prompt 和第 18 个 Runner 生命周期事件。
+执行记录：2026-08-08 PASS。确定性单元测试同时覆盖关闭前已送达事件和关闭后 sender 失败事件，completion 按原顺序回放且清除已送达事件的 dedup；最新 debug 二进制连续执行 5 次 `test_feishu_group_session_context.sh` 均输出 `[feishu-group-session] PASS`，每次引用触发都生成第九个 Prompt 和第 18 个 Runner 生命周期事件。CI production release 会明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不能用测试凭证误连官方飞书接口；URL 规范化、引用读取和权限错误矩阵由 release-safe 单元测试覆盖。
 
 执行记录：2026-08-08 PASS。上述定向测试验证广播/定向消费、未被 @ 的机器人不读取引用且不写本地账本、跨群引用拒绝、无参线程查询分类与空闲/忙碌输出、有效工作目录与 Runner 输出、原始 interactive 卡片、CardKit 二次读取、`230027` 权限指引和群分发读取失败路径；所有命令退出码为 0。随后用最新 `target/debug/bifrost`、临时数据目录和假飞书 OpenAPI 执行 `test_feishu_group_session_context.sh`，输出 `[feishu-group-session] PASS`，确认三个无参查询不启动 Runner，引用读取与权限错误均走真实服务链路。
 

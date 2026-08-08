@@ -6,9 +6,6 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TEST_DIR="$(mktemp -d)"
-BIFROST_LOG="$TEST_DIR/bifrost.log"
-REQUEST_LOG="$TEST_DIR/feishu-requests.jsonl"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 
 # CI's broad shell matrix intentionally reuses the release artifact. Release
@@ -17,11 +14,16 @@ BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 # The real black-box path runs with the debug binary in the focused E2E/human
 # test, while release CI still selects this script and records the security
 # boundary instead of waiting for a request that must never reach loopback.
-if [[ "$BIFROST_BIN" == */target/release/bifrost ]]; then
-  echo "[feishu-new-group-command] SKIP fake OpenAPI: release build rejects Feishu loopback by design"
-  exit 0
-fi
+case "${BIFROST_BIN//\\//}" in
+  target/release/bifrost|*/target/release/bifrost|target/release/bifrost.exe|*/target/release/bifrost.exe)
+    echo "[feishu-new-group-command] SKIP fake OpenAPI: release build rejects Feishu loopback by design"
+    exit 0
+    ;;
+esac
 
+TEST_DIR="$(mktemp -d)"
+BIFROST_LOG="$TEST_DIR/bifrost.log"
+REQUEST_LOG="$TEST_DIR/feishu-requests.jsonl"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
 with socket.socket() as sock:

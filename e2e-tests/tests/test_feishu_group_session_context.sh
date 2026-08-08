@@ -7,6 +7,24 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
+
+# CI's broad shell matrix reuses a production release artifact. Production
+# builds deliberately normalize every Feishu base URL back to the official
+# allowlist, even when the debug-only loopback flag is present. Running this
+# fake-OpenAPI scenario with that binary would contact the official endpoint
+# with test credentials; the first quoted-message read then fails with Feishu
+# code 10003 instead of exercising the local fixture. Keep that security
+# boundary closed. The focused debug E2E below covers the complete black-box
+# flow, while release-safe unit tests cover URL normalization and the Feishu
+# HTTP response/error matrix.
+case "${BIFROST_BIN//\\//}" in
+  target/release/bifrost|*/target/release/bifrost|target/release/bifrost.exe|*/target/release/bifrost.exe)
+    echo "[feishu-group-session] SKIP fake OpenAPI: release build rejects Feishu loopback by design"
+    exit 0
+    ;;
+esac
+
 TEST_DIR="$(mktemp -d)"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 PROMPT_LOG="$TEST_DIR/group-prompts.jsonl"
@@ -19,7 +37,6 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
     print(sock.getsockname()[1])
 PY
 )"
-BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

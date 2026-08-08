@@ -1271,6 +1271,7 @@ mod tests {
                 "--nocapture",
             ])
             .env(CHILD_ENV, "1")
+            .env_remove(super::DESKTOP_CORE_ENV)
             .status()
             .expect("spawn isolated Admin handler test");
             assert!(status.success(), "isolated Admin handler test failed");
