@@ -461,6 +461,31 @@ async fn prepare_group_dispatch_rejects_cross_group_reference() {
 }
 
 #[tokio::test]
+async fn prepare_group_dispatch_records_same_group_reference_for_prompt() {
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, message_reads, server) = spawn_reference_routing_server("oc_group").await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-same-group-reference".to_string();
+    provider.base_url = Some(base_url);
+    let mut event = group_test_event(&provider.id, "same-group", "@_user_1", true, 2);
+    event.message.as_mut().unwrap().parent_id = Some("om_parent".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .expect("same-group reference dispatch");
+    assert!(dispatch.message_text.contains("quoted content"));
+    assert_eq!(message_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.message_count(&provider.id, "oc_group").unwrap(), 2);
+    server.abort();
+}
+
+#[tokio::test]
 async fn prepare_group_dispatch_recovers_nonterminal_turn_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let client =

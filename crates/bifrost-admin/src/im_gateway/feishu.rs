@@ -3154,6 +3154,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_message_covers_validation_api_parse_and_not_found_errors() {
+        let provider = FeishuProvider::new();
+        let mut config = provider_with_base_url(Some("http://127.0.0.1:9/open-apis"));
+        config.secret_ref = Some("secret".to_string());
+        assert!(provider
+            .fetch_message(&config, "  ")
+            .await
+            .expect_err("blank message id")
+            .to_string()
+            .contains("message_id is empty"));
+
+        let cases = [
+            ("not-json", "response parse failed"),
+            (r#"{"code":42,"msg":"remote failure"}"#, "code=42"),
+            (r#"{"code":0,"data":{"items":[]}}"#, "not found"),
+        ];
+        for (body, expected) in cases {
+            let leaked: &'static str = Box::leak(body.to_string().into_boxed_str());
+            let (base_url, task) =
+                spawn_feishu_api_server(r#"{"code":0}"#, r#"{"code":0}"#, leaked).await;
+            config.base_url = Some(format!("{base_url}/open-apis"));
+            let error = provider
+                .fetch_message(&config, "om_error")
+                .await
+                .expect_err("fixture must fail")
+                .to_string();
+            assert!(error.contains(expected), "unexpected error: {error}");
+            task.abort();
+        }
+
+        config.base_url = Some("http://127.0.0.1:9/open-apis".to_string());
+        let error = provider
+            .fetch_message(&config, "om_closed")
+            .await
+            .expect_err("closed endpoint must fail")
+            .to_string();
+        assert!(
+            error.contains("token request failed")
+                || error.contains("referenced message request failed")
+        );
+    }
+
+    #[test]
+    fn message_read_permission_detection_and_help_cover_text_and_missing_app() {
+        assert!(is_feishu_message_read_permission_error(
+            0,
+            "permission denied"
+        ));
+        assert!(is_feishu_message_read_permission_error(0, "缺少权限"));
+        assert!(is_feishu_message_read_permission_error(0, "scope missing"));
+        assert!(!is_feishu_message_read_permission_error(0, "not found"));
+        let help = feishu_message_read_permission_help(None);
+        assert!(!help.contains("App ID"));
+        assert!(help.contains("im:message:readonly"));
+    }
+
+    #[tokio::test]
     async fn fetch_message_retries_cardkit_id_with_visible_card_representation() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
