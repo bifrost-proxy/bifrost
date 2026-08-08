@@ -222,6 +222,46 @@ impl ImGroupContextStore {
         Ok(seq)
     }
 
+    pub fn record_fetched_message(
+        &self,
+        provider_id: &str,
+        chat_id: &str,
+        message: &super::feishu::FeishuFetchedMessage,
+        received_at: u64,
+    ) -> Result<u64, String> {
+        let event = ImEvent {
+            event_id: format!("fetched:{}", message.message_id),
+            provider_id: provider_id.to_string(),
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.fetched".to_string(),
+            source: super::types::ImEventSource {
+                chat_id: Some(chat_id.to_string()),
+                chat_type: Some("group".to_string()),
+                user_id: Some(message.sender_id.clone()),
+                user_name: None,
+                sender_type: message.sender_type.clone(),
+                message_id: Some(message.message_id.clone()),
+            },
+            message: Some(ImEventMessage {
+                text: message.text.clone(),
+                mentions: Vec::new(),
+                images: Vec::new(),
+                files: Vec::new(),
+                reply_to: None,
+                raw_type: Some(message.msg_type.clone()),
+                raw_content: Some(message.raw_content.clone()),
+                create_time: message.create_time,
+                update_time: message.update_time,
+                root_id: None,
+                parent_id: None,
+                thread_id: None,
+            }),
+            received_at,
+            raw_digest: None,
+        };
+        self.record_event(&event, "feishu_message_api")
+    }
+
     pub fn prepare_turn(
         &self,
         event: &ImEvent,
@@ -762,10 +802,21 @@ pub fn classify_group_message(
     bot_identity: Option<&FeishuBotIdentity>,
     session_busy: bool,
 ) -> GroupMessageDisposition {
+    let has_mentions = !message.mentions.is_empty();
     let mentions_bot = message
         .mentions
         .iter()
         .any(|mention| mention_matches_current_bot(mention, bot_identity));
+    // A slash command without mentions is a broadcast command and every bot in
+    // the group may consume it. Once the message contains an explicit mention,
+    // it becomes addressed: only a provider whose own bot identity is present
+    // may continue. This check must happen before slash parsing so `/status`,
+    // `/new`, runner commands, and unknown Agent slashes share the same routing
+    // semantics. It also deliberately fails closed when a real Feishu mention
+    // cannot be resolved to this provider's bot identity.
+    if has_mentions && !mentions_bot {
+        return GroupMessageDisposition::Ambient;
+    }
     let text = strip_current_bot_mentions(&message.text, &message.mentions, bot_identity);
     let trimmed = text.trim();
     if trimmed.starts_with('/') {
@@ -851,7 +902,7 @@ fn classify_slash(message: &str, session_busy: bool) -> GroupMessageDisposition 
             command: message.to_string(),
             reset_context: true,
         },
-        "/help" | "/status" | "/stop" if rest.is_empty() => {
+        "/help" | "/status" | "/stop" | "/q" | "/pwd" if rest.is_empty() => {
             GroupMessageDisposition::SystemCommand {
                 command: message.to_string(),
                 reset_context: false,

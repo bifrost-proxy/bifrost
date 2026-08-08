@@ -986,6 +986,14 @@ pub(super) fn im_runner_command_lists_configured_external_runners() {
     assert!(!runner_list.contains("Bifrost Agent"));
     assert!(runner_list.contains("Codex"));
     assert!(runner_list.contains("Traex"));
+
+    let temp = tempfile::tempdir().expect("temp group context dir");
+    let group_store = ImGroupContextStore::new(temp.path());
+    let agent_config = crate::im_gateway::agent::ImAgentConfig::default();
+    assert_eq!(
+        format_effective_im_runner(&group_store, "session", &agent_config, &config, "provider",),
+        "当前 Runner：`Codex`"
+    );
 }
 
 #[test]
@@ -1480,6 +1488,7 @@ pub(super) async fn idle_weixin_status_reply_uses_shared_complete_overview() {
                 event: &event,
                 message_log_store: &service.message_log_store,
                 agent_session_manager: &service.agent_session_manager,
+                queue_manager: &service.queue_manager,
             },
         )
         .await

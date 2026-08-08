@@ -562,6 +562,7 @@ pub(super) async fn run_event_loop_with_options(
                                 event: &event,
                                 message_log_store: &message_log_store,
                                 agent_session_manager: &agent_session_manager,
+                                queue_manager: &queue_manager,
                             },
                         )
                         .await
@@ -713,6 +714,7 @@ pub(super) async fn run_event_loop_with_options(
                         event: &event,
                         message_log_store: &message_log_store,
                         agent_session_manager: &agent_session_manager,
+                        queue_manager: &queue_manager,
                     },
                 )
                 .await
@@ -816,6 +818,7 @@ pub(super) async fn run_event_loop_with_options(
                             event: &event,
                             message_log_store: &message_log_store,
                             agent_session_manager: &agent_session_manager,
+                            queue_manager: &queue_manager,
                         },
                     )
                     .await
@@ -1030,7 +1033,6 @@ pub(super) async fn prepare_group_inbound_dispatch(
 ) -> Result<Option<PreparedInboundDispatch>, String> {
     use crate::im_gateway::group_context::{classify_group_message, GroupMessageDisposition};
 
-    store.record_event(event, "event")?;
     let message = event
         .message
         .as_ref()
@@ -1040,6 +1042,56 @@ pub(super) async fn prepare_group_inbound_dispatch(
         .chat_id
         .as_deref()
         .ok_or_else(|| "group event is missing chat_id".to_string())?;
+    let needs_identity =
+        !message.mentions.is_empty() && !message.mentions.iter().any(|mention| mention.is_bot);
+    let bot_identity = if needs_identity {
+        match client.feishu() {
+            Some(feishu) => match feishu.fetch_bot_identity(provider).await {
+                Ok(identity) => Some(identity),
+                Err(error) => {
+                    warn!(
+                        provider_id = %provider.id,
+                        error = %error,
+                        "failed to resolve Feishu bot identity for group mention"
+                    );
+                    None
+                }
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+    let disposition = classify_group_message(message, bot_identity.as_ref(), session_busy);
+    // Only the addressed bot resolves a referenced message. Every provider may
+    // run on a different machine, so the Feishu message API is authoritative;
+    // the local group ledger is only a per-provider cache for prompt assembly.
+    if matches!(disposition, GroupMessageDisposition::AgentTrigger { .. }) {
+        if let Some(parent_id) = message
+            .parent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let feishu = client
+                .feishu()
+                .ok_or_else(|| "referenced group messages require a Feishu provider".to_string())?;
+            let referenced = feishu
+                .fetch_message(provider, parent_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if referenced.chat_id != chat_id {
+                return Err("被引用消息不属于当前群聊，已拒绝读取以避免跨群泄露。".to_string());
+            }
+            store.record_fetched_message(
+                &event.provider_id,
+                chat_id,
+                &referenced,
+                event.received_at,
+            )?;
+        }
+    }
+    store.record_event(event, "event")?;
     let supplied_chat_name = message
         .raw_content
         .as_ref()
@@ -1079,27 +1131,7 @@ pub(super) async fn prepare_group_inbound_dispatch(
             }
         }
     }
-    let needs_identity =
-        !message.mentions.is_empty() && !message.mentions.iter().any(|mention| mention.is_bot);
-    let bot_identity = if needs_identity {
-        match client.feishu() {
-            Some(feishu) => match feishu.fetch_bot_identity(provider).await {
-                Ok(identity) => Some(identity),
-                Err(error) => {
-                    warn!(
-                        provider_id = %provider.id,
-                        error = %error,
-                        "failed to resolve Feishu bot identity for group mention"
-                    );
-                    None
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
-    };
-    match classify_group_message(message, bot_identity.as_ref(), session_busy) {
+    match disposition {
         GroupMessageDisposition::Ambient => Ok(None),
         GroupMessageDisposition::SystemCommand {
             command,

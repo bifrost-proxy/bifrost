@@ -12,6 +12,7 @@ pub(super) struct IdleImCommandContext<'a> {
     pub(super) event: &'a ImEvent,
     pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
     pub(super) agent_session_manager: &'a Arc<ImAgentSessionManager>,
+    pub(super) queue_manager: &'a Arc<SessionQueueManager>,
 }
 
 struct ImCwdCommandContext<'a> {
@@ -33,6 +34,7 @@ struct ImRunnerCommandContext<'a> {
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
     session_manager: &'a Arc<ImAgentSessionManager>,
+    agent_config: &'a crate::im_gateway::agent::ImAgentConfig,
 }
 
 struct ImModelCommandContext<'a> {
@@ -302,6 +304,41 @@ pub(super) async fn handle_im_new_group_command(
         return true;
     }
 
+    if trimmed == "/q" {
+        let reply = format_queue_status(
+            "📋 当前线程排队消息",
+            &ctx.queue_manager.queue_status(session_key),
+        );
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            &reply,
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+
+    if trimmed == "/pwd" {
+        let work_dir = ctx
+            .group_context_store
+            .work_dir_by_session(session_key)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| agent_config.resolve_work_dir());
+        let reply = format!("当前线程工作目录：\n`{}`", work_dir.display());
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            &reply,
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+
     if trimmed == "/stop" {
         let stopped = request_agent_stop(ctx.agent_session_manager, session_key).await;
         let reply = if stopped {
@@ -350,6 +387,7 @@ pub(super) async fn handle_im_new_group_command(
             event: ctx.event,
             message_log_store: ctx.message_log_store,
             session_manager: ctx.agent_session_manager,
+            agent_config,
         },
     )
     .await
@@ -496,8 +534,9 @@ pub(super) fn build_im_channel_help_sections(
     let mut channel_commands = "IM 通道命令（所有 Runner）:\n\
          /help           显示此帮助信息\n\
          /status         查看当前 IM 会话状态、Runner、模型和排队情况\n\
+         /pwd            查看当前线程的工作目录\n\
          /cwd <绝对路径>  切换当前 IM 通道绑定的工作目录；路径必须存在且是目录，运行中会排队到当前任务结束后执行\n\
-         /runner [Runner]  查看或切换当前 IM 通道绑定的 Runner"
+         /runner [Runner]  不带参数查看当前 Runner；带参数切换当前 IM 通道绑定的 Runner"
         .to_string();
     if provider_type == ImProviderType::Feishu {
         channel_commands.push_str(
@@ -508,7 +547,7 @@ pub(super) fn build_im_channel_help_sections(
         "\n\
          /clear          重置当前 IM 会话上下文\n\
          /reset          重置当前 IM 会话上下文\n\
-         /q <消息>       将消息加入队列，当前任务结束后自动继续处理\n\
+         /q [消息]       不带参数查看当前线程排队；带消息则在当前任务结束后继续处理\n\
          /rq <序号>      取消一条排队消息\n\
          /stop           停止当前正在执行的任务",
     );
@@ -625,6 +664,23 @@ pub(super) fn format_im_runner_list(
     names.into_iter().collect::<Vec<_>>().join("\n")
 }
 
+pub(super) fn format_effective_im_runner(
+    group_context_store: &ImGroupContextStore,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+    provider_id: &str,
+) -> String {
+    let configured =
+        configured_runner_id_for_im_session(group_context_store, session_key, agent_config);
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        config,
+        Some(provider_id),
+        configured.as_deref(),
+    );
+    format!("当前 Runner：`{}`", effective.runner_id)
+}
+
 pub(super) fn resolve_im_runner_selection(
     config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
     runner_id: &str,
@@ -726,7 +782,13 @@ async fn handle_im_runner_command(
     };
     let config = ctx.external_cli_config_store.load();
     let reply = match command {
-        ImRunnerCommand::List => format_im_runner_list(&config),
+        ImRunnerCommand::List => format_effective_im_runner(
+            ctx.group_context_store,
+            session_key,
+            ctx.agent_config,
+            &config,
+            &ctx.provider.id,
+        ),
         ImRunnerCommand::Switch(runner_id) => match apply_im_runner_switch(
             ctx.provider_store,
             ctx.group_context_store,
@@ -1366,6 +1428,7 @@ fn persist_im_model_system_message(
     if message.is_empty() {
         return;
     }
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -1819,6 +1882,27 @@ pub(super) fn inbound_message_preview(
         return;
     }
 
+    if trimmed == "/q" {
+        let reply = format_queue_status(
+            "📋 当前线程排队消息",
+            &queue_manager.queue_status(session_key),
+        );
+        send_agent_reply(client, provider, event, &reply, message_log_store).await;
+        return;
+    }
+
+    if trimmed == "/pwd" {
+        let work_dir = ctx
+            .group_context_store
+            .work_dir_by_session(session_key)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| ctx.agent_config.resolve_work_dir());
+        let reply = format!("当前线程工作目录：\n`{}`", work_dir.display());
+        send_agent_reply(client, provider, event, &reply, message_log_store).await;
+        return;
+    }
+
     // /stop — cooperative cancellation of the active turn loop
     if trimmed == "/stop" {
         let stopped = request_agent_stop(agent_session_manager, session_key).await;
@@ -1834,7 +1918,13 @@ pub(super) fn inbound_message_preview(
     if let Some(command) = parse_im_runner_command(trimmed) {
         let config = ctx.external_cli_config_store.load();
         let reply = match command {
-            ImRunnerCommand::List => format_im_runner_list(&config),
+            ImRunnerCommand::List => format_effective_im_runner(
+                ctx.group_context_store,
+                session_key,
+                ctx.agent_config,
+                &config,
+                &ctx.provider.id,
+            ),
             ImRunnerCommand::Switch(runner_id) => {
                 match resolve_im_runner_selection(&config, &runner_id) {
                     Ok(_) => "当前任务正在处理中，请等待任务结束后再切换 Runner。".to_string(),
@@ -2264,6 +2354,7 @@ mod local_resume_tests {
                         event: &event,
                         message_log_store: &service.message_log_store,
                         agent_session_manager: &service.agent_session_manager,
+                        queue_manager: &service.queue_manager,
                     },
                 )
                 .await

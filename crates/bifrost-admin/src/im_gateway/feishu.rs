@@ -148,6 +148,19 @@ pub struct FeishuCreatedChat {
     pub name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeishuFetchedMessage {
+    pub message_id: String,
+    pub chat_id: String,
+    pub sender_id: String,
+    pub sender_type: Option<String>,
+    pub msg_type: String,
+    pub text: String,
+    pub raw_content: serde_json::Value,
+    pub create_time: Option<u64>,
+    pub update_time: Option<u64>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct TokenCacheKey {
     base_url: String,
@@ -1610,6 +1623,142 @@ impl FeishuProvider {
         Ok(identity)
     }
 
+    /// Fetch one referenced message from Feishu. This is intentionally the
+    /// source of truth for group replies: multiple Bifrost providers may run on
+    /// different machines and therefore cannot depend on shared process memory
+    /// or a shared local database to understand another bot's output.
+    pub async fn fetch_message(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+    ) -> Result<FeishuFetchedMessage> {
+        let original = self
+            .fetch_message_with_card_format(config, message_id, true)
+            .await?;
+        if original.msg_type == "interactive" && original.text.trim().is_empty() {
+            // CardKit messages may expose only a card_id in the original send
+            // payload. Feishu's default receive representation can still carry
+            // the visible, current card content, so retry once without asking
+            // for the original JSON.
+            return self
+                .fetch_message_with_card_format(config, message_id, false)
+                .await;
+        }
+        Ok(original)
+    }
+
+    async fn fetch_message_with_card_format(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        original_card_json: bool,
+    ) -> Result<FeishuFetchedMessage> {
+        let message_id = message_id.trim();
+        if message_id.is_empty() {
+            return Err(bifrost_core::BifrostError::Config(
+                "Feishu referenced message_id is empty".to_string(),
+            ));
+        }
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let mut request = self
+            .http
+            .get(format!("{base_url}/im/v1/messages/{message_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .query(&[("user_id_type", "open_id")]);
+        if original_card_json {
+            request = request.query(&[("card_msg_content_type", "user_card_content")]);
+        }
+        let response = request.send().await.map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "fetch Feishu referenced message request failed: {error}"
+            ))
+        })?;
+        let value: serde_json::Value = response.json().await.map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "fetch Feishu referenced message response parse failed: {error}"
+            ))
+        })?;
+        let code = value
+            .get("code")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+        if code != 0 {
+            let message = value
+                .get("msg")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if is_feishu_message_read_permission_error(code, message) {
+                return Err(bifrost_core::BifrostError::Config(
+                    feishu_message_read_permission_help(config.app_id.as_deref()),
+                ));
+            }
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "fetch Feishu referenced message failed: code={code}, msg={message}"
+            )));
+        }
+        let item = value
+            .get("data")
+            .and_then(|data| data.get("items"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.first())
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::NotFound(format!(
+                    "Feishu referenced message not found: {message_id}"
+                ))
+            })?;
+        let raw_content = item
+            .get("body")
+            .and_then(|body| body.get("content"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let msg_type = item
+            .get("msg_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let text = extract_feishu_message_text(&raw_content, &[]);
+        let text = if msg_type == "interactive" {
+            extract_feishu_card_text(&raw_content)
+        } else {
+            text
+        };
+        Ok(FeishuFetchedMessage {
+            message_id: item
+                .get("message_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(message_id)
+                .to_string(),
+            chat_id: item
+                .get("chat_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            sender_id: item
+                .get("sender")
+                .and_then(|sender| sender.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            sender_type: item
+                .get("sender")
+                .and_then(|sender| sender.get("sender_type"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            msg_type,
+            text,
+            raw_content,
+            create_time: item
+                .get("create_time")
+                .and_then(json_u64_from_string_or_number),
+            update_time: item
+                .get("update_time")
+                .and_then(json_u64_from_string_or_number),
+        })
+    }
+
     /// Resolve the display name for a group that this provider's bot belongs
     /// to. Message receive events only contain `chat_id`, so initialization
     /// must enrich the group session through the chat information API.
@@ -2652,6 +2801,99 @@ fn extract_feishu_message_text(value: &serde_json::Value, mentions: &[ImMention]
     parts.join("").trim().to_string()
 }
 
+fn is_feishu_message_read_permission_error(code: i64, message: &str) -> bool {
+    matches!(code, 230027 | 99991672 | 99991679)
+        || message.to_ascii_lowercase().contains("permission")
+        || message.contains("权限")
+        || message.contains("scope")
+}
+
+fn feishu_message_read_permission_help(app_id: Option<&str>) -> String {
+    let app = app_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("（App ID: `{value}`）"))
+        .unwrap_or_default();
+    format!(
+        "当前飞书机器人{app}没有读取被引用群消息的权限。请在飞书开放平台进入该应用的「权限管理」，申请 `im:message:readonly`（获取单聊、群组消息）和 `im:message.group_msg`（获取群组中所有消息），然后创建并发布新版本使权限生效。权限生效后重新引用这条消息并 @ 机器人。"
+    )
+}
+
+fn extract_feishu_card_text(card: &serde_json::Value) -> String {
+    const MAX_CARD_TEXT_CHARS: usize = 16_000;
+
+    fn collect(value: &serde_json::Value, field: Option<&str>, parts: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let tag = map
+                    .get("tag")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if matches!(
+                    tag,
+                    "button"
+                        | "action"
+                        | "select_static"
+                        | "multi_select_static"
+                        | "overflow"
+                        | "date_picker"
+                        | "picker_time"
+                        | "picker_datetime"
+                ) {
+                    return;
+                }
+
+                // serde_json objects are not guaranteed to preserve the card's
+                // visual order. Walk known visual containers explicitly so a
+                // quoted card reads like the card: header, body, then elements.
+                const VISUAL_KEYS: &[&str] = &[
+                    "header", "title", "subtitle", "body", "elements", "summary", "content", "text",
+                ];
+                for key in VISUAL_KEYS {
+                    if let Some(child) = map.get(*key) {
+                        collect(child, Some(key), parts);
+                    }
+                }
+                for (key, child) in map {
+                    if VISUAL_KEYS.contains(&key.as_str())
+                        || matches!(
+                            key.as_str(),
+                            "url"
+                                | "multi_url"
+                                | "behaviors"
+                                | "value"
+                                | "tag"
+                                | "schema"
+                                | "config"
+                        )
+                    {
+                        continue;
+                    }
+                    collect(child, Some(key), parts);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect(item, field, parts);
+                }
+            }
+            serde_json::Value::String(text)
+                if matches!(field, Some("content" | "text" | "title" | "summary")) =>
+            {
+                let text = text.trim();
+                if !text.is_empty() && parts.last().is_none_or(|last| last != text) {
+                    parts.push(text.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut parts = Vec::new();
+    collect(card, None, &mut parts);
+    bifrost_core::text::truncate_chars(&parts.join("\n"), MAX_CARD_TEXT_CHARS)
+}
+
 fn collect_feishu_text_nodes(
     value: &serde_json::Value,
     mentions: &[ImMention],
@@ -2861,6 +3103,123 @@ mod tests {
         assert_eq!(body["chat_mode"], "group");
         assert_eq!(body["chat_type"], "private");
         assert!(body.get("bot_id_list").is_none());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_message_reads_original_interactive_card_content() {
+        let (base_url, task) = spawn_feishu_api_server(
+            r#"{"code":0}"#,
+            r#"{"code":0}"#,
+            r#"{"code":0,"data":{"items":[{"message_id":"om_card","chat_id":"oc_group","msg_type":"interactive","sender":{"id":"ou_other_bot","sender_type":"app"},"body":{"content":"{\"schema\":\"2.0\",\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"分析结果\"}},\"body\":{\"elements\":[{\"tag\":\"markdown\",\"content\":\"测试全部通过\"}]}}"},"create_time":"1710000000000"}]}}"#,
+        )
+        .await;
+        let provider = FeishuProvider::new();
+        let mut config = provider_with_base_url(Some(&format!("{base_url}/open-apis")));
+        config.secret_ref = Some("secret".to_string());
+
+        let message = provider
+            .fetch_message(&config, "om_card")
+            .await
+            .expect("fetch referenced card");
+
+        assert_eq!(message.chat_id, "oc_group");
+        assert_eq!(message.sender_type.as_deref(), Some("app"));
+        assert_eq!(message.text, "分析结果\n测试全部通过");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_message_permission_error_explains_required_scopes_and_publish_step() {
+        let (base_url, task) = spawn_feishu_api_server(
+            r#"{"code":0}"#,
+            r#"{"code":0}"#,
+            r#"{"code":230027,"msg":"Lack of necessary permissions"}"#,
+        )
+        .await;
+        let provider = FeishuProvider::new();
+        let mut config = provider_with_base_url(Some(&format!("{base_url}/open-apis")));
+        config.app_id = Some("cli_test".to_string());
+        config.secret_ref = Some("secret".to_string());
+
+        let error = provider
+            .fetch_message(&config, "om_denied")
+            .await
+            .expect_err("missing read scope must fail");
+        let message = error.to_string();
+        assert!(message.contains("im:message:readonly"));
+        assert!(message.contains("im:message.group_msg"));
+        assert!(message.contains("创建并发布新版本"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_message_retries_cardkit_id_with_visible_card_representation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind CardKit fallback fixture");
+        let address = listener.local_addr().unwrap();
+        let message_reads = Arc::new(AtomicUsize::new(0));
+        let reads_for_server = Arc::clone(&message_reads);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let reads = Arc::clone(&reads_for_server);
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let reads = Arc::clone(&reads);
+                        async move {
+                            let path = request.uri().path();
+                            let body = if path.ends_with("/auth/v3/tenant_access_token/internal") {
+                                r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+                            } else {
+                                let read = reads.fetch_add(1, Ordering::SeqCst);
+                                if read == 0 {
+                                    assert!(request
+                                        .uri()
+                                        .query()
+                                        .unwrap_or_default()
+                                        .contains("card_msg_content_type=user_card_content"));
+                                    r#"{"code":0,"data":{"items":[{"message_id":"om_cardkit","chat_id":"oc_group","msg_type":"interactive","body":{"content":"{\"card_id\":\"AAq9card\"}"}}]}}"#
+                                } else {
+                                    assert!(!request
+                                        .uri()
+                                        .query()
+                                        .unwrap_or_default()
+                                        .contains("card_msg_content_type"));
+                                    r#"{"code":0,"data":{"items":[{"message_id":"om_cardkit","chat_id":"oc_group","msg_type":"interactive","body":{"content":"{\"schema\":\"2.0\",\"body\":{\"elements\":[{\"tag\":\"markdown\",\"content\":\"CardKit 最终结论\"}]}}"}}]}}"#
+                                }
+                            };
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from_static(body.as_bytes())))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let provider = FeishuProvider::new();
+        let mut config = provider_with_base_url(Some(&format!("http://{address}/open-apis")));
+        config.secret_ref = Some("secret".to_string());
+
+        let message = provider
+            .fetch_message(&config, "om_cardkit")
+            .await
+            .expect("fetch visible CardKit representation");
+
+        assert_eq!(message.text, "CardKit 最终结论");
+        assert_eq!(message_reads.load(Ordering::SeqCst), 2);
         task.abort();
     }
 
@@ -3909,6 +4268,39 @@ mod tests {
 
         let plain = serde_json::json!({"text": "plain text"});
         assert_eq!(extract_feishu_message_text(&plain, &mentions), "plain text");
+    }
+
+    #[test]
+    fn card_text_extraction_keeps_visible_content_and_skips_actions() {
+        let card = serde_json::json!({
+            "schema": "2.0",
+            "header": {"title": {"tag": "plain_text", "content": "分析结果"}},
+            "body": {"elements": [
+                {"tag": "markdown", "content": "结论：选择方案 A"},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "确认"}, "url": "https://secret.example"},
+                {"tag": "collapsible_panel", "header": {"title": {"tag": "plain_text", "content": "证据"}}, "elements": [
+                    {"tag": "markdown", "content": "测试全部通过"}
+                ]}
+            ]}
+        });
+        assert_eq!(
+            extract_feishu_card_text(&card),
+            "分析结果\n结论：选择方案 A\n证据\n测试全部通过"
+        );
+        assert!(!extract_feishu_card_text(&card).contains("secret.example"));
+    }
+
+    #[test]
+    fn message_read_permission_help_is_actionable() {
+        assert!(is_feishu_message_read_permission_error(
+            230027,
+            "Lack of necessary permissions"
+        ));
+        let help = feishu_message_read_permission_help(Some("cli_test"));
+        assert!(help.contains("cli_test"));
+        assert!(help.contains("im:message:readonly"));
+        assert!(help.contains("im:message.group_msg"));
+        assert!(help.contains("创建并发布新版本"));
     }
 
     #[test]

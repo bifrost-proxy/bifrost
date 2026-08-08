@@ -322,7 +322,7 @@ async fn prepare_group_dispatch_covers_ambient_commands_triggers_and_duplicates(
 }
 
 #[tokio::test]
-async fn prepare_group_dispatch_directly_replies_when_quoted_message_is_unavailable() {
+async fn prepare_group_dispatch_surfaces_quoted_message_read_failures() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
     let client =
@@ -333,26 +333,12 @@ async fn prepare_group_dispatch_directly_replies_when_quoted_message_is_unavaila
     let mut trigger = group_test_event(&provider.id, "reply", "@_user_1", true, 1);
     trigger.message.as_mut().unwrap().parent_id = Some("invisible-parent".to_string());
 
-    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &trigger, &store, false)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        dispatch.direct_reply.as_deref(),
-        Some("我无法看到你引用的这条消息内容，请重新发送这条消息，或把内容补充到 @ 后面。")
-    );
-    assert!(dispatch.group_turn_id.is_some());
-    assert!(dispatch
-        .message_text
-        .contains("不在当前机器人的本地群消息账本中"));
-
-    let reopened = ImGroupContextStore::new(temp.path());
-    let recovered = prepare_group_inbound_dispatch(&client, &provider, &trigger, &reopened, false)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(recovered.direct_reply, dispatch.direct_reply);
-    assert_eq!(recovered.group_turn_id, dispatch.group_turn_id);
+    let error =
+        match prepare_group_inbound_dispatch(&client, &provider, &trigger, &store, false).await {
+            Err(error) => error,
+            Ok(_) => panic!("authoritative Feishu read failure must be visible"),
+        };
+    assert!(error.contains("feishu token request failed"));
 }
 
 #[tokio::test]

@@ -1176,6 +1176,7 @@ pub(super) async fn codex_fast_commands_cover_busy_idle_modes_and_rejections() {
                 event: &idle_event,
                 message_log_store: &service.message_log_store,
                 agent_session_manager: &service.agent_session_manager,
+                queue_manager: &service.queue_manager,
             },
         )
         .await
