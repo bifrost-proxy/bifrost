@@ -3,6 +3,19 @@ set -euo pipefail
 
 unset BIFROST_DETACHED_DAEMON_CHILD BIFROST_EXTERNAL_CLI_WORKER
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+export CARGO_NET_OFFLINE="${CARGO_NET_OFFLINE:-true}"
+
+# Fail closed for network access. This scenario is self-contained and must only
+# reach its loopback Feishu fixture and loopback Bifrost API. Any accidental
+# public request is sent to a closed local port instead of reaching the network.
+export HTTP_PROXY=http://127.0.0.1:9
+export HTTPS_PROXY=http://127.0.0.1:9
+export ALL_PROXY=http://127.0.0.1:9
+export NO_PROXY=127.0.0.1,localhost
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export all_proxy="$ALL_PROXY"
+export no_proxy="$NO_PROXY"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"

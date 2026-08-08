@@ -81,6 +81,23 @@ async fn fetch_message_reads_original_interactive_card_content() {
 }
 
 #[tokio::test]
+async fn fetch_message_restores_mentions_from_rest_string_ids() {
+    let (base_url, task) = spawn_message_api(
+        r#"{"code":0,"data":{"items":[{"message_id":"om_text","chat_id":"oc_group","msg_type":"text","sender":{"id":"ou_sender","sender_type":"user"},"mentions":[{"key":"@_user_1","id":"ou_alice","id_type":"open_id","name":"Alice"}],"body":{"content":"{\"text\":\"@_user_1 please review\"}"}}]}}"#,
+    )
+    .await;
+    let message = FeishuProvider::new()
+        .fetch_message(&config(base_url), "om_text")
+        .await
+        .expect("fetch referenced text mention");
+    assert_eq!(message.text, "@_user_1 please review");
+    assert_eq!(message.mentions.len(), 1);
+    assert_eq!(message.mentions[0].open_id.as_deref(), Some("ou_alice"));
+    assert_eq!(message.mentions[0].name.as_deref(), Some("Alice"));
+    task.abort();
+}
+
+#[tokio::test]
 async fn fetch_message_permission_error_explains_required_scopes_and_publish_step() {
     let (base_url, task) =
         spawn_message_api(r#"{"code":230027,"msg":"Lack of necessary permissions"}"#).await;

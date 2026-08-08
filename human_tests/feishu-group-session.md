@@ -245,7 +245,7 @@
 3. 执行确定性 mailbox 单元测试：旧 runner 通过最后一次 Queue 检查后关闭 receiver；分别在关闭前成功送达一条事件、关闭后 sender 失败时送达一条事件；随后处理 completion。
 4. 检查事件顺序、dedup 状态和后续 Runner 调用次数。
 
-预期结果：关闭前已送达但未消费、以及关闭后到达的事件都按原顺序交回 Provider 主循环。引用触发实际产生第九个 Prompt 和新的 Runner，不会遗留在内存 Queue 中，也不需要再发送一条消息才能执行。
+预期结果：关闭前已送达但未消费、以及关闭后到达的事件都按原顺序交回 Provider 主循环。当前完整脚本中引用触发实际产生第十个 Prompt，并把 Runner 生命周期事件从 18 增加到 20；不会遗留在内存 Queue 中，也不需要再发送一条消息才能执行。
 
 ## 执行方式
 
@@ -379,11 +379,11 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin completion_replay_removes_unco
 SKIP_BUILD=true bash e2e-tests/tests/test_feishu_group_session_context.sh
 ```
 
-执行记录：2026-08-08 PASS。确定性单元测试同时覆盖关闭前已送达事件和关闭后 sender 失败事件，completion 按原顺序回放且清除已送达事件的 dedup；最新 debug 二进制连续执行 5 次 `test_feishu_group_session_context.sh` 均输出 `[feishu-group-session] PASS`，每次引用触发都生成第九个 Prompt 和第 18 个 Runner 生命周期事件。CI production release 会明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不能用测试凭证误连官方飞书接口；URL 规范化、引用读取和权限错误矩阵由 release-safe 单元测试覆盖。
+执行记录：2026-08-08 PASS。确定性单元测试同时覆盖关闭前已送达事件和关闭后 sender 失败事件，completion 按原顺序回放且清除已送达事件的 dedup；最新 debug 二进制连续执行 5 次 `test_feishu_group_session_context.sh` 均输出 `[feishu-group-session] PASS`。加入忙时第二条队列场景后，每次引用触发均生成第十个 Prompt，并把 Runner 生命周期事件从 18 增加到 20；最终卡片引用完成后合计 11 个 Prompt、22 个 Runner 生命周期事件。CI production release 会明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不能用测试凭证误连官方飞书接口；URL 规范化、引用读取和权限错误矩阵由 release-safe 单元测试覆盖。
 
-执行记录：2026-08-08 PASS。使用最新 debug 二进制、两个独立 Provider、两个 `127.0.0.1` 假飞书 OpenAPI 和本地 mock Runner 真实执行，脚本输出 `[feishu-group-session] PASS`。测试进程同时设置 HTTP(S)/ALL proxy=`127.0.0.1:9`、NO_PROXY=`127.0.0.1,localhost`，未直连任何公网域名；验证无 @ slash 广播、有 @ 定向隔离且未提及 Provider 零入账、普通成员 mention 入账、另一个机器人卡片只提取可见正文、权限错误、忙时两条队列及裸 `/q` 查询、`/pwd`/`/runner`，并在 durable Turn 完成后、不等待 Session idle 就注入引用消息以覆盖 Runner 收尾 mailbox 回放。
+执行记录：2026-08-08 PASS。使用最新 debug 二进制、两个独立 Provider、两个 `127.0.0.1` 假飞书 OpenAPI 和本地 mock Runner 真实执行，脚本输出 `[feishu-group-session] PASS`。两个假 OpenAPI 先各自保留动态 listener 再发布端口，Bifrost 端口具备碰撞检测与最多 5 次 ready 重试。测试进程同时设置 HTTP(S)/ALL proxy=`127.0.0.1:9`、NO_PROXY=`127.0.0.1,localhost`，未直连任何公网域名；验证无 @ slash 广播、有 @ 定向隔离且未提及 Provider 零入账、普通成员 mention（包括带 `parent_id` 的人类 mention 回复）入账、REST 字符串 `open_id` mention 恢复、另一个机器人卡片只提取可见正文、权限错误、忙时两条队列及裸 `/q` 查询、`/pwd`/`/runner`，并在 durable Turn 完成后、不等待 Session idle 就注入引用消息以覆盖 Runner 收尾 mailbox 回放。新增 `reply_that_mentions_a_human_remains_ambient` 与 `fetch_message_restores_mentions_from_rest_string_ids` 回归单测均 1/1 通过。
 
-执行记录：2026-08-07 PASS。真实启动最新 debug 二进制与假飞书 OpenAPI，验证一次建群、同 `message_id` 重投、非 owner 群聊命令、欢迎消息、SQLite 幂等记录和 `/help` 文案；脚本输出 `[feishu-new-group-command] PASS`，退出后自动清理临时进程与目录。CI 广域 Shell 矩阵复用 release 二进制时，脚本明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不可为了假服务放宽生产飞书域名白名单；请求形状与错误矩阵继续由 release 同源单元测试覆盖。
+执行记录：2026-08-08 PASS。真实启动最新 debug 二进制与假飞书 OpenAPI，验证一次建群、同 `message_id` 重投、非 owner 群聊命令、欢迎消息、SQLite 幂等记录和 `/help` 文案；脚本输出 `[feishu-new-group-command] PASS`，退出后自动清理临时进程与目录。该脚本与群会话脚本统一设置 `CARGO_NET_OFFLINE=true`、HTTP(S)/ALL proxy=`127.0.0.1:9`、NO_PROXY=`127.0.0.1,localhost`，只访问 loopback。CI 广域 Shell 矩阵复用 release 二进制时，脚本明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不可为了假服务放宽生产飞书域名白名单；请求形状与错误矩阵继续由 release 同源单元测试覆盖。
 
 ## 清理步骤
 

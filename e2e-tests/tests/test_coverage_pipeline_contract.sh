@@ -51,6 +51,9 @@ while IFS= read -r feishu_loopback_test; do
   grep -Fq 'target/release/bifrost.exe' "$feishu_loopback_test"
   grep -Fq 'SKIP fake OpenAPI: release build rejects Feishu loopback by design' \
     "$feishu_loopback_test"
+  grep -Fq 'CARGO_NET_OFFLINE' "$feishu_loopback_test"
+  grep -Fq 'HTTP_PROXY=http://127.0.0.1:9' "$feishu_loopback_test"
+  grep -Fq 'NO_PROXY=127.0.0.1,localhost' "$feishu_loopback_test"
 done < <(rg -l 'BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1' e2e-tests/tests --glob 'test_*.sh')
 
 grep -Fq 'cargo llvm-cov show-env --sh' "$coverage_all"

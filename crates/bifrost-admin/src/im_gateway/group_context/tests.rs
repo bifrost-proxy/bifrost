@@ -330,6 +330,35 @@ fn mention_only_reply_uses_quoted_message_instead_of_help() {
 }
 
 #[test]
+fn reply_that_mentions_a_human_remains_ambient() {
+    let bot = FeishuBotIdentity {
+        open_id: "ou_bot".to_string(),
+        name: Some("Bifrost".to_string()),
+    };
+    let human_mention = ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_alice".to_string()),
+        name: Some("Alice".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    };
+    let mut event = group_event(
+        "human-reply",
+        "c1",
+        "u1",
+        "@_user_1 please review",
+        vec![human_mention],
+        1,
+    );
+    event.message.as_mut().unwrap().parent_id = Some("quoted".to_string());
+
+    assert_eq!(
+        classify_group_message(event.message.as_ref().unwrap(), Some(&bot), false),
+        GroupMessageDisposition::Ambient
+    );
+}
+
+#[test]
 fn mention_rendering_replaces_longer_placeholder_first() {
     let mentions = vec![
         ImMention {

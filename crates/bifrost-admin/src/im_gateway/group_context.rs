@@ -817,17 +817,13 @@ pub fn classify_group_message(
         .mentions
         .iter()
         .any(|mention| mention_matches_current_bot(mention, bot_identity));
-    // A slash command without mentions is broadcast. A slash/reference whose
+    // A slash command without mentions is broadcast. A mentioned slash whose
     // mentions do not include this provider is explicitly addressed elsewhere.
-    // Ordinary prose may mention human members, so it remains ambient unless
-    // synthetic/debug metadata positively identifies another bot.
+    // Ordinary prose, including a reply that mentions human members, remains
+    // ambient unless synthetic/debug metadata positively identifies a bot.
     if has_mentions && !mentions_bot {
         let without_mentions = strip_all_mentions(&message.text, &message.mentions);
         let explicitly_addressed = without_mentions.trim_start().starts_with('/')
-            || message
-                .parent_id
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
             || message.mentions.iter().any(|mention| mention.is_bot);
         return if explicitly_addressed {
             GroupMessageDisposition::AddressedElsewhere

@@ -2419,8 +2419,10 @@ fn parse_feishu_mentions(value: Option<&serde_json::Value>) -> Vec<ImMention> {
                 .to_string(),
             open_id: mention
                 .get("id")
-                .and_then(|id| id.get("open_id"))
-                .and_then(serde_json::Value::as_str)
+                .and_then(|id| {
+                    id.as_str()
+                        .or_else(|| id.get("open_id").and_then(serde_json::Value::as_str))
+                })
                 .map(str::to_string),
             name: mention
                 .get("name")

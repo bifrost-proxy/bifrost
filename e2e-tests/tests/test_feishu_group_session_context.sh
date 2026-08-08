@@ -4,6 +4,7 @@ set -euo pipefail
 unset BIFROST_DETACHED_DAEMON_CHILD
 unset BIFROST_EXTERNAL_CLI_WORKER
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+export CARGO_NET_OFFLINE="${CARGO_NET_OFFLINE:-true}"
 
 # Hard fail closed for network access: this scenario must only reach the two
 # loopback Feishu fixtures and the loopback Bifrost API. Any accidental public
@@ -42,27 +43,18 @@ BIFROST_LOG="$TEST_DIR/bifrost.log"
 PROMPT_LOG="$TEST_DIR/group-prompts.jsonl"
 RUN_LOG="$TEST_DIR/runner-events.jsonl"
 CONCURRENT_RELEASE="$TEST_DIR/concurrent-release"
-FEISHU_MOCK_PORT="$(python3 - <<'PY'
+FEISHU_MOCK_PORT_FILE="$TEST_DIR/feishu-mock.port"
+FEISHU_MOCK_B_PORT_FILE="$TEST_DIR/feishu-mock-b.port"
+REQUESTED_BIFROST_PORT="${BIFROST_PORT:-}"
+
+choose_loopback_port() {
+  python3 - <<'PY'
 import socket
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
     sock.bind(("127.0.0.1", 0))
     print(sock.getsockname()[1])
 PY
-)"
-FEISHU_MOCK_B_PORT="$(python3 - <<'PY'
-import socket
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-)"
-BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
-import socket
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-)}"
+}
 START_EXTRA_ARGS=()
 if [[ "$(uname -s)" != "Linux" ]]; then
   START_EXTRA_ARGS+=(--no-tray)
@@ -89,12 +81,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 - "$FEISHU_MOCK_PORT" <<'PY' &
+python3 - "$FEISHU_MOCK_PORT_FILE" <<'PY' &
 import json
+import pathlib
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-port = int(sys.argv[1])
+port_file = pathlib.Path(sys.argv[1])
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -146,11 +139,14 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json({"code": 404, "msg": "not found"})
 
-ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port_file.write_text(str(server.server_address[1]), encoding="utf-8")
+server.serve_forever()
 PY
 FEISHU_MOCK_PID=$!
-python3 - "$FEISHU_MOCK_B_PORT" <<'PY' &
+python3 - "$FEISHU_MOCK_B_PORT_FILE" <<'PY' &
 import json
+import pathlib
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -178,9 +174,25 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json({"code": 404, "msg": "not found"})
 
-ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+pathlib.Path(sys.argv[1]).write_text(str(server.server_address[1]), encoding="utf-8")
+server.serve_forever()
 PY
 FEISHU_MOCK_B_PID=$!
+for _ in $(seq 1 80); do
+  if [[ -s "$FEISHU_MOCK_PORT_FILE" && -s "$FEISHU_MOCK_B_PORT_FILE" ]]; then
+    break
+  fi
+  kill -0 "$FEISHU_MOCK_PID" "$FEISHU_MOCK_B_PID" 2>/dev/null || {
+    echo "Feishu loopback fixture exited before reporting its port" >&2
+    exit 1
+  }
+  sleep 0.1
+done
+[[ -s "$FEISHU_MOCK_PORT_FILE" && -s "$FEISHU_MOCK_B_PORT_FILE" ]]
+FEISHU_MOCK_PORT="$(<"$FEISHU_MOCK_PORT_FILE")"
+FEISHU_MOCK_B_PORT="$(<"$FEISHU_MOCK_B_PORT_FILE")"
+[[ "$FEISHU_MOCK_PORT" != "$FEISHU_MOCK_B_PORT" ]]
 export BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1
 
 
@@ -190,9 +202,9 @@ wait_http() {
       "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" >/dev/null 2>&1; then
       return 0
     fi
+    kill -0 "$BIFROST_PID" 2>/dev/null || return 1
     sleep 0.25
   done
-  tail -160 "$BIFROST_LOG" >&2 || true
   return 1
 }
 
@@ -309,16 +321,40 @@ if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
-BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
-  --host 127.0.0.1 \
-  -p "$BIFROST_PORT" \
-  --unsafe-ssl \
-  --skip-cert-check \
-  --no-system-proxy \
-  "${START_EXTRA_ARGS[@]}" \
-  >"$BIFROST_LOG" 2>&1 &
-BIFROST_PID=$!
-wait_http
+BIFROST_READY=false
+for attempt in $(seq 1 5); do
+  if [[ -n "$REQUESTED_BIFROST_PORT" ]]; then
+    BIFROST_PORT="$REQUESTED_BIFROST_PORT"
+  else
+    BIFROST_PORT="$(choose_loopback_port)"
+    if [[ "$BIFROST_PORT" == "$FEISHU_MOCK_PORT" || "$BIFROST_PORT" == "$FEISHU_MOCK_B_PORT" ]]; then
+      continue
+    fi
+  fi
+  : >"$BIFROST_LOG"
+  BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
+    --host 127.0.0.1 \
+    -p "$BIFROST_PORT" \
+    --unsafe-ssl \
+    --skip-cert-check \
+    --no-system-proxy \
+    "${START_EXTRA_ARGS[@]}" \
+    >"$BIFROST_LOG" 2>&1 &
+  BIFROST_PID=$!
+  if wait_http; then
+    BIFROST_READY=true
+    break
+  fi
+  kill "$BIFROST_PID" >/dev/null 2>&1 || true
+  wait "$BIFROST_PID" >/dev/null 2>&1 || true
+  unset BIFROST_PID
+  [[ -z "$REQUESTED_BIFROST_PORT" ]] || break
+  echo "[feishu-group-session] Bifrost bind/start attempt $attempt failed; retrying" >&2
+done
+if [[ "$BIFROST_READY" != "true" ]]; then
+  tail -160 "$BIFROST_LOG" >&2 || true
+  exit 1
+fi
 
 python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" "$RUN_LOG" "$CONCURRENT_RELEASE" "$FEISHU_MOCK_PORT" "$FEISHU_MOCK_B_PORT" <<'PY'
 import json
@@ -517,7 +553,9 @@ fi
 inject chat-alpha user-alice Alice a11 "/status"
 inject chat-alpha user-alice Alice a11 "/status"
 inject chat-alpha user-bob Bob a12 "并发期间的普通背景消息"
+inject chat-alpha user-bob Bob a12human "@_user_1 请人工复核" true group a1 feishu-group-e2e ou_human
 wait_group_message_recorded a12
+wait_group_message_recorded a12human
 touch "$CONCURRENT_RELEASE"
 for _ in $(seq 1 160); do
   if [[ -f "$RUN_LOG" ]] && [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "18" ]]; then
@@ -680,7 +718,7 @@ messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages WHERE provider_id = 'feishu-group-e2e' "
     "AND chat_id IN ('chat-alpha', 'chat-beta') GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 18), ("chat-beta", 8)], messages
+assert messages == [("chat-alpha", 19), ("chat-beta", 8)], messages
 permission_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE trigger_message_id = 'a14'"
 ).fetchall()
