@@ -926,7 +926,17 @@ pub(super) async fn run_external_cli_agent_chat(
                 current_images = external_cli_images_from_chat_images(next_item.images);
                 current_files = next_item.files;
             }
-            None => break,
+            None => {
+                // This is the runner's last mailbox-consumption boundary. Close
+                // the receiver before the remaining session/progress cleanup so
+                // a same-session event cannot be accepted by a mailbox that no
+                // longer has a consumer. Events already accepted are drained by
+                // the task wrapper and replayed through the provider loop;
+                // later sends are buffered by SessionMailboxRegistry and replayed
+                // after the matching generation completes.
+                close_session_mailbox(ctx.rx);
+                break;
+            }
         };
     }
     if recorder.is_some() && !session.history_cleared {

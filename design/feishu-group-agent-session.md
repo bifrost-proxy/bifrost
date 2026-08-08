@@ -51,6 +51,7 @@ Provider 长连接只负责接收事件，不把全局接收器借给任何一�
 - Provider 主循环始终继续接收新事件；启动 Runner 只注册 mailbox 并派生 Session 任务，不在主循环内等待 Runner 完成。
 - Session 任务完成通知携带单调 generation。旧任务延迟完成时只能移除同 generation 的 mailbox，不能误删已经重建的新任务。
 - Provider 输入通道正常关闭时停止接收新消息，但等待已启动的 Session 任务完成并排空收尾消息；event-loop 被显式取消时才终止仍活跃的任务。异常取消或 panic 会释放 Session active 标记，避免永久 busy。
+- Runner 完成最后一次 Guide/Queue 检查、确认没有下一条消息后，必须立即关闭 mailbox receiver，再执行进度卡、历史和 Session 的异步收尾。关闭前已经送达但尚未消费的事件由 task wrapper 按顺序 drain；关闭后 sender 失败的事件由 registry 暂存，两类事件都在 completion 时交回 Provider 主循环。
 - mailbox receiver 关闭后的消息暂存在同 generation 的收尾队列；completion 先回放 receiver 中更早的缓冲消息，再回放关闭后消息并创建替代任务，不能因完成通知竞态而丢失或打乱同 Session 顺序。
 - 并发 E2E 使用显式 release 文件保持 mock Runner 活跃，并在释放前等待同 Session 的最后一条背景消息进入 SQLite 账本。测试不得依赖固定 sleep 恰好覆盖 CI 调度延迟，否则会把 Runner 已结束后的合法空闲态行为误报为活跃态审计回归。
 

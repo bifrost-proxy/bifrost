@@ -237,6 +237,15 @@
 
 预期结果：`/q` 列出当前线程的全部排队项和序号，空队列明确显示已清空；`/pwd` 输出群/线程有效工作目录；`/runner` 只输出当前有效 Runner，不再列出所有 Runner；三种查询均立即返回且不启动模型。`/q 后续任务` 仍加入当前线程队列。
 
+### TC-FGS-28：Runner 收尾期间到达的消息不会遗失
+
+1. 启动群会话真实服务脚本，完成 Alpha、Beta 和私聊的并发任务。
+2. 等 mock Runner 写入 `finish`、SQLite 群 Turn 进入终态后，立即向 Alpha 发送引用历史消息的 `@机器人` 触发，不额外等待进度卡或会话历史收尾。
+3. 执行确定性 mailbox 单元测试：旧 runner 通过最后一次 Queue 检查后关闭 receiver；分别在关闭前成功送达一条事件、关闭后 sender 失败时送达一条事件；随后处理 completion。
+4. 检查事件顺序、dedup 状态和后续 Runner 调用次数。
+
+预期结果：关闭前已送达但未消费、以及关闭后到达的事件都按原顺序交回 Provider 主循环。引用触发实际产生第九个 Prompt 和新的 Runner，不会遗留在内存 Queue 中，也不需要再发送一条消息才能执行。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -357,6 +366,15 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin fetch_message_ --lib -- --noca
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin card_text_extraction_keeps_visible_content_and_skips_actions --lib -- --nocapture
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin prepare_group_dispatch --lib -- --nocapture
 ```
+
+TC-FGS-28 的 Runner 收尾 mailbox 回放和真实引用触发执行：
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin completion_replay_removes_unconsumed_event_from_dedup_window --lib -- --nocapture
+SKIP_BUILD=true bash e2e-tests/tests/test_feishu_group_session_context.sh
+```
+
+执行记录：2026-08-08 PASS。确定性单元测试同时覆盖关闭前已送达事件和关闭后 sender 失败事件，completion 按原顺序回放且清除已送达事件的 dedup；最新 debug 二进制连续执行 5 次 `test_feishu_group_session_context.sh` 均输出 `[feishu-group-session] PASS`，每次引用触发都生成第九个 Prompt 和第 18 个 Runner 生命周期事件。
 
 执行记录：2026-08-08 PASS。上述定向测试验证广播/定向消费、未被 @ 的机器人不读取引用且不写本地账本、跨群引用拒绝、无参线程查询分类与空闲/忙碌输出、有效工作目录与 Runner 输出、原始 interactive 卡片、CardKit 二次读取、`230027` 权限指引和群分发读取失败路径；所有命令退出码为 0。随后用最新 `target/debug/bifrost`、临时数据目录和假飞书 OpenAPI 执行 `test_feishu_group_session_context.sh`，输出 `[feishu-group-session] PASS`，确认三个无参查询不启动 Runner，引用读取与权限错误均走真实服务链路。
 

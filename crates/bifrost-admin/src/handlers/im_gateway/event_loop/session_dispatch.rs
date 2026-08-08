@@ -26,6 +26,16 @@ pub(super) struct SessionDispatchResult {
     pub(super) delivered: bool,
 }
 
+pub(super) fn close_session_mailbox(receiver: &mut mpsc::UnboundedReceiver<ImEvent>) {
+    receiver.close();
+}
+
+pub(super) fn drain_session_mailbox(
+    receiver: &mut mpsc::UnboundedReceiver<ImEvent>,
+) -> VecDeque<ImEvent> {
+    std::iter::from_fn(|| receiver.try_recv().ok()).collect()
+}
+
 impl SessionMailboxRegistry {
     pub(super) fn new() -> Self {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
@@ -224,8 +234,8 @@ pub(super) fn spawn_external_cli_agent_chat(
             input,
         )
         .await;
-        session_rx.close();
-        let recovered_events = std::iter::from_fn(|| session_rx.try_recv().ok()).collect();
+        close_session_mailbox(&mut session_rx);
+        let recovered_events = drain_session_mailbox(&mut session_rx);
         guard.complete(recovered_events);
     });
     registry.register(session_key, generation, session_tx, task.abort_handle());
