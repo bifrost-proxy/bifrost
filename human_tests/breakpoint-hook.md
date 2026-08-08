@@ -469,6 +469,39 @@
 
 **实际结果：** 2026-08-07 执行 `SKIP_BUILD=true bash e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。localhost Web Origin 与 `tauri://localhost` 对 pending GET、resume POST 的 OPTIONS 均返回 204 和正确 allow-origin/allow-headers；带 Tauri Origin、cross-site fetch metadata 与有效 CSRF 的实际 resume 请求进入业务 409 phase mismatch，响应保留 Tauri allow-origin 且 pending 未被消费。
 
+---
+
+### TC-BP-23: Review 回归 - 搜索态、远端时钟、流式响应、规则上限、URL 路由与无 body 状态
+**目标：** 验证 PR review 暴露的六类边界已关闭，正常/搜索列表和 HTTP/HTTPS 代理行为保持一致。
+
+**步骤：**
+1. 执行 Breakpoint 决策、URL 路由和状态 framing 回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy response_breakpoint_buffers_only_known_safe_lengths -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy no_body_status_edits_remove_response_framing -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy plaintext_breakpoint_edited_url_ignores_stale_host_rule -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy plaintext_unknown_length_response_pauses_before_stream_eof -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy breakpoint_capture_limit_does_not_reduce_response_rule_buffer_limit -- --nocapture
+   ```
+2. 执行真实 Network UI 回归：
+   ```bash
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts --grep "Network detail edits"
+   ```
+3. request 暂停后进入 Fuzzy Search，搜索该 URL，确认搜索结果行继续显示淡黄色背景、阶段标签；退出搜索后状态不丢失。
+4. 在浏览器时钟比代理主机快 1 小时的模拟环境中刷新页面，打开断点详情并检查倒计时。
+5. 对未知 Content-Length 且不结束的响应确认先在 header 阶段进入 pending；将 status 改成 204 后恢复。
+6. 配置旧 host/path rewrite 规则，在 request breakpoint 中把 URL 改到另一个 upstream；另配置 response body replace，并把 Breakpoint capture limit 调小到响应体以下。
+
+**预期结果：**
+- SearchMode 与普通 Network 表都显示相同的 warning token 背景和 request/response 阶段；resume/timeout 后同步清除。
+- 倒计时使用 `deadline_at_ms - server_now_ms` 得到服务端剩余时间，再按浏览器本地经过时间递减；客户端与代理时钟偏差不会显示提前超时。
+- 未知长度响应不会为了捕获 body 等待 EOF；Breakpoint 先以 header-only 状态暂停，普通流仍可在恢复后继续。
+- `max_body_bytes` 只限制 Breakpoint 可编辑捕获，不降低独立的响应规则/script body-processing 上限。
+- 编辑后的绝对 URL 决定 host、port、scheme 和 path，不重新套用请求暂停前的 host/path rewrite。
+- status 改为 1xx、204 或 304 时清空 payload，并移除 `Content-Length` / `Transfer-Encoding`；Traffic 记录同步为最终状态且无响应 body。
+
+**实际结果：** 2026-08-07 按步骤执行 5 个聚焦 proxy 回归测试与真实 Network Playwright，全部通过。Fuzzy Search 中暂停行保留 warning token 背景和阶段标签；浏览器 `Date.now()` 人为快 1 小时后倒计时仍显示服务端剩余时间而非 `0.0s`。未知长度响应以 header-only 状态及时暂停；定长响应在 Network 详情中完成 response status/header/body 编辑。编辑 URL 后请求到达新 upstream 且不再套用旧 host/path rule；小 Breakpoint capture limit 不降低 response rule buffer limit；无 body 状态会清空 payload 和 framing headers。
+
 ## 清理步骤
 - 结束测试脚本后确认临时 Bifrost 进程、mock server、WebSocket probe 均已退出。
 - 删除临时 `BIFROST_DATA_DIR`。

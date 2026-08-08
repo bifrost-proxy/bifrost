@@ -1291,6 +1291,106 @@ pub(super) fn active_im_status_text_keeps_complete_overview_and_live_session_id(
 }
 
 #[test]
+pub(super) fn im_status_text_covers_context_fallbacks_goal_and_conversation_session() {
+    let provider = test_provider();
+    let context = bifrost_agent::StatusRuntimeContext {
+        agent_type: Some("Context Agent".to_string()),
+        runner_type: Some("claude-code".to_string()),
+        runner_id: Some("Claude Code".to_string()),
+        model: Some("claude-context".to_string()),
+        model_provider: Some("context-provider".to_string()),
+        model_reasoning_effort: Some("medium".to_string()),
+        model_reasoning_summary: Some("auto".to_string()),
+        external_conversation_id: Some(" conversation-fallback ".to_string()),
+        external_thread_id: Some("   ".to_string()),
+    };
+    let detail = bifrost_agent::SessionDetail {
+        session_key: "fallback-detail".to_string(),
+        user_id: None,
+        message_count: 2,
+        user_turn_count: 1,
+        created_at: 1,
+        last_active_at: 2,
+        compaction_count: 0,
+        total_tokens_used: None,
+        estimated_tokens: 42,
+        history_version: 3,
+        work_dir: None,
+        source: "im".to_string(),
+        agent_type: None,
+        runner_type: None,
+        runner_id: None,
+        model: None,
+        model_provider: None,
+        model_reasoning_effort: None,
+        model_reasoning_summary: None,
+        external_conversation_id: None,
+        external_thread_id: None,
+        metadata: None,
+        title: None,
+        messages: Vec::new(),
+        goal_status: Some("active".to_string()),
+        goal_objective: Some("verify the complete status fallback path".to_string()),
+        history_path: None,
+        has_timeline: false,
+        timeline_event_count: 0,
+        run_state: "idle".to_string(),
+    };
+    let text = build_im_status_text(
+        Some(&detail),
+        &context,
+        Some("/tmp/fallback-workdir"),
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "fallback-device",
+            session_key: "fallback-detail",
+            queue_info: "1 条排队消息",
+            status: "Ready",
+        },
+    );
+    assert!(text.contains("Runner 类型: claude-code"));
+    assert!(text.contains("模型: claude-context（context-provider）"));
+    assert!(text.contains("External Session ID**: `conversation-fallback`"));
+    assert!(text.contains("目标状态: active"));
+    assert!(text.contains("目标: verify the complete status fallback path"));
+
+    let running_new_session = build_im_status_text(
+        None,
+        &context,
+        None,
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "fallback-device",
+            session_key: "fallback-running",
+            queue_info: "无排队消息",
+            status: "Running",
+        },
+    );
+    assert!(running_new_session.contains("- **Workspace**: `N/A`"));
+    assert!(running_new_session.contains("- **Status**: Running"));
+    assert!(!running_new_session.contains("Ready（新会话）"));
+
+    let mut active = bifrost_agent::ActiveTurnStatus::new("active-fallback");
+    active.user_turn_count = 2;
+    active.external_thread_id = Some(" ".to_string());
+    let active_text = build_active_im_status_text(
+        &active,
+        &context,
+        Some("/tmp/active-fallback"),
+        &ImStatusChannelContext {
+            provider: &provider,
+            device_name: "fallback-device",
+            session_key: "active-fallback",
+            queue_info: "无排队消息",
+            status: "Running",
+        },
+    );
+    assert!(active_text.contains("- **Runner Type**: `claude-code`"));
+    assert!(active_text.contains("- **Workspace**: `/tmp/active-fallback`"));
+    assert!(active_text.contains("- **External Session ID**: `conversation-fallback`"));
+}
+
+#[test]
 pub(super) fn im_status_runtime_context_reads_persisted_runner_overrides_and_session_id() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let _env_guard = EnvGuard::set_data_dir(temp_dir.path());

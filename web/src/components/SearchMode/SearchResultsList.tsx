@@ -12,6 +12,7 @@ interface SearchResultsListProps {
   results: SearchResultItem[];
   keyword: string;
   selectedId?: string;
+  breakpointPhases?: Map<string, "request" | "response">;
   onSelect: (item: SearchResultItem) => void;
   onDoubleClick: (item: SearchResultItem) => void;
   onLoadMore: () => void;
@@ -133,6 +134,7 @@ export default function SearchResultsList({
   results,
   keyword,
   selectedId,
+  breakpointPhases,
   onSelect,
   onDoubleClick,
   onLoadMore,
@@ -207,17 +209,27 @@ export default function SearchResultsList({
           const item = results[virtualRow.index];
           const record = item.record;
           const isSelected = record.id === selectedId;
+          const breakpointPhase = breakpointPhases?.get(record.id);
           const hasRuleHit = (record.flags & TrafficFlags.HAS_RULE_HIT) !== 0;
 
           return (
             <div
               key={record.id}
+              data-testid="search-result-row"
+              data-record-id={record.id}
+              data-breakpoint-phase={breakpointPhase}
               style={{
                 ...styles.row,
                 transform: `translateY(${virtualRow.start}px)`,
-                backgroundColor: isSelected
-                  ? token.colorPrimaryBg
-                  : "transparent",
+                backgroundColor: breakpointPhase
+                  ? token.colorWarningBg
+                  : isSelected
+                    ? token.colorPrimaryBg
+                    : "transparent",
+                boxShadow:
+                  breakpointPhase && isSelected
+                    ? `inset 3px 0 ${token.colorPrimary}`
+                    : undefined,
               }}
               onClick={() => onSelect(item)}
               onDoubleClick={() => onDoubleClick(item)}
@@ -264,6 +276,15 @@ export default function SearchResultsList({
                   <ThunderboltOutlined
                     style={{ color: token.colorWarning, fontSize: 12 }}
                   />
+                )}
+                {breakpointPhase && (
+                  <Tag
+                    color="warning"
+                    data-testid={`search-breakpoint-${breakpointPhase}-indicator`}
+                    style={{ margin: 0, fontSize: 10, lineHeight: "16px" }}
+                  >
+                    Breakpoint · {breakpointPhase === "request" ? "Request" : "Response"}
+                  </Tag>
                 )}
                 <span
                   style={{

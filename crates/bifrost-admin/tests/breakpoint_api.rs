@@ -23,6 +23,7 @@ fn pending(request_id: &str, phase: &str) -> PendingBreakpoint {
         content_encoding: None,
         paused_at_ms: 1,
         deadline_at_ms: 2,
+        server_now_ms: 1,
     }
 }
 

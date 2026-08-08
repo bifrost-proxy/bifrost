@@ -13,7 +13,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
   const updateMetadata = useBreakpointStore((state) => state.updatePausedMetadata);
   const resume = useBreakpointStore((state) => state.resume);
   const [submitting, setSubmitting] = useState(false);
-  const remainingMs = Math.max(0, paused.deadlineAtMs - now);
+  const remainingMs = Math.max(0, paused.localDeadlineAtMs - now);
   const remainingLabel = useMemo(
     () => `${(remainingMs / 1000).toFixed(1)}s`,
     [remainingMs],

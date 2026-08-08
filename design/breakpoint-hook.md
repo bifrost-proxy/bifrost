@@ -20,7 +20,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 - 全局开关 `enabled=false` 时零开销，业务流量不产生 body clone、body collect、oneshot 等待或 breakpoint push。
 - 全局开关开启但当前请求未命中 `breakpoint://request` / `breakpoint://response` 规则时，不发生 pause，也不做 body collect。
 - 命中 `breakpoint://request` 时暂停 request（editable 或 header-only）；命中 `breakpoint://response` 时暂停 response；`breakpoint://request,response` 顺序触发两次。
-- 已在内存中的 body，或可在 `max_body_bytes` 内完整读取的未知长度 body，在解压后大小不超限且为 UTF-8 时允许 body 编辑；否则只允许 header-only pause。
+- Request 中已在内存里的 body，或可在 `max_body_bytes` 内完整读取的未知长度 body，在解压后大小不超限且为 UTF-8 时允许 body 编辑；response 只有明确安全 `Content-Length` 时才尝试捕获 body，未知长度 response 立即 header-only pause。
 - SSE response 仅在明确 `Content-Length` 且长度不超过 `max_body_bytes` 时允许缓存并进入 response breakpoint；未知长度或超过限制时保持原始 streaming。
 - Request 阶段允许修改 method、absolute URL（含 query）、有序重复 headers 和 body；response 阶段允许修改 status、headers 和 body。
 - `GET /api/breakpoint/pending` 暴露权威内存快照，WebUI 在首次连接、重连或刷新后恢复暂停状态，不依赖单次 push 是否送达。
@@ -106,11 +106,11 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 同样位于 `crates/bifrost-proxy/src/proxy/http/breakpoint.rs` 与 handler / tunnel 之间的钩子：
 
 1. 默认关闭、全局开关关闭或未命中 `breakpoint://response` 规则时，保持原有 response streaming/tee 快路径。
-2. 普通 response 不论是否声明 `Content-Length`，都只做 `max_body_bytes` 内的有界读取；完整读完则允许编辑，超过限制则进入 header-only pause 并重放原始流。
+2. 普通 response 仅在明确声明 `Content-Length` 且长度不超过 `max_body_bytes` 时读取并尝试允许 body 编辑；未知长度或已知超限时不等待 EOF，立即进入 header-only pause，resume 后重放原始流。
 3. gzip / deflate / br 等受支持的压缩正文以解压后的文本呈现，Apply 后按最终 `Content-Encoding` 重新编码；解压失败、解压后超限或二进制正文进入 header-only。
-4. SSE 只在明确长度且不超过上限时缓存；否则跳过 body breakpoint 继续 streaming。
+4. SSE 只在明确长度且不超过上限时缓存；否则以 header-only breakpoint 暂停，resume 后继续原始 streaming。
 5. response breakpoint 同样使用 `timeout_ms` 自动放行。
-6. body 被替换后才重新计算 `Content-Length`，否则保留原路径行为。
+6. body 被替换后才重新计算 `Content-Length`；status 被改为 1xx、204 或 304 时清空 payload 并移除 `Content-Length` / `Transfer-Encoding`。
 
 ### Admin API
 
@@ -132,7 +132,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 
 | Type | Data |
 | --- | --- |
-| `breakpoint_paused` | `{phase, request_id, method, url, status, headers, body, body_omitted, body_size, max_body_bytes}`，`phase` 为 `"request"` 或 `"response"`；`method` / `url` 仅 request 阶段填充，`status` 仅 response 阶段填充 |
+| `breakpoint_paused` | `{phase, request_id, method, url, status, headers, body, body_omitted, body_size, max_body_bytes, paused_at_ms, deadline_at_ms, server_now_ms}`，`phase` 为 `"request"` 或 `"response"`；`method` / `url` 仅 request 阶段填充，`status` 仅 response 阶段填充；UI 用服务端时间差换算本地倒计时，避免远端时钟偏差 |
 | `breakpoint_resumed` | `{request_id, phase, reason}`，`reason` 为 `resumed` 或 `timeout` |
 | `breakpoint_settings_updated` | `{enabled, max_body_bytes}` |
 | `settings_update(performance_config)` | 包含 `breakpoint.timeout_ms`、`timeout_min_ms`、`timeout_max_ms` |
@@ -146,9 +146,9 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 ### Web UI
 
 - Settings -> Performance 提供 Breakpoint Auto-Resume Timeout，说明无人 resume 时自动放行的应用场景，并使用后端返回的 min/max 渲染滑块。
-- `useBreakpointStore` 保存 `maxBodyBytes`、phase-specific paused snapshot、原始值/编辑值和 deadline；首次连接、重连及 resume 冲突后都会重新拉取 pending，并用 revision 避免旧 pending HTTP 响应覆盖更新的 push 状态。
+- `useBreakpointStore` 保存 `maxBodyBytes`、phase-specific paused snapshot、原始值/编辑值和 deadline；用 `deadline_at_ms - server_now_ms` 换算本地 deadline；首次连接、重连及 resume 冲突后都会重新拉取 pending，并用 revision 避免旧 pending HTTP 响应覆盖更新的 push 状态。
 - `pushService` 消费 `breakpoint_paused` payload：`body_omitted=true` 时不回退读取 TrafficDetail 里已有 body，避免把未捕获 body 误显示为可编辑。
-- Network 行显示 request/response 阶段暂停标识并整行使用 `colorWarningBg`；主题切换时虚拟列表 memo 因 token 变化重绘，resume/disabled/timeout 移除 pending 后背景同步消失，选中态使用 primary inset 而不覆盖警示背景。
+- Network 与 Fuzzy Search 结果行显示 request/response 阶段暂停标识并整行使用 `colorWarningBg`；主题切换时虚拟列表 memo 因 token 变化重绘，resume/disabled/timeout 移除 pending 后背景同步消失，选中态使用 primary inset 而不覆盖警示背景。
 - TrafficDetail 顶部显示阶段、倒计时、压缩编码和明确的 `Resume unchanged` / `Apply & Resume`；headers、query、request method/URL、response status 与可编辑 body 均在原详情内编辑。
 - TrafficDetail 在 header-only pause 时禁用 body 编辑，但保留 metadata 与 headers 编辑。
 - 全局 Breakpoint 开启且 CONNECT 命中 Breakpoint 规则时，在标准 TLS 端口自动触发 scoped TLS interception；显式 `tlsIntercept://false` 仍优先，UI 同时提示客户端必须信任 Bifrost CA。

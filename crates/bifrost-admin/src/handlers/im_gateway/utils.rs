@@ -466,24 +466,7 @@ pub(super) fn build_im_status_text(
                     status: channel.status,
                 },
             );
-            format!(
-                "{overview}\n\n会话诊断:\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 思考强度: {}\n- 思考摘要: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}{}",
-                agent_type,
-                runner_type,
-                runner_id,
-                model_text,
-                reasoning_effort_text,
-                reasoning_summary_text,
-                conversation_ref,
-                d.user_turn_count,
-                d.message_count,
-                bifrost_agent::format_status_metric_count(d.estimated_tokens.into()),
-                real,
-                d.compaction_count,
-                context_management_text,
-                d.history_version,
-                goal_info
-            )
+            format!("{overview}\n\n会话诊断:\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 思考强度: {}\n- 思考摘要: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}{}", agent_type, runner_type, runner_id, model_text, reasoning_effort_text, reasoning_summary_text, conversation_ref, d.user_turn_count, d.message_count, bifrost_agent::format_status_metric_count(d.estimated_tokens.into()), real, d.compaction_count, context_management_text, d.history_version, goal_info)
         }
         None => {
             let work_dir = default_work_dir.unwrap_or("N/A");
@@ -520,9 +503,7 @@ pub(super) fn build_im_status_text(
                     },
                 },
             );
-            format!(
-                "{overview}\n\n会话诊断:\n- 消息数: 0\n- 上下文管理: 尚未创建本地会话历史\n\n提示: 发送消息即可开始对话。"
-            )
+            overview + "\n\n会话诊断:\n- 消息数: 0\n- 上下文管理: 尚未创建本地会话历史\n\n提示: 发送消息即可开始对话。"
         }
     }
 }
@@ -619,23 +600,7 @@ fn build_im_status_overview(
     channel: &ImStatusChannelContext<'_>,
     overview: &ImStatusOverview<'_>,
 ) -> String {
-    format!(
-        "**Bifrost status**\n\n- **Provider**: {} (`{}`)\n- **Device**: {}\n- **Workspace**: `{}`\n- **Runner Type**: `{}`\n- **Runner ID**: `{}`\n- **Model**: `{}`\n- **Reasoning Effort**: `{}`\n- **Reasoning Summary**: `{}`\n- **Bound Session**: `{}`\n- **External Session ID**: `{}`\n- **Completed User Turns**: {}\n- **Queue**: {}\n- **Status**: {}",
-        inline_status_value(&channel.provider.display_name),
-        inline_status_value(&channel.provider.id),
-        inline_status_value(channel.device_name),
-        inline_status_value(overview.work_dir),
-        inline_status_value(overview.runner_type),
-        inline_status_value(overview.runner_id),
-        inline_status_value(overview.model_text),
-        inline_status_value(overview.reasoning_effort_text),
-        inline_status_value(overview.reasoning_summary_text),
-        inline_status_value(channel.session_key),
-        inline_status_value(overview.external_session_id),
-        overview.user_turn_count,
-        channel.queue_info,
-        overview.status,
-    )
+    format!("**Bifrost status**\n\n- **Provider**: {} (`{}`)\n- **Device**: {}\n- **Workspace**: `{}`\n- **Runner Type**: `{}`\n- **Runner ID**: `{}`\n- **Model**: `{}`\n- **Reasoning Effort**: `{}`\n- **Reasoning Summary**: `{}`\n- **Bound Session**: `{}`\n- **External Session ID**: `{}`\n- **Completed User Turns**: {}\n- **Queue**: {}\n- **Status**: {}", inline_status_value(&channel.provider.display_name), inline_status_value(&channel.provider.id), inline_status_value(channel.device_name), inline_status_value(overview.work_dir), inline_status_value(overview.runner_type), inline_status_value(overview.runner_id), inline_status_value(overview.model_text), inline_status_value(overview.reasoning_effort_text), inline_status_value(overview.reasoning_summary_text), inline_status_value(channel.session_key), inline_status_value(overview.external_session_id), overview.user_turn_count, channel.queue_info, overview.status)
 }
 
 fn external_session_id<'a>(
@@ -705,7 +670,7 @@ pub(super) fn resolve_im_status_runtime_context(
             model_config.reasoning_effort = Some(effort.to_string());
         }
     }
-    bifrost_agent::StatusRuntimeContext {
+    let status_context = bifrost_agent::StatusRuntimeContext {
         agent_type: Some("External Runner Agent".to_string()),
         runner_type: Some(effective.settings.adapter),
         runner_id: Some(effective.runner_id),
@@ -717,7 +682,8 @@ pub(super) fn resolve_im_status_runtime_context(
             .as_ref()
             .and_then(|state| state.external_conversation_id.clone()),
         external_thread_id: state.and_then(|state| state.external_thread_id),
-    }
+    };
+    status_context
 }
 
 pub(super) fn status_context_from_agent_runner(

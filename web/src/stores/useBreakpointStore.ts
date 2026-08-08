@@ -36,6 +36,7 @@ export interface PausedBreakpoint {
   contentEncoding?: string;
   pausedAtMs: number;
   deadlineAtMs: number;
+  localDeadlineAtMs: number;
 }
 
 type BreakpointPhase = "request" | "response";
@@ -98,6 +99,8 @@ const fromSnapshot = (data: SnapshotLike): PausedBreakpoint => {
     contentEncoding: data.content_encoding,
     pausedAtMs: data.paused_at_ms,
     deadlineAtMs: data.deadline_at_ms,
+    localDeadlineAtMs:
+      Date.now() + Math.max(0, data.deadline_at_ms - data.server_now_ms),
   };
 };
 

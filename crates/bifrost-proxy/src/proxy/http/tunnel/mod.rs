@@ -49,7 +49,9 @@ use super::body_metadata::{
     response_content_encoding, set_content_encoding_header, streaming_res_body_mode, BodyMode,
 };
 use super::breakpoint::breakpoint_tls_interception_required as bp_tls;
-use super::breakpoint::{apply_edited_status, body_limit, body_read_error_response};
+use super::breakpoint::{
+    apply_edited_response_status, body_read_error_response, response_breakpoint_can_buffer_body,
+};
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
     maybe_inject_devtools_bridge_html, take_devtools_client_req_id,
@@ -1486,10 +1488,7 @@ async fn tls_intercept_tunnel_with_cancel(
             return Err(BifrostError::Tls(format!("TLS accept failed: {e}")));
         }
     };
-    let client_alpn = client_tls.get_ref().1.alpn_protocol().map(|p| p.to_vec());
-    // HTTP/1.1 clients are allowed to omit ALPN. Windows Schannel commonly
-    // does so for IP-address targets, so sniff the first decrypted payload
-    // before deciding that an ALPN-less connection is non-HTTP.
+    let client_alpn = client_tls.get_ref().1.alpn_protocol().map(|p| p.to_vec()); // HTTP/1.1 may omit ALPN, notably Schannel for IP targets.
     let should_sniff_payload =
         client_alpn.is_none() || !is_standard_tls_intercept_port(original_port);
 
@@ -2778,9 +2777,7 @@ async fn handle_intercepted_request_with_protocol(
                                 request_body_omitted_for_breakpoint = true;
                                 streaming_body = Some(replay_body.boxed());
                             }
-                            Err(error) => {
-                                return Ok(body_read_error_response(error));
-                            }
+                            Err(error) => return Ok(body_read_error_response(error)),
                         }
                     } else {
                         request_body_omitted_for_breakpoint = true;
@@ -3957,21 +3954,17 @@ async fn handle_intercepted_request_with_protocol(
                 && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
         })
         .unwrap_or(false);
-    let enabled = response_breakpoint_enabled;
-    let limit = body_limit(&admin_state, enabled, max_body_buffer_size);
-    let max_body_buffer_size = limit;
-    let response_breakpoint_can_buffer_body = response_breakpoint_enabled
-        && !is_websocket
-        && !is_sse
-        && !skip_binary_recording
-        && admin_state
-            .as_ref()
-            .map(|state| {
-                res_content_length
-                    .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
-                    .unwrap_or(true)
-            })
-            .unwrap_or(false);
+    let breakpoint_max_body_bytes = admin_state
+        .as_ref()
+        .map_or(0, |state| state.breakpoint_manager.max_body_bytes());
+    let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(
+        response_breakpoint_enabled,
+        is_websocket,
+        is_sse,
+        skip_binary_recording,
+        res_content_length,
+        breakpoint_max_body_bytes,
+    );
     let response_breakpoint_header_only = response_breakpoint_enabled
         && !is_websocket
         && !is_sse
@@ -4285,7 +4278,29 @@ async fn handle_intercepted_request_with_protocol(
                 &mut ignored_body,
             )
             .await;
-            apply_edited_status(&mut res_parts.status, outcome.status);
+            let no_body = apply_edited_response_status(&mut res_parts, &method_str, outcome.status);
+            if let Some(ref state) = admin_state {
+                let final_status = res_parts.status.as_u16();
+                let final_headers = super::headers_to_pairs(&res_parts.headers);
+                let final_content_type = res_parts
+                    .headers
+                    .get(hyper::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                state.update_traffic_by_id(&record_id, move |record| {
+                    record.status = final_status;
+                    record.content_type = final_content_type.clone();
+                    record.response_headers = Some(final_headers.clone());
+                    if no_body {
+                        record.response_size = 0;
+                        record.download_bytes = 0;
+                        record.response_body_ref = None;
+                    }
+                });
+            }
+            if no_body {
+                return Ok(Response::from_parts(res_parts, full_body(Bytes::new())));
+            }
         }
 
         if is_sse {
@@ -4388,9 +4403,11 @@ async fn handle_intercepted_request_with_protocol(
                     )
                     .await;
 
-                    apply_edited_status(&mut res_parts.status, outcome.status);
-
-                    if outcome.body_replaced {
+                    let no_body =
+                        apply_edited_response_status(&mut res_parts, &method_str, outcome.status);
+                    if no_body {
+                        final_body = Bytes::new();
+                    } else if outcome.body_replaced {
                         normalize_res_headers(
                             &mut res_parts,
                             buffered_res_body_mode(
@@ -5074,7 +5091,9 @@ async fn handle_intercepted_request_with_protocol(
             &mut final_body,
         )
         .await;
-        apply_edited_status(&mut res_parts.status, outcome.status);
+        if apply_edited_response_status(&mut res_parts, &method_str, outcome.status) {
+            final_body = Bytes::new();
+        }
     }
 
     normalize_res_headers(
@@ -12345,6 +12364,71 @@ mod coverage_90_wave {
         assert_eq!(response.status().as_u16(), 219);
         assert_eq!(response.headers()["x-header-only"], "yes");
         assert_eq!(body_bytes(response).await, Bytes::from(large_body));
+    }
+
+    #[tokio::test]
+    async fn intercepted_header_only_response_breakpoint_no_content_clears_body_and_record() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19461)
+            .build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 4,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/large-no-content"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain")
+                    .set_body_string("large-response-must-be-removed"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("response")],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("/large-no-content")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_intercepted_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+        wait_for_breakpoint(&state).await;
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                "REQ-tunnel-coverage",
+                "response",
+                BreakpointEdit {
+                    status: Some(204),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        assert!(!response.headers().contains_key(header::TRANSFER_ENCODING));
+        assert!(body_bytes(response).await.is_empty());
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("tunnel no-content traffic record");
+        assert_eq!(record.status, 204);
+        assert_eq!(record.response_size, 0);
+        assert_eq!(record.download_bytes, 0);
+        assert!(record.response_body_ref.is_none());
     }
 
     #[test]

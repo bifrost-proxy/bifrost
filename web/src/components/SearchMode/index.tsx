@@ -46,12 +46,14 @@ interface SearchModeProps {
   onSelect: (record: TrafficSummary) => void;
   onDoubleClick: (record: TrafficSummary) => void;
   selectedId?: string;
+  breakpointPhases?: Map<string, "request" | "response">;
 }
 
 export default function SearchMode({
   onSelect,
   onDoubleClick,
   selectedId,
+  breakpointPhases,
 }: SearchModeProps) {
   const { token } = theme.useToken();
 
@@ -447,6 +449,7 @@ export default function SearchMode({
             results={results}
             keyword={keyword}
             selectedId={selectedId}
+            breakpointPhases={breakpointPhases}
             onSelect={handleResultSelect}
             onDoubleClick={handleResultDoubleClick}
             onLoadMore={handleLoadMore}
