@@ -54,6 +54,7 @@
 |---------|---------|------|---------|------|
 | Q001 | 单个请求头 | `test.com reqHeaders://(X-Custom: value)` | 请求包含自定义头 | ✅ |
 | Q002 | 多个请求头 | `test.com reqHeaders://{"X-A":"1","X-B":"2"}` | 请求包含两个头 | ✅ |
+| Q002a | `&` 分隔多个请求头 | `test.com reqHeaders://(X-A=1&X-B=2)` | 请求包含两个独立头 | ✅ |
 | Q003 | 覆盖已有头 | `test.com reqHeaders://(Accept: text/plain)` | Accept 被覆盖 | ✅ |
 | Q004 | 模板变量 | `test.com reqHeaders://(X-UUID: ${randomUUID})` | 头部包含有效 UUID | ✅ |
 

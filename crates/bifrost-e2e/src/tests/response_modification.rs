@@ -28,6 +28,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_res_headers_multiple,
         ),
         TestCase::standalone(
+            "res_headers_ampersand_separated",
+            "ResHeaders protocol: ampersand-separated inline header map",
+            "response_modification",
+            test_res_headers_ampersand_separated,
+        ),
+        TestCase::standalone(
             "res_headers_override",
             "ResHeaders protocol: later rule overrides earlier",
             "response_modification",
@@ -173,6 +179,32 @@ async fn test_res_headers_multiple() -> Result<(), String> {
         &format!("test.local host://127.0.0.1:{}", mock.port),
         "test.local resHeaders://X-Header-A=value-a",
         "test.local resHeaders://X-Header-B=value-b",
+    )?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    result.assert_header("x-header-a", "value-a")?;
+    result.assert_header("x-header-b", "value-b")?;
+
+    Ok(())
+}
+
+async fn test_res_headers_ampersand_separated() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "ok");
+
+    let (port, _proxy) = start_proxy_with_rules!(
+        &format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local resHeaders://(X-Header-A=value-a&X-Header-B=value-b)",
     )?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -613,6 +645,12 @@ mod tests {
     #[tokio::test]
     async fn test_headers_override() {
         let result = test_res_headers_override().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_ampersand_separated() {
+        let result = test_res_headers_ampersand_separated().await;
         assert!(result.is_ok(), "Test failed: {:?}", result.err());
     }
 

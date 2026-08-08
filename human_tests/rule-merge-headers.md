@@ -202,6 +202,33 @@ cargo run -p bifrost-e2e -- --test req_headers_json_object
 - E2E mock upstream 收到 `x-tt-env: ppe_next_agent_new`、`x-use-ppe: 1`、`x-tt-env-fe: dev`。
 - malformed JSON object 不会回退到旧冒号拆分路径生成非法 header name。
 
+### TC-RMH-08: reqHeaders 使用 `&` 写入多个独立 Header（用户反馈回归）
+
+**操作步骤**：
+1. 运行共享 Header parser 单元测试：
+```bash
+cargo test -p bifrost-core rule_headers -- --nocapture
+```
+2. 运行与用户截图配置等价的真实代理 E2E：
+```bash
+cargo run -p bifrost-e2e -- --test req_headers_ampersand_separated
+cargo run -p bifrost-e2e -- --test res_headers_ampersand_separated
+```
+3. 运行请求 Header 规则夹具：
+```bash
+cd e2e-tests
+BIFROST_DATA_DIR=./.bifrost-e2e-header-ampersand \
+  BIFROST_BIN="$(cd .. && pwd)/target/debug/bifrost" \
+  ./test_rules.sh -p 18808 --use-binary rules/request_modify/headers.txt
+```
+
+**预期结果**：
+- `reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)` 被解析为三个独立 Header。
+- mock upstream 分别收到 `x-tt-env: ppe_doubao_connect_lark`、`x-flow-env: ppe_doubao_connect_lark`、`x-use-ppe: 1`。
+- `x-tt-env` 的值不包含 `&x-flow-env=...` 或 `&x-use-ppe=...`。
+- `resHeaders://(X-Header-A=value-a&X-Header-B=value-b)` 同样产生两个独立响应 Header。
+- JSON、多行 Values 和单 Header 旧写法继续通过同一组回归测试。
+
 ## 清理步骤
 
 1. 停止本地 HTTPS 回显服务

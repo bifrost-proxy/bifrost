@@ -12,6 +12,7 @@
 
 ```
 pattern reqHeaders://key=value                    # 内联格式（单个头）
+pattern reqHeaders://(key1=value1&key2=value2)    # & 分隔格式（多个头）
 pattern reqHeaders://(key1: value1)               # 小括号格式（可包含空格）
 pattern reqHeaders://{"key1":"value1","key2":"value2"} # JSON 对象格式（多个头，不能包含未包裹空格）
 pattern reqHeaders://({"key1":"value with space"}) # 小括号 JSON 格式（可包含空格）

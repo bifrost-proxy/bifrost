@@ -63,7 +63,7 @@ pattern params://foo=1&bar=2
 - 键为空时忽略该对
 - 值可以为空（如 `flag=`）
 
-> ⚠️ **重要**：`&` 拆分仅对 `urlParams`、`params` 这类查询参数协议生效。对 `reqHeaders`、`reqCookies`、`resCookies` 而言，`&` **不是分隔符**：`reqHeaders://X-Custom=test&X-Another=value` 会设置单个请求头 `x-custom: test&X-Another=value`，`reqCookies://session=abc123&user=test` 会设置单个 cookie 值 `session=abc123&user=test`。要设置多个 header/cookie，请使用行格式（每行一个 `Header: value`，例如通过内嵌值块引用）或合法 JSON 对象：
+> `reqHeaders` / `resHeaders` 的单行内联值也使用 `&` 拆分多个 Header，例如 `reqHeaders://(X-Custom=test&X-Another=value)` 会设置两个独立 Header。若 Header 值本身需要包含字面 `&`，请使用行格式（每行一个 `Header: value`，例如通过内嵌值块引用）或合法 JSON 对象。`reqCookies` / `resCookies` 不采用该 Header 分隔语义。
 
 ````txt
 ``` headers.txt

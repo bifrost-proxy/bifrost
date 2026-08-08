@@ -201,7 +201,7 @@ example.*/api/* file:///mock/$1/$2   # $1 = TLD, $2 = 路径
 /api\/v(\d+)\/users\/(\d+)/ reqHeaders://X-Version=$1 reqHeaders://X-ID=$2
 ```
 
-> `reqHeaders://` 不以 `&` 拆分多个 header：写成 `reqHeaders://X-Version=$1&X-ID=$2` 只会设置单个请求头 `X-Version: <值>&X-ID=<值>`（`&X-ID=...` 成为值的一部分）。要设置多个 header，请用多个独立的 `reqHeaders://` 操作（如上例），详见 operation.md。
+> `reqHeaders://` 支持用 `&` 拆分多个 Header：`reqHeaders://(X-Version=$1&X-ID=$2)` 会设置两个独立请求头。需要在 Header 值内保留字面 `&` 时，请使用 JSON 对象或多行 Values，详见 operation.md。
 
 ## 优先级
 

@@ -26,6 +26,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_req_headers_json_object,
         ),
         TestCase::standalone(
+            "req_headers_ampersand_separated",
+            "ReqHeaders protocol: ampersand-separated inline header map",
+            "request_modification",
+            test_req_headers_ampersand_separated,
+        ),
+        TestCase::standalone(
             "req_headers_override",
             "ReqHeaders protocol: later rule overrides earlier",
             "request_modification",
@@ -235,6 +241,33 @@ async fn test_req_headers_json_object() -> Result<(), String> {
     mock.assert_header_received("x-tt-env", "ppe_next_agent_new")?;
     mock.assert_header_received("x-use-ppe", "1")?;
     mock.assert_header_received("x-tt-env-fe", "dev")?;
+
+    Ok(())
+}
+
+async fn test_req_headers_ampersand_separated() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)".to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("x-tt-env", "ppe_doubao_connect_lark")?;
+    mock.assert_header_received("x-flow-env", "ppe_doubao_connect_lark")?;
+    mock.assert_header_received("x-use-ppe", "1")?;
 
     Ok(())
 }
@@ -648,6 +681,12 @@ mod tests {
     #[tokio::test]
     async fn test_headers_override() {
         let result = test_req_headers_override().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_ampersand_separated() {
+        let result = test_req_headers_ampersand_separated().await;
         assert!(result.is_ok(), "Test failed: {:?}", result.err());
     }
 

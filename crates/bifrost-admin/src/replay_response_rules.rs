@@ -1,4 +1,4 @@
-use bifrost_core::{Protocol, ResolvedRules};
+use bifrost_core::{parse_rule_header_pairs, Protocol, ResolvedRules};
 
 pub(crate) fn apply_response_rules(
     resolved_rules: &ResolvedRules,
@@ -25,7 +25,8 @@ pub(crate) fn apply_response_rules(
                 delete_res_headers.extend(parse_delete_value(&rule.resolved_value).res_headers);
             }
             Protocol::ResHeaders => {
-                res_headers.extend(parse_header_values(&rule.resolved_value));
+                res_headers
+                    .extend(parse_rule_header_pairs(&rule.resolved_value).unwrap_or_default());
             }
             Protocol::StatusCode | Protocol::ReplaceStatus => {
                 if let Ok(code) = rule.resolved_value.parse::<u16>() {
@@ -148,7 +149,8 @@ pub(crate) fn apply_websocket_response_header_rules(
                 delete_res_headers.extend(parse_delete_value(&rule.resolved_value).res_headers);
             }
             Protocol::ResHeaders => {
-                res_headers.extend(parse_header_values(&rule.resolved_value));
+                res_headers
+                    .extend(parse_rule_header_pairs(&rule.resolved_value).unwrap_or_default());
             }
             Protocol::HeaderReplace => {
                 header_replace.extend(parse_header_replace_value(&rule.resolved_value));
@@ -584,6 +586,19 @@ mod tests {
 
         assert_eq!(header(&headers, "X-Env"), Some("ppe"));
         assert_eq!(header(&headers, "X-Flag"), Some("1"));
+    }
+
+    #[test]
+    fn replay_response_rules_apply_ampersand_separated_headers() {
+        let rules = resolve(
+            "https://example.test/api resHeaders://(X-Env=ppe&X-Flag=1&X-Query=a%3D1%26b%3D2)",
+        );
+
+        let (_, headers, _) = apply_response_rules(&rules, 200, Vec::new(), None);
+
+        assert_eq!(header(&headers, "X-Env"), Some("ppe"));
+        assert_eq!(header(&headers, "X-Flag"), Some("1"));
+        assert_eq!(header(&headers, "X-Query"), Some("a%3D1%26b%3D2"));
     }
 
     #[test]

@@ -38,7 +38,7 @@
 
 | `old_doc` 条目 | 状态 | 规则夹具                                                                       | 说明                                           |
 | -------------- | ---- | ------------------------------------------------------------------------------ | ---------------------------------------------- |
-| `reqHeaders`   | ⚠️   | `request_modify/headers.txt`, `regression/rule_semantics_split_parsing.txt`    | 头部增删改已覆盖，但分词/复杂 value 仍属高风险 |
+| `reqHeaders`   | ⚠️   | `request_modify/headers.txt`, `regression/rule_semantics_split_parsing.txt`    | 头部增删改、JSON 与 `&` 分隔多头已覆盖，但其他复杂 value 仍属高风险 |
 | `reqBody`      | ✅   | `request_modify/body.txt`, `advanced/body_size_strategy.txt`                   | 已覆盖                                         |
 | `reqPrepend`   | ✅   | `request_modify/body.txt`, `advanced/body_size_strategy.txt`                   | 已覆盖                                         |
 | `reqAppend`    | ✅   | `request_modify/body.txt`, `advanced/body_size_strategy.txt`                   | 已覆盖                                         |

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bifrost_core::{
-    matcher::factory::pattern_uses_exact_forward_target_path, Protocol, RequestContext, Rule,
-    RulesResolver as CoreRulesResolver,
+    matcher::factory::pattern_uses_exact_forward_target_path, parse_rule_header_pairs, Protocol,
+    RequestContext, Rule, RulesResolver as CoreRulesResolver,
 };
 use bifrost_proxy::{
     DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ResolvedRules as ProxyResolvedRules, RuleValue,
@@ -499,7 +499,7 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 result.redirect_status = status;
             }
             Protocol::ReqHeaders => {
-                if let Some(headers) = parse_header_value(value) {
+                if let Some(headers) = parse_rule_header_pairs(value) {
                     for (k, v) in headers {
                         let key_lower = k.to_lowercase();
                         if !result
@@ -513,7 +513,7 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::ResHeaders => {
-                if let Some(headers) = parse_header_value(value) {
+                if let Some(headers) = parse_rule_header_pairs(value) {
                     for (k, v) in headers {
                         let key_lower = k.to_lowercase();
                         if !result
@@ -1163,6 +1163,40 @@ mod tests {
         );
 
         assert!(resolved.upstream_http3);
+    }
+
+    #[test]
+    fn resolver_splits_ampersand_separated_request_and_response_headers() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules(
+                "example.com reqHeaders://(X-Req-A=one&X-Req-B=two) resHeaders://(X-Res-A=three&X-Res-B=four)",
+            )
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            resolved.req_headers,
+            vec![
+                ("X-Req-A".into(), "one".into()),
+                ("X-Req-B".into(), "two".into()),
+            ]
+        );
+        assert_eq!(
+            resolved.res_headers,
+            vec![
+                ("X-Res-A".into(), "three".into()),
+                ("X-Res-B".into(), "four".into()),
+            ]
+        );
     }
 
     #[test]

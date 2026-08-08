@@ -2839,17 +2839,40 @@ extract_headers_from_value() {
         fi
     fi
 
-    local header_name=""
-    local header_value=""
-
-    local first_line=$(echo "$value" | head -1)
-
-    if [[ "$first_line" == *":"* ]]; then
-        header_name=$(echo "$first_line" | cut -d':' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        header_value=$(echo "$first_line" | cut -d':' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local segments="$value"
+    if [[ "$value" != *$'\n'* ]]; then
+        segments="${segments//&/$'\n'}"
+        segments="${segments//,/$'\n'}"
     fi
 
-    echo "$header_name|$header_value"
+    local part
+    while IFS= read -r part || [[ -n "$part" ]]; do
+        part=$(printf '%s' "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$part" || "$part" == \#* ]] && continue
+
+        local separator=""
+        local eq_prefix="${part%%=*}"
+        local colon_prefix="${part%%:*}"
+        if [[ "$part" == *"="* && "$part" == *":"* ]]; then
+            if (( ${#eq_prefix} < ${#colon_prefix} )); then
+                separator="="
+            else
+                separator=":"
+            fi
+        elif [[ "$part" == *"="* ]]; then
+            separator="="
+        elif [[ "$part" == *":"* ]]; then
+            separator=":"
+        else
+            continue
+        fi
+
+        local header_name="${part%%${separator}*}"
+        local header_value="${part#*${separator}}"
+        header_name=$(printf '%s' "$header_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        header_value=$(printf '%s' "$header_value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -n "$header_name" ]] && printf '%s|%s\n' "$header_name" "$header_value"
+    done <<< "$segments"
 }
 
 test_res_headers_template() {
