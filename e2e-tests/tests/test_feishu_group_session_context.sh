@@ -12,6 +12,13 @@ BIFROST_LOG="$TEST_DIR/bifrost.log"
 PROMPT_LOG="$TEST_DIR/group-prompts.jsonl"
 RUN_LOG="$TEST_DIR/runner-events.jsonl"
 CONCURRENT_RELEASE="$TEST_DIR/concurrent-release"
+FEISHU_MOCK_PORT="$(python3 - <<'PY'
+import socket
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
@@ -26,6 +33,10 @@ if [[ "$(uname -s)" != "Linux" ]]; then
 fi
 
 cleanup() {
+  if [[ -n "${FEISHU_MOCK_PID:-}" ]]; then
+    kill "$FEISHU_MOCK_PID" >/dev/null 2>&1 || true
+    wait "$FEISHU_MOCK_PID" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${BIFROST_PID:-}" ]]; then
     kill "$BIFROST_PID" >/dev/null 2>&1 || true
     wait "$BIFROST_PID" >/dev/null 2>&1 || true
@@ -37,6 +48,54 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+python3 - "$FEISHU_MOCK_PORT" <<'PY' &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port = int(sys.argv[1])
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def send_json(self, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path.endswith("/auth/v3/tenant_access_token/internal"):
+            self.send_json({"code": 0, "tenant_access_token": "e2e-token", "expire": 7200})
+        else:
+            self.send_json({"code": 0})
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path.endswith("/bot/v3/info"):
+            self.send_json({"code": 0, "bot": {"open_id": "ou_bot", "app_name": "Bifrost"}})
+        elif path.endswith("/im/v1/messages/a1"):
+            content = json.dumps({"text": "先讨论发布窗口"}, ensure_ascii=False)
+            self.send_json({"code": 0, "data": {"items": [{
+                "message_id": "a1", "chat_id": "chat-alpha", "msg_type": "text",
+                "sender": {"id": "user-alice", "sender_type": "user"},
+                "body": {"content": content}, "create_time": "1"
+            }]}})
+        elif path.endswith("/im/v1/messages/invisible-parent"):
+            self.send_json({"code": 230027, "msg": "Lack of necessary permissions"})
+        elif "/im/v1/chats/" in path:
+            self.send_json({"code": 0, "data": {"name": "Alpha 发布群"}})
+        else:
+            self.send_json({"code": 404, "msg": "not found"})
+
+ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+FEISHU_MOCK_PID=$!
+export BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1
 
 
 wait_http() {
@@ -175,12 +234,12 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
 BIFROST_PID=$!
 wait_http
 
-python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" "$RUN_LOG" "$CONCURRENT_RELEASE" <<'PY'
+python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" "$RUN_LOG" "$CONCURRENT_RELEASE" "$FEISHU_MOCK_PORT" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, repo_dir, prompt_log, run_log, concurrent_release = sys.argv[1:6]
+port, repo_dir, prompt_log, run_log, concurrent_release, feishu_mock_port = sys.argv[1:7]
 base = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway"
 
 def request(path, payload, method="POST"):
@@ -247,7 +306,7 @@ request("/providers", {
     "provider_type": "feishu",
     "display_name": "Feishu Group E2E",
     "enabled": True,
-    "base_url": "http://127.0.0.1:9/open-apis",
+    "base_url": f"http://127.0.0.1:{feishu_mock_port}/open-apis",
     "app_id": "cli_group_e2e",
     "app_secret": "group-e2e-secret",
     "owner_open_id": "owner-only-in-p2p",
@@ -308,6 +367,9 @@ wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 inject chat-alpha user-bob Bob a4 "/cwd $REPO_DIR"
 inject chat-alpha user-bob Bob a5 "/runner group-mock"
 inject chat-alpha user-bob Bob a6 "/status"
+inject chat-alpha user-bob Bob a6q "/q"
+inject chat-alpha user-bob Bob a6pwd "/pwd"
+inject chat-alpha user-bob Bob a6runner "/runner"
 sleep 1
 wait_prompt_count 1
 inject chat-alpha user-bob Bob a7 "补充：需要回滚预案"
@@ -371,10 +433,9 @@ wait_prompt_count 9
 wait_run_count 18
 wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 
-# If the parent message was never visible to the bot, reply deterministically
+# If Feishu denies reading the parent, return actionable permission guidance
 # without starting a Runner or pretending that the quoted content was read.
 inject chat-alpha user-alice Alice a14 "@_user_1" true group invisible-parent
-wait_group_turn_completed a14
 wait_prompt_count 9
 wait_run_count 18
 
@@ -454,11 +515,11 @@ assert bindings[0][5] == "group-mock", bindings
 messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 14), ("chat-beta", 6)], messages
-missing_quote_turns = connection.execute(
+assert messages == [("chat-alpha", 16), ("chat-beta", 6)], messages
+permission_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE trigger_message_id = 'a14'"
 ).fetchall()
-assert missing_quote_turns == [("completed",)], missing_quote_turns
+assert permission_turns == [], permission_turns
 beta_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE chat_id = 'chat-beta' ORDER BY created_at"
 ).fetchall()
@@ -470,18 +531,27 @@ status_logs = [
     if entry.get("direction") == "inbound" and entry.get("message_id") == "a11"
 ]
 assert len(status_logs) == 1, status_logs
-assert status_logs[0].get("reaction_added") is False, status_logs
+assert status_logs[0].get("reaction_added") is True, status_logs
 ambient_logs = [
     entry for entry in message_logs
     if entry.get("direction") == "inbound" and entry.get("message_id") == "a12"
 ]
 assert ambient_logs == [], ambient_logs
-missing_quote_replies = [
+permission_replies = [
     entry for entry in message_logs
     if entry.get("direction") == "outbound"
-    and "我无法看到你引用的这条消息内容" in (entry.get("content_preview") or "")
+    and "im:message:readonly" in ((entry.get("content") or "") + (entry.get("content_preview") or ""))
+    and "im:message.group_msg" in ((entry.get("content") or "") + (entry.get("content_preview") or ""))
 ]
-assert len(missing_quote_replies) == 1, missing_quote_replies
+assert len(permission_replies) == 1, permission_replies
+outbound_text = "\n".join(
+    (entry.get("content") or "") + "\n" + (entry.get("content_preview") or "")
+    for entry in message_logs
+    if entry.get("direction") == "outbound"
+)
+assert "当前线程排队消息" in outbound_text and "排队已清空" in outbound_text, outbound_text
+assert "当前线程工作目录" in outbound_text and str(pathlib.Path(repo_dir).resolve()) in outbound_text, outbound_text
+assert "当前 Runner：`group-mock`" in outbound_text, outbound_text
 PY
 
 echo "[feishu-group-session] PASS"

@@ -113,6 +113,63 @@ async fn spawn_group_lookup_server() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{address}"), task)
 }
 
+async fn spawn_reference_routing_server(
+    referenced_chat_id: &'static str,
+) -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let message_reads = Arc::new(AtomicUsize::new(0));
+    let server_reads = Arc::clone(&message_reads);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let message_reads = Arc::clone(&server_reads);
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(
+                    move |request: hyper::Request<hyper::body::Incoming>| {
+                        let message_reads = Arc::clone(&message_reads);
+                        async move {
+                            let path = request.uri().path();
+                            let body = if path.ends_with("/auth/v3/tenant_access_token/internal") {
+                                r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+                                    .to_string()
+                            } else if path.ends_with("/bot/v3/info") {
+                                r#"{"code":0,"bot":{"open_id":"ou_bot","app_name":"Bifrost"}}"#
+                                    .to_string()
+                            } else if path.contains("/im/v1/messages/") {
+                                message_reads.fetch_add(1, Ordering::SeqCst);
+                                format!(
+                                    r#"{{"code":0,"data":{{"items":[{{"message_id":"om_parent","chat_id":"{referenced_chat_id}","msg_type":"text","sender":{{"id":"ou_author","sender_type":"user"}},"body":{{"content":"{{\"text\":\"quoted content\"}}"}},"create_time":"1"}}]}}}}"#
+                                )
+                            } else {
+                                r#"{"code":0,"data":{"name":"Engineering"}}"#.to_string()
+                            };
+                            Ok::<_, hyper::Error>(
+                                hyper::Response::builder()
+                                    .header("Content-Type", "application/json")
+                                    .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (format!("http://{address}"), message_reads, task)
+}
+
 async fn spawn_new_group_event_loop_server() -> (
     String,
     Arc<std::sync::atomic::AtomicUsize>,
@@ -339,6 +396,68 @@ async fn prepare_group_dispatch_surfaces_quoted_message_read_failures() {
             Ok(_) => panic!("authoritative Feishu read failure must be visible"),
         };
     assert!(error.contains("feishu token request failed"));
+}
+
+#[tokio::test]
+async fn unmentioned_bot_neither_fetches_nor_records_addressed_reference() {
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, message_reads, server) = spawn_reference_routing_server("oc_group").await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-unmentioned-reference".to_string();
+    provider.base_url = Some(base_url);
+    let mut event = group_test_event(
+        &provider.id,
+        "addressed-elsewhere",
+        "@_user_1 /q inspect",
+        true,
+        1,
+    );
+    let message = event.message.as_mut().unwrap();
+    message.parent_id = Some("om_parent".to_string());
+    message.mentions[0].is_bot = false;
+    message.mentions[0].open_id = Some("ou_other_bot".to_string());
+    message.mentions[0].name = Some("Other Bot".to_string());
+
+    assert!(
+        prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(message_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(store.message_count(&provider.id, "oc_group").unwrap(), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn prepare_group_dispatch_rejects_cross_group_reference() {
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, message_reads, server) = spawn_reference_routing_server("oc_other_group").await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-cross-group-reference".to_string();
+    provider.base_url = Some(base_url);
+    let mut event = group_test_event(&provider.id, "cross-group", "@_user_1 inspect", true, 1);
+    event.message.as_mut().unwrap().parent_id = Some("om_parent".to_string());
+
+    let error =
+        match prepare_group_inbound_dispatch(&client, &provider, &event, &store, false).await {
+            Err(error) => error,
+            Ok(_) => panic!("cross-group reference must be rejected"),
+        };
+    assert!(error.contains("不属于当前群聊"));
+    assert_eq!(message_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.message_count(&provider.id, "oc_group").unwrap(), 0);
+    server.abort();
 }
 
 #[tokio::test]

@@ -192,7 +192,7 @@
 4. 构造引用目标位于当前增量区间的场景，确认它不同时作为普通背景重复出现。
 5. 构造 `parentId` 只存在于另一个群或本地账本完全不存在的场景。
 
-预期结果：可见消息的纯引用 + @ 会创建 Agent Turn 并实际启动 Runner，不会被视为空消息或返回 `/help`；同一 Provider、同一群中的被引用消息作为“本轮主要处理对象”进入 Prompt，即使它早于当前游标也能读取，且全文只出现一次。当前用户没有附加文字时，Prompt 明确要求直接理解并回应被引用消息。跨群或缺失引用不泄露消息内容、不隐式扩大权限补拉；网关直接回复“我无法看到你引用的这条消息内容，请重新发送这条消息，或把内容补充到 @ 后面”，不启动 Runner、不让模型猜测，并把该 Turn 标记为 `completed` 以保持游标和重投幂等；真实服务脚本应等待该确定性终态，不因 CI 调度慢而把合法的中间态 `dispatched` 误判为失败。
+预期结果：可见消息的纯引用 + @ 会创建 Agent Turn 并实际启动 Runner，不会被视为空消息或返回 `/help`；Bifrost 通过飞书消息读取 API 获取同群被引用消息，以它作为“本轮主要处理对象”进入 Prompt，即使该消息早于当前机器的本地游标或来自另一个机器人，全文也只出现一次。当前用户没有附加文字时，Prompt 明确要求直接理解并回应被引用消息。返回 `chat_id` 不同的跨群引用必须拒绝；读取失败不让模型猜测，权限不足时给出所需 scope 和重新发布指引。
 
 ### TC-FGS-23：并发审计验证不依赖固定 Runner 时间窗口
 
@@ -210,6 +210,32 @@
 4. 检查假 OpenAPI 请求、SQLite `im_feishu_new_groups`、消息日志及帮助文本。
 
 预期结果：只发起一次 `POST /im/v1/chats`；请求设置 `user_id_type=open_id`、`set_bot_manager=true`、私有群、owner=`ou_owner` 和稳定 uuid，群名完整保留空格。当前应用机器人自动加入并成为管理员，命令发送者成为群主；新群收到欢迎消息。相同消息重投返回已创建结果但不重复建群；非 owner 被明确拒绝；`/help` 展示 `/new <群名>` 及仅 Provider owner 可用的限制。生产配置仍只接受飞书/Lark 官方 API 域名，loopback 仅在显式 E2E 开关下可用。
+
+### TC-FGS-25：同群多机器人广播与定向命令隔离
+
+1. 为同一群构造 Bot A 和 Bot B 两个独立 Provider 身份，分别使用独立 Session Key 和本地数据目录。
+2. 发送未带 mention 的 `/status`、`/q`、`/pwd`、`/runner`，分别对两个身份执行分类。
+3. 发送 `@Bot A /status`、`@Bot B /q 后续任务` 和 `@Bot A /review`。
+4. 检查未被提及的 Provider 是否读取引用、创建 Turn 或修改本地账本。
+
+预期结果：没有 @ 的 slash 由两个机器人各自消费；有 @ 时只有被提及机器人消费，其他机器人返回 Ambient，不读取引用、不创建 Turn、不修改状态。该能力不依赖两个 Bifrost 实例共享内存、JSON 或 SQLite。
+
+### TC-FGS-26：引用其他机器人卡片并处理读取权限
+
+1. mock 飞书 `GET /im/v1/messages/{message_id}` 返回另一个应用机器人发送的 interactive 卡片，包含标题、Markdown、折叠正文、按钮和 URL。
+2. mock CardKit 首次以 `card_msg_content_type=user_card_content` 只返回 `card_id`，第二次默认表示返回当前可见正文。
+3. mock API 返回 `230027` 权限错误；再构造返回消息 `chat_id` 与当前群不一致。
+4. 检查 Agent Prompt、错误回复与 API 请求次数。
+
+预期结果：Prompt 只包含卡片可阅读内容，不包含按钮、URL 或 action value；CardKit 自动二次读取并使用当前可见正文；跨群消息被拒绝。权限不足时明确要求申请 `im:message:readonly` 和 `im:message.group_msg`，并提示创建、发布新版本后重试。
+
+### TC-FGS-27：线程查询命令不产生 Agent Turn
+
+1. 在空闲线程和执行中的线程分别发送无参数 `/q`、`/pwd`、`/runner`。
+2. 给线程加入两条排队消息、绑定自定义工作目录和 Runner 后再次查询。
+3. 发送 `/q 后续任务` 验证带参数语义不变。
+
+预期结果：`/q` 列出当前线程的全部排队项和序号，空队列明确显示已清空；`/pwd` 输出群/线程有效工作目录；`/runner` 只输出当前有效 Runner，不再列出所有 Runner；三种查询均立即返回且不启动模型。`/q 后续任务` 仍加入当前线程队列。
 
 ## 执行方式
 
@@ -321,6 +347,18 @@ TC-FGS-24 的建群、owner 权限、幂等、欢迎消息与 help 路径执行�
 SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
   bash e2e-tests/tests/test_feishu_new_group_command.sh
 ```
+
+TC-FGS-25 至 TC-FGS-27 的多机器人路由、卡片读取、权限指引与线程查询执行：
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin addressed_slash --lib -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin thread_query_commands --lib -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin fetch_message_ --lib -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin card_text_extraction_keeps_visible_content_and_skips_actions --lib -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin prepare_group_dispatch --lib -- --nocapture
+```
+
+执行记录：2026-08-08 PASS。上述定向测试验证广播/定向消费、未被 @ 的机器人不读取引用且不写本地账本、跨群引用拒绝、无参线程查询分类与空闲/忙碌输出、有效工作目录与 Runner 输出、原始 interactive 卡片、CardKit 二次读取、`230027` 权限指引和群分发读取失败路径；所有命令退出码为 0。随后用最新 `target/debug/bifrost`、临时数据目录和假飞书 OpenAPI 执行 `test_feishu_group_session_context.sh`，输出 `[feishu-group-session] PASS`，确认三个无参查询不启动 Runner，引用读取与权限错误均走真实服务链路。
 
 执行记录：2026-08-07 PASS。真实启动最新 debug 二进制与假飞书 OpenAPI，验证一次建群、同 `message_id` 重投、非 owner 群聊命令、欢迎消息、SQLite 幂等记录和 `/help` 文案；脚本输出 `[feishu-new-group-command] PASS`，退出后自动清理临时进程与目录。CI 广域 Shell 矩阵复用 release 二进制时，脚本明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不可为了假服务放宽生产飞书域名白名单；请求形状与错误矩阵继续由 release 同源单元测试覆盖。
 

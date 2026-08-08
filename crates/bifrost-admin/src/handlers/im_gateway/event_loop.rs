@@ -1063,6 +1063,13 @@ pub(super) async fn prepare_group_inbound_dispatch(
         None
     };
     let disposition = classify_group_message(message, bot_identity.as_ref(), session_busy);
+    if !message.mentions.is_empty() && matches!(disposition, GroupMessageDisposition::Ambient) {
+        // An explicitly addressed message for another bot is not ambient
+        // context for this provider. Return before reference reads and before
+        // recording anything locally so independently deployed bots neither
+        // consume nor persist one another's addressed traffic.
+        return Ok(None);
+    }
     // Only the addressed bot resolves a referenced message. Every provider may
     // run on a different machine, so the Feishu message API is authoritative;
     // the local group ledger is only a per-provider cache for prompt assembly.

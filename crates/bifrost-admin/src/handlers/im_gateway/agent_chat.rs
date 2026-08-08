@@ -321,13 +321,11 @@ pub(super) async fn handle_im_new_group_command(
     }
 
     if trimmed == "/pwd" {
-        let work_dir = ctx
-            .group_context_store
-            .work_dir_by_session(session_key)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| agent_config.resolve_work_dir());
-        let reply = format!("当前线程工作目录：\n`{}`", work_dir.display());
+        let reply = format_effective_im_work_dir(
+            ctx.group_context_store,
+            session_key,
+            agent_config,
+        );
         send_agent_reply(
             ctx.client,
             ctx.provider,
@@ -679,6 +677,19 @@ pub(super) fn format_effective_im_runner(
         configured.as_deref(),
     );
     format!("当前 Runner：`{}`", effective.runner_id)
+}
+
+pub(super) fn format_effective_im_work_dir(
+    group_context_store: &ImGroupContextStore,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+) -> String {
+    let work_dir = group_context_store
+        .work_dir_by_session(session_key)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| agent_config.resolve_work_dir());
+    format!("当前线程工作目录：\n`{}`", work_dir.display())
 }
 
 pub(super) fn resolve_im_runner_selection(
@@ -1892,13 +1903,11 @@ pub(super) fn inbound_message_preview(
     }
 
     if trimmed == "/pwd" {
-        let work_dir = ctx
-            .group_context_store
-            .work_dir_by_session(session_key)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| ctx.agent_config.resolve_work_dir());
-        let reply = format!("当前线程工作目录：\n`{}`", work_dir.display());
+        let reply = format_effective_im_work_dir(
+            ctx.group_context_store,
+            session_key,
+            ctx.agent_config,
+        );
         send_agent_reply(client, provider, event, &reply, message_log_store).await;
         return;
     }

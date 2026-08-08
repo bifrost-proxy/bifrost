@@ -900,7 +900,7 @@ pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
     assert!(help.contains("仅 Provider owner"));
     assert!(help.contains("/clear"));
     assert!(help.contains("/reset"));
-    assert!(help.contains("/q <消息>"));
+    assert!(help.contains("/q [消息]"));
     assert!(help.contains("/rq <序号>"));
     assert!(help.contains("/stop"));
     assert!(help.contains("Traex Runner 命令:"));
@@ -993,6 +993,30 @@ pub(super) fn im_runner_command_lists_configured_external_runners() {
     assert_eq!(
         format_effective_im_runner(&group_store, "session", &agent_config, &config, "provider",),
         "当前 Runner：`Codex`"
+    );
+    assert_eq!(
+        format_effective_im_work_dir(&group_store, "session", &agent_config),
+        format!(
+            "当前线程工作目录：\n`{}`",
+            agent_config.resolve_work_dir().display()
+        )
+    );
+    let bound_dir = tempfile::tempdir().expect("bound work dir");
+    let mut binding_event = new_group_event(&test_provider(), Some("ou_owner"), "om-pwd");
+    binding_event.source.chat_type = Some("group".to_string());
+    group_store
+        .record_event(&binding_event, "test")
+        .expect("create group binding");
+    let bound_session = crate::im_gateway::group_context::build_group_session_key(
+        &binding_event.provider_id,
+        binding_event.source.chat_id.as_deref().unwrap(),
+    );
+    group_store
+        .set_work_dir_by_session(&bound_session, bound_dir.path().to_str().unwrap())
+        .expect("persist bound work dir");
+    assert_eq!(
+        format_effective_im_work_dir(&group_store, &bound_session, &agent_config),
+        format!("当前线程工作目录：\n`{}`", bound_dir.path().display())
     );
 }
 
