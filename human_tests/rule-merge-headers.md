@@ -221,6 +221,13 @@ BIFROST_DATA_DIR=./.bifrost-e2e-header-ampersand \
   BIFROST_BIN="$(cd .. && pwd)/target/debug/bifrost" \
   ./test_rules.sh -p 18808 --use-binary rules/request_modify/headers.txt
 ```
+4. 运行 Values Header 特殊字符兼容夹具，确认多 Header 断言不会截断值中的 `|`：
+```bash
+cd e2e-tests
+BIFROST_DATA_DIR=./.bifrost-e2e-header-values \
+  BIFROST_BIN="$(cd .. && pwd)/target/debug/bifrost" \
+  ./test_rules.sh -p 18809 --use-binary rules/template/values.txt
+```
 
 **预期结果**：
 - `reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)` 被解析为三个独立 Header。
@@ -228,6 +235,7 @@ BIFROST_DATA_DIR=./.bifrost-e2e-header-ampersand \
 - `x-tt-env` 的值不包含 `&x-flow-env=...` 或 `&x-use-ppe=...`。
 - `resHeaders://(X-Header-A=value-a&X-Header-B=value-b)` 同样产生两个独立响应 Header。
 - JSON、多行 Values 和单 Header 旧写法继续通过同一组回归测试。
+- Values 中 `X-Symbols: !@#$%^*()_+-[]{}|` 的尾部 `|` 被完整保留并由夹具准确断言。
 
 ## 清理步骤
 

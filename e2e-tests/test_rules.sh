@@ -1604,7 +1604,7 @@ test_line_props_rule() {
         disabled_header_raw=$(resolve_code_block_var "$disabled_header_raw" "$RULE_FILE")
         local disabled_header_info=$(extract_header_from_value "$disabled_header_raw")
         local disabled_header_name=$(echo "$disabled_header_info" | cut -d'|' -f1)
-        local disabled_header_value=$(echo "$disabled_header_info" | cut -d'|' -f2)
+        local disabled_header_value=$(echo "$disabled_header_info" | cut -d'|' -f2-)
 
         if [[ -z "$disabled_header_name" ]]; then
             _log_fail "disabled 规则缺少可验证响应头" "resHeaders 规则" "$protocols"
@@ -2883,7 +2883,7 @@ test_res_headers_template() {
     local extra_headers=""
 
     local header_name=$(echo "$header_info" | cut -d'|' -f1)
-    local header_template=$(echo "$header_info" | cut -d'|' -f2)
+    local header_template=$(echo "$header_info" | cut -d'|' -f2-)
 
     if [[ "$header_template" == *'${reqCookies.'* ]]; then
         local cookie_name=$(echo "$header_template" | grep -o '\${reqCookies\.[^}]*}' | head -1 | sed 's/\${reqCookies\.//;s/}//')
@@ -2941,7 +2941,7 @@ test_req_headers_template() {
     test_url=$(build_test_url "https" "$pattern")
 
     local header_name=$(echo "$header_info" | cut -d'|' -f1)
-    local header_template=$(echo "$header_info" | cut -d'|' -f2)
+    local header_template=$(echo "$header_info" | cut -d'|' -f2-)
 
     echo ""
     echo -e "  ${CYAN}【测试】添加请求头 (模板变量)${NC}"
@@ -3839,7 +3839,7 @@ run_tests() {
                 if [[ -n "$req_header_infos" ]]; then
                     while IFS= read -r req_header_info; do
                         local req_header_name=$(echo "$req_header_info" | cut -d'|' -f1)
-                        local req_header_value=$(echo "$req_header_info" | cut -d'|' -f2)
+                        local req_header_value=$(echo "$req_header_info" | cut -d'|' -f2-)
                         [[ -z "$req_header_name" ]] && continue
                         if [[ "$req_header_value" == *'${'* ]] || [[ "$req_header_raw" == *'`'* ]]; then
                             test_req_headers_template "$pattern" "$req_header_info"
@@ -3859,7 +3859,7 @@ run_tests() {
                 if [[ -n "$res_header_infos" ]]; then
                     while IFS= read -r res_header_info; do
                         local res_header_name=$(echo "$res_header_info" | cut -d'|' -f1)
-                        local res_header_value=$(echo "$res_header_info" | cut -d'|' -f2)
+                        local res_header_value=$(echo "$res_header_info" | cut -d'|' -f2-)
                         [[ -z "$res_header_name" ]] && continue
                         if [[ "$res_header_value" == *'${'* ]] || [[ "$res_header_raw" == *'`'* ]]; then
                             test_res_headers_template "$pattern" "$res_header_info"
