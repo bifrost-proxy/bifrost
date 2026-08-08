@@ -20,11 +20,11 @@ pattern resBody://{mock-response.json}    # {key} = an embedded block in this ru
 pattern urlParams://t=${now}&id=${randomUUID}
 ```
 
-Single-line inline `reqHeaders` / `resHeaders` values use `&` to separate
-multiple headers, for example `reqHeaders://(X-Env=test&X-Mode=debug)`. To keep
-a literal `&` inside a header value, use a JSON object or a multi-line/referenced
-Value with one `Header: value` entry per line. This separator rule does not
-change `reqCookies` / `resCookies` behavior.
+Single-line inline `reqHeaders` / `resHeaders`, `reqCookies` / `resCookies`, and
+`trailers` values use `&` to separate multiple pairs, for example
+`reqCookies://(sessionid=xxx&a=c)`. To keep a literal `&` inside a value, use a
+JSON object or a multi-line/referenced Value. Response Cookies with attributes
+such as Path, Secure, or HttpOnly continue to use the JSON object form.
 
 `reqReplace` and `resReplace` additionally accept a referenced strict JSON object, for example `pattern resReplace://{replaceMap}` where the Value is `{ "old": "new" }`. Legacy `old=new&foo=bar` values remain supported.
 

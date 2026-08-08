@@ -63,7 +63,7 @@ pattern params://foo=1&bar=2
 - 键为空时忽略该对
 - 值可以为空（如 `flag=`）
 
-> `reqHeaders` / `resHeaders` 的单行内联值也使用 `&` 拆分多个 Header，例如 `reqHeaders://(X-Custom=test&X-Another=value)` 会设置两个独立 Header。若 Header 值本身需要包含字面 `&`，请使用行格式（每行一个 `Header: value`，例如通过内嵌值块引用）或合法 JSON 对象。`reqCookies` / `resCookies` 不采用该 Header 分隔语义。
+> `reqHeaders` / `resHeaders`、`reqCookies` / `resCookies` 与 `trailers` 的单行内联值都可使用 `&` 拆分多个键值对，例如 `reqCookies://(sessionid=xxx&a=c)` 会设置两个独立 Cookie。若值本身需要包含字面 `&`，请使用行格式（例如通过 Values 内嵌值块引用）或合法 JSON 对象；带 Path、Secure、HttpOnly 等属性的响应 Cookie 仍使用 JSON 对象格式。
 
 ````txt
 ``` headers.txt
