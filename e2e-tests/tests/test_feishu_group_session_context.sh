@@ -424,6 +424,9 @@ for _ in $(seq 1 160); do
 done
 [[ -f "$RUN_LOG" ]]
 [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
+wait_session_idle "im:feishu-group-e2e:group:chat-beta"
+wait_session_idle "feishu-group-e2e:owner-only-in-p2p"
 
 # Replying to an older message with only an @ mention is still a valid Agent
 # turn. The quoted message becomes the main input even though it is before the
