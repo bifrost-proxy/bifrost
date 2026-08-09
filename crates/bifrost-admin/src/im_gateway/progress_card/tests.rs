@@ -68,6 +68,58 @@ fn subagent_progress_upserts_by_agent_identity_and_renders_task_state_and_durati
 }
 
 #[test]
+fn subagent_progress_covers_status_labels_defaults_and_short_duration() {
+    let statuses = [
+        (SubAgentStatus::Pending, "待启动"),
+        (SubAgentStatus::Running, "执行中"),
+        (SubAgentStatus::Completed, "已完成"),
+        (SubAgentStatus::Failed, "失败"),
+        (SubAgentStatus::Interrupted, "已中断"),
+        (SubAgentStatus::Unknown, "状态未知"),
+    ];
+    for (status, label) in statuses {
+        assert_eq!(subagent_status_label(status), label);
+    }
+    assert_eq!(format_subagent_duration(450), "450ms");
+
+    let mut snapshot = ImAgentProgressSnapshot::new("subagent-defaults", "coordinate");
+    snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+        progress: SubAgentProgress {
+            id: "pending-1".to_string(),
+            agent_id: None,
+            label: None,
+            task: String::new(),
+            phase: "dispatching".to_string(),
+            status: SubAgentStatus::Pending,
+            detail: None,
+            started_at_ms: None,
+            updated_at_ms: 0,
+            duration_ms: None,
+        },
+    });
+    assert_eq!(snapshot.timeline.len(), 1);
+    assert!(snapshot.timeline[0].started_at_ms.is_some());
+    assert_eq!(snapshot.timeline[0].success, None);
+
+    snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+        progress: SubAgentProgress {
+            id: "pending-1".to_string(),
+            agent_id: None,
+            label: None,
+            task: String::new(),
+            phase: "finished".to_string(),
+            status: SubAgentStatus::Failed,
+            detail: None,
+            started_at_ms: None,
+            updated_at_ms: snapshot.timeline[0].started_at_ms.unwrap() + 450,
+            duration_ms: None,
+        },
+    });
+    assert_eq!(snapshot.timeline[0].duration_ms, Some(450));
+    assert_eq!(snapshot.timeline[0].success, Some(false));
+}
+
+#[test]
 fn subagent_budget_trims_old_terminal_entries_but_preserves_running_and_latest_five() {
     let mut snapshot = ImAgentProgressSnapshot::new("subagent-budget", "coordinate reviews");
     for index in 0..7 {

@@ -4610,6 +4610,31 @@ mod tests {
     }
 
     #[test]
+    fn system_proxy_readiness_rejects_empty_and_non_successful_admin_responses() {
+        let empty_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let empty_port = empty_listener.local_addr().unwrap().port();
+        let empty_server = std::thread::spawn(move || {
+            let (stream, _) = empty_listener.accept().unwrap();
+            drop(stream);
+        });
+        assert!(!system_proxy_target_is_ready("127.0.0.1", empty_port));
+        empty_server.join().unwrap();
+
+        let rejected_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let rejected_port = rejected_listener.local_addr().unwrap().port();
+        let rejected_server = std::thread::spawn(move || {
+            let (mut stream, _) = rejected_listener.accept().unwrap();
+            let mut request = [0_u8; 256];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        assert!(!system_proxy_target_is_ready("127.0.0.1", rejected_port));
+        rejected_server.join().unwrap();
+    }
+
+    #[test]
     fn port_in_use_detects_bound_listener_without_accept_loop() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();

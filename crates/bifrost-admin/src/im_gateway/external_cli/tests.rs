@@ -3731,6 +3731,99 @@ fn progress_event_observation_adds_tool_duration() {
 }
 
 #[test]
+fn progress_event_observation_tracks_and_freezes_subagent_duration() {
+    let mut starts = std::collections::HashMap::new();
+    let mut running = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::SubAgentUpdated,
+        content: String::new(),
+        title: None,
+        raw: serde_json::json!({
+            "subagent": {"id": "agent-1", "status": "running"}
+        }),
+    };
+    let mut completed = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::SubAgentUpdated,
+        content: String::new(),
+        title: None,
+        raw: serde_json::json!({
+            "subagent": {"id": "agent-1", "status": "completed"}
+        }),
+    };
+
+    enrich_progress_event_observation(&mut running, 2_000, &mut starts);
+    assert_eq!(running.raw["observedAtMs"], 2_000);
+    assert_eq!(starts.get("agent-1"), Some(&2_000));
+
+    enrich_progress_event_observation(&mut completed, 2_450, &mut starts);
+    assert_eq!(completed.raw["subagent"]["startedAtMs"], 2_000);
+    assert_eq!(completed.raw["subagent"]["durationMs"], 450);
+    assert!(starts.is_empty());
+}
+
+#[test]
+fn subagent_status_and_phase_fallbacks_cover_provider_edge_states() {
+    assert_eq!(
+        normalize_codex_subagent_status(Some("pendingInit"), None, false),
+        "pending"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, Some("failed"), false),
+        "failed"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, Some("completed"), false),
+        "completed"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, Some("in_progress"), false),
+        "running"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, None, true),
+        "completed"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, None, false),
+        "running"
+    );
+
+    let events = parse_progress_events(
+        r#"{"type":"item.updated","item":{"id":"close-1","type":"collab_agent_tool_call","tool":"closeAgent","status":"in_progress"}}
+{"type":"item.updated","item":{"id":"custom-1","type":"collab_agent_tool_call","tool":"customAction","status":"in_progress"}}"#,
+    );
+    assert_eq!(
+        external_progress_subagent(&events[0]).unwrap().phase,
+        "closing"
+    );
+    assert_eq!(
+        external_progress_subagent(&events[1]).unwrap().phase,
+        "working"
+    );
+
+    let unknown = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::SubAgentUpdated,
+        content: String::new(),
+        title: None,
+        raw: serde_json::json!({"subagent": {"id": "unknown-1", "status": "new-state"}}),
+    };
+    assert_eq!(
+        external_progress_subagent(&unknown).unwrap().status,
+        bifrost_agent::SubAgentStatus::Unknown
+    );
+}
+
+#[test]
+fn claude_code_subagent_error_without_interrupt_maps_to_failed() {
+    let events = parse_progress_events(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"task-failed","name":"Task","input":{"prompt":"Review auth"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"task-failed","type":"tool_result","content":"Permission denied","is_error":true}]},"tool_use_result":{"interrupted":false}}"#,
+    );
+    let failed = external_progress_subagent(&events[1]).unwrap();
+    assert_eq!(failed.status, bifrost_agent::SubAgentStatus::Failed);
+    assert_eq!(failed.detail.as_deref(), Some("Permission denied"));
+}
+
+#[test]
 fn codex_cli_parser_maps_reasoning_summary_to_assistant_delta() {
     let events = parse_progress_events(
         r#"{"type":"item.completed","item":{"id":"reasoning_0","type":"reasoning_summary","summary":"I checked the workspace and will run the focused tests."}}"#,
