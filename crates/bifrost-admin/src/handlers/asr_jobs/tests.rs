@@ -6978,8 +6978,12 @@ mod tests {
             binding_name: "RECORDER".to_string(),
             ..Default::default()
         };
+        let relative_key = PathBuf::from("archive")
+            .join("recording.wav")
+            .to_string_lossy()
+            .to_string();
         state.files.insert(
-            "archive/recording.wav".to_string(),
+            relative_key.clone(),
             AsrImportedFileRecord {
                 relative_path: PathBuf::from("archive/recording.wav"),
                 source_size: payload.len() as u64,
@@ -7028,9 +7032,9 @@ mod tests {
 
         assert_eq!(result, "processed_record_skipped");
         assert!(!target.exists());
-        assert_eq!(state.files["archive/recording.wav"].target_size, 0);
+        assert_eq!(state.files[&relative_key].target_size, 0);
         assert_eq!(
-            state.files["archive/recording.wav"].source_hashes.get("blake3"),
+            state.files[&relative_key].source_hashes.get("blake3"),
             Some(&hash)
         );
         let progress = load_external_import_progress(&task.id).unwrap();
