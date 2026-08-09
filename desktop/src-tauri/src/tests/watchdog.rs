@@ -82,10 +82,10 @@ fn desktop_watchdog_requires_failure_count_and_grace_window() {
 }
 
 #[test]
-fn desktop_watchdog_sustained_readiness_failure_preserves_managed_child() {
+fn desktop_watchdog_sustained_readiness_failure_recovers_managed_child() {
     assert_eq!(
         sustained_readiness_failure_action(true),
-        SustainedReadinessAction::PreserveManagedChild
+        SustainedReadinessAction::RecoverManagedChild
     );
     assert_eq!(
         sustained_readiness_failure_action(false),
@@ -94,7 +94,7 @@ fn desktop_watchdog_sustained_readiness_failure_preserves_managed_child() {
 }
 
 #[test]
-fn desktop_watchdog_preserved_degradation_closes_with_recovery_log_state() {
+fn desktop_watchdog_requested_recovery_closes_with_recovery_log_state() {
     let started = Instant::now();
     let mut health = BackendWatchdogHealth::default();
 
@@ -108,7 +108,7 @@ fn desktop_watchdog_preserved_degradation_closes_with_recovery_log_state() {
         health.observe_failure(started + Duration::from_secs(15)),
         WatchdogProbeDisposition::ConfirmRecovery { .. }
     ));
-    health.preserve_managed_child();
+    health.mark_recovery_requested();
     assert_eq!(
         health.observe_failure(started + Duration::from_secs(20)),
         WatchdogProbeDisposition::Preserved

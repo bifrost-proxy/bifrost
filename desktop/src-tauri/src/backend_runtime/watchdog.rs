@@ -21,7 +21,7 @@ pub(crate) enum WatchdogProbeDisposition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SustainedReadinessAction {
-    PreserveManagedChild,
+    RecoverManagedChild,
     MarkExternalUnavailable,
 }
 
@@ -29,7 +29,7 @@ pub(crate) fn sustained_readiness_failure_action(
     has_managed_child: bool,
 ) -> SustainedReadinessAction {
     if has_managed_child {
-        SustainedReadinessAction::PreserveManagedChild
+        SustainedReadinessAction::RecoverManagedChild
     } else {
         SustainedReadinessAction::MarkExternalUnavailable
     }
@@ -67,12 +67,12 @@ pub(crate) fn open_backend_recovery_circuit(state: &BackendState, message: Strin
 pub(crate) struct BackendWatchdogHealth {
     first_failure_at: Option<Instant>,
     consecutive_failures: u32,
-    managed_child_preserved: bool,
+    recovery_requested: bool,
 }
 
 impl BackendWatchdogHealth {
     pub(crate) fn observe_success(&mut self, now: Instant) -> WatchdogProbeDisposition {
-        self.managed_child_preserved = false;
+        self.recovery_requested = false;
         let Some(first_failure_at) = self.first_failure_at.take() else {
             self.consecutive_failures = 0;
             return WatchdogProbeDisposition::Healthy;
@@ -94,7 +94,7 @@ impl BackendWatchdogHealth {
             .unwrap_or_default();
         let failures = self.consecutive_failures;
 
-        if self.managed_child_preserved {
+        if self.recovery_requested {
             return WatchdogProbeDisposition::Preserved;
         }
 
@@ -116,11 +116,11 @@ impl BackendWatchdogHealth {
     pub(super) fn reset(&mut self) {
         self.first_failure_at = None;
         self.consecutive_failures = 0;
-        self.managed_child_preserved = false;
+        self.recovery_requested = false;
     }
 
-    pub(crate) fn preserve_managed_child(&mut self) {
-        self.managed_child_preserved = true;
+    pub(crate) fn mark_recovery_requested(&mut self) {
+        self.recovery_requested = true;
     }
 }
 
@@ -301,14 +301,52 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                     .map(|child| child.is_some())
                     .unwrap_or(false);
                 match sustained_readiness_failure_action(managed_backend) {
-                    SustainedReadinessAction::PreserveManagedChild => {
+                    SustainedReadinessAction::RecoverManagedChild => {
                         append_desktop_bootstrap_log(
                             &state.data_dir,
                             format!(
-                                "desktop backend readiness remained degraded; preserving live managed child because readiness failure is not process-exit proof; {reason}"
+                                "desktop backend readiness remained degraded; terminating unresponsive managed child for bounded recovery; {reason}"
                             ),
                         );
-                        watchdog_health.preserve_managed_child();
+                        watchdog_health.mark_recovery_requested();
+                        if !recovery_budget.try_acquire(Instant::now()) {
+                            open_backend_recovery_circuit(
+                                &state,
+                                format!(
+                                    "desktop backend remained unresponsive repeatedly; automatic recovery circuit opened after {} attempts in {}s",
+                                    BACKEND_WATCHDOG_MAX_RECOVERIES,
+                                    BACKEND_WATCHDOG_RECOVERY_WINDOW.as_secs()
+                                ),
+                            );
+                            try_start_native_handoff(app, "backend recovery circuit open");
+                            continue;
+                        }
+                        let pid = state
+                            .child
+                            .lock()
+                            .ok()
+                            .and_then(|guard| guard.as_ref().map(std::process::Child::id))
+                            .unwrap_or_default();
+                        if let Err(error) = terminate_managed_backend(
+                            &state,
+                            "after sustained readiness failure",
+                        ) {
+                            open_backend_recovery_circuit(
+                                &state,
+                                format!("failed to terminate unresponsive managed backend: {error}"),
+                            );
+                            continue;
+                        }
+                        attempt_backend_recovery(
+                            app,
+                            &ManagedBackendExit {
+                                pid,
+                                detail: format!(
+                                    "managed backend child pid={pid} was terminated after sustained readiness failure"
+                                ),
+                            },
+                        );
+                        watchdog_health.reset();
                     }
                     SustainedReadinessAction::MarkExternalUnavailable => {
                         mark_backend_unavailable_for_manual_start(&state, &reason);

@@ -9,7 +9,7 @@ use crate::tools::update_plan::PlanStep;
 use crate::types::{ChatImageInput, ChatMessage, ToolCallMessage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
@@ -58,7 +58,13 @@ pub struct ConversationRecorder {
     writer: Option<BufWriter<std::fs::File>>,
     max_bytes: Option<usize>,
     event_count: Option<usize>,
+    tool_call_ids: Option<HashSet<String>>,
 }
+
+/// Canonical sessions are recovery state, not rolling diagnostic logs.
+pub const DEFAULT_SESSION_MAX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
+const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
 
 impl ConversationRecorder {
     /// Create a recorder at the stable path owned by this session key.
@@ -66,8 +72,9 @@ impl ConversationRecorder {
         Self {
             file_path: canonical_conversation_path(data_dir, session_key),
             writer: None,
-            max_bytes: None,
+            max_bytes: Some(DEFAULT_SESSION_MAX_BYTES),
             event_count: Some(0),
+            tool_call_ids: Some(HashSet::new()),
         }
     }
 
@@ -78,7 +85,7 @@ impl ConversationRecorder {
         max_bytes: Option<usize>,
     ) -> Self {
         let mut recorder = Self::new(data_dir, session_key);
-        recorder.max_bytes = max_bytes.filter(|value| *value > 0);
+        recorder.max_bytes = Some(effective_max_bytes(max_bytes));
         recorder
     }
 
@@ -127,23 +134,40 @@ impl ConversationRecorder {
         Self {
             file_path,
             writer: None,
-            max_bytes: max_bytes.filter(|value| *value > 0),
+            max_bytes: Some(effective_max_bytes(max_bytes)),
             event_count: None,
+            tool_call_ids: None,
         }
     }
 
     /// Record a conversation event.
     pub fn record(&mut self, event: ConversationEvent) -> Result<(), String> {
         let current_event_count = self.ensure_event_count()?;
+        let flush_now = should_flush_event(&event.event_type)
+            || current_event_count.saturating_add(1) % 32 == 0;
+        let mut line =
+            serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
+        let max_bytes = self.max_bytes.unwrap_or(DEFAULT_SESSION_MAX_BYTES);
+        if line.len().saturating_add(1) > max_bytes {
+            line = serde_json::to_string(&ConversationEvent {
+                timestamp: event.timestamp,
+                event_type: event.event_type,
+                session_key: event.session_key,
+                content: serde_json::json!({
+                    "_bifrost_truncated": true,
+                    "original_bytes": line.len(),
+                    "reason": "event exceeded canonical session size limit",
+                }),
+            })
+            .map_err(|e| format!("serialize truncated event: {e}"))?;
+        }
         let writer = self.get_or_create_writer()?;
-
-        let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
 
         writeln!(writer, "{}", line).map_err(|e| format!("write event: {e}"))?;
 
-        // Flush immediately so events are durable even if the process crashes
-        // or the recorder is held open across turns.
-        writer.flush().map_err(|e| format!("flush event: {e}"))?;
+        if flush_now {
+            writer.flush().map_err(|e| format!("flush event: {e}"))?;
+        }
         self.event_count = Some(current_event_count.saturating_add(1));
         if self.enforce_max_bytes()? {
             self.event_count = Some(count_conversation_event_lines(&self.file_path)?);
@@ -224,12 +248,11 @@ impl ConversationRecorder {
         session_key: &str,
         content: &str,
     ) -> Result<(), String> {
-        self.record(ConversationEvent {
-            timestamp: current_time_secs(),
-            event_type: event_types::ASSISTANT_DELTA.to_string(),
-            session_key: session_key.to_string(),
-            content: serde_json::json!({ "message": content }),
-        })
+        // Streaming deltas are transient UI state. Persisting every token/status line
+        // creates large rolling logs and synchronous disk pressure; the final assistant
+        // message remains the durable recovery boundary.
+        let _ = (session_key, content);
+        Ok(())
     }
 
     pub fn record_run_state(
@@ -259,6 +282,7 @@ impl ConversationRecorder {
         arguments: &str,
         call_id: Option<&str>,
     ) -> Result<(), String> {
+        let (arguments, original_bytes, truncated) = compact_tool_arguments(arguments);
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::TOOL_CALL.to_string(),
@@ -268,8 +292,14 @@ impl ConversationRecorder {
                 "call_type": "function",
                 "tool_name": tool_name,
                 "arguments": arguments,
+                "original_bytes": original_bytes,
+                "truncated": truncated,
             }),
-        })
+        })?;
+        if let Some(call_id) = call_id.filter(|value| !value.is_empty()) {
+            self.ensure_tool_call_ids()?.insert(call_id.to_string());
+        }
+        Ok(())
     }
 
     /// Record a tool result event with the provider's tool call id.
@@ -281,6 +311,7 @@ impl ConversationRecorder {
         success: bool,
         call_id: Option<&str>,
     ) -> Result<(), String> {
+        let (result, original_bytes, truncated) = compact_text(result, MAX_TOOL_RESULT_BYTES);
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::TOOL_RESULT.to_string(),
@@ -290,6 +321,8 @@ impl ConversationRecorder {
                 "tool_name": tool_name,
                 "result": result,
                 "success": success,
+                "original_bytes": original_bytes,
+                "truncated": truncated,
             }),
         })
     }
@@ -422,6 +455,46 @@ impl ConversationRecorder {
         self.event_count
     }
 
+    /// Check a tool-call id without repeatedly loading the whole timeline.
+    pub fn has_tool_call_id(&mut self, session_key: &str, call_id: &str) -> Result<bool, String> {
+        if self.tool_call_ids.is_none() {
+            let mut ids = HashSet::new();
+            if self.file_path.exists() {
+                for event in load_conversation_events(&self.file_path)? {
+                    if event.session_key == session_key
+                        && event.event_type == event_types::TOOL_CALL
+                    {
+                        if let Some(id) = event
+                            .content
+                            .get("call_id")
+                            .and_then(|value| value.as_str())
+                        {
+                            ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+            self.tool_call_ids = Some(ids);
+        }
+        if call_id.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .tool_call_ids
+            .as_ref()
+            .is_some_and(|ids| ids.contains(call_id)))
+    }
+
+    fn ensure_tool_call_ids(&mut self) -> Result<&mut HashSet<String>, String> {
+        if self.tool_call_ids.is_none() {
+            let _ = self.has_tool_call_id("", "")?;
+        }
+        Ok(self
+            .tool_call_ids
+            .as_mut()
+            .expect("tool call ids initialized"))
+    }
+
     fn ensure_event_count(&mut self) -> Result<usize, String> {
         if let Some(count) = self.event_count {
             return Ok(count);
@@ -490,6 +563,63 @@ impl ConversationRecorder {
             .map_err(|e| format!("write trimmed session file: {e}"))?;
         Ok(true)
     }
+}
+
+fn effective_max_bytes(max_bytes: Option<usize>) -> usize {
+    max_bytes
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SESSION_MAX_BYTES)
+}
+
+fn should_flush_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        event_types::USER_MESSAGE
+            | event_types::ASSISTANT_MESSAGE
+            | event_types::SESSION_END
+            | event_types::COMPACTION
+            | event_types::RUN_STATE_CHANGED
+            | event_types::GOAL_UPDATED
+            | event_types::GOAL_CLEARED
+            | event_types::PLAN_UPDATED
+            | event_types::PLAN_CLEARED
+    )
+}
+
+fn compact_text(value: &str, max_bytes: usize) -> (String, usize, bool) {
+    let original_bytes = value.len();
+    if original_bytes <= max_bytes {
+        return (value.to_string(), original_bytes, false);
+    }
+    let mut boundary = max_bytes.min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    (
+        format!(
+            "{}\n… [truncated; original_bytes={original_bytes}]",
+            &value[..boundary]
+        ),
+        original_bytes,
+        true,
+    )
+}
+
+fn compact_tool_arguments(value: &str) -> (String, usize, bool) {
+    let (preview, original_bytes, truncated) = compact_text(value, MAX_TOOL_ARGUMENT_BYTES);
+    if !truncated {
+        return (preview, original_bytes, false);
+    }
+    (
+        serde_json::json!({
+            "_bifrost_truncated": true,
+            "original_bytes": original_bytes,
+            "preview": preview,
+        })
+        .to_string(),
+        original_bytes,
+        true,
+    )
 }
 
 fn count_conversation_event_lines(path: &Path) -> Result<usize, String> {
@@ -1840,7 +1970,7 @@ mod tests {
         recorder.close();
 
         let events = load_conversation_events(recorder.file_path()).unwrap();
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 4);
 
         // Verify event types and content
         assert_eq!(events[0].event_type, USER_MESSAGE);
@@ -1857,16 +1987,77 @@ mod tests {
         assert_eq!(events[2].content["result"], "file1.txt");
         assert_eq!(events[2].content["success"], true);
 
-        assert_eq!(events[3].event_type, ASSISTANT_DELTA);
-        assert_eq!(events[3].content["message"], "checking result");
-
-        assert_eq!(events[4].event_type, ASSISTANT_MESSAGE);
-        assert_eq!(events[4].content["message"], "done");
+        assert_eq!(events[3].event_type, ASSISTANT_MESSAGE);
+        assert_eq!(events[3].content["message"], "done");
+        assert!(events
+            .iter()
+            .all(|event| event.event_type != ASSISTANT_DELTA));
 
         // Verify timestamps are present
         for event in &events {
             assert!(event.timestamp > 0);
         }
+    }
+
+    #[test]
+    fn recorder_compacts_tool_payloads_and_caches_call_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "bounded-session");
+        recorder
+            .record_tool_call_with_id(
+                "bounded-session",
+                "exec_command",
+                &"a".repeat(MAX_TOOL_ARGUMENT_BYTES + 1),
+                Some("call-large"),
+            )
+            .unwrap();
+        recorder
+            .record_tool_result_with_call_id(
+                "bounded-session",
+                "exec_command",
+                &"b".repeat(MAX_TOOL_RESULT_BYTES + 1),
+                true,
+                Some("call-large"),
+            )
+            .unwrap();
+        assert!(recorder
+            .has_tool_call_id("bounded-session", "call-large")
+            .unwrap());
+        recorder.close();
+
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events[0].content["truncated"], true);
+        assert_eq!(events[1].content["truncated"], true);
+        assert!(events[0].content["arguments"]
+            .as_str()
+            .unwrap()
+            .contains("_bifrost_truncated"));
+        assert!(events[1].content["result"]
+            .as_str()
+            .unwrap()
+            .contains("original_bytes"));
+    }
+
+    #[test]
+    fn recorder_uses_default_session_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = ConversationRecorder::new(dir.path(), "default-limit");
+        assert_eq!(recorder.max_bytes, Some(DEFAULT_SESSION_MAX_BYTES));
+    }
+
+    #[test]
+    fn recorder_never_keeps_one_event_larger_than_session_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let limit = 1024;
+        let mut recorder =
+            ConversationRecorder::new_with_max_bytes(dir.path(), "hard-limit", Some(limit));
+        recorder
+            .record_user_message("hard-limit", &"x".repeat(limit * 2))
+            .unwrap();
+        recorder.close();
+        assert!(std::fs::metadata(recorder.file_path()).unwrap().len() <= limit as u64);
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events[0].content["_bifrost_truncated"], true);
     }
 
     #[test]
@@ -1914,10 +2105,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(tail.total_count, 6);
-        assert_eq!(tail.start_index, 4);
-        assert_eq!(tail.end_index, 6);
-        assert_eq!(tail.next_cursor, Some(4));
+        assert_eq!(tail.total_count, 5);
+        assert_eq!(tail.start_index, 3);
+        assert_eq!(tail.end_index, 5);
+        assert_eq!(tail.next_cursor, Some(3));
         assert!(tail.has_more);
         assert_eq!(tail.events[0].event_type, USER_MESSAGE);
         assert_eq!(tail.events[1].event_type, ASSISTANT_MESSAGE);
@@ -1931,30 +2122,30 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(older.start_index, 1);
-        assert_eq!(older.end_index, 4);
-        assert_eq!(older.next_cursor, Some(1));
-        assert!(older.has_more);
+        assert_eq!(older.start_index, 0);
+        assert_eq!(older.end_index, 3);
+        assert_eq!(older.next_cursor, Some(0));
+        assert!(!older.has_more);
         assert_eq!(
             older
                 .events
                 .iter()
                 .map(|event| event.event_type.as_str())
                 .collect::<Vec<_>>(),
-            vec![ASSISTANT_DELTA, TOOL_CALL, TOOL_RESULT]
+            vec![USER_MESSAGE, TOOL_CALL, TOOL_RESULT]
         );
 
         let delta = load_conversation_events_page(
             recorder.file_path(),
             ConversationEventPageOptions {
-                since: Some(5),
+                since: Some(4),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(delta.start_index, 5);
-        assert_eq!(delta.end_index, 6);
-        assert_eq!(delta.next_cursor, Some(6));
+        assert_eq!(delta.start_index, 4);
+        assert_eq!(delta.end_index, 5);
+        assert_eq!(delta.next_cursor, Some(5));
         assert!(!delta.has_more);
         assert_eq!(delta.events.len(), 1);
         assert_eq!(delta.events[0].event_type, ASSISTANT_MESSAGE);

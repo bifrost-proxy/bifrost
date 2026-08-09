@@ -558,27 +558,19 @@ fn gather_status_with_runtime<F>(
 where
     F: FnMut(u16) -> Option<RuntimeInfo>,
 {
-    let recorded_runtime_is_live = recorded_runtime
+    let mut candidate_ports = recorded_runtime
         .as_ref()
-        .is_some_and(|info| is_process_running(info.pid));
-    let mut runtime_discovered = false;
-    let runtime_info = if recorded_runtime_is_live {
-        recorded_runtime
-    } else {
-        let mut candidate_ports = recorded_runtime
-            .as_ref()
-            .map(|info| vec![info.port])
-            .unwrap_or_default();
-        if !candidate_ports.contains(&requested_port) {
-            candidate_ports.push(requested_port);
-        }
-        let discovered = candidate_ports.into_iter().find_map(discover_runtime);
-        runtime_discovered = discovered.is_some();
-        discovered.or(recorded_runtime)
-    };
-    let is_running = runtime_info
-        .as_ref()
-        .is_some_and(|info| runtime_discovered || is_process_running(info.pid));
+        .map(|info| vec![info.port])
+        .unwrap_or_default();
+    if !candidate_ports.contains(&requested_port) {
+        candidate_ports.push(requested_port);
+    }
+    let discovered = candidate_ports.into_iter().find_map(discover_runtime);
+    let runtime_discovered = discovered.is_some();
+    let runtime_info = discovered.or(recorded_runtime);
+    // A live PID is diagnostic evidence only. Running means the Admin API is
+    // responsive and the service can actually accept traffic.
+    let is_running = runtime_discovered;
     let runtime_port = runtime_info
         .as_ref()
         .map(|info| info.port)
@@ -665,8 +657,13 @@ fn render_status_text(g: &GatheredStatus) {
                 }
                 true
             } else {
-                println!("Status: Stopped (stale PID file exists)");
-                println!("Stale PID: {}", info.pid);
+                if is_process_running(info.pid) {
+                    println!("Status: Unresponsive (process exists, Admin API unavailable)");
+                    println!("Unresponsive PID: {}", info.pid);
+                } else {
+                    println!("Status: Stopped (stale PID file exists)");
+                    println!("Stale PID: {}", info.pid);
+                }
                 false
             }
         }

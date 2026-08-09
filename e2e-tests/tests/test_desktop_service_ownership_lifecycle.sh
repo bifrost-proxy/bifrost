@@ -378,14 +378,10 @@ fi
 kill -STOP "$CORE_PID"
 if ! wait_for_log_line \
   "$desktop_bootstrap_log" \
-  "preserving live managed child"; then
+  "terminating unresponsive managed child for bounded recovery"; then
   kill -CONT "$CORE_PID" >/dev/null 2>&1 || true
-  echo "FAIL: sustained readiness degradation did not preserve the live managed Service"
+  echo "FAIL: sustained readiness degradation did not trigger bounded recovery"
   cat "$desktop_bootstrap_log" || true
-  exit 1
-fi
-if ! process_is_running "$CORE_PID"; then
-  echo "FAIL: sustained backend stall terminated the Desktop-owned Service"
   exit 1
 fi
 if ! grep -Fq "desktop backend health degraded" "$desktop_bootstrap_log"; then
@@ -394,28 +390,18 @@ if ! grep -Fq "desktop backend health degraded" "$desktop_bootstrap_log"; then
   cat "$desktop_bootstrap_log" || true
   exit 1
 fi
-if grep -Fq "triggering recovery for confirmed child exit" "$desktop_bootstrap_log"; then
-  kill -CONT "$CORE_PID" >/dev/null 2>&1 || true
-  echo "FAIL: readiness degradation incorrectly triggered child-exit recovery"
-  cat "$desktop_bootstrap_log" || true
-  exit 1
-fi
-kill -CONT "$CORE_PID"
-if ! wait_for_runtime "$desktop_data_dir" "$desktop_port"; then
-  echo "FAIL: Desktop-owned Service did not recover after the sustained stall"
-  cat "$desktop_bootstrap_log" || true
-  exit 1
-fi
-runtime_pid_after_stall="$(runtime_pid "$desktop_data_dir")"
-if [[ "$runtime_pid_after_stall" != "$CORE_PID" ]]; then
-  echo "FAIL: Desktop watchdog restarted Service after the sustained stall"
+stalled_core_pid="$CORE_PID"
+kill -CONT "$stalled_core_pid" >/dev/null 2>&1 || true
+if ! CORE_PID="$(wait_for_runtime_pid_change \
+  "$desktop_data_dir" "$desktop_port" "$stalled_core_pid")"; then
+  echo "FAIL: Desktop watchdog did not replace the unresponsive owned Service"
   cat "$desktop_bootstrap_log" || true
   exit 1
 fi
 if ! wait_for_log_line \
   "$desktop_bootstrap_log" \
-  "desktop backend health recovered without restart"; then
-  echo "FAIL: Desktop watchdog did not record non-restarting health recovery"
+  "desktop backend watchdog recovery succeeded"; then
+  echo "FAIL: Desktop watchdog did not record successful stall recovery"
   cat "$desktop_bootstrap_log" || true
   exit 1
 fi
@@ -586,4 +572,4 @@ BIFROST_DATA_DIR="$cli_data_dir" "$CLI_BIN" stop >/dev/null
 wait_for_process_exit "$CORE_PID"
 CORE_PID=""
 
-echo "PASS: Desktop ownership stays scoped by data-dir, transient stalls preserve PID, real exits recover, and CLI lifecycle commands preserve App ownership"
+echo "PASS: Desktop ownership stays scoped by data-dir, sustained stalls trigger bounded recovery, real exits recover, and CLI lifecycle commands preserve App ownership"

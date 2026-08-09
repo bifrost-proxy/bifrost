@@ -44,6 +44,12 @@ const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
 const CLI_VERSION_DETECTION_TIMEOUT_SECS: u64 = 10;
+const MAX_CAPTURED_STREAM_BYTES: usize = 256 * 1024;
+const MAX_CAPTURED_EVENTS: usize = 512;
+const MAX_PROGRESS_CONTENT_BYTES: usize = 8 * 1024;
+const MAX_PROGRESS_RAW_BYTES: usize = 8 * 1024;
+const MAX_RETAINED_RUNS: usize = 64;
+const MAX_RETAINED_RUN_BYTES: u64 = 256 * 1024 * 1024;
 const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
 #[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
@@ -1250,6 +1256,7 @@ impl ExternalCliRuntime {
         validate_work_dir(&request)?;
         let started_at = now_ms();
         let run_id = format!("{}-{}", started_at, uuid::Uuid::new_v4());
+        prune_completed_run_directories(&self.runs_root, Some(&run_id))?;
         let run_dir = self.runs_root.join(&run_id);
         tokio::fs::create_dir_all(&run_dir)
             .await
@@ -1510,7 +1517,8 @@ impl ExternalCliRuntime {
         tokio::fs::write(&stderr_path, &run_output.stderr)
             .await
             .map_err(|error| format!("write stderr failed: {error}"))?;
-        write_events_jsonl(&events_path, &run_output.events).await?;
+        let persisted_events = persisted_event_summaries(&run_output.events);
+        write_events_jsonl(&events_path, &persisted_events).await?;
         let artifacts = ExternalCliRunArtifacts {
             run_dir: run_dir.display().to_string(),
             prompt: prompt_path.display().to_string(),
@@ -1534,7 +1542,10 @@ impl ExternalCliRuntime {
             finished_at,
             duration_ms: finished_at.saturating_sub(started_at),
             artifacts,
-            events: run_output.events,
+            // The full event stream is returned to the live UI through the worker
+            // protocol. Persist only compact summaries so result.json is not a
+            // second copy of potentially large executor output.
+            events: persisted_events,
             metadata,
         };
         let result_path = run_dir.join("result.json");
@@ -4194,13 +4205,19 @@ async fn read_stdout_events(
         .await
         .map_err(|error| format!("read external cli stdout failed: {error}"))?
     {
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
+        append_tail(&mut bytes, line.as_bytes(), MAX_CAPTURED_STREAM_BYTES);
+        append_tail(&mut bytes, b"\n", MAX_CAPTURED_STREAM_BYTES);
         if let Some(mut event) = parse_progress_event_line_with_state(&line, &mut parse_state) {
             let observed_at = now_ms();
             enrich_progress_event_observation(&mut event, observed_at, &mut tool_started_at);
             if let Some(progress_tx) = progress_tx.as_ref() {
                 let _ = progress_tx.send(event.clone());
+            }
+            // The live UI gets the full event above. Only the bounded in-memory
+            // fallback/result stream is compacted.
+            compact_progress_event(&mut event);
+            if events.len() == MAX_CAPTURED_EVENTS {
+                events.remove(0);
             }
             events.push(event);
         }
@@ -4257,10 +4274,125 @@ async fn read_stderr_lines(stderr: tokio::process::ChildStderr) -> Result<Vec<u8
         .await
         .map_err(|error| format!("read external cli stderr failed: {error}"))?
     {
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
+        append_tail(&mut bytes, line.as_bytes(), MAX_CAPTURED_STREAM_BYTES);
+        append_tail(&mut bytes, b"\n", MAX_CAPTURED_STREAM_BYTES);
     }
     Ok(bytes)
+}
+
+fn append_tail(target: &mut Vec<u8>, next: &[u8], limit: usize) {
+    if next.len() >= limit {
+        target.clear();
+        target.extend_from_slice(&next[next.len() - limit..]);
+        return;
+    }
+    let excess = target
+        .len()
+        .saturating_add(next.len())
+        .saturating_sub(limit);
+    if excess > 0 {
+        target.drain(..excess);
+    }
+    target.extend_from_slice(next);
+}
+
+fn compact_progress_event(event: &mut ExternalCliProgressEvent) {
+    if event.content.len() > MAX_PROGRESS_CONTENT_BYTES {
+        let original_bytes = event.content.len();
+        let mut boundary = MAX_PROGRESS_CONTENT_BYTES;
+        while boundary > 0 && !event.content.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        event.content = format!(
+            "{}\n… [truncated; original_bytes={original_bytes}]",
+            &event.content[..boundary]
+        );
+    }
+    if serde_json::to_vec(&event.raw)
+        .map(|value| value.len())
+        .unwrap_or_default()
+        > MAX_PROGRESS_RAW_BYTES
+    {
+        event.raw = serde_json::json!({
+            "_bifrost_truncated": true,
+            "reason": "raw progress event exceeded persistence limit"
+        });
+    }
+}
+
+fn persisted_event_summaries(events: &[ExternalCliProgressEvent]) -> Vec<ExternalCliProgressEvent> {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_type,
+                ExternalCliProgressEventType::RunStarted
+                    | ExternalCliProgressEventType::ToolStarted
+                    | ExternalCliProgressEventType::ToolFinished
+                    | ExternalCliProgressEventType::AssistantFinal
+                    | ExternalCliProgressEventType::RunFinished
+                    | ExternalCliProgressEventType::RunFailed
+            )
+        })
+        .rev()
+        .take(128)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|mut event| {
+            compact_progress_event(&mut event);
+            event
+        })
+        .collect()
+}
+
+fn prune_completed_run_directories(
+    runs_root: &Path,
+    active_run: Option<&str>,
+) -> Result<(), String> {
+    if !runs_root.exists() {
+        return Ok(());
+    }
+    let mut runs = std::fs::read_dir(runs_root)
+        .map_err(|error| format!("read external run root failed: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter(|entry| active_run != entry.file_name().to_str())
+        .filter(|entry| !ACTIVE_RUNS.contains_key(entry.file_name().to_string_lossy().as_ref()))
+        .filter(|entry| entry.path().join("result.json").is_file())
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            let bytes = directory_size(&entry.path());
+            (entry.path(), modified, bytes)
+        })
+        .collect::<Vec<_>>();
+    runs.sort_by_key(|(_, modified, _)| *modified);
+    let mut total = runs.iter().map(|(_, _, bytes)| *bytes).sum::<u64>();
+    while runs.len() > MAX_RETAINED_RUNS || total > MAX_RETAINED_RUN_BYTES {
+        let (path, _, bytes) = runs.remove(0);
+        std::fs::remove_dir_all(&path)
+            .map_err(|error| format!("prune external run {} failed: {error}", path.display()))?;
+        total = total.saturating_sub(bytes);
+    }
+    Ok(())
+}
+
+fn directory_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => directory_size(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map(|value| value.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn remove_active_sessions_for_run(run_id: &str) {

@@ -3970,3 +3970,67 @@ async fn wait_for_single_run_dir(runs_root: &Path) -> String {
     }
     panic!("run dir was not created");
 }
+
+#[test]
+fn executor_persistence_keeps_only_bounded_ui_summaries() {
+    let mut tail = vec![b'a'; MAX_CAPTURED_STREAM_BYTES];
+    append_tail(&mut tail, b"xyz", MAX_CAPTURED_STREAM_BYTES);
+    assert_eq!(tail.len(), MAX_CAPTURED_STREAM_BYTES);
+    assert!(tail.ends_with(b"xyz"));
+
+    let events = vec![
+        ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::AssistantDelta,
+            content: "transient".to_string(),
+            title: None,
+            raw: serde_json::json!({"detail": "not archived"}),
+        },
+        ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::ToolFinished,
+            content: "x".repeat(MAX_PROGRESS_CONTENT_BYTES + 100),
+            title: Some("read_file".to_string()),
+            raw: serde_json::json!({"result": "x".repeat(MAX_PROGRESS_RAW_BYTES + 100)}),
+        },
+        ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::AssistantFinal,
+            content: "done".to_string(),
+            title: None,
+            raw: serde_json::json!({}),
+        },
+    ];
+    let persisted = persisted_event_summaries(&events);
+    assert_eq!(persisted.len(), 2);
+    assert!(persisted[0].content.contains("truncated"));
+    assert_eq!(persisted[0].raw["_bifrost_truncated"], true);
+    assert_eq!(persisted[1].content, "done");
+}
+
+#[test]
+fn executor_run_retention_prunes_oldest_completed_directories() {
+    let root = tempfile::tempdir().unwrap();
+    for index in 0..=(MAX_RETAINED_RUNS + 1) {
+        let run = root.path().join(format!("run-{index:03}"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("result.json"), b"{}").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    prune_completed_run_directories(root.path(), Some("run-065")).unwrap();
+    assert!(!root.path().join("run-000").exists());
+    assert!(root.path().join("run-065").exists());
+}
+
+#[test]
+fn executor_run_retention_never_prunes_incomplete_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let incomplete = root.path().join("incomplete-active");
+    std::fs::create_dir_all(&incomplete).unwrap();
+    std::fs::write(incomplete.join("cli.stdout.log"), vec![0_u8; 1024]).unwrap();
+    for index in 0..=(MAX_RETAINED_RUNS + 1) {
+        let run = root.path().join(format!("completed-{index:03}"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("result.json"), b"{}").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    prune_completed_run_directories(root.path(), None).unwrap();
+    assert!(incomplete.exists());
+}

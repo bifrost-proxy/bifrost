@@ -3036,22 +3036,12 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
 }
 
 fn timeline_has_tool_call(
-    recorder: &bifrost_agent::persistence::ConversationRecorder,
+    recorder: &mut bifrost_agent::persistence::ConversationRecorder,
     session_key: &str,
     call_id: &str,
 ) -> bool {
-    bifrost_agent::persistence::load_conversation_events(recorder.file_path())
-        .map(|events| {
-            events.iter().any(|event| {
-                event.session_key == session_key
-                    && event.event_type == bifrost_agent::persistence::event_types::TOOL_CALL
-                    && event
-                        .content
-                        .get("call_id")
-                        .and_then(|value| value.as_str())
-                        == Some(call_id)
-            })
-        })
+    recorder
+        .has_tool_call_id(session_key, call_id)
         .unwrap_or(false)
 }
 
@@ -5847,12 +5837,12 @@ mod coverage_boost {
         recorder.close();
 
         assert!(timeline_has_tool_call(
-            &recorder,
+            &mut recorder,
             "session-tool",
             "call-123"
         ));
         assert!(!timeline_has_tool_call(
-            &recorder,
+            &mut recorder,
             "session-tool",
             "missing"
         ));
@@ -6000,12 +5990,12 @@ fn timeline_has_tool_call_detects_existing_call_id() {
     recorder.close();
 
     assert!(timeline_has_tool_call(
-        &recorder,
+        &mut recorder,
         "session-tool",
         "call-123"
     ));
     assert!(!timeline_has_tool_call(
-        &recorder,
+        &mut recorder,
         "session-tool",
         "missing"
     ));
