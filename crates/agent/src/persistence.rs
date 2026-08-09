@@ -62,9 +62,9 @@ pub struct ConversationRecorder {
 }
 
 /// Canonical sessions are recovery state, not rolling diagnostic logs.
-pub const DEFAULT_SESSION_MAX_BYTES: usize = 8 * 1024 * 1024;
-const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
-const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
+pub const DEFAULT_SESSION_MAX_BYTES: usize = 1024 * 1024;
+// Tool payloads belong exclusively to the live executor/UI stream. Canonical
+// sessions keep identifiers and terminal state, never arguments or results.
 
 impl ConversationRecorder {
     /// Create a recorder at the stable path owned by this session key.
@@ -279,10 +279,9 @@ impl ConversationRecorder {
         &mut self,
         session_key: &str,
         tool_name: &str,
-        arguments: &str,
+        _arguments: &str,
         call_id: Option<&str>,
     ) -> Result<(), String> {
-        let (arguments, original_bytes, truncated) = compact_tool_arguments(arguments);
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::TOOL_CALL.to_string(),
@@ -291,9 +290,7 @@ impl ConversationRecorder {
                 "call_id": call_id,
                 "call_type": "function",
                 "tool_name": tool_name,
-                "arguments": arguments,
-                "original_bytes": original_bytes,
-                "truncated": truncated,
+                "arguments": {},
             }),
         })?;
         if let Some(call_id) = call_id.filter(|value| !value.is_empty()) {
@@ -307,11 +304,10 @@ impl ConversationRecorder {
         &mut self,
         session_key: &str,
         tool_name: &str,
-        result: &str,
+        _result: &str,
         success: bool,
         call_id: Option<&str>,
     ) -> Result<(), String> {
-        let (result, original_bytes, truncated) = compact_text(result, MAX_TOOL_RESULT_BYTES);
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::TOOL_RESULT.to_string(),
@@ -319,10 +315,34 @@ impl ConversationRecorder {
             content: serde_json::json!({
                 "call_id": call_id,
                 "tool_name": tool_name,
-                "result": result,
+                "result": if success { "succeeded" } else { "failed" },
                 "success": success,
-                "original_bytes": original_bytes,
-                "truncated": truncated,
+                "external_summary": true,
+            }),
+        })
+    }
+
+    /// Record the durable state of an externally executed tool without storing
+    /// its command, parameters, stdout, stderr, or returned payload.
+    pub fn record_external_tool_result_summary(
+        &mut self,
+        session_key: &str,
+        tool_name: &str,
+        success: bool,
+        call_id: Option<&str>,
+        duration_ms: Option<u64>,
+    ) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::TOOL_RESULT.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({
+                "call_id": call_id,
+                "tool_name": tool_name,
+                "result": if success { "succeeded" } else { "failed" },
+                "success": success,
+                "duration_ms": duration_ms,
+                "external_summary": true,
             }),
         })
     }
@@ -576,6 +596,8 @@ fn should_flush_event(event_type: &str) -> bool {
         event_type,
         event_types::USER_MESSAGE
             | event_types::ASSISTANT_MESSAGE
+            | event_types::TOOL_CALL
+            | event_types::TOOL_RESULT
             | event_types::SESSION_END
             | event_types::COMPACTION
             | event_types::RUN_STATE_CHANGED
@@ -583,42 +605,6 @@ fn should_flush_event(event_type: &str) -> bool {
             | event_types::GOAL_CLEARED
             | event_types::PLAN_UPDATED
             | event_types::PLAN_CLEARED
-    )
-}
-
-fn compact_text(value: &str, max_bytes: usize) -> (String, usize, bool) {
-    let original_bytes = value.len();
-    if original_bytes <= max_bytes {
-        return (value.to_string(), original_bytes, false);
-    }
-    let mut boundary = max_bytes.min(value.len());
-    while boundary > 0 && !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    (
-        format!(
-            "{}\n… [truncated; original_bytes={original_bytes}]",
-            &value[..boundary]
-        ),
-        original_bytes,
-        true,
-    )
-}
-
-fn compact_tool_arguments(value: &str) -> (String, usize, bool) {
-    let (preview, original_bytes, truncated) = compact_text(value, MAX_TOOL_ARGUMENT_BYTES);
-    if !truncated {
-        return (preview, original_bytes, false);
-    }
-    (
-        serde_json::json!({
-            "_bifrost_truncated": true,
-            "original_bytes": original_bytes,
-            "preview": preview,
-        })
-        .to_string(),
-        original_bytes,
-        true,
     )
 }
 
@@ -1979,13 +1965,14 @@ mod tests {
         assert_eq!(events[1].event_type, TOOL_CALL);
         assert_eq!(events[1].content["call_id"], "call-exec-command");
         assert_eq!(events[1].content["tool_name"], "exec_command");
-        assert_eq!(events[1].content["arguments"], r#"{"cmd": "ls"}"#);
+        assert_eq!(events[1].content["arguments"], serde_json::json!({}));
 
         assert_eq!(events[2].event_type, TOOL_RESULT);
         assert_eq!(events[2].content["call_id"], "call-exec-command");
         assert_eq!(events[2].content["tool_name"], "exec_command");
-        assert_eq!(events[2].content["result"], "file1.txt");
+        assert_eq!(events[2].content["result"], "succeeded");
         assert_eq!(events[2].content["success"], true);
+        assert_eq!(events[2].content["external_summary"], true);
 
         assert_eq!(events[3].event_type, ASSISTANT_MESSAGE);
         assert_eq!(events[3].content["message"], "done");
@@ -2000,14 +1987,14 @@ mod tests {
     }
 
     #[test]
-    fn recorder_compacts_tool_payloads_and_caches_call_ids() {
+    fn recorder_discards_tool_payloads_and_caches_call_ids() {
         let dir = tempfile::tempdir().unwrap();
         let mut recorder = ConversationRecorder::new(dir.path(), "bounded-session");
         recorder
             .record_tool_call_with_id(
                 "bounded-session",
                 "exec_command",
-                &"a".repeat(MAX_TOOL_ARGUMENT_BYTES + 1),
+                &"secret-argument".repeat(1024),
                 Some("call-large"),
             )
             .unwrap();
@@ -2015,7 +2002,7 @@ mod tests {
             .record_tool_result_with_call_id(
                 "bounded-session",
                 "exec_command",
-                &"b".repeat(MAX_TOOL_RESULT_BYTES + 1),
+                &"secret-result".repeat(1024),
                 true,
                 Some("call-large"),
             )
@@ -2026,16 +2013,53 @@ mod tests {
         recorder.close();
 
         let events = load_conversation_events(recorder.file_path()).unwrap();
-        assert_eq!(events[0].content["truncated"], true);
-        assert_eq!(events[1].content["truncated"], true);
-        assert!(events[0].content["arguments"]
-            .as_str()
+        assert_eq!(events[0].content["arguments"], serde_json::json!({}));
+        assert_eq!(events[1].content["result"], "succeeded");
+        let stored = std::fs::read_to_string(recorder.file_path()).unwrap();
+        assert!(!stored.contains("secret-argument"));
+        assert!(!stored.contains("secret-result"));
+    }
+
+    #[test]
+    fn existing_recorder_loads_tool_call_ids_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_conversation_path(dir.path(), "existing-tools");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string(&ConversationEvent {
+                timestamp: 1,
+                event_type: event_types::TOOL_CALL.to_string(),
+                session_key: "existing-tools".to_string(),
+                content: serde_json::json!({"call_id":"existing-call"}),
+            })
             .unwrap()
-            .contains("_bifrost_truncated"));
-        assert!(events[1].content["result"]
-            .as_str()
+                + "\n",
+        )
+        .unwrap();
+        let mut recorder = ConversationRecorder::from_existing_file(path, None);
+        assert!(recorder
+            .has_tool_call_id("existing-tools", "existing-call")
+            .unwrap());
+        assert!(!recorder.has_tool_call_id("existing-tools", "").unwrap());
+
+        let second_path = canonical_conversation_path(dir.path(), "lazy-tools");
+        std::fs::write(
+            &second_path,
+            serde_json::to_string(&ConversationEvent {
+                timestamp: 1,
+                event_type: event_types::USER_MESSAGE.to_string(),
+                session_key: "other-session".to_string(),
+                content: serde_json::json!({"message":"ignored"}),
+            })
             .unwrap()
-            .contains("original_bytes"));
+                + "\n",
+        )
+        .unwrap();
+        let mut lazy = ConversationRecorder::from_existing_file(second_path, None);
+        lazy.record_tool_call_with_id("lazy-tools", "read_file", "secret", Some("lazy-call"))
+            .unwrap();
+        assert!(lazy.has_tool_call_id("lazy-tools", "lazy-call").unwrap());
     }
 
     #[test]
@@ -2043,6 +2067,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let recorder = ConversationRecorder::new(dir.path(), "default-limit");
         assert_eq!(recorder.max_bytes, Some(DEFAULT_SESSION_MAX_BYTES));
+        assert_eq!(DEFAULT_SESSION_MAX_BYTES, 1024 * 1024);
     }
 
     #[test]

@@ -20,11 +20,11 @@ CLI 启动 Service 后由 Desktop 复用，再暂停其 API。预期 Desktop 只
 
 ### TC-FA-03 Agent 精简持久化
 
-写入 delta、超 16 KiB 参数、超 32 KiB 结果和最终消息。预期 delta 不落盘，超长事件带截断元数据，最终消息可恢复，默认上限 8 MiB。
+写入 delta、计划、超 512 B 参数、超 1 KiB 结果和最终消息。预期外部执行器的 delta、计划、工具参数和工具结果均不落盘，工具事件只留名称、调用 ID、状态和耗时，最终消息只保存一次且可恢复，默认上限 1 MiB。
 
 ### TC-FA-04 runner 日志有界
 
-向 stdout/stderr 输入超过 256 KiB 并创建超额历史目录。预期持续排空管道、仅保存 256 KiB 尾部，清理最旧完成目录且不删除 active run。
+向 stdout/stderr 输入超过 4 KiB 并创建超额历史目录。预期持续排空管道、仅保存 4 KiB 尾部；prompt/CLI 参数值/params 值/工具 command 不落盘，持久化 raw 不包含工具结果，清理最旧完成目录且不删除 active run。
 
 ### TC-FA-05 正式环境安装验收
 

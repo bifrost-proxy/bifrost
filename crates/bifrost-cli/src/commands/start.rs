@@ -564,12 +564,19 @@ fn system_proxy_target_is_ready(proxy_host: &str, proxy_port: u16) -> bool {
         .is_some_and(|read| response[..read].starts_with(b"HTTP/1.1 2"))
 }
 
-fn should_suspend_system_proxy_for_unready(
-    should_enable: bool,
-    ownership: SystemProxyOwnership,
-    target_ready: bool,
+#[rustfmt::skip]
+fn suspend_unready_owned_system_proxy(should_enable: bool, ownership: SystemProxyOwnership, target_ready: bool, enabled_flag: &AtomicBool,
+    manager: &tokio::sync::RwLock<bifrost_core::SystemProxyManager>,
+    proxy_host: &str, proxy_port: u16,
 ) -> bool {
-    should_enable && ownership == SystemProxyOwnership::ThisBifrost && !target_ready
+    if !should_enable || ownership != SystemProxyOwnership::ThisBifrost || target_ready {
+        return false;
+    }
+    let _ = manager
+        .blocking_write()
+        .disable_if_matches(proxy_host, proxy_port);
+    enabled_flag.store(false, Ordering::Release);
+    true
 }
 
 fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
@@ -621,28 +628,9 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                 }
                 let should_enable = desired_enabled.load(Ordering::Acquire);
                 let ownership = inspect_system_proxy_ownership(&proxy_host, proxy_port);
-                if should_suspend_system_proxy_for_unready(
-                    should_enable,
-                    ownership,
-                    system_proxy_target_is_ready(&proxy_host, proxy_port),
-                ) {
-                    let mut manager = system_proxy_manager.blocking_write();
-                    match manager.disable_if_matches(&proxy_host, proxy_port) {
-                        Ok(_) => tracing::warn!(
-                            target: "bifrost_cli::startup",
-                            host = %proxy_host,
-                            port = proxy_port,
-                            "system proxy target is unresponsive; restored system proxy until service recovers"
-                        ),
-                        Err(error) => tracing::warn!(
-                            target: "bifrost_cli::startup",
-                            error = %error,
-                            "failed to restore unresponsive system proxy target"
-                        ),
-                    }
+                let target_ready = system_proxy_target_is_ready(&proxy_host, proxy_port);
+                if suspend_unready_owned_system_proxy(should_enable, ownership, target_ready, &enabled_flag, &system_proxy_manager, &proxy_host, proxy_port) {
                     applied_by_this_runtime = false;
-                    enabled_flag.store(false, Ordering::Release);
-                    drop(manager);
                     if wait_for_reconcile(&stop_flag, &bifrost_dir, Duration::from_secs(2)) {
                         return;
                     }
@@ -888,10 +876,8 @@ fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
                     );
                     continue;
                 }
-                if !system_proxy_target_is_ready(&proxy_host, proxy_port) {
-                    let mut manager = system_proxy_manager.blocking_write();
-                    let _ = manager.disable_if_matches(&proxy_host, proxy_port);
-                    enabled_flag.store(false, Ordering::Release);
+                let target_ready = system_proxy_target_is_ready(&proxy_host, proxy_port);
+                if suspend_unready_owned_system_proxy(should_enable, SystemProxyOwnership::ThisBifrost, target_ready, &enabled_flag, &system_proxy_manager, &proxy_host, proxy_port) {
                     tracing::warn!(
                         target: "bifrost_cli::startup",
                         host = %proxy_host,
@@ -4552,26 +4538,75 @@ mod tests {
 
     #[test]
     fn unresponsive_owned_proxy_is_suspended_but_other_owners_are_preserved() {
-        assert!(should_suspend_system_proxy_for_unready(
+        let dir = tempfile::tempdir().unwrap();
+        let manager = tokio::sync::RwLock::new(bifrost_core::SystemProxyManager::new(
+            dir.path().to_path_buf(),
+        ));
+        let enabled = AtomicBool::new(true);
+        assert!(suspend_unready_owned_system_proxy(
             true,
             SystemProxyOwnership::ThisBifrost,
-            false
+            false,
+            &enabled,
+            &manager,
+            "127.0.0.1",
+            allocate_loopback_port(),
         ));
-        assert!(!should_suspend_system_proxy_for_unready(
+        assert!(!enabled.load(Ordering::Acquire));
+
+        enabled.store(true, Ordering::Release);
+        assert!(!suspend_unready_owned_system_proxy(
             true,
             SystemProxyOwnership::Other,
-            false
+            false,
+            &enabled,
+            &manager,
+            "127.0.0.1",
+            allocate_loopback_port(),
         ));
-        assert!(!should_suspend_system_proxy_for_unready(
+        assert!(enabled.load(Ordering::Acquire));
+
+        assert!(!suspend_unready_owned_system_proxy(
             false,
             SystemProxyOwnership::ThisBifrost,
-            false
+            false,
+            &enabled,
+            &manager,
+            "127.0.0.1",
+            allocate_loopback_port(),
         ));
-        assert!(!should_suspend_system_proxy_for_unready(
+        assert!(!suspend_unready_owned_system_proxy(
             true,
             SystemProxyOwnership::ThisBifrost,
-            true
+            true,
+            &enabled,
+            &manager,
+            "127.0.0.1",
+            allocate_loopback_port(),
         ));
+    }
+
+    #[test]
+    fn system_proxy_readiness_requires_a_successful_admin_response() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 256];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read])
+                .contains("/_bifrost/api/proxy/system/support"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .unwrap();
+        });
+
+        assert!(system_proxy_target_is_ready("0.0.0.0", port));
+        server.join().unwrap();
+
+        let closed_port = allocate_loopback_port();
+        assert!(!system_proxy_target_is_ready("127.0.0.1", closed_port));
+        assert!(!system_proxy_target_is_ready("invalid host", 9900));
     }
 
     #[test]

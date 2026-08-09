@@ -363,19 +363,12 @@ for report in (github_report, product_report):
     assert "## 事实与证据" in report, report
     assert "## 推断与不确定性" in report, report
     assert "## 对原始问题的直接回答" in report, report
-wait_prompts = [
-    path
+prompt_summaries = [
+    json.loads(path.read_text(encoding="utf-8"))
     for path in (pathlib.Path(data_dir) / "im_gateway" / "runs").glob("*/prompt.md")
-    if not path.read_text(encoding="utf-8").strip()
 ]
-assert len(wait_prompts) >= 2, wait_prompts
-retry_prompts = [
-    path
-    for path in (pathlib.Path(data_dir) / "im_gateway" / "runs").glob("*/prompt.md")
-    if "上一条回复不是最终研究报告"
-    in path.read_text(encoding="utf-8")
-]
-assert len(retry_prompts) >= 2, retry_prompts
+assert len(prompt_summaries) >= 4, prompt_summaries
+assert all(item.get("_bifrost_compacted") is True for item in prompt_summaries), prompt_summaries
 
 fanout_report = (fanout_dir / f"{date}-report.md").read_text(encoding="utf-8")
 assert github["full_report_link"] in fanout_report, fanout_report

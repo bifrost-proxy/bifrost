@@ -211,9 +211,9 @@ def final_event(events, event_type):
 
 def assert_run_images(run_id, expected_images):
     run_dir = test_path / "agent" / "im_gateway" / "chat_runs" / run_id
-    prompt = (run_dir / "prompt.md").read_text(encoding="utf-8")
-    assert "## Attached Images" in prompt, prompt
-    assert "/attachments/session-" in prompt, prompt
+    prompt = json.loads((run_dir / "prompt.md").read_text(encoding="utf-8"))
+    assert prompt["_bifrost_compacted"] is True, prompt
+    assert prompt["image_count"] == len(expected_images), prompt
 
     result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     attachments = json.loads(result["metadata"]["attachments.images"])
@@ -229,16 +229,15 @@ def assert_run_images(run_id, expected_images):
         assert image_path.exists(), image_path
         assert b"/attachments/session-" in str(image_path).encode("utf-8"), image_path
         assert image_path.read_bytes() == expected_bytes, image_path
-        assert str(image_path) in prompt, prompt
         paths.append(image_path)
     return paths
 
 
 def assert_run_files(run_id, expected_files):
     run_dir = test_path / "agent" / "im_gateway" / "chat_runs" / run_id
-    prompt = (run_dir / "prompt.md").read_text(encoding="utf-8")
-    assert "## Attached Files" in prompt, prompt
-    assert "Use these paths" in prompt, prompt
+    prompt = json.loads((run_dir / "prompt.md").read_text(encoding="utf-8"))
+    assert prompt["_bifrost_compacted"] is True, prompt
+    assert prompt["file_count"] == len(expected_files), prompt
 
     result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     attachments = json.loads(result["metadata"]["attachments.files"])
@@ -254,7 +253,6 @@ def assert_run_files(run_id, expected_files):
         assert attachment_path.exists(), attachment_path
         assert attachment_path.parent.name == "files", attachment_path
         assert attachment_path.read_bytes() == expected_bytes, attachment_path
-        assert str(attachment_path) in prompt, prompt
         paths.append(attachment_path)
     return paths
 
@@ -269,7 +267,8 @@ def assert_runner_metadata(run_id, expected_adapter, expected_attachment_count=1
     metadata = result["metadata"]
     required_keys = [
         "cli.executable",
-        "cli.args",
+        "cli.argCount",
+        "cli.argFlags",
         "cli.version",
         "runner.adapter",
         "prompt.estimatedTokens",

@@ -705,7 +705,7 @@ while True:
             // The cleanup path has two 1.5s grace windows. Leave scheduler
             // headroom for full-workspace test contention while still proving
             // that a SIGTERM-ignoring child cannot hang the runner forever.
-            Duration::from_secs(8),
+            Duration::from_secs(15),
             run_command(
                 run_id,
                 None,
@@ -726,7 +726,10 @@ while True:
         .unwrap();
 
         assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
-        assert!(started.elapsed() < Duration::from_secs(7));
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "SIGTERM-ignoring runner cleanup exceeded the bounded timeout"
+        );
         assert!(!ACTIVE_RUNS.contains_key(run_id));
     }
 

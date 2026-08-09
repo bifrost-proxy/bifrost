@@ -327,13 +327,14 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                             .ok()
                             .and_then(|guard| guard.as_ref().map(std::process::Child::id))
                             .unwrap_or_default();
-                        if let Err(error) = terminate_managed_backend(
-                            &state,
-                            "after sustained readiness failure",
-                        ) {
+                        if let Err(error) =
+                            terminate_managed_backend(&state, "after sustained readiness failure")
+                        {
                             open_backend_recovery_circuit(
                                 &state,
-                                format!("failed to terminate unresponsive managed backend: {error}"),
+                                format!(
+                                    "failed to terminate unresponsive managed backend: {error}"
+                                ),
                             );
                             continue;
                         }

@@ -1698,6 +1698,24 @@ async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
     assert_eq!(result.events.len(), 2);
     assert!(Path::new(&result.artifacts.command_snapshot).exists());
     assert!(Path::new(&result.artifacts.normalized_events).exists());
+    let prompt_summary: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(&result.artifacts.prompt)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(prompt_summary["_bifrost_compacted"], true);
+    assert!(!tokio::fs::read_to_string(&result.artifacts.prompt)
+        .await
+        .unwrap()
+        .contains("hello from api"));
+    let persisted: ExternalCliRunResult = serde_json::from_str(
+        &tokio::fs::read_to_string(Path::new(&result.artifacts.run_dir).join("result.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(persisted.responses.is_empty());
 }
 
 #[cfg(unix)]
@@ -1805,15 +1823,11 @@ async fn external_cli_runtime_persists_chatgpt_web_adapter_errors() {
     assert!(Path::new(&result.artifacts.stdout).exists());
     assert!(Path::new(&result.artifacts.stderr).exists());
     assert!(Path::new(&result.artifacts.normalized_events).exists());
-    assert!(Path::new(&result.artifacts.last_message).exists());
+    assert!(!Path::new(&result.artifacts.last_message).exists());
     let stderr = tokio::fs::read_to_string(&result.artifacts.stderr)
         .await
         .unwrap();
     assert!(stderr.contains("parse chatgpt_web adapter config failed"));
-    let last_message = tokio::fs::read_to_string(&result.artifacts.last_message)
-        .await
-        .unwrap();
-    assert_eq!(last_message, result.response);
     assert!(Path::new(&result.artifacts.run_dir)
         .join("result.json")
         .exists());
@@ -2043,12 +2057,14 @@ async fn external_cli_run_writes_attachments_and_injects_prompt_paths() {
 
     let result = runtime.run(request).await.unwrap();
 
-    let prompt = tokio::fs::read_to_string(&result.artifacts.prompt)
-        .await
-        .unwrap();
-    assert!(prompt.contains("## Attached Images"));
-    assert!(prompt.contains("image-1.png"));
-    assert!(prompt.contains("image-2.jpg"));
+    let prompt_summary: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(&result.artifacts.prompt)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(prompt_summary["_bifrost_compacted"], true);
+    assert_eq!(prompt_summary["image_count"], 2);
     let images: Vec<ExternalCliSavedImageAttachment> = serde_json::from_str(
         result
             .metadata
@@ -2083,13 +2099,14 @@ async fn external_cli_run_writes_attachments_and_injects_prompt_paths() {
     assert_eq!(tokio::fs::read(&images[1].path).await.unwrap(), b"two");
 
     let file_result = runtime.run(file_request).await.unwrap();
-    let file_prompt = tokio::fs::read_to_string(&file_result.artifacts.prompt)
-        .await
-        .unwrap();
-    assert!(file_prompt.contains("## Attached Files"));
-    assert!(file_prompt.contains("1-report_final.md"));
-    assert!(file_prompt.contains("name: report_final.md"));
-    assert!(!file_prompt.contains("name: ../report final.md"));
+    let file_prompt_summary: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(&file_result.artifacts.prompt)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file_prompt_summary["_bifrost_compacted"], true);
+    assert_eq!(file_prompt_summary["file_count"], 1);
     let files: Vec<ExternalCliSavedFileAttachment> = serde_json::from_str(
         file_result
             .metadata
@@ -3987,9 +4004,14 @@ fn executor_persistence_keeps_only_bounded_ui_summaries() {
         },
         ExternalCliProgressEvent {
             event_type: ExternalCliProgressEventType::ToolFinished,
-            content: "x".repeat(MAX_PROGRESS_CONTENT_BYTES + 100),
+            content: "x".repeat(4096),
             title: Some("read_file".to_string()),
-            raw: serde_json::json!({"result": "x".repeat(MAX_PROGRESS_RAW_BYTES + 100)}),
+            raw: serde_json::json!({
+                "call_id": "call-1",
+                "tool_name": "read_file",
+                "success": true,
+                "result": "x".repeat(4096),
+            }),
         },
         ExternalCliProgressEvent {
             event_type: ExternalCliProgressEventType::AssistantFinal,
@@ -3999,10 +4021,123 @@ fn executor_persistence_keeps_only_bounded_ui_summaries() {
         },
     ];
     let persisted = persisted_event_summaries(&events);
-    assert_eq!(persisted.len(), 2);
-    assert!(persisted[0].content.contains("truncated"));
-    assert_eq!(persisted[0].raw["_bifrost_truncated"], true);
-    assert_eq!(persisted[1].content, "done");
+    assert_eq!(persisted.len(), 1);
+    assert!(persisted[0].content.is_empty());
+    assert_eq!(persisted[0].raw["_bifrost_compacted"], true);
+    assert_eq!(persisted[0].raw["call_id"], "call-1");
+    assert_eq!(persisted[0].raw["tool_name"], "read_file");
+    assert_eq!(persisted[0].raw["success"], true);
+    assert!(persisted[0].raw.get("result").is_none());
+    assert_eq!(events[0].content, "transient");
+    assert_eq!(events[1].content.len(), 4096);
+    assert_eq!(events[2].content, "done");
+
+    let mut oversized = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: "done".to_string(),
+        title: Some("shell".to_string()),
+        raw: serde_json::json!({
+            "item": {
+                "id": "nested-call",
+                "name": "shell",
+                "status": "completed",
+                "exit_code": 0,
+                "aggregated_output": "x".repeat(4096),
+            }
+        }),
+    };
+    oversized = compact_persisted_progress_event(oversized);
+    assert!(oversized.content.is_empty());
+    assert_eq!(oversized.raw["_bifrost_compacted"], true);
+    assert_eq!(oversized.raw["id"], "nested-call");
+    assert_eq!(oversized.raw["tool_name"], "shell");
+    assert_eq!(oversized.raw["status"], "completed");
+    assert_eq!(oversized.raw["exit_code"], 0);
+    assert!(oversized.raw.get("aggregated_output").is_none());
+
+    let bounded_raw = compacted_progress_raw(&serde_json::json!({
+        "call_id": "x".repeat(MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES + 100),
+        "tool_name": {"nested": "must not persist"},
+        "status": ["must not persist"],
+    }));
+    assert_eq!(
+        bounded_raw["call_id"].as_str().unwrap().len(),
+        MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES
+    );
+    assert!(bounded_raw.get("tool_name").is_none());
+    assert!(bounded_raw.get("status").is_none());
+
+    let nested_only = compacted_progress_raw(&serde_json::json!({
+        "item": {
+            "id": "nested-id",
+            "name": "nested-tool",
+            "status": "failed",
+            "exit_code": 9
+        }
+    }));
+    assert_eq!(nested_only["id"], "nested-id");
+    assert_eq!(nested_only["tool_name"], "nested-tool");
+    assert_eq!(nested_only["status"], "failed");
+    assert_eq!(nested_only["exit_code"], 9);
+
+    let utf8 = truncate_utf8_bytes("éé", 3);
+    assert_eq!(utf8, "é");
+}
+
+#[test]
+fn append_tail_keeps_only_the_bounded_suffix() {
+    let mut tail = b"old".to_vec();
+    append_tail(&mut tail, b"0123456789", 4);
+    assert_eq!(tail, b"6789");
+}
+
+#[test]
+fn directory_size_handles_missing_nested_and_regular_files() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(root.path().join("one"), b"123").unwrap();
+    std::fs::write(nested.join("two"), b"4567").unwrap();
+    assert_eq!(directory_size(root.path()), 7);
+    assert_eq!(directory_size(&root.path().join("missing")), 0);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.path().join("one"), root.path().join("linked")).unwrap();
+        assert_eq!(directory_size(root.path()), 7);
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn stdout_event_capture_keeps_only_the_latest_bounded_live_events() {
+    use tokio::process::Command;
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "i=0; while [ $i -lt {} ]; do printf '{{\"type\":\"run_started\",\"content\":\"%s\"}}\\n' \"$i\"; i=$((i+1)); done",
+            MAX_CAPTURED_EVENTS + 1
+        ))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (_, events) = read_stdout_events(stdout, None).await.unwrap();
+    child.wait().await.unwrap();
+
+    assert_eq!(events.len(), MAX_CAPTURED_EVENTS);
+    assert_eq!(events.first().unwrap().content, "1");
+}
+
+#[test]
+fn persisted_argument_flags_keep_prefixes_without_values() {
+    let flags = persisted_arg_flags(&[
+        "--stdio".to_string(),
+        "--model=gpt-5".to_string(),
+        "-v".to_string(),
+        "secret-prompt".to_string(),
+    ]);
+    assert_eq!(flags, vec!["--stdio", "--model", "-v"]);
 }
 
 #[test]

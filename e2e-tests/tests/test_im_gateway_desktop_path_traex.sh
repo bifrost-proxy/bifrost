@@ -171,7 +171,7 @@ with urllib.request.urlopen(
 
 snapshot = detail["snapshot"]
 assert snapshot["executable"] == "traex", snapshot
-assert snapshot["args"][:3] == ["app-server", "--listen", "stdio://"], snapshot
+assert "--listen" in snapshot["argFlags"], snapshot
 assert "PATH" not in snapshot["envKeys"], snapshot
 assert (
     detail["metadata"].get("cli.version") == "traex 0.0.0-desktop-path-mock"

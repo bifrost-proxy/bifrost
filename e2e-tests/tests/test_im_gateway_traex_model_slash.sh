@@ -302,9 +302,7 @@ def assert_runner_model_flow(runner_id, session_key, model, expected_response, l
     assert expected_response in run_response, run_response
     run_id = [event for event in run_events if event.get("eventType") == "run_finished"][0]["runId"]
     snapshot = json.loads((test_path / "agent" / "im_gateway" / "chat_runs" / run_id / "runtime_snapshot.json").read_text(encoding="utf-8"))
-    args = snapshot["args"]
-    assert "--model" in args, args
-    assert args[args.index("--model") + 1] == model, args
+    assert snapshot["model"] == model, snapshot
     argv = pathlib.Path(argv_log).read_text(encoding="utf-8")
     assert "debug models" in argv, argv
     assert "exec --json" in argv, argv
@@ -322,9 +320,7 @@ def assert_runner_effort_flow(runner_id, session_key, effort, expected_response,
     assert expected_response in run_response, run_response
     run_id = [event for event in run_events if event.get("eventType") == "run_finished"][0]["runId"]
     snapshot = json.loads((test_path / "agent" / "im_gateway" / "chat_runs" / run_id / "runtime_snapshot.json").read_text(encoding="utf-8"))
-    args = snapshot["args"]
-    joined = " ".join(args)
-    assert expected_arg_fragment in joined, args
+    assert snapshot["reasoningEffort"] == effort, snapshot
     argv = pathlib.Path(argv_log).read_text(encoding="utf-8")
     assert expected_arg_fragment in argv, argv
     return run_id
@@ -414,9 +410,7 @@ claude_response = final_response(claude_events)
 assert "BIFROST_CLAUDE_MODEL_SLASH_OK" in claude_response, claude_response
 claude_run_id = [event for event in claude_events if event.get("eventType") == "run_finished"][0]["runId"]
 claude_snapshot = json.loads((test_path / "agent" / "im_gateway" / "chat_runs" / claude_run_id / "runtime_snapshot.json").read_text(encoding="utf-8"))
-claude_args = claude_snapshot["args"]
-assert "--model" in claude_args, claude_args
-assert claude_args[claude_args.index("--model") + 1] == "sonnet", claude_args
+assert claude_snapshot["model"] == "sonnet", claude_snapshot
 claude_argv = pathlib.Path(claude_argv_log).read_text(encoding="utf-8")
 assert "debug models" not in claude_argv, claude_argv
 assert "--model sonnet" in claude_argv, claude_argv

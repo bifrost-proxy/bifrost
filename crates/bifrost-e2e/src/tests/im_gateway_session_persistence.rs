@@ -18,6 +18,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let data_dir =
                     std::env::temp_dir().join(format!("bifrost_e2e_chatgpt_web_resume_{port}"));
                 let _env_guard = DataDirEnvGuard::new(&data_dir);
+                let _e2e_guard = EnvVarGuard::set("BIFROST_E2E", "1");
                 let _mock_guard = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", "1");
                 let (_proxy, admin_state) =
                     start_im_gateway_admin_with_data_dir(port, data_dir.clone()).await?;
@@ -86,13 +87,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 assert_status(&resume_response, 200)?;
 
                 let resume_snapshot = latest_chat_run_snapshot(&data_dir)?;
-                let restored_conversation = resume_snapshot
-                    .get("params")
-                    .and_then(|params| params.get("conversationId"))
-                    .and_then(|value| value.as_str());
-                if restored_conversation != Some(conversation_id) {
+                let restored_conversation =
+                    snapshot_has_param_key(&resume_snapshot, "conversationId");
+                if !restored_conversation {
                     return Err(format!(
-                        "Expected restored chatgpt_web conversationId {conversation_id:?}, got snapshot: {resume_snapshot}"
+                        "Expected restored chatgpt_web conversationId key, got snapshot: {resume_snapshot}"
                     ));
                 }
 
@@ -127,11 +126,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 assert_status(&fresh_response, 200)?;
 
                 let fresh_snapshot = latest_chat_run_snapshot(&data_dir)?;
-                let fresh_conversation = fresh_snapshot
-                    .get("params")
-                    .and_then(|params| params.get("conversationId"))
-                    .and_then(|value| value.as_str());
-                if fresh_conversation.is_some() {
+                let fresh_conversation =
+                    snapshot_has_param_key(&fresh_snapshot, "conversationId");
+                if fresh_conversation {
                     return Err(format!(
                         "Expected /reset to prevent chatgpt_web conversationId restore, got snapshot: {fresh_snapshot}"
                     ));
@@ -142,6 +139,31 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
     ];
     tests.into_iter().map(TestCase::serial).collect()
+}
+
+fn snapshot_has_param_key(snapshot: &serde_json::Value, expected: &str) -> bool {
+    snapshot
+        .get("paramKeys")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|keys| keys.iter().any(|key| key == expected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_has_param_key;
+
+    #[test]
+    fn runtime_snapshot_checks_parameter_names_without_persisting_values() {
+        let snapshot = serde_json::json!({
+            "paramKeys": ["conversationId", "timeoutSecs"]
+        });
+        assert!(snapshot_has_param_key(&snapshot, "conversationId"));
+        assert!(!snapshot_has_param_key(
+            &snapshot,
+            "secret-conversation-value"
+        ));
+        assert!(!snapshot.to_string().contains("conv-chatgpt-web-e2e-1"));
+    }
 }
 
 fn latest_chat_run_snapshot(data_dir: &std::path::Path) -> Result<serde_json::Value, String> {

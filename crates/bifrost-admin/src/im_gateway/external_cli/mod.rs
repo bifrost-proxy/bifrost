@@ -44,10 +44,10 @@ const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
 const CLI_VERSION_DETECTION_TIMEOUT_SECS: u64 = 10;
-const MAX_CAPTURED_STREAM_BYTES: usize = 256 * 1024;
+const MAX_CAPTURED_STREAM_BYTES: usize = 4 * 1024;
 const MAX_CAPTURED_EVENTS: usize = 512;
-const MAX_PROGRESS_CONTENT_BYTES: usize = 8 * 1024;
-const MAX_PROGRESS_RAW_BYTES: usize = 8 * 1024;
+const MAX_PERSISTED_PROGRESS_TITLE_BYTES: usize = 128;
+const MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES: usize = 256;
 const MAX_RETAINED_RUNS: usize = 64;
 const MAX_RETAINED_RUN_BYTES: u64 = 256 * 1024 * 1024;
 const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
@@ -886,12 +886,15 @@ pub struct ExternalCliRunDetail {
 #[serde(rename_all = "camelCase")]
 struct CommandSnapshot {
     executable: String,
-    args: Vec<String>,
+    arg_count: usize,
+    arg_flags: Vec<String>,
     env_keys: Vec<String>,
     work_dir: Option<String>,
     runtime: String,
     adapter: String,
-    params: serde_json::Value,
+    param_keys: Vec<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
     timeout_secs: Option<u64>,
 }
 
@@ -1273,9 +1276,12 @@ impl ExternalCliRuntime {
         let saved_files = save_file_attachments(&run_dir, &request).await?;
 
         let prompt = build_prompt(&request, &saved_images, &saved_files).await?;
-        tokio::fs::write(&prompt_path, &prompt)
-            .await
-            .map_err(|error| format!("write prompt failed: {error}"))?;
+        tokio::fs::write(
+            &prompt_path,
+            prompt_persistence_summary(&prompt, saved_images.len(), saved_files.len()),
+        )
+        .await
+        .map_err(|error| format!("write prompt failed: {error}"))?;
 
         let external_cli_transport =
             if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
@@ -1542,14 +1548,19 @@ impl ExternalCliRuntime {
             finished_at,
             duration_ms: finished_at.saturating_sub(started_at),
             artifacts,
-            // The full event stream is returned to the live UI through the worker
-            // protocol. Persist only compact summaries so result.json is not a
-            // second copy of potentially large executor output.
-            events: persisted_events,
+            // The caller and live UI consume the full in-memory event stream.
+            // Only durable artifacts below receive compact summaries.
+            events: run_output.events,
             metadata,
         };
         let result_path = run_dir.join("result.json");
-        write_json_pretty(&result_path, &result).await?;
+        let mut persisted_result = result.clone();
+        persisted_result.responses.clear();
+        persisted_result.events = persisted_events;
+        write_json_pretty(&result_path, &persisted_result).await?;
+        // result.json is the single durable copy of the final model response.
+        // The adapter-owned last_message file is only a handoff scratch file.
+        let _ = tokio::fs::remove_file(&last_message_path).await;
         Ok(result)
     }
 }
@@ -3544,9 +3555,11 @@ fn append_external_cli_request_metadata(
 }
 
 fn command_snapshot(request: &ExternalCliRunRequest, spec: &CommandSpec) -> CommandSnapshot {
+    let resolved = resolve_external_cli_model_config(&request.adapter, &request.adapter_config);
     CommandSnapshot {
         executable: spec.executable.clone(),
-        args: spec.args.clone(),
+        arg_count: spec.args.len(),
+        arg_flags: persisted_arg_flags(&spec.args),
         env_keys: spec.env.keys().cloned().collect(),
         work_dir: spec
             .work_dir
@@ -3554,9 +3567,35 @@ fn command_snapshot(request: &ExternalCliRunRequest, spec: &CommandSpec) -> Comm
             .map(|path| path.display().to_string()),
         runtime: request.runtime.clone(),
         adapter: request.adapter.clone(),
-        params: request.params.clone(),
+        param_keys: request
+            .params
+            .as_object()
+            .map(|params| params.keys().cloned().collect())
+            .unwrap_or_default(),
+        model: resolved.model,
+        reasoning_effort: resolved.reasoning_effort,
         timeout_secs: spec.timeout_secs,
     }
+}
+
+fn persisted_arg_flags(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter_map(|arg| {
+            arg.starts_with('-')
+                .then(|| arg.split('=').next().unwrap_or(arg).to_string())
+        })
+        .collect()
+}
+
+fn prompt_persistence_summary(prompt: &str, image_count: usize, file_count: usize) -> String {
+    serde_json::json!({
+        "_bifrost_compacted": true,
+        "bytes": prompt.len(),
+        "chars": prompt.chars().count(),
+        "image_count": image_count,
+        "file_count": file_count,
+    })
+    .to_string()
 }
 
 async fn detect_cli_version(adapter: &str, spec: &CommandSpec) -> Option<String> {
@@ -3624,7 +3663,8 @@ fn append_external_cli_observability_metadata(
     let events = input.events;
     let timings = input.timings;
     insert_metadata(metadata, "cli.executable", &spec.executable);
-    insert_metadata_json(metadata, "cli.args", &spec.args);
+    insert_metadata_u64(metadata, "cli.argCount", spec.args.len() as u64);
+    insert_metadata_json(metadata, "cli.argFlags", &persisted_arg_flags(&spec.args));
     if let Some(work_dir) = spec.work_dir.as_ref() {
         insert_metadata(metadata, "cli.workDir", &work_dir.display().to_string());
     }
@@ -3740,8 +3780,16 @@ fn append_external_cli_observability_metadata(
     insert_metadata_u64(metadata, "io.stderrBytes", stderr.len() as u64);
     insert_metadata_u64(metadata, "io.stdoutLines", line_count(stdout));
     insert_metadata_u64(metadata, "io.stderrLines", line_count(stderr));
-    insert_metadata_bool(metadata, "io.stdoutTruncated", false);
-    insert_metadata_bool(metadata, "io.stderrTruncated", false);
+    insert_metadata_bool(
+        metadata,
+        "io.stdoutTruncated",
+        stdout.len() >= MAX_CAPTURED_STREAM_BYTES,
+    );
+    insert_metadata_bool(
+        metadata,
+        "io.stderrTruncated",
+        stderr.len() >= MAX_CAPTURED_STREAM_BYTES,
+    );
 
     if let Some(command_started_at) = timings.command_started_at {
         insert_metadata_u64(
@@ -3816,7 +3864,6 @@ fn append_tool_observability_metadata(
             serde_json::json!({
                 "id": raw_tool_id(&event.raw),
                 "name": raw_tool_name(&event.raw).unwrap_or_else(|| event.title.clone().unwrap_or_else(|| "tool".to_string())),
-                "command": raw_string_path(&event.raw, &["item", "command"]).or_else(|| raw_string_path(&event.raw, &["command"])),
                 "exitCode": raw_i64_path(&event.raw, &["item", "exit_code"]).or_else(|| raw_i64_path(&event.raw, &["exitCode"])),
                 "success": success,
                 "durationMs": raw_u64(&event.raw, "durationMs"),
@@ -4213,9 +4260,9 @@ async fn read_stdout_events(
             if let Some(progress_tx) = progress_tx.as_ref() {
                 let _ = progress_tx.send(event.clone());
             }
-            // The live UI gets the full event above. Only the bounded in-memory
-            // fallback/result stream is compacted.
-            compact_progress_event(&mut event);
+            // Keep the bounded in-memory result stream complete too: callers
+            // without a progress sink still need to record the same UI events.
+            // Durable artifacts are compacted separately after the run.
             if events.len() == MAX_CAPTURED_EVENTS {
                 events.remove(0);
             }
@@ -4296,30 +4343,6 @@ fn append_tail(target: &mut Vec<u8>, next: &[u8], limit: usize) {
     target.extend_from_slice(next);
 }
 
-fn compact_progress_event(event: &mut ExternalCliProgressEvent) {
-    if event.content.len() > MAX_PROGRESS_CONTENT_BYTES {
-        let original_bytes = event.content.len();
-        let mut boundary = MAX_PROGRESS_CONTENT_BYTES;
-        while boundary > 0 && !event.content.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        event.content = format!(
-            "{}\n… [truncated; original_bytes={original_bytes}]",
-            &event.content[..boundary]
-        );
-    }
-    if serde_json::to_vec(&event.raw)
-        .map(|value| value.len())
-        .unwrap_or_default()
-        > MAX_PROGRESS_RAW_BYTES
-    {
-        event.raw = serde_json::json!({
-            "_bifrost_truncated": true,
-            "reason": "raw progress event exceeded persistence limit"
-        });
-    }
-}
-
 fn persisted_event_summaries(events: &[ExternalCliProgressEvent]) -> Vec<ExternalCliProgressEvent> {
     events
         .iter()
@@ -4329,7 +4352,6 @@ fn persisted_event_summaries(events: &[ExternalCliProgressEvent]) -> Vec<Externa
                 ExternalCliProgressEventType::RunStarted
                     | ExternalCliProgressEventType::ToolStarted
                     | ExternalCliProgressEventType::ToolFinished
-                    | ExternalCliProgressEventType::AssistantFinal
                     | ExternalCliProgressEventType::RunFinished
                     | ExternalCliProgressEventType::RunFailed
             )
@@ -4340,11 +4362,119 @@ fn persisted_event_summaries(events: &[ExternalCliProgressEvent]) -> Vec<Externa
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .map(|mut event| {
-            compact_progress_event(&mut event);
-            event
-        })
+        .map(compact_persisted_progress_event)
         .collect()
+}
+
+fn compact_persisted_progress_event(
+    mut event: ExternalCliProgressEvent,
+) -> ExternalCliProgressEvent {
+    // `content` carries model deltas, commands, parameters, stdout, stderr, or
+    // results depending on the adapter. The live event remains untouched, but
+    // none of that executor payload belongs in a durable run artifact.
+    event.content.clear();
+    event.title = event
+        .title
+        .as_deref()
+        .map(|title| truncate_utf8_bytes(title, MAX_PERSISTED_PROGRESS_TITLE_BYTES));
+
+    // Raw executor events may contain complete commands, arguments, results or
+    // model deltas. They are useful to the live UI but are not durable history.
+    // Keep only stable identifiers and status/timing fields needed to render a
+    // compact historical tool row.
+    event.raw = compacted_progress_raw(&event.raw);
+    event
+}
+
+fn compacted_progress_raw(raw: &serde_json::Value) -> serde_json::Value {
+    let mut summary = serde_json::Map::new();
+    if let Some(raw_object) = raw.as_object() {
+        for key in [
+            "id",
+            "call_id",
+            "callId",
+            "tool_call_id",
+            "toolCallId",
+            "tool_name",
+            "toolName",
+            "status",
+            "success",
+            "exit_code",
+            "exitCode",
+            "observedAtMs",
+            "durationMs",
+        ] {
+            if let Some(value) = raw_object.get(key) {
+                if let Some(value) = compacted_progress_scalar(value) {
+                    summary.insert(key.to_string(), value);
+                }
+            }
+        }
+    }
+    if !summary.contains_key("id") {
+        if let Some(id) = raw_tool_id(raw) {
+            summary.insert(
+                "id".to_string(),
+                serde_json::Value::String(truncate_utf8_bytes(
+                    &id,
+                    MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES,
+                )),
+            );
+        }
+    }
+    if !summary.contains_key("tool_name") && !summary.contains_key("toolName") {
+        if let Some(name) = raw_tool_name(raw) {
+            summary.insert(
+                "tool_name".to_string(),
+                serde_json::Value::String(truncate_utf8_bytes(
+                    &name,
+                    MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES,
+                )),
+            );
+        }
+    }
+    if !summary.contains_key("status") {
+        if let Some(status) = raw_string_path(raw, &["item", "status"]) {
+            summary.insert(
+                "status".to_string(),
+                serde_json::Value::String(truncate_utf8_bytes(
+                    &status,
+                    MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES,
+                )),
+            );
+        }
+    }
+    if !summary.contains_key("exit_code") && !summary.contains_key("exitCode") {
+        if let Some(exit_code) = raw_i64_path(raw, &["item", "exit_code"]) {
+            summary.insert("exit_code".to_string(), serde_json::json!(exit_code));
+        }
+    }
+    summary.insert("_bifrost_compacted".to_string(), serde_json::json!(true));
+    serde_json::Value::Object(summary)
+}
+
+fn compacted_progress_scalar(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::String(value) => Some(serde_json::Value::String(truncate_utf8_bytes(
+            value,
+            MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES,
+        ))),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::Null => {
+            Some(value.clone())
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_string()
 }
 
 fn prune_completed_run_directories(

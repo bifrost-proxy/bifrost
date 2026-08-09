@@ -30,7 +30,7 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 - `/models` 不能透出 Traex raw catalog 中的 `base_instructions` 等大字段或内部字段;只展示 slug/display name/description/reasoning/tier/visibility 等白名单字段,并过滤 hidden model。
 - `/model` 只影响当前 `sessionKey + adapter + runnerId`,不能修改全局 runner 配置;session slash override 会覆盖 runner 默认模型,并在 Web UI、API 和 IM event loop 的下一轮 run 中统一生效。
 - 未显式配置 `timeoutSecs` 时,不对 Trae/external runner 设置固定超时;长任务由用户显式 `/stop` 或 runner 自然结束控制。
-- 飞书 progress card 展示工具输入/输出预览,完整 stdout/stderr 与 normalized events 保存在 run artifacts;重复的 running tool start 事件必须去重,避免卡片体过大导致中间刷新丢失。
+- 飞书 progress card 只在运行中消费实时工具输入/输出预览；run artifacts 不保存完整 stdout/stderr、模型增量、工具参数或结果，只保留 4 KiB 诊断尾与工具标识/状态摘要；重复的 running tool start 事件必须去重，避免卡片体过大导致中间刷新丢失。
 - 飞书绑定 Codex/Trae external runner 时,如果 IM channel 没有显式配置 `deliveryMode`,必须默认使用 progress card;runner 级默认 `final_reply` 只作为非飞书或显式 channel 继承外的普通回退,不能让飞书过程卡片被静默短路。
 - 不影响飞书 IM progress card 的最终收敛和普通 final reply 投递策略。
 

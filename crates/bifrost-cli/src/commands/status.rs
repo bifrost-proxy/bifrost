@@ -642,30 +642,10 @@ fn render_status_text(g: &GatheredStatus) {
 
     let is_running = match &g.runtime_info {
         Some(info) => {
-            if g.is_running {
-                println!("Status: Running");
-                println!("PID: {}", info.pid);
-                println!("Port: {}", info.port);
-                if g.runtime_discovered {
-                    println!("Source: Admin API fallback (runtime metadata unavailable or stale)");
-                }
-                if let Some(ref host) = info.host {
-                    println!("Host: {}", host);
-                }
-                if let Some(socks5_port) = info.socks5_port {
-                    println!("SOCKS5 Port: {}", socks5_port);
-                }
-                true
-            } else {
-                if is_process_running(info.pid) {
-                    println!("Status: Unresponsive (process exists, Admin API unavailable)");
-                    println!("Unresponsive PID: {}", info.pid);
-                } else {
-                    println!("Status: Stopped (stale PID file exists)");
-                    println!("Stale PID: {}", info.pid);
-                }
-                false
+            for line in runtime_status_lines(info, g.is_running, g.runtime_discovered) {
+                println!("{line}");
             }
+            g.is_running
         }
         None => {
             println!("Status: Stopped");
@@ -727,6 +707,55 @@ fn render_status_text(g: &GatheredStatus) {
         g.temporary_port_bindings.as_deref().map_err(String::as_str),
     ) {
         println!("{}", line);
+    }
+}
+
+fn runtime_status_lines(
+    info: &RuntimeInfo,
+    is_running: bool,
+    runtime_discovered: bool,
+) -> Vec<String> {
+    runtime_status_lines_with_process_state(
+        info,
+        is_running,
+        runtime_discovered,
+        is_process_running(info.pid),
+    )
+}
+
+fn runtime_status_lines_with_process_state(
+    info: &RuntimeInfo,
+    is_running: bool,
+    runtime_discovered: bool,
+    process_running: bool,
+) -> Vec<String> {
+    if is_running {
+        let mut lines = vec![
+            "Status: Running".to_string(),
+            format!("PID: {}", info.pid),
+            format!("Port: {}", info.port),
+        ];
+        if runtime_discovered {
+            lines.push("Source: Admin API fallback (runtime metadata unavailable or stale)".into());
+        }
+        if let Some(host) = info.host.as_ref() {
+            lines.push(format!("Host: {host}"));
+        }
+        if let Some(socks5_port) = info.socks5_port {
+            lines.push(format!("SOCKS5 Port: {socks5_port}"));
+        }
+        return lines;
+    }
+    if process_running {
+        vec![
+            "Status: Unresponsive (process exists, Admin API unavailable)".to_string(),
+            format!("Unresponsive PID: {}", info.pid),
+        ]
+    } else {
+        vec![
+            "Status: Stopped (stale PID file exists)".to_string(),
+            format!("Stale PID: {}", info.pid),
+        ]
     }
 }
 
@@ -971,12 +1000,44 @@ fn build_status_json(g: &GatheredStatus) -> StatusJson {
 mod tests {
     use super::{
         build_status_json, format_active_summary_status_block, format_service_overview_lines,
-        format_temporary_port_bindings_block, gather_status_with_runtime, GatheredStatus,
-        ProxyAddress, ProxyAddressInfo, RuleGroup, SystemProxyStatus, TlsConfig,
+        format_temporary_port_bindings_block, gather_status_with_runtime,
+        runtime_status_lines_with_process_state, GatheredStatus, ProxyAddress, ProxyAddressInfo,
+        RuleGroup, SystemProxyStatus, TlsConfig,
     };
     use crate::commands::rule::{ActiveRuleItem, ActiveSummaryResponse};
     use crate::process::RuntimeInfo;
     use bifrost_admin::{RuleSetRef, TemporaryPortBinding, TemporaryPortStatus};
+
+    #[test]
+    fn runtime_status_lines_distinguish_healthy_and_stale_processes() {
+        let running = RuntimeInfo {
+            pid: std::process::id(),
+            port: 9900,
+            socks5_port: Some(9901),
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
+            start_mode: Default::default(),
+            restartable_runtime: false,
+            binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
+        };
+        let healthy =
+            runtime_status_lines_with_process_state(&running, true, true, true).join("\n");
+        assert!(healthy.contains("Status: Running"));
+        assert!(healthy.contains("Source: Admin API fallback"));
+        assert!(healthy.contains("SOCKS5 Port: 9901"));
+
+        let unresponsive =
+            runtime_status_lines_with_process_state(&running, false, false, true).join("\n");
+        assert!(unresponsive.contains("Status: Unresponsive"));
+
+        let mut stale = running;
+        stale.pid = 0;
+        let stopped =
+            runtime_status_lines_with_process_state(&stale, false, false, false).join("\n");
+        assert!(stopped.contains("Status: Stopped"));
+    }
 
     #[test]
     fn status_running_includes_active_summary_block() {

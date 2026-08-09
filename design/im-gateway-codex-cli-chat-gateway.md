@@ -15,7 +15,7 @@ Chat Gateway 不是新的 Agent 产品形态，也不是绕过 IM Gateway 的快
 - 支持同步返回最终结果，也支持流式读取进度事件，方便自动化测试断言。
 - 支持注入工程目录、route/provider/global 指令、skill roots、Bifrost 工具集合和 adapter-specific CLI 执行参数。
 - 支持构造 IM 上下文元数据（provider、chat_id、user_id、message_id、reply target），用于验证 send/update 消息类工具。
-- 每次 run 生成不可变 `runtime_snapshot.json`，落盘 stdout/stderr、normalized events、last_message，便于审计和复现。
+- 每次 run 生成精简 `runtime_snapshot.json`；完整 stdout/stderr、prompt、CLI 参数值和工具结果只供实时执行，历史只保存短诊断尾、事件摘要与唯一 final response。
 - 已内置 Codex 与 Claude-Code 两个 adapter；`defaultRunnerId` 默认 `Codex`。
 
 ### 必须不破坏
@@ -54,9 +54,9 @@ Chat Gateway 不是新的 Agent 产品形态，也不是绕过 IM Gateway 的快
 
 - 真实 IM 渲染走 provider `send_text` / `send_card` / `patch_card`。
 - Chat Gateway 默认把同一组 progress event 暴露给调用方：
-  - 同步模式：阻塞到 turn 结束，返回 final response、工具日志、进度快照。
+  - 同步模式：阻塞到 turn 结束，内存响应可返回本轮完整事件供当前 UI 消费；持久化 run detail 只保留 final response 与工具名/调用 ID/状态/耗时。
   - 流式模式：NDJSON 输出 `AgentTurnProgressEvent`。
-  - 回放模式：给定 `run_id` 读取历史 JSONL / event log。
+  - 回放模式：给定 `run_id` 读取有界历史摘要；完整事件只存在于运行中的实时流。
 - 只有 `reply_mode=real_im` 且调用方具备 admin 权限时，才把结果发送到真实 provider/target。
 
 ### Runtime adapter 插件化
@@ -79,7 +79,7 @@ trait ExternalCliAgentAdapter {
 }
 ```
 
-`ExternalCliAgentRuntime` 是通用进程托管 runtime，负责 run dir、进程生命周期、stdout/stderr、超时、stop、artifact、事件落盘。adapter 只负责 CLI 差异：命令参数、prompt envelope、stdout 事件解析、最终答案提取。
+`ExternalCliAgentRuntime` 是通用进程托管 runtime，负责 run dir、进程生命周期、stdout/stderr 持续排空、超时、stop、有界 artifact 和摘要落盘。adapter 只负责 CLI 差异：命令参数、prompt envelope、stdout 事件解析、最终答案提取。
 
 ### Canonical progress event
 
@@ -93,7 +93,7 @@ Codex app-server 的 `error` notification 同时承载“最终失败”和“�
 
 - `willRetry: true` 归一化为普通 `Status`，保留重连提示，但继续等待同一个 turn 的后续事件。
 - `willRetry: false` 或缺失时归一化为 `RunFailed`，结束本次 turn。
-- 失败且没有 assistant final 时，用户可见回复优先采用最后一个 `RunFailed` 的错误信息；JSON-RPC 初始化、thread resume、MCP 启动状态等原始 stdout 只作为 artifact 保存，不得直接发送到 IM。
+- 失败且没有 assistant final 时，用户可见回复优先采用最后一个 `RunFailed` 的错误信息；JSON-RPC 初始化、thread resume、MCP 启动状态等原始 stdout 不得直接发送到 IM，历史只保留最多 4 KiB 诊断尾。
 
 这样既保留 Codex 自身的重试能力，也避免瞬时网络抖动被 Bifrost 提前放大成终止失败。
 
@@ -216,13 +216,13 @@ V1 通过 skill 调用 `bifrost` CLI（`traffic list/search/get`、`im send`、`
 
 ```text
 $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
-  request.json prompt.md
+  prompt.md
   cli.stdout.log cli.stderr.log
-  normalized_events.jsonl last_message.md
-  runtime_snapshot.json meta.json
+  normalized_events.jsonl result.json
+  runtime_snapshot.json
 ```
 
-监听：stdout 原样落盘再交 adapter parser，未识别行落盘不阻断；stderr 落盘并节流摘要；parser 转 canonical event；final response 优先 `last_message.md`，为空时用最后一个 assistant/final event 兜底；进度事件进入 `ImAgentProgressRegistry` 与 Chat Gateway stream。
+监听：stdout/stderr 必须持续排空，完整事件先进入 `ImAgentProgressRegistry` 与 Chat Gateway stream；本地只保留每路 4 KiB 诊断尾。parser 转 canonical event；最终 response 从 runner handoff 或最后一个 assistant/final event 生成，完成后仅在 `result.json` 保存一份。`prompt.md` 是不含正文的大小/附件数摘要，`runtime_snapshot.json` 只保存参数数量、flag 名称、params 键名和模型配置，不保存值。
 
 飞书 progress card 会在 Runner/Adapter 状态行追加目标 Runner 创建的 `Session ID`。Codex/Trae 的 `thread_id`/`threadId` 与 Claude Code 的 `session_id`/`sessionId` 必须在启动事件到达时立即合并进运行中 metadata 并刷新卡片，不能等整个 run 完成后才显示；目标 Runner 尚未返回 ID 时不展示该字段。原“外部会话”详情行继续保留，用于显示带 adapter 语义的 conversation reference。
 

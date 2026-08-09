@@ -9,9 +9,10 @@
 - 托管子进程持续不可用并经二次确认后，进入有次数上限的受控重启；外部进程只标记不可用，不越权终止。
 - 重启前先终止失去响应的托管进程；恢复预算继续限制重启风暴。
 - CLI `status` 只有在管理 API 可发现时才报告 `Running`；仅 PID 存活报告 `Unresponsive`。
-- Agent 会话默认限制为 8 MiB，只持久化恢复所需的结构化事件；不持久化流式 assistant delta，工具参数和结果保存带截断标记的预览。
+- Agent 会话默认限制为 1 MiB，只持久化恢复所需的结构化事件；外部执行器不持久化流式 assistant delta、计划、工具参数或工具结果，只保留工具名、调用 ID、状态、耗时和最终回复。通用内部 recorder 仍对必要恢复字段施加 512 B/1 KiB 硬上限。
 - 工具调用 ID 在 recorder 打开时最多扫描一次并缓存，禁止每个 IM 工具事件重新读取完整 JSONL。
-- 外部 runner 必须持续排空 stdout/stderr，但每路只保留 256 KiB 诊断尾部；标准化事件数量和字段大小有界，历史 run 目录按数量和总大小清理。
+- 外部 runner 必须持续排空 stdout/stderr，但每路只保留 4 KiB 诊断尾部；完整事件只发送给实时 UI，历史事件的 raw 仅保留调用 ID、工具名、状态和耗时白名单字段，历史 run 目录按数量和总大小清理。
+- runner 的完整 prompt、CLI 参数值、params 值、工具 command 和重复 final response 不落盘；artifact 只保留大小/数量/键名摘要，stdout/stderr 每路最多保留 4 KiB 诊断尾部。
 
 ## 兼容与风险
 
