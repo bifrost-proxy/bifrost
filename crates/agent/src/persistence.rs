@@ -463,12 +463,31 @@ impl ConversationRecorder {
         session_key: &str,
         progress: &crate::SubAgentProgress,
     ) -> Result<(), String> {
+        // Sub-agent prompts and progress detail belong to the live executor stream.
+        // Canonical history only needs a compact lifecycle marker so Agent Chat can
+        // restore identity, phase, terminal status, and duration after a refresh.
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::SUBAGENT_UPDATED.to_string(),
             session_key: session_key.to_string(),
-            content: serde_json::to_value(progress)
-                .map_err(|error| format!("serialize subagent progress: {error}"))?,
+            content: serde_json::json!({
+                "id": truncate_external_summary_text(&progress.id, 128),
+                "agentId": progress
+                    .agent_id
+                    .as_deref()
+                    .map(|value| truncate_external_summary_text(value, 128)),
+                "label": progress
+                    .label
+                    .as_deref()
+                    .map(|value| truncate_external_summary_text(value, 80)),
+                "task": "",
+                "phase": truncate_external_summary_text(&progress.phase, 32),
+                "status": progress.status,
+                "startedAtMs": progress.started_at_ms,
+                "updatedAtMs": progress.updated_at_ms,
+                "durationMs": progress.duration_ms,
+                "externalSummary": true,
+            }),
         })
     }
 
@@ -620,7 +639,15 @@ fn should_flush_event(event_type: &str) -> bool {
             | event_types::GOAL_CLEARED
             | event_types::PLAN_UPDATED
             | event_types::PLAN_CLEARED
+            | event_types::SUBAGENT_UPDATED
     )
+}
+
+fn truncate_external_summary_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    value.chars().take(max_chars).collect()
 }
 
 fn count_conversation_event_lines(path: &Path) -> Result<usize, String> {
@@ -1462,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_progress_is_persisted_as_replayable_timeline_event() {
+    fn subagent_progress_is_persisted_as_compact_replayable_timeline_event() {
         let dir = tempfile::tempdir().unwrap();
         let mut recorder = ConversationRecorder::new(dir.path(), "subagent-session");
         let progress = crate::SubAgentProgress {
@@ -1486,8 +1513,12 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, SUBAGENT_UPDATED);
         assert_eq!(events[0].content["agentId"], "agent-1");
-        assert_eq!(events[0].content["task"], "Review auth");
+        assert_eq!(events[0].content["task"], "");
         assert_eq!(events[0].content["status"], "running");
+        assert_eq!(events[0].content["externalSummary"], true);
+        let serialized = serde_json::to_string(&events[0]).unwrap();
+        assert!(!serialized.contains("Review auth"));
+        assert!(!serialized.contains("Reading handlers"));
     }
 
     #[test]

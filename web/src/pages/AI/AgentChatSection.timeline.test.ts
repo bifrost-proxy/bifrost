@@ -113,7 +113,7 @@ describe("external runner process rendering", () => {
     });
   });
 
-  it("replays persisted sub-agent progress as one process item", () => {
+  it("replays compact persisted sub-agent progress as one process item", () => {
     const messages = historyEventsToMessages([
       {
         timestamp: 1,
@@ -129,7 +129,7 @@ describe("external runner process rendering", () => {
           id: "task-1",
           agentId: "claude-agent-1",
           label: "security-reviewer",
-          task: "Review auth",
+          task: "",
           phase: "working",
           status: "running",
           startedAtMs: 2_000,
@@ -144,7 +144,7 @@ describe("external runner process rendering", () => {
           id: "task-1",
           agentId: "claude-agent-1",
           label: "security-reviewer",
-          task: "Review auth",
+          task: "",
           phase: "finished",
           status: "completed",
           startedAtMs: 2_000,
@@ -158,7 +158,7 @@ describe("external runner process rendering", () => {
     expect(messages[0].processSteps).toHaveLength(1);
     expect(messages[0].processSteps?.[0]).toMatchObject({
       type: "subagent",
-      subAgentTask: "Review auth",
+      subAgentTask: "Task details unavailable",
       subAgentStatus: "completed",
       durationMs: 3000,
     });

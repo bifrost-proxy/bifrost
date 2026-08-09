@@ -4438,7 +4438,12 @@ mod tests {
             bifrost_agent::persistence::load_conversation_events(recorder.file_path()).unwrap();
         assert_eq!(events[0].event_type, "subagent_updated");
         assert_eq!(events[0].content["agentId"], "agent-7");
-        assert_eq!(events[0].content["detail"], "Inspecting guards");
+        assert_eq!(events[0].content["task"], "");
+        assert!(events[0].content.get("detail").is_none());
+        assert_eq!(events[0].content["externalSummary"], true);
+        let serialized = serde_json::to_string(&events).unwrap();
+        assert!(!serialized.contains("Review auth"));
+        assert!(!serialized.contains("Inspecting guards"));
     }
 
     #[test]
