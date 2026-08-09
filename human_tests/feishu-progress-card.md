@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；最终正文只在卡片底部出现一次。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
+本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；原任务卡中的最终正文只在卡片底部出现一次。任务结束后还会另发一张终态卡：成功卡显示多语言“任务执行结束 / Task completed”等标题并包含最后一次最终总结，失败卡显示多语言失败标题并包含异常原因；终态卡直接引用刚结束的任务卡。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
 
 ## 前置条件
 
@@ -165,12 +165,36 @@
 - 超长或包含 Markdown backtick 的异常 ID 会被限制长度并安全转义，不能破坏卡片其余布局。
 - E2E CardKit payload 在既有 24KB 预算内，原 Token、额度、耗时和过程信息不丢失。
 
+### TC-FPC-10：长任务结束后发送多语言终态卡并直接引用任务卡
+
+**操作步骤**：
+1. 执行成功、失败和通知发送失败的 HTTP 集成回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_runner_success_finishes_progress_card_and_sends_terminal_summary -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_runner_failure_finishes_progress_card_and_sends_terminal_reason -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_runner_terminal_send_failure_does_not_rollback_finished_progress_card -- --nocapture
+   ```
+2. 使用当前 debug 二进制执行真实 Service + mock Runner + loopback Feishu OpenAPI 黑盒回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+
+**预期结果**：
+- 成功和失败路径都先更新原任务进度卡，再各发送且只发送一张新终态卡。
+- 成功终态卡为绿色 header，默认标题为 `Task completed`，通过 `i18n_content` 覆盖飞书支持的 16 个 locale，其中 `zh_cn=任务执行结束`、`ja_jp=タスク実行完了`；正文包含最后一个非空 `AssistantFinal` 的最终总结。
+- 失败终态卡为红色 header，默认标题为 `Task failed`，包含相同的 16-locale i18n 集合；正文包含真实异常原因。
+- 消息请求路径形成 `用户原消息 → progress card message_id → terminal card` 引用链；终态卡不得再次直接引用用户原消息。
+- 原任务卡仍保持单卡正文去重语义；终态卡是独立主动通知，不由 progress snapshot 重试产生。
+- 若终态卡发送失败，原任务卡仍保持 Finished/Failed 终态，outbound message log 记录失败，session/queue 收尾不回滚。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-09：PASS — 新增 TC-FPC-10 后立即逐条执行。成功、失败、终态通知发送失败 3 个 focused HTTP 集成测试全部通过：原 CardKit 分别收敛为 Finished/Failed，成功终态卡保留绿色 header、默认 `Task completed` 与 16-locale `i18n_content`（含 `zh_cn=任务执行结束`、`ja_jp=タスク実行完了`）并携带 `FINAL_SUMMARY_MARKER`，失败终态卡保留红色 header、多语言失败标题与真实错误原因；mock 请求路径确认终态卡通过 `/im/v1/messages/om_1/reply` 直接引用任务进度卡。随后使用当前 debug 二进制执行 `test_feishu_progress_terminal_notification.sh`，真实启动隔离 Bifrost、mock external runner 与 loopback Feishu OpenAPI；成功任务和退出码 17 异常任务共生成 4 条消息，引用链分别为 `terminal-success → om_1`、`terminal-failure → om_3`，成功正文包含最后一个 `AssistantFinal` 的 `E2E_FINAL_SUMMARY_SUCCESS`，失败正文包含 `E2E_PERMISSION_DENIED`，整卡 update 同时保留对应终态。通知发送被 mock 拒绝时原卡仍为 Finished，outbound log 为 Failed，未回滚任务状态。测试沙箱与所属进程已由 trap 清理。
 
 - 2026-08-07：PASS — 新增 TC-FPC-09 后立即逐条执行。`codex_like_progress_metadata_captures_target_runner_session_id_immediately`、`external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics`、`external_runner_footer_hides_machine_status_line` 三项 focused 单测全部通过，覆盖 Codex `thread_id`、Trae `threadId`、Claude Code `session_id` 的运行中 metadata 合并，以及 Session ID 存在/缺失两种 Runner 行渲染。第一轮 Review/Fix/Test 发现异常 Session ID 可能过长或含 backtick，并补充 `external_runner_footer_bounds_and_escapes_session_id` 与 `external_cli_progress_session_id_flows_from_live_event_to_feishu_card`；首次链路测试因引用私有测试常量编译失败，改用公开协议值 `codex` 后两项均通过，完整验证 live event → metadata → runner summary → CardKit payload。`im_gateway_progress_card_budget_and_codex_resources` E2E 1 项通过，完整 CardKit JSON 在 24KB 预算内包含 `Runner：codex · Adapter：codex · Session ID：thread-resource-e2e`，并保留 Token、周额度、耗时和执行过程。当前未向真实飞书租户发送测试卡片；本轮真实场景证据来自当前源码生成的完整 CardKit payload。
 - 2026-08-07：PASS — 第二轮 Review/Fix/Test 基于第一轮最新 diff 重新执行 `git status --short`、本需求 `git diff --check` 和 staged 检查；确认 9 个本需求文件与当前分支既有 breakpoint 改动边界清晰、暂存区为空。随后 `progress_card` 69 项、既有 `codex_progress_metadata` 2 项、live-event 链路 1 项和 CardKit E2E 1 项全部通过；未发现新的功能、布局、预算、文档或测试缺口，无需第三轮。

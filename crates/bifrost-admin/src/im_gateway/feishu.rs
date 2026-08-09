@@ -645,25 +645,8 @@ impl ImProvider for FeishuProvider {
         card: serde_json::Value,
         opts: SendOptions,
     ) -> Result<SendResult> {
-        let base_url = Self::base_url(config);
-        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
-        let token = self.get_tenant_token(config, app_secret).await?;
-
-        let card = without_root_card_header(card);
-        let content = serde_json::to_string(&card).map_err(|e| {
-            bifrost_core::BifrostError::Parse(format!("failed to serialize card: {}", e))
-        })?;
-
-        self.send_message_internal(
-            base_url,
-            &token,
-            &target.receive_id_type,
-            &target.receive_id,
-            &opts.msg_type,
-            &content,
-            opts.uuid.as_deref(),
-        )
-        .await
+        self.send_card_with_header_policy(config, target, card, opts, false)
+            .await
     }
 
     async fn send_text(
@@ -735,6 +718,49 @@ impl ImProvider for FeishuProvider {
 // ---------------------------------------------------------------------------
 
 impl FeishuProvider {
+    pub(crate) async fn send_card_preserving_header(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        card: serde_json::Value,
+        opts: SendOptions,
+    ) -> Result<SendResult> {
+        self.send_card_with_header_policy(config, target, card, opts, true)
+            .await
+    }
+
+    async fn send_card_with_header_policy(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        card: serde_json::Value,
+        opts: SendOptions,
+        preserve_header: bool,
+    ) -> Result<SendResult> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let card = if preserve_header {
+            card
+        } else {
+            without_root_card_header(card)
+        };
+        let content = serde_json::to_string(&card).map_err(|e| {
+            bifrost_core::BifrostError::Parse(format!("failed to serialize card: {}", e))
+        })?;
+
+        self.send_message_internal(
+            base_url,
+            &token,
+            &target.receive_id_type,
+            &target.receive_id,
+            &opts.msg_type,
+            &content,
+            opts.uuid.as_deref(),
+        )
+        .await
+    }
+
     pub async fn reply_card(
         &self,
         config: &ImProviderConfig,
@@ -742,10 +768,37 @@ impl FeishuProvider {
         card: serde_json::Value,
         uuid: Option<&str>,
     ) -> Result<SendResult> {
+        self.reply_card_with_header_policy(config, message_id, card, uuid, false)
+            .await
+    }
+
+    pub(crate) async fn reply_card_preserving_header(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        card: serde_json::Value,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        self.reply_card_with_header_policy(config, message_id, card, uuid, true)
+            .await
+    }
+
+    async fn reply_card_with_header_policy(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        card: serde_json::Value,
+        uuid: Option<&str>,
+        preserve_header: bool,
+    ) -> Result<SendResult> {
         let base_url = Self::base_url(config);
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
         let token = self.get_tenant_token(config, app_secret).await?;
-        let card = without_root_card_header(card);
+        let card = if preserve_header {
+            card
+        } else {
+            without_root_card_header(card)
+        };
         let content = serde_json::to_string(&card).map_err(|e| {
             bifrost_core::BifrostError::Parse(format!("failed to serialize reply card: {}", e))
         })?;
