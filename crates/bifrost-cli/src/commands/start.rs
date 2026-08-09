@@ -557,11 +557,31 @@ fn system_proxy_target_is_ready(proxy_host: &str, proxy_port: u16) -> bool {
         return false;
     }
     let mut response = [0_u8; 64];
-    stream
-        .read(&mut response)
-        .ok()
-        .filter(|read| *read > 0)
-        .is_some_and(|read| response[..read].starts_with(b"HTTP/1.1 2"))
+    let mut received = 0;
+    while received < response.len() {
+        match stream.read(&mut response[received..]) {
+            Ok(0) => break,
+            Ok(read) => {
+                received += read;
+                if response[..received]
+                    .windows(2)
+                    .any(|window| window == b"\r\n")
+                {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(_) => return false,
+        }
+    }
+    received > 0 && response[..received].starts_with(b"HTTP/1.1 2")
 }
 
 #[rustfmt::skip]
@@ -4590,17 +4610,22 @@ mod tests {
     fn system_proxy_readiness_requires_a_successful_admin_response() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let server = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 256];
             let read = stream.read(&mut request).unwrap();
             assert!(String::from_utf8_lossy(&request[..read])
                 .contains("/_bifrost/api/proxy/system/support"));
+            stream.write_all(b"HTTP/1.1 ").unwrap();
+            std::thread::sleep(Duration::from_millis(10));
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .write_all(b"200 OK\r\nContent-Length: 2\r\n\r\n{}")
                 .unwrap();
         });
 
+        ready_rx.recv().unwrap();
         assert!(system_proxy_target_is_ready("0.0.0.0", port));
         server.join().unwrap();
 
@@ -4613,16 +4638,21 @@ mod tests {
     fn system_proxy_readiness_rejects_empty_and_non_successful_admin_responses() {
         let empty_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let empty_port = empty_listener.local_addr().unwrap().port();
+        let (empty_ready_tx, empty_ready_rx) = std::sync::mpsc::sync_channel(0);
         let empty_server = std::thread::spawn(move || {
+            empty_ready_tx.send(()).unwrap();
             let (stream, _) = empty_listener.accept().unwrap();
             drop(stream);
         });
+        empty_ready_rx.recv().unwrap();
         assert!(!system_proxy_target_is_ready("127.0.0.1", empty_port));
         empty_server.join().unwrap();
 
         let rejected_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let rejected_port = rejected_listener.local_addr().unwrap().port();
+        let (rejected_ready_tx, rejected_ready_rx) = std::sync::mpsc::sync_channel(0);
         let rejected_server = std::thread::spawn(move || {
+            rejected_ready_tx.send(()).unwrap();
             let (mut stream, _) = rejected_listener.accept().unwrap();
             let mut request = [0_u8; 256];
             let _ = stream.read(&mut request).unwrap();
@@ -4630,6 +4660,7 @@ mod tests {
                 .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
         });
+        rejected_ready_rx.recv().unwrap();
         assert!(!system_proxy_target_is_ready("127.0.0.1", rejected_port));
         rejected_server.join().unwrap();
     }
