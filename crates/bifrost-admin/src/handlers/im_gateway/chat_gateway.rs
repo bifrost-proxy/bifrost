@@ -1374,6 +1374,13 @@ fn external_cli_progress_event_payload(
                 .unwrap_or_else(|_| serde_json::json!([])),
             );
         }
+    } else if event.event_type
+        == crate::im_gateway::external_cli::ExternalCliProgressEventType::SubAgentUpdated
+    {
+        if let (Some(object), Some(subagent)) = (payload.as_object_mut(), event.raw.get("subagent"))
+        {
+            object.insert("subagent".to_string(), subagent.clone());
+        }
     }
     payload
 }
@@ -2907,6 +2914,17 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
             // Plans are rendered from the live progress payload, not retained as
             // external-executor conversation history.
         }
+        EventType::SubAgentUpdated => {
+            if let Some(progress) =
+                crate::im_gateway::external_cli::external_progress_subagent(event)
+            {
+                if let Err(error) = recorder.record_subagent_updated(session_key, &progress) {
+                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner subagent update");
+                } else {
+                    changed = true;
+                }
+            }
+        }
         EventType::ToolStarted => {
             let call_id = external_progress_call_id(adapter, event);
             let tool_name = external_progress_tool_name(event, adapter);
@@ -4386,6 +4404,41 @@ mod tests {
             steps[1].get("status").and_then(|value| value.as_str()),
             Some("in_progress")
         );
+    }
+
+    #[test]
+    fn external_runner_subagent_progress_is_flattened_and_persisted_for_web_replay() {
+        let event = crate::im_gateway::external_cli::parse_progress_events(
+            r#"{"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"in_progress","prompt":"Review auth","receiver_thread_ids":["agent-7"],"sender_thread_id":"root","agents_states":{"agent-7":{"status":"running","message":"Inspecting guards"}}}}"#,
+        )
+        .pop()
+        .expect("subagent event");
+        let payload = external_cli_progress_event_payload(&event);
+        assert_eq!(payload["eventType"], "sub_agent_updated");
+        assert_eq!(payload["subagent"]["agentId"], "agent-7");
+        assert_eq!(payload["subagent"]["task"], "Review auth");
+        assert_eq!(payload["subagent"]["status"], "running");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut recorder = bifrost_agent::persistence::ConversationRecorder::new(
+            temp_dir.path(),
+            "subagent-web-replay",
+        );
+        let end_index = record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            "subagent-web-replay",
+            "web",
+            "codex",
+            "codex",
+            &event,
+        )
+        .expect("subagent event changes timeline");
+        assert_eq!(end_index, 1);
+        let events =
+            bifrost_agent::persistence::load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events[0].event_type, "subagent_updated");
+        assert_eq!(events[0].content["agentId"], "agent-7");
+        assert_eq!(events[0].content["detail"], "Inspecting guards");
     }
 
     #[test]

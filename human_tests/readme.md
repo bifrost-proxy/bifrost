@@ -263,6 +263,7 @@
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 7 | 外部 Runner 通用通道命令与 adapter-specific 模型、effort、默认 Guide、显式 `/q` 和飞书 `/new <群名>` 帮助，同时隐藏冗余 `/g` |
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 4 | 外部 Runner Guide/Queue、排队取消、busy effort slash 系统处理不透传、并发事件与失败降级回归，污染父环境下 detached daemon 清除内部 worker 标记后仍可 live guide，以及 Claude stream-json 回放首帧后的 `stream_ready` guide 触发 |
 | [external-runner-plan-ui.md](./external-runner-plan-ui.md) | External Runner Plan UI | 5 | Codex/Traex external runner `todo_list` / `plan_updated` 输出采样与解析，飞书 progress card 任务计划面板，Web UI history telemetry 恢复 external runner plan，真实 Bifrost `/chat/stream`、run detail 与 session JSONL 持久化回归 |
+| [external-runner-subagent-observability.md](./external-runner-subagent-observability.md) | External Runner 子 Agent 状态可观测性 | 3 | Codex/TraeX `collabAgentToolCall`/`subAgentActivity` 与 Claude Code `Task`/`Agent` 归一为可持久化 `sub_agent_updated`，飞书卡片和 Web UI 展示派发任务、阶段、身份、状态、详情与耗时，同一生命周期原位更新且不混入命令统计，覆盖亮暗主题定向浏览器回归 |
 | [im-markdown-converter.md](./im-markdown-converter.md) | IM Markdown 格式转换器 | 10 | 标准 CommonMark → 飞书卡片 Markdown 转换：代码块语言标准化、图片 URL 转文字链接、任务列表 emoji 替换、水平分割线统一、HTML 标签过滤、UTF-8 多字节字符兼容、代码块内容保护、Bold+Italic 组合、脚注处理、综合场景 |
 | [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 13 | External Runner Session JSONL、History 列表/详情/删除 API、WebUI 事件时间线、线程列表与运行态投影回归 |
 | [agent-skills-admin-cli.md](./agent-skills-admin-cli.md) | Agent Skills Admin and CLI | 3 | Skill import multipart/bytes 接口、AgentSkillError 错误码分层、IM CLI secret 缺失错误 |

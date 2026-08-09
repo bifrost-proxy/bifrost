@@ -27,7 +27,7 @@ pub use session_status::{
     format_context_management_status, format_conversation_ref, format_model_ref,
     format_optional_status_text, format_status_metric_count, snapshot_agent_context,
     ActiveTurnStatus, AgentCompactionProgress, AgentContextSnapshot, AgentTurnProgressEvent,
-    AgentTurnProgressSender, StatusRuntimeContext,
+    AgentTurnProgressSender, StatusRuntimeContext, SubAgentProgress, SubAgentStatus,
 };
 pub use skills::{install_system_skills, SkillMetadata, SkillScope, SkillsManager};
 pub use tools::update_plan::{PlanStep, PlanStepStatus, UpdatePlanArgs};
