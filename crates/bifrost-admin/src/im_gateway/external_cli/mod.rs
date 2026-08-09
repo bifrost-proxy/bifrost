@@ -3580,10 +3580,8 @@ fn command_snapshot(request: &ExternalCliRunRequest, spec: &CommandSpec) -> Comm
 
 fn persisted_arg_flags(args: &[String]) -> Vec<String> {
     args.iter()
-        .filter_map(|arg| {
-            arg.starts_with('-')
-                .then(|| arg.split('=').next().unwrap_or(arg).to_string())
-        })
+        .filter(|arg| arg.starts_with('-'))
+        .map(|arg| arg.split('=').next().unwrap_or(arg).to_string())
         .collect()
 }
 
