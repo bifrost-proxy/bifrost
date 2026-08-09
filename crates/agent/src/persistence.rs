@@ -44,6 +44,7 @@ pub mod event_types {
     pub const GOAL_CLEARED: &str = "goal_cleared";
     pub const PLAN_UPDATED: &str = "plan_updated";
     pub const PLAN_CLEARED: &str = "plan_cleared";
+    pub const SUBAGENT_UPDATED: &str = "subagent_updated";
     pub const PROPOSED_PLAN: &str = "proposed_plan";
     pub const RUN_STATE_CHANGED: &str = "run_state_changed";
 }
@@ -401,6 +402,20 @@ impl ConversationRecorder {
                 "explanation": explanation,
                 "plan": plan,
             }),
+        })
+    }
+
+    pub fn record_subagent_updated(
+        &mut self,
+        session_key: &str,
+        progress: &crate::SubAgentProgress,
+    ) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::SUBAGENT_UPDATED.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::to_value(progress)
+                .map_err(|error| format!("serialize subagent progress: {error}"))?,
         })
     }
 
@@ -1328,6 +1343,35 @@ mod tests {
             session_key: session_key.to_string(),
             content: serde_json::json!({ "message": message }),
         }
+    }
+
+    #[test]
+    fn subagent_progress_is_persisted_as_replayable_timeline_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "subagent-session");
+        let progress = crate::SubAgentProgress {
+            id: "spawn-1".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            label: Some("reviewer".to_string()),
+            task: "Review auth".to_string(),
+            phase: "working".to_string(),
+            status: crate::SubAgentStatus::Running,
+            detail: Some("Reading handlers".to_string()),
+            started_at_ms: Some(1_000),
+            updated_at_ms: 2_000,
+            duration_ms: None,
+        };
+        recorder
+            .record_subagent_updated("subagent-session", &progress)
+            .unwrap();
+        recorder.close();
+
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, SUBAGENT_UPDATED);
+        assert_eq!(events[0].content["agentId"], "agent-1");
+        assert_eq!(events[0].content["task"], "Review auth");
+        assert_eq!(events[0].content["status"], "running");
     }
 
     #[test]

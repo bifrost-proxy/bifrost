@@ -40,6 +40,38 @@ describe("process log grouping", () => {
     ]);
   });
 
+  it("keeps sub-agent progress out of command groups and preserves observable fields", () => {
+    const subagent = eventToProcessStep({
+      eventType: "sub_agent_updated",
+      subagent: {
+        id: "spawn-1",
+        agentId: "agent-7",
+        label: "reviewer",
+        task: "Review authentication handlers",
+        phase: "working",
+        status: "running",
+        detail: "Inspecting route guards",
+        startedAtMs: 1_000,
+        updatedAtMs: 3_000,
+      },
+    });
+
+    expect(subagent).toMatchObject({
+      type: "subagent",
+      status: "running",
+      subAgentId: "spawn-1",
+      callId: "agent-7",
+      subAgentLabel: "reviewer",
+      subAgentTask: "Review authentication handlers",
+      subAgentPhase: "working",
+      subAgentStatus: "running",
+      subAgentDetail: "Inspecting route guards",
+    });
+    expect(buildProcessLogItems([subagent!])).toEqual([
+      { type: "text", step: subagent, index: 0 },
+    ]);
+  });
+
   it("summarizes command groups by running and failed state", () => {
     expect(
       formatCommandGroupSummary(

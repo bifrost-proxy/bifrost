@@ -34,6 +34,9 @@ pub enum AgentTurnProgressEvent {
         log: ToolCallLog,
         duration_ms: u64,
     },
+    SubAgentUpdated {
+        progress: SubAgentProgress,
+    },
     LongTaskStatus {
         session_key: String,
         session_id: String,
@@ -66,6 +69,38 @@ pub enum AgentTurnProgressEvent {
     TurnFailed {
         error: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubAgentStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    Unknown,
+}
+
+impl SubAgentStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Interrupted)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubAgentProgress {
+    pub id: String,
+    pub agent_id: Option<String>,
+    pub label: Option<String>,
+    pub task: String,
+    pub phase: String,
+    pub status: SubAgentStatus,
+    pub detail: Option<String>,
+    pub started_at_ms: Option<u64>,
+    pub updated_at_ms: u64,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

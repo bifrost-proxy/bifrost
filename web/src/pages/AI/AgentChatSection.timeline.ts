@@ -1,5 +1,6 @@
 import {
   EMPTY_TELEMETRY,
+  eventToProcessStep,
   finishTool,
   isReadableProgressStatus,
   numberFrom,
@@ -417,6 +418,34 @@ function hasImageContentParts(contentParts: ChatMessage["contentParts"] | undefi
 }
 
 export function appendProcessStepToTimeline(steps: ProcessStep[], step: ProcessStep) {
+  if (step.type === "subagent") {
+    const existingIndex = steps.findIndex(
+      (candidate) =>
+        candidate.type === "subagent" &&
+        ((step.subAgentId && candidate.subAgentId === step.subAgentId) ||
+          (step.callId && candidate.callId === step.callId)),
+    );
+    if (existingIndex >= 0) {
+      const existing = steps[existingIndex];
+      const startedAt = existing.startedAt ?? step.startedAt;
+      const completedAt = step.completedAt ?? existing.completedAt;
+      const next = [...steps];
+      next[existingIndex] = {
+        ...existing,
+        ...step,
+        startedAt,
+        completedAt,
+        subAgentTask:
+          step.subAgentTask && step.subAgentTask !== "Task details unavailable"
+            ? step.subAgentTask
+            : existing.subAgentTask,
+        subAgentLabel: step.subAgentLabel || existing.subAgentLabel,
+        durationMs: step.durationMs ?? durationMsBetween(startedAt, completedAt),
+      };
+      return next;
+    }
+    return [...steps, step];
+  }
   if (step.type !== "thinking") {
     return [...steps, step];
   }
@@ -522,6 +551,12 @@ function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
   if (event.event_type === "compaction") {
     return { type: "compaction", summary: "上下文已自动压缩", status: "success" };
   }
+  if (event.event_type === "subagent_updated") {
+    return eventToProcessStep({
+      eventType: "sub_agent_updated",
+      subagent: event.content,
+    });
+  }
   if (event.event_type === "tool_call") {
     const name = stringFrom(event.content.tool_name) || "tool";
     return {
@@ -560,7 +595,7 @@ function normalizeTimestampSeconds(timestamp: number) {
 }
 
 function isExternalCliAdapter(adapter?: string) {
-  return adapter === "codex" || adapter === "traex" || adapter === "mock" || adapter === "custom";
+  return adapter === "codex" || adapter === "traex" || adapter === "claude_code" || adapter === "mock" || adapter === "custom";
 }
 
 function findMatchingToolStep(steps: ProcessStep[], callId?: string, name?: string) {

@@ -198,18 +198,21 @@ pub(super) async fn run_command(
                     interrupted_results_to_ignore -= 1;
                 }
                 if !interrupted_result {
-                    if let Some(mut event) =
+                    if let Some(event) =
                         parse_progress_event_line_with_state(&line, &mut parse_state)
                     {
-                        enrich_progress_event_observation(
-                            &mut event,
-                            now_ms(),
-                            &mut tool_started_at,
-                        );
-                        if let Some(progress_tx) = progress_tx.as_ref() {
-                            let _ = progress_tx.send(event.clone());
+                        let observed_at = now_ms();
+                        for mut event in expand_subagent_progress_event(event) {
+                            enrich_progress_event_observation(
+                                &mut event,
+                                observed_at,
+                                &mut tool_started_at,
+                            );
+                            if let Some(progress_tx) = progress_tx.as_ref() {
+                                let _ = progress_tx.send(event.clone());
+                            }
+                            events.push(event);
                         }
-                        events.push(event);
                     }
                 }
                 if !interrupted_result {

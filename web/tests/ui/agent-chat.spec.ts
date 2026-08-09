@@ -404,6 +404,63 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
     .toBe(true);
 });
 
+test("AI Agent Chat shows sub-agent task phase identity status and duration", async ({
+  page,
+}) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await routeExternalAgentChatConfig(page);
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/subagent-ui" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
+    // Let the newly-created draft session become the selected session before
+    // delivering the first progress event, matching a real runner startup.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      body:
+        '{"eventType":"run_started"}\n' +
+        '{"eventType":"sub_agent_updated","subagent":{"id":"spawn-1","agentId":"agent-7","label":"reviewer","task":"Review authentication handlers","phase":"working","status":"running","detail":"Inspecting route guards","startedAtMs":1000,"updatedAtMs":3000}}\n' +
+        '{"eventType":"sub_agent_updated","subagent":{"id":"wait-2","agentId":"agent-7","task":"","phase":"waiting","status":"completed","detail":"Review complete","updatedAtMs":5200,"durationMs":4200}}\n' +
+        '{"eventType":"run_finished","response":"Coordination complete"}\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await dismissConnectedDeviceModal(page);
+  await page.getByTestId("agent-chat-input").fill("Coordinate a review");
+  await page.getByTestId("agent-chat-send").click();
+
+  await page.getByTestId("agent-chat-turn-collapse-toggle").click();
+  const subagent = page.getByTestId("agent-chat-subagent-step");
+  await expect(subagent).toBeVisible();
+  await expect(subagent).toContainText("reviewer");
+  await expect(subagent).toContainText("Review authentication handlers");
+  await expect(subagent).toContainText("Completed · waiting · 4s");
+  await subagent.locator("summary").click();
+  const detail = subagent.getByTestId("agent-chat-subagent-detail");
+  await expect(detail).toContainText("Agent ID：agent-7");
+  await expect(detail).toContainText("进度：Review complete");
+  await expect(page.getByTestId("agent-chat-process-command-group")).toHaveCount(0);
+
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(subagent).toBeVisible();
+  await expect(subagent).toContainText("Completed · waiting · 4s");
+});
+
 test("AI Agent Chat token HUD stays subtle above the composer", async ({
   page,
 }, testInfo) => {
