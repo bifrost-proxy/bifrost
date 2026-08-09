@@ -30,7 +30,7 @@
 - 平台事件漏掉或设备已在启动前连接时，WebUI 和 API 必须提供手动补跑入口。
 - 按设备名称作为 `audio_dir` 下一级根目录导入。
 - 导入保持设备内相对目录结构和文件名不变。
-- 只导入差异文件，避免每次全量重复复制。
+- 只导入差异文件；已经完成转写且产物仍有效的精确相同内容，必须在写入本地临时文件之前跳过，避免压缩或清理本地源文件后再次从外盘复制。
 - ASR 处理前做内容哈希去重；同一任务内已有相同内容文件完成转写且产物存在时，后续重复文件跳过模型推理并复用转写结果。
 - 导入时检查大小、稳定性和完整性，避免复制半写入文件。
 - 容错、去重、断点/临时文件恢复、异常状态可见。
@@ -85,9 +85,9 @@ V1 以设备事件监听 + 手动补跑组合为主，禁止后台定时扫描�
 导入用 "路径 + size + mtime" 判定差异（保持设备目录结构完整），去重发生在 ASR 处理前：
 
 - T0 设备 manifest 快路径：同 UUID + relative_path + size + mtime 命中即零读取跳过。
-- T1 已处理记录：source_key 或产物存在时不再从外设拉回。
+- T1 已处理记录：source_key、压缩前原路径或可信 manifest BLAKE3 命中，且转写产物和 ASR 参数仍有效时，不再从外设拉回。
 - T2 轻量候选筛选：size/duration/codec/sample_fingerprint 缩小候选，不能单独跳过 ASR。
-- T3 精确 BLAKE3：复制流顺手计算或后台队列补齐；跳过 ASR 需 hash + 产物 + ASR 参数三重匹配。
+- T3 精确 BLAKE3：已有 manifest hash 时先查任务级内容索引；manifest 不足但存在同尺寸已完成候选时，在复制前串行读取外盘文件计算 BLAKE3。只有 hash + size + 产物 + ASR 参数四重匹配才允许零写入跳过；未命中才进入复制流。
 - T4 canonical audio hash：只在 normalize/ffmpeg 已发生时顺手计算。
 
 ### 危险操作显式确认
@@ -219,23 +219,23 @@ Apple FSEvents 是目录层级变化通知，适合在设备已挂载后观察�
 对 Bifrost ASR 来说，最佳平衡不是追求“首次就识别所有跨路径重复”，而是：
 
 1. 外接设备导入以同步系统思路为主：同设备同相对路径优先用 metadata manifest 快速跳过，保证重复连接、重复扫描是零读取。
-2. ASR 转写以准确性为第一约束：只有已有可信内容 hash 且 transcript artifacts 仍存在时才跳过模型；轻量指纹不能单独导致漏转写。
-3. 内容 hash 作为增量增强能力：导入复制时顺手计算；历史文件的补 hash 进入后台队列，给下一轮和后续重复文件优化，不阻塞当前导入或转写。
+2. ASR 转写与导入都以准确性为第一约束：只有可信内容 hash、原始字节数、transcript artifacts 和 ASR 参数同时匹配时，才允许在复制前跳过；轻量指纹不能单独导致漏导入或漏转写。
+3. 内容 hash 作为增量增强能力：同一路径 manifest 已缓存 hash 时先做零读取索引命中；manifest 缺失或过期但任务索引存在同尺寸已完成候选时，在后台导入线程和全局串行 hash 队列中先读取外盘计算精确 BLAKE3。未命中才执行复制，复制流继续顺手计算并持久化 hash。
 4. CDC/block 级去重暂不进入 V1 主链路：录音文件通常是完整文件粒度输入，ASR 输出按文件/timeline 管理；CDC 适合备份仓库省空间，但会显著增加索引复杂度和 CPU 压力。后续如要做“录音仓库级重复片段识别”，应作为独立后台索引服务，而不是导入/Resume 的同步前置步骤。
 
 ### 大文件极致性能去重策略
 
 录音文件可能单个数百 MiB 到数 GiB、总量几十 GiB，因此去重必须分层，优先走“不读文件”的快路径，完整内容 hash 只能作为精确兜底。
 
-1. **T0 设备 manifest 去重**：外接设备导入首先用 `volume_uuid/device_identifier + relative_path + source_size + source_modified_ms` 判断同一设备同一路径是否已经导入且目标文件仍匹配。命中时直接 `unchanged/skipped`，不打开源文件、不计算 hash、不复制。
-2. **T1 已处理记录去重**：目标文件被用户清理后，如果 `files.json` 中已有相同目标路径或源记录的 `success/partial_success` 且 transcript artifacts 仍存在，导入阶段直接记为 `processed_record_skipped`，不再从外设拉回本地。
+1. **T0 设备 manifest 去重**：外接设备导入首先用 `volume_uuid/device_identifier + relative_path + source_size + source_modified_ms` 判断同一设备同一路径是否已经导入且目标文件仍匹配。命中时直接 `unchanged/skipped`，不打开源文件、不计算 hash、不复制。目标文件因压缩或清理而不存在时，如果同一条 manifest 已缓存 BLAKE3，则继续用该 hash 查询任务级内容索引；索引记录的原始字节数、转写产物和 ASR 参数有效时同样零读取跳过。
+2. **T1 已处理记录去重**：目标文件被用户清理后，如果 `files.json` 中已有相同目标路径或 `source_compression.original_source_path` 的 `success/partial_success`，且 transcript artifacts 仍存在，导入阶段直接记为 `processed_record_skipped`，不再从外设拉回本地。源路径关联元数据缺失时，不能退化为仅按文件名判断，必须进入 T3 精确 hash。
 3. **T2 轻量候选筛选**：跨路径或跨设备的“可能重复”先用 size、mtime、duration、codec、device relative path、已有 source key、已有 manifest hash 和 `sample_fingerprint` 缩小候选。`sample_fingerprint` 可用 XXH3/XXH128 或 BLAKE3 采样窗口计算，但只能减少候选和展示风险，不能单独作为“内容相同”并跳过 ASR 的最终依据，避免 partial fingerprint 误判导致漏转写。
-4. **T3 精确文件内容 hash**：只有两类场景做完整文件 hash：导入复制本来已经要顺序读源文件时顺手更新 BLAKE3 digest；或者用户/后台索引任务明确请求补齐当前目录文件 hash。完整 hash 必须进入全局后台内容哈希队列，串行、低优先级、流式读取，不能占用 Admin API 请求线程、Tokio async worker 或 ASR 模型处理锁。
+4. **T3 精确文件内容 hash**：当 manifest 无可复用 hash、但任务级内容索引存在同尺寸且产物有效的候选时，导入后台线程必须在创建本地 `.part` 文件之前通过全局内容哈希队列串行读取外盘源文件。读取前后再次校验 size/mtime；精确 BLAKE3 命中后写入 `processed_record_skipped` manifest 状态并停止，不创建目标或临时文件。未命中才执行复制；复制流继续顺手更新 BLAKE3 digest。该兜底可能让“同尺寸但全新内容”多读一次外盘，这是确保已处理内容零本地写入的必要代价，但不会占用 Admin API 请求线程、Tokio async worker 或 ASR 模型处理锁。
 5. **T4 规范化音频 hash**：如果两个文件字节不同但可能是同一段录音的不同容器/码率版本，只在 ASR normalize/ffmpeg decode 已经发生时顺手计算 `canonical_audio_hash`，即对统一采样率、声道和 PCM sample format 后的 PCM frame 流做 BLAKE3。它用于识别转码后精确相同的音频内容，但不在导入阶段默认触发全量解码。
 6. **ASR 主流程不等待 hash**：ASR run 只消费已经存在的 `content_hash`、`canonical_audio_hash` 和相关索引。缺少 hash 的大文件按普通文件继续处理，不为了去重同步读完整音频；后台 hash 后续命中只能优化下一轮或后续重复文件。
 7. **算法演进**：V1 持久化字段保留 `content_hash_algorithm`，当前只写入和消费 `blake3`；旧 SHA-256 数据不做兼容，必要时重建索引。
 
-因此“重复的就不导入/不转写”分两种：同一设备同一路径、同 size/mtime 的重复连接导入必须零读取跳过；跨路径内容重复只有已有可信 hash 或已存在成功处理记录时才跳过，否则宁可正常导入/转写，也不能用高成本 hash 阻塞代理服务。
+因此“重复的就不导入/不转写”分两种：同一设备同一路径、同 size/mtime 的重复连接导入必须零读取跳过；目标 WAV 被压缩为 FLAC、被清理或 manifest 路径过期时，只要原始 WAV 的 BLAKE3 仍能命中有效内容索引，就必须在复制前跳过。跨路径内容若只有同尺寸候选，则在后台串行计算精确 hash 后决定；没有可信候选时正常导入，不能用文件名、mtime 或轻量指纹单独跳过。
 
 ## 数据模型
 
