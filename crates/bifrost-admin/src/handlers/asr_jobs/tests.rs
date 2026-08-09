@@ -6684,6 +6684,61 @@ mod tests {
         assert!(!has_completed_processing_record_for_import_target(
             &task.id, &target, 16
         ));
+        let mount_path = temp.path().join("external");
+        let source = mount_path.join("done.wav");
+        std::fs::create_dir_all(&mount_path).unwrap();
+        std::fs::write(&source, b"processed-audio").unwrap();
+        let source_modified = source_modified_ms(&source);
+        let mut state = AsrExternalDeviceState {
+            binding_name: "RIGHT".to_string(),
+            ..Default::default()
+        };
+        state.files.insert(
+            "done.wav".to_string(),
+            AsrImportedFileRecord {
+                relative_path: PathBuf::from("done.wav"),
+                source_size: 15,
+                source_modified_ms: source_modified,
+                source_hashes: BTreeMap::from([(
+                    "blake3".to_string(),
+                    "cached-source-hash".to_string(),
+                )]),
+                sample_fingerprint: None,
+                target_path: target.clone(),
+                target_size: 15,
+                first_seen_at_ms: None,
+                imported_at_ms: 1,
+                status: "imported".to_string(),
+                error: None,
+            },
+        );
+        let volume = ExternalVolumeInfo {
+            name: "RIGHT".to_string(),
+            mount_path,
+            volume_uuid: None,
+            device_identifier: None,
+            kind: "external".to_string(),
+            read_only: false,
+            available_bytes: None,
+        };
+
+        assert_eq!(
+            import_one_file(
+                &task,
+                &volume,
+                target.parent().unwrap(),
+                &source,
+                &mut state,
+                "run",
+            )
+            .unwrap(),
+            "processed_record_skipped"
+        );
+        assert_eq!(
+            state.files["done.wav"].source_hashes.get("blake3"),
+            Some(&"cached-source-hash".to_string())
+        );
+        assert!(!target.exists());
         let mut legacy_record = pending_record(&task.id, &target);
         legacy_record.status = FileStatus::PartialSuccess;
         legacy_record.source_size = None;
@@ -6837,6 +6892,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(hashes.get("blake3"), Some(&hash));
+
+        task.import_policy.content_hash_dedupe_enabled = false;
+        assert!(reusable_processed_content_hash_for_import(
+            &task,
+            &temp.path().join("source-does-not-exist.wav"),
+            payload.len() as u64,
+            Some(42),
+            Some(&import_record),
+        )
+        .unwrap()
+        .is_none());
+
+        task.import_policy.content_hash_dedupe_enabled = true;
+        let error = reusable_processed_content_hash_for_import(
+            &task,
+            &temp.path().join("source-does-not-exist.wav"),
+            payload.len() as u64,
+            Some(42),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("source changed before content hash check"));
     }
 
     #[test]
@@ -6901,6 +6978,50 @@ mod tests {
             binding_name: "RECORDER".to_string(),
             ..Default::default()
         };
+        state.files.insert(
+            "archive/recording.wav".to_string(),
+            AsrImportedFileRecord {
+                relative_path: PathBuf::from("archive/recording.wav"),
+                source_size: payload.len() as u64,
+                source_modified_ms: source_modified_ms(&source),
+                source_hashes: BTreeMap::from([(
+                    "blake3".to_string(),
+                    "stale-cached-hash".to_string(),
+                )]),
+                sample_fingerprint: None,
+                target_path: target_root.join("archive/recording.wav"),
+                target_size: payload.len() as u64,
+                first_seen_at_ms: None,
+                imported_at_ms: 1,
+                status: "imported".to_string(),
+                error: None,
+            },
+        );
+        save_external_import_progress(
+            &task.id,
+            &AsrExternalImportRunProgress {
+                run_id: "run".to_string(),
+                trigger: "test".to_string(),
+                started_at_ms: 1,
+                updated_at_ms: 1,
+                finished_at_ms: None,
+                imported: 0,
+                skipped: 0,
+                processed_record_skipped: 0,
+                failed: 0,
+                status: "importing".to_string(),
+                current_device: Some("RECORDER".to_string()),
+                current_file: None,
+                current_file_size: None,
+                current_file_copied_bytes: 0,
+                total_files_discovered: 1,
+                processed_files: 0,
+                completion_token: None,
+                auto_run_consumed: false,
+                message: "running".to_string(),
+            },
+        )
+        .unwrap();
 
         let result = import_one_file(&task, &volume, &target_root, &source, &mut state, "run").unwrap();
         let target = target_root.join("archive").join("recording.wav");
@@ -6912,6 +7033,10 @@ mod tests {
             state.files["archive/recording.wav"].source_hashes.get("blake3"),
             Some(&hash)
         );
+        let progress = load_external_import_progress(&task.id).unwrap();
+        assert_eq!(progress.current_file.as_deref(), Some(source.as_path()));
+        assert_eq!(progress.current_file_size, Some(payload.len() as u64));
+        assert!(progress.message.contains("Checking processed content"));
     }
 
     #[test]
@@ -6930,31 +7055,61 @@ mod tests {
         task.import_policy.content_hash_dedupe_enabled = true;
         task.import_policy.file_stable_secs = 0;
         let hash = blake3_file(&source).unwrap();
+        let valid_text_path = temp.path().join("valid-other.txt");
+        let valid_metadata_path = temp.path().join("valid-other.json");
+        std::fs::write(&valid_text_path, "other transcript").unwrap();
+        std::fs::write(&valid_metadata_path, "{}").unwrap();
+        let other_hash = blake3::hash(&vec![b'x'; source.metadata().unwrap().len() as usize])
+            .to_hex()
+            .to_string();
         save_content_hash_index(
             &task.id,
             &AsrContentHashIndex {
                 version: TASK_STORE_VERSION,
-                hashes: BTreeMap::from([(
-                    format!("blake3:{hash}"),
-                    AsrContentHashRecord {
-                        algorithm: "blake3".to_string(),
-                        hash,
-                        canonical_audio_hash: None,
-                        size: source.metadata().unwrap().len(),
-                        canonical_source_key: "missing-artifacts".to_string(),
-                        canonical_source_path: temp.path().join("gone.flac"),
-                        transcript_artifacts: AsrTranscriptArtifacts {
-                            text_path: temp.path().join("missing.txt"),
-                            metadata_path: temp.path().join("missing.json"),
-                            timeline_path: None,
+                hashes: BTreeMap::from([
+                    (
+                        format!("blake3:{hash}"),
+                        AsrContentHashRecord {
+                            algorithm: "blake3".to_string(),
+                            hash,
+                            canonical_audio_hash: None,
+                            size: source.metadata().unwrap().len(),
+                            canonical_source_key: "missing-artifacts".to_string(),
+                            canonical_source_path: temp.path().join("gone.flac"),
+                            transcript_artifacts: AsrTranscriptArtifacts {
+                                text_path: temp.path().join("missing.txt"),
+                                metadata_path: temp.path().join("missing.json"),
+                                timeline_path: None,
+                            },
+                            model: task.model.clone(),
+                            language: task.language.clone(),
+                            runtime_strategy: task.runtime_strategy,
+                            completed_at_ms: 1,
+                            duplicate_count: 0,
                         },
-                        model: task.model.clone(),
-                        language: task.language.clone(),
-                        runtime_strategy: task.runtime_strategy,
-                        completed_at_ms: 1,
-                        duplicate_count: 0,
-                    },
-                )]),
+                    ),
+                    (
+                        format!("blake3:{other_hash}"),
+                        AsrContentHashRecord {
+                            algorithm: "blake3".to_string(),
+                            hash: other_hash,
+                            canonical_audio_hash: None,
+                            size: source.metadata().unwrap().len(),
+                            canonical_source_key: "valid-other-content".to_string(),
+                            canonical_source_path: temp.path().join("other.flac"),
+                            transcript_artifacts: AsrTranscriptArtifacts {
+                                text_path: valid_text_path,
+                                metadata_path: valid_metadata_path,
+                                timeline_path: None,
+                            },
+                            model: task.model.clone(),
+                            language: task.language.clone(),
+                            runtime_strategy: task.runtime_strategy,
+                            completed_at_ms: 1,
+                            duplicate_count: 0,
+                        },
+                    ),
+                ]),
             },
         )
         .unwrap();
