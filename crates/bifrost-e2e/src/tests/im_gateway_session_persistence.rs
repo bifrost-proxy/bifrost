@@ -148,24 +148,6 @@ fn snapshot_has_param_key(snapshot: &serde_json::Value, expected: &str) -> bool 
         .is_some_and(|keys| keys.iter().any(|key| key == expected))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::snapshot_has_param_key;
-
-    #[test]
-    fn runtime_snapshot_checks_parameter_names_without_persisting_values() {
-        let snapshot = serde_json::json!({
-            "paramKeys": ["conversationId", "timeoutSecs"]
-        });
-        assert!(snapshot_has_param_key(&snapshot, "conversationId"));
-        assert!(!snapshot_has_param_key(
-            &snapshot,
-            "secret-conversation-value"
-        ));
-        assert!(!snapshot.to_string().contains("conv-chatgpt-web-e2e-1"));
-    }
-}
-
 fn latest_chat_run_snapshot(data_dir: &std::path::Path) -> Result<serde_json::Value, String> {
     let runs_dir = data_dir.join("agent/im_gateway/chat_runs");
     let mut entries = std::fs::read_dir(&runs_dir)
@@ -246,5 +228,23 @@ impl Drop for EnvVarGuard {
             Some(value) => std::env::set_var(self.key, value),
             None => std::env::remove_var(self.key),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_has_param_key;
+
+    #[test]
+    fn runtime_snapshot_checks_parameter_names_without_persisting_values() {
+        let snapshot = serde_json::json!({
+            "paramKeys": ["conversationId", "timeoutSecs"]
+        });
+        assert!(snapshot_has_param_key(&snapshot, "conversationId"));
+        assert!(!snapshot_has_param_key(
+            &snapshot,
+            "secret-conversation-value"
+        ));
+        assert!(!snapshot.to_string().contains("conv-chatgpt-web-e2e-1"));
     }
 }
