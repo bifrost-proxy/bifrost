@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证 Codex Runner 与 Traex/Traex Runner 的 plan/todo list 输出被 Bifrost 解析为统一 `plan_updated`，并在飞书 progress card 与 Web UI Agent Chat 历史/实时展示中可见。
+本模块验证 Codex Runner 与 Traex/Traex Runner 的 plan/todo list 输出被 Bifrost 解析为统一 `plan_updated`，并在飞书 progress card 与 Web UI Agent Chat 实时展示中可见；完整计划属于外部执行器过程数据，不写入 run artifact 或 session durable history。
 
 ## 前置条件
 
@@ -54,7 +54,7 @@
 - 通过。Traex 输出 `thread.started` 和 `turn.started`。
 - 本次 90 秒内未继续输出 todo list 或最终消息，已终止探针；Bifrost parser 通过 Codex 真实 fixture 与通用 `plan_updated` fixture 覆盖 Traex 同协议兼容。
 
-### TC-ERP-03：真实 Bifrost 服务把 external runner plan 推到 stream、run detail 和 history
+### TC-ERP-03：真实 Bifrost 服务实时推送 external runner plan，但不长期落盘
 
 **操作步骤**：
 1. 执行稳定 E2E：
@@ -65,18 +65,18 @@
 **预期结果**：
 - 脚本输出 `PASS`。
 - `/chat/stream` 返回 `plan_updated` 事件，`steps` 状态为 `completed`、`in_progress`、`pending`。
-- run detail normalized events 包含 `plan_updated`。
-- session JSONL 持久化 `plan_updated`，并包含 `inspect output`、`map parser`、`verify UI`。
+- run detail normalized events 不包含 `plan_updated` 或计划文本。
+- session JSONL 不包含 `plan_updated`、`inspect output`、`map parser`、`verify UI`，但包含最终回复 `BIFROST_EXTERNAL_PLAN_UI_OK`。
 
 **实际结果**：
-- 通过。2026-06-25 执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_plan_ui.sh`，脚本使用临时数据目录与随机端口 `50346` 启动真实 Bifrost 服务，返回 run id `1782369927083-c03d847b-ba97-4771-b562-510349b85065`，输出 `[im-gateway-external-runner-plan-ui] PASS`。
+- 通过。2026-06-25 的旧版本验证了实时 stream；2026-08-09 按“外部执行器详细过程不落档”的新契约更新脚本并重新执行，实时 plan 保留，run detail/session history 不再保存完整步骤。
 
-### TC-ERP-04：Rust focused 测试覆盖解析、飞书卡片和 Web history 持久化
+### TC-ERP-04：Rust focused 测试覆盖解析、飞书卡片和 live-only 持久化边界
 
 **操作步骤**：
 1. 执行：
    ```bash
-   cargo test -p bifrost-admin --lib external_runner_plan_progress_is_recorded_as_plan_updated_event
+   cargo test -p bifrost-admin --lib external_runner_progress_is_live_while_durable_timeline_keeps_tool_summary_only
    cargo test -p bifrost-admin --lib external_runner_todo_list_plan_renders_in_feishu_progress_card
    cargo test -p bifrost-admin --lib codex_cli_parser_maps_real_todo_list_events_to_plan_updates
    cargo test -p bifrost-admin --lib generic_plan_updated_parser_accepts_status_fields
@@ -87,17 +87,17 @@
 - 所有测试通过。
 - 解析层产生 `ExternalCliProgressEventType::PlanUpdated`。
 - 飞书 card payload 包含任务计划面板和计划条目。
-- Web history 持久化为 `plan_updated`。
+- live stream 保留 `plan_updated`，durable history 不保存 plan、模型 delta 或完整工具参数/结果。
 
 **实际结果**：
 - 通过。2026-06-25 已执行：
-  - `cargo test -p bifrost-admin --lib external_runner_plan_progress`：2 passed，覆盖 stream payload `steps` 和 history `plan_updated` 持久化。
+  - `cargo test -p bifrost-admin --lib external_runner_plan_progress`：旧契约下 2 passed；2026-08-09 已由 live-only durable timeline 回归替代持久化断言。
   - `cargo test -p bifrost-admin --lib codex_cli_parser_maps_real_todo_list_events_to_plan_updates`：1 passed。
   - `cargo test -p bifrost-admin --lib generic_plan_updated_parser_accepts_status_fields`：1 passed。
   - `cargo test -p bifrost-admin --lib external_progress_maps_to_agent_turn_progress_events`：1 passed。
   - `cargo test -p bifrost-admin --lib external_runner_todo_list_plan_renders_in_feishu_progress_card`：1 passed。
 
-### TC-ERP-05：Web UI history telemetry 恢复 external runner plan
+### TC-ERP-05：Web UI 兼容旧 history 中的 external runner plan
 
 **操作步骤**：
 1. 执行：
@@ -107,8 +107,8 @@
 
 **预期结果**：
 - 测试通过。
-- `historyEventsToTelemetry` 从 persisted `plan_updated` 恢复 plan。
-- `historyEventsToMessages` 把 external runner plan 作为同轮 assistant 的过程步骤。
+- `historyEventsToTelemetry` 可从旧版 persisted `plan_updated` 恢复 plan。
+- `historyEventsToMessages` 可把旧版 external runner plan 作为同轮 assistant 的过程步骤；新运行不再产生该 durable event。
 
 **实际结果**：
 - 通过。2026-06-25 执行 `pnpm --dir web run test:unit AgentChatSection.timeline.test.ts`，`1 passed`，共 `15` 个测试通过。

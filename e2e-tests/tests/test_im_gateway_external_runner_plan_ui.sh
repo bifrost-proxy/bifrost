@@ -182,15 +182,15 @@ with urllib.request.urlopen(
 ) as resp:
     detail = json.loads(resp.read().decode("utf-8"))
 
-assert any(event.get("eventType") == "plan_updated" for event in detail.get("events") or []), detail
+assert not any(event.get("eventType") == "plan_updated" for event in detail.get("events") or []), detail
 digest = hashlib.sha256(b"external-plan-ui-e2e").hexdigest()
 session_paths = [
     os.path.join(test_dir, "agent", "sessions", "by-key", f"session-{digest}.jsonl")
 ]
 assert os.path.isfile(session_paths[0]), "canonical session timeline should be persisted"
 timeline = "\n".join(open(path, encoding="utf-8").read() for path in session_paths)
-assert '"event_type":"plan_updated"' in timeline or '"event_type": "plan_updated"' in timeline, timeline
-assert "inspect output" in timeline and "map parser" in timeline and "verify UI" in timeline, timeline
+assert '"event_type":"plan_updated"' not in timeline and '"event_type": "plan_updated"' not in timeline, timeline
+assert "inspect output" not in timeline and "map parser" not in timeline and "verify UI" not in timeline, timeline
 assert "BIFROST_EXTERNAL_PLAN_UI_OK" in timeline, timeline
 PY
 
