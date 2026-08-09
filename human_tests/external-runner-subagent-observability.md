@@ -28,11 +28,12 @@
 - Claude Code 的 `Task`/`Agent` tool use/result 产生相同的 provider-neutral 事件。
 - 实时事件保留 task、phase、agent id、状态、详情、开始/更新时间和终态耗时；pending/running 更新不落盘，可回放 session timeline 只在终态保存一次不含 task/detail 的有界生命周期摘要。
 - 历史 JSONL 不包含子 Agent prompt、description 或进度详情原文。
+- 同一终态被 provider 重复投递或 recorder 重开后再次收到时，历史 JSONL 仍只保留一条紧凑摘要。
 - 同一 Agent 的后续 `wait`/完成事件不会丢失首次派发的任务。
 
 **实际结果（2026-08-09）**：
 
-- 通过。`bifrost-agent` focused 测试 `1 passed`；`bifrost-admin` focused 测试 `5 passed`。
+- 通过。最终复测 `bifrost-agent` focused 测试 `3 passed`、`bifrost-admin` focused 测试 `13 passed`；覆盖 running 更新不落盘、终态首次写入、同一 agent 使用不同事件 ID 的重复终态、recorder 重开后重复投递和 Web timeline 重复终态均不追加历史事件。
 - 覆盖 Codex/TraeX collab、Codex activity、Claude Code Task、飞书 snapshot 合并和 Web history 持久化。
 
 ### TC-ERSO-02：飞书进度卡片展示子 Agent 任务、状态和耗时

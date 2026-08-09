@@ -60,6 +60,7 @@ pub struct ConversationRecorder {
     max_bytes: Option<usize>,
     event_count: Option<usize>,
     tool_call_ids: Option<HashSet<String>>,
+    terminal_subagent_ids: Option<HashSet<String>>,
 }
 
 /// Canonical sessions are recovery state, not rolling diagnostic logs.
@@ -76,6 +77,7 @@ impl ConversationRecorder {
             max_bytes: Some(DEFAULT_SESSION_MAX_BYTES),
             event_count: Some(0),
             tool_call_ids: Some(HashSet::new()),
+            terminal_subagent_ids: Some(HashSet::new()),
         }
     }
 
@@ -138,6 +140,7 @@ impl ConversationRecorder {
             max_bytes: Some(effective_max_bytes(max_bytes)),
             event_count: None,
             tool_call_ids: None,
+            terminal_subagent_ids: None,
         }
     }
 
@@ -462,16 +465,24 @@ impl ConversationRecorder {
         &mut self,
         session_key: &str,
         progress: &crate::SubAgentProgress,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         // Sub-agent prompts and progress detail belong to the live executor stream.
         // Canonical history only needs a compact lifecycle marker so Agent Chat can
         // restore identity, phase, terminal status, and duration after a refresh.
+        if !progress.status.is_terminal() {
+            return Ok(false);
+        }
+        let id = truncate_external_summary_text(&progress.id, 128);
+        let dedupe_key = terminal_subagent_dedupe_key(progress);
+        if self.ensure_terminal_subagent_ids()?.contains(&dedupe_key) {
+            return Ok(false);
+        }
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::SUBAGENT_UPDATED.to_string(),
             session_key: session_key.to_string(),
             content: serde_json::json!({
-                "id": truncate_external_summary_text(&progress.id, 128),
+                "id": id.clone(),
                 "agentId": progress
                     .agent_id
                     .as_deref()
@@ -488,7 +499,9 @@ impl ConversationRecorder {
                 "durationMs": progress.duration_ms,
                 "externalSummary": true,
             }),
-        })
+        })?;
+        self.ensure_terminal_subagent_ids()?.insert(dedupe_key);
+        Ok(true)
     }
 
     /// Flush and close the recorder.
@@ -547,6 +560,32 @@ impl ConversationRecorder {
             .tool_call_ids
             .as_mut()
             .expect("tool call ids initialized"))
+    }
+
+    fn ensure_terminal_subagent_ids(&mut self) -> Result<&mut HashSet<String>, String> {
+        if self.terminal_subagent_ids.is_none() {
+            let mut ids = HashSet::new();
+            if self.file_path.exists() {
+                for event in load_conversation_events(&self.file_path)? {
+                    if event.event_type == event_types::SUBAGENT_UPDATED
+                        && event
+                            .content
+                            .get("status")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(is_terminal_subagent_status)
+                    {
+                        if let Some(key) = terminal_subagent_event_dedupe_key(&event.content) {
+                            ids.insert(key);
+                        }
+                    }
+                }
+            }
+            self.terminal_subagent_ids = Some(ids);
+        }
+        Ok(self
+            .terminal_subagent_ids
+            .as_mut()
+            .expect("terminal sub-agent ids initialized"))
     }
 
     fn ensure_event_count(&mut self) -> Result<usize, String> {
@@ -648,6 +687,40 @@ fn truncate_external_summary_text(value: &str, max_chars: usize) -> String {
         return value.to_string();
     }
     value.chars().take(max_chars).collect()
+}
+
+fn terminal_subagent_dedupe_key(progress: &crate::SubAgentProgress) -> String {
+    progress
+        .agent_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("agent:{}", truncate_external_summary_text(value, 128)))
+        .unwrap_or_else(|| {
+            format!(
+                "event:{}",
+                truncate_external_summary_text(&progress.id, 128)
+            )
+        })
+}
+
+fn terminal_subagent_event_dedupe_key(content: &serde_json::Value) -> Option<String> {
+    content
+        .get("agentId")
+        .or_else(|| content.get("agent_id"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("agent:{}", truncate_external_summary_text(value, 128)))
+        .or_else(|| {
+            content
+                .get("id")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!("event:{}", truncate_external_summary_text(value, 128)))
+        })
+}
+
+fn is_terminal_subagent_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "interrupted")
 }
 
 fn count_conversation_event_lines(path: &Path) -> Result<usize, String> {
@@ -1498,7 +1571,7 @@ mod tests {
             label: Some("reviewer".to_string()),
             task: "Review auth".to_string(),
             phase: "working".to_string(),
-            status: crate::SubAgentStatus::Running,
+            status: crate::SubAgentStatus::Completed,
             detail: Some("Reading handlers".to_string()),
             started_at_ms: Some(1_000),
             updated_at_ms: 2_000,
@@ -1507,6 +1580,9 @@ mod tests {
         recorder
             .record_subagent_updated("subagent-session", &progress)
             .unwrap();
+        assert!(!recorder
+            .record_subagent_updated("subagent-session", &progress)
+            .unwrap());
         recorder.close();
 
         let events = load_conversation_events(recorder.file_path()).unwrap();
@@ -1514,11 +1590,79 @@ mod tests {
         assert_eq!(events[0].event_type, SUBAGENT_UPDATED);
         assert_eq!(events[0].content["agentId"], "agent-1");
         assert_eq!(events[0].content["task"], "");
-        assert_eq!(events[0].content["status"], "running");
+        assert_eq!(events[0].content["status"], "completed");
         assert_eq!(events[0].content["externalSummary"], true);
         let serialized = serde_json::to_string(&events[0]).unwrap();
         assert!(!serialized.contains("Review auth"));
         assert!(!serialized.contains("Reading handlers"));
+    }
+
+    #[test]
+    fn existing_recorder_deduplicates_terminal_subagent_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let progress = crate::SubAgentProgress {
+            id: "spawn-existing".to_string(),
+            agent_id: Some("agent-existing".to_string()),
+            label: None,
+            task: String::new(),
+            phase: "finished".to_string(),
+            status: crate::SubAgentStatus::Completed,
+            detail: None,
+            started_at_ms: Some(1_000),
+            updated_at_ms: 2_000,
+            duration_ms: Some(1_000),
+        };
+        let mut recorder = ConversationRecorder::new(dir.path(), "subagent-existing");
+        assert!(recorder
+            .record_subagent_updated("subagent-existing", &progress)
+            .unwrap());
+        recorder.close();
+
+        let path = recorder.file_path().to_path_buf();
+        let mut reopened = ConversationRecorder::from_existing_file(path.clone(), None);
+        assert!(!reopened
+            .record_subagent_updated("subagent-existing", &progress)
+            .unwrap());
+        reopened.close();
+        assert_eq!(load_conversation_events(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn subagent_recorder_ignores_live_updates_and_deduplicates_terminal_by_agent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "subagent-lifecycle");
+        let mut progress = crate::SubAgentProgress {
+            id: "spawn-event".to_string(),
+            agent_id: Some("agent-stable".to_string()),
+            label: None,
+            task: "Review auth".to_string(),
+            phase: "working".to_string(),
+            status: crate::SubAgentStatus::Running,
+            detail: Some("Reading handlers".to_string()),
+            started_at_ms: Some(1_000),
+            updated_at_ms: 2_000,
+            duration_ms: None,
+        };
+        assert!(!recorder
+            .record_subagent_updated("subagent-lifecycle", &progress)
+            .unwrap());
+        progress.id = "wait-event".to_string();
+        progress.status = crate::SubAgentStatus::Completed;
+        progress.updated_at_ms = 3_000;
+        progress.duration_ms = Some(2_000);
+        assert!(recorder
+            .record_subagent_updated("subagent-lifecycle", &progress)
+            .unwrap());
+        progress.id = "close-event".to_string();
+        assert!(!recorder
+            .record_subagent_updated("subagent-lifecycle", &progress)
+            .unwrap());
+        recorder.close();
+
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].content["id"], "wait-event");
+        assert_eq!(events[0].content["agentId"], "agent-stable");
     }
 
     #[test]

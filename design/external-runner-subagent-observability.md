@@ -77,7 +77,7 @@ Claude Code stream-json 通过 assistant `tool_use` 发出 `Task` / `Agent`，�
 2. `external_progress_to_agent_turn_event` 转成 `AgentTurnProgressEvent::SubAgentUpdated`，供飞书 progress registry 使用。
 3. `ImAgentProgressSnapshot` 按稳定 ID upsert，记录首次开始时间并在终态冻结耗时。
 4. 飞书卡片在 process panel 中渲染独立子 Agent 条目；预算收缩时优先移除最旧的终态条目，并至少保留最新 5 条终态与所有运行中条目。
-5. Web NDJSON 直接携带统一字段；pending/running 更新只供实时 UI 消费，history recorder 只在终态写入一次不含 task/detail 的有界 `subagent_updated` 摘要（身份、阶段、状态、时间），Agent Chat 对 live 与 replay 使用同一 `ProcessStep` 结构，历史任务文案可读降级为不可用。
+5. Web NDJSON 直接携带统一字段；pending/running 更新只供实时 UI 消费，history recorder 按稳定子 Agent ID 去重，只在终态写入一次不含 task/detail 的有界 `subagent_updated` 摘要（身份、阶段、状态、时间），即使 provider 重连后重复投递终态也不会追加；Agent Chat 对 live 与 replay 使用同一 `ProcessStep` 结构，历史任务文案可读降级为不可用。
 
 ## UI 约束
 

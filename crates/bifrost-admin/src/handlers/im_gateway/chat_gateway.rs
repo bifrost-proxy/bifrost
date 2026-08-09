@@ -2922,10 +2922,11 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                 // frequency. Persist only the terminal compact summary so canonical
                 // history does not become another rolling executor log.
                 if progress.status.is_terminal() {
-                    if let Err(error) = recorder.record_subagent_updated(session_key, &progress) {
-                        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner subagent update");
-                    } else {
-                        changed = true;
+                    match recorder.record_subagent_updated(session_key, &progress) {
+                        Ok(recorded) => changed = recorded,
+                        Err(error) => {
+                            tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner subagent update");
+                        }
                     }
                 }
             }
@@ -4452,6 +4453,18 @@ mod tests {
         )
         .expect("subagent event changes timeline");
         assert_eq!(end_index, 1);
+        assert_eq!(
+            record_external_cli_progress_event_to_timeline(
+                &mut recorder,
+                "subagent-web-replay",
+                "web",
+                "codex",
+                "codex",
+                &terminal,
+            ),
+            None,
+            "redelivered terminal state must not append another history event"
+        );
         let events =
             bifrost_agent::persistence::load_conversation_events(recorder.file_path()).unwrap();
         assert_eq!(events[0].event_type, "subagent_updated");
