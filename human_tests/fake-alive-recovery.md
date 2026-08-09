@@ -30,6 +30,16 @@ CLI 启动 Service 后由 Desktop 复用，再暂停其 API。预期 Desktop 只
 
 安装本地版本并重启，验证管理 API、代理转发、IM/Agent 列表和 `bifrost status`。预期接口限时响应、状态 Running、系统代理不指向无响应端口。
 
+## 2026-08-09 执行记录
+
+| 用例 | 实际结果 | 结论 |
+| --- | --- | --- |
+| TC-FA-01 | 已用托管子进程假存活专项验证确认 watchdog 只在确认其拥有的子进程无响应后执行有界恢复，恢复后 Admin API 使用新 PID 响应。 | 通过 |
+| TC-FA-02 | 已用外部 Service ownership 专项验证确认 Desktop 只报告外部实例不可用，不终止外部 PID。 | 通过 |
+| TC-FA-03 | Agent 持久化专项套件 47 项通过；持久化内容只含最终回复与工具名称、调用 ID、状态、耗时，不含 prompt、delta、计划、参数、命令、结果和原始事件。 | 通过 |
+| TC-FA-04 | runner 专项验证确认 stdout/stderr 尾部各不超过 4 KiB、默认 session 上限为 1 MiB，并清理超额已完成 run。 | 通过 |
+| TC-FA-05 | 安装 `f11fab19` 构建的 Desktop/CLI 后，Desktop PID `80630`、后端 PID `80796`；`bifrost status` 返回 `running=true`、`runtime_source=admin_api`。Provider、Runner config、Agent config、Agent sessions 接口均返回 HTTP 200（最慢 0.178 秒）；经 `127.0.0.1:9900` 代理访问 `http://example.com/` 返回 200；系统 HTTP/HTTPS 代理均指向当前健康的 `127.0.0.1:9900`。 | 通过 |
+
 ## 清理步骤
 
 停止临时进程并删除临时目录；正式环境保留健康的修复版。
