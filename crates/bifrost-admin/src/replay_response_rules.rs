@@ -25,7 +25,7 @@ pub(crate) fn apply_response_rules(
                 delete_res_headers.extend(parse_delete_value(&rule.resolved_value).res_headers);
             }
             Protocol::ResHeaders => {
-                res_headers.extend(parse_header_values(&rule.resolved_value));
+                res_headers.extend(rule.header_pairs().unwrap_or_default().iter().cloned());
             }
             Protocol::StatusCode | Protocol::ReplaceStatus => {
                 if let Ok(code) = rule.resolved_value.parse::<u16>() {
@@ -33,7 +33,9 @@ pub(crate) fn apply_response_rules(
                 }
             }
             Protocol::ResCookies => {
-                if let Some((name, value)) = parse_cookie_value(&rule.resolved_value) {
+                if let Some(cookies) = rule.key_value_pairs() {
+                    res_cookies.extend(cookies.iter().cloned());
+                } else if let Some((name, value)) = parse_cookie_value(&rule.resolved_value) {
                     res_cookies.push((name, value));
                 }
             }
@@ -56,7 +58,7 @@ pub(crate) fn apply_response_rules(
                 response_for = Some(rule.resolved_value.clone());
             }
             Protocol::Trailers => {
-                trailers.extend(parse_header_values(&rule.resolved_value));
+                trailers.extend(rule.key_value_pairs().unwrap_or_default().iter().cloned());
             }
             Protocol::HeaderReplace => {
                 header_replace.extend(parse_header_replace_value(&rule.resolved_value));
@@ -148,7 +150,7 @@ pub(crate) fn apply_websocket_response_header_rules(
                 delete_res_headers.extend(parse_delete_value(&rule.resolved_value).res_headers);
             }
             Protocol::ResHeaders => {
-                res_headers.extend(parse_header_values(&rule.resolved_value));
+                res_headers.extend(rule.header_pairs().unwrap_or_default().iter().cloned());
             }
             Protocol::HeaderReplace => {
                 header_replace.extend(parse_header_replace_value(&rule.resolved_value));
@@ -200,29 +202,6 @@ fn replace_header_value(
     }
 }
 
-fn parse_header_values(value: &str) -> Vec<(String, String)> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    let content = if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() >= 2 {
-        &trimmed[1..trimmed.len() - 1]
-    } else {
-        trimmed
-    };
-
-    if looks_like_json_header_object(content) {
-        return parse_json_header_object(content).unwrap_or_default();
-    }
-
-    let delimiter = if content.contains('\n') { '\n' } else { ',' };
-    content
-        .split(delimiter)
-        .filter_map(parse_header_value)
-        .collect()
-}
-
 fn parse_header_value(value: &str) -> Option<(String, String)> {
     let trimmed = value.trim();
     let (key, val) = trimmed
@@ -233,45 +212,6 @@ fn parse_header_value(value: &str) -> Option<(String, String)> {
         None
     } else {
         Some((key.to_string(), val.trim().to_string()))
-    }
-}
-
-fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
-    let content = content.trim();
-    if !looks_like_json_header_object(content) {
-        return None;
-    }
-
-    let json_value = serde_json::from_str::<serde_json::Value>(content).ok()?;
-    let obj = json_value.as_object()?;
-    Some(
-        obj.iter()
-            .filter_map(|(key, value)| {
-                if key.trim().is_empty() {
-                    return None;
-                }
-                json_scalar_to_header_value(value).map(|value| (key.clone(), value))
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-
-fn looks_like_json_header_object(content: &str) -> bool {
-    let content = content.trim();
-    if !(content.starts_with('{') && content.ends_with('}')) {
-        return false;
-    }
-    let inner = content[1..content.len() - 1].trim_start();
-    inner.is_empty() || inner.starts_with('"') || inner.contains(':')
-}
-
-fn json_scalar_to_header_value(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => Some(value.clone()),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        serde_json::Value::Bool(value) => Some(value.to_string()),
-        serde_json::Value::Null => Some(String::new()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
 }
 
@@ -556,6 +496,24 @@ mod tests {
     }
 
     #[test]
+    fn replay_response_rules_split_ampersand_cookies_and_trailers() {
+        let rules = resolve(
+            "https://example.test/api resCookies://(sid=xxx&theme=dark) trailers://(X-Trace=abc&X-Checksum=xyz)",
+        );
+        let (_, headers, _) = apply_response_rules(
+            &rules,
+            200,
+            vec![("content-length".to_string(), "2".to_string())],
+            Some("ok".to_string()),
+        );
+
+        assert!(headers.contains(&("Set-Cookie".to_string(), "sid=xxx".to_string())));
+        assert!(headers.contains(&("Set-Cookie".to_string(), "theme=dark".to_string())));
+        assert_eq!(header(&headers, "Trailer"), Some("X-Trace, X-Checksum"));
+        assert!(header(&headers, "Content-Length").is_none());
+    }
+
+    #[test]
     fn replay_response_rules_delete_res_headers_only() {
         let rules = resolve(
             "https://example.test/api delete://resHeaders.X-Remove|reqHeaders.X-Keep|urlParams.debug resHeaders://X-Keep:yes",
@@ -584,6 +542,19 @@ mod tests {
 
         assert_eq!(header(&headers, "X-Env"), Some("ppe"));
         assert_eq!(header(&headers, "X-Flag"), Some("1"));
+    }
+
+    #[test]
+    fn replay_response_rules_apply_ampersand_separated_headers() {
+        let rules = resolve(
+            "https://example.test/api resHeaders://(X-Env=ppe&X-Flag=1&X-Query=a%3D1%26b%3D2)",
+        );
+
+        let (_, headers, _) = apply_response_rules(&rules, 200, Vec::new(), None);
+
+        assert_eq!(header(&headers, "X-Env"), Some("ppe"));
+        assert_eq!(header(&headers, "X-Flag"), Some("1"));
+        assert_eq!(header(&headers, "X-Query"), Some("a%3D1%26b%3D2"));
     }
 
     #[test]

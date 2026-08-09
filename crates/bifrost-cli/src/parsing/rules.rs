@@ -499,8 +499,8 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 result.redirect_status = status;
             }
             Protocol::ReqHeaders => {
-                if let Some(headers) = parse_header_value(value) {
-                    for (k, v) in headers {
+                if let Some(headers) = resolved_rule.header_pairs() {
+                    for (k, v) in headers.iter().cloned() {
                         let key_lower = k.to_lowercase();
                         if !result
                             .req_headers
@@ -513,8 +513,8 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::ResHeaders => {
-                if let Some(headers) = parse_header_value(value) {
-                    for (k, v) in headers {
+                if let Some(headers) = resolved_rule.header_pairs() {
+                    for (k, v) in headers.iter().cloned() {
                         let key_lower = k.to_lowercase();
                         if !result
                             .res_headers
@@ -588,18 +588,23 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::ReqCookies => {
-                if let Some(cookies) = parse_header_value(value) {
-                    for (k, v) in cookies {
-                        result.req_cookies.push((k, v));
-                    }
+                if let Some(cookies) = resolved_rule.key_value_pairs() {
+                    result.req_cookies.extend(cookies.iter().cloned());
                 }
             }
             Protocol::ForwardedFor => {
                 result.forwarded_for = Some(value.to_string());
             }
             Protocol::ResCookies => {
-                let parsed_cookies = parse_res_cookies_value(value);
-                result.res_cookies.extend(parsed_cookies);
+                if let Some(cookies) = resolved_rule.key_value_pairs() {
+                    result.res_cookies.extend(
+                        cookies.iter().cloned().map(|(name, value)| {
+                            (name, bifrost_proxy::ResCookieValue::simple(value))
+                        }),
+                    );
+                } else {
+                    result.res_cookies.extend(parse_res_cookies_value(value));
+                }
             }
             Protocol::ResponseFor => {
                 result.response_for = Some(value.to_string());
@@ -712,10 +717,8 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
                 }
             }
             Protocol::Trailers => {
-                if let Some(headers) = parse_header_value(value) {
-                    for (k, v) in headers {
-                        result.trailers.push((k, v));
-                    }
+                if let Some(trailers) = resolved_rule.key_value_pairs() {
+                    result.trailers.extend(trailers.iter().cloned());
                 }
             }
             Protocol::Dns => {
@@ -1163,6 +1166,40 @@ mod tests {
         );
 
         assert!(resolved.upstream_http3);
+    }
+
+    #[test]
+    fn resolver_splits_ampersand_separated_request_and_response_headers() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules(
+                "example.com reqHeaders://(X-Req-A=one&X-Req-B=two) resHeaders://(X-Res-A=three&X-Res-B=four)",
+            )
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            resolved.req_headers,
+            vec![
+                ("X-Req-A".into(), "one".into()),
+                ("X-Req-B".into(), "two".into()),
+            ]
+        );
+        assert_eq!(
+            resolved.res_headers,
+            vec![
+                ("X-Res-A".into(), "three".into()),
+                ("X-Res-B".into(), "four".into()),
+            ]
+        );
     }
 
     #[test]
@@ -2664,6 +2701,56 @@ stream.onEvent = event => ({ data: event.data });
     }
 
     #[test]
+    fn test_req_cookies_ampersand_separated() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com reqCookies://(sessionid=xxx&a=c&b=two=parts)")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            resolved.req_cookies,
+            vec![
+                ("sessionid".to_string(), "xxx".to_string()),
+                ("a".to_string(), "c".to_string()),
+                ("b".to_string(), "two=parts".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_req_cookies_value_reference_preserves_literal_ampersand() {
+        let mut values = HashMap::new();
+        values.insert(
+            "cookies".to_string(),
+            "session=safe&injected=yes".to_string(),
+        );
+        let parser = bifrost_core::RuleParser::with_values(values.clone());
+        let rules = parser
+            .parse_rules("example.com reqCookies://{cookies}")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            resolved.req_cookies,
+            vec![("session".to_string(), "safe&injected=yes".to_string())]
+        );
+    }
+
+    #[test]
     fn test_merge_res_cookies_accumulate() {
         let parser = bifrost_core::RuleParser::new();
         let rules = parser
@@ -2678,6 +2765,39 @@ stream.onEvent = event => ({ data: event.data });
             &HashMap::new(),
         );
         assert!(resolved.res_cookies.len() >= 2);
+    }
+
+    #[test]
+    fn test_res_cookies_ampersand_and_json_attributes() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules(
+                r#"example.com resCookies://(sid=xxx&theme=dark)
+example.com resCookies://{"auth":{"value":"token","path":"/","httpOnly":true}}"#,
+            )
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.res_cookies.len(), 3);
+        assert!(resolved
+            .res_cookies
+            .iter()
+            .any(|(name, value)| name == "sid" && value.value == "xxx"));
+        assert!(resolved
+            .res_cookies
+            .iter()
+            .any(|(name, value)| name == "theme" && value.value == "dark"));
+        assert!(resolved
+            .res_cookies
+            .iter()
+            .any(|(name, value)| { name == "auth" && value.value == "token" && value.http_only }));
     }
 
     #[test]
@@ -2766,6 +2886,29 @@ stream.onEvent = event => ({ data: event.data });
             &HashMap::new(),
         );
         assert_eq!(resolved.trailers.len(), 2);
+    }
+
+    #[test]
+    fn test_trailers_ampersand_separated() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com trailers://(X-Trace=abc&X-Checksum=xyz)")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            resolved.trailers,
+            vec![
+                ("X-Trace".to_string(), "abc".to_string()),
+                ("X-Checksum".to_string(), "xyz".to_string()),
+            ]
+        );
     }
 
     #[test]

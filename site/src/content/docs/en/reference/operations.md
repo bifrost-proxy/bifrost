@@ -20,6 +20,12 @@ pattern resBody://{mock-response.json}    # {key} = an embedded block in this ru
 pattern urlParams://t=${now}&id=${randomUUID}
 ```
 
+Single-line inline `reqHeaders` / `resHeaders`, `reqCookies` / `resCookies`, and
+`trailers` values use `&` to separate multiple pairs, for example
+`reqCookies://(sessionid=xxx&a=c)`. To keep a literal `&` inside a value, use a
+JSON object or a multi-line/referenced Value. Response Cookies with attributes
+such as Path, Secure, or HttpOnly continue to use the JSON object form.
+
 `reqReplace` and `resReplace` additionally accept a referenced strict JSON object, for example `pattern resReplace://{replaceMap}` where the Value is `{ "old": "new" }`. Legacy `old=new&foo=bar` values remain supported.
 
 Template variables (`${...}`) expand unconditionally inside any value — backticks do not enable template parsing and are not special syntax (they pass through into the output literally). Backticks are only useful to protect a value that contains spaces from the rule-line tokenizer. Note: request-context vars (`${host}`, `${reqHeaders.x}`, …) work, but response-phase vars `${statusCode}` / `${resHeaders.x}` / `${resCookies.x}` and `${realHost}` / `${realPort}` / `${realUrl}` currently expand to an empty string (verified).

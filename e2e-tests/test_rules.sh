@@ -838,12 +838,26 @@ test_req_headers_add() {
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
-    if command -v jq &> /dev/null && [[ -n "$HTTP_BODY" ]]; then
-        local header_key_lower=$(echo "$header_name" | tr '[:upper:]' '[:lower:]')
-        local actual_value=$(echo "$HTTP_BODY" | jq -r ".request.headers[\"$header_name\"] // .request.headers[\"$header_key_lower\"]" 2>/dev/null)
-
-        assert_equals "$header_value" "$actual_value" "后端应收到添加的请求头 $header_name=$header_value"
+    if [[ -z "$HTTP_BODY" ]]; then
+        _log_fail "后端未返回请求详情" "非空 JSON 响应体" "空响应体"
+        return
     fi
+
+    local actual_value
+    actual_value=$(HEADER_NAME="$header_name" "$PYTHON_BIN" -c '
+import json, os, sys
+payload = json.load(sys.stdin)
+headers = payload.get("request", {}).get("headers", {})
+name = os.environ["HEADER_NAME"]
+value = headers.get(name)
+if value is None:
+    value = headers.get(name.lower())
+if value is None:
+    sys.exit(2)
+print(value, end="")
+' <<< "$HTTP_BODY" 2>/dev/null) || actual_value="__BIFROST_HEADER_MISSING__"
+
+    assert_equals "$header_value" "$actual_value" "后端应收到添加的请求头 $header_name=$header_value"
 }
 
 test_req_headers_delete() {
@@ -1122,10 +1136,23 @@ test_req_cookies() {
 
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
-    if command -v jq &> /dev/null && [[ -n "$HTTP_BODY" ]]; then
-        local actual_cookie=$(echo "$HTTP_BODY" | jq -r ".request.cookies[\"$cookie_name\"]" 2>/dev/null)
-        assert_equals "$cookie_value" "$actual_cookie" "后端应收到 Cookie $cookie_name=$cookie_value"
+    if [[ -z "$HTTP_BODY" ]]; then
+        _log_fail "后端未返回请求详情" "非空 JSON 响应体" "空响应体"
+        return
     fi
+
+    local actual_cookie
+    actual_cookie=$(COOKIE_NAME="$cookie_name" "$PYTHON_BIN" -c '
+import json, os, sys
+payload = json.load(sys.stdin)
+cookies = payload.get("request", {}).get("cookies", {})
+name = os.environ["COOKIE_NAME"]
+if name not in cookies:
+    sys.exit(2)
+print(cookies[name], end="")
+' <<< "$HTTP_BODY" 2>/dev/null) || actual_cookie="__BIFROST_COOKIE_MISSING__"
+
+    assert_equals "$cookie_value" "$actual_cookie" "后端应收到 Cookie $cookie_name=$cookie_value"
 }
 
 test_forwarded_for_rule() {
@@ -1172,6 +1199,7 @@ test_response_for_rule() {
 test_res_cookies() {
     local pattern="$1"
     local cookie_name="$2"
+    local cookie_value="${3:-}"
     local test_url="https://${pattern}/test"
 
     echo ""
@@ -1184,6 +1212,10 @@ test_res_cookies() {
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
     assert_header_exists "Set-Cookie" "$HTTP_HEADERS" "响应应包含 Set-Cookie 头"
     assert_header_contains "Set-Cookie" "$cookie_name" "$HTTP_HEADERS" "Set-Cookie 应包含 $cookie_name"
+    if [[ -n "$cookie_value" && "$cookie_value" != *";"* ]]; then
+        assert_header_contains "Set-Cookie" "${cookie_name}=${cookie_value}" "$HTTP_HEADERS" \
+            "Set-Cookie 应保留完整值 ${cookie_name}=${cookie_value}"
+    fi
 }
 
 test_websocket_forward() {
@@ -1604,7 +1636,7 @@ test_line_props_rule() {
         disabled_header_raw=$(resolve_code_block_var "$disabled_header_raw" "$RULE_FILE")
         local disabled_header_info=$(extract_header_from_value "$disabled_header_raw")
         local disabled_header_name=$(echo "$disabled_header_info" | cut -d'|' -f1)
-        local disabled_header_value=$(echo "$disabled_header_info" | cut -d'|' -f2)
+        local disabled_header_value=$(echo "$disabled_header_info" | cut -d'|' -f2-)
 
         if [[ -z "$disabled_header_name" ]]; then
             _log_fail "disabled 规则缺少可验证响应头" "resHeaders 规则" "$protocols"
@@ -2459,7 +2491,7 @@ test_trailers_rule() {
     assert_status_2xx "$HTTP_STATUS" "请求应成功"
 
     local actual_value=$(echo "$HTTP_HEADERS" | grep -i "^Trailer:" | head -1 | cut -d':' -f2- | sed 's/^[[:space:]]*//' | tr -d '\r')
-    if [[ "$actual_value" == *"$trailer_header"* ]]; then
+    if [[ "$actual_value" == "$trailer_header" ]]; then
         _log_pass "Trailer 头已设置: $actual_value"
     else
         _log_fail "Trailer 头不匹配" "$trailer_header" "${actual_value:-空}"
@@ -2812,10 +2844,63 @@ extract_header_from_value() {
     extract_headers_from_value "$value" | head -1
 }
 
+split_inline_map_entries() {
+    local value="$1"
+    local split_ampersands="${2:-true}"
+    local split_commas="${3:-true}"
+    local current=""
+    local template_brace_depth=0
+    local index=0
+    local value_length=${#value}
+    local character=""
+    local next_character=""
+
+    while (( index < value_length )); do
+        character="${value:index:1}"
+        next_character="${value:index+1:1}"
+
+        if (( template_brace_depth == 0 )) && [[ "$character" == '$' && "$next_character" == '{' ]]; then
+            current+='$'"{"
+            template_brace_depth=1
+            index=$((index + 2))
+            continue
+        fi
+
+        if (( template_brace_depth > 0 )); then
+            current+="$character"
+            if [[ "$character" == '{' ]]; then
+                template_brace_depth=$((template_brace_depth + 1))
+            elif [[ "$character" == '}' ]]; then
+                template_brace_depth=$((template_brace_depth - 1))
+            fi
+            index=$((index + 1))
+            continue
+        fi
+
+        if { [[ "$split_ampersands" == true && "$character" == '&' ]]; } \
+            || { [[ "$split_commas" == true && "$character" == ',' ]]; }; then
+            printf '%s\n' "$current"
+            current=""
+        else
+            current+="$character"
+        fi
+        index=$((index + 1))
+    done
+
+    printf '%s\n' "$current"
+}
+
 extract_headers_from_value() {
     local value="$1"
+    local value_source="${2:-$value}"
+    local split_ampersands=true
 
-    value=$(resolve_value_reference "$value")
+    if [[ "$value_source" =~ ^\{([a-zA-Z_][a-zA-Z0-9_.-]*)\}$ ]]; then
+        split_ampersands=false
+        if [[ "$value" == "$value_source" ]]; then
+            value=$(resolve_value_reference "$value_source")
+        fi
+    fi
 
     value="${value#\`}"
     value="${value%\`}"
@@ -2839,17 +2924,91 @@ extract_headers_from_value() {
         fi
     fi
 
-    local header_name=""
-    local header_value=""
-
-    local first_line=$(echo "$value" | head -1)
-
-    if [[ "$first_line" == *":"* ]]; then
-        header_name=$(echo "$first_line" | cut -d':' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        header_value=$(echo "$first_line" | cut -d':' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local segments="$value"
+    if [[ "$value" != *$'\n'* ]]; then
+        segments=$(split_inline_map_entries "$value" "$split_ampersands" true)
     fi
 
-    echo "$header_name|$header_value"
+    local part
+    while IFS= read -r part || [[ -n "$part" ]]; do
+        part=$(printf '%s' "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$part" || "$part" == \#* ]] && continue
+
+        local separator=""
+        local eq_prefix="${part%%=*}"
+        local colon_prefix="${part%%:*}"
+        if [[ "$part" == *"="* && "$part" == *":"* ]]; then
+            if (( ${#eq_prefix} < ${#colon_prefix} )); then
+                separator="="
+            else
+                separator=":"
+            fi
+        elif [[ "$part" == *"="* ]]; then
+            separator="="
+        elif [[ "$part" == *":"* ]]; then
+            separator=":"
+        else
+            continue
+        fi
+
+        local header_name="${part%%${separator}*}"
+        local header_value="${part#*${separator}}"
+        header_name=$(printf '%s' "$header_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        header_value=$(printf '%s' "$header_value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -n "$header_name" ]] && printf '%s|%s\n' "$header_name" "$header_value"
+    done <<< "$segments"
+}
+
+extract_key_values_from_value() {
+    local value="$1"
+    local value_source="${2:-$value}"
+    local split_ampersands=true
+
+    if [[ "$value_source" =~ ^\{([a-zA-Z_][a-zA-Z0-9_.-]*)\}$ ]]; then
+        split_ampersands=false
+        if [[ "$value" == "$value_source" ]]; then
+            value=$(resolve_value_reference "$value_source")
+        fi
+    fi
+
+    value="${value#\`}"
+    value="${value%\`}"
+    value="${value#(}"
+    value="${value%)}"
+
+    local segments="$value"
+    if [[ "$value" != *$'\n'* ]]; then
+        segments=$(split_inline_map_entries "$value" "$split_ampersands" true)
+    fi
+
+    local part
+    while IFS= read -r part || [[ -n "$part" ]]; do
+        part=$(printf '%s' "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -z "$part" || "$part" == \#* ]] && continue
+
+        local separator=""
+        local eq_prefix="${part%%=*}"
+        local colon_prefix="${part%%:*}"
+        if [[ "$part" == *"="* && "$part" == *":"* ]]; then
+            if (( ${#eq_prefix} < ${#colon_prefix} )); then
+                separator="="
+            else
+                separator=":"
+            fi
+        elif [[ "$part" == *"="* ]]; then
+            separator="="
+        elif [[ "$part" == *":"* ]]; then
+            separator=":"
+        else
+            continue
+        fi
+
+        local key="${part%%${separator}*}"
+        local item_value="${part#*${separator}}"
+        key=$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        item_value=$(printf '%s' "$item_value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -n "$key" ]] && printf '%s|%s\n' "$key" "$item_value"
+    done <<< "$segments"
 }
 
 test_res_headers_template() {
@@ -2860,7 +3019,7 @@ test_res_headers_template() {
     local extra_headers=""
 
     local header_name=$(echo "$header_info" | cut -d'|' -f1)
-    local header_template=$(echo "$header_info" | cut -d'|' -f2)
+    local header_template=$(echo "$header_info" | cut -d'|' -f2-)
 
     if [[ "$header_template" == *'${reqCookies.'* ]]; then
         local cookie_name=$(echo "$header_template" | grep -o '\${reqCookies\.[^}]*}' | head -1 | sed 's/\${reqCookies\.//;s/}//')
@@ -2918,7 +3077,7 @@ test_req_headers_template() {
     test_url=$(build_test_url "https" "$pattern")
 
     local header_name=$(echo "$header_info" | cut -d'|' -f1)
-    local header_template=$(echo "$header_info" | cut -d'|' -f2)
+    local header_template=$(echo "$header_info" | cut -d'|' -f2-)
 
     echo ""
     echo -e "  ${CYAN}【测试】添加请求头 (模板变量)${NC}"
@@ -3810,13 +3969,14 @@ run_tests() {
                 ;;
             reqHeaders)
                 local req_header_raw=$(extract_value "$protocols" "reqHeaders")
+                local req_header_source="$req_header_raw"
                 req_header_raw=$(resolve_code_block_var "$req_header_raw" "$RULE_FILE")
                 local req_header_infos
-                req_header_infos=$(extract_headers_from_value "$req_header_raw")
+                req_header_infos=$(extract_headers_from_value "$req_header_raw" "$req_header_source")
                 if [[ -n "$req_header_infos" ]]; then
                     while IFS= read -r req_header_info; do
                         local req_header_name=$(echo "$req_header_info" | cut -d'|' -f1)
-                        local req_header_value=$(echo "$req_header_info" | cut -d'|' -f2)
+                        local req_header_value=$(echo "$req_header_info" | cut -d'|' -f2-)
                         [[ -z "$req_header_name" ]] && continue
                         if [[ "$req_header_value" == *'${'* ]] || [[ "$req_header_raw" == *'`'* ]]; then
                             test_req_headers_template "$pattern" "$req_header_info"
@@ -3830,13 +3990,14 @@ run_tests() {
                 ;;
             resHeaders)
                 local res_header_raw=$(extract_value "$protocols" "resHeaders")
+                local res_header_source="$res_header_raw"
                 res_header_raw=$(resolve_code_block_var "$res_header_raw" "$RULE_FILE")
                 local res_header_infos
-                res_header_infos=$(extract_headers_from_value "$res_header_raw")
+                res_header_infos=$(extract_headers_from_value "$res_header_raw" "$res_header_source")
                 if [[ -n "$res_header_infos" ]]; then
                     while IFS= read -r res_header_info; do
                         local res_header_name=$(echo "$res_header_info" | cut -d'|' -f1)
-                        local res_header_value=$(echo "$res_header_info" | cut -d'|' -f2)
+                        local res_header_value=$(echo "$res_header_info" | cut -d'|' -f2-)
                         [[ -z "$res_header_name" ]] && continue
                         if [[ "$res_header_value" == *'${'* ]] || [[ "$res_header_raw" == *'`'* ]]; then
                             test_res_headers_template "$pattern" "$res_header_info"
@@ -3888,16 +4049,27 @@ run_tests() {
                 ;;
             reqCookies)
                 local req_cookie_raw=$(extract_value "$protocols" "reqCookies")
+                local req_cookie_source="$req_cookie_raw"
                 req_cookie_raw=$(resolve_code_block_var "$req_cookie_raw" "$RULE_FILE")
-                local cookie_name=$(echo "$req_cookie_raw" | cut -d'=' -f1)
-                local cookie_value=$(echo "$req_cookie_raw" | cut -d'=' -f2-)
-                test_req_cookies "$pattern" "$cookie_name" "$cookie_value"
+                local req_cookie_pairs
+                req_cookie_pairs=$(extract_key_values_from_value "$req_cookie_raw" "$req_cookie_source")
+                while IFS= read -r cookie_pair || [[ -n "$cookie_pair" ]]; do
+                    local cookie_name="${cookie_pair%%|*}"
+                    local cookie_value="${cookie_pair#*|}"
+                    test_req_cookies "$pattern" "$cookie_name" "$cookie_value"
+                done <<< "$req_cookie_pairs"
                 ;;
             resCookies)
                 local res_cookie_raw=$(extract_value "$protocols" "resCookies")
+                local res_cookie_source="$res_cookie_raw"
                 res_cookie_raw=$(resolve_code_block_var "$res_cookie_raw" "$RULE_FILE")
-                local cookie_name=$(echo "$res_cookie_raw" | cut -d'=' -f1)
-                test_res_cookies "$pattern" "$cookie_name"
+                local res_cookie_pairs
+                res_cookie_pairs=$(extract_key_values_from_value "$res_cookie_raw" "$res_cookie_source")
+                while IFS= read -r cookie_pair || [[ -n "$cookie_pair" ]]; do
+                    local cookie_name="${cookie_pair%%|*}"
+                    local cookie_value="${cookie_pair#*|}"
+                    test_res_cookies "$pattern" "$cookie_name" "$cookie_value"
+                done <<< "$res_cookie_pairs"
                 ;;
             websocket|websocket_secure)
                 test_websocket_forward "$pattern" "$target"
@@ -4036,7 +4208,15 @@ run_tests() {
                 ;;
             trailers)
                 local trailers_value=$(extract_value "$protocols" "trailers")
-                local trailer_header=$(echo "$trailers_value" | cut -d':' -f1)
+                local trailers_source="$trailers_value"
+                trailers_value=$(resolve_code_block_var "$trailers_value" "$RULE_FILE")
+                local trailer_pairs
+                trailer_pairs=$(extract_key_values_from_value "$trailers_value" "$trailers_source")
+                local trailer_header=""
+                while IFS= read -r trailer_pair || [[ -n "$trailer_pair" ]]; do
+                    local trailer_name="${trailer_pair%%|*}"
+                    trailer_header="${trailer_header:+${trailer_header}, }${trailer_name}"
+                done <<< "$trailer_pairs"
                 test_trailers_rule "$pattern" "$trailer_header"
                 ;;
             pac|proxy)
@@ -4181,4 +4361,6 @@ main() {
     exit $?
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

@@ -132,12 +132,12 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
             Protocol::ReqHeaders => {
                 applied
                     .req_headers
-                    .extend(parse_header_values(&rule.resolved_value));
+                    .extend(rule.header_pairs().unwrap_or_default().iter().cloned());
             }
             Protocol::ReqCookies => {
                 applied
                     .req_cookies
-                    .extend(parse_header_values(&rule.resolved_value));
+                    .extend(rule.key_value_pairs().unwrap_or_default().iter().cloned());
             }
             Protocol::Delete => {
                 let parsed = parse_delete_value(&rule.resolved_value);
@@ -766,6 +766,7 @@ fn apply_body_rules(
     }
 }
 
+#[cfg(test)]
 fn parse_header_values(value: &str) -> Vec<(String, String)> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -791,6 +792,7 @@ fn parse_header_values(value: &str) -> Vec<(String, String)> {
         .collect::<Vec<_>>()
 }
 
+#[cfg(test)]
 fn parse_header_value(value: &str) -> Option<(String, String)> {
     let trimmed = value.trim();
 
@@ -813,6 +815,7 @@ fn parse_header_value(value: &str) -> Option<(String, String)> {
     None
 }
 
+#[cfg(test)]
 fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
     let content = content.trim();
     if !looks_like_json_header_object(content) {
@@ -833,6 +836,7 @@ fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
     )
 }
 
+#[cfg(test)]
 fn looks_like_json_header_object(content: &str) -> bool {
     let content = content.trim();
     if !(content.starts_with('{') && content.ends_with('}')) {
@@ -842,6 +846,7 @@ fn looks_like_json_header_object(content: &str) -> bool {
     inner.is_empty() || inner.starts_with('"') || inner.contains(':')
 }
 
+#[cfg(test)]
 fn json_scalar_to_header_value(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
@@ -1584,6 +1589,25 @@ qianchuan.jinritemai.com https://10.37.102.138:8080
         assert_eq!(value["a"], 1);
         assert_eq!(value["b"], 2);
         assert_eq!(value["c"], 3);
+    }
+
+    #[test]
+    fn replay_request_rules_split_ampersand_cookies() {
+        let rules =
+            parse_rules("https://example.test/api reqCookies://(sessionid=xxx&a=c&b=two=parts)")
+                .unwrap();
+        let resolver = RulesResolver::new(rules);
+        let ctx = RequestContext::from_url("https://example.test/api").with_method("GET");
+        let applied_rules = build_applied_rules(&resolver.resolve(&ctx));
+
+        assert_eq!(
+            applied_rules.req_cookies,
+            vec![
+                ("sessionid".to_string(), "xxx".to_string()),
+                ("a".to_string(), "c".to_string()),
+                ("b".to_string(), "two=parts".to_string()),
+            ]
+        );
     }
 
     #[test]

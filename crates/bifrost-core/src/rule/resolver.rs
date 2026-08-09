@@ -7,6 +7,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use super::context::RequestContext;
+use super::header_value::{
+    is_json_object_syntax, parse_rule_key_value_entries, ParsedKeyValuePair,
+};
 use super::template::TemplateEngine;
 use super::types::Rule;
 use super::{MemoryValueStore, ValueSource, ValueStore};
@@ -18,6 +21,7 @@ pub struct ResolvedRule {
     pub rule: Rule,
     pub captures: Option<Vec<String>>,
     pub resolved_value: String,
+    resolved_key_value_pairs: Option<Vec<(String, String)>>,
 }
 
 impl ResolvedRule {
@@ -27,6 +31,14 @@ impl ResolvedRule {
         ctx: &RequestContext,
         values: &HashMap<String, String>,
     ) -> Self {
+        let is_key_value_protocol = matches!(
+            rule.protocol,
+            crate::protocol::Protocol::ReqHeaders
+                | crate::protocol::Protocol::ResHeaders
+                | crate::protocol::Protocol::ReqCookies
+                | crate::protocol::Protocol::ResCookies
+                | crate::protocol::Protocol::Trailers
+        );
         let base_value = if matches!(rule.protocol, crate::protocol::Protocol::Bp) {
             match &rule.value_source {
                 ValueSource::ValueRef(var_name) => values
@@ -51,18 +63,109 @@ impl ResolvedRule {
                 | crate::protocol::Protocol::Tpl
         ) {
             rule.value.clone()
+        } else if is_key_value_protocol && matches!(rule.value_source, ValueSource::InlineParams(_))
+        {
+            // InlineParams normalizes query-like values into `name=value`.
+            // Header/cookie/trailer maps allow each authored entry to choose
+            // either `:` or `=`, so parse the original text before that
+            // normalization can change a colon entry into `name:value=`.
+            rule.value.clone()
         } else {
             let store = MemoryValueStore::from_hashmap(values.clone());
             rule.value_source.resolve_with_fallback(&store)
         };
-        let resolved_value =
-            TemplateEngine::expand_with_context(&base_value, ctx, captures.as_deref(), values);
+
+        // JSON needs scalar templates expanded before it can be parsed (for
+        // example `{"X-Now":${now}}`). JSON already provides field boundaries,
+        // so expanding it first cannot reinterpret a template-produced `&` as
+        // separator syntax.
+        let (resolved_value, resolved_key_value_pairs) = if is_key_value_protocol
+            && is_json_object_syntax(&base_value)
+        {
+            let safely_expanded =
+                expand_json_templates_safely(&base_value, ctx, captures.as_deref(), values);
+            let resolved_value = safely_expanded.clone().unwrap_or_else(|| {
+                TemplateEngine::expand_with_context(&base_value, ctx, captures.as_deref(), values)
+            });
+            let pairs = if safely_expanded.is_none()
+                || (rule.protocol == crate::protocol::Protocol::ResCookies
+                    && response_cookie_json_has_attributes(&resolved_value))
+            {
+                None
+            } else {
+                parse_rule_key_value_entries(&resolved_value, &rule.value_source)
+                    .map(entries_to_pairs)
+            };
+            (resolved_value, pairs)
+        } else if is_key_value_protocol {
+            // For delimiter syntax, parse authored boundaries first and expand
+            // every field exactly once. The rendered diagnostic value is then
+            // derived from those same expanded fields, so nondeterministic
+            // templates match the value actually applied to the request.
+            if let Some(entries) = parse_rule_key_value_entries(&base_value, &rule.value_source) {
+                let expanded_entries = entries
+                    .into_iter()
+                    .map(|entry| ParsedKeyValuePair {
+                        name: TemplateEngine::expand_with_context(
+                            &entry.name,
+                            ctx,
+                            captures.as_deref(),
+                            values,
+                        ),
+                        value: TemplateEngine::expand_with_context(
+                            &entry.value,
+                            ctx,
+                            captures.as_deref(),
+                            values,
+                        ),
+                        separator: entry.separator,
+                    })
+                    .collect::<Vec<_>>();
+                let resolved_value =
+                    render_key_value_entries(&base_value, &rule.value_source, &expanded_entries);
+                (resolved_value, Some(entries_to_pairs(expanded_entries)))
+            } else {
+                (
+                    TemplateEngine::expand_with_context(
+                        &base_value,
+                        ctx,
+                        captures.as_deref(),
+                        values,
+                    ),
+                    None,
+                )
+            }
+        } else {
+            (
+                TemplateEngine::expand_with_context(&base_value, ctx, captures.as_deref(), values),
+                None,
+            )
+        };
 
         Self {
             rule,
             captures,
             resolved_value,
+            resolved_key_value_pairs,
         }
+    }
+
+    /// Return request/response headers parsed before template expansion.
+    ///
+    /// Expanding each parsed name/value independently ensures an `&` produced by
+    /// `${url}` or `${reqHeaders.*}` remains data and cannot become a separator.
+    pub fn header_pairs(&self) -> Option<&[(String, String)]> {
+        matches!(
+            self.rule.protocol,
+            crate::protocol::Protocol::ReqHeaders | crate::protocol::Protocol::ResHeaders
+        )
+        .then_some(self.resolved_key_value_pairs.as_deref())
+        .flatten()
+    }
+
+    /// Return source-aware pairs for headers, cookies and trailers.
+    pub fn key_value_pairs(&self) -> Option<&[(String, String)]> {
+        self.resolved_key_value_pairs.as_deref()
     }
 
     pub fn new_simple(
@@ -73,6 +176,150 @@ impl ResolvedRule {
         let ctx = RequestContext::new();
         Self::new(rule, captures, &ctx, values)
     }
+}
+
+fn entries_to_pairs(entries: Vec<ParsedKeyValuePair>) -> Vec<(String, String)> {
+    entries
+        .into_iter()
+        .map(|entry| (entry.name, entry.value))
+        .collect()
+}
+
+fn render_key_value_entries(
+    authored_value: &str,
+    value_source: &ValueSource,
+    entries: &[ParsedKeyValuePair],
+) -> String {
+    let delimiter = if authored_value.contains('\n') {
+        "\n"
+    } else if matches!(
+        value_source,
+        ValueSource::Inline(_) | ValueSource::InlineParams(_) | ValueSource::ParenContent(_)
+    ) && authored_value.contains('&')
+    {
+        "&"
+    } else {
+        ","
+    };
+    entries
+        .iter()
+        .map(|entry| format!("{}{}{}", entry.name, entry.separator, entry.value))
+        .collect::<Vec<_>>()
+        .join(delimiter)
+}
+
+fn expand_json_templates_safely(
+    authored_value: &str,
+    ctx: &RequestContext,
+    captures: Option<&[String]>,
+    values: &HashMap<String, String>,
+) -> Option<String> {
+    if !authored_value.contains("${") {
+        serde_json::from_str::<serde_json::Value>(authored_value).ok()?;
+        return Some(authored_value.to_string());
+    }
+
+    let mut output = String::with_capacity(authored_value.len());
+    let bytes = authored_value.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let character = authored_value[index..]
+            .chars()
+            .next()
+            .expect("valid UTF-8 boundary");
+        let character_len = character.len_utf8();
+
+        if character == '"' {
+            let end = find_json_string_end(authored_value, index)?;
+            let raw_string = &authored_value[index..end];
+            if raw_string.contains("${") {
+                let decoded = serde_json::from_str::<String>(raw_string).ok()?;
+                let expanded = TemplateEngine::expand_with_context(&decoded, ctx, captures, values);
+                output.push_str(&serde_json::to_string(&expanded).ok()?);
+            } else {
+                output.push_str(raw_string);
+            }
+            index = end;
+            continue;
+        }
+
+        if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'{') {
+            let end = find_template_end(authored_value, index)?;
+            let expanded = TemplateEngine::expand_with_context(
+                &authored_value[index..end],
+                ctx,
+                captures,
+                values,
+            );
+            let scalar = serde_json::from_str::<serde_json::Value>(&expanded)
+                .ok()
+                .filter(|value| !value.is_array() && !value.is_object())
+                .unwrap_or(serde_json::Value::String(expanded));
+            output.push_str(&serde_json::to_string(&scalar).ok()?);
+            index = end;
+            continue;
+        }
+
+        output.push(character);
+        index += character_len;
+    }
+
+    serde_json::from_str::<serde_json::Value>(&output).ok()?;
+    Some(output)
+}
+
+fn find_json_string_end(value: &str, start: usize) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let mut index = start + 1;
+    let mut escaped = false;
+    while index < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[index] == b'\\' {
+            escaped = true;
+        } else if bytes[index] == b'"' {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_template_end(value: &str, start: usize) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let mut index = start + 1;
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn response_cookie_json_has_attributes(value: &str) -> bool {
+    let trimmed = value.trim();
+    let content = if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .as_object()
+                .is_some_and(|object| object.values().any(serde_json::Value::is_object))
+        })
 }
 
 #[derive(Debug, Clone, Default)]

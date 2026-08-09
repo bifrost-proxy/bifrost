@@ -28,6 +28,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_res_headers_multiple,
         ),
         TestCase::standalone(
+            "res_headers_ampersand_separated",
+            "ResHeaders protocol: ampersand-separated inline header map",
+            "response_modification",
+            test_res_headers_ampersand_separated,
+        ),
+        TestCase::standalone(
             "res_headers_override",
             "ResHeaders protocol: later rule overrides earlier",
             "response_modification",
@@ -38,6 +44,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "ResCookies protocol: set response cookies",
             "response_modification",
             test_res_cookies_set,
+        ),
+        TestCase::standalone(
+            "res_cookies_ampersand_separated",
+            "ResCookies protocol: ampersand-separated inline cookie map",
+            "response_modification",
+            test_res_cookies_ampersand_separated,
         ),
         TestCase::standalone(
             "res_cookies_with_attrs",
@@ -98,6 +110,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "Cache protocol: set cache-control",
             "response_modification",
             test_res_cache_control,
+        ),
+        TestCase::standalone(
+            "trailers_ampersand_separated",
+            "Trailers protocol: ampersand-separated response trailer map",
+            "response_modification",
+            test_trailers_ampersand_separated,
         ),
         TestCase::standalone(
             "res_disable_cache",
@@ -192,6 +210,32 @@ async fn test_res_headers_multiple() -> Result<(), String> {
     Ok(())
 }
 
+async fn test_res_headers_ampersand_separated() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "ok");
+
+    let (port, _proxy) = start_proxy_with_rules!(
+        &format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local resHeaders://(X-Header-A=value-a&X-Header-B=value-b)",
+    )?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    result.assert_header("x-header-a", "value-a")?;
+    result.assert_header("x-header-b", "value-b")?;
+
+    Ok(())
+}
+
 async fn test_res_headers_override() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "ok");
@@ -240,6 +284,63 @@ async fn test_res_cookies_set() -> Result<(), String> {
     result.assert_success()?;
     result.assert_header_contains("set-cookie", "session_id")?;
 
+    Ok(())
+}
+
+async fn test_res_cookies_ampersand_separated() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "ok");
+    let (port, _proxy) = start_proxy_with_rules!(
+        &format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local resCookies://(sid=xxx&theme=dark)",
+    )?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {e}"))?;
+
+    result.assert_success()?;
+    if !result
+        .stdout
+        .to_ascii_lowercase()
+        .contains("set-cookie: sid=xxx")
+        || !result
+            .stdout
+            .to_ascii_lowercase()
+            .contains("set-cookie: theme=dark")
+    {
+        return Err(format!(
+            "expected both Set-Cookie fields in curl output: {}",
+            result.stdout
+        ));
+    }
+    Ok(())
+}
+
+async fn test_trailers_ampersand_separated() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "ok");
+    let (port, _proxy) = start_proxy_with_rules!(
+        &format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local trailers://(X-Trace=abc&X-Checksum=xyz)",
+    )?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {e}"))?;
+
+    result.assert_success()?;
+    result.assert_header("trailer", "X-Trace, X-Checksum")?;
     Ok(())
 }
 
@@ -613,6 +714,12 @@ mod tests {
     #[tokio::test]
     async fn test_headers_override() {
         let result = test_res_headers_override().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_ampersand_separated() {
+        let result = test_res_headers_ampersand_separated().await;
         assert!(result.is_ok(), "Test failed: {:?}", result.err());
     }
 

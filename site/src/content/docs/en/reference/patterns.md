@@ -42,6 +42,10 @@ A wildcard host may be followed by a normal path fragment. When the path itself 
 
 A single `*` in the host does not span `.`, while `**` does. Path wildcards such as `example.com/api/*` retain their existing behavior; use the leading `^` form for strict path-segment wildcard semantics.
 
+Captured values may be used in multiple headers with an ampersand-separated
+inline map: `reqHeaders://(X-Version=$1&X-ID=$2)`. Use JSON or a multi-line Value
+when the resulting header value itself must contain a literal `&`.
+
 > ⚠️ **Negated (`!`) patterns do not work at runtime (verified, 0.0.96).** A `!X` pattern parses, but `matches_host()` always returns `false`, so a standalone `!`-prefixed pattern matches nothing — neither `X` nor non-`X` (verified: `!keep.test statusCode://249` returns no `249` for either `keep.test` or `other.test`, while the non-negated `pos.test statusCode://248` works). Don't use `!` as a router. To exclude a subset, use `excludeFilter://` instead (request-phase method/path/standard-header excludes work).
 
 ## Caveat: do not prefix wildcard patterns with a scheme

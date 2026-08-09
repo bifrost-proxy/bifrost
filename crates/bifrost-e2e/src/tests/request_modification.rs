@@ -26,6 +26,24 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_req_headers_json_object,
         ),
         TestCase::standalone(
+            "req_headers_json_scalar_template",
+            "ReqHeaders protocol: expand an unquoted scalar template before JSON parsing",
+            "request_modification",
+            test_req_headers_json_scalar_template,
+        ),
+        TestCase::standalone(
+            "req_headers_ampersand_separated",
+            "ReqHeaders protocol: ampersand-separated inline header map",
+            "request_modification",
+            test_req_headers_ampersand_separated,
+        ),
+        TestCase::standalone(
+            "req_headers_referer_equals_url",
+            "ReqHeaders protocol: equals delimiter before a URL colon",
+            "request_modification",
+            test_req_headers_referer_equals_url,
+        ),
+        TestCase::standalone(
             "req_headers_override",
             "ReqHeaders protocol: later rule overrides earlier",
             "request_modification",
@@ -38,6 +56,18 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_req_headers_value_ref,
         ),
         TestCase::standalone(
+            "req_headers_value_ref_literal_ampersand",
+            "ReqHeaders protocol: preserve literal ampersand in a referenced one-line value",
+            "request_modification",
+            test_req_headers_value_ref_literal_ampersand,
+        ),
+        TestCase::standalone(
+            "req_headers_template_literal_ampersand",
+            "ReqHeaders protocol: template-produced ampersand remains inside one header",
+            "request_modification",
+            test_req_headers_template_literal_ampersand,
+        ),
+        TestCase::standalone(
             "req_headers_inline_markdown",
             "ReqHeaders protocol: inline markdown code block values",
             "request_modification",
@@ -48,6 +78,24 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "ReqCookies protocol: add request cookies",
             "request_modification",
             test_req_cookies_add,
+        ),
+        TestCase::standalone(
+            "req_cookies_ampersand_separated",
+            "ReqCookies protocol: ampersand-separated inline cookie map",
+            "request_modification",
+            test_req_cookies_ampersand_separated,
+        ),
+        TestCase::standalone(
+            "req_cookies_value_ref_literal_ampersand",
+            "ReqCookies protocol: referenced ampersand remains cookie value data",
+            "request_modification",
+            test_req_cookies_value_ref_literal_ampersand,
+        ),
+        TestCase::standalone(
+            "req_cookies_template_literal_ampersand",
+            "ReqCookies protocol: template-produced ampersand remains cookie data",
+            "request_modification",
+            test_req_cookies_template_literal_ampersand,
         ),
         TestCase::standalone(
             "req_cookies_merge",
@@ -239,6 +287,86 @@ async fn test_req_headers_json_object() -> Result<(), String> {
     Ok(())
 }
 
+async fn test_req_headers_json_scalar_template() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        r#"test.local reqHeaders://({"x-now":${reqHeaders.x-number}})"#.to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .header("X-Number", "42")
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("x-now", "42")?;
+
+    Ok(())
+}
+
+async fn test_req_headers_ampersand_separated() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local reqHeaders://(x-tt-env:ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1&x-template-comma=${hostname.replace(test,example)}&x-template-amp=${hostname.replace(no&match,replaced)})".to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("x-tt-env", "ppe_doubao_connect_lark")?;
+    mock.assert_header_received("x-flow-env", "ppe_doubao_connect_lark")?;
+    mock.assert_header_received("x-use-ppe", "1")?;
+    mock.assert_header_received("x-template-comma", "example.local")?;
+    mock.assert_header_received("x-template-amp", "test.local")?;
+
+    Ok(())
+}
+
+async fn test_req_headers_referer_equals_url() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local reqHeaders://Referer=https://example.test/".to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("referer", "https://example.test/")?;
+
+    Ok(())
+}
+
 async fn test_req_headers_override() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
 
@@ -295,6 +423,69 @@ async fn test_req_headers_value_ref() -> Result<(), String> {
 
     result.assert_success()?;
     mock.assert_header_received("x-custom-token", "secret-12345")?;
+
+    Ok(())
+}
+
+async fn test_req_headers_value_ref_literal_ampersand() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let mut values = HashMap::new();
+    values.insert("queryHeader".to_string(), "X-Query: a=1&b=2".to_string());
+
+    let (port, _proxy) = start_proxy_with_values(
+        vec![
+            format!("test.local host://127.0.0.1:{}", mock.port),
+            "test.local reqHeaders://{queryHeader}".to_string(),
+        ],
+        values,
+    )
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("x-query", "a=1&b=2")?;
+
+    Ok(())
+}
+
+async fn test_req_headers_template_literal_ampersand() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local reqHeaders://X-Full-Url=${url}".to_string(),
+        "test.local reqHeaders://X-Copied=${reqHeaders.x-source}".to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api?a=1&b=2",
+    )
+    .header("X-Source", "safe&X-Injected=yes")
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("x-full-url", "http://test.local/api?a=1&b=2")?;
+    mock.assert_header_received("x-copied", "safe&X-Injected=yes")?;
+    let request = mock.last_request().ok_or("No request received")?;
+    if request.headers.keys().any(|name| name == "x-injected") {
+        return Err("template output injected an unintended X-Injected header".to_string());
+    }
 
     Ok(())
 }
@@ -356,6 +547,83 @@ async fn test_req_cookies_add() -> Result<(), String> {
     result.assert_success()?;
     mock.assert_header_contains("cookie", "session")?;
 
+    Ok(())
+}
+
+async fn test_req_cookies_ampersand_separated() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local reqCookies://(sessionid=xxx&a=c&b=two=parts)".to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {e}"))?
+    .assert_success()?;
+
+    mock.assert_header_contains("cookie", "sessionid=xxx")?;
+    mock.assert_header_contains("cookie", "a=c")?;
+    mock.assert_header_contains("cookie", "b=two=parts")?;
+    Ok(())
+}
+
+async fn test_req_cookies_value_ref_literal_ampersand() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    let mut values = HashMap::new();
+    values.insert(
+        "cookieValue".to_string(),
+        "session=safe&injected=yes".to_string(),
+    );
+    let (port, _proxy) = start_proxy_with_values(
+        vec![
+            format!("test.local host://127.0.0.1:{}", mock.port),
+            "test.local reqCookies://{cookieValue}".to_string(),
+        ],
+        values,
+    )
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {e}"))?
+    .assert_success()?;
+
+    mock.assert_header_contains("cookie", "session=safe&injected=yes")?;
+    Ok(())
+}
+
+async fn test_req_cookies_template_literal_ampersand() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        "test.local reqCookies://session=${reqHeaders.x-source}".to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .header("X-Source", "safe&injected=yes")
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {e}"))?
+    .assert_success()?;
+
+    mock.assert_header_contains("cookie", "session=safe&injected=yes")?;
     Ok(())
 }
 
@@ -652,8 +920,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_headers_ampersand_separated() {
+        let result = test_req_headers_ampersand_separated().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_json_scalar_template() {
+        let result = test_req_headers_json_scalar_template().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_referer_equals_url() {
+        let result = test_req_headers_referer_equals_url().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
     async fn test_headers_value_ref() {
         let result = test_req_headers_value_ref().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_value_ref_literal_ampersand() {
+        let result = test_req_headers_value_ref_literal_ampersand().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_headers_template_literal_ampersand() {
+        let result = test_req_headers_template_literal_ampersand().await;
         assert!(result.is_ok(), "Test failed: {:?}", result.err());
     }
 

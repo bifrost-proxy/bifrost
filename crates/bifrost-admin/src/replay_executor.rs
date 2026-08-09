@@ -396,9 +396,7 @@ impl ReplayExecutor {
                     body = Some(content);
                 }
                 Protocol::ResHeaders => {
-                    if let Some(parsed) = parse_headers(&rule.resolved_value) {
-                        headers.extend(parsed);
-                    }
+                    headers.extend(rule.header_pairs().unwrap_or_default().iter().cloned());
                 }
                 Protocol::Host | Protocol::XHost => {}
                 _ => {}
@@ -1281,43 +1279,6 @@ fn extract_inline_content(value: &str) -> String {
     }
 }
 
-fn parse_headers(value: &str) -> Option<Vec<(String, String)>> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let (content, use_colon) = if trimmed.starts_with('(') && trimmed.ends_with(')') {
-        (&trimmed[1..trimmed.len() - 1], true)
-    } else {
-        (trimmed, trimmed.contains('\n') || trimmed.contains(':'))
-    };
-
-    let mut headers = Vec::new();
-
-    let delimiter = if content.contains('\n') { '\n' } else { ',' };
-    for part in content.split(delimiter) {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let separator = if use_colon { ':' } else { '=' };
-        if let Some(pos) = part.find(separator) {
-            let key = part[..pos].trim().to_string();
-            let val = part[pos + 1..].trim().to_string();
-            if !key.is_empty() {
-                headers.push((key, val));
-            }
-        }
-    }
-
-    if headers.is_empty() {
-        None
-    } else {
-        Some(headers)
-    }
-}
-
 fn get_tls_client_config(unsafe_ssl: bool) -> rustls::ClientConfig {
     use rustls::{ClientConfig, RootCertStore};
 
@@ -1390,7 +1351,10 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bifrost_core::{matcher::WildcardMatcher, Protocol, ResolvedRule, ResolvedRules, Rule};
+    use bifrost_core::{
+        matcher::WildcardMatcher, parse_rule_header_pairs, rule::ValueSource, Protocol,
+        ResolvedRule, ResolvedRules, Rule,
+    };
     use serde_json::json;
     use std::sync::Arc;
 
@@ -1404,11 +1368,7 @@ mod tests {
             resolved_value.to_string(),
             format!("* {}://{}", protocol.to_str(), resolved_value),
         );
-        ResolvedRule {
-            rule,
-            captures: None,
-            resolved_value: resolved_value.to_string(),
-        }
+        ResolvedRule::new_simple(rule, None, &HashMap::new())
     }
 
     fn build_resolved_rules(rules: &[(Protocol, &str)]) -> ResolvedRules {
@@ -1429,7 +1389,7 @@ mod tests {
     #[test]
     fn parse_headers_supports_parens_and_colon_and_equals() {
         let value = "(X-One: a, X-Two: b)";
-        let headers = parse_headers(value).unwrap();
+        let headers = parse_rule_header_pairs(value, &ValueSource::parse(value)).unwrap();
         assert_eq!(
             headers,
             vec![
@@ -1439,16 +1399,30 @@ mod tests {
         );
 
         let value2 = "X-One=a,X-Two=b";
-        let headers2 = parse_headers(value2).unwrap();
+        let headers2 = parse_rule_header_pairs(value2, &ValueSource::parse(value2)).unwrap();
         assert_eq!(headers2, headers);
     }
 
     #[test]
-    fn parse_headers_ignores_empty_and_invalid_parts() {
-        assert!(parse_headers("   ").is_none());
-        assert!(parse_headers(", , ").is_none());
+    fn parse_headers_supports_ampersand_separated_values() {
+        let value = "(X-One=a&X-Two=b)";
+        let headers = parse_rule_header_pairs(value, &ValueSource::parse(value)).expect("headers");
+        assert_eq!(
+            headers,
+            vec![
+                ("X-One".to_string(), "a".to_string()),
+                ("X-Two".to_string(), "b".to_string()),
+            ]
+        );
+    }
 
-        let headers = parse_headers("X-Ok=1,missing,Y-Ok=2").unwrap();
+    #[test]
+    fn parse_headers_ignores_empty_and_invalid_parts() {
+        assert!(parse_rule_header_pairs("   ", &ValueSource::parse("   ")).is_none());
+        assert!(parse_rule_header_pairs(", , ", &ValueSource::parse(", , ")).is_none());
+
+        let value = "X-Ok=1,missing,Y-Ok=2";
+        let headers = parse_rule_header_pairs(value, &ValueSource::parse(value)).unwrap();
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0], ("X-Ok".to_string(), "1".to_string()));
         assert_eq!(headers[1], ("Y-Ok".to_string(), "2".to_string()));
@@ -1618,11 +1592,13 @@ mod tests {
 #[cfg(test)]
 mod replay_executor_helper_tests {
     use super::*;
+    use bifrost_core::{parse_rule_header_pairs, rule::ValueSource};
     use rustls::client::danger::ServerCertVerifier;
 
     #[test]
     fn parse_headers_supports_newline_delimited_format() {
-        let headers = parse_headers("X-One: a\nX-Two: b").expect("headers");
+        let value = "X-One: a\nX-Two: b";
+        let headers = parse_rule_header_pairs(value, &ValueSource::parse(value)).expect("headers");
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0], ("X-One".to_string(), "a".to_string()));
         assert_eq!(headers[1], ("X-Two".to_string(), "b".to_string()));

@@ -19,6 +19,7 @@ editLink: false
 
 ```
 pattern reqHeaders://key=value                    # 内联格式（单个头）
+pattern reqHeaders://(key1=value1&key2=value2)    # & 分隔格式（多个头）
 pattern reqHeaders://(key1: value1)               # 小括号格式（可包含空格）
 pattern reqHeaders://{"key1":"value1","key2":"value2"} # JSON 对象格式（多个头，不能包含未包裹空格）
 pattern reqHeaders://({"key1":"value with space"}) # 小括号 JSON 格式（可包含空格）
@@ -149,13 +150,16 @@ pattern referer://referer_url
 
 > ⚠️ **重要**：以 `http://` / `https://` 开头的值会被当作远程抓取来源（RemoteUrl），而不是字面字符串，此时 Referer 头部根本不会被设置。把完整 URL 放进块变量再用 `referer://{ref-url}` 引用**同样无效**——块变量并不会绕过 RemoteUrl 判定，Referer 依旧不会被设置。`referer://` 只能设置**不以 `http://` / `https://` 开头**的值（例如 `referer://example.org/page`）。
 >
-> 要把 Referer 设为某个 URL，不要用 `referer://`，也不要用内联的 `reqHeaders://Referer=<url>`（`=` 形式中以 `http://` / `https://` 开头的值会被丢弃，头部不会被设置）。请改用下面两种已验证可行的写法之一：小括号格式 `reqHeaders://(Referer: <url>)`，或把 `Referer: <url>` 写进块变量再用 `reqHeaders://{ref-hdr}` 引用。
+> 要把 Referer 设为某个 URL，不要用 `referer://`。可直接使用 `reqHeaders://Referer=<url>`；解析器会选择最先出现的 `=` 作为 Header 名值分隔符，因此 URL 中的 `:` 会保留在 Header 值里。小括号格式 `reqHeaders://(Referer: <url>)`，或把 `Referer: <url>` 写进块变量再用 `reqHeaders://{ref-hdr}` 引用也同样可用。
 >
 > `referer://`（空值）不会删除 Referer 头部，而是把它置为空字符串。要真正删除头部，请使用删除头部的规则。
 
 ```bash
 # 设置 URL 形式的 Referer（小括号格式，已验证可行）
 www.example.com reqHeaders://(Referer: https://www.google.com/)
+
+# 或使用等号内联格式（已验证可行）
+www.example.com reqHeaders://Referer=https://www.google.com/
 
 # 或把 Referer 行写进块变量再引用（已验证可行）
 www.example.com reqHeaders://{ref-hdr}
@@ -283,11 +287,12 @@ www.example.com/api/resource method://DELETE
 
 ```
 pattern reqCookies://name=value              # 内联格式（单个）
+pattern reqCookies://(a=1&b=2)              # `&` 分隔多个 Cookie
 pattern reqCookies://(name: value)           # 小括号格式（可包含空格）
 pattern reqCookies://{varName}               # 引用内嵌值（推荐）
 ```
 
-> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多个 Cookie 或带属性的复杂值建议使用块变量
+> 单行内联或小括号值可用 `&` 分隔多个 Cookie。Values 引用、多行内容、文件、远程内容及模板展开结果中的 `&` 保持为 Cookie 值数据，不会注入新 Cookie。
 
 ### 示例
 
@@ -297,6 +302,9 @@ www.example.com reqCookies://session=abc123
 
 # 小括号格式
 www.example.com reqCookies://(token: xyz789)
+
+# 一条规则设置多个 Cookie
+www.example.com reqCookies://(session=abc123&theme=dark)
 
 # 引用内嵌值（多个 Cookie，推荐）
 www.example.com reqCookies://{my-cookies}
@@ -316,6 +324,7 @@ user_id: 12345
 |---------|------|------|
 | 内联格式 | `test.com reqCookies://session=abc` | Cookie 包含 session=abc |
 | 小括号格式 | `test.com reqCookies://(a: 1)` | Cookie 包含 a=1 |
+| 多 Cookie | `test.com reqCookies://(a=1&b=2)` | Cookie 包含 a=1 和 b=2 |
 
 ---
 

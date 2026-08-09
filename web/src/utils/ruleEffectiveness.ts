@@ -1053,9 +1053,13 @@ function parseHeaderEntries(value: string): HeaderEntry[] {
   const trimmed = value.trim();
   if (!trimmed) return [];
 
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+  const inline = trimmed.startsWith("(") && trimmed.endsWith(")")
+    ? trimmed.slice(1, -1).trim()
+    : trimmed;
+
+  if (inline.startsWith("{") && inline.endsWith("}")) {
     try {
-      const parsed = JSON.parse(trimmed) as unknown;
+      const parsed = JSON.parse(inline) as unknown;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         return Object.entries(parsed).map(([name, rawValue]) => ({
           name,
@@ -1067,12 +1071,7 @@ function parseHeaderEntries(value: string): HeaderEntry[] {
     }
   }
 
-  const inline = trimmed.startsWith("(") && trimmed.endsWith(")")
-    ? trimmed.slice(1, -1)
-    : trimmed;
-
-  return inline
-    .split(/[,\n]/)
+  return splitInlineEntries(inline)
     .map((part) => part.trim())
     .map((part) => {
       const match = part.match(/^([^:=]+)[:=](.*)$/s);
@@ -1083,6 +1082,36 @@ function parseHeaderEntries(value: string): HeaderEntry[] {
       };
     })
     .filter((entry): entry is HeaderEntry => Boolean(entry?.name));
+}
+
+function splitInlineEntries(value: string): string[] {
+  const entries: string[] = [];
+  let entryStart = 0;
+  let templateBraceDepth = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+
+    if (templateBraceDepth === 0 && character === "$" && value[index + 1] === "{") {
+      templateBraceDepth = 1;
+      index += 1;
+      continue;
+    }
+
+    if (templateBraceDepth > 0) {
+      if (character === "{") templateBraceDepth += 1;
+      if (character === "}") templateBraceDepth -= 1;
+      continue;
+    }
+
+    if (character === "," || character === "&" || character === "\n") {
+      entries.push(value.slice(entryStart, index));
+      entryStart = index + 1;
+    }
+  }
+
+  entries.push(value.slice(entryStart));
+  return entries;
 }
 
 function matcherDetail(op: ParsedOperation): string {

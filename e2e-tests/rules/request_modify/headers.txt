@@ -1,5 +1,5 @@
-# R-01 ~ R-04: 请求头修改测试
-# 需求: 代理应能添加、修改、删除请求头，并支持 JSON object 多 header 写法
+# R-01 ~ R-05: 请求头修改测试
+# 需求: 代理应能添加、修改、删除请求头，并支持 JSON object 与 & 分隔多 header 写法
 
 # R-01: 添加请求头 (使用单个代码块变量)
 req-header-add.local 127.0.0.1:3000 reqHeaders://{add_custom}
@@ -14,11 +14,15 @@ req-header-delete.local 127.0.0.1:3000 reqHeaders://{delete_encoding}
 # R-04: JSON object 写法添加多个请求头
 req-header-json.local 127.0.0.1:3000 reqHeaders://{"x-tt-env":"ppe_next_agent_new","x-use-ppe":"1","x-tt-env-fe":"dev"}
 
+# R-05: & 分隔写法添加多个请求头
+req-header-ampersand.local 127.0.0.1:3000 reqHeaders://(x-tt-env=ppe_doubao_connect_lark&x-flow-env=ppe_doubao_connect_lark&x-use-ppe=1)
+
 # 测试用例:
 # 1. [添加] 请求后端应收到 X-Custom-Header: test-value
 # 2. [修改] 请求后端应收到修改后的 User-Agent
 # 3. [删除] 请求后端不应收到 Accept-Encoding 头
 # 4. [JSON object] 请求后端应收到 x-tt-env、x-use-ppe、x-tt-env-fe 三个头
+# 5. [& 分隔] 请求后端应收到 x-tt-env、x-flow-env、x-use-ppe 三个独立头
 
 ```add_custom
 X-Custom-Header: test-value

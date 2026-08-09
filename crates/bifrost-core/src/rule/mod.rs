@@ -1,6 +1,7 @@
 mod context;
 pub mod filter;
 mod group;
+mod header_value;
 mod parser;
 mod references;
 mod replace;
@@ -14,6 +15,7 @@ mod value_store;
 pub use context::{RequestContext, RequestContextBuilder};
 pub use filter::{parse_filter, parse_line_props, Filter, LineProps};
 pub use group::{RuleGroup, RuleGroupManager};
+pub use header_value::{parse_rule_header_pairs, parse_rule_key_value_pairs};
 pub use parser::{
     extract_inline_variables, parse_line, parse_rules, parse_rules_tolerant, validate_rules,
     validate_rules_with_context, CodeFix, ParseError, ParseErrorSeverity, ParseResult, RuleParser,

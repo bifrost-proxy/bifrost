@@ -68,6 +68,19 @@ describe("analyzeRuleEffectiveness", () => {
     expect(laterHeaders).toMatchObject({ status: "active" });
   });
 
+  test("treats ampersand-separated request headers as independent override fields", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        "https://example.test/api/ reqHeaders://(x-env=one&x-stable=keep)",
+        "https://example.test/api/ reqHeaders://x-env=two",
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "partial", coveredByLine: 2 });
+    expect(effects[0].details.join("\n")).toContain("x-env");
+    expect(effects[1]).toMatchObject({ status: "active" });
+  });
+
   test("keeps different protocols on the same matcher active when they do not compete", () => {
     const effects = analyzeRuleEffectiveness(
       [
@@ -89,6 +102,31 @@ describe("analyzeRuleEffectiveness", () => {
     );
 
     expect(effects[0]).toMatchObject({ status: "partial", coveredByLine: 2 });
+    expect(effects[1]).toMatchObject({ status: "active" });
+  });
+
+  test("keeps ampersands inside parenthesized JSON header values", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        `https://example.test/api/ reqHeaders://({"x-query":"a=1&stable=yes"})`,
+        `https://example.test/api/ reqHeaders://stable=overridden`,
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "active" });
+    expect(effects[1]).toMatchObject({ status: "active" });
+  });
+
+  test("keeps delimiters inside header template expressions", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        "https://example.test/api/ reqHeaders://(x-host=${hostname.replace(no&x-fake=1,replaced)}&x-mode=active)",
+        "https://example.test/api/ reqHeaders://x-fake=overridden",
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "active" });
+    expect(effects[0].details.join("\n")).not.toContain("x-fake");
     expect(effects[1]).toMatchObject({ status: "active" });
   });
 
