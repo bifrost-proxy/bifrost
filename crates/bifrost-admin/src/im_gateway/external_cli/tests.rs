@@ -4092,6 +4092,15 @@ fn append_tail_keeps_only_the_bounded_suffix() {
 }
 
 #[test]
+fn app_server_stdout_capture_keeps_only_the_bounded_suffix() {
+    let mut bytes = Vec::new();
+    super::app_server::record_stdout_line(&mut bytes, &"x".repeat(MAX_CAPTURED_STREAM_BYTES * 2));
+
+    assert_eq!(bytes.len(), MAX_CAPTURED_STREAM_BYTES);
+    assert_eq!(bytes.last(), Some(&b'\n'));
+}
+
+#[test]
 fn directory_size_handles_missing_nested_and_regular_files() {
     let root = tempfile::tempdir().unwrap();
     let nested = root.path().join("nested");

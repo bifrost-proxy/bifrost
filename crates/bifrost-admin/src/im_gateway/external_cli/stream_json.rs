@@ -119,8 +119,8 @@ pub(super) async fn run_command(
                     terminal_status = Some(ExternalCliRunStatus::Failed);
                     break;
                 };
-                stdout_bytes.extend_from_slice(line.as_bytes());
-                stdout_bytes.push(b'\n');
+                append_tail(&mut stdout_bytes, line.as_bytes(), MAX_CAPTURED_STREAM_BYTES);
+                append_tail(&mut stdout_bytes, b"\n", MAX_CAPTURED_STREAM_BYTES);
                 let raw = serde_json::from_str::<serde_json::Value>(&line).ok();
                 if thread_id.is_none() {
                     thread_id = raw.as_ref().and_then(stream_json_session_id);

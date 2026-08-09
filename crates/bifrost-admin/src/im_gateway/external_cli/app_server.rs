@@ -991,9 +991,9 @@ async fn read_handshake_response(
     })?
 }
 
-fn record_stdout_line(bytes: &mut Vec<u8>, line: &str) {
-    bytes.extend_from_slice(line.as_bytes());
-    bytes.push(b'\n');
+pub(super) fn record_stdout_line(bytes: &mut Vec<u8>, line: &str) {
+    append_tail(bytes, line.as_bytes(), MAX_CAPTURED_STREAM_BYTES);
+    append_tail(bytes, b"\n", MAX_CAPTURED_STREAM_BYTES);
 }
 
 fn guide_result_from_response(
