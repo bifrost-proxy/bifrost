@@ -962,8 +962,37 @@ pub(super) async fn send_agent_reply_from_work_dir(
         event,
         reply_text,
         message_log_store,
-        None,
         work_dir,
+        AgentReplyCardKind::Standard { title: None },
+    )
+    .await;
+}
+
+pub(super) struct ExternalRunnerTerminalReply<'a> {
+    pub(super) text: &'a str,
+    pub(super) failed: bool,
+    pub(super) progress_message_id: Option<&'a str>,
+    pub(super) work_dir: Option<&'a Path>,
+}
+
+pub(super) async fn send_external_runner_terminal_reply_from_work_dir(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    terminal_reply: ExternalRunnerTerminalReply<'_>,
+    message_log_store: &Arc<ImMessageLogStore>,
+) {
+    send_agent_reply_with_title_and_base_dir(
+        client,
+        provider,
+        event,
+        terminal_reply.text,
+        message_log_store,
+        terminal_reply.work_dir,
+        AgentReplyCardKind::ExternalRunnerTerminal(ExternalRunnerTerminalReplyOptions {
+            failed: terminal_reply.failed,
+            progress_message_id: terminal_reply.progress_message_id,
+        }),
     )
     .await;
 }
@@ -984,8 +1013,8 @@ pub(super) async fn send_agent_reply_with_title(
         event,
         reply_text,
         message_log_store,
-        title,
         None,
+        AgentReplyCardKind::Standard { title },
     )
     .await;
 }
@@ -1005,8 +1034,8 @@ async fn send_agent_reply_with_title_and_base_dir(
     event: &ImEvent,
     reply_text: &str,
     message_log_store: &Arc<ImMessageLogStore>,
-    title: Option<&str>,
     work_dir: Option<&Path>,
+    card_kind: AgentReplyCardKind<'_>,
 ) {
     let image_base_dir = agent_reply_base_dir(provider, work_dir);
     let (reply_text_for_card, reply_images, reply_attachments) =
@@ -1037,40 +1066,82 @@ async fn send_agent_reply_with_title_and_base_dir(
     };
     let converted_text =
         crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
-    let card_title = title.unwrap_or("Bifrost AI");
-    let card = serde_json::json!({
-        "schema": "2.0",
-        "config": {
-            "width_mode": "fill",
-            "update_multi": true
-        },
-        "header": {
-            "template": "blue",
-            "title": {
-                "tag": "plain_text",
-                "content": card_title
-            }
-        },
-        "body": {
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": converted_text,
-                    "element_id": "agent_reply"
-                }
-            ]
+    let card = match card_kind {
+        AgentReplyCardKind::ExternalRunnerTerminal(options) => {
+            build_external_runner_terminal_card(&converted_text, options.failed)
         }
-    });
+        AgentReplyCardKind::Standard { title } => {
+            let card_title = title.unwrap_or("Bifrost AI");
+            serde_json::json!({
+                "schema": "2.0",
+                "config": {
+                    "width_mode": "fill",
+                    "update_multi": true
+                },
+                "header": {
+                    "template": "blue",
+                    "title": {
+                        "tag": "plain_text",
+                        "content": card_title
+                    }
+                },
+                "body": {
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": converted_text,
+                            "element_id": "agent_reply"
+                        }
+                    ]
+                }
+            })
+        }
+    };
 
-    let send_result = client
-        .send_reply_card(
-            provider,
-            &reply_target,
-            event.source.message_id.as_deref(),
-            card,
-            crate::im_gateway::types::SendOptions::default(),
-        )
-        .await;
+    let reply_to_message_id = match card_kind {
+        AgentReplyCardKind::ExternalRunnerTerminal(options) => options.progress_message_id,
+        AgentReplyCardKind::Standard { .. } => event.source.message_id.as_deref(),
+    };
+    let send_result = if matches!(card_kind, AgentReplyCardKind::ExternalRunnerTerminal(_)) {
+        match (client.feishu(), reply_to_message_id) {
+            (Some(feishu), Some(message_id)) => {
+                feishu
+                    .reply_card_preserving_header(provider, message_id, card, None)
+                    .await
+            }
+            (Some(feishu), None) => {
+                feishu
+                    .send_card_preserving_header(
+                        provider,
+                        &reply_target,
+                        card,
+                        crate::im_gateway::types::SendOptions::default(),
+                    )
+                    .await
+            }
+            _ => {
+                client
+                    .send_reply_card(
+                        provider,
+                        &reply_target,
+                        reply_to_message_id,
+                        card,
+                        crate::im_gateway::types::SendOptions::default(),
+                    )
+                    .await
+            }
+        }
+    } else {
+        client
+            .send_reply_card(
+                provider,
+                &reply_target,
+                reply_to_message_id,
+                card,
+                crate::im_gateway::types::SendOptions::default(),
+            )
+            .await
+    };
 
     let (status, message_id, error_msg) = match &send_result {
         Ok(r) => (MessageStatus::Success, r.message_id.clone(), None),
@@ -1113,6 +1184,96 @@ async fn send_agent_reply_with_title_and_base_dir(
         message_log_store,
     )
     .await;
+}
+
+#[derive(Clone, Copy)]
+enum AgentReplyCardKind<'a> {
+    Standard { title: Option<&'a str> },
+    ExternalRunnerTerminal(ExternalRunnerTerminalReplyOptions<'a>),
+}
+
+#[derive(Clone, Copy)]
+struct ExternalRunnerTerminalReplyOptions<'a> {
+    failed: bool,
+    progress_message_id: Option<&'a str>,
+}
+
+fn build_external_runner_terminal_card(converted_text: &str, failed: bool) -> serde_json::Value {
+    let (default_title, template, i18n_content) = if failed {
+        (
+            "Task failed",
+            "red",
+            serde_json::json!({
+                "zh_cn": "任务执行失败",
+                "en_us": "Task failed",
+                "ja_jp": "タスク実行失敗",
+                "zh_hk": "任務執行失敗",
+                "zh_tw": "任務執行失敗",
+                "id_id": "Tugas gagal",
+                "vi_vn": "Tác vụ thất bại",
+                "th_th": "งานล้มเหลว",
+                "pt_br": "Falha na tarefa",
+                "es_es": "Tarea fallida",
+                "ko_kr": "작업 실패",
+                "de_de": "Aufgabe fehlgeschlagen",
+                "fr_fr": "Échec de la tâche",
+                "it_it": "Attività non riuscita",
+                "ru_ru": "Ошибка выполнения задачи",
+                "ms_my": "Tugasan gagal"
+            }),
+        )
+    } else {
+        (
+            "Task completed",
+            "green",
+            serde_json::json!({
+                "zh_cn": "任务执行结束",
+                "en_us": "Task completed",
+                "ja_jp": "タスク実行完了",
+                "zh_hk": "任務執行完成",
+                "zh_tw": "任務執行完成",
+                "id_id": "Tugas selesai",
+                "vi_vn": "Tác vụ đã hoàn tất",
+                "th_th": "งานเสร็จสิ้น",
+                "pt_br": "Tarefa concluída",
+                "es_es": "Tarea completada",
+                "ko_kr": "작업 완료",
+                "de_de": "Aufgabe abgeschlossen",
+                "fr_fr": "Tâche terminée",
+                "it_it": "Attività completata",
+                "ru_ru": "Задача завершена",
+                "ms_my": "Tugasan selesai"
+            }),
+        )
+    };
+    let content = if converted_text.trim().is_empty() {
+        "—"
+    } else {
+        converted_text
+    };
+
+    serde_json::json!({
+        "schema": "2.0",
+        "config": {
+            "width_mode": "fill",
+            "update_multi": true
+        },
+        "header": {
+            "template": template,
+            "title": {
+                "tag": "plain_text",
+                "content": default_title,
+                "i18n_content": i18n_content
+            }
+        },
+        "body": {
+            "elements": [{
+                "tag": "markdown",
+                "content": content,
+                "element_id": "terminal_reply"
+            }]
+        }
+    })
 }
 
 pub(super) async fn send_agent_reply_images(

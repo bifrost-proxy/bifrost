@@ -1485,7 +1485,7 @@ pub(crate) async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressSer
     spawn_mock_feishu_progress_server_with_failures(None, Vec::new(), Vec::new(), None).await
 }
 
-async fn spawn_mock_feishu_progress_server_with_send_failure(
+pub(crate) async fn spawn_mock_feishu_progress_server_with_send_failure(
     fail_message_send_number: Option<usize>,
 ) -> MockFeishuProgressServer {
     spawn_mock_feishu_progress_server_with_failures(

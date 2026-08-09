@@ -96,6 +96,51 @@ pub(in crate::handlers::im_gateway) fn finalize_live_guide_group_turns(
     }
 }
 
+pub(super) struct ExternalRunnerProgressFinishContext<'a> {
+    pub(super) progress_registry: &'a Arc<ImAgentProgressRegistry>,
+    pub(super) client: &'a ImProviderClient,
+    pub(super) provider: &'a ImProviderConfig,
+    pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
+    pub(super) event: &'a ImEvent,
+}
+
+pub(super) struct ExternalRunnerProgressFinish<'a> {
+    pub(super) session_key: &'a str,
+    pub(super) final_text: &'a str,
+    pub(super) failed: bool,
+    pub(super) work_dir: Option<&'a std::path::Path>,
+}
+
+pub(super) async fn finish_external_runner_progress_and_notify(
+    ctx: ExternalRunnerProgressFinishContext<'_>,
+    finish: ExternalRunnerProgressFinish<'_>,
+) {
+    let progress_message = ctx
+        .progress_registry
+        .finish(
+            finish.session_key,
+            Some(finish.final_text.to_string()),
+            finish.failed,
+        )
+        .await;
+
+    send_external_runner_terminal_reply_from_work_dir(
+        ctx.client,
+        ctx.provider,
+        ctx.event,
+        ExternalRunnerTerminalReply {
+            text: finish.final_text,
+            failed: finish.failed,
+            progress_message_id: progress_message
+                .as_ref()
+                .and_then(|message| message.message_id.as_deref()),
+            work_dir: finish.work_dir,
+        },
+        ctx.message_log_store,
+    )
+    .await;
+}
+
 pub(super) async fn run_external_cli_agent_chat(
     ctx: ExternalCliChatContext<'_>,
     input: ExternalCliChatInput,
@@ -763,14 +808,22 @@ pub(super) async fn run_external_cli_agent_chat(
                     if let Some(task) = progress_task.take() {
                         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
                     }
-                    let _ = ctx
-                        .progress_registry
-                        .finish(
-                            &input.session_key,
-                            Some(result.response.clone()),
-                            !run_succeeded,
-                        )
-                        .await;
+                    finish_external_runner_progress_and_notify(
+                        ExternalRunnerProgressFinishContext {
+                            progress_registry: ctx.progress_registry,
+                            client: ctx.client,
+                            provider: ctx.provider,
+                            message_log_store: ctx.message_log_store,
+                            event: &current_event,
+                        },
+                        ExternalRunnerProgressFinish {
+                            session_key: &input.session_key,
+                            final_text: &result.response,
+                            failed: !run_succeeded,
+                            work_dir: request.work_dir.as_deref(),
+                        },
+                    )
+                    .await;
                 } else if !matches!(
                     delivery_mode,
                     crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm
@@ -853,10 +906,22 @@ pub(super) async fn run_external_cli_agent_chat(
                     if let Some(task) = progress_task.take() {
                         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
                     }
-                    let _ = ctx
-                        .progress_registry
-                        .finish(&input.session_key, Some(reply.clone()), true)
-                        .await;
+                    finish_external_runner_progress_and_notify(
+                        ExternalRunnerProgressFinishContext {
+                            progress_registry: ctx.progress_registry,
+                            client: ctx.client,
+                            provider: ctx.provider,
+                            message_log_store: ctx.message_log_store,
+                            event: &current_event,
+                        },
+                        ExternalRunnerProgressFinish {
+                            session_key: &input.session_key,
+                            final_text: &reply,
+                            failed: true,
+                            work_dir: request.work_dir.as_deref(),
+                        },
+                    )
+                    .await;
                 } else {
                     send_agent_reply(
                         ctx.client,
