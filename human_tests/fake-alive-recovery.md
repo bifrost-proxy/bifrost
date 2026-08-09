@@ -34,7 +34,7 @@ CLI 启动 Service 后由 Desktop 复用，再暂停其 API。预期 Desktop 只
 
 执行 `cargo test -p bifrost-cli --lib system_proxy_readiness -- --nocapture`，其中成功 fixture 把 `HTTP/1.1 ` 与 `200 OK` 分两次写入。预期探针继续读取到完整状态行后判定成功；空响应、503 和关闭端口仍判定失败。
 
-## 2026-08-09 执行记录
+## 2026-08-09 至 2026-08-10 执行记录
 
 | 用例 | 实际结果 | 结论 |
 | --- | --- | --- |
@@ -42,8 +42,8 @@ CLI 启动 Service 后由 Desktop 复用，再暂停其 API。预期 Desktop 只
 | TC-FA-02 | 已用外部 Service ownership 专项验证确认 Desktop 只报告外部实例不可用，不终止外部 PID。 | 通过 |
 | TC-FA-03 | Agent 持久化专项套件 47 项通过；持久化内容只含最终回复与工具名称、调用 ID、状态、耗时，不含 prompt、delta、计划、参数、命令、结果和原始事件。 | 通过 |
 | TC-FA-04 | runner 专项验证确认 stdout/stderr 尾部各不超过 4 KiB、默认 session 上限为 1 MiB，并清理超额已完成 run。 | 通过 |
-| TC-FA-05 | 安装 `f11fab19` 构建的 Desktop/CLI 后，Desktop PID `80630`、后端 PID `80796`；`bifrost status` 返回 `running=true`、`runtime_source=admin_api`。Provider、Runner config、Agent config、Agent sessions 接口均返回 HTTP 200（最慢 0.178 秒）；经 `127.0.0.1:9900` 代理访问 `http://example.com/` 返回 200；系统 HTTP/HTTPS 代理均指向当前健康的 `127.0.0.1:9900`。 | 通过 |
-| TC-FA-06 | CI 全量并发暴露单次 `read` 可能只收到 `HTTP/1.1 `；修复后 focused readiness 套件重复执行，分片 200 成功，空响应/503/关闭端口失败。 | 通过 |
+| TC-FA-05 | 最终安装 `31418e6a` 构建的 Desktop/CLI，`/Applications/Bifrost.app` 内 sidecar 与构建产物 SHA-256 一致；后端 PID `83958`，`bifrost status` 返回 `running=true`、`runtime_source=admin_api`。Admin、IM providers/config、Agent sessions 接口均返回 HTTP 200；经 `127.0.0.1:9900` 代理访问 `http://example.com/` 返回 200；两条飞书通道均为 `connected`，微信为 `connected` 且 `send_ready=true`；系统 HTTP/HTTPS 代理均指向当前健康的 `127.0.0.1:9900`。 | 通过 |
+| TC-FA-06 | CI 全量并发暴露单次 `read` 可能只收到 `HTTP/1.1 `；修复后 focused readiness 套件连续执行 10 轮，每轮 2/2 通过：分片 200 成功，空响应/503/关闭端口失败。 | 通过 |
 
 ## 清理步骤
 
