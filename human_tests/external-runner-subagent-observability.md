@@ -26,7 +26,7 @@
 
 - Codex/TraeX 的 `collabAgentToolCall`、snake_case CLI 事件与 `subAgentActivity` 均产生 `sub_agent_updated`。
 - Claude Code 的 `Task`/`Agent` tool use/result 产生相同的 provider-neutral 事件。
-- 实时事件保留 task、phase、agent id、状态、详情、开始/更新时间和终态耗时；可回放 session timeline 只保存不含 task/detail 的有界生命周期摘要。
+- 实时事件保留 task、phase、agent id、状态、详情、开始/更新时间和终态耗时；pending/running 更新不落盘，可回放 session timeline 只在终态保存一次不含 task/detail 的有界生命周期摘要。
 - 历史 JSONL 不包含子 Agent prompt、description 或进度详情原文。
 - 同一 Agent 的后续 `wait`/完成事件不会丢失首次派发的任务。
 

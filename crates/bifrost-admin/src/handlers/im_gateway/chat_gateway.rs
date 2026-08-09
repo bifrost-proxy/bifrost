@@ -2918,10 +2918,15 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
             if let Some(progress) =
                 crate::im_gateway::external_cli::external_progress_subagent(event)
             {
-                if let Err(error) = recorder.record_subagent_updated(session_key, &progress) {
-                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner subagent update");
-                } else {
-                    changed = true;
+                // Pending/running updates are live UI state and may arrive at heartbeat
+                // frequency. Persist only the terminal compact summary so canonical
+                // history does not become another rolling executor log.
+                if progress.status.is_terminal() {
+                    if let Err(error) = recorder.record_subagent_updated(session_key, &progress) {
+                        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner subagent update");
+                    } else {
+                        changed = true;
+                    }
                 }
             }
         }
@@ -4408,12 +4413,14 @@ mod tests {
 
     #[test]
     fn external_runner_subagent_progress_is_flattened_and_persisted_for_web_replay() {
-        let event = crate::im_gateway::external_cli::parse_progress_events(
-            r#"{"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"in_progress","prompt":"Review auth","receiver_thread_ids":["agent-7"],"sender_thread_id":"root","agents_states":{"agent-7":{"status":"running","message":"Inspecting guards"}}}}"#,
-        )
-        .pop()
-        .expect("subagent event");
-        let payload = external_cli_progress_event_payload(&event);
+        let mut events = crate::im_gateway::external_cli::parse_progress_events(
+            r#"{"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"in_progress","prompt":"Review auth","receiver_thread_ids":["agent-7"],"sender_thread_id":"root","agents_states":{"agent-7":{"status":"running","message":"Inspecting guards"}}}}
+{"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"completed","prompt":"Review auth","receiver_thread_ids":["agent-7"],"sender_thread_id":"root","agents_states":{"agent-7":{"status":"completed","message":"Review complete"}}}}"#,
+        );
+        assert_eq!(events.len(), 2);
+        let running = events.remove(0);
+        let terminal = events.remove(0);
+        let payload = external_cli_progress_event_payload(&running);
         assert_eq!(payload["eventType"], "sub_agent_updated");
         assert_eq!(payload["subagent"]["agentId"], "agent-7");
         assert_eq!(payload["subagent"]["task"], "Review auth");
@@ -4424,13 +4431,24 @@ mod tests {
             temp_dir.path(),
             "subagent-web-replay",
         );
+        assert_eq!(
+            record_external_cli_progress_event_to_timeline(
+                &mut recorder,
+                "subagent-web-replay",
+                "web",
+                "codex",
+                "codex",
+                &running,
+            ),
+            None
+        );
         let end_index = record_external_cli_progress_event_to_timeline(
             &mut recorder,
             "subagent-web-replay",
             "web",
             "codex",
             "codex",
-            &event,
+            &terminal,
         )
         .expect("subagent event changes timeline");
         assert_eq!(end_index, 1);
@@ -4440,10 +4458,12 @@ mod tests {
         assert_eq!(events[0].content["agentId"], "agent-7");
         assert_eq!(events[0].content["task"], "");
         assert!(events[0].content.get("detail").is_none());
+        assert_eq!(events[0].content["status"], "completed");
         assert_eq!(events[0].content["externalSummary"], true);
         let serialized = serde_json::to_string(&events).unwrap();
         assert!(!serialized.contains("Review auth"));
         assert!(!serialized.contains("Inspecting guards"));
+        assert!(!serialized.contains("Review complete"));
     }
 
     #[test]
