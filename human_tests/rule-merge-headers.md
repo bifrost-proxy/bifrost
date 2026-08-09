@@ -290,6 +290,7 @@ cargo test -p bifrost-core response_cookie_json_with_attributes_stays_structured
 cargo test -p bifrost-cli test_req_cookies_ampersand_separated
 cargo test -p bifrost-cli test_res_cookies_ampersand_and_json_attributes
 cargo test -p bifrost-cli test_trailers_ampersand_separated
+bash e2e-tests/tests/test_rule_fixture_map_extractors.sh
 ```
 2. 逐个运行真实代理 E2E：
 ```bash
@@ -344,3 +345,5 @@ cargo run -p bifrost-e2e -- --test trailers_ampersand_separated
   响应 Cookie、Trailer 三组真实 fixture 分别为 `12/12`、`31/31`、`4/4`，引用值中的
   `&` 均未生成额外字段。额外隐藏 `jq` 后，请求 Cookie fixture 明确提示 JSON 断言降级，
   但 Python 3 Cookie 值断言仍全部执行并得到 `12/12`。
+  fixture extractor 专项回归同时确认 `${...}` 内的 `&` / `,` 不被拆分、单行 Cookie
+  的逗号分隔仍生成多个字段、Value 引用与多行值中的字面 `&` 保持原值。

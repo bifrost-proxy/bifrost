@@ -2844,6 +2844,52 @@ extract_header_from_value() {
     extract_headers_from_value "$value" | head -1
 }
 
+split_inline_map_entries() {
+    local value="$1"
+    local split_ampersands="${2:-true}"
+    local split_commas="${3:-true}"
+    local current=""
+    local template_brace_depth=0
+    local index=0
+    local value_length=${#value}
+    local character=""
+    local next_character=""
+
+    while (( index < value_length )); do
+        character="${value:index:1}"
+        next_character="${value:index+1:1}"
+
+        if (( template_brace_depth == 0 )) && [[ "$character" == '$' && "$next_character" == '{' ]]; then
+            current+='$'"{"
+            template_brace_depth=1
+            index=$((index + 2))
+            continue
+        fi
+
+        if (( template_brace_depth > 0 )); then
+            current+="$character"
+            if [[ "$character" == '{' ]]; then
+                template_brace_depth=$((template_brace_depth + 1))
+            elif [[ "$character" == '}' ]]; then
+                template_brace_depth=$((template_brace_depth - 1))
+            fi
+            index=$((index + 1))
+            continue
+        fi
+
+        if { [[ "$split_ampersands" == true && "$character" == '&' ]]; } \
+            || { [[ "$split_commas" == true && "$character" == ',' ]]; }; then
+            printf '%s\n' "$current"
+            current=""
+        else
+            current+="$character"
+        fi
+        index=$((index + 1))
+    done
+
+    printf '%s\n' "$current"
+}
+
 extract_headers_from_value() {
     local value="$1"
     local value_source="${2:-$value}"
@@ -2880,10 +2926,7 @@ extract_headers_from_value() {
 
     local segments="$value"
     if [[ "$value" != *$'\n'* ]]; then
-        if [[ "$split_ampersands" == true ]]; then
-            segments="${segments//&/$'\n'}"
-        fi
-        segments="${segments//,/$'\n'}"
+        segments=$(split_inline_map_entries "$value" "$split_ampersands" true)
     fi
 
     local part
@@ -2934,8 +2977,8 @@ extract_key_values_from_value() {
     value="${value%)}"
 
     local segments="$value"
-    if [[ "$value" != *$'\n'* && "$split_ampersands" == true ]]; then
-        segments="${segments//&/$'\n'}"
+    if [[ "$value" != *$'\n'* ]]; then
+        segments=$(split_inline_map_entries "$value" "$split_ampersands" true)
     fi
 
     local part
@@ -4318,4 +4361,6 @@ main() {
     exit $?
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
