@@ -15,7 +15,11 @@ cd "$ROOT_DIR"
 
 PORT="${BIFROST_ASR_E2E_PORT:-18880}"
 API="http://127.0.0.1:${PORT}/_bifrost/api/asr"
-DEVICES="${BIFROST_ASR_E2E_DEVICES:-LEFT,RIGHT}"
+if [[ -z "${BIFROST_ASR_E2E_DEVICES:-}" ]]; then
+  echo "Skipping ASR external device E2E: set BIFROST_ASR_E2E_DEVICES to explicit isolated test volume names"
+  exit 0
+fi
+DEVICES="$BIFROST_ASR_E2E_DEVICES"
 IFS=',' read -r DEVICE_LEFT DEVICE_RIGHT <<<"$DEVICES"
 
 if [[ -z "${DEVICE_LEFT:-}" ]]; then
@@ -90,20 +94,29 @@ const fs = require("fs");
 const path = require("path");
 const [api, target, runId, deviceLeft, deviceRight, dataDir] = process.argv.slice(2);
 const must = (cond, msg) => { if (!cond) throw new Error(msg); };
+let csrfToken = null;
 const request = async (path, options = {}) => {
   const res = await fetch(api + path, {
     ...options,
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
+    headers: {
+      "content-type": "application/json",
+      ...(csrfToken ? { "x-bifrost-csrf": csrfToken } : {}),
+      ...(options.headers || {}),
+    },
   });
   const text = await res.text();
   const json = text ? JSON.parse(text) : null;
   return { res, json };
 };
 (async () => {
+  const csrfRes = await fetch(`${api.replace(/\/asr$/, "")}/security/csrf`);
+  const csrf = await csrfRes.json();
+  must(csrfRes.ok && csrf.csrf_token, "CSRF token should be available");
+  csrfToken = csrf.csrf_token;
   const volumes = (await request("/external-volumes")).json.volumes;
-  must(volumes.some((v) => v.name === deviceLeft && v.kind === "external"), `${deviceLeft} external volume not detected`);
+  must(volumes.some((v) => v.name === deviceLeft && ["external", "mounted"].includes(v.kind)), `${deviceLeft} test volume not detected`);
   if (deviceRight) {
-    must(volumes.some((v) => v.name === deviceRight && v.kind === "external"), `${deviceRight} external volume not detected`);
+    must(volumes.some((v) => v.name === deviceRight && ["external", "mounted"].includes(v.kind)), `${deviceRight} test volume not detected`);
   }
   const externalDevices = [{ name: deviceLeft, enabled: true }];
   if (deviceRight) externalDevices.push({ name: deviceRight, enabled: true });
@@ -173,7 +186,12 @@ const request = async (path, options = {}) => {
   const processedSize = fs.statSync(leftTarget).size;
   const now = Date.now();
   const fileStorePath = path.join(dataDir, "asr", "tasks", task.id, "files.json");
+  const processedText = path.join(dataDir, "asr", "processed", "processed-left-target.txt");
+  const processedMetadata = path.join(dataDir, "asr", "processed", "processed-left-target.json");
   fs.mkdirSync(path.dirname(fileStorePath), { recursive: true });
+  fs.mkdirSync(path.dirname(processedText), { recursive: true });
+  fs.writeFileSync(processedText, "processed");
+  fs.writeFileSync(processedMetadata, "{}");
   fs.writeFileSync(fileStorePath, JSON.stringify({
     version: 1,
     files: {
@@ -190,8 +208,8 @@ const request = async (path, options = {}) => {
         transcript_alias: null,
         media_duration_ms: null,
         status: "success",
-        output_text_path: path.join(dataDir, "asr", "processed", "processed-left-target.txt"),
-        output_metadata_path: path.join(dataDir, "asr", "processed", "processed-left-target.json"),
+        output_text_path: processedText,
+        output_metadata_path: processedMetadata,
         output_timeline_path: null,
         text_chars: 9,
         error: null,
@@ -214,6 +232,87 @@ const request = async (path, options = {}) => {
   must(processedSkipCompleted.imported === 0, `already processed deleted target should not be reimported, got ${processedSkipCompleted.imported}`);
   must(processedSkipCompleted.processed_record_skipped >= 1, `already processed skip count should be visible, got ${processedSkipCompleted.processed_record_skipped}`);
   must(!fs.existsSync(leftTarget), "already processed deleted target should stay absent after import");
+
+  // Regression: old compression state may leave the import manifest pointing
+  // at the removed WAV while the reusable canonical source is now a FLAC.
+  // The original WAV hash must prevent any new local copy before ASR discovery.
+  const duplicateTarget = path.join(target, deviceLeft, runId, "2026-05-21", "duplicate.wav");
+  const compressedTarget = duplicateTarget.replace(/\.wav$/, ".flac");
+  const externalStorePath = path.join(dataDir, "asr", "tasks", task.id, "external_imports.json");
+  const externalStore = JSON.parse(fs.readFileSync(externalStorePath, "utf8"));
+  const importedDuplicate = Object.values(externalStore.devices)
+    .flatMap((device) => Object.values(device.files))
+    .find((record) => record.target_path === duplicateTarget);
+  must(importedDuplicate, "duplicate import manifest record should exist");
+  const originalHash = importedDuplicate.source_hashes?.blake3;
+  must(originalHash, "duplicate import manifest should retain original BLAKE3");
+  const originalSize = fs.statSync(duplicateTarget).size;
+  fs.renameSync(duplicateTarget, compressedTarget);
+  const compressedText = path.join(dataDir, "asr", "processed", "compressed-duplicate.txt");
+  const compressedMetadata = path.join(dataDir, "asr", "processed", "compressed-duplicate.json");
+  fs.mkdirSync(path.dirname(compressedText), { recursive: true });
+  fs.writeFileSync(compressedText, "compressed transcript");
+  fs.writeFileSync(compressedMetadata, "{}");
+  const fileStore = JSON.parse(fs.readFileSync(fileStorePath, "utf8"));
+  fileStore.files["compressed-duplicate-key"] = {
+    task_id: task.id,
+    source_path: compressedTarget,
+    source_size: fs.statSync(compressedTarget).size,
+    source_modified_ms: null,
+    source_created_at_ms: null,
+    source_created_at_source: null,
+    content_hash: originalHash,
+    content_hash_algorithm: "blake3",
+    duplicate_of_source_key: null,
+    transcript_alias: null,
+    media_duration_ms: null,
+    status: "success",
+    output_text_path: compressedText,
+    output_metadata_path: compressedMetadata,
+    output_timeline_path: null,
+    text_chars: 21,
+    error: null,
+    runtime_strategy: "reuse_per_file",
+    chunk_metrics: [],
+    fallback_reason: null,
+    started_at_ms: now - 1000,
+    finished_at_ms: now,
+    progress_current: null,
+    progress_total: null,
+    failed_chunks: [],
+    memory_limit_hints: [],
+  };
+  fs.writeFileSync(fileStorePath, JSON.stringify(fileStore, null, 2));
+  const contentHashIndexPath = path.join(dataDir, "asr", "tasks", task.id, "content_hash_index.json");
+  fs.writeFileSync(contentHashIndexPath, JSON.stringify({
+    version: 1,
+    hashes: {
+      [`blake3:${originalHash}`]: {
+        algorithm: "blake3",
+        hash: originalHash,
+        size: originalSize,
+        canonical_source_key: "compressed-duplicate-key",
+        canonical_source_path: compressedTarget,
+        transcript_artifacts: {
+          text_path: compressedText,
+          metadata_path: compressedMetadata,
+          timeline_path: null,
+        },
+        model: "Qwen3-ASR-1.7B",
+        language: "chinese",
+        runtime_strategy: "reuse_per_file",
+        completed_at_ms: now,
+        duplicate_count: 0,
+      },
+    },
+  }, null, 2));
+  const compressedSkip = await request(`/tasks/${encodeURIComponent(task.id)}/external-import/run`, { method: "POST", body: "{}" });
+  must(compressedSkip.res.status === 202, `compressed-source import should start with 202, got ${compressedSkip.res.status}`);
+  const compressedSkipCompleted = await waitForImport();
+  must(compressedSkipCompleted.imported === 0, `compressed original WAV should not be copied again, got ${compressedSkipCompleted.imported}`);
+  must(compressedSkipCompleted.processed_record_skipped >= 2, `path and hash skips should be visible, got ${compressedSkipCompleted.processed_record_skipped}`);
+  must(!fs.existsSync(duplicateTarget), "compressed original WAV should remain absent after import");
+  must(fs.existsSync(compressedTarget), "canonical FLAC should remain available after import");
   const edit = await request(`/tasks/${encodeURIComponent(task.id)}`, {
     method: "PATCH",
     body: JSON.stringify({
@@ -243,7 +342,7 @@ const request = async (path, options = {}) => {
   must(badDelete.res.status === 400, `wrong-name delete should fail 400, got ${badDelete.res.status}`);
   const goodDelete = await request(`/tasks/${encodeURIComponent(task.id)}?confirm_name=${encodeURIComponent(edit.json.name)}`, { method: "DELETE" });
   must(goodDelete.res.ok, `confirmed delete failed ${goodDelete.res.status}`);
-  console.log(JSON.stringify({ taskId: task.id, runId, imported: completed.imported, repeatImported: repeatCompleted.imported, reimportedAfterDelete: reimportCompleted.imported, processedRecordSkipped: processedSkipCompleted.processed_record_skipped, runDurationMs }));
+  console.log(JSON.stringify({ taskId: task.id, runId, imported: completed.imported, repeatImported: repeatCompleted.imported, reimportedAfterDelete: reimportCompleted.imported, processedRecordSkipped: processedSkipCompleted.processed_record_skipped, compressedSourceSkipped: compressedSkipCompleted.processed_record_skipped, runDurationMs }));
 })().catch((error) => {
   console.error(error.stack || error);
   process.exit(1);
@@ -251,7 +350,8 @@ const request = async (path, options = {}) => {
 NODE
 
 test ! -e "$TARGET_DIR/$DEVICE_LEFT/$RUN_ID/2026-05-21/A.wav"
-test -f "$TARGET_DIR/$DEVICE_LEFT/$RUN_ID/2026-05-21/duplicate.wav"
+test ! -e "$TARGET_DIR/$DEVICE_LEFT/$RUN_ID/2026-05-21/duplicate.wav"
+test -f "$TARGET_DIR/$DEVICE_LEFT/$RUN_ID/2026-05-21/duplicate.flac"
 if [[ -n "${DEVICE_RIGHT:-}" ]]; then
   test -f "$TARGET_DIR/$DEVICE_RIGHT/$RUN_ID/2026-05-21/sub/B.m4a"
   test -f "$TARGET_DIR/$DEVICE_RIGHT/$RUN_ID/2026-05-21/sub/duplicate-copy.wav"
@@ -261,7 +361,7 @@ if find "$TARGET_DIR" -name '._*' -print -quit | grep -q .; then
   find "$TARGET_DIR" -type f | sort >&2
   exit 1
 fi
-cmp "$LEFT_DIR/duplicate.wav" "$TARGET_DIR/$DEVICE_LEFT/$RUN_ID/2026-05-21/duplicate.wav"
+cmp "$LEFT_DIR/duplicate.wav" "$TARGET_DIR/$DEVICE_LEFT/$RUN_ID/2026-05-21/duplicate.flac"
 if [[ -n "${DEVICE_RIGHT:-}" ]]; then
   cmp "$RIGHT_DIR/B.m4a" "$TARGET_DIR/$DEVICE_RIGHT/$RUN_ID/2026-05-21/sub/B.m4a"
 fi

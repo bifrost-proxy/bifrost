@@ -65,9 +65,9 @@
    ```bash
    rg -n "asr-external-device-import.md|ASR 外接设备自动导入" human_tests/readme.md
    ```
-2. 检查索引用例数量为 12：
+2. 检查索引用例数量为 14：
    ```bash
-   rg -n "asr-external-device-import.md.*\\| 12 \\|" human_tests/readme.md
+   rg -n "asr-external-device-import.md.*\\| 14 \\|" human_tests/readme.md
    ```
 
 预期结果：
@@ -356,9 +356,9 @@
    ```bash
    rg -n 'sample_fingerprint|XXH3/XXH128|只能减少候选|不能单独导致 `duplicate_completed`|仅 Chromaprint/声学指纹近似匹配' design/asr-external-device-import.md
    ```
-10. 检查方案明确导入结构仍完整保留：
+10. 检查方案明确“未处理的新内容正常导入、已处理的精确相同内容复制前跳过”：
    ```bash
-   rg -n '即使内容重复，也要把目标目录下对应文件补齐|内容 hash 只决定“是否重复转写”|两个目标文件都被导入' design/asr-external-device-import.md
+   rg -n '必须在写入本地临时文件之前跳过|零写入跳过|未命中才进入复制流|没有可信候选时正常导入' design/asr-external-device-import.md
    ```
 
 预期结果：
@@ -366,17 +366,17 @@
 - 方案接受哈希去重，并说明成本可控的依据。
 - 方案调研 BLAKE3、SHA-256、XXH3/XXH128、CRC32C、FastCDC/CDC、Chromaprint 和 `canonical_audio_hash`，并明确本地精确内容身份固定使用 BLAKE3，不兼容旧 SHA-256 数据。
 - 方案调研同步、块同步和备份去重系统，并明确 Bifrost ASR V1 采用同步系统快路径 + 后台 hash 增强，不把 CDC/block hash 放入导入/Resume 主链路。
-- 方案明确大文件去重优先走 T0/T1 零读取快路径，完整 hash 只做后台精确兜底；导入时复制和 hash 共用同一次顺序读取，不为 hash 额外读取外接设备。
+- 方案明确大文件去重优先走 T0/T1 零读取快路径；manifest 不足但存在同尺寸已完成候选时，在后台串行读取外盘做精确 hash，命中后不创建本地临时文件，未命中才复制。
 - ASR 进入模型前有独立去重闸口，覆盖用户手动拷贝文件到 `audio_dir` 的情况。
 - 历史大文件缺少 hash 时，ASR run、Resume 和启动恢复不在主流程同步补算；需要补 hash 时通过后台内容哈希队列串行执行。
 - 缺少 hash、hash 计算失败、文件变化、转写产物缺失或 ASR 参数不兼容时，不错误跳过 ASR；`sample_fingerprint`、XXH3/XXH128 采样窗口和 Chromaprint 近似指纹只能缩小候选，不能单独触发 `duplicate_completed`。
 - 精确 `content_hash` 或可信 `canonical_audio_hash` 命中且产物存在、参数兼容时，才允许跳过 ASR 模型推理。
-- 重复文件仍会保留在 `audio_dir/<device_name>/<relative_path>`，只是 ASR 模型推理阶段复用已完成转写产物。
+- 未处理的新内容仍保留设备目录结构并正常导入；已经完成转写且精确 BLAKE3、原始大小、产物与 ASR 参数均匹配的内容，在复制前标记 `processed_record_skipped`，本地 WAV 不再生成。
 
 执行结果：
 
 - 已执行 `cargo test -p bifrost-admin content_hash_dedupe_reuses_completed_transcript`，同内容第二个文件被标记为 `success`，设置 `duplicate_of_source_key`，并复用既有 `output_text_path`。
-- 已执行真实设备导入验证，同内容测试文件仍分别导入到 `LEFT/.../duplicate.wav` 和 `RIGHT/.../duplicate-copy.wav`，目录结构完整保留。
+- 历史验证曾确认尚无已完成转写索引的新内容会分别导入到设备目录；2026-08-10 用户进一步明确已处理内容不得再次复制，新增 TC-AEDI-13 覆盖复制前精确去重。
 - 2026-05-22 已执行本用例文档检查命令，方案已覆盖高性能 hash 算法选型、手动拷贝文件的 ASR 前置去重、轻量指纹边界、后台队列和跳过 ASR 的严格条件。
 - 2026-05-22 已启动真实 Bifrost 服务并使用已挂载外接卷 `LEFT` 执行端到端验证：写入新设备文件后触发 `POST /external-import/run`，接口 4ms 返回，导入完成并在 `external_imports.json` 写入 `source_hashes["blake3"]`；随后手动复制同内容文件到任务 `audio_dir`，触发 `POST /run`，接口 2ms 返回，任务详情中手动文件被标记为 `success`，`duplicate_of_source_key` 指向 canonical 文件并复用既有 transcript artifact，证明 ASR 模型前置去重真实生效。
 
@@ -420,6 +420,55 @@
 - 已更新导入流程和 WebUI 任务列表：后台先扫描候选音频文件总数再导入；Paused 任务仍允许外接设备事件和手动导入，只是不触发自动 ASR 转写；没有 ASR 成功/部分成功处理记录的缺失目标会重新导入；已有成功/部分成功处理记录的缺失目标会跳过并计入 `processed_record_skipped`；导入进度从 Actions 列移到行下方，主进度按 `processed_files / total_files_discovered` 计算；当前文件名、扫描总数、成功导入数、已有处理记录跳过数、已处理数和失败数由 `current_run` 展示；页面刷新后会重新读取已绑定外设任务的 `current_run` 恢复展示。
 - 本轮真实执行记录见下方执行记录表。
 
+### TC-AEDI-13 压缩后原始 WAV 不从外盘重复复制
+
+操作步骤：
+
+1. 在隔离 disk image 中创建 `recording.wav`，触发一次外接设备导入，确认 manifest 保存 `source_hashes["blake3"]`。
+2. 模拟已处理后的压缩状态：本地 canonical source 改为 `recording.flac`，保留有效 `.txt` 与 metadata 产物；内容索引继续保存原始 WAV 的 BLAKE3 和原始字节数，旧 manifest 仍指向已经不存在的 WAV。
+3. 再次调用 `POST /api/asr/tasks/{id}/external-import/run`。
+4. 执行聚焦回归测试：
+   ```bash
+   cargo test -p bifrost-admin external_import_ --lib
+   ```
+5. 检查目标目录不存在 `recording.wav`，canonical FLAC 和转写产物仍存在，并检查 `current_run.processed_record_skipped` 增加。
+6. 删除任一 transcript artifact 后再导入同内容源文件，确认系统正常复制 WAV，不能使用失效索引漏处理。
+
+预期结果：
+
+- manifest 的 size/mtime 与原始 BLAKE3 命中有效任务索引时，不读取源文件、不创建 `.part`、不复制 WAV。
+- manifest 缺失或过期但存在同尺寸有效候选时，后台串行读取外盘计算精确 BLAKE3；命中后零本地写入跳过。
+- BLAKE3 或原始大小不匹配、模型/语言/runtime 不兼容、文本或 metadata 产物缺失时，正常复制并进入后续 ASR，不能误跳过。
+- 导入结果显示 `imported=0` 且 `processed_record_skipped` 增加，ASR 推理不会被触发。
+
+执行结果：
+
+- 2026-08-10 已执行 14 个 `external_import_` 聚焦单测，全部通过；其中新增用例分别验证 manifest 缓存 hash 零读取命中、无 manifest 时复制前精确 hash 命中、产物缺失时继续复制，以及同路径同大小但 mtime 已变化时不能误用旧处理记录跳过。
+- 2026-08-10 已用两个 64 MiB 隔离 HFS+ disk image 和临时 `BIFROST_DATA_DIR` 启动真实服务/API E2E：首次导入 4 个文件、重复导入 0、删除未处理目标后重新导入 1、路径记录跳过 1；模拟 WAV→FLAC 后再次导入 `imported=0`、`processed_record_skipped=2`，WAV 保持不存在且 FLAC 存在。测试端口、disk image、外盘测试目录和临时目录均已清理。
+
+### TC-AEDI-14 正式环境存量错误回拷文件安全清理
+
+操作步骤：
+
+1. 确认正式任务 `735775510b384fff8903d9c6fc54f1a3` 为 `paused=true`、`running=false`，外接导入状态不是 `importing`。
+2. 从 `files.json` 精确筛选 `status=success`、`duplicate_of_source_key != null`、`started_at_ms=null` 且源路径为 WAV 的记录。
+3. 对每条记录验证：本地 WAV 存在且大小匹配；canonical 记录为 success FLAC；文本与 metadata 存在；`content_hash_index.json` 的原始 BLAKE3、原始大小、canonical key/path 与文件记录一致；`external_imports.json` 唯一命中同一 BLAKE3；外盘原文件存在。
+4. 仅删除通过全部校验且位于 `/Users/eden_studio/audio/LEFT/` 或 `/Users/eden_studio/audio/RIGHT/` 下的本地重复 WAV，不删除外盘原件、canonical FLAC、转写产物或文件记录。
+5. 复核筛选清单中的本地 WAV 残留数为 0，外盘原件、canonical FLAC 和转写产物仍存在，并比较清理前后磁盘可用空间。
+
+预期结果：
+
+- 不满足任一校验的路径拒绝删除。
+- 只清理已经确认未进入 ASR 推理且可由外盘恢复的本地重复 WAV。
+- 正式任务全程保持暂停，不触发导入或 ASR。
+- 清理数量、字节数和磁盘空间增量可核验。
+
+执行结果：
+
+- 2026-08-10 已核验 129/129 条记录：内容索引、唯一 import manifest、canonical success FLAC、文本、metadata 和外盘原件全部有效；无缺失、大小不匹配或越界路径。
+- 已删除 129 个本地重复 WAV，共 `31,539,035,355` 字节；磁盘可用空间由 `259,564,336 KiB` 增至 `290,333,284 KiB`，增加 `30,768,948 KiB`（约 29.34 GiB）；清单残留为 0。
+- 外盘原件、canonical FLAC、转写产物和 `files.json` 记录均保留，正式任务仍处于暂停状态。
+
 ## 清理步骤
 
 1. 停止测试 Bifrost 服务。
@@ -431,7 +480,7 @@
 
 | 日期 | 用例 | 命令/场景 | 结果 |
 |---|---|---|---|
-| 2026-05-21 | TC-AEDI-01 / TC-AEDI-02 | `rg` 检查 `design/asr-external-device-import.md` 和 `human_tests/readme.md` | PASS：设计文档存在并覆盖用户目标；索引包含本文件且用例数为 12 |
+| 2026-05-21 | TC-AEDI-01 / TC-AEDI-02 | `rg` 检查 `design/asr-external-device-import.md` 和 `human_tests/readme.md` | PASS：设计文档存在并覆盖用户目标；索引包含本文件；2026-08-10 用例数更新为 14 |
 | 2026-05-21 | TC-AEDI-03 / TC-AEDI-04 | 真实启动 `./target/debug/bifrost start -p 18880 --unsafe-ssl --no-system-proxy`；`GET /api/asr/external-volumes`；在 `/Volumes/LEFT`、`/Volumes/RIGHT` 写入测试音频；`POST /api/asr/tasks/{id}/external-import/run`；再次运行导入；`cmp` 校验源目标文件 | PASS：识别 `LEFT`/`RIGHT`；首次导入 `imported=9`，包含本轮 4 个新增测试文件；目标路径按设备名和相对目录保留；再次导入 `imported=0` |
 | 2026-05-21 | TC-AEDI-03 目录创建回归 | `BIFROST_ASR_E2E_REQUIRE_DEVICES=1 tests/asr_external_device_import_e2e.sh`，脚本传入创建前不存在的 `<temp_target_parent>/missing-target-dir` 作为 `audio_dir` | PASS：保存任务时自动创建缺失目录；真实 `LEFT`/`RIGHT` 导入 `imported=4`，再次导入 `repeatImported=0` |
 | 2026-05-21 | TC-AEDI-05 | `cargo test -p bifrost-admin external_import_defers_recently_modified_files` | PASS：最近修改文件会等待 `file_stable_secs`，超过稳定窗口后放行 |
@@ -448,3 +497,5 @@
 | 2026-05-21 | TC-AEDI-12 | `BIFROST_ASR_E2E_PORT=18882 BIFROST_ASR_E2E_DEVICES=RIGHT BIFROST_ASR_E2E_REQUIRE_DEVICES=1 tests/asr_external_device_import_e2e.sh`；`pnpm --dir web build` | PASS：真实 `RIGHT` 卷导入 `imported=2`，重复导入 `repeatImported=0`，`POST /external-import/run` 在 3ms 返回 202，导入期间 `/tasks` API 保持响应并可轮询 `current_run` 到完成；删除目标文件且任务 Paused 后重新导入 `reimportedAfterDelete=1`；写入成功处理记录后再次删除目标文件，重新导入不复制该文件且 `processedRecordSkipped=1`；WebUI 构建通过，进度 UI 使用行下方全宽展示和后端 `current_run` 恢复逻辑 |
 | 2026-05-22 | TC-AEDI-11 / TC-AEDI-12 真实端到端回归 | `bash tests/asr_external_device_import_e2e.sh`；临时数据目录启动 `./target/debug/bifrost start -p 18883 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`，真实 `LEFT` 卷新增测试文件，API 触发导入，再手动复制重复文件到 `audio_dir` 后调用 `POST /tasks/{id}/run` | PASS：真实 `LEFT`/`RIGHT` 设备导入 `imported=4`、重复导入 `repeatImported=0`、删除后重新导入 `reimportedAfterDelete=1`、已处理记录跳过 `processedRecordSkipped=1`、导入启动 4ms 返回；ASR 前置去重真实服务验证中 `source_hashes["blake3"]` 写入成功，手动拷贝重复文件在 `/run` 后标记 `success`，设置 `duplicate_of_source_key` 并复用 canonical transcript，`/api/proxy/address` 同期保持响应 |
 | 2026-05-22 | TC-AEDI-11 扫描顺序回归 | `cargo test -p bifrost-admin content_hash_dedupe_hashes_manual_copy_when_candidate_exists --lib`；清理 `/Volumes/LEFT/codex-preflight*` 测试残留后，临时数据目录启动 `./target/debug/bifrost start -p 18887 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`，真实 `LEFT` 卷导入 canonical 文件，再将同内容 `manual-copy.wav` 放在 `audio_dir` 根目录并调用 `POST /tasks/{id}/run` | PASS：单测覆盖 `manual-copy` 在扫描顺序中排在 canonical 之前的情况；真实服务验证 `manual-copy.wav` 在 ASR 前置阶段被标记为 `success`，`duplicate_of_source_key` 指向 canonical source key，复用 canonical transcript，`POST /run` 1ms 返回且代理 API 保持响应 |
+| 2026-08-10 | TC-AEDI-13 | `cargo test -p bifrost-admin external_import_ --lib`；两个隔离 64 MiB HFS+ disk image + 临时数据目录运行 `tests/asr_external_device_import_e2e.sh` | PASS：14 个聚焦单测通过；API E2E 首次导入 4、重复导入 0、压缩源跳过计数 2，原 WAV 未回拷、canonical FLAC 保留；测试资源已清理 |
+| 2026-08-10 | TC-AEDI-14 | 正式任务暂停态检查；三份状态文件交叉核验；按限定前缀、大小和记录条件删除；删除后复核 | PASS：删除 129 个、31,539,035,355 字节的错误回拷 WAV，实际释放约 29.34 GiB；残留 0，外盘原件与 canonical/转写产物保留 |

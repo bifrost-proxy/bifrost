@@ -755,16 +755,27 @@ fn import_one_file(
             return Ok("skipped");
         }
     }
+    let manifest_identity_matches = state.files.get(&relative_key).is_some_and(|record| {
+        record.source_size == metadata.len()
+            && source_modified.is_some()
+            && record.source_modified_ms == source_modified
+    });
     if !target.is_file()
+        && manifest_identity_matches
         && has_completed_processing_record_for_import_target(&task.id, &target, metadata.len())
     {
+        let source_hashes = state
+            .files
+            .get(&relative_key)
+            .map(import_record_hashes)
+            .unwrap_or_default();
         state.files.insert(
             relative_key,
             AsrImportedFileRecord {
                 relative_path: relative.to_path_buf(),
                 source_size: metadata.len(),
                 source_modified_ms: source_modified,
-                source_hashes: BTreeMap::new(),
+                source_hashes,
                 sample_fingerprint: None,
                 target_path: target,
                 target_size: 0,
@@ -813,6 +824,34 @@ fn import_one_file(
             },
         );
         return Ok("skipped");
+    }
+    if let Some(hashes) = reusable_processed_content_hash_for_import(
+        task,
+        source,
+        metadata.len(),
+        source_modified,
+        state.files.get(&relative_key),
+    )? {
+        state.files.insert(
+            relative_key,
+            AsrImportedFileRecord {
+                relative_path: relative.to_path_buf(),
+                source_size: metadata.len(),
+                source_modified_ms: source_modified,
+                source_hashes: hashes,
+                sample_fingerprint: None,
+                target_path: target,
+                target_size: 0,
+                first_seen_at_ms: None,
+                imported_at_ms: now_ms(),
+                status: "processed_record_skipped".to_string(),
+                error: Some(
+                    "source content already has reusable completed transcript artifacts"
+                        .to_string(),
+                ),
+            },
+        );
+        return Ok("processed_record_skipped");
     }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
@@ -895,11 +934,20 @@ fn has_completed_processing_record_for_import_target(
             compression.original_source_path == target
                 && compression.original_size_bytes == source_size
         });
+        let artifacts_exist = record
+            .output_text_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())
+            && record
+                .output_metadata_path
+                .as_ref()
+                .is_some_and(|path| path.is_file());
         (current_source_matches || compressed_source_matches)
             && matches!(
                 record.status,
                 FileStatus::Success | FileStatus::PartialSuccess
             )
+            && artifacts_exist
     })
 }
 
@@ -1052,11 +1100,103 @@ fn content_hash_record_reusable(
     existing: &AsrContentHashRecord,
 ) -> bool {
     existing.canonical_source_key != current_key
-        && existing.language == task.language
+        && content_hash_record_artifacts_reusable(task, existing)
+}
+
+fn content_hash_record_artifacts_reusable(
+    task: &AsrDirectoryTask,
+    existing: &AsrContentHashRecord,
+) -> bool {
+    existing.language == task.language
         && existing.model == task.model
         && existing.runtime_strategy == task.runtime_strategy
         && existing.transcript_artifacts.text_path.is_file()
         && existing.transcript_artifacts.metadata_path.is_file()
+}
+
+fn reusable_import_hash_record<'a>(
+    task: &AsrDirectoryTask,
+    index: &'a AsrContentHashIndex,
+    algorithm: &str,
+    hash: &str,
+    size: u64,
+) -> Option<&'a AsrContentHashRecord> {
+    let key = content_hash_key(algorithm, hash)?;
+    index.hashes.get(&key).filter(|existing| {
+        existing.size == size && content_hash_record_artifacts_reusable(task, existing)
+    })
+}
+
+fn candidate_import_hash_algorithm(
+    task: &AsrDirectoryTask,
+    index: &AsrContentHashIndex,
+    size: u64,
+) -> Option<String> {
+    let preferred = preferred_content_hash_algorithm(task);
+    index
+        .hashes
+        .values()
+        .filter(|existing| {
+            existing.size == size && content_hash_record_artifacts_reusable(task, existing)
+        })
+        .filter_map(|existing| normalize_content_hash_algorithm(&existing.algorithm))
+        .find(|algorithm| *algorithm == preferred)
+        .map(str::to_string)
+}
+
+fn reusable_processed_content_hash_for_import(
+    task: &AsrDirectoryTask,
+    source: &Path,
+    source_len: u64,
+    expected_modified_ms: Option<u64>,
+    import_record: Option<&AsrImportedFileRecord>,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    if !task.import_policy.content_hash_dedupe_enabled {
+        return Ok(None);
+    }
+    let index = load_content_hash_index(&task.id);
+    let preferred = preferred_content_hash_algorithm(task);
+
+    if let Some(record) = import_record.filter(|record| {
+        record.source_size == source_len
+            && expected_modified_ms.is_some()
+            && record.source_modified_ms == expected_modified_ms
+    }) {
+        if let Some((algorithm, hash)) = choose_import_hash(record, preferred) {
+            if reusable_import_hash_record(task, &index, &algorithm, &hash, source_len).is_some() {
+                return Ok(Some(BTreeMap::from([(algorithm, hash)])));
+            }
+        }
+    }
+
+    let Some(algorithm) = candidate_import_hash_algorithm(task, &index, source_len) else {
+        return Ok(None);
+    };
+    let before_size = source_size(source);
+    let before_modified = source_modified_ms(source);
+    if before_size != Some(source_len) || before_modified != expected_modified_ms {
+        return Err(format!(
+            "source changed before content hash check: {}",
+            source.display()
+        ));
+    }
+    update_external_import_progress(&task.id, |progress| {
+        progress.current_file = Some(source.to_path_buf());
+        progress.current_file_size = Some(source_len);
+        progress.current_file_copied_bytes = 0;
+        progress.message = format!("Checking processed content for {}", source.display());
+    });
+    let hash = run_queued_content_hash_job(|| hash_file_unqueued(source, &algorithm))?;
+    if source_size(source) != before_size || source_modified_ms(source) != before_modified {
+        return Err(format!(
+            "source changed during content hash check: {}",
+            source.display()
+        ));
+    }
+    if reusable_import_hash_record(task, &index, &algorithm, &hash, source_len).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(BTreeMap::from([(algorithm, hash)])))
 }
 
 fn candidate_hash_algorithm_for_size(
