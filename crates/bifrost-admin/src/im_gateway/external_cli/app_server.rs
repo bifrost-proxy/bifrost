@@ -1756,6 +1756,12 @@ mod tests {
 
     #[test]
     fn app_server_scope_requires_the_active_root_thread_and_turn() {
+        assert!(!app_server_frame_belongs_to_active_turn(
+            &serde_json::json!({}),
+            "root-thread",
+            "root-turn"
+        ));
+
         let root_item = serde_json::json!({
             "method": "item/completed",
             "params": {"threadId": "root-thread", "turnId": "root-turn", "item": {}}
@@ -1802,6 +1808,30 @@ mod tests {
         });
         assert!(app_server_frame_belongs_to_active_turn(
             &account_event,
+            "root-thread",
+            "root-turn"
+        ));
+        assert!(app_server_frame_belongs_to_root_thread(
+            &account_event,
+            "root-thread"
+        ));
+
+        let missing_params = serde_json::json!({"method": "item/completed"});
+        assert!(!app_server_frame_belongs_to_root_thread(
+            &missing_params,
+            "root-thread"
+        ));
+
+        let nested_root_thread = serde_json::json!({
+            "method": "item/completed",
+            "params": {"thread": {"id": "root-thread"}, "item": {}}
+        });
+        assert!(app_server_frame_belongs_to_root_thread(
+            &nested_root_thread,
+            "root-thread"
+        ));
+        assert!(app_server_frame_belongs_to_active_turn(
+            &nested_root_thread,
             "root-thread",
             "root-turn"
         ));
