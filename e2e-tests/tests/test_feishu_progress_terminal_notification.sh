@@ -92,8 +92,14 @@ class Handler(BaseHTTPRequestHandler):
                 handle.write(json.dumps({"method": self.command, "path": self.path, "body": body}, ensure_ascii=False) + "\n")
 
     def do_POST(self):
-        body = self.read_json()
         path = self.path.split("?", 1)[0]
+        if path.endswith("/im/v1/files"):
+            length = int(self.headers.get("content-length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            self.record({"multipart_bytes": len(raw)})
+            self.send_json({"code": 0, "data": {"file_key": "file_terminal_e2e"}})
+            return
+        body = self.read_json()
         if path.endswith("/auth/v3/tenant_access_token/internal"):
             self.send_json({"code": 0, "tenant_access_token": "terminal-e2e-token", "expire": 7200})
             return
@@ -162,12 +168,13 @@ for _ in $(seq 1 180); do
 done
 curl -fsS --noproxy '*' "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" >/dev/null
 
-python3 - "$BIFROST_PORT" "$REPO_DIR" "$FEISHU_PORT" <<'PY'
+python3 - "$BIFROST_PORT" "$REPO_DIR" "$FEISHU_PORT" "$TEST_DIR" <<'PY'
 import json
+import pathlib
 import sys
 import urllib.request
 
-port, repo_dir, feishu_port = sys.argv[1:4]
+port, repo_dir, feishu_port, test_dir = sys.argv[1:5]
 base = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway"
 
 def request(path, payload, method="POST"):
@@ -181,6 +188,8 @@ def request(path, payload, method="POST"):
         body = response.read().decode("utf-8")
         assert response.status == 200, body
 
+report_path = pathlib.Path(test_dir) / "terminal-e2e-report.txt"
+report_path.write_text("terminal attachment contents", encoding="utf-8")
 runner_code = r'''
 import json
 import sys
@@ -189,7 +198,7 @@ if "FAIL_TERMINAL_E2E" in prompt:
     print(json.dumps({"type": "run_failed", "content": "E2E_PERMISSION_DENIED"}))
     print("E2E_PERMISSION_DENIED", file=sys.stderr)
     raise SystemExit(17)
-print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS"}))
+print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS\n\n[E2E report](%s)" % sys.argv[1]}))
 '''
 request("/chat/config", {
     "version": 1,
@@ -200,7 +209,7 @@ request("/chat/config", {
             "adapter": "custom",
             "adapterConfig": {
                 "executable": sys.executable,
-                "args": ["-c", runner_code],
+                "args": ["-c", runner_code, str(report_path)],
                 "timeoutSecs": 30,
             },
             "injectBifrostTools": False,
@@ -295,10 +304,10 @@ PY
 
 inject terminal-success "run terminal success e2e"
 wait_session_idle
-wait_message_count 2
+wait_message_count 3
 inject terminal-failure "FAIL_TERMINAL_E2E"
 wait_session_idle
-wait_message_count 4
+wait_message_count 5
 
 python3 - "$FEISHU_REQUEST_LOG" <<'PY'
 import json
@@ -306,13 +315,16 @@ import sys
 
 records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 messages = [record for record in records if "/im/v1/messages" in record["path"]]
-assert len(messages) == 4, messages
+assert len(messages) == 5, messages
 
-success_progress, success_terminal, failure_progress, failure_terminal = messages
+success_progress, success_terminal, success_file, failure_progress, failure_terminal = messages
 assert success_progress["path"].endswith("/im/v1/messages/terminal-success/reply"), success_progress
 assert success_terminal["path"].endswith("/im/v1/messages/om_1/reply"), success_terminal
+assert success_file["path"].split("?", 1)[0].endswith("/im/v1/messages"), success_file
+assert success_file["body"]["msg_type"] == "file", success_file
+assert "file_terminal_e2e" in success_file["body"]["content"], success_file
 assert failure_progress["path"].endswith("/im/v1/messages/terminal-failure/reply"), failure_progress
-assert failure_terminal["path"].endswith("/im/v1/messages/om_3/reply"), failure_terminal
+assert failure_terminal["path"].endswith("/im/v1/messages/om_4/reply"), failure_terminal
 
 success_card = json.loads(success_terminal["body"]["content"])
 failure_card = json.loads(failure_terminal["body"]["content"])
@@ -342,6 +354,31 @@ updates = [
 rendered_updates = "\n".join(record["body"]["card"]["data"] for record in updates)
 assert "E2E_FINAL_SUMMARY_SUCCESS" in rendered_updates, rendered_updates
 assert "E2E_PERMISSION_DENIED" in rendered_updates, rendered_updates
+
+def terminal_progress_card(marker):
+    candidates = [
+        json.loads(record["body"]["card"]["data"])
+        for record in updates
+        if marker in record["body"]["card"]["data"]
+    ]
+    assert candidates, (marker, rendered_updates)
+    return candidates[-1]
+
+for marker, title in [
+    ("E2E_FINAL_SUMMARY_SUCCESS", "最终结论"),
+    ("E2E_PERMISSION_DENIED", "失败结论"),
+]:
+    progress_card = terminal_progress_card(marker)
+    elements = progress_card["body"]["elements"]
+    status = next(element for element in elements if element.get("element_id") == "agent_status_panel")
+    output = next(element for element in elements if element.get("element_id") == "agent_output")
+    assert status["tag"] == "collapsible_panel" and status["expanded"] is False, status
+    assert output["tag"] == "collapsible_panel" and output["expanded"] is False, output
+    assert output["header"]["title"]["content"] == title, output
+    assert marker in json.dumps(output, ensure_ascii=False), output
+
+uploads = [record for record in records if record["path"].split("?", 1)[0].endswith("/im/v1/files")]
+assert len(uploads) == 1 and uploads[0]["body"]["multipart_bytes"] > 0, uploads
 PY
 
 echo "[feishu-progress-terminal] PASS"

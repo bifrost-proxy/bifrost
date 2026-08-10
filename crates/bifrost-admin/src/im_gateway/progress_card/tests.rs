@@ -1073,6 +1073,16 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
     assert_eq!(elements[1]["element_id"], PROCESS_PANEL_ELEMENT_ID);
     assert_eq!(elements[1]["expanded"], false);
     assert_eq!(elements.last().unwrap()["element_id"], OUTPUT_ELEMENT_ID);
+    assert_eq!(elements.last().unwrap()["tag"], "collapsible_panel");
+    assert_eq!(elements.last().unwrap()["expanded"], false);
+    assert_eq!(
+        elements.last().unwrap()["header"]["title"]["content"],
+        "最终结论"
+    );
+    assert_eq!(
+        elements.last().unwrap()["elements"][0]["element_id"],
+        OUTPUT_CONTENT_ELEMENT_ID
+    );
 
     let finished_serialized = serde_json::to_string(&finished_card).unwrap();
     assert!(finished_serialized.contains("最终结论：测试通过。"));
@@ -1089,6 +1099,156 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
         .as_str()
         .unwrap()
         .contains("已完成：exec_command"));
+}
+
+#[test]
+fn terminal_progress_card_collapses_status_plan_process_and_conclusion() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "terminal layout");
+    snapshot.apply_event(AgentTurnProgressEvent::PlanUpdated {
+        title: Some("Implement terminal layout".to_string()),
+        steps: vec![PlanStep {
+            step: "Verify collapsed panels".to_string(),
+            status: PlanStepStatus::Completed,
+        }],
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "先检查终态布局。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "exec_command".to_string(),
+            arguments: "cargo test".to_string(),
+            result: "ok".to_string(),
+            success: true,
+        },
+        duration_ms: 15,
+    });
+
+    let running_card = build_feishu_progress_card(&snapshot, true);
+    let running_elements = running_card["body"]["elements"].as_array().unwrap();
+    assert_eq!(running_elements[0]["expanded"], false);
+    assert_eq!(running_elements[1]["element_id"], PLAN_PANEL_ELEMENT_ID);
+    assert_eq!(running_elements[1]["expanded"], true);
+    assert_eq!(running_elements[2]["element_id"], PROCESS_PANEL_ELEMENT_ID);
+    assert_eq!(running_elements[2]["expanded"], true);
+    assert_eq!(running_elements[3]["element_id"], OUTPUT_ELEMENT_ID);
+    assert_eq!(running_elements[3]["tag"], "markdown");
+
+    snapshot.apply_event(AgentTurnProgressEvent::TurnFinished {
+        content: "TERMINAL_COLLAPSED_CONCLUSION".to_string(),
+    });
+
+    let card = build_feishu_progress_card(&snapshot, false);
+    let elements = card["body"]["elements"].as_array().unwrap();
+    assert_eq!(
+        elements
+            .iter()
+            .map(|element| element["element_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            STATUS_PANEL_ELEMENT_ID,
+            PLAN_PANEL_ELEMENT_ID,
+            PROCESS_PANEL_ELEMENT_ID,
+            OUTPUT_ELEMENT_ID,
+        ]
+    );
+    for element in elements {
+        assert_eq!(
+            element["tag"], "collapsible_panel",
+            "terminal section must be collapsible: {element}"
+        );
+        assert_eq!(
+            element["expanded"], false,
+            "terminal section must default to collapsed: {element}"
+        );
+    }
+    assert_eq!(elements[3]["header"]["title"]["content"], "最终结论");
+    assert!(serde_json::to_string(&elements[3])
+        .unwrap()
+        .contains("TERMINAL_COLLAPSED_CONCLUSION"));
+}
+
+#[test]
+fn failed_progress_card_collapses_failure_conclusion_in_standard_and_compact_cards() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "failed layout");
+    snapshot.apply_event(AgentTurnProgressEvent::PlanUpdated {
+        title: Some("Investigate failure".to_string()),
+        steps: vec![PlanStep {
+            step: "Reproduce failure".to_string(),
+            status: PlanStepStatus::InProgress,
+        }],
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "先复现失败路径。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "exec_command".to_string(),
+            arguments: "cargo test".to_string(),
+            result: "failed".to_string(),
+            success: false,
+        },
+        duration_ms: 20,
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::TurnFailed {
+        error: "TERMINAL_COLLAPSED_FAILURE".to_string(),
+    });
+
+    let standard = build_feishu_progress_card(&snapshot, false);
+    let standard_elements = standard["body"]["elements"].as_array().unwrap();
+    for element_id in [
+        STATUS_PANEL_ELEMENT_ID,
+        PLAN_PANEL_ELEMENT_ID,
+        PROCESS_PANEL_ELEMENT_ID,
+        OUTPUT_ELEMENT_ID,
+    ] {
+        let element = standard_elements
+            .iter()
+            .find(|element| element["element_id"] == element_id)
+            .expect("terminal section");
+        assert_eq!(element["tag"], "collapsible_panel");
+        assert_eq!(element["expanded"], false);
+    }
+
+    for card in [
+        standard,
+        build_feishu_compact_progress_card(&snapshot, false),
+    ] {
+        let output = card["body"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|element| element["element_id"] == OUTPUT_ELEMENT_ID)
+            .expect("output element");
+        assert_eq!(output["tag"], "collapsible_panel");
+        assert_eq!(output["expanded"], false);
+        assert_eq!(output["header"]["title"]["content"], "失败结论");
+        assert!(serde_json::to_string(output)
+            .unwrap()
+            .contains("TERMINAL_COLLAPSED_FAILURE"));
+    }
+}
+
+#[test]
+fn progress_output_content_updates_target_the_visible_phase_specific_markdown_element() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "output patch target");
+    assert_eq!(output_content_element_id(&snapshot), OUTPUT_ELEMENT_ID);
+
+    snapshot.apply_event(AgentTurnProgressEvent::TurnFinished {
+        content: "done".to_string(),
+    });
+    assert_eq!(
+        output_content_element_id(&snapshot),
+        OUTPUT_CONTENT_ELEMENT_ID
+    );
+
+    snapshot.apply_event(AgentTurnProgressEvent::TurnFailed {
+        error: "failed".to_string(),
+    });
+    assert_eq!(
+        output_content_element_id(&snapshot),
+        OUTPUT_CONTENT_ELEMENT_ID
+    );
 }
 
 #[test]
