@@ -198,6 +198,7 @@ for adapter in ("codex", "traex"):
         "EARLY_CHILD_FINAL_MUST_NOT_ESCAPE",
         "CHILD_TOOL_MUST_NOT_ESCAPE",
         "CHILD_INTERNAL_STATE_MUST_NOT_ESCAPE",
+        "child-thread",
         "subagent_updated",
     ):
         assert forbidden not in serialized, (adapter, forbidden, result)
@@ -209,6 +210,7 @@ for adapter in ("codex", "traex"):
     ]
     assert [event["eventType"] for event in collaboration] == ["tool_started", "tool_finished"], result
     assert collaboration[0]["raw"]["arguments"]["prompt"] == "inspect the boundary", collaboration
+    assert "receiverThreadIds" not in collaboration[0]["raw"]["arguments"], collaboration
     assert collaboration[1]["content"] == "child result received", collaboration
 
 claude_result = run("claude_code", claude, "exec")

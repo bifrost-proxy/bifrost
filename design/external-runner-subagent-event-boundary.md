@@ -24,7 +24,7 @@ Bifrost 在 `thread/start|resume` 和 `turn/start` 的响应中保存根 `thread
 3. `account/rateLimits/updated` 等账户级事件没有 thread/turn 作用域，继续按原逻辑处理。
 4. 根 turn 中的 `collabAgentToolCall` 仅产生普通工具开始/完成事件；`item/updated` 和 `subAgentActivity` 不产生事件。
 
-协作工具输入只保留工具调用参数（例如 `prompt`、`receiverThreadIds`）；完成输出优先使用 provider 的 `result` / `error` / `message`。`agentsStates` 是子 Agent 内部生命周期状态，不展开成卡片步骤，也不用于结束根任务。
+协作工具输入只保留用户提供的工具调用参数（例如 `prompt`、`message`、`input`）；完成输出优先使用 provider 的 `result` / `error` / `message`。`senderThreadId`、`receiverThreadIds` 与 `agentsStates` 都属于子 Agent 内部生命周期元数据，不进入普通工具输入输出、不展开成卡片步骤，也不用于结束根任务。这样同一次工具调用的开始与完成参数保持一致，可被现有普通工具卡片合并为一个步骤。
 
 ### Stream JSON
 

@@ -292,7 +292,7 @@ fn codex_cli_parser_maps_real_todo_list_events_to_plan_updates() {
 
 #[test]
 fn codex_and_traex_collab_events_are_plain_tool_input_and_output() {
-    let stdout = r#"{"type":"item.started","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":[],"agents_states":{}}}
+    let stdout = r#"{"type":"item.started","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","arguments":{"prompt":"Review the authentication flow","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"starting"}}},"sender_thread_id":"root","receiver_thread_ids":[],"agents_states":{}}}
 {"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"running","message":"Inspecting handlers"}}}}
 {"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"completed","prompt":"Review the authentication flow","result":"Review complete","sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"completed","message":"internal detail must stay hidden"}}}}"#;
 
@@ -307,7 +307,11 @@ fn codex_and_traex_collab_events_are_plain_tool_input_and_output() {
         events[0].raw["arguments"]["prompt"],
         "Review the authentication flow"
     );
+    assert!(events[0].raw["arguments"]
+        .get("receiver_thread_ids")
+        .is_none());
     assert!(events[0].raw["arguments"].get("agents_states").is_none());
+    assert!(!events[0].raw.to_string().contains("agent-7"));
     assert_eq!(
         events[1].event_type,
         ExternalCliProgressEventType::ToolFinished
@@ -315,6 +319,7 @@ fn codex_and_traex_collab_events_are_plain_tool_input_and_output() {
     assert_eq!(events[1].content, "Review complete");
     assert_eq!(events[1].raw["success"], true);
     assert!(!events[1].content.contains("internal detail"));
+    assert!(!events[1].raw.to_string().contains("agent-7"));
     assert!(!events[1].raw.to_string().contains("internal detail"));
 
     let mapped = external_progress_to_agent_turn_event(

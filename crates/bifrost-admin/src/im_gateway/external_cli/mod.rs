@@ -5691,13 +5691,12 @@ fn codex_collaboration_tool_event(
         .get_mut("item")
         .and_then(serde_json::Value::as_object_mut)
     {
-        for key in [
-            "agentsStates",
-            "agents_states",
-            "senderThreadId",
-            "sender_thread_id",
-        ] {
-            item.remove(key);
+        remove_codex_collaboration_internal_fields(item);
+        if let Some(arguments) = item
+            .get_mut("arguments")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            remove_codex_collaboration_internal_fields(arguments);
         }
     }
     if let Some(object) = enriched_raw.as_object_mut() {
@@ -5725,21 +5724,34 @@ fn codex_collaboration_tool_event(
 
 fn codex_collaboration_tool_arguments(item: &serde_json::Value) -> serde_json::Value {
     if let Some(arguments) = item.get("arguments").filter(|value| !value.is_null()) {
-        return arguments.clone();
+        let mut arguments = arguments.clone();
+        if let Some(arguments) = arguments.as_object_mut() {
+            remove_codex_collaboration_internal_fields(arguments);
+        }
+        return arguments;
     }
     let mut arguments = serde_json::Map::new();
-    for key in [
-        "prompt",
-        "message",
-        "input",
-        "receiverThreadIds",
-        "receiver_thread_ids",
-    ] {
+    for key in ["prompt", "message", "input"] {
         if let Some(value) = item.get(key).filter(|value| !value.is_null()) {
             arguments.insert(key.to_string(), value.clone());
         }
     }
     serde_json::Value::Object(arguments)
+}
+
+fn remove_codex_collaboration_internal_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    for key in [
+        "agentsStates",
+        "agents_states",
+        "senderThreadId",
+        "sender_thread_id",
+        "receiverThreadIds",
+        "receiver_thread_ids",
+    ] {
+        object.remove(key);
+    }
 }
 
 fn json_value_text(value: &serde_json::Value) -> String {

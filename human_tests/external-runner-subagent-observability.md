@@ -29,10 +29,10 @@
 - Codex 与 Trae X 在 mock 子 thread 输出消息、工具和 `turn/completed` 后仍继续处理根 turn，最终响应为 `ROOT_FINAL_OK`。
 - 两者都只在根 `turn/completed` 产生一次 `run_finished`；协作调用恰好是一组普通 `tool_started` / `tool_finished`。
 - Claude Code 的 `Task` 也只产生普通工具输入/输出，最终响应为 `ROOT_CLAUDE_FINAL_OK`。
-- 三条链路均不产生新的 `subagent_updated`，事件 JSON 不包含 mock 子消息、子工具输出或 `agentsStates` 内部详情。
+- 三条链路均不产生新的 `subagent_updated`，事件 JSON 不包含 mock 子消息、子工具输出、子 thread ID 或 `agentsStates` 内部详情。
 - 三次调用复用的隔离 Bifrost 服务持续存活，脚本输出 `[im-gateway-subagent-event-boundary] PASS` 后清理临时进程和目录。
 
-**实际结果（2026-08-11）**：通过。执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_subagent_event_boundary.sh`，Codex、Trae X、Claude Code 三次隔离 `/chat` 调用全部满足断言，脚本输出 `[im-gateway-subagent-event-boundary] PASS`；mock 子消息、子工具、内部 `agentsStates` 和 `subagent_updated` 均未进入根事件流。
+**实际结果（2026-08-11）**：通过。执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_subagent_event_boundary.sh`，Codex、Trae X、Claude Code 三次隔离 `/chat` 调用全部满足断言，脚本输出 `[im-gateway-subagent-event-boundary] PASS`；mock 子消息、子工具、子 thread ID、内部 `agentsStates` 和 `subagent_updated` 均未进入根事件流。
 
 ### TC-ERSO-02：真实 Trae X 子协作完成不结束根任务
 

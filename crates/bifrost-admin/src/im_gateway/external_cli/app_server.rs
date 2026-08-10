@@ -1820,6 +1820,11 @@ mod tests {
                     "tool": "spawnAgent",
                     "status": "inProgress",
                     "prompt": "Inspect the API boundary",
+                    "arguments": {
+                        "prompt": "Inspect the API boundary",
+                        "receiverThreadIds": ["agent-hidden"],
+                        "agentsStates": {"agent-hidden": {"status": "starting"}}
+                    },
                     "senderThreadId": "root-thread",
                     "receiverThreadIds": [],
                     "agentsStates": {}
@@ -1836,7 +1841,11 @@ mod tests {
             started_event.raw["arguments"]["prompt"],
             "Inspect the API boundary"
         );
+        assert!(started_event.raw["arguments"]
+            .get("receiverThreadIds")
+            .is_none());
         assert!(started_event.raw["arguments"].get("agentsStates").is_none());
+        assert!(!started_event.raw.to_string().contains("agent-hidden"));
 
         let updated = serde_json::json!({
             "method": "item/updated",
@@ -1923,6 +1932,7 @@ mod tests {
         );
         assert_eq!(multi_events[0].content, "Wait completed");
         assert!(!multi_events[0].content.contains("Still working"));
+        assert!(!multi_events[0].raw.to_string().contains("agent-1"));
         assert!(!multi_events[0].raw.to_string().contains("Still working"));
     }
 
