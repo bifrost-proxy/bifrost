@@ -17,6 +17,7 @@ use super::queue_manager::QueueItem;
 use super::types::{ImProviderConfig, ImTarget, SendResult};
 
 const OUTPUT_ELEMENT_ID: &str = "agent_output";
+const OUTPUT_CONTENT_ELEMENT_ID: &str = "agent_output_content";
 const PLAN_PANEL_ELEMENT_ID: &str = "agent_plan_panel";
 const PLAN_ELEMENT_ID: &str = "agent_plan";
 const TOOL_PANEL_ELEMENT_ID: &str = "agent_tool_panel";
@@ -1264,7 +1265,7 @@ impl FeishuProgressCardSession {
                 .update_card_element_content(
                     &self.provider,
                     &handle.card_id,
-                    OUTPUT_ELEMENT_ID,
+                    output_content_element_id(&self.snapshot),
                     &output_content,
                     sequence,
                     &uuid,
@@ -1684,11 +1685,7 @@ fn build_feishu_progress_card_unchecked(
     streaming_mode: bool,
 ) -> serde_json::Value {
     let mut elements = Vec::new();
-    let output_element = serde_json::json!({
-        "tag": "markdown",
-        "content": format_output_markdown(snapshot),
-        "element_id": OUTPUT_ELEMENT_ID
-    });
+    let output_element = build_output_element(snapshot, false);
 
     elements.push(build_status_panel_element(snapshot));
     if !snapshot.plan_steps.is_empty() || snapshot.proposed_plan.is_some() {
@@ -1734,11 +1731,7 @@ pub fn build_feishu_compact_progress_card(
     let elements = vec![
         build_status_panel_element(snapshot),
         build_compact_notice_element(snapshot),
-        serde_json::json!({
-            "tag": "markdown",
-            "content": format_compact_output_markdown(snapshot),
-            "element_id": OUTPUT_ELEMENT_ID
-        }),
+        build_output_element(snapshot, true),
     ];
 
     serde_json::json!({
@@ -1968,6 +1961,14 @@ fn output_hash(snapshot: &ImAgentProgressSnapshot) -> u64 {
     stable_hash(&format_output_markdown(snapshot))
 }
 
+fn output_content_element_id(snapshot: &ImAgentProgressSnapshot) -> &'static str {
+    if matches!(snapshot.phase, ImProgressPhase::Running) {
+        OUTPUT_ELEMENT_ID
+    } else {
+        OUTPUT_CONTENT_ELEMENT_ID
+    }
+}
+
 fn status_hash(snapshot: &ImAgentProgressSnapshot) -> u64 {
     element_hash(&build_status_panel_element(snapshot))
 }
@@ -2140,7 +2141,7 @@ fn build_plan_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::V
     serde_json::json!({
         "tag": "collapsible_panel",
         "element_id": PLAN_PANEL_ELEMENT_ID,
-        "expanded": true,
+        "expanded": matches!(snapshot.phase, ImProgressPhase::Running),
         "background_color": "grey",
         "header": {
             "title": {
@@ -2152,6 +2153,43 @@ fn build_plan_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::V
             "tag": "markdown",
             "content": format_plan_panel_markdown(snapshot),
             "element_id": PLAN_ELEMENT_ID
+        }]
+    })
+}
+
+fn build_output_element(snapshot: &ImAgentProgressSnapshot, compact: bool) -> serde_json::Value {
+    let content = if compact {
+        format_compact_output_markdown(snapshot)
+    } else {
+        format_output_markdown(snapshot)
+    };
+    if matches!(snapshot.phase, ImProgressPhase::Running) {
+        return serde_json::json!({
+            "tag": "markdown",
+            "content": content,
+            "element_id": OUTPUT_ELEMENT_ID
+        });
+    }
+
+    serde_json::json!({
+        "tag": "collapsible_panel",
+        "element_id": OUTPUT_ELEMENT_ID,
+        "expanded": false,
+        "background_color": "grey",
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": match snapshot.phase {
+                    ImProgressPhase::Failed => "失败结论",
+                    ImProgressPhase::Finished => "最终结论",
+                    ImProgressPhase::Running => unreachable!("running output is rendered above"),
+                }
+            }
+        },
+        "elements": [{
+            "tag": "markdown",
+            "content": content,
+            "element_id": OUTPUT_CONTENT_ELEMENT_ID
         }]
     })
 }
