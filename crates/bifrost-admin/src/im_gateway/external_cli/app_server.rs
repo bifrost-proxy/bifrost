@@ -288,6 +288,7 @@ pub(super) async fn run_command(
     read_handshake_response(
         &mut lines,
         1,
+        None,
         &mut stdout_bytes,
         &mut events,
         progress_tx.as_ref(),
@@ -302,6 +303,7 @@ pub(super) async fn run_command(
     let thread_response = read_handshake_response(
         &mut lines,
         2,
+        existing_thread_id.as_deref(),
         &mut stdout_bytes,
         &mut events,
         progress_tx.as_ref(),
@@ -326,6 +328,7 @@ pub(super) async fn run_command(
     let turn_response = read_handshake_response(
         &mut lines,
         3,
+        Some(&thread_id),
         &mut stdout_bytes,
         &mut events,
         progress_tx.as_ref(),
@@ -416,6 +419,15 @@ pub(super) async fn run_command(
                     }
                     continue;
                 }
+                if !app_server_frame_belongs_to_active_turn(&frame, &thread_id, &turn_id) {
+                    tracing::debug!(
+                        method = frame.get("method").and_then(serde_json::Value::as_str),
+                        root_thread_id = %thread_id,
+                        root_turn_id = %turn_id,
+                        "ignoring app-server notification outside the active root turn"
+                    );
+                    continue;
+                }
                 let frame_events = progress_events_from_app_server_frame(&frame);
                 if !frame_events.is_empty() {
                     let can_retry_capacity = should_retry_capacity_error(
@@ -467,6 +479,7 @@ pub(super) async fn run_command(
                         let retry_turn_response = read_handshake_response(
                             &mut lines,
                             retry_request_id,
+                            Some(&thread_id),
                             &mut stdout_bytes,
                             &mut events,
                             progress_tx.as_ref(),
@@ -671,6 +684,61 @@ fn progress_event_has_retry_side_effect(event: &ExternalCliProgressEvent) -> boo
             | ExternalCliProgressEventType::ToolFinished
             | ExternalCliProgressEventType::SubAgentUpdated
     )
+}
+
+fn app_server_frame_belongs_to_active_turn(
+    frame: &serde_json::Value,
+    root_thread_id: &str,
+    root_turn_id: &str,
+) -> bool {
+    let Some(method) = frame.get("method").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if method == "account/rateLimits/updated" {
+        return true;
+    }
+    if !app_server_frame_belongs_to_root_thread(frame, root_thread_id) {
+        return false;
+    }
+    let params = frame.get("params").expect("root thread scope has params");
+    let turn_id = params
+        .get("turnId")
+        .or_else(|| params.get("turn_id"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            params
+                .get("turn")
+                .and_then(|turn| turn.get("id"))
+                .and_then(serde_json::Value::as_str)
+        });
+    if method == "turn/completed" {
+        return turn_id == Some(root_turn_id);
+    }
+    turn_id.is_none_or(|turn_id| turn_id == root_turn_id)
+}
+
+fn app_server_frame_belongs_to_root_thread(
+    frame: &serde_json::Value,
+    root_thread_id: &str,
+) -> bool {
+    if frame.get("method").and_then(serde_json::Value::as_str) == Some("account/rateLimits/updated")
+    {
+        return true;
+    }
+    let Some(params) = frame.get("params") else {
+        return false;
+    };
+    let thread_id = params
+        .get("threadId")
+        .or_else(|| params.get("thread_id"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            params
+                .get("thread")
+                .and_then(|thread| thread.get("id"))
+                .and_then(serde_json::Value::as_str)
+        });
+    thread_id == Some(root_thread_id)
 }
 
 fn capacity_retry_delay(retry_attempt: u32) -> Duration {
@@ -947,6 +1015,7 @@ async fn write_jsonrpc_frame(
 async fn read_until_response(
     lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
     expected_id: u64,
+    root_thread_id: Option<&str>,
     stdout_bytes: &mut Vec<u8>,
     events: &mut Vec<ExternalCliProgressEvent>,
     progress_tx: Option<&mpsc::UnboundedSender<ExternalCliProgressEvent>>,
@@ -969,6 +1038,11 @@ async fn read_until_response(
                 .cloned()
                 .ok_or_else(|| format!("app-server response {expected_id} missing result"));
         }
+        if root_thread_id.is_some_and(|root_thread_id| {
+            !app_server_frame_belongs_to_root_thread(&frame, root_thread_id)
+        }) {
+            continue;
+        }
         for event in progress_events_from_app_server_frame(&frame) {
             if let Some(progress_tx) = progress_tx {
                 let _ = progress_tx.send(event.clone());
@@ -981,13 +1055,21 @@ async fn read_until_response(
 async fn read_handshake_response(
     lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
     expected_id: u64,
+    root_thread_id: Option<&str>,
     stdout_bytes: &mut Vec<u8>,
     events: &mut Vec<ExternalCliProgressEvent>,
     progress_tx: Option<&mpsc::UnboundedSender<ExternalCliProgressEvent>>,
 ) -> Result<serde_json::Value, String> {
     timeout(
         Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
-        read_until_response(lines, expected_id, stdout_bytes, events, progress_tx),
+        read_until_response(
+            lines,
+            expected_id,
+            root_thread_id,
+            stdout_bytes,
+            events,
+            progress_tx,
+        ),
     )
     .await
     .map_err(|_| {
@@ -1230,12 +1312,17 @@ fn progress_event_from_app_server_item(
     let item = params.get("item")?;
     let item_type = item.get("type")?.as_str()?;
     let completed = method == "item/completed";
-    if is_codex_subagent_item_type(item_type) {
-        return codex_subagent_event(
+    if is_codex_subagent_activity_item_type(item_type) {
+        return None;
+    }
+    if is_codex_collaboration_tool_item_type(item_type) {
+        if method == "item/updated" {
+            return None;
+        }
+        return codex_collaboration_tool_event(
             &serde_json::json!({
                 "type": method.replace('/', "."),
                 "item": item,
-                "appServerFrame": raw,
             }),
             completed,
         );
@@ -1668,7 +1755,60 @@ mod tests {
     }
 
     #[test]
-    fn app_server_subagent_collab_notifications_keep_prompt_target_state_and_phase() {
+    fn app_server_scope_requires_the_active_root_thread_and_turn() {
+        let root_item = serde_json::json!({
+            "method": "item/completed",
+            "params": {"threadId": "root-thread", "turnId": "root-turn", "item": {}}
+        });
+        assert!(app_server_frame_belongs_to_active_turn(
+            &root_item,
+            "root-thread",
+            "root-turn"
+        ));
+
+        let child_item = serde_json::json!({
+            "method": "item/completed",
+            "params": {"threadId": "child-thread", "turnId": "child-turn", "item": {}}
+        });
+        assert!(!app_server_frame_belongs_to_active_turn(
+            &child_item,
+            "root-thread",
+            "root-turn"
+        ));
+
+        let stale_root_turn = serde_json::json!({
+            "method": "turn/completed",
+            "params": {"threadId": "root-thread", "turn": {"id": "old-turn"}}
+        });
+        assert!(!app_server_frame_belongs_to_active_turn(
+            &stale_root_turn,
+            "root-thread",
+            "root-turn"
+        ));
+
+        let missing_turn = serde_json::json!({
+            "method": "turn/completed",
+            "params": {"threadId": "root-thread", "turn": {"status": "completed"}}
+        });
+        assert!(!app_server_frame_belongs_to_active_turn(
+            &missing_turn,
+            "root-thread",
+            "root-turn"
+        ));
+
+        let account_event = serde_json::json!({
+            "method": "account/rateLimits/updated",
+            "params": {"rateLimits": {}}
+        });
+        assert!(app_server_frame_belongs_to_active_turn(
+            &account_event,
+            "root-thread",
+            "root-turn"
+        ));
+    }
+
+    #[test]
+    fn app_server_collaboration_notifications_are_plain_tool_events() {
         let started = serde_json::json!({
             "method": "item/started",
             "params": {
@@ -1687,13 +1827,16 @@ mod tests {
             }
         });
         let started_event = progress_event_from_app_server_frame(&started).unwrap();
-        let started_progress = external_progress_subagent(&started_event).unwrap();
         assert_eq!(
             started_event.event_type,
-            ExternalCliProgressEventType::SubAgentUpdated
+            ExternalCliProgressEventType::ToolStarted
         );
-        assert_eq!(started_progress.task, "Inspect the API boundary");
-        assert_eq!(started_progress.phase, "dispatching");
+        assert_eq!(started_event.title.as_deref(), Some("spawnAgent"));
+        assert_eq!(
+            started_event.raw["arguments"]["prompt"],
+            "Inspect the API boundary"
+        );
+        assert!(started_event.raw["arguments"].get("agentsStates").is_none());
 
         let updated = serde_json::json!({
             "method": "item/updated",
@@ -1714,12 +1857,42 @@ mod tests {
                 }
             }
         });
-        let updated_progress =
-            external_progress_subagent(&progress_event_from_app_server_frame(&updated).unwrap())
-                .unwrap();
-        assert_eq!(updated_progress.agent_id.as_deref(), Some("agent-1"));
-        assert_eq!(updated_progress.phase, "waiting");
-        assert_eq!(updated_progress.detail.as_deref(), Some("Reading handlers"));
+        assert!(progress_event_from_app_server_frame(&updated).is_none());
+
+        let activity = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "root-thread",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "activity-1",
+                    "type": "subAgentActivity",
+                    "agentThreadId": "agent-1",
+                    "kind": "interrupted"
+                }
+            }
+        });
+        assert!(progress_event_from_app_server_frame(&activity).is_none());
+
+        let ordinary_tool_update = serde_json::json!({
+            "method": "item/updated",
+            "params": {
+                "threadId": "root-thread",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "mcp-1",
+                    "type": "mcpToolCall",
+                    "tool": "lookup",
+                    "arguments": {"query": "root-only"}
+                }
+            }
+        });
+        assert_eq!(
+            progress_event_from_app_server_frame(&ordinary_tool_update)
+                .expect("ordinary tool updates must keep their existing behavior")
+                .event_type,
+            ExternalCliProgressEventType::ToolStarted
+        );
 
         let multi = serde_json::json!({
             "method": "item/completed",
@@ -1730,8 +1903,9 @@ mod tests {
                     "id": "wait-2",
                     "type": "collabAgentToolCall",
                     "tool": "wait",
-                    "status": "inProgress",
+                    "status": "completed",
                     "prompt": null,
+                    "result": "Wait completed",
                     "senderThreadId": "root-thread",
                     "receiverThreadIds": ["agent-1", "agent-2"],
                     "agentsStates": {
@@ -1742,16 +1916,14 @@ mod tests {
             }
         });
         let multi_events = progress_events_from_app_server_frame(&multi);
-        assert_eq!(multi_events.len(), 2);
-        let agent_ids = multi_events
-            .iter()
-            .filter_map(external_progress_subagent)
-            .filter_map(|progress| progress.agent_id)
-            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(multi_events.len(), 1);
         assert_eq!(
-            agent_ids,
-            std::collections::BTreeSet::from(["agent-1".to_string(), "agent-2".to_string()])
+            multi_events[0].event_type,
+            ExternalCliProgressEventType::ToolFinished
         );
+        assert_eq!(multi_events[0].content, "Wait completed");
+        assert!(!multi_events[0].content.contains("Still working"));
+        assert!(!multi_events[0].raw.to_string().contains("Still working"));
     }
 
     #[test]
@@ -2015,6 +2187,129 @@ mod tests {
         let status = child.wait().await.expect("wait for mock app-server");
         release_handle.join().expect("release writable handle");
         assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_and_traex_ignore_child_turn_completion_until_root_turn_finishes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = temp_dir.path().join("mock-collaboration-app-server");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    frame = json.loads(line)
+    method = frame.get("method")
+    request_id = frame.get("id")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method in ("thread/start", "thread/resume"):
+        send({"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"root-thread"}}})
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"root-thread"}}})
+    elif method == "turn/start":
+        send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"child-thread","turnId":"child-turn","item":{"id":"early-child-message","type":"agentMessage","text":"EARLY_CHILD_FINAL_MUST_NOT_ESCAPE"}}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"completed"}}})
+        send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"root-turn"}}})
+        send({"jsonrpc":"2.0","method":"item/started","params":{"threadId":"root-thread","turnId":"root-turn","item":{"id":"collab-1","type":"collabAgentToolCall","tool":"spawnAgent","status":"inProgress","prompt":"inspect the boundary","receiverThreadIds":[],"agentsStates":{}}}})
+        send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"child-thread","turnId":"child-turn","item":{"id":"child-message","type":"agentMessage","text":"CHILD_FINAL_MUST_NOT_ESCAPE"}}})
+        send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"child-thread","turnId":"child-turn","item":{"id":"child-tool","type":"commandExecution","command":"false","aggregatedOutput":"CHILD_TOOL_MUST_NOT_ESCAPE","exitCode":1}}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"completed"}}})
+        send({
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "threadId": "root-thread",
+                "turnId": "root-turn",
+                "item": {
+                    "id": "collab-1",
+                    "type": "collabAgentToolCall",
+                    "tool": "spawnAgent",
+                    "status": "completed",
+                    "prompt": "inspect the boundary",
+                    "result": "child result received",
+                    "receiverThreadIds": ["child-thread"],
+                    "agentsStates": {
+                        "child-thread": {
+                            "status": "completed",
+                            "message": "CHILD_INTERNAL_STATE_MUST_NOT_ESCAPE"
+                        }
+                    }
+                }
+            }
+        })
+        send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"root-thread","turnId":"root-turn","item":{"id":"root-message","type":"agentMessage","text":"ROOT_FINAL_OK"}}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"root-thread","turn":{"id":"root-turn","status":"completed"}}})
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        for adapter in [DEFAULT_ADAPTER, TRAEX_ADAPTER] {
+            let mut request = request(adapter);
+            request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+            request.adapter_config.executable = Some(executable.display().to_string());
+            let run_id = format!("mock-{adapter}-subagent-boundary-run");
+            let output = run_command(
+                &run_id,
+                None,
+                &request,
+                "delegate and finish".to_string(),
+                temp_dir.path().join(format!("stop-{adapter}")),
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(output.status, ExternalCliRunStatus::Succeeded, "{adapter}");
+            assert_eq!(output.exit_code, Some(0), "{adapter}");
+            assert!(output.events.iter().any(|event| {
+                event.event_type == ExternalCliProgressEventType::AssistantFinal
+                    && event.content == "ROOT_FINAL_OK"
+            }));
+            assert!(!output.events.iter().any(|event| {
+                event.content.contains("CHILD_FINAL_MUST_NOT_ESCAPE")
+                    || event.content.contains("EARLY_CHILD_FINAL_MUST_NOT_ESCAPE")
+                    || event.content.contains("CHILD_TOOL_MUST_NOT_ESCAPE")
+                    || event
+                        .content
+                        .contains("CHILD_INTERNAL_STATE_MUST_NOT_ESCAPE")
+                    || event.event_type == ExternalCliProgressEventType::SubAgentUpdated
+            }));
+            assert_eq!(
+                output
+                    .events
+                    .iter()
+                    .filter(|event| event.event_type == ExternalCliProgressEventType::RunFinished)
+                    .count(),
+                1,
+                "{adapter} must finish exactly once on the root turn"
+            );
+            assert_eq!(
+                output
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event.event_type,
+                            ExternalCliProgressEventType::ToolStarted
+                                | ExternalCliProgressEventType::ToolFinished
+                        ) && event.title.as_deref() == Some("spawnAgent")
+                    })
+                    .count(),
+                2,
+                "{adapter} collaboration must be one plain tool input/output pair"
+            );
+        }
     }
 
     #[cfg(unix)]

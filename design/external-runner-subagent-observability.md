@@ -1,5 +1,9 @@
 # External Runner 子 Agent 可观测性
 
+> 兼容说明：本文描述的专属 `subagent_updated` 实时归一化已被
+> [External Runner 子 Agent 事件边界](./external-runner-subagent-event-boundary.md) 取代。
+> 运行时不再解析子 Agent 内部事件；该数据类型与 UI 仅为升级前历史记录保留兼容。
+
 ## 背景
 
 Bifrost 会把 Codex、Trae X 与 Claude Code 的执行进度同时呈现在飞书 progress card 和 Web UI Agent Chat。现有归一化层只区分整体 run、thinking、plan 与普通 tool call。子 Agent 派发因此被压成普通工具事件：Codex / Trae X 的 `collabAgentToolCall` 在开始阶段读不到 `prompt`，Claude Code 的 `Task` / `Agent` 也只显示工具名。用户无法稳定看到派发任务、目标子 Agent、当前阶段、独立状态和耗时。

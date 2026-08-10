@@ -5560,8 +5560,11 @@ fn parse_codex_cli_event(
             if item_type == "todo_list" {
                 return codex_todo_list_event(raw);
             }
-            if is_codex_subagent_item_type(&item_type) {
-                return codex_subagent_event(raw, false);
+            if is_codex_collaboration_tool_item_type(&item_type) {
+                return codex_collaboration_tool_event(raw, false);
+            }
+            if is_codex_subagent_activity_item_type(&item_type) {
+                return None;
             }
             match item_type.as_str() {
                 "command_execution" => Some(codex_command_execution_event(
@@ -5589,8 +5592,6 @@ fn parse_codex_cli_event(
             let item_type = value_text_path(raw, &["item", "type"])?;
             if item_type == "todo_list" {
                 codex_todo_list_event(raw)
-            } else if is_codex_subagent_item_type(&item_type) {
-                codex_subagent_event(raw, false)
             } else {
                 None
             }
@@ -5600,8 +5601,11 @@ fn parse_codex_cli_event(
             if item_type == "todo_list" {
                 return codex_todo_list_event(raw);
             }
-            if is_codex_subagent_item_type(&item_type) {
-                return codex_subagent_event(raw, true);
+            if is_codex_collaboration_tool_item_type(&item_type) {
+                return codex_collaboration_tool_event(raw, true);
+            }
+            if is_codex_subagent_activity_item_type(&item_type) {
+                return None;
             }
             if item_type == "command_execution" {
                 return Some(codex_command_execution_event(
@@ -5647,123 +5651,102 @@ fn parse_codex_cli_event(
     }
 }
 
-fn is_codex_subagent_item_type(item_type: &str) -> bool {
+fn is_codex_collaboration_tool_item_type(item_type: &str) -> bool {
     matches!(
         item_type,
-        "collabAgentToolCall"
-            | "collab_agent_tool_call"
-            | "collaboration_tool_call"
-            | "subAgentActivity"
-            | "sub_agent_activity"
+        "collabAgentToolCall" | "collab_agent_tool_call" | "collaboration_tool_call"
     )
 }
 
-fn codex_subagent_event(
+fn is_codex_subagent_activity_item_type(item_type: &str) -> bool {
+    matches!(item_type, "subAgentActivity" | "sub_agent_activity")
+}
+
+fn codex_collaboration_tool_event(
     raw: &serde_json::Value,
-    item_completed: bool,
+    completed: bool,
 ) -> Option<ExternalCliProgressEvent> {
     let item = raw.get("item")?;
-    let item_type = value_text(item, &["type"])?;
-    let updated_at_ms = now_ms();
-    if matches!(
-        item_type.as_str(),
-        "subAgentActivity" | "sub_agent_activity"
-    ) {
-        let kind = value_text(item, &["kind"]).unwrap_or_else(|| "started".to_string());
-        let status = match kind.as_str() {
-            "interrupted" => "interrupted",
-            _ => "running",
-        };
-        let phase = match kind.as_str() {
-            "interacted" => "interacting",
-            "interrupted" => "interrupted",
-            _ => "working",
-        };
-        let agent_id = value_text(item, &["agentThreadId", "agent_thread_id"]);
-        let id = value_text(item, &["id"])
-            .or_else(|| agent_id.clone())
-            .unwrap_or_else(|| format!("subagent-{updated_at_ms}"));
-        let label = value_text(item, &["agentPath", "agent_path"]);
-        return Some(external_subagent_progress_event(
-            raw,
-            id,
-            agent_id,
-            label,
-            String::new(),
-            phase.to_string(),
-            status.to_string(),
-            None,
-            Some(updated_at_ms),
-            updated_at_ms,
-            None,
-        ));
-    }
-
-    let tool = value_text(item, &["tool"]).unwrap_or_else(|| "spawnAgent".to_string());
-    let receiver_ids = item
-        .get("receiverThreadIds")
-        .or_else(|| item.get("receiver_thread_ids"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let states = item
-        .get("agentsStates")
-        .or_else(|| item.get("agents_states"))
-        .and_then(serde_json::Value::as_object);
-    let agent_id = receiver_ids
-        .first()
-        .cloned()
-        .or_else(|| states.and_then(|states| states.keys().next().cloned()));
-    let state = agent_id
-        .as_deref()
-        .and_then(|id| states.and_then(|states| states.get(id)))
-        .or_else(|| states.and_then(|states| states.values().next()));
-    let agent_status = state.and_then(|state| value_text(state, &["status"]));
-    let call_status = value_text(item, &["status"]);
-    let status = normalize_codex_subagent_status(
-        agent_status.as_deref(),
-        call_status.as_deref(),
-        item_completed,
-    );
-    let phase = match tool.as_str() {
-        "spawnAgent" | "spawn_agent" => {
-            if agent_id.is_some() {
-                "working"
-            } else {
-                "dispatching"
-            }
-        }
-        "sendInput" | "send_input" => "interacting",
-        "resumeAgent" | "resume_agent" => "resuming",
-        "wait" => "waiting",
-        "closeAgent" | "close_agent" => "closing",
-        _ => "working",
+    let tool_name =
+        value_text(item, &["tool", "name"]).unwrap_or_else(|| "collabAgentToolCall".to_string());
+    let arguments = codex_collaboration_tool_arguments(item);
+    let result = if completed {
+        item.get("result")
+            .or_else(|| item.get("error"))
+            .or_else(|| item.get("message"))
+            .map(json_value_text)
+            .or_else(|| value_text(item, &["status"]))
+            .unwrap_or_default()
+    } else {
+        claude_code_tool_arguments_text(&arguments)
     };
-    let detail = state
-        .and_then(|state| value_text(state, &["message"]))
-        .or_else(|| value_text(item, &["error", "result", "message"]));
-    let task = value_text(item, &["prompt", "task", "description"]).unwrap_or_default();
-    let id = value_text(item, &["id"])
-        .or_else(|| agent_id.clone())
-        .unwrap_or_else(|| format!("subagent-{updated_at_ms}"));
-    Some(external_subagent_progress_event(
-        raw,
-        id,
-        agent_id,
-        None,
-        task,
-        phase.to_string(),
-        status.to_string(),
-        detail,
-        (!item_completed).then_some(updated_at_ms),
-        updated_at_ms,
-        item.get("durationMs")
-            .or_else(|| item.get("duration_ms"))
-            .and_then(serde_json::Value::as_u64),
-    ))
+    let failed = value_text(item, &["status"]).is_some_and(|status| {
+        matches!(
+            status.trim().to_ascii_lowercase().as_str(),
+            "failed" | "errored" | "error" | "interrupted" | "cancelled" | "canceled"
+        )
+    }) || item.get("error").is_some_and(|error| !error.is_null());
+    let mut enriched_raw = raw.clone();
+    if let Some(item) = enriched_raw
+        .get_mut("item")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for key in [
+            "agentsStates",
+            "agents_states",
+            "senderThreadId",
+            "sender_thread_id",
+        ] {
+            item.remove(key);
+        }
+    }
+    if let Some(object) = enriched_raw.as_object_mut() {
+        object.insert("tool_name".to_string(), serde_json::json!(tool_name));
+        object.insert(
+            "tool_use_id".to_string(),
+            item.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        );
+        object.insert("arguments".to_string(), arguments);
+        if completed {
+            object.insert("success".to_string(), serde_json::json!(!failed));
+        }
+    }
+    Some(ExternalCliProgressEvent {
+        event_type: if completed {
+            ExternalCliProgressEventType::ToolFinished
+        } else {
+            ExternalCliProgressEventType::ToolStarted
+        },
+        content: result,
+        title: Some(tool_name),
+        raw: enriched_raw,
+    })
+}
+
+fn codex_collaboration_tool_arguments(item: &serde_json::Value) -> serde_json::Value {
+    if let Some(arguments) = item.get("arguments").filter(|value| !value.is_null()) {
+        return arguments.clone();
+    }
+    let mut arguments = serde_json::Map::new();
+    for key in [
+        "prompt",
+        "message",
+        "input",
+        "receiverThreadIds",
+        "receiver_thread_ids",
+    ] {
+        if let Some(value) = item.get(key).filter(|value| !value.is_null()) {
+            arguments.insert(key.to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(arguments)
+}
+
+fn json_value_text(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
 }
 
 fn normalize_codex_subagent_status(
@@ -5785,46 +5768,6 @@ fn normalize_codex_subagent_status(
         Some("inProgress" | "in_progress") => "running",
         _ if item_completed => "completed",
         _ => "running",
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn external_subagent_progress_event(
-    raw: &serde_json::Value,
-    id: String,
-    agent_id: Option<String>,
-    label: Option<String>,
-    task: String,
-    phase: String,
-    status: String,
-    detail: Option<String>,
-    started_at_ms: Option<u64>,
-    updated_at_ms: u64,
-    duration_ms: Option<u64>,
-) -> ExternalCliProgressEvent {
-    let mut enriched_raw = raw.clone();
-    if let Some(object) = enriched_raw.as_object_mut() {
-        object.insert(
-            "subagent".to_string(),
-            serde_json::json!({
-                "id": id,
-                "agentId": agent_id,
-                "label": label.clone(),
-                "task": task.clone(),
-                "phase": phase,
-                "status": status,
-                "detail": detail,
-                "startedAtMs": started_at_ms,
-                "updatedAtMs": updated_at_ms,
-                "durationMs": duration_ms,
-            }),
-        );
-    }
-    ExternalCliProgressEvent {
-        event_type: ExternalCliProgressEventType::SubAgentUpdated,
-        content: task,
-        title: label,
-        raw: enriched_raw,
     }
 }
 
@@ -6036,18 +5979,6 @@ fn claude_code_tool_use_event(
             started_at_ms,
         },
     );
-    if is_claude_code_subagent_tool(&tool_name) {
-        return Some(claude_code_subagent_event(
-            raw,
-            &tool_use_id,
-            &tool_name,
-            &arguments,
-            started_at_ms,
-            false,
-            false,
-            String::new(),
-        ));
-    }
     let mut enriched_raw = raw.clone();
     if let Some(object) = enriched_raw.as_object_mut() {
         object
@@ -6108,22 +6039,6 @@ fn claude_code_tool_result_event(
         .and_then(|value| value.get("interrupted"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    if context
-        .as_ref()
-        .is_some_and(|context| is_claude_code_subagent_tool(&context.name))
-    {
-        let context = context.expect("checked above");
-        return Some(claude_code_subagent_event(
-            raw,
-            &tool_use_id,
-            &context.name,
-            &context.arguments,
-            context.started_at_ms,
-            true,
-            is_error || interrupted,
-            result,
-        ));
-    }
     let mut enriched_raw = raw.clone();
     if let Some(object) = enriched_raw.as_object_mut() {
         object
@@ -6138,6 +6053,22 @@ fn claude_code_tool_result_event(
         object
             .entry("success".to_string())
             .or_insert_with(|| serde_json::json!(!is_error && !interrupted));
+        if let Some(context) = context.as_ref() {
+            let duration_ms = raw
+                .get("tool_use_result")
+                .and_then(|value| {
+                    value
+                        .get("totalDurationMs")
+                        .or_else(|| value.get("total_duration_ms"))
+                        .or_else(|| value.get("durationMs"))
+                        .or_else(|| value.get("duration_ms"))
+                })
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(|| now_ms().saturating_sub(context.started_at_ms));
+            object
+                .entry("durationMs".to_string())
+                .or_insert_with(|| serde_json::json!(duration_ms));
+        }
     }
     Some(ExternalCliProgressEvent {
         event_type: ExternalCliProgressEventType::ToolFinished,
@@ -6145,74 +6076,6 @@ fn claude_code_tool_result_event(
         title: Some(tool_name),
         raw: enriched_raw,
     })
-}
-
-fn is_claude_code_subagent_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name.trim().to_ascii_lowercase().as_str(),
-        "task" | "agent"
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn claude_code_subagent_event(
-    raw: &serde_json::Value,
-    tool_use_id: &str,
-    tool_name: &str,
-    arguments: &serde_json::Value,
-    started_at_ms: u64,
-    completed: bool,
-    failed_or_interrupted: bool,
-    result: String,
-) -> ExternalCliProgressEvent {
-    let updated_at_ms = now_ms();
-    let interrupted = raw
-        .get("tool_use_result")
-        .and_then(|value| value.get("interrupted"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let status = if interrupted {
-        "interrupted"
-    } else if failed_or_interrupted {
-        "failed"
-    } else if completed {
-        "completed"
-    } else {
-        "running"
-    };
-    let task = value_text(arguments, &["prompt", "description", "task"]).unwrap_or_default();
-    let label = value_text(arguments, &["subagent_type", "subagentType", "agent_type"])
-        .or_else(|| Some(tool_name.to_string()));
-    let agent_id = value_text_path(raw, &["tool_use_result", "agentId"])
-        .or_else(|| value_text_path(raw, &["tool_use_result", "agent_id"]))
-        .or_else(|| value_text(raw, &["agentId", "agent_id"]));
-    let provider_duration = raw
-        .get("tool_use_result")
-        .and_then(|value| {
-            value
-                .get("totalDurationMs")
-                .or_else(|| value.get("total_duration_ms"))
-                .or_else(|| value.get("durationMs"))
-                .or_else(|| value.get("duration_ms"))
-        })
-        .or_else(|| raw.get("durationMs"))
-        .or_else(|| raw.get("duration_ms"))
-        .and_then(serde_json::Value::as_u64);
-    let duration_ms = completed
-        .then(|| provider_duration.unwrap_or_else(|| updated_at_ms.saturating_sub(started_at_ms)));
-    external_subagent_progress_event(
-        raw,
-        tool_use_id.to_string(),
-        agent_id,
-        label,
-        task,
-        if completed { "finished" } else { "working" }.to_string(),
-        status.to_string(),
-        (!result.trim().is_empty()).then_some(result),
-        Some(started_at_ms),
-        updated_at_ms,
-        duration_ms,
-    )
 }
 
 fn claude_code_message_content(raw: &serde_json::Value) -> Option<&serde_json::Value> {

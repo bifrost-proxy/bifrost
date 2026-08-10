@@ -4413,14 +4413,39 @@ mod tests {
     }
 
     #[test]
-    fn external_runner_subagent_progress_is_flattened_and_persisted_for_web_replay() {
-        let mut events = crate::im_gateway::external_cli::parse_progress_events(
-            r#"{"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"in_progress","prompt":"Review auth","receiver_thread_ids":["agent-7"],"sender_thread_id":"root","agents_states":{"agent-7":{"status":"running","message":"Inspecting guards"}}}}
-{"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"completed","prompt":"Review auth","receiver_thread_ids":["agent-7"],"sender_thread_id":"root","agents_states":{"agent-7":{"status":"completed","message":"Review complete"}}}}"#,
-        );
-        assert_eq!(events.len(), 2);
-        let running = events.remove(0);
-        let terminal = events.remove(0);
+    fn legacy_external_runner_subagent_progress_is_preserved_for_web_replay() {
+        let running = crate::im_gateway::external_cli::ExternalCliProgressEvent {
+            event_type:
+                crate::im_gateway::external_cli::ExternalCliProgressEventType::SubAgentUpdated,
+            content: "Review auth".to_string(),
+            title: None,
+            raw: serde_json::json!({
+                "subagent": {
+                    "id": "collab-1",
+                    "agentId": "agent-7",
+                    "task": "Review auth",
+                    "status": "running",
+                    "phase": "working",
+                    "detail": "Inspecting guards"
+                }
+            }),
+        };
+        let terminal = crate::im_gateway::external_cli::ExternalCliProgressEvent {
+            event_type:
+                crate::im_gateway::external_cli::ExternalCliProgressEventType::SubAgentUpdated,
+            content: "Review auth".to_string(),
+            title: None,
+            raw: serde_json::json!({
+                "subagent": {
+                    "id": "collab-1",
+                    "agentId": "agent-7",
+                    "task": "Review auth",
+                    "status": "completed",
+                    "phase": "finished",
+                    "detail": "Review complete"
+                }
+            }),
+        };
         let payload = external_cli_progress_event_payload(&running);
         assert_eq!(payload["eventType"], "sub_agent_updated");
         assert_eq!(payload["subagent"]["agentId"], "agent-7");

@@ -291,110 +291,95 @@ fn codex_cli_parser_maps_real_todo_list_events_to_plan_updates() {
 }
 
 #[test]
-fn codex_and_traex_collab_events_preserve_subagent_task_status_and_identity() {
+fn codex_and_traex_collab_events_are_plain_tool_input_and_output() {
     let stdout = r#"{"type":"item.started","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":[],"agents_states":{}}}
 {"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"running","message":"Inspecting handlers"}}}}
-{"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"completed","prompt":null,"sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"completed","message":"Review complete"}}}}"#;
+{"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"completed","prompt":"Review the authentication flow","result":"Review complete","sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"completed","message":"internal detail must stay hidden"}}}}"#;
 
     let events = parse_progress_events(stdout);
-    assert_eq!(events.len(), 3);
-    assert!(events
-        .iter()
-        .all(|event| { event.event_type == ExternalCliProgressEventType::SubAgentUpdated }));
-
-    let started = external_progress_subagent(&events[0]).expect("started subagent");
-    assert_eq!(started.id, "collab-1");
-    assert_eq!(started.task, "Review the authentication flow");
-    assert_eq!(started.label, None);
-    assert_eq!(started.phase, "dispatching");
-    assert_eq!(started.status, bifrost_agent::SubAgentStatus::Running);
-
-    let working = external_progress_subagent(&events[1]).expect("working subagent");
-    assert_eq!(working.agent_id.as_deref(), Some("agent-7"));
-    assert_eq!(working.phase, "working");
-    assert_eq!(working.detail.as_deref(), Some("Inspecting handlers"));
-
-    let completed = external_progress_subagent(&events[2]).expect("completed subagent");
-    assert_eq!(completed.agent_id.as_deref(), Some("agent-7"));
-    assert_eq!(completed.phase, "waiting");
-    assert_eq!(completed.status, bifrost_agent::SubAgentStatus::Completed);
-    assert_eq!(completed.detail.as_deref(), Some("Review complete"));
+    assert_eq!(events.len(), 2, "item.updated is internal lifecycle noise");
+    assert_eq!(
+        events[0].event_type,
+        ExternalCliProgressEventType::ToolStarted
+    );
+    assert_eq!(events[0].title.as_deref(), Some("spawnAgent"));
+    assert_eq!(
+        events[0].raw["arguments"]["prompt"],
+        "Review the authentication flow"
+    );
+    assert!(events[0].raw["arguments"].get("agents_states").is_none());
+    assert_eq!(
+        events[1].event_type,
+        ExternalCliProgressEventType::ToolFinished
+    );
+    assert_eq!(events[1].content, "Review complete");
+    assert_eq!(events[1].raw["success"], true);
+    assert!(!events[1].content.contains("internal detail"));
+    assert!(!events[1].raw.to_string().contains("internal detail"));
 
     let mapped = external_progress_to_agent_turn_event(
         "session",
         TRAEX_ADAPTER,
         ExternalCliProgressStatusContext::new(None, None, None, None, None, None),
-        &events[1],
+        &events[0],
     )
-    .expect("provider-neutral event");
+    .expect("plain tool event");
     assert!(matches!(
         mapped,
-        bifrost_agent::AgentTurnProgressEvent::SubAgentUpdated { progress }
-            if progress.agent_id.as_deref() == Some("agent-7")
+        bifrost_agent::AgentTurnProgressEvent::ToolStarted { .. }
     ));
 }
 
 #[test]
-fn codex_subagent_activity_maps_agent_path_and_interruption() {
+fn codex_subagent_activity_is_not_user_visible() {
     let events = parse_progress_events(
         r#"{"type":"item.started","item":{"id":"activity-1","type":"sub_agent_activity","agent_thread_id":"agent-9","agent_path":"reviewer","kind":"started"}}
 {"type":"item.completed","item":{"id":"activity-2","type":"sub_agent_activity","agent_thread_id":"agent-9","agent_path":"reviewer","kind":"interrupted"}}"#,
     );
-
-    let started = external_progress_subagent(&events[0]).unwrap();
-    assert_eq!(started.agent_id.as_deref(), Some("agent-9"));
-    assert_eq!(started.label.as_deref(), Some("reviewer"));
-    assert_eq!(started.status, bifrost_agent::SubAgentStatus::Running);
-    let interrupted = external_progress_subagent(&events[1]).unwrap();
-    assert_eq!(
-        interrupted.status,
-        bifrost_agent::SubAgentStatus::Interrupted
-    );
+    assert!(events.is_empty());
 }
 
 #[test]
-fn codex_subagent_collab_event_expands_each_agent_state_without_collapsing_concurrency() {
+fn codex_collab_completion_does_not_expand_internal_agent_states() {
     let events = parse_progress_events(
-        r#"{"type":"item.completed","item":{"id":"wait-9","type":"collab_agent_tool_call","tool":"wait","status":"in_progress","prompt":null,"sender_thread_id":"root","receiver_thread_ids":["agent-1","agent-2"],"agents_states":{"agent-1":{"status":"completed","message":"Review complete"},"agent-2":{"status":"running","message":"Still testing"}}}}"#,
+        r#"{"type":"item.completed","item":{"id":"wait-9","type":"collab_agent_tool_call","tool":"wait","status":"completed","result":"Wait completed","sender_thread_id":"root","receiver_thread_ids":["agent-1","agent-2"],"agents_states":{"agent-1":{"status":"completed","message":"Review complete"},"agent-2":{"status":"running","message":"Still testing"}}}}"#,
     );
 
-    assert_eq!(events.len(), 2);
-    let progress = events
-        .iter()
-        .filter_map(external_progress_subagent)
-        .map(|progress| (progress.agent_id.clone().unwrap(), progress))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let first = &progress["agent-1"];
-    let second = &progress["agent-2"];
-    assert_ne!(first.id, second.id);
-    assert_eq!(first.agent_id.as_deref(), Some("agent-1"));
-    assert_eq!(first.status, bifrost_agent::SubAgentStatus::Completed);
-    assert_eq!(first.detail.as_deref(), Some("Review complete"));
-    assert_eq!(second.agent_id.as_deref(), Some("agent-2"));
-    assert_eq!(second.status, bifrost_agent::SubAgentStatus::Running);
-    assert_eq!(second.detail.as_deref(), Some("Still testing"));
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].event_type,
+        ExternalCliProgressEventType::ToolFinished
+    );
+    assert_eq!(events[0].content, "Wait completed");
+    assert!(!events[0].content.contains("Still testing"));
 }
 
 #[test]
-fn codex_failed_and_claude_interrupted_subagents_keep_terminal_state() {
+fn codex_failed_and_claude_interrupted_collaboration_tools_keep_failure_state() {
     let failed = parse_progress_events(
-        r#"{"type":"item.completed","item":{"id":"collab-failed","type":"collab_agent_tool_call","tool":"wait","status":"failed","prompt":"Review auth","receiver_thread_ids":["agent-failed"],"agents_states":{"agent-failed":{"status":"errored","message":"Permission denied"}}}}"#,
+        r#"{"type":"item.completed","item":{"id":"collab-failed","type":"collab_agent_tool_call","tool":"wait","status":"failed","prompt":"Review auth","error":"Permission denied","receiver_thread_ids":["agent-failed"],"agents_states":{"agent-failed":{"status":"errored","message":"internal"}}}}"#,
     );
-    let failed = external_progress_subagent(&failed[0]).unwrap();
-    assert_eq!(failed.status, bifrost_agent::SubAgentStatus::Failed);
-    assert_eq!(failed.detail.as_deref(), Some("Permission denied"));
+    assert_eq!(
+        failed[0].event_type,
+        ExternalCliProgressEventType::ToolFinished
+    );
+    assert_eq!(failed[0].content, "Permission denied");
+    assert_eq!(failed[0].raw["success"], false);
 
     let interrupted = parse_progress_events(
         r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"task-interrupted","name":"Agent","input":{"description":"Inspect auth","prompt":"Review auth","subagent_type":"reviewer"}}]}}
 {"type":"user","message":{"content":[{"tool_use_id":"task-interrupted","type":"tool_result","content":"Stopped by parent","is_error":true}]},"tool_use_result":{"agentId":"claude-agent-2","totalDurationMs":2500,"interrupted":true}}"#,
     );
-    let interrupted = external_progress_subagent(&interrupted[1]).unwrap();
     assert_eq!(
-        interrupted.status,
-        bifrost_agent::SubAgentStatus::Interrupted
+        interrupted[0].event_type,
+        ExternalCliProgressEventType::ToolStarted
     );
-    assert_eq!(interrupted.duration_ms, Some(2500));
-    assert_eq!(interrupted.detail.as_deref(), Some("Stopped by parent"));
+    assert_eq!(
+        interrupted[1].event_type,
+        ExternalCliProgressEventType::ToolFinished
+    );
+    assert_eq!(interrupted[1].content, "Stopped by parent");
+    assert_eq!(interrupted[1].raw["success"], false);
 }
 
 #[test]
@@ -791,26 +776,28 @@ fn claude_code_parser_maps_tool_use_and_tool_result() {
 }
 
 #[test]
-fn claude_code_task_tool_maps_to_provider_neutral_subagent_progress() {
+fn claude_code_task_tool_uses_plain_tool_events() {
     let stdout = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"task_1","name":"Task","input":{"description":"Inspect auth","prompt":"Review the authentication flow and report risks","subagent_type":"security-reviewer"}}]}}
 {"type":"user","message":{"content":[{"tool_use_id":"task_1","type":"tool_result","content":"Found no blocker","is_error":false}]},"tool_use_result":{"agentId":"claude-agent-1","totalDurationMs":4200,"interrupted":false}}"#;
 
     let events = parse_progress_events(stdout);
     assert_eq!(events.len(), 2);
-    let started = external_progress_subagent(&events[0]).unwrap();
-    assert_eq!(started.id, "task_1");
-    assert_eq!(started.label.as_deref(), Some("security-reviewer"));
     assert_eq!(
-        started.task,
+        events[0].event_type,
+        ExternalCliProgressEventType::ToolStarted
+    );
+    assert_eq!(events[0].title.as_deref(), Some("Task"));
+    assert_eq!(
+        events[0].raw["arguments"]["prompt"],
         "Review the authentication flow and report risks"
     );
-    assert_eq!(started.status, bifrost_agent::SubAgentStatus::Running);
-
-    let completed = external_progress_subagent(&events[1]).unwrap();
-    assert_eq!(completed.agent_id.as_deref(), Some("claude-agent-1"));
-    assert_eq!(completed.status, bifrost_agent::SubAgentStatus::Completed);
-    assert_eq!(completed.duration_ms, Some(4200));
-    assert_eq!(completed.detail.as_deref(), Some("Found no blocker"));
+    assert_eq!(
+        events[1].event_type,
+        ExternalCliProgressEventType::ToolFinished
+    );
+    assert_eq!(events[1].title.as_deref(), Some("Task"));
+    assert_eq!(events[1].content, "Found no blocker");
+    assert_eq!(events[1].raw["success"], true);
 }
 
 #[test]
@@ -3761,7 +3748,7 @@ fn progress_event_observation_tracks_and_freezes_subagent_duration() {
 }
 
 #[test]
-fn subagent_status_and_phase_fallbacks_cover_provider_edge_states() {
+fn legacy_subagent_status_fallbacks_remain_compatible_for_history_replay() {
     assert_eq!(
         normalize_codex_subagent_status(Some("pendingInit"), None, false),
         "pending"
@@ -3787,19 +3774,6 @@ fn subagent_status_and_phase_fallbacks_cover_provider_edge_states() {
         "running"
     );
 
-    let events = parse_progress_events(
-        r#"{"type":"item.updated","item":{"id":"close-1","type":"collab_agent_tool_call","tool":"closeAgent","status":"in_progress"}}
-{"type":"item.updated","item":{"id":"custom-1","type":"collab_agent_tool_call","tool":"customAction","status":"in_progress"}}"#,
-    );
-    assert_eq!(
-        external_progress_subagent(&events[0]).unwrap().phase,
-        "closing"
-    );
-    assert_eq!(
-        external_progress_subagent(&events[1]).unwrap().phase,
-        "working"
-    );
-
     let unknown = ExternalCliProgressEvent {
         event_type: ExternalCliProgressEventType::SubAgentUpdated,
         content: String::new(),
@@ -3813,14 +3787,18 @@ fn subagent_status_and_phase_fallbacks_cover_provider_edge_states() {
 }
 
 #[test]
-fn claude_code_subagent_error_without_interrupt_maps_to_failed() {
+fn claude_code_task_error_without_interrupt_is_a_failed_plain_tool() {
     let events = parse_progress_events(
         r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"task-failed","name":"Task","input":{"prompt":"Review auth"}}]}}
 {"type":"user","message":{"content":[{"tool_use_id":"task-failed","type":"tool_result","content":"Permission denied","is_error":true}]},"tool_use_result":{"interrupted":false}}"#,
     );
-    let failed = external_progress_subagent(&events[1]).unwrap();
-    assert_eq!(failed.status, bifrost_agent::SubAgentStatus::Failed);
-    assert_eq!(failed.detail.as_deref(), Some("Permission denied"));
+    assert_eq!(
+        events[1].event_type,
+        ExternalCliProgressEventType::ToolFinished
+    );
+    assert_eq!(events[1].title.as_deref(), Some("Task"));
+    assert_eq!(events[1].content, "Permission denied");
+    assert_eq!(events[1].raw["success"], false);
 }
 
 #[test]
