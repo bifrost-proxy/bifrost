@@ -362,15 +362,14 @@ with urllib.request.urlopen(
     f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/chat/runs/{run_id}", timeout=30
 ) as response:
     detail = json.loads(response.read().decode())
-args = detail["snapshot"]["args"]
+args = detail["snapshot"]["argFlags"]
 if runner == "claude":
     assert "--input-format" in args, args
-    assert args[args.index("--input-format") + 1] == "stream-json", args
     assert "--replay-user-messages" in args, args
 elif runner == "traex":
-    assert args[:3] == ["app-server", "--listen", "stdio://"], args
+    assert "--listen" in args, args
 else:
-    assert args[:2] == ["app-server", "--stdio"], args
+    assert "--stdio" in args, args
 metadata = detail["metadata"]
 assert metadata["threadId"] == f"thread-{runner}", metadata
 assert metadata["usageInputTokens"] == "11", metadata

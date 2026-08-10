@@ -211,8 +211,8 @@ with urllib.request.urlopen(
 
 snapshot = detail.get("snapshot") or {}
 assert snapshot.get("adapter") == "codex", detail
-args = snapshot.get("args") or []
-assert args[:2] == ["app-server", "--stdio"], args
+flags = snapshot.get("argFlags") or []
+assert "--stdio" in flags, flags
 tool_started = any(event.get("eventType") == "tool_started" for event in detail.get("events") or [])
 tool_finished = any(event.get("eventType") == "tool_finished" for event in detail.get("events") or [])
 assert tool_started == tool_finished, detail

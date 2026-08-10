@@ -12,7 +12,7 @@ import { apiFetch } from "../../api/apiFetch";
 const { Text } = Typography;
 
 export type ProcessStep = {
-  type: "tool" | "plan" | "status" | "compaction" | "thinking";
+  type: "tool" | "plan" | "status" | "compaction" | "thinking" | "subagent";
   summary: string;
   detail?: string;
   /** Tool arguments JSON string */
@@ -24,6 +24,12 @@ export type ProcessStep = {
   startedAt?: number;
   completedAt?: number;
   durationMs?: number;
+  subAgentId?: string;
+  subAgentLabel?: string;
+  subAgentTask?: string;
+  subAgentPhase?: string;
+  subAgentStatus?: string;
+  subAgentDetail?: string;
 };
 
 export type ChatMessage = {
@@ -1487,6 +1493,50 @@ export function normalizeExternalRunnerEvent(event: Record<string, unknown>) {
  */
 export function eventToProcessStep(event: Record<string, unknown>): ProcessStep | null {
   const eventType = typeof event.eventType === "string" ? event.eventType : "";
+  if (eventType === "sub_agent_updated") {
+    const subagent = isRecord(event.subagent)
+      ? event.subagent
+      : isRecord(event.raw) && isRecord(event.raw.subagent)
+        ? event.raw.subagent
+        : undefined;
+    if (!subagent) {
+      return null;
+    }
+    const id = stringFrom(subagent.id);
+    const agentId = stringFrom(subagent.agentId) || stringFrom(subagent.agent_id);
+    const label = stringFrom(subagent.label);
+    const task = stringFrom(subagent.task) || "Task details unavailable";
+    const phase = stringFrom(subagent.phase) || "working";
+    const state = stringFrom(subagent.status) || "unknown";
+    const startedAtMs = numberFrom(subagent.startedAtMs ?? subagent.started_at_ms);
+    const updatedAtMs = numberFrom(subagent.updatedAtMs ?? subagent.updated_at_ms);
+    const durationMs = numberFrom(subagent.durationMs ?? subagent.duration_ms);
+    return {
+      type: "subagent",
+      summary: `${label || "Sub-agent"} · ${formatSubAgentStatus(state)} · ${phase}`,
+      status:
+        state === "completed"
+          ? "success"
+          : state === "failed" || state === "interrupted"
+            ? "failed"
+            : "running",
+      startedAt: typeof startedAtMs === "number" ? startedAtMs / 1000 : undefined,
+      completedAt:
+        state === "completed" || state === "failed" || state === "interrupted"
+          ? typeof updatedAtMs === "number"
+            ? updatedAtMs / 1000
+            : undefined
+          : undefined,
+      durationMs,
+      subAgentId: id,
+      callId: agentId || id,
+      subAgentLabel: label,
+      subAgentTask: task,
+      subAgentPhase: phase,
+      subAgentStatus: state,
+      subAgentDetail: stringFrom(subagent.detail),
+    };
+  }
   if (eventType === "status") {
     const content = stringFrom(event.content);
     if (!content || !isReadableProgressStatus(content)) {
@@ -1588,6 +1638,23 @@ export function eventToProcessStep(event: Record<string, unknown>): ProcessStep 
     };
   }
   return null;
+}
+
+function formatSubAgentStatus(status?: string) {
+  switch (status) {
+    case "pending":
+      return "Pending";
+    case "running":
+      return "Running";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "interrupted":
+      return "Interrupted";
+    default:
+      return "Unknown";
+  }
 }
 
 /**
@@ -1891,7 +1958,15 @@ export function ProcessStepsBlock({
     >
       {processLogItems.map((item) =>
         item.type === "text" ? (
-          <ProcessTextStepItem key={`text-${item.index}`} step={item.step} />
+          item.step.type === "subagent" ? (
+            <ProcessSubAgentStepItem
+              key={`subagent-${item.step.subAgentId || item.index}`}
+              step={item.step}
+              nowSeconds={nowSeconds}
+            />
+          ) : (
+            <ProcessTextStepItem key={`text-${item.index}`} step={item.step} />
+          )
         ) : (
           <ProcessCommandGroupItem
             key={`commands-${item.startIndex}`}
@@ -1906,6 +1981,88 @@ export function ProcessStepsBlock({
         ),
       )}
     </div>
+  );
+}
+
+function ProcessSubAgentStepItem({
+  step,
+  nowSeconds,
+}: {
+  step: ProcessStep;
+  nowSeconds: number;
+}) {
+  const { token } = theme.useToken();
+  const state = step.subAgentStatus || "unknown";
+  const durationMs = processStepDurationMs(step, nowSeconds);
+  const duration = durationMs > 0 ? formatCompactDuration(durationMs / 1000) : "0s";
+  const statusIcon =
+    step.status === "running" ? (
+      <LoadingOutlined style={{ fontSize: 11, color: token.colorTextTertiary }} />
+    ) : step.status === "failed" ? (
+      <ExclamationCircleOutlined style={{ fontSize: 11, color: token.colorError }} />
+    ) : (
+      <CheckCircleOutlined style={{ fontSize: 11, color: token.colorSuccess }} />
+    );
+  return (
+    <details
+      data-testid="agent-chat-subagent-step"
+      style={{
+        border: `1px solid ${token.colorBorderSecondary}`,
+        borderRadius: token.borderRadius,
+        background: token.colorFillQuaternary,
+        padding: "6px 8px",
+      }}
+    >
+      <summary
+        style={{
+          cursor: "pointer",
+          listStyle: "none",
+          display: "grid",
+          gridTemplateColumns: "auto minmax(0, 1fr) auto",
+          alignItems: "center",
+          gap: 7,
+          minWidth: 0,
+        }}
+      >
+        {statusIcon}
+        <span style={{ minWidth: 0 }}>
+          <Text strong style={{ fontSize: 12 }}>
+            {step.subAgentLabel || "Sub-agent"}
+          </Text>
+          <Text
+            type="secondary"
+            ellipsis={{ tooltip: step.subAgentTask }}
+            style={{ display: "block", fontSize: 11, maxWidth: "100%" }}
+          >
+            {step.subAgentTask || "Task details unavailable"}
+          </Text>
+        </span>
+        <Text type="secondary" style={{ fontSize: 11, whiteSpace: "nowrap" }}>
+          {formatSubAgentStatus(state)} · {step.subAgentPhase || "working"} · {duration}
+        </Text>
+      </summary>
+      <div
+        data-testid="agent-chat-subagent-detail"
+        style={{
+          display: "grid",
+          gap: 4,
+          marginTop: 7,
+          paddingTop: 7,
+          borderTop: `1px solid ${token.colorBorderSecondary}`,
+          fontSize: 11,
+          color: token.colorTextSecondary,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+        }}
+      >
+        <span>状态：{formatSubAgentStatus(state)}</span>
+        <span>阶段：{step.subAgentPhase || "working"}</span>
+        <span>耗时：{duration}</span>
+        {step.callId ? <span>Agent ID：{step.callId}</span> : null}
+        <span>任务：{step.subAgentTask || "Task details unavailable"}</span>
+        {step.subAgentDetail ? <span>进度：{step.subAgentDetail}</span> : null}
+      </div>
+    </details>
   );
 }
 

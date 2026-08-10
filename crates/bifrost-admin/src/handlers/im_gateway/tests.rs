@@ -2494,20 +2494,11 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
     let runtime_snapshot: serde_json::Value =
         serde_json::from_str(&runtime_snapshot.expect("runtime snapshot for matching run"))
             .expect("runtime snapshot json");
-    let args = runtime_snapshot["args"].as_array().expect("args array");
-    let joined_args = args
-        .iter()
-        .filter_map(|arg| arg.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        !joined_args.contains("xhigh"),
-        "runner config effort must be overridden by session slash command: {args:?}"
+    assert_eq!(
+        runtime_snapshot["reasoningEffort"], "high",
+        "session effort override must be reflected without archiving raw CLI args"
     );
-    assert!(
-        joined_args.contains("model_reasoning_effort=\"high\""),
-        "session effort override must reach external runner args: {args:?}"
-    );
+    assert!(runtime_snapshot.get("args").is_none());
 
     let detail = service
         .agent_session_manager

@@ -291,6 +291,113 @@ fn codex_cli_parser_maps_real_todo_list_events_to_plan_updates() {
 }
 
 #[test]
+fn codex_and_traex_collab_events_preserve_subagent_task_status_and_identity() {
+    let stdout = r#"{"type":"item.started","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":[],"agents_states":{}}}
+{"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"running","message":"Inspecting handlers"}}}}
+{"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"completed","prompt":null,"sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"completed","message":"Review complete"}}}}"#;
+
+    let events = parse_progress_events(stdout);
+    assert_eq!(events.len(), 3);
+    assert!(events
+        .iter()
+        .all(|event| { event.event_type == ExternalCliProgressEventType::SubAgentUpdated }));
+
+    let started = external_progress_subagent(&events[0]).expect("started subagent");
+    assert_eq!(started.id, "collab-1");
+    assert_eq!(started.task, "Review the authentication flow");
+    assert_eq!(started.label, None);
+    assert_eq!(started.phase, "dispatching");
+    assert_eq!(started.status, bifrost_agent::SubAgentStatus::Running);
+
+    let working = external_progress_subagent(&events[1]).expect("working subagent");
+    assert_eq!(working.agent_id.as_deref(), Some("agent-7"));
+    assert_eq!(working.phase, "working");
+    assert_eq!(working.detail.as_deref(), Some("Inspecting handlers"));
+
+    let completed = external_progress_subagent(&events[2]).expect("completed subagent");
+    assert_eq!(completed.agent_id.as_deref(), Some("agent-7"));
+    assert_eq!(completed.phase, "waiting");
+    assert_eq!(completed.status, bifrost_agent::SubAgentStatus::Completed);
+    assert_eq!(completed.detail.as_deref(), Some("Review complete"));
+
+    let mapped = external_progress_to_agent_turn_event(
+        "session",
+        TRAEX_ADAPTER,
+        ExternalCliProgressStatusContext::new(None, None, None, None, None, None),
+        &events[1],
+    )
+    .expect("provider-neutral event");
+    assert!(matches!(
+        mapped,
+        bifrost_agent::AgentTurnProgressEvent::SubAgentUpdated { progress }
+            if progress.agent_id.as_deref() == Some("agent-7")
+    ));
+}
+
+#[test]
+fn codex_subagent_activity_maps_agent_path_and_interruption() {
+    let events = parse_progress_events(
+        r#"{"type":"item.started","item":{"id":"activity-1","type":"sub_agent_activity","agent_thread_id":"agent-9","agent_path":"reviewer","kind":"started"}}
+{"type":"item.completed","item":{"id":"activity-2","type":"sub_agent_activity","agent_thread_id":"agent-9","agent_path":"reviewer","kind":"interrupted"}}"#,
+    );
+
+    let started = external_progress_subagent(&events[0]).unwrap();
+    assert_eq!(started.agent_id.as_deref(), Some("agent-9"));
+    assert_eq!(started.label.as_deref(), Some("reviewer"));
+    assert_eq!(started.status, bifrost_agent::SubAgentStatus::Running);
+    let interrupted = external_progress_subagent(&events[1]).unwrap();
+    assert_eq!(
+        interrupted.status,
+        bifrost_agent::SubAgentStatus::Interrupted
+    );
+}
+
+#[test]
+fn codex_subagent_collab_event_expands_each_agent_state_without_collapsing_concurrency() {
+    let events = parse_progress_events(
+        r#"{"type":"item.completed","item":{"id":"wait-9","type":"collab_agent_tool_call","tool":"wait","status":"in_progress","prompt":null,"sender_thread_id":"root","receiver_thread_ids":["agent-1","agent-2"],"agents_states":{"agent-1":{"status":"completed","message":"Review complete"},"agent-2":{"status":"running","message":"Still testing"}}}}"#,
+    );
+
+    assert_eq!(events.len(), 2);
+    let progress = events
+        .iter()
+        .filter_map(external_progress_subagent)
+        .map(|progress| (progress.agent_id.clone().unwrap(), progress))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let first = &progress["agent-1"];
+    let second = &progress["agent-2"];
+    assert_ne!(first.id, second.id);
+    assert_eq!(first.agent_id.as_deref(), Some("agent-1"));
+    assert_eq!(first.status, bifrost_agent::SubAgentStatus::Completed);
+    assert_eq!(first.detail.as_deref(), Some("Review complete"));
+    assert_eq!(second.agent_id.as_deref(), Some("agent-2"));
+    assert_eq!(second.status, bifrost_agent::SubAgentStatus::Running);
+    assert_eq!(second.detail.as_deref(), Some("Still testing"));
+}
+
+#[test]
+fn codex_failed_and_claude_interrupted_subagents_keep_terminal_state() {
+    let failed = parse_progress_events(
+        r#"{"type":"item.completed","item":{"id":"collab-failed","type":"collab_agent_tool_call","tool":"wait","status":"failed","prompt":"Review auth","receiver_thread_ids":["agent-failed"],"agents_states":{"agent-failed":{"status":"errored","message":"Permission denied"}}}}"#,
+    );
+    let failed = external_progress_subagent(&failed[0]).unwrap();
+    assert_eq!(failed.status, bifrost_agent::SubAgentStatus::Failed);
+    assert_eq!(failed.detail.as_deref(), Some("Permission denied"));
+
+    let interrupted = parse_progress_events(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"task-interrupted","name":"Agent","input":{"description":"Inspect auth","prompt":"Review auth","subagent_type":"reviewer"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"task-interrupted","type":"tool_result","content":"Stopped by parent","is_error":true}]},"tool_use_result":{"agentId":"claude-agent-2","totalDurationMs":2500,"interrupted":true}}"#,
+    );
+    let interrupted = external_progress_subagent(&interrupted[1]).unwrap();
+    assert_eq!(
+        interrupted.status,
+        bifrost_agent::SubAgentStatus::Interrupted
+    );
+    assert_eq!(interrupted.duration_ms, Some(2500));
+    assert_eq!(interrupted.detail.as_deref(), Some("Stopped by parent"));
+}
+
+#[test]
 fn generic_plan_updated_parser_accepts_status_fields() {
     let events = parse_progress_events(
         r#"{"type":"plan_updated","title":"Runner plan","items":[{"text":"inspect","status":"completed"},{"text":"map","status":"in_progress"},{"text":"verify","status":"pending"}]}"#,
@@ -681,6 +788,29 @@ fn claude_code_parser_maps_tool_use_and_tool_result() {
         }
         other => panic!("expected tool finished event, got {other:?}"),
     }
+}
+
+#[test]
+fn claude_code_task_tool_maps_to_provider_neutral_subagent_progress() {
+    let stdout = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"task_1","name":"Task","input":{"description":"Inspect auth","prompt":"Review the authentication flow and report risks","subagent_type":"security-reviewer"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"task_1","type":"tool_result","content":"Found no blocker","is_error":false}]},"tool_use_result":{"agentId":"claude-agent-1","totalDurationMs":4200,"interrupted":false}}"#;
+
+    let events = parse_progress_events(stdout);
+    assert_eq!(events.len(), 2);
+    let started = external_progress_subagent(&events[0]).unwrap();
+    assert_eq!(started.id, "task_1");
+    assert_eq!(started.label.as_deref(), Some("security-reviewer"));
+    assert_eq!(
+        started.task,
+        "Review the authentication flow and report risks"
+    );
+    assert_eq!(started.status, bifrost_agent::SubAgentStatus::Running);
+
+    let completed = external_progress_subagent(&events[1]).unwrap();
+    assert_eq!(completed.agent_id.as_deref(), Some("claude-agent-1"));
+    assert_eq!(completed.status, bifrost_agent::SubAgentStatus::Completed);
+    assert_eq!(completed.duration_ms, Some(4200));
+    assert_eq!(completed.detail.as_deref(), Some("Found no blocker"));
 }
 
 #[test]
@@ -1698,6 +1828,24 @@ async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
     assert_eq!(result.events.len(), 2);
     assert!(Path::new(&result.artifacts.command_snapshot).exists());
     assert!(Path::new(&result.artifacts.normalized_events).exists());
+    let prompt_summary: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(&result.artifacts.prompt)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(prompt_summary["_bifrost_compacted"], true);
+    assert!(!tokio::fs::read_to_string(&result.artifacts.prompt)
+        .await
+        .unwrap()
+        .contains("hello from api"));
+    let persisted: ExternalCliRunResult = serde_json::from_str(
+        &tokio::fs::read_to_string(Path::new(&result.artifacts.run_dir).join("result.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(persisted.responses.is_empty());
 }
 
 #[cfg(unix)]
@@ -1805,15 +1953,11 @@ async fn external_cli_runtime_persists_chatgpt_web_adapter_errors() {
     assert!(Path::new(&result.artifacts.stdout).exists());
     assert!(Path::new(&result.artifacts.stderr).exists());
     assert!(Path::new(&result.artifacts.normalized_events).exists());
-    assert!(Path::new(&result.artifacts.last_message).exists());
+    assert!(!Path::new(&result.artifacts.last_message).exists());
     let stderr = tokio::fs::read_to_string(&result.artifacts.stderr)
         .await
         .unwrap();
     assert!(stderr.contains("parse chatgpt_web adapter config failed"));
-    let last_message = tokio::fs::read_to_string(&result.artifacts.last_message)
-        .await
-        .unwrap();
-    assert_eq!(last_message, result.response);
     assert!(Path::new(&result.artifacts.run_dir)
         .join("result.json")
         .exists());
@@ -2043,12 +2187,14 @@ async fn external_cli_run_writes_attachments_and_injects_prompt_paths() {
 
     let result = runtime.run(request).await.unwrap();
 
-    let prompt = tokio::fs::read_to_string(&result.artifacts.prompt)
-        .await
-        .unwrap();
-    assert!(prompt.contains("## Attached Images"));
-    assert!(prompt.contains("image-1.png"));
-    assert!(prompt.contains("image-2.jpg"));
+    let prompt_summary: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(&result.artifacts.prompt)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(prompt_summary["_bifrost_compacted"], true);
+    assert_eq!(prompt_summary["image_count"], 2);
     let images: Vec<ExternalCliSavedImageAttachment> = serde_json::from_str(
         result
             .metadata
@@ -2083,13 +2229,14 @@ async fn external_cli_run_writes_attachments_and_injects_prompt_paths() {
     assert_eq!(tokio::fs::read(&images[1].path).await.unwrap(), b"two");
 
     let file_result = runtime.run(file_request).await.unwrap();
-    let file_prompt = tokio::fs::read_to_string(&file_result.artifacts.prompt)
-        .await
-        .unwrap();
-    assert!(file_prompt.contains("## Attached Files"));
-    assert!(file_prompt.contains("1-report_final.md"));
-    assert!(file_prompt.contains("name: report_final.md"));
-    assert!(!file_prompt.contains("name: ../report final.md"));
+    let file_prompt_summary: serde_json::Value = serde_json::from_str(
+        &tokio::fs::read_to_string(&file_result.artifacts.prompt)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file_prompt_summary["_bifrost_compacted"], true);
+    assert_eq!(file_prompt_summary["file_count"], 1);
     let files: Vec<ExternalCliSavedFileAttachment> = serde_json::from_str(
         file_result
             .metadata
@@ -3584,6 +3731,99 @@ fn progress_event_observation_adds_tool_duration() {
 }
 
 #[test]
+fn progress_event_observation_tracks_and_freezes_subagent_duration() {
+    let mut starts = std::collections::HashMap::new();
+    let mut running = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::SubAgentUpdated,
+        content: String::new(),
+        title: None,
+        raw: serde_json::json!({
+            "subagent": {"id": "agent-1", "status": "running"}
+        }),
+    };
+    let mut completed = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::SubAgentUpdated,
+        content: String::new(),
+        title: None,
+        raw: serde_json::json!({
+            "subagent": {"id": "agent-1", "status": "completed"}
+        }),
+    };
+
+    enrich_progress_event_observation(&mut running, 2_000, &mut starts);
+    assert_eq!(running.raw["observedAtMs"], 2_000);
+    assert_eq!(starts.get("agent-1"), Some(&2_000));
+
+    enrich_progress_event_observation(&mut completed, 2_450, &mut starts);
+    assert_eq!(completed.raw["subagent"]["startedAtMs"], 2_000);
+    assert_eq!(completed.raw["subagent"]["durationMs"], 450);
+    assert!(starts.is_empty());
+}
+
+#[test]
+fn subagent_status_and_phase_fallbacks_cover_provider_edge_states() {
+    assert_eq!(
+        normalize_codex_subagent_status(Some("pendingInit"), None, false),
+        "pending"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, Some("failed"), false),
+        "failed"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, Some("completed"), false),
+        "completed"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, Some("in_progress"), false),
+        "running"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, None, true),
+        "completed"
+    );
+    assert_eq!(
+        normalize_codex_subagent_status(None, None, false),
+        "running"
+    );
+
+    let events = parse_progress_events(
+        r#"{"type":"item.updated","item":{"id":"close-1","type":"collab_agent_tool_call","tool":"closeAgent","status":"in_progress"}}
+{"type":"item.updated","item":{"id":"custom-1","type":"collab_agent_tool_call","tool":"customAction","status":"in_progress"}}"#,
+    );
+    assert_eq!(
+        external_progress_subagent(&events[0]).unwrap().phase,
+        "closing"
+    );
+    assert_eq!(
+        external_progress_subagent(&events[1]).unwrap().phase,
+        "working"
+    );
+
+    let unknown = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::SubAgentUpdated,
+        content: String::new(),
+        title: None,
+        raw: serde_json::json!({"subagent": {"id": "unknown-1", "status": "new-state"}}),
+    };
+    assert_eq!(
+        external_progress_subagent(&unknown).unwrap().status,
+        bifrost_agent::SubAgentStatus::Unknown
+    );
+}
+
+#[test]
+fn claude_code_subagent_error_without_interrupt_maps_to_failed() {
+    let events = parse_progress_events(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"task-failed","name":"Task","input":{"prompt":"Review auth"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"task-failed","type":"tool_result","content":"Permission denied","is_error":true}]},"tool_use_result":{"interrupted":false}}"#,
+    );
+    let failed = external_progress_subagent(&events[1]).unwrap();
+    assert_eq!(failed.status, bifrost_agent::SubAgentStatus::Failed);
+    assert_eq!(failed.detail.as_deref(), Some("Permission denied"));
+}
+
+#[test]
 fn codex_cli_parser_maps_reasoning_summary_to_assistant_delta() {
     let events = parse_progress_events(
         r#"{"type":"item.completed","item":{"id":"reasoning_0","type":"reasoning_summary","summary":"I checked the workspace and will run the focused tests."}}"#,
@@ -3969,4 +4209,195 @@ async fn wait_for_single_run_dir(runs_root: &Path) -> String {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("run dir was not created");
+}
+
+#[test]
+fn executor_persistence_keeps_only_bounded_ui_summaries() {
+    let mut tail = vec![b'a'; MAX_CAPTURED_STREAM_BYTES];
+    append_tail(&mut tail, b"xyz", MAX_CAPTURED_STREAM_BYTES);
+    assert_eq!(tail.len(), MAX_CAPTURED_STREAM_BYTES);
+    assert!(tail.ends_with(b"xyz"));
+
+    let events = vec![
+        ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::AssistantDelta,
+            content: "transient".to_string(),
+            title: None,
+            raw: serde_json::json!({"detail": "not archived"}),
+        },
+        ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::ToolFinished,
+            content: "x".repeat(4096),
+            title: Some("read_file".to_string()),
+            raw: serde_json::json!({
+                "call_id": "call-1",
+                "tool_name": "read_file",
+                "success": true,
+                "result": "x".repeat(4096),
+            }),
+        },
+        ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::AssistantFinal,
+            content: "done".to_string(),
+            title: None,
+            raw: serde_json::json!({}),
+        },
+    ];
+    let persisted = persisted_event_summaries(&events);
+    assert_eq!(persisted.len(), 1);
+    assert!(persisted[0].content.is_empty());
+    assert_eq!(persisted[0].raw["_bifrost_compacted"], true);
+    assert_eq!(persisted[0].raw["call_id"], "call-1");
+    assert_eq!(persisted[0].raw["tool_name"], "read_file");
+    assert_eq!(persisted[0].raw["success"], true);
+    assert!(persisted[0].raw.get("result").is_none());
+    assert_eq!(events[0].content, "transient");
+    assert_eq!(events[1].content.len(), 4096);
+    assert_eq!(events[2].content, "done");
+
+    let mut oversized = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: "done".to_string(),
+        title: Some("shell".to_string()),
+        raw: serde_json::json!({
+            "item": {
+                "id": "nested-call",
+                "name": "shell",
+                "status": "completed",
+                "exit_code": 0,
+                "aggregated_output": "x".repeat(4096),
+            }
+        }),
+    };
+    oversized = compact_persisted_progress_event(oversized);
+    assert!(oversized.content.is_empty());
+    assert_eq!(oversized.raw["_bifrost_compacted"], true);
+    assert_eq!(oversized.raw["id"], "nested-call");
+    assert_eq!(oversized.raw["tool_name"], "shell");
+    assert_eq!(oversized.raw["status"], "completed");
+    assert_eq!(oversized.raw["exit_code"], 0);
+    assert!(oversized.raw.get("aggregated_output").is_none());
+
+    let bounded_raw = compacted_progress_raw(&serde_json::json!({
+        "call_id": "x".repeat(MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES + 100),
+        "tool_name": {"nested": "must not persist"},
+        "status": ["must not persist"],
+    }));
+    assert_eq!(
+        bounded_raw["call_id"].as_str().unwrap().len(),
+        MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES
+    );
+    assert!(bounded_raw.get("tool_name").is_none());
+    assert!(bounded_raw.get("status").is_none());
+
+    let nested_only = compacted_progress_raw(&serde_json::json!({
+        "item": {
+            "id": "nested-id",
+            "name": "nested-tool",
+            "status": "failed",
+            "exit_code": 9
+        }
+    }));
+    assert_eq!(nested_only["id"], "nested-id");
+    assert_eq!(nested_only["tool_name"], "nested-tool");
+    assert_eq!(nested_only["status"], "failed");
+    assert_eq!(nested_only["exit_code"], 9);
+
+    let utf8 = truncate_utf8_bytes("éé", 3);
+    assert_eq!(utf8, "é");
+}
+
+#[test]
+fn append_tail_keeps_only_the_bounded_suffix() {
+    let mut tail = b"old".to_vec();
+    append_tail(&mut tail, b"0123456789", 4);
+    assert_eq!(tail, b"6789");
+}
+
+#[test]
+fn app_server_stdout_capture_keeps_only_the_bounded_suffix() {
+    let mut bytes = Vec::new();
+    super::app_server::record_stdout_line(&mut bytes, &"x".repeat(MAX_CAPTURED_STREAM_BYTES * 2));
+
+    assert_eq!(bytes.len(), MAX_CAPTURED_STREAM_BYTES);
+    assert_eq!(bytes.last(), Some(&b'\n'));
+}
+
+#[test]
+fn directory_size_handles_missing_nested_and_regular_files() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(root.path().join("one"), b"123").unwrap();
+    std::fs::write(nested.join("two"), b"4567").unwrap();
+    assert_eq!(directory_size(root.path()), 7);
+    assert_eq!(directory_size(&root.path().join("missing")), 0);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.path().join("one"), root.path().join("linked")).unwrap();
+        assert_eq!(directory_size(root.path()), 7);
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn stdout_event_capture_keeps_only_the_latest_bounded_live_events() {
+    use tokio::process::Command;
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "i=0; while [ $i -lt {} ]; do printf '{{\"type\":\"run_started\",\"content\":\"%s\"}}\\n' \"$i\"; i=$((i+1)); done",
+            MAX_CAPTURED_EVENTS + 1
+        ))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (_, events) = read_stdout_events(stdout, None).await.unwrap();
+    child.wait().await.unwrap();
+
+    assert_eq!(events.len(), MAX_CAPTURED_EVENTS);
+    assert_eq!(events.first().unwrap().content, "1");
+}
+
+#[test]
+fn persisted_argument_flags_keep_prefixes_without_values() {
+    let flags = persisted_arg_flags(&[
+        "--stdio".to_string(),
+        "--model=gpt-5".to_string(),
+        "-v".to_string(),
+        "secret-prompt".to_string(),
+    ]);
+    assert_eq!(flags, vec!["--stdio", "--model", "-v"]);
+}
+
+#[test]
+fn executor_run_retention_prunes_oldest_completed_directories() {
+    let root = tempfile::tempdir().unwrap();
+    for index in 0..=(MAX_RETAINED_RUNS + 1) {
+        let run = root.path().join(format!("run-{index:03}"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("result.json"), b"{}").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    prune_completed_run_directories(root.path(), Some("run-065")).unwrap();
+    assert!(!root.path().join("run-000").exists());
+    assert!(root.path().join("run-065").exists());
+}
+
+#[test]
+fn executor_run_retention_never_prunes_incomplete_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let incomplete = root.path().join("incomplete-active");
+    std::fs::create_dir_all(&incomplete).unwrap();
+    std::fs::write(incomplete.join("cli.stdout.log"), vec![0_u8; 1024]).unwrap();
+    for index in 0..=(MAX_RETAINED_RUNS + 1) {
+        let run = root.path().join(format!("completed-{index:03}"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("result.json"), b"{}").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    prune_completed_run_directories(root.path(), None).unwrap();
+    assert!(incomplete.exists());
 }

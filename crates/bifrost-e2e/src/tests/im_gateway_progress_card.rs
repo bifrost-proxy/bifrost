@@ -87,6 +87,82 @@ pub fn get_all_tests() -> Vec<TestCase> {
         },
         ),
         TestCase::standalone(
+        "im_gateway_subagent_progress_card_renderer",
+        "Validate Codex and TraeX collaboration events render one provider-neutral Feishu sub-agent entry with the dispatched task, phase, identity, terminal state, detail, and elapsed time",
+        "admin",
+        || async move {
+            use bifrost_admin::im_gateway::external_cli::{
+                external_progress_to_agent_turn_event, parse_progress_events,
+                ExternalCliProgressStatusContext,
+            };
+            use bifrost_admin::im_gateway::progress_card::{
+                build_feishu_progress_card, ImAgentProgressSnapshot,
+            };
+
+            let events = parse_progress_events(
+                r#"{"type":"item.started","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":[],"agents_states":{}}}
+{"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"running","message":"Inspecting handlers"}}}}
+{"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"completed","duration_ms":4200,"prompt":null,"sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"completed","message":"Review complete"}}}}"#,
+            );
+            if events.len() != 3 {
+                return Err(format!("expected three collaboration events, got {}", events.len()));
+            }
+
+            let mut snapshot =
+                ImAgentProgressSnapshot::new("provider:owner", "coordinate an auth review");
+            let context = ExternalCliProgressStatusContext::new(
+                Some("traex"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            for event in &events {
+                let mapped = external_progress_to_agent_turn_event(
+                    "provider:owner",
+                    "traex",
+                    context,
+                    event,
+                )
+                .ok_or_else(|| format!("collaboration event was not mapped: {event:?}"))?;
+                snapshot.apply_event(mapped);
+            }
+
+            let card = build_feishu_progress_card(&snapshot, true);
+            let process_element = card["body"]["elements"]
+                .as_array()
+                .and_then(|elements| {
+                    elements
+                        .iter()
+                        .find(|element| element["element_id"] == "agent_process_panel")
+                })
+                .ok_or_else(|| "sub-agent card missing process panel".to_string())?;
+            let process_body = process_element["elements"].to_string();
+            for needle in [
+                "子 Agent · 已完成 · waiting · 4 秒",
+                "任务：Review the authentication flow",
+                "Agent ID：`agent-7`",
+                "进度：Review complete",
+            ] {
+                if !process_body.contains(needle) {
+                    return Err(format!("sub-agent card body missing {needle}: {process_body}"));
+                }
+            }
+            if process_body.matches("任务：Review the authentication flow").count() != 1 {
+                return Err(format!(
+                    "sub-agent lifecycle was not merged into one entry: {process_body}"
+                ));
+            }
+            if process_body.contains("步骤：`spawnAgent`") {
+                return Err(format!(
+                    "sub-agent status was incorrectly rendered as a generic tool: {process_body}"
+                ));
+            }
+            Ok(())
+        },
+        ),
+        TestCase::standalone(
         "im_gateway_progress_card_budget_and_codex_resources",
         "Validate a long progress card keeps old tools as readable steps, preserves expandable details for the latest five tools, removes old thinking and tools together, and stays inside the local byte budget while its top status exposes Codex session tokens, weekly balance, and elapsed time",
         "admin",

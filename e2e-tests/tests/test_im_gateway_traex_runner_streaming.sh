@@ -194,14 +194,12 @@ snapshot = detail.get("snapshot") or {}
 assert snapshot.get("adapter") == "traex", detail
 assert snapshot.get("executable") == "traex", snapshot
 assert snapshot.get("timeoutSecs") in (None, 0), snapshot
-args = snapshot.get("args") or []
-joined = " ".join(args)
-assert "--permission-mode default" not in joined, args
+args = snapshot.get("argFlags") or []
 assert not (
     "--permission-mode" in args
     and "--dangerously-bypass-approvals-and-sandbox" in args
 ), args
-assert args[:3] == ["app-server", "--listen", "stdio://"], args
+assert "--listen" in args, args
 assert detail.get("events"), detail
 metadata = detail.get("metadata") or {}
 assert metadata.get("modelSource") in ("trae default", "trae config"), metadata

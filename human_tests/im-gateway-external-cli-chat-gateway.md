@@ -64,8 +64,8 @@
 预期结果：
 1. 响应 `runId` 与请求一致。
 2. `snapshot.executable` 为 `/tmp/mock-external-agent.sh`。
-3. `stdout` 包含 mock 输出的 JSONL。
-4. `events` 与 TC-IEC-01 返回的事件一致。
+3. `stdout` 仅包含最多 4 KiB 的诊断尾，不承诺完整 JSONL 回放。
+4. `events` 只包含工具名、调用 ID、状态、耗时和短预览，不包含完整工具参数、结果或 assistant delta。
 
 ### TC-IEC-03: 非法 runId 被拒绝
 
@@ -285,7 +285,7 @@
 预期结果：
 1. 直接 Codex CLI 调用输出真实 Codex JSONL，包含 `thread.started`、`item.completed`、`turn.completed`，并写出 last message。
 2. Chat Gateway 响应 `adapter:"codex"`、`status:"succeeded"`，`response` 包含 `BIFROST_CHAT_GATEWAY_REAL_CODEX_OK`。
-3. run detail 可读取 stdout、last message、normalized events；stdout 保留真实 Codex JSONL。
+3. run detail 可读取最多 4 KiB stdout 诊断尾和 normalized event 摘要；`last_message.md` 在 final response 写入 `result.json` 后删除。
 4. normalized events 包含 `run_started`、`assistant_final`、`run_finished`。
 5. `/chat/stream` 返回 NDJSON，包含 `BIFROST_STREAM_REAL_CODEX_OK`，不依赖 mock CLI。
 
@@ -307,7 +307,7 @@
 
 预期结果：
 1. HTTP 响应 `status:"succeeded"`，`response` 精确包含 `BIFROST_REVIEW_REAL_CODEX_CHAT_OK3`。
-2. `cli.stdout.log` 是真实 Codex JSONL，允许出现 Codex 本地配置 warning。
+2. 实时流是完整 Codex JSONL；`cli.stdout.log` 只保存最多 4 KiB 诊断尾，允许尾部出现 Codex 本地配置 warning。
 3. warning 归一化为 `status` 事件，不出现 `run_failed` 事件；真实失败仍由进程 exit status 判断。
 
 ### TC-IEC-17: Chat Gateway stream 不重复发送 start/finish
@@ -379,13 +379,13 @@
 4. 创建或更新 Provider `workdir-provider`，配置 `agent_config.runner="codex"` 与 `agent_config.work_dir="~/work/github/bifrost/crates/bifrost-admin"`。
 5. 带 providerId 调用 `/chat`，要求 Codex 执行 `pwd` 并返回 `WORKDIR_CHECK:<pwd>`。
 6. 不带 providerId 调用 `/chat`，要求 Codex 执行 `pwd` 并返回 `GLOBAL_WORKDIR_CHECK:<pwd>`。
-7. 分别读取两个 run 的 `runtime_snapshot.json` 与 `last_message.md`。
+7. 分别读取两个 run 的 `runtime_snapshot.json` 与 `result.json`。
 
 预期结果：
 1. Provider run 的响应为 `WORKDIR_CHECK:~/work/github/bifrost/crates/bifrost-admin`。
-2. Provider run 的 `runtime_snapshot.args` 包含 `--cd ~/work/github/bifrost/crates/bifrost-admin` 与 `--output-last-message <run>/last_message.md`，`workDir` 为 Provider 工作目录。
+2. Provider run 的 `runtime_snapshot.workDir` 为 Provider 工作目录，`argFlags` 包含 `--cd` 与 `--output-last-message`，但不保存参数值。
 3. 无 providerId 的 Chat Gateway run 降级使用全局 Agent 工作目录，响应为 `GLOBAL_WORKDIR_CHECK:~/work/github/bifrost`。
-4. Global run 的 `runtime_snapshot.args` 包含 `--cd ~/work/github/bifrost` 与 `--output-last-message <run>/last_message.md`，`workDir` 为全局 Agent 工作目录。
+4. Global run 的 `runtime_snapshot.workDir` 为全局 Agent 工作目录，`argFlags` 包含必要 flag，`result.json` 是最终回复的唯一持久化副本。
 5. Codex session 在 Codex Desktop 中归属到对应 `--cd` 项目目录，而不是 Bifrost 服务启动时的偶然 cwd。
 
 ### TC-IEC-20: Schedule Agent 支持当前 Codex CLI 参数覆盖且保留 Runner 命令配置
@@ -481,7 +481,7 @@
 8. 再次重启服务后发送普通消息，并读取最新 `runtime_snapshot.json`。
 
 预期结果：
-1. 第一次普通消息在显式 E2E mock ChatGPT Web adapter 下成功返回，`runtime_snapshot.params.conversationId` 为 `conv-chatgpt-web-e2e-1`，证明重启后默认恢复旧 conversation。
+1. 第一次普通消息在显式 E2E mock ChatGPT Web adapter 下成功返回，`runtime_snapshot.paramKeys` 包含 `conversationId`，但不落盘其值；运行结果证明重启后默认恢复旧 conversation。
 2. `/reset` 返回 `{"success":true,"cleared":true}`，不触发真实 ChatGPT Web run。
 3. `/reset` 后的下一次普通消息不再携带 `conv-chatgpt-web-e2e-1`。
 4. 同一 `sessionKey` 下非 `chatgpt_web/chatgpt-web-resume-e2e` 的状态不被清理。
@@ -520,7 +520,7 @@
 5. 运行中观察消息气泡的过程区域；完成后刷新或打开历史 session，检查最终消息。
 
 预期结果：
-1. run 使用 `adapter:"traex"`、`runner_id:"traex"`，run detail artifact 中 `runtime_snapshot.args` 包含 `--cd <work_dir> exec --json --output-last-message <last_message.md> -`。
+1. run 使用 `adapter:"traex"`、`runner_id:"traex"`，run detail artifact 中 `runtime_snapshot.argFlags` 包含必要 flag，但不保存完整 argv。
 2. 运行中可以看到 Trae JSONL 归一化后的 process event；完成后最终消息包含 `BIFROST_TRAEX_WEB_UI_STREAM_OK`。
 3. Web History 中完成后的过程块默认可见，页面不需要用户再次点开才能看到过程信息；飞书 progress card 的完成态折叠规则以 TC-IEC-29 为准。
 4. timeline 中不出现外层 `traex` wrapper 的单次工具调用噪音；只展示 Trae 自己输出的状态、工具或最终事件。
@@ -551,7 +551,7 @@
 6. 再显式为 Codex 配置 `sandbox` 或 `approvalPolicy`，触发一次 run 并读取 `runtime_snapshot.json`。
 
 预期结果：
-1. `runtime_snapshot.args` 不包含 `--permission-mode default`。
+1. `runtime_snapshot.argFlags` 不包含 `--permission-mode` 与默认值组合；snapshot 不保存参数值。
 2. Trae 不再报错 `permission_mode = "default" is not supported in exec mode`。
 3. 默认/空值/历史 `default` 会生成 `--dangerously-bypass-approvals-and-sandbox`，且不同时生成 `--permission-mode bypass_permissions`，避免 Trae CLI 报 `sandbox_mode` 与 `permission_mode` override 冲突，同时保持 IM/Web 无人值守 full access。
 4. 如果用户显式选择 `plan`、`auto` 或 `custom`，后端生成对应 `--permission-mode <value>`，且不默认追加 full access；显式选择 `bypass_permissions` 时默认视为 full access，并只生成 dangerous full access 参数。
@@ -655,7 +655,7 @@
 预期结果：
 1. `runtime_snapshot.json` 中不再出现 180 秒默认超时；未显式配置 timeout 时，Bifrost 不主动按固定秒数杀掉外部 runner。
 2. Trae 重复输出同一条 `command_execution item.started` 时，执行过程不重复插入相同的运行中工具行。
-3. 执行过程中持续展示模型公开 content 和工具调用；连续工具调用默认折叠为一组，组内单条工具详情默认折叠，展开后展示输入与输出预览，完整输出仍保存在 run artifacts。
+3. 执行过程中通过实时通道持续展示模型公开 content 和工具调用；连续工具调用默认折叠为一组，组内单条工具详情默认折叠，展开后展示当次内存事件中的输入与输出预览；完整输出不写入 run artifacts。
 4. 大输出工具不会导致后续飞书卡片更新丢失，最终结论仍位于卡片底部。
 
 ### TC-IEC-33: Trae Web Chat 长任务实时过程展示
@@ -674,7 +674,7 @@
 1. 运行中 WebView 不只显示命令数量汇总行；过程块默认展开，并能持续看到模型公开 content/status 与工具调用。
 2. 工具调用行展示 `exec_command: <命令片段>`，而不是只重复显示一串 `exec_command`。
 3. Trae/Codex 重复输出同一 `call_id` 的 `item.started` 时，WebView 不重复插入相同工具行，active commands 不会持续虚高。
-4. 单条工具详情默认折叠，点击工具行后可查看输入和输出；输出过长时只在 WebView 中展示预览，完整输出保留在 run artifacts。
+4. 运行中单条工具详情默认折叠，点击工具行后可查看实时输入和输出；输出过长时只在 WebView 中展示预览，刷新后的历史仅保留工具名、调用 ID、状态和耗时。
 5. 完成后过程块默认折叠，最终 review 结论显示在该轮消息底部；用户仍可以手动展开过程块查看历史过程。
 
 ### TC-IEC-34: Feishu progress card 过程元素 ID 合法性回归
@@ -869,11 +869,11 @@
 2. 配置一个 mock external runner，executable 从 stdin 读取 prompt 并输出 `{"type":"assistant_final","content":"BIFROST_IMAGE_PATH_OK"}`。
 3. 调用 `/_bifrost/api/im-gateway/chat/stream`，请求体包含 `runnerId`、`sessionKey` 和 `images:[{"mimeType":"image/png","data":"<base64>","name":"hello.png"}]`。
 4. 使用同一个 `sessionKey` 再调用一次 `/_bifrost/api/im-gateway/chat/stream`，传入不同字节的第二张图片。
-5. 读取两次返回的 `runId`，检查 `agent/im_gateway/chat_runs/<runId>/prompt.md`、`result.json` 和 session 附件目录。
+5. 读取两次返回的 `runId`，检查 `agent/im_gateway/chat_runs/<runId>/prompt.md` 摘要、`result.json` 和 session 附件目录。
 
 预期结果：
 1. stream 返回 `eventType:"run_finished"`、`status:"succeeded"`，response 为 `BIFROST_IMAGE_PATH_OK`。
-2. `prompt.md` 包含 `## Attached Images`，并列出本地绝对图片路径。
+2. `prompt.md` 仅包含 `_bifrost_compacted`、字节数与图片数量，不包含正文或本地绝对图片路径；runner stdin 仍包含完整 prompt。
 3. 图片文件位于 `agent/sessions/by-key/attachments/<session-file-stem>/<runId>/images/image-1.png`，文件字节与请求图片一致。
 4. `result.json.metadata["attachments.images"]` 记录图片 path、mimeType、sizeBytes 和 name。
 5. session timeline 中该 user message 带图片内容，Web History 回放能感知这一轮包含图片。
@@ -965,11 +965,11 @@
      ]
    }
    ```
-5. 等待 `agent/im_gateway/chat_runs/<runId>/result.json` 写入，读取同一 run 的 `prompt.md`、`result.json.metadata` 和附件目录。
+5. 等待 `agent/im_gateway/chat_runs/<runId>/result.json` 写入，读取同一 run 的 `prompt.md` 摘要、`result.json.metadata` 和附件目录。
 
 预期结果：
 1. debug inbound API 返回 `success:true`，纯文件消息不再因正文为空被拒绝。
-2. external runner 成功执行，`prompt.md` 包含 `## Attached Files`，并列出本地绝对文件路径。
+2. external runner 成功执行，`prompt.md` 只记录文件数量和 prompt 大小；完整附件路径只进入 runner stdin，不在 prompt artifact 重复落盘。
 3. 文件落盘在本次 run 的 `attachments/files/` 或 session 附件子目录下，文件名经过安全净化，例如 `1-report_final.md`，且文件字节与注入的 base64 内容一致。
 4. `result.json.metadata["attachments.files"]` 记录 path、mimeType、sizeBytes、name；`attachments.fileCount=1`、`attachments.imageCount=0`、`attachments.count=1`。
 5. 捕获到的 runner stdin prompt 中包含同一个附件路径，说明 Agent 实际能在 prompt 里看到用户发送的文档路径。
@@ -984,7 +984,7 @@
 5. 打开 Web UI Agent Chat 对应 session 的状态弹窗，查看 Context 卡片下方的 `Runner diagnostics`。
 
 预期结果：
-1. Codex 与 Traex run metadata 均包含 `cli.executable`、`cli.args`、`cli.version`、`runner.adapter`、`prompt.estimatedTokens`、`attachments.count`、`attachments.totalBytes`、`io.stdoutBytes`、`io.stderrBytes`、`timing.totalDurationMs`、`tools.count`、`tools.totalDurationMs`、`resume.requested`。
+1. Codex 与 Traex run metadata 均包含 `cli.executable`、`cli.argCount`、`cli.argFlags`、`cli.version`、`runner.adapter`、prompt/attachment/I/O/timing/tool/resume 计数；不包含完整 argv 或工具 command。
 2. session detail 响应包含同一组 metadata，Web UI 可从 `SessionDetail.metadata` 展示 diagnostics，不依赖仅存在于 run artifact 的本地文件读取。
 3. Web UI 显示 CLI、Prompt、Attachments、I/O、Tools、Tool time、Run time、First event、Resume 等行；缺失字段显示 `-`，不伪造 context window、剩余 context 或 billing token。
 4. `normalized_events.jsonl` 中 tool completed raw event 带 `observedAtMs`，同一 tool 有 started/completed 时带 `durationMs`。
@@ -1425,7 +1425,7 @@
 
 1. 第一轮状态为 `succeeded`，回复为 `BIFROST_RETRY_RECOVERED`；重连提示归一化为 `status`，不存在 `run_failed`。
 2. 第二轮状态为 `failed`，用户可见回复精确为 `permanent request failure`。
-3. 两轮回复都不以 app-server 初始化 JSON（如 `{"id":1`）开头；原始 JSON-RPC stdout 只保存在 run artifact 中。
+3. 两轮回复都不以 app-server 初始化 JSON（如 `{"id":1`）开头；原始 JSON-RPC stdout 只供实时解析，run artifact 最多保留 4 KiB 诊断尾。
 4. 脚本输出 `[im-gateway-codex-retryable-error] PASS` 并清理其临时进程和数据。
 
 ## 最近执行记录
@@ -1636,6 +1636,8 @@
 
 ## 最近执行记录
 
+- 2026-08-09：PASS — 在最终收紧“完整数据只供实时 UI、外部执行器历史不保存 content/参数/结果/增量/计划”后，立即重新执行 TC-IEC-43/44/46/48：`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 输出 `[im-gateway-external-runner-image-input] PASS`。真实临时服务完成普通图片两轮、Traex-compatible、image-only runner-call 和纯文件 IM inbound；完整 prompt 仅进入 runner stdin，`prompt.md` 为计数摘要，`runtime_snapshot.json` 不含参数值，normalized events/result 仅含工具标识与状态，session 不含 assistant delta/plan/工具参数/工具结果，脚本已清理隔离数据与进程。
+- 2026-08-09：PASS — 按新的外部执行器持久化边界立即复测 TC-IEC-43/44/46/48 与 TC-IEC-68。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 输出 `[im-gateway-external-runner-image-input] PASS`，验证实时 runner stdin 仍收到完整图片/文件 prompt，而 `prompt.md` 只保存字节数和附件数摘要、runtime snapshot 只保存 flag/键名、历史 raw 不含工具 command/result、final response 不重复落盘；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_desktop_path_traex.sh` 输出 `[im-gateway-desktop-path-traex] PASS`，确认精简 PATH 下 `--listen` flag 保留且不落参数值。两条脚本均使用隔离数据目录并完成清理，未调用真实模型。
 - 2026-08-05：PASS — 修复 Codex Runner 被 Bifrost 隐式设为 Fast 的回归并立即执行 TC-IEC-70。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_codex_fast_slash.sh` 输出 `[im-codex-fast] PASS`；隔离 IM mock-inbound 链路先发送 `/fast status`，回复明确为“未显式设置 service tier，将使用 Codex 自身默认模式”且不执行 Runner，随后首个普通 Codex `exec` argv 不含任何 `service_tier=`。用户显式执行 `/fast off` 与裸 `/fast` 后，后续 argv 才分别包含 `service_tier="default"` 与 `service_tier="fast"`；忙碌切换、排队读取最新 session、Traex 拒绝路径均继续通过。六条 focused Rust 回归逐条通过，覆盖 parser、session 覆盖静态配置、默认 tier 解析为空、App Server 默认 thread/turn 省略 `serviceTier`、帮助文案与群聊 slash 分类。首轮远端 Linux E2E 正确暴露新增默认 turn 后仍沿用“argv 日志为空”的旧断言；修正为只统计真实 `exec` 次数并断言 `0 -> 1 -> 1` 后，本地完整脚本再次通过，确保 `/fast status` 和 `/fast off` 本身均不触发额外 Runner。
 - 2026-07-31：PASS — 新增并立即执行 TC-IEC-70。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_codex_fast_slash.sh` 输出 `[im-codex-fast] PASS`；真实隔离 IM mock-inbound 链路确认 `/fast off` 与裸 `/fast` 不执行 Runner，随后两次 Codex `exec` 分别只携带 `service_tier="default"` 与 `service_tier="fast"`，`/fast status` 回复当前快速模式；扩展忙碌链路后，当前任务仍使用切换前的 `fast`，运行中 `/fast off` 不进入 stdin/live guide，`/q` 排队的下一轮读取最新 session 并只携带 `service_tier="default"`，session 最终持久化 `serviceTierOverride:"default"` 和来源 `session slash command`；Traex 收到合法 `/fast off` 与非法参数 `/fast invalid` 都优先明确返回不支持且未执行。五条 focused Rust 回归逐条通过，覆盖 parser、session 覆盖 Runner 静态配置、Codex 默认 tier、帮助文案和群聊 slash 系统命令分类。E2E 首轮仅因断言把 mock Runner 的 `--version` 探测计作业务运行而失败，修正为只统计 `exec`；扩展非支持 Runner 双消息后又发现最终断言早于第二条异步 outbound log，改为等待计数达到 2 后完整复跑通过。
 - 2026-07-30：PASS — 新增并立即执行 TC-IEC-69。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_prompt_passthrough.sh` 输出 `[im-prompt-passthrough] PASS`；mock IM + mock Runner 捕获的三条 stdin 分别精确为原始消息、首条 `Base -> Developer -> User -> Runner -> 消息`、后续 `Developer -> User -> Runner -> 消息`，遗留 `injectBifrostTools:true` 未生成 `Bifrost Tool Context`。三组 focused Rust 回归分别通过 `2/2`、`1/1`、`1/1`。首次 Settings Playwright 暴露旧用例仍把只读 `default_base_instructions` 当成已配置 Base，已按“空值不注入”语义修正为显式填写后才保存；完整重跑 `Settings Agent 三层 instructions|Agent Runners 新增弹窗` 通过 `2/2`，确认遗留开关不再显示且生命周期说明可见。

@@ -51,6 +51,7 @@ pub(super) fn progress_event_needs_immediate_flush(
         event,
         bifrost_agent::AgentTurnProgressEvent::ToolStarted { .. }
             | bifrost_agent::AgentTurnProgressEvent::ToolFinished { .. }
+            | bifrost_agent::AgentTurnProgressEvent::SubAgentUpdated { .. }
             | bifrost_agent::AgentTurnProgressEvent::LongTaskStatus { .. }
             | bifrost_agent::AgentTurnProgressEvent::PlanUpdated { .. }
             | bifrost_agent::AgentTurnProgressEvent::ProposedPlan { .. }

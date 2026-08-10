@@ -71,6 +71,99 @@ describe("mergeHistoryEventWindow", () => {
 });
 
 describe("external runner process rendering", () => {
+  it("upserts sub-agent snapshots by stable identity and freezes terminal duration", () => {
+    const started = appendProcessStepToTimeline([], {
+      type: "subagent",
+      summary: "reviewer · Running · dispatching",
+      status: "running",
+      subAgentId: "spawn-1",
+      subAgentLabel: "reviewer",
+      subAgentTask: "Review auth",
+      subAgentPhase: "dispatching",
+      subAgentStatus: "running",
+      startedAt: 1,
+    });
+    const completed = appendProcessStepToTimeline(started, {
+      type: "subagent",
+      summary: "reviewer · Completed · waiting",
+      status: "success",
+      subAgentId: "wait-2",
+      callId: "agent-7",
+      subAgentTask: "Task details unavailable",
+      subAgentPhase: "waiting",
+      subAgentStatus: "completed",
+      completedAt: 5.2,
+    });
+
+    // A provider can learn the receiver id only after spawn; first merge that identity.
+    const identified = appendProcessStepToTimeline(started, {
+      ...started[0],
+      callId: "agent-7",
+      subAgentPhase: "working",
+    });
+    const terminal = appendProcessStepToTimeline(identified, completed[1]);
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toMatchObject({
+      subAgentId: "wait-2",
+      callId: "agent-7",
+      subAgentLabel: "reviewer",
+      subAgentTask: "Review auth",
+      subAgentStatus: "completed",
+      durationMs: 4200,
+    });
+  });
+
+  it("replays compact persisted sub-agent progress as one process item", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 1,
+        event_type: "session_start",
+        session_key: "subagent-history",
+        content: { adapter: "claude_code", runtime: "external_cli" },
+      },
+      {
+        timestamp: 2,
+        event_type: "subagent_updated",
+        session_key: "subagent-history",
+        content: {
+          id: "task-1",
+          agentId: "claude-agent-1",
+          label: "security-reviewer",
+          task: "",
+          phase: "working",
+          status: "running",
+          startedAtMs: 2_000,
+          updatedAtMs: 2_000,
+        },
+      },
+      {
+        timestamp: 5,
+        event_type: "subagent_updated",
+        session_key: "subagent-history",
+        content: {
+          id: "task-1",
+          agentId: "claude-agent-1",
+          label: "security-reviewer",
+          task: "",
+          phase: "finished",
+          status: "completed",
+          startedAtMs: 2_000,
+          updatedAtMs: 5_000,
+          durationMs: 3_000,
+        },
+      },
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].processSteps).toHaveLength(1);
+    expect(messages[0].processSteps?.[0]).toMatchObject({
+      type: "subagent",
+      subAgentTask: "Task details unavailable",
+      subAgentStatus: "completed",
+      durationMs: 3000,
+    });
+  });
+
   it("coalesces adjacent assistant deltas without crossing tool boundaries", () => {
     const first = appendProcessStepToTimeline([], {
       type: "thinking",

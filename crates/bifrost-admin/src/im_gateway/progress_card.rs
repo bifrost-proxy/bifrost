@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use bifrost_agent::{
     ActiveTurnStatus, AgentContextSnapshot, AgentTurnProgressEvent, PlanStep, PlanStepStatus,
-    ToolCallLog,
+    SubAgentProgress, SubAgentStatus, ToolCallLog,
 };
 use bifrost_core::{BifrostError, Result};
 
@@ -36,6 +36,7 @@ const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 300;
 const PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT: usize = 30;
 const PROCESS_TIMELINE_DETAILED_TOOL_LIMIT: usize = 5;
 const PROCESS_TIMELINE_MIN_VISIBLE_THINKING: usize = 5;
+const PROCESS_TIMELINE_MIN_VISIBLE_TERMINAL_SUBAGENTS: usize = 5;
 const FEISHU_CARD_STANDARD_MAX_BYTES: usize = 24 * 1024;
 const FEISHU_CARD_STANDARD_MAX_COMPONENTS: usize = 180;
 const FEISHU_CARD_RETRY_MAX_BYTES: usize = 16 * 1024;
@@ -170,6 +171,9 @@ impl ImAgentProgressSnapshot {
                 });
                 self.finish_timeline_tool(&log, duration_ms);
                 self.tool_calls.push(log);
+            }
+            AgentTurnProgressEvent::SubAgentUpdated { progress } => {
+                self.upsert_subagent(progress);
             }
             AgentTurnProgressEvent::LongTaskStatus {
                 session_id,
@@ -387,6 +391,46 @@ impl ImAgentProgressSnapshot {
         self.push_timeline(item);
     }
 
+    fn upsert_subagent(&mut self, mut progress: SubAgentProgress) {
+        if progress.updated_at_ms == 0 {
+            progress.updated_at_ms = current_time_millis();
+        }
+        let existing = self.timeline.iter_mut().rev().find(|item| {
+            item.kind == ProgressTimelineKind::SubAgent
+                && (item.stable_id.as_deref() == Some(progress.id.as_str())
+                    || progress
+                        .agent_id
+                        .as_deref()
+                        .is_some_and(|agent_id| item.agent_id.as_deref() == Some(agent_id)))
+        });
+        if let Some(item) = existing {
+            if item.agent_id.is_none() {
+                item.agent_id = progress.agent_id.clone();
+            }
+            if progress.task.trim().is_empty() {
+                progress.task = item.task.clone().unwrap_or_default();
+            }
+            if progress.label.as_deref().is_none_or(str::is_empty) {
+                progress.label = item.label.clone();
+            }
+            let started_at_ms = item
+                .started_at_ms
+                .or(progress.started_at_ms)
+                .or_else(|| (!progress.status.is_terminal()).then_some(progress.updated_at_ms));
+            progress.started_at_ms = started_at_ms;
+            if progress.status.is_terminal() && progress.duration_ms.is_none() {
+                progress.duration_ms =
+                    started_at_ms.map(|started| progress.updated_at_ms.saturating_sub(started));
+            }
+            *item = ProgressTimelineItem::subagent(progress);
+            return;
+        }
+        if progress.started_at_ms.is_none() && !progress.status.is_terminal() {
+            progress.started_at_ms = Some(progress.updated_at_ms);
+        }
+        self.push_timeline(ProgressTimelineItem::subagent(progress));
+    }
+
     fn apply_context_snapshot(&mut self, context: AgentContextSnapshot) {
         if let Some(status) = self.status.as_mut() {
             status.estimated_context_tokens = context.estimated_context_tokens;
@@ -541,12 +585,22 @@ pub struct ProgressToolSummary {
 pub enum ProgressTimelineKind {
     Thinking,
     Tool,
+    SubAgent,
     Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgressTimelineItem {
     pub kind: ProgressTimelineKind,
+    pub stable_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub label: Option<String>,
+    pub task: Option<String>,
+    pub phase: Option<String>,
+    pub subagent_status: Option<SubAgentStatus>,
+    pub started_at_ms: Option<u64>,
+    pub updated_at_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
     pub title: String,
     pub summary: String,
     pub detail: String,
@@ -558,6 +612,15 @@ impl ProgressTimelineItem {
     fn thinking(content: String) -> Self {
         Self {
             kind: ProgressTimelineKind::Thinking,
+            stable_id: None,
+            agent_id: None,
+            label: None,
+            task: None,
+            phase: None,
+            subagent_status: None,
+            started_at_ms: None,
+            updated_at_ms: None,
+            duration_ms: None,
             title: "思考".to_string(),
             summary: truncate_one_line(&content, 120),
             detail: content,
@@ -569,6 +632,15 @@ impl ProgressTimelineItem {
     fn status(content: String) -> Self {
         Self {
             kind: ProgressTimelineKind::Status,
+            stable_id: None,
+            agent_id: None,
+            label: None,
+            task: None,
+            phase: None,
+            subagent_status: None,
+            started_at_ms: None,
+            updated_at_ms: None,
+            duration_ms: None,
             title: "状态".to_string(),
             summary: truncate_one_line(&content, 120),
             detail: content,
@@ -581,6 +653,15 @@ impl ProgressTimelineItem {
         let summary = format!("正在运行 `{}`", truncate_one_line(&tool_name, 32));
         Self {
             kind: ProgressTimelineKind::Tool,
+            stable_id: None,
+            agent_id: None,
+            label: None,
+            task: None,
+            phase: None,
+            subagent_status: None,
+            started_at_ms: None,
+            updated_at_ms: None,
+            duration_ms: None,
             title: tool_name,
             summary,
             detail: format_tool_input_preview(&arguments),
@@ -592,11 +673,49 @@ impl ProgressTimelineItem {
     fn tool_finished(log: &ToolCallLog, duration_ms: u64) -> Self {
         Self {
             kind: ProgressTimelineKind::Tool,
+            stable_id: None,
+            agent_id: None,
+            label: None,
+            task: None,
+            phase: None,
+            subagent_status: None,
+            started_at_ms: None,
+            updated_at_ms: None,
+            duration_ms: Some(duration_ms),
             title: log.tool_name.clone(),
             summary: format_tool_timeline_summary(log, duration_ms),
             detail: format_tool_timeline_detail(&log.arguments, &log.result, duration_ms),
             completed: true,
             success: Some(log.success),
+        }
+    }
+
+    fn subagent(progress: SubAgentProgress) -> Self {
+        let completed = progress.status.is_terminal();
+        let success = match progress.status {
+            SubAgentStatus::Completed => Some(true),
+            SubAgentStatus::Failed | SubAgentStatus::Interrupted => Some(false),
+            _ => None,
+        };
+        Self {
+            kind: ProgressTimelineKind::SubAgent,
+            stable_id: Some(progress.id.clone()),
+            agent_id: progress.agent_id.clone(),
+            label: progress.label.clone(),
+            task: Some(progress.task.clone()),
+            phase: Some(progress.phase.clone()),
+            subagent_status: Some(progress.status),
+            started_at_ms: progress.started_at_ms,
+            updated_at_ms: Some(progress.updated_at_ms),
+            duration_ms: progress.duration_ms,
+            title: progress
+                .label
+                .clone()
+                .unwrap_or_else(|| "子 Agent".to_string()),
+            summary: format_subagent_timeline_summary(&progress),
+            detail: format_subagent_timeline_detail(&progress),
+            completed,
+            success,
         }
     }
 }
@@ -1702,7 +1821,7 @@ fn oldest_budget_removable_timeline_range(
             return Some(0..visible_start);
         }
         if tool_indexes.len() <= PROCESS_TIMELINE_DETAILED_TOOL_LIMIT {
-            return None;
+            return oldest_budget_removable_subagent_range(timeline);
         }
         let first_protected_tool =
             tool_indexes[tool_indexes.len() - PROCESS_TIMELINE_DETAILED_TOOL_LIMIT];
@@ -1723,6 +1842,10 @@ fn oldest_budget_removable_timeline_range(
         return Some(0..end);
     }
 
+    if let Some(range) = oldest_budget_removable_subagent_range(timeline) {
+        return Some(range);
+    }
+
     if let Some(status_index) = timeline
         .iter()
         .position(|item| item.kind == ProgressTimelineKind::Status)
@@ -1741,6 +1864,23 @@ fn oldest_budget_removable_timeline_range(
     }
 
     None
+}
+
+fn oldest_budget_removable_subagent_range(
+    timeline: &[ProgressTimelineItem],
+) -> Option<std::ops::Range<usize>> {
+    let terminal_indexes = timeline
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            (item.kind == ProgressTimelineKind::SubAgent && item.completed).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if terminal_indexes.len() <= PROCESS_TIMELINE_MIN_VISIBLE_TERMINAL_SUBAGENTS {
+        return None;
+    }
+    let index = terminal_indexes[0];
+    Some(index..index + 1)
 }
 
 fn feishu_card_fits_budget(card: &serde_json::Value, budget: FeishuCardBudget) -> bool {
@@ -2136,7 +2276,9 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
     while timeline_index < visible_timeline.len() {
         let (item_index, item) = visible_timeline[timeline_index];
         match item.kind {
-            ProgressTimelineKind::Thinking | ProgressTimelineKind::Status => {
+            ProgressTimelineKind::Thinking
+            | ProgressTimelineKind::Status
+            | ProgressTimelineKind::SubAgent => {
                 markdown_lines.push(format_process_timeline_line(item));
                 timeline_index += 1;
             }
@@ -2371,6 +2513,9 @@ fn format_process_timeline_line(item: &ProgressTimelineItem) -> String {
             "状态：{}",
             convert_progress_prose_to_feishu_markdown(&item.summary, None)
         ),
+        ProgressTimelineKind::SubAgent => {
+            convert_progress_prose_to_feishu_markdown(&item.detail, Some(800))
+        }
         ProgressTimelineKind::Tool => {
             let status = match item.success {
                 Some(true) => "完成",
@@ -2432,6 +2577,82 @@ fn format_tool_timeline_summary(log: &ToolCallLog, duration_ms: u64) -> String {
         summary.push_str(&format!(" · {}", truncate_one_line(&log.result, 80)));
     }
     summary
+}
+
+fn format_subagent_timeline_summary(progress: &SubAgentProgress) -> String {
+    let status = subagent_status_label(progress.status);
+    let mut parts = vec![
+        match progress
+            .label
+            .as_deref()
+            .filter(|label| !label.trim().is_empty())
+        {
+            Some(label) => format!("子 Agent `{}`", truncate_one_line(label, 36)),
+            None => "子 Agent".to_string(),
+        },
+        status.to_string(),
+        truncate_one_line(&progress.phase, 24),
+    ];
+    if let Some(duration_ms) = progress.duration_ms.or_else(|| {
+        progress
+            .started_at_ms
+            .map(|started| progress.updated_at_ms.saturating_sub(started))
+    }) {
+        parts.push(format_subagent_duration(duration_ms));
+    }
+    parts.join(" · ")
+}
+
+fn format_subagent_timeline_detail(progress: &SubAgentProgress) -> String {
+    let mut lines = vec![format_subagent_timeline_summary(progress)];
+    if !progress.task.trim().is_empty() {
+        lines.push(format!(
+            "任务：{}",
+            truncate_str_within_limit(&progress.task, 600)
+        ));
+    }
+    if let Some(agent_id) = progress
+        .agent_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!("Agent ID：`{}`", truncate_one_line(agent_id, 80)));
+    }
+    if let Some(detail) = progress
+        .detail
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!("进度：{}", truncate_str_within_limit(detail, 300)));
+    }
+    lines.join("\n")
+}
+
+fn subagent_status_label(status: SubAgentStatus) -> &'static str {
+    match status {
+        SubAgentStatus::Pending => "待启动",
+        SubAgentStatus::Running => "执行中",
+        SubAgentStatus::Completed => "已完成",
+        SubAgentStatus::Failed => "失败",
+        SubAgentStatus::Interrupted => "已中断",
+        SubAgentStatus::Unknown => "状态未知",
+    }
+}
+
+fn format_subagent_duration(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        return format!("{duration_ms}ms");
+    }
+    format_progress_elapsed_duration(duration_ms / 1_000)
+}
+
+fn current_time_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn timeline_tool_matches(item: &ProgressTimelineItem, log: &ToolCallLog) -> bool {

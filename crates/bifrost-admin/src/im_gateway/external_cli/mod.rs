@@ -44,6 +44,12 @@ const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
 const CLI_VERSION_DETECTION_TIMEOUT_SECS: u64 = 10;
+const MAX_CAPTURED_STREAM_BYTES: usize = 4 * 1024;
+const MAX_CAPTURED_EVENTS: usize = 512;
+const MAX_PERSISTED_PROGRESS_TITLE_BYTES: usize = 128;
+const MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES: usize = 256;
+const MAX_RETAINED_RUNS: usize = 64;
+const MAX_RETAINED_RUN_BYTES: u64 = 256 * 1024 * 1024;
 const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
 #[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
@@ -854,6 +860,7 @@ pub enum ExternalCliProgressEventType {
     RunStarted,
     Status,
     PlanUpdated,
+    SubAgentUpdated,
     AssistantDelta,
     AssistantFinal,
     ToolStarted,
@@ -880,12 +887,15 @@ pub struct ExternalCliRunDetail {
 #[serde(rename_all = "camelCase")]
 struct CommandSnapshot {
     executable: String,
-    args: Vec<String>,
+    arg_count: usize,
+    arg_flags: Vec<String>,
     env_keys: Vec<String>,
     work_dir: Option<String>,
     runtime: String,
     adapter: String,
-    params: serde_json::Value,
+    param_keys: Vec<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
     timeout_secs: Option<u64>,
 }
 
@@ -1250,6 +1260,7 @@ impl ExternalCliRuntime {
         validate_work_dir(&request)?;
         let started_at = now_ms();
         let run_id = format!("{}-{}", started_at, uuid::Uuid::new_v4());
+        prune_completed_run_directories(&self.runs_root, Some(&run_id))?;
         let run_dir = self.runs_root.join(&run_id);
         tokio::fs::create_dir_all(&run_dir)
             .await
@@ -1266,9 +1277,12 @@ impl ExternalCliRuntime {
         let saved_files = save_file_attachments(&run_dir, &request).await?;
 
         let prompt = build_prompt(&request, &saved_images, &saved_files).await?;
-        tokio::fs::write(&prompt_path, &prompt)
-            .await
-            .map_err(|error| format!("write prompt failed: {error}"))?;
+        tokio::fs::write(
+            &prompt_path,
+            prompt_persistence_summary(&prompt, saved_images.len(), saved_files.len()),
+        )
+        .await
+        .map_err(|error| format!("write prompt failed: {error}"))?;
 
         let external_cli_transport =
             if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
@@ -1510,7 +1524,8 @@ impl ExternalCliRuntime {
         tokio::fs::write(&stderr_path, &run_output.stderr)
             .await
             .map_err(|error| format!("write stderr failed: {error}"))?;
-        write_events_jsonl(&events_path, &run_output.events).await?;
+        let persisted_events = persisted_event_summaries(&run_output.events);
+        write_events_jsonl(&events_path, &persisted_events).await?;
         let artifacts = ExternalCliRunArtifacts {
             run_dir: run_dir.display().to_string(),
             prompt: prompt_path.display().to_string(),
@@ -1534,11 +1549,19 @@ impl ExternalCliRuntime {
             finished_at,
             duration_ms: finished_at.saturating_sub(started_at),
             artifacts,
+            // The caller and live UI consume the full in-memory event stream.
+            // Only durable artifacts below receive compact summaries.
             events: run_output.events,
             metadata,
         };
         let result_path = run_dir.join("result.json");
-        write_json_pretty(&result_path, &result).await?;
+        let mut persisted_result = result.clone();
+        persisted_result.responses.clear();
+        persisted_result.events = persisted_events;
+        write_json_pretty(&result_path, &persisted_result).await?;
+        // result.json is the single durable copy of the final model response.
+        // The adapter-owned last_message file is only a handoff scratch file.
+        let _ = tokio::fs::remove_file(&last_message_path).await;
         Ok(result)
     }
 }
@@ -3533,9 +3556,11 @@ fn append_external_cli_request_metadata(
 }
 
 fn command_snapshot(request: &ExternalCliRunRequest, spec: &CommandSpec) -> CommandSnapshot {
+    let resolved = resolve_external_cli_model_config(&request.adapter, &request.adapter_config);
     CommandSnapshot {
         executable: spec.executable.clone(),
-        args: spec.args.clone(),
+        arg_count: spec.args.len(),
+        arg_flags: persisted_arg_flags(&spec.args),
         env_keys: spec.env.keys().cloned().collect(),
         work_dir: spec
             .work_dir
@@ -3543,9 +3568,33 @@ fn command_snapshot(request: &ExternalCliRunRequest, spec: &CommandSpec) -> Comm
             .map(|path| path.display().to_string()),
         runtime: request.runtime.clone(),
         adapter: request.adapter.clone(),
-        params: request.params.clone(),
+        param_keys: request
+            .params
+            .as_object()
+            .map(|params| params.keys().cloned().collect())
+            .unwrap_or_default(),
+        model: resolved.model,
+        reasoning_effort: resolved.reasoning_effort,
         timeout_secs: spec.timeout_secs,
     }
+}
+
+fn persisted_arg_flags(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter(|arg| arg.starts_with('-'))
+        .map(|arg| arg.split('=').next().unwrap_or(arg).to_string())
+        .collect()
+}
+
+fn prompt_persistence_summary(prompt: &str, image_count: usize, file_count: usize) -> String {
+    serde_json::json!({
+        "_bifrost_compacted": true,
+        "bytes": prompt.len(),
+        "chars": prompt.chars().count(),
+        "image_count": image_count,
+        "file_count": file_count,
+    })
+    .to_string()
 }
 
 async fn detect_cli_version(adapter: &str, spec: &CommandSpec) -> Option<String> {
@@ -3613,7 +3662,8 @@ fn append_external_cli_observability_metadata(
     let events = input.events;
     let timings = input.timings;
     insert_metadata(metadata, "cli.executable", &spec.executable);
-    insert_metadata_json(metadata, "cli.args", &spec.args);
+    insert_metadata_u64(metadata, "cli.argCount", spec.args.len() as u64);
+    insert_metadata_json(metadata, "cli.argFlags", &persisted_arg_flags(&spec.args));
     if let Some(work_dir) = spec.work_dir.as_ref() {
         insert_metadata(metadata, "cli.workDir", &work_dir.display().to_string());
     }
@@ -3729,8 +3779,16 @@ fn append_external_cli_observability_metadata(
     insert_metadata_u64(metadata, "io.stderrBytes", stderr.len() as u64);
     insert_metadata_u64(metadata, "io.stdoutLines", line_count(stdout));
     insert_metadata_u64(metadata, "io.stderrLines", line_count(stderr));
-    insert_metadata_bool(metadata, "io.stdoutTruncated", false);
-    insert_metadata_bool(metadata, "io.stderrTruncated", false);
+    insert_metadata_bool(
+        metadata,
+        "io.stdoutTruncated",
+        stdout.len() >= MAX_CAPTURED_STREAM_BYTES,
+    );
+    insert_metadata_bool(
+        metadata,
+        "io.stderrTruncated",
+        stderr.len() >= MAX_CAPTURED_STREAM_BYTES,
+    );
 
     if let Some(command_started_at) = timings.command_started_at {
         insert_metadata_u64(
@@ -3805,7 +3863,6 @@ fn append_tool_observability_metadata(
             serde_json::json!({
                 "id": raw_tool_id(&event.raw),
                 "name": raw_tool_name(&event.raw).unwrap_or_else(|| event.title.clone().unwrap_or_else(|| "tool".to_string())),
-                "command": raw_string_path(&event.raw, &["item", "command"]).or_else(|| raw_string_path(&event.raw, &["command"])),
                 "exitCode": raw_i64_path(&event.raw, &["item", "exit_code"]).or_else(|| raw_i64_path(&event.raw, &["exitCode"])),
                 "success": success,
                 "durationMs": raw_u64(&event.raw, "durationMs"),
@@ -4194,15 +4251,20 @@ async fn read_stdout_events(
         .await
         .map_err(|error| format!("read external cli stdout failed: {error}"))?
     {
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
-        if let Some(mut event) = parse_progress_event_line_with_state(&line, &mut parse_state) {
+        append_tail(&mut bytes, line.as_bytes(), MAX_CAPTURED_STREAM_BYTES);
+        append_tail(&mut bytes, b"\n", MAX_CAPTURED_STREAM_BYTES);
+        if let Some(event) = parse_progress_event_line_with_state(&line, &mut parse_state) {
             let observed_at = now_ms();
-            enrich_progress_event_observation(&mut event, observed_at, &mut tool_started_at);
-            if let Some(progress_tx) = progress_tx.as_ref() {
-                let _ = progress_tx.send(event.clone());
+            for mut event in expand_subagent_progress_event(event) {
+                enrich_progress_event_observation(&mut event, observed_at, &mut tool_started_at);
+                if let Some(progress_tx) = progress_tx.as_ref() {
+                    let _ = progress_tx.send(event.clone());
+                }
+                if events.len() == MAX_CAPTURED_EVENTS {
+                    events.remove(0);
+                }
+                events.push(event);
             }
-            events.push(event);
         }
     }
     Ok((bytes, events))
@@ -4220,8 +4282,9 @@ fn enrich_progress_event_observation(
     }
     let Some(item_id) = event
         .raw
-        .get("item")
-        .and_then(|item| item.get("id"))
+        .get("subagent")
+        .and_then(|subagent| subagent.get("id"))
+        .or_else(|| event.raw.get("item").and_then(|item| item.get("id")))
         .or_else(|| event.raw.get("item_id"))
         .or_else(|| event.raw.get("id"))
         .and_then(serde_json::Value::as_str)
@@ -4245,6 +4308,32 @@ fn enrich_progress_event_observation(
                 }
             }
         }
+        ExternalCliProgressEventType::SubAgentUpdated => {
+            let terminal = event
+                .raw
+                .get("subagent")
+                .and_then(|subagent| subagent.get("status"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|status| matches!(status, "completed" | "failed" | "interrupted"));
+            if terminal {
+                if let Some(started_at) = tool_started_at.remove(&item_id) {
+                    if let Some(subagent) = event
+                        .raw
+                        .get_mut("subagent")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        subagent
+                            .entry("startedAtMs".to_string())
+                            .or_insert_with(|| serde_json::json!(started_at));
+                        subagent.entry("durationMs".to_string()).or_insert_with(|| {
+                            serde_json::json!(observed_at.saturating_sub(started_at))
+                        });
+                    }
+                }
+            } else {
+                tool_started_at.entry(item_id).or_insert(observed_at);
+            }
+        }
         _ => {}
     }
 }
@@ -4257,10 +4346,208 @@ async fn read_stderr_lines(stderr: tokio::process::ChildStderr) -> Result<Vec<u8
         .await
         .map_err(|error| format!("read external cli stderr failed: {error}"))?
     {
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
+        append_tail(&mut bytes, line.as_bytes(), MAX_CAPTURED_STREAM_BYTES);
+        append_tail(&mut bytes, b"\n", MAX_CAPTURED_STREAM_BYTES);
     }
     Ok(bytes)
+}
+
+fn append_tail(target: &mut Vec<u8>, next: &[u8], limit: usize) {
+    if next.len() >= limit {
+        target.clear();
+        target.extend_from_slice(&next[next.len() - limit..]);
+        return;
+    }
+    let excess = target
+        .len()
+        .saturating_add(next.len())
+        .saturating_sub(limit);
+    if excess > 0 {
+        target.drain(..excess);
+    }
+    target.extend_from_slice(next);
+}
+
+fn persisted_event_summaries(events: &[ExternalCliProgressEvent]) -> Vec<ExternalCliProgressEvent> {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_type,
+                ExternalCliProgressEventType::RunStarted
+                    | ExternalCliProgressEventType::ToolStarted
+                    | ExternalCliProgressEventType::ToolFinished
+                    | ExternalCliProgressEventType::RunFinished
+                    | ExternalCliProgressEventType::RunFailed
+            )
+        })
+        .rev()
+        .take(128)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(compact_persisted_progress_event)
+        .collect()
+}
+
+fn compact_persisted_progress_event(
+    mut event: ExternalCliProgressEvent,
+) -> ExternalCliProgressEvent {
+    // `content` carries model deltas, commands, parameters, stdout, stderr, or
+    // results depending on the adapter. The live event remains untouched, but
+    // none of that executor payload belongs in a durable run artifact.
+    event.content.clear();
+    event.title = event
+        .title
+        .as_deref()
+        .map(|title| truncate_utf8_bytes(title, MAX_PERSISTED_PROGRESS_TITLE_BYTES));
+
+    // Raw executor events may contain complete commands, arguments, results or
+    // model deltas. They are useful to the live UI but are not durable history.
+    // Keep only stable identifiers and status/timing fields needed to render a
+    // compact historical tool row.
+    event.raw = compacted_progress_raw(&event.raw);
+    event
+}
+
+fn compacted_progress_raw(raw: &serde_json::Value) -> serde_json::Value {
+    let mut summary = serde_json::Map::new();
+    if let Some(raw_object) = raw.as_object() {
+        for key in [
+            "id",
+            "call_id",
+            "callId",
+            "tool_call_id",
+            "toolCallId",
+            "tool_name",
+            "toolName",
+            "status",
+            "success",
+            "exit_code",
+            "exitCode",
+            "observedAtMs",
+            "durationMs",
+        ] {
+            if let Some(value) = raw_object.get(key) {
+                if let Some(value) = compacted_progress_scalar(value) {
+                    summary.insert(key.to_string(), value);
+                }
+            }
+        }
+    }
+    if !summary.contains_key("id") {
+        if let Some(id) = raw_tool_id(raw) {
+            summary.insert(
+                "id".to_string(),
+                serde_json::Value::String(truncate_utf8_bytes(
+                    &id,
+                    MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES,
+                )),
+            );
+        }
+    }
+    if !summary.contains_key("tool_name") && !summary.contains_key("toolName") {
+        if let Some(name) = raw_tool_name(raw) {
+            summary.insert(
+                "tool_name".to_string(),
+                serde_json::Value::String(truncate_utf8_bytes(
+                    &name,
+                    MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES,
+                )),
+            );
+        }
+    }
+    if !summary.contains_key("status") {
+        if let Some(status) = raw_string_path(raw, &["item", "status"]) {
+            summary.insert(
+                "status".to_string(),
+                serde_json::Value::String(truncate_utf8_bytes(
+                    &status,
+                    MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES,
+                )),
+            );
+        }
+    }
+    if !summary.contains_key("exit_code") && !summary.contains_key("exitCode") {
+        if let Some(exit_code) = raw_i64_path(raw, &["item", "exit_code"]) {
+            summary.insert("exit_code".to_string(), serde_json::json!(exit_code));
+        }
+    }
+    summary.insert("_bifrost_compacted".to_string(), serde_json::json!(true));
+    serde_json::Value::Object(summary)
+}
+
+fn compacted_progress_scalar(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::String(value) => Some(serde_json::Value::String(truncate_utf8_bytes(
+            value,
+            MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES,
+        ))),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::Null => {
+            Some(value.clone())
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_string()
+}
+
+fn prune_completed_run_directories(
+    runs_root: &Path,
+    active_run: Option<&str>,
+) -> Result<(), String> {
+    if !runs_root.exists() {
+        return Ok(());
+    }
+    let mut runs = std::fs::read_dir(runs_root)
+        .map_err(|error| format!("read external run root failed: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter(|entry| active_run != entry.file_name().to_str())
+        .filter(|entry| !ACTIVE_RUNS.contains_key(entry.file_name().to_string_lossy().as_ref()))
+        .filter(|entry| entry.path().join("result.json").is_file())
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            let bytes = directory_size(&entry.path());
+            (entry.path(), modified, bytes)
+        })
+        .collect::<Vec<_>>();
+    runs.sort_by_key(|(_, modified, _)| *modified);
+    let mut total = runs.iter().map(|(_, _, bytes)| *bytes).sum::<u64>();
+    while runs.len() > MAX_RETAINED_RUNS || total > MAX_RETAINED_RUN_BYTES {
+        let (path, _, bytes) = runs.remove(0);
+        std::fs::remove_dir_all(&path)
+            .map_err(|error| format!("prune external run {} failed: {error}", path.display()))?;
+        total = total.saturating_sub(bytes);
+    }
+    Ok(())
+}
+
+fn directory_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => directory_size(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map(|value| value.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn remove_active_sessions_for_run(run_id: &str) {
@@ -4498,10 +4785,81 @@ pub fn parse_progress_events(stdout: &str) -> Vec<ExternalCliProgressEvent> {
     let mut state = ExternalCliParseState::default();
     for line in stdout.lines() {
         if let Some(event) = parse_progress_event_line_with_state(line, &mut state) {
-            events.push(event);
+            events.extend(expand_subagent_progress_event(event));
         }
     }
     events
+}
+
+pub(super) fn expand_subagent_progress_event(
+    event: ExternalCliProgressEvent,
+) -> Vec<ExternalCliProgressEvent> {
+    if event.event_type != ExternalCliProgressEventType::SubAgentUpdated {
+        return vec![event];
+    }
+    let Some(item) = event.raw.get("item") else {
+        return vec![event];
+    };
+    let states = item
+        .get("agentsStates")
+        .or_else(|| item.get("agents_states"))
+        .and_then(serde_json::Value::as_object);
+    let receiver_ids = item
+        .get("receiverThreadIds")
+        .or_else(|| item.get("receiver_thread_ids"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let agent_ids = states
+        .map(|states| states.keys().cloned().collect::<Vec<_>>())
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or(receiver_ids);
+    if agent_ids.len() <= 1 {
+        return vec![event];
+    }
+
+    let base_subagent = event.raw.get("subagent").cloned().unwrap_or_default();
+    let base_id = value_text(&base_subagent, &["id"])
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("subagent-{}", now_ms()));
+    let call_status = value_text(item, &["status"]);
+    let item_completed =
+        value_text(&event.raw, &["type"]).is_some_and(|event_type| event_type == "item.completed");
+
+    agent_ids
+        .into_iter()
+        .map(|agent_id| {
+            let state = states.and_then(|states| states.get(&agent_id));
+            let status = normalize_codex_subagent_status(
+                state
+                    .and_then(|state| value_text(state, &["status"]))
+                    .as_deref(),
+                call_status.as_deref(),
+                item_completed,
+            );
+            let detail = state
+                .and_then(|state| value_text(state, &["message"]))
+                .or_else(|| value_text(item, &["error", "result", "message"]));
+            let mut expanded = event.clone();
+            if let Some(subagent) = expanded
+                .raw
+                .get_mut("subagent")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                subagent.insert(
+                    "id".to_string(),
+                    serde_json::json!(format!("{base_id}:{agent_id}")),
+                );
+                subagent.insert("agentId".to_string(), serde_json::json!(agent_id));
+                subagent.insert("status".to_string(), serde_json::json!(status));
+                subagent.insert("detail".to_string(), serde_json::json!(detail));
+            }
+            expanded
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -4513,6 +4871,7 @@ struct ExternalCliParseState {
 struct ClaudeCodeToolContext {
     name: String,
     arguments: serde_json::Value,
+    started_at_ms: u64,
 }
 
 fn parse_progress_event_line_with_state(
@@ -4658,6 +5017,8 @@ pub fn external_progress_to_agent_turn_event(
                 })
             }
         }
+        ExternalCliProgressEventType::SubAgentUpdated => external_progress_subagent(event)
+            .map(|progress| bifrost_agent::AgentTurnProgressEvent::SubAgentUpdated { progress }),
         ExternalCliProgressEventType::ToolStarted => {
             Some(bifrost_agent::AgentTurnProgressEvent::ToolStarted {
                 tool_name: event_title_or_default(event, "runner"),
@@ -4695,6 +5056,47 @@ pub fn external_progress_to_agent_turn_event(
             })
         }
     }
+}
+
+pub fn external_progress_subagent(
+    event: &ExternalCliProgressEvent,
+) -> Option<bifrost_agent::SubAgentProgress> {
+    let subagent = event.raw.get("subagent")?;
+    let status = match value_text(subagent, &["status"])
+        .unwrap_or_else(|| "unknown".to_string())
+        .as_str()
+    {
+        "pending" | "pending_init" | "pendingInit" => bifrost_agent::SubAgentStatus::Pending,
+        "running" => bifrost_agent::SubAgentStatus::Running,
+        "completed" | "shutdown" => bifrost_agent::SubAgentStatus::Completed,
+        "failed" | "errored" | "not_found" | "notFound" => bifrost_agent::SubAgentStatus::Failed,
+        "interrupted" => bifrost_agent::SubAgentStatus::Interrupted,
+        _ => bifrost_agent::SubAgentStatus::Unknown,
+    };
+    Some(bifrost_agent::SubAgentProgress {
+        id: value_text(subagent, &["id"])
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| format!("subagent-{}", now_ms())),
+        agent_id: value_text(subagent, &["agentId", "agent_id"]),
+        label: value_text(subagent, &["label"]),
+        task: value_text(subagent, &["task"]).unwrap_or_default(),
+        phase: value_text(subagent, &["phase"]).unwrap_or_else(|| "working".to_string()),
+        status,
+        detail: value_text(subagent, &["detail"]),
+        started_at_ms: subagent
+            .get("startedAtMs")
+            .or_else(|| subagent.get("started_at_ms"))
+            .and_then(serde_json::Value::as_u64),
+        updated_at_ms: subagent
+            .get("updatedAtMs")
+            .or_else(|| subagent.get("updated_at_ms"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(now_ms),
+        duration_ms: subagent
+            .get("durationMs")
+            .or_else(|| subagent.get("duration_ms"))
+            .and_then(serde_json::Value::as_u64),
+    })
 }
 
 fn external_progress_arguments_text(event: &ExternalCliProgressEvent) -> String {
@@ -5158,6 +5560,9 @@ fn parse_codex_cli_event(
             if item_type == "todo_list" {
                 return codex_todo_list_event(raw);
             }
+            if is_codex_subagent_item_type(&item_type) {
+                return codex_subagent_event(raw, false);
+            }
             match item_type.as_str() {
                 "command_execution" => Some(codex_command_execution_event(
                     raw,
@@ -5184,6 +5589,8 @@ fn parse_codex_cli_event(
             let item_type = value_text_path(raw, &["item", "type"])?;
             if item_type == "todo_list" {
                 codex_todo_list_event(raw)
+            } else if is_codex_subagent_item_type(&item_type) {
+                codex_subagent_event(raw, false)
             } else {
                 None
             }
@@ -5192,6 +5599,9 @@ fn parse_codex_cli_event(
             let item_type = value_text_path(raw, &["item", "type"])?;
             if item_type == "todo_list" {
                 return codex_todo_list_event(raw);
+            }
+            if is_codex_subagent_item_type(&item_type) {
+                return codex_subagent_event(raw, true);
             }
             if item_type == "command_execution" {
                 return Some(codex_command_execution_event(
@@ -5234,6 +5644,187 @@ fn parse_codex_cli_event(
             })
         }
         _ => None,
+    }
+}
+
+fn is_codex_subagent_item_type(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "collabAgentToolCall"
+            | "collab_agent_tool_call"
+            | "collaboration_tool_call"
+            | "subAgentActivity"
+            | "sub_agent_activity"
+    )
+}
+
+fn codex_subagent_event(
+    raw: &serde_json::Value,
+    item_completed: bool,
+) -> Option<ExternalCliProgressEvent> {
+    let item = raw.get("item")?;
+    let item_type = value_text(item, &["type"])?;
+    let updated_at_ms = now_ms();
+    if matches!(
+        item_type.as_str(),
+        "subAgentActivity" | "sub_agent_activity"
+    ) {
+        let kind = value_text(item, &["kind"]).unwrap_or_else(|| "started".to_string());
+        let status = match kind.as_str() {
+            "interrupted" => "interrupted",
+            _ => "running",
+        };
+        let phase = match kind.as_str() {
+            "interacted" => "interacting",
+            "interrupted" => "interrupted",
+            _ => "working",
+        };
+        let agent_id = value_text(item, &["agentThreadId", "agent_thread_id"]);
+        let id = value_text(item, &["id"])
+            .or_else(|| agent_id.clone())
+            .unwrap_or_else(|| format!("subagent-{updated_at_ms}"));
+        let label = value_text(item, &["agentPath", "agent_path"]);
+        return Some(external_subagent_progress_event(
+            raw,
+            id,
+            agent_id,
+            label,
+            String::new(),
+            phase.to_string(),
+            status.to_string(),
+            None,
+            Some(updated_at_ms),
+            updated_at_ms,
+            None,
+        ));
+    }
+
+    let tool = value_text(item, &["tool"]).unwrap_or_else(|| "spawnAgent".to_string());
+    let receiver_ids = item
+        .get("receiverThreadIds")
+        .or_else(|| item.get("receiver_thread_ids"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let states = item
+        .get("agentsStates")
+        .or_else(|| item.get("agents_states"))
+        .and_then(serde_json::Value::as_object);
+    let agent_id = receiver_ids
+        .first()
+        .cloned()
+        .or_else(|| states.and_then(|states| states.keys().next().cloned()));
+    let state = agent_id
+        .as_deref()
+        .and_then(|id| states.and_then(|states| states.get(id)))
+        .or_else(|| states.and_then(|states| states.values().next()));
+    let agent_status = state.and_then(|state| value_text(state, &["status"]));
+    let call_status = value_text(item, &["status"]);
+    let status = normalize_codex_subagent_status(
+        agent_status.as_deref(),
+        call_status.as_deref(),
+        item_completed,
+    );
+    let phase = match tool.as_str() {
+        "spawnAgent" | "spawn_agent" => {
+            if agent_id.is_some() {
+                "working"
+            } else {
+                "dispatching"
+            }
+        }
+        "sendInput" | "send_input" => "interacting",
+        "resumeAgent" | "resume_agent" => "resuming",
+        "wait" => "waiting",
+        "closeAgent" | "close_agent" => "closing",
+        _ => "working",
+    };
+    let detail = state
+        .and_then(|state| value_text(state, &["message"]))
+        .or_else(|| value_text(item, &["error", "result", "message"]));
+    let task = value_text(item, &["prompt", "task", "description"]).unwrap_or_default();
+    let id = value_text(item, &["id"])
+        .or_else(|| agent_id.clone())
+        .unwrap_or_else(|| format!("subagent-{updated_at_ms}"));
+    Some(external_subagent_progress_event(
+        raw,
+        id,
+        agent_id,
+        None,
+        task,
+        phase.to_string(),
+        status.to_string(),
+        detail,
+        (!item_completed).then_some(updated_at_ms),
+        updated_at_ms,
+        item.get("durationMs")
+            .or_else(|| item.get("duration_ms"))
+            .and_then(serde_json::Value::as_u64),
+    ))
+}
+
+fn normalize_codex_subagent_status(
+    agent_status: Option<&str>,
+    call_status: Option<&str>,
+    item_completed: bool,
+) -> &'static str {
+    match agent_status {
+        Some("completed" | "shutdown") => return "completed",
+        Some("errored" | "notFound" | "not_found") => return "failed",
+        Some("interrupted") => return "interrupted",
+        Some("running") => return "running",
+        Some("pendingInit" | "pending_init") => return "pending",
+        _ => {}
+    }
+    match call_status {
+        Some("failed") => "failed",
+        Some("completed") => "completed",
+        Some("inProgress" | "in_progress") => "running",
+        _ if item_completed => "completed",
+        _ => "running",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn external_subagent_progress_event(
+    raw: &serde_json::Value,
+    id: String,
+    agent_id: Option<String>,
+    label: Option<String>,
+    task: String,
+    phase: String,
+    status: String,
+    detail: Option<String>,
+    started_at_ms: Option<u64>,
+    updated_at_ms: u64,
+    duration_ms: Option<u64>,
+) -> ExternalCliProgressEvent {
+    let mut enriched_raw = raw.clone();
+    if let Some(object) = enriched_raw.as_object_mut() {
+        object.insert(
+            "subagent".to_string(),
+            serde_json::json!({
+                "id": id,
+                "agentId": agent_id,
+                "label": label.clone(),
+                "task": task.clone(),
+                "phase": phase,
+                "status": status,
+                "detail": detail,
+                "startedAtMs": started_at_ms,
+                "updatedAtMs": updated_at_ms,
+                "durationMs": duration_ms,
+            }),
+        );
+    }
+    ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::SubAgentUpdated,
+        content: task,
+        title: label,
+        raw: enriched_raw,
     }
 }
 
@@ -5436,13 +6027,27 @@ fn claude_code_tool_use_event(
         .get("input")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    let started_at_ms = now_ms();
     state.claude_tools.insert(
         tool_use_id.clone(),
         ClaudeCodeToolContext {
             name: tool_name.clone(),
             arguments: arguments.clone(),
+            started_at_ms,
         },
     );
+    if is_claude_code_subagent_tool(&tool_name) {
+        return Some(claude_code_subagent_event(
+            raw,
+            &tool_use_id,
+            &tool_name,
+            &arguments,
+            started_at_ms,
+            false,
+            false,
+            String::new(),
+        ));
+    }
     let mut enriched_raw = raw.clone();
     if let Some(object) = enriched_raw.as_object_mut() {
         object
@@ -5503,6 +6108,22 @@ fn claude_code_tool_result_event(
         .and_then(|value| value.get("interrupted"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    if context
+        .as_ref()
+        .is_some_and(|context| is_claude_code_subagent_tool(&context.name))
+    {
+        let context = context.expect("checked above");
+        return Some(claude_code_subagent_event(
+            raw,
+            &tool_use_id,
+            &context.name,
+            &context.arguments,
+            context.started_at_ms,
+            true,
+            is_error || interrupted,
+            result,
+        ));
+    }
     let mut enriched_raw = raw.clone();
     if let Some(object) = enriched_raw.as_object_mut() {
         object
@@ -5524,6 +6145,74 @@ fn claude_code_tool_result_event(
         title: Some(tool_name),
         raw: enriched_raw,
     })
+}
+
+fn is_claude_code_subagent_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name.trim().to_ascii_lowercase().as_str(),
+        "task" | "agent"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn claude_code_subagent_event(
+    raw: &serde_json::Value,
+    tool_use_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    started_at_ms: u64,
+    completed: bool,
+    failed_or_interrupted: bool,
+    result: String,
+) -> ExternalCliProgressEvent {
+    let updated_at_ms = now_ms();
+    let interrupted = raw
+        .get("tool_use_result")
+        .and_then(|value| value.get("interrupted"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let status = if interrupted {
+        "interrupted"
+    } else if failed_or_interrupted {
+        "failed"
+    } else if completed {
+        "completed"
+    } else {
+        "running"
+    };
+    let task = value_text(arguments, &["prompt", "description", "task"]).unwrap_or_default();
+    let label = value_text(arguments, &["subagent_type", "subagentType", "agent_type"])
+        .or_else(|| Some(tool_name.to_string()));
+    let agent_id = value_text_path(raw, &["tool_use_result", "agentId"])
+        .or_else(|| value_text_path(raw, &["tool_use_result", "agent_id"]))
+        .or_else(|| value_text(raw, &["agentId", "agent_id"]));
+    let provider_duration = raw
+        .get("tool_use_result")
+        .and_then(|value| {
+            value
+                .get("totalDurationMs")
+                .or_else(|| value.get("total_duration_ms"))
+                .or_else(|| value.get("durationMs"))
+                .or_else(|| value.get("duration_ms"))
+        })
+        .or_else(|| raw.get("durationMs"))
+        .or_else(|| raw.get("duration_ms"))
+        .and_then(serde_json::Value::as_u64);
+    let duration_ms = completed
+        .then(|| provider_duration.unwrap_or_else(|| updated_at_ms.saturating_sub(started_at_ms)));
+    external_subagent_progress_event(
+        raw,
+        tool_use_id.to_string(),
+        agent_id,
+        label,
+        task,
+        if completed { "finished" } else { "working" }.to_string(),
+        status.to_string(),
+        (!result.trim().is_empty()).then_some(result),
+        Some(started_at_ms),
+        updated_at_ms,
+        duration_ms,
+    )
 }
 
 fn claude_code_message_content(raw: &serde_json::Value) -> Option<&serde_json::Value> {

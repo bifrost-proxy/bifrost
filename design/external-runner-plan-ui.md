@@ -5,8 +5,8 @@
 Bifrost 的 IM Gateway 会作为聚合层承接多个外部 Runner（Codex CLI、Traex CLI、Cursor CLI 等），把它们输出的 JSONL 事件流归一化后：
 
 1. 转成 `AgentTurnProgressEvent`，用于飞书 progress card 与其他 IM 通道的实时进度展示；
-2. 写入 `ConversationRecorder`，作为 Web UI Agent Chat 的历史事件；
-3. 通过 `/chat/stream` SSE 推送到 Web UI 与调用方，作为增量渲染源。
+2. 通过 `/chat/stream` SSE 推送到 Web UI 与调用方，作为增量渲染源；
+3. 计划步骤属于外部执行器的高频过程数据，只在当前运行内存中保留，不写入 durable history。
 
 Codex/Traex Runner 的执行过程输出（thinking、file edits、shell exec、tool call、summary）此前已经归一化。缺口在 **plan / todo list** 类事件：Runner 真实输出计划更新时，飞书卡片没有"任务计划"面板，Web UI Agent Chat 的 timeline 也不会显示计划步骤。这会让用户在 IM 或 Web 上看不到"接下来 Runner 打算做什么"，从而对长任务失去可见性。
 
@@ -22,16 +22,16 @@ Codex/Traex Runner 的执行过程输出（thinking、file edits、shell exec、
 - 条目文本字段优先级：`text` → `step` → `content` → `title`。
 - 条目状态字段优先级：`completed=true` → `completed`；否则解析 `status` 中 `pending` / `in_progress` / `completed`；缺省 `pending`。
 - 飞书 progress card 收到 `AgentTurnProgressEvent::PlanUpdated` 时渲染任务计划面板；`ImAgentProgressSnapshot.plan_steps` 已有的展示逻辑复用。
-- Web UI Agent Chat timeline 通过 `ConversationRecorder::record_plan_updated()` 写入 `plan_updated`；Web history 恢复与实时增量都能显示同一批 plan steps。
+- Web UI Agent Chat 实时 timeline 消费 `/chat/stream` 的 `plan_updated`；刷新后的 durable history 不恢复完整计划步骤，避免把外部执行器过程数据变成滚动日志。
 - Web UI 任务计划胶囊采用 hover 展开详情浮层；胶囊、桥接区、浮层共享同一展开状态，浮层内选文本不会被误关闭，离开整组区域后延迟关闭。
 
 ### 必须不破坏
 
 - 现有 Codex/Traex `thread.started` / `turn.started` / `item.completed` 归一化路径保持不变。
 - 现有飞书 progress card 的 thinking、tool call、file edits 展示不变。
-- Web UI Agent Chat history 现有 telemetry (`plan_updated` 事件之外的) 恢复不变。
+- Web UI Agent Chat 现有 durable history 恢复不变；旧版本已经保存的 `plan_updated` 仍可兼容读取。
 - 不为 Codex/Traex 分叉 UI；不新增前端专用协议。
-- 现有 IM Gateway session JSONL 持久化格式保持向后兼容，`plan_updated` 作为新事件追加。
+- 现有 IM Gateway session JSONL 保持向后兼容，但新运行不再追加 `plan_updated`。
 - Traex 短时间未输出 todo list 不视为 parser 失败，只作为 Runner 行为差异记录。
 
 ### 必须真实验证
@@ -39,7 +39,7 @@ Codex/Traex Runner 的执行过程输出（thinking、file edits、shell exec、
 - 真实运行 Codex CLI 探针，采集 `todo_list` 事件并验证 parser 输出 `PlanUpdated`。
 - 真实运行 Traex CLI 探针，记录当前 Runner 是否在合理窗口内输出 todo list；若未输出，需要作为 human_tests 环境差异记录。
 - 飞书真实 progress card 或 mock card payload 中出现任务计划面板。
-- Web UI Agent Chat 历史页与 `/chat/stream` 实时流都能看到任务计划胶囊，hover 可展开详情。
+- Web UI Agent Chat 的 `/chat/stream` 实时流能看到任务计划胶囊，hover 可展开详情；完成后刷新不要求保留完整计划。
 - E2E 场景 `test_im_gateway_external_runner_plan_ui.sh` 端到端通过。
 
 ## 产品语义
@@ -100,9 +100,9 @@ Web UI 上任务计划胶囊、胶囊与浮层之间的透明桥接区域、浮�
 
 ### Web UI timeline
 
-- `record_external_cli_progress_event_to_timeline()`：将 `PlanUpdated` 写入 `ConversationRecorder::record_plan_updated()`。
-- Agent Chat 历史与实时增量沿用现有 `plan_updated` telemetry 解析。
-- `historyEventsToTelemetry` 恢复历史 plan updates 时按同一 timeline entry 排序。
+- `record_external_cli_progress_event_to_timeline()`：`PlanUpdated` 为 live-only，不写入 `ConversationRecorder`。
+- Agent Chat 实时增量沿用 `plan_updated` telemetry 解析。
+- `historyEventsToTelemetry` 继续兼容旧版本已经持久化的 plan updates，但新运行不会产生这类 durable event。
 
 ### Web UI 任务计划胶囊
 
@@ -113,19 +113,20 @@ Web UI 上任务计划胶囊、胶囊与浮层之间的透明桥接区域、浮�
 
 ### 持久化
 
-- IM Gateway session JSONL：`plan_updated` 事件按现有 event schema 追加，`steps` 字段保持字符串数组顺序。
-- Web UI history: `record_plan_updated` 已包含时间戳、run id、step 快照。
+- IM Gateway session JSONL：不写入 `plan_updated`、步骤文本和标题；只保存最终助手回复、紧凑工具摘要与子 Agent 终态摘要。
+- external runner `normalized_events.jsonl` / `result.json`：不保存 plan 或模型增量；完整 plan 只在 live stream 生命周期内存在。
+- Web UI history：继续兼容旧记录中的 `plan_updated`，不要求新记录跨刷新恢复计划。
 - 不新增新的数据库表；沿用现有 session run 存储。
 
 ## CLI / API / IM 集成
 
 - CLI：不新增用户可见命令；`bifrost agent status` 等命令若展示计划，可复用同一事件流（后续扩展）。
-- API：`/chat/stream` SSE 增加 `plan_updated` payload；`/agent/history` REST 返回带 `plan_updated` 的 timeline。
+- API：`/chat/stream` SSE 增加 `plan_updated` payload；`/agent/history` 只会在读取旧版本记录时返回历史 `plan_updated`。
 - IM：飞书 card 自动渲染 `plan_steps`；其他 IM 通道（Lark 未来的 mini-card、Slack 等）沿用 `AgentTurnProgressEvent::PlanUpdated`。
 
 ## Sync 边界
 
-- Plan events 属于运行时事件，通过现有 Sync 通道（session run history）参与同步；不新增 sync 契约字段。
+- Plan events 属于 live-only 运行时事件，不进入 session run history 或 Sync；不新增 sync 契约字段。
 - IM Gateway 与 Sync 服务器交互不变。
 
 ## 实现切分
@@ -141,10 +142,10 @@ Web UI 上任务计划胶囊、胶囊与浮层之间的透明桥接区域、浮�
 - `external_progress_to_agent_turn_event` 映射 `PlanUpdated`。
 - `ImAgentProgressSnapshot.plan_steps` 接通；card payload snapshot 测试。
 
-### Phase 3：Web UI timeline & history
+### Phase 3：Web UI timeline
 
-- `record_external_cli_progress_event_to_timeline` 写入 `record_plan_updated`。
-- `historyEventsToTelemetry` 从 persisted history 恢复 plan updates。
+- `record_external_cli_progress_event_to_timeline` 明确把 plan 保持为 live-only。
+- `historyEventsToTelemetry` 仅承担旧 persisted history 的向后兼容。
 - 任务计划胶囊 hover 组件（胶囊 + 桥接 + 浮层共享状态）。
 
 ### Phase 4：E2E 与真实场景
@@ -160,15 +161,15 @@ Web UI 上任务计划胶囊、胶囊与浮层之间的透明桥接区域、浮�
 - `codex_cli_parser_maps_real_todo_list_events_to_plan_updates`：真实 Codex `todo_list` started/updated/completed JSONL 覆盖。
 - `generic_plan_updated_parser_accepts_status_fields`：通用 `plan_updated` 与 `in_progress` 状态。
 - `external_progress_maps_to_agent_turn_progress_events`：external plan event → `AgentTurnProgressEvent::PlanUpdated`。
-- `external_runner_plan_progress_is_recorded_as_plan_updated_event`：Web history 持久化。
+- `external_runner_progress_is_live_while_durable_timeline_keeps_tool_summary_only`：plan 不进入 durable history。
 - `external_runner_todo_list_plan_renders_in_feishu_progress_card`：飞书 card payload 展示。
-- `historyEventsToTelemetry restores external runner plan updates from persisted history`：Web UI telemetry 与过程步骤。
+- `historyEventsToTelemetry restores external runner plan updates from persisted history`：只验证旧记录向后兼容。
 
 ### E2E 测试
 
-- `e2e-tests/tests/test_im_gateway_external_runner_plan_ui.sh`：使用真实 Bifrost 服务和 mock external runner 输出稳定 `plan_updated`，断言 `/chat/stream` 中出现 `plan_updated.steps`；run detail normalized events 保留 plan；session JSONL 持久化 `plan_updated`。
+- `e2e-tests/tests/test_im_gateway_external_runner_plan_ui.sh`：使用真实 Bifrost 服务和 mock external runner 输出稳定 `plan_updated`，断言 `/chat/stream` 中出现完整 `plan_updated.steps`；run detail 与 session JSONL 不保存计划文本，session 仍保存最终回复。
 - 真实 Codex/Traex 输出作为 `human_tests` 采样证据；Traex 若在限定时间未输出 todo list，记录为环境/Runner 输出差异，不判 parser 失败。
-- Web UI 单测复用 Agent Chat history fixture，断言 external runner 历史页恢复任务计划。
+- Web UI 单测复用旧 Agent Chat history fixture，断言既有 `plan_updated` 记录仍能恢复任务计划。
 - Web UI Playwright：任务计划胶囊 hover 展开、慢速跨过胶囊与浮层缝隙、浮层内文本选择、离开后延迟关闭。
 
 ### 真实场景测试 human_tests
@@ -191,9 +192,9 @@ Web UI 上任务计划胶囊、胶囊与浮层之间的透明桥接区域、浮�
 
 ### 第 1 轮
 
-- 复核用户目标：Codex/Traex parser、飞书 card、Web history、Web UI hover 组件是否全部落地。
+- 复核用户目标：Codex/Traex parser、飞书 card、Web 实时流、Web UI hover 组件是否全部落地，且完整 plan 不落档。
 - 复核 diff：`ExternalCliProgressEventType` 是否 exhaustive match；状态映射是否保守；title 是否只在通用协议时更新。
-- 复核真实 Codex/Traex 输出、parser 状态映射、飞书 card 事件路径、Web history 持久化路径。
+- 复核真实 Codex/Traex 输出、parser 状态映射、飞书 card 事件路径与 durable history 排除 plan 的边界。
 - 复测：focused Rust 单测、Web timeline 单测、飞书 card payload snapshot 单测。
 
 ### 第 2 轮
@@ -209,4 +210,4 @@ Web UI 上任务计划胶囊、胶囊与浮层之间的透明桥接区域、浮�
 - **Traex 迟迟不输出 plan**：视为 Runner 行为差异；不作为 Bifrost 失败。若 Traex 后续支持，Parser 无需改动。
 - **Web UI hover 误关**：桥接区高度/延迟阈值需要真实用户测试；建议提供 e2e 交互测试并预留延迟时间常量。
 - **飞书 card 空计划**：Runner 只输出 `title` 无 `steps` 时，plan 面板应显示"无步骤"或不渲染；建议不渲染避免误导。
-- **持久化字段膨胀**：长期运行的 session 会累积大量 plan snapshot；建议只保留最新一份，历史可通过 diff/事件重放推导。
+- **持久化字段膨胀**：完整 plan snapshot 已设为 live-only；历史只保留最终回复与紧凑摘要，不通过落盘重建执行器内部过程。

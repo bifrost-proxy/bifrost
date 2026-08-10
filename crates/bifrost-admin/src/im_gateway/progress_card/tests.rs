@@ -1,6 +1,170 @@
 use super::*;
 use crate::im_gateway::provider::ImProvider;
-use bifrost_agent::PlanStepStatus;
+use bifrost_agent::{PlanStepStatus, SubAgentProgress, SubAgentStatus};
+
+#[test]
+fn subagent_progress_upserts_by_agent_identity_and_renders_task_state_and_duration() {
+    let mut snapshot = ImAgentProgressSnapshot::new("subagents", "coordinate review");
+    snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+        progress: SubAgentProgress {
+            id: "spawn-call-1".to_string(),
+            agent_id: None,
+            label: Some("reviewer".to_string()),
+            task: "Review authentication handlers".to_string(),
+            phase: "dispatching".to_string(),
+            status: SubAgentStatus::Running,
+            detail: None,
+            started_at_ms: Some(1_000),
+            updated_at_ms: 1_000,
+            duration_ms: None,
+        },
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+        progress: SubAgentProgress {
+            id: "spawn-call-1".to_string(),
+            agent_id: Some("agent-7".to_string()),
+            label: Some("reviewer".to_string()),
+            task: "Review authentication handlers".to_string(),
+            phase: "working".to_string(),
+            status: SubAgentStatus::Running,
+            detail: Some("Inspecting route guards".to_string()),
+            started_at_ms: None,
+            updated_at_ms: 3_500,
+            duration_ms: None,
+        },
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+        progress: SubAgentProgress {
+            id: "wait-call-2".to_string(),
+            agent_id: Some("agent-7".to_string()),
+            label: None,
+            task: String::new(),
+            phase: "waiting".to_string(),
+            status: SubAgentStatus::Completed,
+            detail: Some("Review complete".to_string()),
+            started_at_ms: None,
+            updated_at_ms: 5_200,
+            duration_ms: None,
+        },
+    });
+
+    assert_eq!(snapshot.timeline.len(), 1);
+    let item = &snapshot.timeline[0];
+    assert_eq!(item.kind, ProgressTimelineKind::SubAgent);
+    assert_eq!(item.agent_id.as_deref(), Some("agent-7"));
+    assert_eq!(item.subagent_status, Some(SubAgentStatus::Completed));
+    assert_eq!(item.duration_ms, Some(4_200));
+    assert!(item.detail.contains("Review authentication handlers"));
+    assert!(item.detail.contains("Review complete"));
+
+    let card = build_feishu_progress_card(&snapshot, true);
+    let serialized = serde_json::to_string(&card).unwrap();
+    assert!(serialized.contains("子 Agent"));
+    assert!(serialized.contains("Review authentication handlers"));
+    assert!(serialized.contains("Agent ID"));
+    assert!(serialized.contains("agent-7"));
+    assert!(serialized.contains("已完成"));
+    assert!(serialized.contains("4 秒"));
+}
+
+#[test]
+fn subagent_progress_covers_status_labels_defaults_and_short_duration() {
+    let statuses = [
+        (SubAgentStatus::Pending, "待启动"),
+        (SubAgentStatus::Running, "执行中"),
+        (SubAgentStatus::Completed, "已完成"),
+        (SubAgentStatus::Failed, "失败"),
+        (SubAgentStatus::Interrupted, "已中断"),
+        (SubAgentStatus::Unknown, "状态未知"),
+    ];
+    for (status, label) in statuses {
+        assert_eq!(subagent_status_label(status), label);
+    }
+    assert_eq!(format_subagent_duration(450), "450ms");
+
+    let mut snapshot = ImAgentProgressSnapshot::new("subagent-defaults", "coordinate");
+    snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+        progress: SubAgentProgress {
+            id: "pending-1".to_string(),
+            agent_id: None,
+            label: None,
+            task: String::new(),
+            phase: "dispatching".to_string(),
+            status: SubAgentStatus::Pending,
+            detail: None,
+            started_at_ms: None,
+            updated_at_ms: 0,
+            duration_ms: None,
+        },
+    });
+    assert_eq!(snapshot.timeline.len(), 1);
+    assert!(snapshot.timeline[0].started_at_ms.is_some());
+    assert_eq!(snapshot.timeline[0].success, None);
+
+    snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+        progress: SubAgentProgress {
+            id: "pending-1".to_string(),
+            agent_id: None,
+            label: None,
+            task: String::new(),
+            phase: "finished".to_string(),
+            status: SubAgentStatus::Failed,
+            detail: None,
+            started_at_ms: None,
+            updated_at_ms: snapshot.timeline[0].started_at_ms.unwrap() + 450,
+            duration_ms: None,
+        },
+    });
+    assert_eq!(snapshot.timeline[0].duration_ms, Some(450));
+    assert_eq!(snapshot.timeline[0].success, Some(false));
+}
+
+#[test]
+fn subagent_budget_trims_old_terminal_entries_but_preserves_running_and_latest_five() {
+    let mut snapshot = ImAgentProgressSnapshot::new("subagent-budget", "coordinate reviews");
+    for index in 0..7 {
+        snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+            progress: SubAgentProgress {
+                id: format!("done-{index}"),
+                agent_id: Some(format!("agent-{index}")),
+                label: Some("reviewer".to_string()),
+                task: format!("Review module {index}"),
+                phase: "finished".to_string(),
+                status: SubAgentStatus::Completed,
+                detail: Some("done".to_string()),
+                started_at_ms: Some(1_000),
+                updated_at_ms: 2_000,
+                duration_ms: Some(1_000),
+            },
+        });
+    }
+    snapshot.apply_event(AgentTurnProgressEvent::SubAgentUpdated {
+        progress: SubAgentProgress {
+            id: "running".to_string(),
+            agent_id: Some("agent-running".to_string()),
+            label: Some("tester".to_string()),
+            task: "Run tests".to_string(),
+            phase: "working".to_string(),
+            status: SubAgentStatus::Running,
+            detail: None,
+            started_at_ms: Some(1_000),
+            updated_at_ms: 2_000,
+            duration_ms: None,
+        },
+    });
+
+    let first = oldest_budget_removable_subagent_range(&snapshot.timeline).unwrap();
+    assert_eq!(first, 0..1);
+    snapshot.timeline.drain(first);
+    let second = oldest_budget_removable_subagent_range(&snapshot.timeline).unwrap();
+    assert_eq!(second, 0..1);
+    snapshot.timeline.drain(second);
+    assert!(oldest_budget_removable_subagent_range(&snapshot.timeline).is_none());
+    assert!(snapshot.timeline.iter().any(|item| {
+        item.kind == ProgressTimelineKind::SubAgent
+            && item.subagent_status == Some(SubAgentStatus::Running)
+    }));
+}
 
 #[test]
 fn assistant_stream_fragments_are_coalesced_and_terminal_duplicate_is_removed() {

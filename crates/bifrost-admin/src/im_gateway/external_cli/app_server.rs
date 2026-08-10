@@ -416,7 +416,8 @@ pub(super) async fn run_command(
                     }
                     continue;
                 }
-                if let Some(event) = progress_event_from_app_server_frame(&frame) {
+                let frame_events = progress_events_from_app_server_frame(&frame);
+                if !frame_events.is_empty() {
                     let can_retry_capacity = should_retry_capacity_error(
                         &frame,
                         turn_has_side_effects,
@@ -494,36 +495,38 @@ pub(super) async fn run_command(
                         turn_has_side_effects = false;
                         continue;
                     }
-                    turn_has_side_effects |= progress_event_has_retry_side_effect(&event);
-                    if let Some(progress_tx) = progress_tx.as_ref() {
-                        let _ = progress_tx.send(event.clone());
-                    }
-                    if event.event_type == ExternalCliProgressEventType::RunFinished
-                        || event.event_type == ExternalCliProgressEventType::RunFailed
-                    {
-                        let turn_status = frame
-                            .get("params")
-                            .and_then(|params| params.get("turn"))
-                            .and_then(|turn| turn.get("status"))
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default();
-                        match turn_status {
-                            "completed" => {
-                                status = ExternalCliRunStatus::Succeeded;
-                                exit_code = Some(0);
-                            }
-                            "interrupted" | "cancelled" => {
-                                status = ExternalCliRunStatus::Stopped;
-                                exit_code = None;
-                            }
-                            _ => {
-                                status = ExternalCliRunStatus::Failed;
-                                exit_code = Some(1);
-                            }
+                    for event in frame_events {
+                        turn_has_side_effects |= progress_event_has_retry_side_effect(&event);
+                        if let Some(progress_tx) = progress_tx.as_ref() {
+                            let _ = progress_tx.send(event.clone());
                         }
-                        terminal = true;
+                        if event.event_type == ExternalCliProgressEventType::RunFinished
+                            || event.event_type == ExternalCliProgressEventType::RunFailed
+                        {
+                            let turn_status = frame
+                                .get("params")
+                                .and_then(|params| params.get("turn"))
+                                .and_then(|turn| turn.get("status"))
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default();
+                            match turn_status {
+                                "completed" => {
+                                    status = ExternalCliRunStatus::Succeeded;
+                                    exit_code = Some(0);
+                                }
+                                "interrupted" | "cancelled" => {
+                                    status = ExternalCliRunStatus::Stopped;
+                                    exit_code = None;
+                                }
+                                _ => {
+                                    status = ExternalCliRunStatus::Failed;
+                                    exit_code = Some(1);
+                                }
+                            }
+                            terminal = true;
+                        }
+                        events.push(event);
                     }
-                    events.push(event);
                 }
             }
             command = guide_rx.recv() => {
@@ -666,6 +669,7 @@ fn progress_event_has_retry_side_effect(event: &ExternalCliProgressEvent) -> boo
             | ExternalCliProgressEventType::AssistantFinal
             | ExternalCliProgressEventType::ToolStarted
             | ExternalCliProgressEventType::ToolFinished
+            | ExternalCliProgressEventType::SubAgentUpdated
     )
 }
 
@@ -965,7 +969,7 @@ async fn read_until_response(
                 .cloned()
                 .ok_or_else(|| format!("app-server response {expected_id} missing result"));
         }
-        if let Some(event) = progress_event_from_app_server_frame(&frame) {
+        for event in progress_events_from_app_server_frame(&frame) {
             if let Some(progress_tx) = progress_tx {
                 let _ = progress_tx.send(event.clone());
             }
@@ -991,9 +995,9 @@ async fn read_handshake_response(
     })?
 }
 
-fn record_stdout_line(bytes: &mut Vec<u8>, line: &str) {
-    bytes.extend_from_slice(line.as_bytes());
-    bytes.push(b'\n');
+pub(super) fn record_stdout_line(bytes: &mut Vec<u8>, line: &str) {
+    append_tail(bytes, line.as_bytes(), MAX_CAPTURED_STREAM_BYTES);
+    append_tail(bytes, b"\n", MAX_CAPTURED_STREAM_BYTES);
 }
 
 fn guide_result_from_response(
@@ -1138,7 +1142,7 @@ fn progress_event_from_app_server_frame(
             })
         }
         "account/rateLimits/updated" => Some(account_rate_limits_event(params)),
-        "item/started" | "item/completed" => {
+        "item/started" | "item/updated" | "item/completed" => {
             progress_event_from_app_server_item(method, &params, raw)
         }
         "error" => {
@@ -1168,6 +1172,12 @@ fn progress_event_from_app_server_frame(
         }
         _ => None,
     }
+}
+
+fn progress_events_from_app_server_frame(raw: &serde_json::Value) -> Vec<ExternalCliProgressEvent> {
+    progress_event_from_app_server_frame(raw)
+        .map(expand_subagent_progress_event)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1220,6 +1230,16 @@ fn progress_event_from_app_server_item(
     let item = params.get("item")?;
     let item_type = item.get("type")?.as_str()?;
     let completed = method == "item/completed";
+    if is_codex_subagent_item_type(item_type) {
+        return codex_subagent_event(
+            &serde_json::json!({
+                "type": method.replace('/', "."),
+                "item": item,
+                "appServerFrame": raw,
+            }),
+            completed,
+        );
+    }
     match item_type {
         "agentMessage" if completed => Some(ExternalCliProgressEvent {
             event_type: ExternalCliProgressEventType::AssistantFinal,
@@ -1290,7 +1310,7 @@ fn progress_event_from_app_server_item(
                 raw,
             })
         }
-        "mcpToolCall" | "dynamicToolCall" | "fileChange" | "collabAgentToolCall" => {
+        "mcpToolCall" | "dynamicToolCall" | "fileChange" => {
             let tool_name = item
                 .get("tool")
                 .or_else(|| item.get("type"))
@@ -1645,6 +1665,93 @@ mod tests {
         assert_eq!(command_event.title.as_deref(), Some("exec_command"));
         assert_eq!(command_event.raw["success"], true);
         assert_eq!(command_event.raw["durationMs"], 12);
+    }
+
+    #[test]
+    fn app_server_subagent_collab_notifications_keep_prompt_target_state_and_phase() {
+        let started = serde_json::json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "root-thread",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "collab-1",
+                    "type": "collabAgentToolCall",
+                    "tool": "spawnAgent",
+                    "status": "inProgress",
+                    "prompt": "Inspect the API boundary",
+                    "senderThreadId": "root-thread",
+                    "receiverThreadIds": [],
+                    "agentsStates": {}
+                }
+            }
+        });
+        let started_event = progress_event_from_app_server_frame(&started).unwrap();
+        let started_progress = external_progress_subagent(&started_event).unwrap();
+        assert_eq!(
+            started_event.event_type,
+            ExternalCliProgressEventType::SubAgentUpdated
+        );
+        assert_eq!(started_progress.task, "Inspect the API boundary");
+        assert_eq!(started_progress.phase, "dispatching");
+
+        let updated = serde_json::json!({
+            "method": "item/updated",
+            "params": {
+                "threadId": "root-thread",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "collab-1",
+                    "type": "collabAgentToolCall",
+                    "tool": "wait",
+                    "status": "inProgress",
+                    "prompt": null,
+                    "senderThreadId": "root-thread",
+                    "receiverThreadIds": ["agent-1"],
+                    "agentsStates": {
+                        "agent-1": {"status": "running", "message": "Reading handlers"}
+                    }
+                }
+            }
+        });
+        let updated_progress =
+            external_progress_subagent(&progress_event_from_app_server_frame(&updated).unwrap())
+                .unwrap();
+        assert_eq!(updated_progress.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(updated_progress.phase, "waiting");
+        assert_eq!(updated_progress.detail.as_deref(), Some("Reading handlers"));
+
+        let multi = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "root-thread",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "wait-2",
+                    "type": "collabAgentToolCall",
+                    "tool": "wait",
+                    "status": "inProgress",
+                    "prompt": null,
+                    "senderThreadId": "root-thread",
+                    "receiverThreadIds": ["agent-1", "agent-2"],
+                    "agentsStates": {
+                        "agent-1": {"status": "completed", "message": "Done"},
+                        "agent-2": {"status": "running", "message": "Still working"}
+                    }
+                }
+            }
+        });
+        let multi_events = progress_events_from_app_server_frame(&multi);
+        assert_eq!(multi_events.len(), 2);
+        let agent_ids = multi_events
+            .iter()
+            .filter_map(external_progress_subagent)
+            .filter_map(|progress| progress.agent_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            agent_ids,
+            std::collections::BTreeSet::from(["agent-1".to_string(), "agent-2".to_string()])
+        );
     }
 
     #[test]

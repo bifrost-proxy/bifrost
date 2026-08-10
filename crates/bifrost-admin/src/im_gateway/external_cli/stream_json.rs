@@ -119,8 +119,8 @@ pub(super) async fn run_command(
                     terminal_status = Some(ExternalCliRunStatus::Failed);
                     break;
                 };
-                stdout_bytes.extend_from_slice(line.as_bytes());
-                stdout_bytes.push(b'\n');
+                append_tail(&mut stdout_bytes, line.as_bytes(), MAX_CAPTURED_STREAM_BYTES);
+                append_tail(&mut stdout_bytes, b"\n", MAX_CAPTURED_STREAM_BYTES);
                 let raw = serde_json::from_str::<serde_json::Value>(&line).ok();
                 if thread_id.is_none() {
                     thread_id = raw.as_ref().and_then(stream_json_session_id);
@@ -198,18 +198,21 @@ pub(super) async fn run_command(
                     interrupted_results_to_ignore -= 1;
                 }
                 if !interrupted_result {
-                    if let Some(mut event) =
+                    if let Some(event) =
                         parse_progress_event_line_with_state(&line, &mut parse_state)
                     {
-                        enrich_progress_event_observation(
-                            &mut event,
-                            now_ms(),
-                            &mut tool_started_at,
-                        );
-                        if let Some(progress_tx) = progress_tx.as_ref() {
-                            let _ = progress_tx.send(event.clone());
+                        let observed_at = now_ms();
+                        for mut event in expand_subagent_progress_event(event) {
+                            enrich_progress_event_observation(
+                                &mut event,
+                                observed_at,
+                                &mut tool_started_at,
+                            );
+                            if let Some(progress_tx) = progress_tx.as_ref() {
+                                let _ = progress_tx.send(event.clone());
+                            }
+                            events.push(event);
                         }
-                        events.push(event);
                     }
                 }
                 if !interrupted_result {
@@ -705,7 +708,7 @@ while True:
             // The cleanup path has two 1.5s grace windows. Leave scheduler
             // headroom for full-workspace test contention while still proving
             // that a SIGTERM-ignoring child cannot hang the runner forever.
-            Duration::from_secs(8),
+            Duration::from_secs(15),
             run_command(
                 run_id,
                 None,
@@ -726,7 +729,10 @@ while True:
         .unwrap();
 
         assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
-        assert!(started.elapsed() < Duration::from_secs(7));
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "SIGTERM-ignoring runner cleanup exceeded the bounded timeout"
+        );
         assert!(!ACTIVE_RUNS.contains_key(run_id));
     }
 

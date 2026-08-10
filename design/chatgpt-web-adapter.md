@@ -84,7 +84,7 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - `ConversationTab` 容量按 `profile_dir` 独立计算，每个 browser profile 最多保留 16 个 conversation tab；其他 runner/profile 的 tab 不能占用当前 profile 的配额或触发它的 LRU 淘汰。测试清理也只能清理自己的 profile，禁止清空进程全局池，以免并行用例或并行 runner 相互破坏。
 - 新会话必须创建自己的隔离 tab，不能先关闭共享 profile 中的其他 ChatGPT tab；其他 tab 可能仍有深度研究在后台继续，关闭它们会使后续 `wait` 无法重新 attach 到原会话。
 - 图片消息可能渲染为后续 `section[data-testid^="conversation-turn-"]`（正文只有 `ChatGPT 说：`），图片在 section 内的 `estuary/content` URL。DOM fallback 必须把最后一个 user turn 之后的这类 image-only section 当作 assistant 结果；空壳文本且图片数为 0 必须继续等待。
-- DOM 提取和 `allMarkdownTexts` 自然批次必须保存完整文本，不允许固定字符数截断；`response`、`last_message.md`、`result.json` 必须保留长任务最终输出全文。
+- DOM 提取和 `allMarkdownTexts` 自然批次在执行期必须保持完整，不允许固定字符数截断；历史只在 `result.json.response` 保留一份最终输出全文，不再重复保存 `last_message.md` 或完整过程批次。
 
 ## 技术细节
 

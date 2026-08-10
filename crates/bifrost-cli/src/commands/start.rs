@@ -1,8 +1,8 @@
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
-#[cfg(unix)]
 use std::io::Read;
 use std::io::{self, IsTerminal, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -534,6 +534,71 @@ fn inspect_system_proxy_ownership(proxy_host: &str, proxy_port: u16) -> SystemPr
     }
 }
 
+fn system_proxy_target_is_ready(proxy_host: &str, proxy_port: u16) -> bool {
+    let host = if proxy_host == "0.0.0.0" {
+        "127.0.0.1"
+    } else {
+        proxy_host
+    };
+    let Ok(address) = format!("{host}:{proxy_port}").parse::<SocketAddr>() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(400)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+    if write!(
+        stream,
+        "GET /_bifrost/api/proxy/system/support HTTP/1.1\r\nHost: {host}:{proxy_port}\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let mut response = [0_u8; 64];
+    let mut received = 0;
+    while received < response.len() {
+        match stream.read(&mut response[received..]) {
+            Ok(0) => break,
+            Ok(read) => {
+                received += read;
+                if response[..received]
+                    .windows(2)
+                    .any(|window| window == b"\r\n")
+                {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(_) => return false,
+        }
+    }
+    received > 0 && response[..received].starts_with(b"HTTP/1.1 2")
+}
+
+#[rustfmt::skip]
+fn suspend_unready_owned_system_proxy(should_enable: bool, ownership: SystemProxyOwnership, target_ready: bool, enabled_flag: &AtomicBool,
+    manager: &tokio::sync::RwLock<bifrost_core::SystemProxyManager>,
+    proxy_host: &str, proxy_port: u16,
+) -> bool {
+    if !should_enable || ownership != SystemProxyOwnership::ThisBifrost || target_ready {
+        return false;
+    }
+    let _ = manager
+        .blocking_write()
+        .disable_if_matches(proxy_host, proxy_port);
+    enabled_flag.store(false, Ordering::Release);
+    true
+}
+
 fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
     let SystemProxyReconcileConfig {
         bifrost_dir,
@@ -583,6 +648,14 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                 }
                 let should_enable = desired_enabled.load(Ordering::Acquire);
                 let ownership = inspect_system_proxy_ownership(&proxy_host, proxy_port);
+                let target_ready = system_proxy_target_is_ready(&proxy_host, proxy_port);
+                if suspend_unready_owned_system_proxy(should_enable, ownership, target_ready, &enabled_flag, &system_proxy_manager, &proxy_host, proxy_port) {
+                    applied_by_this_runtime = false;
+                    if wait_for_reconcile(&stop_flag, &bifrost_dir, Duration::from_secs(2)) {
+                        return;
+                    }
+                    continue;
+                }
                 let since_last_full_reconcile =
                     last_full_reconcile_at.map(|instant| instant.elapsed());
                 let skip_full_reconcile = should_skip_system_proxy_full_reconcile(
@@ -820,6 +893,16 @@ fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
                         host = %proxy_host,
                         port = proxy_port,
                         "system proxy wake reconcile skipped because runtime desired state is disabled"
+                    );
+                    continue;
+                }
+                let target_ready = system_proxy_target_is_ready(&proxy_host, proxy_port);
+                if suspend_unready_owned_system_proxy(should_enable, SystemProxyOwnership::ThisBifrost, target_ready, &enabled_flag, &system_proxy_manager, &proxy_host, proxy_port) {
+                    tracing::warn!(
+                        target: "bifrost_cli::startup",
+                        host = %proxy_host,
+                        port = proxy_port,
+                        "system proxy wake reconcile skipped because target is unresponsive"
                     );
                     continue;
                 }
@@ -4471,6 +4554,115 @@ mod tests {
     fn allocate_loopback_port() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn unresponsive_owned_proxy_is_suspended_but_other_owners_are_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = tokio::sync::RwLock::new(bifrost_core::SystemProxyManager::new(
+            dir.path().to_path_buf(),
+        ));
+        let enabled = AtomicBool::new(true);
+        assert!(suspend_unready_owned_system_proxy(
+            true,
+            SystemProxyOwnership::ThisBifrost,
+            false,
+            &enabled,
+            &manager,
+            "127.0.0.1",
+            allocate_loopback_port(),
+        ));
+        assert!(!enabled.load(Ordering::Acquire));
+
+        enabled.store(true, Ordering::Release);
+        assert!(!suspend_unready_owned_system_proxy(
+            true,
+            SystemProxyOwnership::Other,
+            false,
+            &enabled,
+            &manager,
+            "127.0.0.1",
+            allocate_loopback_port(),
+        ));
+        assert!(enabled.load(Ordering::Acquire));
+
+        assert!(!suspend_unready_owned_system_proxy(
+            false,
+            SystemProxyOwnership::ThisBifrost,
+            false,
+            &enabled,
+            &manager,
+            "127.0.0.1",
+            allocate_loopback_port(),
+        ));
+        assert!(!suspend_unready_owned_system_proxy(
+            true,
+            SystemProxyOwnership::ThisBifrost,
+            true,
+            &enabled,
+            &manager,
+            "127.0.0.1",
+            allocate_loopback_port(),
+        ));
+    }
+
+    #[test]
+    fn system_proxy_readiness_requires_a_successful_admin_response() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let server = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 256];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read])
+                .contains("/_bifrost/api/proxy/system/support"));
+            stream.write_all(b"HTTP/1.1 ").unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            stream
+                .write_all(b"200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        assert!(system_proxy_target_is_ready("0.0.0.0", port));
+        server.join().unwrap();
+
+        let closed_port = allocate_loopback_port();
+        assert!(!system_proxy_target_is_ready("127.0.0.1", closed_port));
+        assert!(!system_proxy_target_is_ready("invalid host", 9900));
+    }
+
+    #[test]
+    fn system_proxy_readiness_rejects_empty_and_non_successful_admin_responses() {
+        let empty_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let empty_port = empty_listener.local_addr().unwrap().port();
+        let (empty_ready_tx, empty_ready_rx) = std::sync::mpsc::sync_channel(0);
+        let empty_server = std::thread::spawn(move || {
+            empty_ready_tx.send(()).unwrap();
+            let (stream, _) = empty_listener.accept().unwrap();
+            drop(stream);
+        });
+        empty_ready_rx.recv().unwrap();
+        assert!(!system_proxy_target_is_ready("127.0.0.1", empty_port));
+        empty_server.join().unwrap();
+
+        let rejected_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let rejected_port = rejected_listener.local_addr().unwrap().port();
+        let (rejected_ready_tx, rejected_ready_rx) = std::sync::mpsc::sync_channel(0);
+        let rejected_server = std::thread::spawn(move || {
+            rejected_ready_tx.send(()).unwrap();
+            let (mut stream, _) = rejected_listener.accept().unwrap();
+            let mut request = [0_u8; 256];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        rejected_ready_rx.recv().unwrap();
+        assert!(!system_proxy_target_is_ready("127.0.0.1", rejected_port));
+        rejected_server.join().unwrap();
     }
 
     #[test]
