@@ -58,13 +58,19 @@
 
 ### 过程卡接入
 
-`FeishuProgressCardSession` 保存本轮图片基准目录。Registry 在获取 session context 后先释放
-mutex，再异步预处理 `AssistantDelta`、`AssistantFinal`、`TurnFinished` 和 `ProposedPlan`
-中的完整 Markdown 图片，最后重新加锁按原顺序合并事件和刷新卡片。
+`FeishuProgressCardSession` 保存本轮图片基准目录。Registry 先在 mutex 内按原顺序把
+`AssistantDelta`、`AssistantFinal`、`TurnFinished` 和 `ProposedPlan` 合并到快照，复制当前
+快照与 session context 后释放 mutex，再异步解析快照中的完整 Markdown 图片；最后重新
+加锁，仅把并发期间未被新事件改写的字段合回并刷新卡片。
 
 逐字符流中尚未闭合的图片语法保持原文本；每批事件先合并进快照，再解析累计后的完整
 Markdown，因此即使 `![alt](path)` 被拆到多个 `AssistantDelta`，也会在闭合后完成上传和
 改写。这样不会为了每个字符发请求，也不会在锁内等待网络。
+
+图片上传会让时间线中的目标从本地路径变成 `image_key`，而稍后到达的 `TurnFinished`
+仍可能携带原始路径。流式文本重叠与终态去重比较会保留正文和图片 alt，但把图片目标
+统一成占位符；因此同一最终结论仍能从过程时间线移除，而含同一图片、正文不同的上一条
+过程说明会继续保留在“最新进展”。
 
 ### 终态双卡接入
 

@@ -252,6 +252,8 @@
 
 ## 执行记录
 
+- 2026-08-11：PASS（rebase 后终态过程说明回归复测）— TC-FPC-12 在最新 `origin/main` 上首次重跑时发现：同一图片在 `AssistantDelta` 中已转换为 `image_key`，但 `TurnFinished` 仍携带本地路径，导致最终结论未从过程时间线去重，`agent_process_sum` 错误覆盖最新过程说明。修复文本比较键对 Markdown 图片目标的归一化，并新增 `progress_registry_keeps_delta_explanation_when_terminal_reuses_uploaded_image`；聚焦 Registry、共享解析器和黑盒 E2E 复测均通过，终态同时保留 `E2E_LATEST_EXPLANATION` 与 `E2E_FINAL_SUMMARY_SUCCESS`，图片仍只上传一次并渲染为 `img_v3_terminal_e2e`。
+
 - 2026-08-11：PASS（第 2 轮 Review/Fix/Test）— 复查发现逐 delta 解析无法处理跨分片 `![alt](path)`，改为先合并进度快照再在 session mutex 外解析累计 Markdown，并补 `progress_registry_uploads_markdown_image_split_across_deltas`；同时把远程图片改为 Content-Length 预检 + 分片累计 10 MiB 硬限额，补超大响应回归。共享解析器 6 项、progress Registry 4 项、标准回复 1 项测试通过；重新构建当前 `target/debug/bifrost` 后，黑盒 E2E 再次 PASS，确认没有复用旧二进制造成假通过。
 
 - 2026-08-11：PASS（本地完整 HTTP/CardKit 链路）— 新增 TC-FPC-12 后立即逐条执行。共享图片解析器 5 项测试全部通过，覆盖既有 `img_*`、fenced code block、缺图降级、远程下载上传和缓存复用；progress Registry 3 项测试全部通过，确认本地相对路径按 work dir 上传后再更新卡片，同一文件复用上传结果。隔离 Bifrost + mock Runner + loopback Feishu OpenAPI 黑盒 E2E 通过：`terminal-e2e-chart.png` 只调用一次 `/im/v1/images`，运行中过程更新、原任务卡最终结论和独立成功终态卡都包含 `![E2E chart](img_v3_terminal_e2e)`；6 条成功/失败相关消息均无 `msg_type=image`，`.txt` 与 `.tar.gz` 仍各自上传并发送 `msg_type=file`。测试 trap 已清理所属临时目录和进程。当前环境的 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 已设置，但 `FEISHU_OWNER_OPEN_ID` 缺失，因此未向真实租户投递卡片，也未把 mock payload 验证表述为真实客户端肉眼渲染。

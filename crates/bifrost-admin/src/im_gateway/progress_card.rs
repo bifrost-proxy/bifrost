@@ -3799,10 +3799,38 @@ fn assistant_text_comparison_key(input: &str) -> String {
     if input.contains("```") {
         return input.trim().to_string();
     }
-    normalize_progress_prose_linebreaks(input)
+    let input = normalize_assistant_markdown_image_destinations(input);
+    normalize_progress_prose_linebreaks(&input)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn normalize_assistant_markdown_image_destinations(input: &str) -> String {
+    if !input.contains("![") {
+        return input.to_string();
+    }
+
+    let mut normalized = String::with_capacity(input.len());
+    let mut pos = 0;
+    while pos < input.len() {
+        if input.as_bytes()[pos] == b'!'
+            && pos + 1 < input.len()
+            && input.as_bytes()[pos + 1] == b'['
+        {
+            if let Some((alt, _, end)) =
+                crate::im_gateway::markdown_converter::parse_image_syntax(input, pos + 2)
+            {
+                normalized.push_str(&format!("![{alt}](__image__)"));
+                pos = end;
+                continue;
+            }
+        }
+        let ch = input[pos..].chars().next().expect("valid UTF-8 boundary");
+        normalized.push(ch);
+        pos += ch.len_utf8();
+    }
+    normalized
 }
 
 fn truncate_str(input: &str, max_chars: usize) -> String {

@@ -328,6 +328,84 @@ async fn progress_registry_uploads_markdown_image_split_across_deltas() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn progress_registry_keeps_delta_explanation_when_terminal_reuses_uploaded_image() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let provider = mock_feishu_provider(&server.base_url);
+    let registry = ImAgentProgressRegistry::new();
+    let temp = tempfile::tempdir().expect("temp image dir");
+    tokio::fs::write(temp.path().join("same.png"), b"same-image")
+        .await
+        .expect("write image fixture");
+    registry
+        .start_feishu(
+            "inline-image-terminal-process",
+            Arc::new(FeishuProvider::new()),
+            provider,
+            mock_progress_target(),
+            "render chart",
+        )
+        .await
+        .expect("start progress card");
+    registry
+        .update_runner_summary(
+            "inline-image-terminal-process",
+            ProgressRunnerSummary {
+                work_dir: Some(temp.path().display().to_string()),
+                ..ProgressRunnerSummary::default()
+            },
+        )
+        .await;
+
+    registry
+        .apply_event(
+            "inline-image-terminal-process",
+            AgentTurnProgressEvent::AssistantDelta {
+                content: "E2E_LATEST_EXPLANATION\n\n![chart](./same.png)".to_string(),
+            },
+        )
+        .await;
+    registry
+        .apply_events(
+            "inline-image-terminal-process",
+            vec![
+                AgentTurnProgressEvent::ToolStarted {
+                    tool_name: "exec_command".to_string(),
+                    arguments: "verify output".to_string(),
+                },
+                AgentTurnProgressEvent::ToolFinished {
+                    log: ToolCallLog {
+                        tool_name: "exec_command".to_string(),
+                        arguments: "verify output".to_string(),
+                        result: "ok".to_string(),
+                        success: true,
+                    },
+                    duration_ms: 1,
+                },
+                AgentTurnProgressEvent::AssistantFinal {
+                    content: "E2E_FINAL_SUMMARY_SUCCESS\n\n![chart](./same.png)".to_string(),
+                },
+            ],
+        )
+        .await;
+    registry
+        .apply_event(
+            "inline-image-terminal-process",
+            AgentTurnProgressEvent::TurnFinished {
+                content: "E2E_FINAL_SUMMARY_SUCCESS\n\n![chart](./same.png)".to_string(),
+            },
+        )
+        .await;
+
+    assert_eq!(server.image_upload_payloads.lock().unwrap().len(), 1);
+    let updates = server.card_update_payloads.lock().unwrap();
+    let terminal_card = updates.last().expect("terminal card update");
+    assert!(terminal_card.contains("E2E_LATEST_EXPLANATION"));
+    assert!(terminal_card.contains("E2E_FINAL_SUMMARY_SUCCESS"));
+    assert!(terminal_card.contains("![chart](img_v3_progress_inline)"));
+    assert!(!terminal_card.contains("./same.png"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn progress_registry_reuses_uploaded_image_for_terminal_output() {
     let server = spawn_mock_feishu_progress_server().await;
     let provider = mock_feishu_provider(&server.base_url);
