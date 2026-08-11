@@ -9,14 +9,15 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 # force `start --daemon` to run in the FOREGROUND (it tells bifrost "you are the
 # already-detached child"), hanging the test at the start step. Clear it so the
 # daemon spawn always detaches, independent of how this script was invoked.
-unset BIFROST_DETACHED_DAEMON_CHILD
+unset BIFROST_DETACHED_DAEMON_CHILD BIFROST_DESKTOP_CORE BIFROST_EXTERNAL_CLI_WORKER
 
 #
 # Bifrost Admin-API Upgrade E2E 测试
 #
 # 目标：真实地、端到端地验证 "Admin UI 立即更新" 这条新链路，而不是 mock 数据。
 #
-#   POST /_bifrost/api/system/upgrade
+#   BIFROST_EXTERNAL_CLI_WORKER=1 bifrost upgrade
+#     -> CLI POST /_bifrost/api/system/upgrade?channel=cli and exits promptly
 #     -> 写入初始 Checking 进度
 #     -> spawn `bifrost self-update --source admin` 子进程（继承 admin 进程环境）
 #     -> 子进程真实执行：解包本地 release 归档 -> 原子替换二进制 -> verify_binary
@@ -31,6 +32,7 @@ unset BIFROST_DETACHED_DAEMON_CHILD
 # 真实性保证：
 #   - 不 mock 升级逻辑。仅用 BIFROST_UPGRADE_TEST_ARCHIVE 把"网络下载源"替换成
 #     一个真实的本地 .tar.xz 归档；解包/原子替换/二进制校验/进程重启全部真实执行。
+#   - 断言 worker CLI 只提交任务并及时退出；后台 updater 不依赖调用者存活。
 #   - 断言旧 daemon PID 与新 daemon PID 不同，证明确实发生了停止+重启。
 #   - 断言运行中的二进制路径指向被替换的安装路径，证明确实换了二进制。
 #   - 断言进度文件最终 phase=completed 且 source=admin，证明新链路打通。
@@ -311,40 +313,54 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
         return 1
     }
 
-    # Drive two simultaneous Web UI clicks. Exactly one request may claim and
-    # spawn the updater; the other must observe active progress and return 409.
-    local response_a="$TEST_ROOT/upgrade-a.json" response_b="$TEST_ROOT/upgrade-b.json"
-    local code_a_file="$TEST_ROOT/upgrade-a.code" code_b_file="$TEST_ROOT/upgrade-b.code"
+    # Reproduce the Feishu/Codex process role. The nested CLI must not stop the
+    # daemon itself; it delegates to Admin, receives 202, and exits while the
+    # detached updater continues independently of this caller.
+    local worker_output="$TEST_ROOT/worker-upgrade.log"
+    local competing_response="$TEST_ROOT/competing-upgrade.json"
+    local competing_code_file="$TEST_ROOT/competing-upgrade.code"
+    local worker_started_at worker_elapsed
+    worker_started_at="$(date +%s)"
+    BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+    BIFROST_EXTERNAL_CLI_WORKER=1 \
+    NO_PROXY='*' no_proxy='*' \
+        "$INSTALL_BIN" upgrade >"$worker_output" 2>&1 &
+    local worker_pid=$!
     env NO_PROXY='*' no_proxy='*' curl -sS -X POST --connect-timeout 2 --max-time 15 \
-        -o "$response_a" -w '%{http_code}' \
-        "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/upgrade" >"$code_a_file" &
-    local post_a_pid=$!
-    env NO_PROXY='*' no_proxy='*' curl -sS -X POST --connect-timeout 2 --max-time 15 \
-        -o "$response_b" -w '%{http_code}' \
-        "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/upgrade" >"$code_b_file" &
-    local post_b_pid=$!
-    wait "$post_a_pid" || true
-    wait "$post_b_pid" || true
-    local code_a code_b upgrade_resp phase source
-    code_a="$(cat "$code_a_file" 2>/dev/null)"
-    code_b="$(cat "$code_b_file" 2>/dev/null)"
-    if [[ "$code_a $code_b" == "202 409" ]]; then
-        upgrade_resp="$(cat "$response_a")"
-    elif [[ "$code_a $code_b" == "409 202" ]]; then
-        upgrade_resp="$(cat "$response_b")"
+        -o "$competing_response" -w '%{http_code}' \
+        "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/upgrade" >"$competing_code_file" &
+    local competing_pid=$!
+    wait "$worker_pid" || {
+        _log_fail "external worker upgrade delegates successfully" "exit 0" "$(cat "$worker_output")"
+        return 1
+    }
+    wait "$competing_pid" || true
+    worker_elapsed=$(( $(date +%s) - worker_started_at ))
+    local competing_code
+    competing_code="$(cat "$competing_code_file" 2>/dev/null)"
+    if grep -q "Upgrade scheduled by the running Bifrost service" "$worker_output"; then
+        assert_equals "409" "$competing_code" "competing POST observes delegated upgrade" || return 1
+    elif grep -q "An upgrade is already in progress" "$worker_output"; then
+        assert_equals "202" "$competing_code" "competing POST owns serialized upgrade" || return 1
     else
-        _log_fail "concurrent POSTs have one upgrade owner" "202 + 409" "$code_a + $code_b"
+        _log_fail "external worker reports delegated upgrade" "scheduled/already-in-progress message" "$(cat "$worker_output")"
         return 1
     fi
-    _log_pass "concurrent POSTs serialized to one updater (HTTP $code_a + $code_b)"
-    phase="$(json_field "$upgrade_resp" phase)"
-    source="$(json_field "$upgrade_resp" source)"
-    if [[ "$phase" != "checking" && "$phase" != "downloading" ]]; then
-        _log_fail "POST upgrade returns active progress" "checking/downloading" "$phase ($upgrade_resp)"
+    if [[ $worker_elapsed -ge 10 ]]; then
+        _log_fail "external worker returns promptly" "< 10 seconds" "${worker_elapsed}s"
         return 1
     fi
-    assert_equals "admin" "$source" "POST upgrade records source=admin" || return 1
-    _log_pass "POST /api/system/upgrade accepted once (phase=$phase, source=admin)"
+    _log_pass "external worker delegated upgrade, competing POST serialized, and caller exited in ${worker_elapsed}s"
+
+    local initial_progress phase source
+    initial_progress="$(cat "${TEST_DATA_DIR}/upgrade-progress.json" 2>/dev/null || true)"
+    phase="$(json_field "$initial_progress" phase)"
+    source="$(json_field "$initial_progress" source)"
+    if [[ "$phase" != "checking" && "$phase" != "downloading" && "$phase" != "installing" && "$phase" != "restarting" ]]; then
+        _log_fail "delegated upgrade writes active progress" "active phase" "$phase ($initial_progress)"
+        return 1
+    fi
+    assert_equals "admin" "$source" "delegated upgrade records source=admin" || return 1
 
     # Poll progress across the restart window. The admin endpoint goes down while
     # the proxy restarts, then comes back and reads terminal state from the file.

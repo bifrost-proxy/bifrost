@@ -139,6 +139,176 @@ fn test_install_method_display() {
     assert_eq!(InstallMethod::Unknown.to_string(), "Unknown");
 }
 
+#[test]
+fn external_worker_upgrade_delegation_classifies_admin_responses() {
+    assert_eq!(
+        classify_admin_upgrade_response(202, r#"{"phase":"checking"}"#).unwrap(),
+        AdminUpgradeDelegationOutcome::Scheduled
+    );
+    assert_eq!(
+        classify_admin_upgrade_response(
+            409,
+            r#"{"error":"An upgrade is already in progress","status":409}"#,
+        )
+        .unwrap(),
+        AdminUpgradeDelegationOutcome::AlreadyInProgress
+    );
+    assert_eq!(
+        classify_admin_upgrade_response(409, r#"{"error":"No update available","status":409}"#,)
+            .unwrap(),
+        AdminUpgradeDelegationOutcome::AlreadyCurrent
+    );
+
+    let error = classify_admin_upgrade_response(500, r#"{"error":"spawn failed"}"#)
+        .expect_err("unexpected Admin failure must not be treated as success");
+    assert!(error.contains("HTTP 500: spawn failed"));
+    assert!(error.contains("left unchanged"));
+}
+
+#[test]
+fn external_worker_upgrade_delegation_is_fail_closed() {
+    let missing_runtime = delegate_external_worker_upgrade_with(None, |_| {
+        panic!("Admin request must not run without a live runtime")
+    })
+    .expect_err("missing owner must fail without inline upgrade");
+    assert!(missing_runtime.to_string().contains("left unchanged"));
+
+    let runtime = RuntimeInfo::new(
+        std::process::id(),
+        19876,
+        None,
+        Some("127.0.0.1".to_string()),
+        RuntimeStartMode::Daemon,
+    );
+    let unreachable = delegate_external_worker_upgrade_with(Some(runtime.clone()), |port| {
+        assert_eq!(port, 19876);
+        Err("connection refused".to_string())
+    })
+    .expect_err("unreachable Admin must not fall back to inline upgrade");
+    assert!(unreachable.to_string().contains("connection refused"));
+    assert!(unreachable.to_string().contains("left unchanged"));
+
+    let scheduled = delegate_external_worker_upgrade_with(Some(runtime), |port| {
+        assert_eq!(port, 19876);
+        Ok((202, r#"{"phase":"checking"}"#.to_string()))
+    })
+    .expect("Admin accepts delegated upgrade");
+    assert_eq!(scheduled, AdminUpgradeDelegationOutcome::Scheduled);
+}
+
+#[test]
+fn external_worker_marker_accepts_documented_truthy_values() {
+    const CHILD_ENV: &str = "BIFROST_TEST_EXTERNAL_WORKER_ENV_CHILD";
+    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "commands::upgrade::tests::external_worker_marker_accepts_documented_truthy_values",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated environment test");
+        assert!(status.success());
+        return;
+    }
+
+    for value in ["1", "true", "yes"] {
+        std::env::set_var(EXTERNAL_CLI_WORKER_ENV, value);
+        assert!(env_flag(EXTERNAL_CLI_WORKER_ENV), "value={value}");
+    }
+    for value in ["0", "false", "no", ""] {
+        std::env::set_var(EXTERNAL_CLI_WORKER_ENV, value);
+        assert!(!env_flag(EXTERNAL_CLI_WORKER_ENV), "value={value}");
+    }
+    std::env::remove_var(EXTERNAL_CLI_WORKER_ENV);
+    assert!(!env_flag(EXTERNAL_CLI_WORKER_ENV));
+}
+
+#[test]
+fn external_worker_handle_upgrade_uses_live_admin_without_inline_fallback() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    const CHILD_ENV: &str = "BIFROST_TEST_EXTERNAL_WORKER_HANDLE_CHILD";
+    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "commands::upgrade::tests::external_worker_handle_upgrade_uses_live_admin_without_inline_fallback",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .env_remove(EXTERNAL_CLI_WORKER_ENV)
+            .status()
+            .expect("spawn isolated delegated upgrade test");
+        assert!(status.success());
+        return;
+    }
+
+    fn serve_request(listener: &TcpListener, status: &str, body: &str) {
+        let (mut stream, _) = listener.accept().expect("accept Admin request");
+        let mut request = [0_u8; 4096];
+        let count = stream.read(&mut request).expect("read Admin request");
+        assert!(count > 0);
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write Admin response");
+    }
+
+    fn run_case(status: &'static str, body: &'static str) -> Result<(), BifrostError> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock Admin");
+        let port = listener.local_addr().expect("mock Admin address").port();
+        write_runtime_info(&RuntimeInfo::new(
+            std::process::id(),
+            port,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        ))
+        .expect("write runtime");
+        let server = std::thread::spawn(move || {
+            let overview = format!(
+                r#"{{"server":{{"port":{port}}},"system":{{"pid":{},"uptime_secs":1,"version":"test"}}}}"#,
+                std::process::id()
+            );
+            serve_request(&listener, "200 OK", &overview);
+            serve_request(&listener, status, body);
+        });
+        let result = handle_upgrade(true);
+        server.join().expect("join mock Admin");
+        result
+    }
+
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    std::env::set_var("BIFROST_DATA_DIR", data_dir.path());
+    std::env::set_var(EXTERNAL_CLI_WORKER_ENV, "1");
+
+    run_case("202 Accepted", r#"{"phase":"checking"}"#).expect("scheduled upgrade");
+    run_case(
+        "409 Conflict",
+        r#"{"error":"An upgrade is already in progress","status":409}"#,
+    )
+    .expect("already running is idempotent success");
+    run_case(
+        "409 Conflict",
+        r#"{"error":"No update available","status":409}"#,
+    )
+    .expect("already current is idempotent success");
+    let rejected = run_case(
+        "500 Internal Server Error",
+        r#"{"error":"spawn failed","status":500}"#,
+    )
+    .expect_err("unexpected Admin error must stay fail closed");
+    assert!(rejected.to_string().contains("spawn failed"));
+
+    std::env::remove_var("BIFROST_DATA_DIR");
+    std::env::remove_var(EXTERNAL_CLI_WORKER_ENV);
+}
+
 #[cfg(unix)]
 #[test]
 fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {

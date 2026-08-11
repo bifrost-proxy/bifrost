@@ -9,7 +9,7 @@ pub(crate) use desktop_companion::{
 };
 use install_method::*;
 
-use bifrost_core::BifrostError;
+use bifrost_core::{BifrostError, EXTERNAL_CLI_WORKER_ENV};
 use colored::Colorize;
 use std::env;
 use std::fs;
@@ -27,9 +27,9 @@ use super::streamed_output::StreamedOutputCapture;
 use super::update_check::{get_latest_version, get_latest_version_fresh_with_diagnostics};
 use crate::config::get_bifrost_dir;
 use crate::process::{
-    capture_runtime_system_proxy_snapshot, find_process_on_port, is_process_running, read_pid,
-    read_runtime_info, write_runtime_info, RuntimeInfo, RuntimeStartMode,
-    RuntimeSystemProxySnapshot,
+    capture_runtime_system_proxy_snapshot, discover_bifrost_runtime, find_process_on_port,
+    is_process_running, read_pid, read_runtime_info, write_runtime_info, RuntimeInfo,
+    RuntimeStartMode, RuntimeSystemProxySnapshot,
 };
 use bifrost_core::version_check::{
     is_newer_version, make_release_tag, VersionCache, GITHUB_RELEASE_URL,
@@ -61,6 +61,7 @@ const UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 const HOMEBREW_COMMAND_TIMEOUT_SECS: u64 = 600;
 const HOMEBREW_METADATA_TIMEOUT_SECS: u64 = 60;
 const UPGRADE_TEST_INSTALL_TARGET_ENV: &str = "BIFROST_UPGRADE_TEST_INSTALL_TARGET";
+const ADMIN_UPGRADE_REQUEST_TIMEOUT_SECS: u64 = 10;
 pub(crate) const DESKTOP_MANAGED_SKIP_APP_ENV: &str = "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP";
 pub(crate) const DESKTOP_MANAGED_SKIP_RESTART_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART";
@@ -142,6 +143,13 @@ enum UpgradeInstallOutcome {
     Installed,
     #[cfg(windows)]
     DeferredWindows(WindowsDeferredInstall),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdminUpgradeDelegationOutcome {
+    Scheduled,
+    AlreadyInProgress,
+    AlreadyCurrent,
 }
 
 #[cfg(windows)]
@@ -1210,6 +1218,10 @@ pub(crate) fn handle_background_upgrade(
 }
 
 pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
+    if env_flag(EXTERNAL_CLI_WORKER_ENV) {
+        return delegate_external_worker_upgrade();
+    }
+
     let skip_app = env_flag(DESKTOP_MANAGED_SKIP_APP_ENV);
     let skip_restart = env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV);
     let pinned_target = env::var(DESKTOP_MANAGED_TARGET_ENV).ok();
@@ -1231,6 +1243,113 @@ pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
         UpgradeBehavior::interactive(skip_app, skip_restart),
         pinned_target,
     )
+}
+
+/// An external CLI worker is owned by the running Bifrost daemon. Performing
+/// an inline upgrade from that process tree is self-defeating: stopping the old
+/// daemon also kills the worker, Codex, and the nested updater before it can
+/// install and restart Bifrost. Hand the request back to Admin, which starts the
+/// existing detached `self-update` orchestrator outside the worker process
+/// group.
+fn delegate_external_worker_upgrade() -> Result<(), BifrostError> {
+    let runtime = read_runtime_info().and_then(|runtime| {
+        let discovered = discover_bifrost_runtime(runtime.port)?;
+        (discovered.pid == runtime.pid).then_some(runtime)
+    });
+    let outcome = delegate_external_worker_upgrade_with(runtime, request_admin_upgrade)?;
+    match outcome {
+        AdminUpgradeDelegationOutcome::Scheduled => println!(
+            "{}",
+            "✓ Upgrade scheduled by the running Bifrost service; it will restart automatically."
+                .bright_green()
+                .bold()
+        ),
+        AdminUpgradeDelegationOutcome::AlreadyInProgress => println!(
+            "{}",
+            "✓ An upgrade is already in progress in the running Bifrost service.".bright_green()
+        ),
+        AdminUpgradeDelegationOutcome::AlreadyCurrent => {
+            println!("{}", "✓ Bifrost is already up to date.".bright_green())
+        }
+    }
+    Ok(())
+}
+
+fn delegate_external_worker_upgrade_with<F>(
+    runtime: Option<RuntimeInfo>,
+    request: F,
+) -> Result<AdminUpgradeDelegationOutcome, BifrostError>
+where
+    F: FnOnce(u16) -> Result<(u16, String), String>,
+{
+    let runtime = runtime.ok_or_else(|| {
+        BifrostError::Config(
+            "Cannot safely schedule an upgrade from an external CLI worker because the owning Bifrost service is not reachable. The running service was left unchanged."
+                .to_string(),
+        )
+    })?;
+    let (status, body) = request(runtime.port).map_err(|error| {
+        BifrostError::Config(format!(
+            "Failed to schedule the upgrade through the running Bifrost service: {error}. The running service was left unchanged."
+        ))
+    })?;
+    classify_admin_upgrade_response(status, &body).map_err(BifrostError::Config)
+}
+
+fn request_admin_upgrade(port: u16) -> Result<(u16, String), String> {
+    let url = format!("http://127.0.0.1:{port}/_bifrost/api/system/upgrade?channel=cli");
+    let result = bifrost_core::direct_ureq_agent_builder()
+        .timeout(Duration::from_secs(ADMIN_UPGRADE_REQUEST_TIMEOUT_SECS))
+        .build()
+        .post(&url)
+        .call();
+    match result {
+        Ok(response) => {
+            let status = response.status();
+            let body = response.into_string().unwrap_or_default();
+            Ok((status, body))
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            Ok((status, body))
+        }
+        Err(error) => Err(format!("POST {url} failed: {error}")),
+    }
+}
+
+fn classify_admin_upgrade_response(
+    status: u16,
+    body: &str,
+) -> Result<AdminUpgradeDelegationOutcome, String> {
+    if status == 202 {
+        return Ok(AdminUpgradeDelegationOutcome::Scheduled);
+    }
+
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .or_else(|| value.get("message"))
+                .and_then(|message| message.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| body.trim().to_string());
+    if status == 409 && message == "An upgrade is already in progress" {
+        return Ok(AdminUpgradeDelegationOutcome::AlreadyInProgress);
+    }
+    if status == 409 && message == "No update available" {
+        return Ok(AdminUpgradeDelegationOutcome::AlreadyCurrent);
+    }
+
+    let detail = if message.is_empty() {
+        "empty response".to_string()
+    } else {
+        message
+    };
+    Err(format!(
+        "Bifrost Admin rejected the delegated upgrade with HTTP {status}: {detail}. The running service was left unchanged"
+    ))
 }
 
 pub(crate) fn handle_app_managed_upgrade(target_version: String) -> Result<(), BifrostError> {

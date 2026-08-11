@@ -151,6 +151,19 @@ other adapter                          -> existing transport
 
 这项清理只作用于新子进程的环境，不修改当前进程环境，也不清理真实 worker 的标记。旧版本已经启动且受污染的长期进程不会被热修复；安装新版本后需要由用户选择合适窗口完整重启 Desktop、Tray 和 core，避免打断正在进行的连接。
 
+### Worker 内发起自升级
+
+外部 CLI worker、Codex 和它启动的 shell 都是运行中 Bifrost daemon 的后代。如果这条进程树直接执行普通 `bifrost upgrade`，updater 在停止旧 daemon 时会触发 active run 回收，连同 worker、Codex 和 updater 自身一起被终止，导致二进制尚未替换而服务已经退出。
+
+因此 `bifrost upgrade` 在检测到 `BIFROST_EXTERNAL_CLI_WORKER=1` 时必须在获取本地 upgrade lock 或执行任何安装动作之前改变编排方式：
+
+1. 从当前 data dir 的 `runtime.json` 读取 owner PID 和 Admin 端口，并确认 owner 仍存活；
+2. 通过 loopback 直连请求 `POST /_bifrost/api/system/upgrade?channel=cli`；
+3. Admin 使用既有 detached `bifrost self-update --source admin` 编排器启动升级；该进程不属于 external run 的 process group，能在 daemon 回收 Codex 后继续完成安装和重启；
+4. CLI 收到 `202 Accepted` 后只报告“已安排升级”并退出，不等待重启完成；`409 No update available` 和 `409 An upgrade is already in progress` 作为幂等成功返回。
+
+这一委托必须 fail closed：runtime 缺失、owner 已退出、Admin 不可达或返回未知错误时，CLI 返回明确错误并保留当前服务，禁止回退到进程树内 inline upgrade。隐藏的 `self-update` 子命令继续直接进入 background handler，不读取该分支，避免 Admin 派生的 updater 再次委托形成循环。
+
 Linux 的传统 daemon 路径使用 `fork` 而不是 `Command`，因此在 fork child 进入长期运行前直接 `remove_var` 清除该角色标记；生产 dispatch 同时不再读取 ambient marker，形成进程环境与调度语义两层隔离。由 Tray 创建 Linux 服务时，Tray 的 command 边界仍会清除该变量。
 
 ### Admin API 与 CLI
@@ -200,6 +213,8 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 所有模拟 Claude Code stream-json 的测试夹具必须读取一条初始 user JSONL frame 后开始输出，不能通过 `cat` 等待 stdin EOF。需要验证 guide 的夹具还必须依次校验 interrupt control request、返回匹配 request id 的 control response、读取 guide user frame，并模拟旧响应的 interrupted result 与 guide 的最终 success result。真实 transport 会保持 stdin 打开；等待 EOF 会让夹具在正确的产品行为下永久阻塞并最终误报 30 秒超时。
 
 Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue、ChatGPT Web 只展示 Queue，以及 Guide 降级后刷新队列状态。IM mock inbound 覆盖普通 busy text 默认排队、显式 `/g` steer、`/q` 显式排队、busy Codex/Traex 的 `/efforts` 与 `/effort` 不透传、微信引用上下文，以及 ChatGPT Web 默认排队。
+
+`e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh` 以真实本地 release 归档启动独立 daemon，再执行 `BIFROST_EXTERNAL_CLI_WORKER=1 bifrost upgrade`：断言 worker CLI 在 10 秒内返回委托成功、后台进度持续到 completed、旧 PID 被新 PID 替换且新 daemon 使用升级后的安装路径。该链路同时证明 updater 不依赖发起升级的 worker/Codex 调用者继续存活。
 
 ### Human tests
 
