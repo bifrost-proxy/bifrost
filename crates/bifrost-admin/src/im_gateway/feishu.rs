@@ -40,6 +40,12 @@ const WS_SERVER_SILENCE_TIMEOUT_SECS: u64 = 180;
 /// How often the silence watchdog wakes up to re-check `last_server_msg_at`.
 const WS_SILENCE_CHECK_INTERVAL_SECS: u64 = 15;
 
+#[derive(Clone, Copy)]
+struct FeishuReplyOptions<'a> {
+    uuid: Option<&'a str>,
+    reply_in_thread: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Protobuf Frame types for Feishu WebSocket binary protocol
 // ---------------------------------------------------------------------------
@@ -490,8 +496,7 @@ impl FeishuProvider {
         message_id: &str,
         msg_type: &str,
         content: &str,
-        uuid: Option<&str>,
-        reply_in_thread: bool,
+        options: FeishuReplyOptions<'_>,
     ) -> Result<SendResult> {
         let url = format!("{}/im/v1/messages/{}/reply", base_url, message_id);
 
@@ -515,8 +520,8 @@ impl FeishuProvider {
             .json(&build_reply_request(
                 msg_type,
                 content,
-                uuid,
-                reply_in_thread,
+                options.uuid,
+                options.reply_in_thread,
             ))
             .send()
             .await
@@ -831,8 +836,10 @@ impl FeishuProvider {
             message_id,
             "interactive",
             &content,
-            uuid,
-            reply_in_thread,
+            FeishuReplyOptions {
+                uuid,
+                reply_in_thread,
+            },
         )
         .await
     }
@@ -1227,8 +1234,10 @@ impl FeishuProvider {
             message_id,
             "interactive",
             &content,
-            uuid,
-            false,
+            FeishuReplyOptions {
+                uuid,
+                reply_in_thread: false,
+            },
         )
         .await
     }
@@ -1254,8 +1263,10 @@ impl FeishuProvider {
             message_id,
             "interactive",
             &content,
-            uuid,
-            true,
+            FeishuReplyOptions {
+                uuid,
+                reply_in_thread: true,
+            },
         )
         .await
     }

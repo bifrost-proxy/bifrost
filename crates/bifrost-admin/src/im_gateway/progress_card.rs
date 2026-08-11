@@ -1692,8 +1692,7 @@ impl ImAgentProgressRegistry {
         };
         let session = Arc::clone(session.value());
         let guard = session.lock().await;
-        let infos = guard.message_history[guard.turn_message_start..].to_vec();
-        infos
+        guard.message_history[guard.turn_message_start..].to_vec()
     }
 
     pub async fn restart_existing(&self, session_key: &str, initial_message: &str) -> bool {

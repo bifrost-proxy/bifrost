@@ -94,6 +94,99 @@ pub(super) fn take_thread_derivation_anchor(anchor: &mut Option<String>) -> Opti
     anchor.take()
 }
 
+fn apply_ready_thread_anchor(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    anchor: crate::im_gateway::group_context::FeishuMessageAnchor,
+) -> bool {
+    let Some(source_thread_id) = anchor.checkpoint_thread_id.or(anchor.external_thread_id) else {
+        return false;
+    };
+    crate::im_gateway::external_cli::apply_thread_derivation_to_run_request(
+        request,
+        &crate::im_gateway::external_cli::ExternalCliThreadDerivation {
+            source_thread_id,
+            last_turn_id: (anchor.status != "active_ready")
+                .then_some(anchor.external_turn_id)
+                .flatten(),
+        },
+    );
+    true
+}
+
+fn apply_thread_fallback(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    fallback_message: Option<&str>,
+) {
+    if let Some(fallback) = fallback_message {
+        request.message = fallback.to_string();
+    }
+}
+
+pub(super) async fn apply_thread_anchor_to_request(
+    store: &ImGroupContextStore,
+    session_manager: &ImAgentSessionManager,
+    provider_id: &str,
+    anchor_message_id: &str,
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    fallback_message: Option<&str>,
+) {
+    let anchor = match store.feishu_message_anchor(provider_id, anchor_message_id) {
+        Ok(Some(anchor)) => anchor,
+        Ok(None) => {
+            apply_thread_fallback(request, fallback_message);
+            return;
+        }
+        Err(error) => {
+            warn!(message_id = anchor_message_id, error = %error, "failed to load Feishu source anchor");
+            apply_thread_fallback(request, fallback_message);
+            return;
+        }
+    };
+    if anchor.is_derivable() && matches!(anchor.status.as_str(), "ready" | "active_ready") {
+        if !apply_ready_thread_anchor(request, anchor) {
+            apply_thread_fallback(request, fallback_message);
+        }
+        return;
+    }
+    if anchor.status != "pending" {
+        apply_thread_fallback(request, fallback_message);
+        return;
+    }
+
+    let wait_started = std::time::Instant::now();
+    loop {
+        if wait_started.elapsed() > std::time::Duration::from_secs(3600) {
+            warn!(
+                message_id = anchor_message_id,
+                "timed out waiting for Feishu source anchor"
+            );
+            break;
+        }
+        match store.feishu_message_anchor(provider_id, anchor_message_id) {
+            Ok(Some(updated))
+                if updated.is_derivable()
+                    && matches!(updated.status.as_str(), "ready" | "active_ready") =>
+            {
+                if apply_ready_thread_anchor(request, updated) {
+                    return;
+                }
+                break;
+            }
+            Ok(Some(updated)) if updated.status == "pending" => {}
+            Ok(Some(_)) | Ok(None) => break,
+            Err(error) => {
+                warn!(message_id = anchor_message_id, error = %error, "failed to poll Feishu source anchor");
+                break;
+            }
+        }
+        if !session_manager.is_session_active(&anchor.source_session_key) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    apply_thread_fallback(request, fallback_message);
+}
+
 pub(in crate::handlers::im_gateway) fn finalize_live_guide_group_turns(
     queue_manager: &SessionQueueManager,
     group_context_store: &ImGroupContextStore,
@@ -498,94 +591,15 @@ pub(super) async fn run_external_cli_agent_chat(
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
         let current_thread_anchor = take_thread_derivation_anchor(&mut thread_anchor_pending);
         if let Some(anchor_message_id) = current_thread_anchor.as_deref() {
-            match ctx
-                .group_context_store
-                .feishu_message_anchor(&ctx.provider.id, anchor_message_id)
-            {
-                Ok(Some(anchor))
-                    if anchor.is_derivable()
-                        && matches!(anchor.status.as_str(), "ready" | "active_ready") =>
-                {
-                    if let Some(source_thread_id) = anchor
-                        .checkpoint_thread_id
-                        .clone()
-                        .or(anchor.external_thread_id.clone())
-                    {
-                        crate::im_gateway::external_cli::apply_thread_derivation_to_run_request(
-                            &mut request,
-                            &crate::im_gateway::external_cli::ExternalCliThreadDerivation {
-                                source_thread_id,
-                                last_turn_id: (anchor.status != "active_ready")
-                                    .then_some(anchor.external_turn_id)
-                                    .flatten(),
-                            },
-                        );
-                    }
-                }
-                Ok(Some(anchor)) if anchor.status == "pending" => {
-                    let wait_started = std::time::Instant::now();
-                    let mut derived = false;
-                    loop {
-                        match ctx
-                            .group_context_store
-                            .feishu_message_anchor(&ctx.provider.id, anchor_message_id)
-                        {
-                            Ok(Some(updated))
-                                if updated.is_derivable()
-                                    && matches!(
-                                        updated.status.as_str(),
-                                        "ready" | "active_ready"
-                                    ) =>
-                            {
-                                if let Some(source_thread_id) =
-                                    updated.checkpoint_thread_id.or(updated.external_thread_id)
-                                {
-                                    crate::im_gateway::external_cli::apply_thread_derivation_to_run_request(
-                                        &mut request,
-                                        &crate::im_gateway::external_cli::ExternalCliThreadDerivation {
-                                            source_thread_id,
-                                            last_turn_id: (updated.status != "active_ready")
-                                                .then_some(updated.external_turn_id)
-                                                .flatten(),
-                                        },
-                                    );
-                                    derived = true;
-                                }
-                                break;
-                            }
-                            Ok(Some(updated)) if updated.status == "failed" => break,
-                            Err(error) => {
-                                warn!(message_id = anchor_message_id, error = %error, "failed to poll Feishu source anchor");
-                                break;
-                            }
-                            _ if wait_started.elapsed() > std::time::Duration::from_secs(3600) => {
-                                warn!(
-                                    message_id = anchor_message_id,
-                                    "timed out waiting for Feishu source anchor"
-                                );
-                                break;
-                            }
-                            _ => {}
-                        }
-                        if !ctx
-                            .agent_session_manager
-                            .is_session_active(&anchor.source_session_key)
-                        {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                    if !derived {
-                        if let Some(fallback) = thread_fallback_message.as_ref() {
-                            request.message = fallback.clone();
-                        }
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    warn!(message_id = anchor_message_id, error = %error, "failed to load Feishu source anchor")
-                }
-            }
+            apply_thread_anchor_to_request(
+                ctx.group_context_store,
+                ctx.agent_session_manager,
+                &ctx.provider.id,
+                anchor_message_id,
+                &mut request,
+                thread_fallback_message.as_deref(),
+            )
+            .await;
         }
         apply_session_bound_work_dir(
             &mut request,

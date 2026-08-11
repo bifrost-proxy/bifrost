@@ -1182,6 +1182,16 @@ fn group_store_rejects_non_group_and_missing_message_events() {
 }
 
 #[test]
+fn feishu_thread_parts_rejects_empty_thread_id() {
+    let mut event = group_event("empty-thread", "c1", "u1", "hi", Vec::new(), 1);
+    let message = event.message.as_mut().unwrap();
+    message.thread_id = Some("   ".to_string());
+    message.root_id = Some("root-message".to_string());
+
+    assert_eq!(feishu_thread_parts(&event), None);
+}
+
+#[test]
 fn group_binding_can_be_resolved_from_canonical_session_key() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
@@ -1320,6 +1330,58 @@ fn pending_thread_recovery_is_atomically_claimed_once_per_process() {
         .claim_pending_feishu_thread_bindings("provider-b", 3)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn topic_binding_state_update_clears_recovery_claim_and_persists_terminal_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let binding = FeishuThreadBinding {
+        provider_id: "provider-a".to_string(),
+        chat_id: "chat-a".to_string(),
+        feishu_thread_id: "topic-a".to_string(),
+        root_message_id: "root-a".to_string(),
+        derived_session_key: "derived-a".to_string(),
+        source_kind: "local_checkpoint".to_string(),
+        source_message_id: "root-a".to_string(),
+        source_adapter: Some("codex".to_string()),
+        source_thread_id: Some("thread-a".to_string()),
+        source_turn_id: Some("turn-a".to_string()),
+        trigger_message_id: "trigger-a".to_string(),
+        initial_message: "continue".to_string(),
+        fallback_message: None,
+        initial_event_json: None,
+        state: "initializing".to_string(),
+    };
+    store.claim_feishu_thread_binding(&binding, 1).unwrap();
+    assert_eq!(
+        store
+            .claim_pending_feishu_thread_bindings("provider-a", 2)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    store
+        .update_feishu_thread_binding_state("provider-a", "chat-a", "topic-a", "ready", 3)
+        .unwrap();
+    assert_eq!(
+        store
+            .feishu_thread_binding("provider-a", "chat-a", "topic-a")
+            .unwrap()
+            .unwrap()
+            .state,
+        "ready"
+    );
+    let recovery_token: Option<String> = rusqlite::Connection::open(store.file_path())
+        .unwrap()
+        .query_row(
+            "SELECT recovery_token FROM im_feishu_thread_bindings WHERE provider_id = 'provider-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(recovery_token.is_none());
 }
 
 #[test]
