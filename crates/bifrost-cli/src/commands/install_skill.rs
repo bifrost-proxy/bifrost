@@ -2,13 +2,13 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use colored::Colorize;
 
 use bifrost_core::BifrostError;
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 const SKILL_RAW_URL: &str = "https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/SKILL.md";
 const REMOTE_SKILL_RAW_URL: &str =
@@ -52,65 +52,29 @@ const SKILL_SOURCES: &[SkillSource] = &[
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AiTool {
-    ClaudeCode,
-    Codex,
-    Trae,
-    Cursor,
-    GitHubCopilot,
     Universal,
+    ClaudeCode,
 }
 
 impl AiTool {
     fn all() -> Vec<AiTool> {
-        vec![
-            AiTool::ClaudeCode,
-            AiTool::Codex,
-            AiTool::Trae,
-            AiTool::Cursor,
-            AiTool::GitHubCopilot,
-        ]
+        vec![AiTool::Universal, AiTool::ClaudeCode]
     }
 
     fn default_global_dirs(&self) -> Vec<PathBuf> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
         match self {
+            AiTool::Universal => vec![home.join(".agents").join("skills").join("bifrost")],
             AiTool::ClaudeCode => {
                 vec![home.join(".claude").join("skills").join("bifrost")]
             }
-            AiTool::Codex => vec![
-                home.join(".codex").join("skills").join("bifrost"),
-                home.join(".agents").join("skills").join("bifrost"),
-            ],
-            AiTool::Trae => vec![
-                home.join(".trae").join("skills").join("bifrost"),
-                home.join(".trae-cn").join("skills").join("bifrost"),
-            ],
-            AiTool::Cursor => vec![home.join(".cursor").join("skills").join("bifrost")],
-            AiTool::GitHubCopilot => {
-                vec![home.join(".copilot").join("skills").join("bifrost")]
-            }
-            AiTool::Universal => vec![home.join(".agents").join("skills").join("bifrost")],
-        }
-    }
-
-    fn project_local_dir(&self, base: &Path) -> PathBuf {
-        match self {
-            AiTool::ClaudeCode => base.join(".claude").join("skills").join("bifrost"),
-            AiTool::Codex => base.join(".codex").join("skills").join("bifrost"),
-            AiTool::Trae => base.join(".trae").join("skills").join("bifrost"),
-            AiTool::Cursor => base.join(".cursor").join("skills").join("bifrost"),
-            AiTool::GitHubCopilot => base.join(".github").join("skills").join("bifrost"),
-            AiTool::Universal => base.join(".agents").join("skills").join("bifrost"),
         }
     }
 
     fn project_local_dirs(&self, base: &Path) -> Vec<PathBuf> {
         match self {
-            AiTool::Codex => vec![
-                self.project_local_dir(base),
-                base.join(".agents").join("skills").join("bifrost"),
-            ],
-            _ => vec![self.project_local_dir(base)],
+            AiTool::Universal => vec![base.join(".agents").join("skills").join("bifrost")],
+            AiTool::ClaudeCode => vec![base.join(".claude").join("skills").join("bifrost")],
         }
     }
 
@@ -126,12 +90,8 @@ impl AiTool {
 impl fmt::Display for AiTool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AiTool::ClaudeCode => write!(f, "Claude Code"),
-            AiTool::Codex => write!(f, "Codex"),
-            AiTool::Trae => write!(f, "Trae"),
-            AiTool::Cursor => write!(f, "Cursor"),
-            AiTool::GitHubCopilot => write!(f, "GitHub Copilot"),
             AiTool::Universal => write!(f, "Universal Agent Skills"),
+            AiTool::ClaudeCode => write!(f, "Claude Code"),
         }
     }
 }
@@ -139,14 +99,10 @@ impl fmt::Display for AiTool {
 fn parse_tool(s: &str) -> Result<Vec<AiTool>, BifrostError> {
     match s.to_lowercase().replace(' ', "-").as_str() {
         "all" => Ok(AiTool::all()),
-        "claude-code" | "claude" => Ok(vec![AiTool::ClaudeCode]),
-        "codex" | "openai-codex" => Ok(vec![AiTool::Codex]),
-        "trae" => Ok(vec![AiTool::Trae]),
-        "cursor" => Ok(vec![AiTool::Cursor]),
-        "github-copilot" | "copilot" => Ok(vec![AiTool::GitHubCopilot]),
         "universal" | "agent-skills" => Ok(vec![AiTool::Universal]),
+        "claude-code" | "claude" => Ok(vec![AiTool::ClaudeCode]),
         _ => Err(BifrostError::Config(format!(
-            "Unknown tool: '{}'. Available: claude-code, codex, trae, cursor, github-copilot, universal, all",
+            "Unknown tool: '{}'. Available: universal, claude-code, all",
             s
         ))),
     }
@@ -217,8 +173,8 @@ fn download_skill_source(source: SkillSource) -> Result<String, BifrostError> {
         source.raw_url.dimmed()
     );
 
-    // NOTE: Even with per-socket timeouts, some environments can still hang during TLS/DNS.
-    // Guard the whole network attempt with a hard deadline, and fall back to embedded copy.
+    // Even with per-socket timeouts, DNS/TLS can hang in some environments.
+    // Guard the whole attempt and fall back to the copy compiled into the CLI.
     let hard_timeout = Duration::from_secs(45);
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -254,7 +210,7 @@ fn download_skill_source(source: SkillSource) -> Result<String, BifrostError> {
             println!(
                 "  {} {}",
                 "⚠".bright_yellow(),
-                "Failed to download SKILL.md from network; falling back to embedded copy."
+                "Failed to download skill from network; falling back to embedded copy."
                     .bright_yellow()
             );
             println!("    {}", err_msg.dimmed());
@@ -284,7 +240,7 @@ fn download_skill_source(source: SkillSource) -> Result<String, BifrostError> {
 
     if body.trim().is_empty() {
         return Err(BifrostError::Parse(
-            "Downloaded SKILL.md is empty — the remote file may be blank or corrupted. \
+            "Downloaded skill is empty — the remote file may be blank or corrupted. \
              Please verify the source URL and try again."
                 .to_string(),
         ));
@@ -295,13 +251,12 @@ fn download_skill_source(source: SkillSource) -> Result<String, BifrostError> {
         println!(
             "  {} {}",
             "⚠".bright_yellow(),
-            "Warning: Downloaded SKILL.md does not contain standard YAML frontmatter (---)."
+            "Warning: Downloaded skill does not contain standard YAML frontmatter (---)."
                 .bright_yellow()
         );
         println!(
             "    {}",
-            "Major AI coding tools and Agent Skills runtimes (Claude Code, Codex, Trae, Cursor, \
-             GitHub Copilot, and standard .agents/skills consumers) require frontmatter with \
+            "Claude Code and standard .agents/skills consumers require frontmatter with \
              'name' and 'description' fields for skill auto-discovery."
                 .dimmed()
         );
@@ -410,7 +365,6 @@ fn install_to_dir(
         .map_err(|e| format_io_error(&e, &target_dir, "create directory"))?;
 
     let final_content = tool.wrap_content(&asset.content);
-
     fs::write(&target_file, &final_content)
         .map_err(|e| format_io_error(&e, &target_file, "write file"))?;
 
@@ -430,10 +384,9 @@ fn install_to_tool(
     custom_dir: &Option<PathBuf>,
     cwd: bool,
 ) -> Result<(), BifrostError> {
-    let dirs = resolve_target_dirs(tool, custom_dir, cwd);
-    for d in &dirs {
+    for dir in resolve_target_dirs(tool, custom_dir, cwd) {
         for asset in assets {
-            install_to_dir(tool, asset, d)?;
+            install_to_dir(tool, asset, &dir)?;
         }
     }
     Ok(())
@@ -501,13 +454,11 @@ pub fn handle_install_skill(
     }
 
     println!();
-
     println!("  Target paths:");
-    for t in &tools {
-        let target_dirs = resolve_target_dirs(t, &dir, cwd);
-        for target_dir in &target_dirs {
+    for tool in &tools {
+        for target_dir in resolve_target_dirs(tool, &dir, cwd) {
             for source in SKILL_SOURCES {
-                let target_file = skill_target_dir(target_dir, *source).join(t.target_filename());
+                let target_file = skill_target_dir(&target_dir, *source).join(tool.target_filename());
                 let exists = if target_file.exists() {
                     " (exists → overwrite)".bright_yellow().to_string()
                 } else {
@@ -516,7 +467,7 @@ pub fn handle_install_skill(
                 println!(
                     "    {} {} / {} → {}{}",
                     "•".bright_cyan(),
-                    t,
+                    tool,
                     source.dir_name,
                     target_file.display(),
                     exists
@@ -526,28 +477,26 @@ pub fn handle_install_skill(
     }
 
     println!();
-
     if !yes && !prompt_confirm("Proceed with installation?") {
         println!("{}", "Installation cancelled.".dimmed());
         return Ok(());
     }
 
     let assets = download_skill_bundle()?;
-
     let mut success_count = 0;
     let mut errors: Vec<(AiTool, String)> = Vec::new();
 
-    for t in &tools {
-        match install_to_tool(t, &assets, &dir, cwd) {
+    for tool in &tools {
+        match install_to_tool(tool, &assets, &dir, cwd) {
             Ok(()) => success_count += 1,
             Err(e) => {
                 println!(
                     "  {} {} — {}",
                     "✗".bright_red().bold(),
-                    t,
+                    tool,
                     e.to_string().bright_red()
                 );
-                errors.push((t.clone(), e.to_string()));
+                errors.push((tool.clone(), e.to_string()));
             }
         }
     }
@@ -559,7 +508,7 @@ pub fn handle_install_skill(
         println!(
             "{}",
             format!(
-                "  ✓ Successfully installed to {} tool{}!",
+                "  ✓ Successfully installed to {} target{}!",
                 success_count,
                 if success_count > 1 { "s" } else { "" }
             )
@@ -570,7 +519,7 @@ pub fn handle_install_skill(
         println!(
             "{}",
             format!(
-                "  ⚠ Installed to {}/{} tools ({} failed)",
+                "  ⚠ Installed to {}/{} targets ({} failed)",
                 success_count,
                 tools.len(),
                 errors.len()
@@ -596,38 +545,71 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn parse_tool_parses_known_values_and_all() {
+    fn parse_tool_supports_only_universal_and_claude() {
         let all = parse_tool("all").unwrap();
-        assert!(all.contains(&AiTool::ClaudeCode));
-        assert!(all.contains(&AiTool::GitHubCopilot));
+        assert_eq!(all, vec![AiTool::Universal, AiTool::ClaudeCode]);
 
+        assert_eq!(parse_tool("universal").unwrap(), vec![AiTool::Universal]);
+        assert_eq!(parse_tool("agent-skills").unwrap(), vec![AiTool::Universal]);
         assert_eq!(parse_tool("claude-code").unwrap(), vec![AiTool::ClaudeCode]);
         assert_eq!(parse_tool("Claude Code").unwrap(), vec![AiTool::ClaudeCode]);
-        assert_eq!(parse_tool("copilot").unwrap(), vec![AiTool::GitHubCopilot]);
-        assert!(parse_tool("unknown-tool").is_err());
+
+        for legacy in ["codex", "trae", "cursor", "github-copilot", "copilot"] {
+            assert!(parse_tool(legacy).is_err(), "legacy target should be rejected: {legacy}");
+        }
+    }
+
+    #[test]
+    fn default_global_dirs_are_standard_agents_and_claude_only() {
+        let universal = AiTool::Universal.default_global_dirs();
+        assert_eq!(universal.len(), 1);
+        assert!(universal[0].ends_with(Path::new(".agents/skills/bifrost")));
+
+        let claude = AiTool::ClaudeCode.default_global_dirs();
+        assert_eq!(claude.len(), 1);
+        assert!(claude[0].ends_with(Path::new(".claude/skills/bifrost")));
     }
 
     #[test]
     fn resolve_target_dirs_prefers_custom_dir() {
         let custom = PathBuf::from("/tmp/custom-dir");
-        let dirs = resolve_target_dirs(&AiTool::ClaudeCode, &Some(custom.clone()), false);
+        let dirs = resolve_target_dirs(&AiTool::Universal, &Some(custom.clone()), false);
         assert_eq!(dirs, vec![custom]);
     }
 
     #[test]
     fn resolve_target_dirs_uses_cwd_project_dirs() {
         let temp_dir = TempDir::new().unwrap();
-        let dirs =
-            resolve_target_dirs_with_base(&AiTool::Codex, &None, true, || temp_dir.path().into());
-        let expected = AiTool::Codex.project_local_dirs(temp_dir.path());
-        assert_eq!(dirs, expected);
+        let universal = resolve_target_dirs_with_base(&AiTool::Universal, &None, true, || {
+            temp_dir.path().into()
+        });
+        assert_eq!(
+            universal,
+            vec![temp_dir
+                .path()
+                .join(".agents")
+                .join("skills")
+                .join("bifrost")]
+        );
+
+        let claude = resolve_target_dirs_with_base(&AiTool::ClaudeCode, &None, true, || {
+            temp_dir.path().into()
+        });
+        assert_eq!(
+            claude,
+            vec![temp_dir
+                .path()
+                .join(".claude")
+                .join("skills")
+                .join("bifrost")]
+        );
     }
 
     #[test]
     fn resolve_target_dirs_uses_env_dir_for_global_installs() {
         let env_dir = PathBuf::from("/tmp/env-skill-dir");
         let dirs = resolve_target_dirs_with_base_and_env(
-            &AiTool::Codex,
+            &AiTool::Universal,
             &None,
             false,
             || PathBuf::from("/tmp/project"),
@@ -641,7 +623,7 @@ mod tests {
         let custom = PathBuf::from("/tmp/custom-dir");
         let env_dir = Some(PathBuf::from("/tmp/env-skill-dir"));
         let dirs = resolve_target_dirs_with_base_and_env(
-            &AiTool::Codex,
+            &AiTool::Universal,
             &Some(custom.clone()),
             false,
             || PathBuf::from("/tmp/project"),
@@ -651,18 +633,18 @@ mod tests {
 
         let project = PathBuf::from("/tmp/project");
         let dirs = resolve_target_dirs_with_base_and_env(
-            &AiTool::Codex,
+            &AiTool::Universal,
             &None,
             true,
             || project.clone(),
             env_dir,
         );
-        assert_eq!(dirs, AiTool::Codex.project_local_dirs(&project));
+        assert_eq!(dirs, AiTool::Universal.project_local_dirs(&project));
     }
 
     #[test]
     fn skill_target_dir_for_primary_and_remote_sources() {
-        let base = PathBuf::from("/home/user/.claude/skills/bifrost");
+        let base = PathBuf::from("/home/user/.agents/skills/bifrost");
         let primary = skill_target_dir(&base, SKILL_SOURCES[0]);
         assert_eq!(primary, base);
 
@@ -677,12 +659,12 @@ mod tests {
     #[test]
     fn install_to_dir_writes_skill_file() {
         let temp_dir = TempDir::new().unwrap();
-        let tool = AiTool::ClaudeCode;
+        let tool = AiTool::Universal;
         let asset = SkillAsset {
             source: SKILL_SOURCES[0],
             content: "test-skill".to_string(),
         };
-        let primary_target = temp_dir.path().join("cli").join("skills").join("bifrost");
+        let primary_target = temp_dir.path().join(".agents").join("skills").join("bifrost");
 
         install_to_dir(&tool, &asset, &primary_target).unwrap();
 
