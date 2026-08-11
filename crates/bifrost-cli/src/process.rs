@@ -366,8 +366,9 @@ pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
 /// Used on both Unix and Windows: after a daemon is stopped, the OS does not
 /// release the listening socket instantaneously, so a fresh daemon that binds
 /// immediately can fail (EADDRINUSE on Unix / WSAEADDRINUSE on Windows). The
-/// bind-probe logic is platform-agnostic, so the same implementation serves
-/// both targets.
+/// Windows can retain an exclusive bind reservation after the owning process
+/// has disappeared. In that case two consecutive process-table snapshots with
+/// no TCP listener or UDP owner are accepted as proof that a restart is safe.
 #[cfg(any(unix, windows))]
 pub fn wait_for_port_released(port: u16, budget: std::time::Duration) -> bool {
     use std::net::{SocketAddr, TcpListener, UdpSocket};
@@ -376,6 +377,8 @@ pub fn wait_for_port_released(port: u16, budget: std::time::Duration) -> bool {
     let deadline = Instant::now() + budget;
     let any: SocketAddr = ([0, 0, 0, 0], port).into();
     let lo: SocketAddr = ([127, 0, 0, 1], port).into();
+    #[cfg(windows)]
+    let mut consecutive_no_owner = 0_u8;
 
     while Instant::now() < deadline {
         let tcp_any_ok = TcpListener::bind(any).is_ok();
@@ -385,19 +388,36 @@ pub fn wait_for_port_released(port: u16, budget: std::time::Duration) -> bool {
         if tcp_any_ok && tcp_lo_ok && udp_any_ok && udp_lo_ok {
             return true;
         }
+
+        #[cfg(windows)]
+        {
+            if matches!(query_process_on_port_windows(port), Ok(None)) {
+                consecutive_no_owner += 1;
+                if consecutive_no_owner >= 2 {
+                    return true;
+                }
+            } else {
+                consecutive_no_owner = 0;
+            }
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     false
 }
 
 #[cfg(windows)]
-pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
+fn query_process_on_port_windows(port: u16) -> std::io::Result<Option<PortProcessInfo>> {
     let output = std::process::Command::new("netstat")
         .args(["-ano"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "netstat exited with {}",
+            output.status
+        )));
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let port_str = format!(":{}", port);
@@ -414,7 +434,7 @@ pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
             if local_addr.ends_with(&port_str) {
                 if let Ok(pid) = parts[4].parse::<u32>() {
                     let name = get_process_name_windows(pid).unwrap_or_default();
-                    return Some(PortProcessInfo { pid, name });
+                    return Ok(Some(PortProcessInfo { pid, name }));
                 }
             }
         } else if is_udp_socket && parts.len() >= 4 {
@@ -422,12 +442,17 @@ pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
             if local_addr.ends_with(&port_str) {
                 if let Ok(pid) = parts[3].parse::<u32>() {
                     let name = get_process_name_windows(pid).unwrap_or_default();
-                    return Some(PortProcessInfo { pid, name });
+                    return Ok(Some(PortProcessInfo { pid, name }));
                 }
             }
         }
     }
-    None
+    Ok(None)
+}
+
+#[cfg(windows)]
+pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
+    query_process_on_port_windows(port).ok().flatten()
 }
 
 #[cfg(windows)]
@@ -673,9 +698,7 @@ mod tests {
         );
     }
 
-    // Windows can keep the UDP side of a freshly released TCP ephemeral port
-    // unavailable long enough to make this positive timing assertion flaky.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn wait_for_port_released_returns_quickly_when_port_is_free() {
         let mut attempts = Vec::new();

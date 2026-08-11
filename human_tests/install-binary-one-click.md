@@ -579,6 +579,7 @@
 预期结果：
 
 - Windows x86 CI 必须执行真实进程链路：当前 PR `bifrost.exe` 复制到临时安装路径并启动 daemon，同一路径的 `bifrost.exe` 执行 upgrade，upgrade 停止 daemon，等待旧端口释放，替换当前安装路径，最后用替换后的 `bifrost.exe start -d` 启动新 daemon。
+- Windows 在旧进程退出后若仍因系统残留的独占绑定预留而无法通过四路 bind probe，必须以连续两次 `netstat` 均确认没有 TCP listener 或 UDP owner 后继续重启；`netstat` 查询失败或任一次仍有 owner 时不得提前判定端口已释放。
 - 该路径必须覆盖 Windows 用户最关键的 self-update 行为；历史 release 如 v0.0.100 缺少 Windows daemon exec start 能力，不作为本用例的启动 fixture。
 - 由于 Windows 不允许当前进程直接覆盖正在运行的 exe，upgrade 必须先 stage 新 exe，再调度 PowerShell helper 在当前 upgrade 进程退出后替换目标 exe；检测到运行中 daemon 时，helper 必须替换后执行新 exe 的 restart args。
 - CI 输出必须包含 detected/stop/wait/restart 里程碑，且允许 Windows 输出 `Proxy restart scheduled with the new version`；由于 Windows self-replacement 由 deferred PowerShell helper 在 upgrade 进程退出后执行，脚本必须先等待 Admin API ready 作为 helper 已完成重启的同步点，再验证临时 HOME 下的 `bifrost` / `bifrost-remote` skills 已自动安装。Windows runner 不再把 PID 必须变化作为唯一门禁；若 `runtime.json` pid 与旧 pid 相同，记录诊断并继续验证 Admin API ready、skills installed、`runtime.json` 记录 `system_proxy_enabled=false`、stop 后端口释放等行为。非 Windows 仍要求 PID 更换与新二进制路径。
