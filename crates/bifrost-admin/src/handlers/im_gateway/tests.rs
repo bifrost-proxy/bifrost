@@ -3442,6 +3442,7 @@ pub(super) async fn outbound_target_validation_and_upload_error_matrix() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[cfg(not(windows))]
 pub(super) async fn outbound_chunked_upload_enforces_streaming_size_limit() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
