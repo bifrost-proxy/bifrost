@@ -578,6 +578,32 @@ fn assistant_stream_keeps_repeated_tokens_and_word_boundaries() {
 }
 
 #[test]
+fn assistant_text_comparison_normalizes_only_valid_markdown_image_destinations() {
+    assert_eq!(
+        normalize_assistant_markdown_image_destinations("plain text"),
+        "plain text"
+    );
+    assert_eq!(
+        normalize_assistant_markdown_image_destinations(
+            "进展 ![图表](./本地/chart.png) done ![远程](https://example.com/chart.png)"
+        ),
+        "进展 ![图表](__image__) done ![远程](__image__)"
+    );
+    assert_eq!(
+        normalize_assistant_markdown_image_destinations("保留未闭合 ![图表](./chart.png"),
+        "保留未闭合 ![图表](./chart.png"
+    );
+    assert!(assistant_texts_equivalent(
+        "结论 ![图表](./chart.png)",
+        "结论 ![图表](img_v3_uploaded)"
+    ));
+    assert!(!assistant_texts_overlap(
+        "过程说明 ![图表](./chart.png)",
+        "最终结论 ![图表](img_v3_uploaded)"
+    ));
+}
+
+#[test]
 fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "initial task");
     assert_eq!(snapshot.title.as_deref(), Some("initial task"));

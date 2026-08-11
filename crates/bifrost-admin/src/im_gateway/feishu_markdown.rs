@@ -399,13 +399,14 @@ mod tests {
     #[test]
     fn local_path_and_mime_helpers_cover_supported_variants() {
         let base = Path::new("/runner");
+        let absolute = std::env::temp_dir().join("b.jpg");
         assert_eq!(
             resolve_local_path("file:///tmp/a.png", None),
             Some(PathBuf::from("/tmp/a.png"))
         );
         assert_eq!(
-            resolve_local_path("/tmp/b.jpg", None),
-            Some(PathBuf::from("/tmp/b.jpg"))
+            resolve_local_path(absolute.to_str().expect("UTF-8 temp path"), None),
+            Some(absolute)
         );
         assert_eq!(
             resolve_local_path("c.gif", Some(base)),
