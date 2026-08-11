@@ -474,6 +474,106 @@ async fn external_runner_terminal_without_reply_id_uses_provider_send_fallback()
     assert_eq!(message_log_store.list()[0].status, MessageStatus::Success);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn topic_terminal_without_progress_card_replies_in_thread_instead_of_main_group() {
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().unwrap();
+    let logs = Arc::new(ImMessageLogStore::new(temp.path()));
+    let provider = crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut event = group_test_event(&provider.id, "topic-trigger", "run", false, 1);
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-1".to_string());
+
+    send_external_runner_terminal_reply_from_work_dir(
+        &client,
+        &provider,
+        &event,
+        ExternalRunnerTerminalReply {
+            text: "done",
+            failed: false,
+            progress_message_id: None,
+            work_dir: None,
+        },
+        &logs,
+    )
+    .await;
+
+    let paths = server.message_paths.lock().unwrap().clone();
+    assert_eq!(paths, ["/open-apis/im/v1/messages/topic-trigger/reply"]);
+    let payloads = server.message_payloads.lock().unwrap().clone();
+    assert_eq!(payloads[0]["reply_in_thread"], true);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_and_terminal_cards_are_both_persisted_as_derivation_anchors() {
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().unwrap();
+    let logs = Arc::new(ImMessageLogStore::new(temp.path()));
+    let group_store = Arc::new(ImGroupContextStore::new(temp.path()));
+    let registry = Arc::new(ImAgentProgressRegistry::new());
+    let provider = crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    let feishu = Arc::new(crate::im_gateway::feishu::FeishuProvider::new());
+    let client = ImProviderClient::Feishu(Arc::clone(&feishu));
+    let event = group_test_event(&provider.id, "anchor-trigger", "run", false, 1);
+    registry
+        .start_feishu_replying_to(
+            "anchor-session",
+            feishu,
+            provider.clone(),
+            crate::im_gateway::progress_card::tests::mock_progress_target(),
+            "run",
+            event.source.message_id.as_deref(),
+        )
+        .await
+        .unwrap();
+    let anchor = crate::im_gateway::group_context::FeishuMessageAnchor {
+        provider_id: provider.id.clone(),
+        chat_id: "oc_group".to_string(),
+        message_id: String::new(),
+        source_session_key: "anchor-session".to_string(),
+        run_id: Some("run-1".to_string()),
+        runner_id: "Codex".to_string(),
+        adapter: "codex".to_string(),
+        transport: "app_server".to_string(),
+        external_thread_id: Some("thread-1".to_string()),
+        external_turn_id: Some("turn-1".to_string()),
+        checkpoint_thread_id: None,
+        status: "ready".to_string(),
+    };
+
+    finish_external_runner_progress_and_notify(
+        ExternalRunnerProgressFinishContext {
+            progress_registry: &registry,
+            client: &client,
+            provider: &provider,
+            message_log_store: &logs,
+            group_context_store: &group_store,
+            event: &event,
+        },
+        ExternalRunnerProgressFinish {
+            session_key: "anchor-session",
+            final_text: "done",
+            failed: false,
+            work_dir: None,
+            anchor: Some(anchor),
+        },
+    )
+    .await;
+
+    assert!(group_store
+        .feishu_message_anchor(&provider.id, "om_1")
+        .unwrap()
+        .is_some());
+    assert!(group_store
+        .feishu_message_anchor(&provider.id, "om_2")
+        .unwrap()
+        .is_some());
+}
+
 #[cfg(unix)]
 async fn exercise_external_runner_control_flow_with_progress(
     server: &crate::im_gateway::progress_card::tests::MockFeishuProgressServer,
@@ -631,4 +731,28 @@ async fn external_runner_small_branches_keep_safe_defaults() {
 
     let other_session = group_test_event("provider", "stop", "/stop", false, 3);
     maybe_stop_external_cli_for_event(&other_session, "unrelated").await;
+}
+
+#[test]
+fn thread_derivation_anchor_is_consumed_once_for_queued_turns() {
+    let mut anchor = Some("source-card".to_string());
+    assert_eq!(
+        take_thread_derivation_anchor(&mut anchor).as_deref(),
+        Some("source-card")
+    );
+    assert!(take_thread_derivation_anchor(&mut anchor).is_none());
+}
+
+#[test]
+fn traex_checkpoint_requires_app_server_fork_capability() {
+    let mut app_server = recorder_test_request("traex-checkpoint-capability");
+    app_server.adapter = crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string();
+    assert!(should_create_traex_checkpoint(true, "traex", &app_server));
+
+    let mut exec = app_server.clone();
+    exec.adapter_config.transport =
+        Some(crate::im_gateway::external_cli::ExternalCliTransport::Exec);
+    assert!(!should_create_traex_checkpoint(true, "traex", &exec));
+    assert!(!should_create_traex_checkpoint(false, "traex", &app_server));
+    assert!(!should_create_traex_checkpoint(true, "codex", &app_server));
 }

@@ -79,6 +79,21 @@ pub(super) fn is_im_progress_card_external_adapter(adapter: &str) -> bool {
     )
 }
 
+pub(super) fn should_create_traex_checkpoint(
+    run_succeeded: bool,
+    adapter: &str,
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+) -> bool {
+    run_succeeded
+        && adapter == crate::im_gateway::external_cli::TRAEX_ADAPTER
+        && crate::im_gateway::external_cli::thread_derivation_capability_for_request(request)
+            .fork_completed
+}
+
+pub(super) fn take_thread_derivation_anchor(anchor: &mut Option<String>) -> Option<String> {
+    anchor.take()
+}
+
 pub(in crate::handlers::im_gateway) fn finalize_live_guide_group_turns(
     queue_manager: &SessionQueueManager,
     group_context_store: &ImGroupContextStore,
@@ -397,6 +412,7 @@ pub(super) async fn run_external_cli_agent_chat(
     );
     let mut current_message = input.message_text;
     let thread_fallback_message = input.thread_fallback_message.clone();
+    let mut thread_anchor_pending = input.thread_anchor_message_id.clone();
     let mut current_images = input.images;
     let mut current_files = input.files;
     let mut current_event = ctx.event.clone();
@@ -480,7 +496,8 @@ pub(super) async fn run_external_cli_agent_chat(
         request.images = std::mem::take(&mut current_images);
         request.files = std::mem::take(&mut current_files);
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
-        if let Some(anchor_message_id) = input.thread_anchor_message_id.as_deref() {
+        let current_thread_anchor = take_thread_derivation_anchor(&mut thread_anchor_pending);
+        if let Some(anchor_message_id) = current_thread_anchor.as_deref() {
             match ctx
                 .group_context_store
                 .feishu_message_anchor(&ctx.provider.id, anchor_message_id)
@@ -933,18 +950,6 @@ pub(super) async fn run_external_cli_agent_chat(
                     result.status,
                     crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
                 );
-                if let (Some(chat_id), Some((thread_id, _))) = (
-                    current_event.source.chat_id.as_deref(),
-                    crate::im_gateway::group_context::feishu_thread_parts(&current_event),
-                ) {
-                    let _ = ctx.group_context_store.update_feishu_thread_binding_state(
-                        &ctx.provider.id,
-                        chat_id,
-                        thread_id,
-                        if run_succeeded { "ready" } else { "failed" },
-                        now_ms(),
-                    );
-                }
                 if !run_succeeded {
                     let failure_reply = external_cli_non_success_reply(&result);
                     result.response = failure_reply.clone();
@@ -976,9 +981,11 @@ pub(super) async fn run_external_cli_agent_chat(
                     },
                 );
                 remember_external_cli_result_metadata(&mut runner_metadata, &result.metadata);
-                let traex_checkpoint_thread_id = if run_succeeded
-                    && settings.adapter == crate::im_gateway::external_cli::TRAEX_ADAPTER
-                {
+                let traex_checkpoint_thread_id = if should_create_traex_checkpoint(
+                    run_succeeded,
+                    &settings.adapter,
+                    &request_for_progress,
+                ) {
                     if let Some(source_thread_id) = result.metadata.get("threadId") {
                         let mut checkpoint_request = request_for_progress.clone();
                         checkpoint_request.message.clear();
@@ -1012,6 +1019,18 @@ pub(super) async fn run_external_cli_agent_chat(
                 } else {
                     "ready"
                 };
+                if let (Some(chat_id), Some((thread_id, _))) = (
+                    current_event.source.chat_id.as_deref(),
+                    crate::im_gateway::group_context::feishu_thread_parts(&current_event),
+                ) {
+                    let _ = ctx.group_context_store.update_feishu_thread_binding_state(
+                        &ctx.provider.id,
+                        chat_id,
+                        thread_id,
+                        anchor_status,
+                        now_ms(),
+                    );
+                }
                 let terminal_anchor = current_event.source.chat_id.as_deref().map(|chat_id| {
                     crate::im_gateway::group_context::FeishuMessageAnchor {
                         provider_id: ctx.provider.id.clone(),

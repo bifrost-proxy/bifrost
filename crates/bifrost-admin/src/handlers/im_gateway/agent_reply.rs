@@ -1115,6 +1115,22 @@ async fn send_agent_reply_with_title_and_base_dir(
                         .await
                 }
             }
+            (Some(feishu), None)
+                if crate::im_gateway::group_context::feishu_thread_parts(event).is_some() =>
+            {
+                match event.source.message_id.as_deref() {
+                    Some(message_id) => {
+                        feishu
+                            .reply_card_preserving_header_in_thread(
+                                provider, message_id, card, None,
+                            )
+                            .await
+                    }
+                    None => Err(bifrost_core::BifrostError::Config(
+                        "Feishu topic terminal reply has no message target".to_string(),
+                    )),
+                }
+            }
             (Some(feishu), None) => {
                 feishu
                     .send_card_preserving_header(

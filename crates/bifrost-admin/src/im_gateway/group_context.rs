@@ -383,6 +383,46 @@ impl ImGroupContextStore {
         Ok(())
     }
 
+    pub fn pending_feishu_thread_bindings(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<FeishuThreadBinding>, String> {
+        let connection = self.connection.lock();
+        let mut statement = connection
+            .prepare(
+                "SELECT provider_id, chat_id, feishu_thread_id, root_message_id,
+                    derived_session_key, source_kind, source_message_id, source_adapter,
+                    source_thread_id, source_turn_id, trigger_message_id, initial_message,
+                    fallback_message, state
+                 FROM im_feishu_thread_bindings
+                 WHERE provider_id = ?1 AND state IN ('waiting_source', 'initializing')
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|error| format!("prepare pending Feishu thread bindings: {error}"))?;
+        let rows = statement
+            .query_map(params![provider_id], |row| {
+                Ok(FeishuThreadBinding {
+                    provider_id: row.get(0)?,
+                    chat_id: row.get(1)?,
+                    feishu_thread_id: row.get(2)?,
+                    root_message_id: row.get(3)?,
+                    derived_session_key: row.get(4)?,
+                    source_kind: row.get(5)?,
+                    source_message_id: row.get(6)?,
+                    source_adapter: row.get(7)?,
+                    source_thread_id: row.get(8)?,
+                    source_turn_id: row.get(9)?,
+                    trigger_message_id: row.get(10)?,
+                    initial_message: row.get(11)?,
+                    fallback_message: row.get(12)?,
+                    state: row.get(13)?,
+                })
+            })
+            .map_err(|error| format!("query pending Feishu thread bindings: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("decode pending Feishu thread binding: {error}"))
+    }
+
     pub fn record_event(&self, event: &ImEvent, source: &str) -> Result<u64, String> {
         let (chat_id, message_id, message) = group_event_parts(event)?;
         let mut connection = self.connection.lock();

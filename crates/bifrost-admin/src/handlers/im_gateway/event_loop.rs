@@ -228,7 +228,8 @@ pub(super) async fn run_event_loop_with_options(
 
     let mut dedup = EventDedup::new();
     let mut session_mailboxes = SessionMailboxRegistry::new();
-    let mut recovered_session_events = VecDeque::new();
+    let mut recovered_session_events =
+        recover_pending_feishu_thread_events(&provider.id, &group_context_store);
     let mut inbound_open = true;
 
     loop {
@@ -960,6 +961,47 @@ fn recover_session_completion(
     }
 }
 
+fn recover_pending_feishu_thread_events(
+    provider_id: &str,
+    group_context_store: &ImGroupContextStore,
+) -> VecDeque<ImEvent> {
+    group_context_store
+        .pending_feishu_thread_bindings(provider_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|binding| ImEvent {
+            event_id: format!("recovered:{}", binding.trigger_message_id),
+            provider_id: binding.provider_id,
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.recovered".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some(binding.chat_id),
+                chat_type: Some("group".to_string()),
+                user_id: None,
+                user_name: None,
+                sender_type: Some("user".to_string()),
+                message_id: Some(binding.trigger_message_id),
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: binding.initial_message,
+                mentions: Vec::new(),
+                images: Vec::new(),
+                files: Vec::new(),
+                reply_to: None,
+                raw_type: Some("text".to_string()),
+                raw_content: None,
+                create_time: None,
+                update_time: None,
+                root_id: Some(binding.root_message_id.clone()),
+                parent_id: Some(binding.root_message_id),
+                thread_id: Some(binding.feishu_thread_id),
+            }),
+            received_at: now_ms(),
+            raw_digest: Some("startup_recovery".to_string()),
+        })
+        .collect()
+}
+
 pub(super) async fn acknowledge_and_log_inbound_event(
     client: &ImProviderClient,
     provider: &ImProviderConfig,
@@ -1120,11 +1162,6 @@ pub(super) async fn prepare_group_inbound_dispatch(
             return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
                 message_text: if recovering {
                     binding.initial_message.clone()
-                } else if binding.state == "failed" {
-                    binding
-                        .fallback_message
-                        .clone()
-                        .unwrap_or_else(|| binding.initial_message.clone())
                 } else {
                     agent_message_text(message)
                 },

@@ -66,6 +66,12 @@
 
 预期结果：源轮结束后只执行 `thread/fork` 创建不可变 checkpoint，不额外执行 `turn/start`；checkpoint 失败时锚点不可被标成 ready。
 
+### TC-FTD-09：队列、启动恢复与话题失败隔离
+
+操作步骤：运行 `cargo test -p bifrost-admin thread_derivation_anchor_is_consumed_once_for_queued_turns -- --nocapture`、`cargo test -p bifrost-admin traex_checkpoint_requires_app_server_fork_capability -- --nocapture`、`cargo test -p bifrost-admin startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redelivery -- --nocapture`、`cargo test -p bifrost-admin failed_topic_binding_uses_new_message_instead_of_replaying_old_instruction -- --nocapture`、`cargo test -p bifrost-admin thread_progress_card_never_falls_back_to_main_group_send -- --nocapture`、`cargo test -p bifrost-admin topic_terminal_without_progress_card_replies_in_thread_instead_of_main_group -- --nocapture` 和 `cargo test -p bifrost-admin progress_and_terminal_cards_are_both_persisted_as_derivation_anchors -- --nocapture`。
+
+预期结果：派生锚点只消费一次，后续排队轮次续写派生 thread；Traex exec 不创建伪 checkpoint；进程启动按当前 provider 从 SQLite nonterminal binding 合成并重放 pending 首消息，不依赖有界事件历史；failed binding 使用用户的新指令；话题 progress 失败时 terminal 卡仍以 `reply_in_thread=true` 回复原话题，不直接发送到主群；本轮 progress 与 terminal 卡 message_id 均写入可派生锚点。
+
 ## 清理步骤
 
 测试脚本退出时终止 fake OpenAPI/Bifrost/Runner 进程并删除临时目录；确认未修改用户数据目录且无测试进程残留。

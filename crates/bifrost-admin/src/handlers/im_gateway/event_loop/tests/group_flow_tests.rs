@@ -207,6 +207,96 @@ async fn topic_initialization_is_recovered_from_persisted_binding_after_restart(
     );
 }
 
+#[test]
+fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redelivery() {
+    let temp = tempfile::tempdir().unwrap();
+    let group_store = ImGroupContextStore::new(temp.path());
+    let provider_id = "feishu-startup-topic-recovery";
+    group_store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider_id.to_string(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-startup".to_string(),
+                root_message_id: "root-card".to_string(),
+                derived_session_key:
+                    crate::im_gateway::group_context::build_group_thread_session_key(
+                        provider_id,
+                        "oc_group",
+                        "topic-startup",
+                    ),
+                source_kind: "local_checkpoint".to_string(),
+                source_message_id: "root-card".to_string(),
+                source_adapter: Some("codex".to_string()),
+                source_thread_id: Some("source-thread".to_string()),
+                source_turn_id: Some("source-turn".to_string()),
+                trigger_message_id: "persisted-trigger".to_string(),
+                initial_message: "continue".to_string(),
+                fallback_message: None,
+                state: "initializing".to_string(),
+            },
+            2,
+        )
+        .unwrap();
+
+    let recovered = recover_pending_feishu_thread_events(provider_id, &group_store);
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].source.message_id.as_deref(),
+        Some("persisted-trigger")
+    );
+    assert!(recover_pending_feishu_thread_events("other-provider", &group_store).is_empty());
+}
+
+#[tokio::test]
+async fn failed_topic_binding_uses_new_message_instead_of_replaying_old_instruction() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-failed-topic-retry".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-failed".to_string(),
+                root_message_id: "root-card".to_string(),
+                derived_session_key:
+                    crate::im_gateway::group_context::build_group_thread_session_key(
+                        &provider.id,
+                        "oc_group",
+                        "topic-failed",
+                    ),
+                source_kind: "message_context".to_string(),
+                source_message_id: "root-card".to_string(),
+                source_adapter: None,
+                source_thread_id: None,
+                source_turn_id: None,
+                trigger_message_id: "old-trigger".to_string(),
+                initial_message: "old instruction".to_string(),
+                fallback_message: Some("old root + old instruction".to_string()),
+                state: "failed".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+    let mut retry = group_test_event(&provider.id, "new-trigger", "retry with X", false, 3);
+    let message = retry.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("old-trigger".to_string());
+    message.thread_id = Some("topic-failed".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &retry, &store, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(dispatch.message_text, "retry with X");
+    assert!(dispatch.thread_anchor_message_id.is_none());
+}
+
 #[tokio::test]
 async fn prepare_group_dispatch_surfaces_quoted_message_read_failures() {
     let temp = tempfile::tempdir().unwrap();
