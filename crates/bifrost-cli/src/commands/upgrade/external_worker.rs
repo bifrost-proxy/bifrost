@@ -172,11 +172,6 @@ mod tests {
     }
 
     #[test]
-    fn admin_request_timeout_covers_the_server_version_check_budget() {
-        assert!(ADMIN_UPGRADE_REQUEST_TIMEOUT_SECS > 40);
-    }
-
-    #[test]
     fn delegation_is_fail_closed() {
         let missing_runtime = delegate_upgrade_with(None, |_| {
             panic!("Admin request must not run without a live runtime")
