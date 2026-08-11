@@ -1126,13 +1126,17 @@ fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
         .as_str()
         .unwrap()
         .contains("已省略前面 5 次工具调用，仅显示最新 30 次。"));
+    let condensed_process = process_elements[0]["content"].as_str().unwrap();
+    assert!(condensed_process.contains("THINKING_ROUND_5\n\n- `tool_5` · 完成 · 15ms"));
+    assert!(condensed_process.contains("- `tool_6` · 完成 · 16ms"));
+    assert!(!condensed_process.contains("步骤：`tool_5`"));
 
     let serialized = serde_json::to_string(&card).unwrap();
     assert!(!serialized.contains("tool-0"));
     assert!(!serialized.contains("result-4"));
     assert!(!serialized.contains("THINKING_ROUND_0"));
     assert!(serialized.contains("THINKING_ROUND_5"));
-    assert!(serialized.contains("步骤：`tool_5` · 完成"));
+    assert!(serialized.contains("- `tool_5` · 完成 · 15ms"));
     assert!(!serialized.contains("result-5"));
     assert!(serialized.contains("ap_t_61"));
     assert!(serialized.contains("result-34"));
@@ -1260,7 +1264,7 @@ fn budget_removal_tool_boundaries_and_step_statuses_cover_all_states() {
         ProgressTimelineItem::tool_started("running_tool".to_string(), "RUNNING_INPUT".to_string());
     assert_eq!(
         format_process_tool_step_line(&running),
-        "步骤：`running_tool` · 执行中"
+        "- `running_tool` · 执行中"
     );
     assert_eq!(
         oldest_budget_removable_timeline_range(std::slice::from_ref(&running)),
@@ -1278,7 +1282,7 @@ fn budget_removal_tool_boundaries_and_step_statuses_cover_all_states() {
     );
     assert_eq!(
         format_process_tool_step_line(&failed),
-        "步骤：`failed_tool` · 失败 · 12ms"
+        "- `failed_tool` · 失败 · 12ms"
     );
 
     let consecutive_tools = (0..7)
@@ -1301,7 +1305,7 @@ fn budget_removal_tool_boundaries_and_step_statuses_cover_all_states() {
 }
 
 #[test]
-fn old_tools_render_as_steps_while_latest_five_keep_expandable_details() {
+fn old_tools_render_as_list_items_while_latest_five_keep_expandable_details() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "balanced tool history");
     for index in 0..8 {
         snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
@@ -1320,7 +1324,7 @@ fn old_tools_render_as_steps_while_latest_five_keep_expandable_details() {
 
     let serialized = serde_json::to_string(&build_feishu_progress_card(&snapshot, true)).unwrap();
     for index in 0..3 {
-        assert!(serialized.contains(&format!("步骤：`tool_{index}` · 完成")));
+        assert!(serialized.contains(&format!("- `tool_{index}` · 完成")));
         assert!(!serialized.contains(&format!("TOOL_INPUT_{index}")));
         assert!(!serialized.contains(&format!("TOOL_OUTPUT_{index}")));
     }

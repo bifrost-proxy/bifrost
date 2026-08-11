@@ -136,7 +136,7 @@
 
 **预期结果**：
 - 单条工具输入和输出分别最多展示 300 个 Unicode 字符，超过上限的尾部 marker 不出现在 CardKit payload；整体 payload 仍按 UTF-8 JSON 字节数和组件数预算。
-- 旧工具不再完全消失，而是显示“步骤：工具名 · 完成/失败/执行中 · 耗时”的可读摘要，不展示参数和输出详情；最近 5 次工具仍使用可展开详情面板。
+- 旧工具不再完全消失，而是逐条显示为“`- 工具名 · 完成/失败/执行中 · 耗时`”Markdown 列表项，不展示参数和输出详情；最近 5 次工具仍使用可展开详情面板。
 - “最多 30 次工具”窗口以及字节/组件预算裁剪都以完整执行段为边界：删除旧工具时，同时删除该轮位于工具之前的思考和状态，不能留下失去工具边界、最终粘连成大段的孤立思考。
 - 长卡片仍能看出执行过哪些步骤、哪些步骤成功或失败；最近 5 次工具的输入/输出、顶部状态和最终结论保持可见，并展示省略提示；原始 snapshot 不丢历史。
 - mock CardKit 返回 `200860` 或 `300305` 后，先在同一 card entity 使用收缩预算重试；连续两次限制错误后改用精简卡片，精简卡也被限额拒绝才 rollover；精简阶段的普通错误不创建重复消息。
@@ -258,12 +258,35 @@
 
 **预期结果**：飞书官方上传文件接口只支持不超过 30 MB，Bifrost 不采用不可实现的 250 MB 出站单文件上限。超限、空文件、上传失败或文件消息发送失败均只影响对应附件，其余附件继续；终态卡和任务状态不回滚，提示卡发送失败也不会使事件循环或服务异常。入站引用消息仍独立执行 100 MiB 单文件、250 MiB 单 Turn 总预算。
 
+### TC-FPC-14：执行过程历史步骤与多行输出不再粘连
+
+**操作步骤**：
+1. 执行历史步骤列表、段落边界和最近五次详情的聚焦单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib old_tools_render_as_list_items_while_latest_five_keep_expandable_details -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib process_tool_detail_caps_input_and_output_previews_at_three_hundred_chars -- --nocapture
+   ```
+2. 使用当前源码构建的 E2E runner 执行长过程 CardKit renderer：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_progress_card_budget_and_codex_resources --jobs 1 --timeout 180
+   ```
+3. 检查 E2E 生成的 `agent_process_panel`：历史工具摘要内容包含 `THINKING_ROUND_N\n\n- \`tool_N\` · 完成 · 10ms`；最后一个工具详情包含 `LATEST_MARKER\nSECOND_OUTPUT_LINE`；完整 JSON 小于 24 KiB。
+
+**预期结果**：
+- 被降级为摘要的历史工具逐条使用 `-` Markdown 列表项，状态和耗时仍可见；不再出现多个“步骤：工具名”被普通单换行折叠后连成一整行。
+- 公开解释、状态、子 Agent 与工具列表之间至少保留一个空行，飞书 CardKit 按块级段落渲染，长过程可从上到下扫读。
+- 最近 5 次工具仍为可展开详情面板，输入/输出最多 300 个 Unicode 字符的既有裁剪不变；fenced code block 中的多行输出保留真实换行。
+- 30 次工具窗口、完整执行段裁剪、默认折叠、主题自适应和 24 KiB / 180 组件预算不退化。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-11：PASS（TC-FPC-14 执行过程可读性回归）— 截图与群消息 `om_x100b688669cf78b8c2a0077a2205800` 先确认旧卡将普通单换行折叠为空格，造成 `select_page` / `evaluate_script` 等历史步骤和公开解释粘成一整行。更新用例后立即逐条执行：历史 30 工具窗口、旧工具列表与 300 字符详情裁剪 3 个聚焦单测全部通过；`im_gateway_progress_card_budget_and_codex_resources` renderer E2E 通过，直接断言 `agent_process_log` 中公开解释与 `- \`tool_N\` · 完成 · 10ms` 之间存在空段落，最后一个工具详情保留 `LATEST_MARKER\nSECOND_OUTPUT_LINE`，完整 CardKit JSON 仍小于 24 KiB，最近 5 次可展开详情、主题自适应和裁剪边界不变。首次 E2E 构建因磁盘仅余 396 MiB 在链接阶段报 `errno=28`，仅清理 `bifrost-e2e` 可再生成构建缓存后重跑；随后一次断言误在 JSON 序列化字符串中匹配真实换行，改为读取详情组件 `content` 后复跑通过。当前运行中的正式 Bifrost 仍是修复前二进制，未重启承载本 Agent 的服务，因此未伪造修复后飞书客户端截图结论；线上肉眼复核留待新版本部署后执行。
 
 - 2026-08-11：PASS（TC-FPC-13 出站文件上限与失败降级）— 官方文档确认 `POST /open-apis/im/v1/files` 单文件不得超过 30 MB、空文件禁止、超限错误码 `234006`，因此未采用不可实现的 250 MB 出站上限。首次黑盒执行发现测试夹具的 `.bin` 链接标签未包含“file/附件”，按产品“只发送显式附件链接”的安全规则未被识别；修正标签为显式 file 后立即复跑通过。隔离 Service + mock Runner + loopback Feishu OpenAPI 验证绿色 `Task completed` 终态卡先成功发布，`30 MiB + 1 byte` 文件未调用上传接口，小文件上传返回 `234006` 后未发送 file 消息，两项失败汇总到一张“附件发送提示（不影响任务结论）”卡；Session 正常 idle、Bifrost 服务继续健康。测试 trap 已清理临时目录和所属进程。
 

@@ -2732,7 +2732,7 @@ fn flush_process_markdown(
     };
     elements.push(build_process_markdown_element(
         element_id,
-        markdown_lines.join("\n"),
+        markdown_lines.join("\n\n"),
     ));
     markdown_lines.clear();
     *markdown_element_count += 1;
@@ -2911,7 +2911,7 @@ fn format_process_tool_step_line(item: &ProgressTimelineItem) -> String {
         .map(|value| format!(" · {value}"))
         .unwrap_or_default();
     format!(
-        "步骤：`{}` · {status}{duration}",
+        "- `{}` · {status}{duration}",
         truncate_one_line(&item.title, 32)
     )
 }
