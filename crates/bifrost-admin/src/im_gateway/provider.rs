@@ -4,8 +4,8 @@ use tokio::sync::mpsc;
 use bifrost_core::Result;
 
 use super::types::{
-    ConnectionHandle, ImEvent, ImProviderConfig, ImProviderType, ImTarget, ProviderValidation,
-    SendOptions, SendResult, UploadedImage,
+    ConnectionHandle, ImEvent, ImProviderConfig, ImProviderType, ImSendCapabilities, ImTarget,
+    ProviderValidation, SendOptions, SendResult, UploadedImage,
 };
 
 pub type EventSink = mpsc::UnboundedSender<ImEvent>;
@@ -13,6 +13,8 @@ pub type EventSink = mpsc::UnboundedSender<ImEvent>;
 #[async_trait]
 pub trait ImProvider: Send + Sync {
     fn provider_type(&self) -> ImProviderType;
+
+    fn send_capabilities(&self, config: &ImProviderConfig) -> ImSendCapabilities;
 
     async fn validate_config(&self, config: &ImProviderConfig) -> Result<ProviderValidation>;
 
@@ -37,6 +39,16 @@ pub trait ImProvider: Send + Sync {
         text: &str,
     ) -> Result<SendResult>;
 
+    async fn send_text_with_uuid(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        text: &str,
+        _uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        self.send_text(config, target, text).await
+    }
+
     async fn upload_image(
         &self,
         config: &ImProviderConfig,
@@ -53,4 +65,46 @@ pub trait ImProvider: Send + Sync {
         image_key: &str,
         uuid: Option<&str>,
     ) -> Result<SendResult>;
+
+    async fn upload_file(
+        &self,
+        _config: &ImProviderConfig,
+        _file_name: &str,
+        _bytes: Vec<u8>,
+        _mime_type: Option<&str>,
+    ) -> Result<String> {
+        Err(bifrost_core::BifrostError::Config(format!(
+            "{} provider does not support generic file attachments",
+            serde_json::to_value(self.provider_type())
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string())
+        )))
+    }
+
+    async fn send_file(
+        &self,
+        _config: &ImProviderConfig,
+        _target: &ImTarget,
+        _file_key: &str,
+        _uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        Err(bifrost_core::BifrostError::Config(format!(
+            "{} provider does not support generic file attachments",
+            serde_json::to_value(self.provider_type())
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string())
+        )))
+    }
+
+    async fn send_native_card(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        card: serde_json::Value,
+        opts: SendOptions,
+    ) -> Result<SendResult> {
+        self.send_card(config, target, card, opts).await
+    }
 }

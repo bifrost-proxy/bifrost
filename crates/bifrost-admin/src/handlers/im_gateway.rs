@@ -11,7 +11,10 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::handlers::{error_response, full_body, json_response, method_not_allowed, BoxBody};
+use crate::handlers::{
+    error_response, full_body, json_response, json_response_with_status, method_not_allowed,
+    BoxBody,
+};
 use crate::im_gateway::event_router::ImEventRouter;
 use crate::im_gateway::progress_card::ImAgentProgressRegistry;
 use crate::im_gateway::provider::ImProvider;
@@ -100,6 +103,9 @@ pub async fn handle_im_gateway(
     }
     if sub == "/messages/send" || sub == "/messages/send/" {
         return messages::handle_messages_send(req, &service).await;
+    }
+    if sub == "/messages/upload" || sub == "/messages/upload/" {
+        return messages::handle_messages_upload(req, &service).await;
     }
     if let Some(rest) = sub.strip_prefix("/routes") {
         return messages::handle_routes(req, &service, rest).await;

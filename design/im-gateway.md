@@ -58,6 +58,37 @@ Gateway 只负责“把 IM 消息接进来 / 把消息发出去 / 把定时任�
 
 Provider 声明 `ImSendCapability`（支持的消息类型、是否支持流式卡片、是否支持撤回、是否支持图片附件等）。外部 Runner 进度卡渲染、Add Provider 表单、Schedule 通知等入口都按 capability 动态裁剪：飞书暴露 text/markdown/interactive card，微信只暴露当前支持的类型；不支持的字段直接从 schema/表单中隐藏。
 
+### 主动发送 V2 契约
+
+主动发送把 Provider、Destination 与 Content Part 分开建模，CLI、Admin API 和安装给 Agent 的根 `SKILL.md` 共用同一套语义：
+
+- Provider 是已经配置的机器人或微信通道。CLI 首选 `bifrost im send <provider>` 位置参数，同时保留 `--provider <id>` 兼容形式。群内 Agent 不一定知道 Bifrost provider ID，因此 Feishu 还支持 `--bot-id <app_id>` 与 `--bot-name <display_name>`：Admin 只在 enabled Feishu provider 中精确匹配，ID 与名称同时给出时必须指向同一 provider，名称重名返回 409 而不是猜选；解析响应不回传完整 App ID。
+- Destination 只能是 `owner`、已配置的 target alias，或显式 direct receive id。Feishu 群聊使用 `--chat-id <oc_xxx>`；其他 direct 目标使用 `--receive-id-type <type> --receive-id <id>`。不得根据最近消息猜测群或用户。
+- Content Part 支持 `text`、`markdown`、`image`、`file`、`native_card`。一次命令可以包含多个 part，按命令行出现顺序串行发送；主内容、图片、文件的消息 ID 分别返回。
+- Feishu 原生支持 text、Card JSON 2.0 Markdown、image、file 和 native card；native card 必须保留调用方提供的 root header。Weixin 原生支持 text 与 image，Markdown 降级为可读文本并在回执中返回 warning，generic file 与 native card 明确返回 unsupported，不能静默转成其他内容。
+- Provider capability 是运行时事实。`GET /providers/:id/capabilities` 与 `bifrost im provider capabilities <id>` 返回 destination、part、大小上限和 `requires_context`；CLI 在上传或发送前预检，服务端仍做最终校验。
+
+二进制不放进 JSON。CLI 先调用 `POST /messages/upload`，以 raw body 上传单个 image/file，并通过 query/header 传 provider、kind、文件名、MIME；Admin 在读取前检查 `Content-Length`，读取后再次检查实际字节数。图片上限 10 MiB，Feishu 文件上限 30 MiB；空文件与超限请求返回 4xx。服务端只接收客户端字节，不读取客户端本地路径，也不在日志中记录绝对路径或原始内容。
+
+`POST /messages/send` V2 请求示例：
+
+```json
+{
+  "provider_id": "feishu-main",
+  "destination": { "mode": "direct", "receive_id_type": "chat_id", "receive_id": "oc_xxx" },
+  "parts": [
+    { "type": "markdown", "text": "## Release" },
+    { "type": "image", "image_key": "img_v3_xxx" },
+    { "type": "file", "file_key": "file_v3_xxx", "file_name": "report.pdf" }
+  ],
+  "idempotency_key": "release-2026-08-11"
+}
+```
+
+每个 part 使用稳定的 `<bundle-key>:<index>` outbox key。服务端按顺序尝试全部 part；全部成功返回 `status=success`，成功与失败并存返回 HTTP 207 与 `status=partial_success`，全部失败返回对应 4xx/5xx 与 `status=failed`。回执包含 `bundle_id`、provider、destination 摘要、每个 part 的 requested/delivered kind、message/request id、warning 或 error。旧版单 part `msg_type/content/image/rich_card` 请求与 `SendResult` 响应保持兼容。
+
+主动发送日志记录 requested/delivered kind、消息 ID、内容摘要和 digest；不记录二进制、base64、完整 Card JSON、secret 或本地绝对路径。显式用户指令“发给 owner/发到某群”构成外部发送授权；分析、草拟、检查或询问能力不构成发送授权。
+
 ### 权限先审再执行
 
 任何 IM 操作都先经过：
@@ -248,11 +279,11 @@ pub enum RemoteImGatewayAction {
 - `bifrost im target add|list|remove|check --provider <id> --receive-id <...> --receive-id-type <chat_id|open_id|...>`
 - `bifrost im route add|list|pause|resume|remove --provider <id> --trigger <chat_id|user|keyword|regex> --script-file <...>`
 - `bifrost im schedule add|list|pause|resume|run|remove --provider <id> [--cron <expr>|--interval <secs>] [--script-file <...>|--agent-prompt <...>|--agent-prompt-file <...>|--agent-session-key <...>|--agent-work-dir <...>|--agent-system-prompt <...>] [--target <...>|--provider-owner]`
-- `bifrost im send [--provider <id>] [--target <...>] --text <...>|--markdown-file <...>|--card-file <...>`
+- `bifrost im send [<provider>|--provider <id>|--bot-id <app_id>|--bot-name <name>] [--target <...>|--chat-id <oc_xxx>] --text <...>|--markdown-file <...>|--image <...>|--file <...>|--card-file <...>`
 - `bifrost im history events|runs|messages --provider <id>`
 - `bifrost im channel check --provider <id> --target <...>`
 
-Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中；多 enabled provider 非交互式返回错误、交互式弹选择列表。
+Provider 选择：provider 位置参数与 `--provider` 是直接选择；`--bot-id` / `--bot-name` 通过服务端精确解析 enabled Feishu provider，并与直接 provider 选择互斥；两者都不传时，单 enabled provider 自动选中，多 enabled provider 非交互式返回错误、交互式弹选择列表。机器人名称不保证唯一，重名时必须补 `--bot-id` 或 provider ID。
 
 远端命令通过 `bifrost remote im ...` 使用等价子命令，透传到 `CommandKind::ImGateway`，落到 `RemoteImGatewayAction`。
 
@@ -261,6 +292,7 @@ Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中
 `/_bifrost/api/im-gateway/*`：
 
 - `POST/GET/PATCH/DELETE /providers[/:id]`
+- `POST /providers/resolve`（使用 Feishu `bot_id` / `bot_name` 解析最小 `provider_id` 响应；不暴露 App ID）
 - `POST /providers/feishu-setup/start`, `GET /providers/feishu-setup/:session/status`, `POST /providers/feishu-setup/:session/provider`
 - `POST /providers/:id/weixin-login/start`
 - `POST/GET/PATCH/DELETE /targets[/:id]`

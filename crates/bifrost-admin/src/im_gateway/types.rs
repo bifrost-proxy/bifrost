@@ -179,6 +179,46 @@ pub struct ImTarget {
     pub updated_at: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Outbound send capabilities
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImSendSupportLevel {
+    Native,
+    Degraded,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImSendPartCapability {
+    pub support: ImSendSupportLevel,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_as: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImSendCapabilities {
+    pub provider_id: String,
+    pub provider_type: ImProviderType,
+    pub destinations: Vec<String>,
+    pub receive_id_types: Vec<String>,
+    pub parts: BTreeMap<String, ImSendPartCapability>,
+    #[serde(default)]
+    pub requires_context: bool,
+}
+
+impl ImSendCapabilities {
+    pub fn part(&self, kind: &str) -> Option<&ImSendPartCapability> {
+        self.parts.get(kind)
+    }
+}
+
 fn default_msg_type() -> String {
     "interactive".to_string()
 }

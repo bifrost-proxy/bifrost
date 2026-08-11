@@ -28,6 +28,9 @@ pub(super) async fn handle_targets(
                     target.created_at = now;
                 }
                 target.updated_at = now;
+                if let Err(message) = validate_target(service, &target) {
+                    return error_response(StatusCode::BAD_REQUEST, &message);
+                }
                 match service.target_store.add(target) {
                     Ok(()) => json_response(&serde_json::json!({"success": true})),
                     Err(e) => error_response(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -63,6 +66,9 @@ pub(super) async fn handle_target_by_id(
                 return error_response(StatusCode::NOT_FOUND, "Target not found");
             };
             apply_target_patch(&mut existing, &patch);
+            if let Err(message) = validate_target(service, &existing) {
+                return error_response(StatusCode::BAD_REQUEST, &message);
+            }
             match service.target_store.update(existing) {
                 Ok(()) => json_response(&serde_json::json!({"success": true})),
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -74,6 +80,41 @@ pub(super) async fn handle_target_by_id(
         },
         _ => method_not_allowed(),
     }
+}
+
+fn validate_target(
+    service: &ImGatewayService,
+    target: &ImTarget,
+) -> std::result::Result<(), String> {
+    if target.id.trim().is_empty() {
+        return Err("target id is required".to_string());
+    }
+    if target.display_name.trim().is_empty() {
+        return Err("target display_name is required".to_string());
+    }
+    if target.receive_id.trim().is_empty() {
+        return Err("target receive_id is required".to_string());
+    }
+    let provider = service
+        .provider_store
+        .get(&target.provider_id)
+        .ok_or_else(|| format!("Provider '{}' not found", target.provider_id))?;
+    let capabilities = service
+        .provider_client(&provider)
+        .send_capabilities(&provider);
+    if !capabilities
+        .receive_id_types
+        .iter()
+        .any(|value| value == &target.receive_id_type)
+    {
+        return Err(format!(
+            "receive_id_type '{}' is not supported by provider '{}'; supported: {}",
+            target.receive_id_type,
+            provider.id,
+            capabilities.receive_id_types.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +140,83 @@ pub(super) struct SendMessageRequest {
     #[serde(default)]
     pub(super) rich_card: Option<SendRichCardRequest>,
     #[serde(default)]
+    pub(super) destination: Option<SendDestinationRequest>,
+    #[serde(default)]
+    pub(super) parts: Vec<SendPartRequest>,
+    #[serde(default)]
     pub(super) idempotency_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub(super) enum SendDestinationRequest {
+    Owner,
+    Target {
+        target_id: String,
+    },
+    Direct {
+        receive_id_type: String,
+        receive_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(super) enum SendPartRequest {
+    Text {
+        text: String,
+    },
+    Markdown {
+        text: String,
+    },
+    Image {
+        image_key: String,
+    },
+    File {
+        file_key: String,
+        #[serde(default)]
+        file_name: Option<String>,
+    },
+    NativeCard {
+        card: serde_json::Value,
+    },
+}
+
+impl SendPartRequest {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Markdown { .. } => "markdown",
+            Self::Image { .. } => "image",
+            Self::File { .. } => "file",
+            Self::NativeCard { .. } => "native_card",
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct SendPartReceipt {
+    pub(super) index: usize,
+    pub(super) requested_kind: String,
+    pub(super) delivered_kind: String,
+    pub(super) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) error: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct SendBundleResponse {
+    pub(super) bundle_id: String,
+    pub(super) provider_id: String,
+    pub(super) destination: String,
+    pub(super) status: String,
+    pub(super) receipts: Vec<SendPartReceipt>,
 }
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
@@ -151,6 +268,10 @@ pub(super) async fn handle_messages_send(
         Err(resp) => return resp,
     };
 
+    if !body.parts.is_empty() || body.destination.is_some() {
+        return handle_message_bundle_send(service, body).await;
+    }
+
     let resolved = match resolve_send_message_request(service, &body) {
         Ok(v) => v,
         Err((status, message)) => return error_response(status, &message),
@@ -164,12 +285,18 @@ pub(super) async fn handle_messages_send(
         return error_response(StatusCode::BAD_REQUEST, "Target is disabled");
     }
 
-    let feishu = service.connection_manager.feishu_provider();
-    let prepared =
-        match prepare_outbound_content(feishu, &resolved.provider, &body, resolved.content).await {
-            Ok(content) => content,
-            Err((status, message)) => return error_response(status, &message),
-        };
+    let client = service.provider_client(&resolved.provider);
+    let prepared = match prepare_outbound_content(
+        &client,
+        &resolved.provider,
+        &body,
+        resolved.content,
+    )
+    .await
+    {
+        Ok(content) => content,
+        Err((status, message)) => return error_response(status, &message),
+    };
     let content_preview = build_content_preview(&body.msg_type, &prepared);
     let log_content = (body.msg_type == "text").then(|| {
         prepared
@@ -242,7 +369,6 @@ pub(super) async fn handle_messages_send(
     }
 
     // Send via the configured provider implementation.
-    let client = service.provider_client(&resolved.provider);
     let result = if body.msg_type == "text" {
         let text = prepared
             .as_str()
@@ -271,7 +397,7 @@ pub(super) async fn handle_messages_send(
             .get("image_key")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
-        feishu
+        client
             .send_image(&resolved.provider, &resolved.target, image_key, None)
             .await
     } else {
@@ -349,6 +475,664 @@ pub(super) async fn handle_messages_send(
     }
 }
 
+pub(super) async fn handle_messages_upload(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+) -> Response<BoxBody> {
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+
+    let query = req.uri().query().unwrap_or_default();
+    let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    let required = |name: &str| {
+        params
+            .get(name)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("query parameter '{name}' is required"))
+    };
+    let provider_id = match required("provider_id") {
+        Ok(value) => value,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
+    };
+    let kind = match required("kind") {
+        Ok("image") => "image",
+        Ok("file") => "file",
+        Ok(other) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("unsupported upload kind '{other}'; supported: image, file"),
+            )
+        }
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
+    };
+    let file_name =
+        match required("file_name") {
+            Ok(value) if is_safe_upload_file_name(value) => value,
+            Ok(_) => return error_response(
+                StatusCode::BAD_REQUEST,
+                "file_name must be a plain file name without path components or control characters",
+            ),
+            Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
+        };
+
+    let Some(provider) = service.provider_store.get(provider_id) else {
+        return error_response(StatusCode::NOT_FOUND, "Provider not found");
+    };
+    if !provider.enabled {
+        return error_response(StatusCode::BAD_REQUEST, "Provider is disabled");
+    }
+    let client = service.provider_client(&provider);
+    let capabilities = client.send_capabilities(&provider);
+    let Some(capability) = capabilities.part(kind) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("provider '{provider_id}' does not support {kind} uploads"),
+        );
+    };
+    if capability.support == crate::im_gateway::types::ImSendSupportLevel::Unsupported {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            capability
+                .reason
+                .as_deref()
+                .unwrap_or("upload type is unsupported by this provider"),
+        );
+    }
+    let max_bytes = capability.max_bytes.unwrap_or(10 * 1024 * 1024);
+    if req
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > max_bytes)
+    {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("{kind} upload exceeds the {max_bytes} byte limit"),
+        );
+    }
+    let mime_type = params
+        .get("mime_type")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            req.headers()
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        });
+    let body = match http_body_util::Limited::new(req.into_body(), max_bytes as usize)
+        .collect()
+        .await
+    {
+        Ok(body) => body.to_bytes(),
+        Err(error) => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("{kind} upload exceeded the {max_bytes} byte streaming limit: {error}"),
+            )
+        }
+    };
+    if body.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "upload body must not be empty");
+    }
+    if body.len() as u64 > max_bytes {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("{kind} upload exceeds the {max_bytes} byte limit"),
+        );
+    }
+
+    let result = if kind == "image" {
+        client
+            .upload_image(
+                &provider,
+                params
+                    .get("image_type")
+                    .map(String::as_str)
+                    .unwrap_or("message"),
+                file_name,
+                body.to_vec(),
+                mime_type.as_deref(),
+            )
+            .await
+            .map(|uploaded| {
+                serde_json::json!({
+                    "kind": "image",
+                    "key": uploaded.image_key,
+                    "request_id": uploaded.request_id,
+                })
+            })
+    } else {
+        client
+            .upload_file(&provider, file_name, body.to_vec(), mime_type.as_deref())
+            .await
+            .map(|file_key| serde_json::json!({ "kind": "file", "key": file_key }))
+    };
+
+    match result {
+        Ok(value) => json_response(&value),
+        Err(error) => error_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("failed to upload {kind}: {error}"),
+        ),
+    }
+}
+
+fn is_safe_upload_file_name(file_name: &str) -> bool {
+    !file_name.is_empty()
+        && !file_name.chars().any(char::is_control)
+        && !file_name.contains('/')
+        && !file_name.contains('\\')
+        && Path::new(file_name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            == Some(file_name)
+}
+
+pub(super) async fn handle_message_bundle_send(
+    service: &ImGatewayService,
+    body: SendMessageRequest,
+) -> Response<BoxBody> {
+    if body.parts.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "parts must not be empty");
+    }
+    if body.parts.len() > 16 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "parts must contain at most 16 items",
+        );
+    }
+    for (index, part) in body.parts.iter().enumerate() {
+        if let Err(message) = validate_send_part(part) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid part at index {index}: {message}"),
+            );
+        }
+    }
+    let provider_id = match body
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => value,
+        None => return error_response(StatusCode::BAD_REQUEST, "provider_id is required"),
+    };
+    let Some(provider) = service.provider_store.get(provider_id) else {
+        return error_response(StatusCode::NOT_FOUND, "Provider not found");
+    };
+    if !provider.enabled {
+        return error_response(StatusCode::BAD_REQUEST, "Provider is disabled");
+    }
+    let (target, log_target_id, log_target_name, destination) =
+        match resolve_bundle_destination(service, &provider, &body) {
+            Ok(value) => value,
+            Err((status, message)) => return error_response(status, &message),
+        };
+    if !target.enabled {
+        return error_response(StatusCode::BAD_REQUEST, "Target is disabled");
+    }
+    let idempotency_key = body
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if idempotency_key.is_some_and(|value| value.len() > 480) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "bundle idempotency_key must be at most 480 bytes",
+        );
+    }
+
+    let client = service.provider_client(&provider);
+    let capabilities = client.send_capabilities(&provider);
+    let bundle_id = idempotency_key
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("im-bundle-{}", uuid_short()));
+    let mut receipts = Vec::with_capacity(body.parts.len());
+
+    for (index, part) in body.parts.iter().enumerate() {
+        let requested_kind = part.kind();
+        let capability = capabilities.part(requested_kind);
+        let delivered_kind = capability
+            .and_then(|value| value.delivered_as.as_deref())
+            .unwrap_or(requested_kind)
+            .to_string();
+        let warning = capability.and_then(|value| {
+            (value.support == crate::im_gateway::types::ImSendSupportLevel::Degraded)
+                .then(|| value.reason.clone())
+                .flatten()
+        });
+        if capability.is_none_or(|value| {
+            value.support == crate::im_gateway::types::ImSendSupportLevel::Unsupported
+        }) {
+            let error = capability
+                .and_then(|value| value.reason.clone())
+                .unwrap_or_else(|| format!("{requested_kind} is unsupported by this provider"));
+            receipts.push(SendPartReceipt {
+                index,
+                requested_kind: requested_kind.to_string(),
+                delivered_kind,
+                status: "failed".to_string(),
+                message_id: None,
+                request_id: None,
+                warning: None,
+                error: Some(error),
+            });
+            continue;
+        }
+
+        if provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin
+            && !service
+                .connection_manager
+                .weixin_provider()
+                .send_ready(&provider, &target)
+        {
+            receipts.push(SendPartReceipt {
+                index,
+                requested_kind: requested_kind.to_string(),
+                delivered_kind,
+                status: "failed".to_string(),
+                message_id: None,
+                request_id: None,
+                warning,
+                error: Some(
+                    "Weixin provider is connected but not send-ready; send the bot an inbound message first"
+                        .to_string(),
+                ),
+            });
+            continue;
+        }
+
+        use sha2::{Digest, Sha256};
+        let part_payload = serde_json::to_vec(part).unwrap_or_default();
+        let payload_sha256 = format!("{:x}", Sha256::digest(part_payload));
+        let part_key = idempotency_key.map(|key| format!("{key}:{index:03}"));
+        let stable_client_id = if let Some(key) = part_key.as_deref() {
+            match service.outbox_store.begin(
+                key,
+                &provider.id,
+                &log_target_id,
+                requested_kind,
+                &payload_sha256,
+            ) {
+                Ok(crate::im_gateway::ImOutboxBegin::Replay { message_id }) => {
+                    receipts.push(SendPartReceipt {
+                        index,
+                        requested_kind: requested_kind.to_string(),
+                        delivered_kind,
+                        status: "success".to_string(),
+                        message_id,
+                        request_id: Some("idempotent-replay".to_string()),
+                        warning,
+                        error: None,
+                    });
+                    continue;
+                }
+                Ok(crate::im_gateway::ImOutboxBegin::Send { stable_client_id }) => {
+                    Some(stable_client_id)
+                }
+                Err(error) => {
+                    receipts.push(SendPartReceipt {
+                        index,
+                        requested_kind: requested_kind.to_string(),
+                        delivered_kind,
+                        status: "failed".to_string(),
+                        message_id: None,
+                        request_id: None,
+                        warning,
+                        error: Some(error.to_string()),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        let send_result = send_bundle_part(
+            service,
+            &client,
+            &provider,
+            &target,
+            part,
+            stable_client_id.as_deref(),
+        )
+        .await;
+        let (status, message_id, request_id, error) = match send_result {
+            Ok(result) => {
+                if let Some(key) = part_key.as_deref() {
+                    if let Err(error) = service
+                        .outbox_store
+                        .mark_sent(key, result.message_id.as_deref())
+                    {
+                        receipts.push(SendPartReceipt {
+                            index,
+                            requested_kind: requested_kind.to_string(),
+                            delivered_kind,
+                            status: "failed".to_string(),
+                            message_id: result.message_id,
+                            request_id: result.request_id,
+                            warning,
+                            error: Some(format!(
+                                "provider acknowledged the part but outbox commit failed: {error}"
+                            )),
+                        });
+                        continue;
+                    }
+                }
+                ("success", result.message_id, result.request_id, None)
+            }
+            Err(error) => {
+                if let Some(key) = part_key.as_deref() {
+                    let _ = service.outbox_store.mark_pending(key, &error.to_string());
+                }
+                ("failed", None, None, Some(error.to_string()))
+            }
+        };
+
+        let preview = bundle_part_preview(part);
+        let log = ImMessageLog {
+            id: uuid_short(),
+            provider_id: provider.id.clone(),
+            direction: MessageDirection::Outbound,
+            status: if status == "success" {
+                MessageStatus::Success
+            } else {
+                MessageStatus::Failed
+            },
+            timestamp: now_ms(),
+            target_id: Some(log_target_id.clone()),
+            target_name: Some(log_target_name.clone()),
+            message_id: message_id.clone(),
+            msg_type: Some(delivered_kind.clone()),
+            content: matches!(part, SendPartRequest::Text { .. }).then(|| preview.clone()),
+            content_preview: Some(preview),
+            trigger: Some(format!("api:{bundle_id}")),
+            error: error.clone(),
+            sender_open_id: None,
+            event_id: None,
+            reaction_added: None,
+        };
+        if let Err(log_error) = service.message_log_store.add(log) {
+            error!(error = %log_error, "failed to store outbound bundle part log");
+        }
+        receipts.push(SendPartReceipt {
+            index,
+            requested_kind: requested_kind.to_string(),
+            delivered_kind,
+            status: status.to_string(),
+            message_id,
+            request_id,
+            warning,
+            error,
+        });
+    }
+
+    let success_count = receipts
+        .iter()
+        .filter(|receipt| receipt.status == "success")
+        .count();
+    let status = if success_count == receipts.len() {
+        "success"
+    } else if success_count == 0 {
+        "failed"
+    } else {
+        "partial_success"
+    };
+    let response = SendBundleResponse {
+        bundle_id,
+        provider_id: provider.id,
+        destination,
+        status: status.to_string(),
+        receipts,
+    };
+    let http_status = match status {
+        "success" => StatusCode::OK,
+        "partial_success" => StatusCode::MULTI_STATUS,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    json_response_with_status(http_status, &response)
+}
+
+pub(super) fn validate_send_part(part: &SendPartRequest) -> std::result::Result<(), String> {
+    match part {
+        SendPartRequest::Text { text } | SendPartRequest::Markdown { text } => {
+            if text.trim().is_empty() {
+                return Err("text must not be empty".to_string());
+            }
+        }
+        SendPartRequest::Image { image_key } => {
+            if image_key.trim().is_empty() {
+                return Err("image_key must not be empty".to_string());
+            }
+        }
+        SendPartRequest::File {
+            file_key,
+            file_name,
+        } => {
+            if file_key.trim().is_empty() {
+                return Err("file_key must not be empty".to_string());
+            }
+            if file_name
+                .as_deref()
+                .is_some_and(|name| !is_safe_upload_file_name(name))
+            {
+                return Err("file_name must be a plain file name".to_string());
+            }
+        }
+        SendPartRequest::NativeCard { card } => {
+            if !card.is_object() {
+                return Err("card must be a JSON object".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn resolve_bundle_destination(
+    service: &ImGatewayService,
+    provider: &ImProviderConfig,
+    body: &SendMessageRequest,
+) -> std::result::Result<(ImTarget, String, String, String), (StatusCode, String)> {
+    let destination = body.destination.clone().unwrap_or_else(|| {
+        body.target_id
+            .as_deref()
+            .filter(|value| !matches!(*value, "__owner__" | "owner"))
+            .map(|target_id| SendDestinationRequest::Target {
+                target_id: target_id.to_string(),
+            })
+            .unwrap_or(SendDestinationRequest::Owner)
+    });
+    match destination {
+        SendDestinationRequest::Owner => {
+            let owner = provider
+                .owner_open_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Provider '{}' has no owner_open_id", provider.id),
+                    )
+                })?;
+            Ok((
+                ImTarget {
+                    id: "__owner__".to_string(),
+                    provider_id: provider.id.clone(),
+                    display_name: "Owner".to_string(),
+                    receive_id_type: "open_id".to_string(),
+                    receive_id: owner,
+                    default_msg_type: "text".to_string(),
+                    enabled: true,
+                    created_at: 0,
+                    updated_at: 0,
+                },
+                "__owner__".to_string(),
+                "Owner".to_string(),
+                "owner".to_string(),
+            ))
+        }
+        SendDestinationRequest::Target { target_id } => {
+            let target = service.target_store.get(&target_id).ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("Target '{target_id}' not found"),
+                )
+            })?;
+            if target.provider_id != provider.id {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "Target '{target_id}' does not belong to provider '{}'",
+                        provider.id
+                    ),
+                ));
+            }
+            let display_name = target.display_name.clone();
+            Ok((
+                target,
+                target_id.clone(),
+                display_name,
+                format!("target:{target_id}"),
+            ))
+        }
+        SendDestinationRequest::Direct {
+            receive_id_type,
+            receive_id,
+        } => {
+            let receive_id_type = receive_id_type.trim().to_string();
+            let capabilities = service
+                .provider_client(provider)
+                .send_capabilities(provider);
+            if !capabilities
+                .receive_id_types
+                .iter()
+                .any(|value| value == &receive_id_type)
+            {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "receive_id_type '{}' is not supported by provider '{}'; supported: {}",
+                        receive_id_type,
+                        provider.id,
+                        capabilities.receive_id_types.join(", ")
+                    ),
+                ));
+            }
+            let receive_id = receive_id.trim();
+            if receive_id.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "receive_id must not be empty".to_string(),
+                ));
+            }
+            let masked = if receive_id.chars().count() > 8 {
+                format!("{}***", receive_id.chars().take(8).collect::<String>())
+            } else {
+                receive_id.to_string()
+            };
+            let summary = format!("direct:{receive_id_type}:{masked}");
+            Ok((
+                ImTarget {
+                    id: summary.clone(),
+                    provider_id: provider.id.clone(),
+                    display_name: "Direct recipient".to_string(),
+                    receive_id_type,
+                    receive_id: receive_id.to_string(),
+                    default_msg_type: "text".to_string(),
+                    enabled: true,
+                    created_at: 0,
+                    updated_at: 0,
+                },
+                summary.clone(),
+                "Direct recipient".to_string(),
+                summary,
+            ))
+        }
+    }
+}
+
+async fn send_bundle_part(
+    service: &ImGatewayService,
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    target: &ImTarget,
+    part: &SendPartRequest,
+    stable_client_id: Option<&str>,
+) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+    match part {
+        SendPartRequest::Text { text } | SendPartRequest::Markdown { text } => {
+            if provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin {
+                if let Some(client_id) = stable_client_id {
+                    return service
+                        .connection_manager
+                        .weixin_provider()
+                        .send_text_with_client_id(provider, target, text, client_id)
+                        .await;
+                }
+            }
+            client
+                .send_text_with_uuid(provider, target, text, stable_client_id)
+                .await
+        }
+        SendPartRequest::Image { image_key } => {
+            client
+                .send_image(provider, target, image_key, stable_client_id)
+                .await
+        }
+        SendPartRequest::File { file_key, .. } => {
+            client
+                .send_file(provider, target, file_key, stable_client_id)
+                .await
+        }
+        SendPartRequest::NativeCard { card } => {
+            client
+                .send_native_card(
+                    provider,
+                    target,
+                    card.clone(),
+                    crate::im_gateway::types::SendOptions {
+                        uuid: stable_client_id.map(str::to_string),
+                        msg_type: "interactive".to_string(),
+                    },
+                )
+                .await
+        }
+    }
+}
+
+fn bundle_part_preview(part: &SendPartRequest) -> String {
+    match part {
+        SendPartRequest::Text { text } | SendPartRequest::Markdown { text } => {
+            truncate_str(text, 200)
+        }
+        SendPartRequest::Image { .. } => "[image]".to_string(),
+        SendPartRequest::File { file_name, .. } => file_name
+            .as_deref()
+            .map(|name| format!("[file:{name}]"))
+            .unwrap_or_else(|| "[file]".to_string()),
+        SendPartRequest::NativeCard { card } => card
+            .get("header")
+            .and_then(|header| header.get("title"))
+            .and_then(|title| title.get("content"))
+            .and_then(|content| content.as_str())
+            .map(|title| truncate_str(title, 200))
+            .unwrap_or_else(|| "[native_card]".to_string()),
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ResolvedSendMessage {
     pub(super) provider: ImProviderConfig,
@@ -378,12 +1162,18 @@ pub(super) fn resolve_send_message_request(
                 format!("Provider '{provider_id}' not found"),
             )
         })?;
-        let owner_open_id = provider.owner_open_id.clone().ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Provider '{provider_id}' has no owner_open_id"),
-            )
-        })?;
+        let owner_open_id = provider
+            .owner_open_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Provider '{provider_id}' has no owner_open_id"),
+                )
+            })?;
         let target = ImTarget {
             id: "__owner__".to_string(),
             provider_id: provider.id.clone(),
@@ -473,7 +1263,7 @@ pub(super) fn normalized_send_content(
 }
 
 pub(super) async fn prepare_outbound_content(
-    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     body: &SendMessageRequest,
     content: serde_json::Value,
@@ -481,12 +1271,12 @@ pub(super) async fn prepare_outbound_content(
     match body.msg_type.as_str() {
         "image" => {
             let image = body.image.clone().or_else(|| parse_image_content(&content));
-            let image_key = resolve_image_key(feishu, provider, image.as_ref()).await?;
+            let image_key = resolve_image_key(client, provider, image.as_ref()).await?;
             Ok(serde_json::json!({ "image_key": image_key }))
         }
         "interactive" => {
             if let Some(rich_card) = &body.rich_card {
-                build_rich_card_content(feishu, provider, rich_card).await
+                build_rich_card_content(client, provider, rich_card).await
             } else {
                 Ok(content)
             }
@@ -516,7 +1306,7 @@ pub(super) fn parse_image_content(content: &serde_json::Value) -> Option<SendIma
 }
 
 pub(super) async fn resolve_image_key(
-    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     image: Option<&SendImageRequest>,
 ) -> std::result::Result<String, (StatusCode, String)> {
@@ -558,7 +1348,7 @@ pub(super) async fn resolve_image_key(
     }
 
     let file_name = image.file_name.as_deref().unwrap_or("bifrost-image");
-    let uploaded = feishu
+    let uploaded = client
         .upload_image(
             provider,
             &image.image_type,
@@ -577,7 +1367,7 @@ pub(super) async fn resolve_image_key(
 }
 
 pub(super) async fn build_rich_card_content(
-    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     rich_card: &SendRichCardRequest,
 ) -> std::result::Result<serde_json::Value, (StatusCode, String)> {
@@ -601,7 +1391,7 @@ pub(super) async fn build_rich_card_content(
     {
         Some(image_key.to_string())
     } else if rich_card.image.is_some() {
-        Some(resolve_image_key(feishu, provider, rich_card.image.as_ref()).await?)
+        Some(resolve_image_key(client, provider, rich_card.image.as_ref()).await?)
     } else {
         None
     };
@@ -631,13 +1421,17 @@ pub(super) async fn build_rich_card_content(
         }));
     }
     if let Some(text) = text {
-        let rendered_text = render_agent_markdown_for_feishu(
-            feishu,
-            provider,
-            text,
-            provider_agent_work_dir(provider).as_deref(),
-        )
-        .await;
+        let rendered_text = if let Some(feishu) = client.feishu() {
+            render_agent_markdown_for_feishu(
+                &feishu,
+                provider,
+                text,
+                provider_agent_work_dir(provider).as_deref(),
+            )
+            .await
+        } else {
+            text.to_string()
+        };
         let rendered_text =
             crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
         elements.push(serde_json::json!({

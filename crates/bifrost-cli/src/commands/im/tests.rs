@@ -1,6 +1,6 @@
 use super::schedule::{parse_schedule_add_args, parse_schedule_update_args};
 use super::*;
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn mock_server_host_port(server: &MockServer) -> (String, u16) {
@@ -61,21 +61,20 @@ fn resolve_secret_missing_file_returns_io_error() {
 
 #[test]
 fn im_send_defaults_to_owner_and_uses_content_field() {
-    let args = parse_send_args(&[
-        "--provider".into(),
-        "feishu-main".into(),
-        "--text".into(),
-        "hello".into(),
-    ])
-    .expect("parse send args");
+    let args = parse_send_args(&["feishu-main".into(), "--text".into(), "hello".into()])
+        .expect("parse send args");
 
-    let body = build_send_body("feishu-main", &args).expect("build send body");
+    let body = build_send_body(
+        "feishu-main",
+        &args,
+        vec![json!({ "type": "text", "text": "hello" })],
+    )
+    .expect("build send body");
 
     assert_eq!(body["provider_id"], "feishu-main");
-    assert_eq!(body["target_id"], "__owner__");
-    assert_eq!(body["msg_type"], "text");
-    assert_eq!(body["content"], "hello");
-    assert!(body.get("text").is_none());
+    assert_eq!(body["destination"]["mode"], "owner");
+    assert_eq!(body["parts"][0]["type"], "text");
+    assert_eq!(body["parts"][0]["text"], "hello");
 }
 
 #[test]
@@ -90,13 +89,21 @@ fn im_send_keeps_explicit_target_and_card_content() {
     ])
     .expect("parse send args");
 
-    let body = build_send_body("feishu-main", &args).expect("build send body");
+    let body = build_send_body(
+        "feishu-main",
+        &args,
+        vec![json!({
+            "type": "native_card",
+            "card": {"config": {}, "elements": []}
+        })],
+    )
+    .expect("build send body");
 
     assert_eq!(body["provider_id"], "feishu-main");
-    assert_eq!(body["target_id"], "oncall");
-    assert_eq!(body["msg_type"], "interactive");
-    assert!(body["content"]["elements"].is_array());
-    assert!(body.get("card").is_none());
+    assert_eq!(body["destination"]["mode"], "target");
+    assert_eq!(body["destination"]["target_id"], "oncall");
+    assert_eq!(body["parts"][0]["type"], "native_card");
+    assert!(body["parts"][0]["card"]["elements"].is_array());
 }
 
 #[test]
@@ -109,13 +116,20 @@ fn im_send_builds_image_key_payload() {
     ])
     .expect("parse send args");
 
-    let body = build_send_body("feishu-main", &args).expect("build send body");
+    assert!(matches!(
+        args.parts.as_slice(),
+        [ImSendPartArg::ImageKey(key)] if key == "img_v3_key"
+    ));
+    let body = build_send_body(
+        "feishu-main",
+        &args,
+        vec![json!({ "type": "image", "image_key": "img_v3_key" })],
+    )
+    .expect("build send body");
 
     assert_eq!(body["provider_id"], "feishu-main");
-    assert_eq!(body["target_id"], "__owner__");
-    assert_eq!(body["msg_type"], "image");
-    assert_eq!(body["image"]["image_key"], "img_v3_key");
-    assert_eq!(body["image"]["image_type"], "message");
+    assert_eq!(body["destination"]["mode"], "owner");
+    assert_eq!(body["parts"][0]["image_key"], "img_v3_key");
 }
 
 #[test]
@@ -132,14 +146,31 @@ fn im_send_builds_rich_card_payload() {
     ])
     .expect("parse send args");
 
-    let body = build_send_body("feishu-main", &args).expect("build send body");
+    let capabilities = json!({
+        "parts": {
+            "native_card": { "support": "native" },
+            "image": { "support": "native" }
+        }
+    });
+    let parts = prepare_send_parts("127.0.0.1", 9900, "feishu-main", &args, &capabilities)
+        .expect("prepare rich card");
+    let body = build_send_body("feishu-main", &args, parts).expect("build send body");
 
     assert_eq!(body["provider_id"], "feishu-main");
-    assert_eq!(body["target_id"], "__owner__");
-    assert_eq!(body["msg_type"], "interactive");
-    assert_eq!(body["rich_card"]["title"], "Deploy report");
-    assert_eq!(body["rich_card"]["text"], "**Done**");
-    assert_eq!(body["rich_card"]["image_key"], "img_v3_chart");
+    assert_eq!(body["destination"]["mode"], "owner");
+    assert_eq!(body["parts"][0]["type"], "native_card");
+    assert_eq!(
+        body["parts"][0]["card"]["header"]["title"]["content"],
+        "Deploy report"
+    );
+    assert_eq!(
+        body["parts"][0]["card"]["elements"][1]["content"],
+        "**Done**"
+    );
+    assert_eq!(
+        body["parts"][0]["card"]["elements"][0]["img_key"],
+        "img_v3_chart"
+    );
 }
 
 #[test]
@@ -954,30 +985,190 @@ fn handle_im_command_help_and_empty_args_do_not_error() {
 }
 
 #[test]
-fn build_image_payload_reads_file_and_sets_mime_and_base64() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("image.png");
-    std::fs::write(&path, [1u8, 2, 3]).unwrap();
+fn parse_send_args_preserves_order_and_direct_chat_destination() {
+    let args = parse_send_args(&[
+        "feishu-main".into(),
+        "--chat-id".into(),
+        "oc_group".into(),
+        "--text".into(),
+        "first".into(),
+        "--image-key".into(),
+        "img_key".into(),
+        "--markdown".into(),
+        "**last**".into(),
+    ])
+    .expect("parse ordered send parts");
 
-    let payload = build_image_payload(Some(path.to_str().unwrap()), None, Some("avatar"))
-        .expect("build image payload");
-
-    assert_eq!(payload["image_type"], "avatar");
-    assert_eq!(payload["file_name"], "image.png");
-    assert_eq!(payload["mime_type"], "image/png");
-    // 0x01 0x02 0x03 -> AQID in base64
-    assert_eq!(payload["data_base64"], "AQID");
+    assert_eq!(args.provider.as_deref(), Some("feishu-main"));
+    assert_eq!(args.chat_id.as_deref(), Some("oc_group"));
+    assert!(matches!(args.parts[0], ImSendPartArg::Text(ref text) if text == "first"));
+    assert!(matches!(args.parts[1], ImSendPartArg::ImageKey(ref key) if key == "img_key"));
+    assert!(matches!(args.parts[2], ImSendPartArg::Markdown(ref text) if text == "**last**"));
 }
 
 #[test]
-fn build_image_payload_requires_file_or_key() {
-    let err = build_image_payload(None, None, None).unwrap_err();
-    match err {
-        bifrost_core::BifrostError::Config(msg) => {
-            assert!(msg.contains("image file or image key is required"));
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+fn parse_send_args_accepts_feishu_bot_selectors_without_provider_name() {
+    let args = parse_send_args(&[
+        "--bot-id".into(),
+        "cli_bot".into(),
+        "--bot-name".into(),
+        "Release Bot".into(),
+        "--chat-id".into(),
+        "oc_group".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .expect("parse bot selectors");
+
+    assert!(args.provider.is_none());
+    assert_eq!(args.bot_id.as_deref(), Some("cli_bot"));
+    assert_eq!(args.bot_name.as_deref(), Some("Release Bot"));
+    assert_eq!(args.chat_id.as_deref(), Some("oc_group"));
+}
+
+#[tokio::test]
+async fn resolve_send_provider_id_supports_bot_name_and_rejects_invalid_response() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/providers/resolve"))
+        .and(body_partial_json(json!({"bot_name": "Release Bot"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "provider_id": "feishu-release"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let by_name = parse_send_args(&[
+        "--bot-name".into(),
+        "Release Bot".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .expect("parse bot name");
+    assert_eq!(
+        resolve_send_provider_id(&host, port, &by_name).expect("resolve bot name"),
+        "feishu-release"
+    );
+
+    let invalid = MockServer::start().await;
+    let (invalid_host, invalid_port) = mock_server_host_port(&invalid);
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/providers/resolve"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"provider_id": "  "})))
+        .expect(1)
+        .mount(&invalid)
+        .await;
+    let by_id = parse_send_args(&[
+        "--bot-id".into(),
+        "cli_bot".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .expect("parse bot id");
+    assert!(
+        resolve_send_provider_id(&invalid_host, invalid_port, &by_id)
+            .expect_err("blank provider id must fail")
+            .to_string()
+            .contains("missing provider_id")
+    );
+
+    let explicit = parse_send_args(&["feishu-main".into(), "--text".into(), "hello".into()])
+        .expect("parse explicit provider");
+    assert_eq!(
+        resolve_send_provider_id("127.0.0.1", 1, &explicit).expect("explicit provider"),
+        "feishu-main"
+    );
+
+    let fallback = MockServer::start().await;
+    let (fallback_host, fallback_port) = mock_server_host_port(&fallback);
+    Mock::given(method("GET"))
+        .and(path("/_bifrost/api/im-gateway/providers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "id": "only-enabled",
+            "display_name": "Only Enabled",
+            "enabled": true
+        }])))
+        .expect(1)
+        .mount(&fallback)
+        .await;
+    let implicit =
+        parse_send_args(&["--text".into(), "hello".into()]).expect("parse provider-less send");
+    assert_eq!(
+        resolve_send_provider_id(&fallback_host, fallback_port, &implicit)
+            .expect("select only enabled provider"),
+        "only-enabled"
+    );
+}
+
+#[test]
+fn parse_send_args_rejects_unknown_conflicting_and_incomplete_options() {
+    let unknown = parse_send_args(&[
+        "feishu-main".into(),
+        "--text".into(),
+        "hello".into(),
+        "--typo".into(),
+    ])
+    .unwrap_err();
+    assert!(unknown.to_string().contains("unknown im send option"));
+
+    let provider_conflict = parse_send_args(&[
+        "feishu-main".into(),
+        "--provider".into(),
+        "other".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .unwrap_err();
+    assert!(provider_conflict.to_string().contains("mutually exclusive"));
+
+    let bot_provider_conflict = parse_send_args(&[
+        "feishu-main".into(),
+        "--bot-id".into(),
+        "cli_bot".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .unwrap_err();
+    assert!(bot_provider_conflict
+        .to_string()
+        .contains("mutually exclusive"));
+
+    let destination_conflict = parse_send_args(&[
+        "feishu-main".into(),
+        "--owner".into(),
+        "--target".into(),
+        "oncall".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .unwrap_err();
+    assert!(destination_conflict
+        .to_string()
+        .contains("mutually exclusive"));
+
+    let incomplete = parse_send_args(&[
+        "feishu-main".into(),
+        "--receive-id".into(),
+        "ou_user".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .unwrap_err();
+    assert!(incomplete.to_string().contains("must be provided together"));
+}
+
+#[test]
+fn parse_send_args_help_does_not_require_provider_or_content() {
+    let args = parse_send_args(&["--help".into()]).expect("help should parse offline");
+    assert!(args.help);
+    assert!(args.provider.is_none());
+}
+
+#[test]
+fn parse_card_json_requires_object() {
+    let error = parse_card_json("[]").expect_err("array card must fail");
+    assert!(error.to_string().contains("card JSON must be an object"));
 }
 
 #[test]
@@ -1064,4 +1255,724 @@ fn print_message_logs_formats_inbound_and_outbound() {
 fn handle_im_command_unknown_subcommand_falls_back_to_help() {
     handle_im_command("127.0.0.1", 9900, &["unknown".into()])
         .expect("unknown subcommand should not error");
+}
+
+#[tokio::test]
+async fn im_send_full_bundle_uploads_files_and_posts_ordered_payload() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+    let temp = tempfile::tempdir().expect("temp send files");
+    let markdown = temp.path().join("report.md");
+    let image = temp.path().join("chart.png");
+    let attachment = temp.path().join("report.bin");
+    let card = temp.path().join("card.json");
+    std::fs::write(&markdown, "# Report").expect("write markdown");
+    std::fs::write(&image, b"PNG-DATA").expect("write image");
+    std::fs::write(&attachment, b"FILE-DATA").expect("write file");
+    std::fs::write(&card, r#"{"config":{},"elements":[]}"#).expect("write card");
+
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/providers/resolve"))
+        .and(body_partial_json(json!({"bot_id": "cli_e2e"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "provider_id": "feishu-main",
+            "provider_type": "feishu",
+            "display_name": "Feishu Main"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-main/capabilities",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "provider_id": "feishu-main",
+            "provider_type": "feishu",
+            "destinations": ["owner", "target", "direct"],
+            "receive_id_types": ["chat_id", "open_id"],
+            "requires_context": false,
+            "parts": {
+                "text": {"support": "native"},
+                "markdown": {"support": "native"},
+                "image": {"support": "native", "max_bytes": 1024},
+                "file": {"support": "native", "max_bytes": 1024},
+                "native_card": {"support": "native"}
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/messages/upload"))
+        .and(query_param("kind", "image"))
+        .and(query_param("provider_id", "feishu-main"))
+        .and(query_param("image_type", "avatar"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "image", "key": "img_uploaded"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/messages/upload"))
+        .and(query_param("kind", "file"))
+        .and(query_param("provider_id", "feishu-main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "file", "key": "file_uploaded"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/messages/send"))
+        .and(body_partial_json(json!({
+            "provider_id": "feishu-main",
+            "destination": {
+                "mode": "direct",
+                "receive_id_type": "open_id",
+                "receive_id": "ou_owner"
+            },
+            "idempotency_key": "bundle-1",
+            "parts": [
+                {"type": "text", "text": "first"},
+                {"type": "markdown", "text": "**second**"},
+                {"type": "markdown", "text": "# Report"},
+                {"type": "image", "image_key": "img_uploaded"},
+                {"type": "image", "image_key": "img_existing"},
+                {"type": "file", "file_key": "file_uploaded", "file_name": "report.bin"},
+                {"type": "file", "file_key": "file_existing"},
+                {"type": "native_card", "card": {"config": {}, "elements": []}},
+                {"type": "native_card", "card": {"config": {}, "elements": []}}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "bundle_id": "bundle-1",
+            "provider_id": "feishu-main",
+            "destination": "direct:open_id:ou_owner",
+            "status": "success",
+            "receipts": [{
+                "index": 0,
+                "requested_kind": "text",
+                "delivered_kind": "text",
+                "status": "success",
+                "message_id": "om_1"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    handle_im_send(
+        &host,
+        port,
+        &[
+            "--bot-id".into(),
+            "cli_e2e".into(),
+            "--receive-id-type".into(),
+            "open_id".into(),
+            "--receive-id".into(),
+            "ou_owner".into(),
+            "--text".into(),
+            "first".into(),
+            "--markdown".into(),
+            "**second**".into(),
+            "--markdown-file".into(),
+            markdown.display().to_string(),
+            "--image".into(),
+            image.display().to_string(),
+            "--image-key".into(),
+            "img_existing".into(),
+            "--file".into(),
+            attachment.display().to_string(),
+            "--file-key".into(),
+            "file_existing".into(),
+            "--card-file".into(),
+            card.display().to_string(),
+            "--card-json".into(),
+            r#"{"config":{},"elements":[]}"#.into(),
+            "--image-type".into(),
+            "avatar".into(),
+            "--idempotency-key".into(),
+            "bundle-1".into(),
+            "--format".into(),
+            "json".into(),
+        ],
+    )
+    .expect("full IM send should succeed");
+}
+
+#[tokio::test]
+async fn im_send_card_image_and_partial_response_cover_error_path() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+    let temp = tempfile::tempdir().expect("temp card image");
+    let image = temp.path().join("hero.unknown");
+    std::fs::write(&image, b"IMAGE").expect("write card image");
+    let capabilities = json!({
+        "parts": {
+            "native_card": {"support": "native"},
+            "image": {"support": "native"}
+        }
+    });
+    Mock::given(method("GET"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-main/capabilities",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/messages/upload"))
+        .and(query_param("kind", "image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"key": "img_hero"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/messages/send"))
+        .and(body_partial_json(json!({
+            "destination": {"mode": "direct", "receive_id_type": "chat_id", "receive_id": "oc_group"},
+            "parts": [{
+                "type": "native_card",
+                "card": {
+                    "header": {"title": {"content": "Deploy"}},
+                    "elements": [
+                        {"tag": "img", "img_key": "img_hero", "alt": {"content": "hero"}},
+                        {"tag": "markdown", "content": "failed"}
+                    ]
+                }
+            }]
+        })))
+        .respond_with(ResponseTemplate::new(207).set_body_json(json!({
+            "bundle_id": "generated",
+            "provider_id": "feishu-main",
+            "destination": "direct:chat_id:oc_group",
+            "status": "partial_success",
+            "receipts": [{
+                "index": 0,
+                "requested_kind": "native_card",
+                "delivered_kind": "native_card",
+                "status": "failed",
+                "warning": "degraded",
+                "error": "provider rejected card"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let error = handle_im_send(
+        &host,
+        port,
+        &[
+            "feishu-main".into(),
+            "--chat-id".into(),
+            "oc_group".into(),
+            "--card-title".into(),
+            "Deploy".into(),
+            "--card-text".into(),
+            "failed".into(),
+            "--card-image-file".into(),
+            image.display().to_string(),
+            "--card-image-alt".into(),
+            "hero".into(),
+        ],
+    )
+    .expect_err("partial send should be surfaced as an error");
+    assert!(error.to_string().contains("partial_success"));
+}
+
+#[tokio::test]
+async fn im_provider_capabilities_command_supports_formats_and_validation() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+    Mock::given(method("GET"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-main/capabilities",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "provider_id": "feishu-main",
+            "provider_type": "feishu",
+            "destinations": ["owner"],
+            "receive_id_types": ["open_id"],
+            "requires_context": false,
+            "parts": {"text": {"support": "native"}}
+        })))
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    for format in ["human", "json", "json-pretty"] {
+        handle_im_provider(
+            &host,
+            port,
+            &[
+                "capabilities".into(),
+                "feishu-main".into(),
+                "--format".into(),
+                format.into(),
+            ],
+        )
+        .expect("print provider capabilities");
+    }
+    assert!(handle_im_provider(&host, port, &["capabilities".into()])
+        .unwrap_err()
+        .to_string()
+        .contains("provider name required"));
+    assert!(handle_im_provider(
+        &host,
+        port,
+        &[
+            "capabilities".into(),
+            "feishu-main".into(),
+            "--format".into(),
+            "xml".into(),
+        ],
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("--format"));
+}
+
+#[tokio::test]
+async fn im_http_helpers_preserve_status_json_and_transport_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/status-json"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({"error": "conflict"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/upload-error"))
+        .respond_with(ResponseTemplate::new(413).set_body_json(json!({"error": "too large"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/invalid-json"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (status, body) = http_post_with_status(
+        &format!("{}/status-json", server.uri()),
+        &json!({"hello": "world"}),
+    )
+    .expect("status response remains readable");
+    assert_eq!(status, 409);
+    assert_eq!(body["error"], "conflict");
+
+    assert!(http_post_bytes(
+        &format!("{}/upload-error", server.uri()),
+        b"bytes",
+        "application/octet-stream",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("HTTP 413: too large"));
+    assert!(
+        http_post_with_status(&format!("{}/invalid-json", server.uri()), &json!({}))
+            .unwrap_err()
+            .to_string()
+            .contains("failed to parse response")
+    );
+    assert!(
+        http_post_with_status("http://127.0.0.1:1/unreachable", &json!({}))
+            .unwrap_err()
+            .to_string()
+            .contains("HTTP POST failed")
+    );
+    assert!(http_post_bytes(
+        "http://127.0.0.1:1/unreachable",
+        b"bytes",
+        "application/octet-stream",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("IM upload failed"));
+}
+
+#[test]
+fn im_send_helpers_cover_formats_capabilities_and_validation_edges() {
+    let capabilities = json!({
+        "provider_id": "feishu-main",
+        "provider_type": "feishu",
+        "destinations": ["owner", "target", "direct"],
+        "receive_id_types": ["chat_id"],
+        "requires_context": false,
+        "parts": {
+            "markdown": {"support": "degraded", "delivered_as": "text", "reason": "plain text"},
+            "file": {"support": "native", "max_bytes": 32},
+            "native_card": {"support": "unsupported", "reason": "not supported"}
+        }
+    });
+    print_provider_capabilities(&capabilities, "human").expect("human capabilities");
+    print_provider_capabilities(&capabilities, "json").expect("JSON capabilities");
+    print_provider_capabilities(&capabilities, "json-pretty").expect("pretty capabilities");
+    assert_eq!(send_capability_max_bytes(&capabilities, "file", 99), 32);
+    assert_eq!(send_capability_max_bytes(&capabilities, "image", 99), 99);
+    assert!(ensure_send_capability(&capabilities, "native_card")
+        .unwrap_err()
+        .to_string()
+        .contains("not supported"));
+    assert!(ensure_send_capability(&capabilities, "image")
+        .unwrap_err()
+        .to_string()
+        .contains("does not declare"));
+
+    for format in ["human", "json", "json-pretty"] {
+        print_send_response(
+            &json!({
+                "bundle_id": "b1",
+                "provider_id": "p1",
+                "destination": "owner",
+                "status": if format == "human" { "failed" } else { "success" },
+                "receipts": [{
+                    "index": 1,
+                    "requested_kind": "markdown",
+                    "delivered_kind": "text",
+                    "status": "failed",
+                    "warning": "plain text",
+                    "error": "send failed"
+                }]
+            }),
+            format,
+        )
+        .expect("print send response");
+    }
+    print_send_response(
+        &json!({
+            "bundle_id": "b2",
+            "provider_id": "p1",
+            "destination": "owner",
+            "status": "success"
+        }),
+        "human",
+    )
+    .expect("print successful human response");
+    print_im_send_help();
+    handle_im_send("127.0.0.1", 1, &["--help".into()]).expect("offline send help");
+    handle_im_provider("127.0.0.1", 1, &["unknown".into()])
+        .expect("unknown provider subcommand prints usage");
+    handle_im_target("127.0.0.1", 1, &["unknown".into()])
+        .expect("unknown target subcommand prints usage");
+
+    let duplicate_provider =
+        parse_send_args(&["one".into(), "two".into(), "--text".into(), "hello".into()])
+            .unwrap_err();
+    assert!(duplicate_provider.to_string().contains("only one provider"));
+    assert!(parse_send_args(&[
+        "feishu-main".into(),
+        "--format".into(),
+        "xml".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .unwrap_err()
+    .to_string()
+    .contains("--format"));
+    assert!(parse_send_args(&["feishu-main".into(), "--text".into()])
+        .unwrap_err()
+        .to_string()
+        .contains("non-empty"));
+    assert!(parse_send_args(&["feishu-main".into()])
+        .unwrap_err()
+        .to_string()
+        .contains("at least one"));
+    assert!(parse_card_json("not-json").is_err());
+
+    let target = parse_send_args(&[
+        "feishu-main".into(),
+        "--target".into(),
+        "oncall".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .expect("target args");
+    assert_eq!(
+        build_send_body(
+            "feishu-main",
+            &target,
+            vec![json!({"type":"text","text":"hello"})]
+        )
+        .expect("target body")["destination"]["mode"],
+        "target"
+    );
+}
+
+#[test]
+fn im_send_file_helpers_reject_missing_directory_empty_and_oversized_files() {
+    let temp = tempfile::tempdir().expect("temp upload validation");
+    let missing = temp.path().join("missing.bin");
+    assert!(read_text_send_file(missing.to_str().unwrap(), "Markdown").is_err());
+    assert!(upload_send_file(
+        "127.0.0.1",
+        1,
+        "p",
+        "file",
+        missing.to_str().unwrap(),
+        None,
+        10,
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("failed to inspect"));
+    assert!(upload_send_file(
+        "127.0.0.1",
+        1,
+        "p",
+        "file",
+        temp.path().to_str().unwrap(),
+        None,
+        10,
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("not a regular file"));
+    let empty = temp.path().join("empty.bin");
+    std::fs::write(&empty, []).expect("write empty file");
+    assert!(upload_send_file(
+        "127.0.0.1",
+        1,
+        "p",
+        "file",
+        empty.to_str().unwrap(),
+        None,
+        10,
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("between 1 and 10"));
+    let large = temp.path().join("large.bin");
+    std::fs::write(&large, b"too large").expect("write large file");
+    assert!(upload_send_file(
+        "127.0.0.1",
+        1,
+        "p",
+        "file",
+        large.to_str().unwrap(),
+        None,
+        2,
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("between 1 and 2"));
+}
+
+#[test]
+fn im_send_parser_and_preflight_cover_every_offline_content_form() {
+    let temp = tempfile::tempdir().expect("temp send content");
+    let markdown = temp.path().join("body.md");
+    let card = temp.path().join("card.json");
+    std::fs::write(&markdown, "# status").expect("write markdown");
+    std::fs::write(&card, r#"{"config":{},"elements":[]}"#).expect("write card");
+
+    let args = parse_send_args(&[
+        "--provider".into(),
+        "feishu-main".into(),
+        "--receive-id-type".into(),
+        "open_id".into(),
+        "--receive-id".into(),
+        "ou_owner".into(),
+        "--text".into(),
+        "plain".into(),
+        "--markdown".into(),
+        "**inline**".into(),
+        "--markdown-file".into(),
+        markdown.display().to_string(),
+        "--image-key".into(),
+        "img_key".into(),
+        "--file-key".into(),
+        "file_key".into(),
+        "--card-file".into(),
+        card.display().to_string(),
+        "--card-json".into(),
+        r#"{"elements":[]}"#.into(),
+        "--image-type".into(),
+        "message".into(),
+        "--idempotency-key".into(),
+        "stable-key".into(),
+        "--format".into(),
+        "json-pretty".into(),
+    ])
+    .expect("parse every offline content form");
+    let capabilities = json!({
+        "parts": {
+            "text": {"support":"native"},
+            "markdown": {"support":"native"},
+            "image": {"support":"native"},
+            "file": {"support":"native"},
+            "native_card": {"support":"native"}
+        }
+    });
+    let parts = prepare_send_parts("127.0.0.1", 1, "feishu-main", &args, &capabilities)
+        .expect("prepare offline parts");
+    assert_eq!(parts.len(), 7);
+    assert_eq!(parts[2]["text"], "# status");
+    assert_eq!(parts[3]["image_key"], "img_key");
+    assert_eq!(parts[4]["file_key"], "file_key");
+    let body = build_send_body("feishu-main", &args, parts).expect("build direct body");
+    assert_eq!(body["destination"]["receive_id_type"], "open_id");
+    assert_eq!(body["destination"]["receive_id"], "ou_owner");
+    assert_eq!(body["idempotency_key"], "stable-key");
+
+    let selectors = parse_send_args(&[
+        "--bot-id".into(),
+        "cli_app".into(),
+        "--bot-name".into(),
+        "Release bot".into(),
+        "--owner".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .expect("bot selectors can be intersected");
+    assert_eq!(selectors.bot_id.as_deref(), Some("cli_app"));
+    assert_eq!(selectors.bot_name.as_deref(), Some("Release bot"));
+    let debug = format!("{selectors:?}");
+    assert!(debug.contains("part_count: 1"));
+    assert!(!debug.contains("hello"));
+}
+
+#[test]
+fn im_send_parser_rejects_each_validation_boundary() {
+    for flag in [
+        "--provider",
+        "--bot-id",
+        "--bot-name",
+        "--target",
+        "--chat-id",
+        "--receive-id-type",
+        "--receive-id",
+        "--text",
+        "--markdown",
+        "--markdown-file",
+        "--image",
+        "--image-key",
+        "--file",
+        "--file-key",
+        "--card-file",
+        "--card-json",
+        "--card-title",
+        "--card-text",
+        "--card-image-file",
+        "--card-image-key",
+        "--card-image-alt",
+        "--image-type",
+        "--idempotency-key",
+        "--format",
+    ] {
+        let error = parse_send_args(&[flag.into()]).expect_err("missing value must fail");
+        assert!(error.to_string().contains("requires a non-empty value"));
+    }
+    assert!(parse_send_args(&[
+        "feishu-main".into(),
+        "--text".into(),
+        "hello".into(),
+        "--format".into(),
+        "yaml".into(),
+    ])
+    .unwrap_err()
+    .to_string()
+    .contains("--format must be one of"));
+    assert!(parse_send_args(&[
+        "--bot-name".into(),
+        "Release bot".into(),
+        "--chat-id".into(),
+        "oc_group".into(),
+        "--owner".into(),
+        "--text".into(),
+        "hello".into(),
+    ])
+    .unwrap_err()
+    .to_string()
+    .contains("mutually exclusive"));
+}
+
+#[test]
+fn im_send_preflight_rejects_missing_and_reasonless_unsupported_capabilities() {
+    let missing = ensure_send_capability(&json!({"parts": {}}), "image")
+        .expect_err("missing capability must fail");
+    assert!(missing.to_string().contains("does not declare"));
+    let unsupported =
+        ensure_send_capability(&json!({"parts":{"file":{"support":"unsupported"}}}), "file")
+            .expect_err("unsupported capability must fail");
+    assert!(unsupported.to_string().contains("does not support file"));
+
+    assert_eq!(guess_image_mime_type("PIC.PNG"), Some("image/png"));
+    assert_eq!(guess_image_mime_type("photo.jpeg"), Some("image/jpeg"));
+    assert_eq!(guess_image_mime_type("anim.gif"), Some("image/gif"));
+    assert_eq!(guess_image_mime_type("modern.webp"), Some("image/webp"));
+    assert_eq!(guess_image_mime_type("unknown.bin"), None);
+}
+
+#[tokio::test]
+async fn im_send_http_helpers_cover_invalid_json_and_transport_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/invalid-json"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        http_post_with_status(&format!("{}/invalid-json", server.uri()), &json!({}))
+            .unwrap_err()
+            .to_string()
+            .contains("failed to parse response")
+    );
+
+    let unavailable = "http://127.0.0.1:1/unavailable";
+    assert!(http_post_with_status(unavailable, &json!({})).is_err());
+    assert!(http_post_bytes(unavailable, b"x", "application/octet-stream").is_err());
+}
+
+#[test]
+fn target_add_requires_ids_rejects_unknown_flags_and_has_defaults() {
+    let body = parse_target_add_args(
+        "oncall",
+        &[
+            "--receive-id-type".into(),
+            "chat_id".into(),
+            "--receive-id".into(),
+            "oc_group".into(),
+        ],
+    )
+    .expect("minimal target");
+    assert_eq!(body["display_name"], "oncall");
+    assert_eq!(body["default_msg_type"], "text");
+    assert_eq!(body["enabled"], true);
+    let customized = parse_target_add_args(
+        "oncall",
+        &[
+            "--receive-id-type".into(),
+            "chat_id".into(),
+            "--receive-id".into(),
+            "oc_group".into(),
+            "--msg-type".into(),
+            "interactive".into(),
+        ],
+    )
+    .expect("custom target message type");
+    assert_eq!(customized["default_msg_type"], "interactive");
+    assert!(parse_target_add_args("bad", &[])
+        .unwrap_err()
+        .to_string()
+        .contains("required"));
+    assert!(parse_target_add_args(
+        "bad",
+        &[
+            "--receive-id-type".into(),
+            "chat_id".into(),
+            "--receive-id".into(),
+            "oc_group".into(),
+            "--typo".into(),
+        ],
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("unknown im target add option"));
 }

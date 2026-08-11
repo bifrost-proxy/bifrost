@@ -4,7 +4,6 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use base64::Engine as _;
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
 use qrcode::{render::unicode, QrCode};
@@ -120,8 +119,27 @@ fn handle_im_provider(host: &str, port: u16, args: &[String]) -> Result<()> {
             print_provider_status(name, &resp);
             Ok(())
         }
+        Some("capabilities") => {
+            let name = args.get(1).ok_or_else(|| {
+                bifrost_core::BifrostError::Config("provider name required".to_string())
+            })?;
+            let format = args
+                .windows(2)
+                .find(|pair| pair[0] == "--format")
+                .map(|pair| pair[1].as_str())
+                .unwrap_or("human");
+            if !matches!(format, "human" | "json" | "json-pretty") {
+                return Err(bifrost_core::BifrostError::Config(
+                    "--format must be one of: human, json, json-pretty".to_string(),
+                ));
+            }
+            let url = api_url(host, port, &format!("/providers/{name}/capabilities"));
+            let resp = http_get(&url)?;
+            print_provider_capabilities(&resp, format)?;
+            Ok(())
+        }
         _ => {
-            eprintln!("Usage: bifrost im provider <list|add|update|delete|status>");
+            eprintln!("Usage: bifrost im provider <list|add|update|delete|status|capabilities>");
             Ok(())
         }
     }
@@ -792,6 +810,49 @@ fn print_provider_status(name: &str, resp: &Value) {
     }
 }
 
+fn print_provider_capabilities(resp: &Value, format: &str) -> Result<()> {
+    if format == "json" {
+        let rendered = serde_json::to_string(resp).map_err(im_json_error)?;
+        println!("{rendered}");
+        return Ok(());
+    }
+    if format == "json-pretty" {
+        let rendered = serde_json::to_string_pretty(resp).map_err(im_json_error)?;
+        println!("{rendered}");
+        return Ok(());
+    }
+    let provider_id = resp["provider_id"].as_str().unwrap_or("unknown");
+    let provider_type = resp["provider_type"].as_str().unwrap_or("unknown");
+    println!("Provider '{provider_id}' ({provider_type})");
+    println!("  Destinations: {}", string_array(&resp["destinations"]));
+    println!(
+        "  Receive ID types: {}",
+        string_array(&resp["receive_id_types"])
+    );
+    let requires_context = resp["requires_context"].as_bool().unwrap_or(false);
+    println!("  Requires inbound context: {requires_context}");
+    if let Some(parts) = resp["parts"].as_object() {
+        println!("  Content parts:");
+        for (kind, capability) in parts {
+            let mut detail = capability["support"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            if let Some(delivered_as) = capability["delivered_as"].as_str() {
+                detail.push_str(&format!(" → {delivered_as}"));
+            }
+            if let Some(max_bytes) = capability["max_bytes"].as_u64() {
+                detail.push_str(&format!(" (max {max_bytes} bytes)"));
+            }
+            println!("    {kind}: {detail}");
+            if let Some(reason) = capability["reason"].as_str() {
+                println!("      {reason}");
+            }
+        }
+    }
+    Ok(())
+}
+#[rustfmt::skip] fn string_array(value: &Value) -> String { value.as_array().map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default() }
 // ─── Target ──────────────────────────────────────────────────────────────────
 
 fn handle_im_target(host: &str, port: u16, args: &[String]) -> Result<()> {
@@ -851,6 +912,9 @@ fn handle_im_target(host: &str, port: u16, args: &[String]) -> Result<()> {
 fn parse_target_add_args(name: &str, args: &[String]) -> Result<Value> {
     let mut body = json!({
         "id": name,
+        "display_name": name,
+        "default_msg_type": "text",
+        "enabled": true,
     });
 
     let mut i = 0;
@@ -858,37 +922,37 @@ fn parse_target_add_args(name: &str, args: &[String]) -> Result<Value> {
         match args[i].as_str() {
             "--provider" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["provider_id"] = json!(v);
-                }
+                body["provider_id"] = json!(required_send_arg(args, i, "--provider")?);
             }
             "--receive-id-type" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["receive_id_type"] = json!(v);
-                }
+                body["receive_id_type"] = json!(required_send_arg(args, i, "--receive-id-type")?);
             }
             "--receive-id" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["receive_id"] = json!(v);
-                }
+                body["receive_id"] = json!(required_send_arg(args, i, "--receive-id")?);
             }
             "--display-name" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["display_name"] = json!(v);
-                }
+                body["display_name"] = json!(required_send_arg(args, i, "--display-name")?);
             }
             "--msg-type" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["default_msg_type"] = json!(v);
-                }
+                body["default_msg_type"] = json!(required_send_arg(args, i, "--msg-type")?);
             }
-            _ => {}
+            value => {
+                return Err(bifrost_core::BifrostError::Config(format!(
+                    "unknown im target add option '{value}'"
+                )))
+            }
         }
         i += 1;
+    }
+
+    if body["receive_id_type"].as_str().is_none() || body["receive_id"].as_str().is_none() {
+        return Err(bifrost_core::BifrostError::Config(
+            "--receive-id-type and --receive-id are required".to_string(),
+        ));
     }
 
     Ok(body)
@@ -973,222 +1037,485 @@ fn print_target_list(resp: &Value) {
 
 fn handle_im_send(host: &str, port: u16, args: &[String]) -> Result<()> {
     let send_args = parse_send_args(args)?;
-    let provider_id = match send_args.provider.clone() {
-        Some(provider) => provider,
-        None => select_provider_interactively(host, port)?,
-    };
+    if send_args.help {
+        print_im_send_help();
+        return Ok(());
+    }
+    let provider_id = resolve_send_provider_id(host, port, &send_args)?;
 
-    let body = build_send_body(&provider_id, &send_args)?;
+    let capabilities_path = format!("/providers/{provider_id}/capabilities");
+    let capabilities_url = api_url(host, port, &capabilities_path);
+    let capabilities = http_get(&capabilities_url)?;
+    let parts = prepare_send_parts(host, port, &provider_id, &send_args, &capabilities)?;
+    let body = build_send_body(&provider_id, &send_args, parts)?;
 
     let url = api_url(host, port, "/messages/send");
-    let resp = http_post(&url, &body)?;
-
-    let message_id = resp["message_id"].as_str().unwrap_or("unknown");
-    println!(
-        "{} Message sent via provider '{}' to {} (message_id: {})",
-        "✓".bright_green(),
-        provider_id,
-        send_args
-            .target
-            .as_deref()
-            .unwrap_or("__owner__")
-            .bright_white(),
-        message_id.dimmed()
-    );
-    Ok(())
+    let (_http_status, resp) = http_post_with_status(&url, &body)?;
+    print_send_response(&resp, &send_args.output_format)?;
+    (resp["status"].as_str() == Some("success"))
+        .then_some(())
+        .ok_or_else(|| {
+            bifrost_core::BifrostError::Config(format!(
+                "IM send completed with status '{}'",
+                resp["status"].as_str().unwrap_or("failed")
+            ))
+        })
 }
-
-#[derive(Debug, Default)]
-struct ImSendArgs {
-    provider: Option<String>,
-    target: Option<String>,
-    card_file: Option<String>,
-    card_json: Option<String>,
-    card_title: Option<String>,
-    card_text: Option<String>,
-    card_image_file: Option<String>,
-    card_image_key: Option<String>,
-    card_image_alt: Option<String>,
-    image_file: Option<String>,
-    image_key: Option<String>,
-    image_type: Option<String>,
-    text: Option<String>,
+#[rustfmt::skip] enum ImSendPartArg { Text(String), Markdown(String), MarkdownFile(String), ImageFile(String), ImageKey(String), File(String), FileKey(String), CardFile(String), CardJson(String) }
+#[derive(Default)]
+#[rustfmt::skip] struct ImSendArgs { provider: Option<String>, bot_id: Option<String>, bot_name: Option<String>, target: Option<String>, chat_id: Option<String>, receive_id_type: Option<String>, receive_id: Option<String>, owner: bool, parts: Vec<ImSendPartArg>, card_title: Option<String>, card_text: Option<String>, card_image_file: Option<String>, card_image_key: Option<String>, card_image_alt: Option<String>, image_type: Option<String>, idempotency_key: Option<String>, output_format: String, help: bool }
+impl std::fmt::Debug for ImSendArgs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ImSendArgs")
+            .field("provider", &self.provider)
+            .field("bot_id", &self.bot_id)
+            .field("bot_name", &self.bot_name)
+            .field(
+                "destination",
+                &self.target.as_ref().or(self.chat_id.as_ref()),
+            )
+            .field("part_count", &self.parts.len())
+            .field("output_format", &self.output_format)
+            .finish_non_exhaustive()
+    }
 }
 
 fn parse_send_args(args: &[String]) -> Result<ImSendArgs> {
-    let mut parsed = ImSendArgs::default();
+    let mut parsed = ImSendArgs {
+        output_format: "human".to_string(),
+        ..ImSendArgs::default()
+    };
+    let mut positional_provider = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--provider" => {
-                i += 1;
-                parsed.provider = args.get(i).cloned();
+            "--help" | "-h" => parsed.help = true,
+            "--provider" => parsed.provider = Some(next_send_arg(args, &mut i)?),
+            "--bot-id" => parsed.bot_id = Some(next_send_arg(args, &mut i)?),
+            "--bot-name" => parsed.bot_name = Some(next_send_arg(args, &mut i)?),
+            "--target" => parsed.target = Some(next_send_arg(args, &mut i)?),
+            "--owner" => parsed.owner = true,
+            "--chat-id" => parsed.chat_id = Some(next_send_arg(args, &mut i)?),
+            "--receive-id-type" => parsed.receive_id_type = Some(next_send_arg(args, &mut i)?),
+            "--receive-id" => parsed.receive_id = Some(next_send_arg(args, &mut i)?),
+            "--text" => parsed
+                .parts
+                .push(ImSendPartArg::Text(next_send_arg(args, &mut i)?)),
+            "--markdown" => parsed
+                .parts
+                .push(ImSendPartArg::Markdown(next_send_arg(args, &mut i)?)),
+            "--markdown-file" => parsed
+                .parts
+                .push(ImSendPartArg::MarkdownFile(next_send_arg(args, &mut i)?)),
+            "--image" | "--image-file" => parsed
+                .parts
+                .push(ImSendPartArg::ImageFile(next_send_arg(args, &mut i)?)),
+            "--image-key" => parsed
+                .parts
+                .push(ImSendPartArg::ImageKey(next_send_arg(args, &mut i)?)),
+            "--file" => parsed
+                .parts
+                .push(ImSendPartArg::File(next_send_arg(args, &mut i)?)),
+            "--file-key" => parsed
+                .parts
+                .push(ImSendPartArg::FileKey(next_send_arg(args, &mut i)?)),
+            "--card-file" => parsed
+                .parts
+                .push(ImSendPartArg::CardFile(next_send_arg(args, &mut i)?)),
+            "--card-json" => parsed
+                .parts
+                .push(ImSendPartArg::CardJson(next_send_arg(args, &mut i)?)),
+            "--card-title" => parsed.card_title = Some(next_send_arg(args, &mut i)?),
+            "--card-text" => parsed.card_text = Some(next_send_arg(args, &mut i)?),
+            "--card-image-file" => parsed.card_image_file = Some(next_send_arg(args, &mut i)?),
+            "--card-image-key" => parsed.card_image_key = Some(next_send_arg(args, &mut i)?),
+            "--card-image-alt" => parsed.card_image_alt = Some(next_send_arg(args, &mut i)?),
+            "--image-type" => parsed.image_type = Some(next_send_arg(args, &mut i)?),
+            "--idempotency-key" => parsed.idempotency_key = Some(next_send_arg(args, &mut i)?),
+            "--format" => parsed.output_format = next_send_arg(args, &mut i)?,
+            value if value.starts_with('-') => {
+                return send_config_error(format!("unknown im send option '{value}'"))
             }
-            "--target" => {
-                i += 1;
-                parsed.target = args.get(i).cloned();
+            value => {
+                if positional_provider.replace(value.to_string()).is_some() {
+                    return send_config_error("only one provider positional argument is allowed");
+                }
             }
-            "--card-file" => {
-                i += 1;
-                parsed.card_file = args.get(i).cloned();
-            }
-            "--card-json" => {
-                i += 1;
-                parsed.card_json = args.get(i).cloned();
-            }
-            "--card-title" => {
-                i += 1;
-                parsed.card_title = args.get(i).cloned();
-            }
-            "--card-text" => {
-                i += 1;
-                parsed.card_text = args.get(i).cloned();
-            }
-            "--card-image-file" => {
-                i += 1;
-                parsed.card_image_file = args.get(i).cloned();
-            }
-            "--card-image-key" => {
-                i += 1;
-                parsed.card_image_key = args.get(i).cloned();
-            }
-            "--card-image-alt" => {
-                i += 1;
-                parsed.card_image_alt = args.get(i).cloned();
-            }
-            "--image-file" => {
-                i += 1;
-                parsed.image_file = args.get(i).cloned();
-            }
-            "--image-key" => {
-                i += 1;
-                parsed.image_key = args.get(i).cloned();
-            }
-            "--image-type" => {
-                i += 1;
-                parsed.image_type = args.get(i).cloned();
-            }
-            "--text" => {
-                i += 1;
-                parsed.text = args.get(i).cloned();
-            }
-            _ => {}
         }
         i += 1;
     }
 
+    if parsed.help {
+        return Ok(parsed);
+    }
+    if parsed.provider.is_some() && positional_provider.is_some() {
+        return send_config_error(
+            "provider positional argument and --provider are mutually exclusive",
+        );
+    }
+    parsed.provider = parsed.provider.or(positional_provider);
+    if parsed.provider.is_some() && (parsed.bot_id.is_some() || parsed.bot_name.is_some()) {
+        return send_config_error(
+            "PROVIDER/--provider and --bot-id/--bot-name are mutually exclusive",
+        );
+    }
+    let destination_count = usize::from(parsed.owner)
+        + usize::from(parsed.target.is_some())
+        + usize::from(parsed.chat_id.is_some())
+        + usize::from(parsed.receive_id.is_some() || parsed.receive_id_type.is_some());
+    if destination_count > 1 {
+        return send_config_error(
+            "--owner, --target, --chat-id, and --receive-id are mutually exclusive",
+        );
+    }
+    if parsed.receive_id.is_some() != parsed.receive_id_type.is_some() {
+        return send_config_error("--receive-id and --receive-id-type must be provided together");
+    }
+    if !matches!(
+        parsed.output_format.as_str(),
+        "human" | "json" | "json-pretty"
+    ) {
+        return send_config_error("--format must be one of: human, json, json-pretty");
+    }
+    let has_rich_card = parsed.card_title.is_some()
+        || parsed.card_text.is_some()
+        || parsed.card_image_file.is_some()
+        || parsed.card_image_key.is_some()
+        || parsed.card_image_alt.is_some();
+    if parsed.parts.is_empty() && !has_rich_card {
+        return send_config_error("at least one of --text, --markdown, --markdown-file, --image, --file, --card-file, or --card-json is required");
+    }
     Ok(parsed)
 }
-
-fn build_send_body(provider_id: &str, args: &ImSendArgs) -> Result<Value> {
-    let target_id = args.target.as_deref().unwrap_or("__owner__");
-    let mut body = json!({
-        "provider_id": provider_id,
-        "target_id": target_id,
-    });
-
-    if let Some(file_path) = &args.card_file {
-        let content = fs::read_to_string(Path::new(file_path)).map_err(|e| {
-            bifrost_core::BifrostError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to read card file '{}': {}", file_path, e),
-            ))
-        })?;
-        let card: Value = serde_json::from_str(&content)
-            .map_err(|e| bifrost_core::BifrostError::Parse(format!("invalid card JSON: {}", e)))?;
-        body["content"] = card;
-        body["msg_type"] = json!("interactive");
-    } else if let Some(json_str) = &args.card_json {
-        let card: Value = serde_json::from_str(json_str)
-            .map_err(|e| bifrost_core::BifrostError::Parse(format!("invalid card JSON: {}", e)))?;
-        body["content"] = card;
-        body["msg_type"] = json!("interactive");
-    } else if args.card_title.is_some()
+fn resolve_send_provider_id(host: &str, port: u16, args: &ImSendArgs) -> Result<String> {
+    if let Some(provider_id) = &args.provider {
+        return Ok(provider_id.clone());
+    }
+    if args.bot_id.is_some() || args.bot_name.is_some() {
+        let mut body = json!({});
+        if let Some(bot_id) = &args.bot_id {
+            body["bot_id"] = json!(bot_id);
+        }
+        if let Some(bot_name) = &args.bot_name {
+            body["bot_name"] = json!(bot_name);
+        }
+        let response = http_post(&api_url(host, port, "/providers/resolve"), &body)?;
+        return resolved_provider_id(&response);
+    }
+    select_provider_interactively(host, port)
+}
+#[rustfmt::skip] fn required_send_arg<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a str> { args.get(index).map(String::as_str).filter(|value| !value.is_empty()).ok_or_else(|| bifrost_core::BifrostError::Config(format!("{flag} requires a non-empty value"))) }
+fn next_send_arg(args: &[String], index: &mut usize) -> Result<String> {
+    let flag = args[*index].as_str();
+    *index += 1;
+    required_send_arg(args, *index, flag).map(str::to_string)
+}
+#[rustfmt::skip] fn send_config_error<T>(message: impl Into<String>) -> Result<T> { Err(bifrost_core::BifrostError::Config(message.into())) }
+#[rustfmt::skip] fn resolved_provider_id(response: &Value) -> Result<String> { response["provider_id"].as_str().filter(|value| !value.trim().is_empty()).map(str::to_string).ok_or_else(|| bifrost_core::BifrostError::Parse("provider resolve response is missing provider_id".to_string())) }
+fn build_send_body(provider_id: &str, args: &ImSendArgs, parts: Vec<Value>) -> Result<Value> {
+    let destination = if let Some(target_id) = &args.target {
+        json!({ "mode": "target", "target_id": target_id })
+    } else if let Some(chat_id) = &args.chat_id {
+        json!({ "mode": "direct", "receive_id_type": "chat_id", "receive_id": chat_id })
+    } else if let (Some(receive_id_type), Some(receive_id)) =
+        (&args.receive_id_type, &args.receive_id)
+    {
+        json!({ "mode": "direct", "receive_id_type": receive_id_type, "receive_id": receive_id })
+    } else {
+        json!({ "mode": "owner" })
+    };
+    let mut body =
+        json!({ "provider_id": provider_id, "destination": destination, "parts": parts });
+    if let Some(key) = &args.idempotency_key {
+        body["idempotency_key"] = json!(key);
+    }
+    Ok(body)
+}
+fn prepare_send_parts(
+    host: &str,
+    port: u16,
+    provider_id: &str,
+    args: &ImSendArgs,
+    capabilities: &Value,
+) -> Result<Vec<Value>> {
+    let mut parts = Vec::new();
+    for part in &args.parts {
+        let kind = match part {
+            ImSendPartArg::Text(_) => "text",
+            ImSendPartArg::Markdown(_) | ImSendPartArg::MarkdownFile(_) => "markdown",
+            ImSendPartArg::ImageFile(_) | ImSendPartArg::ImageKey(_) => "image",
+            ImSendPartArg::File(_) | ImSendPartArg::FileKey(_) => "file",
+            ImSendPartArg::CardFile(_) | ImSendPartArg::CardJson(_) => "native_card",
+        };
+        ensure_send_capability(capabilities, kind)?;
+        let value = match part {
+            ImSendPartArg::Text(text) => scalar_send_part("text", "text", text.as_str()),
+            ImSendPartArg::Markdown(text) => scalar_send_part("markdown", "text", text.as_str()),
+            ImSendPartArg::MarkdownFile(path) => {
+                scalar_send_part("markdown", "text", read_text_send_file(path, "Markdown")?)
+            }
+            ImSendPartArg::ImageFile(path) => scalar_send_part(
+                "image",
+                "image_key",
+                upload_send_key(host, port, provider_id, "image", path, args, capabilities)?,
+            ),
+            ImSendPartArg::ImageKey(key) => scalar_send_part("image", "image_key", key.as_str()),
+            ImSendPartArg::File(path) => {
+                let key =
+                    upload_send_key(host, port, provider_id, "file", path, args, capabilities)?;
+                file_send_part(key, send_file_name(path))
+            }
+            ImSendPartArg::FileKey(key) => scalar_send_part("file", "file_key", key.as_str()),
+            ImSendPartArg::CardFile(path) => {
+                native_card_send_part(parse_card_json(&read_text_send_file(path, "card JSON")?)?)
+            }
+            ImSendPartArg::CardJson(card) => native_card_send_part(parse_card_json(card)?),
+        };
+        parts.push(value);
+    }
+    if args.card_title.is_some()
         || args.card_text.is_some()
         || args.card_image_file.is_some()
         || args.card_image_key.is_some()
         || args.card_image_alt.is_some()
     {
-        body["rich_card"] = build_rich_card_payload(args)?;
-        body["msg_type"] = json!("interactive");
-    } else if args.image_file.is_some() || args.image_key.is_some() {
-        body["image"] = build_image_payload(
-            args.image_file.as_deref(),
-            args.image_key.as_deref(),
-            args.image_type.as_deref(),
-        )?;
-        body["msg_type"] = json!("image");
-    } else if let Some(text_content) = &args.text {
-        body["content"] = json!(text_content);
-        body["msg_type"] = json!("text");
-    } else {
-        return Err(bifrost_core::BifrostError::Config(
-            "one of --card-file, --card-json, --card-text, --card-image-file, --card-image-key, --image-file, --image-key, or --text is required".to_string(),
-        ));
+        ensure_send_capability(capabilities, "native_card")?;
+        let image_key = if let Some(path) = &args.card_image_file {
+            ensure_send_capability(capabilities, "image")?;
+            Some(upload_send_key(
+                host,
+                port,
+                provider_id,
+                "image",
+                path,
+                args,
+                capabilities,
+            )?)
+        } else {
+            args.card_image_key.as_ref().map(|key| json!(key))
+        };
+        let mut elements = Vec::new();
+        if let Some(image_key) = image_key {
+            elements.push(card_image_element(
+                image_key,
+                args.card_image_alt.as_deref().unwrap_or("image"),
+            ));
+        }
+        if let Some(text) = &args.card_text {
+            elements.push(json!({ "tag": "markdown", "content": text }));
+        }
+        let mut card = json!({ "config": { "wide_screen_mode": true }, "elements": elements });
+        if let Some(title) = &args.card_title {
+            card["header"] = card_header(title);
+        }
+        parts.push(json!({ "type": "native_card", "card": card }));
     }
 
-    Ok(body)
+    Ok(parts)
+}
+fn scalar_send_part(kind: &str, field: &str, value: impl Into<Value>) -> Value {
+    let mut part = json!({ "type": kind });
+    part[field] = value.into();
+    part
+}
+fn file_send_part(key: Value, file_name: &str) -> Value {
+    json!({ "type": "file", "file_key": key, "file_name": file_name })
 }
 
-fn build_rich_card_payload(args: &ImSendArgs) -> Result<Value> {
-    let mut rich_card = json!({});
-    if let Some(title) = &args.card_title {
-        rich_card["title"] = json!(title);
-    }
-    if let Some(text) = &args.card_text {
-        rich_card["text"] = json!(text);
-    }
-    if let Some(image_key) = &args.card_image_key {
-        rich_card["image_key"] = json!(image_key);
-    }
-    if args.card_image_file.is_some() {
-        rich_card["image"] = build_image_payload(
-            args.card_image_file.as_deref(),
-            None,
-            args.image_type.as_deref(),
-        )?;
-    }
-    if let Some(alt) = &args.card_image_alt {
-        rich_card["image_alt"] = json!(alt);
-    }
-    Ok(rich_card)
+fn native_card_send_part(card: Value) -> Value {
+    json!({ "type": "native_card", "card": card })
+}
+fn card_image_element(image_key: Value, alt: &str) -> Value {
+    json!({ "tag": "img", "img_key": image_key, "alt": { "tag": "plain_text", "content": alt } })
 }
 
-fn build_image_payload(
-    image_file: Option<&str>,
-    image_key: Option<&str>,
-    image_type: Option<&str>,
-) -> Result<Value> {
-    let mut image = json!({
-        "image_type": image_type.unwrap_or("message")
-    });
-
-    if let Some(image_key) = image_key.filter(|value| !value.trim().is_empty()) {
-        image["image_key"] = json!(image_key);
-        return Ok(image);
-    }
-
-    let file_path = image_file.ok_or_else(|| {
-        bifrost_core::BifrostError::Config("image file or image key is required".to_string())
-    })?;
-    let bytes = fs::read(Path::new(file_path)).map_err(|e| {
-        bifrost_core::BifrostError::Io(std::io::Error::new(
-            e.kind(),
-            format!("failed to read image file '{}': {}", file_path, e),
-        ))
-    })?;
-    let file_name = Path::new(file_path)
+fn card_header(title: &str) -> Value {
+    json!({ "template": "blue", "title": { "tag": "plain_text", "content": title } })
+}
+fn send_file_name(path: &str) -> &str {
+    Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("bifrost-image");
-    image["file_name"] = json!(file_name);
-    image["data_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
-    if let Some(mime_type) = guess_image_mime_type(file_name) {
-        image["mime_type"] = json!(mime_type);
+        .unwrap_or("attachment")
+}
+fn upload_send_key(
+    host: &str,
+    port: u16,
+    provider_id: &str,
+    kind: &str,
+    path: &str,
+    args: &ImSendArgs,
+    capabilities: &Value,
+) -> Result<Value> {
+    let (image_type, fallback) = if kind == "image" {
+        (args.image_type.as_deref(), 10 * 1024 * 1024)
+    } else {
+        (None, 30 * 1024 * 1024)
+    };
+    Ok(upload_send_file(
+        host,
+        port,
+        provider_id,
+        kind,
+        path,
+        image_type,
+        send_capability_max_bytes(capabilities, kind, fallback),
+    )?["key"]
+        .clone())
+}
+fn ensure_send_capability(capabilities: &Value, kind: &str) -> Result<()> {
+    let capability = capabilities
+        .get("parts")
+        .and_then(|parts| parts.get(kind))
+        .ok_or_else(|| {
+            bifrost_core::BifrostError::Config(format!(
+                "provider does not declare the '{kind}' send capability"
+            ))
+        })?;
+    if capability["support"].as_str() == Some("unsupported") {
+        return Err(bifrost_core::BifrostError::Config(
+            capability["reason"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("provider does not support {kind}")),
+        ));
     }
+    Ok(())
+}
 
-    Ok(image)
+fn send_capability_max_bytes(capabilities: &Value, kind: &str, fallback: u64) -> u64 {
+    capabilities["parts"][kind]["max_bytes"]
+        .as_u64()
+        .unwrap_or(fallback)
+}
+
+fn read_text_send_file(path: &str, label: &str) -> Result<String> {
+    fs::read_to_string(Path::new(path)).map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!("failed to read {label} file '{path}': {error}"),
+        ))
+    })
+}
+fn parse_card_json(content: &str) -> Result<Value> {
+    let card: Value = serde_json::from_str(content).map_err(|error| {
+        bifrost_core::BifrostError::Parse(format!("invalid card JSON: {error}"))
+    })?;
+    if !card.is_object() {
+        return Err(bifrost_core::BifrostError::Config(
+            "card JSON must be an object".to_string(),
+        ));
+    }
+    Ok(card)
+}
+fn upload_send_file(
+    host: &str,
+    port: u16,
+    provider_id: &str,
+    kind: &str,
+    path: &str,
+    image_type: Option<&str>,
+    max_bytes: u64,
+) -> Result<Value> {
+    let path_ref = Path::new(path);
+    let metadata = fs::metadata(path_ref).map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!("failed to inspect {kind} file '{path}': {error}"),
+        ))
+    })?;
+    if !metadata.is_file() {
+        return send_config_error(format!("{kind} path '{path}' is not a regular file"));
+    }
+    if metadata.len() == 0 || metadata.len() > max_bytes {
+        return send_config_error(format!(
+            "{kind} file must be between 1 and {max_bytes} bytes"
+        ));
+    }
+    let bytes = fs::read(path_ref).map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!("failed to read {kind} file '{path}': {error}"),
+        ))
+    })?;
+    let file_name = path_ref
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            bifrost_core::BifrostError::Config("file name must be valid UTF-8".to_string())
+        })?;
+    let mime_type = upload_mime_type(kind, file_name);
+    let mut url = upload_send_url(host, port, provider_id, kind, file_name, mime_type);
+    if let Some(image_type) = image_type {
+        url.push_str("&image_type=");
+        url.push_str(&urlencoding::encode(image_type));
+    }
+    http_post_bytes(&url, &bytes, mime_type)
+}
+#[rustfmt::skip] fn upload_mime_type(kind: &str, file_name: &str) -> &'static str { if kind == "image" { guess_image_mime_type(file_name).unwrap_or("application/octet-stream") } else { "application/octet-stream" } }
+#[rustfmt::skip] fn upload_send_url(host: &str, port: u16, provider_id: &str, kind: &str, file_name: &str, mime_type: &str) -> String { format!("{}?provider_id={}&kind={}&file_name={}&mime_type={}", api_url(host, port, "/messages/upload"), urlencoding::encode(provider_id), urlencoding::encode(kind), urlencoding::encode(file_name), urlencoding::encode(mime_type)) }
+fn print_send_response(response: &Value, format: &str) -> Result<()> {
+    let rendered = match format {
+        "json" => serde_json::to_string(response).map_err(im_json_error)?,
+        "json-pretty" => serde_json::to_string_pretty(response).map_err(im_json_error)?,
+        _ => format_send_response_human(response),
+    };
+    println!("{rendered}");
+    Ok(())
+}
+#[rustfmt::skip]
+fn format_send_response_human(response: &Value) -> String {
+    let status = response["status"].as_str().unwrap_or("failed");
+    let glyph = if status == "success" { "✓" } else { "!" };
+    let bundle = response["bundle_id"].as_str().unwrap_or("unknown");
+    let provider = response["provider_id"].as_str().unwrap_or("unknown");
+    let destination = response["destination"].as_str().unwrap_or("unknown");
+    let mut lines = vec![format!("{glyph} IM bundle {bundle} via '{provider}' to {destination}: {status}")];
+    for receipt in response["receipts"].as_array().into_iter().flatten() {
+        let index = receipt["index"].as_u64().unwrap_or(0) + 1;
+        let receipt_status = receipt["status"].as_str().unwrap_or("failed");
+        let glyph = if receipt_status == "success" { "✓" } else { "✗" };
+        let requested = receipt["requested_kind"].as_str().unwrap_or("unknown");
+        let delivered = receipt["delivered_kind"].as_str().unwrap_or("unknown");
+        let suffix = receipt["message_id"].as_str().map(|value| format!(" ({value})")).unwrap_or_default();
+        lines.push(format!("  {glyph} part {index} {requested} → {delivered}{suffix}"));
+        if let Some(warning) = receipt["warning"].as_str() {
+            lines.push(format!("    warning: {warning}"));
+        }
+        if let Some(error) = receipt["error"].as_str() {
+            lines.push(format!("    error: {error}"));
+        }
+    }
+    lines.join("\n")
+}
+#[rustfmt::skip] fn im_json_error(error: serde_json::Error) -> bifrost_core::BifrostError { bifrost_core::BifrostError::Parse(format!("failed to format response: {error}")) }
+fn print_im_send_help() {
+    println!("bifrost im send - send ordered content parts through an IM provider");
+    println!();
+    println!("USAGE:");
+    println!("    bifrost im send [PROVIDER] [DESTINATION] <CONTENT>...");
+    println!();
+    println!("DESTINATION (choose at most one):");
+    println!("    --owner                         Send to provider owner (default)");
+    println!("    --target <ALIAS>                Send to a configured target");
+    println!("    --chat-id <ID>                  Send directly to a Feishu group chat");
+    println!("    --receive-id-type <TYPE> --receive-id <ID>");
+    println!();
+    println!("CONTENT (repeatable, sent in argument order):");
+    println!("    --text <TEXT>");
+    println!("    --markdown <MARKDOWN> | --markdown-file <PATH>");
+    println!("    --image <PATH> | --image-key <KEY>");
+    println!("    --file <PATH> | --file-key <KEY>");
+    println!("    --card-file <PATH> | --card-json <JSON>");
+    println!();
+    println!("OPTIONS:");
+    println!("    --provider <ID>                 Compatibility form for PROVIDER");
+    println!("    --bot-id <APP_ID>               Resolve Feishu provider by bot App ID");
+    println!("    --bot-name <NAME>               Resolve exact name; reject ambiguity");
+    println!("    --idempotency-key <KEY>         Stable bundle idempotency key");
+    println!("    --format human|json|json-pretty");
 }
 
 fn guess_image_mime_type(file_name: &str) -> Option<&'static str> {
@@ -1660,6 +1987,32 @@ fn http_post(url: &str, body: &Value) -> Result<Value> {
     Ok(resp_body)
 }
 
+fn http_post_with_status(url: &str, body: &Value) -> Result<(u16, Value)> {
+    debug!(url = %url, "im: POST");
+    let result = bifrost_core::direct_ureq_agent().post(url).send_json(body);
+    let (status, response) = match result {
+        Ok(response) => (response.status(), response),
+        Err(ureq::Error::Status(status, response)) => (status, response),
+        Err(error) => return Err(im_network_error("HTTP POST failed", error)),
+    };
+    read_im_json_response(response).map(|body| (status, body))
+}
+
+fn http_post_bytes(url: &str, bytes: &[u8], content_type: &str) -> Result<Value> {
+    debug!(url = %url, bytes = bytes.len(), "im: POST binary upload");
+    let request = bifrost_core::direct_ureq_agent()
+        .post(url)
+        .set("Content-Type", content_type);
+    let result = request.send_bytes(bytes);
+    match result {
+        Ok(response) => read_im_json_response(response),
+        Err(ureq::Error::Status(status, response)) => upload_status_error(status, response),
+        Err(error) => Err(im_network_error("IM upload failed", error)),
+    }
+}
+#[rustfmt::skip] fn upload_status_error(status: u16, response: ureq::Response) -> Result<Value> { let body = read_im_json_response(response).unwrap_or_else(|_| json!({})); let message = body["error"].as_str().unwrap_or("unknown error"); Err(bifrost_core::BifrostError::Network(format!("IM upload failed with HTTP {status}: {message}"))) }
+#[rustfmt::skip] fn im_network_error(context: &str, error: ureq::Error) -> bifrost_core::BifrostError { bifrost_core::BifrostError::Network(format!("{context}: {error}")) }
+#[rustfmt::skip] fn read_im_json_response(response: ureq::Response) -> Result<Value> { let body = response.into_string().map_err(|error| bifrost_core::BifrostError::Parse(format!("failed to read response: {error}")))?; serde_json::from_str(&body).map_err(|error| bifrost_core::BifrostError::Parse(format!("failed to parse response: {error}"))) }
 fn http_patch(url: &str, body: &Value) -> Result<Value> {
     debug!(url = %url, "im: PATCH");
     let resp = bifrost_core::direct_ureq_agent()
@@ -1911,11 +2264,12 @@ fn print_im_help() {
     println!("    bifrost im provider add feishu-main --type feishu --runner traex");
     println!("    bifrost im provider add weixin-main --type weixin --runner codex");
     println!("    bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --runner 'Claude Code'");
-    println!("    bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx");
-    println!("    bifrost im send --provider feishu-main --text 'hello owner'");
-    println!("    bifrost im send --provider feishu-main --image-file ./alert.png");
-    println!("    bifrost im send --provider feishu-main --card-title 'Deploy' --card-text 'done' --card-image-file ./chart.png");
-    println!("    bifrost im send --target oncall --card-file ./card.json");
+    println!("    bifrost im provider capabilities feishu-main --format json-pretty");
+    println!("    bifrost im target add oncall --provider feishu-main --receive-id-type chat_id --receive-id oc_xxx");
+    println!("    bifrost im send weixin-main --text 'hello owner'");
+    println!("    bifrost im send feishu-main --markdown-file ./report.md");
+    println!("    bifrost im send feishu-main --target oncall --card-file ./card.json");
+    println!("    bifrost im send feishu-main --chat-id oc_xxx --markdown '**done**' --image ./chart.png --file ./report.pdf");
     println!("    bifrost im route add deploy --provider feishu-main --event message.receive --regex '^/deploy' --script-file ./deploy.sh");
     println!("    bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh");
     println!("    bifrost im schedule add agent-daily --target oncall --cron '0 9 * * *' --agent-prompt 'Summarize traffic' --agent-runner-id codex --agent-model gpt-5 --agent-reasoning-effort high");

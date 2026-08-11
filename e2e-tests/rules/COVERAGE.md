@@ -145,6 +145,7 @@
 
 ## 9. 非规则代理稳定性回归
 
+- `tests/test_im_outbound_send_e2e.sh`：通过仅 debug 可用的 loopback 飞书 fixture，验证 provider 能力矩阵、owner/target/direct 目的地、Markdown/图片/文件/原生卡片的有序 bundle、二进制上传、危险附件文件名拒绝、逐项 receipt、稳定 UUID、未知参数失败和离线 help；不访问真实 IM 服务。
 - `tests/test_admin_cross_site_security.sh`：对 `/_bifrost/api/syntax` 执行可信 `tauri://localhost` Origin 的 GET 与 `X-Client-Id` 预检，断言桌面 Rules 补全接口保留允许 Origin/Headers，并验证响应协议包含 `reqHeaders`。
 - `web/tests/ui/admin-rules-values.spec.ts`：中断 Rules 编辑器首次 syntax 请求，随后模拟继续输入，断言请求重试、建议框自动出现、`Ctrl+Space` 仍可触发，并可选中 `reqHeaders://`。
 - `tests/test_tls_intercept_e2e.sh`：配置 Domain Passthrough 与 curl App Force Intercept 的冲突场景，验证 `Rules > Domain > App` 中的域名优先级；HTTPS HTML 保持原始响应、不含 `__bifrost_badge__`，流量仅有 CONNECT 外层记录而没有解包后的内层请求。

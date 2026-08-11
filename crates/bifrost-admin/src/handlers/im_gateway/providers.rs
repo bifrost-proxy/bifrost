@@ -11,6 +11,9 @@ pub(super) async fn handle_providers(
 ) -> Response<BoxBody> {
     let rest = rest.trim_end_matches('/');
 
+    if rest == "/resolve" {
+        return handle_provider_resolve(req, service).await;
+    }
     if rest == "/feishu-setup/start" {
         return handle_provider_feishu_setup_start(req, service).await;
     }
@@ -64,7 +67,7 @@ pub(super) async fn handle_providers(
         };
     }
 
-    // Sub-paths: /:id, /:id/status, /:id/policy, /:id/policy/bind-shell
+    // Sub-paths: /:id, /:id/status, /:id/capabilities, /:id/policy, /:id/policy/bind-shell
     if let Some(id_and_rest) = rest.strip_prefix('/') {
         // Check for /:id/policy/bind-shell
         if let Some(id) = extract_segment_before(id_and_rest, "/policy/bind-shell") {
@@ -77,6 +80,10 @@ pub(super) async fn handle_providers(
         // Check for /:id/status
         if let Some(id) = extract_segment_before(id_and_rest, "/status") {
             return handle_provider_status(&req, service, id);
+        }
+        // Check for /:id/capabilities
+        if let Some(id) = extract_segment_before(id_and_rest, "/capabilities") {
+            return handle_provider_capabilities(&req, service, id);
         }
         // Check for /:id/connect
         if let Some(id) = extract_segment_before(id_and_rest, "/connect") {
@@ -110,6 +117,99 @@ pub(super) async fn handle_providers(
     }
 
     error_response(StatusCode::NOT_FOUND, "Provider endpoint not found")
+}
+
+pub(super) async fn handle_provider_resolve(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+) -> Response<BoxBody> {
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+    let selector: serde_json::Value = match read_body_json(req).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let bot_id = match optional_bot_selector(&selector, "bot_id") {
+        Ok(value) => value,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
+    };
+    let bot_name = match optional_bot_selector(&selector, "bot_name") {
+        Ok(value) => value,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
+    };
+    match resolve_feishu_provider_by_bot(service.provider_store.list(), bot_id, bot_name) {
+        Ok(provider) => json_response(&serde_json::json!({
+            "provider_id": provider.id,
+            "provider_type": provider.provider_type,
+            "display_name": provider.display_name,
+        })),
+        Err((status, message)) => error_response(status, &message),
+    }
+}
+
+fn optional_bot_selector<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    match value.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| format!("{key} must be a string")),
+    }
+}
+
+pub(super) fn resolve_feishu_provider_by_bot(
+    providers: Vec<ImProviderConfig>,
+    bot_id: Option<&str>,
+    bot_name: Option<&str>,
+) -> Result<ImProviderConfig, (StatusCode, String)> {
+    let bot_id = bot_id.map(str::trim).filter(|value| !value.is_empty());
+    let bot_name = bot_name.map(str::trim).filter(|value| !value.is_empty());
+    if bot_id.is_none() && bot_name.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "bot_id or bot_name is required".to_string(),
+        ));
+    }
+    let mut matches = providers.into_iter().filter(|provider| {
+        provider.enabled
+            && provider.provider_type == ImProviderType::Feishu
+            && bot_id.is_none_or(|expected| provider.app_id.as_deref() == Some(expected))
+            && bot_name.is_none_or(|expected| provider.display_name.trim() == expected)
+    });
+    let Some(provider) = matches.next() else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no enabled Feishu provider matches the bot selector".to_string(),
+        ));
+    };
+    if matches.next().is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "multiple enabled Feishu providers match the bot selector; pass --bot-id or --provider"
+                .to_string(),
+        ));
+    }
+    Ok(provider)
+}
+pub(super) fn handle_provider_capabilities(
+    req: &Request<Incoming>,
+    service: &ImGatewayService,
+    id: &str,
+) -> Response<BoxBody> {
+    if req.method() != Method::GET {
+        return method_not_allowed();
+    }
+    let Some(provider) = service.provider_store.get(id) else {
+        return error_response(StatusCode::NOT_FOUND, "Provider not found");
+    };
+    let capabilities = service
+        .provider_client(&provider)
+        .send_capabilities(&provider);
+    json_response(&capabilities)
 }
 
 pub(super) async fn handle_provider_by_id(

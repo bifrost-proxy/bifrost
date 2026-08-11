@@ -1,6 +1,6 @@
 ---
 name: "bifrost"
-description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询（含 JSONPath/header 等值/时间窗高级过滤、search --include 直接挂 body/headers、traffic 批量 get、auth-status JWT/Cookie 诊断、export curl/fetch/HAR、replay + JSON Patch、capture wait 等下一条请求、status --format json），以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）；8) 诊断 JWT/Cookie 过期/重放请求/导出 curl/fetch/HAR/等待下一条匹配请求/批量取多条 traffic。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''导出 xxxxx 为 curl''重放 xxxxx 这条请求''看下 xxxxx 的 JWT 还有效吗''等下一条 POST xxxxx 的请求''远程执行命令''管理远程授权' 等、远程文件操作（file.read/list/stat/glob/search/hash/upload/download）。"
+description: "使用 bifrost CLI 管理代理生命周期、规则、证书、脚本、系统代理、运行时配置、流量查询与远程调用；也用于通过 Bifrost IM Gateway 配置飞书/Lark、微信/Weixin 机器人，并向机器人 owner、已配置 target 或指定飞书群聊/用户发送文本、Markdown、图片、文件附件和飞书原生卡片。当用户提到启动/停止/检查 bifrost、TLS 拦截、规则或脚本、流量搜索或少于 6 位的请求 ID、JWT/Cookie 诊断、重放/导出/等待请求、远程 shell/授权/文件操作，或提到‘用 bifrost/机器人发飞书或微信消息’‘给 owner 发消息’‘给指定群发 Markdown/图片/文件/卡片’‘配置 IM provider/target’时触发。"
 ---
 
 # Bifrost
@@ -728,15 +728,21 @@ bifrost completions fish                       # 生成 fish 补全脚本
 
 ### 21. IM Gateway provider 与 Agent 通道
 
-当用户要求配置飞书、Lark、微信、Weixin、IM Gateway、IM 通道、通过聊天工具运行 Agent、扫码添加通道或排查 IM 通道命令时，使用本地 `bifrost im` 命令。先确认 Bifrost 服务已启动；未启动时使用 `bifrost start -d`。
+当用户要求配置飞书、Lark、微信、Weixin、IM Gateway、IM 通道、通过聊天工具运行 Agent、扫码添加通道、向 owner/群聊/用户发消息，或发送 Markdown、图片、文件、飞书卡片时，使用本地 `bifrost im` 命令。先确认 Bifrost 服务已启动；未启动时使用 `bifrost start -d`。
 
 ```bash
 bifrost im provider list
 bifrost im provider add feishu-main --type feishu --runner traex
 bifrost im provider add weixin-main --type weixin --runner codex
 bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --runner "Claude Code"
-bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx
-bifrost im send --provider feishu-main --text "hello owner"
+bifrost im provider capabilities feishu-main --format json-pretty
+bifrost im target add oncall --provider feishu-main --receive-id-type chat_id --receive-id oc_xxx
+bifrost im send weixin-main --text "hello owner"
+bifrost im send feishu-main --markdown-file ./report.md
+bifrost im send feishu-main --target oncall --card-file ./card.json
+bifrost im send feishu-main --chat-id oc_xxx --markdown "**发布完成**" --image ./chart.png --file ./report.pdf
+bifrost im send --bot-id cli_xxx --chat-id oc_xxx --markdown-file ./report.md
+bifrost im send --bot-name "Release Bot" --chat-id oc_xxx --text "发布完成"
 bifrost im messages list --provider feishu-main --direction inbound
 ```
 
@@ -747,6 +753,11 @@ bifrost im messages list --provider feishu-main --direction inbound
 - 支持常见 Runner 别名：`codex`、`traex` / `trae`、`Claude Code`。如果用户给了具体 runner，先让 CLI 校验，不要自己猜配置文件。
 - Feishu / Weixin / WeChat provider 的 `base_url` 由 provider 类型固定管理。不要建议传 `--base-url`；CLI 会拒绝该参数。
 - 已有 App ID / Secret 时可以手动配置，但 secret 应使用 `env:NAME`，避免写入 shell history 或最终报告。
+- `bifrost im send` 的第一个位置参数是 provider 名称；兼容形式是 `--provider <ID>`。群内 Agent 若只拿到飞书机器人 App ID/名称和群 ID，可省略 provider，使用 `--bot-id <APP_ID> --chat-id <chat_id>`，或名称唯一时使用 `--bot-name <精确名称> --chat-id <chat_id>`；机器人名称重名会明确失败，应改用 bot ID。直接 provider 选择与 bot 选择器互斥。未指定目的地时发送给 owner；`--target <别名>` 使用已配置 target；其他直达地址使用成对的 `--receive-id-type` 与 `--receive-id`。不要猜 provider、机器人、群 ID 或用户 ID。
+- 内容参数可以重复并按命令行顺序发送：`--text`、`--markdown` / `--markdown-file`、`--image` / `--image-key`、`--file` / `--file-key`、`--card-file` / `--card-json`。图片和文件通过本地 Admin API 以二进制上传，不把内容写成 base64 JSON。
+- 发送前先运行 `bifrost im provider list` 与 `bifrost im provider capabilities <ID>`。飞书原生支持文本、Markdown 卡片、图片、文件和原生卡片；微信原生支持文本和图片，Markdown 会降级为可读纯文本，通用文件与飞书卡片不支持，而且机器人必须先收到该用户的一条消息以建立发送上下文。
+- IM 外发会影响真实人员和群聊。只有用户已明确要求发送且 provider 与目的地都能从上下文唯一确定时才执行；否则先确认。用户只要求设计、开发或测试时，只能使用本地假服务，不能向真实 IM 通道试发。
+- 每次发送都检查 bundle 级 `status` 与逐项 receipt。`partial_success` 代表只有部分内容成功，必须向用户明确列出失败项和 provider 返回原因，不能笼统声称消息已发出。需要安全重试时传稳定的 `--idempotency-key`。
 - IM 通道上线通知会自动附带 runner-aware 帮助。所有外部 Runner 支持 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop`；Codex / Traex / Claude Code 等 Runner 只在适配器支持时展示 `/models`、`/model`、`/efforts`、`/effort`。
 
 ### 22. 安装 Skill 到 AI 工具
