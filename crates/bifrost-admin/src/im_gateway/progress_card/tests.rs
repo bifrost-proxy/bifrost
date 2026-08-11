@@ -3503,6 +3503,64 @@ async fn progress_card_falls_back_to_direct_send_when_native_reply_fails() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn thread_progress_card_never_falls_back_to_main_group_send() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server_with_send_failure(Some(1)).await;
+    let registry = ImAgentProgressRegistry::new();
+    let result = registry
+        .start_feishu_replying_in_thread(
+            "s-thread-reply-no-fallback",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+            Some("om_topic_trigger"),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        server.message_paths.lock().unwrap().as_slice(),
+        ["/open-apis/im/v1/messages/om_topic_trigger/reply"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn thread_progress_registry_exposes_current_and_turn_message_history() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let registry = ImAgentProgressRegistry::new();
+    registry
+        .start_feishu_replying_in_thread(
+            "s-thread-registry-info",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+            Some("om_topic_trigger"),
+        )
+        .await
+        .expect("start topic progress card");
+
+    let info = registry
+        .message_info("s-thread-registry-info")
+        .await
+        .expect("current message info");
+    assert_eq!(info.message_id.as_deref(), Some("om_1"));
+    let infos = registry.message_infos("s-thread-registry-info").await;
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].message_id, info.message_id);
+    assert_eq!(infos[0].card_id, info.card_id);
+    assert!(registry.message_info("missing-session").await.is_none());
+    assert!(registry.message_infos("missing-session").await.is_empty());
+    assert_eq!(
+        server.message_payloads.lock().unwrap()[0]["reply_in_thread"],
+        true
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn recall_message_sends_delete_with_tenant_token() {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};

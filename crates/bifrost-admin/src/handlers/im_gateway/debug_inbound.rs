@@ -395,7 +395,9 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         let mut runnable = request("debug-provider", "please run");
+        runnable.root_id = None;
         runnable.parent_id = None;
+        runnable.thread_id = None;
         assert_eq!(
             inject_mock_inbound(runnable, &service).await.status(),
             StatusCode::OK

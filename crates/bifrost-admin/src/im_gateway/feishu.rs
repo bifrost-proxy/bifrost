@@ -40,6 +40,12 @@ const WS_SERVER_SILENCE_TIMEOUT_SECS: u64 = 180;
 /// How often the silence watchdog wakes up to re-check `last_server_msg_at`.
 const WS_SILENCE_CHECK_INTERVAL_SECS: u64 = 15;
 
+#[derive(Clone, Copy)]
+struct FeishuReplyOptions<'a> {
+    uuid: Option<&'a str>,
+    reply_in_thread: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Protobuf Frame types for Feishu WebSocket binary protocol
 // ---------------------------------------------------------------------------
@@ -490,17 +496,9 @@ impl FeishuProvider {
         message_id: &str,
         msg_type: &str,
         content: &str,
-        uuid: Option<&str>,
+        options: FeishuReplyOptions<'_>,
     ) -> Result<SendResult> {
         let url = format!("{}/im/v1/messages/{}/reply", base_url, message_id);
-
-        #[derive(Serialize)]
-        struct ReplyRequest<'a> {
-            msg_type: &'a str,
-            content: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            uuid: Option<&'a str>,
-        }
 
         #[derive(Deserialize)]
         struct ReplyResponse {
@@ -519,11 +517,12 @@ impl FeishuProvider {
             .http
             .post(&url)
             .header("Authorization", format!("Bearer {}", token))
-            .json(&ReplyRequest {
+            .json(&build_reply_request(
                 msg_type,
                 content,
-                uuid,
-            })
+                options.uuid,
+                options.reply_in_thread,
+            ))
             .send()
             .await
             .map_err(|e| {
@@ -554,6 +553,23 @@ impl FeishuProvider {
             request_id,
         })
     }
+}
+
+fn build_reply_request(
+    msg_type: &str,
+    content: &str,
+    uuid: Option<&str>,
+    reply_in_thread: bool,
+) -> serde_json::Value {
+    let mut request = serde_json::json!({
+        "msg_type": msg_type,
+        "content": content,
+        "reply_in_thread": reply_in_thread,
+    });
+    if let Some(uuid) = uuid {
+        request["uuid"] = serde_json::json!(uuid);
+    }
+    request
 }
 
 pub(crate) fn build_default_text_card(text: &str) -> serde_json::Value {
@@ -768,7 +784,7 @@ impl FeishuProvider {
         card: serde_json::Value,
         uuid: Option<&str>,
     ) -> Result<SendResult> {
-        self.reply_card_with_header_policy(config, message_id, card, uuid, false)
+        self.reply_card_with_header_policy(config, message_id, card, uuid, false, false)
             .await
     }
 
@@ -779,7 +795,18 @@ impl FeishuProvider {
         card: serde_json::Value,
         uuid: Option<&str>,
     ) -> Result<SendResult> {
-        self.reply_card_with_header_policy(config, message_id, card, uuid, true)
+        self.reply_card_with_header_policy(config, message_id, card, uuid, true, false)
+            .await
+    }
+
+    pub(crate) async fn reply_card_preserving_header_in_thread(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        card: serde_json::Value,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        self.reply_card_with_header_policy(config, message_id, card, uuid, true, true)
             .await
     }
 
@@ -790,6 +817,7 @@ impl FeishuProvider {
         card: serde_json::Value,
         uuid: Option<&str>,
         preserve_header: bool,
+        reply_in_thread: bool,
     ) -> Result<SendResult> {
         let base_url = Self::base_url(config);
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
@@ -802,8 +830,18 @@ impl FeishuProvider {
         let content = serde_json::to_string(&card).map_err(|e| {
             bifrost_core::BifrostError::Parse(format!("failed to serialize reply card: {}", e))
         })?;
-        self.reply_message_internal(base_url, &token, message_id, "interactive", &content, uuid)
-            .await
+        self.reply_message_internal(
+            base_url,
+            &token,
+            message_id,
+            "interactive",
+            &content,
+            FeishuReplyOptions {
+                uuid,
+                reply_in_thread,
+            },
+        )
+        .await
     }
 
     /// Upload an image and return the Feishu image_key that can be used in
@@ -1190,8 +1228,47 @@ impl FeishuProvider {
             }
         })
         .to_string();
-        self.reply_message_internal(base_url, &token, message_id, "interactive", &content, uuid)
-            .await
+        self.reply_message_internal(
+            base_url,
+            &token,
+            message_id,
+            "interactive",
+            &content,
+            FeishuReplyOptions {
+                uuid,
+                reply_in_thread: false,
+            },
+        )
+        .await
+    }
+
+    pub async fn reply_card_entity_in_thread(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        card_id: &str,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let content = serde_json::json!({
+            "type": "card",
+            "data": { "card_id": card_id }
+        })
+        .to_string();
+        self.reply_message_internal(
+            base_url,
+            &token,
+            message_id,
+            "interactive",
+            &content,
+            FeishuReplyOptions {
+                uuid,
+                reply_in_thread: true,
+            },
+        )
+        .await
     }
 
     /// Replace the full JSON 2.0 payload of a CardKit card entity.
@@ -4027,5 +4104,15 @@ mod tests {
         let err_body: serde_json::Value =
             serde_json::from_slice(err_frame.payload.as_deref().unwrap()).unwrap();
         assert_eq!(err_body["code"], 500);
+    }
+
+    #[test]
+    fn topic_reply_request_sets_reply_in_thread() {
+        let request = build_reply_request("interactive", "{}", Some("uuid-1"), true);
+        assert_eq!(request["reply_in_thread"], true);
+        assert_eq!(request["uuid"], "uuid-1");
+        let ordinary = build_reply_request("interactive", "{}", None, false);
+        assert_eq!(ordinary["reply_in_thread"], false);
+        assert!(ordinary.get("uuid").is_none());
     }
 }

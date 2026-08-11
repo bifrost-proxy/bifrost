@@ -735,7 +735,6 @@ fn quoted_message_uses_immediate_parent_instead_of_thread_root() {
     let message = reply.message.as_mut().unwrap();
     message.root_id = Some("root".to_string());
     message.parent_id = Some("parent".to_string());
-    message.thread_id = Some("thread".to_string());
     for event in [&root, &parent, &reply] {
         store.record_event(event, "event").unwrap();
     }
@@ -1183,6 +1182,16 @@ fn group_store_rejects_non_group_and_missing_message_events() {
 }
 
 #[test]
+fn feishu_thread_parts_rejects_empty_thread_id() {
+    let mut event = group_event("empty-thread", "c1", "u1", "hi", Vec::new(), 1);
+    let message = event.message.as_mut().unwrap();
+    message.thread_id = Some("   ".to_string());
+    message.root_id = Some("root-message".to_string());
+
+    assert_eq!(feishu_thread_parts(&event), None);
+}
+
+#[test]
 fn group_binding_can_be_resolved_from_canonical_session_key() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
@@ -1203,4 +1212,253 @@ fn group_binding_can_be_resolved_from_canonical_session_key() {
         .binding_by_session("admin-chat-unbound")
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn feishu_thread_session_and_prompt_are_isolated() {
+    assert_eq!(
+        build_group_thread_session_key("provider-a", "chat-a", "thread-a"),
+        "im:provider-a:group:chat-a:thread:thread-a"
+    );
+    let prompt = build_feishu_thread_prompt(
+        "ou_root",
+        Some("Root"),
+        "root body",
+        "ou_current",
+        Some("Current"),
+        "current body",
+    );
+    assert_eq!(prompt.matches("root body").count(), 1);
+    assert_eq!(prompt.matches("current body").count(), 1);
+    assert!(!prompt.contains("群聊背景"));
+}
+
+#[test]
+fn feishu_anchor_and_thread_binding_are_provider_scoped_and_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let anchor = FeishuMessageAnchor {
+        provider_id: "provider-a".to_string(),
+        chat_id: "chat-a".to_string(),
+        message_id: "card-a".to_string(),
+        source_session_key: "source-a".to_string(),
+        run_id: Some("run-a".to_string()),
+        runner_id: "Codex".to_string(),
+        adapter: "codex".to_string(),
+        transport: "app_server".to_string(),
+        external_thread_id: Some("external-a".to_string()),
+        external_turn_id: Some("turn-a".to_string()),
+        checkpoint_thread_id: None,
+        status: "ready".to_string(),
+    };
+    store.upsert_feishu_message_anchor(&anchor, 1).unwrap();
+    assert_eq!(
+        store.feishu_message_anchor("provider-a", "card-a").unwrap(),
+        Some(anchor)
+    );
+    assert!(store
+        .feishu_message_anchor("provider-b", "card-a")
+        .unwrap()
+        .is_none());
+
+    let binding = FeishuThreadBinding {
+        provider_id: "provider-a".to_string(),
+        chat_id: "chat-a".to_string(),
+        feishu_thread_id: "topic-a".to_string(),
+        root_message_id: "card-a".to_string(),
+        derived_session_key: build_group_thread_session_key("provider-a", "chat-a", "topic-a"),
+        source_kind: "local_checkpoint".to_string(),
+        source_message_id: "card-a".to_string(),
+        source_adapter: Some("codex".to_string()),
+        source_thread_id: Some("external-a".to_string()),
+        source_turn_id: Some("turn-a".to_string()),
+        trigger_message_id: "trigger-a".to_string(),
+        initial_message: "start".to_string(),
+        fallback_message: Some("root + start".to_string()),
+        initial_event_json: None,
+        state: "initializing".to_string(),
+    };
+    assert_eq!(
+        store.claim_feishu_thread_binding(&binding, 2).unwrap(),
+        binding
+    );
+    let conflicting = FeishuThreadBinding {
+        derived_session_key: "wrong-session".to_string(),
+        ..binding.clone()
+    };
+    assert_eq!(
+        store.claim_feishu_thread_binding(&conflicting, 3).unwrap(),
+        binding
+    );
+}
+
+#[test]
+fn pending_thread_recovery_is_atomically_claimed_once_per_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let binding = FeishuThreadBinding {
+        provider_id: "provider-a".to_string(),
+        chat_id: "chat-a".to_string(),
+        feishu_thread_id: "topic-a".to_string(),
+        root_message_id: "card-a".to_string(),
+        derived_session_key: build_group_thread_session_key("provider-a", "chat-a", "topic-a"),
+        source_kind: "local_checkpoint".to_string(),
+        source_message_id: "card-a".to_string(),
+        source_adapter: Some("codex".to_string()),
+        source_thread_id: Some("thread-a".to_string()),
+        source_turn_id: Some("turn-a".to_string()),
+        trigger_message_id: "trigger-a".to_string(),
+        initial_message: "continue".to_string(),
+        fallback_message: None,
+        initial_event_json: Some("{}".to_string()),
+        state: "initializing".to_string(),
+    };
+    store.claim_feishu_thread_binding(&binding, 1).unwrap();
+
+    assert_eq!(
+        store
+            .claim_pending_feishu_thread_bindings("provider-a", 2)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store
+        .claim_pending_feishu_thread_bindings("provider-a", 3)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .claim_pending_feishu_thread_bindings("provider-b", 3)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn topic_binding_state_update_clears_recovery_claim_and_persists_terminal_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let binding = FeishuThreadBinding {
+        provider_id: "provider-a".to_string(),
+        chat_id: "chat-a".to_string(),
+        feishu_thread_id: "topic-a".to_string(),
+        root_message_id: "root-a".to_string(),
+        derived_session_key: "derived-a".to_string(),
+        source_kind: "local_checkpoint".to_string(),
+        source_message_id: "root-a".to_string(),
+        source_adapter: Some("codex".to_string()),
+        source_thread_id: Some("thread-a".to_string()),
+        source_turn_id: Some("turn-a".to_string()),
+        trigger_message_id: "trigger-a".to_string(),
+        initial_message: "continue".to_string(),
+        fallback_message: None,
+        initial_event_json: None,
+        state: "initializing".to_string(),
+    };
+    store.claim_feishu_thread_binding(&binding, 1).unwrap();
+    assert_eq!(
+        store
+            .claim_pending_feishu_thread_bindings("provider-a", 2)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    store
+        .update_feishu_thread_binding_state("provider-a", "chat-a", "topic-a", "ready", 3)
+        .unwrap();
+    assert_eq!(
+        store
+            .feishu_thread_binding("provider-a", "chat-a", "topic-a")
+            .unwrap()
+            .unwrap()
+            .state,
+        "ready"
+    );
+    let recovery_token: Option<String> = rusqlite::Connection::open(store.file_path())
+        .unwrap()
+        .query_row(
+            "SELECT recovery_token FROM im_feishu_thread_bindings WHERE provider_id = 'provider-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(recovery_token.is_none());
+}
+
+#[test]
+fn only_supported_healthy_anchors_are_derivable() {
+    let base = FeishuMessageAnchor {
+        provider_id: "provider".to_string(),
+        chat_id: "chat".to_string(),
+        message_id: "card".to_string(),
+        source_session_key: "session".to_string(),
+        run_id: None,
+        runner_id: "runner".to_string(),
+        adapter: "codex".to_string(),
+        transport: "app_server".to_string(),
+        external_thread_id: Some("thread".to_string()),
+        external_turn_id: Some("turn".to_string()),
+        checkpoint_thread_id: None,
+        status: "ready".to_string(),
+    };
+    assert!(base.is_derivable());
+    assert!(!FeishuMessageAnchor {
+        adapter: "mock".to_string(),
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(!FeishuMessageAnchor {
+        transport: "exec".to_string(),
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(!FeishuMessageAnchor {
+        external_thread_id: None,
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(!FeishuMessageAnchor {
+        status: "failed".to_string(),
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(FeishuMessageAnchor {
+        adapter: "traex".to_string(),
+        external_thread_id: None,
+        external_turn_id: None,
+        status: "pending".to_string(),
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(!FeishuMessageAnchor {
+        adapter: "traex".to_string(),
+        external_thread_id: Some("mutable-source".to_string()),
+        checkpoint_thread_id: None,
+        status: "ready".to_string(),
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(FeishuMessageAnchor {
+        adapter: "traex".to_string(),
+        checkpoint_thread_id: Some("immutable-checkpoint".to_string()),
+        status: "ready".to_string(),
+        ..base
+    }
+    .is_derivable());
+}
+
+#[test]
+fn main_group_turn_excludes_topic_messages() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let mut topic = group_event("topic", "chat-a", "u1", "topic background", Vec::new(), 1);
+    topic.message.as_mut().unwrap().thread_id = Some("thread-a".to_string());
+    topic.message.as_mut().unwrap().root_id = Some("root-a".to_string());
+    let trigger = group_event("trigger", "chat-a", "u2", "run", Vec::new(), 2);
+    store.record_event(&topic, "event").unwrap();
+    store.record_event(&trigger, "event").unwrap();
+    let turn = store
+        .prepare_turn(&trigger, GroupTriggerKind::Mention, "run")
+        .unwrap();
+    assert_eq!(turn.message_count, 1);
+    assert!(!turn.prompt.contains("topic background"));
 }

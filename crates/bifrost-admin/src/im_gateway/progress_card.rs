@@ -771,6 +771,9 @@ pub struct FeishuProgressCardSession {
     compact_card_mode: bool,
     card_budget: FeishuCardBudget,
     reply_to_message_id: Option<String>,
+    reply_in_thread: bool,
+    message_history: Vec<ProgressCardMessageInfo>,
+    turn_message_start: usize,
 }
 
 impl FeishuProgressCardSession {
@@ -790,6 +793,9 @@ impl FeishuProgressCardSession {
             compact_card_mode: false,
             card_budget: FEISHU_CARD_STANDARD_BUDGET,
             reply_to_message_id: None,
+            reply_in_thread: false,
+            message_history: Vec::new(),
+            turn_message_start: 0,
         }
     }
 
@@ -802,6 +808,19 @@ impl FeishuProgressCardSession {
     ) -> Self {
         let mut session = Self::new(feishu, provider, target, snapshot);
         session.reply_to_message_id = normalized_message_id(reply_to_message_id);
+        session
+    }
+
+    pub fn new_replying_in_thread(
+        feishu: Arc<FeishuProvider>,
+        provider: ImProviderConfig,
+        target: ImTarget,
+        snapshot: ImAgentProgressSnapshot,
+        reply_to_message_id: Option<&str>,
+    ) -> Self {
+        let mut session =
+            Self::new_replying_to(feishu, provider, target, snapshot, reply_to_message_id);
+        session.reply_in_thread = true;
         session
     }
 
@@ -891,9 +910,11 @@ impl FeishuProgressCardSession {
         let previous_compact_card_mode = self.compact_card_mode;
         let previous_card_budget = self.card_budget;
         let previous_reply_to_message_id = self.reply_to_message_id.clone();
+        let previous_turn_message_start = self.turn_message_start;
         let session_key = self.snapshot.session_key.clone();
         self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
         self.reply_to_message_id = normalized_message_id(reply_to_message_id);
+        self.turn_message_start = self.message_history.len();
         if let Err(error) = self.send_initial_card().await {
             self.snapshot = previous_snapshot;
             self.handle = previous_handle;
@@ -901,6 +922,7 @@ impl FeishuProgressCardSession {
             self.compact_card_mode = previous_compact_card_mode;
             self.card_budget = previous_card_budget;
             self.reply_to_message_id = previous_reply_to_message_id;
+            self.turn_message_start = previous_turn_message_start;
             return Err(error);
         }
         self.freeze_previous_card_after_rollover(
@@ -1033,12 +1055,23 @@ impl FeishuProgressCardSession {
             let (card_id, compact_card_mode) = self.create_initial_card_entity().await?;
             let send_uuid = format!("progress_send_{}", uuid::Uuid::new_v4().simple());
             let send_result = if let Some(message_id) = self.reply_to_message_id.as_deref() {
-                match self
-                    .feishu
-                    .reply_card_entity(&self.provider, message_id, &card_id, Some(&send_uuid))
-                    .await
-                {
+                let reply_result = if self.reply_in_thread {
+                    self.feishu
+                        .reply_card_entity_in_thread(
+                            &self.provider,
+                            message_id,
+                            &card_id,
+                            Some(&send_uuid),
+                        )
+                        .await
+                } else {
+                    self.feishu
+                        .reply_card_entity(&self.provider, message_id, &card_id, Some(&send_uuid))
+                        .await
+                };
+                match reply_result {
                     Ok(result) => Ok(result),
+                    Err(reply_error) if self.reply_in_thread => Err(reply_error),
                     Err(reply_error) => {
                         warn!(
                             message_id,
@@ -1117,6 +1150,15 @@ impl FeishuProgressCardSession {
             } else {
                 current_has_process_hash(&self.snapshot)
             },
+        });
+        self.message_history.push(ProgressCardMessageInfo {
+            card_id: self
+                .handle
+                .as_ref()
+                .expect("progress handle was set")
+                .card_id
+                .clone(),
+            message_id: send_result.message_id.clone(),
         });
         if let Some(handle) = self.handle.as_ref() {
             info!(
@@ -1512,6 +1554,30 @@ impl ImAgentProgressRegistry {
         Ok(session)
     }
 
+    pub async fn start_feishu_replying_in_thread(
+        &self,
+        session_key: &str,
+        feishu: Arc<FeishuProvider>,
+        provider: ImProviderConfig,
+        target: ImTarget,
+        initial_message: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<Arc<Mutex<FeishuProgressCardSession>>> {
+        let snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
+        let mut session = FeishuProgressCardSession::new_replying_in_thread(
+            feishu,
+            provider,
+            target,
+            snapshot,
+            reply_to_message_id,
+        );
+        session.start().await?;
+        let session = Arc::new(Mutex::new(session));
+        self.sessions
+            .insert(session_key.to_string(), Arc::clone(&session));
+        Ok(session)
+    }
+
     pub async fn apply_event(&self, session_key: &str, event: AgentTurnProgressEvent) {
         self.apply_events(session_key, vec![event]).await;
     }
@@ -1611,6 +1677,22 @@ impl ImAgentProgressRegistry {
             );
         }
         session.message_info()
+    }
+
+    pub async fn message_info(&self, session_key: &str) -> Option<ProgressCardMessageInfo> {
+        let session = self.sessions.get(session_key)?;
+        let session = Arc::clone(session.value());
+        let info = session.lock().await.message_info();
+        info
+    }
+
+    pub async fn message_infos(&self, session_key: &str) -> Vec<ProgressCardMessageInfo> {
+        let Some(session) = self.sessions.get(session_key) else {
+            return Vec::new();
+        };
+        let session = Arc::clone(session.value());
+        let guard = session.lock().await;
+        guard.message_history[guard.turn_message_start..].to_vec()
     }
 
     pub async fn restart_existing(&self, session_key: &str, initial_message: &str) -> bool {

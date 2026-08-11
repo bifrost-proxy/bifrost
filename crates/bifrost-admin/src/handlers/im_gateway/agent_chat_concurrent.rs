@@ -96,6 +96,8 @@ pub(super) async fn handle_concurrent_event_during_chat(
             group_turn_id: None,
             reset_group_context: false,
             direct_reply: None,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
         }
     };
     if is_group_event {
