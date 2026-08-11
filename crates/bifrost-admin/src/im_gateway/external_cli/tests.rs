@@ -1898,6 +1898,10 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
     assert!(ExternalCliTransport::AppServer.supports_live_guide());
     assert!(ExternalCliTransport::StreamJson.supports_live_guide());
     assert!(!ExternalCliTransport::Exec.supports_live_guide());
+    assert_eq!(
+        resolved_transport_name_for_request(&request),
+        Some("stream_json")
+    );
     let result = runtime.run(request).await.unwrap();
     assert_eq!(result.status, ExternalCliRunStatus::Succeeded);
     assert_eq!(result.response, "runtime stream final");
@@ -4383,4 +4387,40 @@ fn executor_run_retention_never_prunes_incomplete_directory() {
     }
     prune_completed_run_directories(root.path(), None).unwrap();
     assert!(incomplete.exists());
+}
+
+#[test]
+fn thread_derivation_capability_matrix_reserves_claude_extension_point() {
+    assert_eq!(
+        thread_derivation_capability("codex", ExternalCliTransport::AppServer),
+        ThreadDerivationCapability {
+            fork_completed: true,
+            fork_active: true,
+            fork_at_turn: true,
+        }
+    );
+    assert_eq!(
+        thread_derivation_capability(TRAEX_ADAPTER, ExternalCliTransport::AppServer),
+        ThreadDerivationCapability {
+            fork_completed: true,
+            fork_active: false,
+            fork_at_turn: false,
+        }
+    );
+    assert_eq!(
+        thread_derivation_capability(CLAUDE_CODE_ADAPTER, ExternalCliTransport::StreamJson),
+        ThreadDerivationCapability::default()
+    );
+    assert_eq!(
+        thread_derivation_capability(CLAUDE_CODE_ADAPTER, ExternalCliTransport::AppServer),
+        ThreadDerivationCapability::default()
+    );
+    assert_eq!(
+        thread_derivation_capability("codex", ExternalCliTransport::Exec),
+        ThreadDerivationCapability::default()
+    );
+    assert_eq!(
+        thread_derivation_capability("custom-runner", ExternalCliTransport::AppServer),
+        ThreadDerivationCapability::default()
+    );
 }

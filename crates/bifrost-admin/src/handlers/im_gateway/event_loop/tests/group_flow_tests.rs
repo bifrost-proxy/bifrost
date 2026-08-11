@@ -108,6 +108,397 @@ async fn prepare_group_dispatch_covers_ambient_commands_triggers_and_duplicates(
 }
 
 #[tokio::test]
+async fn local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-local-topic-anchor".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    store
+        .upsert_feishu_message_anchor(
+            &crate::im_gateway::group_context::FeishuMessageAnchor {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                message_id: "root-card".to_string(),
+                source_session_key: "source-session".to_string(),
+                run_id: Some("run".to_string()),
+                runner_id: "Codex".to_string(),
+                adapter: "codex".to_string(),
+                transport: "app_server".to_string(),
+                external_thread_id: Some("codex-thread".to_string()),
+                external_turn_id: Some("codex-turn".to_string()),
+                checkpoint_thread_id: None,
+                status: "ready".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+    let mut event = group_test_event(&provider.id, "topic-reply", "continue here", false, 2);
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-1".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .expect("local anchor owns its topic without requiring an @ mention");
+    assert_eq!(dispatch.message_text, "continue here");
+    assert_eq!(
+        dispatch.thread_anchor_message_id.as_deref(),
+        Some("root-card")
+    );
+    assert!(dispatch.thread_fallback_message.is_none());
+}
+
+#[tokio::test]
+async fn topic_initialization_is_recovered_from_persisted_binding_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-topic-recovery".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    let mut event = group_test_event(&provider.id, "topic-trigger", "continue here", false, 2);
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-recovery".to_string());
+
+    {
+        let store = ImGroupContextStore::new(temp.path());
+        store
+            .upsert_feishu_message_anchor(
+                &crate::im_gateway::group_context::FeishuMessageAnchor {
+                    provider_id: provider.id.clone(),
+                    chat_id: "oc_group".to_string(),
+                    message_id: "root-card".to_string(),
+                    source_session_key: "source-session".to_string(),
+                    run_id: Some("run".to_string()),
+                    runner_id: "Codex".to_string(),
+                    adapter: "codex".to_string(),
+                    transport: "app_server".to_string(),
+                    external_thread_id: Some("codex-thread".to_string()),
+                    external_turn_id: Some("codex-turn".to_string()),
+                    checkpoint_thread_id: None,
+                    status: "ready".to_string(),
+                },
+                1,
+            )
+            .unwrap();
+        let first = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.message_text, "continue here");
+    }
+
+    let reopened = ImGroupContextStore::new(temp.path());
+    let recovered = prepare_group_inbound_dispatch(&client, &provider, &event, &reopened, false)
+        .await
+        .unwrap()
+        .expect("redelivered first topic event must recover initialization");
+    assert_eq!(recovered.message_text, "continue here");
+    assert_eq!(
+        recovered.thread_anchor_message_id.as_deref(),
+        Some("root-card")
+    );
+}
+
+#[test]
+fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redelivery() {
+    let temp = tempfile::tempdir().unwrap();
+    let group_store = ImGroupContextStore::new(temp.path());
+    let provider_id = "feishu-startup-topic-recovery";
+    let mut persisted_event =
+        group_test_event(provider_id, "persisted-trigger", "continue", false, 2);
+    let persisted_message = persisted_event.message.as_mut().unwrap();
+    persisted_message.root_id = Some("root-card".to_string());
+    persisted_message.parent_id = Some("root-card".to_string());
+    persisted_message.thread_id = Some("topic-startup".to_string());
+    persisted_message
+        .images
+        .push(crate::im_gateway::types::ImImageAttachment {
+            file_key: "image-key".to_string(),
+            source: Default::default(),
+            mime_type: Some("image/png".to_string()),
+            data_base64: Some("aW1hZ2U=".to_string()),
+            download_url: None,
+            encrypted_query_param: None,
+            aes_key: None,
+        });
+    persisted_message
+        .files
+        .push(crate::im_gateway::types::ImFileAttachment {
+            file_key: "file-key".to_string(),
+            name: Some("context.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: Some(4),
+            data_base64: Some("ZmlsZQ==".to_string()),
+            download_url: None,
+        });
+    group_store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider_id.to_string(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-startup".to_string(),
+                root_message_id: "root-card".to_string(),
+                derived_session_key:
+                    crate::im_gateway::group_context::build_group_thread_session_key(
+                        provider_id,
+                        "oc_group",
+                        "topic-startup",
+                    ),
+                source_kind: "local_checkpoint".to_string(),
+                source_message_id: "root-card".to_string(),
+                source_adapter: Some("codex".to_string()),
+                source_thread_id: Some("source-thread".to_string()),
+                source_turn_id: Some("source-turn".to_string()),
+                trigger_message_id: "persisted-trigger".to_string(),
+                initial_message: "continue".to_string(),
+                fallback_message: None,
+                initial_event_json: Some(serde_json::to_string(&persisted_event).unwrap()),
+                state: "initializing".to_string(),
+            },
+            2,
+        )
+        .unwrap();
+
+    let recovered = recover_pending_feishu_thread_events(provider_id, &group_store).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].source.message_id.as_deref(),
+        Some("persisted-trigger")
+    );
+    let recovered_message = recovered[0].message.as_ref().unwrap();
+    assert_eq!(recovered_message.images[0].file_key, "image-key");
+    assert_eq!(recovered_message.files[0].file_key, "file-key");
+    assert!(
+        recover_pending_feishu_thread_events("other-provider", &group_store)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        recover_pending_feishu_thread_events(provider_id, &group_store)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn startup_recovery_reconstructs_topic_event_when_persisted_json_is_invalid() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let provider_id = "feishu-startup-topic-fallback";
+    store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider_id.to_string(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-fallback".to_string(),
+                root_message_id: "root-card".to_string(),
+                derived_session_key:
+                    crate::im_gateway::group_context::build_group_thread_session_key(
+                        provider_id,
+                        "oc_group",
+                        "topic-fallback",
+                    ),
+                source_kind: "message_context".to_string(),
+                source_message_id: "root-card".to_string(),
+                source_adapter: None,
+                source_thread_id: None,
+                source_turn_id: None,
+                trigger_message_id: "topic-trigger".to_string(),
+                initial_message: "root plus current".to_string(),
+                fallback_message: None,
+                initial_event_json: Some("{not-json".to_string()),
+                state: "initializing".to_string(),
+            },
+            2,
+        )
+        .unwrap();
+
+    let recovered = recover_pending_feishu_thread_events(provider_id, &store).unwrap();
+    assert_eq!(recovered.len(), 1);
+    let event = &recovered[0];
+    assert_eq!(event.event_id, "recovered:topic-trigger");
+    assert_eq!(event.source.chat_id.as_deref(), Some("oc_group"));
+    assert_eq!(event.source.message_id.as_deref(), Some("topic-trigger"));
+    assert_eq!(event.raw_digest.as_deref(), Some("startup_recovery"));
+    let message = event.message.as_ref().unwrap();
+    assert_eq!(message.text, "root plus current");
+    assert_eq!(message.root_id.as_deref(), Some("root-card"));
+    assert_eq!(message.parent_id.as_deref(), Some("root-card"));
+    assert_eq!(message.thread_id.as_deref(), Some("topic-fallback"));
+}
+
+#[tokio::test]
+async fn unknown_topic_root_uses_exactly_root_and_current_message_context() {
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, message_reads, server) = spawn_reference_routing_server("oc_group").await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-unknown-topic-root".to_string();
+    provider.base_url = Some(base_url);
+    let mut event = group_test_event(
+        &provider.id,
+        "topic-current",
+        "@_user_1 inspect only these two messages",
+        true,
+        3,
+    );
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("om_parent".to_string());
+    message.parent_id = Some("om_parent".to_string());
+    message.thread_id = Some("topic-unknown-root".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .expect("an explicitly addressed unknown-root topic should start a session");
+    assert!(dispatch.message_text.contains("quoted content"));
+    assert!(dispatch
+        .message_text
+        .contains("inspect only these two messages"));
+    assert!(!dispatch.message_text.contains("Engineering：hello"));
+    assert!(dispatch.thread_anchor_message_id.is_none());
+    assert!(dispatch.thread_fallback_message.is_none());
+    assert_eq!(message_reads.load(Ordering::SeqCst), 1);
+    let binding = store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-unknown-root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.source_kind, "message_context");
+    assert_eq!(binding.initial_message, dispatch.message_text);
+    assert_eq!(binding.state, "initializing");
+    server.abort();
+}
+
+#[tokio::test]
+async fn pending_local_topic_anchor_freezes_root_fallback_while_source_runs() {
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, message_reads, server) = spawn_reference_routing_server("oc_group").await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-pending-topic-anchor".to_string();
+    provider.base_url = Some(base_url);
+    store
+        .upsert_feishu_message_anchor(
+            &crate::im_gateway::group_context::FeishuMessageAnchor {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                message_id: "om_parent".to_string(),
+                source_session_key: "source-session".to_string(),
+                run_id: Some("run".to_string()),
+                runner_id: "Traex".to_string(),
+                adapter: crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string(),
+                transport: "app_server".to_string(),
+                external_thread_id: Some("traex-running".to_string()),
+                external_turn_id: None,
+                checkpoint_thread_id: None,
+                status: "pending".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+    let mut event = group_test_event(
+        &provider.id,
+        "topic-current",
+        "continue after completion",
+        false,
+        3,
+    );
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("om_parent".to_string());
+    message.parent_id = Some("om_parent".to_string());
+    message.thread_id = Some("topic-pending-root".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(dispatch.message_text, "continue after completion");
+    assert_eq!(
+        dispatch.thread_anchor_message_id.as_deref(),
+        Some("om_parent")
+    );
+    let fallback = dispatch.thread_fallback_message.as_deref().unwrap();
+    assert!(fallback.contains("quoted content"));
+    assert!(fallback.contains("continue after completion"));
+    assert_eq!(message_reads.load(Ordering::SeqCst), 1);
+    let binding = store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-pending-root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.source_kind, "local_checkpoint");
+    assert_eq!(binding.source_adapter.as_deref(), Some("traex"));
+    assert_eq!(binding.source_thread_id.as_deref(), Some("traex-running"));
+    assert_eq!(binding.state, "waiting_source");
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_topic_binding_uses_new_message_instead_of_replaying_old_instruction() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-failed-topic-retry".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-failed".to_string(),
+                root_message_id: "root-card".to_string(),
+                derived_session_key:
+                    crate::im_gateway::group_context::build_group_thread_session_key(
+                        &provider.id,
+                        "oc_group",
+                        "topic-failed",
+                    ),
+                source_kind: "message_context".to_string(),
+                source_message_id: "root-card".to_string(),
+                source_adapter: None,
+                source_thread_id: None,
+                source_turn_id: None,
+                trigger_message_id: "old-trigger".to_string(),
+                initial_message: "old instruction".to_string(),
+                fallback_message: Some("old root + old instruction".to_string()),
+                initial_event_json: None,
+                state: "failed".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+    let mut retry = group_test_event(&provider.id, "new-trigger", "retry with X", false, 3);
+    let message = retry.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("old-trigger".to_string());
+    message.thread_id = Some("topic-failed".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &retry, &store, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(dispatch.message_text, "retry with X");
+    assert!(dispatch.thread_anchor_message_id.is_none());
+}
+
+#[tokio::test]
 async fn prepare_group_dispatch_surfaces_quoted_message_read_failures() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
@@ -1274,6 +1665,8 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
             runner_selected: false,
             group_turn_id: Some(turn.turn_id.clone()),
             reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
         },
     )
     .await;
@@ -1333,6 +1726,8 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
             runner_selected: false,
             group_turn_id: None,
             reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
         },
     )
     .await;

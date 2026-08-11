@@ -471,6 +471,76 @@ impl ExternalCliTransport {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ThreadDerivationCapability {
+    pub fork_completed: bool,
+    pub fork_active: bool,
+    pub fork_at_turn: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalCliThreadDerivation {
+    pub source_thread_id: String,
+    pub last_turn_id: Option<String>,
+}
+
+pub fn apply_thread_derivation_to_run_request(
+    request: &mut ExternalCliRunRequest,
+    derivation: &ExternalCliThreadDerivation,
+) {
+    request.operation = "fork".to_string();
+    request.params = serde_json::json!({
+        "threadId": derivation.source_thread_id,
+        "lastTurnId": derivation.last_turn_id,
+    });
+}
+
+pub fn thread_derivation_capability(
+    adapter: &str,
+    transport: ExternalCliTransport,
+) -> ThreadDerivationCapability {
+    if transport != ExternalCliTransport::AppServer {
+        return ThreadDerivationCapability::default();
+    }
+    match adapter.trim() {
+        DEFAULT_ADAPTER => ThreadDerivationCapability {
+            fork_completed: true,
+            fork_active: true,
+            fork_at_turn: true,
+        },
+        TRAEX_ADAPTER => ThreadDerivationCapability {
+            fork_completed: true,
+            fork_active: false,
+            fork_at_turn: false,
+        },
+        // Claude Code is intentionally unavailable until its local protocol can
+        // be verified. Keeping this branch explicit prevents resume from being
+        // mistaken for a safe fork when support is added later.
+        CLAUDE_CODE_ADAPTER => ThreadDerivationCapability::default(),
+        _ => ThreadDerivationCapability::default(),
+    }
+}
+
+pub fn thread_derivation_capability_for_request(
+    request: &ExternalCliRunRequest,
+) -> ThreadDerivationCapability {
+    app_server::resolved_transport(request)
+        .map(|transport| thread_derivation_capability(&request.adapter, transport))
+        .unwrap_or_default()
+}
+
+pub fn resolved_transport_name_for_request(
+    request: &ExternalCliRunRequest,
+) -> Option<&'static str> {
+    app_server::resolved_transport(request)
+        .ok()
+        .map(|transport| match transport {
+            ExternalCliTransport::Exec => "exec",
+            ExternalCliTransport::AppServer => "app_server",
+            ExternalCliTransport::StreamJson => "stream_json",
+        })
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExternalCliResolvedModelConfig {
     pub model: Option<String>,
@@ -2195,6 +2265,20 @@ pub fn merge_external_cli_progress_metadata(
             .filter(|value| !value.is_empty())
         {
             metadata.insert("threadId".to_string(), thread_id.to_string());
+        }
+    }
+    if !metadata.contains_key("turnId") {
+        if let Some(turn_id) = event
+            .raw
+            .get("turnId")
+            .or_else(|| event.raw.get("turn_id"))
+            .or_else(|| event.raw.pointer("/params/turnId"))
+            .or_else(|| event.raw.pointer("/appServerFrame/params/turnId"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            metadata.insert("turnId".to_string(), turn_id.to_string());
         }
     }
     if let Some(usage) = event

@@ -228,6 +228,7 @@ async fn exercise_external_runner_terminal_notification(
     let temp = tempfile::tempdir().expect("terminal notification message store");
     let message_log_store = Arc::new(ImMessageLogStore::new(temp.path()));
     let progress_registry = Arc::new(ImAgentProgressRegistry::new());
+    let group_context_store = Arc::new(ImGroupContextStore::new(temp.path()));
     let provider = crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
     let feishu = Arc::new(crate::im_gateway::feishu::FeishuProvider::new());
     let client = ImProviderClient::Feishu(Arc::clone(&feishu));
@@ -256,6 +257,7 @@ async fn exercise_external_runner_terminal_notification(
             client: &client,
             provider: &provider,
             message_log_store: &message_log_store,
+            group_context_store: &group_context_store,
             event: &event,
         },
         ExternalRunnerProgressFinish {
@@ -263,6 +265,7 @@ async fn exercise_external_runner_terminal_notification(
             final_text,
             failed,
             work_dir: None,
+            anchor: None,
         },
     )
     .await;
@@ -471,6 +474,106 @@ async fn external_runner_terminal_without_reply_id_uses_provider_send_fallback()
     assert_eq!(message_log_store.list()[0].status, MessageStatus::Success);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn topic_terminal_without_progress_card_replies_in_thread_instead_of_main_group() {
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().unwrap();
+    let logs = Arc::new(ImMessageLogStore::new(temp.path()));
+    let provider = crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut event = group_test_event(&provider.id, "topic-trigger", "run", false, 1);
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-1".to_string());
+
+    send_external_runner_terminal_reply_from_work_dir(
+        &client,
+        &provider,
+        &event,
+        ExternalRunnerTerminalReply {
+            text: "done",
+            failed: false,
+            progress_message_id: None,
+            work_dir: None,
+        },
+        &logs,
+    )
+    .await;
+
+    let paths = server.message_paths.lock().unwrap().clone();
+    assert_eq!(paths, ["/open-apis/im/v1/messages/topic-trigger/reply"]);
+    let payloads = server.message_payloads.lock().unwrap().clone();
+    assert_eq!(payloads[0]["reply_in_thread"], true);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_and_terminal_cards_are_both_persisted_as_derivation_anchors() {
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().unwrap();
+    let logs = Arc::new(ImMessageLogStore::new(temp.path()));
+    let group_store = Arc::new(ImGroupContextStore::new(temp.path()));
+    let registry = Arc::new(ImAgentProgressRegistry::new());
+    let provider = crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    let feishu = Arc::new(crate::im_gateway::feishu::FeishuProvider::new());
+    let client = ImProviderClient::Feishu(Arc::clone(&feishu));
+    let event = group_test_event(&provider.id, "anchor-trigger", "run", false, 1);
+    registry
+        .start_feishu_replying_to(
+            "anchor-session",
+            feishu,
+            provider.clone(),
+            crate::im_gateway::progress_card::tests::mock_progress_target(),
+            "run",
+            event.source.message_id.as_deref(),
+        )
+        .await
+        .unwrap();
+    let anchor = crate::im_gateway::group_context::FeishuMessageAnchor {
+        provider_id: provider.id.clone(),
+        chat_id: "oc_group".to_string(),
+        message_id: String::new(),
+        source_session_key: "anchor-session".to_string(),
+        run_id: Some("run-1".to_string()),
+        runner_id: "Codex".to_string(),
+        adapter: "codex".to_string(),
+        transport: "app_server".to_string(),
+        external_thread_id: Some("thread-1".to_string()),
+        external_turn_id: Some("turn-1".to_string()),
+        checkpoint_thread_id: None,
+        status: "ready".to_string(),
+    };
+
+    finish_external_runner_progress_and_notify(
+        ExternalRunnerProgressFinishContext {
+            progress_registry: &registry,
+            client: &client,
+            provider: &provider,
+            message_log_store: &logs,
+            group_context_store: &group_store,
+            event: &event,
+        },
+        ExternalRunnerProgressFinish {
+            session_key: "anchor-session",
+            final_text: "done",
+            failed: false,
+            work_dir: None,
+            anchor: Some(anchor),
+        },
+    )
+    .await;
+
+    assert!(group_store
+        .feishu_message_anchor(&provider.id, "om_1")
+        .unwrap()
+        .is_some());
+    assert!(group_store
+        .feishu_message_anchor(&provider.id, "om_2")
+        .unwrap()
+        .is_some());
+}
+
 #[cfg(unix)]
 async fn exercise_external_runner_control_flow_with_progress(
     server: &crate::im_gateway::progress_card::tests::MockFeishuProgressServer,
@@ -540,6 +643,8 @@ async fn exercise_external_runner_control_flow_with_progress(
             runner_selected: true,
             group_turn_id: None,
             reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
         },
     )
     .await;
@@ -574,6 +679,330 @@ async fn external_runner_success_control_flow_sends_terminal_card() {
         service.message_log_store.list()[0].status,
         MessageStatus::Success
     );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn external_runner_derives_ready_codex_anchor_and_keeps_cards_in_topic() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().expect("derived external runner data dir");
+    let guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+    let executable = temp.path().join("mock-codex-topic-fork");
+    std::fs::write(
+        &executable,
+        r#"#!/usr/bin/env python3
+import json, sys
+def send(value): print(json.dumps(value, separators=(",", ":")), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line); method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize": send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/fork":
+        assert frame["params"] == {"threadId":"thread-source","lastTurnId":"turn-source"}
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"thread-derived"}}})
+    elif method == "turn/start":
+        assert frame["params"]["threadId"] == "thread-derived"
+        send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"turn-derived"}}})
+        send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thread-derived","turnId":"turn-derived","item":{"id":"message","type":"agentMessage","text":"TOPIC_DERIVED_OK"}}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread-derived","turn":{"id":"turn-derived","status":"completed"}}})
+    elif method == "account/rateLimits/read": send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"unsupported"}})
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider =
+        crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    provider.id = "provider-derived-topic".to_string();
+    service.provider_store.add(provider.clone()).unwrap();
+    let mut config = service.external_cli_config_store.load();
+    let runner_id = config.default_runner_id.clone();
+    let runner = config.runners.get_mut(&runner_id).unwrap();
+    runner.enabled = true;
+    runner.adapter = "codex".to_string();
+    runner.inject_bifrost_tools = false;
+    runner.delivery_mode = crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard;
+    runner.adapter_config.transport =
+        Some(crate::im_gateway::external_cli::ExternalCliTransport::AppServer);
+    runner.adapter_config.executable = Some(executable.display().to_string());
+    runner.adapter_config.args.clear();
+    runner.adapter_config.timeout_secs = Some(10);
+    service.external_cli_config_store.save(config).unwrap();
+
+    let source_anchor = crate::im_gateway::group_context::FeishuMessageAnchor {
+        provider_id: provider.id.clone(),
+        chat_id: "oc_group".to_string(),
+        message_id: "source-card".to_string(),
+        source_session_key: "source-session".to_string(),
+        run_id: Some("source-run".to_string()),
+        runner_id: runner_id.clone(),
+        adapter: "codex".to_string(),
+        transport: "app_server".to_string(),
+        external_thread_id: Some("thread-source".to_string()),
+        external_turn_id: Some("turn-source".to_string()),
+        checkpoint_thread_id: None,
+        status: "ready".to_string(),
+    };
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&source_anchor, 1)
+        .unwrap();
+
+    let session_key = crate::im_gateway::group_context::build_group_thread_session_key(
+        &provider.id,
+        "oc_group",
+        "topic-derived",
+    );
+    let mut event = group_test_event(
+        &provider.id,
+        "topic-trigger",
+        "continue from the card",
+        false,
+        2,
+    );
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("source-card".to_string());
+    message.parent_id = Some("source-card".to_string());
+    message.thread_id = Some("topic-derived".to_string());
+    service
+        .group_context_store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-derived".to_string(),
+                root_message_id: "source-card".to_string(),
+                derived_session_key: session_key.clone(),
+                source_kind: "local_checkpoint".to_string(),
+                source_message_id: "source-card".to_string(),
+                source_adapter: Some("codex".to_string()),
+                source_thread_id: Some("thread-source".to_string()),
+                source_turn_id: Some("turn-source".to_string()),
+                trigger_message_id: "topic-trigger".to_string(),
+                initial_message: "continue from the card".to_string(),
+                fallback_message: None,
+                initial_event_json: Some(serde_json::to_string(&event).unwrap()),
+                state: "initializing".to_string(),
+            },
+            2,
+        )
+        .unwrap();
+
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let (_tx, mut rx) = mpsc::unbounded_channel();
+    run_external_cli_agent_chat(
+        ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+        },
+        ExternalCliChatInput {
+            message_text: "continue from the card".to_string(),
+            images: Vec::new(),
+            files: Vec::new(),
+            session_key: session_key.clone(),
+            adapter_override: Some("codex".to_string()),
+            instructions_override: None,
+            delivery_override: Some(
+                crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard,
+            ),
+            runner_id_override: Some(runner_id),
+            runner_selected: true,
+            group_turn_id: None,
+            reset_group_context: false,
+            thread_anchor_message_id: Some("source-card".to_string()),
+            thread_fallback_message: None,
+        },
+    )
+    .await;
+
+    let binding = service
+        .group_context_store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-derived")
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.state, "ready");
+    let paths = server.message_paths.lock().unwrap().clone();
+    assert!(paths.len() >= 2, "progress and terminal replies: {paths:?}");
+    let payloads = server.message_payloads.lock().unwrap().clone();
+    assert!(payloads.iter().all(|payload| {
+        payload["reply_in_thread"].as_bool() == Some(true)
+            || payload["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("TOPIC_DERIVED_OK"))
+    }));
+    assert!(service
+        .group_context_store
+        .feishu_message_anchor(&provider.id, "om_1")
+        .unwrap()
+        .is_some());
+    drop(guard);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn external_runner_traex_completion_creates_immutable_topic_checkpoint() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().expect("Traex checkpoint data dir");
+    let guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+    let executable = temp.path().join("mock-traex-topic-checkpoint");
+    std::fs::write(
+        &executable,
+        r#"#!/usr/bin/env python3
+import json, sys
+def send(value): print(json.dumps(value, separators=(",", ":")), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line); method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize": send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/start":
+        send({"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"traex-finished"}}})
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"traex-finished"}}})
+    elif method == "turn/start":
+        send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"traex-turn"}}})
+        send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"traex-finished","turnId":"traex-turn","item":{"id":"message","type":"agentMessage","text":"TRAEX_TOPIC_OK"}}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"traex-finished","turn":{"id":"traex-turn","status":"completed"}}})
+    elif method == "thread/fork":
+        assert frame["params"] == {"threadId":"traex-finished"}
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"traex-immutable-checkpoint"}}})
+    elif method == "account/rateLimits/read": send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"unsupported"}})
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider =
+        crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    provider.id = "provider-traex-topic".to_string();
+    service.provider_store.add(provider.clone()).unwrap();
+    let mut config = service.external_cli_config_store.load();
+    let runner_id = config.default_runner_id.clone();
+    let runner = config.runners.get_mut(&runner_id).unwrap();
+    runner.enabled = true;
+    runner.adapter = crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string();
+    runner.inject_bifrost_tools = false;
+    runner.delivery_mode = crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard;
+    runner.adapter_config.transport =
+        Some(crate::im_gateway::external_cli::ExternalCliTransport::AppServer);
+    runner.adapter_config.executable = Some(executable.display().to_string());
+    runner.adapter_config.args.clear();
+    runner.adapter_config.timeout_secs = Some(10);
+    service.external_cli_config_store.save(config).unwrap();
+
+    let session_key = crate::im_gateway::group_context::build_group_thread_session_key(
+        &provider.id,
+        "oc_group",
+        "topic-traex",
+    );
+    let mut event = group_test_event(
+        &provider.id,
+        "topic-traex-trigger",
+        "run Traex in this topic",
+        false,
+        2,
+    );
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("ordinary-root".to_string());
+    message.parent_id = Some("ordinary-root".to_string());
+    message.thread_id = Some("topic-traex".to_string());
+    service
+        .group_context_store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-traex".to_string(),
+                root_message_id: "ordinary-root".to_string(),
+                derived_session_key: session_key.clone(),
+                source_kind: "message_context".to_string(),
+                source_message_id: "ordinary-root".to_string(),
+                source_adapter: None,
+                source_thread_id: None,
+                source_turn_id: None,
+                trigger_message_id: "topic-traex-trigger".to_string(),
+                initial_message: "run Traex in this topic".to_string(),
+                fallback_message: None,
+                initial_event_json: Some(serde_json::to_string(&event).unwrap()),
+                state: "initializing".to_string(),
+            },
+            2,
+        )
+        .unwrap();
+
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let (_tx, mut rx) = mpsc::unbounded_channel();
+    run_external_cli_agent_chat(
+        ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+        },
+        ExternalCliChatInput {
+            message_text: "run Traex in this topic".to_string(),
+            images: Vec::new(),
+            files: Vec::new(),
+            session_key,
+            adapter_override: Some(crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string()),
+            instructions_override: None,
+            delivery_override: Some(
+                crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard,
+            ),
+            runner_id_override: Some(runner_id),
+            runner_selected: true,
+            group_turn_id: None,
+            reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
+        },
+    )
+    .await;
+
+    let binding = service
+        .group_context_store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-traex")
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.state, "ready");
+    let anchor = service
+        .group_context_store
+        .feishu_message_anchor(&provider.id, "om_1")
+        .unwrap()
+        .expect("Traex topic card anchor");
+    assert_eq!(anchor.external_thread_id.as_deref(), Some("traex-finished"));
+    assert_eq!(
+        anchor.checkpoint_thread_id.as_deref(),
+        Some("traex-immutable-checkpoint")
+    );
+    assert_eq!(anchor.status, "ready");
+    drop(guard);
 }
 
 #[cfg(unix)]
@@ -626,4 +1055,292 @@ async fn external_runner_small_branches_keep_safe_defaults() {
 
     let other_session = group_test_event("provider", "stop", "/stop", false, 3);
     maybe_stop_external_cli_for_event(&other_session, "unrelated").await;
+}
+
+#[test]
+fn thread_derivation_anchor_is_consumed_once_for_queued_turns() {
+    let mut anchor = Some("source-card".to_string());
+    assert_eq!(
+        take_thread_derivation_anchor(&mut anchor).as_deref(),
+        Some("source-card")
+    );
+    assert!(take_thread_derivation_anchor(&mut anchor).is_none());
+}
+
+#[test]
+fn traex_checkpoint_requires_app_server_fork_capability() {
+    let mut app_server = recorder_test_request("traex-checkpoint-capability");
+    app_server.adapter = crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string();
+    assert!(should_create_traex_checkpoint(true, "traex", &app_server));
+
+    let mut exec = app_server.clone();
+    exec.adapter_config.transport =
+        Some(crate::im_gateway::external_cli::ExternalCliTransport::Exec);
+    assert!(!should_create_traex_checkpoint(true, "traex", &exec));
+    assert!(!should_create_traex_checkpoint(false, "traex", &app_server));
+    assert!(!should_create_traex_checkpoint(true, "codex", &app_server));
+}
+
+#[tokio::test]
+async fn thread_anchor_request_planning_covers_active_wait_fallback_and_missing_sources() {
+    fn anchor(
+        provider_id: &str,
+        message_id: &str,
+        source_session_key: &str,
+        status: &str,
+    ) -> crate::im_gateway::group_context::FeishuMessageAnchor {
+        crate::im_gateway::group_context::FeishuMessageAnchor {
+            provider_id: provider_id.to_string(),
+            chat_id: "oc_group".to_string(),
+            message_id: message_id.to_string(),
+            source_session_key: source_session_key.to_string(),
+            run_id: Some("run".to_string()),
+            runner_id: "Codex".to_string(),
+            adapter: "codex".to_string(),
+            transport: "app_server".to_string(),
+            external_thread_id: Some("source-thread".to_string()),
+            external_turn_id: Some("source-turn".to_string()),
+            checkpoint_thread_id: None,
+            status: status.to_string(),
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let provider_id = "thread-plan-provider";
+
+    let mut active = anchor(provider_id, "active", "source-active", "active_ready");
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&active, 1)
+        .unwrap();
+    let mut request = recorder_test_request("active-derived");
+    apply_thread_anchor_to_request(
+        &service.group_context_store,
+        &service.agent_session_manager,
+        provider_id,
+        "active",
+        &mut request,
+        Some("unused fallback"),
+    )
+    .await;
+    assert_eq!(request.operation, "fork");
+    assert_eq!(request.params["threadId"], "source-thread");
+    assert!(request.params["lastTurnId"].is_null());
+
+    active.message_id = "no-thread".to_string();
+    active.external_thread_id = None;
+    active.external_turn_id = None;
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&active, 2)
+        .unwrap();
+    let mut no_thread = recorder_test_request("no-thread-derived");
+    apply_thread_anchor_to_request(
+        &service.group_context_store,
+        &service.agent_session_manager,
+        provider_id,
+        "no-thread",
+        &mut no_thread,
+        None,
+    )
+    .await;
+    assert_eq!(no_thread.operation, "chat");
+
+    let pending = anchor(provider_id, "pending", "source-pending", "pending");
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&pending, 3)
+        .unwrap();
+    let mut fallback = recorder_test_request("pending-fallback");
+    apply_thread_anchor_to_request(
+        &service.group_context_store,
+        &service.agent_session_manager,
+        provider_id,
+        "pending",
+        &mut fallback,
+        Some("root plus current"),
+    )
+    .await;
+    assert_eq!(fallback.operation, "chat");
+    assert_eq!(fallback.message, "root plus current");
+
+    let failed = anchor(provider_id, "failed", "source-failed", "failed");
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&failed, 4)
+        .unwrap();
+    let mut failed_fallback = recorder_test_request("failed-anchor");
+    apply_thread_anchor_to_request(
+        &service.group_context_store,
+        &service.agent_session_manager,
+        provider_id,
+        "failed",
+        &mut failed_fallback,
+        Some("unused failed fallback"),
+    )
+    .await;
+    assert_eq!(failed_fallback.operation, "chat");
+    assert_eq!(failed_fallback.message, "unused failed fallback");
+
+    let held_source = service
+        .agent_session_manager
+        .try_take_session("source-running")
+        .unwrap();
+    let waiting = anchor(provider_id, "waiting", "source-running", "pending");
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&waiting, 4)
+        .unwrap();
+    let store = Arc::clone(&service.group_context_store);
+    let manager = Arc::clone(&service.agent_session_manager);
+    let wait_task = tokio::spawn(async move {
+        let mut request = recorder_test_request("waiting-derived");
+        apply_thread_anchor_to_request(
+            &store,
+            &manager,
+            provider_id,
+            "waiting",
+            &mut request,
+            Some("must not fall back"),
+        )
+        .await;
+        request
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let mut ready = waiting;
+    ready.status = "ready".to_string();
+    ready.checkpoint_thread_id = Some("immutable-checkpoint".to_string());
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&ready, 5)
+        .unwrap();
+    let derived = wait_task.await.unwrap();
+    assert_eq!(derived.operation, "fork");
+    assert_eq!(derived.params["threadId"], "immutable-checkpoint");
+    assert_eq!(derived.params["lastTurnId"], "source-turn");
+    service.agent_session_manager.return_session(held_source);
+
+    let held_failed_source = service
+        .agent_session_manager
+        .try_take_session("source-running-failed")
+        .unwrap();
+    let pending_then_failed = anchor(
+        provider_id,
+        "pending-then-failed",
+        "source-running-failed",
+        "pending",
+    );
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&pending_then_failed, 6)
+        .unwrap();
+    let store = Arc::clone(&service.group_context_store);
+    let manager = Arc::clone(&service.agent_session_manager);
+    let failed_wait_task = tokio::spawn(async move {
+        let mut request = recorder_test_request("waiting-for-failed-source");
+        apply_thread_anchor_to_request(
+            &store,
+            &manager,
+            provider_id,
+            "pending-then-failed",
+            &mut request,
+            Some("root plus current after failure"),
+        )
+        .await;
+        request
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let mut failed_update = pending_then_failed;
+    failed_update.status = "failed".to_string();
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&failed_update, 7)
+        .unwrap();
+    let failed_after_wait = failed_wait_task.await.unwrap();
+    assert_eq!(failed_after_wait.operation, "chat");
+    assert_eq!(failed_after_wait.message, "root plus current after failure");
+    service
+        .agent_session_manager
+        .return_session(held_failed_source);
+
+    let held_missing_source = service
+        .agent_session_manager
+        .try_take_session("source-running-missing")
+        .unwrap();
+    let pending_then_missing = anchor(
+        provider_id,
+        "pending-then-missing",
+        "source-running-missing",
+        "pending",
+    );
+    service
+        .group_context_store
+        .upsert_feishu_message_anchor(&pending_then_missing, 8)
+        .unwrap();
+    let store = Arc::clone(&service.group_context_store);
+    let manager = Arc::clone(&service.agent_session_manager);
+    let missing_wait_task = tokio::spawn(async move {
+        let mut request = recorder_test_request("waiting-for-missing-source");
+        apply_thread_anchor_to_request(
+            &store,
+            &manager,
+            provider_id,
+            "pending-then-missing",
+            &mut request,
+            Some("root plus current after anchor removal"),
+        )
+        .await;
+        request
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    rusqlite::Connection::open(service.group_context_store.file_path())
+        .unwrap()
+        .execute(
+            "DELETE FROM im_feishu_message_anchors WHERE provider_id = ?1 AND message_id = ?2",
+            rusqlite::params![provider_id, "pending-then-missing"],
+        )
+        .unwrap();
+    let missing_after_wait =
+        tokio::time::timeout(std::time::Duration::from_secs(1), missing_wait_task)
+            .await
+            .expect("removed anchor must not wait for the active source session")
+            .unwrap();
+    assert_eq!(missing_after_wait.operation, "chat");
+    assert_eq!(
+        missing_after_wait.message,
+        "root plus current after anchor removal"
+    );
+    service
+        .agent_session_manager
+        .return_session(held_missing_source);
+
+    let mut missing = recorder_test_request("missing-anchor");
+    apply_thread_anchor_to_request(
+        &service.group_context_store,
+        &service.agent_session_manager,
+        provider_id,
+        "missing",
+        &mut missing,
+        Some("unused"),
+    )
+    .await;
+    assert_eq!(missing.operation, "chat");
+    assert_eq!(missing.message, "unused");
+
+    rusqlite::Connection::open(service.group_context_store.file_path())
+        .unwrap()
+        .execute_batch("DROP TABLE im_feishu_message_anchors;")
+        .unwrap();
+    apply_thread_anchor_to_request(
+        &service.group_context_store,
+        &service.agent_session_manager,
+        provider_id,
+        "database-error",
+        &mut missing,
+        Some("database error fallback"),
+    )
+    .await;
+    assert_eq!(missing.operation, "chat");
+    assert_eq!(missing.message, "database error fallback");
 }

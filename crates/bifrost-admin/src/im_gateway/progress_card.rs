@@ -26,6 +26,7 @@ const STATUS_PANEL_ELEMENT_ID: &str = "agent_status_panel";
 const FOOTER_ELEMENT_ID: &str = "agent_footer";
 const COMPACT_NOTICE_ELEMENT_ID: &str = "agent_compact";
 const THINKING_PANEL_ELEMENT_ID: &str = "agent_thinking_panel";
+const PROCESS_SUMMARY_ELEMENT_ID: &str = "agent_process_sum";
 const PROCESS_PANEL_ELEMENT_ID: &str = "agent_process_panel";
 const PROCESS_LOG_ELEMENT_ID: &str = "agent_process_log";
 const PROCESS_DYNAMIC_LOG_ELEMENT_PREFIX: &str = "ap_log";
@@ -99,6 +100,8 @@ pub struct ImAgentProgressSnapshot {
     pub phase: ImProgressPhase,
     pub turn_started_at: Option<u64>,
     pub turn_updated_at: Option<u64>,
+    render_total_steps: Option<usize>,
+    render_total_tools: Option<usize>,
 }
 
 impl ImAgentProgressSnapshot {
@@ -122,6 +125,8 @@ impl ImAgentProgressSnapshot {
             phase: ImProgressPhase::Running,
             turn_started_at: None,
             turn_updated_at: None,
+            render_total_steps: None,
+            render_total_tools: None,
         }
     }
 
@@ -771,6 +776,9 @@ pub struct FeishuProgressCardSession {
     compact_card_mode: bool,
     card_budget: FeishuCardBudget,
     reply_to_message_id: Option<String>,
+    reply_in_thread: bool,
+    message_history: Vec<ProgressCardMessageInfo>,
+    turn_message_start: usize,
 }
 
 impl FeishuProgressCardSession {
@@ -790,6 +798,9 @@ impl FeishuProgressCardSession {
             compact_card_mode: false,
             card_budget: FEISHU_CARD_STANDARD_BUDGET,
             reply_to_message_id: None,
+            reply_in_thread: false,
+            message_history: Vec::new(),
+            turn_message_start: 0,
         }
     }
 
@@ -802,6 +813,19 @@ impl FeishuProgressCardSession {
     ) -> Self {
         let mut session = Self::new(feishu, provider, target, snapshot);
         session.reply_to_message_id = normalized_message_id(reply_to_message_id);
+        session
+    }
+
+    pub fn new_replying_in_thread(
+        feishu: Arc<FeishuProvider>,
+        provider: ImProviderConfig,
+        target: ImTarget,
+        snapshot: ImAgentProgressSnapshot,
+        reply_to_message_id: Option<&str>,
+    ) -> Self {
+        let mut session =
+            Self::new_replying_to(feishu, provider, target, snapshot, reply_to_message_id);
+        session.reply_in_thread = true;
         session
     }
 
@@ -891,9 +915,11 @@ impl FeishuProgressCardSession {
         let previous_compact_card_mode = self.compact_card_mode;
         let previous_card_budget = self.card_budget;
         let previous_reply_to_message_id = self.reply_to_message_id.clone();
+        let previous_turn_message_start = self.turn_message_start;
         let session_key = self.snapshot.session_key.clone();
         self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
         self.reply_to_message_id = normalized_message_id(reply_to_message_id);
+        self.turn_message_start = self.message_history.len();
         if let Err(error) = self.send_initial_card().await {
             self.snapshot = previous_snapshot;
             self.handle = previous_handle;
@@ -901,6 +927,7 @@ impl FeishuProgressCardSession {
             self.compact_card_mode = previous_compact_card_mode;
             self.card_budget = previous_card_budget;
             self.reply_to_message_id = previous_reply_to_message_id;
+            self.turn_message_start = previous_turn_message_start;
             return Err(error);
         }
         self.freeze_previous_card_after_rollover(
@@ -1033,12 +1060,23 @@ impl FeishuProgressCardSession {
             let (card_id, compact_card_mode) = self.create_initial_card_entity().await?;
             let send_uuid = format!("progress_send_{}", uuid::Uuid::new_v4().simple());
             let send_result = if let Some(message_id) = self.reply_to_message_id.as_deref() {
-                match self
-                    .feishu
-                    .reply_card_entity(&self.provider, message_id, &card_id, Some(&send_uuid))
-                    .await
-                {
+                let reply_result = if self.reply_in_thread {
+                    self.feishu
+                        .reply_card_entity_in_thread(
+                            &self.provider,
+                            message_id,
+                            &card_id,
+                            Some(&send_uuid),
+                        )
+                        .await
+                } else {
+                    self.feishu
+                        .reply_card_entity(&self.provider, message_id, &card_id, Some(&send_uuid))
+                        .await
+                };
+                match reply_result {
                     Ok(result) => Ok(result),
+                    Err(reply_error) if self.reply_in_thread => Err(reply_error),
                     Err(reply_error) => {
                         warn!(
                             message_id,
@@ -1117,6 +1155,15 @@ impl FeishuProgressCardSession {
             } else {
                 current_has_process_hash(&self.snapshot)
             },
+        });
+        self.message_history.push(ProgressCardMessageInfo {
+            card_id: self
+                .handle
+                .as_ref()
+                .expect("progress handle was set")
+                .card_id
+                .clone(),
+            message_id: send_result.message_id.clone(),
         });
         if let Some(handle) = self.handle.as_ref() {
             info!(
@@ -1512,6 +1559,30 @@ impl ImAgentProgressRegistry {
         Ok(session)
     }
 
+    pub async fn start_feishu_replying_in_thread(
+        &self,
+        session_key: &str,
+        feishu: Arc<FeishuProvider>,
+        provider: ImProviderConfig,
+        target: ImTarget,
+        initial_message: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<Arc<Mutex<FeishuProgressCardSession>>> {
+        let snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
+        let mut session = FeishuProgressCardSession::new_replying_in_thread(
+            feishu,
+            provider,
+            target,
+            snapshot,
+            reply_to_message_id,
+        );
+        session.start().await?;
+        let session = Arc::new(Mutex::new(session));
+        self.sessions
+            .insert(session_key.to_string(), Arc::clone(&session));
+        Ok(session)
+    }
+
     pub async fn apply_event(&self, session_key: &str, event: AgentTurnProgressEvent) {
         self.apply_events(session_key, vec![event]).await;
     }
@@ -1611,6 +1682,22 @@ impl ImAgentProgressRegistry {
             );
         }
         session.message_info()
+    }
+
+    pub async fn message_info(&self, session_key: &str) -> Option<ProgressCardMessageInfo> {
+        let session = self.sessions.get(session_key)?;
+        let session = Arc::clone(session.value());
+        let info = session.lock().await.message_info();
+        info
+    }
+
+    pub async fn message_infos(&self, session_key: &str) -> Vec<ProgressCardMessageInfo> {
+        let Some(session) = self.sessions.get(session_key) else {
+            return Vec::new();
+        };
+        let session = Arc::clone(session.value());
+        let guard = session.lock().await;
+        guard.message_history[guard.turn_message_start..].to_vec()
     }
 
     pub async fn restart_existing(&self, session_key: &str, initial_message: &str) -> bool {
@@ -1728,11 +1815,12 @@ pub fn build_feishu_compact_progress_card(
     snapshot: &ImAgentProgressSnapshot,
     streaming_mode: bool,
 ) -> serde_json::Value {
-    let elements = vec![
-        build_status_panel_element(snapshot),
-        build_compact_notice_element(snapshot),
-        build_output_element(snapshot, true),
-    ];
+    let mut elements = vec![build_status_panel_element(snapshot)];
+    if has_process_state(snapshot) {
+        elements.push(build_process_summary_element(snapshot));
+    }
+    elements.push(build_compact_notice_element(snapshot));
+    elements.push(build_output_element(snapshot, true));
 
     serde_json::json!({
         "schema": "2.0",
@@ -1761,6 +1849,16 @@ fn build_budgeted_feishu_progress_card(
     budget: FeishuCardBudget,
 ) -> BudgetedProgressCard {
     let mut view = snapshot.clone();
+    view.render_total_steps = Some(
+        snapshot
+            .render_total_steps
+            .unwrap_or(snapshot.timeline.len()),
+    );
+    view.render_total_tools = Some(
+        snapshot
+            .render_total_tools
+            .unwrap_or_else(|| process_tool_count(snapshot).max(snapshot.tool_calls.len())),
+    );
     let mut omitted_timeline_items = 0;
 
     loop {
@@ -2142,10 +2240,11 @@ fn build_plan_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::V
         "tag": "collapsible_panel",
         "element_id": PLAN_PANEL_ELEMENT_ID,
         "expanded": matches!(snapshot.phase, ImProgressPhase::Running),
-        "background_color": "grey",
+        "background_color": "default",
         "header": {
             "title": {
                 "tag": "plain_text",
+                "text_color": "default",
                 "content": format_plan_panel_title(snapshot)
             }
         },
@@ -2175,10 +2274,11 @@ fn build_output_element(snapshot: &ImAgentProgressSnapshot, compact: bool) -> se
         "tag": "collapsible_panel",
         "element_id": OUTPUT_ELEMENT_ID,
         "expanded": false,
-        "background_color": "grey",
+        "background_color": "default",
         "header": {
             "title": {
                 "tag": "plain_text",
+                "text_color": "default",
                 "content": match snapshot.phase {
                     ImProgressPhase::Failed => "失败结论",
                     ImProgressPhase::Finished => "最终结论",
@@ -2264,18 +2364,93 @@ fn append_process_elements(
     if !has_process_state(snapshot) {
         return;
     }
+    elements.push(build_process_summary_element(snapshot));
     elements.push(build_process_panel_element(snapshot));
+}
+
+fn build_process_summary_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "markdown",
+        "element_id": PROCESS_SUMMARY_ELEMENT_ID,
+        "content": format_process_summary_markdown(snapshot)
+    })
+}
+
+fn format_process_summary_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
+    let round_start = snapshot
+        .timeline
+        .iter()
+        .rposition(|item| item.kind == ProgressTimelineKind::Thinking)
+        .unwrap_or(0);
+    let round_items = &snapshot.timeline[round_start..];
+    let latest_explanation = snapshot
+        .timeline
+        .iter()
+        .rev()
+        .find(|item| item.kind == ProgressTimelineKind::Thinking)
+        .map(|item| convert_progress_prose_to_feishu_markdown(&item.detail, Some(360)))
+        .unwrap_or_else(|| "等待模型输出下一步说明。".to_string());
+
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut running = 0usize;
+    let mut running_tools = Vec::<(String, usize)>::new();
+    for item in round_items
+        .iter()
+        .filter(|item| item.kind == ProgressTimelineKind::Tool)
+    {
+        match item.success {
+            Some(true) => succeeded += 1,
+            Some(false) => failed += 1,
+            None => {
+                running += 1;
+                if let Some((_, count)) = running_tools
+                    .iter_mut()
+                    .find(|(name, _)| name == &item.title)
+                {
+                    *count += 1;
+                } else {
+                    running_tools.push((item.title.clone(), 1));
+                }
+            }
+        }
+    }
+    let visible_running_tools = running_tools
+        .iter()
+        .take(3)
+        .map(|(name, count)| {
+            let name = truncate_one_line(name, 28);
+            if *count > 1 {
+                format!("`{name}` ×{count}")
+            } else {
+                format!("`{name}`")
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut current_tools = if visible_running_tools.is_empty() {
+        "暂无正在执行的工具".to_string()
+    } else {
+        visible_running_tools.join("、")
+    };
+    if running_tools.len() > 3 {
+        current_tools.push_str(&format!("，等 {} 个", running_tools.len() - 3));
+    }
+
+    format!(
+        "**最新进展**\n\n{latest_explanation}\n\n当前工具：{current_tools}\n本轮工具：成功 {succeeded} · 失败 {failed} · 执行中 {running}"
+    )
 }
 
 fn build_process_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
     serde_json::json!({
         "tag": "collapsible_panel",
         "element_id": PROCESS_PANEL_ELEMENT_ID,
-        "expanded": matches!(snapshot.phase, ImProgressPhase::Running),
-        "background_color": "grey",
+        "expanded": false,
+        "background_color": "default",
         "header": {
             "title": {
                 "tag": "plain_text",
+                "text_color": "default",
                 "content": format_process_panel_title(snapshot)
             }
         },
@@ -2430,10 +2605,11 @@ fn build_process_tool_detail_element(
         "tag": "collapsible_panel",
         "element_id": process_dynamic_element_id(PROCESS_TOOL_ELEMENT_PREFIX, index),
         "expanded": false,
-        "background_color": "grey",
+        "background_color": "default",
         "header": {
             "title": {
                 "tag": "plain_text",
+                "text_color": "default",
                 "content": format_process_tool_panel_title(item)
             }
         },
@@ -2459,10 +2635,11 @@ fn build_process_tool_group_element(
         "tag": "collapsible_panel",
         "element_id": process_dynamic_element_id(PROCESS_TOOL_GROUP_ELEMENT_PREFIX, index),
         "expanded": false,
-        "background_color": "grey",
+        "background_color": "default",
         "header": {
             "title": {
                 "tag": "plain_text",
+                "text_color": "default",
                 "content": format_process_tool_group_title(items)
             }
         },
@@ -2475,16 +2652,21 @@ fn process_dynamic_element_id(prefix: &str, index: usize) -> String {
 }
 
 fn format_process_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
-    let tool_count = process_tool_count(snapshot).max(snapshot.tool_calls.len());
+    let step_count = snapshot
+        .render_total_steps
+        .unwrap_or(snapshot.timeline.len());
+    let tool_count = snapshot
+        .render_total_tools
+        .unwrap_or_else(|| process_tool_count(snapshot).max(snapshot.tool_calls.len()));
     let base = match snapshot.phase {
         ImProgressPhase::Running => "执行过程",
         ImProgressPhase::Finished => "执行过程",
         ImProgressPhase::Failed => "失败前过程",
     };
-    if tool_count == 0 {
+    if step_count == 0 {
         base.to_string()
     } else {
-        format!("{base}：已执行 {tool_count} 个步骤")
+        format!("{base}：共 {step_count} 步 · 工具 {tool_count} 次")
     }
 }
 
@@ -2590,10 +2772,11 @@ fn build_tool_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::V
         "tag": "collapsible_panel",
         "element_id": TOOL_PANEL_ELEMENT_ID,
         "expanded": false,
-        "background_color": "grey",
+        "background_color": "default",
         "header": {
             "title": {
                 "tag": "plain_text",
+                "text_color": "default",
                 "content": format_tool_panel_title(snapshot)
             }
         },
@@ -2740,10 +2923,11 @@ fn build_status_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json:
         "tag": "collapsible_panel",
         "element_id": STATUS_PANEL_ELEMENT_ID,
         "expanded": false,
-        "background_color": "grey",
+        "background_color": "default",
         "header": {
             "title": {
                 "tag": "plain_text",
+                "text_color": "default",
                 "content": format_status_panel_title(snapshot)
             }
         },
@@ -2800,9 +2984,16 @@ fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
         let reasoning = external_runner_reasoning_title(snapshot)
             .map(|value| format!(" · {value}"))
             .unwrap_or_default();
+        let session = external_runner_session_id(snapshot)
+            .map(|value| truncate_one_line(value, 48))
+            .unwrap_or_else(|| match snapshot.phase {
+                ImProgressPhase::Running => "获取中".to_string(),
+                ImProgressPhase::Finished | ImProgressPhase::Failed => "未提供".to_string(),
+            });
         let mut title = format!(
-            "Runner：{} · 模型：{}{}",
+            "Runner：{} · Session：{} · 模型：{}{}",
             truncate_str(&runner_id, 24),
+            session,
             model,
             reasoning
         );
