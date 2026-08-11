@@ -43,7 +43,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
 
             let card = build_feishu_progress_card(&snapshot, true);
             let body = card["body"]["elements"].to_string();
-            for needle in ["文件变更", "target/demo.txt", "新增 3 行", "已执行 1 个步骤"] {
+            for needle in ["文件变更", "target/demo.txt", "新增 3 行", "共 1 步 · 工具 1 次"] {
                 if !body.contains(needle) {
                     return Err(format!("file change card body missing {needle}: {body}"));
                 }
@@ -252,6 +252,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
             }
             let serialized = String::from_utf8(bytes).map_err(|error| error.to_string())?;
             for needle in [
+                "Runner：codex · Session：thread-resource-e2e",
+                "共 80 步 · 工具 40 次",
                 "本次：12.3K Token",
                 "周余额：37%",
                 "耗时：2 分 05 秒",
@@ -267,6 +269,35 @@ pub fn get_all_tests() -> Vec<TestCase> {
             ] {
                 if !serialized.contains(needle) {
                     return Err(format!("resource-aware card missing {needle}: {serialized}"));
+                }
+            }
+            let elements = card["body"]["elements"]
+                .as_array()
+                .ok_or_else(|| "resource-aware card body is not an array".to_string())?;
+            let summary_index = elements
+                .iter()
+                .position(|element| element["element_id"] == "agent_process_sum")
+                .ok_or_else(|| "resource-aware card missing process summary".to_string())?;
+            let process_index = elements
+                .iter()
+                .position(|element| element["element_id"] == "agent_process_panel")
+                .ok_or_else(|| "resource-aware card missing process panel".to_string())?;
+            if summary_index >= process_index || elements[process_index]["expanded"] != false {
+                return Err(format!(
+                    "process summary/panel order or collapsed state is invalid: {elements:?}"
+                ));
+            }
+            if elements[process_index]["background_color"] != "default"
+                || elements[process_index]["header"]["title"]["text_color"] != "default"
+            {
+                return Err(format!(
+                    "process panel does not use theme-adaptive colors: {}",
+                    elements[process_index]
+                ));
+            }
+            for forbidden in ["\"background_color\":\"grey\"", "rgba(", "rgb(", "<font color='black'", "<font color='white'"] {
+                if serialized.to_ascii_lowercase().contains(forbidden) {
+                    return Err(format!("resource-aware card contains fixed theme style {forbidden}"));
                 }
             }
             let summarized_indexes = (0..35)

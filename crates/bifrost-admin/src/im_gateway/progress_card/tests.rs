@@ -730,7 +730,7 @@ fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
         .expect("process element");
     assert_eq!(
         process_element["header"]["title"]["content"],
-        "执行过程：已执行 35 个步骤"
+        "执行过程：共 70 步 · 工具 35 次"
     );
     let process_elements = process_element["elements"].as_array().unwrap();
     assert_eq!(process_elements[0]["element_id"], PROCESS_LOG_ELEMENT_ID);
@@ -837,6 +837,7 @@ fn budgeted_card_drops_oldest_process_items_and_keeps_latest() {
     assert!(!serialized.contains("RESULT_MARKER_0"));
     assert!(!serialized.contains("OLD_THINKING_MARKER_0"));
     assert!(serialized.contains("已省略前面"));
+    assert!(serialized.contains("执行过程：共 11 步 · 工具 8 次"));
     assert!(serialized.contains("保留最近执行脉络"));
 }
 
@@ -1033,20 +1034,76 @@ fn feishu_card_limit_errors_are_classified_by_official_codes() {
 }
 
 #[test]
-fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish() {
+fn feishu_progress_card_collapses_process_with_current_round_summary() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "stream task");
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+        content: "上一轮先读取配置。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "read_file".to_string(),
+            arguments: "config.toml".to_string(),
+            result: "ok".to_string(),
+            success: true,
+        },
+        duration_ms: 10,
+    });
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
         content: "我会先检查代码路径，然后运行测试。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "view_image".to_string(),
+            arguments: "failure.png".to_string(),
+            result: "opened".to_string(),
+            success: true,
+        },
+        duration_ms: 20,
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "read_file".to_string(),
+            arguments: "missing.rs".to_string(),
+            result: "not found".to_string(),
+            success: false,
+        },
+        duration_ms: 21,
     });
     snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
         tool_name: "exec_command".to_string(),
         arguments: r#"{"cmd":"cargo test -p bifrost-admin progress_card"}"#.to_string(),
     });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "exec_command".to_string(),
+        arguments: r#"{"cmd":"cargo clippy -p bifrost-admin"}"#.to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "web_search".to_string(),
+        arguments: "CardKit theme".to_string(),
+    });
 
     let running_card = build_feishu_progress_card(&snapshot, true);
     let running_serialized = serde_json::to_string(&running_card).unwrap();
     assert!(running_serialized.contains(PROCESS_PANEL_ELEMENT_ID));
-    assert!(running_serialized.contains(r#""expanded":true"#));
+    let elements = running_card["body"]["elements"].as_array().unwrap();
+    let summary = elements
+        .iter()
+        .find(|element| element["element_id"] == PROCESS_SUMMARY_ELEMENT_ID)
+        .expect("process summary");
+    let summary_content = summary["content"].as_str().unwrap();
+    assert!(summary_content.contains("我会先检查代码路径，然后运行测试。"));
+    assert!(summary_content.contains("当前工具：`exec_command` ×2、`web_search`"));
+    assert!(summary_content.contains("本轮工具：成功 1 · 失败 1 · 执行中 3"));
+    assert!(!summary_content.contains("上一轮先读取配置"));
+    let process = elements
+        .iter()
+        .find(|element| element["element_id"] == PROCESS_PANEL_ELEMENT_ID)
+        .expect("process panel");
+    assert_eq!(process["expanded"], false);
+    assert_eq!(
+        process["header"]["title"]["content"],
+        "执行过程：共 8 步 · 工具 6 次"
+    );
     assert!(running_serialized.contains("我会先检查代码路径"));
     assert!(!running_serialized.contains("1. 我会先检查代码路径"));
     assert!(running_serialized.contains("正在运行：exec_command"));
@@ -1070,8 +1127,9 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
     let finished_card = build_feishu_progress_card(&snapshot, false);
     let elements = finished_card["body"]["elements"].as_array().unwrap();
     assert_eq!(elements[0]["element_id"], STATUS_PANEL_ELEMENT_ID);
-    assert_eq!(elements[1]["element_id"], PROCESS_PANEL_ELEMENT_ID);
-    assert_eq!(elements[1]["expanded"], false);
+    assert_eq!(elements[1]["element_id"], PROCESS_SUMMARY_ELEMENT_ID);
+    assert_eq!(elements[2]["element_id"], PROCESS_PANEL_ELEMENT_ID);
+    assert_eq!(elements[2]["expanded"], false);
     assert_eq!(elements.last().unwrap()["element_id"], OUTPUT_ELEMENT_ID);
     assert_eq!(elements.last().unwrap()["tag"], "collapsible_panel");
     assert_eq!(elements.last().unwrap()["expanded"], false);
@@ -1086,19 +1144,116 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
 
     let finished_serialized = serde_json::to_string(&finished_card).unwrap();
     assert!(finished_serialized.contains("最终结论：测试通过。"));
-    assert!(finished_serialized.contains("执行过程：已执行 1 个步骤"));
+    assert!(finished_serialized.contains("执行过程：共 8 步 · 工具 6 次"));
     assert!(finished_serialized.contains("已完成：exec_command"));
     assert!(finished_serialized.contains("test result: ok"));
     assert!(!finished_serialized.contains("Pipeline"));
     assert!(!finished_serialized.contains("Loop"));
     assert!(!finished_serialized.contains("工具摘要"));
-    let process_elements = elements[1]["elements"].as_array().unwrap();
-    assert_eq!(process_elements[1]["element_id"], "ap_t_1");
-    assert_eq!(process_elements[1]["expanded"], false);
-    assert!(process_elements[1]["header"]["title"]["content"]
-        .as_str()
-        .unwrap()
-        .contains("已完成：exec_command"));
+    assert!(elements[2].to_string().contains("已完成：exec_command"));
+}
+
+#[test]
+fn external_runner_status_title_exposes_session_id_lifecycle() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "runner task");
+    snapshot.runner = Some(ProgressRunnerSummary {
+        runner_id: "claude-code".to_string(),
+        adapter: "claude-code".to_string(),
+        ..ProgressRunnerSummary::default()
+    });
+
+    assert!(format_status_panel_title(&snapshot).contains("Session：获取中"));
+
+    snapshot.runner.as_mut().unwrap().external_thread_id = Some("session-live-123".to_string());
+    assert!(format_status_panel_title(&snapshot).contains("Session：session-live-123"));
+
+    snapshot.runner.as_mut().unwrap().external_thread_id = None;
+    snapshot.phase = ImProgressPhase::Finished;
+    assert!(format_status_panel_title(&snapshot).contains("Session：未提供"));
+}
+
+#[test]
+fn process_summary_limits_running_tool_types_without_public_explanation() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "parallel tools");
+    for tool_name in ["exec_command", "view_image", "web_search", "read_file"] {
+        snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+            tool_name: tool_name.to_string(),
+            arguments: tool_name.to_string(),
+        });
+    }
+
+    let summary = format_process_summary_markdown(&snapshot);
+    assert!(summary.contains("等待模型输出下一步说明。"));
+    assert!(summary.contains("`exec_command`、`view_image`、`web_search`，等 1 个"));
+    assert!(!summary.contains("`read_file`"));
+    assert!(summary.contains("成功 0 · 失败 0 · 执行中 4"));
+}
+
+#[test]
+fn generated_feishu_cards_use_theme_adaptive_colors() {
+    fn assert_theme_safe(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    if key == "background_color" || key == "text_color" {
+                        assert_eq!(child, "default", "non-adaptive {key}: {child}");
+                    }
+                    assert_theme_safe(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_theme_safe(item);
+                }
+            }
+            serde_json::Value::String(text) => {
+                let lower = text.to_ascii_lowercase();
+                assert!(!lower.contains("rgba("));
+                assert!(!lower.contains("rgb("));
+                assert!(!lower.contains("<font color='black'"));
+                assert!(!lower.contains("<font color='white'"));
+                assert!(!lower.contains("<font color=\"black\""));
+                assert!(!lower.contains("<font color=\"white\""));
+            }
+            _ => {}
+        }
+    }
+
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "theme task");
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "检查主题。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "exec_command".to_string(),
+        arguments: "cargo test".to_string(),
+    });
+
+    let standard = build_feishu_progress_card(&snapshot, true);
+    let compact = build_feishu_compact_progress_card(&snapshot, true);
+    let mut legacy_tool_snapshot = ImAgentProgressSnapshot::new("s2", "legacy tool theme");
+    legacy_tool_snapshot.latest_tool = Some(ProgressToolSummary {
+        tool_name: "exec_command".to_string(),
+        arguments: Some("cargo test".to_string()),
+        success: None,
+        result_preview: None,
+        duration_ms: None,
+    });
+    let legacy_tool = build_feishu_progress_card(&legacy_tool_snapshot, true);
+    assert_theme_safe(&standard);
+    assert_theme_safe(&compact);
+    assert_theme_safe(&legacy_tool);
+
+    for card in [&standard, &compact, &legacy_tool] {
+        for panel in card["body"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|element| element["tag"] == "collapsible_panel")
+        {
+            assert_eq!(panel["background_color"], "default");
+            assert_eq!(panel["header"]["title"]["text_color"], "default");
+        }
+    }
 }
 
 #[test]
@@ -1129,10 +1284,14 @@ fn terminal_progress_card_collapses_status_plan_process_and_conclusion() {
     assert_eq!(running_elements[0]["expanded"], false);
     assert_eq!(running_elements[1]["element_id"], PLAN_PANEL_ELEMENT_ID);
     assert_eq!(running_elements[1]["expanded"], true);
-    assert_eq!(running_elements[2]["element_id"], PROCESS_PANEL_ELEMENT_ID);
-    assert_eq!(running_elements[2]["expanded"], true);
-    assert_eq!(running_elements[3]["element_id"], OUTPUT_ELEMENT_ID);
-    assert_eq!(running_elements[3]["tag"], "markdown");
+    assert_eq!(
+        running_elements[2]["element_id"],
+        PROCESS_SUMMARY_ELEMENT_ID
+    );
+    assert_eq!(running_elements[3]["element_id"], PROCESS_PANEL_ELEMENT_ID);
+    assert_eq!(running_elements[3]["expanded"], false);
+    assert_eq!(running_elements[4]["element_id"], OUTPUT_ELEMENT_ID);
+    assert_eq!(running_elements[4]["tag"], "markdown");
 
     snapshot.apply_event(AgentTurnProgressEvent::TurnFinished {
         content: "TERMINAL_COLLAPSED_CONCLUSION".to_string(),
@@ -1148,11 +1307,15 @@ fn terminal_progress_card_collapses_status_plan_process_and_conclusion() {
         vec![
             STATUS_PANEL_ELEMENT_ID,
             PLAN_PANEL_ELEMENT_ID,
+            PROCESS_SUMMARY_ELEMENT_ID,
             PROCESS_PANEL_ELEMENT_ID,
             OUTPUT_ELEMENT_ID,
         ]
     );
-    for element in elements {
+    for element in elements
+        .iter()
+        .filter(|element| element["element_id"] != PROCESS_SUMMARY_ELEMENT_ID)
+    {
         assert_eq!(
             element["tag"], "collapsible_panel",
             "terminal section must be collapsible: {element}"
@@ -1162,8 +1325,8 @@ fn terminal_progress_card_collapses_status_plan_process_and_conclusion() {
             "terminal section must default to collapsed: {element}"
         );
     }
-    assert_eq!(elements[3]["header"]["title"]["content"], "最终结论");
-    assert!(serde_json::to_string(&elements[3])
+    assert_eq!(elements[4]["header"]["title"]["content"], "最终结论");
+    assert!(serde_json::to_string(&elements[4])
         .unwrap()
         .contains("TERMINAL_COLLAPSED_CONCLUSION"));
 }
@@ -1658,6 +1821,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
     let populated_serialized = serde_json::to_string(populated_body).unwrap();
     for id in [
         PLAN_ELEMENT_ID,
+        PROCESS_SUMMARY_ELEMENT_ID,
         PROCESS_PANEL_ELEMENT_ID,
         PROCESS_LOG_ELEMENT_ID,
         "ap_t_1",
@@ -1693,7 +1857,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
         .find(|element| element["element_id"] == PROCESS_PANEL_ELEMENT_ID)
         .unwrap();
     assert_eq!(process_element["tag"], "collapsible_panel");
-    assert_eq!(process_element["expanded"], true);
+    assert_eq!(process_element["expanded"], false);
     let process_content = process_element["elements"][0]["content"].as_str().unwrap();
     assert!(
         process_content.contains("Inspecting files before running tests."),

@@ -252,7 +252,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [feishu-progress-card.md](./feishu-progress-card.md) | Feishu Progress Card | 10 | 飞书 Agent progress card 归并逐字符 assistant stream 并保留模型思考、工具、计划与可读状态，结束后状态/计划/执行过程/最终结论统一默认折叠，同时过滤 token usage 机器态状态；覆盖独立发送 16-locale 多语言终态卡、成功最终总结、失败原因、终态卡直接引用任务卡、本地文件自动上传发送、Runner 行实时展示目标 Runner Session ID、文件变更详情、Codex session 累计 Token、7 天额度余额、任务耗时，以及长卡片旧工具步骤摘要、最近 5 次工具详情、思考与工具完整执行段裁剪、UTF-8 字节/组件预算、200860/300305 同卡收缩重试和精简降级，通过真实 Service、mock Runner、本地 CardKit JSON 2.0 renderer 与 mock API 验证 payload |
+| [feishu-progress-card.md](./feishu-progress-card.md) | Feishu Progress Card | 11 | 飞书 Agent progress card 归并逐字符 assistant stream，执行过程默认折叠并常驻最新解释、当前工具、本轮成败统计和总体步骤/工具次数；覆盖即时 Runner Session ID、主题自适应默认色、亮暗主题契约、独立发送 16-locale 终态卡、本地文档与压缩包自动上传发送、文件变更详情、Codex session Token/周额度/耗时、长卡片执行段裁剪及 CardKit 限额降级，通过隔离 Service、mock Runner、本地 renderer 与 mock API 验证 payload |
 | [agent-chat-history-pagination.md](./agent-chat-history-pagination.md) | Agent Chat 单会话日志与全量历史渲染 | 8 | 单 key 固定 SHA-256 JSONL，非规范历史直接清理；历史默认完整加载，重复/重叠 SSE 不覆盖首轮，delta 合并、usage 过滤与亮暗主题一致 |
 | [remove-builtin-bifrost-agent.md](./remove-builtin-bifrost-agent.md) | Remove built-in Bifrost Agent | 4 | 内置 runtime HTTP/worker/CLI/UI 入口已删除、Agent Chat 只走 external runner stream、专属代码文档测试资产已删除、Codex/Trae X/Claude Code/ChatGPT Web 与自定义 Runner 保留 |
 | [asr-scheduled-task-plan-b.md](./asr-scheduled-task-plan-b.md) | ASR 定时任务 Runtime 策略 | 42 | ASR runtime 策略、Daily Agent 外部 Runner、ChatGPT Web、IM delivery、恢复与性能回归 |

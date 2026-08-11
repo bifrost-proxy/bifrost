@@ -284,7 +284,7 @@ pub(super) async fn download_agent_reply_remote_attachment(
     })
 }
 
-fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
+pub(super) fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
     image_extension_from_content_type(content_type).or_else(|| {
         match content_type.to_ascii_lowercase().as_str() {
             "application/pdf" => Some("pdf"),
@@ -293,6 +293,13 @@ fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
             "text/csv" => Some("csv"),
             "application/json" => Some("json"),
             "application/zip" => Some("zip"),
+            "application/x-tar" => Some("tar"),
+            "application/gzip" | "application/x-gzip" => Some("gz"),
+            "application/x-bzip2" => Some("bz2"),
+            "application/x-xz" => Some("xz"),
+            "application/zstd" | "application/x-zstd" => Some("zst"),
+            "application/x-7z-compressed" => Some("7z"),
+            "application/vnd.rar" | "application/x-rar-compressed" => Some("rar"),
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
                 Some("docx")
             }
@@ -305,9 +312,19 @@ fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
     })
 }
 
-fn attachment_extension_from_path(path: &str) -> Option<&'static str> {
-    let path = path.split('?').next().unwrap_or(path);
-    let ext = std::path::Path::new(path)
+pub(super) fn attachment_extension_from_path(path: &str) -> Option<&'static str> {
+    let path = path.split('?').next().unwrap_or(path).to_ascii_lowercase();
+    for (suffix, extension) in [
+        (".tar.gz", "tar.gz"),
+        (".tar.bz2", "tar.bz2"),
+        (".tar.xz", "tar.xz"),
+        (".tar.zst", "tar.zst"),
+    ] {
+        if path.ends_with(suffix) {
+            return Some(extension);
+        }
+    }
+    let ext = std::path::Path::new(&path)
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
@@ -319,6 +336,18 @@ fn attachment_extension_from_path(path: &str) -> Option<&'static str> {
         "csv" => Some("csv"),
         "json" => Some("json"),
         "zip" => Some("zip"),
+        "tar" => Some("tar"),
+        "tgz" => Some("tgz"),
+        "tbz" => Some("tbz"),
+        "tbz2" => Some("tbz2"),
+        "txz" => Some("txz"),
+        "tzst" => Some("tzst"),
+        "gz" => Some("gz"),
+        "bz2" => Some("bz2"),
+        "xz" => Some("xz"),
+        "zst" => Some("zst"),
+        "7z" => Some("7z"),
+        "rar" => Some("rar"),
         "doc" => Some("doc"),
         "docx" => Some("docx"),
         "xls" => Some("xls"),
