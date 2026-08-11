@@ -1303,6 +1303,11 @@ fn only_supported_healthy_anchors_are_derivable() {
     }
     .is_derivable());
     assert!(!FeishuMessageAnchor {
+        transport: "exec".to_string(),
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(!FeishuMessageAnchor {
         external_thread_id: None,
         ..base.clone()
     }
@@ -1317,6 +1322,21 @@ fn only_supported_healthy_anchors_are_derivable() {
         external_thread_id: None,
         external_turn_id: None,
         status: "pending".to_string(),
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(!FeishuMessageAnchor {
+        adapter: "traex".to_string(),
+        external_thread_id: Some("mutable-source".to_string()),
+        checkpoint_thread_id: None,
+        status: "ready".to_string(),
+        ..base.clone()
+    }
+    .is_derivable());
+    assert!(FeishuMessageAnchor {
+        adapter: "traex".to_string(),
+        checkpoint_thread_id: Some("immutable-checkpoint".to_string()),
+        status: "ready".to_string(),
         ..base
     }
     .is_derivable());

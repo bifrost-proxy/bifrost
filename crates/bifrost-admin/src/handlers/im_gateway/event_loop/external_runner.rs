@@ -1159,7 +1159,7 @@ pub(super) async fn run_external_cli_agent_chat(
                         } else {
                             reply_text.clone()
                         };
-                        send_agent_reply_from_work_dir(
+                        let message_id = send_agent_reply_from_work_dir(
                             ctx.client,
                             ctx.provider,
                             &current_event,
@@ -1168,6 +1168,14 @@ pub(super) async fn run_external_cli_agent_chat(
                             request.work_dir.as_deref(),
                         )
                         .await;
+                        if let (Some(message_id), Some(mut anchor)) =
+                            (message_id, terminal_anchor.clone())
+                        {
+                            anchor.message_id = message_id;
+                            let _ = ctx
+                                .group_context_store
+                                .upsert_feishu_message_anchor(&anchor, now_ms());
+                        }
                     }
                 }
             }

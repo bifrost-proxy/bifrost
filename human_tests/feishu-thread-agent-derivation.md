@@ -54,6 +54,18 @@
 
 预期结果：话题卡片 reply payload 含 `reply_in_thread=true`；普通 reply 为 false。
 
+### TC-FTD-07：本机锚点自动认领与 transport 降级
+
+操作步骤：运行 `cargo test -p bifrost-admin local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch -- --nocapture` 和 `cargo test -p bifrost-admin only_supported_healthy_anchors_are_derivable -- --nocapture`。
+
+预期结果：本机 app-server ready 锚点下的首条话题消息即使未 @ 当前 Bot、且飞书根消息读取不可用，也直接派生；exec/custom transport、失败锚点和 Traex 无 checkpoint 的 mutable source 均不可派生，降级为普通双消息路径。
+
+### TC-FTD-08：Traex checkpoint 不启动新 turn
+
+操作步骤：运行 `cargo test -p bifrost-admin mock_traex_checkpoint_fork_finishes_without_starting_turn -- --nocapture`。
+
+预期结果：源轮结束后只执行 `thread/fork` 创建不可变 checkpoint，不额外执行 `turn/start`；checkpoint 失败时锚点不可被标成 ready。
+
 ## 清理步骤
 
 测试脚本退出时终止 fake OpenAPI/Bifrost/Runner 进程并删除临时目录；确认未修改用户数据目录且无测试进程残留。

@@ -955,7 +955,7 @@ pub(super) async fn send_agent_reply_from_work_dir(
     reply_text: &str,
     message_log_store: &Arc<ImMessageLogStore>,
     work_dir: Option<&Path>,
-) {
+) -> Option<String> {
     send_agent_reply_with_title_and_base_dir(
         client,
         provider,
@@ -965,7 +965,7 @@ pub(super) async fn send_agent_reply_from_work_dir(
         work_dir,
         AgentReplyCardKind::Standard { title: None },
     )
-    .await;
+    .await
 }
 
 pub(super) struct ExternalRunnerTerminalReply<'a> {
