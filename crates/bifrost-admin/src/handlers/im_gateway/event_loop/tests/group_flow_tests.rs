@@ -212,6 +212,33 @@ fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redel
     let temp = tempfile::tempdir().unwrap();
     let group_store = ImGroupContextStore::new(temp.path());
     let provider_id = "feishu-startup-topic-recovery";
+    let mut persisted_event =
+        group_test_event(provider_id, "persisted-trigger", "continue", false, 2);
+    let persisted_message = persisted_event.message.as_mut().unwrap();
+    persisted_message.root_id = Some("root-card".to_string());
+    persisted_message.parent_id = Some("root-card".to_string());
+    persisted_message.thread_id = Some("topic-startup".to_string());
+    persisted_message
+        .images
+        .push(crate::im_gateway::types::ImImageAttachment {
+            file_key: "image-key".to_string(),
+            source: Default::default(),
+            mime_type: Some("image/png".to_string()),
+            data_base64: Some("aW1hZ2U=".to_string()),
+            download_url: None,
+            encrypted_query_param: None,
+            aes_key: None,
+        });
+    persisted_message
+        .files
+        .push(crate::im_gateway::types::ImFileAttachment {
+            file_key: "file-key".to_string(),
+            name: Some("context.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: Some(4),
+            data_base64: Some("ZmlsZQ==".to_string()),
+            download_url: None,
+        });
     group_store
         .claim_feishu_thread_binding(
             &crate::im_gateway::group_context::FeishuThreadBinding {
@@ -233,19 +260,32 @@ fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redel
                 trigger_message_id: "persisted-trigger".to_string(),
                 initial_message: "continue".to_string(),
                 fallback_message: None,
+                initial_event_json: Some(serde_json::to_string(&persisted_event).unwrap()),
                 state: "initializing".to_string(),
             },
             2,
         )
         .unwrap();
 
-    let recovered = recover_pending_feishu_thread_events(provider_id, &group_store);
+    let recovered = recover_pending_feishu_thread_events(provider_id, &group_store).unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!(
         recovered[0].source.message_id.as_deref(),
         Some("persisted-trigger")
     );
-    assert!(recover_pending_feishu_thread_events("other-provider", &group_store).is_empty());
+    let recovered_message = recovered[0].message.as_ref().unwrap();
+    assert_eq!(recovered_message.images[0].file_key, "image-key");
+    assert_eq!(recovered_message.files[0].file_key, "file-key");
+    assert!(
+        recover_pending_feishu_thread_events("other-provider", &group_store)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        recover_pending_feishu_thread_events(provider_id, &group_store)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -278,6 +318,7 @@ async fn failed_topic_binding_uses_new_message_instead_of_replaying_old_instruct
                 trigger_message_id: "old-trigger".to_string(),
                 initial_message: "old instruction".to_string(),
                 fallback_message: Some("old root + old instruction".to_string()),
+                initial_event_json: None,
                 state: "failed".to_string(),
             },
             1,

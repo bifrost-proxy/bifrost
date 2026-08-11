@@ -228,8 +228,16 @@ pub(super) async fn run_event_loop_with_options(
 
     let mut dedup = EventDedup::new();
     let mut session_mailboxes = SessionMailboxRegistry::new();
-    let mut recovered_session_events =
-        recover_pending_feishu_thread_events(&provider.id, &group_context_store);
+    let mut recovered_session_events = match recover_pending_feishu_thread_events(
+        &provider.id,
+        &group_context_store,
+    ) {
+        Ok(events) => events,
+        Err(error) => {
+            error!(provider_id = %provider.id, error = %error, "failed to claim pending Feishu topic recoveries");
+            VecDeque::new()
+        }
+    };
     let mut inbound_open = true;
 
     loop {
@@ -964,42 +972,49 @@ fn recover_session_completion(
 fn recover_pending_feishu_thread_events(
     provider_id: &str,
     group_context_store: &ImGroupContextStore,
-) -> VecDeque<ImEvent> {
-    group_context_store
-        .pending_feishu_thread_bindings(provider_id)
-        .unwrap_or_default()
+) -> Result<VecDeque<ImEvent>, String> {
+    let events = group_context_store
+        .claim_pending_feishu_thread_bindings(provider_id, now_ms())?
         .into_iter()
-        .map(|binding| ImEvent {
-            event_id: format!("recovered:{}", binding.trigger_message_id),
-            provider_id: binding.provider_id,
-            provider_type: ImProviderType::Feishu,
-            event_type: "message.recovered".to_string(),
-            source: crate::im_gateway::types::ImEventSource {
-                chat_id: Some(binding.chat_id),
-                chat_type: Some("group".to_string()),
-                user_id: None,
-                user_name: None,
-                sender_type: Some("user".to_string()),
-                message_id: Some(binding.trigger_message_id),
-            },
-            message: Some(crate::im_gateway::types::ImEventMessage {
-                text: binding.initial_message,
-                mentions: Vec::new(),
-                images: Vec::new(),
-                files: Vec::new(),
-                reply_to: None,
-                raw_type: Some("text".to_string()),
-                raw_content: None,
-                create_time: None,
-                update_time: None,
-                root_id: Some(binding.root_message_id.clone()),
-                parent_id: Some(binding.root_message_id),
-                thread_id: Some(binding.feishu_thread_id),
-            }),
-            received_at: now_ms(),
-            raw_digest: Some("startup_recovery".to_string()),
+        .map(|binding| {
+            if let Some(event_json) = binding.initial_event_json.as_deref() {
+                if let Ok(event) = serde_json::from_str::<ImEvent>(event_json) {
+                    return event;
+                }
+            }
+            ImEvent {
+                event_id: format!("recovered:{}", binding.trigger_message_id),
+                provider_id: binding.provider_id,
+                provider_type: ImProviderType::Feishu,
+                event_type: "message.recovered".to_string(),
+                source: crate::im_gateway::types::ImEventSource {
+                    chat_id: Some(binding.chat_id),
+                    chat_type: Some("group".to_string()),
+                    user_id: None,
+                    user_name: None,
+                    sender_type: Some("user".to_string()),
+                    message_id: Some(binding.trigger_message_id),
+                },
+                message: Some(crate::im_gateway::types::ImEventMessage {
+                    text: binding.initial_message,
+                    mentions: Vec::new(),
+                    images: Vec::new(),
+                    files: Vec::new(),
+                    reply_to: None,
+                    raw_type: Some("text".to_string()),
+                    raw_content: None,
+                    create_time: None,
+                    update_time: None,
+                    root_id: Some(binding.root_message_id.clone()),
+                    parent_id: Some(binding.root_message_id),
+                    thread_id: Some(binding.feishu_thread_id),
+                }),
+                received_at: now_ms(),
+                raw_digest: Some("startup_recovery".to_string()),
+            }
         })
-        .collect()
+        .collect::<VecDeque<_>>();
+    Ok(events)
 }
 
 pub(super) async fn acknowledge_and_log_inbound_event(
@@ -1158,7 +1173,10 @@ pub(super) async fn prepare_group_inbound_dispatch(
             store.record_event(event, "event")?;
             let recovering = event.source.message_id.as_deref()
                 == Some(binding.trigger_message_id.as_str())
-                && matches!(binding.state.as_str(), "waiting_source" | "initializing");
+                && matches!(
+                    binding.state.as_str(),
+                    "waiting_source" | "initializing" | "recovering"
+                );
             return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
                 message_text: if recovering {
                     binding.initial_message.clone()
@@ -1273,32 +1291,36 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 None,
             )
         };
-        let binding = store.claim_feishu_thread_binding(
-            &crate::im_gateway::group_context::FeishuThreadBinding {
-                provider_id: event.provider_id.clone(),
-                chat_id: chat_id.to_string(),
-                feishu_thread_id: thread_id.to_string(),
-                root_message_id: root_message_id.to_string(),
-                derived_session_key: session_key.clone(),
-                source_kind,
-                source_message_id: root_message_id.to_string(),
-                source_adapter,
-                source_thread_id,
-                source_turn_id,
-                trigger_message_id: event.source.message_id.clone().unwrap_or_default(),
-                initial_message: message_text.clone(),
-                fallback_message: fallback_message.clone(),
-                state: if anchor
-                    .as_ref()
-                    .is_some_and(|value| value.status == "pending")
-                {
-                    "waiting_source".to_string()
-                } else {
-                    "initializing".to_string()
+        let binding =
+            store.claim_feishu_thread_binding(
+                &crate::im_gateway::group_context::FeishuThreadBinding {
+                    provider_id: event.provider_id.clone(),
+                    chat_id: chat_id.to_string(),
+                    feishu_thread_id: thread_id.to_string(),
+                    root_message_id: root_message_id.to_string(),
+                    derived_session_key: session_key.clone(),
+                    source_kind,
+                    source_message_id: root_message_id.to_string(),
+                    source_adapter,
+                    source_thread_id,
+                    source_turn_id,
+                    trigger_message_id: event.source.message_id.clone().unwrap_or_default(),
+                    initial_message: message_text.clone(),
+                    fallback_message: fallback_message.clone(),
+                    initial_event_json: Some(serde_json::to_string(event).map_err(|error| {
+                        format!("serialize Feishu topic recovery event: {error}")
+                    })?),
+                    state: if anchor
+                        .as_ref()
+                        .is_some_and(|value| value.status == "pending")
+                    {
+                        "waiting_source".to_string()
+                    } else {
+                        "initializing".to_string()
+                    },
                 },
-            },
-            event.received_at,
-        )?;
+                event.received_at,
+            )?;
         return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
             message_text,
             session_key: binding.derived_session_key,

@@ -1265,6 +1265,7 @@ fn feishu_anchor_and_thread_binding_are_provider_scoped_and_idempotent() {
         trigger_message_id: "trigger-a".to_string(),
         initial_message: "start".to_string(),
         fallback_message: Some("root + start".to_string()),
+        initial_event_json: None,
         state: "initializing".to_string(),
     };
     assert_eq!(
@@ -1279,6 +1280,46 @@ fn feishu_anchor_and_thread_binding_are_provider_scoped_and_idempotent() {
         store.claim_feishu_thread_binding(&conflicting, 3).unwrap(),
         binding
     );
+}
+
+#[test]
+fn pending_thread_recovery_is_atomically_claimed_once_per_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let binding = FeishuThreadBinding {
+        provider_id: "provider-a".to_string(),
+        chat_id: "chat-a".to_string(),
+        feishu_thread_id: "topic-a".to_string(),
+        root_message_id: "card-a".to_string(),
+        derived_session_key: build_group_thread_session_key("provider-a", "chat-a", "topic-a"),
+        source_kind: "local_checkpoint".to_string(),
+        source_message_id: "card-a".to_string(),
+        source_adapter: Some("codex".to_string()),
+        source_thread_id: Some("thread-a".to_string()),
+        source_turn_id: Some("turn-a".to_string()),
+        trigger_message_id: "trigger-a".to_string(),
+        initial_message: "continue".to_string(),
+        fallback_message: None,
+        initial_event_json: Some("{}".to_string()),
+        state: "initializing".to_string(),
+    };
+    store.claim_feishu_thread_binding(&binding, 1).unwrap();
+
+    assert_eq!(
+        store
+            .claim_pending_feishu_thread_bindings("provider-a", 2)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store
+        .claim_pending_feishu_thread_bindings("provider-a", 3)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .claim_pending_feishu_thread_bindings("provider-b", 3)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

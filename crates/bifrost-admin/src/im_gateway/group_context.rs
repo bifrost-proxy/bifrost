@@ -147,6 +147,7 @@ pub struct FeishuThreadBinding {
     pub trigger_message_id: String,
     pub initial_message: String,
     pub fallback_message: Option<String>,
+    pub initial_event_json: Option<String>,
     pub state: String,
 }
 
@@ -294,8 +295,8 @@ impl ImGroupContextStore {
                 provider_id, chat_id, feishu_thread_id, root_message_id,
                 derived_session_key, source_kind, source_message_id, source_adapter,
                 source_thread_id, source_turn_id, trigger_message_id, initial_message,
-                fallback_message, state, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+                fallback_message, initial_event_json, state, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
              ON CONFLICT(provider_id, chat_id, feishu_thread_id) DO NOTHING",
                 params![
                     binding.provider_id,
@@ -311,6 +312,7 @@ impl ImGroupContextStore {
                     binding.trigger_message_id,
                     binding.initial_message,
                     binding.fallback_message,
+                    binding.initial_event_json,
                     binding.state,
                     now,
                 ],
@@ -337,7 +339,7 @@ impl ImGroupContextStore {
                 "SELECT provider_id, chat_id, feishu_thread_id, root_message_id,
                     derived_session_key, source_kind, source_message_id, source_adapter,
                     source_thread_id, source_turn_id, trigger_message_id, initial_message,
-                    fallback_message, state
+                    fallback_message, initial_event_json, state
              FROM im_feishu_thread_bindings
              WHERE provider_id = ?1 AND chat_id = ?2 AND feishu_thread_id = ?3",
                 params![provider_id, chat_id, thread_id],
@@ -356,7 +358,8 @@ impl ImGroupContextStore {
                         trigger_message_id: row.get(10)?,
                         initial_message: row.get(11)?,
                         fallback_message: row.get(12)?,
-                        state: row.get(13)?,
+                        initial_event_json: row.get(13)?,
+                        state: row.get(14)?,
                     })
                 },
             )
@@ -375,7 +378,8 @@ impl ImGroupContextStore {
         let connection = self.connection.lock();
         connection
             .execute(
-                "UPDATE im_feishu_thread_bindings SET state = ?4, updated_at = ?5
+                "UPDATE im_feishu_thread_bindings
+             SET state = ?4, recovery_token = NULL, updated_at = ?5
                  WHERE provider_id = ?1 AND chat_id = ?2 AND feishu_thread_id = ?3",
                 params![provider_id, chat_id, thread_id, state, now],
             )
@@ -383,24 +387,43 @@ impl ImGroupContextStore {
         Ok(())
     }
 
-    pub fn pending_feishu_thread_bindings(
+    pub fn claim_pending_feishu_thread_bindings(
         &self,
         provider_id: &str,
+        now: u64,
     ) -> Result<Vec<FeishuThreadBinding>, String> {
-        let connection = self.connection.lock();
-        let mut statement = connection
+        static PROCESS_RECOVERY_OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let owner = PROCESS_RECOVERY_OWNER.get_or_init(|| uuid::Uuid::new_v4().to_string());
+        let recovery_token = format!("{owner}:{}", uuid::Uuid::new_v4());
+        let owner_pattern = format!("{owner}:%");
+        let mut connection = self.connection.lock();
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("begin pending Feishu recovery claim: {error}"))?;
+        transaction
+            .execute(
+                "UPDATE im_feishu_thread_bindings
+                 SET state = 'recovering', recovery_token = ?2, updated_at = ?3
+                 WHERE provider_id = ?1
+                   AND (state IN ('waiting_source', 'initializing')
+                        OR (state = 'recovering' AND
+                            (recovery_token IS NULL OR recovery_token NOT LIKE ?4)))",
+                params![provider_id, recovery_token, now, owner_pattern],
+            )
+            .map_err(|error| format!("claim pending Feishu thread bindings: {error}"))?;
+        let mut statement = transaction
             .prepare(
                 "SELECT provider_id, chat_id, feishu_thread_id, root_message_id,
                     derived_session_key, source_kind, source_message_id, source_adapter,
                     source_thread_id, source_turn_id, trigger_message_id, initial_message,
-                    fallback_message, state
+                    fallback_message, initial_event_json, state
                  FROM im_feishu_thread_bindings
-                 WHERE provider_id = ?1 AND state IN ('waiting_source', 'initializing')
+                 WHERE provider_id = ?1 AND recovery_token = ?2
                  ORDER BY created_at ASC",
             )
             .map_err(|error| format!("prepare pending Feishu thread bindings: {error}"))?;
         let rows = statement
-            .query_map(params![provider_id], |row| {
+            .query_map(params![provider_id, recovery_token], |row| {
                 Ok(FeishuThreadBinding {
                     provider_id: row.get(0)?,
                     chat_id: row.get(1)?,
@@ -415,12 +438,19 @@ impl ImGroupContextStore {
                     trigger_message_id: row.get(10)?,
                     initial_message: row.get(11)?,
                     fallback_message: row.get(12)?,
-                    state: row.get(13)?,
+                    initial_event_json: row.get(13)?,
+                    state: row.get(14)?,
                 })
             })
             .map_err(|error| format!("query pending Feishu thread bindings: {error}"))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("decode pending Feishu thread binding: {error}"))
+        let bindings = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("decode pending Feishu thread binding: {error}"))?;
+        drop(statement);
+        transaction
+            .commit()
+            .map_err(|error| format!("commit pending Feishu recovery claim: {error}"))?;
+        Ok(bindings)
     }
 
     pub fn record_event(&self, event: &ImEvent, source: &str) -> Result<u64, String> {
@@ -1440,6 +1470,8 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
                 trigger_message_id TEXT NOT NULL DEFAULT '',
                 initial_message TEXT NOT NULL DEFAULT '',
                 fallback_message TEXT,
+                initial_event_json TEXT,
+                recovery_token TEXT,
                 state TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
@@ -1493,6 +1525,16 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
             "im_feishu_thread_bindings",
             "fallback_message",
             "ALTER TABLE im_feishu_thread_bindings ADD COLUMN fallback_message TEXT",
+        ),
+        (
+            "im_feishu_thread_bindings",
+            "initial_event_json",
+            "ALTER TABLE im_feishu_thread_bindings ADD COLUMN initial_event_json TEXT",
+        ),
+        (
+            "im_feishu_thread_bindings",
+            "recovery_token",
+            "ALTER TABLE im_feishu_thread_bindings ADD COLUMN recovery_token TEXT",
         ),
     ] {
         if let Err(error) = connection.execute(sql, []) {
