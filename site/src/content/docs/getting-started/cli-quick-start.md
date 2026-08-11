@@ -434,7 +434,7 @@ Agent skill 的完整协作流程见下一节。
 第一步，给 Agent 安装 Bifrost 能力说明。这个命令只安装 skill 文档，不启动代理、不抓流量、不修改规则：
 
 ```bash
-bifrost install-skill -t codex -y
+bifrost install-skill -t universal -y
 ```
 
 如果你同时使用多个支持的 Agent，可以安装到默认可发现的位置：

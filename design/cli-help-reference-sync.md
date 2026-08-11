@@ -63,7 +63,7 @@
 7. 访问控制：默认 `interactive` mode、loopback 允许、非本机审批。
 8. 远程操作：`bifrost remote conn`、`remote file`、`remote exec`。
 9. 备份 / 同步：`config export/import`、rule sync。
-10. Agent 协作开发业务 Skill：`install-skill -t codex`、复用主服务、按 `--client-app` 抓应用流量、给 Agent 的指令模板。
+10. Agent 协作开发业务 Skill：`install-skill -t universal`、复用主服务、按 `--client-app` 抓应用流量、给 Agent 的指令模板。
 
 每个场景讲：**何时使用**（识别信号）、**命令**（可独立执行的最小命令序列）、**常见误区**（例如临时端口示例不能脱离 `port bind` 上下文）、**下一步**（链到 `docs/cli.md`、`docs/rule.md` 对应章节）。
 
@@ -197,7 +197,7 @@ More docs:
 ### Phase 2：新增 quick-start 文档
 
 - 创建 `docs/cli-quick-start.md`，按 10 个场景组织。
-- 覆盖 Agent 协作 Skill 场景：`install-skill -t codex`、复用主服务、按 `--client-app` 过滤、给 Agent 的指令模板、要求 Agent 基于真实 traffic 证据。
+- 覆盖 Agent 协作 Skill 场景：`install-skill -t universal`、复用主服务、按 `--client-app` 过滤、给 Agent 的指令模板、要求 Agent 基于真实 traffic 证据。
 - 覆盖同一服务多任务场景：常驻主服务 + 任务端口 + `listener_port` 过滤。
 - 默认起手式与 TLS 抓包边界说明。
 - Values 边界：默认推荐内联，特别大内容才用全局 Values。
@@ -245,7 +245,7 @@ More docs:
 
 - `TC-CSA-32-a`：顶层 `--help` 不含 `SUBCOMMAND REFERENCE`，末尾包含关键文档链接；`docs/cli-quick-start.md` 存在并承接常用命令、环境变量、规则快速入门。
 - `TC-CSA-32-b`：`docs/cli-quick-start.md` 采用使用场景组织；`docs/cli.md` 包含命令覆盖索引、环境变量和规则变量速查。
-- `TC-CSA-32-c`：快速开始包含「和 Agent 协作开发业务 Skill」场景、`install-skill -t codex`、按 `--client-app` 过滤应用流量、明确要求 Agent 基于真实 traffic 证据而不是 mock/猜测。
+- `TC-CSA-32-c`：快速开始包含「和 Agent 协作开发业务 Skill」场景、`install-skill -t universal`、按 `--client-app` 过滤应用流量、明确要求 Agent 基于真实 traffic 证据而不是 mock/猜测。
 - `TC-CSA-32-d`：quick-start、CLI 手册和 operation 手册均不把全局 Values 作为默认推荐，而是优先内联或规则文件内嵌值。
 - `TC-CSA-32-e`：quick-start 和 CLI/getting-started 文档默认推荐系统代理 + 主服务 + 多端口；TLS 抓包按需通过规则级、域名白名单或应用白名单开启；SSL pinning 应用应排除；`ca generate/install`、全局 `--intercept`、`--no-system-proxy`、`--unsafe-ssl`/`-k`/临时数据目录不是默认路径。
 - `TC-CSA-32-f`：quick-start 和 CLI 手册包含「同一个 Bifrost 服务服务多个应用/开发任务」场景；Agent 指令使用 `listener_port` 隔离任务流量。

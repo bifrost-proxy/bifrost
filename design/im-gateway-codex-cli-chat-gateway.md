@@ -206,7 +206,7 @@ Schedule Agent 覆盖：以 schedule 覆盖值覆盖 Runner 默认值；`dangerF
 
 ### Skill 与 Bifrost 工具集合
 
-Skill resolver：`<work_dir>/.agents/skills`、`~/.agents/skills`、`~/.codex/skills`、`$BIFROST_DATA_DIR/agent/skills` 与 `.system`。prompt 中只放 name、description、绝对路径；不 eager 注入完整 SKILL.md。Codex adapter 用 `--add-dir` 让 CLI 读取 skill root；Bifrost 内置能力优先通过 `bifrost install-skill -t codex -y` 安装为 Codex 原生 skill。
+Skill resolver：`<work_dir>/.agents/skills`、`~/.agents/skills`、`~/.codex/skills`、`$BIFROST_DATA_DIR/agent/skills` 与 `.system`。prompt 中只放 name、description、绝对路径；不 eager 注入完整 SKILL.md。Codex adapter 用 `--add-dir` 让 CLI 读取 skill root；Bifrost 内置能力优先通过 `bifrost install-skill -t universal -y` 安装到标准 Agent Skills 目录。
 
 V1 通过 skill 调用 `bifrost` CLI（`traffic list/search/get`、`im send`、`im provider status`、`remote ...`、`rules ...`）。Chat Gateway 测试默认不允许 `bifrost im send` 发到真实 IM。V2 新增 `bifrost mcp-server` 结构化工具：`im_send`、`im_update_progress`、`traffic_search/get`、`rule_list`、`remote_status/invoke`、`schedule_*`。
 
@@ -232,7 +232,7 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 ## CLI + Web + Admin API
 
-- CLI：`bifrost im schedule add/update ... --provider <p> --runner <r> --target ...`；`bifrost install-skill -t codex -y`。
+- CLI：`bifrost im schedule add/update ... --provider <p> --runner <r> --target ...`；`bifrost install-skill -t universal -y`。
 - Admin API：如上 `chat`/`chat/stream`/`runs/:id`/`runs/:id/stop`/`chat/config`/`chat/config/channels/:provider_id`；`agent/defaults`、`agent/providers/:id/agent`、`agent/resolve-config` 为 planned。
 - Web：AI → Agent → Runners 管理 runner；AI → Agent → General 选默认 runner；IM Provider 编辑弹窗覆盖 `agent_config.runner`；Chat Gateway 测试抽屉 + Runs 详情页共用同一入口。真实 IM 入站和 Chat Gateway 测试 run 都进入同一 Runs 页面，按 `source_kind` 区分。
 

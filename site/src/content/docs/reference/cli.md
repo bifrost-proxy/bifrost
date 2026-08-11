@@ -923,16 +923,14 @@ bifrost completions powershell
 
 ```bash
 bifrost install-skill -y
-bifrost install-skill -t codex -y
-bifrost install-skill -t trae -y
-bifrost install-skill -t github-copilot -y
 bifrost install-skill -t universal -y
+bifrost install-skill -t claude-code -y
 bifrost install-skill -t all -y
 bifrost install-skill --cwd -y
 ```
 
-`install-skill` 只安装 Bifrost Agent Skill 文档，让 Agent 知道如何调用本机或远端 Bifrost CLI。它不会启动代理、不会开启系统代理、不会导入规则，也不会授予远端 shell 权限。默认目标为 `all`，会覆盖安装到所有支持的 AI 编程工具；`--cwd` 安装到当前项目目录，`--dir` 可指定自定义目录，二者互斥。`BIFROST_INSTALL_SKILL_SOURCE` 可覆盖安装源，`BIFROST_INSTALL_SKILL_DIR` 可在测试中覆盖默认安装目录，普通用户通常不需要设置。
+`install-skill` 只安装 Bifrost Agent Skill 文档，让 Agent 知道如何调用本机或远端 Bifrost CLI。它不会启动代理、不会开启系统代理、不会导入规则，也不会授予远端 shell 权限。默认目标为 `all`，会覆盖安装到标准 `.agents/skills` 与 Claude Code 的 `.claude/skills`；`--cwd` 安装到当前项目目录，`--dir` 可指定自定义目录，二者互斥。`BIFROST_INSTALL_SKILL_SOURCE` 可覆盖安装源，`BIFROST_INSTALL_SKILL_DIR` 可在测试中覆盖默认安装目录，普通用户通常不需要设置。历史 vendor target（`codex`、`trae`、`cursor`、`github-copilot`）不再接受，请使用 `universal`。
 
 安装内容包含通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户只是在本机启动代理、写规则、查本机流量时使用通用 skill；如果要连接另一台机器、使用 pair code / SSH key、远程查询流量、上传脚本执行或通过授权 shell 操作目标设备，应切换到 `bifrost-remote` skill 的完整流程。
 
-和 Agent 协作沉淀业务 skill 时，推荐先执行 `bifrost install-skill -t codex -y` 或面向当前工具的目标安装，再用 `capture wait`、`traffic list/get/search` 给 Agent 提供真实流量证据；流量详情当前按捕获原文输出，沉淀可复用 skill 前必须手动移除 token、cookie、手机号、邮箱等敏感信息。
+和 Agent 协作沉淀业务 skill 时，推荐先执行 `bifrost install-skill -t universal -y`，Claude Code 用户也可使用 `-t claude-code`，再用 `capture wait`、`traffic list/get/search` 给 Agent 提供真实流量证据；流量详情当前按捕获原文输出，沉淀可复用 skill 前必须手动移除 token、cookie、手机号、邮箱等敏感信息。

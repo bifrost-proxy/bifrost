@@ -10,10 +10,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
     vec![
         TestCase::standalone(
             "install_skill_single_tool_to_temp_dir",
-            "Install skill to a single tool (claude-code) in a temp directory",
+            "Install skill to a single supported target in a temp directory",
             "install_skill",
             || async move {
-                // Avoid flaky external network dependency in CI.
                 std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
                 let tmp = tempdir("install_skill_single")?;
                 handle_install_skill(
@@ -24,24 +23,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 )
                 .map_err(|e| format!("handle_install_skill failed: {e}"))?;
 
-                let target = tmp.join("SKILL.md");
-                if !target.exists() {
-                    return Err(format!("Expected file not found: {}", target.display()));
-                }
-
-                let content = fs::read_to_string(&target)
-                    .map_err(|e| format!("Failed to read installed file: {e}"))?;
-
-                if content.trim().is_empty() {
-                    return Err("Installed file is empty".to_string());
-                }
-
-                if !content.contains("bifrost") && !content.contains("Bifrost") {
-                    return Err(
-                        "Installed file does not contain expected bifrost content".to_string()
-                    );
-                }
-
+                assert_installed_skill(&tmp.join("SKILL.md"))?;
                 cleanup_dir(&tmp);
                 Ok(())
             },
@@ -58,25 +40,20 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 fs::write(&target, "old content that should be replaced")
                     .map_err(|e| format!("Failed to write seed file: {e}"))?;
 
-                handle_install_skill(Some("codex".to_string()), Some(tmp.clone()), false, true)
-                    .map_err(|e| format!("handle_install_skill failed: {e}"))?;
+                handle_install_skill(
+                    Some("universal".to_string()),
+                    Some(tmp.clone()),
+                    false,
+                    true,
+                )
+                .map_err(|e| format!("handle_install_skill failed: {e}"))?;
 
                 let new_content = fs::read_to_string(&target)
                     .map_err(|e| format!("Failed to read overwritten file: {e}"))?;
-
                 if new_content == "old content that should be replaced" {
                     return Err("File was NOT overwritten — still contains old content".to_string());
                 }
-
-                if new_content.trim().is_empty() {
-                    return Err("Overwritten file is empty".to_string());
-                }
-
-                if !new_content.contains("bifrost") && !new_content.contains("Bifrost") {
-                    return Err(
-                        "Overwritten file does not contain expected bifrost content".to_string()
-                    );
-                }
+                assert_skill_content(&new_content)?;
 
                 cleanup_dir(&tmp);
                 Ok(())
@@ -84,42 +61,67 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "install_skill_has_standard_frontmatter",
-            "Installed SKILL.md should contain standard YAML frontmatter (name + description)",
+            "Installed SKILL.md should contain standard YAML frontmatter",
             "install_skill",
             || async move {
                 std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
                 let tmp = tempdir("install_skill_fm")?;
 
-                handle_install_skill(Some("trae".to_string()), Some(tmp.clone()), false, true)
-                    .map_err(|e| format!("handle_install_skill failed: {e}"))?;
+                handle_install_skill(
+                    Some("universal".to_string()),
+                    Some(tmp.clone()),
+                    false,
+                    true,
+                )
+                .map_err(|e| format!("handle_install_skill failed: {e}"))?;
 
                 let target = tmp.join("SKILL.md");
-                if !target.exists() {
-                    return Err(format!("Expected file not found: {}", target.display()));
-                }
-
                 let content =
                     fs::read_to_string(&target).map_err(|e| format!("Failed to read file: {e}"))?;
-
                 let normalized = content.replace("\r\n", "\n");
                 if !normalized.starts_with("---\n") {
                     return Err("SKILL.md should start with YAML frontmatter (---)".to_string());
                 }
-
                 if !content.contains("name:") {
-                    return Err(
-                        "SKILL.md frontmatter should contain 'name' field for skill discovery"
-                            .to_string(),
-                    );
+                    return Err("SKILL.md frontmatter should contain 'name'".to_string());
                 }
-
                 if !content.contains("description:") {
-                    return Err(
-                        "SKILL.md frontmatter should contain 'description' field for skill discovery"
-                            .to_string(),
-                    );
+                    return Err("SKILL.md frontmatter should contain 'description'".to_string());
                 }
 
+                cleanup_dir(&tmp);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "install_skill_legacy_targets_rejected",
+            "Legacy vendor-specific skill targets are rejected",
+            "install_skill",
+            || async move {
+                let tmp = tempdir("install_skill_legacy")?;
+                for legacy in ["codex", "trae", "cursor", "github-copilot"] {
+                    let result = handle_install_skill(
+                        Some(legacy.to_string()),
+                        Some(tmp.clone()),
+                        false,
+                        true,
+                    );
+                    match result {
+                        Ok(()) => {
+                            cleanup_dir(&tmp);
+                            return Err(format!(
+                                "Expected legacy target '{legacy}' to be rejected"
+                            ));
+                        }
+                        Err(e) if e.to_string().contains("Unknown tool") => {}
+                        Err(e) => {
+                            cleanup_dir(&tmp);
+                            return Err(format!(
+                                "Legacy target '{legacy}' returned unexpected error: {e}"
+                            ));
+                        }
+                    }
+                }
                 cleanup_dir(&tmp);
                 Ok(())
             },
@@ -130,7 +132,6 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "install_skill",
             || async move {
                 let tmp = tempdir("install_skill_unknown")?;
-
                 let result = handle_install_skill(
                     Some("nonexistent-tool".to_string()),
                     Some(tmp.clone()),
@@ -145,17 +146,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        if !msg.contains("Unknown tool") {
+                        if !msg.contains("Unknown tool") || !msg.contains("nonexistent-tool") {
                             cleanup_dir(&tmp);
-                            return Err(format!(
-                                "Error message should mention 'Unknown tool', got: {msg}"
-                            ));
-                        }
-                        if !msg.contains("nonexistent-tool") {
-                            cleanup_dir(&tmp);
-                            return Err(format!(
-                                "Error message should mention the invalid tool name, got: {msg}"
-                            ));
+                            return Err(format!("Unexpected error message: {msg}"));
                         }
                         cleanup_dir(&tmp);
                         Ok(())
@@ -164,8 +157,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
-            "install_skill_all_tools_to_temp_dir",
-            "Install skill to all tools writes SKILL.md for each",
+            "install_skill_all_targets_to_temp_dir",
+            "Default install writes the skill for both supported targets",
             "install_skill",
             || async move {
                 std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
@@ -174,33 +167,18 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 handle_install_skill(None, Some(tmp.clone()), false, true)
                     .map_err(|e| format!("handle_install_skill (all) failed: {e}"))?;
 
-                let target = tmp.join("SKILL.md");
-                if !target.exists() {
-                    return Err(format!("Expected SKILL.md not found: {}", target.display()));
-                }
-
-                let content = fs::read_to_string(&target)
-                    .map_err(|e| format!("Failed to read SKILL.md: {e}"))?;
-
-                if content.trim().is_empty() {
-                    return Err("SKILL.md is empty".to_string());
-                }
-
-                if !content.contains("bifrost") && !content.contains("Bifrost") {
-                    return Err("SKILL.md does not contain bifrost content".to_string());
-                }
-
+                assert_installed_skill(&tmp.join("SKILL.md"))?;
                 cleanup_dir(&tmp);
                 Ok(())
             },
         ),
         TestCase::standalone(
-            "install_skill_cwd_mode",
-            "Install skill with --cwd installs to project-local skills/bifrost/ directories",
+            "install_skill_cwd_claude_mode",
+            "Project-local Claude install writes .claude/skills/bifrost",
             "install_skill",
             || async move {
                 std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
-                let tmp = tempdir("install_skill_cwd")?;
+                let tmp = tempdir("install_skill_cwd_claude")?;
                 with_temp_cwd(&tmp, || {
                     handle_install_skill(Some("claude-code".to_string()), None, true, true)
                         .map_err(|e| format!("handle_install_skill --cwd failed: {e}"))
@@ -211,97 +189,30 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .join("skills")
                     .join("bifrost")
                     .join("SKILL.md");
-                if !target.exists() {
-                    return Err(format!(
-                        "Expected project-local file not found: {}",
-                        target.display()
-                    ));
-                }
-
-                let content = fs::read_to_string(&target)
-                    .map_err(|e| format!("Failed to read project-local file: {e}"))?;
-
-                if content.trim().is_empty() {
-                    return Err("Project-local installed file is empty".to_string());
-                }
+                assert_installed_skill(&target)?;
 
                 cleanup_dir(&tmp);
                 Ok(())
             },
         ),
         TestCase::standalone(
-            "install_skill_cwd_codex_installs_legacy_and_universal_dirs",
-            "Install skill with --cwd for codex writes both .codex and .agents skill directories",
+            "install_skill_cwd_universal_mode",
+            "Project-local universal install writes .agents/skills/bifrost",
             "install_skill",
             || async move {
                 std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
-                let tmp = tempdir("install_skill_cwd_codex")?;
+                let tmp = tempdir("install_skill_cwd_universal")?;
                 with_temp_cwd(&tmp, || {
-                    handle_install_skill(Some("codex".to_string()), None, true, true)
-                        .map_err(|e| format!("handle_install_skill codex --cwd failed: {e}"))
-                })?;
-
-                let targets = [
-                    tmp.join(".codex")
-                        .join("skills")
-                        .join("bifrost")
-                        .join("SKILL.md"),
-                    tmp.join(".agents")
-                        .join("skills")
-                        .join("bifrost")
-                        .join("SKILL.md"),
-                ];
-
-                for target in &targets {
-                    if !target.exists() {
-                        return Err(format!(
-                            "Expected project-local file not found: {}",
-                            target.display()
-                        ));
-                    }
-
-                    let content = fs::read_to_string(target)
-                        .map_err(|e| format!("Failed to read project-local file: {e}"))?;
-                    if content.trim().is_empty() {
-                        return Err(format!("Installed file is empty: {}", target.display()));
-                    }
-                }
-
-                cleanup_dir(&tmp);
-                Ok(())
-            },
-        ),
-        TestCase::standalone(
-            "install_skill_github_copilot_cwd_mode",
-            "Install skill with --cwd for GitHub Copilot writes to .github/skills/bifrost",
-            "install_skill",
-            || async move {
-                std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
-                let tmp = tempdir("install_skill_cwd_copilot")?;
-                with_temp_cwd(&tmp, || {
-                    handle_install_skill(Some("github-copilot".to_string()), None, true, true)
-                        .map_err(|e| {
-                            format!("handle_install_skill github-copilot --cwd failed: {e}")
-                        })
+                    handle_install_skill(Some("universal".to_string()), None, true, true)
+                        .map_err(|e| format!("handle_install_skill universal --cwd failed: {e}"))
                 })?;
 
                 let target = tmp
-                    .join(".github")
+                    .join(".agents")
                     .join("skills")
                     .join("bifrost")
                     .join("SKILL.md");
-                if !target.exists() {
-                    return Err(format!(
-                        "Expected GitHub Copilot project-local file not found: {}",
-                        target.display()
-                    ));
-                }
-
-                let content = fs::read_to_string(&target)
-                    .map_err(|e| format!("Failed to read GitHub Copilot file: {e}"))?;
-                if content.trim().is_empty() {
-                    return Err("GitHub Copilot installed file is empty".to_string());
-                }
+                assert_installed_skill(&target)?;
 
                 cleanup_dir(&tmp);
                 Ok(())
@@ -342,6 +253,25 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
     ]
+}
+
+fn assert_installed_skill(target: &PathBuf) -> Result<(), String> {
+    if !target.exists() {
+        return Err(format!("Expected file not found: {}", target.display()));
+    }
+    let content = fs::read_to_string(target)
+        .map_err(|e| format!("Failed to read installed file {}: {e}", target.display()))?;
+    assert_skill_content(&content)
+}
+
+fn assert_skill_content(content: &str) -> Result<(), String> {
+    if content.trim().is_empty() {
+        return Err("Installed skill is empty".to_string());
+    }
+    if !content.contains("bifrost") && !content.contains("Bifrost") {
+        return Err("Installed skill does not contain expected bifrost content".to_string());
+    }
+    Ok(())
 }
 
 fn tempdir(prefix: &str) -> Result<PathBuf, String> {

@@ -1165,7 +1165,10 @@ jobs:
   build-cli-windows:
     name: Build Windows CLI (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # A cold x86_64 runner builds both the release CLI and a pinned-version
+    # upgrade fixture. Two consecutive attempts reached the old 60 minute job
+    # limit during the second build without a compiler error.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

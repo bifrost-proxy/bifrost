@@ -528,22 +528,14 @@ previous runtime settings."
         action: CaptureCommands,
     },
     #[command(
-        about = "Install bifrost SKILL.md to AI coding tools (Claude Code, Codex, Trae, Cursor, GitHub Copilot, and standard Agent Skills runtimes)"
+        about = "Install bifrost SKILL.md to standard Agent Skills and Claude Code directories"
     )]
     InstallSkill {
         #[arg(
             short,
             long,
-            value_parser = [
-                "claude-code",
-                "codex",
-                "trae",
-                "cursor",
-                "github-copilot",
-                "universal",
-                "all"
-            ],
-            help = "Target tool: claude-code, codex, trae, cursor, github-copilot, universal, or 'all' (default: all)"
+            value_parser = ["universal", "claude-code", "all"],
+            help = "Target directory set: universal, claude-code, or 'all' (default: all)"
         )]
         tool: Option<String>,
         #[arg(

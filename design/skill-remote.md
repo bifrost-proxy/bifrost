@@ -225,7 +225,7 @@ Agent 必须主动获取远端最新 `skill_remote.md`，以
 
 ### CLI（caller 侧）
 
-- 安装：`bifrost install-skill --tool codex [--dir <path>] [-y]`。
+- 安装：`bifrost install-skill --tool universal [--dir <path>] [-y]`。
 - 远程：`bifrost remote [--client-id <id>] <subcommand>`
   - `conn status/down/up`
   - `traffic list/get/search`
@@ -335,7 +335,7 @@ Skill 文本断言（在 install_skill 单测里）：
 
 ### E2E 测试
 
-- `cargo run -p bifrost-cli -- install-skill --tool codex --dir <tmp>/skills/bifrost -y`
+- `cargo run -p bifrost-cli -- install-skill --tool universal --dir <tmp>/skills/bifrost -y`
   - 断言 `<tmp>/skills/bifrost/SKILL.md` 与 `<tmp>/skills/bifrost-remote/SKILL.md` 均存在。
   - 断言 remote skill 包含 `--from-local`、`AGENTS.md`、`.agents/skills/`、`remote exec --detach`、
     `job list/status/logs/watch`、`scratch-dir`、`file.op_not_permitted`、`--login`、
