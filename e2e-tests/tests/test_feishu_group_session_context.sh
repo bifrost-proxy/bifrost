@@ -795,7 +795,7 @@ assert "example.invalid" not in quoted_card_prompt and "不应读取" not in quo
 assert "[附件 1 个]" in quoted_file_prompt, quoted_file_prompt
 assert "## Attached Files" in quoted_file_prompt, quoted_file_prompt
 assert "name: quoted-requirements.md" in quoted_file_prompt, quoted_file_prompt
-assert "最前面的 0 张图片和 1 个文件属于被引用消息" in quoted_file_prompt, quoted_file_prompt
+assert "最前面的 0 张图片和 1 个文件来自引用消息" in quoted_file_prompt, quoted_file_prompt
 file_paths = [
     pathlib.Path(path) for path in re.findall(r"`([^`]+)`", quoted_file_prompt)
     if path.endswith("1-quoted-requirements.md")
@@ -805,7 +805,7 @@ assert file_paths[0].read_bytes() == b"# Quoted requirements\n", file_paths[0]
 
 assert "[附件 1 个]" in quoted_image_prompt, quoted_image_prompt
 assert "## Attached Images" in quoted_image_prompt, quoted_image_prompt
-assert "最前面的 1 张图片和 0 个文件属于被引用消息" in quoted_image_prompt, quoted_image_prompt
+assert "最前面的 1 张图片和 0 个文件来自引用消息" in quoted_image_prompt, quoted_image_prompt
 image_paths = [
     pathlib.Path(path) for path in re.findall(r"`([^`]+)`", quoted_image_prompt)
     if path.endswith("image-1.png")

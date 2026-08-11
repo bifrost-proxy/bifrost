@@ -724,23 +724,16 @@ pub(super) async fn hydrate_referenced_group_attachments_with_limits(
         notices.push(count_notice("图片", referenced.images.len(), max_per_kind));
     }
     for mut image in referenced.images.into_iter().take(max_per_kind) {
-        if let Some(data) = image.data_base64.as_deref() {
-            match decoded_base64_payload_size(data, max_image_bytes) {
-                Ok(_) => {}
-                Err(Base64PayloadSizeError::TooLarge) => {
-                    notices.push(size_notice("图片", &image.file_key, max_image_bytes));
-                    continue;
-                }
-                Err(Base64PayloadSizeError::Invalid) => {
-                    notices.push(problem_notice(
-                        "图片",
-                        &image.file_key,
-                        "内容不是有效 Base64",
-                    ));
-                    continue;
-                }
-            }
-        } else {
+        if let Err(notice) = preloaded_payload_size(
+            image.data_base64.as_deref(),
+            "图片",
+            &image.file_key,
+            max_image_bytes,
+        ) {
+            notices.push(notice);
+            continue;
+        }
+        if image.data_base64.is_none() {
             let (mime_type, bytes) = match client
                 .download_message_image_resource(provider, &referenced.message_id, &image)
                 .await
@@ -769,19 +762,17 @@ pub(super) async fn hydrate_referenced_group_attachments_with_limits(
     let mut total_file_bytes = 0u64;
     for mut file in referenced.files.into_iter().take(max_per_kind) {
         let file_label = file.name.as_deref().unwrap_or(&file.file_key).to_string();
-        let preloaded_size = match file.data_base64.as_deref() {
-            Some(data) => match decoded_base64_payload_size(data, max_file_bytes) {
-                Ok(size) => Some(size),
-                Err(Base64PayloadSizeError::TooLarge) => {
-                    notices.push(size_notice("文件", &file_label, max_file_bytes));
-                    continue;
-                }
-                Err(Base64PayloadSizeError::Invalid) => {
-                    notices.push(problem_notice("文件", &file_label, "内容不是有效 Base64"));
-                    continue;
-                }
-            },
-            None => None,
+        let preloaded_size = match preloaded_payload_size(
+            file.data_base64.as_deref(),
+            "文件",
+            &file_label,
+            max_file_bytes,
+        ) {
+            Ok(size) => size,
+            Err(notice) => {
+                notices.push(notice);
+                continue;
+            }
         };
         let expected_size = preloaded_size.or(file.size_bytes);
         if expected_size.is_some_and(|size| size > max_file_bytes) {
@@ -853,12 +844,6 @@ fn total_notice(label: &str, max_bytes: u64) -> String {
     format!("引用文件「{label}」会使附件总量超过 {max_mib} MiB；已跳过，任务继续执行。")
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Base64PayloadSizeError {
-    Invalid,
-    TooLarge,
-}
-
 #[cfg(test)]
 pub(super) fn referenced_file_budget_exceeded(current_bytes: u64, next_bytes: u64) -> bool {
     referenced_file_budget_exceeded_with_limit(
@@ -876,25 +861,29 @@ fn referenced_file_budget_exceeded_with_limit(
     current_bytes.saturating_add(next_bytes) > max_bytes
 }
 
-fn decoded_base64_payload_size(data: &str, max_bytes: u64) -> Result<u64, Base64PayloadSizeError> {
-    // Reject obviously oversized payloads before allocating the decoded Vec.
-    // The estimate intentionally rounds up; exact enforcement follows decode.
+fn preloaded_payload_size(
+    data: Option<&str>,
+    kind: &str,
+    label: &str,
+    max_bytes: u64,
+) -> Result<Option<u64>, String> {
+    let Some(data) = data else { return Ok(None) };
     let decoded_upper_bound = data
         .len()
         .checked_add(3)
         .and_then(|length| length.checked_div(4))
         .and_then(|groups| groups.checked_mul(3))
-        .ok_or(Base64PayloadSizeError::TooLarge)?;
+        .ok_or_else(|| size_notice(kind, label, max_bytes))?;
     if decoded_upper_bound as u64 > max_bytes.saturating_add(2) {
-        return Err(Base64PayloadSizeError::TooLarge);
+        return Err(size_notice(kind, label, max_bytes));
     }
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(data)
-        .map_err(|_| Base64PayloadSizeError::Invalid)?;
+        .map_err(|_| problem_notice(kind, label, "内容不是有效 Base64"))?;
     if decoded.len() as u64 > max_bytes {
-        return Err(Base64PayloadSizeError::TooLarge);
+        return Err(size_notice(kind, label, max_bytes));
     }
-    Ok(decoded.len() as u64)
+    Ok(Some(decoded.len() as u64))
 }
 
 pub(super) fn agent_message_text(message: &crate::im_gateway::types::ImEventMessage) -> String {

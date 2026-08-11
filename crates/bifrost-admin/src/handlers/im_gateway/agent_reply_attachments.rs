@@ -609,6 +609,9 @@ async fn send_agent_reply_attachment_notice(
     }
 }
 
+// Keeping the shared delivery context explicit makes both the standard and
+// planned reply paths use the same best-effort attachment semantics.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn send_agent_reply_assets(
     client: &ImProviderClient,
     provider: &ImProviderConfig,

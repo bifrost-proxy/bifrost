@@ -2760,11 +2760,7 @@ fn collect_rich_text_image_keys(value: &serde_json::Value, images: &mut Vec<ImIm
                     images.push(ImImageAttachment {
                         file_key: image_key.to_string(),
                         source: ImImageSource::MessageResource,
-                        mime_type: None,
-                        data_base64: None,
-                        download_url: None,
-                        encrypted_query_param: None,
-                        aes_key: None,
+                        ..Default::default()
                     });
                 }
             }
@@ -2797,11 +2793,7 @@ pub(super) fn parse_feishu_message_attachments(
             images.push(ImImageAttachment {
                 file_key: image_key.to_string(),
                 source: ImImageSource::MessageResource,
-                mime_type: None,
-                data_base64: None,
-                download_url: None,
-                encrypted_query_param: None,
-                aes_key: None,
+                ..Default::default()
             });
         }
     }
@@ -2829,8 +2821,7 @@ pub(super) fn parse_feishu_message_attachments(
                     .or_else(|| content.get("size"))
                     .or_else(|| content.get("size_bytes"))
                     .and_then(serde_json::Value::as_u64),
-                data_base64: None,
-                download_url: None,
+                ..Default::default()
             });
         }
     }

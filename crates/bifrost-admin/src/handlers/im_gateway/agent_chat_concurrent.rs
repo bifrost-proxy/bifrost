@@ -57,7 +57,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
         )
         .await
         {
-            Ok(GroupInboundDispatch::Dispatch(dispatch)) => dispatch,
+            Ok(GroupInboundDispatch::Dispatch(dispatch)) => *dispatch,
             Ok(GroupInboundDispatch::Ambient) => {
                 if let Err(error) = event_store.add(event.clone()) {
                     error!(error = %error, "failed to store concurrent ambient group event");

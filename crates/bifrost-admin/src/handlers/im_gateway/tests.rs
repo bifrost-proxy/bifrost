@@ -1578,7 +1578,11 @@ pub(super) async fn agent_reply_remote_file_stream_limit_and_empty_body_are_non_
         .expect("bind streamed attachment server");
     let port = listener.local_addr().expect("streamed server addr").port();
     let server = tokio::spawn(async move {
-        for body in ["3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n", "0\r\n\r\n"] {
+        for body in [
+            "3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
+            "0\r\n\r\n",
+            "10\r\nabc",
+        ] {
             let (mut stream, _) = listener.accept().await.expect("accept download");
             let mut request = [0u8; 1024];
             let _ = stream.read(&mut request).await;
@@ -1604,6 +1608,10 @@ pub(super) async fn agent_reply_remote_file_stream_limit_and_empty_body_are_non_
         .await
         .expect_err("empty response must be rejected");
     assert!(empty.to_string().contains("empty body"));
+    let truncated = download_remote_attachment_with_limit(&attachment("truncated"), 64)
+        .await
+        .expect_err("truncated chunked response must return a body read error");
+    assert!(truncated.to_string().contains("body failed"));
     server.await.expect("streamed attachment server");
 }
 

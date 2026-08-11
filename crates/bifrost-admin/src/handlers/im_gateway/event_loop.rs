@@ -409,7 +409,7 @@ pub(super) async fn run_event_loop_with_options(
             )
             .await
             {
-                Ok(GroupInboundDispatch::Dispatch(dispatch)) => dispatch,
+                Ok(GroupInboundDispatch::Dispatch(dispatch)) => *dispatch,
                 Ok(GroupInboundDispatch::Ambient) => {
                     if let Err(error) = event_store.add(event.clone()) {
                         error!(error = %error, "failed to store ambient group event");
@@ -1150,7 +1150,7 @@ pub(super) fn attachment_notice_message(notices: &[String]) -> String {
 }
 
 pub(super) enum GroupInboundDispatch {
-    Dispatch(PreparedInboundDispatch),
+    Dispatch(Box<PreparedInboundDispatch>),
     Ambient,
     AddressedElsewhere,
 }
@@ -1163,7 +1163,7 @@ impl GroupInboundDispatch {
 
     fn unwrap(self) -> PreparedInboundDispatch {
         match self {
-            Self::Dispatch(dispatch) => dispatch,
+            Self::Dispatch(dispatch) => *dispatch,
             Self::Ambient => panic!("expected dispatch, got ambient message"),
             Self::AddressedElsewhere => {
                 panic!("expected dispatch, got addressed-elsewhere message")
@@ -1173,7 +1173,7 @@ impl GroupInboundDispatch {
 
     fn expect(self, message: &str) -> PreparedInboundDispatch {
         match self {
-            Self::Dispatch(dispatch) => dispatch,
+            Self::Dispatch(dispatch) => *dispatch,
             _ => panic!("{message}"),
         }
     }
@@ -1216,22 +1216,25 @@ pub(super) async fn prepare_group_inbound_dispatch(
                     binding.state.as_str(),
                     "waiting_source" | "initializing" | "recovering"
                 );
-            return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
-                message_text: if recovering {
-                    binding.initial_message.clone()
-                } else {
-                    agent_message_text(message)
+            return Ok(GroupInboundDispatch::Dispatch(Box::new(
+                PreparedInboundDispatch {
+                    message_text: if recovering {
+                        binding.initial_message.clone()
+                    } else {
+                        agent_message_text(message)
+                    },
+                    session_key: binding.derived_session_key,
+                    group_turn_id: None,
+                    reset_group_context: false,
+                    direct_reply: None,
+                    thread_anchor_message_id: recovering
+                        .then_some(binding.source_message_id.clone()),
+                    thread_fallback_message: binding.fallback_message,
+                    referenced_images: Vec::new(),
+                    referenced_files: Vec::new(),
+                    attachment_notices: Vec::new(),
                 },
-                session_key: binding.derived_session_key,
-                group_turn_id: None,
-                reset_group_context: false,
-                direct_reply: None,
-                thread_anchor_message_id: recovering.then_some(binding.source_message_id.clone()),
-                thread_fallback_message: binding.fallback_message,
-                referenced_images: Vec::new(),
-                referenced_files: Vec::new(),
-                attachment_notices: Vec::new(),
-            }));
+            )));
         }
 
         let anchor = store
@@ -1363,18 +1366,20 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 },
                 event.received_at,
             )?;
-        return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
-            message_text,
-            session_key: binding.derived_session_key,
-            group_turn_id: None,
-            reset_group_context: false,
-            direct_reply: None,
-            thread_anchor_message_id: anchor.map(|_| root_message_id.to_string()),
-            thread_fallback_message: fallback_message,
-            referenced_images: Vec::new(),
-            referenced_files: Vec::new(),
-            attachment_notices: Vec::new(),
-        }));
+        return Ok(GroupInboundDispatch::Dispatch(Box::new(
+            PreparedInboundDispatch {
+                message_text,
+                session_key: binding.derived_session_key,
+                group_turn_id: None,
+                reset_group_context: false,
+                direct_reply: None,
+                thread_anchor_message_id: anchor.map(|_| root_message_id.to_string()),
+                thread_fallback_message: fallback_message,
+                referenced_images: Vec::new(),
+                referenced_files: Vec::new(),
+                attachment_notices: Vec::new(),
+            },
+        )));
     }
     let needs_identity =
         !message.mentions.is_empty() && !message.mentions.iter().any(|mention| mention.is_bot);
@@ -1486,21 +1491,23 @@ pub(super) async fn prepare_group_inbound_dispatch(
         GroupMessageDisposition::SystemCommand {
             command,
             reset_context,
-        } => Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
-            message_text: command,
-            session_key: crate::im_gateway::group_context::build_group_session_key(
-                &event.provider_id,
-                chat_id,
-            ),
-            group_turn_id: None,
-            reset_group_context: reset_context,
-            direct_reply: None,
-            thread_anchor_message_id: None,
-            thread_fallback_message: None,
-            referenced_images: Vec::new(),
-            referenced_files: Vec::new(),
-            attachment_notices: Vec::new(),
-        })),
+        } => Ok(GroupInboundDispatch::Dispatch(Box::new(
+            PreparedInboundDispatch {
+                message_text: command,
+                session_key: crate::im_gateway::group_context::build_group_session_key(
+                    &event.provider_id,
+                    chat_id,
+                ),
+                group_turn_id: None,
+                reset_group_context: reset_context,
+                direct_reply: None,
+                thread_anchor_message_id: None,
+                thread_fallback_message: None,
+                referenced_images: Vec::new(),
+                referenced_files: Vec::new(),
+                attachment_notices: Vec::new(),
+            },
+        ))),
         GroupMessageDisposition::AgentTrigger {
             kind,
             active_request,
@@ -1550,7 +1557,7 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 message_text.push_str("\n\n");
                 message_text.push_str(&attachment_notice_message(&attachment_notices));
             }
-            Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
+            Ok(GroupInboundDispatch::Dispatch(Box::new(PreparedInboundDispatch {
                 message_text,
                 session_key: prepared.session_key,
                 group_turn_id: Some(prepared.turn_id),
@@ -1564,7 +1571,7 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 referenced_images,
                 referenced_files,
                 attachment_notices,
-            }))
+            })))
         }
     }
 }
