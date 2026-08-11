@@ -26,7 +26,7 @@
 4. 普通 agent reply 继续在 provider 边界移除根级 header；终态卡通过专用的 header-preserving reply/send 路径发送，只有该卡保留多语言状态标题，不改变其它飞书卡片的紧凑样式。
 5. 终态正文继续复用 agent reply 的 Markdown、图片、附件、工作目录解析和消息日志能力。
 6. 两个发送动作均为 best effort；原卡更新失败不阻止新通知，新通知失败也不回滚任务终态。
-7. progress card 运行中继续展开任务计划与执行过程，便于实时观察；进入 `Finished` 或 `Failed` 后，计划、过程和结论板块全部设置 `expanded=false`。最终正文仍保留在原卡的“最终结论/失败结论”折叠板块中，作为独立终态卡发送失败时的可追溯兜底。
+7. progress card 运行中继续展开任务计划，但执行过程默认折叠，并在折叠栏上方展示最新进展与本轮工具摘要；进入 `Finished` 或 `Failed` 后，计划、过程和结论板块全部设置 `expanded=false`。最终正文仍保留在原卡的“最终结论/失败结论”折叠板块中，作为独立终态卡发送失败时的可追溯兜底。
 
 ## 边界
 
@@ -43,7 +43,7 @@
 - 单元/HTTP 集成测试：断言终态请求路径直接引用上一张任务卡的 message id，而不是再次引用用户原消息。
 - 单元/HTTP 集成测试：终态消息发送失败时原卡仍完成收敛，message log 记录失败且调用正常返回。
 - shell E2E：隔离启动 Bifrost、mock external runner 与 loopback Feishu OpenAPI，分别注入成功和异常任务，断言 CardKit update 与独立 reply payload。
-- progress card renderer：成功终态断言状态、计划、执行过程、最终结论四个板块均为 `collapsible_panel` 且 `expanded=false`；失败和 compact 终态断言“失败结论”同样折叠。运行中计划与执行过程仍保持展开。
+- progress card renderer：运行期断言计划保持展开、执行过程默认折叠且摘要常驻；成功终态断言状态、计划、执行过程、最终结论四个板块均为 `collapsible_panel` 且 `expanded=false`；失败和 compact 终态断言“失败结论”同样折叠。
 - human_tests：按成功、非成功状态、runtime 异常和既有单卡持续更新回归逐条执行。
 
 ## 风险

@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；任务结束后，原任务卡的状态摘要、任务计划/实施方案、执行过程和最终结论统一默认折叠。随后另发一张完整终态卡：成功卡显示多语言“任务执行结束 / Task completed”等标题并包含最后一次最终总结，失败卡显示多语言失败标题并包含异常原因；终态卡直接引用刚结束的任务卡，并继续自动上传和发送最终总结引用的本地文件。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
+本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；执行过程默认折叠，折叠栏上方常驻最新公开解释、当前工具和本轮成功/失败/执行中统计，折叠标题区分总体步骤数与工具调用次数。任务结束后，原任务卡的状态摘要、任务计划/实施方案、执行过程和最终结论统一默认折叠。随后另发一张完整终态卡：成功卡显示多语言“任务执行结束 / Task completed”等标题并包含最后一次最终总结，失败卡显示多语言失败标题并包含异常原因；终态卡直接引用刚结束的任务卡，并继续自动上传和发送最终总结显式引用的本地文档与压缩包。卡片折叠面板使用飞书主题自适应默认背景/文本色，需在亮色和暗色主题下保持可读。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
 
 ## 前置条件
 
@@ -83,9 +83,9 @@
 - Feishu progress card 的 `fileChange` / `file_change` 工具标题显示为“文件变更”，展开详情包含工作区相对路径、变更摘要和 diff 内容。
 - unified diff 按文件汇总为“修改 N 行”“新增 N 行”“删除 N 行”；`+++` / `---` 文件头不计入统计。
 - app-server 只返回新增/删除文件正文时，按正文逻辑行数显示“新增 N 行”或“删除 N 行”；多行正文的每一行保持一致缩进。
-- 执行过程标题显示“已执行 N 个步骤”，不把 `fileChange` 误称为命令；工作区外路径保持原样，不进行错误截断。
+- 执行过程标题显示“共 N 步 · 工具 M 次”，不把总体步骤和工具次数混为一个口径，也不把 `fileChange` 误称为命令；工作区外路径保持原样，不进行错误截断。
 - 展开详情不显示 `暂无工具详情`。
-- 卡片只使用 CardKit 标准 `grey` 背景与 Markdown 文本，不写死亮色或暗色值；飞书亮色、暗色主题由 CardKit 自适应。无飞书测试凭据时仅验证 payload，不宣称完成线上双主题截图测试。
+- 卡片只使用 CardKit 标准 `default` 背景与 `text_color=default`，Markdown 文本不写死亮色或暗色值；飞书亮色、暗色主题由 CardKit 自适应。无飞书测试凭据时验证完整 payload 的主题安全契约，并明确记录未执行线上双主题截图测试。
 
 ### TC-FPC-06：卡片尾部展示可读执行耗时且 token usage 刷新耗时
 
@@ -160,8 +160,8 @@
 
 **预期结果**：
 - Codex `thread_id`、Trae `threadId` 和 Claude Code `session_id` 启动事件到达时立即写入运行中 metadata，无需等待 run 完成。
-- 已创建目标 session 时，卡片包含 `Runner：codex · Adapter：codex · Session ID：thread-resource-e2e`，并继续保留“外部会话”详情行。
-- 目标 Runner 尚未返回 session ID 时，Runner/Adapter 行不显示空值或 `N/A` Session ID。
+- 已创建目标 session 时，顶部折叠标题立即包含 `Session：thread-resource-e2e`，展开详情继续包含 `Runner：codex · Adapter：codex · Session ID：thread-resource-e2e` 与“外部会话”行。
+- 目标 Runner 尚未返回 session ID 时，运行态顶部显示 `Session：获取中`；终态仍无 ID 时显示 `Session：未提供`，不显示空值或 `N/A`。
 - 超长或包含 Markdown backtick 的异常 ID 会被限制长度并安全转义，不能破坏卡片其余布局。
 - E2E CardKit payload 在既有 24KB 预算内，原 Token、额度、耗时和过程信息不丢失。
 
@@ -183,14 +183,38 @@
 
 **预期结果**：
 - 成功和失败路径都先更新原任务进度卡，再各发送且只发送一张新终态卡。
-- 成功终态的原任务卡中，状态摘要、任务计划/实施方案、执行过程和最终结论均为 `collapsible_panel` 且 `expanded=false`；失败终态使用同样的折叠策略，结论标题为“失败结论”。运行中计划和执行过程仍展开。
+- 成功终态的原任务卡中，状态摘要、任务计划/实施方案、执行过程和最终结论均为 `collapsible_panel` 且 `expanded=false`；失败终态使用同样的折叠策略，结论标题为“失败结论”。运行中计划仍展开，执行过程默认折叠，摘要保持可见。
 - compact 降级卡的成功/失败结论也保持默认折叠，不能重新裸露与终态卡重复的正文。
 - 成功终态卡为绿色 header，默认标题为 `Task completed`，通过 `i18n_content` 覆盖飞书支持的 16 个 locale，其中 `zh_cn=任务执行结束`、`ja_jp=タスク実行完了`；正文包含最后一个非空 `AssistantFinal` 的最终总结。
 - 失败终态卡为红色 header，默认标题为 `Task failed`，包含相同的 16-locale i18n 集合；正文包含真实异常原因。
 - 消息请求路径形成 `用户原消息 → progress card message_id → terminal card` 引用链；终态卡不得再次直接引用用户原消息。
 - 原任务卡仍保持单卡正文去重语义；终态卡是独立主动通知，不由 progress snapshot 重试产生。
-- 最终总结引用的本地文件经 `/im/v1/files` 上传后，以独立 `msg_type=file` 消息发送到同一 IM 会话；过程卡折叠不得影响附件解析、上传和发送。
+- 最终总结引用的本地文档与 `tar.gz` 压缩包都经 `/im/v1/files` 上传后，以独立 `msg_type=file` 消息发送到同一 IM 会话；过程卡折叠不得影响附件解析、上传和发送。
 - 若终态卡发送失败，原任务卡仍保持 Finished/Failed 终态，outbound message log 记录失败，session/queue 收尾不回滚。
+
+### TC-FPC-11：折叠摘要、Session 三态、压缩包与暗色主题契约
+
+**操作步骤**：
+1. 执行当前轮摘要、Session 三态、主题颜色和归档扩展名单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib feishu_progress_card_collapses_process_with_current_round_summary -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_runner_status_title_exposes_session_id_lifecycle -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib generated_feishu_cards_use_theme_adaptive_colors -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib agent_reply_collects_local_and_remote_archive_attachments -- --nocapture
+   ```
+2. 执行完整 renderer 与隔离 Service 黑盒链路：
+   ```bash
+   target/debug/bifrost-e2e --test im_gateway_progress_card_budget_and_codex_resources --jobs 1 --timeout 180
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+3. 若当前租户凭据可用，在飞书客户端分别切换亮色/暗色主题，查看运行态摘要、手动展开过程面板、成功终态和失败终态；再触发一次进度更新确认面板仍可操作。若凭据不可用，记录未执行线上截图，使用步骤 1/2 的完整 CardKit JSON 契约作为本地验证证据。
+
+**预期结果**：
+- 运行过程 `agent_process_panel` 初始 `expanded=false`，其前方 `agent_process_sum` 展示最后一次公开解释、最多三个正在运行的工具类型和本轮成功/失败/执行中次数；展开后原时间线与工具详情完整。
+- 折叠标题展示“共 N 步 · 工具 M 次”，不再把工具数误称为全部步骤数。
+- 外部 Runner Session ID 在 live metadata 到达后立即刷新；无 ID 的运行/终态分别显示“获取中/未提供”。
+- 本地和远程 `tar.gz/tgz/tar.xz/tar.zst/7z/rar` 等显式链接被识别为文件附件；黑盒 E2E 的 `.txt` 与 `.tar.gz` 均真实调用上传并各发送一条文件消息。
+- 所有折叠面板均为 `background_color=default`，标题为 `text_color=default`；payload 不含固定 `grey`、黑白、十六进制或 RGB/RGBA 样式。亮色/暗色客户端均可读；无租户凭据时不伪造线上截图结论。
 
 ## 清理步骤
 
@@ -198,6 +222,8 @@
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-11：PASS（本地真实链路）— 更新 TC-FPC-11 后立即执行。4 个 focused Rust 用例全部通过，分别验证运行过程默认折叠、最新公开解释与当前轮工具三态计数、总体步骤/工具次数、Session ID 的“获取中/实时值/未提供”三态、standard/compact 卡片主题安全字段，以及本地/远程复合归档扩展名。`im_gateway_progress_card_budget_and_codex_resources` renderer E2E 通过，完整 CardKit JSON 小于 24KB，`agent_process_sum` 位于默认折叠的 `agent_process_panel` 前方，面板使用 `background_color=default` 与 `text_color=default`。隔离 Bifrost + mock Runner + loopback Feishu OpenAPI 黑盒 E2E 通过：成功/失败终态卡按预期更新，`.txt` 与 `.tar.gz` 两份显式链接均真实调用 `/im/v1/files` multipart 上传并各发送一条 `msg_type=file` 消息，所有进度卡 payload 不含固定 `grey`、黑白或 RGB/RGBA 样式。测试临时目录和所属进程已由 trap 清理。当前环境缺少 `FEISHU_OWNER_OPEN_ID`，未向真实租户投递测试卡，也未伪造亮/暗主题客户端截图；暗色兼容结论以飞书 CardKit 官方主题语义字段和完整 HTTP payload 契约为证据。
 
 - 2026-08-10：PASS — 更新 TC-FPC-10 后立即执行。5 个 focused Rust/HTTP 回归全部通过，覆盖成功、失败、终态通知发送失败、完整四板块终态折叠和 standard/compact 失败结论折叠。随后构建当前 debug `bifrost` 并执行隔离 Service + mock external runner + loopback Feishu OpenAPI 黑盒场景；第一次执行发现测试夹具漏导入 `pathlib`，第二次捕获到真实文件消息后发现路径断言未剥离 query，两处均修复测试而未削弱产品断言，第三次完整 PASS。最终成功/失败原任务卡的状态摘要与“最终结论/失败结论”均为 `collapsible_panel` 且 `expanded=false`；独立成功/失败终态卡继续保留 16-locale 标题与完整正文，引用链分别指向对应 progress message；成功总结引用的本地报告实际调用 `/im/v1/files` multipart 上传并以 `msg_type=file` 发送。测试临时目录和所属进程已由 trap 清理。
 

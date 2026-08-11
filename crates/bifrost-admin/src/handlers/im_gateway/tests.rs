@@ -1548,6 +1548,72 @@ pub(super) fn agent_reply_collects_remote_file_attachments_from_explicit_links()
 }
 
 #[test]
+pub(super) fn agent_reply_collects_local_and_remote_archive_attachments() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let local_archive = temp.path().join("agent-result.tar.gz");
+    std::fs::write(&local_archive, b"archive bytes").expect("write archive");
+    let markdown = format!(
+        "[本地打包结果]({})\n[远程打包结果](https://example.com/download?filename=runner-output.tar.zst)",
+        local_archive.display()
+    );
+    let mut images = Vec::new();
+    let mut local_attachments = Vec::new();
+    collect_agent_reply_local_attachment_links(
+        &markdown,
+        Some(temp.path()),
+        &mut images,
+        &mut local_attachments,
+    );
+    let remote_attachments = collect_agent_reply_remote_attachment_links(&markdown);
+
+    assert!(images.is_empty());
+    assert_eq!(local_attachments.len(), 1);
+    assert_eq!(local_attachments[0].path, local_archive);
+    assert_eq!(remote_attachments.len(), 1);
+    assert_eq!(
+        remote_attachments[0].url,
+        "https://example.com/download?filename=runner-output.tar.zst"
+    );
+    assert_eq!(
+        attachment_extension_from_path("bundle.tar.gz"),
+        Some("tar.gz")
+    );
+    for (path, extension) in [
+        ("bundle.tar.bz2", "tar.bz2"),
+        ("bundle.tar.xz", "tar.xz"),
+        ("bundle.tar.zst", "tar.zst"),
+        ("bundle.tar", "tar"),
+        ("bundle.tgz", "tgz"),
+        ("bundle.tbz", "tbz"),
+        ("bundle.tbz2", "tbz2"),
+        ("bundle.txz", "txz"),
+        ("bundle.tzst", "tzst"),
+        ("bundle.gz", "gz"),
+        ("bundle.bz2", "bz2"),
+        ("bundle.xz", "xz"),
+        ("bundle.zst", "zst"),
+        ("bundle.7z", "7z"),
+        ("bundle.rar", "rar"),
+    ] {
+        assert_eq!(attachment_extension_from_path(path), Some(extension));
+    }
+    for (content_type, extension) in [
+        ("application/x-tar", "tar"),
+        ("application/gzip", "gz"),
+        ("application/x-gzip", "gz"),
+        ("application/x-bzip2", "bz2"),
+        ("application/x-xz", "xz"),
+        ("application/zstd", "zst"),
+        ("application/x-zstd", "zst"),
+        ("application/x-7z-compressed", "7z"),
+        ("application/vnd.rar", "rar"),
+        ("application/x-rar-compressed", "rar"),
+    ] {
+        assert_eq!(extension_from_content_type(content_type), Some(extension));
+    }
+}
+
+#[test]
 pub(super) fn agent_reply_target_uses_feishu_chat_id_for_event_channel() {
     let mut provider = test_provider();
     provider.owner_open_id = Some("owner-ou".to_string());
