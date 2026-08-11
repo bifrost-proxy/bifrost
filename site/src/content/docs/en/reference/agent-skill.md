@@ -9,7 +9,14 @@ editLink: false
 
 # Agent Skill Installation Guide
 
-Bifrost provides skill files that teach AI coding assistants how to operate the Bifrost CLI. It supports Claude Code, Codex, Trae, Cursor, GitHub Copilot, and generic Agent Skills runtimes. The installer writes both the general `bifrost` skill and the dedicated `bifrost-remote` skill: use the general skill for local proxy/rule/traffic work and IM Gateway CLI setup, and use the remote skill when connecting to another machine with a pair code or SSH key, inspecting remote traffic, uploading scripts, or operating an authorized remote shell.
+Bifrost ships standard `SKILL.md` files so AI coding assistants that support Agent Skills can discover and use the Bifrost CLI.
+
+The installer now maintains only two target locations:
+
+- Universal Agent Skills: `~/.agents/skills/`
+- Claude Code compatibility: `~/.claude/skills/`
+
+Bifrost no longer installs separate copies into vendor-specific Codex, Trae, Cursor, or GitHub Copilot skill directories. Tools that support the standard `.agents/skills` location share the same portable skill source.
 
 ## Quick Install
 
@@ -17,34 +24,92 @@ Bifrost provides skill files that teach AI coding assistants how to operate the 
 bifrost install-skill -y
 ```
 
-Each run downloads the latest `SKILL.md` from the GitHub `main` branch and installs it into supported target directories.
+By default, this installs to both Universal Agent Skills and Claude Code. Each run fetches the latest skill content from the GitHub `main` branch; if the network is unavailable, the CLI falls back to its embedded copy.
 
-## Install for a Specific Tool
+The installer writes two skills:
+
+```text
+~/.agents/skills/
+├── bifrost/
+│   └── SKILL.md
+└── bifrost-remote/
+    └── SKILL.md
+
+~/.claude/skills/
+├── bifrost/
+│   └── SKILL.md
+└── bifrost-remote/
+    └── SKILL.md
+```
+
+- `bifrost`: local proxy, rules, traffic analysis, agent evidence workflows, and IM Gateway CLI setup.
+- `bifrost-remote`: pair-code / SSH-key authorization, remote traffic, remote files, remote run/job, and authorized shell operations.
+
+## Install a Specific Target
 
 ```bash
-bifrost install-skill -t claude-code -y
-bifrost install-skill -t codex -y
-bifrost install-skill -t trae -y
-bifrost install-skill -t cursor -y
-bifrost install-skill -t github-copilot -y
-bifrost install-skill -t universal -y
-bifrost install-skill -t all -y
+bifrost install-skill -t universal -y    # ~/.agents/skills only
+bifrost install-skill -t claude-code -y  # ~/.claude/skills only
+bifrost install-skill -t all -y          # both targets (default)
 ```
+
+Supported `--tool` values are limited to:
+
+- `universal` (alias: `agent-skills`)
+- `claude-code` (alias: `claude`)
+- `all`
+
+Legacy targets such as `codex`, `trae`, `cursor`, and `github-copilot` are no longer supported.
 
 ## Project-local Install
 
 ```bash
 bifrost install-skill --cwd -y
-bifrost install-skill --cwd -t trae -y
 ```
 
-All tools use the `skills/bifrost/SKILL.md` structure. The installer also writes `skills/bifrost-remote/SKILL.md` for remote workflows. Codex keeps the historical `.codex/skills` path while adding `.agents/skills` for broader compatibility.
+The default project-local layout is:
 
-`install-skill` only installs documentation for agents. It does not start the proxy, enable the system proxy, import rules, create remote grants, or authorize shell access. Remote access must still be explicitly granted by the user through a pair code or SSH key.
+```text
+./.agents/skills/
+├── bifrost/SKILL.md
+└── bifrost-remote/SKILL.md
+
+./.claude/skills/
+├── bifrost/SKILL.md
+└── bifrost-remote/SKILL.md
+```
+
+You can also install only one target:
+
+```bash
+bifrost install-skill --cwd -t universal -y
+bifrost install-skill --cwd -t claude-code -y
+```
+
+## Custom Directory
+
+```bash
+bifrost install-skill -d /custom/path -y
+```
+
+`--dir` and `--cwd` are mutually exclusive.
+
+## Installation Behavior
+
+The installer maps repository sources as follows:
+
+```text
+SKILL.md        -> bifrost/SKILL.md
+skill_remote.md -> bifrost-remote/SKILL.md
+```
+
+The original skill content, including standard YAML frontmatter, is installed without extra wrapping.
+
+`install-skill` only writes skill documentation. It does not start the proxy, change system proxy settings, import rules, create remote grants, or authorize shell access. Remote access must still be explicitly granted by the user with a pair code or SSH key.
 
 ## Using IM Gateway After Install
 
-After the general `bifrost` skill is installed, agents should use the local `bifrost im` CLI for Feishu or Weixin channel setup instead of editing provider files directly.
+After the `bifrost` skill is installed, agents should use the local `bifrost im` CLI for Feishu or Weixin setup instead of editing provider files directly.
 
 ```bash
 bifrost start -d
@@ -52,14 +117,48 @@ bifrost im provider add feishu-main --type feishu --runner traex
 bifrost im provider add weixin-main --type weixin --runner codex
 ```
 
-Feishu interactive setup prints an authorization URL and terminal QR code. Weixin interactive setup prints a scan QR code. The CLI keeps waiting until the user authorizes or scans, then creates and connects the provider. Non-interactive runs must pass `--runner`; interactive terminals can present a keyboard-selectable runner list. Invalid runners are rejected with the current supported runner list. Feishu and Weixin provider base URLs are fixed by provider type, so agents should not suggest `--base-url`.
+Feishu interactive setup prints an authorization URL and QR code. Weixin interactive setup prints a scan QR code. The CLI waits for the user to finish authorization and then creates and connects the provider. Non-interactive runs must pass `--runner`; interactive terminals can present a selectable runner list.
 
-When an IM channel comes online, Bifrost sends the online notification followed by runner-aware help. External runners such as Codex, Traex, and Claude Code should advertise model or reasoning-effort commands only when their adapter supports them.
+## Options
 
-Useful options and environment variables:
+| Option | Description |
+| --- | --- |
+| `-t, --tool <TOOL>` | `universal`, `claude-code`, or `all` (default: `all`) |
+| `-d, --dir <PATH>` | Custom install directory; mutually exclusive with `--cwd` |
+| `--cwd` | Install into the current project; mutually exclusive with `--dir` |
+| `-y, --yes` | Skip the confirmation prompt |
 
-- `-t, --tool`: `claude-code`, `codex`, `trae`, `cursor`, `github-copilot`, `universal`, or `all`.
-- `--cwd`: install into the current project directory.
-- `-d, --dir`: install into a custom directory; mutually exclusive with `--cwd`.
-- `BIFROST_INSTALL_SKILL_SOURCE`: override the skill download source for development or verification.
-- `BIFROST_INSTALL_SKILL_DIR`: override the default global install directory for isolated tests.
+Environment variables:
+
+| Variable | Description |
+| --- | --- |
+| `BIFROST_INSTALL_SKILL_SOURCE` | Override the skill download source, mainly for development or verification |
+| `BIFROST_INSTALL_SKILL_DIR` | Override the default global install directory, mainly for isolated tests |
+
+## Manual Install
+
+```bash
+# Universal Agent Skills
+mkdir -p ~/.agents/skills/bifrost ~/.agents/skills/bifrost-remote
+cp ./SKILL.md ~/.agents/skills/bifrost/SKILL.md
+cp ./skill_remote.md ~/.agents/skills/bifrost-remote/SKILL.md
+
+# Claude Code
+mkdir -p ~/.claude/skills/bifrost ~/.claude/skills/bifrost-remote
+cp ./SKILL.md ~/.claude/skills/bifrost/SKILL.md
+cp ./skill_remote.md ~/.claude/skills/bifrost-remote/SKILL.md
+```
+
+## Verify and Update
+
+After installation, start a new session in the target agent and ask it to perform a Bifrost operation such as “start the proxy” or “inspect traffic.” If it discovers the skill and calls the `bifrost` CLI correctly, the general skill is working.
+
+To verify the remote skill, ask the agent to connect to another Bifrost machine using a pair code or SSH key; it should enter the `bifrost-remote` workflow.
+
+Update the skills with:
+
+```bash
+bifrost install-skill -y
+```
+
+Each run overwrites the installed skills with the latest version.
