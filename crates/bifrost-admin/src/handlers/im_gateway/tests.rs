@@ -1541,12 +1541,17 @@ pub(super) async fn agent_reply_rejects_remote_file_above_feishu_upload_limit_be
         .local_addr()
         .expect("attachment server addr")
         .port();
-    tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let Ok((mut stream, _)) = listener.accept().await else {
             return;
         };
+        // Drain the request before closing the socket. On Windows, dropping a
+        // socket with unread inbound bytes resets the connection and can hide
+        // the response headers from reqwest.
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).await;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             MAX_AGENT_REPLY_ATTACHMENT_BYTES + 1
@@ -1567,6 +1572,7 @@ pub(super) async fn agent_reply_rejects_remote_file_above_feishu_upload_limit_be
         error.to_string().contains("飞书上传文件 30 MiB 上限"),
         "unexpected oversized attachment error: {error}"
     );
+    server.await.expect("oversized attachment server");
 }
 
 #[tokio::test(flavor = "current_thread")]
