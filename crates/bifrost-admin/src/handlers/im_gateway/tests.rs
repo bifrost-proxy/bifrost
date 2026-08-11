@@ -3453,7 +3453,7 @@ pub(super) async fn outbound_chunked_upload_enforces_streaming_size_limit() {
     service.provider_store.add(provider).expect("save provider");
 
     let (address, server) = spawn_im_gateway_http(service).await;
-    let mut stream = tokio::net::TcpStream::connect(address)
+    let stream = tokio::net::TcpStream::connect(address)
         .await
         .expect("connect chunked upload client");
     let body = vec![b'x'; 10 * 1024 * 1024 + 1];
@@ -3461,18 +3461,30 @@ pub(super) async fn outbound_chunked_upload_enforces_streaming_size_limit() {
         "POST /api/im-gateway/messages/upload?provider_id=feishu-main&kind=image&file_name=huge.png HTTP/1.1\r\nHost: {address}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
         body.len()
     );
-    stream
-        .write_all(headers.as_bytes())
-        .await
-        .expect("write chunked upload headers");
-    let _ = stream.write_all(&body).await;
-    let _ = stream.write_all(b"\r\n0\r\n\r\n").await;
+    let (mut reader, mut writer) = stream.into_split();
+    let upload = tokio::spawn(async move {
+        writer
+            .write_all(headers.as_bytes())
+            .await
+            .expect("write chunked upload headers");
+        let _ = writer.write_all(&body).await;
+        let _ = writer.write_all(b"\r\n0\r\n\r\n").await;
+    });
 
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .expect("read chunked upload response");
+    let read_result = reader.read_to_end(&mut response).await;
+    upload.await.expect("chunked upload writer");
+    if let Err(error) = read_result {
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+            ) && response.starts_with(b"HTTP/1.1 413"),
+            "read chunked upload response: {error}"
+        );
+        server.await.expect("chunked upload server");
+        return;
+    }
     let response = String::from_utf8_lossy(&response);
     assert!(
         response.starts_with("HTTP/1.1 413"),
