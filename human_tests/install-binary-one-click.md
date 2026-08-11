@@ -579,6 +579,7 @@
 预期结果：
 
 - Windows x86 CI 必须执行真实进程链路：当前 PR `bifrost.exe` 复制到临时安装路径并启动 daemon，同一路径的 `bifrost.exe` 执行 upgrade，upgrade 停止 daemon，等待旧端口释放，替换当前安装路径，最后用替换后的 `bifrost.exe start -d` 启动新 daemon。
+- Windows 在旧进程退出后若仍因系统残留的独占绑定预留而无法通过四路 bind probe，必须以连续两次 `netstat` 均确认没有 TCP listener 或 UDP owner 后继续重启；`netstat` 查询失败或任一次仍有 owner 时不得提前判定端口已释放。
 - 该路径必须覆盖 Windows 用户最关键的 self-update 行为；历史 release 如 v0.0.100 缺少 Windows daemon exec start 能力，不作为本用例的启动 fixture。
 - 由于 Windows 不允许当前进程直接覆盖正在运行的 exe，upgrade 必须先 stage 新 exe，再调度 PowerShell helper 在当前 upgrade 进程退出后替换目标 exe；检测到运行中 daemon 时，helper 必须替换后执行新 exe 的 restart args。
 - CI 输出必须包含 detected/stop/wait/restart 里程碑，且允许 Windows 输出 `Proxy restart scheduled with the new version`；由于 Windows self-replacement 由 deferred PowerShell helper 在 upgrade 进程退出后执行，脚本必须先等待 Admin API ready 作为 helper 已完成重启的同步点，再验证临时 HOME 下的 `bifrost` / `bifrost-remote` skills 已自动安装。Windows runner 不再把 PID 必须变化作为唯一门禁；若 `runtime.json` pid 与旧 pid 相同，记录诊断并继续验证 Admin API ready、skills installed、`runtime.json` 记录 `system_proxy_enabled=false`、stop 后端口释放等行为。非 Windows 仍要求 PID 更换与新二进制路径。
@@ -764,6 +765,40 @@
 - 原 CI 失败用例连续 20 轮通过，每轮都确认目标版本不匹配并从 backup 恢复旧二进制。
 - GitHub Actions coverage job 继续执行 90% coverage gate，不再因并行 lib/bin 测试启动刚写入的临时可执行文件而中断。
 
+### TC-IBOC-27 飞书/Codex worker 发起 upgrade 后后台独立完成重启
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   cargo build -p bifrost-cli
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh
+   ```
+2. 检查输出包含：
+   ```text
+   PASS external worker delegated upgrade, competing POST serialized, and caller exited
+   PASS upgrade progress reached phase=completed
+   PASS admin-driven upgrade restarted daemon with new PID
+   ```
+3. 在 managed worker 环境中执行：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib \
+     commands::upgrade::tests::review_comments::parent_lock_credential_is_only_inherited_by_managed_companion \
+     -- --exact --nocapture
+   ```
+
+预期结果：
+
+- `BIFROST_EXTERNAL_CLI_WORKER=1 bifrost upgrade` 不在 Codex/worker 进程树内停止 Bifrost，而是通过运行中 Admin 安排 detached self-update，并在 10 秒内返回。
+- 发起命令退出后，后台 updater 仍真实完成本地 release 归档安装、旧 daemon 停止和新 daemon 启动。
+- 升级进度最终为 `completed`、source 为 `admin`，新 PID 与旧 PID 不同且新进程使用升级后的安装路径。
+- Desktop-owned worker 使用短时一次性 origin token 和 `channel=desktop` 进入既有 Desktop handoff；CLI-owned worker 保持 `channel=cli`。
+- runtime PID 或启动时间不匹配、Admin 不可达时实现必须安全失败并保留旧服务，不允许回退到会被 daemon shutdown 杀死的 inline upgrade。
+- Admin 无法解析最新版本时返回独立错误，worker 不得把查询失败误报为“已是最新”；Admin 聚合版本检查预算为 40 秒，worker 请求超时为 45 秒。
+- managed worker 环境中的 parent upgrade-lock token/PID 不得泄漏给普通 helper；只有显式 managed companion 能收到重新解析的凭据。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数、执行 dry-run 或使用 `mktemp -d` 临时数据目录，不产生持久化测试数据。
@@ -820,3 +855,4 @@
 | 2026-06-20 | TC-IBOC-23 | Parallels `Windows 11` VM：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1`；`install-binary.ps1 -Version v0.0.110`；raw branch `Invoke-RestMethod https://raw.githubusercontent.com/bifrost-proxy/bifrost/codex/windows-installer-path/install-binary.ps1` 后以 `eden_studio` 当前用户执行 `-Version v0.0.110`；验证 `%LOCALAPPDATA%\bifrost\bin\bifrost.exe --version`、`(Get-Command bifrost).Source`、`bifrost --version` | PASS：Windows PowerShell 5.1 回归 31/31 通过；真实安装输出 `Architecture: aarch64`、`Target: aarch64-pc-windows-msvc`，成功下载 release zip 与 checksums、完成 checksum verified、extracting、installation completed；raw branch 当前用户验证输出 `edenstudio175f\eden_studio`，安装目录 `C:\Users\eden_studio\AppData\Local\bifrost\bin\bifrost.exe` 输出 `bifrost 0.0.110`；当前 PowerShell 会话 `Get-Command bifrost` 指向同一安装目录并输出 `bifrost 0.0.110`。 |
 | 2026-07-10 | TC-IBOC-25 | `bash e2e-tests/tests/test_install_binary_post_install.sh`；`bash install-binary.sh --help | rg ...`；PowerShell 源码门禁与中英文文档 `rg` 断言 | PASS：安装编排回归 33/33 通过，覆盖 macOS / Windows Git Bash 默认同版本 App 安装、`BIFROST_APP_SKIP_RESTART=1`、既有 post-install dry-run 不产生桌面变更、桌面安装失败保留 CLI 并输出重试命令、Linux CLI-only、参数与环境变量 opt-out；Bash help、PowerShell `-NoDesktop`/环境变量/不自动拉起 App 源码门禁，以及中英文 README、安装指南、设计文档和 Release quick-install 文案断言全部命中。当前 Mac 无 `pwsh`，PowerShell 5.1 脚本执行由 Windows E2E Shell CI 补充验证。 |
 | 2026-07-20 | TC-IBOC-26 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_command_spawn_ -- --nocapture`；连续 20 轮 `upgrade_target_version_mismatch_restores_previous_binary` | PASS：3 个确定性回归覆盖 `ETXTBSY` 第三次恢复、非瞬态错误不重试、持续占用恰好 8 次停止；原 CI 失败用例连续 20/20 轮通过，每轮完成版本不匹配诊断和旧二进制恢复。 |
+| 2026-08-11 | TC-IBOC-27 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh`；managed worker 环境执行 parent-lock credential 隔离测试 | PASS（PR review 修复后复测）：15/15；worker CLI 0 秒内返回，progress=`completed`/source=`admin`，daemon PID `30105 -> 30676`，新进程使用升级后的安装路径；already-latest 后台重启也成功完成；普通 helper 不继承 ambient parent-lock credential。 |

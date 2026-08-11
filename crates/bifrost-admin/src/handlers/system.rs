@@ -32,10 +32,12 @@ use crate::state::SharedAdminState;
 
 mod version_companion;
 use version_companion::{
-    desktop_app_version_for_version_check, standalone_cli_version_for_version_check,
+    desktop_app_version_for_version_check, resolve_upgrade_target,
+    standalone_cli_version_for_version_check,
 };
 
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
+const UPGRADE_VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(40);
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
 const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
 const WEBVIEW_UPGRADE_ORIGIN_ENV: &str = "BIFROST_WEBVIEW_UPGRADE_ORIGIN_INTERNAL";
@@ -304,13 +306,14 @@ async fn start_upgrade(
     }
 
     // Confirm there is actually a newer version to upgrade to.
-    let version = check_unified_version_for_channel(state, false, channel).await;
-    if !version.has_update {
-        return error_response(StatusCode::CONFLICT, "No update available");
-    }
-    let target_version = match required_upgrade_target(&version) {
+    let target_version = match resolve_upgrade_target(
+        check_unified_version_for_channel(state, false, channel),
+        UPGRADE_VERSION_CHECK_TIMEOUT,
+    )
+    .await
+    {
         Ok(target) => target,
-        Err(message) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(error) => return error_response(error.status(), error.message()),
     };
 
     // Seed the channel so the Web UI sees movement immediately, before the
@@ -769,13 +772,6 @@ fn desktop_version_check_uses_standalone_cli(desktop_core: bool) -> bool {
     desktop_core
 }
 
-fn required_upgrade_target(version: &crate::VersionCheckResponse) -> Result<String, &'static str> {
-    version
-        .latest_version
-        .clone()
-        .ok_or("Update metadata did not include a target version")
-}
-
 fn parse_upgrade_channel(query: Option<&str>) -> UpgradeChannel {
     if query.unwrap_or_default().split('&').any(|part| {
         matches!(
@@ -977,10 +973,10 @@ mod tests {
         build_cli_install_status, check_unified_version_for_channel, check_version,
         desktop_core_env_enabled, desktop_version_check_uses_standalone_cli,
         effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
-        merge_companion_update, normalize_progress, parse_upgrade_channel, required_upgrade_target,
-        spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_process_environment,
-        upgrade_request_plan, upgrade_start_lock, validate_upgrade_request_channel,
-        validated_webview_upgrade_origin, CliInstallRequest, StatusCode, UpgradeChannel,
+        merge_companion_update, normalize_progress, parse_upgrade_channel, spawn_upgrade_process,
+        start_upgrade, upgrade_process_args, upgrade_process_environment, upgrade_request_plan,
+        upgrade_start_lock, validate_upgrade_request_channel, validated_webview_upgrade_origin,
+        CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -1097,19 +1093,6 @@ mod tests {
         assert_eq!(
             app_owned_without_cli_version.current_version,
             env!("CARGO_PKG_VERSION")
-        );
-    }
-
-    #[test]
-    fn upgrade_requires_a_pinned_target_in_release_metadata() {
-        let valid = version_response("0.0.155", "0.0.156", true);
-        assert_eq!(required_upgrade_target(&valid).as_deref(), Ok("0.0.156"));
-
-        let mut missing = valid;
-        missing.latest_version = None;
-        assert_eq!(
-            required_upgrade_target(&missing),
-            Err("Update metadata did not include a target version")
         );
     }
 
