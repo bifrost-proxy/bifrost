@@ -429,6 +429,7 @@ test_upgrade_review_feedback_contracts() {
     local upgrade_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
     local upgrade_desktop_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/desktop_companion.rs"
     local upgrade_download_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/download.rs"
+    local upgrade_external_worker_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/external_worker.rs"
     local upgrade_restart_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
     local upgrade_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests.rs"
     local upgrade_review_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests/review_comments.rs"
@@ -451,6 +452,7 @@ test_upgrade_review_feedback_contracts() {
         && [ "$(wc -l <"$upgrade_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_desktop_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_download_src")" -le 1500 ] \
+        && [ "$(wc -l <"$upgrade_external_worker_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_restart_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_tests")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_review_tests")" -le 1500 ] \
