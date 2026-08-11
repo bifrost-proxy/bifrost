@@ -101,6 +101,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_bytes(self, body, content_type):
+        self.send_response(200)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_error_bytes(self, status, body):
+        self.send_response(status)
+        self.send_header("content-type", "text/plain")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         if self.path.endswith("/auth/v3/tenant_access_token/internal"):
             self.send_json({"code": 0, "tenant_access_token": "e2e-token", "expire": 7200})
@@ -133,6 +147,41 @@ class Handler(BaseHTTPRequestHandler):
                 "message_id": "card-parent", "chat_id": "chat-alpha", "msg_type": "interactive",
                 "sender": {"id": "ou_other_bot", "sender_type": "app"},
                 "body": {"content": content}, "create_time": "2"
+            }]}})
+        elif path.endswith("/im/v1/messages/quoted-file-parent/resources/file_v3_quoted_e2e"):
+            self.send_bytes(b"# Quoted requirements\n", "text/markdown; charset=utf-8")
+        elif path.endswith("/im/v1/messages/quoted-file-parent"):
+            content = json.dumps({
+                "file_key": "file_v3_quoted_e2e",
+                "file_name": "quoted-requirements.md",
+                "mime_type": "text/markdown",
+                "file_size": 22,
+            }, ensure_ascii=False)
+            self.send_json({"code": 0, "data": {"items": [{
+                "message_id": "quoted-file-parent", "chat_id": "chat-alpha", "msg_type": "file",
+                "sender": {"id": "user-alice", "sender_type": "user"},
+                "body": {"content": content}, "create_time": "3"
+            }]}})
+        elif path.endswith("/im/v1/messages/quoted-image-parent/resources/img_v3_quoted_e2e"):
+            self.send_bytes(
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01",
+                "image/png",
+            )
+        elif path.endswith("/im/v1/messages/quoted-image-parent"):
+            content = json.dumps({"image_key": "img_v3_quoted_e2e"}, ensure_ascii=False)
+            self.send_json({"code": 0, "data": {"items": [{
+                "message_id": "quoted-image-parent", "chat_id": "chat-alpha", "msg_type": "image",
+                "sender": {"id": "user-bob", "sender_type": "user"},
+                "body": {"content": content}, "create_time": "4"
+            }]}})
+        elif path.endswith("/im/v1/messages/quoted-image-failure-parent/resources/img_v3_quoted_failure"):
+            self.send_error_bytes(500, b"simulated resource failure")
+        elif path.endswith("/im/v1/messages/quoted-image-failure-parent"):
+            content = json.dumps({"image_key": "img_v3_quoted_failure"}, ensure_ascii=False)
+            self.send_json({"code": 0, "data": {"items": [{
+                "message_id": "quoted-image-failure-parent", "chat_id": "chat-alpha", "msg_type": "image",
+                "sender": {"id": "user-bob", "sender_type": "user"},
+                "body": {"content": content}, "create_time": "5"
             }]}})
         elif "/im/v1/chats/" in path:
             self.send_json({"code": 0, "data": {"name": "Alpha 发布群"}})
@@ -591,23 +640,39 @@ wait_prompt_count 11
 wait_run_count 22
 wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 
+# Referenced file/image messages are authoritative Feishu resources. They must
+# be downloaded with the parent message ID, saved under the current session,
+# and exposed to the runner as absolute local paths.
+inject chat-alpha user-alice Alice a13file "@_user_1" true group quoted-file-parent
+wait_prompt_count 12
+wait_run_count 24
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
+inject chat-alpha user-bob Bob a13image "@_user_1" true group quoted-image-parent
+wait_prompt_count 13
+wait_run_count 26
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
+inject chat-alpha user-bob Bob a13image-failure "@_user_1" true group quoted-image-failure-parent
+wait_prompt_count 14
+wait_run_count 28
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
+
 # A topic rooted at another Bot's card has no local anchor on this provider,
 # which is equivalent to receiving a card produced on another device. It must
 # start an independent session with exactly root + current, never accumulated
 # group history. An unmentioned first topic reply is ignored.
 inject chat-alpha user-alice Alice topic-ignored "普通话题回复" false group card-parent feishu-group-e2e "" card-parent topic-cross-device
 sleep 1
-wait_prompt_count 11
+wait_prompt_count 14
 inject chat-alpha user-alice Alice topic-claimed "@_user_1 基于这条卡片继续" true group card-parent feishu-group-e2e "" card-parent topic-cross-device
-wait_prompt_count 12
-wait_run_count 24
+wait_prompt_count 15
+wait_run_count 30
 wait_session_idle "im:feishu-group-e2e:group:chat-alpha:thread:topic-cross-device"
 
 # If Feishu denies reading the parent, return actionable permission guidance
 # without starting a Runner or pretending that the quoted content was read.
 inject chat-alpha user-alice Alice a14 "@_user_1" true group invisible-parent
-wait_prompt_count 12
-wait_run_count 24
+wait_prompt_count 15
+wait_run_count 30
 
 wait_permission_reply() {
   for _ in $(seq 1 160); do
@@ -641,8 +706,8 @@ inject shared-multi user-alice Alice mb-b-broadcast "/status" false group "" fei
 # loops must consume it just like an unmentioned broadcast slash.
 inject shared-multi user-alice Alice mb-a-human-arg "/q ask @_user_1 to review" true group "" feishu-group-e2e ou_human
 inject shared-multi user-alice Alice mb-b-human-arg "/q ask @_user_1 to review" true group "" feishu-group-e2e-b ou_human
-wait_prompt_count 14
-wait_run_count 28
+wait_prompt_count 17
+wait_run_count 34
 wait_session_idle "im:feishu-group-e2e:group:shared-multi"
 wait_session_idle "im:feishu-group-e2e-b:group:shared-multi"
 inject shared-multi user-alice Alice mb-a-directed "@_user_1 /status" true group "" feishu-group-e2e ou_bot_b
@@ -663,19 +728,23 @@ done
 python3 - "$PROMPT_LOG" "$RUN_LOG" "$TEST_DIR/admin/im_group_context.db" "$REPO_DIR" "$TEST_DIR/admin/im_gateway_message_logs.json" <<'PY'
 import json
 import pathlib
+import re
 import sqlite3
 import sys
 
 prompt_path, run_path, db_path, repo_dir, message_log_path = sys.argv[1:6]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
-assert len(prompts) == 14, prompts
+assert len(prompts) == 17, prompts
 first, second, slash_fallback, third, queued = prompts[:5]
 queued_second = prompts[5]
 concurrent_prompts = prompts[6:9]
 quoted_prompt = prompts[9]
 quoted_card_prompt = prompts[10]
-topic_prompt = prompts[11]
-human_argument_prompts = prompts[12:14]
+quoted_file_prompt = prompts[11]
+quoted_image_prompt = prompts[12]
+quoted_image_failure_prompt = prompts[13]
+topic_prompt = prompts[14]
+human_argument_prompts = prompts[15:17]
 
 assert "群名称：Alpha 发布群" in first, first
 assert "群 ID：chat-alpha" in first, first
@@ -722,6 +791,33 @@ assert "/help" not in quoted_prompt, quoted_prompt
 assert "另一机器人结论" in quoted_card_prompt, quoted_card_prompt
 assert "卡片正文：选择方案 A" in quoted_card_prompt, quoted_card_prompt
 assert "example.invalid" not in quoted_card_prompt and "不应读取" not in quoted_card_prompt, quoted_card_prompt
+
+assert "[附件 1 个]" in quoted_file_prompt, quoted_file_prompt
+assert "## Attached Files" in quoted_file_prompt, quoted_file_prompt
+assert "name: quoted-requirements.md" in quoted_file_prompt, quoted_file_prompt
+assert "最前面的 0 张图片和 1 个文件属于被引用消息" in quoted_file_prompt, quoted_file_prompt
+file_paths = [
+    pathlib.Path(path) for path in re.findall(r"`([^`]+)`", quoted_file_prompt)
+    if path.endswith("1-quoted-requirements.md")
+]
+assert len(file_paths) == 1 and file_paths[0].is_absolute(), file_paths
+assert file_paths[0].read_bytes() == b"# Quoted requirements\n", file_paths[0]
+
+assert "[附件 1 个]" in quoted_image_prompt, quoted_image_prompt
+assert "## Attached Images" in quoted_image_prompt, quoted_image_prompt
+assert "最前面的 1 张图片和 0 个文件属于被引用消息" in quoted_image_prompt, quoted_image_prompt
+image_paths = [
+    pathlib.Path(path) for path in re.findall(r"`([^`]+)`", quoted_image_prompt)
+    if path.endswith("image-1.png")
+]
+assert len(image_paths) == 1 and image_paths[0].is_absolute(), image_paths
+assert image_paths[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), image_paths[0]
+
+assert "附件处理提示（不影响任务继续执行）" in quoted_image_failure_prompt, quoted_image_failure_prompt
+assert "img_v3_quoted_failure" in quoted_image_failure_prompt, quoted_image_failure_prompt
+assert "下载失败" in quoted_image_failure_prompt and "任务继续执行" in quoted_image_failure_prompt, quoted_image_failure_prompt
+assert "## Attached Images" not in quoted_image_failure_prompt, quoted_image_failure_prompt
+
 assert "话题根消息（仅作为上下文）" in topic_prompt, topic_prompt
 assert "另一机器人结论" in topic_prompt and "卡片正文：选择方案 A" in topic_prompt, topic_prompt
 assert "基于这条卡片继续" in topic_prompt, topic_prompt
@@ -732,7 +828,7 @@ assert len(human_argument_prompts) == 2, human_argument_prompts
 assert all("ask <at id=ou_human>" in prompt and "to review" in prompt for prompt in human_argument_prompts), human_argument_prompts
 
 runner_events = [json.loads(line) for line in open(run_path, encoding="utf-8") if line.strip()]
-assert len(runner_events) == 28, runner_events
+assert len(runner_events) == 34, runner_events
 concurrent_events = runner_events[12:18]
 assert [event["phase"] for event in concurrent_events[:3]] == ["start"] * 3, concurrent_events
 assert len({event["pid"] for event in concurrent_events[:3]}) == 3, concurrent_events
@@ -754,7 +850,7 @@ messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages WHERE provider_id = 'feishu-group-e2e' "
     "AND chat_id IN ('chat-alpha', 'chat-beta') GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 20), ("chat-beta", 8)], messages
+assert messages == [("chat-alpha", 26), ("chat-beta", 8)], messages
 topic_bindings = connection.execute(
     "SELECT feishu_thread_id, root_message_id, derived_session_key, source_kind "
     "FROM im_feishu_thread_bindings WHERE provider_id='feishu-group-e2e'"
@@ -792,6 +888,14 @@ permission_replies = [
     and "im:message.group_msg" in ((entry.get("content") or "") + (entry.get("content_preview") or ""))
 ]
 assert len(permission_replies) == 1, permission_replies
+attachment_failure_replies = [
+    entry for entry in message_logs
+    if entry.get("direction") == "outbound"
+    and "img_v3_quoted_failure" in ((entry.get("content") or "") + (entry.get("content_preview") or ""))
+    and "下载失败" in ((entry.get("content") or "") + (entry.get("content_preview") or ""))
+]
+assert len(attachment_failure_replies) == 1, attachment_failure_replies
+assert attachment_failure_replies[0].get("status") == "success", attachment_failure_replies
 outbound_text = "\n".join(
     (entry.get("content") or "") + "\n" + (entry.get("content_preview") or "")
     for entry in message_logs

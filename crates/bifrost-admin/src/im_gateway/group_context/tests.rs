@@ -1066,6 +1066,19 @@ fn group_prompt_renders_mentions_attachments_and_empty_content_safely() {
             encrypted_query_param: None,
             aes_key: None,
         });
+    attachment
+        .message
+        .as_mut()
+        .unwrap()
+        .files
+        .push(crate::im_gateway::types::ImFileAttachment {
+            file_key: "file-1".to_string(),
+            name: Some("report.md".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(12),
+            data_base64: None,
+            download_url: None,
+        });
     let empty = group_event("a2", "render", "u2", "", Vec::new(), 2);
     let mentions = vec![
         ImMention {
@@ -1098,7 +1111,7 @@ fn group_prompt_renders_mentions_attachments_and_empty_content_safely() {
     let turn = store
         .prepare_turn(&trigger, GroupTriggerKind::Mention, "run")
         .unwrap();
-    assert!(turn.prompt.contains("[附件 1 个]"));
+    assert!(turn.prompt.contains("[附件 2 个]"));
     assert!(!turn.prompt.contains("<at id=u2></at>："));
     assert!(turn
         .prompt
@@ -1162,6 +1175,61 @@ fn group_prompt_renders_mentions_attachments_and_empty_content_safely() {
             ..
         }
     ));
+}
+
+#[test]
+fn referenced_attachments_are_rebuilt_from_persisted_message_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    assert!(store
+        .referenced_attachments_for_trigger("feishu-main", "missing")
+        .unwrap()
+        .is_none());
+    let mut quoted = group_event("quoted-file", "quoted", "u1", "", Vec::new(), 1);
+    let quoted_message = quoted.message.as_mut().unwrap();
+    quoted_message.raw_type = Some("file".to_string());
+    quoted_message.raw_content = Some(serde_json::json!({
+        "file_key": "file_v3_persisted",
+        "file_name": "persisted.md",
+        "mime_type": "text/markdown",
+        "file_size": 14
+    }));
+    quoted_message.files.clear();
+
+    let mut trigger = group_event(
+        "trigger",
+        "quoted",
+        "u2",
+        "@_user_1",
+        vec![bot_mention()],
+        2,
+    );
+    trigger.message.as_mut().unwrap().parent_id = Some("quoted-file".to_string());
+    store.record_event(&quoted, "feishu_message_api").unwrap();
+    store.record_event(&trigger, "event").unwrap();
+
+    let attachments = store
+        .referenced_attachments_for_trigger("feishu-main", "trigger")
+        .unwrap()
+        .expect("persisted quoted attachment metadata");
+    assert_eq!(attachments.message_id, "quoted-file");
+    assert!(attachments.images.is_empty());
+    assert_eq!(attachments.files.len(), 1);
+    assert_eq!(attachments.files[0].file_key, "file_v3_persisted");
+    assert_eq!(attachments.files[0].name.as_deref(), Some("persisted.md"));
+
+    store
+        .connection
+        .lock()
+        .execute(
+            "UPDATE im_group_messages SET content_json = 'not-json' WHERE message_id = 'quoted-file'",
+            [],
+        )
+        .unwrap();
+    assert!(store
+        .referenced_attachments_for_trigger("feishu-main", "trigger")
+        .unwrap()
+        .is_none());
 }
 
 #[test]

@@ -628,5 +628,65 @@ mod tests {
                 .await
                 .is_err()
         );
+        let unused_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused_address = unused_listener.local_addr().unwrap();
+        drop(unused_listener);
+        assert!(upload_remote_image(
+            &FeishuProvider::new(),
+            &provider,
+            &format!("http://{unused_address}/unreachable.png"),
+        )
+        .await
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn unreadable_local_image_returns_a_read_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let server = spawn_mock_feishu_progress_server().await;
+        let provider = mock_feishu_provider(&server.base_url);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("unreadable.png");
+        tokio::fs::write(&path, b"image").await.unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = upload_local_image(&FeishuProvider::new(), &provider, path.clone()).await;
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn truncated_chunked_remote_image_returns_a_body_read_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n10\r\nabc",
+                )
+                .await
+                .unwrap();
+            let _ = stream.shutdown().await;
+        });
+        let server = spawn_mock_feishu_progress_server().await;
+        let provider = mock_feishu_provider(&server.base_url);
+
+        let result = upload_remote_image(
+            &FeishuProvider::new(),
+            &provider,
+            &format!("http://{address}/truncated.png"),
+        )
+        .await;
+
+        assert!(result.is_err());
+        task.await.unwrap();
     }
 }

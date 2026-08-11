@@ -2582,7 +2582,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                                     .status(StatusCode::OK)
                                     .header("content-type", "image/png")
                                     .header("content-length", (11 * 1024 * 1024).to_string())
-                                    .body(Full::new(Bytes::new()))
+                                    .body(Full::new(Bytes::from(vec![0; 11 * 1024 * 1024])))
                                     .unwrap(),
                             );
                         }

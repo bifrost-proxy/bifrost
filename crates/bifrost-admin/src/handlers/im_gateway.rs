@@ -72,7 +72,8 @@ use service::{
     save_pending_feishu_setups, FeishuSetupBrand, ImProviderClient, PendingFeishuSetup,
     PendingWeixinLogin, AGENT_REPLY_IMAGE_UPLOAD_CACHE, IMAGE_ONLY_AGENT_PROMPT,
     MAX_AGENT_ATTACHMENTS_PER_MESSAGE, MAX_AGENT_REPLY_ATTACHMENT_BYTES,
-    MAX_AGENT_REPLY_IMAGE_BYTES,
+    MAX_AGENT_REPLY_IMAGE_BYTES, MAX_FEISHU_REFERENCED_FILE_BYTES,
+    MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
 };
 pub use service::{ImGatewayService, SharedImGatewayService};
 use utils::*;

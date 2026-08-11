@@ -98,6 +98,38 @@ async fn fetch_message_restores_mentions_from_rest_string_ids() {
 }
 
 #[tokio::test]
+async fn fetch_message_extracts_referenced_image_and_file_attachments() {
+    let (image_base_url, image_task) = spawn_message_api(
+        r#"{"code":0,"data":{"items":[{"message_id":"om_image","chat_id":"oc_group","msg_type":"image","sender":{"id":"ou_sender","sender_type":"user"},"body":{"content":"{\"image_key\":\"img_v3_quoted\"}"}}]}}"#,
+    )
+    .await;
+    let image = FeishuProvider::new()
+        .fetch_message(&config(image_base_url), "om_image")
+        .await
+        .expect("fetch referenced image");
+    assert_eq!(image.images.len(), 1);
+    assert_eq!(image.images[0].file_key, "img_v3_quoted");
+    assert!(image.files.is_empty());
+    image_task.abort();
+
+    let (file_base_url, file_task) = spawn_message_api(
+        r#"{"code":0,"data":{"items":[{"message_id":"om_file","chat_id":"oc_group","msg_type":"file","sender":{"id":"ou_sender","sender_type":"user"},"body":{"content":"{\"file_key\":\"file_v3_quoted\",\"file_name\":\"需求说明.md\",\"mime_type\":\"text/markdown\",\"file_size\":12}"}}]}}"#,
+    )
+    .await;
+    let file = FeishuProvider::new()
+        .fetch_message(&config(file_base_url), "om_file")
+        .await
+        .expect("fetch referenced file");
+    assert!(file.images.is_empty());
+    assert_eq!(file.files.len(), 1);
+    assert_eq!(file.files[0].file_key, "file_v3_quoted");
+    assert_eq!(file.files[0].name.as_deref(), Some("需求说明.md"));
+    assert_eq!(file.files[0].mime_type.as_deref(), Some("text/markdown"));
+    assert_eq!(file.files[0].size_bytes, Some(12));
+    file_task.abort();
+}
+
+#[tokio::test]
 async fn fetch_message_permission_error_explains_required_scopes_and_publish_step() {
     let (base_url, task) =
         spawn_message_api(r#"{"code":230027,"msg":"Lack of necessary permissions"}"#).await;

@@ -1,5 +1,4 @@
 use super::*;
-
 #[test]
 fn queued_event_restores_the_triggering_reply_target() {
     let base = group_test_event("feishu-queue", "m1", "first", false, 1);
@@ -70,6 +69,469 @@ fn group_session_work_dir_overrides_runner_and_provider_defaults() {
         provider_request.work_dir.as_deref(),
         Some(std::path::Path::new("/provider/default"))
     );
+}
+
+#[test]
+fn referenced_attachments_are_prepended_before_current_message_attachments() {
+    let mut event = group_test_event("feishu-order", "trigger", "inspect", true, 1);
+    let message = event.message.as_mut().unwrap();
+    message
+        .images
+        .push(crate::im_gateway::types::ImImageAttachment {
+            file_key: "current-image".to_string(),
+            source: Default::default(),
+            mime_type: None,
+            data_base64: None,
+            download_url: None,
+            encrypted_query_param: None,
+            aes_key: None,
+        });
+    message
+        .files
+        .push(crate::im_gateway::types::ImFileAttachment {
+            file_key: "current-file".to_string(),
+            name: Some("current.txt".to_string()),
+            mime_type: None,
+            size_bytes: None,
+            data_base64: None,
+            download_url: None,
+        });
+    let dispatch = PreparedInboundDispatch {
+        message_text: "inspect".to_string(),
+        session_key: "session".to_string(),
+        group_turn_id: None,
+        reset_group_context: false,
+        direct_reply: None,
+        thread_anchor_message_id: None,
+        thread_fallback_message: None,
+        referenced_images: vec![crate::im_gateway::types::ImImageAttachment {
+            file_key: "quoted-image".to_string(),
+            source: Default::default(),
+            mime_type: None,
+            data_base64: None,
+            download_url: None,
+            encrypted_query_param: None,
+            aes_key: None,
+        }],
+        referenced_files: vec![crate::im_gateway::types::ImFileAttachment {
+            file_key: "quoted-file".to_string(),
+            name: Some("quoted.txt".to_string()),
+            mime_type: None,
+            size_bytes: None,
+            data_base64: None,
+            download_url: None,
+        }],
+        attachment_notices: Vec::new(),
+    };
+
+    prepend_referenced_attachments(&mut event, &dispatch);
+
+    let message = event.message.as_ref().unwrap();
+    assert_eq!(
+        message
+            .images
+            .iter()
+            .map(|image| image.file_key.as_str())
+            .collect::<Vec<_>>(),
+        ["quoted-image", "current-image"]
+    );
+    assert_eq!(
+        message
+            .files
+            .iter()
+            .map(|file| file.file_key.as_str())
+            .collect::<Vec<_>>(),
+        ["quoted-file", "current-file"]
+    );
+
+    let mut event_without_message = event.clone();
+    event_without_message.message = None;
+    prepend_referenced_attachments(&mut event_without_message, &dispatch);
+    assert!(event_without_message.message.is_none());
+    assert!(referenced_attachment_prompt_note(1, 1).contains("1 张图片和 1 个文件"));
+    assert_eq!(
+        attachment_notice_message(&["文件过大；已跳过".to_string()]),
+        "附件处理提示（不影响任务继续执行）：\n- 文件过大；已跳过"
+    );
+}
+
+#[tokio::test]
+async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks_file_size() {
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let provider = recorder_test_provider();
+    let images = (0..=MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
+        .map(|index| crate::im_gateway::types::ImImageAttachment {
+            file_key: format!("image-{index}"),
+            source: Default::default(),
+            mime_type: Some("image/png".to_string()),
+            data_base64: Some("aW1hZ2U=".to_string()),
+            download_url: None,
+            encrypted_query_param: None,
+            aes_key: None,
+        })
+        .collect();
+    let files = (0..=MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
+        .map(|index| crate::im_gateway::types::ImFileAttachment {
+            file_key: format!("file-{index}"),
+            name: Some(format!("file-{index}.txt")),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: Some(4),
+            data_base64: Some("ZmlsZQ==".to_string()),
+            download_url: None,
+        })
+        .collect();
+    let (images, files, notices) = hydrate_referenced_group_attachments(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-preloaded".to_string(),
+            images,
+            files,
+        },
+    )
+    .await;
+    assert_eq!(images.len(), MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
+    assert_eq!(files.len(), MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
+    assert_eq!(notices.len(), 2);
+
+    let (images, files, notices) = hydrate_referenced_group_attachments(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-oversize".to_string(),
+            images: Vec::new(),
+            files: vec![crate::im_gateway::types::ImFileAttachment {
+                file_key: "oversize".to_string(),
+                name: Some("oversize.bin".to_string()),
+                mime_type: None,
+                size_bytes: Some(MAX_FEISHU_REFERENCED_FILE_BYTES + 1),
+                data_base64: None,
+                download_url: None,
+            }],
+        },
+    )
+    .await;
+    assert!(images.is_empty());
+    assert!(files.is_empty());
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains("100 MiB 上限"));
+
+    let files = (0..3)
+        .map(|index| crate::im_gateway::types::ImFileAttachment {
+            file_key: format!("budget-{index}"),
+            name: Some(format!("budget-{index}.bin")),
+            mime_type: Some("application/octet-stream".to_string()),
+            size_bytes: Some(MAX_FEISHU_REFERENCED_FILE_BYTES),
+            data_base64: Some("AA==".to_string()),
+            download_url: None,
+        })
+        .collect();
+    let (_, files, notices) = hydrate_referenced_group_attachments(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-total-budget".to_string(),
+            images: Vec::new(),
+            files,
+        },
+    )
+    .await;
+    assert_eq!(files.len(), 3);
+    assert!(notices.is_empty());
+    assert!(files.iter().all(|file| file.size_bytes == Some(1)));
+    assert!(!referenced_file_budget_exceeded(
+        2 * MAX_FEISHU_REFERENCED_FILE_BYTES,
+        50 * 1024 * 1024
+    ));
+    assert!(referenced_file_budget_exceeded(
+        2 * MAX_FEISHU_REFERENCED_FILE_BYTES,
+        50 * 1024 * 1024 + 1
+    ));
+
+    let (_, files, notices) = hydrate_referenced_group_attachments(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-invalid-base64".to_string(),
+            images: vec![crate::im_gateway::types::ImImageAttachment {
+                file_key: "invalid-image".to_string(),
+                source: Default::default(),
+                mime_type: Some("image/png".to_string()),
+                data_base64: Some("not base64".to_string()),
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
+            }],
+            files: vec![crate::im_gateway::types::ImFileAttachment {
+                file_key: "invalid-file".to_string(),
+                name: Some("invalid.bin".to_string()),
+                mime_type: None,
+                size_bytes: None,
+                data_base64: Some("also not base64".to_string()),
+                download_url: None,
+            }],
+        },
+    )
+    .await;
+    assert!(files.is_empty());
+    assert_eq!(notices.len(), 2);
+    assert!(notices
+        .iter()
+        .all(|notice| notice.contains("不是有效 Base64")));
+}
+
+async fn spawn_oversized_referenced_resource_server() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 8192];
+                let Ok(length) = stream.read(&mut request).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&request[..length]);
+                let response = if request.contains("/auth/v3/tenant_access_token/internal") {
+                    let body = r#"{"code":0,"tenant_access_token":"token","expire":7200}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                } else if request.contains("/resources/oversized-image") {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        MAX_AGENT_REPLY_IMAGE_BYTES + 1
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        MAX_FEISHU_REFERENCED_FILE_BYTES + 1
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{address}/open-apis"), task)
+}
+
+#[tokio::test]
+async fn referenced_attachment_hydration_rejects_oversized_downloaded_payloads() {
+    let (base_url, server) = spawn_oversized_referenced_resource_server().await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.base_url = Some(base_url);
+
+    let (images, files, notices) = hydrate_referenced_group_attachments(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-oversized-image".to_string(),
+            images: vec![crate::im_gateway::types::ImImageAttachment {
+                file_key: "oversized-image".to_string(),
+                source: Default::default(),
+                mime_type: None,
+                data_base64: None,
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
+            }],
+            files: Vec::new(),
+        },
+    )
+    .await;
+    assert!(images.is_empty());
+    assert!(files.is_empty());
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains("超过 10 MiB 上限"));
+
+    let (images, files, notices) = hydrate_referenced_group_attachments(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-oversized-file".to_string(),
+            images: Vec::new(),
+            files: vec![crate::im_gateway::types::ImFileAttachment {
+                file_key: "oversized-file".to_string(),
+                name: Some("oversized.bin".to_string()),
+                mime_type: None,
+                size_bytes: None,
+                data_base64: None,
+                download_url: None,
+            }],
+        },
+    )
+    .await;
+    assert!(images.is_empty());
+    assert!(files.is_empty());
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains("100 MiB 上限"));
+    server.abort();
+}
+
+async fn spawn_referenced_resource_branch_server() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 8192];
+                let Ok(length) = stream.read(&mut request).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&request[..length]);
+                let (status, content_type, body): (&str, &str, &[u8]) =
+                    if request.contains("/auth/v3/tenant_access_token/internal") {
+                        (
+                            "200 OK",
+                            "application/json",
+                            br#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                        )
+                    } else if request.contains("fail") {
+                        ("500 Internal Server Error", "text/plain", b"failed")
+                    } else if request.contains("image-ok") {
+                        ("200 OK", "image/png", b"img4")
+                    } else if request.contains("image-too-big") {
+                        ("200 OK", "image/png", b"image")
+                    } else if request.contains("file-too-big") {
+                        ("200 OK", "application/octet-stream", b"12345")
+                    } else {
+                        ("200 OK", "application/octet-stream", b"abc")
+                    };
+                let headers = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(headers.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+            });
+        }
+    });
+    (format!("http://{address}/open-apis"), task)
+}
+
+#[tokio::test]
+async fn referenced_attachment_hydration_covers_small_limit_error_matrix() {
+    let (base_url, server) = spawn_referenced_resource_branch_server().await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.base_url = Some(base_url);
+    let limits: ReferencedAttachmentLimits = [6, 4, 4, 5];
+
+    let image = |key: &str, data_base64: Option<&str>| ImImageAttachment {
+        file_key: key.to_string(),
+        source: Default::default(),
+        mime_type: None,
+        data_base64: data_base64.map(ToString::to_string),
+        download_url: None,
+        encrypted_query_param: None,
+        aes_key: None,
+    };
+    let file = |key: &str, size_bytes: Option<u64>, data_base64: Option<&str>| ImFileAttachment {
+        file_key: key.to_string(),
+        name: Some(format!("{key}.bin")),
+        mime_type: None,
+        size_bytes,
+        data_base64: data_base64.map(ToString::to_string),
+        download_url: None,
+    };
+
+    let (images, files, notices) = hydrate_referenced_group_attachments_with_limits(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-small-limits".to_string(),
+            images: vec![
+                image("preloaded-ok", Some("aW1nNA==")),
+                image("preloaded-too-big", Some("aW1hZ2U=")),
+                image("preloaded-invalid", Some("?")),
+                image("image-ok", None),
+                image("image-too-big", None),
+                image("image-fail", None),
+            ],
+            files: vec![
+                file("preloaded-file", None, Some("YWJj")),
+                file("budget-preflight", Some(3), None),
+                file("metadata-too-big", Some(5), None),
+                file("invalid-file", None, Some("?")),
+                file("file-ok", None, None),
+                file("file-too-big", None, None),
+            ],
+        },
+        limits,
+    )
+    .await;
+
+    assert_eq!(
+        images
+            .iter()
+            .map(|image| image.file_key.as_str())
+            .collect::<Vec<_>>(),
+        ["preloaded-ok", "image-ok"]
+    );
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].file_key, "preloaded-file");
+    assert!(notices
+        .iter()
+        .any(|notice| notice.contains("不是有效 Base64")));
+    assert!(notices.iter().any(|notice| notice.contains("下载失败")));
+    assert!(notices.iter().any(|notice| notice.contains("附件总量")));
+    assert!(notices
+        .iter()
+        .any(|notice| notice.contains("超过 0 MiB 上限")));
+
+    let (_, files, notices) = hydrate_referenced_group_attachments_with_limits(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-post-download-budget".to_string(),
+            images: Vec::new(),
+            files: vec![
+                file("file-first", None, None),
+                file("file-second", None, None),
+                file("file-fail", None, None),
+            ],
+        },
+        limits,
+    )
+    .await;
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].file_key, "file-first");
+    assert!(notices.iter().any(|notice| notice.contains("附件总量")));
+    assert!(notices.iter().any(|notice| notice.contains("下载失败")));
+
+    let truncation_limits: ReferencedAttachmentLimits = [1, limits[1], limits[2], limits[3]];
+    let (_, _, notices) = hydrate_referenced_group_attachments_with_limits(
+        &client,
+        &provider,
+        crate::im_gateway::group_context::ReferencedGroupAttachments {
+            message_id: "quoted-count-limits".to_string(),
+            images: vec![image("first", Some("aW1nNA==")), image("second", None)],
+            files: vec![
+                file("first", None, Some("YWJj")),
+                file("second", None, None),
+            ],
+        },
+        truncation_limits,
+    )
+    .await;
+    assert_eq!(notices.len(), 2);
+    assert!(notices[0].contains("最多处理 1 张"));
+    assert!(notices[1].contains("最多处理 1 个"));
+    server.abort();
 }
 
 async fn spawn_group_lookup_server() -> (String, tokio::task::JoinHandle<()>) {
@@ -168,6 +630,204 @@ async fn spawn_reference_routing_server(
         }
     });
     (format!("http://{address}"), message_reads, task)
+}
+
+async fn spawn_referenced_file_server() -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let message_reads = Arc::new(AtomicUsize::new(0));
+    let resource_reads = Arc::new(AtomicUsize::new(0));
+    let server_message_reads = Arc::clone(&message_reads);
+    let server_reads = Arc::clone(&resource_reads);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let message_reads = Arc::clone(&server_message_reads);
+            let resource_reads = Arc::clone(&server_reads);
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(
+                    move |request: hyper::Request<hyper::body::Incoming>| {
+                        let message_reads = Arc::clone(&message_reads);
+                        let resource_reads = Arc::clone(&resource_reads);
+                        async move {
+                            let path = request.uri().path();
+                            let (content_type, body) = if path
+                                .ends_with("/auth/v3/tenant_access_token/internal")
+                            {
+                                (
+                                    "application/json",
+                                    bytes::Bytes::from_static(
+                                        br#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                                    ),
+                                )
+                            } else if path.ends_with(
+                                "/im/v1/messages/om_quoted_file/resources/file_v3_quoted",
+                            ) {
+                                resource_reads.fetch_add(1, Ordering::SeqCst);
+                                (
+                                    "text/markdown; charset=utf-8",
+                                    bytes::Bytes::from_static(b"# quoted attachment"),
+                                )
+                            } else if path.ends_with("/im/v1/messages/om_quoted_file") {
+                                message_reads.fetch_add(1, Ordering::SeqCst);
+                                (
+                                    "application/json",
+                                    bytes::Bytes::from_static(
+                                        br#"{"code":0,"data":{"items":[{"message_id":"om_quoted_file","chat_id":"oc_group","msg_type":"file","sender":{"id":"ou_author","sender_type":"user"},"body":{"content":"{\"file_key\":\"file_v3_quoted\",\"file_name\":\"quoted.md\",\"mime_type\":\"text/markdown\",\"file_size\":19}"},"create_time":"1"}]}}"#,
+                                    ),
+                                )
+                            } else if path.ends_with("/bot/v3/info") {
+                                (
+                                    "application/json",
+                                    bytes::Bytes::from_static(
+                                        br#"{"code":0,"bot":{"open_id":"ou_bot","app_name":"Bifrost"}}"#,
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "application/json",
+                                    bytes::Bytes::from_static(
+                                        br#"{"code":0,"data":{"name":"Engineering"}}"#,
+                                    ),
+                                )
+                            };
+                            Ok::<_, hyper::Error>(
+                                hyper::Response::builder()
+                                    .header("Content-Type", content_type)
+                                    .body(http_body_util::Full::new(body))
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (
+        format!("http://{address}"),
+        message_reads,
+        resource_reads,
+        task,
+    )
+}
+
+async fn spawn_referenced_image_server(
+    fail_resource: bool,
+) -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let message_reads = Arc::new(AtomicUsize::new(0));
+    let resource_reads = Arc::new(AtomicUsize::new(0));
+    let server_message_reads = Arc::clone(&message_reads);
+    let server_resource_reads = Arc::clone(&resource_reads);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let message_reads = Arc::clone(&server_message_reads);
+            let resource_reads = Arc::clone(&server_resource_reads);
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(
+                    move |request: hyper::Request<hyper::body::Incoming>| {
+                        let message_reads = Arc::clone(&message_reads);
+                        let resource_reads = Arc::clone(&resource_reads);
+                        async move {
+                            let path = request.uri().path();
+                            let (status, content_type, body) = if path
+                                .ends_with("/auth/v3/tenant_access_token/internal")
+                            {
+                                (
+                                    hyper::StatusCode::OK,
+                                    "application/json",
+                                    bytes::Bytes::from_static(
+                                        br#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                                    ),
+                                )
+                            } else if path.ends_with(
+                                "/im/v1/messages/om_quoted_image/resources/img_v3_quoted",
+                            ) {
+                                resource_reads.fetch_add(1, Ordering::SeqCst);
+                                if fail_resource {
+                                    (
+                                        hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                                        "application/json",
+                                        bytes::Bytes::from_static(br#"{"code":230001}"#),
+                                    )
+                                } else {
+                                    (
+                                        hyper::StatusCode::OK,
+                                        "image/png",
+                                        bytes::Bytes::from_static(b"quoted image bytes"),
+                                    )
+                                }
+                            } else if path.ends_with("/im/v1/messages/om_quoted_image") {
+                                message_reads.fetch_add(1, Ordering::SeqCst);
+                                (
+                                    hyper::StatusCode::OK,
+                                    "application/json",
+                                    bytes::Bytes::from_static(
+                                        br#"{"code":0,"data":{"items":[{"message_id":"om_quoted_image","chat_id":"oc_group","msg_type":"image","sender":{"id":"ou_author","sender_type":"user"},"body":{"content":"{\"image_key\":\"img_v3_quoted\"}"},"create_time":"1"}]}}"#,
+                                    ),
+                                )
+                            } else if path.ends_with("/bot/v3/info") {
+                                (
+                                    hyper::StatusCode::OK,
+                                    "application/json",
+                                    bytes::Bytes::from_static(
+                                        br#"{"code":0,"bot":{"open_id":"ou_bot","app_name":"Bifrost"}}"#,
+                                    ),
+                                )
+                            } else {
+                                (
+                                    hyper::StatusCode::OK,
+                                    "application/json",
+                                    bytes::Bytes::from_static(
+                                        br#"{"code":0,"data":{"name":"Engineering"}}"#,
+                                    ),
+                                )
+                            };
+                            Ok::<_, hyper::Error>(
+                                hyper::Response::builder()
+                                    .status(status)
+                                    .header("Content-Type", content_type)
+                                    .body(http_body_util::Full::new(body))
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (
+        format!("http://{address}"),
+        message_reads,
+        resource_reads,
+        task,
+    )
 }
 
 async fn spawn_new_group_event_loop_server() -> (

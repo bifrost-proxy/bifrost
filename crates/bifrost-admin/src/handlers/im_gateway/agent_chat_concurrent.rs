@@ -98,6 +98,9 @@ pub(super) async fn handle_concurrent_event_during_chat(
             direct_reply: None,
             thread_anchor_message_id: None,
             thread_fallback_message: None,
+            referenced_images: Vec::new(),
+            referenced_files: Vec::new(),
+            attachment_notices: Vec::new(),
         }
     };
     if is_group_event {
@@ -105,6 +108,9 @@ pub(super) async fn handle_concurrent_event_during_chat(
             error!(error = %error, "failed to store accepted concurrent group event");
         }
     }
+    let mut event_with_referenced_attachments = event.clone();
+    prepend_referenced_attachments(&mut event_with_referenced_attachments, &dispatch);
+    let event = &event_with_referenced_attachments;
     let direct_reply = dispatch.direct_reply.clone();
     let message_text = dispatch.message_text;
     let session_key = dispatch.session_key;
@@ -113,6 +119,10 @@ pub(super) async fn handle_concurrent_event_during_chat(
     // acknowledgement and inbound audit side effects as the normal path even
     // though their session mailbox already has a runner in flight.
     acknowledge_and_log_inbound_event(client, &provider, event, message_log_store).await;
+    if !dispatch.attachment_notices.is_empty() {
+        let notice = attachment_notice_message(&dispatch.attachment_notices);
+        send_agent_reply(client, &provider, event, &notice, message_log_store).await;
+    }
     if let Some(reply) = direct_reply {
         send_agent_reply(client, &provider, event, &reply, message_log_store).await;
         if let Some(turn_id) = group_turn_id.as_deref() {

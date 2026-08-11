@@ -191,9 +191,11 @@ pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
     String,
     Vec<AgentReplyLocalImage>,
     Vec<AgentReplyLocalAttachment>,
+    Vec<String>,
 ) {
     let mut images = collect_agent_reply_local_images(markdown, base_dir);
     let mut attachments = Vec::new();
+    let mut attachment_notices = Vec::new();
     let mut remote_urls_to_strip = HashSet::new();
     let mut linked_image_urls_to_strip = HashSet::new();
     collect_agent_reply_local_attachment_links(markdown, base_dir, &mut images, &mut attachments);
@@ -230,11 +232,12 @@ pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
                 }
             }
             Err(error) => {
-                warn!(
-                    attachment_url = %remote_attachment.url,
-                    error = %error,
-                    "failed to download remote attachment referenced by agent markdown"
-                );
+                let url = &remote_attachment.url;
+                warn!("failed to download agent reply remote attachment {url}: {error}");
+                attachment_notices.push(remote_attachment_download_notice(
+                    &remote_attachment.label,
+                    &error,
+                ));
             }
         }
     }
@@ -249,7 +252,11 @@ pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
             &linked_image_urls_to_strip,
         )
     };
-    (text, images, attachments)
+    (text, images, attachments, attachment_notices)
+}
+
+fn remote_attachment_download_notice(label: &str, error: &bifrost_core::BifrostError) -> String {
+    format!("远程文件「{label}」下载失败：{error}；任务结论已正常发布。")
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -871,7 +878,7 @@ async fn send_agent_reply_with_title_and_base_dir(
     } else {
         reply_text.to_string()
     };
-    let (reply_text_for_card, reply_images, reply_attachments) =
+    let (reply_text_for_card, reply_images, reply_attachments, reply_attachment_notices) =
         prepare_agent_reply_text_and_images_with_downloads(
             &rendered_reply_text,
             image_base_dir.as_deref(),
@@ -1028,6 +1035,7 @@ async fn send_agent_reply_with_title_and_base_dir(
         &reply_target,
         &reply_images,
         &reply_attachments,
+        &reply_attachment_notices,
         message_log_store,
     )
     .await;
@@ -1215,7 +1223,7 @@ pub(super) async fn send_agent_reply_with_plan(
     } else {
         reply_text.to_string()
     };
-    let (reply_text_for_card, reply_images, reply_attachments) =
+    let (reply_text_for_card, reply_images, reply_attachments, reply_attachment_notices) =
         prepare_agent_reply_text_and_images_with_downloads(
             &rendered_reply_text,
             image_base_dir.as_deref(),
@@ -1365,6 +1373,7 @@ pub(super) async fn send_agent_reply_with_plan(
         &reply_target,
         &reply_images,
         &reply_attachments,
+        &reply_attachment_notices,
         message_log_store,
     )
     .await;

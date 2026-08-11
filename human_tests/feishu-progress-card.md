@@ -245,12 +245,27 @@
 - 普通 `.txt` 和 `.tar.gz` 仍分别调用 `/im/v1/files` 并发送 `msg_type=file`，图片内联不破坏非图片附件。
 - 无真实租户凭据时，本地完整 HTTP/CardKit payload 契约必须通过，并明确将飞书客户端肉眼渲染标记为未执行，而不是假设通过。
 
+### TC-FPC-13：出站文件 30 MiB 平台上限与非阻塞失败提示
+
+**操作步骤**：
+1. 使用当前 debug 二进制执行隔离 Service + mock Runner + loopback Feishu OpenAPI：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+2. mock Runner 的成功结论同时显式链接一个 `30 MiB + 1 byte` 稀疏文件和一个小文本文件；mock `/im/v1/files` 对小文本文件返回飞书错误码 `234006`。
+3. 检查请求日志：绿色 `Task completed` 终态卡先发布；超限文件不进入 `/im/v1/files`；小文件发生一次上传尝试但不产生 `msg_type=file` 消息；随后只补发一张汇总提示卡。
+4. 检查提示卡和消息日志包含两个失败文件名、30 MiB 平台上限、上传错误码及“任务结论已正常发布”；确认 Bifrost 进程仍健康且 Session 已 idle。
+
+**预期结果**：飞书官方上传文件接口只支持不超过 30 MB，Bifrost 不采用不可实现的 250 MB 出站单文件上限。超限、空文件、上传失败或文件消息发送失败均只影响对应附件，其余附件继续；终态卡和任务状态不回滚，提示卡发送失败也不会使事件循环或服务异常。入站引用消息仍独立执行 100 MiB 单文件、250 MiB 单 Turn 总预算。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-11：PASS（TC-FPC-13 出站文件上限与失败降级）— 官方文档确认 `POST /open-apis/im/v1/files` 单文件不得超过 30 MB、空文件禁止、超限错误码 `234006`，因此未采用不可实现的 250 MB 出站上限。首次黑盒执行发现测试夹具的 `.bin` 链接标签未包含“file/附件”，按产品“只发送显式附件链接”的安全规则未被识别；修正标签为显式 file 后立即复跑通过。隔离 Service + mock Runner + loopback Feishu OpenAPI 验证绿色 `Task completed` 终态卡先成功发布，`30 MiB + 1 byte` 文件未调用上传接口，小文件上传返回 `234006` 后未发送 file 消息，两项失败汇总到一张“附件发送提示（不影响任务结论）”卡；Session 正常 idle、Bifrost 服务继续健康。测试 trap 已清理临时目录和所属进程。
 
 - 2026-08-11：PASS（rebase 后终态过程说明回归复测）— TC-FPC-12 在最新 `origin/main` 上首次重跑时发现：同一图片在 `AssistantDelta` 中已转换为 `image_key`，但 `TurnFinished` 仍携带本地路径，导致最终结论未从过程时间线去重，`agent_process_sum` 错误覆盖最新过程说明。修复文本比较键对 Markdown 图片目标的归一化，并新增 `progress_registry_keeps_delta_explanation_when_terminal_reuses_uploaded_image`；聚焦 Registry、共享解析器和黑盒 E2E 复测均通过，终态同时保留 `E2E_LATEST_EXPLANATION` 与 `E2E_FINAL_SUMMARY_SUCCESS`，图片仍只上传一次并渲染为 `img_v3_terminal_e2e`。
 

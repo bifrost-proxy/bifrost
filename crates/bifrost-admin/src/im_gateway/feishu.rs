@@ -31,6 +31,8 @@ const DEFAULT_BASE_URL: &str = "https://open.feishu.cn/open-apis";
 const TOKEN_REFRESH_AHEAD_SECS: u64 = 300; // 5 minutes before expiry
 const MAX_BACKOFF_SECS: u64 = 60;
 const INITIAL_BACKOFF_SECS: u64 = 1;
+const MAX_MESSAGE_IMAGE_RESOURCE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_MESSAGE_FILE_RESOURCE_BYTES: u64 = 100 * 1024 * 1024;
 const WS_PING_INTERVAL_SECS: u64 = 90;
 /// Maximum time we're willing to wait for *any* server-originated traffic
 /// (event / pong / server-initiated ping) before considering the connection
@@ -1900,13 +1902,10 @@ impl FeishuProvider {
                 status, body
             )));
         }
-        let bytes = resp.bytes().await.map_err(|e| {
-            bifrost_core::BifrostError::Network(format!(
-                "feishu message image body read failed: {}",
-                e
-            ))
-        })?;
-        Ok((mime_type, bytes.to_vec()))
+        let bytes =
+            read_feishu_message_resource_body(resp, "image", MAX_MESSAGE_IMAGE_RESOURCE_BYTES)
+                .await?;
+        Ok((mime_type, bytes))
     }
 
     /// Download a generic file resource embedded in a Feishu message.
@@ -1957,14 +1956,46 @@ impl FeishuProvider {
                 status, body
             )));
         }
-        let bytes = resp.bytes().await.map_err(|e| {
+        let bytes =
+            read_feishu_message_resource_body(resp, "file", MAX_MESSAGE_FILE_RESOURCE_BYTES)
+                .await?;
+        Ok((mime_type, bytes))
+    }
+}
+
+async fn read_feishu_message_resource_body(
+    response: reqwest::Response,
+    resource_kind: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    let header_too_large = response
+        .content_length()
+        .is_some_and(|length| length > max_bytes);
+    if header_too_large {
+        return Err(feishu_resource_size_error(resource_kind, max_bytes));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
             bifrost_core::BifrostError::Network(format!(
-                "feishu message file body read failed: {}",
-                e
+                "feishu message {resource_kind} body read failed: {error}"
             ))
         })?;
-        Ok((mime_type, bytes.to_vec()))
+        let buffered = bytes.len() as u64;
+        if buffered.saturating_add(chunk.len() as u64) > max_bytes {
+            return Err(feishu_resource_size_error(resource_kind, max_bytes));
+        }
+        bytes.extend_from_slice(&chunk);
     }
+    Ok(bytes)
+}
+
+fn feishu_resource_size_error(resource_kind: &str, max_bytes: u64) -> bifrost_core::BifrostError {
+    let max_mib = max_bytes / 1024 / 1024;
+    bifrost_core::BifrostError::Config(format!(
+        "飞书消息 {resource_kind} 资源超过 {max_mib} MiB 上限"
+    ))
 }
 
 fn parse_feishu_chat_name(value: &serde_json::Value) -> std::result::Result<String, String> {
@@ -2412,46 +2443,10 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
     // those placeholders before group classification and prompt rendering.
     let text = extract_feishu_message_text(&content_obj, &mentions);
 
-    let mut images = Vec::new();
-    let mut files = Vec::new();
-    if message_type.as_deref() == Some("image") {
-        if let Some(image_key) = content_obj.get("image_key").and_then(|v| v.as_str()) {
-            images.push(ImImageAttachment {
-                file_key: image_key.to_string(),
-                source: ImImageSource::MessageResource,
-                mime_type: None,
-                data_base64: None,
-                download_url: None,
-                encrypted_query_param: None,
-                aes_key: None,
-            });
-        }
-    }
-    if message_type.as_deref() == Some("file") {
-        if let Some(file_key) = content_obj.get("file_key").and_then(|v| v.as_str()) {
-            files.push(ImFileAttachment {
-                file_key: file_key.to_string(),
-                name: content_obj
-                    .get("file_name")
-                    .or_else(|| content_obj.get("name"))
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string),
-                mime_type: content_obj
-                    .get("mime_type")
-                    .or_else(|| content_obj.get("mimeType"))
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string),
-                size_bytes: content_obj
-                    .get("file_size")
-                    .or_else(|| content_obj.get("size"))
-                    .or_else(|| content_obj.get("size_bytes"))
-                    .and_then(|value| value.as_u64()),
-                data_base64: None,
-                download_url: None,
-            });
-        }
-    }
-    collect_rich_text_image_keys(&content_obj, &mut images);
+    let (images, files) = parse_feishu_message_attachments(
+        message_type.as_deref().unwrap_or("unknown"),
+        &content_obj,
+    );
 
     info!(
         provider_id = %provider_id,
@@ -2755,7 +2750,12 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn collect_rich_text_image_keys(value: &serde_json::Value, images: &mut Vec<ImImageAttachment>) {
     match value {
         serde_json::Value::Object(map) => {
-            if let Some(image_key) = map.get("image_key").and_then(|v| v.as_str()) {
+            if let Some(image_key) = map
+                .get("image_key")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 if !images.iter().any(|image| image.file_key == image_key) {
                     images.push(ImImageAttachment {
                         file_key: image_key.to_string(),
@@ -2779,6 +2779,63 @@ fn collect_rich_text_image_keys(value: &serde_json::Value, images: &mut Vec<ImIm
         }
         _ => {}
     }
+}
+
+pub(super) fn parse_feishu_message_attachments(
+    message_type: &str,
+    content: &serde_json::Value,
+) -> (Vec<ImImageAttachment>, Vec<ImFileAttachment>) {
+    let mut images = Vec::new();
+    let mut files = Vec::new();
+    if message_type == "image" {
+        if let Some(image_key) = content
+            .get("image_key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            images.push(ImImageAttachment {
+                file_key: image_key.to_string(),
+                source: ImImageSource::MessageResource,
+                mime_type: None,
+                data_base64: None,
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
+            });
+        }
+    }
+    if message_type == "file" {
+        if let Some(file_key) = content
+            .get("file_key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            files.push(ImFileAttachment {
+                file_key: file_key.to_string(),
+                name: content
+                    .get("file_name")
+                    .or_else(|| content.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                mime_type: content
+                    .get("mime_type")
+                    .or_else(|| content.get("mimeType"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                size_bytes: content
+                    .get("file_size")
+                    .or_else(|| content.get("size"))
+                    .or_else(|| content.get("size_bytes"))
+                    .and_then(serde_json::Value::as_u64),
+                data_base64: None,
+                download_url: None,
+            });
+        }
+    }
+    collect_rich_text_image_keys(content, &mut images);
+    (images, files)
 }
 
 fn extract_feishu_message_text(value: &serde_json::Value, mentions: &[ImMention]) -> String {
@@ -4114,5 +4171,66 @@ mod tests {
         let ordinary = build_reply_request("interactive", "{}", None, false);
         assert_eq!(ordinary["reply_in_thread"], false);
         assert!(ordinary.get("uuid").is_none());
+    }
+
+    #[tokio::test]
+    async fn message_resource_body_enforces_header_and_stream_limits() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind message resource server");
+        let address = listener.local_addr().expect("message resource address");
+        let server = tokio::spawn(async move {
+            for response in [
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabcdef",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
+            ] {
+                let (mut stream, _) = listener.accept().await.expect("accept resource request");
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write resource response");
+            }
+        });
+        let http = reqwest::Client::new();
+
+        let header_response = http
+            .get(format!("http://{address}/header"))
+            .send()
+            .await
+            .expect("header response");
+        let header_error = read_feishu_message_resource_body(header_response, "file", 4)
+            .await
+            .expect_err("content-length must be checked before buffering");
+        assert!(header_error.to_string().contains("0 MiB 上限"));
+
+        let stream_response = http
+            .get(format!("http://{address}/stream"))
+            .send()
+            .await
+            .expect("stream response");
+        let stream_error = read_feishu_message_resource_body(stream_response, "image", 4)
+            .await
+            .expect_err("streamed cumulative size must be checked");
+        assert!(stream_error.to_string().contains("image"));
+        server.await.expect("message resource server");
+    }
+
+    #[test]
+    fn parse_message_attachments_ignores_blank_resource_keys() {
+        let (images, files) =
+            parse_feishu_message_attachments("image", &serde_json::json!({"image_key": "   "}));
+        assert!(images.is_empty());
+        assert!(files.is_empty());
+
+        let (images, files) = parse_feishu_message_attachments(
+            "file",
+            &serde_json::json!({"file_key": "", "file_name": "blank.txt"}),
+        );
+        assert!(images.is_empty());
+        assert!(files.is_empty());
     }
 }
