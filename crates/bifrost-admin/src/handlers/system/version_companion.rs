@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -292,9 +293,79 @@ fn spawn_cli_version_probe_with_retry<T>(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UpgradeTargetError {
+    Timeout,
+    Unavailable,
+    Current,
+}
+
+pub(super) async fn resolve_upgrade_target<F>(
+    version_check: F,
+    timeout: Duration,
+) -> Result<String, UpgradeTargetError>
+where
+    F: Future<Output = crate::VersionCheckResponse>,
+{
+    let version = tokio::time::timeout(timeout, version_check)
+        .await
+        .map_err(|_| UpgradeTargetError::Timeout)?;
+    match version.latest_version {
+        None => Err(UpgradeTargetError::Unavailable),
+        Some(target) if version.has_update => Ok(target),
+        Some(_) => Err(UpgradeTargetError::Current),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn version_response(latest: Option<&str>, has_update: bool) -> crate::VersionCheckResponse {
+        crate::VersionCheckResponse {
+            has_update,
+            current_version: "0.0.155".to_string(),
+            latest_version: latest.map(str::to_string),
+            release_highlights: Vec::new(),
+            release_url: None,
+            checked_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_target_distinguishes_current_unavailable_and_timeout() {
+        let target = resolve_upgrade_target(
+            std::future::ready(version_response(Some("0.0.156"), true)),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("newer cached release resolves a target");
+        assert_eq!(target, "0.0.156");
+
+        let current = resolve_upgrade_target(
+            std::future::ready(version_response(Some("0.0.155"), false)),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("current version remains a conflict");
+        assert_eq!(current, UpgradeTargetError::Current);
+
+        let unavailable = resolve_upgrade_target(
+            std::future::ready(version_response(None, false)),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("missing metadata remains unavailable");
+        assert_eq!(unavailable, UpgradeTargetError::Unavailable);
+
+        let timeout = resolve_upgrade_target(
+            std::future::pending::<crate::VersionCheckResponse>(),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("pending version check must time out");
+        assert_eq!(timeout, UpgradeTargetError::Timeout);
+    }
 
     #[cfg(target_os = "macos")]
     fn write_app_version(app: &Path, version: &str) {

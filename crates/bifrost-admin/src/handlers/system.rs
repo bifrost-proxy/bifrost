@@ -1,5 +1,4 @@
 use std::fs::{self, OpenOptions};
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -33,7 +32,8 @@ use crate::state::SharedAdminState;
 
 mod version_companion;
 use version_companion::{
-    desktop_app_version_for_version_check, standalone_cli_version_for_version_check,
+    desktop_app_version_for_version_check, resolve_upgrade_target,
+    standalone_cli_version_for_version_check, UpgradeTargetError,
 };
 
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -313,7 +313,21 @@ async fn start_upgrade(
     .await
     {
         Ok(target) => target,
-        Err(response) => return response,
+        Err(UpgradeTargetError::Timeout) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Timed out while checking the latest Bifrost version",
+            )
+        }
+        Err(UpgradeTargetError::Unavailable) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Unable to determine the latest Bifrost version",
+            )
+        }
+        Err(UpgradeTargetError::Current) => {
+            return error_response(StatusCode::CONFLICT, "No update available")
+        }
     };
 
     // Seed the channel so the Web UI sees movement immediately, before the
@@ -772,31 +786,6 @@ fn desktop_version_check_uses_standalone_cli(desktop_core: bool) -> bool {
     desktop_core
 }
 
-async fn resolve_upgrade_target<F>(
-    version_check: F,
-    timeout: Duration,
-) -> Result<String, Response<BoxBody>>
-where
-    F: Future<Output = crate::VersionCheckResponse>,
-{
-    let version = tokio::time::timeout(timeout, version_check)
-        .await
-        .map_err(|_| {
-            error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Timed out while checking the latest Bifrost version",
-            )
-        })?;
-    match version.latest_version {
-        None => Err(error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Unable to determine the latest Bifrost version",
-        )),
-        Some(target) if version.has_update => Ok(target),
-        Some(_) => Err(error_response(StatusCode::CONFLICT, "No update available")),
-    }
-}
-
 fn parse_upgrade_channel(query: Option<&str>) -> UpgradeChannel {
     if query.unwrap_or_default().split('&').any(|part| {
         matches!(
@@ -998,16 +987,15 @@ mod tests {
         build_cli_install_status, check_unified_version_for_channel, check_version,
         desktop_core_env_enabled, desktop_version_check_uses_standalone_cli,
         effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
-        merge_companion_update, normalize_progress, parse_upgrade_channel, resolve_upgrade_target,
-        spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_process_environment,
-        upgrade_request_plan, upgrade_start_lock, validate_upgrade_request_channel,
-        validated_webview_upgrade_origin, CliInstallRequest, StatusCode, UpgradeChannel,
+        merge_companion_update, normalize_progress, parse_upgrade_channel, spawn_upgrade_process,
+        start_upgrade, upgrade_process_args, upgrade_process_environment, upgrade_request_plan,
+        upgrade_start_lock, validate_upgrade_request_channel, validated_webview_upgrade_origin,
+        CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
     use std::path::Path;
     use std::sync::Arc;
-    use std::time::Duration;
 
     fn version_response(
         current: &str,
@@ -1120,43 +1108,6 @@ mod tests {
             app_owned_without_cli_version.current_version,
             env!("CARGO_PKG_VERSION")
         );
-    }
-
-    #[tokio::test]
-    async fn upgrade_target_resolution_distinguishes_current_unavailable_and_timeout() {
-        let valid = version_response("0.0.155", "0.0.156", true);
-        let target =
-            resolve_upgrade_target(std::future::ready(valid.clone()), Duration::from_secs(1))
-                .await
-                .expect("newer cached release resolves a target");
-        assert_eq!(target, "0.0.156");
-
-        let current = version_response("0.0.156", "0.0.156", false);
-        assert_eq!(
-            resolve_upgrade_target(std::future::ready(current), Duration::from_secs(1))
-                .await
-                .expect_err("current version returns a conflict")
-                .status(),
-            StatusCode::CONFLICT
-        );
-
-        let mut missing = valid;
-        missing.latest_version = None;
-        assert_eq!(
-            resolve_upgrade_target(std::future::ready(missing), Duration::from_secs(1))
-                .await
-                .expect_err("missing metadata returns unavailable")
-                .status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-
-        let timeout = resolve_upgrade_target(
-            std::future::pending::<crate::VersionCheckResponse>(),
-            Duration::from_millis(1),
-        )
-        .await
-        .expect_err("pending version check must time out");
-        assert_eq!(timeout.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
