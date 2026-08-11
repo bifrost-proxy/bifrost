@@ -108,6 +108,52 @@ async fn prepare_group_dispatch_covers_ambient_commands_triggers_and_duplicates(
 }
 
 #[tokio::test]
+async fn local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-local-topic-anchor".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    store
+        .upsert_feishu_message_anchor(
+            &crate::im_gateway::group_context::FeishuMessageAnchor {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                message_id: "root-card".to_string(),
+                source_session_key: "source-session".to_string(),
+                run_id: Some("run".to_string()),
+                runner_id: "Codex".to_string(),
+                adapter: "codex".to_string(),
+                transport: "app_server".to_string(),
+                external_thread_id: Some("codex-thread".to_string()),
+                external_turn_id: Some("codex-turn".to_string()),
+                checkpoint_thread_id: None,
+                status: "ready".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+    let mut event = group_test_event(&provider.id, "topic-reply", "continue here", false, 2);
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-1".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .expect("local anchor owns its topic without requiring an @ mention");
+    assert_eq!(dispatch.message_text, "continue here");
+    assert_eq!(
+        dispatch.thread_anchor_message_id.as_deref(),
+        Some("root-card")
+    );
+    assert!(dispatch.thread_fallback_message.is_none());
+}
+
+#[tokio::test]
 async fn prepare_group_dispatch_surfaces_quoted_message_read_failures() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
@@ -1274,6 +1320,8 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
             runner_selected: false,
             group_turn_id: Some(turn.turn_id.clone()),
             reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
         },
     )
     .await;
@@ -1333,6 +1381,8 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
             runner_selected: false,
             group_turn_id: None,
             reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
         },
     )
     .await;

@@ -4384,3 +4384,31 @@ fn executor_run_retention_never_prunes_incomplete_directory() {
     prune_completed_run_directories(root.path(), None).unwrap();
     assert!(incomplete.exists());
 }
+
+#[test]
+fn thread_derivation_capability_matrix_reserves_claude_extension_point() {
+    assert_eq!(
+        thread_derivation_capability("codex", ExternalCliTransport::AppServer),
+        ThreadDerivationCapability {
+            fork_completed: true,
+            fork_active: true,
+            fork_at_turn: true,
+        }
+    );
+    assert_eq!(
+        thread_derivation_capability(TRAEX_ADAPTER, ExternalCliTransport::AppServer),
+        ThreadDerivationCapability {
+            fork_completed: true,
+            fork_active: false,
+            fork_at_turn: false,
+        }
+    );
+    assert_eq!(
+        thread_derivation_capability(CLAUDE_CODE_ADAPTER, ExternalCliTransport::StreamJson),
+        ThreadDerivationCapability::default()
+    );
+    assert_eq!(
+        thread_derivation_capability("codex", ExternalCliTransport::Exec),
+        ThreadDerivationCapability::default()
+    );
+}

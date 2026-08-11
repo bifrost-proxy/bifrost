@@ -317,6 +317,36 @@ pub(super) async fn run_command(
         .or(existing_thread_id)
         .ok_or_else(|| "app-server thread response missing thread.id".to_string())?;
 
+    if request.operation == "checkpoint_fork" {
+        let event = ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::Status,
+            content: "thread checkpoint created".to_string(),
+            title: Some("thread_checkpoint".to_string()),
+            raw: serde_json::json!({ "threadId": thread_id }),
+        };
+        if let Some(progress_tx) = progress_tx.as_ref() {
+            let _ = progress_tx.send(event.clone());
+        }
+        events.push(event);
+        if pid != 0 {
+            let _ = terminate_process(pid);
+        }
+        let _ = timeout(Duration::from_millis(WORKER_STOP_GRACE_MS), child.wait()).await;
+        ACTIVE_RUNS.remove(run_id);
+        remove_active_sessions_for_run(run_id);
+        cleanup.disarm();
+        let stderr = stderr_task
+            .await
+            .map_err(|error| format!("join app-server stderr task failed: {error}"))??;
+        return Ok(CommandOutput {
+            status: ExternalCliRunStatus::Succeeded,
+            exit_code: Some(0),
+            stdout: stdout_bytes,
+            stderr,
+            events,
+        });
+    }
+
     let client_user_message_id = format!("bifrost-{run_id}");
     send_jsonrpc_request(
         &mut stdin,
@@ -340,6 +370,20 @@ pub(super) async fn run_command(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "app-server turn response missing turn.id".to_string())?;
+    let turn_started_event = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: "turn started".to_string(),
+        title: Some("Codex turn".to_string()),
+        raw: serde_json::json!({
+            "type": "turn_started",
+            "threadId": thread_id.clone(),
+            "turnId": turn_id.clone(),
+        }),
+    };
+    if let Some(progress_tx) = progress_tx.as_ref() {
+        let _ = progress_tx.send(turn_started_event.clone());
+    }
+    events.push(turn_started_event);
 
     let (guide_tx, mut guide_rx) = mpsc::unbounded_channel::<live_guide::LiveGuideCommand>();
     if let Some(session_key) = session_key {
@@ -824,6 +868,25 @@ fn build_thread_request(
     request: &ExternalCliRunRequest,
     existing_thread_id: Option<&str>,
 ) -> (&'static str, serde_json::Value) {
+    if matches!(request.operation.as_str(), "fork" | "checkpoint_fork") {
+        let mut params = serde_json::Map::new();
+        if let Some(thread_id) = existing_thread_id {
+            params.insert("threadId".to_string(), serde_json::json!(thread_id));
+        }
+        if request.adapter == DEFAULT_ADAPTER {
+            if let Some(last_turn_id) = request
+                .params
+                .get("lastTurnId")
+                .or_else(|| request.params.get("last_turn_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                params.insert("lastTurnId".to_string(), serde_json::json!(last_turn_id));
+            }
+        }
+        return ("thread/fork", serde_json::Value::Object(params));
+    }
     let config = &request.adapter_config;
     let danger_full_access = effective_danger_full_access(request);
     let mut params = serde_json::Map::new();
@@ -1629,6 +1692,26 @@ mod tests {
         assert_eq!(start_params["serviceTier"], "default");
         assert_eq!(resume_params["serviceTier"], "default");
         assert_eq!(turn_params["serviceTier"], "default");
+    }
+
+    #[test]
+    fn thread_fork_is_precise_for_codex_and_omits_turn_for_traex() {
+        let mut codex = request(DEFAULT_ADAPTER);
+        codex.operation = "fork".to_string();
+        codex.params = serde_json::json!({
+            "threadId": "thread-source",
+            "lastTurnId": "turn-source",
+        });
+        let (method, params) = build_thread_request(&codex, Some("thread-source"));
+        assert_eq!(method, "thread/fork");
+        assert_eq!(params["threadId"], "thread-source");
+        assert_eq!(params["lastTurnId"], "turn-source");
+
+        let mut traex = codex;
+        traex.adapter = TRAEX_ADAPTER.to_string();
+        let (method, params) = build_thread_request(&traex, Some("thread-source"));
+        assert_eq!(method, "thread/fork");
+        assert!(params.get("lastTurnId").is_none());
     }
 
     #[test]
@@ -2457,6 +2540,108 @@ for line in sys.stdin:
         assert!(!ACTIVE_RUNS.contains_key("mock-app-server-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));
         assert!(live_guide::active_handle(session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mock_app_server_forks_at_codex_turn_before_starting_new_turn() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = temp_dir.path().join("mock-codex-fork");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json, sys
+def send(value): print(json.dumps(value, separators=(",", ":")), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize": send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/fork":
+        assert frame["params"] == {"threadId":"thread-source","lastTurnId":"turn-source"}
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"thread-derived"}}})
+    elif method == "turn/start":
+        assert frame["params"]["threadId"] == "thread-derived"
+        send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"turn-derived"}}})
+        send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thread-derived","turnId":"turn-derived","item":{"id":"message","type":"agentMessage","text":"derived result"}}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread-derived","turn":{"id":"turn-derived","status":"completed"}}})
+    elif method == "account/rateLimits/read": send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"unsupported"}})
+"#,
+        ).unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let mut request = request(DEFAULT_ADAPTER);
+        request.operation = "fork".to_string();
+        request.params = serde_json::json!({
+            "threadId": "thread-source",
+            "lastTurnId": "turn-source",
+        });
+        request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+        request.adapter_config.executable = Some(executable.display().to_string());
+        let output = run_command(
+            "mock-codex-fork-run",
+            None,
+            &request,
+            "continue".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
+        assert!(output
+            .events
+            .iter()
+            .any(|event| event.content == "derived result"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mock_traex_checkpoint_fork_finishes_without_starting_turn() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = temp_dir.path().join("mock-traex-checkpoint");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json, sys
+def send(value): print(json.dumps(value, separators=(",", ":")), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line); method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize": send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/fork":
+        assert frame["params"] == {"threadId":"traex-source"}
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"traex-checkpoint"}}})
+    elif method == "turn/start": raise RuntimeError("checkpoint must not start a turn")
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let mut request = request(TRAEX_ADAPTER);
+        request.operation = "checkpoint_fork".to_string();
+        request.params = serde_json::json!({ "threadId": "traex-source" });
+        request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+        request.adapter_config.executable = Some(executable.display().to_string());
+        let output = run_command(
+            "mock-traex-checkpoint-run",
+            None,
+            &request,
+            String::new(),
+            temp_dir.path().join("stop"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
+        assert!(output.events.iter().any(|event| {
+            event.title.as_deref() == Some("thread_checkpoint")
+                && event.raw["threadId"] == "traex-checkpoint"
+        }));
     }
 
     #[cfg(unix)]

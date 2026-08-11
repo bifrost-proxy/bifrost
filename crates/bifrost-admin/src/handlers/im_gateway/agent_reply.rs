@@ -981,7 +981,7 @@ pub(super) async fn send_external_runner_terminal_reply_from_work_dir(
     event: &ImEvent,
     terminal_reply: ExternalRunnerTerminalReply<'_>,
     message_log_store: &Arc<ImMessageLogStore>,
-) {
+) -> Option<String> {
     send_agent_reply_with_title_and_base_dir(
         client,
         provider,
@@ -994,7 +994,7 @@ pub(super) async fn send_external_runner_terminal_reply_from_work_dir(
             progress_message_id: terminal_reply.progress_message_id,
         }),
     )
-    .await;
+    .await
 }
 
 /// Send an agent reply card. The Feishu provider strips the root title before
@@ -1036,7 +1036,7 @@ async fn send_agent_reply_with_title_and_base_dir(
     message_log_store: &Arc<ImMessageLogStore>,
     work_dir: Option<&Path>,
     card_kind: AgentReplyCardKind<'_>,
-) {
+) -> Option<String> {
     let image_base_dir = agent_reply_base_dir(provider, work_dir);
     let (reply_text_for_card, reply_images, reply_attachments) =
         prepare_agent_reply_text_and_images_with_downloads(reply_text, image_base_dir.as_deref())
@@ -1050,7 +1050,7 @@ async fn send_agent_reply_with_title_and_base_dir(
         "interactive",
     ) else {
         error!("no reply target to send agent reply");
-        return;
+        return None;
     };
 
     let rendered_text = if let Some(feishu) = client.feishu() {
@@ -1105,9 +1105,15 @@ async fn send_agent_reply_with_title_and_base_dir(
     let send_result = if matches!(card_kind, AgentReplyCardKind::ExternalRunnerTerminal(_)) {
         match (client.feishu(), reply_to_message_id) {
             (Some(feishu), Some(message_id)) => {
-                feishu
-                    .reply_card_preserving_header(provider, message_id, card, None)
-                    .await
+                if crate::im_gateway::group_context::feishu_thread_parts(event).is_some() {
+                    feishu
+                        .reply_card_preserving_header_in_thread(provider, message_id, card, None)
+                        .await
+                } else {
+                    feishu
+                        .reply_card_preserving_header(provider, message_id, card, None)
+                        .await
+                }
             }
             (Some(feishu), None) => {
                 feishu
@@ -1155,7 +1161,7 @@ async fn send_agent_reply_with_title_and_base_dir(
         timestamp: now_ms(),
         target_id: Some(reply_target.receive_id.clone()),
         target_name: Some(reply_target.display_name.clone()),
-        message_id,
+        message_id: message_id.clone(),
         msg_type: Some("interactive".to_string()),
         content_preview: Some(truncate_str(&reply_text_for_card, 200)),
         content: Some(reply_text_for_card.clone()),
@@ -1184,6 +1190,7 @@ async fn send_agent_reply_with_title_and_base_dir(
         message_log_store,
     )
     .await;
+    message_id
 }
 
 #[derive(Clone, Copy)]

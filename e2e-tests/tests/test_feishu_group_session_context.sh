@@ -458,12 +458,14 @@ inject() {
   local parent_id="${8:-}"
   local provider_id="${9:-feishu-group-e2e}"
   local mentioned_bot_open_id="${10:-}"
-  python3 - "$BIFROST_PORT" "$chat_id" "$user_id" "$user_name" "$message_id" "$text" "$mention_bot" "$chat_type" "$parent_id" "$provider_id" "$mentioned_bot_open_id" <<'PY'
+  local root_id="${11:-}"
+  local thread_id="${12:-}"
+  python3 - "$BIFROST_PORT" "$chat_id" "$user_id" "$user_name" "$message_id" "$text" "$mention_bot" "$chat_type" "$parent_id" "$provider_id" "$mentioned_bot_open_id" "$root_id" "$thread_id" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, chat_id, user_id, user_name, message_id, text, mention_bot, chat_type, parent_id, provider_id, mentioned_bot_open_id = sys.argv[1:12]
+port, chat_id, user_id, user_name, message_id, text, mention_bot, chat_type, parent_id, provider_id, mentioned_bot_open_id, root_id, thread_id = sys.argv[1:14]
 payload = {
     "providerId": provider_id,
     "chatId": chat_id,
@@ -480,6 +482,10 @@ if mentioned_bot_open_id:
     payload["mentionedBotOpenId"] = mentioned_bot_open_id
 if parent_id:
     payload["parentId"] = parent_id
+if root_id:
+    payload["rootId"] = root_id
+if thread_id:
+    payload["threadId"] = thread_id
 req = urllib.request.Request(
     f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-inbound",
     data=json.dumps(payload, ensure_ascii=False).encode(),
@@ -585,11 +591,23 @@ wait_prompt_count 11
 wait_run_count 22
 wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 
+# A topic rooted at another Bot's card has no local anchor on this provider,
+# which is equivalent to receiving a card produced on another device. It must
+# start an independent session with exactly root + current, never accumulated
+# group history. An unmentioned first topic reply is ignored.
+inject chat-alpha user-alice Alice topic-ignored "普通话题回复" false group card-parent feishu-group-e2e "" card-parent topic-cross-device
+sleep 1
+wait_prompt_count 11
+inject chat-alpha user-alice Alice topic-claimed "@_user_1 基于这条卡片继续" true group card-parent feishu-group-e2e "" card-parent topic-cross-device
+wait_prompt_count 12
+wait_run_count 24
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha:thread:topic-cross-device"
+
 # If Feishu denies reading the parent, return actionable permission guidance
 # without starting a Runner or pretending that the quoted content was read.
 inject chat-alpha user-alice Alice a14 "@_user_1" true group invisible-parent
-wait_prompt_count 11
-wait_run_count 22
+wait_prompt_count 12
+wait_run_count 24
 
 wait_permission_reply() {
   for _ in $(seq 1 160); do
@@ -623,8 +641,8 @@ inject shared-multi user-alice Alice mb-b-broadcast "/status" false group "" fei
 # loops must consume it just like an unmentioned broadcast slash.
 inject shared-multi user-alice Alice mb-a-human-arg "/q ask @_user_1 to review" true group "" feishu-group-e2e ou_human
 inject shared-multi user-alice Alice mb-b-human-arg "/q ask @_user_1 to review" true group "" feishu-group-e2e-b ou_human
-wait_prompt_count 13
-wait_run_count 26
+wait_prompt_count 14
+wait_run_count 28
 wait_session_idle "im:feishu-group-e2e:group:shared-multi"
 wait_session_idle "im:feishu-group-e2e-b:group:shared-multi"
 inject shared-multi user-alice Alice mb-a-directed "@_user_1 /status" true group "" feishu-group-e2e ou_bot_b
@@ -650,13 +668,14 @@ import sys
 
 prompt_path, run_path, db_path, repo_dir, message_log_path = sys.argv[1:6]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
-assert len(prompts) == 13, prompts
+assert len(prompts) == 14, prompts
 first, second, slash_fallback, third, queued = prompts[:5]
 queued_second = prompts[5]
 concurrent_prompts = prompts[6:9]
 quoted_prompt = prompts[9]
 quoted_card_prompt = prompts[10]
-human_argument_prompts = prompts[11:13]
+topic_prompt = prompts[11]
+human_argument_prompts = prompts[12:14]
 
 assert "群名称：Alpha 发布群" in first, first
 assert "群 ID：chat-alpha" in first, first
@@ -703,11 +722,17 @@ assert "/help" not in quoted_prompt, quoted_prompt
 assert "另一机器人结论" in quoted_card_prompt, quoted_card_prompt
 assert "卡片正文：选择方案 A" in quoted_card_prompt, quoted_card_prompt
 assert "example.invalid" not in quoted_card_prompt and "不应读取" not in quoted_card_prompt, quoted_card_prompt
+assert "话题根消息（仅作为上下文）" in topic_prompt, topic_prompt
+assert "另一机器人结论" in topic_prompt and "卡片正文：选择方案 A" in topic_prompt, topic_prompt
+assert "基于这条卡片继续" in topic_prompt, topic_prompt
+assert "先讨论发布窗口" not in topic_prompt and "补充：需要回滚预案" not in topic_prompt, topic_prompt
+assert topic_prompt.count("卡片正文：选择方案 A") == 1, topic_prompt
+assert topic_prompt.count("基于这条卡片继续") == 1, topic_prompt
 assert len(human_argument_prompts) == 2, human_argument_prompts
 assert all("ask <at id=ou_human>" in prompt and "to review" in prompt for prompt in human_argument_prompts), human_argument_prompts
 
 runner_events = [json.loads(line) for line in open(run_path, encoding="utf-8") if line.strip()]
-assert len(runner_events) == 26, runner_events
+assert len(runner_events) == 28, runner_events
 concurrent_events = runner_events[12:18]
 assert [event["phase"] for event in concurrent_events[:3]] == ["start"] * 3, concurrent_events
 assert len({event["pid"] for event in concurrent_events[:3]}) == 3, concurrent_events
@@ -729,7 +754,16 @@ messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages WHERE provider_id = 'feishu-group-e2e' "
     "AND chat_id IN ('chat-alpha', 'chat-beta') GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 19), ("chat-beta", 8)], messages
+assert messages == [("chat-alpha", 20), ("chat-beta", 8)], messages
+topic_bindings = connection.execute(
+    "SELECT feishu_thread_id, root_message_id, derived_session_key, source_kind "
+    "FROM im_feishu_thread_bindings WHERE provider_id='feishu-group-e2e'"
+).fetchall()
+assert topic_bindings == [(
+    "topic-cross-device", "card-parent",
+    "im:feishu-group-e2e:group:chat-alpha:thread:topic-cross-device",
+    "message_context",
+)], topic_bindings
 permission_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE trigger_message_id = 'a14'"
 ).fetchall()

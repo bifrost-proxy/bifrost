@@ -470,6 +470,8 @@ pub(super) async fn run_event_loop_with_options(
                 group_turn_id: None,
                 reset_group_context: false,
                 direct_reply: None,
+                thread_anchor_message_id: None,
+                thread_fallback_message: None,
             }
         };
 
@@ -624,6 +626,12 @@ pub(super) async fn run_event_loop_with_options(
                                 runner_selected: runner_id.is_some(),
                                 group_turn_id: inbound_dispatch.group_turn_id.clone(),
                                 reset_group_context: inbound_dispatch.reset_group_context,
+                                thread_anchor_message_id: inbound_dispatch
+                                    .thread_anchor_message_id
+                                    .clone(),
+                                thread_fallback_message: inbound_dispatch
+                                    .thread_fallback_message
+                                    .clone(),
                             },
                         );
                         continue;
@@ -784,6 +792,8 @@ pub(super) async fn run_event_loop_with_options(
                         runner_selected: runner_id.is_some(),
                         group_turn_id: inbound_dispatch.group_turn_id.clone(),
                         reset_group_context: inbound_dispatch.reset_group_context,
+                        thread_anchor_message_id: inbound_dispatch.thread_anchor_message_id.clone(),
+                        thread_fallback_message: inbound_dispatch.thread_fallback_message.clone(),
                     },
                 );
                 continue;
@@ -880,6 +890,8 @@ pub(super) async fn run_event_loop_with_options(
                         runner_selected: false,
                         group_turn_id: inbound_dispatch.group_turn_id.clone(),
                         reset_group_context: inbound_dispatch.reset_group_context,
+                        thread_anchor_message_id: inbound_dispatch.thread_anchor_message_id.clone(),
+                        thread_fallback_message: inbound_dispatch.thread_fallback_message.clone(),
                     },
                 );
             }
@@ -1027,6 +1039,8 @@ struct ExternalCliChatInput {
     runner_selected: bool,
     group_turn_id: Option<String>,
     reset_group_context: bool,
+    thread_anchor_message_id: Option<String>,
+    thread_fallback_message: Option<String>,
 }
 
 pub(super) struct PreparedInboundDispatch {
@@ -1035,6 +1049,8 @@ pub(super) struct PreparedInboundDispatch {
     pub(super) group_turn_id: Option<String>,
     pub(super) reset_group_context: bool,
     pub(super) direct_reply: Option<String>,
+    pub(super) thread_anchor_message_id: Option<String>,
+    pub(super) thread_fallback_message: Option<String>,
 }
 
 pub(super) enum GroupInboundDispatch {
@@ -1085,6 +1101,174 @@ pub(super) async fn prepare_group_inbound_dispatch(
         .chat_id
         .as_deref()
         .ok_or_else(|| "group event is missing chat_id".to_string())?;
+
+    if let Some((thread_id, root_message_id)) =
+        crate::im_gateway::group_context::feishu_thread_parts(event)
+    {
+        let session_key = crate::im_gateway::group_context::build_group_thread_session_key(
+            &event.provider_id,
+            chat_id,
+            thread_id,
+        );
+        if let Some(binding) =
+            store.feishu_thread_binding(&event.provider_id, chat_id, thread_id)?
+        {
+            store.record_event(event, "event")?;
+            let recovering = matches!(binding.state.as_str(), "waiting_source" | "initializing");
+            return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
+                message_text: if recovering {
+                    binding.initial_message.clone()
+                } else if binding.state == "failed" {
+                    binding
+                        .fallback_message
+                        .clone()
+                        .unwrap_or_else(|| binding.initial_message.clone())
+                } else {
+                    agent_message_text(message)
+                },
+                session_key: binding.derived_session_key,
+                group_turn_id: None,
+                reset_group_context: false,
+                direct_reply: None,
+                thread_anchor_message_id: recovering.then_some(binding.source_message_id.clone()),
+                thread_fallback_message: binding.fallback_message,
+            }));
+        }
+
+        let anchor = store
+            .feishu_message_anchor(&event.provider_id, root_message_id)?
+            .filter(|anchor| anchor.chat_id == chat_id && anchor.is_derivable());
+
+        let needs_identity =
+            !message.mentions.is_empty() && !message.mentions.iter().any(|mention| mention.is_bot);
+        let bot_identity = if needs_identity {
+            match client.feishu() {
+                Some(feishu) => feishu.fetch_bot_identity(provider).await.ok(),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let active_request = if anchor.is_some() {
+            agent_message_text(message)
+        } else {
+            let disposition = classify_group_message(message, bot_identity.as_ref(), session_busy);
+            let GroupMessageDisposition::AgentTrigger { active_request, .. } = disposition else {
+                return Ok(match disposition {
+                    GroupMessageDisposition::AddressedElsewhere => {
+                        GroupInboundDispatch::AddressedElsewhere
+                    }
+                    _ => GroupInboundDispatch::Ambient,
+                });
+            };
+            active_request
+        };
+        store.record_event(event, "event")?;
+        let (
+            message_text,
+            fallback_message,
+            source_kind,
+            source_adapter,
+            source_thread_id,
+            source_turn_id,
+        ) = if let Some(anchor) = anchor.as_ref() {
+            let fallback_message = if anchor.status == "pending" {
+                let feishu = client.feishu().ok_or_else(|| {
+                    "Feishu topic root messages require a Feishu provider".to_string()
+                })?;
+                let root = feishu
+                    .fetch_message(provider, root_message_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if root.chat_id != chat_id {
+                    return Err("话题根消息不属于当前群聊，已拒绝读取以避免跨群泄露。".to_string());
+                }
+                Some(
+                    crate::im_gateway::group_context::build_feishu_thread_prompt(
+                        &root.sender_id,
+                        None,
+                        &root.text,
+                        event.source.user_id.as_deref().unwrap_or("unknown"),
+                        event.source.user_name.as_deref(),
+                        &active_request,
+                    ),
+                )
+            } else {
+                None
+            };
+            (
+                active_request,
+                fallback_message,
+                "local_checkpoint".to_string(),
+                Some(anchor.adapter.clone()),
+                anchor
+                    .checkpoint_thread_id
+                    .clone()
+                    .or_else(|| anchor.external_thread_id.clone()),
+                anchor.external_turn_id.clone(),
+            )
+        } else {
+            let feishu = client.feishu().ok_or_else(|| {
+                "Feishu topic root messages require a Feishu provider".to_string()
+            })?;
+            let root = feishu
+                .fetch_message(provider, root_message_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if root.chat_id != chat_id {
+                return Err("话题根消息不属于当前群聊，已拒绝读取以避免跨群泄露。".to_string());
+            }
+            (
+                crate::im_gateway::group_context::build_feishu_thread_prompt(
+                    &root.sender_id,
+                    None,
+                    &root.text,
+                    event.source.user_id.as_deref().unwrap_or("unknown"),
+                    event.source.user_name.as_deref(),
+                    &active_request,
+                ),
+                None,
+                "message_context".to_string(),
+                None,
+                None,
+                None,
+            )
+        };
+        let binding = store.claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: event.provider_id.clone(),
+                chat_id: chat_id.to_string(),
+                feishu_thread_id: thread_id.to_string(),
+                root_message_id: root_message_id.to_string(),
+                derived_session_key: session_key.clone(),
+                source_kind,
+                source_message_id: root_message_id.to_string(),
+                source_adapter,
+                source_thread_id,
+                source_turn_id,
+                initial_message: message_text.clone(),
+                fallback_message: fallback_message.clone(),
+                state: if anchor
+                    .as_ref()
+                    .is_some_and(|value| value.status == "pending")
+                {
+                    "waiting_source".to_string()
+                } else {
+                    "initializing".to_string()
+                },
+            },
+            event.received_at,
+        )?;
+        return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
+            message_text,
+            session_key: binding.derived_session_key,
+            group_turn_id: None,
+            reset_group_context: false,
+            direct_reply: None,
+            thread_anchor_message_id: anchor.map(|_| root_message_id.to_string()),
+            thread_fallback_message: fallback_message,
+        }));
+    }
     let needs_identity =
         !message.mentions.is_empty() && !message.mentions.iter().any(|mention| mention.is_bot);
     let bot_identity = if needs_identity {
@@ -1204,6 +1388,8 @@ pub(super) async fn prepare_group_inbound_dispatch(
             group_turn_id: None,
             reset_group_context: reset_context,
             direct_reply: None,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
         })),
         GroupMessageDisposition::AgentTrigger {
             kind,
@@ -1238,6 +1424,8 @@ pub(super) async fn prepare_group_inbound_dispatch(
                     "我无法看到你引用的这条消息内容，请重新发送这条消息，或把内容补充到 @ 后面。"
                         .to_string()
                 }),
+                thread_anchor_message_id: None,
+                thread_fallback_message: None,
             }))
         }
     }

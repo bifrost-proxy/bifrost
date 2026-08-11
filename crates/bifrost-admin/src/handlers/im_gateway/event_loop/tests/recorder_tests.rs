@@ -228,6 +228,7 @@ async fn exercise_external_runner_terminal_notification(
     let temp = tempfile::tempdir().expect("terminal notification message store");
     let message_log_store = Arc::new(ImMessageLogStore::new(temp.path()));
     let progress_registry = Arc::new(ImAgentProgressRegistry::new());
+    let group_context_store = Arc::new(ImGroupContextStore::new(temp.path()));
     let provider = crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
     let feishu = Arc::new(crate::im_gateway::feishu::FeishuProvider::new());
     let client = ImProviderClient::Feishu(Arc::clone(&feishu));
@@ -256,6 +257,7 @@ async fn exercise_external_runner_terminal_notification(
             client: &client,
             provider: &provider,
             message_log_store: &message_log_store,
+            group_context_store: &group_context_store,
             event: &event,
         },
         ExternalRunnerProgressFinish {
@@ -263,6 +265,7 @@ async fn exercise_external_runner_terminal_notification(
             final_text,
             failed,
             work_dir: None,
+            anchor: None,
         },
     )
     .await;
@@ -540,6 +543,8 @@ async fn exercise_external_runner_control_flow_with_progress(
             runner_selected: true,
             group_turn_id: None,
             reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
         },
     )
     .await;

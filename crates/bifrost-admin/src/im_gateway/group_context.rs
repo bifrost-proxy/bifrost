@@ -116,6 +116,62 @@ pub struct CreatedFeishuGroupRecord {
     pub created_at: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeishuMessageAnchor {
+    pub provider_id: String,
+    pub chat_id: String,
+    pub message_id: String,
+    pub source_session_key: String,
+    pub run_id: Option<String>,
+    pub runner_id: String,
+    pub adapter: String,
+    pub transport: String,
+    pub external_thread_id: Option<String>,
+    pub external_turn_id: Option<String>,
+    pub checkpoint_thread_id: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeishuThreadBinding {
+    pub provider_id: String,
+    pub chat_id: String,
+    pub feishu_thread_id: String,
+    pub root_message_id: String,
+    pub derived_session_key: String,
+    pub source_kind: String,
+    pub source_message_id: String,
+    pub source_adapter: Option<String>,
+    pub source_thread_id: Option<String>,
+    pub source_turn_id: Option<String>,
+    pub initial_message: String,
+    pub fallback_message: Option<String>,
+    pub state: String,
+}
+
+impl FeishuMessageAnchor {
+    pub fn is_derivable(&self) -> bool {
+        if self.transport != "app_server" || self.status == "failed" {
+            return false;
+        }
+        match self.adapter.as_str() {
+            "codex" => {
+                self.external_thread_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || matches!(self.status.as_str(), "pending" | "active_ready")
+            }
+            "traex" => {
+                self.checkpoint_thread_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || self.status == "pending"
+            }
+            _ => false,
+        }
+    }
+}
+
 impl PreparedGroupTurn {
     pub fn delivery_message(&self, command_prefix: Option<&str>) -> String {
         command_prefix
@@ -156,6 +212,171 @@ impl ImGroupContextStore {
 
     pub fn file_path(&self) -> &Path {
         &self.file_path
+    }
+
+    pub fn upsert_feishu_message_anchor(
+        &self,
+        anchor: &FeishuMessageAnchor,
+        now: u64,
+    ) -> Result<(), String> {
+        let connection = self.connection.lock();
+        connection.execute(
+            "INSERT INTO im_feishu_message_anchors (
+                provider_id, chat_id, message_id, source_session_key, run_id,
+                runner_id, adapter, transport, external_thread_id, external_turn_id,
+                checkpoint_thread_id, status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+             ON CONFLICT(provider_id, message_id) DO UPDATE SET
+                run_id = COALESCE(excluded.run_id, im_feishu_message_anchors.run_id),
+                runner_id = excluded.runner_id,
+                adapter = excluded.adapter,
+                transport = excluded.transport,
+                external_thread_id = COALESCE(excluded.external_thread_id, im_feishu_message_anchors.external_thread_id),
+                external_turn_id = COALESCE(excluded.external_turn_id, im_feishu_message_anchors.external_turn_id),
+                checkpoint_thread_id = COALESCE(excluded.checkpoint_thread_id, im_feishu_message_anchors.checkpoint_thread_id),
+                status = excluded.status,
+                updated_at = excluded.updated_at",
+            params![
+                anchor.provider_id, anchor.chat_id, anchor.message_id,
+                anchor.source_session_key, anchor.run_id, anchor.runner_id,
+                anchor.adapter, anchor.transport, anchor.external_thread_id,
+                anchor.external_turn_id, anchor.checkpoint_thread_id, anchor.status, now,
+            ],
+        ).map_err(|error| format!("upsert Feishu message anchor: {error}"))?;
+        Ok(())
+    }
+
+    pub fn feishu_message_anchor(
+        &self,
+        provider_id: &str,
+        message_id: &str,
+    ) -> Result<Option<FeishuMessageAnchor>, String> {
+        let connection = self.connection.lock();
+        connection
+            .query_row(
+                "SELECT provider_id, chat_id, message_id, source_session_key, run_id,
+                    runner_id, adapter, transport, external_thread_id, external_turn_id,
+                    checkpoint_thread_id, status
+             FROM im_feishu_message_anchors
+             WHERE provider_id = ?1 AND message_id = ?2",
+                params![provider_id, message_id],
+                |row| {
+                    Ok(FeishuMessageAnchor {
+                        provider_id: row.get(0)?,
+                        chat_id: row.get(1)?,
+                        message_id: row.get(2)?,
+                        source_session_key: row.get(3)?,
+                        run_id: row.get(4)?,
+                        runner_id: row.get(5)?,
+                        adapter: row.get(6)?,
+                        transport: row.get(7)?,
+                        external_thread_id: row.get(8)?,
+                        external_turn_id: row.get(9)?,
+                        checkpoint_thread_id: row.get(10)?,
+                        status: row.get(11)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("load Feishu message anchor: {error}"))
+    }
+
+    pub fn claim_feishu_thread_binding(
+        &self,
+        binding: &FeishuThreadBinding,
+        now: u64,
+    ) -> Result<FeishuThreadBinding, String> {
+        let connection = self.connection.lock();
+        connection
+            .execute(
+                "INSERT INTO im_feishu_thread_bindings (
+                provider_id, chat_id, feishu_thread_id, root_message_id,
+                derived_session_key, source_kind, source_message_id, source_adapter,
+                source_thread_id, source_turn_id, initial_message, fallback_message,
+                state, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+             ON CONFLICT(provider_id, chat_id, feishu_thread_id) DO NOTHING",
+                params![
+                    binding.provider_id,
+                    binding.chat_id,
+                    binding.feishu_thread_id,
+                    binding.root_message_id,
+                    binding.derived_session_key,
+                    binding.source_kind,
+                    binding.source_message_id,
+                    binding.source_adapter,
+                    binding.source_thread_id,
+                    binding.source_turn_id,
+                    binding.initial_message,
+                    binding.fallback_message,
+                    binding.state,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("claim Feishu thread binding: {error}"))?;
+        drop(connection);
+        self.feishu_thread_binding(
+            &binding.provider_id,
+            &binding.chat_id,
+            &binding.feishu_thread_id,
+        )?
+        .ok_or_else(|| "claimed Feishu thread binding disappeared".to_string())
+    }
+
+    pub fn feishu_thread_binding(
+        &self,
+        provider_id: &str,
+        chat_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<FeishuThreadBinding>, String> {
+        let connection = self.connection.lock();
+        connection
+            .query_row(
+                "SELECT provider_id, chat_id, feishu_thread_id, root_message_id,
+                    derived_session_key, source_kind, source_message_id, source_adapter,
+                    source_thread_id, source_turn_id, initial_message, fallback_message, state
+             FROM im_feishu_thread_bindings
+             WHERE provider_id = ?1 AND chat_id = ?2 AND feishu_thread_id = ?3",
+                params![provider_id, chat_id, thread_id],
+                |row| {
+                    Ok(FeishuThreadBinding {
+                        provider_id: row.get(0)?,
+                        chat_id: row.get(1)?,
+                        feishu_thread_id: row.get(2)?,
+                        root_message_id: row.get(3)?,
+                        derived_session_key: row.get(4)?,
+                        source_kind: row.get(5)?,
+                        source_message_id: row.get(6)?,
+                        source_adapter: row.get(7)?,
+                        source_thread_id: row.get(8)?,
+                        source_turn_id: row.get(9)?,
+                        initial_message: row.get(10)?,
+                        fallback_message: row.get(11)?,
+                        state: row.get(12)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("load Feishu thread binding: {error}"))
+    }
+
+    pub fn update_feishu_thread_binding_state(
+        &self,
+        provider_id: &str,
+        chat_id: &str,
+        thread_id: &str,
+        state: &str,
+        now: u64,
+    ) -> Result<(), String> {
+        let connection = self.connection.lock();
+        connection
+            .execute(
+                "UPDATE im_feishu_thread_bindings SET state = ?4, updated_at = ?5
+                 WHERE provider_id = ?1 AND chat_id = ?2 AND feishu_thread_id = ?3",
+                params![provider_id, chat_id, thread_id, state, now],
+            )
+            .map_err(|error| format!("update Feishu thread binding state: {error}"))?;
+        Ok(())
     }
 
     pub fn record_event(&self, event: &ImEvent, source: &str) -> Result<u64, String> {
@@ -807,6 +1028,48 @@ pub fn build_group_session_key(provider_id: &str, chat_id: &str) -> String {
     format!("im:{}:group:{}", provider_id.trim(), chat_id.trim())
 }
 
+pub fn build_group_thread_session_key(provider_id: &str, chat_id: &str, thread_id: &str) -> String {
+    format!(
+        "{}:thread:{}",
+        build_group_session_key(provider_id, chat_id),
+        thread_id.trim()
+    )
+}
+
+pub fn feishu_thread_parts(event: &ImEvent) -> Option<(&str, &str)> {
+    if !is_feishu_group_event(event) {
+        return None;
+    }
+    let message = event.message.as_ref()?;
+    let thread_id = message.thread_id.as_deref()?.trim();
+    if thread_id.is_empty() {
+        return None;
+    }
+    let root_id = message
+        .root_id
+        .as_deref()
+        .or(message.parent_id.as_deref())?
+        .trim();
+    (!root_id.is_empty()).then_some((thread_id, root_id))
+}
+
+pub fn build_feishu_thread_prompt(
+    root_sender_id: &str,
+    root_sender_name: Option<&str>,
+    root_text: &str,
+    current_sender_id: &str,
+    current_sender_name: Option<&str>,
+    current_text: &str,
+) -> String {
+    let root_sender = feishu_sender_at(root_sender_id, root_sender_name);
+    let current_sender = feishu_sender_at(current_sender_id, current_sender_name);
+    format!(
+        "话题根消息（仅作为上下文）：\n{root_sender}：{}\n\n当前用户消息：\n{current_sender}：{}",
+        root_text.trim(),
+        current_text.trim(),
+    )
+}
+
 pub fn classify_group_message(
     message: &ImEventMessage,
     bot_identity: Option<&FeishuBotIdentity>,
@@ -1099,6 +1362,43 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
                 owner_open_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY(provider_id, source_message_id)
+             );
+             CREATE TABLE IF NOT EXISTS im_feishu_message_anchors (
+                provider_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                source_session_key TEXT NOT NULL,
+                run_id TEXT,
+                runner_id TEXT NOT NULL,
+                adapter TEXT NOT NULL,
+                transport TEXT NOT NULL DEFAULT 'exec',
+                external_thread_id TEXT,
+                external_turn_id TEXT,
+                checkpoint_thread_id TEXT,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(provider_id, message_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_im_feishu_anchors_source
+                ON im_feishu_message_anchors(provider_id, source_session_key, status);
+             CREATE TABLE IF NOT EXISTS im_feishu_thread_bindings (
+                provider_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                feishu_thread_id TEXT NOT NULL,
+                root_message_id TEXT NOT NULL,
+                derived_session_key TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_message_id TEXT NOT NULL,
+                source_adapter TEXT,
+                source_thread_id TEXT,
+                source_turn_id TEXT,
+                initial_message TEXT NOT NULL DEFAULT '',
+                fallback_message TEXT,
+                state TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(provider_id, chat_id, feishu_thread_id)
              );",
         )
         .map_err(|error| format!("initialize group context schema: {error}"))?;
@@ -1125,6 +1425,30 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
             let duplicate_column = error.to_string().contains("duplicate column name");
             if !duplicate_column {
                 return Err(format!("migrate group binding {column}: {error}"));
+            }
+        }
+    }
+    for (table, column, sql) in [
+        (
+            "im_feishu_message_anchors",
+            "transport",
+            "ALTER TABLE im_feishu_message_anchors ADD COLUMN transport TEXT NOT NULL DEFAULT 'exec'",
+        ),
+        (
+            "im_feishu_thread_bindings",
+            "initial_message",
+            "ALTER TABLE im_feishu_thread_bindings ADD COLUMN initial_message TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "im_feishu_thread_bindings",
+            "fallback_message",
+            "ALTER TABLE im_feishu_thread_bindings ADD COLUMN fallback_message TEXT",
+        ),
+    ] {
+        if let Err(error) = connection.execute(sql, []) {
+            let duplicate_column = error.to_string().contains("duplicate column name");
+            if !duplicate_column {
+                return Err(format!("migrate {table}.{column}: {error}"));
             }
         }
     }
@@ -1199,6 +1523,7 @@ fn load_message_range(
                     mentions_json, root_id, parent_id, thread_id, attachment_count
              FROM im_group_messages
              WHERE provider_id = ?1 AND chat_id = ?2 AND seq > ?3 AND seq <= ?4
+               AND (thread_id IS NULL OR thread_id = '')
              ORDER BY seq ASC",
         )
         .map_err(|error| format!("prepare group context range query: {error}"))?;
