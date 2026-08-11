@@ -189,7 +189,7 @@
 - 失败终态卡为红色 header，默认标题为 `Task failed`，包含相同的 16-locale i18n 集合；正文包含真实异常原因。
 - 消息请求路径形成 `用户原消息 → progress card message_id → terminal card` 引用链；终态卡不得再次直接引用用户原消息。
 - 原任务卡仍保持单卡正文去重语义；终态卡是独立主动通知，不由 progress snapshot 重试产生。
-- 最终总结引用的本地文档与 `tar.gz` 压缩包都经 `/im/v1/files` 上传后，以独立 `msg_type=file` 消息发送到同一 IM 会话；过程卡折叠不得影响附件解析、上传和发送。
+- 最终总结引用的本地文档、`tar.gz` 压缩包与 `next-harness.yaml` 配置都经 `/im/v1/files` 上传后，以独立 `msg_type=file` 消息发送到同一 IM 会话；同一总结中的 `.rs` 源码链接不上传。过程卡折叠不得影响附件解析、上传和发送。
 - 若终态卡发送失败，原任务卡仍保持 Finished/Failed 终态，outbound message log 记录失败，session/queue 收尾不回滚。
 
 ### TC-FPC-11：折叠摘要、Session 三态、压缩包与暗色主题契约
@@ -241,8 +241,8 @@
 - 图片语法跨多个流式 delta 时，在闭合后按累计 Markdown 上传；远程响应超过 10 MiB 时在读取完整 body 前拒绝，不向飞书上传。
 - mock `/im/v1/images` 仅收到一次 `terminal-e2e-chart.png` multipart 上传，并返回 `img_v3_terminal_e2e`。
 - 运行中过程卡、原任务卡最终结论和独立 `Task completed` 终态卡的 Markdown 均包含 `![E2E chart](img_v3_terminal_e2e)`；原本地绝对路径不进入 CardKit payload。
-- 成功任务消息数仍为 4（progress、terminal、`.txt`、`.tar.gz`），失败任务消息数仍为 2；所有消息均无 `msg_type=image`，证明没有重复补发独立图片消息。
-- 普通 `.txt` 和 `.tar.gz` 仍分别调用 `/im/v1/files` 并发送 `msg_type=file`，图片内联不破坏非图片附件。
+- 成功任务消息数为 5（progress、terminal、`.txt`、`.tar.gz`、`.yaml`），失败任务消息数仍为 2；所有消息均无 `msg_type=image`，证明没有重复补发独立图片消息。
+- 普通 `.txt`、`.tar.gz` 和 `.yaml` 分别调用 `/im/v1/files` 并发送 `msg_type=file`，图片内联不破坏非图片附件；`.rs` 源码链接不调用上传接口。
 - 无真实租户凭据时，本地完整 HTTP/CardKit payload 契约必须通过，并明确将飞书客户端肉眼渲染标记为未执行，而不是假设通过。
 
 ### TC-FPC-13：出站文件 30 MiB 平台上限与非阻塞失败提示
@@ -279,12 +279,34 @@
 - 最近 5 次工具仍为可展开详情面板，输入/输出最多 300 个 Unicode 字符的既有裁剪不变；fenced code block 中的多行输出保留真实换行。
 - 30 次工具窗口、完整执行段裁剪、默认折叠、主题自适应和 24 KiB / 180 组件预算不退化。
 
+### TC-FPC-15：最终消息自动发送易读配置文件但排除源码
+
+**操作步骤**：
+1. 执行配置扩展名、远程 MIME、源码拒绝优先级聚焦单测：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib agent_reply_collects_config_attachments_but_excludes_source_code -- --nocapture
+   ```
+2. 使用当前源码构建 debug 二进制并执行隔离 Service + mock Runner + loopback Feishu OpenAPI：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+3. 检查 mock `/im/v1/files` multipart 文件名：必须包含 `next-harness.yaml`，不得包含 `terminal-e2e-handler.rs`；成功任务必须多一条 `msg_type=file` 配置消息，既有 `.txt`、`.tar.gz`、图片与失败降级行为保持通过。
+
+**预期结果**：
+- 本地及远程显式链接中的 `yaml/yml`、`toml`、`ini`、`cfg`、`conf/cnf`、`config`、`properties`、`xml`、`jsonc/json5`、`hcl`、`tfvars`、`plist`、`xcconfig` 被识别为配置附件；远程 YAML/TOML/XML MIME 能生成对应后缀。
+- `.rs/.py/.js/.ts/.go/.sql/.css` 等源码后缀不自动发送；即使 Markdown 标签包含 `file/附件/download`，或 URL 来自受信下载域名、通过 `filename=` 查询参数携带源码名，也不能绕过拒绝判断。
+- `.env` 等未列入配置白名单且可能携带敏感凭据的文件不因后缀自动发送；系统不扫描工作目录，只处理最终回复显式链接。
+- 配置附件继续受普通文件、去重、30 MiB 与非阻塞失败规则约束，不改变任务成功状态。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-12：PASS（TC-FPC-15 配置附件与源码排除）— 在独立 `codex/feishu-config-attachments` worktree、最新 `origin/main@8820d5ef` 上执行。`agent_reply_collects_config_attachments_but_excludes_source_code` 聚焦单测通过，覆盖本地 `next-harness.yaml`、远程 `filename=service.TOML`、YAML/TOML/XML MIME、全部配置扩展名与大小写，以及显式 `source file` 标签、受信下载域名、URL 编码的 `worker%2Epy` 均不能绕过源码拒绝；`.env.production`、`credentials/secrets` 和私钥文件名即使带宽泛 `file` 标签也被拒绝。随后构建当前 debug 二进制并执行隔离 Service + mock Runner + loopback Feishu OpenAPI，黑盒 E2E PASS：成功任务新增 `next-harness.yaml` multipart 上传与 `msg_type=file` 消息，`terminal-e2e-handler.rs` 未进入 `/im/v1/files`，既有 `.txt`、`.tar.gz`、内联图片、30 MiB 预检和上传失败非阻塞提示全部保持通过。第 1 轮 review 补强敏感配置与 URL 编码边界后，聚焦单测和同一黑盒 E2E 均再次通过。首次独立 worktree 构建因磁盘只余 240 MiB 报 `errno=28`；仅清理该 worktree 5.9 GiB 可再生成 target 和共享 target 的 Cargo incremental 缓存后，以 `CARGO_INCREMENTAL=0` 增量构建复跑通过，未删除源码、用户数据、release 产物或现有 debug 二进制。
 
 - 2026-08-11：PASS（TC-FPC-14 执行过程可读性回归）— 截图与群消息 `om_x100b688669cf78b8c2a0077a2205800` 先确认旧卡将普通单换行折叠为空格，造成 `select_page` / `evaluate_script` 等历史步骤和公开解释粘成一整行。更新用例后立即逐条执行：历史 30 工具窗口、旧工具列表与 300 字符详情裁剪 3 个聚焦单测全部通过；`im_gateway_progress_card_budget_and_codex_resources` renderer E2E 通过，直接断言 `agent_process_log` 中公开解释与 `- \`tool_N\` · 完成 · 10ms` 之间存在空段落，最后一个工具详情保留 `LATEST_MARKER\nSECOND_OUTPUT_LINE`，完整 CardKit JSON 仍小于 24 KiB，最近 5 次可展开详情、主题自适应和裁剪边界不变。首次 E2E 构建因磁盘仅余 396 MiB 在链接阶段报 `errno=28`，仅清理 `bifrost-e2e` 可再生成构建缓存后重跑；随后一次断言误在 JSON 序列化字符串中匹配真实换行，改为读取详情组件 `content` 后复跑通过。当前运行中的正式 Bifrost 仍是修复前二进制，未重启承载本 Agent 的服务，因此未伪造修复后飞书客户端截图结论；线上肉眼复核留待新版本部署后执行。
 

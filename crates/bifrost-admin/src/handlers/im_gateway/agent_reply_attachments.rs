@@ -162,6 +162,9 @@ fn is_remote_markdown_attachment_candidate(label: &str, raw_url: &str) -> bool {
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return false;
     }
+    if attachment_url_points_to_denied_path(&parsed) {
+        return false;
+    }
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
     let path = parsed.path().to_ascii_lowercase();
     if host == "www.google.com" && path == "/s2/favicons" {
@@ -186,7 +189,23 @@ fn is_remote_markdown_attachment_candidate(label: &str, raw_url: &str) -> bool {
     })
 }
 
-fn is_explicit_attachment_label_or_path(label: &str, path: &str) -> bool {
+fn attachment_url_points_to_denied_path(url: &Url) -> bool {
+    is_denied_agent_reply_attachment_path(url.path())
+        || url.query_pairs().any(|(key, value)| {
+            let key = key.to_ascii_lowercase();
+            (key == "filename" || key == "file" || key == "name")
+                && is_denied_agent_reply_attachment_path(value.as_ref())
+        })
+}
+
+pub(super) fn is_explicit_attachment_label_or_path(label: &str, path: &str) -> bool {
+    // Source code is intentionally never auto-sent from a terminal reply,
+    // even when the link label says "file". Configuration files have a
+    // dedicated allowlist below; keeping code on a denylist prevents a broad
+    // attachment label from accidentally publishing implementation details.
+    if is_denied_agent_reply_attachment_path(path) {
+        return false;
+    }
     let label = label.to_ascii_lowercase();
     if label.contains("附件")
         || label.contains("下载")
@@ -314,6 +333,9 @@ pub(super) fn extension_from_content_type(content_type: &str) -> Option<&'static
             "text/markdown" => Some("md"),
             "text/csv" => Some("csv"),
             "application/json" => Some("json"),
+            "application/yaml" | "application/x-yaml" | "text/yaml" | "text/x-yaml" => Some("yaml"),
+            "application/toml" | "text/toml" | "application/x-toml" => Some("toml"),
+            "application/xml" | "text/xml" => Some("xml"),
             "application/zip" => Some("zip"),
             "application/x-tar" => Some("tar"),
             "application/gzip" | "application/x-gzip" => Some("gz"),
@@ -357,6 +379,22 @@ pub(super) fn attachment_extension_from_path(path: &str) -> Option<&'static str>
         "md" => Some("md"),
         "csv" => Some("csv"),
         "json" => Some("json"),
+        "jsonc" => Some("jsonc"),
+        "json5" => Some("json5"),
+        "yaml" => Some("yaml"),
+        "yml" => Some("yml"),
+        "toml" => Some("toml"),
+        "ini" => Some("ini"),
+        "cfg" => Some("cfg"),
+        "conf" => Some("conf"),
+        "config" => Some("config"),
+        "cnf" => Some("cnf"),
+        "properties" => Some("properties"),
+        "xml" => Some("xml"),
+        "hcl" => Some("hcl"),
+        "tfvars" => Some("tfvars"),
+        "plist" => Some("plist"),
+        "xcconfig" => Some("xcconfig"),
         "zip" => Some("zip"),
         "tar" => Some("tar"),
         "tgz" => Some("tgz"),
@@ -378,6 +416,137 @@ pub(super) fn attachment_extension_from_path(path: &str) -> Option<&'static str>
         "pptx" => Some("pptx"),
         _ => None,
     }
+}
+
+pub(super) fn is_source_code_path(path: &str) -> bool {
+    let decoded = urlencoding::decode(path).ok();
+    let path = decoded.as_deref().unwrap_or(path);
+    let path = path.split('?').next().unwrap_or(path).to_ascii_lowercase();
+    let path = std::path::Path::new(&path);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if matches!(
+        file_name,
+        "dockerfile"
+            | "containerfile"
+            | "makefile"
+            | "gnumakefile"
+            | "rakefile"
+            | "gemfile"
+            | "vagrantfile"
+            | "jenkinsfile"
+            | "cmakelists.txt"
+    ) {
+        return true;
+    }
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "rs" | "py"
+            | "pyw"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "tsx"
+            | "java"
+            | "kt"
+            | "kts"
+            | "go"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "cxx"
+            | "hh"
+            | "hpp"
+            | "hxx"
+            | "cs"
+            | "fs"
+            | "fsx"
+            | "vb"
+            | "swift"
+            | "m"
+            | "mm"
+            | "rb"
+            | "php"
+            | "scala"
+            | "sc"
+            | "lua"
+            | "r"
+            | "dart"
+            | "ex"
+            | "exs"
+            | "erl"
+            | "hrl"
+            | "clj"
+            | "cljs"
+            | "cljc"
+            | "groovy"
+            | "gradle"
+            | "sol"
+            | "move"
+            | "zig"
+            | "nim"
+            | "nix"
+            | "hs"
+            | "lhs"
+            | "ml"
+            | "mli"
+            | "v"
+            | "odin"
+            | "asm"
+            | "s"
+            | "cmake"
+            | "mk"
+            | "vue"
+            | "svelte"
+            | "astro"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "ps1"
+            | "bat"
+            | "cmd"
+            | "sql"
+            | "graphql"
+            | "gql"
+            | "proto"
+            | "html"
+            | "htm"
+            | "css"
+            | "scss"
+            | "sass"
+            | "less"
+    )
+}
+
+pub(super) fn is_sensitive_config_path(path: &str) -> bool {
+    let decoded = urlencoding::decode(path).ok();
+    let path = decoded.as_deref().unwrap_or(path);
+    let path = path.split('?').next().unwrap_or(path).to_ascii_lowercase();
+    let file_name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    file_name == ".env"
+        || file_name.starts_with(".env.")
+        || matches!(
+            file_name,
+            "credentials" | "secrets" | "id_rsa" | "id_ed25519"
+        )
+}
+
+fn is_denied_agent_reply_attachment_path(path: &str) -> bool {
+    is_source_code_path(path) || is_sensitive_config_path(path)
 }
 
 fn extension_from_attachment_url(url: &Url) -> Option<&'static str> {
