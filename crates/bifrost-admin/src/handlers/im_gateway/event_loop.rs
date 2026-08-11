@@ -329,7 +329,7 @@ pub(super) async fn run_event_loop_with_options(
         }
 
         let dispatch_result = session_mailboxes.dispatch(event);
-        let Some(event) = dispatch_result.unrouted_event else {
+        let Some(mut event) = dispatch_result.unrouted_event else {
             if dispatch_result.delivered && !dedup_key.is_empty() {
                 dedup.record(&dedup_key);
             }
@@ -409,7 +409,7 @@ pub(super) async fn run_event_loop_with_options(
             )
             .await
             {
-                Ok(GroupInboundDispatch::Dispatch(dispatch)) => dispatch,
+                Ok(GroupInboundDispatch::Dispatch(dispatch)) => *dispatch,
                 Ok(GroupInboundDispatch::Ambient) => {
                     if let Err(error) = event_store.add(event.clone()) {
                         error!(error = %error, "failed to store ambient group event");
@@ -481,6 +481,9 @@ pub(super) async fn run_event_loop_with_options(
                 direct_reply: None,
                 thread_anchor_message_id: None,
                 thread_fallback_message: None,
+                referenced_images: Vec::new(),
+                referenced_files: Vec::new(),
+                attachment_notices: Vec::new(),
             }
         };
 
@@ -490,7 +493,13 @@ pub(super) async fn run_event_loop_with_options(
             }
         }
 
+        prepend_referenced_attachments(&mut event, &inbound_dispatch);
+
         acknowledge_and_log_inbound_event(&client, &provider, &event, &message_log_store).await;
+        if !inbound_dispatch.attachment_notices.is_empty() {
+            let notice = attachment_notice_message(&inbound_dispatch.attachment_notices);
+            send_agent_reply(&client, &provider, &event, &notice, &message_log_store).await;
+        }
         if let Some(reply) = inbound_dispatch.direct_reply.as_deref() {
             send_agent_reply(&client, &provider, &event, reply, &message_log_store).await;
             if let Some(turn_id) = inbound_dispatch.group_turn_id.as_deref() {
@@ -1108,10 +1117,40 @@ pub(super) struct PreparedInboundDispatch {
     pub(super) direct_reply: Option<String>,
     pub(super) thread_anchor_message_id: Option<String>,
     pub(super) thread_fallback_message: Option<String>,
+    pub(super) referenced_images: Vec<ImImageAttachment>,
+    pub(super) referenced_files: Vec<ImFileAttachment>,
+    pub(super) attachment_notices: Vec<String>,
+}
+
+pub(super) fn prepend_referenced_attachments(
+    event: &mut ImEvent,
+    dispatch: &PreparedInboundDispatch,
+) {
+    if dispatch.referenced_images.is_empty() && dispatch.referenced_files.is_empty() {
+        return;
+    }
+    let Some(message) = event.message.as_mut() else {
+        return;
+    };
+    let mut images = dispatch.referenced_images.clone();
+    images.append(&mut message.images);
+    message.images = images;
+    let mut files = dispatch.referenced_files.clone();
+    files.append(&mut message.files);
+    message.files = files;
+}
+
+fn referenced_attachment_prompt_note(image_count: usize, file_count: usize) -> String {
+    format!("引用附件已下载到本地；Attached Images/Files 列表最前面的 {image_count} 张图片和 {file_count} 个文件来自引用消息，请优先使用这些绝对路径。")
+}
+
+pub(super) fn attachment_notice_message(notices: &[String]) -> String {
+    let notices = notices.join("\n- ");
+    format!("附件处理提示（不影响任务继续执行）：\n- {notices}")
 }
 
 pub(super) enum GroupInboundDispatch {
-    Dispatch(PreparedInboundDispatch),
+    Dispatch(Box<PreparedInboundDispatch>),
     Ambient,
     AddressedElsewhere,
 }
@@ -1124,7 +1163,7 @@ impl GroupInboundDispatch {
 
     fn unwrap(self) -> PreparedInboundDispatch {
         match self {
-            Self::Dispatch(dispatch) => dispatch,
+            Self::Dispatch(dispatch) => *dispatch,
             Self::Ambient => panic!("expected dispatch, got ambient message"),
             Self::AddressedElsewhere => {
                 panic!("expected dispatch, got addressed-elsewhere message")
@@ -1134,7 +1173,7 @@ impl GroupInboundDispatch {
 
     fn expect(self, message: &str) -> PreparedInboundDispatch {
         match self {
-            Self::Dispatch(dispatch) => dispatch,
+            Self::Dispatch(dispatch) => *dispatch,
             _ => panic!("{message}"),
         }
     }
@@ -1177,19 +1216,25 @@ pub(super) async fn prepare_group_inbound_dispatch(
                     binding.state.as_str(),
                     "waiting_source" | "initializing" | "recovering"
                 );
-            return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
-                message_text: if recovering {
-                    binding.initial_message.clone()
-                } else {
-                    agent_message_text(message)
+            return Ok(GroupInboundDispatch::Dispatch(Box::new(
+                PreparedInboundDispatch {
+                    message_text: if recovering {
+                        binding.initial_message.clone()
+                    } else {
+                        agent_message_text(message)
+                    },
+                    session_key: binding.derived_session_key,
+                    group_turn_id: None,
+                    reset_group_context: false,
+                    direct_reply: None,
+                    thread_anchor_message_id: recovering
+                        .then_some(binding.source_message_id.clone()),
+                    thread_fallback_message: binding.fallback_message,
+                    referenced_images: Vec::new(),
+                    referenced_files: Vec::new(),
+                    attachment_notices: Vec::new(),
                 },
-                session_key: binding.derived_session_key,
-                group_turn_id: None,
-                reset_group_context: false,
-                direct_reply: None,
-                thread_anchor_message_id: recovering.then_some(binding.source_message_id.clone()),
-                thread_fallback_message: binding.fallback_message,
-            }));
+            )));
         }
 
         let anchor = store
@@ -1321,15 +1366,20 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 },
                 event.received_at,
             )?;
-        return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
-            message_text,
-            session_key: binding.derived_session_key,
-            group_turn_id: None,
-            reset_group_context: false,
-            direct_reply: None,
-            thread_anchor_message_id: anchor.map(|_| root_message_id.to_string()),
-            thread_fallback_message: fallback_message,
-        }));
+        return Ok(GroupInboundDispatch::Dispatch(Box::new(
+            PreparedInboundDispatch {
+                message_text,
+                session_key: binding.derived_session_key,
+                group_turn_id: None,
+                reset_group_context: false,
+                direct_reply: None,
+                thread_anchor_message_id: anchor.map(|_| root_message_id.to_string()),
+                thread_fallback_message: fallback_message,
+                referenced_images: Vec::new(),
+                referenced_files: Vec::new(),
+                attachment_notices: Vec::new(),
+            },
+        )));
     }
     let needs_identity =
         !message.mentions.is_empty() && !message.mentions.iter().any(|mention| mention.is_bot);
@@ -1441,23 +1491,52 @@ pub(super) async fn prepare_group_inbound_dispatch(
         GroupMessageDisposition::SystemCommand {
             command,
             reset_context,
-        } => Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
-            message_text: command,
-            session_key: crate::im_gateway::group_context::build_group_session_key(
-                &event.provider_id,
-                chat_id,
-            ),
-            group_turn_id: None,
-            reset_group_context: reset_context,
-            direct_reply: None,
-            thread_anchor_message_id: None,
-            thread_fallback_message: None,
-        })),
+        } => Ok(GroupInboundDispatch::Dispatch(Box::new(
+            PreparedInboundDispatch {
+                message_text: command,
+                session_key: crate::im_gateway::group_context::build_group_session_key(
+                    &event.provider_id,
+                    chat_id,
+                ),
+                group_turn_id: None,
+                reset_group_context: reset_context,
+                direct_reply: None,
+                thread_anchor_message_id: None,
+                thread_fallback_message: None,
+                referenced_images: Vec::new(),
+                referenced_files: Vec::new(),
+                attachment_notices: Vec::new(),
+            },
+        ))),
         GroupMessageDisposition::AgentTrigger {
             kind,
             active_request,
             command_prefix,
         } => {
+            if let Some(existing) = existing_turn.as_ref() {
+                let recoverable = matches!(existing.status.as_str(), "prepared" | "dispatched");
+                if session_busy || !recoverable {
+                    return Ok(GroupInboundDispatch::Ambient);
+                }
+                warn!(
+                    turn_id = %existing.turn_id,
+                    status = %existing.status,
+                    "recovering nonterminal group turn from a redelivered event"
+                );
+            }
+            let trigger_message_id = existing_turn
+                .as_ref()
+                .map(|turn| turn.trigger_message_id.as_str())
+                .or(event.source.message_id.as_deref())
+                .ok_or_else(|| "group event is missing message_id".to_string())?;
+            let (referenced_images, referenced_files, attachment_notices) = match store
+                .referenced_attachments_for_trigger(&event.provider_id, trigger_message_id)?
+            {
+                Some(referenced) => {
+                    hydrate_referenced_group_attachments(client, provider, referenced).await
+                }
+                None => (Vec::new(), Vec::new(), Vec::new()),
+            };
             let prepared = match existing_turn {
                 Some(mut existing) => {
                     existing.duplicate = true;
@@ -1465,20 +1544,21 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 }
                 None => store.prepare_turn(event, kind, &active_request)?,
             };
-            if prepared.duplicate {
-                let recoverable = matches!(prepared.status.as_str(), "prepared" | "dispatched");
-                if session_busy || !recoverable {
-                    return Ok(GroupInboundDispatch::Ambient);
-                }
-                warn!(
-                    turn_id = %prepared.turn_id,
-                    status = %prepared.status,
-                    "recovering nonterminal group turn from a redelivered event"
-                );
-            }
             store.mark_turn_dispatched(&prepared.turn_id, now_ms())?;
-            Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
-                message_text: prepared.delivery_message(command_prefix),
+            let mut message_text = prepared.delivery_message(command_prefix);
+            if !referenced_images.is_empty() || !referenced_files.is_empty() {
+                message_text.push_str("\n\n");
+                message_text.push_str(&referenced_attachment_prompt_note(
+                    referenced_images.len(),
+                    referenced_files.len(),
+                ));
+            }
+            if !attachment_notices.is_empty() {
+                message_text.push_str("\n\n");
+                message_text.push_str(&attachment_notice_message(&attachment_notices));
+            }
+            Ok(GroupInboundDispatch::Dispatch(Box::new(PreparedInboundDispatch {
+                message_text,
                 session_key: prepared.session_key,
                 group_turn_id: Some(prepared.turn_id),
                 reset_group_context: false,
@@ -1488,7 +1568,10 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 }),
                 thread_anchor_message_id: None,
                 thread_fallback_message: None,
-            }))
+                referenced_images,
+                referenced_files,
+                attachment_notices,
+            })))
         }
     }
 }

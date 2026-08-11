@@ -620,13 +620,14 @@ pub(super) async fn group_reply_assets_use_the_session_work_dir_before_provider_
 
     let base_dir = agent_reply_base_dir(&provider, Some(&group_dir)).unwrap();
     assert_eq!(base_dir, group_dir);
-    let (_text, images, attachments) = prepare_agent_reply_text_and_images_with_downloads(
+    let (_text, images, attachments, notices) = prepare_agent_reply_text_and_images_with_downloads(
         "[报告附件](./report.txt)",
         Some(&base_dir),
     )
     .await;
     assert!(images.is_empty());
     assert_eq!(attachments.len(), 1);
+    assert!(notices.is_empty());
     assert_eq!(attachments[0].path, group_dir.join("report.txt"));
 
     assert_eq!(agent_reply_base_dir(&provider, None), Some(provider_dir));
@@ -1474,11 +1475,12 @@ pub(super) async fn agent_reply_downloads_remote_markdown_image_to_local_attachm
     });
     let markdown = format!("图片如下：\n![chart](http://127.0.0.1:{port}/chart.png)\n正文保留。");
 
-    let (text, images, attachments) =
+    let (text, images, attachments, notices) =
         prepare_agent_reply_text_and_images_with_downloads(&markdown, None).await;
 
     assert_eq!(images.len(), 1);
     assert!(attachments.is_empty());
+    assert!(notices.is_empty());
     assert_eq!(images[0].alt, "chart");
     assert!(images[0].path.exists());
     assert_eq!(
@@ -1515,11 +1517,12 @@ pub(super) async fn agent_reply_download_link_with_image_content_type_uses_image
     });
     let markdown = format!("这是下载链接：[下载图片](http://127.0.0.1:{port}/download)\n正文。");
 
-    let (text, images, attachments) =
+    let (text, images, attachments, notices) =
         prepare_agent_reply_text_and_images_with_downloads(&markdown, None).await;
 
     assert_eq!(images.len(), 1);
     assert!(attachments.is_empty());
+    assert!(notices.is_empty());
     assert_eq!(images[0].alt, "下载图片");
     assert_eq!(
         std::fs::read(&images[0].path).expect("read downloaded image link"),
@@ -1527,6 +1530,345 @@ pub(super) async fn agent_reply_download_link_with_image_content_type_uses_image
     );
     assert!(!text.contains("http://127.0.0.1"));
     assert!(text.contains("正文"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn agent_reply_rejects_remote_file_above_feishu_upload_limit_before_body_read() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oversized attachment server");
+    let port = listener
+        .local_addr()
+        .expect("attachment server addr")
+        .port();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        // Drain the request before closing the socket. On Windows, dropping a
+        // socket with unread inbound bytes resets the connection and can hide
+        // the response headers from reqwest.
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_AGENT_REPLY_ATTACHMENT_BYTES + 1
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+    });
+    let attachment = AgentReplyRemoteAttachment {
+        label: "oversized file".to_string(),
+        url: format!("http://127.0.0.1:{port}/oversized.bin"),
+    };
+
+    let error = download_agent_reply_remote_attachment(&attachment)
+        .await
+        .expect_err("oversized remote file must be rejected before buffering its body");
+
+    assert_eq!(MAX_AGENT_REPLY_ATTACHMENT_BYTES, 30 * 1024 * 1024);
+    assert!(
+        error.to_string().contains("飞书上传文件 30 MiB 上限"),
+        "unexpected oversized attachment error: {error}"
+    );
+    server.await.expect("oversized attachment server");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn agent_reply_remote_file_stream_limit_and_empty_body_are_non_panicking_errors() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind streamed attachment server");
+    let port = listener.local_addr().expect("streamed server addr").port();
+    let server = tokio::spawn(async move {
+        for body in [
+            "3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
+            "0\r\n\r\n",
+            "10\r\nabc",
+        ] {
+            let (mut stream, _) = listener.accept().await.expect("accept download");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{body}"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write chunked response");
+        }
+    });
+
+    let attachment = |name: &str| AgentReplyRemoteAttachment {
+        label: name.to_string(),
+        url: format!("http://127.0.0.1:{port}/{name}.bin"),
+    };
+    let oversized = download_remote_attachment_with_limit(&attachment("streamed"), 4)
+        .await
+        .expect_err("chunked response must enforce the cumulative limit");
+    assert!(oversized.to_string().contains("0 MiB 上限"));
+    let empty = download_remote_attachment_with_limit(&attachment("empty"), 4)
+        .await
+        .expect_err("empty response must be rejected");
+    assert!(empty.to_string().contains("empty body"));
+    let truncated = download_remote_attachment_with_limit(&attachment("truncated"), 64)
+        .await
+        .expect_err("truncated chunked response must return a body read error");
+    assert!(truncated.to_string().contains("body failed"));
+    server.await.expect("streamed attachment server");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn agent_reply_remote_file_download_failure_returns_non_blocking_notice() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind failed attachment download server");
+    let port = listener.local_addr().expect("failed download addr").port();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept failed download");
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).await;
+        let body = r#"{"error":"unavailable"}"#;
+        let response = format!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write failed download response");
+    });
+    let markdown = format!("[最终报告](http://127.0.0.1:{port}/report.pdf)\n结论正文");
+
+    let (text, images, attachments, notices) =
+        prepare_agent_reply_text_and_images_with_downloads(&markdown, None).await;
+
+    server.await.expect("failed attachment download server");
+    assert_eq!(text, markdown);
+    assert!(images.is_empty());
+    assert!(attachments.is_empty());
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains("最终报告"));
+    assert!(notices[0].contains("503"));
+    assert!(notices[0].contains("任务结论已正常发布"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn agent_reply_attachment_notice_send_failure_is_logged_without_failing_task() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let temp = tempfile::tempdir().expect("temp failed notice store");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind failed notice server");
+    let address = listener.local_addr().expect("failed notice address");
+    let server = tokio::spawn(async move {
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept Feishu request");
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.expect("read request");
+            let (status, body) = if index == 0 {
+                (
+                    "200 OK",
+                    r#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                )
+            } else {
+                ("500 Internal Server Error", r#"{"code":230001}"#)
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write Feishu response");
+        }
+    });
+
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = test_provider();
+    provider.base_url = Some(format!("http://{address}/open-apis"));
+    let event = ImEvent {
+        event_id: "evt-failed-attachment-notice".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("chat-failed-attachment-notice".to_string()),
+            message_id: Some("msg-failed-attachment-notice".to_string()),
+            ..Default::default()
+        },
+        message: None,
+        received_at: now_ms(),
+        raw_digest: None,
+    };
+    let target = ImTarget {
+        id: "failed-attachment-notice".to_string(),
+        provider_id: provider.id.clone(),
+        display_name: "Failed notice".to_string(),
+        receive_id_type: "chat_id".to_string(),
+        receive_id: "chat-failed-attachment-notice".to_string(),
+        default_msg_type: "interactive".to_string(),
+        enabled: true,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let message_log_store = Arc::new(ImMessageLogStore::new(temp.path()));
+
+    send_agent_reply_attachments(
+        &client,
+        &provider,
+        &event,
+        &target,
+        &[],
+        &["模拟附件发送失败".to_string()],
+        &message_log_store,
+    )
+    .await;
+    server.await.expect("failed notice server");
+
+    let notice = message_log_store
+        .list()
+        .into_iter()
+        .find(|log| log.trigger.as_deref() == Some("agent_attachment_notice"))
+        .expect("failed notice log");
+    assert_eq!(notice.status, MessageStatus::Failed);
+    assert!(notice
+        .error
+        .as_deref()
+        .is_some_and(|value| !value.is_empty()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn agent_reply_attachment_failures_are_logged_and_reported_without_failing_task() {
+    use std::io::Write;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let temp = tempfile::tempdir().expect("temp attachment notice store");
+    let empty_path = temp.path().join("empty.txt");
+    std::fs::File::create(&empty_path).expect("create empty attachment");
+    let oversized_path = temp.path().join("oversized.bin");
+    let mut oversized = std::fs::File::create(&oversized_path).expect("create oversized file");
+    oversized.write_all(b"x").expect("seed oversized file");
+    oversized
+        .set_len(MAX_AGENT_REPLY_ATTACHMENT_BYTES + 1)
+        .expect("extend oversized sparse file");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind attachment notice server");
+    let address = listener.local_addr().expect("attachment notice address");
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept Feishu request");
+            let mut request = vec![0u8; 8192];
+            let length = stream
+                .read(&mut request)
+                .await
+                .expect("read Feishu request");
+            let request = String::from_utf8_lossy(&request[..length]);
+            let body = if request.contains("/auth/v3/tenant_access_token/internal") {
+                r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+            } else {
+                assert!(request.contains("/im/v1/messages/msg-attachment-limit/reply"));
+                assert!(request.contains("interactive"));
+                r#"{"code":0,"data":{"message_id":"notice-message"}}"#
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write Feishu response");
+        }
+    });
+
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = test_provider();
+    provider.base_url = Some(format!("http://{address}/open-apis"));
+    let event = ImEvent {
+        event_id: "evt-attachment-limit".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("chat-attachment-limit".to_string()),
+            user_id: Some("sender-attachment-limit".to_string()),
+            message_id: Some("msg-attachment-limit".to_string()),
+            ..Default::default()
+        },
+        message: None,
+        received_at: now_ms(),
+        raw_digest: None,
+    };
+    let target = ImTarget {
+        id: "target-attachment-limit".to_string(),
+        provider_id: provider.id.clone(),
+        display_name: "Attachment limit".to_string(),
+        receive_id_type: "chat_id".to_string(),
+        receive_id: "chat-attachment-limit".to_string(),
+        default_msg_type: "interactive".to_string(),
+        enabled: true,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let attachments = vec![
+        AgentReplyLocalAttachment {
+            label: "empty report".to_string(),
+            path: empty_path,
+            mime_type: Some("text/plain".to_string()),
+        },
+        AgentReplyLocalAttachment {
+            label: String::new(),
+            path: oversized_path,
+            mime_type: Some("application/octet-stream".to_string()),
+        },
+    ];
+    let message_log_store = Arc::new(ImMessageLogStore::new(temp.path()));
+
+    send_agent_reply_attachments(
+        &client,
+        &provider,
+        &event,
+        &target,
+        &attachments,
+        &["远程附件下载失败；任务结论已正常发布。".to_string()],
+        &message_log_store,
+    )
+    .await;
+    server.await.expect("attachment notice server");
+
+    let logs = message_log_store.list();
+    assert_eq!(
+        logs.iter()
+            .filter(|log| log.msg_type.as_deref() == Some("file"))
+            .count(),
+        2
+    );
+    assert!(logs
+        .iter()
+        .filter(|log| log.msg_type.as_deref() == Some("file"))
+        .all(|log| log.status == MessageStatus::Failed));
+    let notice = logs
+        .iter()
+        .find(|log| log.trigger.as_deref() == Some("agent_attachment_notice"))
+        .expect("attachment failure notice log");
+    assert_eq!(notice.status, MessageStatus::Success);
+    let content = notice.content.as_deref().expect("notice content");
+    assert!(content.contains("附件发送提示（不影响任务结论）"));
+    assert!(content.contains("飞书不允许上传空文件"));
+    assert!(content.contains("飞书上传文件 30 MiB 上限"));
+    assert!(content.contains("远程附件下载失败"));
 }
 
 #[test]

@@ -70,6 +70,7 @@ lock = threading.Lock()
 class Handler(BaseHTTPRequestHandler):
     card_counter = 0
     file_counter = 0
+    image_counter = 0
     message_counter = 0
 
     def log_message(self, *_args):
@@ -95,11 +96,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path.endswith("/im/v1/images"):
+            length = int(self.headers.get("content-length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            filenames = re.findall(r'filename="([^"]+)"', raw.decode("utf-8", errors="replace"))
+            self.record({"multipart_bytes": len(raw), "filenames": filenames})
+            type(self).image_counter += 1
+            self.send_json({"code": 0, "data": {"image_key": "img_v3_terminal_e2e"}})
+            return
         if path.endswith("/im/v1/files"):
             length = int(self.headers.get("content-length", "0"))
             raw = self.rfile.read(length) if length else b""
             filenames = re.findall(r'filename="([^"]+)"', raw.decode("utf-8", errors="replace"))
             self.record({"multipart_bytes": len(raw), "filenames": filenames})
+            if "terminal-e2e-upload-failure.txt" in filenames:
+                self.send_json({"code": 234006, "msg": "The file size exceed the max value."})
+                return
             type(self).file_counter += 1
             self.send_json({"code": 0, "data": {"file_key": f"file_terminal_e2e_{type(self).file_counter}"}})
             return
@@ -147,7 +159,9 @@ done
 FEISHU_PORT="$(<"$FEISHU_PORT_FILE")"
 
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
-  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+  env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    -u http_proxy -u https_proxy -u all_proxy \
+    SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
 BIFROST_PORT="${BIFROST_PORT:-$(choose_loopback_port)}"
@@ -196,6 +210,16 @@ report_path = pathlib.Path(test_dir) / "terminal-e2e-report.txt"
 report_path.write_text("terminal attachment contents", encoding="utf-8")
 archive_path = pathlib.Path(test_dir) / "terminal-e2e-bundle.tar.gz"
 archive_path.write_bytes(b"terminal archive contents")
+image_path = pathlib.Path(test_dir) / "terminal-e2e-chart.png"
+image_path.write_bytes(
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+oversized_path = pathlib.Path(test_dir) / "terminal-e2e-oversized.bin"
+with oversized_path.open("wb") as handle:
+    handle.truncate(30 * 1024 * 1024 + 1)
+upload_failure_path = pathlib.Path(test_dir) / "terminal-e2e-upload-failure.txt"
+upload_failure_path.write_text("upload should fail without failing the task", encoding="utf-8")
 runner_code = r'''
 import json
 import sys
@@ -204,11 +228,15 @@ if "FAIL_TERMINAL_E2E" in prompt:
     print(json.dumps({"type": "run_failed", "content": "E2E_PERMISSION_DENIED"}))
     print("E2E_PERMISSION_DENIED", file=sys.stderr)
     raise SystemExit(17)
+if "ATTACHMENT_FAILURE_E2E" in prompt:
+    print(json.dumps({"type": "run_started", "content": "started", "session_id": "terminal-session-attachment-e2e"}))
+    print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_WITH_ATTACHMENT_FAILURE\n\n[E2E oversized file](%s)\n[E2E upload failure](%s)" % (sys.argv[4], sys.argv[5])}))
+    raise SystemExit(0)
 print(json.dumps({"type": "run_started", "content": "started", "session_id": "terminal-session-e2e"}))
-print(json.dumps({"type": "assistant_delta", "content": "E2E_LATEST_EXPLANATION"}))
+print(json.dumps({"type": "assistant_delta", "content": "E2E_LATEST_EXPLANATION\n\n![E2E chart](%s)" % sys.argv[3]}))
 print(json.dumps({"type": "tool_started", "tool_name": "exec_command", "content": "verify archive"}))
 print(json.dumps({"type": "tool_finished", "tool_name": "exec_command", "arguments": "verify archive", "result": "ok", "success": True, "duration_ms": 5}))
-print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS\n\n[E2E report](%s)\n[E2E archive](%s)" % (sys.argv[1], sys.argv[2])}))
+print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS\n\n![E2E chart](%s)\n\n[E2E report](%s)\n[E2E archive](%s)" % (sys.argv[3], sys.argv[1], sys.argv[2])}))
 '''
 request("/chat/config", {
     "version": 1,
@@ -219,7 +247,7 @@ request("/chat/config", {
             "adapter": "custom",
             "adapterConfig": {
                 "executable": sys.executable,
-                "args": ["-c", runner_code, str(report_path), str(archive_path)],
+                "args": ["-c", runner_code, str(report_path), str(archive_path), str(image_path), str(oversized_path), str(upload_failure_path)],
                 "timeoutSecs": 30,
             },
             "injectBifrostTools": False,
@@ -318,6 +346,9 @@ wait_message_count 4
 inject terminal-failure "FAIL_TERMINAL_E2E"
 wait_session_idle
 wait_message_count 6
+inject terminal-attachment-failure "ATTACHMENT_FAILURE_E2E"
+wait_session_idle
+wait_message_count 9
 
 python3 - "$FEISHU_REQUEST_LOG" <<'PY'
 import json
@@ -325,9 +356,19 @@ import sys
 
 records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 messages = [record for record in records if "/im/v1/messages" in record["path"]]
-assert len(messages) == 6, messages
+assert len(messages) == 9, messages
 
-success_progress, success_terminal, success_report, success_archive, failure_progress, failure_terminal = messages
+(
+    success_progress,
+    success_terminal,
+    success_report,
+    success_archive,
+    failure_progress,
+    failure_terminal,
+    attachment_progress,
+    attachment_terminal,
+    attachment_notice,
+) = messages
 assert success_progress["path"].endswith("/im/v1/messages/terminal-success/reply"), success_progress
 assert success_terminal["path"].endswith("/im/v1/messages/om_1/reply"), success_terminal
 for index, file_message in enumerate([success_report, success_archive], 1):
@@ -336,9 +377,14 @@ for index, file_message in enumerate([success_report, success_archive], 1):
     assert f"file_terminal_e2e_{index}" in file_message["body"]["content"], file_message
 assert failure_progress["path"].endswith("/im/v1/messages/terminal-failure/reply"), failure_progress
 assert failure_terminal["path"].endswith("/im/v1/messages/om_5/reply"), failure_terminal
+assert attachment_progress["path"].endswith("/im/v1/messages/terminal-attachment-failure/reply"), attachment_progress
+assert attachment_terminal["path"].endswith("/im/v1/messages/om_7/reply"), attachment_terminal
+assert attachment_notice["path"].endswith("/im/v1/messages/terminal-attachment-failure/reply"), attachment_notice
 
 success_card = json.loads(success_terminal["body"]["content"])
 failure_card = json.loads(failure_terminal["body"]["content"])
+attachment_terminal_card = json.loads(attachment_terminal["body"]["content"])
+attachment_notice_card = json.loads(attachment_notice["body"]["content"])
 supported_locales = {
     "zh_cn", "en_us", "ja_jp", "zh_hk", "zh_tw", "id_id", "vi_vn", "th_th",
     "pt_br", "es_es", "ko_kr", "de_de", "fr_fr", "it_it", "ru_ru", "ms_my",
@@ -348,12 +394,23 @@ assert success_card["header"]["title"]["content"] == "Task completed", success_c
 assert set(success_card["header"]["title"]["i18n_content"]) == supported_locales, success_card
 assert success_card["header"]["title"]["i18n_content"]["zh_cn"] == "任务执行结束", success_card
 assert "E2E_FINAL_SUMMARY_SUCCESS" in json.dumps(success_card["body"], ensure_ascii=False), success_card
+assert "![E2E chart](img_v3_terminal_e2e)" in json.dumps(success_card["body"], ensure_ascii=False), success_card
 
 assert failure_card["header"]["template"] == "red", failure_card
 assert failure_card["header"]["title"]["content"] == "Task failed", failure_card
 assert set(failure_card["header"]["title"]["i18n_content"]) == supported_locales, failure_card
 assert failure_card["header"]["title"]["i18n_content"]["zh_cn"] == "任务执行失败", failure_card
 assert "E2E_PERMISSION_DENIED" in json.dumps(failure_card["body"], ensure_ascii=False), failure_card
+
+assert attachment_terminal_card["header"]["template"] == "green", attachment_terminal_card
+assert "E2E_FINAL_SUMMARY_WITH_ATTACHMENT_FAILURE" in json.dumps(attachment_terminal_card["body"], ensure_ascii=False), attachment_terminal_card
+attachment_notice_text = json.dumps(attachment_notice_card["body"], ensure_ascii=False)
+assert "附件发送提示（不影响任务结论）" in attachment_notice_text, attachment_notice_card
+assert "terminal-e2e-oversized.bin" in attachment_notice_text, attachment_notice_card
+assert "飞书上传文件 30 MiB 上限" in attachment_notice_text, attachment_notice_card
+assert "terminal-e2e-upload-failure.txt" in attachment_notice_text, attachment_notice_card
+assert "234006" in attachment_notice_text, attachment_notice_card
+assert "任务结论已正常发布" in attachment_notice_text, attachment_notice_card
 
 updates = [
     record for record in records
@@ -366,6 +423,7 @@ rendered_updates = "\n".join(record["body"]["card"]["data"] for record in update
 assert "E2E_FINAL_SUMMARY_SUCCESS" in rendered_updates, rendered_updates
 assert "E2E_PERMISSION_DENIED" in rendered_updates, rendered_updates
 assert "E2E_LATEST_EXPLANATION" in rendered_updates, rendered_updates
+assert "![E2E chart](img_v3_terminal_e2e)" in rendered_updates, rendered_updates
 assert "Session：获取中" in rendered_updates, rendered_updates
 assert "Session：未提供" in rendered_updates, rendered_updates
 
@@ -399,10 +457,18 @@ for marker, title in [
     assert marker in json.dumps(output, ensure_ascii=False), output
 
 uploads = [record for record in records if record["path"].split("?", 1)[0].endswith("/im/v1/files")]
-assert len(uploads) == 2 and all(upload["body"]["multipart_bytes"] > 0 for upload in uploads), uploads
+assert len(uploads) == 3 and all(upload["body"]["multipart_bytes"] > 0 for upload in uploads), uploads
 filenames = [name for upload in uploads for name in upload["body"]["filenames"]]
 assert "terminal-e2e-report.txt" in filenames, filenames
 assert "terminal-e2e-bundle.tar.gz" in filenames, filenames
+assert "terminal-e2e-upload-failure.txt" in filenames, filenames
+assert "terminal-e2e-oversized.bin" not in filenames, filenames
+
+image_uploads = [record for record in records if record["path"].split("?", 1)[0].endswith("/im/v1/images")]
+assert len(image_uploads) == 1, image_uploads
+assert image_uploads[0]["body"]["multipart_bytes"] > 0, image_uploads
+assert "terminal-e2e-chart.png" in image_uploads[0]["body"]["filenames"], image_uploads
+assert all(message["body"].get("msg_type") != "image" for message in messages), messages
 
 progress_cards = []
 for record in records:

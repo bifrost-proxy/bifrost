@@ -774,7 +774,7 @@ pub struct ImMessageReference {
     pub text: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImImageAttachment {
     pub file_key: String,
     #[serde(default)]
@@ -799,7 +799,7 @@ pub enum ImImageSource {
     UploadedImage,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImFileAttachment {
     pub file_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]

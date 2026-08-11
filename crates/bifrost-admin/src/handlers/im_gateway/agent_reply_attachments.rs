@@ -2,6 +2,7 @@ use super::*;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use sha1::{Digest, Sha1};
 use url::Url;
 
@@ -201,6 +202,13 @@ fn is_explicit_attachment_label_or_path(label: &str, path: &str) -> bool {
 pub(super) async fn download_agent_reply_remote_attachment(
     attachment: &AgentReplyRemoteAttachment,
 ) -> bifrost_core::Result<AgentReplyDownloadedAttachment> {
+    download_remote_attachment_with_limit(attachment, MAX_AGENT_REPLY_ATTACHMENT_BYTES).await
+}
+
+pub(super) async fn download_remote_attachment_with_limit(
+    attachment: &AgentReplyRemoteAttachment,
+    max_bytes: u64,
+) -> bifrost_core::Result<AgentReplyDownloadedAttachment> {
     let http = bifrost_core::outbound_reqwest_client().map_err(|error| {
         bifrost_core::BifrostError::Network(format!(
             "build agent reply attachment downloader failed: {error}"
@@ -228,22 +236,31 @@ pub(super) async fn download_agent_reply_remote_attachment(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
-    let bytes = response.bytes().await.map_err(|error| {
-        bifrost_core::BifrostError::Network(format!(
-            "read agent reply attachment body failed: {error}"
-        ))
-    })?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes)
+    {
+        return Err(remote_attachment_size_error(max_bytes));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "read agent reply attachment body failed: {error}"
+            ))
+        })?;
+        let buffered = bytes.len() as u64;
+        if buffered.saturating_add(chunk.len() as u64) > max_bytes {
+            return Err(remote_attachment_size_error(max_bytes));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     if bytes.is_empty() {
         return Err(bifrost_core::BifrostError::Network(
             "download agent reply attachment returned empty body".to_string(),
         ));
     }
-    if bytes.len() as u64 > MAX_AGENT_REPLY_ATTACHMENT_BYTES {
-        return Err(bifrost_core::BifrostError::Config(format!(
-            "downloaded agent reply attachment exceeds {MAX_AGENT_REPLY_ATTACHMENT_BYTES} bytes"
-        )));
-    }
-
     let mut hasher = Sha1::new();
     hasher.update(attachment.url.as_bytes());
     hasher.update(&bytes);
@@ -282,6 +299,11 @@ pub(super) async fn download_agent_reply_remote_attachment(
         path,
         mime_type: content_type,
     })
+}
+
+fn remote_attachment_size_error(max_bytes: u64) -> bifrost_core::BifrostError {
+    let max_mib = max_bytes / 1024 / 1024;
+    bifrost_core::BifrostError::Config(format!("远程附件超过飞书上传文件 {max_mib} MiB 上限"))
 }
 
 pub(super) fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
@@ -405,10 +427,16 @@ async fn upload_agent_reply_file_for_im(
             attachment.path.display()
         )));
     }
+    if metadata.len() == 0 {
+        let path = attachment.path.display();
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "飞书不允许上传空文件：{path}"
+        )));
+    }
     if metadata.len() > MAX_AGENT_REPLY_ATTACHMENT_BYTES {
         return Err(bifrost_core::BifrostError::Config(format!(
-            "agent reply attachment exceeds {} bytes: {}",
-            MAX_AGENT_REPLY_ATTACHMENT_BYTES,
+            "文件超过飞书上传文件 {} MiB 上限：{}",
+            MAX_AGENT_REPLY_ATTACHMENT_BYTES / 1024 / 1024,
             attachment.path.display()
         )));
     }
@@ -439,12 +467,14 @@ pub(super) async fn send_agent_reply_attachments(
     event: &ImEvent,
     reply_target: &crate::im_gateway::types::ImTarget,
     attachments: &[AgentReplyLocalAttachment],
+    initial_failure_notices: &[String],
     message_log_store: &Arc<ImMessageLogStore>,
 ) {
     let file_target = crate::im_gateway::types::ImTarget {
         default_msg_type: "file".to_string(),
         ..reply_target.clone()
     };
+    let mut failure_notices = initial_failure_notices.to_vec();
     for attachment in attachments {
         let file_name = attachment
             .path
@@ -501,15 +531,87 @@ pub(super) async fn send_agent_reply_attachments(
                 path = %attachment.path.display(),
                 "agent reply attachment sent successfully"
             ),
-            Err(e) => warn!(
-                path = %attachment.path.display(),
-                error = %e,
-                "failed to send agent reply attachment; local file is retained"
-            ),
+            Err(e) => {
+                let path = attachment.path.display();
+                warn!("failed to send agent reply attachment {path}; local file is retained: {e}");
+                failure_notices.push(format!(
+                    "文件「{label}」未发送成功：{e}；任务结论已正常发布。"
+                ));
+            }
         }
+    }
+    if !failure_notices.is_empty() {
+        send_agent_reply_attachment_notice(
+            client,
+            provider,
+            event,
+            reply_target,
+            &failure_notices,
+            message_log_store,
+        )
+        .await;
     }
 }
 
+async fn send_agent_reply_attachment_notice(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    reply_target: &crate::im_gateway::types::ImTarget,
+    notices: &[String],
+    message_log_store: &Arc<ImMessageLogStore>,
+) {
+    let text = format!(
+        "附件发送提示（不影响任务结论）：\n- {}",
+        notices.join("\n- ")
+    );
+    let card = crate::im_gateway::feishu::build_default_text_card(&text);
+    let send_result = client
+        .send_reply_card(
+            provider,
+            reply_target,
+            event.source.message_id.as_deref(),
+            card,
+            crate::im_gateway::types::SendOptions::default(),
+        )
+        .await;
+    let (status, message_id, error_msg) = match &send_result {
+        Ok(result) => (MessageStatus::Success, result.message_id.clone(), None),
+        Err(error) => (MessageStatus::Failed, None, Some(error.to_string())),
+    };
+    let log = ImMessageLog {
+        id: uuid_short(),
+        provider_id: provider.id.clone(),
+        direction: MessageDirection::Outbound,
+        status,
+        timestamp: now_ms(),
+        target_id: Some(reply_target.receive_id.clone()),
+        target_name: Some(reply_target.display_name.clone()),
+        message_id,
+        msg_type: Some("interactive".to_string()),
+        content_preview: Some(truncate_str(&text, 200)),
+        content: Some(text),
+        trigger: Some("agent_attachment_notice".to_string()),
+        error: error_msg,
+        sender_open_id: None,
+        event_id: Some(event.event_id.clone()),
+        reaction_added: None,
+    };
+    if let Err(error) = message_log_store.add(log) {
+        warn!(error = %error, "failed to store agent attachment notice log");
+    }
+    match send_result {
+        Ok(_) => debug!("agent attachment failure notice sent successfully"),
+        Err(error) => warn!(
+            error = %error,
+            "failed to send agent attachment failure notice; terminal task remains successful"
+        ),
+    }
+}
+
+// Keeping the shared delivery context explicit makes both the standard and
+// planned reply paths use the same best-effort attachment semantics.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn send_agent_reply_assets(
     client: &ImProviderClient,
     provider: &ImProviderConfig,
@@ -517,6 +619,7 @@ pub(super) async fn send_agent_reply_assets(
     reply_target: &crate::im_gateway::types::ImTarget,
     images: &[AgentReplyLocalImage],
     attachments: &[AgentReplyLocalAttachment],
+    attachment_notices: &[String],
     message_log_store: &Arc<ImMessageLogStore>,
 ) {
     if !images.is_empty() {
@@ -530,13 +633,14 @@ pub(super) async fn send_agent_reply_assets(
         )
         .await;
     }
-    if !attachments.is_empty() {
+    if !attachments.is_empty() || !attachment_notices.is_empty() {
         send_agent_reply_attachments(
             client,
             provider,
             event,
             reply_target,
             attachments,
+            attachment_notices,
             message_log_store,
         )
         .await;

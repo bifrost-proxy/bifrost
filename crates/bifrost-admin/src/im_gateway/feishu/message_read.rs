@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct FeishuFetchedMessage {
     pub message_id: String,
     pub chat_id: String,
@@ -9,6 +9,8 @@ pub struct FeishuFetchedMessage {
     pub msg_type: String,
     pub text: String,
     pub mentions: Vec<ImMention>,
+    pub images: Vec<ImImageAttachment>,
+    pub files: Vec<ImFileAttachment>,
     pub raw_content: serde_json::Value,
     pub create_time: Option<u64>,
     pub update_time: Option<u64>,
@@ -113,6 +115,7 @@ impl FeishuProvider {
         } else {
             extract_feishu_message_text(&raw_content, &mentions)
         };
+        let (images, files) = parse_feishu_message_attachments(&msg_type, &raw_content);
         Ok(FeishuFetchedMessage {
             message_id: item
                 .get("message_id")
@@ -138,6 +141,8 @@ impl FeishuProvider {
             msg_type,
             text,
             mentions,
+            images,
+            files,
             raw_content,
             create_time: item
                 .get("create_time")

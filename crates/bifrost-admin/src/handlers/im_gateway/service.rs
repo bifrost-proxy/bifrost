@@ -3,7 +3,12 @@ use super::*;
 pub(super) const IMAGE_ONLY_AGENT_PROMPT: &str = "请理解这张图片，并根据图片内容回答。";
 pub(super) const MAX_AGENT_ATTACHMENTS_PER_MESSAGE: usize = 6;
 pub(super) const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
-pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
+/// Feishu `POST /im/v1/files` rejects files larger than 30 MB (error 234006).
+/// Keep the local preflight at the platform limit so a generated attachment
+/// cannot turn an otherwise successful terminal reply into a doomed upload.
+pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 30 * 1024 * 1024;
+pub(super) const MAX_FEISHU_REFERENCED_FILE_BYTES: u64 = 100 * 1024 * 1024;
+pub(super) const MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES: u64 = 250 * 1024 * 1024;
 
 pub(super) static AGENT_REPLY_IMAGE_UPLOAD_CACHE: OnceLock<
     Mutex<HashMap<AgentReplyImageCacheKey, String>>,
