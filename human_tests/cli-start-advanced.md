@@ -957,7 +957,7 @@ rm -rf /tmp/bifrost-test-logs
    rg --fixed-strings '不要停止整个主服务' docs/cli-quick-start.md
    rg --fixed-strings '场景 10：远程操作另一台 Bifrost' docs/cli-quick-start.md
    rg --fixed-strings '场景 12：和 Agent 协作开发业务 Skill' docs/cli-quick-start.md
-   rg --fixed-strings 'bifrost install-skill -t codex -y' docs/cli-quick-start.md
+   rg --fixed-strings 'bifrost install-skill -t universal -y' docs/cli-quick-start.md
    rg --fixed-strings 'bifrost port bind --port 18882' docs/cli-quick-start.md
    rg --fixed-strings '如果目标 App 有 SSL pinning，不要强行抓包它的 TLS 明文' docs/cli-quick-start.md
    rg --fixed-strings 'curl -x http://127.0.0.1:18882 https://api.example.com/v1/me' docs/cli-quick-start.md
@@ -1031,7 +1031,8 @@ rm -rf /tmp/bifrost-test-logs
 **实际结果（2026-05-09）**：
 - 已使用 `./target/debug/bifrost --help` 真实执行顶层帮助检查，未匹配到 `SUBCOMMAND REFERENCE`、`RULE TEMPLATE VARIABLES`、`RULES QUICK START`
 - 顶层帮助实际输出包含 `docs/cli-quick-start.md`、`docs/cli.md`、`docs/getting-started.md`、`docs/rule.md`、`docs/operation.md`、`docs/pattern.md`、`docs/rules/README.md`
-- `docs/cli-quick-start.md` 实际按使用场景组织，包含 `先选场景`、默认系统代理、TLS 抓包按需开启、SSL pinning 排除建议、主服务+多端口调试、同一服务服务多个应用/开发任务、流量定位、远程操作、Agent 协作开发业务 Skill 等场景，并保留命令快捷别名、`BIFROST_DATA_DIR`、`RUST_LOG`、规则快速入门和 `curl -x http://127.0.0.1:18888` 验证示例；默认路径实际说明不要默认用全局 `--intercept`、临时 `BIFROST_DATA_DIR`、`--no-system-proxy` 或 `--unsafe-ssl`；多任务场景实际说明共享主服务、每个任务独立端口和规则、按 `listener_port` 过滤流量、结束时只销毁任务端口；Agent 场景实际包含 `install-skill -t codex`、`port bind --port 18882`、`--client-app`/`--listener-port` 流量过滤、traffic 证据读取指令和“不要 mock，不要猜”的约束；规则示例实际说明简单值优先写规则内联 value，较长内容优先规则文件内嵌值，特别大的 mock body/PAC/header 才建议全局 Values
+- `docs/cli-quick-start.md` 实际按使用场景组织，包含 `先选场景`、默认系统代理、TLS 抓包按需开启、SSL pinning 排除建议、主服务+多端口调试、同一服务服务多个应用/开发任务、流量定位、远程操作、Agent 协作开发业务 Skill 等场景，并保留命令快捷别名、`BIFROST_DATA_DIR`、`RUST_LOG`、规则快速入门和 `curl -x http://127.0.0.1:18888` 验证示例；默认路径实际说明不要默认用全局 `--intercept`、临时 `BIFROST_DATA_DIR`、`--no-system-proxy` 或 `--unsafe-ssl`；多任务场景实际说明共享主服务、每个任务独立端口和规则、按 `listener_port` 过滤流量、结束时只销毁任务端口；Agent 场景实际包含 `install-skill -t universal`、`port bind --port 18882`、`--client-app`/`--listener-port` 流量过滤、traffic 证据读取指令和“不要 mock，不要猜”的约束；规则示例实际说明简单值优先写规则内联 value，较长内容优先规则文件内嵌值，特别大的 mock body/PAC/header 才建议全局 Values
+- 2026-08-12（PR #478）复测 `install-skill` 子断言：PASS。中文源文档与站点镜像均包含 `bifrost install-skill -t universal -y`，当前 CLI help 只列出 `universal`、`claude-code`、`all`。
 - `docs/cli.md` 实际包含命令覆盖索引、环境变量、规则变量速查、`--client-app` 应用过滤、`install-skill` 边界、全局 Values 推荐边界、同一服务多任务隔离、默认系统代理、TLS 按需抓包/自动 CA/SSL pinning 排除建议、`setting`/`remote` 边界、系统代理/CLI 代理边界、`remote` 和 `im` 命令入口说明
 - `docs/operation.md` 实际说明日常规则不要默认创建全局 Values，多行内容优先使用规则文件内嵌值
 - `docs/getting-started.md` 实际说明默认启动启用系统代理，TLS 抓包按需开启且启动时自动处理 CA，日常排障优先主服务+多端口而不是临时数据目录

@@ -268,7 +268,7 @@ test_root_help_links_docs_instead_of_subcommand_reference() {
         "Weixin 会显示登录二维码"
         "Feishu / Weixin 的 \`base_url\` 由 provider 类型固定"
         "场景 13：和 Agent 协作开发业务 Skill"
-        "bifrost install-skill -t codex -y"
+        "bifrost install-skill -t universal -y"
         "bifrost port bind --port 18882"
         "如果目标 App 有 SSL pinning，不要强行抓包它的 TLS 明文"
         "bifrost traffic list --listener-port 18882 --limit 50"

@@ -458,7 +458,8 @@ pub fn handle_install_skill(
     for tool in &tools {
         for target_dir in resolve_target_dirs(tool, &dir, cwd) {
             for source in SKILL_SOURCES {
-                let target_file = skill_target_dir(&target_dir, *source).join(tool.target_filename());
+                let target_file =
+                    skill_target_dir(&target_dir, *source).join(tool.target_filename());
                 let exists = if target_file.exists() {
                     " (exists → overwrite)".bright_yellow().to_string()
                 } else {
@@ -555,7 +556,10 @@ mod tests {
         assert_eq!(parse_tool("Claude Code").unwrap(), vec![AiTool::ClaudeCode]);
 
         for legacy in ["codex", "trae", "cursor", "github-copilot", "copilot"] {
-            assert!(parse_tool(legacy).is_err(), "legacy target should be rejected: {legacy}");
+            assert!(
+                parse_tool(legacy).is_err(),
+                "legacy target should be rejected: {legacy}"
+            );
         }
     }
 
@@ -664,7 +668,11 @@ mod tests {
             source: SKILL_SOURCES[0],
             content: "test-skill".to_string(),
         };
-        let primary_target = temp_dir.path().join(".agents").join("skills").join("bifrost");
+        let primary_target = temp_dir
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("bifrost");
 
         install_to_dir(&tool, &asset, &primary_target).unwrap();
 

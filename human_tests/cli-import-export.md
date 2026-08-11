@@ -338,101 +338,133 @@
 
 ---
 
-### TC-CIE-20：安装 SKILL.md 到 AI 工具（install-skill -y）
+### TC-CIE-20：默认安装只写标准 Agent Skills 与 Claude Code 目录
 
 **操作步骤**：
-1. 执行命令：
+1. 使用隔离 HOME 执行默认安装：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- install-skill -y
+   TEST_ROOT="$(mktemp -d)"
+   mkdir -p "$TEST_ROOT/home"
+   HOME="$TEST_ROOT/home" USERPROFILE="$TEST_ROOT/home" \
+     BIFROST_INSTALL_SKILL_SOURCE=embedded target/debug/bifrost install-skill -y
+   ```
+2. 检查标准目录存在、历史 vendor 目录不存在，随后清理：
+   ```bash
+   test -s "$TEST_ROOT/home/.agents/skills/bifrost/SKILL.md"
+   test -s "$TEST_ROOT/home/.claude/skills/bifrost/SKILL.md"
+   test ! -e "$TEST_ROOT/home/.codex/skills/bifrost/SKILL.md"
+   test ! -e "$TEST_ROOT/home/.trae/skills/bifrost/SKILL.md"
+   test ! -e "$TEST_ROOT/home/.cursor/skills/bifrost/SKILL.md"
+   test ! -e "$TEST_ROOT/home/.copilot/skills/bifrost/SKILL.md"
+   /usr/bin/trash "$TEST_ROOT"
    ```
 
 **预期结果**：
 - 输出包含 `🔧 Bifrost SKILL.md Installer` 标题
 - 输出包含 `Source: GitHub main branch (latest)`
-- 输出包含 `Target tools:` 列出所有目标工具（Claude Code, Codex, Trae, Cursor）
+- 输出包含 `Target tools: Universal Agent Skills, Claude Code`
 - 输出包含 `Install mode: global`
-- 输出包含 `Target paths:` 列出每个工具的安装目标路径
-- 下载并安装成功后输出 `✓ Downloaded N bytes`
-- 每个工具安装后输出 `✓ <path> (N bytes)`
-- 最终输出 `✓ Successfully installed to N tools!`
+- `.agents/skills` 与 `.claude/skills` 中的主 skill 均存在，历史 vendor 目录均未创建
+- 最终输出 `✓ Successfully installed to 2 targets!`
 - 命令退出码为 0
 
 ---
 
-### TC-CIE-21：安装 SKILL.md 到指定工具
+### TC-CIE-21：安装 SKILL.md 到 Claude Code 目录
 
 **操作步骤**：
-1. 执行命令：
+1. 使用隔离 HOME 执行命令并检查仅创建 Claude Code 目录：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- install-skill -t claude-code -y
+   TEST_ROOT="$(mktemp -d)"
+   mkdir -p "$TEST_ROOT/home"
+   HOME="$TEST_ROOT/home" USERPROFILE="$TEST_ROOT/home" \
+     BIFROST_INSTALL_SKILL_SOURCE=embedded target/debug/bifrost install-skill -t claude-code -y
+   test -s "$TEST_ROOT/home/.claude/skills/bifrost/SKILL.md"
+   test ! -e "$TEST_ROOT/home/.agents/skills/bifrost/SKILL.md"
+   /usr/bin/trash "$TEST_ROOT"
    ```
 
 **预期结果**：
 - `Target tools:` 仅显示 `Claude Code`
 - 仅安装到 Claude Code 对应路径
-- 输出 `✓ Successfully installed to 1 tool!`
+- 输出 `✓ Successfully installed to 1 target!`
 - 命令退出码为 0
 
 ---
 
-### TC-CIE-22：安装 SKILL.md 到 GitHub Copilot
+### TC-CIE-22（回归）：旧 vendor target 在参数解析阶段被拒绝
 
 **操作步骤**：
-1. 执行命令：
+1. 逐个执行历史 target，并保存退出状态：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- install-skill -t github-copilot -y
+   for legacy in codex trae cursor github-copilot; do
+     if legacy_output=$(target/debug/bifrost install-skill -t "$legacy" -y 2>&1); then
+       echo "legacy target unexpectedly succeeded: $legacy" >&2
+       exit 1
+     fi
+     printf '%s\n' "$legacy_output" | rg --fixed-strings "invalid value '$legacy'"
+   done
    ```
 
 **预期结果**：
-- `Target tools:` 显示 `GitHub Copilot`
-- 输出的目标路径包含 `~/.copilot/skills/bifrost/SKILL.md` 或等价的 Copilot skills 目录
-- 最终输出 `✓ Successfully installed to 1 tool!`
-- 命令退出码为 0
+- `codex`、`trae`、`cursor`、`github-copilot` 均返回非 0
+- 错误信息明确为非法值，并列出 `universal`、`claude-code`、`all`
+- 不进入安装流程、不写任何 skill 文件
 
 ---
 
 ### TC-CIE-23：安装 SKILL.md 到通用 Agent Skills 目录
 
 **操作步骤**：
-1. 执行命令：
+1. 使用隔离 HOME 执行命令：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- install-skill -t universal -y
+   TEST_ROOT="$(mktemp -d)"
+   mkdir -p "$TEST_ROOT/home"
+   HOME="$TEST_ROOT/home" USERPROFILE="$TEST_ROOT/home" \
+     BIFROST_INSTALL_SKILL_SOURCE=embedded target/debug/bifrost install-skill -t universal -y
+   test -s "$TEST_ROOT/home/.agents/skills/bifrost/SKILL.md"
+   test ! -e "$TEST_ROOT/home/.claude/skills/bifrost/SKILL.md"
+   /usr/bin/trash "$TEST_ROOT"
    ```
 
 **预期结果**：
 - `Target tools:` 显示 `Universal Agent Skills`
-- 输出的目标路径包含 `~/.agents/skills/bifrost/SKILL.md` 或等价的项目级 `.agents/skills` 目录
-- 最终输出 `✓ Successfully installed to 1 tool!`
+- 输出的目标路径包含 `~/.agents/skills/bifrost/SKILL.md`
+- 输出 `✓ Successfully installed to 1 target!`
 - 命令退出码为 0
 
 ---
 
-### TC-CIE-24：项目级安装到 Codex 时同时写入 `.codex` 和 `.agents`
+### TC-CIE-24：项目级 universal 安装只写入 `.agents`
 
 **操作步骤**：
 1. 执行命令：
    ```bash
-   TOOLCHAIN_BIN="$(dirname "$(rustup which cargo)")"
    TEST_ROOT="$(mktemp -d)"
    (
-     cd "$TEST_ROOT" && PATH="$TOOLCHAIN_BIN:$PATH" \
-     BIFROST_INSTALL_SKILL_SOURCE=embedded \
-     BIFROST_DATA_DIR=./.bifrost-test \
-     cargo run --manifest-path <REPO_ROOT>/Cargo.toml --bin bifrost -- install-skill -t codex --cwd -y
+     cd "$TEST_ROOT" && BIFROST_INSTALL_SKILL_SOURCE=embedded \
+       <REPO_ROOT>/target/debug/bifrost install-skill -t universal --cwd -y
    )
    ```
-2. 检查以下文件都存在且非空：
+2. 检查仅标准项目目录存在，随后清理：
    ```bash
-   test -s "$TEST_ROOT/.codex/skills/bifrost/SKILL.md"
    test -s "$TEST_ROOT/.agents/skills/bifrost/SKILL.md"
+   test -s "$TEST_ROOT/.agents/skills/bifrost-remote/SKILL.md"
+   test ! -e "$TEST_ROOT/.codex/skills/bifrost/SKILL.md"
+   test ! -e "$TEST_ROOT/.claude/skills/bifrost/SKILL.md"
+   /usr/bin/trash "$TEST_ROOT"
    ```
 
 **预期结果**：
-- `Target tools:` 显示 `Codex`
+- `Target tools:` 显示 `Universal Agent Skills`
 - `Install mode:` 显示 `project-local (current directory)`
-- 输出的目标路径同时包含 `.codex/skills/bifrost/SKILL.md` 和 `.agents/skills/bifrost/SKILL.md`
-- 上述两个 `SKILL.md` 文件都被创建，且内容非空
+- `.agents/skills/bifrost/SKILL.md` 与 sibling `bifrost-remote/SKILL.md` 均被创建且非空
+- `.codex/skills` 与 `.claude/skills` 均未创建
 - 命令退出码为 0
+
+**2026-08-12 执行记录（PR #478）**：
+
+- PASS：使用当前 `target/debug/bifrost` 与隔离 HOME/临时项目逐条执行 TC-CIE-20～24；默认 `all` 只创建 `.agents/skills` 和 `.claude/skills`，单目标各自隔离，四个历史 vendor target 均在 clap 参数解析阶段返回非 0，项目级 `universal` 只创建 `.agents/skills`。所有临时目录已移入废纸篓。
 
 ---
 

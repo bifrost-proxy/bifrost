@@ -1315,12 +1315,9 @@ fn completions_install_skill_tool_values() {
     let completions = get_zsh_completions();
     assert!(
         completions.contains("claude-code")
-            && completions.contains("codex")
-            && completions.contains("cursor")
-            && completions.contains("trae")
-            && completions.contains("github-copilot")
-            && completions.contains("universal"),
-        "completions should include install-skill tool values"
+            && completions.contains("universal")
+            && completions.contains("all"),
+        "completions should include supported install-skill target values"
     );
 }
 
@@ -1517,13 +1514,19 @@ fn install_skill_options_parse() {
         "install-skill should have --yes option"
     );
     assert!(
-        help.contains("github-copilot"),
-        "install-skill help should include github-copilot target"
+        help.contains("universal") && help.contains("claude-code") && help.contains("all"),
+        "install-skill help should include all supported targets"
     );
-    assert!(
-        help.contains("universal"),
-        "install-skill help should include universal target"
-    );
+    for legacy in ["codex", "trae", "cursor", "github-copilot"] {
+        assert!(
+            !help.contains(legacy),
+            "install-skill help should not advertise legacy target {legacy}"
+        );
+        assert!(
+            Cli::try_parse_from(["bifrost", "install-skill", "--tool", legacy]).is_err(),
+            "install-skill should reject legacy target {legacy} during argument parsing"
+        );
+    }
 }
 
 #[test]
@@ -1533,7 +1536,7 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
 
     std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
     handle_install_skill(
-        Some("codex".to_string()),
+        Some("universal".to_string()),
         Some(target_dir.clone()),
         false,
         true,

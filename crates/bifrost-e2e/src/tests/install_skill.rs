@@ -76,8 +76,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 .map_err(|e| format!("handle_install_skill failed: {e}"))?;
 
                 let target = tmp.join("SKILL.md");
-                let content = fs::read_to_string(&target)
-                    .map_err(|e| format!("Failed to read file: {e}"))?;
+                let content =
+                    fs::read_to_string(&target).map_err(|e| format!("Failed to read file: {e}"))?;
                 let normalized = content.replace("\r\n", "\n");
                 if !normalized.starts_with("---\n") {
                     return Err("SKILL.md should start with YAML frontmatter (---)".to_string());

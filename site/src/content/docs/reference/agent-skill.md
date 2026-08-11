@@ -14,7 +14,7 @@ Bifrost 提供标准 `SKILL.md` 技能文件，让支持 Agent Skills 的 AI 编
 - 通用 Agent Skills：`~/.agents/skills/`
 - Claude Code 兼容目录：`~/.claude/skills/`
 
-Bifrost 不再为 Codex、Trae、Cursor、GitHub Copilot 等工具维护各自的私有技能目录；支持标准 `.agents/skills` 的工具统一复用同一份技能。
+不再为 Codex、Trae、Cursor、GitHub Copilot 等工具维护各自的私有技能目录；支持标准 `.agents/skills` 的工具统一复用同一份技能。
 
 ## 快速安装（推荐）
 

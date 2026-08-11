@@ -30,7 +30,7 @@
 2. 执行安装：
    ```bash
    HTTP_PROXY=http://127.0.0.1:9900 HTTPS_PROXY=http://127.0.0.1:9900 BIFROST_INSTALL_SKILL_SOURCE=embedded \
-     cargo run -p bifrost-cli -- install-skill --tool codex --dir "$tmpdir/skills/bifrost" -y
+     cargo run -p bifrost-cli -- install-skill --tool universal --dir "$tmpdir/skills/bifrost" -y
    ```
 3. 检查文件：
    ```bash
@@ -44,6 +44,10 @@
 - 主 skill 写入 `bifrost/SKILL.md`。
 - remote skill 写入 sibling 目录 `bifrost-remote/SKILL.md`。
 - remote skill frontmatter 包含 `name: "bifrost-remote"`。
+
+执行记录（2026-08-12，PR #478）：
+
+- PASS：以 `--tool universal --dir <临时目录>/skills/bifrost` 真实安装嵌入 bundle，主 skill 与 sibling remote skill 均存在且非空，remote frontmatter 命中 `name: "bifrost-remote"`；临时目录已移入废纸篓。
 
 ### TC-SR-02 description 表达远程设备控制能力
 
