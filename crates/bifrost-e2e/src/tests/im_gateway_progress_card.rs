@@ -236,7 +236,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         ),
                         result: format!(
                             "{}_OUTPUT_MARKER_{index}_{}OUTPUT_HIDDEN_{index}",
-                            if index == 39 { "LATEST_MARKER" } else { "OLD_MARKER" },
+                            if index == 39 {
+                                "LATEST_MARKER\nSECOND_OUTPUT_LINE"
+                            } else {
+                                "OLD_MARKER"
+                            },
                             "output".repeat(520),
                         ),
                         success: true,
@@ -302,16 +306,56 @@ pub fn get_all_tests() -> Vec<TestCase> {
             }
             let summarized_indexes = (0..35)
                 .filter(|index| {
-                    serialized.contains(&format!("步骤：`tool_{index}` · 完成"))
+                    serialized.contains(&format!("- `tool_{index}` · 完成"))
                 })
                 .collect::<Vec<_>>();
             let first_summarized_index = summarized_indexes.first().copied().ok_or_else(|| {
                 format!("long progress card did not retain any old tool steps: {serialized}")
             })?;
+            let process_markdown = elements[process_index]["elements"]
+                .as_array()
+                .ok_or_else(|| "process panel elements are not an array".to_string())?
+                .iter()
+                .filter_map(|element| element["content"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let thinking_prefix = format!("THINKING_ROUND_{first_summarized_index}_");
+            let summarized_tool_line =
+                format!("- `tool_{first_summarized_index}` · 完成 · 10ms");
+            let thinking_start = process_markdown.find(&thinking_prefix);
+            let tool_start = process_markdown.find(&summarized_tool_line);
+            let has_block_boundary = match (thinking_start, tool_start) {
+                (Some(thinking_start), Some(tool_start)) => {
+                    thinking_start < tool_start
+                        && process_markdown[..tool_start].ends_with("\n\n")
+                }
+                _ => false,
+            };
+            if !has_block_boundary {
+                return Err(format!(
+                    "condensed process blocks are not separated for CardKit: {process_markdown}"
+                ));
+            }
+            let latest_tool_detail = elements[process_index]["elements"]
+                .as_array()
+                .and_then(|process_elements| {
+                    process_elements.iter().find(|element| {
+                        element["header"]["title"]["content"]
+                            .as_str()
+                            .is_some_and(|title| title.contains("tool_39"))
+                    })
+                })
+                .and_then(|element| element["elements"][0]["content"].as_str())
+                .ok_or_else(|| "latest tool detail markdown is missing".to_string())?;
+            if !latest_tool_detail.contains("LATEST_MARKER\nSECOND_OUTPUT_LINE") {
+                return Err(format!(
+                    "latest tool detail lost multiline output: {latest_tool_detail}"
+                ));
+            }
             for summarized_index in summarized_indexes {
                 for needle in [
                     format!("THINKING_ROUND_{summarized_index}"),
-                    format!("步骤：`tool_{summarized_index}` · 完成"),
+                    format!("- `tool_{summarized_index}` · 完成"),
                 ] {
                     if !serialized.contains(&needle) {
                         return Err(format!(
@@ -334,7 +378,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let omitted_index = first_summarized_index - 1;
                 for forbidden in [
                     format!("THINKING_ROUND_{omitted_index}"),
-                    format!("步骤：`tool_{omitted_index}`"),
+                    format!("- `tool_{omitted_index}`"),
                     format!("INPUT_MARKER_{omitted_index}"),
                     format!("OUTPUT_MARKER_{omitted_index}"),
                 ] {

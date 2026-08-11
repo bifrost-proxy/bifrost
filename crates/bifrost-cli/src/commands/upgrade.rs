@@ -1,4 +1,5 @@
 mod desktop_companion;
+mod external_worker;
 mod install_method;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use desktop_companion::DESKTOP_UPGRADE_SHUTDOWN_ARG;
@@ -555,6 +556,8 @@ fn command_output_with_timeout_and_env_inner(
         .unwrap_or_default();
     let mut output_capture = StreamedOutputCapture::new().map_err(BifrostError::Io)?;
     let mut command = Command::new(program);
+    command.env_remove(super::upgrade_background::PARENT_UPGRADE_LOCK_TOKEN_ENV);
+    command.env_remove(super::upgrade_background::PARENT_UPGRADE_LOCK_OWNER_PID_ENV);
     command
         .args(args)
         .envs(parent_lock_environment)
@@ -1210,6 +1213,10 @@ pub(crate) fn handle_background_upgrade(
 }
 
 pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
+    if external_worker::is_external_cli_worker() {
+        return external_worker::delegate_upgrade();
+    }
+
     let skip_app = env_flag(DESKTOP_MANAGED_SKIP_APP_ENV);
     let skip_restart = env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV);
     let pinned_target = env::var(DESKTOP_MANAGED_TARGET_ENV).ok();

@@ -99,6 +99,13 @@ pub struct PreparedGroupTurn {
     pub quoted_message_missing: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReferencedGroupAttachments {
+    pub message_id: String,
+    pub images: Vec<crate::im_gateway::types::ImImageAttachment>,
+    pub files: Vec<crate::im_gateway::types::ImFileAttachment>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupSessionBinding {
     pub provider_id: String,
@@ -499,7 +506,7 @@ impl ImGroupContextStore {
                     message.root_id,
                     message.parent_id,
                     message.thread_id,
-                    message.images.len() as u64,
+                    message.images.len().saturating_add(message.files.len()) as u64,
                     event.received_at,
                     source.trim(),
                 ],
@@ -541,8 +548,8 @@ impl ImGroupContextStore {
             message: Some(ImEventMessage {
                 text: message.text.clone(),
                 mentions: message.mentions.clone(),
-                images: Vec::new(),
-                files: Vec::new(),
+                images: message.images.clone(),
+                files: message.files.clone(),
                 reply_to: None,
                 raw_type: Some(message.msg_type.clone()),
                 raw_content: Some(message.raw_content.clone()),
@@ -556,6 +563,39 @@ impl ImGroupContextStore {
             raw_digest: None,
         };
         self.record_event(&event, "feishu_message_api")
+    }
+
+    pub fn referenced_attachments_for_trigger(
+        &self,
+        provider_id: &str,
+        trigger_message_id: &str,
+    ) -> Result<Option<ReferencedGroupAttachments>, String> {
+        let connection = self.connection.lock();
+        let row = connection
+            .query_row(
+                "SELECT quoted.message_id, quoted.message_type, quoted.content_json FROM im_group_messages AS trigger JOIN im_group_messages AS quoted ON quoted.provider_id = trigger.provider_id AND quoted.chat_id = trigger.chat_id AND quoted.message_id = trigger.parent_id WHERE trigger.provider_id = ?1 AND trigger.message_id = ?2",
+                params![provider_id, trigger_message_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+            )
+            .optional()
+            .map_err(|error| format!("load referenced group attachments: {error}"))?;
+        let Some((message_id, message_type, content_json)) = row else {
+            return Ok(None);
+        };
+        let content = content_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let (images, files) =
+            super::feishu::parse_feishu_message_attachments(&message_type, &content);
+        if images.is_empty() && files.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ReferencedGroupAttachments {
+            message_id,
+            images,
+            files,
+        }))
     }
 
     pub fn prepare_turn(

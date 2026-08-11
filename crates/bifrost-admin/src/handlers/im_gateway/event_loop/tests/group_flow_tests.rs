@@ -608,6 +608,123 @@ async fn prepare_group_dispatch_records_same_group_reference_for_prompt() {
 }
 
 #[tokio::test]
+async fn prepare_group_dispatch_downloads_referenced_file_with_original_message_id() {
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, message_reads, resource_reads, server) = spawn_referenced_file_server().await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-referenced-file".to_string();
+    provider.base_url = Some(base_url);
+    let mut event = group_test_event(&provider.id, "trigger-file", "@_user_1", true, 2);
+    event.message.as_mut().unwrap().parent_id = Some("om_quoted_file".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .expect("referenced file dispatch");
+    assert_eq!(resource_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(message_reads.load(Ordering::SeqCst), 1);
+    assert!(dispatch.referenced_images.is_empty());
+    assert_eq!(dispatch.referenced_files.len(), 1);
+    assert_eq!(dispatch.referenced_files[0].file_key, "file_v3_quoted");
+    assert_eq!(
+        dispatch.referenced_files[0].name.as_deref(),
+        Some("quoted.md")
+    );
+    assert_eq!(
+        dispatch.referenced_files[0].data_base64.as_deref(),
+        Some("IyBxdW90ZWQgYXR0YWNobWVudA==")
+    );
+    assert!(dispatch.message_text.contains("[附件 1 个]"));
+
+    drop(store);
+    let reopened = ImGroupContextStore::new(temp.path());
+    let recovered = prepare_group_inbound_dispatch(&client, &provider, &event, &reopened, false)
+        .await
+        .unwrap()
+        .expect("referenced attachment turn should recover after restart");
+    assert_eq!(message_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(resource_reads.load(Ordering::SeqCst), 2);
+    assert_eq!(recovered.referenced_files.len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn prepare_group_dispatch_downloads_referenced_image_with_original_message_id() {
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, message_reads, resource_reads, server) =
+        spawn_referenced_image_server(false).await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-referenced-image".to_string();
+    provider.base_url = Some(base_url);
+    let mut event = group_test_event(&provider.id, "trigger-image", "@_user_1", true, 2);
+    event.message.as_mut().unwrap().parent_id = Some("om_quoted_image".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .expect("referenced image dispatch");
+    assert_eq!(message_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(resource_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatch.referenced_images.len(), 1);
+    assert!(dispatch.referenced_files.is_empty());
+    assert_eq!(dispatch.referenced_images[0].file_key, "img_v3_quoted");
+    assert_eq!(
+        dispatch.referenced_images[0].mime_type.as_deref(),
+        Some("image/png")
+    );
+    assert_eq!(
+        dispatch.referenced_images[0].data_base64.as_deref(),
+        Some("cXVvdGVkIGltYWdlIGJ5dGVz")
+    );
+    assert!(dispatch.message_text.contains("最前面的 1 张图片"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn referenced_attachment_download_failure_reports_notice_and_continues_turn() {
+    use std::sync::atomic::Ordering;
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, message_reads, resource_reads, server) =
+        spawn_referenced_image_server(true).await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-referenced-image-failure".to_string();
+    provider.base_url = Some(base_url);
+    let mut event = group_test_event(&provider.id, "trigger-image-failure", "@_user_1", true, 2);
+    event.message.as_mut().unwrap().parent_id = Some("om_quoted_image".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .expect("failed referenced image download must not reject the turn");
+    assert_eq!(message_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(resource_reads.load(Ordering::SeqCst), 1);
+    assert!(dispatch.referenced_images.is_empty());
+    assert_eq!(dispatch.attachment_notices.len(), 1);
+    assert!(dispatch.attachment_notices[0].contains("下载失败"));
+    assert!(dispatch.attachment_notices[0].contains("任务继续执行"));
+    assert!(dispatch.message_text.contains("附件处理提示"));
+    assert!(store
+        .existing_turn(&provider.id, "trigger-image-failure")
+        .unwrap()
+        .is_some());
+    server.abort();
+}
+
+#[tokio::test]
 async fn prepare_group_dispatch_recovers_nonterminal_turn_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let client =

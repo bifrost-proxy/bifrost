@@ -685,6 +685,207 @@ pub(super) async fn resolve_event_files(
     resolved
 }
 
+pub(super) async fn hydrate_referenced_group_attachments(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    referenced: crate::im_gateway::group_context::ReferencedGroupAttachments,
+) -> (Vec<ImImageAttachment>, Vec<ImFileAttachment>, Vec<String>) {
+    hydrate_referenced_group_attachments_with_limits(
+        client,
+        provider,
+        referenced,
+        default_referenced_attachment_limits(),
+    )
+    .await
+}
+
+pub(super) type ReferencedAttachmentLimits = [u64; 4];
+
+fn default_referenced_attachment_limits() -> ReferencedAttachmentLimits {
+    [
+        MAX_AGENT_ATTACHMENTS_PER_MESSAGE as u64,
+        MAX_AGENT_REPLY_IMAGE_BYTES,
+        MAX_FEISHU_REFERENCED_FILE_BYTES,
+        MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
+    ]
+}
+
+pub(super) async fn hydrate_referenced_group_attachments_with_limits(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    referenced: crate::im_gateway::group_context::ReferencedGroupAttachments,
+    limits: ReferencedAttachmentLimits,
+) -> (Vec<ImImageAttachment>, Vec<ImFileAttachment>, Vec<String>) {
+    let [max_per_kind, max_image_bytes, max_file_bytes, max_total_file_bytes] = limits;
+    let max_per_kind = max_per_kind as usize;
+    let mut notices = Vec::new();
+    let mut images = Vec::new();
+    if referenced.images.len() > max_per_kind {
+        notices.push(count_notice("图片", referenced.images.len(), max_per_kind));
+    }
+    for mut image in referenced.images.into_iter().take(max_per_kind) {
+        if let Err(notice) = preloaded_payload_size(
+            image.data_base64.as_deref(),
+            "图片",
+            &image.file_key,
+            max_image_bytes,
+        ) {
+            notices.push(notice);
+            continue;
+        }
+        if image.data_base64.is_none() {
+            let (mime_type, bytes) = match client
+                .download_message_image_resource(provider, &referenced.message_id, &image)
+                .await
+            {
+                Ok(downloaded) => downloaded,
+                Err(error) => {
+                    let problem = format!("下载失败：{error}");
+                    notices.push(problem_notice("图片", &image.file_key, &problem));
+                    continue;
+                }
+            };
+            if bytes.len() as u64 > max_image_bytes {
+                notices.push(size_notice("图片", &image.file_key, max_image_bytes));
+                continue;
+            }
+            image.mime_type = Some(mime_type);
+            image.data_base64 = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
+        }
+        images.push(image);
+    }
+
+    let mut files = Vec::new();
+    if referenced.files.len() > max_per_kind {
+        notices.push(count_notice("文件", referenced.files.len(), max_per_kind));
+    }
+    let mut total_file_bytes = 0u64;
+    for mut file in referenced.files.into_iter().take(max_per_kind) {
+        let file_label = file.name.as_deref().unwrap_or(&file.file_key).to_string();
+        let preloaded_size = match preloaded_payload_size(
+            file.data_base64.as_deref(),
+            "文件",
+            &file_label,
+            max_file_bytes,
+        ) {
+            Ok(size) => size,
+            Err(notice) => {
+                notices.push(notice);
+                continue;
+            }
+        };
+        let expected_size = preloaded_size.or(file.size_bytes);
+        if expected_size.is_some_and(|size| size > max_file_bytes) {
+            notices.push(size_notice("文件", &file_label, max_file_bytes));
+            continue;
+        }
+        if expected_size.is_some_and(|size| {
+            referenced_file_budget_exceeded_with_limit(total_file_bytes, size, max_total_file_bytes)
+        }) {
+            notices.push(total_notice(&file_label, max_total_file_bytes));
+            continue;
+        }
+        if preloaded_size.is_none() {
+            let (mime_type, bytes) = match client
+                .download_message_file_resource(provider, &referenced.message_id, &file)
+                .await
+            {
+                Ok(downloaded) => downloaded,
+                Err(error) => {
+                    let problem = format!("下载失败：{error}");
+                    notices.push(problem_notice("文件", &file_label, &problem));
+                    continue;
+                }
+            };
+            if bytes.len() as u64 > max_file_bytes {
+                notices.push(size_notice("文件", &file_label, max_file_bytes));
+                continue;
+            }
+            file.mime_type = Some(mime_type);
+            file.size_bytes = Some(bytes.len() as u64);
+            file.data_base64 = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
+        } else {
+            // Metadata attached to restored events is not authoritative. Use
+            // the decoded payload size so forged/missing size_bytes cannot
+            // bypass the per-file or per-turn budgets.
+            file.size_bytes = preloaded_size;
+        }
+        let file_bytes = file.size_bytes.unwrap_or_default();
+        if referenced_file_budget_exceeded_with_limit(
+            total_file_bytes,
+            file_bytes,
+            max_total_file_bytes,
+        ) {
+            notices.push(total_notice(&file_label, max_total_file_bytes));
+            continue;
+        }
+        total_file_bytes = total_file_bytes.saturating_add(file_bytes);
+        files.push(file);
+    }
+    (images, files, notices)
+}
+
+fn count_notice(kind: &str, count: usize, max: usize) -> String {
+    let unit = if kind == "图片" { "张" } else { "个" };
+    format!("引用消息包含 {count} {unit}{kind}，最多处理 {max} {unit}；其余已跳过，任务继续执行。")
+}
+
+fn size_notice(kind: &str, label: &str, max_bytes: u64) -> String {
+    let max_mib = max_bytes / 1024 / 1024;
+    format!("引用{kind}「{label}」超过 {max_mib} MiB 上限；已跳过，任务继续执行。")
+}
+
+fn problem_notice(kind: &str, label: &str, problem: &str) -> String {
+    format!("引用{kind}「{label}」{problem}；已跳过，任务继续执行。")
+}
+
+fn total_notice(label: &str, max_bytes: u64) -> String {
+    let max_mib = max_bytes / 1024 / 1024;
+    format!("引用文件「{label}」会使附件总量超过 {max_mib} MiB；已跳过，任务继续执行。")
+}
+
+#[cfg(test)]
+pub(super) fn referenced_file_budget_exceeded(current_bytes: u64, next_bytes: u64) -> bool {
+    referenced_file_budget_exceeded_with_limit(
+        current_bytes,
+        next_bytes,
+        MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
+    )
+}
+
+fn referenced_file_budget_exceeded_with_limit(
+    current_bytes: u64,
+    next_bytes: u64,
+    max_bytes: u64,
+) -> bool {
+    current_bytes.saturating_add(next_bytes) > max_bytes
+}
+
+fn preloaded_payload_size(
+    data: Option<&str>,
+    kind: &str,
+    label: &str,
+    max_bytes: u64,
+) -> Result<Option<u64>, String> {
+    let Some(data) = data else { return Ok(None) };
+    let decoded_upper_bound = data
+        .len()
+        .checked_add(3)
+        .and_then(|length| length.checked_div(4))
+        .and_then(|groups| groups.checked_mul(3))
+        .ok_or_else(|| size_notice(kind, label, max_bytes))?;
+    if decoded_upper_bound as u64 > max_bytes.saturating_add(2) {
+        return Err(size_notice(kind, label, max_bytes));
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| problem_notice(kind, label, "内容不是有效 Base64"))?;
+    if decoded.len() as u64 > max_bytes {
+        return Err(size_notice(kind, label, max_bytes));
+    }
+    Ok(Some(decoded.len() as u64))
+}
+
 pub(super) fn agent_message_text(message: &crate::im_gateway::types::ImEventMessage) -> String {
     let text = message.text.trim();
     if !text.is_empty() {

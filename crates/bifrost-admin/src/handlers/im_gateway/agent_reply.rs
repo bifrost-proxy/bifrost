@@ -31,46 +31,10 @@ pub(super) async fn render_agent_markdown_for_feishu(
     markdown: &str,
     base_dir: Option<&Path>,
 ) -> String {
-    if !markdown.contains("![") {
-        return markdown.to_string();
-    }
-
-    let mut output = String::with_capacity(markdown.len());
-    let mut inside_code_block = false;
-    let mut code_fence: Option<String> = None;
-
-    for line in markdown.split('\n') {
-        let trimmed = line.trim_start();
-        if inside_code_block {
-            output.push_str(line);
-            output.push('\n');
-            if let Some(ref fence) = code_fence {
-                if trimmed.starts_with(fence.as_str()) && trimmed[fence.len()..].trim().is_empty() {
-                    inside_code_block = false;
-                    code_fence = None;
-                }
-            }
-            continue;
-        }
-
-        if let Some(fence) = detect_markdown_code_fence(trimmed) {
-            inside_code_block = true;
-            code_fence = Some(fence);
-            output.push_str(line);
-            output.push('\n');
-            continue;
-        }
-
-        output.push_str(
-            &rewrite_agent_markdown_images_in_line(feishu, provider, line, base_dir).await,
-        );
-        output.push('\n');
-    }
-
-    if output.ends_with('\n') && !markdown.ends_with('\n') {
-        output.pop();
-    }
-    output
+    crate::im_gateway::progress_card::feishu_markdown::render_markdown_images(
+        feishu, provider, markdown, base_dir,
+    )
+    .await
 }
 
 pub(super) fn detect_markdown_code_fence(trimmed: &str) -> Option<String> {
@@ -85,62 +49,7 @@ pub(super) fn detect_markdown_code_fence(trimmed: &str) -> Option<String> {
     Some(trimmed[..fence_len].to_string())
 }
 
-pub(super) async fn rewrite_agent_markdown_images_in_line(
-    feishu: &crate::im_gateway::feishu::FeishuProvider,
-    provider: &ImProviderConfig,
-    line: &str,
-    base_dir: Option<&Path>,
-) -> String {
-    if !line.contains("![") {
-        return line.to_string();
-    }
-
-    let mut result = String::with_capacity(line.len());
-    let mut pos = 0;
-    while pos < line.len() {
-        if line.as_bytes()[pos] == b'!' && pos + 1 < line.len() && line.as_bytes()[pos + 1] == b'['
-        {
-            if let Some((alt, url, end)) =
-                crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 2)
-            {
-                if is_local_markdown_image_candidate(&url) {
-                    if let Some(image_path) = resolve_agent_reply_image_path(&url, base_dir) {
-                        match upload_agent_reply_image_cached(feishu, provider, &image_path).await {
-                            Ok(image_key) => {
-                                result.push_str(&format!("![{}]({})", alt, image_key));
-                                pos = end;
-                                continue;
-                            }
-                            Err(error) => {
-                                warn!(
-                                    provider_id = %provider.id,
-                                    path = %image_path.display(),
-                                    error = %error,
-                                    "failed to upload local image referenced by agent markdown"
-                                );
-                            }
-                        }
-                    } else {
-                        warn!(
-                            provider_id = %provider.id,
-                            image_url = %url,
-                            "failed to resolve local image referenced by agent markdown"
-                        );
-                    }
-                    result.push_str(&local_image_fallback_markdown(&alt, &url));
-                    pos = end;
-                    continue;
-                }
-            }
-        }
-
-        let ch = line[pos..].chars().next().unwrap();
-        result.push(ch);
-        pos += ch.len_utf8();
-    }
-    result
-}
-
+#[cfg(test)]
 pub(super) fn local_image_fallback_markdown(alt: &str, _url: &str) -> String {
     let label = if alt.trim().is_empty() {
         "图片".to_string()
@@ -282,9 +191,11 @@ pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
     String,
     Vec<AgentReplyLocalImage>,
     Vec<AgentReplyLocalAttachment>,
+    Vec<String>,
 ) {
     let mut images = collect_agent_reply_local_images(markdown, base_dir);
     let mut attachments = Vec::new();
+    let mut attachment_notices = Vec::new();
     let mut remote_urls_to_strip = HashSet::new();
     let mut linked_image_urls_to_strip = HashSet::new();
     collect_agent_reply_local_attachment_links(markdown, base_dir, &mut images, &mut attachments);
@@ -321,11 +232,12 @@ pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
                 }
             }
             Err(error) => {
-                warn!(
-                    attachment_url = %remote_attachment.url,
-                    error = %error,
-                    "failed to download remote attachment referenced by agent markdown"
-                );
+                let url = &remote_attachment.url;
+                warn!("failed to download agent reply remote attachment {url}: {error}");
+                attachment_notices.push(remote_attachment_download_notice(
+                    &remote_attachment.label,
+                    &error,
+                ));
             }
         }
     }
@@ -340,7 +252,11 @@ pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
             &linked_image_urls_to_strip,
         )
     };
-    (text, images, attachments)
+    (text, images, attachments, attachment_notices)
+}
+
+fn remote_attachment_download_notice(label: &str, error: &bifrost_core::BifrostError) -> String {
+    format!("远程文件「{label}」下载失败：{error}；任务结论已正常发布。")
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -691,88 +607,6 @@ fn strip_agent_reply_local_images_in_line(line: &str, base_dir: Option<&Path>) -
     result
 }
 
-pub(super) async fn upload_agent_reply_image_cached(
-    feishu: &crate::im_gateway::feishu::FeishuProvider,
-    provider: &ImProviderConfig,
-    image_path: &Path,
-) -> bifrost_core::Result<String> {
-    let metadata = tokio::fs::metadata(image_path).await.map_err(|error| {
-        bifrost_core::BifrostError::Io(std::io::Error::new(
-            error.kind(),
-            format!(
-                "failed to stat agent reply image '{}': {}",
-                image_path.display(),
-                error
-            ),
-        ))
-    })?;
-    if !metadata.is_file() {
-        return Err(bifrost_core::BifrostError::Config(format!(
-            "agent reply image is not a file: {}",
-            image_path.display()
-        )));
-    }
-    if metadata.len() > MAX_AGENT_REPLY_IMAGE_BYTES {
-        return Err(bifrost_core::BifrostError::Config(format!(
-            "agent reply image exceeds {} bytes: {}",
-            MAX_AGENT_REPLY_IMAGE_BYTES,
-            image_path.display()
-        )));
-    }
-
-    let cache_key = AgentReplyImageCacheKey {
-        provider_id: provider.id.clone(),
-        path: image_path
-            .canonicalize()
-            .unwrap_or_else(|_| image_path.to_path_buf()),
-        len: metadata.len(),
-        modified_ms: metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis())
-            .unwrap_or_default(),
-    };
-
-    if let Some(image_key) = agent_reply_image_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(&cache_key).cloned())
-    {
-        return Ok(image_key);
-    }
-
-    let bytes = tokio::fs::read(image_path).await.map_err(|error| {
-        bifrost_core::BifrostError::Io(std::io::Error::new(
-            error.kind(),
-            format!(
-                "failed to read agent reply image '{}': {}",
-                image_path.display(),
-                error
-            ),
-        ))
-    })?;
-    let file_name = image_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("agent-reply-image.png");
-    let uploaded = feishu
-        .upload_image(
-            provider,
-            "message",
-            file_name,
-            bytes,
-            mime_type_for_image_path(image_path),
-        )
-        .await?;
-    let image_key = uploaded.image_key;
-
-    if let Ok(mut cache) = agent_reply_image_cache().lock() {
-        cache.insert(cache_key, image_key.clone());
-    }
-    Ok(image_key)
-}
-
 pub(super) async fn upload_agent_reply_image_for_im(
     client: &ImProviderClient,
     provider: &ImProviderConfig,
@@ -1038,9 +872,18 @@ async fn send_agent_reply_with_title_and_base_dir(
     card_kind: AgentReplyCardKind<'_>,
 ) -> Option<String> {
     let image_base_dir = agent_reply_base_dir(provider, work_dir);
-    let (reply_text_for_card, reply_images, reply_attachments) =
-        prepare_agent_reply_text_and_images_with_downloads(reply_text, image_base_dir.as_deref())
-            .await;
+    let rendered_reply_text = if let Some(feishu) = client.feishu() {
+        render_agent_markdown_for_feishu(&feishu, provider, reply_text, image_base_dir.as_deref())
+            .await
+    } else {
+        reply_text.to_string()
+    };
+    let (reply_text_for_card, reply_images, reply_attachments, reply_attachment_notices) =
+        prepare_agent_reply_text_and_images_with_downloads(
+            &rendered_reply_text,
+            image_base_dir.as_deref(),
+        )
+        .await;
 
     let Some(reply_target) = build_agent_reply_target(
         provider,
@@ -1053,19 +896,8 @@ async fn send_agent_reply_with_title_and_base_dir(
         return None;
     };
 
-    let rendered_text = if let Some(feishu) = client.feishu() {
-        render_agent_markdown_for_feishu(
-            &feishu,
-            provider,
-            &reply_text_for_card,
-            image_base_dir.as_deref(),
-        )
-        .await
-    } else {
-        reply_text_for_card.clone()
-    };
     let converted_text =
-        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&reply_text_for_card);
     let card = match card_kind {
         AgentReplyCardKind::ExternalRunnerTerminal(options) => {
             build_external_runner_terminal_card(&converted_text, options.failed)
@@ -1203,6 +1035,7 @@ async fn send_agent_reply_with_title_and_base_dir(
         &reply_target,
         &reply_images,
         &reply_attachments,
+        &reply_attachment_notices,
         message_log_store,
     )
     .await;
@@ -1384,9 +1217,18 @@ pub(super) async fn send_agent_reply_with_plan(
     message_log_store: &Arc<ImMessageLogStore>,
 ) {
     let image_base_dir = provider_agent_work_dir(provider);
-    let (reply_text_for_card, reply_images, reply_attachments) =
-        prepare_agent_reply_text_and_images_with_downloads(reply_text, image_base_dir.as_deref())
-            .await;
+    let rendered_reply_text = if let Some(feishu) = client.feishu() {
+        render_agent_markdown_for_feishu(&feishu, provider, reply_text, image_base_dir.as_deref())
+            .await
+    } else {
+        reply_text.to_string()
+    };
+    let (reply_text_for_card, reply_images, reply_attachments, reply_attachment_notices) =
+        prepare_agent_reply_text_and_images_with_downloads(
+            &rendered_reply_text,
+            image_base_dir.as_deref(),
+        )
+        .await;
     let Some(reply_target) = build_agent_reply_target(
         provider,
         event,
@@ -1398,19 +1240,8 @@ pub(super) async fn send_agent_reply_with_plan(
         return;
     };
 
-    let rendered_text = if let Some(feishu) = client.feishu() {
-        render_agent_markdown_for_feishu(
-            &feishu,
-            provider,
-            &reply_text_for_card,
-            image_base_dir.as_deref(),
-        )
-        .await
-    } else {
-        reply_text_for_card.clone()
-    };
     let converted_text =
-        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
+        crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&reply_text_for_card);
     let mut elements = vec![serde_json::json!({
         "tag": "markdown",
         "content": converted_text,
@@ -1542,6 +1373,7 @@ pub(super) async fn send_agent_reply_with_plan(
         &reply_target,
         &reply_images,
         &reply_attachments,
+        &reply_attachment_notices,
         message_log_store,
     )
     .await;

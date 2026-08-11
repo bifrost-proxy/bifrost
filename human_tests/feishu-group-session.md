@@ -247,6 +247,17 @@
 
 预期结果：关闭前已送达但未消费、以及关闭后到达的事件都按原顺序交回 Provider 主循环。当前完整脚本中引用触发实际产生第十个 Prompt，并把 Runner 生命周期事件从 18 增加到 20；不会遗留在内存 Queue 中，也不需要再发送一条消息才能执行。
 
+### TC-FGS-29：引用图片或文件自动落盘并把绝对路径交给模型
+
+1. 使用临时数据目录启动真实 debug Bifrost、`127.0.0.1` 假飞书 OpenAPI 和本地 mock Runner。
+2. 假 OpenAPI 分别返回一条文件消息和一条图片消息；当前用户仅发送 `@机器人` 并通过 `parent_id` 引用它们。
+3. 检查资源下载请求的消息 ID 与资源 key、Runner Prompt 中的 `Attached Files` / `Attached Images`、绝对路径、原文件名，以及路径对应的磁盘内容。
+4. 模拟引用图片资源下载返回 HTTP 500，检查飞书收到“附件未加载但任务继续”的提示、Runner 仍启动且群 Turn 正常创建；再检查当前消息附件与引用附件同时存在时，引用附件排在列表最前面。
+5. 关闭并重新打开 SQLite Store 后重投同一个非终态 Turn，检查不再 GET 引用消息正文，但会重新下载资源并重新生成本轮会话附件。
+6. 构造超过 100 MiB 的单个引用文件和累计超过 250 MiB 的引用文件列表，检查超限项被跳过、提示包含平台/总预算上限，其余附件和 Turn 继续执行。
+
+预期结果：引用文件保留 `quoted-requirements.md` 和 `text/markdown`，引用图片保留 `image/png`，两者都写入当前 Session 的 `attachments/<run>/files|images`，Runner 只看到可消费的绝对路径且磁盘字节与假 OpenAPI 响应一致。资源下载使用被引用消息 ID，不使用当前触发消息 ID。下载失败、单文件超过飞书 100 MiB 平台上限或累计超过 250 MiB 时，飞书用户和模型上下文都会收到非阻塞提示，失败附件被跳过，但 Runner、Turn、其他附件和服务继续正常执行；引用附件排在当前消息附件之前；重启恢复复用 SQLite 中的消息正文和资源 key，仅重新下载二进制。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -378,6 +389,20 @@ TC-FGS-28 的 Runner 收尾 mailbox 回放和真实引用触发执行：
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin completion_replay_removes_unconsumed_event_from_dedup_window --lib -- --nocapture
 SKIP_BUILD=true bash e2e-tests/tests/test_feishu_group_session_context.sh
 ```
+
+TC-FGS-29 的引用图片/文件下载、落盘绝对路径、非阻塞失败、大小预算、顺序和重启恢复执行：
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin referenced_attachments_are_prepended_before_current_message_attachments --lib -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin referenced_attachment_hydration --lib -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin prepare_group_dispatch_downloads_referenced --lib -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin referenced_attachment_download_failure_reports_notice_and_continues_turn --lib -- --nocapture
+bash e2e-tests/tests/test_feishu_group_session_context.sh
+```
+
+执行记录：2026-08-11 PASS（失败提示真实发送链路复测）。预加载附件按 Base64 实际解码大小计费，伪造或缺失 `size_bytes` 不能绕过 100 MiB 单文件/250 MiB 单 Turn 预算，非法 Base64 被跳过并生成 notice。最新 debug 二进制执行完整真实服务脚本输出 `[feishu-group-session] PASS`：假飞书资源接口返回 HTTP 500 后 Runner Prompt 仍包含“附件处理提示（不影响任务继续执行）”，Turn 正常完成；outbound message log 中恰有一条状态为 success、包含失败 `image_key` 与“下载失败”的飞书回复，证明不是只在内存里生成 notice。引用文件/图片的绝对路径、原文件名、MIME 与磁盘字节回归同时通过，测试 trap 已清理沙箱和所属进程。
+
+执行记录：2026-08-11 PASS。四组确定性 Rust 测试验证引用附件前置顺序、引用文件/图片使用原消息 ID 下载、100 MiB 单文件平台上限、250 MiB 单 Turn 总预算，以及资源 HTTP 失败仍创建 Turn、向用户和模型生成“任务继续执行”提示；完整真实服务脚本输出 `[feishu-group-session] PASS`，Runner Prompt 中出现会话目录绝对路径、原文件名和 MIME，磁盘文件字节与 `127.0.0.1` 假飞书 OpenAPI 响应一致。
 
 执行记录：2026-08-08 PASS。确定性单元测试同时覆盖关闭前已送达事件和关闭后 sender 失败事件，completion 按原顺序回放且清除已送达事件的 dedup；最新 debug 二进制连续执行 5 次 `test_feishu_group_session_context.sh` 均输出 `[feishu-group-session] PASS`。加入忙时第二条队列场景后，每次引用触发均生成第十个 Prompt，并把 Runner 生命周期事件从 18 增加到 20；最终卡片引用完成后合计 11 个 Prompt、22 个 Runner 生命周期事件。CI production release 会明确输出 `SKIP fake OpenAPI`：release 必须拒绝 debug-only loopback，不能用测试凭证误连官方飞书接口；URL 规范化、引用读取和权限错误矩阵由 release-safe 单元测试覆盖。
 

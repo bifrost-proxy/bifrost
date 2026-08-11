@@ -85,7 +85,8 @@
 
 ### 端口释放等待
 
-- `wait_for_port_released(port, deadline)` 通过 bind 探测判断端口空闲；`wait_for_restart_port_release` 以 `cfg(any(unix, windows))` 编译，Unix / Windows 行为一致。
+- `wait_for_port_released(port, deadline)` 默认通过 TCP/UDP、any/loopback 四路 bind 探测判断端口空闲；`wait_for_restart_port_release` 以 `cfg(any(unix, windows))` 编译。
+- Windows 退出旧进程后可能保留无 owner 的独占绑定预留：四路 bind 未全部通过时，连续两次 `netstat -ano` 均确认没有 TCP listener 或 UDP owner 即可继续重启；查询命令失败、返回非零或任一次仍有 owner 都会重置该证据并继续等待。
 - 10 秒内仍被占用时输出 `netstat -ano | findstr :<port>`（Windows）或 `lsof -iTCP:<port> -sTCP:LISTEN`（Unix）诊断。
 
 ### CLI + Web + Admin API
@@ -197,7 +198,7 @@ Admin API 与 Web UI 不参与安装本身；`bifrost upgrade` 期间会通过�
 - `upgrade_restore_binary_backup_restores_previous_target`
 - `upgrade_command_status_with_timeout_reports_success_and_failure`
 - `upgrade_command_status_with_timeout_does_not_block_on_hung_child`
-- `wait_for_port_released_returns_quickly_when_port_is_free` / `wait_for_port_released_times_out_when_port_is_held`
+- `wait_for_port_released_returns_quickly_when_port_is_free` / `wait_for_port_released_times_out_when_port_is_held` / `wait_for_port_released_times_out_when_udp_port_is_held`（Windows 同样执行）
 - `upgrade_restart_port_from_runtime_defaults_to_9900` / `upgrade_restart_ports_from_runtime_uses_runtime_ports`
 - `env_flag_enabled_accepts_true_values` / `env_flag_enabled_rejects_absent_and_false_values`
 - `test_build_restart_args_no_runtime_info_uses_default_config_system_proxy` / `test_build_restart_args_no_runtime_info_preserves_disabled_default_config_system_proxy`
