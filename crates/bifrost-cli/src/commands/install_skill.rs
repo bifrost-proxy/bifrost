@@ -204,7 +204,15 @@ fn download_skill_source(source: SkillSource) -> Result<String, BifrostError> {
         let _ = tx.send(attempt);
     });
 
-    let body = match rx.recv_timeout(hard_timeout) {
+    finish_download_attempt(source, hard_timeout, rx.recv_timeout(hard_timeout))
+}
+
+fn finish_download_attempt(
+    source: SkillSource,
+    hard_timeout: Duration,
+    attempt: Result<Result<String, String>, mpsc::RecvTimeoutError>,
+) -> Result<String, BifrostError> {
+    let body = match attempt {
         Ok(Ok(body)) => body,
         Ok(Err(err_msg)) => {
             println!(
@@ -543,7 +551,10 @@ pub fn handle_install_skill(
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static INSTALL_SKILL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_tool_supports_only_universal_and_claude() {
@@ -565,6 +576,9 @@ mod tests {
 
     #[test]
     fn default_global_dirs_are_standard_agents_and_claude_only() {
+        assert_eq!(AiTool::Universal.to_string(), "Universal Agent Skills");
+        assert_eq!(AiTool::ClaudeCode.to_string(), "Claude Code");
+
         let universal = AiTool::Universal.default_global_dirs();
         assert_eq!(universal.len(), 1);
         assert!(universal[0].ends_with(Path::new(".agents/skills/bifrost")));
@@ -683,6 +697,7 @@ mod tests {
 
     #[test]
     fn download_skill_source_uses_embedded_when_requested() {
+        let _guard = INSTALL_SKILL_ENV_LOCK.lock().unwrap();
         let old = std::env::var("BIFROST_INSTALL_SKILL_SOURCE").ok();
         std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
 
@@ -694,6 +709,49 @@ mod tests {
         } else {
             std::env::remove_var("BIFROST_INSTALL_SKILL_SOURCE");
         }
+    }
+
+    #[test]
+    fn finish_download_attempt_covers_fallback_and_validation_paths() {
+        let source = SKILL_SOURCES[0];
+        let timeout = Duration::from_secs(45);
+
+        let fallback =
+            finish_download_attempt(source, timeout, Ok(Err("offline fixture".to_string())))
+                .unwrap();
+        assert_eq!(fallback, source.embedded_content);
+
+        let empty = finish_download_attempt(source, timeout, Ok(Ok(" \n".to_string())))
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("Downloaded skill is empty"));
+
+        let without_frontmatter = "name: bifrost\n".to_string();
+        let accepted =
+            finish_download_attempt(source, timeout, Ok(Ok(without_frontmatter.clone()))).unwrap();
+        assert_eq!(accepted, without_frontmatter);
+    }
+
+    #[test]
+    fn handle_install_skill_reports_each_target_write_failure() {
+        let _guard = INSTALL_SKILL_ENV_LOCK.lock().unwrap();
+        let old = std::env::var("BIFROST_INSTALL_SKILL_SOURCE").ok();
+        std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
+
+        let temp_dir = TempDir::new().unwrap();
+        let invalid_target = temp_dir.path().join("not-a-directory");
+        std::fs::write(&invalid_target, "file blocks create_dir_all").unwrap();
+
+        let result =
+            handle_install_skill(Some("all".to_string()), Some(invalid_target), false, true);
+
+        if let Some(old) = old {
+            std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", old);
+        } else {
+            std::env::remove_var("BIFROST_INSTALL_SKILL_SOURCE");
+        }
+
+        assert!(result.is_ok());
     }
 
     #[test]
