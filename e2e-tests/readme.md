@@ -196,6 +196,7 @@ Admin API 测试脚本位于 `tests/` 目录，用于测试 Bifrost 的管理 AP
 | `test_im_gateway_prompt_passthrough.sh` | 3 | IM 空指令原样透传、Base 首轮生命周期、消息级指令组合 |
 | `test_im_gateway_local_session_resume.sh` | 10 | Codex、Traex、Claude Code 本地 session 列表、选择、provider 隔离与下一轮原生 resume 参数 |
 | `test_feishu_progress_terminal_notification.sh` | 1 | 飞书任务过程卡成功/失败终态折叠、独立终态卡引用链与本地文件自动上传发送 |
+| `test_im_gateway_subagent_event_boundary.sh` | 3 | Codex/Traex 根 thread/turn 隔离与 Claude Code 普通工具事件；子协作完成不提前结束根任务 |
 | `test_process_resolution_performance.sh` | 8 | 管理请求跳过进程识别、外部 Admin-like path 防误伤、诊断计数、主指标隔离、普通代理回归、并发连接共享 snapshot generation、有界缓存诊断与可选 18k 高基数真实连接压力 |
 | `test_scripts_admin_api.sh`   | 12     | 脚本 CRUD、列表、内置脚本            |
 | `test_replay_rules.sh`        | 28     | Replay custom rules、请求/响应修改矩阵 |

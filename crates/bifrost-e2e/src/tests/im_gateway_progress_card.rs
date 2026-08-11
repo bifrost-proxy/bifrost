@@ -88,12 +88,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
         "im_gateway_subagent_progress_card_renderer",
-        "Validate Codex and TraeX collaboration events render one provider-neutral Feishu sub-agent entry with the dispatched task, phase, identity, terminal state, detail, and elapsed time",
+        "Validate Codex and TraeX collaboration calls render as ordinary Feishu tool input/output while child lifecycle details remain hidden",
         "admin",
         || async move {
             use bifrost_admin::im_gateway::external_cli::{
                 external_progress_to_agent_turn_event, parse_progress_events,
-                ExternalCliProgressStatusContext,
+                ExternalCliProgressEventType, ExternalCliProgressStatusContext,
             };
             use bifrost_admin::im_gateway::progress_card::{
                 build_feishu_progress_card, ImAgentProgressSnapshot,
@@ -102,10 +102,20 @@ pub fn get_all_tests() -> Vec<TestCase> {
             let events = parse_progress_events(
                 r#"{"type":"item.started","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":[],"agents_states":{}}}
 {"type":"item.updated","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"in_progress","prompt":"Review the authentication flow","sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"running","message":"Inspecting handlers"}}}}
-{"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"wait","status":"completed","duration_ms":4200,"prompt":null,"sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"completed","message":"Review complete"}}}}"#,
+{"type":"item.completed","item":{"id":"collab-1","type":"collab_agent_tool_call","tool":"spawnAgent","status":"completed","duration_ms":4200,"prompt":"Review the authentication flow","result":"Review complete","sender_thread_id":"root","receiver_thread_ids":["agent-7"],"agents_states":{"agent-7":{"status":"completed","message":"internal child detail"}}}}"#,
             );
-            if events.len() != 3 {
-                return Err(format!("expected three collaboration events, got {}", events.len()));
+            if events.len() != 2 {
+                return Err(format!(
+                    "expected collaboration start/finish only, got {} events",
+                    events.len()
+                ));
+            }
+            if events[0].event_type != ExternalCliProgressEventType::ToolStarted
+                || events[1].event_type != ExternalCliProgressEventType::ToolFinished
+            {
+                return Err(format!(
+                    "collaboration lifecycle was not normalized to ordinary tool events: {events:?}"
+                ));
             }
 
             let mut snapshot =
@@ -130,6 +140,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
             }
 
             let card = build_feishu_progress_card(&snapshot, true);
+            let card_body = card["body"]["elements"].to_string();
             let process_element = card["body"]["elements"]
                 .as_array()
                 .and_then(|elements| {
@@ -137,26 +148,30 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         .iter()
                         .find(|element| element["element_id"] == "agent_process_panel")
                 })
-                .ok_or_else(|| "sub-agent card missing process panel".to_string())?;
+                .ok_or_else(|| "collaboration tool card missing process panel".to_string())?;
             let process_body = process_element["elements"].to_string();
-            for needle in [
-                "子 Agent · 已完成 · waiting · 4 秒",
-                "任务：Review the authentication flow",
-                "Agent ID：`agent-7`",
-                "进度：Review complete",
-            ] {
-                if !process_body.contains(needle) {
-                    return Err(format!("sub-agent card body missing {needle}: {process_body}"));
-                }
-            }
-            if process_body.matches("任务：Review the authentication flow").count() != 1 {
+            if !process_body.contains("已完成：spawnAgent") {
                 return Err(format!(
-                    "sub-agent lifecycle was not merged into one entry: {process_body}"
+                    "collaboration call was not rendered as an ordinary tool: {process_body}"
                 ));
             }
-            if process_body.contains("步骤：`spawnAgent`") {
+            for needle in ["Review the authentication flow", "Review complete"] {
+                if !card_body.contains(needle) {
+                    return Err(format!(
+                        "collaboration tool input/output missing {needle}: {card_body}"
+                    ));
+                }
+            }
+            for hidden in ["子 Agent", "agent-7", "Inspecting handlers", "internal child detail"] {
+                if card_body.contains(hidden) {
+                    return Err(format!(
+                        "child lifecycle detail leaked into the tool card ({hidden}): {card_body}"
+                    ));
+                }
+            }
+            if process_body.matches("spawnAgent").count() != 1 {
                 return Err(format!(
-                    "sub-agent status was incorrectly rendered as a generic tool: {process_body}"
+                    "collaboration tool lifecycle was not merged into one entry: {process_body}"
                 ));
             }
             Ok(())
