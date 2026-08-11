@@ -475,6 +475,112 @@ async fn external_runner_terminal_without_reply_id_uses_provider_send_fallback()
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn standard_feishu_reply_keeps_uploaded_image_inline_without_image_message() {
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().expect("standard reply image store");
+    let message_log_store = Arc::new(ImMessageLogStore::new(temp.path()));
+    let provider = crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let event = group_test_event(&provider.id, "standard-image-trigger", "render", false, 1);
+    tokio::fs::write(temp.path().join("standard.png"), b"standard-image-bytes")
+        .await
+        .expect("write standard image");
+
+    send_agent_reply_from_work_dir(
+        &client,
+        &provider,
+        &event,
+        "before ![standard](./standard.png) after",
+        &message_log_store,
+        Some(temp.path()),
+    )
+    .await;
+
+    assert_eq!(
+        server
+            .image_upload_payloads
+            .lock()
+            .expect("image upload payloads lock")
+            .len(),
+        1
+    );
+    let payloads = server
+        .message_payloads
+        .lock()
+        .expect("message payloads lock")
+        .clone();
+    assert_eq!(payloads.len(), 1, "only the interactive card is sent");
+    assert_eq!(payloads[0]["msg_type"], "interactive");
+    let card: serde_json::Value =
+        serde_json::from_str(payloads[0]["content"].as_str().expect("card content"))
+            .expect("card json");
+    assert_eq!(
+        card["body"]["elements"][0]["content"],
+        "before ![standard](img_v3_progress_inline) after"
+    );
+    assert!(message_log_store
+        .list()
+        .iter()
+        .all(|log| log.msg_type.as_deref() != Some("image")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn planned_feishu_reply_keeps_uploaded_image_inline_without_image_message() {
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().expect("planned reply image store");
+    let message_log_store = Arc::new(ImMessageLogStore::new(temp.path()));
+    let provider = crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let event = group_test_event(&provider.id, "planned-image-trigger", "render", false, 1);
+    let image_path = temp.path().join("planned.png");
+    tokio::fs::write(&image_path, b"planned-image-bytes")
+        .await
+        .expect("write planned image");
+    let reply = format!("planned ![chart]({})", image_path.display());
+    let plan = [PlanStep {
+        step: "Render chart".to_string(),
+        status: bifrost_agent::PlanStepStatus::Completed,
+    }];
+    let tool_calls = [ToolCallLog {
+        tool_name: "render".to_string(),
+        arguments: "{}".to_string(),
+        result: "done".to_string(),
+        success: true,
+    }];
+
+    send_agent_reply_with_plan(
+        &client,
+        &provider,
+        &event,
+        &reply,
+        Some(&plan),
+        &tool_calls,
+        Some("Planned reply"),
+        &message_log_store,
+    )
+    .await;
+
+    assert_eq!(server.image_upload_payloads.lock().unwrap().len(), 1);
+    let payloads = server.message_payloads.lock().unwrap().clone();
+    assert_eq!(payloads.len(), 1, "only the interactive card is sent");
+    let card: serde_json::Value =
+        serde_json::from_str(payloads[0]["content"].as_str().expect("card content"))
+            .expect("card json");
+    assert_eq!(
+        card["body"]["elements"][0]["content"],
+        "planned ![chart](img_v3_progress_inline)"
+    );
+    assert_eq!(card["body"]["elements"][1]["tag"], "collapsible_panel");
+    assert_eq!(card["body"]["elements"][2]["tag"], "collapsible_panel");
+    assert!(message_log_store
+        .list()
+        .iter()
+        .all(|log| log.msg_type.as_deref() != Some("image")));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn topic_terminal_without_progress_card_replies_in_thread_instead_of_main_group() {
     let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
     let temp = tempfile::tempdir().unwrap();

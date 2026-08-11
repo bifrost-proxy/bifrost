@@ -70,6 +70,7 @@ lock = threading.Lock()
 class Handler(BaseHTTPRequestHandler):
     card_counter = 0
     file_counter = 0
+    image_counter = 0
     message_counter = 0
 
     def log_message(self, *_args):
@@ -95,6 +96,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path.endswith("/im/v1/images"):
+            length = int(self.headers.get("content-length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            filenames = re.findall(r'filename="([^"]+)"', raw.decode("utf-8", errors="replace"))
+            self.record({"multipart_bytes": len(raw), "filenames": filenames})
+            type(self).image_counter += 1
+            self.send_json({"code": 0, "data": {"image_key": "img_v3_terminal_e2e"}})
+            return
         if path.endswith("/im/v1/files"):
             length = int(self.headers.get("content-length", "0"))
             raw = self.rfile.read(length) if length else b""
@@ -147,7 +156,9 @@ done
 FEISHU_PORT="$(<"$FEISHU_PORT_FILE")"
 
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
-  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+  env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    -u http_proxy -u https_proxy -u all_proxy \
+    SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
 BIFROST_PORT="${BIFROST_PORT:-$(choose_loopback_port)}"
@@ -196,6 +207,11 @@ report_path = pathlib.Path(test_dir) / "terminal-e2e-report.txt"
 report_path.write_text("terminal attachment contents", encoding="utf-8")
 archive_path = pathlib.Path(test_dir) / "terminal-e2e-bundle.tar.gz"
 archive_path.write_bytes(b"terminal archive contents")
+image_path = pathlib.Path(test_dir) / "terminal-e2e-chart.png"
+image_path.write_bytes(
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 runner_code = r'''
 import json
 import sys
@@ -205,10 +221,10 @@ if "FAIL_TERMINAL_E2E" in prompt:
     print("E2E_PERMISSION_DENIED", file=sys.stderr)
     raise SystemExit(17)
 print(json.dumps({"type": "run_started", "content": "started", "session_id": "terminal-session-e2e"}))
-print(json.dumps({"type": "assistant_delta", "content": "E2E_LATEST_EXPLANATION"}))
+print(json.dumps({"type": "assistant_delta", "content": "E2E_LATEST_EXPLANATION\n\n![E2E chart](%s)" % sys.argv[3]}))
 print(json.dumps({"type": "tool_started", "tool_name": "exec_command", "content": "verify archive"}))
 print(json.dumps({"type": "tool_finished", "tool_name": "exec_command", "arguments": "verify archive", "result": "ok", "success": True, "duration_ms": 5}))
-print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS\n\n[E2E report](%s)\n[E2E archive](%s)" % (sys.argv[1], sys.argv[2])}))
+print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS\n\n![E2E chart](%s)\n\n[E2E report](%s)\n[E2E archive](%s)" % (sys.argv[3], sys.argv[1], sys.argv[2])}))
 '''
 request("/chat/config", {
     "version": 1,
@@ -219,7 +235,7 @@ request("/chat/config", {
             "adapter": "custom",
             "adapterConfig": {
                 "executable": sys.executable,
-                "args": ["-c", runner_code, str(report_path), str(archive_path)],
+                "args": ["-c", runner_code, str(report_path), str(archive_path), str(image_path)],
                 "timeoutSecs": 30,
             },
             "injectBifrostTools": False,
@@ -348,6 +364,7 @@ assert success_card["header"]["title"]["content"] == "Task completed", success_c
 assert set(success_card["header"]["title"]["i18n_content"]) == supported_locales, success_card
 assert success_card["header"]["title"]["i18n_content"]["zh_cn"] == "任务执行结束", success_card
 assert "E2E_FINAL_SUMMARY_SUCCESS" in json.dumps(success_card["body"], ensure_ascii=False), success_card
+assert "![E2E chart](img_v3_terminal_e2e)" in json.dumps(success_card["body"], ensure_ascii=False), success_card
 
 assert failure_card["header"]["template"] == "red", failure_card
 assert failure_card["header"]["title"]["content"] == "Task failed", failure_card
@@ -366,6 +383,7 @@ rendered_updates = "\n".join(record["body"]["card"]["data"] for record in update
 assert "E2E_FINAL_SUMMARY_SUCCESS" in rendered_updates, rendered_updates
 assert "E2E_PERMISSION_DENIED" in rendered_updates, rendered_updates
 assert "E2E_LATEST_EXPLANATION" in rendered_updates, rendered_updates
+assert "![E2E chart](img_v3_terminal_e2e)" in rendered_updates, rendered_updates
 assert "Session：获取中" in rendered_updates, rendered_updates
 assert "Session：未提供" in rendered_updates, rendered_updates
 
@@ -403,6 +421,12 @@ assert len(uploads) == 2 and all(upload["body"]["multipart_bytes"] > 0 for uploa
 filenames = [name for upload in uploads for name in upload["body"]["filenames"]]
 assert "terminal-e2e-report.txt" in filenames, filenames
 assert "terminal-e2e-bundle.tar.gz" in filenames, filenames
+
+image_uploads = [record for record in records if record["path"].split("?", 1)[0].endswith("/im/v1/images")]
+assert len(image_uploads) == 1, image_uploads
+assert image_uploads[0]["body"]["multipart_bytes"] > 0, image_uploads
+assert "terminal-e2e-chart.png" in image_uploads[0]["body"]["filenames"], image_uploads
+assert all(message["body"].get("msg_type") != "image" for message in messages), messages
 
 progress_cards = []
 for record in records:

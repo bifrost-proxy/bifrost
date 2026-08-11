@@ -16,6 +16,9 @@ use super::feishu::FeishuProvider;
 use super::queue_manager::QueueItem;
 use super::types::{ImProviderConfig, ImTarget, SendResult};
 
+#[path = "feishu_markdown.rs"]
+pub(crate) mod feishu_markdown;
+
 const OUTPUT_ELEMENT_ID: &str = "agent_output";
 const OUTPUT_CONTENT_ELEMENT_ID: &str = "agent_output_content";
 const PLAN_PANEL_ELEMENT_ID: &str = "agent_plan_panel";
@@ -1588,24 +1591,78 @@ impl ImAgentProgressRegistry {
     }
 
     pub async fn apply_events(&self, session_key: &str, events: Vec<AgentTurnProgressEvent>) {
-        if let Some(session) = self.sessions.get(session_key) {
-            let mut session = session.value().lock().await;
+        let Some(session) = self.sessions.get(session_key) else {
+            return;
+        };
+        let session = Arc::clone(session.value());
+        let (feishu, provider, base_dir, snapshot_before_render) = {
+            let mut guard = session.lock().await;
             for event in events {
-                session.snapshot.apply_event(event);
+                guard.snapshot.apply_event(event);
             }
-            if let Err(error) = session
-                .flush_snapshot_with_limit_rollover(
-                    "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
-                )
-                .await
-            {
-                warn!(
-                    session_key = session_key,
-                    error = %error,
-                    "failed to apply IM progress card event"
-                );
-            }
+            (
+                Arc::clone(&guard.feishu),
+                guard.provider.clone(),
+                progress_image_base_dir(&guard.snapshot),
+                guard.snapshot.clone(),
+            )
+        };
+        let mut rendered_snapshot = snapshot_before_render.clone();
+        render_progress_snapshot_images(
+            &feishu,
+            &provider,
+            &mut rendered_snapshot,
+            base_dir.as_deref(),
+        )
+        .await;
+        let mut session = session.lock().await;
+        apply_rendered_progress_markdown(
+            &mut session.snapshot,
+            &snapshot_before_render,
+            &rendered_snapshot,
+        );
+        if let Err(error) = session
+            .flush_snapshot_with_limit_rollover(
+                "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
+            )
+            .await
+        {
+            warn!(
+                session_key = session_key,
+                error = %error,
+                "failed to apply IM progress card event"
+            );
         }
+    }
+
+    pub async fn render_markdown_images(
+        &self,
+        session_key: &str,
+        markdown: &str,
+        base_dir: Option<&std::path::Path>,
+    ) -> String {
+        let Some(session) = self.sessions.get(session_key) else {
+            return markdown.to_string();
+        };
+        let session = Arc::clone(session.value());
+        let (feishu, provider, session_base_dir) = {
+            let guard = session.lock().await;
+            (
+                Arc::clone(&guard.feishu),
+                guard.provider.clone(),
+                progress_image_base_dir(&guard.snapshot),
+            )
+        };
+        let effective_base_dir = base_dir
+            .map(std::path::Path::to_path_buf)
+            .or(session_base_dir);
+        feishu_markdown::render_markdown_images(
+            &feishu,
+            &provider,
+            markdown,
+            effective_base_dir.as_deref(),
+        )
+        .await
     }
 
     pub async fn update_queue_state(
@@ -1672,8 +1729,28 @@ impl ImAgentProgressRegistry {
     ) -> Option<ProgressCardMessageInfo> {
         let session = self.sessions.get(session_key)?;
         let session = Arc::clone(session.value());
-        let mut session = session.lock().await;
-        let result = session.finish(output, failed).await;
+        let (feishu, provider, base_dir) = {
+            let guard = session.lock().await;
+            (
+                Arc::clone(&guard.feishu),
+                guard.provider.clone(),
+                progress_image_base_dir(&guard.snapshot),
+            )
+        };
+        let output = match output {
+            Some(output) => Some(
+                feishu_markdown::render_markdown_images(
+                    &feishu,
+                    &provider,
+                    &output,
+                    base_dir.as_deref(),
+                )
+                .await,
+            ),
+            None => None,
+        };
+        let mut guard = session.lock().await;
+        let result = guard.finish(output, failed).await;
         if let Err(error) = result {
             warn!(
                 session_key = session_key,
@@ -1681,7 +1758,7 @@ impl ImAgentProgressRegistry {
                 "failed to finish IM progress card"
             );
         }
-        session.message_info()
+        guard.message_info()
     }
 
     pub async fn message_info(&self, session_key: &str) -> Option<ProgressCardMessageInfo> {
@@ -1749,6 +1826,78 @@ impl ImAgentProgressRegistry {
                 );
                 false
             }
+        }
+    }
+}
+
+fn progress_image_base_dir(snapshot: &ImAgentProgressSnapshot) -> Option<std::path::PathBuf> {
+    snapshot
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.work_dir.as_deref())
+        .or_else(|| {
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.work_dir.as_deref())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+async fn render_progress_snapshot_images(
+    feishu: &FeishuProvider,
+    provider: &ImProviderConfig,
+    snapshot: &mut ImAgentProgressSnapshot,
+    base_dir: Option<&std::path::Path>,
+) {
+    snapshot.output =
+        feishu_markdown::render_markdown_images(feishu, provider, &snapshot.output, base_dir).await;
+    if let Some(plan) = snapshot.proposed_plan.as_mut() {
+        *plan = feishu_markdown::render_markdown_images(feishu, provider, plan, base_dir).await;
+    }
+    if let Some(last_thought) = snapshot.last_thought.as_mut() {
+        *last_thought =
+            feishu_markdown::render_markdown_images(feishu, provider, last_thought, base_dir).await;
+    }
+    for item in &mut snapshot.timeline {
+        if item.kind != ProgressTimelineKind::Thinking {
+            continue;
+        }
+        item.detail =
+            feishu_markdown::render_markdown_images(feishu, provider, &item.detail, base_dir).await;
+        item.summary = truncate_one_line(&item.detail, 120);
+    }
+}
+
+fn apply_rendered_progress_markdown(
+    current: &mut ImAgentProgressSnapshot,
+    before: &ImAgentProgressSnapshot,
+    rendered: &ImAgentProgressSnapshot,
+) {
+    if current.output == before.output {
+        current.output.clone_from(&rendered.output);
+    }
+    if current.proposed_plan == before.proposed_plan {
+        current.proposed_plan.clone_from(&rendered.proposed_plan);
+    }
+    if current.last_thought == before.last_thought {
+        current.last_thought.clone_from(&rendered.last_thought);
+    }
+    for (index, rendered_item) in rendered.timeline.iter().enumerate() {
+        let Some(before_item) = before.timeline.get(index) else {
+            continue;
+        };
+        let Some(current_item) = current.timeline.get_mut(index) else {
+            continue;
+        };
+        if before_item.kind == ProgressTimelineKind::Thinking
+            && current_item.kind == ProgressTimelineKind::Thinking
+            && current_item.detail == before_item.detail
+        {
+            current_item.detail.clone_from(&rendered_item.detail);
+            current_item.summary.clone_from(&rendered_item.summary);
         }
     }
 }

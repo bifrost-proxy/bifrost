@@ -201,6 +201,290 @@ fn assistant_stream_fragments_are_coalesced_and_terminal_duplicate_is_removed() 
     assert!(snapshot.timeline.is_empty());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn progress_registry_uploads_local_markdown_image_before_card_update() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let provider = mock_feishu_provider(&server.base_url);
+    let registry = ImAgentProgressRegistry::new();
+    let temp = tempfile::tempdir().expect("temp image dir");
+    let image_path = temp.path().join("chart.png");
+    tokio::fs::write(&image_path, b"not-a-real-png-but-uploadable")
+        .await
+        .expect("write image fixture");
+    registry
+        .start_feishu(
+            "inline-image-progress",
+            Arc::new(FeishuProvider::new()),
+            provider,
+            mock_progress_target(),
+            "render chart",
+        )
+        .await
+        .expect("start progress card");
+    registry
+        .update_runner_summary(
+            "inline-image-progress",
+            ProgressRunnerSummary {
+                work_dir: Some(temp.path().display().to_string()),
+                ..ProgressRunnerSummary::default()
+            },
+        )
+        .await;
+
+    registry
+        .apply_event(
+            "inline-image-progress",
+            AgentTurnProgressEvent::AssistantFinal {
+                content: "结果如下：\n![chart](./chart.png)".to_string(),
+            },
+        )
+        .await;
+
+    let uploads = server
+        .image_upload_payloads
+        .lock()
+        .expect("image uploads lock");
+    assert_eq!(uploads.len(), 1);
+    assert!(String::from_utf8_lossy(&uploads[0]).contains("not-a-real-png-but-uploadable"));
+    drop(uploads);
+    let updates = server
+        .card_update_payloads
+        .lock()
+        .expect("card updates lock");
+    assert!(updates
+        .iter()
+        .any(|payload| payload.contains("![chart](img_v3_progress_inline)")));
+    assert!(updates
+        .iter()
+        .all(|payload| !payload.contains("./chart.png")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_registry_uploads_markdown_image_split_across_deltas() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let provider = mock_feishu_provider(&server.base_url);
+    let registry = ImAgentProgressRegistry::new();
+    let temp = tempfile::tempdir().expect("temp image dir");
+    tokio::fs::write(temp.path().join("split.png"), b"split-image")
+        .await
+        .expect("write image fixture");
+    registry
+        .start_feishu(
+            "split-inline-image-progress",
+            Arc::new(FeishuProvider::new()),
+            provider,
+            mock_progress_target(),
+            "render chart",
+        )
+        .await
+        .expect("start progress card");
+    registry
+        .update_runner_summary(
+            "split-inline-image-progress",
+            ProgressRunnerSummary {
+                work_dir: Some(temp.path().display().to_string()),
+                ..ProgressRunnerSummary::default()
+            },
+        )
+        .await;
+
+    registry
+        .apply_event(
+            "split-inline-image-progress",
+            AgentTurnProgressEvent::AssistantDelta {
+                content: "result: ![chart](./spl".to_string(),
+            },
+        )
+        .await;
+    assert!(server
+        .image_upload_payloads
+        .lock()
+        .expect("image uploads lock")
+        .is_empty());
+
+    registry
+        .apply_event(
+            "split-inline-image-progress",
+            AgentTurnProgressEvent::AssistantDelta {
+                content: "it.png)".to_string(),
+            },
+        )
+        .await;
+
+    assert_eq!(
+        server
+            .image_upload_payloads
+            .lock()
+            .expect("image uploads lock")
+            .len(),
+        1
+    );
+    assert!(server
+        .card_update_payloads
+        .lock()
+        .expect("card updates lock")
+        .iter()
+        .any(|payload| payload.contains("![chart](img_v3_progress_inline)")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_registry_reuses_uploaded_image_for_terminal_output() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let provider = mock_feishu_provider(&server.base_url);
+    let registry = ImAgentProgressRegistry::new();
+    let temp = tempfile::tempdir().expect("temp image dir");
+    tokio::fs::write(temp.path().join("same.png"), b"same-image")
+        .await
+        .expect("write image fixture");
+    registry
+        .start_feishu(
+            "inline-image-terminal",
+            Arc::new(FeishuProvider::new()),
+            provider,
+            mock_progress_target(),
+            "render chart",
+        )
+        .await
+        .expect("start progress card");
+    let markdown = "![same](./same.png)";
+    let first = registry
+        .render_markdown_images("inline-image-terminal", markdown, Some(temp.path()))
+        .await;
+    let second = registry
+        .render_markdown_images("inline-image-terminal", markdown, Some(temp.path()))
+        .await;
+
+    assert_eq!(first, "![same](img_v3_progress_inline)");
+    assert_eq!(second, first);
+    assert_eq!(
+        server
+            .image_upload_payloads
+            .lock()
+            .expect("image uploads lock")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_registry_missing_session_is_a_noop() {
+    let registry = ImAgentProgressRegistry::new();
+    registry
+        .apply_events(
+            "missing-session",
+            vec![AgentTurnProgressEvent::AssistantFinal {
+                content: "![missing](./missing.png)".to_string(),
+            }],
+        )
+        .await;
+    assert_eq!(
+        registry
+            .render_markdown_images("missing-session", "![missing](./missing.png)", None)
+            .await,
+        "![missing](./missing.png)"
+    );
+    assert!(registry
+        .finish("missing-session", None, false)
+        .await
+        .is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_registry_finish_without_output_preserves_existing_snapshot() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let provider = mock_feishu_provider(&server.base_url);
+    let registry = ImAgentProgressRegistry::new();
+    registry
+        .start_feishu(
+            "finish-without-output",
+            Arc::new(FeishuProvider::new()),
+            provider,
+            mock_progress_target(),
+            "finish",
+        )
+        .await
+        .unwrap();
+    registry
+        .apply_event(
+            "finish-without-output",
+            AgentTurnProgressEvent::TurnFinished {
+                content: "existing conclusion".to_string(),
+            },
+        )
+        .await;
+    assert!(registry
+        .finish("finish-without-output", None, false)
+        .await
+        .is_some());
+    assert!(server
+        .card_update_payloads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|payload| payload.contains("existing conclusion")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn snapshot_image_renderer_handles_plan_and_skips_non_thinking_timeline() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let provider = mock_feishu_provider(&server.base_url);
+    let temp = tempfile::tempdir().unwrap();
+    tokio::fs::write(temp.path().join("plan.png"), b"plan-image")
+        .await
+        .unwrap();
+    let mut snapshot = ImAgentProgressSnapshot::new("plan-image", "task");
+    snapshot.proposed_plan = Some("![plan](./plan.png)".to_string());
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "shell".to_string(),
+            arguments: "{}".to_string(),
+            result: "![tool](./plan.png)".to_string(),
+            success: true,
+        },
+        duration_ms: 1,
+    });
+    let tool_detail = snapshot.timeline.last().unwrap().detail.clone();
+
+    render_progress_snapshot_images(
+        &FeishuProvider::new(),
+        &provider,
+        &mut snapshot,
+        Some(temp.path()),
+    )
+    .await;
+
+    assert_eq!(
+        snapshot.proposed_plan.as_deref(),
+        Some("![plan](img_v3_progress_inline)")
+    );
+    assert_eq!(snapshot.timeline.last().unwrap().detail, tool_detail);
+    assert_eq!(server.image_upload_payloads.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn applying_rendered_snapshot_tolerates_concurrent_timeline_shape_changes() {
+    let mut before = ImAgentProgressSnapshot::new("merge", "task");
+    before.apply_event(AgentTurnProgressEvent::AssistantFinal {
+        content: "before".to_string(),
+    });
+    let mut rendered = before.clone();
+    rendered.timeline[0].detail = "rendered".to_string();
+    rendered.timeline[0].summary = "rendered".to_string();
+
+    let mut current_without_item = before.clone();
+    current_without_item.timeline.clear();
+    apply_rendered_progress_markdown(&mut current_without_item, &before, &rendered);
+    assert!(current_without_item.timeline.is_empty());
+
+    let mut rendered_with_extra = rendered.clone();
+    rendered_with_extra
+        .timeline
+        .push(rendered.timeline[0].clone());
+    let mut current = before.clone();
+    apply_rendered_progress_markdown(&mut current, &before, &rendered_with_extra);
+    assert_eq!(current.timeline[0].detail, "rendered");
+}
+
 #[test]
 fn assistant_stream_keeps_repeated_tokens_and_word_boundaries() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "inspect branch");
@@ -1967,6 +2251,7 @@ pub(crate) struct MockFeishuProgressServer {
     pub(crate) card_update_payloads: Arc<std::sync::Mutex<Vec<String>>>,
     pub(crate) message_paths: Arc<std::sync::Mutex<Vec<String>>>,
     pub(crate) message_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    pub(crate) image_upload_payloads: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
 }
 
 pub(crate) async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
@@ -2098,6 +2383,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let card_update_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let message_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
     let message_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let image_upload_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let fail_card_update_codes = Arc::new(
         fail_card_update_codes
             .into_iter()
@@ -2121,6 +2407,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let card_update_payloads_for_server = Arc::clone(&card_update_payloads);
     let message_paths_for_server = Arc::clone(&message_paths);
     let message_payloads_for_server = Arc::clone(&message_payloads);
+    let image_upload_payloads_for_server = Arc::clone(&image_upload_payloads);
     let fail_card_update_codes_for_server = Arc::clone(&fail_card_update_codes);
     let fail_card_create_codes_for_server = Arc::clone(&fail_card_create_codes);
     tokio::spawn(async move {
@@ -2138,6 +2425,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
             let card_update_payloads = Arc::clone(&card_update_payloads_for_server);
             let message_paths = Arc::clone(&message_paths_for_server);
             let message_payloads = Arc::clone(&message_payloads_for_server);
+            let image_upload_payloads = Arc::clone(&image_upload_payloads_for_server);
             let fail_card_update_codes = Arc::clone(&fail_card_update_codes_for_server);
             let fail_card_create_codes = Arc::clone(&fail_card_create_codes_for_server);
             tokio::spawn(async move {
@@ -2151,6 +2439,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                     let card_update_payloads = Arc::clone(&card_update_payloads);
                     let message_paths = Arc::clone(&message_paths);
                     let message_payloads = Arc::clone(&message_payloads);
+                    let image_upload_payloads = Arc::clone(&image_upload_payloads);
                     let fail_card_update_codes = Arc::clone(&fail_card_update_codes);
                     let fail_card_create_codes = Arc::clone(&fail_card_create_codes);
                     async move {
@@ -2170,6 +2459,57 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                                     .status(StatusCode::OK)
                                     .body(Full::new(Bytes::from_static(
                                         br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
+                                    )))
+                                    .unwrap(),
+                            );
+                        }
+                        if method == Method::GET && path == "/remote.png" {
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("content-type", "image/png")
+                                    .body(Full::new(Bytes::from_static(b"remote-image-bytes")))
+                                    .unwrap(),
+                            );
+                        }
+                        if method == Method::GET && path == "/too-large.png" {
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("content-type", "image/png")
+                                    .header("content-length", (11 * 1024 * 1024).to_string())
+                                    .body(Full::new(Bytes::new()))
+                                    .unwrap(),
+                            );
+                        }
+                        if method == Method::GET && path == "/not-image.png" {
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("content-type", "text/plain; charset=utf-8")
+                                    .body(Full::new(Bytes::from_static(b"not an image")))
+                                    .unwrap(),
+                            );
+                        }
+                        if method == Method::GET && path == "/empty.png" {
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("content-type", "image/png")
+                                    .body(Full::new(Bytes::new()))
+                                    .unwrap(),
+                            );
+                        }
+                        if method == Method::POST && path == "/open-apis/im/v1/images" {
+                            image_upload_payloads
+                                .lock()
+                                .expect("image upload payloads lock")
+                                .push(body.to_vec());
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Full::new(Bytes::from_static(
+                                        br#"{"code":0,"data":{"image_key":"img_v3_progress_inline"}}"#,
                                     )))
                                     .unwrap(),
                             );
@@ -2340,6 +2680,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
         card_update_payloads,
         message_paths,
         message_payloads,
+        image_upload_payloads,
     }
 }
 

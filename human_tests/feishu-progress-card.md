@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；执行过程默认折叠，折叠栏上方常驻最新公开解释、当前工具和本轮成功/失败/执行中统计，折叠标题区分总体步骤数与工具调用次数。任务结束后，原任务卡的状态摘要、任务计划/实施方案、执行过程和最终结论统一默认折叠。随后另发一张完整终态卡：成功卡显示多语言“任务执行结束 / Task completed”等标题并包含最后一次最终总结，失败卡显示多语言失败标题并包含异常原因；终态卡直接引用刚结束的任务卡，并继续自动上传和发送最终总结显式引用的本地文档与压缩包。卡片折叠面板使用飞书主题自适应默认背景/文本色，需在亮色和暗色主题下保持可读。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
+本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；执行过程默认折叠，折叠栏上方常驻最新公开解释、当前工具和本轮成功/失败/执行中统计，折叠标题区分总体步骤数与工具调用次数。过程输出中的 Markdown 图片需先上传飞书并以 `image_key` 原位渲染。任务结束后，原任务卡的状态摘要、任务计划/实施方案、执行过程和最终结论统一默认折叠；原任务卡结论与另发的完整终态卡复用同一 `image_key`，不补发重复的独立图片消息。随后另发的成功卡显示多语言“任务执行结束 / Task completed”等标题并包含最后一次最终总结，失败卡显示多语言失败标题并包含异常原因；终态卡直接引用刚结束的任务卡，并继续自动上传和发送最终总结显式引用的本地文档与压缩包。卡片折叠面板使用飞书主题自适应默认背景/文本色，需在亮色和暗色主题下保持可读。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
 
 ## 前置条件
 
@@ -216,12 +216,45 @@
 - 本地和远程 `tar.gz/tgz/tar.xz/tar.zst/7z/rar` 等显式链接被识别为文件附件；黑盒 E2E 的 `.txt` 与 `.tar.gz` 均真实调用上传并各发送一条文件消息。
 - 所有折叠面板均为 `background_color=default`，标题为 `text_color=default`；payload 不含固定 `grey`、黑白、十六进制或 RGB/RGBA 样式。亮色/暗色客户端均可读；无租户凭据时不伪造线上截图结论。
 
+### TC-FPC-12：过程卡与双终态卡原位渲染同一张图片
+
+**操作步骤**：
+1. 执行共享图片解析器和进度 Registry 聚焦测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib feishu_markdown::tests -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib progress_registry_ -- --nocapture
+   ```
+2. 使用当前 debug 二进制执行隔离 Service + mock Runner + loopback Feishu OpenAPI 黑盒回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+3. 检查当前环境是否具备真实租户凭据：
+   ```bash
+   for key in FEISHU_APP_ID FEISHU_APP_SECRET FEISHU_OWNER_OPEN_ID; do
+     [[ -n "${!key:-}" ]] && echo "$key=set" || echo "$key=missing"
+   done
+   ```
+   若三个变量均存在，再向测试会话投递一条包含本地 PNG 的过程事件和终态，分别查看运行态、原任务卡结论和独立终态卡；否则记录真实租户 UI 验证阻塞，不输出变量值、不伪造客户端渲染结论。
+
+**预期结果**：
+- 本地相对路径按 Runner work dir 解析，远程 HTTP 图片先下载再上传；既有 `img_*` 不重复上传，fenced code block 中的图片示例不上传，缺图只在原位置降级成“未能上传”文案。
+- 图片语法跨多个流式 delta 时，在闭合后按累计 Markdown 上传；远程响应超过 10 MiB 时在读取完整 body 前拒绝，不向飞书上传。
+- mock `/im/v1/images` 仅收到一次 `terminal-e2e-chart.png` multipart 上传，并返回 `img_v3_terminal_e2e`。
+- 运行中过程卡、原任务卡最终结论和独立 `Task completed` 终态卡的 Markdown 均包含 `![E2E chart](img_v3_terminal_e2e)`；原本地绝对路径不进入 CardKit payload。
+- 成功任务消息数仍为 4（progress、terminal、`.txt`、`.tar.gz`），失败任务消息数仍为 2；所有消息均无 `msg_type=image`，证明没有重复补发独立图片消息。
+- 普通 `.txt` 和 `.tar.gz` 仍分别调用 `/im/v1/files` 并发送 `msg_type=file`，图片内联不破坏非图片附件。
+- 无真实租户凭据时，本地完整 HTTP/CardKit payload 契约必须通过，并明确将飞书客户端肉眼渲染标记为未执行，而不是假设通过。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-11：PASS（第 2 轮 Review/Fix/Test）— 复查发现逐 delta 解析无法处理跨分片 `![alt](path)`，改为先合并进度快照再在 session mutex 外解析累计 Markdown，并补 `progress_registry_uploads_markdown_image_split_across_deltas`；同时把远程图片改为 Content-Length 预检 + 分片累计 10 MiB 硬限额，补超大响应回归。共享解析器 6 项、progress Registry 4 项、标准回复 1 项测试通过；重新构建当前 `target/debug/bifrost` 后，黑盒 E2E 再次 PASS，确认没有复用旧二进制造成假通过。
+
+- 2026-08-11：PASS（本地完整 HTTP/CardKit 链路）— 新增 TC-FPC-12 后立即逐条执行。共享图片解析器 5 项测试全部通过，覆盖既有 `img_*`、fenced code block、缺图降级、远程下载上传和缓存复用；progress Registry 3 项测试全部通过，确认本地相对路径按 work dir 上传后再更新卡片，同一文件复用上传结果。隔离 Bifrost + mock Runner + loopback Feishu OpenAPI 黑盒 E2E 通过：`terminal-e2e-chart.png` 只调用一次 `/im/v1/images`，运行中过程更新、原任务卡最终结论和独立成功终态卡都包含 `![E2E chart](img_v3_terminal_e2e)`；6 条成功/失败相关消息均无 `msg_type=image`，`.txt` 与 `.tar.gz` 仍各自上传并发送 `msg_type=file`。测试 trap 已清理所属临时目录和进程。当前环境的 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 已设置，但 `FEISHU_OWNER_OPEN_ID` 缺失，因此未向真实租户投递卡片，也未把 mock payload 验证表述为真实客户端肉眼渲染。
 
 - 2026-08-11：PASS（本地真实链路）— 更新 TC-FPC-11 后立即执行。4 个 focused Rust 用例全部通过，分别验证运行过程默认折叠、最新公开解释与当前轮工具三态计数、总体步骤/工具次数、Session ID 的“获取中/实时值/未提供”三态、standard/compact 卡片主题安全字段，以及本地/远程复合归档扩展名。`im_gateway_progress_card_budget_and_codex_resources` renderer E2E 通过，完整 CardKit JSON 小于 24KB，`agent_process_sum` 位于默认折叠的 `agent_process_panel` 前方，面板使用 `background_color=default` 与 `text_color=default`。隔离 Bifrost + mock Runner + loopback Feishu OpenAPI 黑盒 E2E 通过：成功/失败终态卡按预期更新，`.txt` 与 `.tar.gz` 两份显式链接均真实调用 `/im/v1/files` multipart 上传并各发送一条 `msg_type=file` 消息，所有进度卡 payload 不含固定 `grey`、黑白或 RGB/RGBA 样式。测试临时目录和所属进程已由 trap 清理。当前环境缺少 `FEISHU_OWNER_OPEN_ID`，未向真实租户投递测试卡，也未伪造亮/暗主题客户端截图；暗色兼容结论以飞书 CardKit 官方主题语义字段和完整 HTTP payload 契约为证据。
 

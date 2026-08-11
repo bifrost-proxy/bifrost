@@ -225,11 +225,15 @@ pub(super) async fn finish_external_runner_progress_and_notify(
     ctx: ExternalRunnerProgressFinishContext<'_>,
     finish: ExternalRunnerProgressFinish<'_>,
 ) {
+    let rendered_final_text = ctx
+        .progress_registry
+        .render_markdown_images(finish.session_key, finish.final_text, finish.work_dir)
+        .await;
     let progress_message = ctx
         .progress_registry
         .finish(
             finish.session_key,
-            Some(finish.final_text.to_string()),
+            Some(rendered_final_text.clone()),
             finish.failed,
         )
         .await;
@@ -255,7 +259,7 @@ pub(super) async fn finish_external_runner_progress_and_notify(
         ctx.provider,
         ctx.event,
         ExternalRunnerTerminalReply {
-            text: finish.final_text,
+            text: &rendered_final_text,
             failed: finish.failed,
             progress_message_id: progress_message
                 .as_ref()
