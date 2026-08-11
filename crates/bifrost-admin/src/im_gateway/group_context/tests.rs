@@ -1262,6 +1262,7 @@ fn feishu_anchor_and_thread_binding_are_provider_scoped_and_idempotent() {
         source_adapter: Some("codex".to_string()),
         source_thread_id: Some("external-a".to_string()),
         source_turn_id: Some("turn-a".to_string()),
+        trigger_message_id: "trigger-a".to_string(),
         initial_message: "start".to_string(),
         fallback_message: Some("root + start".to_string()),
         state: "initializing".to_string(),

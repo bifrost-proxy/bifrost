@@ -56,9 +56,9 @@
 
 ### TC-FTD-07：本机锚点自动认领与 transport 降级
 
-操作步骤：运行 `cargo test -p bifrost-admin local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch -- --nocapture` 和 `cargo test -p bifrost-admin only_supported_healthy_anchors_are_derivable -- --nocapture`。
+操作步骤：运行 `cargo test -p bifrost-admin local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch -- --nocapture`、`cargo test -p bifrost-admin topic_initialization_is_recovered_from_persisted_binding_after_restart -- --nocapture` 和 `cargo test -p bifrost-admin only_supported_healthy_anchors_are_derivable -- --nocapture`。
 
-预期结果：本机 app-server ready 锚点下的首条话题消息即使未 @ 当前 Bot、且飞书根消息读取不可用，也直接派生；exec/custom transport、失败锚点和 Traex 无 checkpoint 的 mutable source 均不可派生，降级为普通双消息路径。
+预期结果：本机 app-server ready 锚点下的首条话题消息即使未 @ 当前 Bot、且飞书根消息读取不可用，也直接派生；首条事件在进程重启后重投时从 SQLite 恢复同一派生初始化；exec/custom transport、失败锚点和 Traex 无 checkpoint 的 mutable source 均不可派生，降级为普通双消息路径。
 
 ### TC-FTD-08：Traex checkpoint 不启动新 turn
 

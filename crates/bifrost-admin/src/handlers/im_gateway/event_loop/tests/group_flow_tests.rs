@@ -154,6 +154,60 @@ async fn local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch() {
 }
 
 #[tokio::test]
+async fn topic_initialization_is_recovered_from_persisted_binding_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-topic-recovery".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    let mut event = group_test_event(&provider.id, "topic-trigger", "continue here", false, 2);
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-recovery".to_string());
+
+    {
+        let store = ImGroupContextStore::new(temp.path());
+        store
+            .upsert_feishu_message_anchor(
+                &crate::im_gateway::group_context::FeishuMessageAnchor {
+                    provider_id: provider.id.clone(),
+                    chat_id: "oc_group".to_string(),
+                    message_id: "root-card".to_string(),
+                    source_session_key: "source-session".to_string(),
+                    run_id: Some("run".to_string()),
+                    runner_id: "Codex".to_string(),
+                    adapter: "codex".to_string(),
+                    transport: "app_server".to_string(),
+                    external_thread_id: Some("codex-thread".to_string()),
+                    external_turn_id: Some("codex-turn".to_string()),
+                    checkpoint_thread_id: None,
+                    status: "ready".to_string(),
+                },
+                1,
+            )
+            .unwrap();
+        let first = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.message_text, "continue here");
+    }
+
+    let reopened = ImGroupContextStore::new(temp.path());
+    let recovered = prepare_group_inbound_dispatch(&client, &provider, &event, &reopened, false)
+        .await
+        .unwrap()
+        .expect("redelivered first topic event must recover initialization");
+    assert_eq!(recovered.message_text, "continue here");
+    assert_eq!(
+        recovered.thread_anchor_message_id.as_deref(),
+        Some("root-card")
+    );
+}
+
+#[tokio::test]
 async fn prepare_group_dispatch_surfaces_quoted_message_read_failures() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());

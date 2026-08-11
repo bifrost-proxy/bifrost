@@ -1114,7 +1114,9 @@ pub(super) async fn prepare_group_inbound_dispatch(
             store.feishu_thread_binding(&event.provider_id, chat_id, thread_id)?
         {
             store.record_event(event, "event")?;
-            let recovering = matches!(binding.state.as_str(), "waiting_source" | "initializing");
+            let recovering = event.source.message_id.as_deref()
+                == Some(binding.trigger_message_id.as_str())
+                && matches!(binding.state.as_str(), "waiting_source" | "initializing");
             return Ok(GroupInboundDispatch::Dispatch(PreparedInboundDispatch {
                 message_text: if recovering {
                     binding.initial_message.clone()
@@ -1246,6 +1248,7 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 source_adapter,
                 source_thread_id,
                 source_turn_id,
+                trigger_message_id: event.source.message_id.clone().unwrap_or_default(),
                 initial_message: message_text.clone(),
                 fallback_message: fallback_message.clone(),
                 state: if anchor

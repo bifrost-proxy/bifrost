@@ -144,6 +144,7 @@ pub struct FeishuThreadBinding {
     pub source_adapter: Option<String>,
     pub source_thread_id: Option<String>,
     pub source_turn_id: Option<String>,
+    pub trigger_message_id: String,
     pub initial_message: String,
     pub fallback_message: Option<String>,
     pub state: String,
@@ -292,9 +293,9 @@ impl ImGroupContextStore {
                 "INSERT INTO im_feishu_thread_bindings (
                 provider_id, chat_id, feishu_thread_id, root_message_id,
                 derived_session_key, source_kind, source_message_id, source_adapter,
-                source_thread_id, source_turn_id, initial_message, fallback_message,
-                state, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+                source_thread_id, source_turn_id, trigger_message_id, initial_message,
+                fallback_message, state, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
              ON CONFLICT(provider_id, chat_id, feishu_thread_id) DO NOTHING",
                 params![
                     binding.provider_id,
@@ -307,6 +308,7 @@ impl ImGroupContextStore {
                     binding.source_adapter,
                     binding.source_thread_id,
                     binding.source_turn_id,
+                    binding.trigger_message_id,
                     binding.initial_message,
                     binding.fallback_message,
                     binding.state,
@@ -334,7 +336,8 @@ impl ImGroupContextStore {
             .query_row(
                 "SELECT provider_id, chat_id, feishu_thread_id, root_message_id,
                     derived_session_key, source_kind, source_message_id, source_adapter,
-                    source_thread_id, source_turn_id, initial_message, fallback_message, state
+                    source_thread_id, source_turn_id, trigger_message_id, initial_message,
+                    fallback_message, state
              FROM im_feishu_thread_bindings
              WHERE provider_id = ?1 AND chat_id = ?2 AND feishu_thread_id = ?3",
                 params![provider_id, chat_id, thread_id],
@@ -350,9 +353,10 @@ impl ImGroupContextStore {
                         source_adapter: row.get(7)?,
                         source_thread_id: row.get(8)?,
                         source_turn_id: row.get(9)?,
-                        initial_message: row.get(10)?,
-                        fallback_message: row.get(11)?,
-                        state: row.get(12)?,
+                        trigger_message_id: row.get(10)?,
+                        initial_message: row.get(11)?,
+                        fallback_message: row.get(12)?,
+                        state: row.get(13)?,
                     })
                 },
             )
@@ -1393,6 +1397,7 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
                 source_adapter TEXT,
                 source_thread_id TEXT,
                 source_turn_id TEXT,
+                trigger_message_id TEXT NOT NULL DEFAULT '',
                 initial_message TEXT NOT NULL DEFAULT '',
                 fallback_message TEXT,
                 state TEXT NOT NULL,
@@ -1433,6 +1438,11 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
             "im_feishu_message_anchors",
             "transport",
             "ALTER TABLE im_feishu_message_anchors ADD COLUMN transport TEXT NOT NULL DEFAULT 'exec'",
+        ),
+        (
+            "im_feishu_thread_bindings",
+            "trigger_message_id",
+            "ALTER TABLE im_feishu_thread_bindings ADD COLUMN trigger_message_id TEXT NOT NULL DEFAULT ''",
         ),
         (
             "im_feishu_thread_bindings",

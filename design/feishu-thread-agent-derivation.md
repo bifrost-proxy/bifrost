@@ -23,7 +23,7 @@
 - `im_feishu_thread_bindings`：把飞书 `thread_id` 绑定到独立 Bifrost session，记录来源是本地 checkpoint 或普通消息，并保存初始化/等待/就绪/失败状态。
 
 锚点按 `(provider_id, message_id)` 唯一；话题绑定按
-`(provider_id, chat_id, feishu_thread_id)` 唯一。所有初始化操作使用 SQLite 事务和 upsert，事件重投不会创建第二个 Agent session。
+`(provider_id, chat_id, feishu_thread_id)` 唯一。binding 通过唯一约束下的原子 insert 认领并读回既有记录；anchor 使用 upsert。事件重投不会创建第二个 Agent session。
 
 话题消息仍写入群消息账本，便于审计和根消息读取，但主群增量上下文查询明确排除 `thread_id IS NOT NULL` 的记录，话题不推进主群上下文游标。
 
