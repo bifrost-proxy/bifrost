@@ -356,8 +356,8 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
     initial_progress="$(cat "${TEST_DATA_DIR}/upgrade-progress.json" 2>/dev/null || true)"
     phase="$(json_field "$initial_progress" phase)"
     source="$(json_field "$initial_progress" source)"
-    if [[ "$phase" != "checking" && "$phase" != "downloading" && "$phase" != "installing" && "$phase" != "restarting" ]]; then
-        _log_fail "delegated upgrade writes active progress" "active phase" "$phase ($initial_progress)"
+    if [[ "$phase" != "checking" && "$phase" != "downloading" && "$phase" != "installing" && "$phase" != "restarting" && "$phase" != "completed" ]]; then
+        _log_fail "delegated upgrade writes active or completed progress" "active/completed phase" "$phase ($initial_progress)"
         return 1
     fi
     assert_equals "admin" "$source" "delegated upgrade records source=admin" || return 1

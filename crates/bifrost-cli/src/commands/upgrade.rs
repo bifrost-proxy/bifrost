@@ -556,6 +556,8 @@ fn command_output_with_timeout_and_env_inner(
         .unwrap_or_default();
     let mut output_capture = StreamedOutputCapture::new().map_err(BifrostError::Io)?;
     let mut command = Command::new(program);
+    command.env_remove(super::upgrade_background::PARENT_UPGRADE_LOCK_TOKEN_ENV);
+    command.env_remove(super::upgrade_background::PARENT_UPGRADE_LOCK_OWNER_PID_ENV);
     command
         .args(args)
         .envs(parent_lock_environment)

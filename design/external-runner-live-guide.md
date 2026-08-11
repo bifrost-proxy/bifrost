@@ -157,12 +157,14 @@ other adapter                          -> existing transport
 
 因此 `bifrost upgrade` 在检测到 `BIFROST_EXTERNAL_CLI_WORKER=1` 时必须在获取本地 upgrade lock 或执行任何安装动作之前改变编排方式：
 
-1. 从当前 data dir 的 `runtime.json` 读取 owner PID 和 Admin 端口，并确认 owner 仍存活；
-2. 通过 loopback 直连请求 `POST /_bifrost/api/system/upgrade?channel=cli`；
+1. 从当前 data dir 的 `runtime.json` 读取 owner PID、启动时间、启动模式和 Admin 端口，并用 Admin overview 的 PID、端口、启动时间共同确认 owner 身份，拒绝 PID 复用后的陈旧 runtime；
+2. 通过 loopback 直连请求 Admin upgrade；CLI-owned core 使用 `channel=cli`，Desktop-owned core 通过共享 data dir 签发短时一次性 origin token 并使用 `channel=desktop`，复用现有 Desktop handoff；Admin 将聚合版本检查限制为 40 秒，worker 使用 45 秒请求超时，确保客户端预算严格覆盖服务端预算；
 3. Admin 使用既有 detached `bifrost self-update --source admin` 编排器启动升级；该进程不属于 external run 的 process group，能在 daemon 回收 Codex 后继续完成安装和重启；
-4. CLI 收到 `202 Accepted` 后只报告“已安排升级”并退出，不等待重启完成；`409 No update available` 和 `409 An upgrade is already in progress` 作为幂等成功返回。
+4. CLI 收到 `202 Accepted` 后只报告“已安排升级”并退出，不等待重启完成；`409 No update available` 和 `409 An upgrade is already in progress` 作为幂等成功返回；版本查询没有解析出 `latest_version` 时 Admin 返回独立的 `503`，worker 不会误报“已是最新”。
 
 这一委托必须 fail closed：runtime 缺失、owner 已退出、Admin 不可达或返回未知错误时，CLI 返回明确错误并保留当前服务，禁止回退到进程树内 inline upgrade。隐藏的 `self-update` 子命令继续直接进入 background handler，不读取该分支，避免 Admin 派生的 updater 再次委托形成循环。
+
+worker 继承的 parent upgrade-lock token/PID 只用于当前受管升级链路。所有普通 upgrade helper 的 `Command` 边界先移除 ambient credential；只有显式指定 parent lock data dir 的 managed companion 才从当前 owner sidecar 重新解析并注入凭据，避免任意子进程意外继承升级锁权限。
 
 Linux 的传统 daemon 路径使用 `fork` 而不是 `Command`，因此在 fork child 进入长期运行前直接 `remove_var` 清除该角色标记；生产 dispatch 同时不再读取 ambient marker，形成进程环境与调度语义两层隔离。由 Tray 创建 Linux 服务时，Tray 的 command 边界仍会清除该变量。
 
