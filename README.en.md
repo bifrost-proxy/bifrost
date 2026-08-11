@@ -17,7 +17,6 @@
 
 Bifrost is a high-performance, AI-friendly proxy server written in Rust and inspired by [Whistle](https://github.com/avwo/whistle). It provides request interception, rule-based modification, TLS MITM, script extensions, traffic inspection, request replay, and Web UI management.
 
-The Feishu IM Gateway supports multiple independent bot/Agent threads in one group: slash commands without an `@` mention are broadcast to each bot, while an explicit bot mention is consumed only by that bot. Replies can recover visible text from historical text messages, interactive cards, and CardKit output through Feishu's message-read API. Bare `/q`, `/pwd`, and `/runner` query the current thread queue, working directory, and effective Runner. Group sessions, context cursors, and bindings are persisted in SQLite instead of relying on shared process memory. See [`docs-en/cli.md`](docs-en/cli.md#im-gateway) for commands and required permissions.
 
 ## Quick Start
 
