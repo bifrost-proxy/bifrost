@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hyper::StatusCode;
+
 use super::cli_binary_name;
 
 const CLI_VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -300,6 +302,23 @@ pub(super) enum UpgradeTargetError {
     Current,
 }
 
+impl UpgradeTargetError {
+    pub(super) fn status(self) -> StatusCode {
+        match self {
+            Self::Timeout | Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Current => StatusCode::CONFLICT,
+        }
+    }
+
+    pub(super) fn message(self) -> &'static str {
+        match self {
+            Self::Timeout => "Timed out while checking the latest Bifrost version",
+            Self::Unavailable => "Unable to determine the latest Bifrost version",
+            Self::Current => "No update available",
+        }
+    }
+}
+
 pub(super) async fn resolve_upgrade_target<F>(
     version_check: F,
     timeout: Duration,
@@ -349,6 +368,8 @@ mod tests {
         .await
         .expect_err("current version remains a conflict");
         assert_eq!(current, UpgradeTargetError::Current);
+        assert_eq!(current.status(), StatusCode::CONFLICT);
+        assert_eq!(current.message(), "No update available");
 
         let unavailable = resolve_upgrade_target(
             std::future::ready(version_response(None, false)),
@@ -357,6 +378,11 @@ mod tests {
         .await
         .expect_err("missing metadata remains unavailable");
         assert_eq!(unavailable, UpgradeTargetError::Unavailable);
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            unavailable.message(),
+            "Unable to determine the latest Bifrost version"
+        );
 
         let timeout = resolve_upgrade_target(
             std::future::pending::<crate::VersionCheckResponse>(),
@@ -365,6 +391,11 @@ mod tests {
         .await
         .expect_err("pending version check must time out");
         assert_eq!(timeout, UpgradeTargetError::Timeout);
+        assert_eq!(timeout.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            timeout.message(),
+            "Timed out while checking the latest Bifrost version"
+        );
     }
 
     #[cfg(target_os = "macos")]

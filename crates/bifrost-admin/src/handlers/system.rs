@@ -33,7 +33,7 @@ use crate::state::SharedAdminState;
 mod version_companion;
 use version_companion::{
     desktop_app_version_for_version_check, resolve_upgrade_target,
-    standalone_cli_version_for_version_check, UpgradeTargetError,
+    standalone_cli_version_for_version_check,
 };
 
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -313,21 +313,7 @@ async fn start_upgrade(
     .await
     {
         Ok(target) => target,
-        Err(UpgradeTargetError::Timeout) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Timed out while checking the latest Bifrost version",
-            )
-        }
-        Err(UpgradeTargetError::Unavailable) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Unable to determine the latest Bifrost version",
-            )
-        }
-        Err(UpgradeTargetError::Current) => {
-            return error_response(StatusCode::CONFLICT, "No update available")
-        }
+        Err(error) => return error_response(error.status(), error.message()),
     };
 
     // Seed the channel so the Web UI sees movement immediately, before the
