@@ -1361,7 +1361,7 @@ fn feishu_anchor_and_thread_binding_are_provider_scoped_and_idempotent() {
 }
 
 #[test]
-fn pending_thread_recovery_is_atomically_claimed_once_per_process() {
+fn pending_thread_recovery_is_process_safe_and_released_per_loop() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
     let binding = FeishuThreadBinding {
@@ -1385,19 +1385,156 @@ fn pending_thread_recovery_is_atomically_claimed_once_per_process() {
 
     assert_eq!(
         store
-            .claim_pending_feishu_thread_bindings("provider-a", 2)
+            .claim_pending_feishu_thread_bindings("provider-a", "loop-a", 2)
             .unwrap()
             .len(),
         1
     );
     assert!(store
-        .claim_pending_feishu_thread_bindings("provider-a", 3)
+        .claim_pending_feishu_thread_bindings("provider-a", "loop-a", 3)
         .unwrap()
         .is_empty());
     assert!(store
-        .claim_pending_feishu_thread_bindings("provider-b", 3)
+        .claim_pending_feishu_thread_bindings("provider-b", "loop-a", 3)
         .unwrap()
         .is_empty());
+    assert!(store
+        .claim_pending_feishu_thread_bindings("provider-a", "loop-b", 4)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .release_feishu_thread_recovery_claims("provider-a", "loop-b", 5)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .release_feishu_thread_recovery_claims("provider-a", "loop-a", 6)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .claim_pending_feishu_thread_bindings("provider-a", "loop-c", 7)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    rusqlite::Connection::open(store.file_path())
+        .unwrap()
+        .execute(
+            "UPDATE im_feishu_thread_bindings
+             SET state = 'recovering', recovery_token = 'foreign-process:loop-z:claim'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_pending_feishu_thread_bindings("provider-a", "loop-d", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn topic_sessions_persist_runner_work_dir_and_resolve_group_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let mut event = group_event("message-a", "chat-a", "sender-a", "hello", Vec::new(), 1);
+    event.provider_id = "provider-a".to_string();
+    store.record_event(&event, "event").unwrap();
+    let group_session = build_group_session_key("provider-a", "chat-a");
+    store
+        .set_work_dir_by_session(&group_session, "/tmp/group-work")
+        .unwrap();
+    store
+        .set_runner_id_by_session(&group_session, "codex-group")
+        .unwrap();
+
+    let topic_session = build_group_thread_session_key("provider-a", "chat-a", "topic-a");
+    let binding = FeishuThreadBinding {
+        provider_id: "provider-a".to_string(),
+        chat_id: "chat-a".to_string(),
+        feishu_thread_id: "topic-a".to_string(),
+        root_message_id: "root-a".to_string(),
+        derived_session_key: topic_session.clone(),
+        source_kind: "local_checkpoint".to_string(),
+        source_message_id: "root-a".to_string(),
+        source_adapter: Some("codex".to_string()),
+        source_thread_id: Some("thread-a".to_string()),
+        source_turn_id: Some("turn-a".to_string()),
+        trigger_message_id: "trigger-a".to_string(),
+        initial_message: "continue".to_string(),
+        fallback_message: None,
+        initial_event_json: None,
+        state: "initializing".to_string(),
+    };
+    store.claim_feishu_thread_binding(&binding, 2).unwrap();
+    store
+        .initialize_feishu_thread_session_settings(
+            "provider-a",
+            "chat-a",
+            &topic_session,
+            Some("codex-source"),
+            3,
+        )
+        .unwrap();
+    assert_eq!(
+        store.work_dir_by_session(&topic_session).unwrap(),
+        Some(std::path::PathBuf::from("/tmp/group-work"))
+    );
+    assert_eq!(
+        store
+            .runner_id_by_session(&topic_session)
+            .unwrap()
+            .as_deref(),
+        Some("codex-source")
+    );
+    assert_eq!(
+        store
+            .binding_by_session(&topic_session)
+            .unwrap()
+            .unwrap()
+            .chat_id,
+        "chat-a"
+    );
+
+    store
+        .set_work_dir_by_session(&topic_session, "/tmp/topic-work")
+        .unwrap();
+    store
+        .set_runner_id_by_session(&topic_session, "traex-topic")
+        .unwrap();
+    store
+        .initialize_feishu_thread_session_settings(
+            "provider-a",
+            "chat-a",
+            &topic_session,
+            Some("codex-source-newer"),
+            4,
+        )
+        .unwrap();
+    assert_eq!(
+        store.work_dir_by_session(&topic_session).unwrap(),
+        Some(std::path::PathBuf::from("/tmp/topic-work"))
+    );
+    assert_eq!(
+        store
+            .runner_id_by_session(&topic_session)
+            .unwrap()
+            .as_deref(),
+        Some("traex-topic")
+    );
+    assert_eq!(
+        store
+            .runner_id_by_session(&group_session)
+            .unwrap()
+            .as_deref(),
+        Some("codex-group")
+    );
 }
 
 #[test]
@@ -1424,7 +1561,7 @@ fn topic_binding_state_update_clears_recovery_claim_and_persists_terminal_state(
     store.claim_feishu_thread_binding(&binding, 1).unwrap();
     assert_eq!(
         store
-            .claim_pending_feishu_thread_bindings("provider-a", 2)
+            .claim_pending_feishu_thread_bindings("provider-a", "loop-a", 2)
             .unwrap()
             .len(),
         1

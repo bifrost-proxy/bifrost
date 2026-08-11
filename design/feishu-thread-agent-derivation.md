@@ -61,6 +61,8 @@ Traex 的 `thread/fork` 没有 `lastTurnId`。每轮终态、源会话开始下�
 - 本地锚点已失败：降级为普通双消息 fresh start，并记录降级原因。
 - 等待中的源运行失败：将话题 binding 标记失败并给用户明确反馈；不复制部分历史。
 - 进程重启：SQLite 中的 binding/anchor/pending 状态恢复；初始化状态可幂等重试。
+- 启动恢复租约由“进程 owner + event-loop owner”共同标识：同进程的新旧 loop 短暂重叠时不互抢，旧 loop 正常退出会释放未完成租约；新进程可立即接管旧进程遗留的 `recovering` 记录。
+- 话题 session 独立持久化 Runner 与工作目录；首次派生继承来源 Runner 和主群工作目录，后续 `/runner`、`/cwd` 只修改话题自身，重复初始化也不会覆盖话题已经选择的配置。
 - Claude Code：不声称已验证，能力查询为 unavailable；未来只需实现 capability 与 fork primitive，不改飞书路由。
 
 ## 验证
