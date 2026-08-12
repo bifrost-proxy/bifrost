@@ -644,6 +644,91 @@ async fn media_download_rejects_disallowed_redirect_before_following() {
 }
 
 #[tokio::test]
+async fn media_download_rejects_malformed_and_excessive_redirects() {
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+
+    async fn redirect_error(location: Option<&'static str>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(move |_request: Request<Incoming>| async move {
+                let mut response = Response::builder().status(302);
+                if let Some(location) = location {
+                    response = response.header("location", location);
+                }
+                Ok::<_, hyper::Error>(response.body(Full::new(Bytes::new())).unwrap())
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+        let data_dir = tempfile::tempdir().unwrap();
+        let provider = WeixinProvider::new_with_data_dir(data_dir.path());
+        let mut config = test_provider();
+        config.base_url = Some(format!("http://127.0.0.1:{port}"));
+        provider
+            .download_and_decrypt_media(
+                &config,
+                Some(&format!("http://127.0.0.1:{port}/redirect")),
+                None,
+                None,
+                "redirect",
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+    }
+
+    let missing = redirect_error(None).await;
+    assert!(missing.contains("omitted Location"), "{missing}");
+    let invalid = redirect_error(Some("http://[::1")).await;
+    assert!(invalid.contains("redirect URL is invalid"), "{invalid}");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        for _ in 0..6 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|_request: Request<Incoming>| async move {
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(302)
+                        .header("location", "/loop")
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        }
+    });
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
+    let mut config = test_provider();
+    config.base_url = Some(format!("http://127.0.0.1:{port}"));
+    let excessive = provider
+        .download_and_decrypt_media(
+            &config,
+            Some(&format!("http://127.0.0.1:{port}/loop")),
+            None,
+            None,
+            "loop",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(excessive.contains("exceeded redirect limit"), "{excessive}");
+}
+
+#[tokio::test]
 async fn download_message_image_resource_fetches_plain_full_url() {
     use bytes::Bytes;
     use http_body_util::Full;

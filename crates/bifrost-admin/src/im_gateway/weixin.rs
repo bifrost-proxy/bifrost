@@ -1932,15 +1932,9 @@ impl WeixinProvider {
                     "weixin media {label} has no download URL or CDN query param"
                 ))
             })?;
-        Self::validate_media_download_url(config, &url)?;
-        let mut current_url = reqwest::Url::parse(&url).map_err(|error| {
-            bifrost_core::BifrostError::Config(format!(
-                "weixin media download URL is invalid: {error}"
-            ))
-        })?;
+        let mut current_url = Self::validate_media_download_url(config, &url)?;
         let mut redirect_count = 0usize;
         let response = loop {
-            Self::validate_media_download_url(config, current_url.as_str())?;
             let response = self
                 .media_http
                 .get(current_url.clone())
@@ -1969,12 +1963,12 @@ impl WeixinProvider {
                         "weixin media {label} redirect omitted Location"
                     ))
                 })?;
-            current_url = current_url.join(location).map_err(|error| {
+            let next_url = current_url.join(location).map_err(|error| {
                 bifrost_core::BifrostError::Config(format!(
                     "weixin media {label} redirect URL is invalid: {error}"
                 ))
             })?;
-            Self::validate_media_download_url(config, current_url.as_str())?;
+            current_url = Self::validate_media_download_url(config, next_url.as_str())?;
         };
         let status = response.status();
         let header_mime = response
@@ -2024,7 +2018,7 @@ impl WeixinProvider {
         Ok((header_mime, bytes))
     }
 
-    fn validate_media_download_url(config: &ImProviderConfig, url: &str) -> Result<()> {
+    fn validate_media_download_url(config: &ImProviderConfig, url: &str) -> Result<reqwest::Url> {
         let parsed = reqwest::Url::parse(url).map_err(|error| {
             bifrost_core::BifrostError::Config(format!(
                 "weixin media download URL is invalid: {error}"
@@ -2038,7 +2032,7 @@ impl WeixinProvider {
             .and_then(|url| url.host_str().map(str::to_string))
             .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"));
         if official_cdn || (loopback && base_is_loopback) {
-            return Ok(());
+            return Ok(parsed);
         }
         Err(bifrost_core::BifrostError::Config(
             "weixin media download URL host is not allowed".to_string(),
