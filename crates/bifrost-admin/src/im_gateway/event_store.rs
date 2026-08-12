@@ -31,9 +31,10 @@ impl ImEventStore {
             version: STORE_VERSION,
             events: Vec::new(),
         });
-        let removed_legacy_credentials = data.events.iter_mut().fold(false, |changed, event| {
-            redact_event_for_history_in_place(event) || changed
-        });
+        let mut removed_legacy_credentials = false;
+        for event in &mut data.events {
+            removed_legacy_credentials |= redact_event_for_history_in_place(event);
+        }
         let store = Self {
             file_path,
             data: RwLock::new(data),
