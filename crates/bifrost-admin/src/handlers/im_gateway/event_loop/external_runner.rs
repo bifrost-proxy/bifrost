@@ -429,13 +429,13 @@ mod weixin_companion_tests {
         tx.send(weixin_event("slash", "/pwd", Vec::new())).unwrap();
         drop(tx);
 
-        // Make the event-store parent unwritable as a directory. Coalescing is
-        // best-effort persistence and must still deliver the combined input.
+        // Block only the event-store file path. Removing the whole admin
+        // directory races with other stores that keep files open on Windows.
+        // Coalescing persistence is best-effort and must still deliver input.
         let admin_path = temp.path().join("admin");
-        if admin_path.exists() {
-            std::fs::remove_dir_all(&admin_path).expect("remove event-store directory");
-        }
-        std::fs::write(&admin_path, b"not a directory").expect("block event-store directory");
+        std::fs::create_dir_all(&admin_path).expect("create event-store directory");
+        std::fs::create_dir(admin_path.join("im_gateway_events.json"))
+            .expect("block event-store file path");
 
         let mut input = input(IMAGE_ONLY_AGENT_PROMPT);
         let mut ctx = ExternalCliChatContext {
