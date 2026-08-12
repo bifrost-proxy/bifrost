@@ -529,6 +529,16 @@ mod tests {
         assert!(store.pending.read().entries.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pending_store_file_hardening_and_directory_sync_report_missing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+
+        assert!(harden_private_file(&missing).is_err());
+        assert!(sync_directory(&missing).is_err());
+    }
+
     #[test]
     fn pending_completion_keeps_event_when_ack_persistence_fails() {
         let temp = tempfile::tempdir().unwrap();
