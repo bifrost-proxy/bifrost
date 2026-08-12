@@ -79,27 +79,10 @@ impl WeixinSyncCursorStore {
                 parent.display()
             )))
         })?;
-        let bytes = serde_json::to_vec_pretty(data).map_err(|error| {
-            BifrostError::Config(format!("serialize weixin sync cursor store: {error}"))
-        })?;
-        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
-            BifrostError::Io(std::io::Error::other(format!(
-                "open temporary weixin sync cursor store in {}: {error}",
-                parent.display()
-            )))
-        })?;
-        temporary.write_all(&bytes).map_err(|error| {
-            BifrostError::Io(std::io::Error::other(format!(
-                "write weixin sync cursor store {}: {error}",
-                temporary.path().display()
-            )))
-        })?;
-        temporary.as_file().sync_all().map_err(|error| {
-            BifrostError::Io(std::io::Error::other(format!(
-                "sync weixin sync cursor store {}: {error}",
-                temporary.path().display()
-            )))
-        })?;
+        let bytes = serde_json::to_vec_pretty(data)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
         harden_private_file(temporary.path())?;
         temporary.persist(&self.path).map_err(|error| {
             BifrostError::Io(std::io::Error::other(format!(
