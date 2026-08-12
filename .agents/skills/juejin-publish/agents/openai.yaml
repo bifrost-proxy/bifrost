@@ -1,0 +1,4 @@
+interface:
+  display_name: "Juejin Publisher"
+  short_description: "Publish and verify Bifrost articles on Juejin"
+  default_prompt: "Use $juejin-publish to safely publish this Bifrost article and verify the live page with Microsoft Edge."
