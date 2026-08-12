@@ -69,16 +69,16 @@ async fn collect_weixin_companion_events(
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(remaining_ms);
     let mut events = Vec::new();
-    loop {
-        match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) | Err(_) => break,
-        }
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        events.push(event);
     }
     events
 }
 
 #[cfg(test)]
+// These focused tests stay next to the companion-window helpers so their
+// timing contract remains reviewable without moving the production pipeline.
+#[allow(clippy::items_after_test_module)]
 mod weixin_companion_tests {
     use super::*;
 
