@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -16,8 +16,9 @@ use bifrost_core::Result;
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ConnectionState, ImEvent, ImEventMessage, ImEventSource, ImFileAttachment,
-    ImImageAttachment, ImImageSource, ImMention, ImProviderConfig, ImProviderType, ImTarget,
-    ProviderValidation, SendOptions, SendResult, UploadedImage,
+    ImImageAttachment, ImImageSource, ImMention, ImProviderConfig, ImProviderType,
+    ImSendCapabilities, ImSendPartCapability, ImSendSupportLevel, ImTarget, ProviderValidation,
+    SendOptions, SendResult, UploadedImage,
 };
 
 mod message_read;
@@ -615,6 +616,35 @@ impl ImProvider for FeishuProvider {
         ImProviderType::Feishu
     }
 
+    fn send_capabilities(&self, config: &ImProviderConfig) -> ImSendCapabilities {
+        let native = |max_bytes| ImSendPartCapability {
+            support: ImSendSupportLevel::Native,
+            delivered_as: None,
+            max_bytes,
+            reason: None,
+        };
+        ImSendCapabilities {
+            provider_id: config.id.clone(),
+            provider_type: config.provider_type,
+            destinations: vec!["owner".into(), "target".into(), "direct".into()],
+            receive_id_types: vec![
+                "chat_id".into(),
+                "open_id".into(),
+                "user_id".into(),
+                "union_id".into(),
+                "email".into(),
+            ],
+            parts: BTreeMap::from([
+                ("text".into(), native(None)),
+                ("markdown".into(), native(None)),
+                ("image".into(), native(Some(10 * 1024 * 1024))),
+                ("file".into(), native(Some(30 * 1024 * 1024))),
+                ("native_card".into(), native(None)),
+            ]),
+            requires_context: false,
+        }
+    }
+
     async fn validate_config(&self, config: &ImProviderConfig) -> Result<ProviderValidation> {
         let mut errors = Vec::new();
 
@@ -673,6 +703,10 @@ impl ImProvider for FeishuProvider {
         target: &ImTarget,
         text: &str,
     ) -> Result<SendResult> {
+        self.send_text_with_uuid(config, target, text, None).await
+    }
+
+    #[rustfmt::skip]    async fn send_text_with_uuid(&self, config: &ImProviderConfig, target: &ImTarget, text: &str, uuid: Option<&str>) -> Result<SendResult> {
         let base_url = Self::base_url(config);
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
         let token = self.get_tenant_token(config, app_secret).await?;
@@ -689,7 +723,7 @@ impl ImProvider for FeishuProvider {
             &target.receive_id,
             "interactive",
             &content,
-            None,
+            uuid,
         )
         .await
     }
@@ -728,6 +762,18 @@ impl ImProvider for FeishuProvider {
             uuid,
         )
         .await
+    }
+
+    #[rustfmt::skip]    async fn upload_file(&self, config: &ImProviderConfig, file_name: &str, bytes: Vec<u8>, mime_type: Option<&str>) -> Result<String> {
+        FeishuProvider::upload_file(self, config, file_name, bytes, mime_type).await
+    }
+
+    #[rustfmt::skip]    async fn send_file(&self, config: &ImProviderConfig, target: &ImTarget, file_key: &str, uuid: Option<&str>) -> Result<SendResult> {
+        FeishuProvider::send_file(self, config, target, file_key, uuid).await
+    }
+
+    #[rustfmt::skip]    async fn send_native_card(&self, config: &ImProviderConfig, target: &ImTarget, card: serde_json::Value, opts: SendOptions) -> Result<SendResult> {
+        self.send_card_preserving_header(config, target, card, opts).await
     }
 }
 

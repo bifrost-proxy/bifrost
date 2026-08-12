@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,8 +17,8 @@ use bifrost_core::Result;
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment, ImImageSource,
-    ImMessageReference, ImProviderConfig, ImProviderType, ImTarget, ProviderValidation,
-    SendOptions, SendResult, UploadedImage,
+    ImMessageReference, ImProviderConfig, ImProviderType, ImSendCapabilities, ImSendPartCapability,
+    ImSendSupportLevel, ImTarget, ProviderValidation, SendOptions, SendResult, UploadedImage,
 };
 use crate::im_gateway::weixin_context_store::WeixinContextStore;
 
@@ -1233,6 +1233,51 @@ impl ImProvider for WeixinProvider {
         ImProviderType::Weixin
     }
 
+    fn send_capabilities(&self, config: &ImProviderConfig) -> ImSendCapabilities {
+        let native = |max_bytes| ImSendPartCapability {
+            support: ImSendSupportLevel::Native,
+            delivered_as: None,
+            max_bytes,
+            reason: None,
+        };
+        let unsupported = |reason: &str| ImSendPartCapability {
+            support: ImSendSupportLevel::Unsupported,
+            delivered_as: None,
+            max_bytes: None,
+            reason: Some(reason.to_string()),
+        };
+        ImSendCapabilities {
+            provider_id: config.id.clone(),
+            provider_type: config.provider_type,
+            destinations: vec!["owner".into(), "target".into(), "direct".into()],
+            receive_id_types: vec!["open_id".into()],
+            parts: BTreeMap::from([
+                ("text".into(), native(None)),
+                (
+                    "markdown".into(),
+                    ImSendPartCapability {
+                        support: ImSendSupportLevel::Degraded,
+                        delivered_as: Some("text".into()),
+                        max_bytes: None,
+                        reason: Some("Weixin renders Markdown as readable plain text".to_string()),
+                    },
+                ),
+                ("image".into(), native(Some(10 * 1024 * 1024))),
+                (
+                    "file".into(),
+                    unsupported(
+                        "Weixin generic file sending is not verified by the iLink protocol",
+                    ),
+                ),
+                (
+                    "native_card".into(),
+                    unsupported("Weixin does not support Feishu native cards"),
+                ),
+            ]),
+            requires_context: true,
+        }
+    }
+
     async fn validate_config(&self, config: &ImProviderConfig) -> Result<ProviderValidation> {
         let mut errors = Vec::new();
         if config.secret_ref.as_deref().unwrap_or_default().is_empty() {
@@ -1413,6 +1458,18 @@ impl ImProvider for WeixinProvider {
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
         })
+    }
+
+    async fn send_native_card(
+        &self,
+        _config: &ImProviderConfig,
+        _target: &ImTarget,
+        _card: serde_json::Value,
+        _opts: SendOptions,
+    ) -> Result<SendResult> {
+        Err(bifrost_core::BifrostError::Config(
+            "weixin provider does not support native cards".to_string(),
+        ))
     }
 }
 

@@ -5,11 +5,89 @@ use http_body_util::Full;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+
+struct DefaultMethodProvider;
+
+#[async_trait::async_trait]
+impl crate::im_gateway::provider::ImProvider for DefaultMethodProvider {
+    fn provider_type(&self) -> ImProviderType {
+        ImProviderType::Webhook
+    }
+
+    fn send_capabilities(
+        &self,
+        _config: &ImProviderConfig,
+    ) -> crate::im_gateway::types::ImSendCapabilities {
+        crate::im_gateway::types::ImSendCapabilities {
+            provider_id: "test".to_string(),
+            provider_type: ImProviderType::Webhook,
+            destinations: Vec::new(),
+            receive_id_types: Vec::new(),
+            parts: Default::default(),
+            requires_context: false,
+        }
+    }
+
+    async fn validate_config(
+        &self,
+        _config: &ImProviderConfig,
+    ) -> bifrost_core::Result<crate::im_gateway::types::ProviderValidation> {
+        unreachable!("not used")
+    }
+
+    async fn connect_events(
+        &self,
+        _config: &ImProviderConfig,
+        _sink: crate::im_gateway::provider::EventSink,
+    ) -> bifrost_core::Result<crate::im_gateway::types::ConnectionHandle> {
+        unreachable!("not used")
+    }
+
+    async fn send_card(
+        &self,
+        _config: &ImProviderConfig,
+        _target: &ImTarget,
+        _card: serde_json::Value,
+        _opts: crate::im_gateway::types::SendOptions,
+    ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        Err(bifrost_core::BifrostError::Config("card".to_string()))
+    }
+
+    async fn send_text(
+        &self,
+        _config: &ImProviderConfig,
+        _target: &ImTarget,
+        _text: &str,
+    ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        Err(bifrost_core::BifrostError::Config("text".to_string()))
+    }
+
+    async fn upload_image(
+        &self,
+        _config: &ImProviderConfig,
+        _image_type: &str,
+        _file_name: &str,
+        _bytes: Vec<u8>,
+        _mime_type: Option<&str>,
+    ) -> bifrost_core::Result<crate::im_gateway::types::UploadedImage> {
+        unreachable!("not used")
+    }
+
+    async fn send_image(
+        &self,
+        _config: &ImProviderConfig,
+        _target: &ImTarget,
+        _image_key: &str,
+        _uuid: Option<&str>,
+    ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        unreachable!("not used")
+    }
+}
 
 mod busy_message_mode_tests;
 
-static IM_GATEWAY_TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static IM_GATEWAY_TEST_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 pub(super) struct EnvGuard {
     _guard: crate::test_env::BifrostDataDirGuard,
@@ -366,9 +444,8 @@ pub(super) fn online_notification_context_resolves_external_runner_adapter_and_t
 #[test]
 pub(super) fn online_notification_context_resolves_claude_code_settings_effort() {
     let _env_lock = IM_GATEWAY_TEST_ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap();
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .blocking_lock();
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let home = tempfile::tempdir().expect("home dir");
     let claude_home = home.path().join(".claude");
@@ -2156,6 +2233,137 @@ pub(super) fn test_provider() -> ImProviderConfig {
     }
 }
 
+#[test]
+pub(super) fn provider_resolve_by_feishu_bot_id_and_name_is_exact_and_unambiguous() {
+    let primary = test_provider();
+    let mut duplicate_name = test_provider();
+    duplicate_name.id = "feishu-secondary".to_string();
+    duplicate_name.app_id = Some("cli_secondary".to_string());
+    let mut disabled = test_provider();
+    disabled.id = "feishu-disabled".to_string();
+    disabled.app_id = Some("cli_disabled".to_string());
+    disabled.display_name = "Disabled Bot".to_string();
+    disabled.enabled = false;
+    let mut weixin = test_provider();
+    weixin.id = "weixin-main".to_string();
+    weixin.provider_type = ImProviderType::Weixin;
+    weixin.app_id = Some("cli_weixin".to_string());
+
+    let providers = vec![primary, duplicate_name, disabled, weixin];
+    let resolved = resolve_feishu_provider_by_bot(
+        providers.clone(),
+        Some(" cli_secondary "),
+        Some(" Feishu Main "),
+    )
+    .expect("bot ID and name should resolve the same provider");
+    assert_eq!(resolved.id, "feishu-secondary");
+
+    let (status, message) =
+        resolve_feishu_provider_by_bot(providers.clone(), None, Some("Feishu Main"))
+            .expect_err("duplicate display names must be ambiguous");
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(message.contains("multiple enabled Feishu providers"));
+
+    let (status, _) = resolve_feishu_provider_by_bot(providers.clone(), None, None)
+        .expect_err("empty selector must fail");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = resolve_feishu_provider_by_bot(providers, Some("cli_disabled"), None)
+        .expect_err("disabled providers must not resolve");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn provider_resolve_endpoint_covers_success_and_rejection_matrix() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let primary = test_provider();
+    service
+        .provider_store
+        .add(primary.clone())
+        .expect("save primary provider");
+    let mut duplicate_name = primary;
+    duplicate_name.id = "feishu-secondary".to_string();
+    duplicate_name.app_id = Some("cli_secondary".to_string());
+    service
+        .provider_store
+        .add(duplicate_name)
+        .expect("save duplicate-name provider");
+    let client = reqwest::Client::new();
+
+    let (address, server) = spawn_im_gateway_http(Arc::clone(&service)).await;
+    let response = client
+        .post(format!("http://{address}/api/im-gateway/providers/resolve"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "bot_id": "cli_xxx",
+            "bot_name": "Feishu Main"
+        }))
+        .send()
+        .await
+        .expect("resolve provider");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("resolve JSON");
+    assert_eq!(body["provider_id"], "feishu-main");
+    assert_eq!(body["provider_type"], "feishu");
+    assert_eq!(body["display_name"], "Feishu Main");
+    assert!(body.get("app_id").is_none());
+    server.await.expect("resolve success server");
+
+    for (method, body, expected) in [
+        (
+            reqwest::Method::POST,
+            r#"{"bot_name":"Feishu Main"}"#,
+            reqwest::StatusCode::CONFLICT,
+        ),
+        (
+            reqwest::Method::POST,
+            r#"{"bot_id":"missing"}"#,
+            reqwest::StatusCode::NOT_FOUND,
+        ),
+        (
+            reqwest::Method::POST,
+            r#"{}"#,
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            reqwest::Method::POST,
+            r#"{"bot_id":42}"#,
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            reqwest::Method::POST,
+            r#"{"bot_name":42}"#,
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            reqwest::Method::POST,
+            r#"{"bot_id":"broken""#,
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            reqwest::Method::GET,
+            r#"{}"#,
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+        ),
+    ] {
+        let (address, server) = spawn_im_gateway_http(Arc::clone(&service)).await;
+        let response = client
+            .request(
+                method,
+                format!("http://{address}/api/im-gateway/providers/resolve"),
+            )
+            .header("connection", "close")
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .expect("resolve rejection request");
+        assert_eq!(response.status(), expected);
+        server.await.expect("resolve rejection server");
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 pub(super) async fn debug_mock_inbound_maps_reply_reference_into_event() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
@@ -2738,6 +2946,8 @@ pub(super) fn send_message_request_resolves_owner_target_from_provider() {
         image: None,
         rich_card: None,
         idempotency_key: None,
+        destination: None,
+        parts: Vec::new(),
     };
 
     let resolved =
@@ -2766,6 +2976,8 @@ pub(super) fn send_message_request_rejects_owner_without_provider() {
         image: None,
         rich_card: None,
         idempotency_key: None,
+        destination: None,
+        parts: Vec::new(),
     };
 
     let error = resolve_send_message_request(&service, &body)
@@ -2793,6 +3005,8 @@ pub(super) fn send_message_request_accepts_image_key_payload() {
         }),
         rich_card: None,
         idempotency_key: None,
+        destination: None,
+        parts: Vec::new(),
     };
 
     let content = normalized_send_content(&body).expect("image content");
@@ -2803,7 +3017,9 @@ pub(super) fn send_message_request_accepts_image_key_payload() {
 #[tokio::test(flavor = "current_thread")]
 pub(super) async fn rich_card_builder_uses_image_key_and_markdown() {
     let provider = test_provider();
-    let feishu = crate::im_gateway::feishu::FeishuProvider::new();
+    let feishu = ImProviderClient::Feishu(std::sync::Arc::new(
+        crate::im_gateway::feishu::FeishuProvider::new(),
+    ));
     let rich_card = SendRichCardRequest {
         title: Some("Deploy report".to_string()),
         text: Some("**Done** with chart".to_string()),
@@ -2821,6 +3037,1462 @@ pub(super) async fn rich_card_builder_uses_image_key_and_markdown() {
     assert_eq!(card["elements"][0]["img_key"], "img_v3_chart");
     assert_eq!(card["elements"][1]["tag"], "markdown");
     assert_eq!(card["elements"][1]["content"], "**Done** with chart");
+}
+
+#[test]
+pub(super) fn outbound_capabilities_distinguish_feishu_and_weixin() {
+    let feishu_config = test_provider();
+    let feishu = ImProviderClient::Feishu(std::sync::Arc::new(
+        crate::im_gateway::feishu::FeishuProvider::new(),
+    ));
+    let feishu_caps = feishu.send_capabilities(&feishu_config);
+    assert_eq!(feishu_caps.destinations, ["owner", "target", "direct"]);
+    assert_eq!(
+        feishu_caps.part("file").expect("file capability").support,
+        crate::im_gateway::types::ImSendSupportLevel::Native
+    );
+    assert_eq!(
+        feishu_caps
+            .part("native_card")
+            .expect("card capability")
+            .support,
+        crate::im_gateway::types::ImSendSupportLevel::Native
+    );
+
+    let mut weixin_config = test_provider();
+    weixin_config.id = "weixin-main".to_string();
+    weixin_config.provider_type = ImProviderType::Weixin;
+    let weixin = ImProviderClient::Weixin(std::sync::Arc::new(WeixinProvider::new()));
+    let weixin_caps = weixin.send_capabilities(&weixin_config);
+    assert!(weixin_caps.requires_context);
+    assert_eq!(
+        weixin_caps
+            .part("markdown")
+            .expect("markdown capability")
+            .support,
+        crate::im_gateway::types::ImSendSupportLevel::Degraded
+    );
+    assert_eq!(
+        weixin_caps.part("file").expect("file capability").support,
+        crate::im_gateway::types::ImSendSupportLevel::Unsupported
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn outbound_capabilities_endpoint_and_unsupported_dispatch_are_explicit() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = std::sync::Arc::new(ImGatewayService::new(temp_dir.path()));
+    let provider = test_provider();
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("save provider");
+
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/feishu-main/capabilities"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("get capabilities");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("capabilities JSON");
+    assert_eq!(body["provider_id"], "feishu-main");
+    assert_eq!(body["parts"]["file"]["support"], "native");
+    server.await.expect("capabilities server");
+
+    let unsupported = ImProviderClient::Unsupported(ImProviderType::Webhook);
+    let target = ImTarget {
+        id: "owner".to_string(),
+        provider_id: provider.id.clone(),
+        display_name: "Owner".to_string(),
+        receive_id_type: "open_id".to_string(),
+        receive_id: "ou_owner".to_string(),
+        default_msg_type: "text".to_string(),
+        enabled: true,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let concrete_feishu = crate::im_gateway::feishu::FeishuProvider::new();
+    assert!(crate::im_gateway::provider::ImProvider::upload_file(
+        &concrete_feishu,
+        &provider,
+        "a.txt",
+        vec![1],
+        Some("text/plain"),
+    )
+    .await
+    .is_err());
+    assert!(crate::im_gateway::provider::ImProvider::send_file(
+        &concrete_feishu,
+        &provider,
+        &target,
+        "file-key",
+        Some("uuid"),
+    )
+    .await
+    .is_err());
+    let concrete_weixin = WeixinProvider::new();
+    assert!(crate::im_gateway::provider::ImProvider::send_native_card(
+        &concrete_weixin,
+        &provider,
+        &target,
+        serde_json::json!({"elements": []}),
+        crate::im_gateway::types::SendOptions::default(),
+    )
+    .await
+    .is_err());
+    let weixin_client = ImProviderClient::Weixin(std::sync::Arc::new(WeixinProvider::new()));
+    assert!(weixin_client
+        .send_native_card(
+            &provider,
+            &target,
+            serde_json::json!({"elements": []}),
+            crate::im_gateway::types::SendOptions::default(),
+        )
+        .await
+        .is_err());
+    let default_provider = DefaultMethodProvider;
+    assert!(crate::im_gateway::provider::ImProvider::upload_file(
+        &default_provider,
+        &provider,
+        "a.txt",
+        vec![1],
+        Some("text/plain"),
+    )
+    .await
+    .is_err());
+    assert!(crate::im_gateway::provider::ImProvider::send_file(
+        &default_provider,
+        &provider,
+        &target,
+        "file-key",
+        Some("uuid"),
+    )
+    .await
+    .is_err());
+    assert!(crate::im_gateway::provider::ImProvider::send_native_card(
+        &default_provider,
+        &provider,
+        &target,
+        serde_json::json!({"elements": []}),
+        crate::im_gateway::types::SendOptions::default(),
+    )
+    .await
+    .is_err());
+    assert!(unsupported.send_capabilities(&provider).parts.is_empty());
+    assert!(unsupported
+        .send_text(&provider, &target, "hello")
+        .await
+        .is_err());
+    assert!(unsupported
+        .send_text_with_uuid(&provider, &target, "hello", Some("uuid"))
+        .await
+        .is_err());
+    assert!(unsupported
+        .upload_image(&provider, "message", "a.png", vec![1], Some("image/png"))
+        .await
+        .is_err());
+    assert!(unsupported
+        .send_image(&provider, &target, "img", Some("uuid"))
+        .await
+        .is_err());
+    assert!(unsupported
+        .upload_file(&provider, "a.txt", vec![1], Some("text/plain"))
+        .await
+        .is_err());
+    assert!(unsupported
+        .send_file(&provider, &target, "file", Some("uuid"))
+        .await
+        .is_err());
+    assert!(unsupported
+        .send_native_card(
+            &provider,
+            &target,
+            serde_json::json!({"elements": []}),
+            crate::im_gateway::types::SendOptions::default(),
+        )
+        .await
+        .is_err());
+    assert!(unsupported
+        .create_feishu_group_chat(&provider, "group", "ou_owner", "uuid")
+        .await
+        .is_err());
+    assert!(unsupported
+        .send_card(
+            &provider,
+            &target,
+            serde_json::json!({"elements": []}),
+            crate::im_gateway::types::SendOptions::default(),
+        )
+        .await
+        .is_err());
+    assert!(unsupported
+        .add_reaction(&provider, "om_message", "THUMBSUP")
+        .await
+        .is_err());
+    let image = crate::im_gateway::types::ImImageAttachment {
+        file_key: "img".to_string(),
+        source: Default::default(),
+        mime_type: None,
+        data_base64: None,
+        download_url: None,
+        encrypted_query_param: None,
+        aes_key: None,
+    };
+    assert!(unsupported
+        .download_message_image_resource(&provider, "om_message", &image)
+        .await
+        .is_err());
+    let file = crate::im_gateway::types::ImFileAttachment {
+        file_key: "file".to_string(),
+        name: None,
+        mime_type: None,
+        size_bytes: None,
+        data_base64: None,
+        download_url: None,
+    };
+    assert!(unsupported
+        .download_message_file_resource(&provider, "om_message", &file)
+        .await
+        .is_err());
+
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let missing = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/missing/capabilities"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("missing capabilities request");
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+    server.await.expect("missing capabilities server");
+
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let method = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/im-gateway/providers/feishu-main/capabilities"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("capabilities method request");
+    assert_eq!(method.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+    server.await.expect("capabilities method server");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn outbound_target_validation_and_upload_error_matrix() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = std::sync::Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut primary_provider = test_provider();
+    primary_provider.owner_open_id = Some("ou_owner".to_string());
+    service
+        .provider_store
+        .add(primary_provider)
+        .expect("save provider");
+    let mut disabled_provider = test_provider();
+    disabled_provider.id = "feishu-disabled".to_string();
+    disabled_provider.enabled = false;
+    service
+        .provider_store
+        .add(disabled_provider)
+        .expect("save disabled provider");
+    let mut weixin_provider = test_provider();
+    weixin_provider.id = "weixin-upload".to_string();
+    weixin_provider.provider_type = ImProviderType::Weixin;
+    service
+        .provider_store
+        .add(weixin_provider)
+        .expect("save Weixin provider");
+    let mut webhook_provider = test_provider();
+    webhook_provider.id = "webhook-upload".to_string();
+    webhook_provider.provider_type = ImProviderType::Webhook;
+    service
+        .provider_store
+        .add(webhook_provider)
+        .expect("save webhook provider");
+    let http = reqwest::Client::new();
+
+    for (target, expected) in [
+        (
+            serde_json::json!({
+                "id": "",
+                "provider_id": "feishu-main",
+                "display_name": "Bad",
+                "receive_id_type": "chat_id",
+                "receive_id": "oc_group",
+                "enabled": true
+            }),
+            "target id is required",
+        ),
+        (
+            serde_json::json!({
+                "id": "bad-display",
+                "provider_id": "feishu-main",
+                "display_name": " ",
+                "receive_id_type": "chat_id",
+                "receive_id": "oc_group",
+                "enabled": true
+            }),
+            "display_name is required",
+        ),
+        (
+            serde_json::json!({
+                "id": "missing-receive",
+                "provider_id": "feishu-main",
+                "display_name": "Missing Receive",
+                "receive_id_type": "chat_id",
+                "receive_id": " ",
+                "enabled": true
+            }),
+            "receive_id is required",
+        ),
+        (
+            serde_json::json!({
+                "id": "missing-provider",
+                "provider_id": "does-not-exist",
+                "display_name": "Missing Provider",
+                "receive_id_type": "chat_id",
+                "receive_id": "oc_group",
+                "enabled": true
+            }),
+            "Provider 'does-not-exist' not found",
+        ),
+        (
+            serde_json::json!({
+                "id": "bad-type",
+                "provider_id": "feishu-main",
+                "display_name": "Bad Type",
+                "receive_id_type": "phone",
+                "receive_id": "123",
+                "enabled": true
+            }),
+            "is not supported",
+        ),
+    ] {
+        let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+        let response = http
+            .post(format!("http://{address}/api/im-gateway/targets"))
+            .header("connection", "close")
+            .json(&target)
+            .send()
+            .await
+            .expect("post invalid target");
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(response
+            .text()
+            .await
+            .expect("target error body")
+            .contains(expected));
+        server.await.expect("target server");
+    }
+
+    let valid_target = serde_json::json!({
+        "id": "valid-target",
+        "provider_id": "feishu-main",
+        "display_name": "Valid Target",
+        "receive_id_type": "chat_id",
+        "receive_id": "oc_group",
+        "enabled": true
+    });
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let response = http
+        .post(format!("http://{address}/api/im-gateway/targets"))
+        .header("connection", "close")
+        .json(&valid_target)
+        .send()
+        .await
+        .expect("post valid target");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    server.await.expect("valid target server");
+
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let response = http
+        .patch(format!(
+            "http://{address}/api/im-gateway/targets/valid-target"
+        ))
+        .header("connection", "close")
+        .json(&serde_json::json!({"receive_id_type":"phone"}))
+        .send()
+        .await
+        .expect("patch invalid target");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    server.await.expect("invalid target patch server");
+
+    for (query, body, expected_status) in [
+        ("", vec![1], reqwest::StatusCode::BAD_REQUEST),
+        (
+            "?provider_id=feishu-main",
+            vec![1],
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "?provider_id=feishu-main&kind=image",
+            vec![1],
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "?provider_id=missing&kind=image&file_name=a.png",
+            vec![1],
+            reqwest::StatusCode::NOT_FOUND,
+        ),
+        (
+            "?provider_id=feishu-main&kind=archive&file_name=a.zip",
+            vec![1],
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "?provider_id=feishu-main&kind=image&file_name=..%2Fa.png",
+            vec![1],
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "?provider_id=feishu-main&kind=image&file_name=a.png",
+            Vec::new(),
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "?provider_id=feishu-disabled&kind=image&file_name=a.png",
+            vec![1],
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "?provider_id=weixin-upload&kind=file&file_name=a.txt",
+            vec![1],
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            "?provider_id=webhook-upload&kind=image&file_name=a.png",
+            vec![1],
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+        let response = http
+            .post(format!(
+                "http://{address}/api/im-gateway/messages/upload{query}"
+            ))
+            .header("connection", "close")
+            .body(body)
+            .send()
+            .await
+            .expect("post invalid upload");
+        assert_eq!(response.status(), expected_status);
+        server.await.expect("upload server");
+    }
+
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let response = http
+        .get(format!(
+            "http://{address}/api/im-gateway/messages/upload?provider_id=feishu-main&kind=image&file_name=a.png"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("get upload endpoint");
+    assert_eq!(response.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+    server.await.expect("upload method server");
+
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let response = http
+        .post(format!(
+            "http://{address}/api/im-gateway/messages/upload?provider_id=feishu-main&kind=image&file_name=huge.png"
+        ))
+        .header("connection", "close")
+        .header("content-length", (10 * 1024 * 1024 + 1).to_string())
+        .body(vec![0_u8])
+        .send()
+        .await
+        .expect("post oversized upload");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    server.await.expect("oversized upload server");
+
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let response = http
+        .post(format!(
+            "http://{address}/api/im-gateway/messages/upload?provider_id=feishu-main&kind=image&file_name=a.png"
+        ))
+        .header("connection", "close")
+        .body(vec![1_u8])
+        .send()
+        .await
+        .expect("post provider-failed upload");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    server.await.expect("provider-failed upload server");
+
+    for (data_base64, expected_status) in [
+        ("%%%", reqwest::StatusCode::BAD_REQUEST),
+        ("AQ==", reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+    ] {
+        let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+        let response = http
+            .post(format!("http://{address}/api/im-gateway/messages/send"))
+            .header("connection", "close")
+            .json(&serde_json::json!({
+                "provider_id": "feishu-main",
+                "target_id": "__owner__",
+                "msg_type": "image",
+                "image": {"data_base64": data_base64, "file_name": "a.png"}
+            }))
+            .send()
+            .await
+            .expect("send inline image failure");
+        assert_eq!(response.status(), expected_status);
+        server.await.expect("inline image failure server");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[cfg(not(windows))]
+pub(super) async fn outbound_chunked_upload_enforces_streaming_size_limit() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = std::sync::Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("ou_owner".to_string());
+    service.provider_store.add(provider).expect("save provider");
+
+    let (address, server) = spawn_im_gateway_http(service).await;
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect chunked upload client");
+    let body = vec![b'x'; 10 * 1024 * 1024 + 1];
+    let headers = format!(
+        "POST /api/im-gateway/messages/upload?provider_id=feishu-main&kind=image&file_name=huge.png HTTP/1.1\r\nHost: {address}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
+        body.len()
+    );
+    let (mut reader, mut writer) = stream.into_split();
+    let upload = tokio::spawn(async move {
+        writer
+            .write_all(headers.as_bytes())
+            .await
+            .expect("write chunked upload headers");
+        let _ = writer.write_all(&body).await;
+        let _ = writer.write_all(b"\r\n0\r\n\r\n").await;
+    });
+
+    let mut response = Vec::new();
+    let read_result = reader.read_to_end(&mut response).await;
+    upload.await.expect("chunked upload writer");
+    if let Err(error) = read_result {
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+            ) && response.starts_with(b"HTTP/1.1 413"),
+            "read chunked upload response: {error}"
+        );
+        server.await.expect("chunked upload server");
+        return;
+    }
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 413"),
+        "unexpected response: {}",
+        response.lines().next().unwrap_or_default()
+    );
+    server.await.expect("chunked upload server");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn outbound_bundle_validation_destination_and_provider_defaults_cover_edges() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut feishu = test_provider();
+    feishu.owner_open_id = Some("ou_owner".to_string());
+    service
+        .provider_store
+        .add(feishu.clone())
+        .expect("save Feishu provider");
+
+    let request =
+        |value| serde_json::from_value::<SendMessageRequest>(value).expect("valid request shape");
+    for (body, expected) in [
+        (
+            request(serde_json::json!({
+                "provider_id": "feishu-main",
+                "destination": {"mode": "owner"},
+                "parts": []
+            })),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            request(serde_json::json!({
+                "provider_id": "feishu-main",
+                "destination": {"mode": "owner"},
+                "parts": (0..17).map(|index| serde_json::json!({"type":"text","text":format!("part-{index}")})).collect::<Vec<_>>()
+            })),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            request(serde_json::json!({
+                "provider_id": "feishu-main",
+                "destination": {"mode": "owner"},
+                "parts": [{"type":"text","text":" "}]
+            })),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            request(serde_json::json!({
+                "destination": {"mode": "owner"},
+                "parts": [{"type":"text","text":"hello"}]
+            })),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            request(serde_json::json!({
+                "provider_id": "missing",
+                "destination": {"mode": "owner"},
+                "parts": [{"type":"text","text":"hello"}]
+            })),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            request(serde_json::json!({
+                "provider_id": "feishu-main",
+                "destination": {"mode": "owner"},
+                "parts": [{"type":"text","text":"hello"}],
+                "idempotency_key": "x".repeat(481)
+            })),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(
+            handle_message_bundle_send(&service, body).await.status(),
+            expected
+        );
+    }
+    let mut disabled = feishu.clone();
+    disabled.id = "feishu-disabled-bundle".to_string();
+    disabled.enabled = false;
+    service
+        .provider_store
+        .add(disabled)
+        .expect("save disabled bundle provider");
+    assert_eq!(
+        handle_message_bundle_send(
+            &service,
+            request(serde_json::json!({
+                "provider_id": "feishu-disabled-bundle",
+                "destination": {"mode":"owner"},
+                "parts": [{"type":"text","text":"hello"}]
+            }))
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let owner = request(serde_json::json!({
+        "provider_id": "feishu-main",
+        "parts": [{"type":"text","text":"hello"}]
+    }));
+    let (_, _, _, summary) =
+        resolve_bundle_destination(&service, &feishu, &owner).expect("legacy owner default");
+    assert_eq!(summary, "owner");
+
+    let direct_bad_type = request(serde_json::json!({
+        "destination": {"mode":"direct","receive_id_type":"phone","receive_id":"123"},
+        "parts": [{"type":"text","text":"hello"}]
+    }));
+    assert_eq!(
+        resolve_bundle_destination(&service, &feishu, &direct_bad_type)
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let direct_empty = request(serde_json::json!({
+        "destination": {"mode":"direct","receive_id_type":"chat_id","receive_id":" "},
+        "parts": [{"type":"text","text":"hello"}]
+    }));
+    assert_eq!(
+        resolve_bundle_destination(&service, &feishu, &direct_empty)
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let direct_short = request(serde_json::json!({
+        "destination": {"mode":"direct","receive_id_type":"chat_id","receive_id":"short"},
+        "parts": [{"type":"text","text":"hello"}]
+    }));
+    let (_, _, _, summary) =
+        resolve_bundle_destination(&service, &feishu, &direct_short).expect("short direct ID");
+    assert_eq!(summary, "direct:chat_id:short");
+
+    let target_missing = request(serde_json::json!({
+        "destination": {"mode":"target","target_id":"missing"},
+        "parts": [{"type":"text","text":"hello"}]
+    }));
+    assert_eq!(
+        resolve_bundle_destination(&service, &feishu, &target_missing)
+            .unwrap_err()
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    service
+        .target_store
+        .add(ImTarget {
+            id: "owned-target".to_string(),
+            provider_id: feishu.id.clone(),
+            display_name: "Owned Target".to_string(),
+            receive_id_type: "chat_id".to_string(),
+            receive_id: "oc_owned".to_string(),
+            default_msg_type: "text".to_string(),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .expect("save owned target");
+    service
+        .target_store
+        .add(ImTarget {
+            id: "disabled-target".to_string(),
+            provider_id: feishu.id.clone(),
+            display_name: "Disabled Target".to_string(),
+            receive_id_type: "chat_id".to_string(),
+            receive_id: "oc_disabled".to_string(),
+            default_msg_type: "text".to_string(),
+            enabled: false,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .expect("save disabled target");
+    assert_eq!(
+        handle_message_bundle_send(
+            &service,
+            request(serde_json::json!({
+                "provider_id": "feishu-main",
+                "destination": {"mode":"target","target_id":"disabled-target"},
+                "parts": [{"type":"text","text":"hello"}]
+            }))
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let target_ok = request(serde_json::json!({
+        "destination": {"mode":"target","target_id":"owned-target"},
+        "parts": [{"type":"text","text":"hello"}]
+    }));
+    let (_, id, name, summary) =
+        resolve_bundle_destination(&service, &feishu, &target_ok).expect("owned target");
+    assert_eq!(
+        (id.as_str(), name.as_str(), summary.as_str()),
+        ("owned-target", "Owned Target", "target:owned-target")
+    );
+    let target_legacy = request(serde_json::json!({
+        "target_id": "owned-target",
+        "parts": [{"type":"text","text":"hello"}]
+    }));
+    assert_eq!(
+        resolve_bundle_destination(&service, &feishu, &target_legacy)
+            .expect("legacy target destination")
+            .3,
+        "target:owned-target"
+    );
+    let mut other_provider = feishu.clone();
+    other_provider.id = "feishu-other".to_string();
+    assert_eq!(
+        resolve_bundle_destination(&service, &other_provider, &target_ok)
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let mut no_owner = feishu.clone();
+    no_owner.owner_open_id = Some(" ".to_string());
+    assert_eq!(
+        resolve_bundle_destination(&service, &no_owner, &owner)
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let mut weixin = test_provider();
+    weixin.id = "weixin-no-context".to_string();
+    weixin.provider_type = ImProviderType::Weixin;
+    weixin.owner_open_id = Some("wx-owner".to_string());
+    service
+        .provider_store
+        .add(weixin.clone())
+        .expect("save Weixin provider");
+    let not_ready = request(serde_json::json!({
+        "provider_id": "weixin-no-context",
+        "destination": {"mode":"owner"},
+        "parts": [{"type":"markdown","text":"**hello**"}]
+    }));
+    assert_eq!(
+        handle_message_bundle_send(&service, not_ready)
+            .await
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&weixin, "wx-owner", "context-token")
+        .expect("store Weixin context");
+    let mut failing_weixin = weixin.clone();
+    failing_weixin.id = "weixin-failing".to_string();
+    failing_weixin.base_url = Some("http://127.0.0.1:9".to_string());
+    service
+        .provider_store
+        .add(failing_weixin.clone())
+        .expect("save failing Weixin provider");
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&failing_weixin, "wx-owner", "context-token")
+        .expect("store failing Weixin context");
+    let provider_failure = request(serde_json::json!({
+        "provider_id": "weixin-failing",
+        "destination": {"mode":"owner"},
+        "parts": [{"type":"markdown","text":"**hello**"}]
+    }));
+    assert_eq!(
+        handle_message_bundle_send(&service, provider_failure)
+            .await
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+
+    let mut webhook = test_provider();
+    webhook.id = "webhook-main".to_string();
+    webhook.provider_type = ImProviderType::Webhook;
+    webhook.owner_open_id = Some("hook-owner".to_string());
+    service
+        .provider_store
+        .add(webhook)
+        .expect("save webhook provider");
+    let unsupported = request(serde_json::json!({
+        "provider_id": "webhook-main",
+        "destination": {"mode":"owner"},
+        "parts": [{"type":"text","text":"hello"}]
+    }));
+    assert_eq!(
+        handle_message_bundle_send(&service, unsupported)
+            .await
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+
+    let weixin_provider = WeixinProvider::new();
+    let target = ImTarget {
+        id: "wx-owner".to_string(),
+        provider_id: weixin.id.clone(),
+        display_name: "Owner".to_string(),
+        receive_id_type: "open_id".to_string(),
+        receive_id: "wx-owner".to_string(),
+        default_msg_type: "text".to_string(),
+        enabled: true,
+        created_at: 0,
+        updated_at: 0,
+    };
+    assert!(crate::im_gateway::provider::ImProvider::upload_file(
+        &weixin_provider,
+        &weixin,
+        "a.txt",
+        vec![1],
+        Some("text/plain")
+    )
+    .await
+    .is_err());
+    assert!(crate::im_gateway::provider::ImProvider::send_file(
+        &weixin_provider,
+        &weixin,
+        &target,
+        "file-key",
+        None
+    )
+    .await
+    .is_err());
+    assert!(
+        crate::im_gateway::provider::ImProvider::send_text_with_uuid(
+            &weixin_provider,
+            &weixin,
+            &target,
+            "hello",
+            None
+        )
+        .await
+        .is_err()
+    );
+
+    let legacy_owner_missing = request(serde_json::json!({
+        "provider_id": "feishu-main",
+        "target_id": "owner",
+        "msg_type": "text",
+        "content": "hello"
+    }));
+    let mut provider_without_owner = feishu.clone();
+    provider_without_owner.id = "feishu-no-owner".to_string();
+    provider_without_owner.owner_open_id = None;
+    service
+        .provider_store
+        .add(provider_without_owner)
+        .expect("save ownerless provider");
+    let mut legacy_owner_missing = legacy_owner_missing;
+    legacy_owner_missing.provider_id = Some("feishu-no-owner".to_string());
+    assert_eq!(
+        resolve_send_message_request(&service, &legacy_owner_missing)
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let feishu_client = ImProviderClient::Feishu(std::sync::Arc::new(
+        crate::im_gateway::feishu::FeishuProvider::new(),
+    ));
+    let image_body = request(serde_json::json!({
+        "msg_type": "image",
+        "image": {"image_key": "img_existing"}
+    }));
+    assert_eq!(
+        prepare_outbound_content(
+            &feishu_client,
+            &feishu,
+            &image_body,
+            serde_json::Value::Null
+        )
+        .await
+        .expect("prepare image")["image_key"],
+        "img_existing"
+    );
+    let rich_body = request(serde_json::json!({
+        "msg_type": "interactive",
+        "rich_card": {"text": "**hello**"}
+    }));
+    assert!(
+        prepare_outbound_content(&feishu_client, &feishu, &rich_body, serde_json::Value::Null)
+            .await
+            .expect("prepare rich card")["elements"]
+            .is_array()
+    );
+    assert!(resolve_image_key(&feishu_client, &feishu, None)
+        .await
+        .is_err());
+    let rich_with_invalid_image = SendRichCardRequest {
+        title: None,
+        text: None,
+        image_key: None,
+        image: Some(SendImageRequest {
+            image_key: None,
+            data_base64: Some("%%%".to_string()),
+            file_name: None,
+            mime_type: None,
+            image_type: default_feishu_image_type(),
+        }),
+        image_alt: None,
+    };
+    assert!(
+        build_rich_card_content(&feishu_client, &feishu, &rich_with_invalid_image)
+            .await
+            .is_err()
+    );
+    let unsupported_client = ImProviderClient::Unsupported(ImProviderType::Webhook);
+    let plain_rich = SendRichCardRequest {
+        title: None,
+        text: Some("plain markdown".to_string()),
+        image_key: None,
+        image: None,
+        image_alt: None,
+    };
+    assert!(
+        build_rich_card_content(&unsupported_client, &feishu, &plain_rich)
+            .await
+            .expect("plain rich card")["elements"][0]["content"]
+            .as_str()
+            .is_some_and(|value| value.contains("plain markdown"))
+    );
+}
+
+#[test]
+pub(super) fn outbound_bundle_part_validation_rejects_empty_and_unsafe_payloads() {
+    assert!(validate_send_part(&SendPartRequest::Text {
+        text: "  ".to_string()
+    })
+    .is_err());
+    assert!(validate_send_part(&SendPartRequest::Image {
+        image_key: String::new()
+    })
+    .is_err());
+    assert!(validate_send_part(&SendPartRequest::File {
+        file_key: "file-key".to_string(),
+        file_name: Some("../secret.txt".to_string()),
+    })
+    .is_err());
+    assert!(validate_send_part(&SendPartRequest::File {
+        file_key: "file-key".to_string(),
+        file_name: Some("..\\secret.txt".to_string()),
+    })
+    .is_err());
+    assert!(validate_send_part(&SendPartRequest::File {
+        file_key: " ".to_string(),
+        file_name: None,
+    })
+    .is_err());
+    assert!(validate_send_part(&SendPartRequest::NativeCard {
+        card: serde_json::json!([])
+    })
+    .is_err());
+    assert!(validate_send_part(&SendPartRequest::Markdown {
+        text: "**ok**".to_string()
+    })
+    .is_ok());
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn outbound_weixin_bundle_degrades_markdown_and_reports_unsupported_file() {
+    use http_body_util::BodyExt;
+
+    let _test_guard = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
+    let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake Weixin provider");
+    let provider_address = provider_listener.local_addr().expect("provider address");
+    let provider_server = tokio::spawn(async move {
+        let (stream, _) = provider_listener
+            .accept()
+            .await
+            .expect("accept Weixin send");
+        let io = TokioIo::new(stream);
+        let handler = service_fn(move |request: Request<Incoming>| async move {
+            assert_eq!(request.uri().path(), "/ilink/bot/sendmessage");
+            let body = request.into_body().collect().await?.to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&body).expect("Weixin JSON");
+            assert_eq!(
+                body["msg"]["item_list"][0]["text_item"]["text"],
+                "**report**"
+            );
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Full::new(Bytes::from_static(
+                        br#"{"ret":0,"message_id":"wx-markdown"}"#,
+                    )))
+                    .expect("Weixin response"),
+            )
+        });
+        http1::Builder::new()
+            .keep_alive(false)
+            .serve_connection(io, handler)
+            .await
+            .expect("serve Weixin send");
+    });
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = std::sync::Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-main".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.display_name = "Weixin Main".to_string();
+    provider.base_url = Some(format!("http://{provider_address}"));
+    provider.app_id = Some("bot@im.bot".to_string());
+    provider.secret_ref = Some("bot-token".to_string());
+    provider.owner_open_id = Some("wx-owner".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("save Weixin provider");
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&provider, "wx-owner", "context-token")
+        .expect("store Weixin context");
+
+    let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(format!("http://{address}/api/im-gateway/messages/send"))
+            .header("connection", "close")
+            .json(&serde_json::json!({
+                "provider_id": "weixin-main",
+                "destination": { "mode": "owner" },
+                "parts": [
+                    { "type": "markdown", "text": "**report**" },
+                    { "type": "file", "file_key": "unsupported-file" }
+                ],
+                "idempotency_key": "weixin-partial"
+            }))
+            .send(),
+    )
+    .await
+    .expect("Weixin bundle request timed out")
+    .expect("send Weixin bundle");
+    assert_eq!(response.status(), reqwest::StatusCode::MULTI_STATUS);
+    let body: serde_json::Value = response.json().await.expect("bundle response JSON");
+    assert_eq!(body["status"], "partial_success");
+    assert_eq!(body["receipts"][0]["status"], "success");
+    assert_eq!(body["receipts"][0]["requested_kind"], "markdown");
+    assert_eq!(body["receipts"][0]["delivered_kind"], "text");
+    assert!(body["receipts"][0]["warning"]
+        .as_str()
+        .is_some_and(|value| value.contains("plain text")));
+    assert_eq!(body["receipts"][1]["status"], "failed");
+    assert!(body["receipts"][1]["error"]
+        .as_str()
+        .is_some_and(|value| value.contains("not verified")));
+
+    server.await.expect("gateway server");
+    tokio::time::timeout(std::time::Duration::from_secs(5), provider_server)
+        .await
+        .expect("Weixin provider fixture did not receive the send")
+        .expect("Weixin provider server");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn outbound_bundle_uploads_binary_assets_and_sends_ordered_feishu_parts() {
+    use http_body_util::BodyExt;
+
+    let _test_guard = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
+    let provider_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
+        String,
+        Option<serde_json::Value>,
+        usize,
+    )>::new()));
+    let outbox_failure_path =
+        std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake Feishu provider");
+    let provider_address = listener.local_addr().expect("fake provider address");
+    let captured = std::sync::Arc::clone(&provider_requests);
+    let failure_path = std::sync::Arc::clone(&outbox_failure_path);
+    let provider_server = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let io = TokioIo::new(stream);
+            let captured = std::sync::Arc::clone(&captured);
+            let failure_path = std::sync::Arc::clone(&failure_path);
+            tokio::spawn(async move {
+                let handler = service_fn(move |request: Request<Incoming>| {
+                    let captured = std::sync::Arc::clone(&captured);
+                    let failure_path = std::sync::Arc::clone(&failure_path);
+                    async move {
+                        let path_and_query = request
+                            .uri()
+                            .path_and_query()
+                            .map(|value| value.as_str().to_string())
+                            .unwrap_or_default();
+                        let path = request.uri().path().to_string();
+                        let bytes = request.into_body().collect().await?.to_bytes();
+                        let json_body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                        captured.lock().expect("capture provider request").push((
+                            path_and_query,
+                            json_body,
+                            bytes.len(),
+                        ));
+                        if path == "/open-apis/im/v1/messages" {
+                            if let Some(admin_dir) =
+                                failure_path.lock().expect("outbox failure path").take()
+                            {
+                                std::fs::create_dir(admin_dir.join("im_gateway_outbox.json.tmp"))
+                                    .expect("block outbox temporary file");
+                            }
+                        }
+                        let response = match path.as_str() {
+                            "/open-apis/auth/v3/tenant_access_token/internal" => {
+                                serde_json::json!({
+                                    "code": 0,
+                                    "tenant_access_token": "tenant-token",
+                                    "expire": 7200
+                                })
+                            }
+                            "/open-apis/im/v1/images" => serde_json::json!({
+                                "code": 0,
+                                "data": { "image_key": "img_uploaded" }
+                            }),
+                            "/open-apis/im/v1/files" => serde_json::json!({
+                                "code": 0,
+                                "data": { "file_key": "file_uploaded" }
+                            }),
+                            "/open-apis/im/v1/messages" => serde_json::json!({
+                                "code": 0,
+                                "data": { "message_id": format!("om_{}", bytes.len()) }
+                            }),
+                            _ => serde_json::json!({ "code": 404, "msg": "not found" }),
+                        };
+                        Ok::<_, hyper::Error>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header("content-type", "application/json")
+                                .body(Full::new(Bytes::from(response.to_string())))
+                                .expect("fake Feishu response"),
+                        )
+                    }
+                });
+                let _ = http1::Builder::new().serve_connection(io, handler).await;
+            });
+        }
+    });
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let _loopback_guard = EnvVarGuard::set("BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL", "1");
+    let service = std::sync::Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("ou_owner".to_string());
+    provider.secret_ref = Some("test-secret".to_string());
+    provider.base_url = Some(format!("http://{provider_address}/open-apis"));
+    service
+        .provider_store
+        .add(provider)
+        .expect("save fake Feishu provider");
+
+    let http = reqwest::Client::new();
+    let (upload_address, upload_server) =
+        spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let image_upload = http
+        .post(format!(
+            "http://{upload_address}/api/im-gateway/messages/upload?provider_id=feishu-main&kind=image&file_name=chart.png&mime_type=image%2Fpng"
+        ))
+        .header("connection", "close")
+        .body(Vec::from(&b"PNG-DATA"[..]))
+        .send()
+        .await
+        .expect("upload image through gateway");
+    let image_status = image_upload.status();
+    let image_body = image_upload.text().await.expect("image upload body");
+    assert_eq!(
+        image_status,
+        reqwest::StatusCode::OK,
+        "unexpected image upload response: {image_body}"
+    );
+    let image_upload: serde_json::Value =
+        serde_json::from_str(&image_body).expect("image upload JSON");
+    assert_eq!(image_upload["key"], "img_uploaded");
+    upload_server.await.expect("image upload server");
+
+    let (upload_address, upload_server) =
+        spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let file_upload = http
+        .post(format!(
+            "http://{upload_address}/api/im-gateway/messages/upload?provider_id=feishu-main&kind=file&file_name=report.pdf&mime_type=application%2Fpdf"
+        ))
+        .header("connection", "close")
+        .body(Vec::from(&b"PDF-DATA"[..]))
+        .send()
+        .await
+        .expect("upload file through gateway");
+    let file_status = file_upload.status();
+    let file_body = file_upload.text().await.expect("file upload body");
+    assert_eq!(
+        file_status,
+        reqwest::StatusCode::OK,
+        "unexpected file upload response: {file_body}"
+    );
+    let file_upload: serde_json::Value =
+        serde_json::from_str(&file_body).expect("file upload JSON");
+    assert_eq!(file_upload["key"], "file_uploaded");
+    upload_server.await.expect("file upload server");
+
+    let bundle_payload = serde_json::json!({
+        "provider_id": "feishu-main",
+        "destination": {
+            "mode": "direct",
+            "receive_id_type": "chat_id",
+            "receive_id": "oc_engineering"
+        },
+        "parts": [
+            { "type": "text", "text": "first" },
+            { "type": "markdown", "text": "**second**" },
+            { "type": "image", "image_key": "img_uploaded" },
+            { "type": "file", "file_key": "file_uploaded", "file_name": "report.pdf" },
+            {
+                "type": "native_card",
+                "card": {
+                    "header": {
+                        "title": { "tag": "plain_text", "content": "Final card" }
+                    },
+                    "elements": []
+                }
+            }
+        ],
+        "idempotency_key": "ordered-bundle"
+    });
+    let (send_address, send_server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let send_response = http
+        .post(format!(
+            "http://{send_address}/api/im-gateway/messages/send"
+        ))
+        .header("connection", "close")
+        .json(&bundle_payload)
+        .send()
+        .await
+        .expect("send ordered bundle through gateway");
+    let send_status = send_response.status();
+    let send_body = send_response.text().await.expect("send response body");
+    assert_eq!(
+        send_status,
+        reqwest::StatusCode::OK,
+        "unexpected bundle response: {send_body}"
+    );
+    let send_response: serde_json::Value =
+        serde_json::from_str(&send_body).expect("send response JSON");
+    assert_eq!(send_response["status"], "success");
+    assert_eq!(send_response["destination"], "direct:chat_id:oc_engin***");
+    assert_eq!(send_response["receipts"].as_array().map(Vec::len), Some(5));
+    send_server.await.expect("bundle send server");
+
+    let (replay_address, replay_server) =
+        spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let replay = http
+        .post(format!(
+            "http://{replay_address}/api/im-gateway/messages/send"
+        ))
+        .header("connection", "close")
+        .json(&bundle_payload)
+        .send()
+        .await
+        .expect("replay ordered bundle");
+    assert_eq!(replay.status(), reqwest::StatusCode::OK);
+    let replay: serde_json::Value = replay.json().await.expect("replay JSON");
+    assert!(replay["receipts"]
+        .as_array()
+        .expect("replay receipts")
+        .iter()
+        .all(|receipt| receipt["request_id"] == "idempotent-replay"));
+    replay_server.await.expect("replay server");
+
+    let mut conflicting_payload = bundle_payload.clone();
+    conflicting_payload["parts"][0]["text"] = serde_json::json!("changed");
+    let (conflict_address, conflict_server) =
+        spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let conflict = http
+        .post(format!(
+            "http://{conflict_address}/api/im-gateway/messages/send"
+        ))
+        .header("connection", "close")
+        .json(&conflicting_payload)
+        .send()
+        .await
+        .expect("conflicting ordered bundle");
+    assert_eq!(conflict.status(), reqwest::StatusCode::MULTI_STATUS);
+    let conflict: serde_json::Value = conflict.json().await.expect("conflict JSON");
+    assert_eq!(conflict["status"], "partial_success");
+    assert_eq!(conflict["receipts"][0]["status"], "failed");
+    conflict_server.await.expect("conflict server");
+
+    *outbox_failure_path.lock().expect("set outbox failure path") =
+        Some(temp_dir.path().join("admin"));
+    let (failure_address, failure_server) =
+        spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let failure = http
+        .post(format!(
+            "http://{failure_address}/api/im-gateway/messages/send"
+        ))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id":"feishu-main",
+            "destination":{"mode":"direct","receive_id_type":"chat_id","receive_id":"oc_engineering"},
+            "parts":[{"type":"text","text":"ack then fail commit"}],
+            "idempotency_key":"outbox-commit-failure"
+        }))
+        .send()
+        .await
+        .expect("send outbox commit failure bundle");
+    assert_eq!(failure.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let failure: serde_json::Value = failure.json().await.expect("outbox failure JSON");
+    assert_eq!(failure["receipts"][0]["status"], "failed");
+    assert!(failure["receipts"][0]["error"]
+        .as_str()
+        .is_some_and(|value| value.contains("outbox commit failed")));
+    failure_server.await.expect("outbox failure server");
+
+    {
+        let captured = provider_requests.lock().expect("provider captures");
+        let uploads: Vec<_> = captured
+            .iter()
+            .filter(|(uri, _, _)| uri.ends_with("/im/v1/images") || uri.ends_with("/im/v1/files"))
+            .collect();
+        assert_eq!(uploads.len(), 2);
+        assert!(uploads.iter().all(|(_, _, body_len)| *body_len > 8));
+        let messages: Vec<_> = captured
+            .iter()
+            .filter(|(uri, _, _)| uri.starts_with("/open-apis/im/v1/messages?"))
+            .collect();
+        assert_eq!(messages.len(), 6);
+        assert!(messages
+            .iter()
+            .all(|(uri, _, _)| uri.contains("receive_id_type=chat_id")));
+        let stable_uuids: std::collections::HashSet<_> = messages
+            .iter()
+            .map(|(_, body, _)| {
+                body.as_ref()
+                    .and_then(|value| value["uuid"].as_str())
+                    .expect("stable UUID on every bundle part")
+            })
+            .collect();
+        assert_eq!(stable_uuids.len(), 6);
+        let message_types: Vec<_> = messages
+            .iter()
+            .map(|(_, body, _)| {
+                body.as_ref().expect("message JSON")["msg_type"]
+                    .as_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            message_types,
+            [
+                "interactive",
+                "interactive",
+                "image",
+                "file",
+                "interactive",
+                "interactive"
+            ]
+        );
+        let final_content = messages[4].1.as_ref().expect("card message JSON")["content"]
+            .as_str()
+            .expect("serialized card content");
+        let final_card: serde_json::Value = serde_json::from_str(final_content).expect("card JSON");
+        assert_eq!(final_card["header"]["title"]["content"], "Final card");
+    }
+
+    let (legacy_address, legacy_server) =
+        spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+    let legacy_image = http
+        .post(format!(
+            "http://{legacy_address}/api/im-gateway/messages/send"
+        ))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id":"feishu-main",
+            "target_id":"__owner__",
+            "msg_type":"image",
+            "image":{"image_key":"img_uploaded"}
+        }))
+        .send()
+        .await
+        .expect("send legacy image-key message");
+    assert_eq!(legacy_image.status(), reqwest::StatusCode::OK);
+    legacy_server.await.expect("legacy image server");
+
+    provider_server.abort();
 }
 
 mod provider_agent_tests;

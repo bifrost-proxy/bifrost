@@ -70,9 +70,29 @@ impl FeishuSetupBrand {
 pub(super) enum ImProviderClient {
     Feishu(Arc<crate::im_gateway::feishu::FeishuProvider>),
     Weixin(Arc<WeixinProvider>),
+    Unsupported(crate::im_gateway::types::ImProviderType),
 }
 
 impl ImProviderClient {
+    fn unsupported<T>(
+        provider_type: crate::im_gateway::types::ImProviderType,
+    ) -> bifrost_core::Result<T> {
+        Err(bifrost_core::BifrostError::Config(format!(
+            "provider type '{}' is not implemented",
+            serde_json::to_value(provider_type)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string())
+        )))
+    }
+    #[rustfmt::skip]    fn unsupported_capabilities(config: &ImProviderConfig, provider_type: crate::im_gateway::types::ImProviderType) -> crate::im_gateway::types::ImSendCapabilities { crate::im_gateway::types::ImSendCapabilities { provider_id: config.id.clone(), provider_type, destinations: Vec::new(), receive_id_types: Vec::new(), parts: std::collections::BTreeMap::new(), requires_context: false } }
+    #[rustfmt::skip]    pub(super) fn send_capabilities(&self, config: &ImProviderConfig) -> crate::im_gateway::types::ImSendCapabilities {
+        match self {
+            Self::Feishu(provider) => provider.send_capabilities(config),
+            Self::Weixin(provider) => provider.send_capabilities(config),
+            Self::Unsupported(provider_type) => Self::unsupported_capabilities(config, *provider_type),
+        }
+    }
     pub(super) async fn create_feishu_group_chat(
         &self,
         config: &ImProviderConfig,
@@ -89,6 +109,7 @@ impl ImProviderClient {
             Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
                 "/new is only supported by Feishu providers".to_string(),
             )),
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -96,6 +117,7 @@ impl ImProviderClient {
         match self {
             Self::Feishu(provider) => Some(provider.clone()),
             Self::Weixin(_) => None,
+            Self::Unsupported(_) => None,
         }
     }
 
@@ -109,6 +131,14 @@ impl ImProviderClient {
         match self {
             Self::Feishu(provider) => provider.send_card(config, target, card, opts).await,
             Self::Weixin(provider) => provider.send_card(config, target, card, opts).await,
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
+        }
+    }
+    #[rustfmt::skip]    pub(super) async fn send_native_card(&self, config: &ImProviderConfig, target: &ImTarget, card: serde_json::Value, opts: crate::im_gateway::types::SendOptions) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        match self {
+            Self::Feishu(provider) => provider.send_native_card(config, target, card, opts).await,
+            Self::Weixin(provider) => provider.send_native_card(config, target, card, opts).await,
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -155,6 +185,22 @@ impl ImProviderClient {
         match self {
             Self::Feishu(provider) => provider.send_text(config, target, text).await,
             Self::Weixin(provider) => provider.send_text(config, target, text).await,
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
+        }
+    }
+    #[rustfmt::skip]    pub(super) async fn send_text_with_uuid(&self, config: &ImProviderConfig, target: &ImTarget, text: &str, uuid: Option<&str>) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        match self {
+            Self::Feishu(provider) => {
+                provider
+                    .send_text_with_uuid(config, target, text, uuid)
+                    .await
+            }
+            Self::Weixin(provider) => {
+                provider
+                    .send_text_with_uuid(config, target, text, uuid)
+                    .await
+            }
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -177,6 +223,7 @@ impl ImProviderClient {
                     .upload_image(config, image_type, file_name, bytes, mime_type)
                     .await
             }
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -190,6 +237,7 @@ impl ImProviderClient {
         match self {
             Self::Feishu(provider) => provider.send_image(config, target, image_key, uuid).await,
             Self::Weixin(provider) => provider.send_image(config, target, image_key, uuid).await,
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -209,6 +257,7 @@ impl ImProviderClient {
             Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
                 "weixin provider does not support generic file attachments yet".to_string(),
             )),
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -224,6 +273,7 @@ impl ImProviderClient {
             Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
                 "weixin provider does not support generic file attachments yet".to_string(),
             )),
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -239,6 +289,7 @@ impl ImProviderClient {
                 Ok(true)
             }
             Self::Weixin(_) => Ok(false),
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -259,6 +310,7 @@ impl ImProviderClient {
                     .download_message_image_resource(config, image)
                     .await
             }
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 
@@ -277,6 +329,7 @@ impl ImProviderClient {
             Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
                 "weixin provider does not support inbound file resource downloads yet".to_string(),
             )),
+            Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
 }
@@ -368,10 +421,16 @@ impl ImGatewayService {
 
     pub(super) fn provider_client(&self, provider: &ImProviderConfig) -> ImProviderClient {
         match provider.provider_type {
-            crate::im_gateway::types::ImProviderType::Weixin => {
+            crate::im_gateway::types::ImProviderType::Weixin
+            | crate::im_gateway::types::ImProviderType::WeChat => {
                 ImProviderClient::Weixin(self.connection_manager.weixin_provider().clone())
             }
-            _ => ImProviderClient::Feishu(self.connection_manager.feishu_provider().clone()),
+            crate::im_gateway::types::ImProviderType::Feishu => {
+                ImProviderClient::Feishu(self.connection_manager.feishu_provider().clone())
+            }
+            crate::im_gateway::types::ImProviderType::Webhook => {
+                ImProviderClient::Unsupported(provider.provider_type)
+            }
         }
     }
 
