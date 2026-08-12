@@ -1602,7 +1602,7 @@ async fn connection_retries_until_inbound_event_is_durably_accepted() {
     assert!(reconnecting
         .error
         .as_deref()
-        .is_some_and(|error| error.contains("im_gateway_events.json")));
+        .is_some_and(|error| error.contains("im_gateway_pending_events.json")));
     assert!(event_store.list().is_empty());
     assert!(provider
         .sync_cursor_store
@@ -1622,7 +1622,8 @@ async fn connection_retries_until_inbound_event_is_durably_accepted() {
         .expect("durable event timeout")
         .expect("durable event");
     assert_eq!(event.event_id, "durable-event");
-    assert_eq!(event_store.list().len(), 1);
+    assert!(event_store.list().is_empty());
+    assert_eq!(event_store.pending_by_provider(&config.id).len(), 1);
     assert_eq!(
         provider
             .sync_cursor_store
@@ -1788,7 +1789,11 @@ async fn connect_events_persists_cursor_only_after_enqueue_and_resumes_next_poll
         .expect("event timeout")
         .expect("cursor event");
     assert_eq!(event.event_id, "cursor-msg-1");
-    assert_eq!(event_store.list()[0].event_id, "cursor-msg-1");
+    assert!(event_store.list().is_empty());
+    assert_eq!(
+        event_store.pending_by_provider(&config.id)[0].event_id,
+        "cursor-msg-1"
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if request_bodies.lock().expect("lock cursor bodies").len() >= 2 {

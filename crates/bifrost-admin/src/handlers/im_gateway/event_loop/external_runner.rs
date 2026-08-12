@@ -220,7 +220,7 @@ mod weixin_companion_tests {
             message_text: message_text.to_string(),
             images: Vec::new(),
             files: Vec::new(),
-            session_key: "weixin-session".to_string(),
+            session_key: build_session_key("weixin-main", Some("weixin-user")),
             adapter_override: None,
             instructions_override: None,
             delivery_override: None,
