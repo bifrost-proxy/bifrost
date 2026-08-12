@@ -468,6 +468,97 @@ async fn progress_registry_missing_session_is_a_noop() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn feishu_progress_heartbeat_waits_ten_seconds_and_stops_at_terminal_phase() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server().await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "heartbeat-s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "heartbeat task",
+        )
+        .await
+        .expect("start progress card");
+
+    let now = Instant::now();
+    let mut guard = session.lock().await;
+    assert!(!guard
+        .refresh_heartbeat_if_due(now)
+        .await
+        .expect("skip heartbeat before idle threshold"));
+    guard.last_activity_at = now - Duration::from_secs(9);
+    assert_eq!(guard.heartbeat_wait(now), Some(Duration::from_secs(1)));
+    guard.last_activity_at = now - FEISHU_PROGRESS_HEARTBEAT_INTERVAL;
+    assert_eq!(guard.heartbeat_wait(now), Some(Duration::ZERO));
+
+    let timeline_before = guard.snapshot.timeline.clone();
+    guard.snapshot.card_started_at_ms = current_time_millis().saturating_sub(65_000);
+    assert!(guard
+        .refresh_heartbeat_if_due(Instant::now())
+        .await
+        .expect("refresh standard heartbeat"));
+    assert_eq!(guard.snapshot.timeline, timeline_before);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(server.element_update_counter.load(Ordering::SeqCst), 2);
+    assert!(
+        server.element_update_paths.lock().unwrap()[0].ends_with("/elements/agent_output/content")
+    );
+    assert!(
+        server.element_update_paths.lock().unwrap()[1].ends_with("/elements/agent_status_panel")
+    );
+    {
+        let payloads = server.element_update_payloads.lock().unwrap();
+        assert!(payloads[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("处理中... · 耗时：1 分 05 秒 · 最后更新："));
+        assert!(payloads[1]["element"]
+            .as_str()
+            .unwrap()
+            .contains("最后更新："));
+    }
+
+    guard.compact_card_mode = true;
+    guard.last_activity_at = Instant::now() - FEISHU_PROGRESS_HEARTBEAT_INTERVAL;
+    assert!(guard
+        .refresh_heartbeat_if_due(Instant::now())
+        .await
+        .expect("refresh compact heartbeat"));
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(server.element_update_counter.load(Ordering::SeqCst), 4);
+
+    guard.last_activity_at = Instant::now();
+    drop(guard);
+    tokio::time::sleep(FEISHU_PROGRESS_HEARTBEAT_INTERVAL + Duration::from_millis(250)).await;
+    for _ in 0..20 {
+        if server.element_update_counter.load(Ordering::SeqCst) >= 6 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(server.element_update_counter.load(Ordering::SeqCst), 6);
+
+    let mut guard = session.lock().await;
+    guard.snapshot.phase = ImProgressPhase::Finished;
+    assert_eq!(guard.heartbeat_wait(Instant::now()), None);
+    assert!(!guard
+        .refresh_heartbeat_if_due(Instant::now())
+        .await
+        .expect("terminal phase stops heartbeat"));
+    let handle = guard.handle.take();
+    guard
+        .flush_heartbeat_elements()
+        .await
+        .expect("missing handle is a heartbeat no-op");
+    guard.handle = handle;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn progress_registry_finish_without_output_preserves_existing_snapshot() {
     let server = spawn_mock_feishu_progress_server().await;
     let provider = mock_feishu_provider(&server.base_url);
@@ -575,6 +666,65 @@ fn assistant_stream_keeps_repeated_tokens_and_word_boundaries() {
     assert_eq!(snapshot.last_thought.as_deref(), Some("哈哈 done"));
     assert!(!assistant_texts_equivalent("foo bar", "foobar"));
     assert!(assistant_texts_equivalent("我\n先\n检查", "我先检查"));
+}
+
+#[test]
+fn assistant_final_does_not_repeat_commentary_after_reasoning_prefix() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "inspect branch");
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "**Planning git fetch and rebase**".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "当前目标：检查工作区并刷新远端主干。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+        content: "当前目标：检查工作区并刷新远端主干。".to_string(),
+    });
+
+    assert_eq!(snapshot.timeline.len(), 1);
+    assert_eq!(
+        snapshot.timeline[0].detail,
+        "**Planning git fetch and rebase**当前目标：检查工作区并刷新远端主干。"
+    );
+    assert_eq!(
+        snapshot.timeline[0]
+            .detail
+            .matches("当前目标：检查工作区并刷新远端主干。")
+            .count(),
+        1
+    );
+    assert_eq!(
+        snapshot.last_thought,
+        Some(snapshot.timeline[0].detail.clone())
+    );
+
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "exec_command".to_string(),
+            arguments: "git status --short --branch".to_string(),
+            result: "clean".to_string(),
+            success: true,
+        },
+        duration_ms: 10,
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "**Planning the next check**".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "下一步执行聚焦测试。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+        content: "下一步执行聚焦测试。".to_string(),
+    });
+
+    assert_eq!(snapshot.timeline.len(), 3);
+    assert_eq!(
+        snapshot.timeline[2]
+            .detail
+            .matches("下一步执行聚焦测试。")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1118,7 +1268,7 @@ fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
         .expect("process element");
     assert_eq!(
         process_element["header"]["title"]["content"],
-        "执行过程：共 70 步 · 工具 35 次"
+        "执行过程：共 70 步 · 工具 35 次 · 当前工具：暂无正在执行的工具 · 本轮工具：成功 1 · 失败 0 · 执行中 0"
     );
     let process_elements = process_element["elements"].as_array().unwrap();
     assert_eq!(process_elements[0]["element_id"], PROCESS_LOG_ELEMENT_ID);
@@ -1426,7 +1576,7 @@ fn feishu_card_limit_errors_are_classified_by_official_codes() {
 }
 
 #[test]
-fn feishu_progress_card_collapses_process_with_current_round_summary() {
+fn feishu_progress_card_collapses_process_with_inline_current_round_status() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "stream task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
         content: "上一轮先读取配置。".to_string(),
@@ -1484,8 +1634,8 @@ fn feishu_progress_card_collapses_process_with_current_round_summary() {
         .expect("process summary");
     let summary_content = summary["content"].as_str().unwrap();
     assert!(summary_content.contains("我会先检查代码路径，然后运行测试。"));
-    assert!(summary_content.contains("当前工具：`exec_command` ×2、`web_search`"));
-    assert!(summary_content.contains("本轮工具：成功 1 · 失败 1 · 执行中 3"));
+    assert!(!summary_content.contains("当前工具："));
+    assert!(!summary_content.contains("本轮工具："));
     assert!(!summary_content.contains("上一轮先读取配置"));
     let process = elements
         .iter()
@@ -1494,7 +1644,7 @@ fn feishu_progress_card_collapses_process_with_current_round_summary() {
     assert_eq!(process["expanded"], false);
     assert_eq!(
         process["header"]["title"]["content"],
-        "执行过程：共 8 步 · 工具 6 次"
+        "执行过程：共 8 步 · 工具 6 次 · 当前工具：exec_command ×2、web_search · 本轮工具：成功 1 · 失败 1 · 执行中 3"
     );
     assert!(running_serialized.contains("我会先检查代码路径"));
     assert!(!running_serialized.contains("1. 我会先检查代码路径"));
@@ -1502,6 +1652,22 @@ fn feishu_progress_card_collapses_process_with_current_round_summary() {
     assert!(!running_serialized.contains("Loop"));
     assert!(!running_serialized.contains("[模型]"));
     assert!(!running_serialized.contains("工具摘要"));
+
+    let compact_running_card = build_feishu_compact_progress_card(&snapshot, true);
+    let compact_running_serialized = serde_json::to_string(&compact_running_card).unwrap();
+    assert_eq!(
+        compact_running_serialized.matches("**最新进展**").count(),
+        1
+    );
+    let compact_output = compact_running_card["body"]["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|element| element["element_id"] == OUTPUT_ELEMENT_ID)
+        .expect("compact running output");
+    let compact_output_content = compact_output["content"].as_str().unwrap();
+    assert!(compact_output_content.starts_with("处理中... · 耗时："));
+    assert!(!compact_output_content.contains("我会先检查代码路径"));
 
     snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
         log: ToolCallLog {
@@ -1519,9 +1685,11 @@ fn feishu_progress_card_collapses_process_with_current_round_summary() {
     let finished_card = build_feishu_progress_card(&snapshot, false);
     let elements = finished_card["body"]["elements"].as_array().unwrap();
     assert_eq!(elements[0]["element_id"], STATUS_PANEL_ELEMENT_ID);
-    assert_eq!(elements[1]["element_id"], PROCESS_SUMMARY_ELEMENT_ID);
-    assert_eq!(elements[2]["element_id"], PROCESS_PANEL_ELEMENT_ID);
-    assert_eq!(elements[2]["expanded"], false);
+    assert_eq!(elements[1]["element_id"], PROCESS_PANEL_ELEMENT_ID);
+    assert_eq!(elements[1]["expanded"], false);
+    assert!(elements
+        .iter()
+        .all(|element| element["element_id"] != PROCESS_SUMMARY_ELEMENT_ID));
     assert_eq!(elements.last().unwrap()["element_id"], OUTPUT_ELEMENT_ID);
     assert_eq!(elements.last().unwrap()["tag"], "collapsible_panel");
     assert_eq!(elements.last().unwrap()["expanded"], false);
@@ -1537,12 +1705,15 @@ fn feishu_progress_card_collapses_process_with_current_round_summary() {
     let finished_serialized = serde_json::to_string(&finished_card).unwrap();
     assert!(finished_serialized.contains("最终结论：测试通过。"));
     assert!(finished_serialized.contains("执行过程：共 8 步 · 工具 6 次"));
+    assert!(finished_serialized
+        .contains("当前工具：exec_command、web_search · 本轮工具：成功 2 · 失败 1 · 执行中 2"));
+    assert!(!finished_serialized.contains("**最新进展**"));
     assert!(finished_serialized.contains("已完成：exec_command"));
     assert!(finished_serialized.contains("test result: ok"));
     assert!(!finished_serialized.contains("Pipeline"));
     assert!(!finished_serialized.contains("Loop"));
     assert!(!finished_serialized.contains("工具摘要"));
-    assert!(elements[2].to_string().contains("已完成：exec_command"));
+    assert!(elements[1].to_string().contains("已完成：exec_command"));
 }
 
 #[test]
@@ -1576,9 +1747,12 @@ fn process_summary_limits_running_tool_types_without_public_explanation() {
 
     let summary = format_process_summary_markdown(&snapshot);
     assert!(summary.contains("等待模型输出下一步说明。"));
-    assert!(summary.contains("`exec_command`、`view_image`、`web_search`，等 1 个"));
-    assert!(!summary.contains("`read_file`"));
-    assert!(summary.contains("成功 0 · 失败 0 · 执行中 4"));
+    assert!(!summary.contains("当前工具："));
+    assert!(!summary.contains("本轮工具："));
+    assert_eq!(
+        format_process_panel_title(&snapshot),
+        "执行过程：共 4 步 · 工具 4 次 · 当前工具：exec_command、view_image、web_search，等 1 个 · 本轮工具：成功 0 · 失败 0 · 执行中 4"
+    );
 }
 
 #[test]
@@ -1699,15 +1873,11 @@ fn terminal_progress_card_collapses_status_plan_process_and_conclusion() {
         vec![
             STATUS_PANEL_ELEMENT_ID,
             PLAN_PANEL_ELEMENT_ID,
-            PROCESS_SUMMARY_ELEMENT_ID,
             PROCESS_PANEL_ELEMENT_ID,
             OUTPUT_ELEMENT_ID,
         ]
     );
-    for element in elements
-        .iter()
-        .filter(|element| element["element_id"] != PROCESS_SUMMARY_ELEMENT_ID)
-    {
+    for element in elements {
         assert_eq!(
             element["tag"], "collapsible_panel",
             "terminal section must be collapsible: {element}"
@@ -1717,8 +1887,8 @@ fn terminal_progress_card_collapses_status_plan_process_and_conclusion() {
             "terminal section must default to collapsed: {element}"
         );
     }
-    assert_eq!(elements[4]["header"]["title"]["content"], "最终结论");
-    assert!(serde_json::to_string(&elements[4])
+    assert_eq!(elements[3]["header"]["title"]["content"], "最终结论");
+    assert!(serde_json::to_string(&elements[3])
         .unwrap()
         .contains("TERMINAL_COLLAPSED_CONCLUSION"));
 }
@@ -1751,6 +1921,9 @@ fn failed_progress_card_collapses_failure_conclusion_in_standard_and_compact_car
 
     let standard = build_feishu_progress_card(&snapshot, false);
     let standard_elements = standard["body"]["elements"].as_array().unwrap();
+    assert!(standard_elements
+        .iter()
+        .all(|element| element["element_id"] != PROCESS_SUMMARY_ELEMENT_ID));
     for element_id in [
         STATUS_PANEL_ELEMENT_ID,
         PLAN_PANEL_ELEMENT_ID,
@@ -1769,6 +1942,11 @@ fn failed_progress_card_collapses_failure_conclusion_in_standard_and_compact_car
         standard,
         build_feishu_compact_progress_card(&snapshot, false),
     ] {
+        assert!(card["body"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|element| element["element_id"] != PROCESS_SUMMARY_ELEMENT_ID));
         let output = card["body"]["elements"]
             .as_array()
             .unwrap()
@@ -1961,10 +2139,73 @@ fn external_runner_footer_bounds_and_escapes_session_id() {
 fn progress_footer_formats_elapsed_duration_without_milliseconds() {
     assert_eq!(format_progress_elapsed_duration(0), "0 秒");
     assert_eq!(format_progress_elapsed_duration(12), "12 秒");
+    assert_eq!(format_progress_elapsed_duration(60), "1 分 00 秒");
     assert_eq!(format_progress_elapsed_duration(65), "1 分 05 秒");
-    assert_eq!(format_progress_elapsed_duration(3_600), "1 小时");
-    assert_eq!(format_progress_elapsed_duration(3_780), "1 小时 03 分");
-    assert_eq!(format_progress_elapsed_duration(90_000), "1 天 1 小时");
+    assert_eq!(
+        format_progress_elapsed_duration(3_600),
+        "1 小时 00 分 00 秒"
+    );
+    assert_eq!(
+        format_progress_elapsed_duration(3_781),
+        "1 小时 03 分 01 秒"
+    );
+    assert_eq!(
+        format_progress_elapsed_duration(90_061),
+        "1 天 01 小时 01 分 01 秒"
+    );
+}
+
+#[test]
+fn running_activity_line_uses_device_time_and_omits_zero_leading_units() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "timed task");
+    snapshot.card_started_at_ms = 1_800_000_000_000;
+    snapshot.refresh_card_clock(1_800_000_065_000);
+
+    let expected_local_time = chrono::DateTime::from_timestamp(1_800_000_065, 0)
+        .unwrap()
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let activity = format_running_activity_line(&snapshot);
+    assert_eq!(
+        activity,
+        format!("处理中... · 耗时：1 分 05 秒 · 最后更新：{expected_local_time}")
+    );
+    assert!(!activity.contains("0 天"));
+    assert!(!activity.contains("0 小时"));
+    assert!(
+        format_footer_markdown(&snapshot).ends_with(&format!("最后更新：{expected_local_time}"))
+    );
+}
+
+#[test]
+fn elapsed_time_combines_runner_baseline_with_local_heartbeat_clock() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "clock-skewed task");
+    let mut status = ActiveTurnStatus::new("s1");
+    status.started_at = 1_800_000_000;
+    status.updated_at = 1_800_000_125;
+    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(status)));
+    let observed_at_ms = snapshot.turn_timing_observed_at_ms.unwrap();
+
+    snapshot.refresh_card_clock(observed_at_ms + 10_000);
+
+    assert_eq!(progress_elapsed_seconds(&snapshot), Some(135));
+    assert!(format_running_activity_line(&snapshot).contains("耗时：2 分 15 秒"));
+}
+
+#[test]
+fn compact_terminal_output_handles_thought_only_and_empty_snapshots() {
+    let mut thought_only = ImAgentProgressSnapshot::new("s1", "thought only");
+    thought_only.last_thought = Some("保留终态思考".to_string());
+    thought_only.phase = ImProgressPhase::Finished;
+    assert_eq!(
+        format_compact_output_markdown(&thought_only),
+        "保留终态思考"
+    );
+
+    let mut empty = ImAgentProgressSnapshot::new("s2", "empty terminal");
+    empty.phase = ImProgressPhase::Finished;
+    assert_eq!(format_compact_output_markdown(&empty), "暂无最终结论");
 }
 
 #[test]
@@ -1997,6 +2238,8 @@ fn token_usage_status_refresh_updates_footer_elapsed_without_process_noise() {
     started.runner_type = Some("codex".to_string());
     started.runner_id = Some("codex".to_string());
     snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(started)));
+    let initial_observed_at_ms = snapshot.turn_timing_observed_at_ms.unwrap();
+    snapshot.refresh_card_clock(initial_observed_at_ms);
     assert!(format_footer_markdown(&snapshot).contains("耗时：0 秒"));
 
     let mut usage_update = active_status(0);
@@ -2006,6 +2249,8 @@ fn token_usage_status_refresh_updates_footer_elapsed_without_process_noise() {
     usage_update.runner_type = Some("codex".to_string());
     usage_update.runner_id = Some("codex".to_string());
     snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(usage_update)));
+    let usage_observed_at_ms = snapshot.turn_timing_observed_at_ms.unwrap();
+    snapshot.refresh_card_clock(usage_observed_at_ms);
 
     let footer = format_footer_markdown(&snapshot);
     assert!(footer.contains("耗时：1 分 05 秒"));
@@ -2354,9 +2599,12 @@ pub(crate) struct MockFeishuProgressServer {
     message_counter: Arc<std::sync::atomic::AtomicUsize>,
     recall_counter: Arc<std::sync::atomic::AtomicUsize>,
     card_update_counter: Arc<std::sync::atomic::AtomicUsize>,
+    element_update_counter: Arc<std::sync::atomic::AtomicUsize>,
     settings_update_counter: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) card_create_payloads: Arc<std::sync::Mutex<Vec<String>>>,
     pub(crate) card_update_payloads: Arc<std::sync::Mutex<Vec<String>>>,
+    element_update_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    element_update_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     pub(crate) message_paths: Arc<std::sync::Mutex<Vec<String>>>,
     pub(crate) message_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     pub(crate) image_upload_payloads: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
@@ -2486,9 +2734,12 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let message_counter = Arc::new(AtomicUsize::new(0));
     let recall_counter = Arc::new(AtomicUsize::new(0));
     let card_update_counter = Arc::new(AtomicUsize::new(0));
+    let element_update_counter = Arc::new(AtomicUsize::new(0));
     let settings_update_counter = Arc::new(AtomicUsize::new(0));
     let card_create_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let card_update_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let element_update_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let element_update_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let message_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
     let message_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let image_upload_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2510,9 +2761,12 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let message_counter_for_server = Arc::clone(&message_counter);
     let recall_counter_for_server = Arc::clone(&recall_counter);
     let card_update_counter_for_server = Arc::clone(&card_update_counter);
+    let element_update_counter_for_server = Arc::clone(&element_update_counter);
     let settings_update_counter_for_server = Arc::clone(&settings_update_counter);
     let card_create_payloads_for_server = Arc::clone(&card_create_payloads);
     let card_update_payloads_for_server = Arc::clone(&card_update_payloads);
+    let element_update_paths_for_server = Arc::clone(&element_update_paths);
+    let element_update_payloads_for_server = Arc::clone(&element_update_payloads);
     let message_paths_for_server = Arc::clone(&message_paths);
     let message_payloads_for_server = Arc::clone(&message_payloads);
     let image_upload_payloads_for_server = Arc::clone(&image_upload_payloads);
@@ -2528,9 +2782,12 @@ async fn spawn_mock_feishu_progress_server_with_failures(
             let message_counter = Arc::clone(&message_counter_for_server);
             let recall_counter = Arc::clone(&recall_counter_for_server);
             let card_update_counter = Arc::clone(&card_update_counter_for_server);
+            let element_update_counter = Arc::clone(&element_update_counter_for_server);
             let settings_update_counter = Arc::clone(&settings_update_counter_for_server);
             let card_create_payloads = Arc::clone(&card_create_payloads_for_server);
             let card_update_payloads = Arc::clone(&card_update_payloads_for_server);
+            let element_update_paths = Arc::clone(&element_update_paths_for_server);
+            let element_update_payloads = Arc::clone(&element_update_payloads_for_server);
             let message_paths = Arc::clone(&message_paths_for_server);
             let message_payloads = Arc::clone(&message_payloads_for_server);
             let image_upload_payloads = Arc::clone(&image_upload_payloads_for_server);
@@ -2542,9 +2799,12 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                     let message_counter = Arc::clone(&message_counter);
                     let recall_counter = Arc::clone(&recall_counter);
                     let card_update_counter = Arc::clone(&card_update_counter);
+                    let element_update_counter = Arc::clone(&element_update_counter);
                     let settings_update_counter = Arc::clone(&settings_update_counter);
                     let card_create_payloads = Arc::clone(&card_create_payloads);
                     let card_update_payloads = Arc::clone(&card_update_payloads);
+                    let element_update_paths = Arc::clone(&element_update_paths);
+                    let element_update_payloads = Arc::clone(&element_update_payloads);
                     let message_paths = Arc::clone(&message_paths);
                     let message_payloads = Arc::clone(&message_payloads);
                     let image_upload_payloads = Arc::clone(&image_upload_payloads);
@@ -2690,6 +2950,28 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                                     .unwrap(),
                             );
                         }
+                        if method == Method::PUT
+                            && path.starts_with("/open-apis/cardkit/v1/cards/")
+                            && path.contains("/elements/")
+                        {
+                            element_update_counter.fetch_add(1, Ordering::SeqCst);
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&body).expect("update element json");
+                            element_update_paths
+                                .lock()
+                                .expect("element update paths lock")
+                                .push(path);
+                            element_update_payloads
+                                .lock()
+                                .expect("element update payloads lock")
+                                .push(body);
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
+                                    .unwrap(),
+                            );
+                        }
                         if method == Method::PATCH
                             && path.starts_with("/open-apis/cardkit/v1/cards/")
                             && path.ends_with("/settings")
@@ -2783,9 +3065,12 @@ async fn spawn_mock_feishu_progress_server_with_failures(
         message_counter,
         recall_counter,
         card_update_counter,
+        element_update_counter,
         settings_update_counter,
         card_create_payloads,
         card_update_payloads,
+        element_update_paths,
+        element_update_payloads,
         message_paths,
         message_payloads,
         image_upload_payloads,
