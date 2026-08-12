@@ -391,6 +391,42 @@ mod weixin_companion_tests {
         enforce_weixin_companion_attachment_budgets_with_limits(&mut byte_limited, 6, 10, 10, 7);
         assert_eq!(byte_limited.images.len(), 1);
         assert!(byte_limited.files.is_empty());
+
+        let mut zero_count = input("zero-count");
+        zero_count.images.push(image("ignored.png"));
+        enforce_weixin_companion_attachment_budgets_with_limits(&mut zero_count, 0, 10, 10, 10);
+        assert!(zero_count.images.is_empty());
+
+        let mut rejected_images = input("rejected-images");
+        rejected_images.images = vec![
+            crate::im_gateway::external_cli::ExternalCliImageInput {
+                data: String::new(),
+                ..image("empty.png")
+            },
+            crate::im_gateway::external_cli::ExternalCliImageInput {
+                data: "%%%".to_string(),
+                ..image("invalid.png")
+            },
+            image("over-total.png"),
+        ];
+        enforce_weixin_companion_attachment_budgets_with_limits(&mut rejected_images, 6, 10, 10, 1);
+        assert_eq!(rejected_images.images.len(), 1);
+        assert!(rejected_images.images[0].data.is_empty());
+
+        let mut rejected_files = input("rejected-files");
+        rejected_files.files = vec![
+            crate::im_gateway::external_cli::ExternalCliFileInput {
+                data: String::new(),
+                ..file("empty.txt")
+            },
+            crate::im_gateway::external_cli::ExternalCliFileInput {
+                data: "%%%".to_string(),
+                ..file("invalid.txt")
+            },
+        ];
+        enforce_weixin_companion_attachment_budgets_with_limits(&mut rejected_files, 6, 10, 10, 10);
+        assert_eq!(rejected_files.files.len(), 1);
+        assert!(rejected_files.files[0].data.is_empty());
     }
 
     #[test]
@@ -467,6 +503,8 @@ mod weixin_companion_tests {
         );
         budget.remaining_bytes = 1;
         assert!(!budget.retain_payload("ZmlsZQ==", "文件", "too-large.txt"));
+        budget.remaining_count = 0;
+        assert!(!budget.retain_payload("ZmlsZQ==", "文件", "too-many.txt"));
     }
 
     #[tokio::test]
@@ -637,6 +675,38 @@ mod weixin_companion_tests {
         let (images, files) = resolve_weixin_event_attachments(&client, &provider, &event).await;
         assert!(images.is_empty());
         assert!(files.is_empty());
+
+        let mut budget = WeixinCompanionAttachmentBudget::after_initial(&input("missing-message"));
+        let (images, files) =
+            resolve_weixin_event_attachments_with_budget(&client, &provider, &event, &mut budget)
+                .await;
+        assert!(images.is_empty());
+        assert!(files.is_empty());
+
+        event.message = Some(crate::im_gateway::types::ImEventMessage {
+            images: vec![crate::im_gateway::types::ImImageAttachment {
+                file_key: "inline-image".to_string(),
+                mime_type: Some("image/png".to_string()),
+                data_base64: Some("aW1hZ2U=".to_string()),
+                ..Default::default()
+            }],
+            files: vec![inline_file("inline.txt", "ZmlsZQ==")],
+            ..Default::default()
+        });
+        budget.remaining_count = 0;
+        let (images, files) =
+            resolve_weixin_event_attachments_with_budget(&client, &provider, &event, &mut budget)
+                .await;
+        assert!(images.is_empty());
+        assert!(files.is_empty());
+
+        budget.remaining_count = 2;
+        budget.remaining_bytes = MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES;
+        let (images, files) =
+            resolve_weixin_event_attachments_with_budget(&client, &provider, &event, &mut budget)
+                .await;
+        assert_eq!(images.len(), 1);
+        assert_eq!(files.len(), 1);
 
         event.received_at = now_ms().saturating_sub(WEIXIN_COMPANION_COALESCE_WINDOW_MS);
         let (_tx, mut rx) = mpsc::unbounded_channel();
