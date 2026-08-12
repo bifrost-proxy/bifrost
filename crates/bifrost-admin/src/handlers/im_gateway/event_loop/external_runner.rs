@@ -455,7 +455,7 @@ mod weixin_companion_tests {
             provider_id: provider.id.clone(),
             provider_type: ImProviderType::Weixin,
             event_type: "message.receive".to_string(),
-            source: crate::im_gateway::types::ImEventSource::default(),
+            source: initial_event.source.clone(),
             message: None,
             received_at: now_ms(),
             raw_digest: None,
