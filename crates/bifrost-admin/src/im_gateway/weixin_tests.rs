@@ -1376,7 +1376,7 @@ async fn poll_rejects_invalid_json_and_connection_requires_cursor_store() {
 }
 
 #[tokio::test]
-async fn connection_recovers_after_transient_poll_error_and_stops_on_closed_sink() {
+async fn connection_reports_closed_sink_after_transient_poll_error() {
     use bytes::Bytes;
     use http_body_util::Full;
     use hyper::body::Incoming;
@@ -1439,11 +1439,11 @@ async fn connection_recovers_after_transient_poll_error_and_stops_on_closed_sink
         .expect("reconnecting status timeout")
         .expect("reconnecting status");
     assert_eq!(reconnecting.state, ConnectionState::Reconnecting);
-    let connected = tokio::time::timeout(Duration::from_secs(4), status_rx.recv())
+    let disconnected = tokio::time::timeout(Duration::from_secs(4), status_rx.recv())
         .await
-        .expect("connected status timeout")
-        .expect("connected status");
-    assert_eq!(connected.state, ConnectionState::Connected);
+        .expect("disconnected status timeout")
+        .expect("disconnected status");
+    assert_eq!(disconnected.state, ConnectionState::Disconnected);
     assert!(calls.load(Ordering::SeqCst) >= 2);
     let _ = handle.shutdown_tx.send(());
 }

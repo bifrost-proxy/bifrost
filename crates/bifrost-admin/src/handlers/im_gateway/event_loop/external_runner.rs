@@ -218,7 +218,7 @@ mod weixin_companion_tests {
     fn file(name: &str) -> crate::im_gateway::external_cli::ExternalCliFileInput {
         crate::im_gateway::external_cli::ExternalCliFileInput {
             mime_type: "text/plain".to_string(),
-            data: format!("file-{name}"),
+            data: "ZmlsZQ==".to_string(),
             name: Some(name.to_string()),
         }
     }
