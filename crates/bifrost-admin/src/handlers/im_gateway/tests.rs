@@ -2930,6 +2930,105 @@ pub(super) async fn provider_status_reports_weixin_send_readiness_and_missing_pr
 }
 
 #[tokio::test(flavor = "current_thread")]
+pub(super) async fn provider_delete_stops_pipeline_and_clears_reusable_id_state() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-reused-id".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    provider.app_id = Some("account-old".to_string());
+    provider.secret_ref = Some("bot-token".to_string());
+    provider.event_types = vec!["message.receive".to_string()];
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("provider should be saved");
+
+    let old_sink = service.event_sink_for_provider(&provider);
+    let pending = ImEvent {
+        event_id: "old-account-event".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Weixin,
+        event_type: "message.receive".to_string(),
+        source: Default::default(),
+        message: None,
+        received_at: 1,
+        raw_digest: None,
+    };
+    service
+        .event_store
+        .add_pending(&pending)
+        .expect("old account event should be durable");
+    service
+        .queue_manager
+        .push_queue("weixin-reused-id:user", "old queued turn".to_string())
+        .expect("old account queue should be populated");
+    service
+        .queue_manager
+        .push_queue("other-provider:user", "retained turn".to_string())
+        .expect("other provider queue should be populated");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/im-gateway/providers/{}/connect",
+            provider.id
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("connect provider");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    server.await.expect("provider connect server task");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .delete(format!(
+            "http://{address}/api/im-gateway/providers/{}",
+            provider.id
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("delete provider");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    server.await.expect("provider delete server task");
+
+    assert!(old_sink.is_closed());
+    assert!(service.provider_store.get(&provider.id).is_none());
+    assert!(service
+        .event_store
+        .pending_by_provider(&provider.id)
+        .is_empty());
+    assert!(service
+        .queue_manager
+        .queue_status("weixin-reused-id:user")
+        .is_empty());
+    assert_eq!(
+        service
+            .queue_manager
+            .queue_status("other-provider:user")
+            .len(),
+        1
+    );
+
+    let (address, server) = spawn_im_gateway_http(service).await;
+    let response = reqwest::Client::new()
+        .delete(format!(
+            "http://{address}/api/im-gateway/providers/{}",
+            provider.id
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("delete missing provider");
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    server.await.expect("missing provider delete server task");
+}
+
+#[tokio::test(flavor = "current_thread")]
 pub(super) async fn idempotent_message_send_rejects_oversized_key_and_not_ready_weixin() {
     use sha2::Digest;
 
