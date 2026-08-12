@@ -260,9 +260,23 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("replace weixin sync cursor store"));
+    }
 
-        let missing = blocked_rename_dir.path().join("missing");
+    #[cfg(unix)]
+    #[test]
+    fn unix_file_hardening_and_directory_sync_report_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
         assert!(harden_private_file(&missing).is_err());
         assert!(sync_directory(&missing).is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_file_hardening_and_directory_sync_are_noops() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(harden_private_file(&missing).is_ok());
+        assert!(sync_directory(&missing).is_ok());
     }
 }
