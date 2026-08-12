@@ -729,6 +729,54 @@ async fn media_download_rejects_malformed_and_excessive_redirects() {
 }
 
 #[tokio::test]
+async fn media_download_enforces_limit_for_chunked_response() {
+    use bytes::Bytes;
+    use futures_util::stream;
+    use http_body_util::StreamBody;
+    use hyper::body::{Frame, Incoming};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind chunked media server");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let service = service_fn(|_request: Request<Incoming>| async move {
+            let chunks = stream::iter([
+                Ok::<_, hyper::Error>(Frame::data(Bytes::from(vec![0; MAX_INBOUND_MEDIA_BYTES]))),
+                Ok::<_, hyper::Error>(Frame::data(Bytes::from_static(b"x"))),
+            ]);
+            Ok::<_, hyper::Error>(Response::new(StreamBody::new(chunks)))
+        });
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(socket), service)
+            .await;
+    });
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
+    let mut config = test_provider();
+    config.base_url = Some(format!("http://127.0.0.1:{port}"));
+    let error = provider
+        .download_and_decrypt_media(
+            &config,
+            Some(&format!("http://127.0.0.1:{port}/chunked")),
+            None,
+            None,
+            "chunked",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("exceeds 100 MiB"), "{error}");
+}
+
+#[tokio::test]
 async fn download_message_image_resource_fetches_plain_full_url() {
     use bytes::Bytes;
     use http_body_util::Full;
