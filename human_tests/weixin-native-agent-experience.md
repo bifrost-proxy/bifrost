@@ -158,6 +158,7 @@
 
 - 2026-08-12 自动化部分 PASS：`cargo test -p bifrost-admin weixin_companion --lib --all-features` 11/11 通过；`BIFROST_PORT=18937 bash e2e-tests/tests/test_weixin_provider_e2e.sh` 通过。E2E 在文字与 inline 图片相隔约 2 秒时只记录一个 `===RUN===`，prompt 同时包含原始文字、`## Attached Images` 与本地图片路径。
 - 2026-08-12 真实微信部分待用户在 18881 通道执行“文字后图片”和“图片后文字”并确认回复；服务保持运行，日志待核对 `coalesced adjacent Weixin text and attachments before Agent dispatch`。
+- 2026-08-13 BLOCKED（未执行，不能计为 PASS）：本轮用户明确要求“不要在本地跑测试，直接把代码推上去”，因此没有操作 18881 真实微信通道，也没有取得两种顺序的实机日志/回复证据。TC-WNAE-08 的真实微信部分保持未关闭；后续须由具备该账号与设备访问权限的人分别执行“文字后图片”“图片后文字”，并记录单 turn 日志与回复后，才能把此项改为 PASS。
 
 ### TC-WNAE-09：微信帮助和多行文本保留可见换行
 
