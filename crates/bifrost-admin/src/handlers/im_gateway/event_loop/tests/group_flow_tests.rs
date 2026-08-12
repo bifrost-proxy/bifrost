@@ -1268,7 +1268,9 @@ async fn new_group_command_event_loop_runs_before_dedup_and_runner_dispatch() {
         .expect("new group event loop panicked");
 
     assert_eq!(creates.load(Ordering::SeqCst), 1);
-    assert_eq!(service.event_store.list().len(), 2);
+    // The command handler still observes the provider redelivery, while the
+    // durable event history keeps one record per provider event id.
+    assert_eq!(service.event_store.list().len(), 1);
     assert!(service.message_log_store.list().iter().any(|log| log
         .content
         .as_deref()
