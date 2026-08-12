@@ -1,4 +1,28 @@
 use super::*;
+
+#[tokio::test]
+async fn initial_external_attachments_are_deferred_for_weixin_and_empty_without_message() {
+    let temp = tempfile::tempdir().expect("initial attachment data dir");
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let client = ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider()));
+    let mut provider = crate::handlers::im_gateway::tests::test_provider();
+    provider.id = "weixin-main".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    let mut event = group_test_event("weixin-initial", "message", "caption", false, 1);
+
+    let (images, files) =
+        resolve_initial_external_cli_attachments(&client, &provider, &event).await;
+    assert!(images.is_empty());
+    assert!(files.is_empty());
+
+    provider.provider_type = ImProviderType::Feishu;
+    event.message = None;
+    let (images, files) =
+        resolve_initial_external_cli_attachments(&client, &provider, &event).await;
+    assert!(images.is_empty());
+    assert!(files.is_empty());
+}
+
 #[test]
 fn queued_event_restores_the_triggering_reply_target() {
     let base = group_test_event("feishu-queue", "m1", "first", false, 1);

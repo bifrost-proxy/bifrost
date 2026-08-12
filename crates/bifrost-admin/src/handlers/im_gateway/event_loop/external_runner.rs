@@ -1,5 +1,691 @@
 use super::*;
 
+const WEIXIN_COMPANION_COALESCE_WINDOW_MS: u64 = 3_000;
+
+struct WeixinCompanionInput {
+    event: ImEvent,
+    message_text: String,
+    images: Vec<crate::im_gateway::external_cli::ExternalCliImageInput>,
+    files: Vec<crate::im_gateway::external_cli::ExternalCliFileInput>,
+    has_attachment: bool,
+}
+
+fn merge_weixin_companion_batch(
+    input: &mut ExternalCliChatInput,
+    initial_has_meaningful_text: bool,
+    initial_has_attachment: bool,
+    companions: Vec<WeixinCompanionInput>,
+) -> Vec<WeixinCompanionInput> {
+    if !initial_has_attachment && !companions.iter().any(|item| item.has_attachment) {
+        return companions;
+    }
+
+    let mut text_parts = Vec::new();
+    if initial_has_meaningful_text && !input.message_text.trim().is_empty() {
+        text_parts.push(input.message_text.trim().to_string());
+    }
+    let mut deferred = Vec::new();
+    for companion in companions {
+        if companion.message_text.trim_start().starts_with('/') {
+            deferred.push(companion);
+            continue;
+        }
+        if !companion.message_text.trim().is_empty() {
+            text_parts.push(companion.message_text.trim().to_string());
+        }
+        input.images.extend(companion.images);
+        input.files.extend(companion.files);
+    }
+
+    if !text_parts.is_empty() {
+        input.message_text = text_parts.join("\n\n");
+    } else if !input.images.is_empty() {
+        input.message_text = IMAGE_ONLY_AGENT_PROMPT.to_string();
+    } else if !input.files.is_empty() {
+        input.message_text = format!("[附件消息: {} 个]", input.files.len());
+    }
+    deferred
+}
+
+fn event_has_attachments(event: &ImEvent) -> bool {
+    event
+        .message
+        .as_ref()
+        .is_some_and(|message| !message.images.is_empty() || !message.files.is_empty())
+}
+
+fn weixin_companion_remaining_ms(first_received_at: u64, current_time_ms: u64) -> u64 {
+    WEIXIN_COMPANION_COALESCE_WINDOW_MS
+        .saturating_sub(current_time_ms.saturating_sub(first_received_at))
+}
+
+async fn collect_weixin_companion_events(
+    rx: &mut mpsc::UnboundedReceiver<ImEvent>,
+    first_received_at: u64,
+) -> Vec<ImEvent> {
+    let remaining_ms = weixin_companion_remaining_ms(first_received_at, now_ms());
+    if remaining_ms == 0 {
+        return Vec::new();
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(remaining_ms);
+    let mut events = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(event)) => events.push(event),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    events
+}
+
+#[cfg(test)]
+mod weixin_companion_tests {
+    use super::*;
+
+    fn weixin_event(
+        event_id: &str,
+        text: &str,
+        files: Vec<crate::im_gateway::types::ImFileAttachment>,
+    ) -> ImEvent {
+        ImEvent {
+            event_id: event_id.to_string(),
+            provider_id: "weixin-main".to_string(),
+            provider_type: ImProviderType::Weixin,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("weixin-user".to_string()),
+                chat_type: Some("p2p".to_string()),
+                user_id: Some("weixin-user".to_string()),
+                user_name: Some("Weixin User".to_string()),
+                sender_type: Some("user".to_string()),
+                message_id: Some(format!("message-{event_id}")),
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: text.to_string(),
+                files,
+                raw_type: Some("text".to_string()),
+                ..Default::default()
+            }),
+            received_at: now_ms(),
+            raw_digest: None,
+        }
+    }
+
+    fn inline_file(name: &str, data_base64: &str) -> crate::im_gateway::types::ImFileAttachment {
+        crate::im_gateway::types::ImFileAttachment {
+            file_key: format!("file-{name}"),
+            name: Some(name.to_string()),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: None,
+            data_base64: Some(data_base64.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn input(message_text: &str) -> ExternalCliChatInput {
+        ExternalCliChatInput {
+            message_text: message_text.to_string(),
+            images: Vec::new(),
+            files: Vec::new(),
+            session_key: "weixin-session".to_string(),
+            adapter_override: None,
+            instructions_override: None,
+            delivery_override: None,
+            runner_id_override: None,
+            runner_selected: false,
+            group_turn_id: None,
+            reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
+        }
+    }
+
+    fn image(name: &str) -> crate::im_gateway::external_cli::ExternalCliImageInput {
+        crate::im_gateway::external_cli::ExternalCliImageInput {
+            mime_type: "image/png".to_string(),
+            data: format!("image-{name}"),
+            name: Some(name.to_string()),
+        }
+    }
+
+    fn file(name: &str) -> crate::im_gateway::external_cli::ExternalCliFileInput {
+        crate::im_gateway::external_cli::ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: format!("file-{name}"),
+            name: Some(name.to_string()),
+        }
+    }
+
+    fn companion(
+        message_text: &str,
+        images: Vec<crate::im_gateway::external_cli::ExternalCliImageInput>,
+        files: Vec<crate::im_gateway::external_cli::ExternalCliFileInput>,
+    ) -> WeixinCompanionInput {
+        let has_attachment = !images.is_empty() || !files.is_empty();
+        WeixinCompanionInput {
+            event: ImEvent {
+                event_id: format!("event-{message_text}"),
+                provider_id: "weixin".to_string(),
+                provider_type: ImProviderType::Weixin,
+                event_type: "message.receive".to_string(),
+                source: crate::im_gateway::types::ImEventSource {
+                    chat_id: Some("weixin-user".to_string()),
+                    chat_type: Some("p2p".to_string()),
+                    user_id: Some("weixin-user".to_string()),
+                    user_name: None,
+                    sender_type: Some("user".to_string()),
+                    message_id: Some(format!("message-{message_text}")),
+                },
+                message: None,
+                received_at: now_ms(),
+                raw_digest: None,
+            },
+            message_text: message_text.to_string(),
+            images,
+            files,
+            has_attachment,
+        }
+    }
+
+    #[test]
+    fn attachment_first_then_text_becomes_one_agent_input() {
+        let mut input = input(IMAGE_ONLY_AGENT_PROMPT);
+        input.images.push(image("first.png"));
+
+        let deferred = merge_weixin_companion_batch(
+            &mut input,
+            false,
+            true,
+            vec![companion("这张图里是什么？", Vec::new(), Vec::new())],
+        );
+
+        assert!(deferred.is_empty());
+        assert_eq!(input.message_text, "这张图里是什么？");
+        assert_eq!(input.images.len(), 1);
+    }
+
+    #[test]
+    fn text_first_then_attachment_becomes_one_agent_input() {
+        let mut input = input("帮我总结这个文件");
+
+        let deferred = merge_weixin_companion_batch(
+            &mut input,
+            true,
+            false,
+            vec![companion("", Vec::new(), vec![file("notes.md")])],
+        );
+
+        assert!(deferred.is_empty());
+        assert_eq!(input.message_text, "帮我总结这个文件");
+        assert_eq!(input.files.len(), 1);
+        assert_eq!(input.files[0].name.as_deref(), Some("notes.md"));
+    }
+
+    #[test]
+    fn adjacent_plain_text_is_deferred_instead_of_semantically_merged() {
+        let mut input = input("第一件事");
+
+        let deferred = merge_weixin_companion_batch(
+            &mut input,
+            true,
+            false,
+            vec![companion("第二件事", Vec::new(), Vec::new())],
+        );
+
+        assert_eq!(input.message_text, "第一件事");
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].message_text, "第二件事");
+    }
+
+    #[test]
+    fn slash_command_is_deferred_while_attachment_companions_merge() {
+        let mut input = input("看看附件");
+
+        let deferred = merge_weixin_companion_batch(
+            &mut input,
+            true,
+            false,
+            vec![
+                companion("", vec![image("diagram.png")], Vec::new()),
+                companion("/pwd", Vec::new(), Vec::new()),
+            ],
+        );
+
+        assert_eq!(input.message_text, "看看附件");
+        assert_eq!(input.images.len(), 1);
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].message_text, "/pwd");
+    }
+
+    #[test]
+    fn merges_multiple_images_files_and_text_fragments_in_arrival_order() {
+        let mut input = input("说明");
+        input.images.push(image("initial.png"));
+
+        let deferred = merge_weixin_companion_batch(
+            &mut input,
+            true,
+            true,
+            vec![
+                companion("第一段", vec![image("second.png")], Vec::new()),
+                companion("第二段", Vec::new(), vec![file("report.md")]),
+            ],
+        );
+
+        assert!(deferred.is_empty());
+        assert_eq!(input.message_text, "说明\n\n第一段\n\n第二段");
+        assert_eq!(input.images.len(), 2);
+        assert_eq!(input.files.len(), 1);
+    }
+
+    #[test]
+    fn attachment_only_batches_keep_specific_agent_prompts() {
+        let mut image_input = input("");
+        image_input.images.push(image("only.png"));
+        assert!(merge_weixin_companion_batch(&mut image_input, false, true, Vec::new()).is_empty());
+        assert_eq!(image_input.message_text, IMAGE_ONLY_AGENT_PROMPT);
+
+        let mut file_input = input("");
+        file_input.files.push(file("only.txt"));
+        assert!(merge_weixin_companion_batch(&mut file_input, false, true, Vec::new()).is_empty());
+        assert_eq!(file_input.message_text, "[附件消息: 1 个]");
+    }
+
+    #[test]
+    fn companion_window_uses_first_arrival_and_expires_at_three_seconds() {
+        assert_eq!(weixin_companion_remaining_ms(10_000, 10_000), 3_000);
+        assert_eq!(weixin_companion_remaining_ms(10_000, 12_999), 1);
+        assert_eq!(weixin_companion_remaining_ms(10_000, 13_000), 0);
+        assert_eq!(weixin_companion_remaining_ms(10_000, 13_500), 0);
+    }
+
+    #[tokio::test]
+    async fn expired_companion_collection_does_not_consume_later_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(ImEvent {
+            event_id: "later".to_string(),
+            provider_id: "weixin".to_string(),
+            provider_type: ImProviderType::Weixin,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource::default(),
+            message: None,
+            received_at: now_ms(),
+            raw_digest: None,
+        })
+        .unwrap();
+
+        let events = collect_weixin_companion_events(
+            &mut rx,
+            now_ms().saturating_sub(WEIXIN_COMPANION_COALESCE_WINDOW_MS),
+        )
+        .await;
+
+        assert!(events.is_empty());
+        assert_eq!(rx.try_recv().unwrap().event_id, "later");
+    }
+
+    #[tokio::test]
+    async fn coalesce_resolves_inline_files_ignores_empty_events_and_defers_slash() {
+        let temp = tempfile::tempdir().expect("weixin coalesce data dir");
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let client =
+            ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider()));
+        let mut provider = crate::handlers::im_gateway::tests::test_provider();
+        provider.id = "weixin-main".to_string();
+        provider.provider_type = ImProviderType::Weixin;
+        let initial_event = weixin_event(
+            "initial-file",
+            "",
+            vec![inline_file("initial.txt", "aW5pdA==")],
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(ImEvent {
+            event_id: "missing-message".to_string(),
+            provider_id: provider.id.clone(),
+            provider_type: ImProviderType::Weixin,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource::default(),
+            message: None,
+            received_at: now_ms(),
+            raw_digest: None,
+        })
+        .unwrap();
+        tx.send(weixin_event("empty", "   ", Vec::new())).unwrap();
+        tx.send(weixin_event("caption", "请总结这些附件", Vec::new()))
+            .unwrap();
+        tx.send(weixin_event(
+            "second-file",
+            "",
+            vec![inline_file("second.txt", "c2Vjb25k")],
+        ))
+        .unwrap();
+        tx.send(weixin_event("slash", "/pwd", Vec::new())).unwrap();
+        drop(tx);
+
+        // Make the event-store parent unwritable as a directory. Coalescing is
+        // best-effort persistence and must still deliver the combined input.
+        let admin_path = temp.path().join("admin");
+        if admin_path.exists() {
+            std::fs::remove_dir_all(&admin_path).expect("remove event-store directory");
+        }
+        std::fs::write(&admin_path, b"not a directory").expect("block event-store directory");
+
+        let mut input = input(IMAGE_ONLY_AGENT_PROMPT);
+        let mut ctx = ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &initial_event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+        };
+
+        let deferred = coalesce_weixin_companion_events(&mut ctx, &mut input).await;
+
+        assert_eq!(input.message_text, "请总结这些附件");
+        assert_eq!(input.files.len(), 2);
+        assert_eq!(
+            input
+                .files
+                .iter()
+                .filter_map(|file| file.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["initial.txt", "second.txt"]
+        );
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(
+            deferred[0]
+                .message
+                .as_ref()
+                .map(|message| message.text.as_str()),
+            Some("/pwd")
+        );
+    }
+
+    #[tokio::test]
+    async fn coalesce_skips_non_weixin_and_resolves_slash_attachments_without_waiting() {
+        let temp = tempfile::tempdir().expect("weixin coalesce slash data dir");
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let client =
+            ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider()));
+        let mut provider = crate::handlers::im_gateway::tests::test_provider();
+        let slash_event = weixin_event(
+            "slash-file",
+            "/help",
+            vec![inline_file("slash.txt", "c2xhc2g=")],
+        );
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        let mut input = input("/help");
+        {
+            let mut ctx = ExternalCliChatContext {
+                rx: &mut rx,
+                client: &client,
+                provider: &provider,
+                provider_store: &service.provider_store,
+                event: &slash_event,
+                message_log_store: &service.message_log_store,
+                agent_config_store: &service.agent_config_store,
+                external_cli_config_store: &service.external_cli_config_store,
+                agent_session_manager: &service.agent_session_manager,
+                queue_manager: &service.queue_manager,
+                progress_registry: &service.progress_registry,
+                event_store: &service.event_store,
+                group_context_store: &service.group_context_store,
+            };
+
+            assert!(coalesce_weixin_companion_events(&mut ctx, &mut input)
+                .await
+                .is_empty());
+        }
+        assert!(input.files.is_empty());
+
+        provider.id = "weixin-main".to_string();
+        provider.provider_type = ImProviderType::Weixin;
+        let mut ctx = ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &slash_event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+        };
+        assert!(coalesce_weixin_companion_events(&mut ctx, &mut input)
+            .await
+            .is_empty());
+        assert_eq!(input.files.len(), 1);
+        assert_eq!(input.files[0].name.as_deref(), Some("slash.txt"));
+
+        // A slash command whose attachment was already hydrated must not
+        // download it again or enter the companion wait window.
+        assert!(coalesce_weixin_companion_events(&mut ctx, &mut input)
+            .await
+            .is_empty());
+        assert_eq!(input.files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_resolution_handles_missing_message_and_empty_companion_window() {
+        let temp = tempfile::tempdir().expect("weixin empty companion data dir");
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let client =
+            ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider()));
+        let mut provider = crate::handlers::im_gateway::tests::test_provider();
+        provider.id = "weixin-main".to_string();
+        provider.provider_type = ImProviderType::Weixin;
+        let mut event = weixin_event("missing-message", "", Vec::new());
+        event.message = None;
+
+        let (images, files) = resolve_weixin_event_attachments(&client, &provider, &event).await;
+        assert!(images.is_empty());
+        assert!(files.is_empty());
+
+        event.received_at = now_ms().saturating_sub(WEIXIN_COMPANION_COALESCE_WINDOW_MS);
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        let mut input = input("无需聚合");
+        let mut ctx = ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+        };
+        assert!(coalesce_weixin_companion_events(&mut ctx, &mut input)
+            .await
+            .is_empty());
+        assert_eq!(input.message_text, "无需聚合");
+    }
+
+    #[tokio::test]
+    async fn coalesce_defers_adjacent_plain_text_when_no_attachment_arrives() {
+        let temp = tempfile::tempdir().expect("weixin plain text companion data dir");
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let client =
+            ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider()));
+        let mut provider = crate::handlers::im_gateway::tests::test_provider();
+        provider.id = "weixin-main".to_string();
+        provider.provider_type = ImProviderType::Weixin;
+        let initial_event = weixin_event("first-text", "第一件事", Vec::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(weixin_event("second-text", "第二件事", Vec::new()))
+            .unwrap();
+        drop(tx);
+        let mut input = input("第一件事");
+        let mut ctx = ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &initial_event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+        };
+
+        let deferred = coalesce_weixin_companion_events(&mut ctx, &mut input).await;
+
+        assert_eq!(input.message_text, "第一件事");
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].event_id, "second-text");
+    }
+}
+
+async fn resolve_weixin_event_attachments(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+) -> (
+    Vec<crate::im_gateway::external_cli::ExternalCliImageInput>,
+    Vec<crate::im_gateway::external_cli::ExternalCliFileInput>,
+) {
+    let Some(message) = event.message.as_ref() else {
+        return (Vec::new(), Vec::new());
+    };
+    let (images, files) = tokio::join!(
+        resolve_event_images(client, provider, event, &message.images),
+        resolve_event_files(client, provider, event, &message.files),
+    );
+    (external_cli_images_from_chat_images(images), files)
+}
+
+async fn coalesce_weixin_companion_events(
+    ctx: &mut ExternalCliChatContext<'_>,
+    input: &mut ExternalCliChatInput,
+) -> Vec<ImEvent> {
+    if ctx.provider.provider_type != ImProviderType::Weixin {
+        return Vec::new();
+    }
+
+    if input.message_text.trim_start().starts_with('/') {
+        if input.images.is_empty() && input.files.is_empty() {
+            let (images, files) =
+                resolve_weixin_event_attachments(ctx.client, ctx.provider, ctx.event).await;
+            input.images = images;
+            input.files = files;
+        }
+        return Vec::new();
+    }
+
+    // Start the first media download immediately, but keep polling the session
+    // mailbox for the whole companion window. This is important when Weixin's
+    // CDN download/decryption takes longer than the caption/media event gap.
+    let initial_download = resolve_weixin_event_attachments(ctx.client, ctx.provider, ctx.event);
+    let companion_collection = collect_weixin_companion_events(ctx.rx, ctx.event.received_at);
+    let ((initial_images, initial_files), companion_events) =
+        tokio::join!(initial_download, companion_collection);
+    if input.images.is_empty() && input.files.is_empty() {
+        input.images = initial_images;
+        input.files = initial_files;
+    }
+
+    let mut companions = Vec::new();
+    for next_event in companion_events {
+        let Some(message) = next_event.message.as_ref() else {
+            continue;
+        };
+        if message.text.trim().is_empty() && message.images.is_empty() && message.files.is_empty() {
+            continue;
+        }
+        let message_text = if message.text.trim().is_empty() {
+            String::new()
+        } else {
+            agent_message_text_with_reference(
+                message,
+                &next_event.provider_id,
+                next_event.source.user_id.as_deref(),
+                next_event.source.message_id.as_deref(),
+                ctx.message_log_store,
+            )
+        };
+        let has_attachment = !message.images.is_empty() || !message.files.is_empty();
+        let (images, files) = if message_text.trim_start().starts_with('/') {
+            (Vec::new(), Vec::new())
+        } else {
+            resolve_weixin_event_attachments(ctx.client, ctx.provider, &next_event).await
+        };
+        companions.push(WeixinCompanionInput {
+            event: next_event,
+            message_text,
+            images,
+            files,
+            has_attachment,
+        });
+    }
+
+    if companions.is_empty() {
+        return Vec::new();
+    }
+    let initial_has_meaningful_text = ctx
+        .event
+        .message
+        .as_ref()
+        .is_some_and(|message| !message.text.trim().is_empty() || message.reply_to.is_some());
+    let initial_has_attachment = event_has_attachments(ctx.event);
+    let batch_has_attachment =
+        initial_has_attachment || companions.iter().any(|item| item.has_attachment);
+    if batch_has_attachment {
+        for companion in companions
+            .iter()
+            .filter(|item| !item.message_text.trim_start().starts_with('/'))
+        {
+            if let Err(error) = ctx.event_store.add(companion.event.clone()) {
+                error!(error = %error, "failed to store coalesced Weixin companion event");
+            }
+            acknowledge_and_log_inbound_event(
+                ctx.client,
+                ctx.provider,
+                &companion.event,
+                ctx.message_log_store,
+            )
+            .await;
+        }
+    }
+    let companion_count = companions.len();
+    let deferred = merge_weixin_companion_batch(
+        input,
+        initial_has_meaningful_text,
+        initial_has_attachment,
+        companions,
+    );
+    let merged = companion_count.saturating_sub(deferred.len());
+    if merged > 0 {
+        info!(
+            session_key = %input.session_key,
+            merged_companion_count = merged,
+            image_count = input.images.len(),
+            file_count = input.files.len(),
+            "coalesced adjacent Weixin text and attachments before Agent dispatch"
+        );
+    }
+    deferred.into_iter().map(|item| item.event).collect()
+}
+
 pub(super) struct AbortTaskOnDrop(pub(super) tokio::task::AbortHandle);
 
 impl Drop for AbortTaskOnDrop {
@@ -327,9 +1013,10 @@ pub(super) async fn finish_external_runner_progress_and_notify(
 }
 
 pub(super) async fn run_external_cli_agent_chat(
-    ctx: ExternalCliChatContext<'_>,
-    input: ExternalCliChatInput,
+    mut ctx: ExternalCliChatContext<'_>,
+    mut input: ExternalCliChatInput,
 ) {
+    let deferred_weixin_events = coalesce_weixin_companion_events(&mut ctx, &mut input).await;
     let mut current_group_turn_id = input.group_turn_id.clone();
     let source_anchor = input
         .thread_anchor_message_id
@@ -371,6 +1058,26 @@ pub(super) async fn run_external_cli_agent_chat(
             }
             _ => Some(instructions.to_string()),
         };
+    }
+
+    for deferred_event in deferred_weixin_events {
+        handle_concurrent_event_during_chat(
+            &deferred_event,
+            ctx.provider,
+            &input.session_key,
+            ctx.queue_manager,
+            ctx.client,
+            ctx.message_log_store,
+            ctx.agent_session_manager,
+            ctx.progress_registry,
+            ctx.agent_config_store,
+            ctx.provider_store,
+            ctx.event_store,
+            ctx.group_context_store,
+            ctx.external_cli_config_store,
+            busy_default_mode_for_external_adapter(&settings.adapter),
+        )
+        .await;
     }
 
     // Intercept /clear and /reset after resolving the effective runner so the

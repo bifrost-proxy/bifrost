@@ -1344,8 +1344,32 @@ impl WeixinProvider {
         chunks
             .into_iter()
             .enumerate()
-            .map(|(idx, chunk)| format!("[{}/{}]\n{}", idx + 1, total, chunk))
+            .map(|(idx, chunk)| format!("[{}/{}]\n\n{}", idx + 1, total, chunk))
             .collect()
+    }
+
+    /// Weixin's native text bubble collapses a single LF as inline whitespace,
+    /// while an empty line is rendered as a visible paragraph break. Promote
+    /// single line breaks without expanding existing paragraph spacing.
+    fn render_text_for_weixin(text: &str) -> String {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut rendered = String::with_capacity(normalized.len());
+        let mut chars = normalized.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\n' {
+                rendered.push(ch);
+                continue;
+            }
+            let mut newline_count = 1;
+            while chars.peek() == Some(&'\n') {
+                chars.next();
+                newline_count += 1;
+            }
+            for _ in 0..newline_count.max(2) {
+                rendered.push('\n');
+            }
+        }
+        rendered
     }
 
     async fn send_text_once(
@@ -1427,15 +1451,16 @@ impl WeixinProvider {
         text: &str,
         client_msg_id: &str,
     ) -> Result<SendResult> {
+        let rendered_text = Self::render_text_for_weixin(text);
         let original_error = match self
-            .send_text_once(config, target, text, client_msg_id.to_string())
+            .send_text_once(config, target, &rendered_text, client_msg_id.to_string())
             .await
         {
             Ok(result) => return Ok(result),
             Err(error @ bifrost_core::BifrostError::Network(_)) => error,
             Err(error) => return Err(error),
         };
-        let chunks = Self::split_text_messages_for_retry(text);
+        let chunks = Self::split_text_messages_for_retry(&rendered_text);
         if chunks.len() <= 1 {
             return Err(original_error);
         }

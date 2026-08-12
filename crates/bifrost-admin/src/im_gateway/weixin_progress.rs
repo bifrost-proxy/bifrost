@@ -289,3 +289,55 @@ impl Drop for WeixinProgressSession {
 fn normalize_arguments_key(arguments: &str) -> String {
     arguments.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::im_gateway::types::ImProviderType;
+
+    #[tokio::test]
+    async fn finish_aborts_a_typing_task_that_ignores_shutdown() {
+        let typing_task = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = typing_task.abort_handle();
+        let mut session = WeixinProgressSession {
+            provider: Arc::new(WeixinProvider::new()),
+            config: ImProviderConfig {
+                id: "weixin-test".to_string(),
+                provider_type: ImProviderType::Weixin,
+                display_name: "Weixin Test".to_string(),
+                enabled: true,
+                base_url: None,
+                app_id: None,
+                secret_ref: None,
+                owner_open_id: None,
+                event_connection_enabled: false,
+                event_types: Vec::new(),
+                agent_config: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+            target: ImTarget {
+                id: "target".to_string(),
+                provider_id: "weixin-test".to_string(),
+                display_name: "Target".to_string(),
+                receive_id_type: "open_id".to_string(),
+                receive_id: "user".to_string(),
+                default_msg_type: "text".to_string(),
+                enabled: true,
+                created_at: 0,
+                updated_at: 0,
+            },
+            channel_run_id: "run".to_string(),
+            next_sequence: 0,
+            pending_tools: VecDeque::new(),
+            typing_shutdown: None,
+            typing_task: Some(typing_task),
+        };
+
+        session.finish().await;
+        tokio::task::yield_now().await;
+
+        assert!(abort_handle.is_finished());
+        assert!(session.typing_task.is_none());
+    }
+}

@@ -64,6 +64,7 @@ ImProgressPresentation
 - 微信收到消息后使用原生 Typing，turn 结束、失败、取消或 task abort 时可靠 CANCEL。
 - `ToolStarted/ToolFinished` 映射为类型 11/12，单 turn 的进度、最终文本、图片和文件共享同一个 `channel_run_id`。
 - 微信 FILE 入站可归一化、限流下载、AES-128-ECB + PKCS7 解密并进入 `ExternalCliChatInput.files`。
+- 微信拆分投递的相邻文本与图片/文件在同会话 3 秒窗口内聚合；附件下载解密与窗口收集并行，最终只启动一个 Agent turn。
 - 微信 FILE 出站复用 Agent 回复附件链路，完成 CDN 加密上传和 `type=4` 发送。
 - long-poll timeout 始终大于服务端建议值并可被 shutdown 立即取消；cursor 原子持久化；非零 `ret/errcode` 不得被当作成功。
 - 所有新增能力是 capability-driven；handler 不再通过 `provider_type == Feishu` 判断是否能展示 Progress。
@@ -309,7 +310,19 @@ pub struct ImFileAttachment {
 6. AES-128-ECB + PKCS7 解密失败返回明确 media kind/file key，但日志不打印 key 内容。
 7. 单文件上限 100 MiB、单消息最多 6 个附件、总量 250 MiB；超限附件跳过并记录可观测错误，不把 base64 写入日志。
 
-### 8.4 出站统一存储和上传
+### 8.4 相邻文本与附件聚合
+
+微信客户端可能把用户一次“说明文字 + 图片/文件”操作拆成同一 sender 的两个事件，并产生约 1–2 秒间隔。Bifrost 以首事件 `received_at` 为基准保留 3 秒 companion window：
+
+1. 首事件完成路由后先注册 session mailbox，再开始任何微信 CDN 下载，避免下载期间到达的配套事件被 busy-mode 当成独立 turn。
+2. 首事件附件下载/AES 解密与 mailbox 收集并行；窗口内到达的附件随后下载，最终把全部文字、图片和文件组装成一个 `ExternalCliChatInput`。
+3. 文本先到、附件先到均适用；模型实际收到合并后的文字，以及 External CLI 保存得到的附件绝对路径。
+4. 只有纯文本事件时不合并语义，后续文本进入既有 FIFO queue；slash command 始终独立排队。
+5. mailbox 以 `session_key` 隔离，不跨 provider/sender 合并；超过 3 秒的事件继续走正常并发/排队路径。
+
+普通微信非 slash 消息因此最多增加约 3 秒首轮延迟，这是避免错误拆 turn 的显式体验权衡。
+
+### 8.5 出站统一存储和上传
 
 把只支持图片的 `OutboundImage` 替换为内部 `PendingOutboundMedia`：
 
@@ -380,6 +393,7 @@ P0 不引入完整 Markdown AST 重写。先把当前规则明确为 `WeixinText
 - 本地/远程图片仍拆成真实图片消息。
 - 可下载附件链接仍拆成真实文件消息。
 - 文本保留标题、列表、代码块和表格可读结构；只清理微信明显无法显示的 marker。
+- 微信原生文本气泡会把单个 LF 折叠为空格；发送前把单换行提升为可见的空行分隔，同时保留已有连续空行，保证 `/help` 等逐行内容不会连成一段。
 - 继续先整段发送；仅 `sendmessage` 失败后按安全阈值分片重试。
 
 P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-first 改成预切分，也不声称 4000 是 iLink 服务端硬限制。
@@ -393,11 +407,11 @@ P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-f
 | `handlers/im_gateway/service.rs` | client 分派新增 capabilities/context/file download，不再拒绝微信文件 |
 | `im_gateway/progress_card.rs` | 保留 snapshot/Feishu renderer；Registry 新增类型化 Weixin session map 与公共分派 |
 | `im_gateway/weixin_progress.rs`（新） | Typing lease、工具 correlator、11/12 payload、turn finish |
-| `im_gateway/weixin.rs` | API types/helper、dynamic poll、cursor、文件/视频上传下载、run_id 发送 |
+| `im_gateway/weixin.rs` | API types/helper、dynamic poll、cursor、文件/视频上传下载、run_id 发送、稳定纯文本换行渲染 |
 | `im_gateway/weixin_sync_store.rs`（新） | versioned atomic cursor store |
 | `im_gateway/connection.rs` | 消费微信连接状态事件，把 `-14` 暴露为 `authentication_required` 并停止旧连接 |
 | `handlers/im_gateway/providers.rs` | 状态 API 返回可操作的重新扫码语义，复用现有 login start/status/complete |
-| `handlers/im_gateway/event_loop/external_runner.rs` | capability-driven progress start/finalize，删除 Feishu 类型硬编码 |
+| `handlers/im_gateway/event_loop/external_runner.rs` | capability-driven progress start/finalize、微信 3 秒 companion 聚合，删除 Feishu 类型硬编码 |
 | `handlers/im_gateway/agent_reply*.rs` | 把同一 delivery context 传给最终文本、图片、文件 |
 | `web/src/api/imGateway.ts` / `ImGatewayTab.tsx` | 识别 `authentication_required`，展示并触发现有二维码恢复流程 |
 | `e2e-tests/tests/test_weixin_provider_e2e.sh` | typing/progress/file/cursor/restart 场景 |
@@ -468,6 +482,8 @@ P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-f
 5. 注入 typing/progress API 失败，断言 final 仍成功。
 6. 文件/视频出站解密 CDN 密文，逐字节等于原始 fixture。
 7. 返回 `-14`，断言连接状态可诊断且 poll 不形成忙循环。
+8. 让 mock `getupdates` 以约 2 秒间隔返回文本和 inline 图片，断言 external runner 只启动一次，prompt 同时包含原文本和 `Attached Images` 本地绝对路径。
+9. 发送含单换行的帮助文本，断言微信 payload 使用可见的双 LF 分隔且现有段落不会继续膨胀。
 
 ### 13.3 human_tests
 
@@ -477,6 +493,8 @@ P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-f
 - 触发至少两个工具调用，观察微信原生 start/result 顺序和最终回复。
 - 发送文档、视频、有转写语音、无转写语音，验证 Agent 实际可见内容。
 - Agent 返回文件，验证微信收到的文件名、大小、内容。
+- 分别测试“文字后发图片”和“图片后发文字”，确认只产生一个 Agent turn，回答同时理解文字与附件。
+- 发送 `/help`，确认每条命令独立成行、分组之间留空，不再连成一整段。
 - turn 运行时停止/重启 Bifrost，验证 Typing 不永久残留、cursor 恢复且消息不丢。
 
 ### 13.4 coverage 90% 门禁
@@ -516,6 +534,8 @@ P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-f
 - [x] Typing 在 success/failure/cancel/drop 路径均停止；进程 shutdown 由连接 drain/abort 路径守护。
 - [x] 文件入站/出站 mock 真实字节验证通过，超限、解密错误和 SSRF/redirect 路径被拒绝。
 - [x] long-poll request timeout 带 network margin，cursor 可恢复，`-14` 可诊断且不忙循环。
+- [x] 微信相邻文本/附件在 3 秒窗口合并为单 turn，下载期间仍持续收集 companion 事件。
+- [x] 微信纯文本单换行被渲染为客户端可见分隔，长文本仍保持 full-first/failure-split。
 - [ ] 单元测试、E2E、human_tests、`make coverage-changed`、workspace all-features 和远端 coverage gate 均通过。
 - [ ] 至少两轮 Review/Fix/Test 已关闭发现的问题，设计、代码、capability、测试和文档一致。
 

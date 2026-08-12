@@ -1669,16 +1669,21 @@ async fn im_long_reply_delivery_retries_failed_full_message_with_stable_child_id
                         if path.ends_with("/ilink/bot/sendmessage") {
                             let json: serde_json::Value =
                                 serde_json::from_slice(&body).expect("sendmessage json");
+                            let client_id = json["msg"]["client_id"]
+                                .as_str()
+                                .expect("sendmessage client id")
+                                .to_string();
                             let call_count = {
                                 let mut bodies = bodies.lock().expect("lock bodies");
                                 bodies.push(json);
                                 bodies.len()
                             };
-                            let response = if call_count == 1 {
-                                r#"{"ret":40003,"errmsg":"message too long"}"#.to_string()
-                            } else {
-                                format!(r#"{{"ret":0,"message_id":"chunk-{call_count}"}}"#)
-                            };
+                            let response =
+                                if client_id == "stable-long-1" || client_id.starts_with("fail-") {
+                                    r#"{"ret":40003,"errmsg":"message too long"}"#.to_string()
+                                } else {
+                                    format!(r#"{{"ret":0,"message_id":"chunk-{call_count}"}}"#)
+                                };
                             return Ok::<_, hyper::Error>(
                                 Response::builder()
                                     .status(200)
@@ -1719,6 +1724,7 @@ async fn im_long_reply_delivery_retries_failed_full_message_with_stable_child_id
         "最近一周大模型训练进展".repeat(260),
         "尾段必须保留"
     );
+    let rendered_long_text = WeixinProvider::render_text_for_weixin(&long_text);
 
     let result = provider
         .send_text_with_client_id(&config, &target, &long_text, "stable-long-1")
@@ -1733,7 +1739,7 @@ async fn im_long_reply_delivery_retries_failed_full_message_with_stable_child_id
     );
     assert_eq!(
         bodies[0]["msg"]["item_list"][0]["text_item"]["text"],
-        long_text
+        rendered_long_text
     );
     assert_eq!(bodies[0]["msg"]["client_id"], "stable-long-1");
 
@@ -1744,7 +1750,7 @@ async fn im_long_reply_delivery_retries_failed_full_message_with_stable_child_id
         let text = body["msg"]["item_list"][0]["text_item"]["text"]
             .as_str()
             .expect("chunk text");
-        let prefix = format!("[{}/{}]\n", idx + 1, split_total);
+        let prefix = format!("[{}/{}]\n\n", idx + 1, split_total);
         assert!(text.starts_with(&prefix), "chunk must include order prefix");
         assert!(text.len() <= TEXT_RETRY_CHUNK_MAX_BYTES + 64);
         assert_eq!(
@@ -1754,7 +1760,32 @@ async fn im_long_reply_delivery_retries_failed_full_message_with_stable_child_id
         assert_eq!(body["msg"]["context_token"], "text-context");
         recovered.push_str(&text[prefix.len()..]);
     }
-    assert_eq!(recovered, long_text);
+    assert_eq!(recovered, rendered_long_text);
+
+    let short_error = provider
+        .send_text_with_client_id(&config, &target, "短消息", "fail-short")
+        .await
+        .expect_err("a short network failure cannot be split")
+        .to_string();
+    assert!(short_error.contains("message too long"));
+
+    let chunk_error = provider
+        .send_text_with_client_id(&config, &target, &long_text, "fail-long")
+        .await
+        .expect_err("a failed fallback chunk must preserve both errors")
+        .to_string();
+    assert!(chunk_error.contains("fallback chunk 1/"));
+    assert!(chunk_error.contains("message too long"));
+}
+
+#[test]
+fn weixin_text_renderer_promotes_single_line_breaks_and_preserves_paragraphs() {
+    assert_eq!(
+        WeixinProvider::render_text_for_weixin(
+            "可用命令:\r\n/help  显示帮助\n/status  查看状态\n\nRunner 命令:\r/fast  切换模式"
+        ),
+        "可用命令:\n\n/help  显示帮助\n\n/status  查看状态\n\nRunner 命令:\n\n/fast  切换模式"
+    );
 }
 
 #[test]

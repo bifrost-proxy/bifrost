@@ -138,6 +138,46 @@
 
 - 2026-08-12 PASS：入站限制 helper 单测 1/1、微信专项 33/33 全部通过，覆盖非法 Base64、单文件/总量边界、FILE AES 解密、hex/base64 key、动态 timeout、cursor 入队后持久化/隔离加密与 `-14 -> authentication_required` 不忙循环。
 
+### TC-WNAE-08：相邻文字与附件只产生一个 Agent turn
+
+**操作步骤：**
+
+1. 执行 `cargo test -p bifrost-admin weixin_companion --lib`，验证两种先后顺序、纯文本/slash 隔离、多附件与 3 秒边界。
+2. 构建当前分支 debug 二进制，执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_weixin_provider_e2e.sh`。
+3. 核对 mock `getupdates` 先返回文字、约 2 秒后返回 inline 图片；runner capture 中只能有一个 `===RUN===`，并同时出现原始文字、`## Attached Images` 和本地 `image-1.png` 路径。
+4. 在 18881 真实微信通道分别发送“文字后图片”和“图片后文字”，两次事件间隔不超过 3 秒，观察日志和回复。
+
+**预期结果：**
+
+- 附件下载/AES 解密期间 mailbox 仍接收配套文字。
+- 每组只启动一个 Agent turn，不先回复“没收到附件”，也不把附件作为第二个独立 turn。
+- 真实日志出现 `coalesced adjacent Weixin text and attachments before Agent dispatch`，回复同时理解文字和附件。
+
+**实际执行结果：**
+
+- 2026-08-12 自动化部分 PASS：`cargo test -p bifrost-admin weixin_companion --lib --all-features` 11/11 通过；`BIFROST_PORT=18937 bash e2e-tests/tests/test_weixin_provider_e2e.sh` 通过。E2E 在文字与 inline 图片相隔约 2 秒时只记录一个 `===RUN===`，prompt 同时包含原始文字、`## Attached Images` 与本地图片路径。
+- 2026-08-12 真实微信部分待用户在 18881 通道执行“文字后图片”和“图片后文字”并确认回复；服务保持运行，日志待核对 `coalesced adjacent Weixin text and attachments before Agent dispatch`。
+
+### TC-WNAE-09：微信帮助和多行文本保留可见换行
+
+**操作步骤：**
+
+1. 执行 `cargo test -p bifrost-admin weixin_text_renderer_promotes_single_line_breaks_and_preserves_paragraphs --lib`。
+2. 执行微信 Provider E2E，核对 final 中的单 LF 在 `sendmessage` payload 中变为双 LF，已有双 LF 不继续膨胀。
+3. 使用 18881 微信通道发送三行代表性文本，随后在微信发送 `/help`。
+4. 在真实微信客户端观察三行文本和帮助命令布局。
+
+**预期结果：**
+
+- 三行代表性文本均独立显示，不被折叠成一段。
+- `/help` 中每条命令独立成行，两个命令分组之间有空行。
+- full-first + failure-split 长文本行为保持不变，分片回退可完整拼回渲染后的正文。
+
+**实际执行结果：**
+
+- 2026-08-12 自动化部分 PASS：渲染单测通过，CRLF/CR 先统一为 LF，单 LF 提升为双 LF，已有段落空行不膨胀；微信 Provider E2E 断言 `sendmessage` payload 中三行 final 文本均由双 LF 分隔，long reply 仍保持 full-first，并可从 fallback 分片完整还原正文。
+- 2026-08-12 真实发送 PASS、视觉确认待用户：18881 `weixin-main` 已成功发送“三行 + 段落”代表性文本（idempotency key `weixin-linebreak-live-20260812-2`），Provider 返回 success；待用户在微信客户端确认显示效果并发送 `/help` 复核命令布局。
+
 ## 清理步骤
 
 - 删除用于核验官方仓库的 `/tmp/openclaw-weixin.*` 临时目录。

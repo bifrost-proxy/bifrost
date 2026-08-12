@@ -206,9 +206,17 @@ pub(super) fn spawn_external_cli_agent_chat(
     let generation = registry.reserve_generation();
     let completion_tx = registry.completion_sender();
     let (session_tx, mut session_rx) = mpsc::unbounded_channel();
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
     let guard_session_manager = Arc::clone(&ctx.agent_session_manager);
     let guard_session_key = session_key.clone();
     let task = tokio::spawn(async move {
+        // `tokio::spawn` may start on another worker immediately. Hold the task
+        // until the sender is visible in the registry so an adjacent Weixin
+        // event cannot bypass the mailbox while the first attachment starts
+        // downloading.
+        if start_rx.await.is_err() {
+            return;
+        }
         let guard = SessionTaskCompletionGuard::new(
             completion_tx,
             guard_session_key,
@@ -239,6 +247,7 @@ pub(super) fn spawn_external_cli_agent_chat(
         guard.complete(recovered_events);
     });
     registry.register(session_key, generation, session_tx, task.abort_handle());
+    let _ = start_tx.send(());
 }
 
 #[cfg(test)]

@@ -844,6 +844,32 @@ pub(super) async fn resolve_event_files_handles_inline_limits_and_missing_messag
     assert_eq!(resolved[0].name.as_deref(), Some("file-0.txt"));
     assert_eq!(resolved[0].data, "ZmlsZS0w"); // inline base64 is preserved until runner save time
     assert_eq!(resolved[1].mime_type, "text/plain");
+
+    let invalid_and_oversized = vec![
+        crate::im_gateway::types::ImFileAttachment {
+            file_key: "invalid-inline".to_string(),
+            name: Some("invalid.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: None,
+            data_base64: Some("not-base64!?".to_string()),
+            download_url: None,
+            ..Default::default()
+        },
+        crate::im_gateway::types::ImFileAttachment {
+            file_key: "oversized-declared".to_string(),
+            name: Some("huge.bin".to_string()),
+            mime_type: Some("application/octet-stream".to_string()),
+            size_bytes: Some(MAX_FEISHU_REFERENCED_FILE_BYTES + 1),
+            data_base64: None,
+            download_url: None,
+            ..Default::default()
+        },
+    ];
+    assert!(
+        resolve_event_files(&client, &provider, &event, &invalid_and_oversized)
+            .await
+            .is_empty()
+    );
 }
 
 #[test]

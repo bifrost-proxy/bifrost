@@ -41,6 +41,10 @@ port_file = pathlib.Path(sys.argv[1])
 request_log = pathlib.Path(sys.argv[2])
 lock = threading.Lock()
 state = {"updates": 0, "uploads": 0}
+inline_png = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -100,12 +104,34 @@ class Handler(BaseHTTPRequestHandler):
                         "item_list": [{"type": 1, "text_item": {"text": "RUN_WEIXIN_NATIVE_E2E"}}],
                     }],
                 })
+            elif call == 1:
+                time.sleep(2.0)
+                self.send_json({
+                    "ret": 0,
+                    "longpolling_timeout_ms": 5000,
+                    "get_updates_buf": "cursor-weixin-e2e-2",
+                    "msgs": [{
+                        "message_id": "weixin-e2e-inbound-image-1",
+                        "from_user_id": "owner@im.wechat",
+                        "to_user_id": "mock-bot@im.bot",
+                        "message_type": 2,
+                        "context_token": "weixin-e2e-context",
+                        "item_list": [{
+                            "type": 2,
+                            "msg_id": "weixin-e2e-image-1",
+                            "image_item": {
+                                "mime_type": "image/png",
+                                "data_base64": base64.b64encode(inline_png).decode("ascii"),
+                            },
+                        }],
+                    }],
+                })
             else:
                 time.sleep(1.0)
                 self.send_json({
                     "ret": 0,
                     "longpolling_timeout_ms": 5000,
-                    "get_updates_buf": "cursor-weixin-e2e-1",
+                    "get_updates_buf": "cursor-weixin-e2e-2",
                     "msgs": [],
                 })
             return
@@ -390,18 +416,24 @@ image_path.write_bytes(
 )
 video_path = test_root / "weixin-e2e-video.mp4"
 video_path.write_bytes(b"\x00\x00\x00\x18ftypisomweixin-e2e-video")
+input_capture_path = test_root / "weixin-e2e-agent-input.txt"
 runner_code = r'''
 import json
+import pathlib
 import sys
 import time
 _prompt = sys.stdin.read()
+with pathlib.Path(sys.argv[4]).open("a", encoding="utf-8") as capture:
+    capture.write("===RUN===\n")
+    capture.write(_prompt)
+    capture.write("\n===END===\n")
 print(json.dumps({"type": "run_started", "content": "started", "session_id": "weixin-native-e2e-session"}))
 print(json.dumps({"type": "tool_started", "tool_name": "exec_command", "arguments": "verify weixin attachments"}))
 time.sleep(5.2)
 print(json.dumps({"type": "tool_finished", "tool_name": "exec_command", "arguments": "verify weixin attachments", "result": "ok", "success": True, "duration_ms": 5200}))
 print(json.dumps({
     "type": "assistant_final",
-    "content": "WEIXIN_NATIVE_E2E_FINAL\n\n![Weixin chart](%s)\n\n[Weixin report](%s)\n[Weixin video](%s)" % (sys.argv[1], sys.argv[2], sys.argv[3]),
+    "content": "WEIXIN_NATIVE_E2E_FINAL\nWEIXIN_NATIVE_E2E_SECOND_LINE\n\n![Weixin chart](%s)\n\n[Weixin report](%s)\n[Weixin video](%s)" % (sys.argv[1], sys.argv[2], sys.argv[3]),
 }))
 '''
 request("/chat/config", {
@@ -413,7 +445,7 @@ request("/chat/config", {
             "adapter": "custom",
             "adapterConfig": {
                 "executable": sys.executable,
-                "args": ["-c", runner_code, str(image_path), str(report_path), str(video_path)],
+                "args": ["-c", runner_code, str(image_path), str(report_path), str(video_path), str(input_capture_path)],
                 "timeoutSecs": 30,
             },
             "injectBifrostTools": False,
@@ -479,6 +511,12 @@ log_path = pathlib.Path(sys.argv[1])
 test_root = pathlib.Path(sys.argv[2])
 records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
+agent_input = (test_root / "weixin-e2e-agent-input.txt").read_text(encoding="utf-8")
+assert agent_input.count("===RUN===") == 1, agent_input
+assert "RUN_WEIXIN_NATIVE_E2E" in agent_input, agent_input
+assert "## Attached Images" in agent_input, agent_input
+assert "image-1.png" in agent_input, agent_input
+
 typing = [
     record for record in records
     if record["path"].endswith("/ilink/bot/sendtyping")
@@ -503,7 +541,8 @@ assert item_types.index(11) < item_types.index(12) < item_types.index(1), item_t
 assert all(message["message_state"] == 2 for message in messages), messages
 
 text_message = next(message for message in messages if message["item_list"][0]["type"] == 1)
-assert "WEIXIN_NATIVE_E2E_FINAL" in text_message["item_list"][0]["text_item"]["text"], text_message
+rendered_text = text_message["item_list"][0]["text_item"]["text"]
+assert "WEIXIN_NATIVE_E2E_FINAL\n\nWEIXIN_NATIVE_E2E_SECOND_LINE" in rendered_text, text_message
 file_message = next(message for message in messages if message["item_list"][0]["type"] == 4)
 assert file_message["item_list"][0]["file_item"]["file_name"] == "weixin-e2e-report.md", file_message
 video_message = next(message for message in messages if message["item_list"][0]["type"] == 5)
