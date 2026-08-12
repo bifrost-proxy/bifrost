@@ -1956,6 +1956,113 @@ pub(super) fn agent_reply_collects_local_and_remote_archive_attachments() {
 }
 
 #[test]
+pub(super) fn agent_reply_collects_config_attachments_but_excludes_source_code() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let local_config = temp.path().join("next-harness.yaml");
+    let local_source = temp.path().join("handler.rs");
+    let local_sensitive_config = temp.path().join(".env.production");
+    std::fs::write(&local_config, b"runner: codex\n").expect("write config");
+    std::fs::write(&local_source, b"fn main() {}\n").expect("write source");
+    std::fs::write(&local_sensitive_config, b"TOKEN=secret\n").expect("write sensitive config");
+    let markdown = format!(
+        concat!(
+            "[Next harness config]({})\n",
+            "[source file]({})\n",
+            "[config file]({})\n",
+            "[Remote config](https://example.com/download?filename=service.TOML)\n",
+            "[Remote source file](https://files.oaiusercontent.com/worker%2Epy)\n",
+            "[Remote secret config](https://files.oaiusercontent.com/download?filename=.env.production)"
+        ),
+        local_config.display(),
+        local_source.display(),
+        local_sensitive_config.display(),
+    );
+    let mut images = Vec::new();
+    let mut local_attachments = Vec::new();
+    collect_agent_reply_local_attachment_links(
+        &markdown,
+        Some(temp.path()),
+        &mut images,
+        &mut local_attachments,
+    );
+    let remote_attachments = collect_agent_reply_remote_attachment_links(&markdown);
+
+    assert!(images.is_empty());
+    assert_eq!(local_attachments.len(), 1);
+    assert_eq!(local_attachments[0].path, local_config);
+    assert_eq!(remote_attachments.len(), 1);
+    assert!(remote_attachments[0].url.contains("service.TOML"));
+
+    for (path, extension) in [
+        ("next-harness.yaml", "yaml"),
+        ("settings.YML", "yml"),
+        ("Cargo.toml", "toml"),
+        ("service.ini", "ini"),
+        ("proxy.cfg", "cfg"),
+        ("nginx.conf", "conf"),
+        ("app.config", "config"),
+        ("mysql.cnf", "cnf"),
+        ("application.properties", "properties"),
+        ("settings.xml", "xml"),
+        ("settings.jsonc", "jsonc"),
+        ("settings.json5", "json5"),
+        ("service.hcl", "hcl"),
+        ("variables.tfvars", "tfvars"),
+        ("Info.plist", "plist"),
+        ("build.xcconfig", "xcconfig"),
+    ] {
+        assert_eq!(attachment_extension_from_path(path), Some(extension));
+    }
+    for path in [
+        "main.rs",
+        "worker.py",
+        "app.js",
+        "view.tsx",
+        "server.go",
+        "query.sql",
+        "styles.css",
+        "Dockerfile",
+        "Makefile",
+        "CMakeLists.txt",
+        "build.gradle",
+    ] {
+        assert!(
+            is_source_code_path(path),
+            "expected source-code path: {path}"
+        );
+        assert!(
+            !is_explicit_attachment_label_or_path("source file", path),
+            "source-code denylist must override an explicit file label: {path}"
+        );
+    }
+    assert_eq!(attachment_extension_from_path(".env"), None);
+    for path in [
+        ".env",
+        ".env.production",
+        "credentials",
+        "secrets",
+        "id_rsa",
+        "id_ed25519",
+    ] {
+        assert!(
+            is_sensitive_config_path(path),
+            "expected sensitive config path: {path}"
+        );
+        assert!(
+            !is_explicit_attachment_label_or_path("config file", path),
+            "sensitive config denylist must override an explicit file label: {path}"
+        );
+    }
+    assert!(is_source_code_path("worker%2Epy"));
+    assert_eq!(
+        extension_from_content_type("application/yaml"),
+        Some("yaml")
+    );
+    assert_eq!(extension_from_content_type("text/toml"), Some("toml"));
+    assert_eq!(extension_from_content_type("application/xml"), Some("xml"));
+}
+
+#[test]
 pub(super) fn agent_reply_target_uses_feishu_chat_id_for_event_channel() {
     let mut provider = test_provider();
     provider.owner_open_id = Some("owner-ou".to_string());
