@@ -307,6 +307,47 @@ fn normalize_update_extracts_ilink_image_item_for_multimodal_agent() {
 }
 
 #[test]
+fn normalize_update_uses_opaque_media_keys_when_protocol_ids_are_missing() {
+    let event = WeixinProvider::normalize_update(
+        &test_provider(),
+        "mock-bot@im.bot",
+        serde_json::json!({
+            "message_id": "media-without-item-ids",
+            "from_user_id": "user-media@im.wechat",
+            "item_list": [
+                {
+                    "type": 2,
+                    "image_item": {
+                        "media": {
+                            "encrypt_query_param": "secret-image-query",
+                            "full_url": "https://cdn.example.test/signed-image?token=secret"
+                        }
+                    }
+                },
+                {
+                    "type": 4,
+                    "file_item": {
+                        "file_name": "report.pdf",
+                        "media": {
+                            "encrypt_query_param": "secret-file-query",
+                            "full_url": "https://cdn.example.test/signed-file?token=secret"
+                        }
+                    }
+                }
+            ]
+        }),
+    );
+
+    let message = event.message.expect("normalized message");
+    let image_key = &message.images[0].file_key;
+    let file_key = &message.files[0].file_key;
+    assert!(image_key.starts_with("weixin-image-"), "{image_key}");
+    assert!(file_key.starts_with("weixin-media-"), "{file_key}");
+    assert!(!image_key.contains("secret"), "{image_key}");
+    assert!(!file_key.contains("secret"), "{file_key}");
+}
+
+#[test]
 fn normalize_update_extracts_file_video_and_untranscribed_voice_items() {
     let event = WeixinProvider::normalize_update(
         &test_provider(),
@@ -1368,7 +1409,7 @@ async fn poll_rejects_invalid_json_and_connection_requires_cursor_store() {
     unavailable.sync_cursor_store = None;
     let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
     assert!(unavailable
-        .connect_events_with_status(&config, sink, None)
+        .connect_events_with_status(&config, sink.into(), None)
         .await
         .expect_err("missing cursor store must fail")
         .to_string()
@@ -1462,7 +1503,7 @@ async fn connection_recovers_after_sync_cursor_persist_failure() {
     let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
     let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = provider
-        .connect_events_with_status(&config, sink, Some(status_tx))
+        .connect_events_with_status(&config, sink.into(), Some(status_tx))
         .await
         .expect("start cursor persistence recovery connection");
 
@@ -1550,7 +1591,7 @@ async fn connection_reports_closed_sink_after_transient_poll_error() {
     drop(events);
     let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = provider
-        .connect_events_with_status(&config, sink, Some(status_tx))
+        .connect_events_with_status(&config, sink.into(), Some(status_tx))
         .await
         .expect("start recovery connection");
     let reconnecting = tokio::time::timeout(Duration::from_secs(1), status_rx.recv())
@@ -1632,8 +1673,13 @@ async fn connect_events_persists_cursor_only_after_enqueue_and_resumes_next_poll
     let mut config = test_provider();
     config.base_url = Some(format!("http://127.0.0.1:{port}"));
     let (sink_tx, mut sink_rx) = tokio::sync::mpsc::unbounded_channel();
+    let event_store = Arc::new(crate::im_gateway::ImEventStore::new(data_dir.path()));
+    let sink = crate::im_gateway::provider::EventSink::with_durable_store(
+        sink_tx,
+        Arc::clone(&event_store),
+    );
     let handle = provider
-        .connect_events_with_status(&config, sink_tx, None)
+        .connect_events_with_status(&config, sink, None)
         .await
         .expect("start cursor poll");
     let event = tokio::time::timeout(Duration::from_secs(2), sink_rx.recv())
@@ -1641,6 +1687,7 @@ async fn connect_events_persists_cursor_only_after_enqueue_and_resumes_next_poll
         .expect("event timeout")
         .expect("cursor event");
     assert_eq!(event.event_id, "cursor-msg-1");
+    assert_eq!(event_store.list()[0].event_id, "cursor-msg-1");
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if request_bodies.lock().expect("lock cursor bodies").len() >= 2 {
@@ -1718,7 +1765,7 @@ async fn stale_authorization_updates_connection_status_without_busy_retry() {
     let (sink_tx, _sink_rx) = tokio::sync::mpsc::unbounded_channel();
     let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
     let _handle = provider
-        .connect_events_with_status(&config, sink_tx, Some(status_tx))
+        .connect_events_with_status(&config, sink_tx.into(), Some(status_tx))
         .await
         .expect("start stale auth poll");
     let status = tokio::time::timeout(Duration::from_secs(2), status_rx.recv())

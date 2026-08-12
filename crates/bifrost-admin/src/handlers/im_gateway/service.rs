@@ -611,6 +611,10 @@ impl ImGatewayService {
             let client = self.provider_client(&provider);
             let provider_for_loop = provider.clone();
             let event_store = self.event_store.clone();
+            let sink = crate::im_gateway::provider::EventSink::with_durable_store(
+                tx,
+                Arc::clone(&event_store),
+            );
             let message_log_store = self.message_log_store.clone();
             let group_context_store = self.group_context_store.clone();
             let route_store = self.route_store.clone();
@@ -650,7 +654,7 @@ impl ImGatewayService {
             // Start the long connection
             match self
                 .connection_manager
-                .start_connection(&provider, &app_secret, tx)
+                .start_connection(&provider, &app_secret, sink)
                 .await
             {
                 Ok(()) => {
@@ -799,6 +803,10 @@ impl ImGatewayService {
                             let client = self.provider_client(&provider);
                             let provider_for_loop = provider.clone();
                             let event_store = self.event_store.clone();
+                            let sink = crate::im_gateway::provider::EventSink::with_durable_store(
+                                tx,
+                                Arc::clone(&event_store),
+                            );
                             let message_log_store = self.message_log_store.clone();
                             let group_context_store = self.group_context_store.clone();
                             let route_store = self.route_store.clone();
@@ -836,7 +844,7 @@ impl ImGatewayService {
                             });
                             if let Err(e) = self
                                 .connection_manager
-                                .start_connection(&provider, &app_secret, tx)
+                                .start_connection(&provider, &app_secret, sink)
                                 .await
                             {
                                 warn!(

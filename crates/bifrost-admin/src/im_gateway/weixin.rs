@@ -1087,8 +1087,6 @@ impl WeixinProvider {
             _ => default_mime.to_string(),
         };
         let file_key = Self::string_or_number_field(item, &["msg_id", "message_id", "id"])
-            .or_else(|| encrypted_query_param.clone())
-            .or_else(|| download_url.clone())
             .unwrap_or_else(|| format!("weixin-media-{:016x}", stable_hash(&item.to_string())));
         if files.iter().any(|file| file.file_key == file_key) {
             return;
@@ -1176,8 +1174,6 @@ impl WeixinProvider {
             return;
         }
         let file_key = Self::string_or_number_field(item, &["msg_id", "message_id", "id"])
-            .or_else(|| encrypted_query_param.clone())
-            .or_else(|| download_url.clone())
             .unwrap_or_else(|| format!("weixin-image-{:016x}", stable_hash(&item.to_string())));
         if images.iter().any(|image| image.file_key == file_key) {
             return;
@@ -2104,8 +2100,15 @@ impl WeixinProvider {
                 match result {
                     Ok(batch) => {
                         let was_reconnecting = consecutive_errors > 0;
+                        let mut delivery_error = None;
                         for event in batch.events {
-                            if sink.send(event).is_err() {
+                            if let Err(error) = sink.persist_and_send(event) {
+                                delivery_error = Some(error);
+                                break;
+                            }
+                        }
+                        if let Some(error) = delivery_error {
+                            if sink.is_closed() {
                                 send_connection_status(
                                     status_tx.as_ref(),
                                     ConnectionState::Disconnected,
@@ -2116,6 +2119,27 @@ impl WeixinProvider {
                                 );
                                 break 'polling;
                             }
+                            consecutive_errors = consecutive_errors.saturating_add(1);
+                            warn!(
+                                provider_id = %config.id,
+                                error = %error,
+                                "failed to durably accept Weixin event; cursor not advanced"
+                            );
+                            send_connection_status(
+                                status_tx.as_ref(),
+                                ConnectionState::Reconnecting,
+                                Some(error.to_string()),
+                            );
+                            let delay = if consecutive_errors >= 3 {
+                                Duration::from_secs(30)
+                            } else {
+                                Duration::from_secs(2)
+                            };
+                            tokio::select! {
+                                _ = &mut shutdown_rx => break,
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                            continue;
                         }
                         if let Some(cursor) = batch.next_cursor {
                             let account_id = Self::account_id(&config).to_string();

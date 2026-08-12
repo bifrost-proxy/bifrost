@@ -68,9 +68,21 @@ impl ImEventStore {
 
     pub fn add(&self, event: ImEvent) -> Result<()> {
         let mut data = self.data.write();
+        if !event.event_id.is_empty()
+            && data.events.iter().any(|stored| {
+                stored.provider_id == event.provider_id && stored.event_id == event.event_id
+            })
+        {
+            return Ok(());
+        }
+        let previous = data.clone();
         data.events.push(redact_event_for_history(event));
         self.trim_locked(&mut data);
-        self.save_locked(&data)
+        if let Err(error) = self.save_locked(&data) {
+            *data = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn clear(&self) -> Result<()> {
@@ -156,6 +168,45 @@ fn redact_event_for_history_in_place(event: &mut ImEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(event_id: &str) -> ImEvent {
+        ImEvent {
+            event_id: event_id.to_string(),
+            provider_id: "weixin-main".to_string(),
+            provider_type: super::super::types::ImProviderType::Weixin,
+            event_type: "message.receive".to_string(),
+            source: super::super::types::ImEventSource::default(),
+            message: None,
+            received_at: 1,
+            raw_digest: None,
+        }
+    }
+
+    #[test]
+    fn add_is_idempotent_for_the_same_provider_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImEventStore::new(temp.path());
+
+        store.add(event("event-1")).unwrap();
+        store.add(event("event-1")).unwrap();
+
+        assert_eq!(store.list().len(), 1);
+    }
+
+    #[test]
+    fn failed_add_rolls_back_memory_before_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImEventStore::new(temp.path());
+        let blocked_path = temp.path().join("admin").join(STORE_FILENAME);
+        std::fs::create_dir_all(&blocked_path).unwrap();
+
+        assert!(store.add(event("event-retry")).is_err());
+        assert!(store.list().is_empty());
+
+        std::fs::remove_dir(&blocked_path).unwrap();
+        store.add(event("event-retry")).unwrap();
+        assert_eq!(store.list().len(), 1);
+    }
 
     #[test]
     fn loads_legacy_string_mentions_without_deleting_history() {

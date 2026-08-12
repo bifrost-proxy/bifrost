@@ -56,6 +56,18 @@ while IFS= read -r feishu_loopback_test; do
   grep -Fq 'NO_PROXY=127.0.0.1,localhost' "$feishu_loopback_test"
 done < <(rg -l 'BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1' e2e-tests/tests --glob 'test_*.sh')
 
+# Weixin uses the same production boundary: only debug binaries may opt into a
+# loopback iLink endpoint. Keep release-based shell CI from contacting the
+# public endpoint when it injects its shared binary into the native-flow E2E.
+while IFS= read -r weixin_loopback_test; do
+  grep -Fq 'target/release/bifrost' "$weixin_loopback_test"
+  grep -Fq 'target/release/bifrost.exe' "$weixin_loopback_test"
+  grep -Fq 'SKIP fake iLink: release build rejects Weixin loopback by design' \
+    "$weixin_loopback_test"
+  grep -Fq 'HTTP_PROXY=http://127.0.0.1:9' "$weixin_loopback_test"
+  grep -Fq 'NO_PROXY=127.0.0.1,localhost' "$weixin_loopback_test"
+done < <(rg -l 'BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL=1' e2e-tests/tests --glob 'test_*.sh')
+
 grep -Fq 'cargo llvm-cov show-env --sh' "$coverage_all"
 grep -Fq 'unit-integration.json' "$coverage_all"
 grep -Fq 'e2e.json' "$coverage_all"

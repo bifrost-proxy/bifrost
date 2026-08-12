@@ -1109,6 +1109,8 @@ async fn start_provider_event_connection(
     let client = service.provider_client(&provider);
     let provider_for_loop = provider.clone();
     let event_store = service.event_store.clone();
+    let sink =
+        crate::im_gateway::provider::EventSink::with_durable_store(tx, Arc::clone(&event_store));
     let message_log_store = service.message_log_store.clone();
     let group_context_store = service.group_context_store.clone();
     let route_store = service.route_store.clone();
@@ -1148,7 +1150,7 @@ async fn start_provider_event_connection(
     // Start the long connection
     match service
         .connection_manager
-        .start_connection(&provider, &app_secret, tx)
+        .start_connection(&provider, &app_secret, sink)
         .await
     {
         Ok(()) => {

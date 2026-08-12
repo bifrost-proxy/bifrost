@@ -501,7 +501,7 @@ mod tests {
         };
         let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
         manager
-            .start_connection(&config, "", sink)
+            .start_connection(&config, "", sink.into())
             .await
             .expect("start weixin connection");
 

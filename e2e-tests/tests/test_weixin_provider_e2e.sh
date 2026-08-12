@@ -10,9 +10,21 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_DIR"
 
 BIFROST_PORT="${BIFROST_PORT:-${ADMIN_PORT:-18937}}"
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
+else
+  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
+fi
+
+case "${BIFROST_BIN//\\//}" in
+  target/release/bifrost|*/target/release/bifrost|target/release/bifrost.exe|*/target/release/bifrost.exe)
+    echo "[weixin-provider] SKIP fake iLink: release build rejects Weixin loopback by design"
+    exit 0
+    ;;
+esac
+
 TEST_DIR="$(mktemp -d)"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
-BIFROST_BIN="${BIFROST_BIN:-}"
 WEIXIN_REQUEST_LOG="$TEST_DIR/weixin-requests.ndjson"
 WEIXIN_PORT_FILE="$TEST_DIR/weixin-port"
 
@@ -188,10 +200,8 @@ wait_http() {
 }
 
 if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
-  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
   echo "[weixin-provider] skipping build, using $BIFROST_BIN"
 else
-  BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
   echo "[weixin-provider] building bifrost"
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
@@ -202,6 +212,14 @@ if [[ ! -x "$BIFROST_BIN" ]]; then
 fi
 
 echo "[weixin-provider] starting bifrost on $BIFROST_PORT with data dir $TEST_DIR"
+export HTTP_PROXY=http://127.0.0.1:9
+export HTTPS_PROXY=http://127.0.0.1:9
+export ALL_PROXY=http://127.0.0.1:9
+export NO_PROXY=127.0.0.1,localhost
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export all_proxy="$ALL_PROXY"
+export no_proxy="$NO_PROXY"
 BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL=1 \
 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
   --host 127.0.0.1 \

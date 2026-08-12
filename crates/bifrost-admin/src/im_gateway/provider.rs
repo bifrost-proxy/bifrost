@@ -1,15 +1,61 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use bifrost_core::Result;
+use bifrost_core::{BifrostError, Result};
 
+use super::event_store::ImEventStore;
 use super::types::{
     ConnectionHandle, ImChannelCapabilities, ImConversationCapabilities, ImEvent,
     ImInteractionCapabilities, ImProviderConfig, ImProviderType, ImSendCapabilities, ImTarget,
     ProviderValidation, SendOptions, SendResult, UploadedImage,
 };
 
-pub type EventSink = mpsc::UnboundedSender<ImEvent>;
+#[derive(Clone)]
+pub struct EventSink {
+    sender: mpsc::UnboundedSender<ImEvent>,
+    durable_store: Option<Arc<ImEventStore>>,
+}
+
+impl EventSink {
+    pub fn with_durable_store(
+        sender: mpsc::UnboundedSender<ImEvent>,
+        durable_store: Arc<ImEventStore>,
+    ) -> Self {
+        Self {
+            sender,
+            durable_store: Some(durable_store),
+        }
+    }
+
+    pub fn send(&self, event: ImEvent) -> std::result::Result<(), mpsc::error::SendError<ImEvent>> {
+        self.sender.send(event)
+    }
+
+    pub fn persist_and_send(&self, event: ImEvent) -> Result<()> {
+        let store = self.durable_store.as_ref().ok_or_else(|| {
+            BifrostError::Config("durable IM event store is unavailable".to_string())
+        })?;
+        store.add(event.clone())?;
+        self.sender
+            .send(event)
+            .map_err(|_| BifrostError::Config("IM event sink is closed".to_string()))
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+}
+
+impl From<mpsc::UnboundedSender<ImEvent>> for EventSink {
+    fn from(sender: mpsc::UnboundedSender<ImEvent>) -> Self {
+        Self {
+            sender,
+            durable_store: None,
+        }
+    }
+}
 
 #[async_trait]
 pub trait ImProvider: Send + Sync {

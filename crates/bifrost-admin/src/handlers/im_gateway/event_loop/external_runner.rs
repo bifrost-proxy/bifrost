@@ -11,57 +11,83 @@ struct WeixinCompanionInput {
 }
 
 fn enforce_weixin_companion_attachment_budgets(input: &mut ExternalCliChatInput) {
-    if input.images.len() > MAX_AGENT_ATTACHMENTS_PER_MESSAGE {
-        warn!(
-            image_count = input.images.len(),
-            max_images = MAX_AGENT_ATTACHMENTS_PER_MESSAGE,
-            "too many images across coalesced Weixin events; truncating runner input"
-        );
-        input.images.truncate(MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
-    }
+    enforce_weixin_companion_attachment_budgets_with_limits(
+        input,
+        MAX_AGENT_ATTACHMENTS_PER_MESSAGE,
+        MAX_AGENT_REPLY_IMAGE_BYTES,
+        MAX_FEISHU_REFERENCED_FILE_BYTES,
+        MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
+    );
+}
 
-    let mut retained_files = Vec::new();
-    let mut total_file_bytes = 0u64;
-    let file_count = input.files.len();
-    for file in std::mem::take(&mut input.files)
-        .into_iter()
-        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
-    {
-        let label = file.name.as_deref().unwrap_or("attachment");
-        let decoded_size = match preloaded_payload_size(
-            Some(&file.data),
-            "文件",
-            label,
-            MAX_FEISHU_REFERENCED_FILE_BYTES,
-        ) {
-            Ok(Some(size)) => size,
-            Ok(None) => 0,
-            Err(problem) => {
-                warn!(file = %label, problem, "skipping invalid coalesced Weixin file");
-                continue;
-            }
-        };
-        if referenced_file_budget_exceeded_with_limit(
-            total_file_bytes,
-            decoded_size,
-            MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
-        ) {
+fn enforce_weixin_companion_attachment_budgets_with_limits(
+    input: &mut ExternalCliChatInput,
+    max_attachments: usize,
+    max_image_bytes: u64,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+) {
+    let attachment_count = input.images.len().saturating_add(input.files.len());
+    let mut retained_images = Vec::new();
+    let mut total_bytes = 0u64;
+    for image in std::mem::take(&mut input.images) {
+        if retained_images.len() >= max_attachments {
+            break;
+        }
+        let label = image.name.as_deref().unwrap_or("image");
+        let decoded_size =
+            match preloaded_payload_size(Some(&image.data), "图片", label, max_image_bytes) {
+                Ok(Some(size)) => size,
+                Ok(None) => 0,
+                Err(problem) => {
+                    warn!(image = %label, problem, "skipping invalid coalesced Weixin image");
+                    continue;
+                }
+            };
+        if referenced_file_budget_exceeded_with_limit(total_bytes, decoded_size, max_total_bytes) {
             warn!(
-                file = %label,
-                "skipping coalesced Weixin file because the batch exceeds 250 MiB"
+                image = %label,
+                "skipping coalesced Weixin image because the batch exceeds its byte budget"
             );
             continue;
         }
-        total_file_bytes = total_file_bytes.saturating_add(decoded_size);
+        total_bytes = total_bytes.saturating_add(decoded_size);
+        retained_images.push(image);
+    }
+
+    let mut retained_files = Vec::new();
+    for file in std::mem::take(&mut input.files) {
+        if retained_images.len().saturating_add(retained_files.len()) >= max_attachments {
+            break;
+        }
+        let label = file.name.as_deref().unwrap_or("attachment");
+        let decoded_size =
+            match preloaded_payload_size(Some(&file.data), "文件", label, max_file_bytes) {
+                Ok(Some(size)) => size,
+                Ok(None) => 0,
+                Err(problem) => {
+                    warn!(file = %label, problem, "skipping invalid coalesced Weixin file");
+                    continue;
+                }
+            };
+        if referenced_file_budget_exceeded_with_limit(total_bytes, decoded_size, max_total_bytes) {
+            warn!(
+                file = %label,
+                "skipping coalesced Weixin file because the batch exceeds its byte budget"
+            );
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(decoded_size);
         retained_files.push(file);
     }
-    if file_count > MAX_AGENT_ATTACHMENTS_PER_MESSAGE {
+    if attachment_count > max_attachments {
         warn!(
-            file_count,
-            max_files = MAX_AGENT_ATTACHMENTS_PER_MESSAGE,
-            "too many files across coalesced Weixin events; truncating runner input"
+            attachment_count,
+            max_attachments,
+            "too many attachments across coalesced Weixin events; truncating runner input"
         );
     }
+    input.images = retained_images;
     input.files = retained_files;
 }
 
@@ -210,7 +236,7 @@ mod weixin_companion_tests {
     fn image(name: &str) -> crate::im_gateway::external_cli::ExternalCliImageInput {
         crate::im_gateway::external_cli::ExternalCliImageInput {
             mime_type: "image/png".to_string(),
-            data: format!("image-{name}"),
+            data: "aW1hZ2U=".to_string(),
             name: Some(name.to_string()),
         }
     }
@@ -343,6 +369,24 @@ mod weixin_companion_tests {
         assert_eq!(input.message_text, "说明\n\n第一段\n\n第二段");
         assert_eq!(input.images.len(), 2);
         assert_eq!(input.files.len(), 1);
+    }
+
+    #[test]
+    fn mixed_media_uses_one_shared_count_and_byte_budget() {
+        let mut mixed_input = input("mixed");
+        mixed_input.images = (0..4).map(|index| image(&format!("{index}.png"))).collect();
+        mixed_input.files = (0..4).map(|index| file(&format!("{index}.txt"))).collect();
+
+        enforce_weixin_companion_attachment_budgets_with_limits(&mut mixed_input, 6, 10, 10, 100);
+
+        assert_eq!(mixed_input.images.len() + mixed_input.files.len(), 6);
+
+        let mut byte_limited = input("byte-limited");
+        byte_limited.images.push(image("first.png"));
+        byte_limited.files.push(file("second.txt"));
+        enforce_weixin_companion_attachment_budgets_with_limits(&mut byte_limited, 6, 10, 10, 7);
+        assert_eq!(byte_limited.images.len(), 1);
+        assert!(byte_limited.files.is_empty());
     }
 
     #[test]
