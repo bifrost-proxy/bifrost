@@ -72,8 +72,10 @@ pub(super) fn collect_agent_reply_local_attachment_links(
                             if seen.insert(dedupe_key) {
                                 if is_image_mime_or_path(None, &path) {
                                     images.push(AgentReplyLocalImage { alt: label, path });
-                                } else if is_explicit_attachment_label_or_path(&label, destination)
-                                {
+                                } else if is_explicit_attachment_label_or_path(
+                                    &label,
+                                    &path.to_string_lossy(),
+                                ) {
                                     attachments.push(AgentReplyLocalAttachment {
                                         label,
                                         path,

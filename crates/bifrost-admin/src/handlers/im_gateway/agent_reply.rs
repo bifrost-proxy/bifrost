@@ -713,6 +713,29 @@ pub(super) fn resolve_agent_reply_image_path(
         return None;
     }
 
+    let original_path = resolve_local_markdown_path(destination, base_dir)?;
+    if original_path.exists() {
+        return Some(original_path);
+    }
+
+    let mut candidate = destination;
+    for _ in 0..2 {
+        let Some(stripped) = strip_trailing_source_position(candidate) else {
+            break;
+        };
+        let Some(path) = resolve_local_markdown_path(stripped, base_dir) else {
+            break;
+        };
+        if path.is_file() {
+            return Some(path);
+        }
+        candidate = stripped;
+    }
+
+    Some(original_path)
+}
+
+fn resolve_local_markdown_path(destination: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = destination.strip_prefix("file://") {
         return Some(PathBuf::from(path));
     }
@@ -723,6 +746,12 @@ pub(super) fn resolve_agent_reply_image_path(
     } else {
         base_dir.map(|base_dir| base_dir.join(path))
     }
+}
+
+fn strip_trailing_source_position(destination: &str) -> Option<&str> {
+    let (path, position) = destination.rsplit_once(':')?;
+    (!path.is_empty() && !position.is_empty() && position.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(path)
 }
 
 pub(super) fn is_local_markdown_image_candidate(raw_url: &str) -> bool {
