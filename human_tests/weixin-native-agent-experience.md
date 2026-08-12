@@ -176,7 +176,7 @@
 **实际执行结果：**
 
 - 2026-08-12 自动化部分 PASS：渲染单测通过，CRLF/CR 先统一为 LF，单 LF 提升为双 LF，已有段落空行不膨胀；微信 Provider E2E 断言 `sendmessage` payload 中三行 final 文本均由双 LF 分隔，long reply 仍保持 full-first，并可从 fallback 分片完整还原正文。
-- 2026-08-12 真实发送 PASS、视觉确认待用户：18881 `weixin-main` 已成功发送“三行 + 段落”代表性文本（idempotency key `weixin-linebreak-live-20260812-2`），Provider 返回 success；待用户在微信客户端确认显示效果并发送 `/help` 复核命令布局。
+- 2026-08-12 真实微信 PASS：18881 `weixin-main` 成功发送“三行 + 段落”代表性文本（idempotency key `weixin-linebreak-live-20260812-2`），Provider 返回 success；随后真实会话收到用户明确确认“换行没问题啊”，同一会话中的列表回复也按行显示。`/help` 的 payload 布局由相同渲染器和 Provider E2E 覆盖。
 
 ## 清理步骤
 
