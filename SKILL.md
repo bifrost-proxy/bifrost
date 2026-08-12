@@ -1,6 +1,6 @@
 ---
 name: "bifrost"
-description: "使用 bifrost CLI 管理代理生命周期、规则、证书、脚本、系统代理、运行时配置、流量查询与远程调用；也用于通过 Bifrost IM Gateway 配置飞书/Lark、微信/Weixin 机器人，并向机器人 owner、已配置 target 或指定飞书群聊/用户发送文本、Markdown、图片、文件附件和飞书原生卡片。当用户提到启动/停止/检查 bifrost、TLS 拦截、规则或脚本、流量搜索或少于 6 位的请求 ID、JWT/Cookie 诊断、重放/导出/等待请求、远程 shell/授权/文件操作，或提到‘用 bifrost/机器人发飞书或微信消息’‘给 owner 发消息’‘给指定群发 Markdown/图片/文件/卡片’‘配置 IM provider/target’时触发。"
+description: "使用 bifrost CLI 管理代理生命周期、规则、证书、脚本、系统代理、运行时配置、流量查询与远程调用；也用于通过 Bifrost IM Gateway 配置飞书/Lark、微信/Weixin 机器人，并向机器人 owner、已配置 target 或指定飞书群聊/用户发送文本、Markdown、图片、文件附件和飞书原生卡片。当用户提到启动/停止/检查 bifrost、TLS 拦截、规则或脚本、流量搜索（包括用 Referer/Origin 等请求头关联某站点页面发起的第三方请求）或少于 6 位的请求 ID、JWT/Cookie 诊断、重放/导出/等待请求、远程 shell/授权/文件操作，或提到‘用 bifrost/机器人发飞书或微信消息’‘给 owner 发消息’‘给指定群发 Markdown/图片/文件/卡片’‘配置 IM provider/target’时触发。"
 ---
 
 # Bifrost
@@ -612,6 +612,44 @@ bifrost search foo --include req-body,res-headers                               
 >
 > **时间预过滤**：`--since/--until/--latest` 在 SQL 层（searched_range 索引）就裁掉超窗记录，不会被 `--max-scan` 浪费扫描预算。
 
+#### 按发起站点关联第三方流量（请求头溯源）
+
+当用户要找的不是“发往 `example.com` 的请求”，而是“由 `example.com` 页面触发的请求，包括发往其他域名的第三方服务”时，不要把 `--host example.com` 或 `--domain example.com` 作为主搜索条件。它们过滤的是**请求目的地**，会漏掉分析、埋点、CDN、图片、鉴权等第三方 host。
+
+推荐分两步查询：
+
+```bash
+# 第一步：在请求 header 中搜索发起站点域名，先找候选请求并按结果 host 判断去向
+bifrost search 'example.com' --req-header --latest 30m --max-scan 20000 --format json
+
+# 第二步：需要确认关联依据时，只筛出 Referer / Origin / Sec-Fetch-Site
+# --include req-headers 会读取完整请求头，用 jq 避免把 Cookie/Authorization 打到终端
+bifrost search 'example.com' --req-header --latest 30m --max-scan 20000 \
+  --include req-headers --format json | jq '[.results[] | {
+    seq, host, path,
+    linkage_headers: [.headers.request[] | select(
+      (.[0] | ascii_downcase) as $name
+      | ["referer", "origin", "sec-fetch-site"] | index($name)
+    )]
+  } | select(.linkage_headers | length > 0)]'
+
+# 已知 Origin 的完整值时可以叠加严格等值过滤，进一步收窄 XHR/fetch/CORS 请求
+bifrost search 'example.com' --req-header \
+  --req-header-eq 'origin=https://example.com' --latest 30m --format json
+```
+
+判断规则：
+
+- `Referer`：通常是最直接的页面来源证据，常包含完整页面 URL 和 path；但会受 `Referrer-Policy`、隐私设置、跳转和客户端实现影响，可能只保留 origin 或完全缺失。
+- `Origin`：对 XHR、fetch、CORS、WebSocket 等请求很有价值，通常只有 `scheme://host[:port]`；普通静态资源 GET 经常不带，因此不能只搜 `Origin`。
+- `Sec-Fetch-Site`：只能说明 `same-origin` / `same-site` / `cross-site` 等相对关系，不能单独识别具体是哪个页面发起；应与 `Referer` 或 `Origin` 一起看。
+- `--req-header` 会搜索所有请求头，不只 `Referer` / `Origin`。如果 Cookie、自定义 header 或其他字段也含目标域名，第一步会产生假候选；必须像第二步那样确认关联字段，空 `linkage_headers` 的结果不能据此认定为页面触发。
+- 搜索结果中的 `host` 是请求实际发往的目的地。请求头搜索会同时命中目标站自身请求（例如 `Host`/`Referer` 中含目标域名）和第三方请求；应按结果 `host` 分组，重点检查不同于目标站的 host。
+- `--req-header-eq NAME=VALUE` 是大小写不敏感的**严格等值**过滤，不是包含或 glob 匹配。`referer=*example.com*` 不会匹配带 path 的 Referer；Referer 不知道完整值时，应使用 `bifrost search 'example.com' --req-header` 做包含搜索。
+- 浏览器后台任务、Service Worker、原生客户端或严格隐私策略可能不发送 `Referer` / `Origin`。请求头关联是高价值线索，不是完整因果链；必要时结合 `--latest` 缩小到用户刚执行操作的时间窗，并对比请求时间、目标 host、path 和客户端应用。
+- HTTPS 请求只有在 Bifrost 已解包明文时才能搜索这些 header；如果记录只是 CONNECT 隧道，应按目标域名或浏览器应用小范围启用 TLS 拦截，不要为了关联流量全局开启 `--intercept`。
+- `--include req-headers` 会读取完整请求头。优先像上例一样立即用 `jq` 只保留关联字段；不要把 Cookie、Authorization、JWT、账号标识或带敏感 query 的完整 Referer 写入聊天、日志或技能文档。
+
 ### 13.1 `bifrost capture wait`（新）
 
 等待下一条匹配过滤条件的流量并立即打印，常用于「点一下网页 → 抓那次请求」的脚手架场景：
@@ -850,13 +888,26 @@ bifrost script show add-header
 bifrost script update request add-header -f ./scripts/add-header-v2.js
 ```
 
-### 排查某个域名请求
+### 排查发往某个域名的请求
 
 ```bash
 bifrost search example --domain example.com --format json-pretty
 bifrost traffic list --host example.com --limit 20
 bifrost traffic get <id> --request-body --response-body  # <id> 为少于 6 位的数字序号
 ```
+
+### 排查某个站点页面触发的第三方请求
+
+```bash
+# --host/--domain 查的是请求目的地；页面来源关联要搜索请求 header
+bifrost search 'example.com' --req-header --latest 30m --max-scan 20000 --format json
+
+# Origin 完整值已知时可严格收窄；Referer 通常带 path，未知完整值时不要用 --req-header-eq
+bifrost search 'example.com' --req-header \
+  --req-header-eq 'origin=https://example.com' --latest 30m --format json
+```
+
+先按结果 `host` 找出不同于页面站点的第三方目的地，再按需用 `--include req-headers` 在本地核对 `Referer`、`Origin` 和 `Sec-Fetch-Site`；完整请求头含敏感信息，不要原样分享。
 
 ### 创建规则工作流
 
@@ -955,6 +1006,7 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 - 想知道 token/JWT 是否过期、属于谁，优先用 `bifrost traffic auth-status <ID>`，不要让 user 自己 decode JWT
 - 想在外部 shell / 浏览器复现请求，用 `bifrost traffic export <ID> --as curl|fetch|har`；想直接重放并修改 body/headers 用 `bifrost traffic replay <ID> --patch ...`，不要自己手动拼 curl
 - 需要捕获一次后续请求（比如「等我点击那个按钮」），用 `bifrost capture wait` 而不是 `traffic list` 轮询
+- 用户要找“某站点页面发起的第三方请求”时，先用站点域名配合 `--req-header` 搜索 `Referer` / `Origin` 线索，并用 `--latest` 限定操作时间窗；不要误用只过滤目的地的 `--host` / `--domain`，也不要把严格等值的 `--req-header-eq` 当成 glob 搜索
 - 写脚本/CI 集成时 `bifrost status` 必须加 `--format json`；不要去 grep text 输出
 - 遇到不确定的参数或用法，**先执行** **`bifrost <command> -h`** **获取完整手册**，不要猜测
 
