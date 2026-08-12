@@ -29,8 +29,11 @@ impl EventSink {
         }
     }
 
-    pub fn send(&self, event: ImEvent) -> std::result::Result<(), mpsc::error::SendError<ImEvent>> {
-        self.sender.send(event)
+    pub fn send(
+        &self,
+        event: ImEvent,
+    ) -> std::result::Result<(), Box<mpsc::error::SendError<ImEvent>>> {
+        self.sender.send(event).map_err(Box::new)
     }
 
     pub fn persist_and_send(&self, event: ImEvent) -> Result<()> {
