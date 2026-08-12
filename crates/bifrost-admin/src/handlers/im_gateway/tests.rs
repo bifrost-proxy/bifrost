@@ -2033,6 +2033,72 @@ pub(super) fn agent_reply_collects_local_and_remote_archive_attachments() {
 }
 
 #[test]
+pub(super) fn agent_reply_resolves_codex_source_positions_for_local_attachments() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let docs = temp.path().join("docs");
+    std::fs::create_dir_all(&docs).expect("create docs dir");
+
+    let absolute_line = temp.path().join("方案.md");
+    let absolute_line_column = temp.path().join("review notes.txt");
+    let relative_line = docs.join("report.json");
+    let file_url_line = temp.path().join("runner.yaml");
+    let literal_colon = temp.path().join("literal.md:7");
+    let literal_without_colon = temp.path().join("literal.md");
+    for path in [
+        &absolute_line,
+        &absolute_line_column,
+        &relative_line,
+        &file_url_line,
+        &literal_colon,
+        &literal_without_colon,
+    ] {
+        std::fs::write(path, b"attachment contents").expect("write attachment");
+    }
+
+    let missing = temp.path().join("missing.md");
+    let markdown = format!(
+        concat!(
+            "[完整方案](<{}:1>)\n",
+            "[Review notes](<{}:12:3>)\n",
+            "[Relative report](docs/report.json:8)\n",
+            "[Runner config](file://{}:4)\n",
+            "[字面附件]({})\n",
+            "[Missing report]({}:9)\n",
+            "[Remote report](https://example.com/report.md:1)\n",
+        ),
+        absolute_line.display(),
+        absolute_line_column.display(),
+        file_url_line.display(),
+        literal_colon.display(),
+        missing.display(),
+    );
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_attachment_links(
+        &markdown,
+        Some(temp.path()),
+        &mut images,
+        &mut attachments,
+    );
+
+    assert!(images.is_empty());
+    assert_eq!(
+        attachments
+            .iter()
+            .map(|attachment| attachment.path.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            absolute_line,
+            absolute_line_column,
+            relative_line,
+            file_url_line,
+            literal_colon,
+        ]
+    );
+}
+
+#[test]
 pub(super) fn agent_reply_collects_config_attachments_but_excludes_source_code() {
     let temp = tempfile::tempdir().expect("temp dir");
     let local_config = temp.path().join("next-harness.yaml");

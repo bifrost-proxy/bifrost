@@ -208,6 +208,8 @@ def request(path, payload, method="POST"):
 
 report_path = pathlib.Path(test_dir) / "terminal-e2e-report.txt"
 report_path.write_text("terminal attachment contents", encoding="utf-8")
+codex_line_report_path = pathlib.Path(test_dir) / "方案.md"
+codex_line_report_path.write_text("codex source-position attachment", encoding="utf-8")
 archive_path = pathlib.Path(test_dir) / "terminal-e2e-bundle.tar.gz"
 archive_path.write_bytes(b"terminal archive contents")
 config_path = pathlib.Path(test_dir) / "next-harness.yaml"
@@ -248,7 +250,7 @@ print(json.dumps({"type": "assistant_delta", "content": "E2E_LATEST_EXPLANATION\
 print(json.dumps({"type": "assistant_final", "content": "E2E_LATEST_EXPLANATION\n\n![E2E chart](%s)" % sys.argv[3]}))
 print(json.dumps({"type": "tool_started", "tool_name": "exec_command", "content": "verify archive"}))
 print(json.dumps({"type": "tool_finished", "tool_name": "exec_command", "arguments": "verify archive", "result": "ok", "success": True, "duration_ms": 5}))
-print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS\n\n![E2E chart](%s)\n\n[E2E report](%s)\n[E2E archive](%s)\n[E2E config](%s)\n[E2E source file](%s)" % (sys.argv[3], sys.argv[1], sys.argv[2], sys.argv[6], sys.argv[7])}))
+print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS\n\n![E2E chart](%s)\n\n[E2E report](%s)\n[E2E archive](%s)\n[E2E config](%s)\n[E2E source file](%s)\n[完整方案](%s:1)" % (sys.argv[3], sys.argv[1], sys.argv[2], sys.argv[6], sys.argv[7], sys.argv[8])}))
 '''
 request("/chat/config", {
     "version": 1,
@@ -259,7 +261,7 @@ request("/chat/config", {
             "adapter": "custom",
             "adapterConfig": {
                 "executable": sys.executable,
-                "args": ["-c", runner_code, str(report_path), str(archive_path), str(image_path), str(oversized_path), str(upload_failure_path), str(config_path), str(source_path)],
+                "args": ["-c", runner_code, str(report_path), str(archive_path), str(image_path), str(oversized_path), str(upload_failure_path), str(config_path), str(source_path), str(codex_line_report_path)],
                 "timeoutSecs": 30,
             },
             "injectBifrostTools": False,
@@ -375,13 +377,13 @@ wait_session_idle
 wait_message_count 2
 inject terminal-success "run terminal success e2e"
 wait_session_idle
-wait_message_count 7
+wait_message_count 8
 inject terminal-failure "FAIL_TERMINAL_E2E"
 wait_session_idle
-wait_message_count 9
+wait_message_count 10
 inject terminal-attachment-failure "ATTACHMENT_FAILURE_E2E"
 wait_session_idle
-wait_message_count 12
+wait_message_count 13
 
 python3 - "$FEISHU_REQUEST_LOG" <<'PY'
 import json
@@ -390,7 +392,7 @@ import sys
 
 records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 messages = [record for record in records if "/im/v1/messages" in record["path"]]
-assert len(messages) == 12, messages
+assert len(messages) == 13, messages
 
 (
     heartbeat_progress,
@@ -400,6 +402,7 @@ assert len(messages) == 12, messages
     success_report,
     success_archive,
     success_config,
+    success_codex_line_report,
     failure_progress,
     failure_terminal,
     attachment_progress,
@@ -410,14 +413,16 @@ assert heartbeat_progress["path"].endswith("/im/v1/messages/terminal-heartbeat/r
 assert heartbeat_terminal["path"].endswith("/im/v1/messages/om_1/reply"), heartbeat_terminal
 assert success_progress["path"].endswith("/im/v1/messages/terminal-success/reply"), success_progress
 assert success_terminal["path"].endswith("/im/v1/messages/om_3/reply"), success_terminal
-for index, file_message in enumerate([success_report, success_archive, success_config], 1):
+for index, file_message in enumerate(
+    [success_report, success_archive, success_config, success_codex_line_report], 1
+):
     assert file_message["path"].split("?", 1)[0].endswith("/im/v1/messages"), file_message
     assert file_message["body"]["msg_type"] == "file", file_message
     assert f"file_terminal_e2e_{index}" in file_message["body"]["content"], file_message
 assert failure_progress["path"].endswith("/im/v1/messages/terminal-failure/reply"), failure_progress
-assert failure_terminal["path"].endswith("/im/v1/messages/om_8/reply"), failure_terminal
+assert failure_terminal["path"].endswith("/im/v1/messages/om_9/reply"), failure_terminal
 assert attachment_progress["path"].endswith("/im/v1/messages/terminal-attachment-failure/reply"), attachment_progress
-assert attachment_terminal["path"].endswith("/im/v1/messages/om_10/reply"), attachment_terminal
+assert attachment_terminal["path"].endswith("/im/v1/messages/om_11/reply"), attachment_terminal
 assert attachment_notice["path"].endswith("/im/v1/messages/terminal-attachment-failure/reply"), attachment_notice
 
 heartbeat_card = json.loads(heartbeat_terminal["body"]["content"])
@@ -519,11 +524,13 @@ for marker, title in [
     assert marker in json.dumps(output, ensure_ascii=False), output
 
 uploads = [record for record in records if record["path"].split("?", 1)[0].endswith("/im/v1/files")]
-assert len(uploads) == 4 and all(upload["body"]["multipart_bytes"] > 0 for upload in uploads), uploads
+assert len(uploads) == 5 and all(upload["body"]["multipart_bytes"] > 0 for upload in uploads), uploads
 filenames = [name for upload in uploads for name in upload["body"]["filenames"]]
 assert "terminal-e2e-report.txt" in filenames, filenames
 assert "terminal-e2e-bundle.tar.gz" in filenames, filenames
 assert "next-harness.yaml" in filenames, filenames
+assert "方案.md" in filenames, filenames
+assert "方案.md:1" not in filenames, filenames
 assert "terminal-e2e-upload-failure.txt" in filenames, filenames
 assert "terminal-e2e-oversized.bin" not in filenames, filenames
 assert "terminal-e2e-handler.rs" not in filenames, filenames

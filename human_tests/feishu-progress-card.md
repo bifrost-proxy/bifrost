@@ -344,12 +344,36 @@
 - 耗时依次显示 `10 秒`、`1 分 05 秒`、`1 小时 03 分 01 秒`、`1 天 01 小时 01 分 01 秒`；不展示 `0 天` 等前导零高位单位，高位出现后保留两位低位字段。
 - 静默 12 秒的真实 Service + mock Runner + mock Feishu 链路至少产生一次 10 秒保活更新，随后终态结论、Reason 去重、终态密度、图片与附件行为继续通过。
 
+### TC-FPC-18：Codex 本地文件链接行号后缀附件回归
+
+**操作步骤**：
+1. 执行本地附件路径聚焦单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p bifrost-admin --lib agent_reply_resolves_codex_source_positions_for_local_attachments -- --nocapture
+   ```
+2. 使用当前源码构建 debug Bifrost，并执行隔离黑盒链路：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo build --bin bifrost
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+3. mock Runner 的最终总结中放入 `[完整方案](/临时目录/方案.md:1)`，检查 mock Feishu `/im/v1/files` 的 multipart 文件名和随后发送的 `msg_type=file` 消息。
+4. 同时检查单元用例中的绝对路径、相对路径、`file://`、`:line:column`、真实文件名含 `:数字`、缺失文件与远程 URL 边界。
+
+**预期结果**：
+- 原始路径存在时原样使用，合法的 `literal.md:7` 不会错误改写成 `literal.md`。
+- 原始路径不存在时，`:line` 或 `:line:column` 仅在剥离后的候选是现存文件时被识别为源码位置。
+- `[完整方案](.../方案.md:1)` 实际上传文件名为 `方案.md`，不会尝试上传不存在的 `方案.md:1`，并发送一条对应的飞书文件消息。
+- 相对路径按 Runner 工作目录解析，`file://` 路径同样兼容；缺失文件和远程 URL 不会被误当成本地附件。
+- 测试只启动临时数据目录、动态端口的隔离 Bifrost 与 loopback mock Feishu，结束后由 trap 清理，不操作当前运行服务。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-12：PASS（TC-FPC-18 Codex 本地文件链接行号后缀附件回归）— 更新用例后立即执行聚焦单测与隔离黑盒链路。单测覆盖绝对路径 `:line`、带空格路径 `:line:column`、相对路径、`file://`、真实存在的 `literal.md:7` 优先、缺失文件和远程 URL；隔离 Service + mock Runner + loopback Feishu OpenAPI 验证 `[完整方案](.../方案.md:1)` 最终调用 `/im/v1/files` 上传真实 `方案.md`，未上传 `方案.md:1`，并发送对应 `msg_type=file` 消息。既有终态卡、图片、报告/归档/配置附件、源码排除、30 MiB 预检、上传失败非阻塞提示和 10 秒静默保活断言继续通过；测试 trap 已清理所属进程和临时目录，未操作当前运行服务。
 
 - 2026-08-12：PASS（TC-FPC-15 配置附件与源码排除）— 在独立 `codex/feishu-config-attachments` worktree、最新 `origin/main@8820d5ef` 上执行。`agent_reply_collects_config_attachments_but_excludes_source_code` 聚焦单测通过，覆盖本地 `next-harness.yaml`、远程 `filename=service.TOML`、YAML/TOML/XML MIME、全部配置扩展名与大小写，以及显式 `source file` 标签、受信下载域名、URL 编码的 `worker%2Epy` 均不能绕过源码拒绝；`.env.production`、`credentials/secrets` 和私钥文件名即使带宽泛 `file` 标签也被拒绝。随后构建当前 debug 二进制并执行隔离 Service + mock Runner + loopback Feishu OpenAPI，黑盒 E2E PASS：成功任务新增 `next-harness.yaml` multipart 上传与 `msg_type=file` 消息，`terminal-e2e-handler.rs` 未进入 `/im/v1/files`，既有 `.txt`、`.tar.gz`、内联图片、30 MiB 预检和上传失败非阻塞提示全部保持通过。第 1 轮 review 补强敏感配置与 URL 编码边界后，聚焦单测和同一黑盒 E2E 均再次通过。首次独立 worktree 构建因磁盘只余 240 MiB 报 `errno=28`；仅清理该 worktree 5.9 GiB 可再生成 target 和共享 target 的 Cargo incremental 缓存后，以 `CARGO_INCREMENTAL=0` 增量构建复跑通过，未删除源码、用户数据、release 产物或现有 debug 二进制。
 
