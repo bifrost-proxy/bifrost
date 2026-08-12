@@ -2179,6 +2179,21 @@ fn running_activity_line_uses_device_time_and_omits_zero_leading_units() {
 }
 
 #[test]
+fn elapsed_time_combines_runner_baseline_with_local_heartbeat_clock() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "clock-skewed task");
+    let mut status = ActiveTurnStatus::new("s1");
+    status.started_at = 1_800_000_000;
+    status.updated_at = 1_800_000_125;
+    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(status)));
+    let observed_at_ms = snapshot.turn_timing_observed_at_ms.unwrap();
+
+    snapshot.refresh_card_clock(observed_at_ms + 10_000);
+
+    assert_eq!(progress_elapsed_seconds(&snapshot), Some(135));
+    assert!(format_running_activity_line(&snapshot).contains("耗时：2 分 15 秒"));
+}
+
+#[test]
 fn compact_terminal_output_handles_thought_only_and_empty_snapshots() {
     let mut thought_only = ImAgentProgressSnapshot::new("s1", "thought only");
     thought_only.last_thought = Some("保留终态思考".to_string());
@@ -2223,7 +2238,8 @@ fn token_usage_status_refresh_updates_footer_elapsed_without_process_noise() {
     started.runner_type = Some("codex".to_string());
     started.runner_id = Some("codex".to_string());
     snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(started)));
-    snapshot.refresh_card_clock(1_800_000_000_000);
+    let initial_observed_at_ms = snapshot.turn_timing_observed_at_ms.unwrap();
+    snapshot.refresh_card_clock(initial_observed_at_ms);
     assert!(format_footer_markdown(&snapshot).contains("耗时：0 秒"));
 
     let mut usage_update = active_status(0);
@@ -2233,7 +2249,8 @@ fn token_usage_status_refresh_updates_footer_elapsed_without_process_noise() {
     usage_update.runner_type = Some("codex".to_string());
     usage_update.runner_id = Some("codex".to_string());
     snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(usage_update)));
-    snapshot.refresh_card_clock(1_800_000_065_000);
+    let usage_observed_at_ms = snapshot.turn_timing_observed_at_ms.unwrap();
+    snapshot.refresh_card_clock(usage_observed_at_ms);
 
     let footer = format_footer_markdown(&snapshot);
     assert!(footer.contains("耗时：1 分 05 秒"));

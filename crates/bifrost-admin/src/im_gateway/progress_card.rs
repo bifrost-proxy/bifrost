@@ -106,6 +106,7 @@ pub struct ImAgentProgressSnapshot {
     pub phase: ImProgressPhase,
     pub turn_started_at: Option<u64>,
     pub turn_updated_at: Option<u64>,
+    turn_timing_observed_at_ms: Option<u64>,
     card_started_at_ms: u64,
     card_updated_at_ms: u64,
     render_total_steps: Option<usize>,
@@ -134,6 +135,7 @@ impl ImAgentProgressSnapshot {
             phase: ImProgressPhase::Running,
             turn_started_at: None,
             turn_updated_at: None,
+            turn_timing_observed_at_ms: None,
             card_started_at_ms: now_ms,
             card_updated_at_ms: now_ms,
             render_total_steps: None,
@@ -292,11 +294,17 @@ impl ImAgentProgressSnapshot {
         }
         let effective_updated_at = updated_at.max(started_at);
         if effective_updated_at > 0 {
+            let timing_advanced = self
+                .turn_updated_at
+                .is_none_or(|current| effective_updated_at > current);
             self.turn_updated_at = Some(
                 self.turn_updated_at
                     .map(|current| current.max(effective_updated_at))
                     .unwrap_or(effective_updated_at),
             );
+            if timing_advanced {
+                self.turn_timing_observed_at_ms = Some(current_time_millis());
+            }
         }
     }
 
@@ -3605,12 +3613,24 @@ fn progress_elapsed_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
 }
 
 fn progress_elapsed_seconds(snapshot: &ImAgentProgressSnapshot) -> Option<u64> {
-    let started_at_ms = snapshot
-        .turn_started_at
-        .or_else(|| snapshot.status.as_ref().map(|status| status.started_at))
-        .and_then(|seconds| seconds.checked_mul(1_000))
-        .unwrap_or(snapshot.card_started_at_ms);
-    Some(snapshot.card_updated_at_ms.saturating_sub(started_at_ms) / 1_000)
+    if let (Some(started_at), Some(updated_at)) =
+        (snapshot.turn_started_at, snapshot.turn_updated_at)
+    {
+        let runner_elapsed = updated_at.saturating_sub(started_at);
+        let local_elapsed = snapshot
+            .turn_timing_observed_at_ms
+            .map(|observed_at_ms| {
+                snapshot.card_updated_at_ms.saturating_sub(observed_at_ms) / 1_000
+            })
+            .unwrap_or_default();
+        return Some(runner_elapsed.saturating_add(local_elapsed));
+    }
+    Some(
+        snapshot
+            .card_updated_at_ms
+            .saturating_sub(snapshot.card_started_at_ms)
+            / 1_000,
+    )
 }
 
 fn format_progress_elapsed_duration(seconds: u64) -> String {
