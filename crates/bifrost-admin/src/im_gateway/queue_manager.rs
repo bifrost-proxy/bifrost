@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::im_gateway::external_cli::ExternalCliFileInput;
+use crate::im_gateway::types::ImEvent;
 use bifrost_agent::session::{GuideChannel, GuideMessageChannel};
 
 /// IM reply and group-turn state that must follow a queued message.
@@ -73,6 +74,10 @@ pub struct SessionQueueManager {
 
     /// Queue-mode FIFO: processed sequentially after each turn completes.
     queues: DashMap<String, SessionQueue>,
+
+    /// Companion events merged into the active turn. Completion ownership is
+    /// retained until the runner task returns normally.
+    pending_turn_events: DashMap<String, Vec<ImEvent>>,
 }
 
 /// Maximum number of queued messages per session.
@@ -85,6 +90,7 @@ impl SessionQueueManager {
             handed_off_guides: DashMap::new(),
             live_guide_turns: DashMap::new(),
             queues: DashMap::new(),
+            pending_turn_events: DashMap::new(),
         }
     }
 
@@ -303,6 +309,39 @@ impl SessionQueueManager {
             .unwrap_or_default()
     }
 
+    /// Return whether a durable inbound event is still owned by an in-memory
+    /// queue item. Such events must not be acknowledged until that item has
+    /// actually run.
+    pub fn contains_event(&self, event_id: &str) -> bool {
+        !event_id.is_empty()
+            && self.queues.iter().any(|entry| {
+                entry.value().items.iter().any(|item| {
+                    item.context
+                        .as_ref()
+                        .is_some_and(|context| context.event_id == event_id)
+                })
+            })
+    }
+
+    pub fn track_pending_turn_event(&self, session_key: &str, event: ImEvent) {
+        let mut events = self
+            .pending_turn_events
+            .entry(session_key.to_string())
+            .or_default();
+        if !events.iter().any(|existing| {
+            existing.provider_id == event.provider_id && existing.event_id == event.event_id
+        }) {
+            events.push(event);
+        }
+    }
+
+    pub fn take_pending_turn_events(&self, session_key: &str) -> Vec<ImEvent> {
+        self.pending_turn_events
+            .remove(session_key)
+            .map(|(_, events)| events)
+            .unwrap_or_default()
+    }
+
     /// Clear user-visible guide and queue state for a session. Live group-turn
     /// tracking deliberately survives until the active runner reports its
     /// terminal outcome, including when an API request stops/deletes a session.
@@ -472,6 +511,43 @@ mod tests {
         assert_eq!(item.files[0].mime_type, "text/markdown");
         assert_eq!(item.files[0].data, "IyBSZXBvcnQ=");
         assert_eq!(item.files[0].name.as_deref(), Some("report.md"));
+    }
+
+    #[test]
+    fn durable_event_ownership_follows_queue_and_active_turn() {
+        let mgr = SessionQueueManager::new();
+        mgr.push_queue_with_attachments_and_context(
+            "s1",
+            "queued".into(),
+            Vec::new(),
+            Vec::new(),
+            Some(QueueItemContext {
+                event_id: "queued-event".into(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert!(mgr.contains_event("queued-event"));
+        assert!(!mgr.contains_event(""));
+        mgr.pop_queue_item("s1").unwrap();
+        assert!(!mgr.contains_event("queued-event"));
+
+        let pending = ImEvent {
+            event_id: "companion-event".into(),
+            provider_id: "weixin-main".into(),
+            provider_type: crate::im_gateway::types::ImProviderType::Weixin,
+            event_type: "message.receive".into(),
+            source: crate::im_gateway::types::ImEventSource::default(),
+            message: None,
+            received_at: 1,
+            raw_digest: None,
+        };
+        mgr.track_pending_turn_event("s1", pending.clone());
+        mgr.track_pending_turn_event("s1", pending);
+        let pending = mgr.take_pending_turn_events("s1");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].event_id, "companion-event");
+        assert!(mgr.take_pending_turn_events("s1").is_empty());
     }
 
     #[test]

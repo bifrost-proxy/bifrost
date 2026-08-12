@@ -141,6 +141,7 @@ struct UploadedOutboundMedia {
 
 pub struct WeixinProvider {
     http: reqwest::Client,
+    media_http: reqwest::Client,
     poll_http: reqwest::Client,
     login_http: reqwest::Client,
     runtime: Arc<RwLock<HashMap<String, AccountRuntime>>>,
@@ -188,11 +189,17 @@ impl WeixinProvider {
             .timeout(login_timeout)
             .build()
             .unwrap_or_default();
+        let media_http = bifrost_core::outbound_reqwest_client_builder()
+            .timeout(default_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default();
         let poll_http = bifrost_core::outbound_reqwest_client_builder()
             .build()
             .unwrap_or_default();
         Self {
             http,
+            media_http,
             poll_http,
             login_http,
             runtime: Arc::new(RwLock::new(HashMap::new())),
@@ -1926,12 +1933,49 @@ impl WeixinProvider {
                 ))
             })?;
         Self::validate_media_download_url(config, &url)?;
-        let response = self.http.get(&url).send().await.map_err(|error| {
-            bifrost_core::BifrostError::Network(format!(
-                "weixin media {label} download failed: {error}"
+        let mut current_url = reqwest::Url::parse(&url).map_err(|error| {
+            bifrost_core::BifrostError::Config(format!(
+                "weixin media download URL is invalid: {error}"
             ))
         })?;
-        Self::validate_media_download_url(config, response.url().as_str())?;
+        let mut redirect_count = 0usize;
+        let response = loop {
+            Self::validate_media_download_url(config, current_url.as_str())?;
+            let response = self
+                .media_http
+                .get(current_url.clone())
+                .send()
+                .await
+                .map_err(|error| {
+                    bifrost_core::BifrostError::Network(format!(
+                        "weixin media {label} download failed: {error}"
+                    ))
+                })?;
+            if !response.status().is_redirection() {
+                break response;
+            }
+            if redirect_count >= 5 {
+                return Err(bifrost_core::BifrostError::Network(format!(
+                    "weixin media {label} exceeded redirect limit"
+                )));
+            }
+            redirect_count += 1;
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    bifrost_core::BifrostError::Network(format!(
+                        "weixin media {label} redirect omitted Location"
+                    ))
+                })?;
+            current_url = current_url.join(location).map_err(|error| {
+                bifrost_core::BifrostError::Config(format!(
+                    "weixin media {label} redirect URL is invalid: {error}"
+                ))
+            })?;
+            Self::validate_media_download_url(config, current_url.as_str())?;
+        };
         let status = response.status();
         let header_mime = response
             .headers()
@@ -2080,6 +2124,7 @@ impl WeixinProvider {
         let config = config.clone();
         let provider = Self {
             http: self.http.clone(),
+            media_http: self.media_http.clone(),
             poll_http: self.poll_http.clone(),
             login_http: self.login_http.clone(),
             runtime: Arc::clone(&self.runtime),

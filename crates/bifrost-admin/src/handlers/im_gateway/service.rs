@@ -375,6 +375,7 @@ pub struct ImGatewayService {
     pub external_cli_config_store: Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub queue_manager: Arc<SessionQueueManager>,
     pub progress_registry: Arc<ImAgentProgressRegistry>,
+    event_sinks: Arc<RwLock<HashMap<String, crate::im_gateway::provider::EventSink>>>,
     pub(super) mock_event_sinks: Arc<RwLock<HashMap<String, mpsc::UnboundedSender<ImEvent>>>>,
     pub(super) weixin_login_pending: Arc<RwLock<HashMap<String, PendingWeixinLogin>>>,
     pub(super) feishu_setup_pending: Arc<RwLock<HashMap<String, PendingFeishuSetup>>>,
@@ -432,6 +433,7 @@ impl ImGatewayService {
             ),
             queue_manager: Arc::new(SessionQueueManager::new()),
             progress_registry: Arc::new(ImAgentProgressRegistry::new()),
+            event_sinks: Arc::new(RwLock::new(HashMap::new())),
             mock_event_sinks: Arc::new(RwLock::new(HashMap::new())),
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
             feishu_setup_pending: Arc::new(RwLock::new(load_pending_feishu_setups(data_dir))),
@@ -451,6 +453,72 @@ impl ImGatewayService {
                 ImProviderClient::Unsupported(provider.provider_type)
             }
         }
+    }
+
+    /// Return the single long-lived event pipeline for this provider. Transport
+    /// reconnects reuse its sink so pending events are not replayed into a
+    /// second loop while the first loop still owns active Agent turns.
+    pub(super) fn event_sink_for_provider(
+        &self,
+        provider: &ImProviderConfig,
+    ) -> crate::im_gateway::provider::EventSink {
+        let mut sinks = self.event_sinks.write();
+        if let Some(sink) = sinks.get(&provider.id).filter(|sink| !sink.is_closed()) {
+            return sink.clone();
+        }
+
+        let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
+        let sink = crate::im_gateway::provider::EventSink::with_durable_store(
+            tx,
+            Arc::clone(&self.event_store),
+            &provider.id,
+        );
+        sinks.insert(provider.id.clone(), sink.clone());
+        drop(sinks);
+
+        let client = self.provider_client(provider);
+        let provider = provider.clone();
+        let event_store = Arc::clone(&self.event_store);
+        let message_log_store = Arc::clone(&self.message_log_store);
+        let group_context_store = Arc::clone(&self.group_context_store);
+        let route_store = Arc::clone(&self.route_store);
+        let provider_store = Arc::clone(&self.provider_store);
+        let agent_config_store = Arc::clone(&self.agent_config_store);
+        let schedule_store = Arc::clone(&self.schedule_store);
+        let scheduler = Arc::clone(&self.scheduler);
+        let target_store = Arc::clone(&self.target_store);
+        let connection_manager = Arc::clone(&self.connection_manager);
+        let agent_session_manager = Arc::clone(&self.agent_session_manager);
+        let external_cli_config_store = Arc::clone(&self.external_cli_config_store);
+        let queue_manager = Arc::clone(&self.queue_manager);
+        let progress_registry = Arc::clone(&self.progress_registry);
+        tokio::spawn(async move {
+            run_event_loop(
+                rx,
+                client,
+                provider,
+                event_store,
+                message_log_store,
+                group_context_store,
+                route_store,
+                provider_store,
+                agent_config_store,
+                schedule_store,
+                scheduler,
+                target_store,
+                connection_manager,
+                agent_session_manager,
+                external_cli_config_store,
+                queue_manager,
+                progress_registry,
+            )
+            .await;
+        });
+        sink
+    }
+
+    pub(super) fn remove_event_sink(&self, provider_id: &str) {
+        self.event_sinks.write().remove(provider_id);
     }
 
     pub fn chatgpt_web_startup_auth_runners(&self) -> Vec<ChatGptWebStartupAuthRunner> {
@@ -604,53 +672,7 @@ impl ImGatewayService {
 
             let app_secret = provider.secret_ref.clone().unwrap_or_default();
 
-            // Create event channel
-            let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
-
-            // Spawn the event processing loop
-            let client = self.provider_client(&provider);
-            let provider_for_loop = provider.clone();
-            let event_store = self.event_store.clone();
-            let sink = crate::im_gateway::provider::EventSink::with_durable_store(
-                tx,
-                Arc::clone(&event_store),
-                &provider.id,
-            );
-            let message_log_store = self.message_log_store.clone();
-            let group_context_store = self.group_context_store.clone();
-            let route_store = self.route_store.clone();
-            let provider_store = self.provider_store.clone();
-            let agent_config_store = self.agent_config_store.clone();
-            let schedule_store = self.schedule_store.clone();
-            let scheduler = self.scheduler.clone();
-            let target_store = self.target_store.clone();
-            let connection_manager = self.connection_manager.clone();
-            let agent_session_manager = self.agent_session_manager.clone();
-            let external_cli_config_store = self.external_cli_config_store.clone();
-            let queue_manager = self.queue_manager.clone();
-            let progress_registry = self.progress_registry.clone();
-            tokio::spawn(async move {
-                run_event_loop(
-                    rx,
-                    client,
-                    provider_for_loop,
-                    event_store,
-                    message_log_store,
-                    group_context_store,
-                    route_store,
-                    provider_store,
-                    agent_config_store,
-                    schedule_store,
-                    scheduler,
-                    target_store,
-                    connection_manager,
-                    agent_session_manager,
-                    external_cli_config_store,
-                    queue_manager,
-                    progress_registry,
-                )
-                .await;
-            });
+            let sink = self.event_sink_for_provider(&provider);
 
             // Start the long connection
             match self
@@ -800,50 +822,7 @@ impl ImGatewayService {
                                 prev_state = ?st.state,
                                 "supervisor: attempting reconnect"
                             );
-                            let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
-                            let client = self.provider_client(&provider);
-                            let provider_for_loop = provider.clone();
-                            let event_store = self.event_store.clone();
-                            let sink = crate::im_gateway::provider::EventSink::with_durable_store(
-                                tx,
-                                Arc::clone(&event_store),
-                                &provider.id,
-                            );
-                            let message_log_store = self.message_log_store.clone();
-                            let group_context_store = self.group_context_store.clone();
-                            let route_store = self.route_store.clone();
-                            let provider_store = self.provider_store.clone();
-                            let agent_config_store = self.agent_config_store.clone();
-                            let schedule_store = self.schedule_store.clone();
-                            let scheduler = self.scheduler.clone();
-                            let target_store = self.target_store.clone();
-                            let connection_manager = self.connection_manager.clone();
-                            let agent_session_manager = self.agent_session_manager.clone();
-                            let external_cli_config_store = self.external_cli_config_store.clone();
-                            let queue_manager = self.queue_manager.clone();
-                            let progress_registry = self.progress_registry.clone();
-                            tokio::spawn(async move {
-                                run_event_loop(
-                                    rx,
-                                    client,
-                                    provider_for_loop,
-                                    event_store,
-                                    message_log_store,
-                                    group_context_store,
-                                    route_store,
-                                    provider_store,
-                                    agent_config_store,
-                                    schedule_store,
-                                    scheduler,
-                                    target_store,
-                                    connection_manager,
-                                    agent_session_manager,
-                                    external_cli_config_store,
-                                    queue_manager,
-                                    progress_registry,
-                                )
-                                .await;
-                            });
+                            let sink = self.event_sink_for_provider(&provider);
                             if let Err(e) = self
                                 .connection_manager
                                 .start_connection(&provider, &app_secret, sink)
@@ -988,6 +967,22 @@ mod provider_event_connection_tests {
 
         provider.secret_ref = None;
         assert!(!should_run_provider_event_connection(&provider));
+    }
+
+    #[tokio::test]
+    async fn reconnect_reuses_one_provider_event_pipeline() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = ImGatewayService::new(temp_dir.path());
+        let provider = provider_with_secret();
+
+        let first = service.event_sink_for_provider(&provider);
+        let second = service.event_sink_for_provider(&provider);
+        assert!(!first.is_closed());
+        assert!(!second.is_closed());
+        assert_eq!(service.event_sinks.read().len(), 1);
+
+        service.remove_event_sink(&provider.id);
+        assert!(service.event_sinks.read().is_empty());
     }
 
     #[tokio::test]

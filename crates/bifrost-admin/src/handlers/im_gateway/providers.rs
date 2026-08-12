@@ -244,6 +244,7 @@ pub(super) async fn handle_provider_by_id(
         Method::DELETE => match service.provider_store.delete(id) {
             Ok(()) => {
                 service.connection_manager.stop_connection(id);
+                service.remove_event_sink(id);
                 service.weixin_login_pending.write().remove(id);
                 json_response(&serde_json::json!({"success": true}))
             }
@@ -1102,53 +1103,7 @@ async fn start_provider_event_connection(
         }
     }
 
-    // Create event channel
-    let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
-
-    // Spawn the event processing loop
-    let client = service.provider_client(&provider);
-    let provider_for_loop = provider.clone();
-    let event_store = service.event_store.clone();
-    let sink = crate::im_gateway::provider::EventSink::with_durable_store(
-        tx,
-        Arc::clone(&event_store),
-        &provider.id,
-    );
-    let message_log_store = service.message_log_store.clone();
-    let group_context_store = service.group_context_store.clone();
-    let route_store = service.route_store.clone();
-    let provider_store = service.provider_store.clone();
-    let agent_config_store = service.agent_config_store.clone();
-    let schedule_store = service.schedule_store.clone();
-    let scheduler = service.scheduler.clone();
-    let target_store = service.target_store.clone();
-    let connection_manager = service.connection_manager.clone();
-    let agent_session_manager = service.agent_session_manager.clone();
-    let external_cli_config_store = service.external_cli_config_store.clone();
-    let queue_manager = service.queue_manager.clone();
-    let progress_registry = service.progress_registry.clone();
-    tokio::spawn(async move {
-        run_event_loop(
-            rx,
-            client,
-            provider_for_loop,
-            event_store,
-            message_log_store,
-            group_context_store,
-            route_store,
-            provider_store,
-            agent_config_store,
-            schedule_store,
-            scheduler,
-            target_store,
-            connection_manager,
-            agent_session_manager,
-            external_cli_config_store,
-            queue_manager,
-            progress_registry,
-        )
-        .await;
-    });
+    let sink = service.event_sink_for_provider(&provider);
 
     // Start the long connection
     match service

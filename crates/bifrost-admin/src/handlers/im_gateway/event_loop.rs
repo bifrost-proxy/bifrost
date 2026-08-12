@@ -310,7 +310,11 @@ pub(super) async fn run_event_loop_with_options(
                 message_id = ?event.source.message_id,
                 "dropping duplicate event"
             );
-            pending_completion.complete();
+            if session_mailboxes.contains(&session_key_for_event(&event)) {
+                pending_completion.defer();
+            } else {
+                pending_completion.complete();
+            }
             continue;
         }
 

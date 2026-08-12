@@ -595,6 +595,55 @@ async fn download_message_file_resource_decrypts_aes_payload() {
 }
 
 #[tokio::test]
+async fn media_download_rejects_disallowed_redirect_before_following() {
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind redirect server");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept redirect request");
+        let service = service_fn(|_request: Request<Incoming>| async move {
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(302)
+                    .header("location", "http://192.168.0.1/private")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+        });
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
+    let mut config = test_provider();
+    config.base_url = Some(format!("http://127.0.0.1:{port}"));
+    let error = provider
+        .download_and_decrypt_media(
+            &config,
+            Some(&format!("http://127.0.0.1:{port}/redirect")),
+            None,
+            None,
+            "redirect",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("host is not allowed"), "{error}");
+}
+
+#[tokio::test]
 async fn download_message_image_resource_fetches_plain_full_url() {
     use bytes::Bytes;
     use http_body_util::Full;

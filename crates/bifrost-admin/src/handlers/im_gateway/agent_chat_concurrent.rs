@@ -35,13 +35,15 @@ pub(super) async fn handle_concurrent_event_during_chat(
         active_session_default_mode,
     )
     .await;
-    if let Err(error) = event_store.complete_pending(event) {
-        error!(
-            provider_id = %event.provider_id,
-            event_id = %event.event_id,
-            error = %error,
-            "failed to complete concurrently handled durable pending event"
-        );
+    if !queue_manager.contains_event(&event.event_id) {
+        if let Err(error) = event_store.complete_pending(event) {
+            error!(
+                provider_id = %event.provider_id,
+                event_id = %event.event_id,
+                error = %error,
+                "failed to complete concurrently handled durable pending event"
+            );
+        }
     }
 }
 
