@@ -18,6 +18,50 @@ pub(super) async fn handle_concurrent_event_during_chat(
     external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     active_session_default_mode: BusyMessageDefaultMode,
 ) {
+    handle_concurrent_event_during_chat_inner(
+        event,
+        provider,
+        active_session_key,
+        queue_manager,
+        client,
+        message_log_store,
+        agent_session_manager,
+        progress_registry,
+        agent_config_store,
+        provider_store,
+        event_store,
+        group_context_store,
+        external_cli_config_store,
+        active_session_default_mode,
+    )
+    .await;
+    if let Err(error) = event_store.complete_pending(event) {
+        error!(
+            provider_id = %event.provider_id,
+            event_id = %event.event_id,
+            error = %error,
+            "failed to complete concurrently handled durable pending event"
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_concurrent_event_during_chat_inner(
+    event: &ImEvent,
+    provider: &ImProviderConfig,
+    active_session_key: &str,
+    queue_manager: &Arc<SessionQueueManager>,
+    client: &ImProviderClient,
+    message_log_store: &Arc<ImMessageLogStore>,
+    agent_session_manager: &Arc<ImAgentSessionManager>,
+    progress_registry: &Arc<ImAgentProgressRegistry>,
+    agent_config_store: &Arc<ImAgentConfigStore>,
+    provider_store: &Arc<ImProviderStore>,
+    event_store: &Arc<ImEventStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
+    external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    active_session_default_mode: BusyMessageDefaultMode,
+) {
     let provider = provider_store
         .get(&event.provider_id)
         .unwrap_or_else(|| provider.clone());

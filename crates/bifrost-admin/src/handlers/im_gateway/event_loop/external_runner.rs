@@ -665,6 +665,53 @@ mod weixin_companion_tests {
         assert_eq!(deferred.len(), 1);
         assert_eq!(deferred[0].event_id, "second-text");
     }
+
+    #[tokio::test]
+    async fn coalesce_never_merges_a_different_weixin_session() {
+        let temp = tempfile::tempdir().expect("weixin session isolation data dir");
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let client =
+            ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider()));
+        let mut provider = crate::handlers::im_gateway::tests::test_provider();
+        provider.id = "weixin-main".to_string();
+        provider.provider_type = ImProviderType::Weixin;
+        let initial_event = weixin_event("first-user", "第一位用户", Vec::new());
+        let mut other_user_event = weixin_event(
+            "second-user-file",
+            "第二位用户",
+            vec![inline_file("private.txt", "cHJpdmF0ZQ==")],
+        );
+        other_user_event.source.user_id = Some("other-weixin-user".to_string());
+        other_user_event.source.chat_id = Some("other-weixin-user".to_string());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(other_user_event).unwrap();
+        drop(tx);
+        let mut input = input("第一位用户");
+        input.session_key = session_key_for_event(&initial_event);
+        let mut ctx = ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &initial_event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+        };
+
+        let deferred = coalesce_weixin_companion_events(&mut ctx, &mut input).await;
+
+        assert_eq!(input.message_text, "第一位用户");
+        assert!(input.images.is_empty());
+        assert!(input.files.is_empty());
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].event_id, "second-user-file");
+    }
 }
 
 async fn resolve_weixin_event_attachments(
@@ -716,11 +763,29 @@ async fn coalesce_weixin_companion_events(
     }
 
     let mut companions = Vec::new();
+    let mut deferred_events = Vec::new();
     for next_event in companion_events {
+        let event_session_key = session_key_for_event(&next_event);
+        if event_session_key != input.session_key {
+            warn!(
+                active_session_key = %input.session_key,
+                event_session_key = %event_session_key,
+                event_id = %next_event.event_id,
+                "deferring Weixin companion candidate from another session"
+            );
+            deferred_events.push(next_event);
+            continue;
+        }
         let Some(message) = next_event.message.as_ref() else {
+            if let Err(error) = ctx.event_store.complete_pending(&next_event) {
+                error!(error = %error, "failed to complete empty Weixin companion event");
+            }
             continue;
         };
         if message.text.trim().is_empty() && message.images.is_empty() && message.files.is_empty() {
+            if let Err(error) = ctx.event_store.complete_pending(&next_event) {
+                error!(error = %error, "failed to complete empty Weixin companion event");
+            }
             continue;
         }
         let message_text = if message.text.trim().is_empty() {
@@ -750,7 +815,7 @@ async fn coalesce_weixin_companion_events(
     }
 
     if companions.is_empty() {
-        return Vec::new();
+        return deferred_events;
     }
     let initial_has_meaningful_text = ctx
         .event
@@ -775,6 +840,13 @@ async fn coalesce_weixin_companion_events(
                 ctx.message_log_store,
             )
             .await;
+            if let Err(error) = ctx.event_store.complete_pending(&companion.event) {
+                error!(
+                    event_id = %companion.event.event_id,
+                    error = %error,
+                    "failed to complete merged Weixin companion event"
+                );
+            }
         }
     }
     let companion_count = companions.len();
@@ -794,7 +866,8 @@ async fn coalesce_weixin_companion_events(
             "coalesced adjacent Weixin text and attachments before Agent dispatch"
         );
     }
-    deferred.into_iter().map(|item| item.event).collect()
+    deferred_events.extend(deferred.into_iter().map(|item| item.event));
+    deferred_events
 }
 
 pub(super) struct AbortTaskOnDrop(pub(super) tokio::task::AbortHandle);

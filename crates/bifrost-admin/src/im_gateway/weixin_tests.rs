@@ -1574,7 +1574,10 @@ async fn connection_retries_until_inbound_event_is_durably_accepted() {
     let data_dir = tempfile::tempdir().unwrap();
     let provider = WeixinProvider::new_with_data_dir(data_dir.path());
     let event_store = Arc::new(crate::im_gateway::ImEventStore::new(data_dir.path()));
-    let blocked_store_path = data_dir.path().join("admin").join("im_gateway_events.json");
+    let blocked_store_path = data_dir
+        .path()
+        .join("admin")
+        .join("im_gateway_pending_events.json");
     std::fs::create_dir_all(&blocked_store_path).unwrap();
 
     let mut config = test_provider();
@@ -1583,6 +1586,7 @@ async fn connection_retries_until_inbound_event_is_durably_accepted() {
     let sink = crate::im_gateway::provider::EventSink::with_durable_store(
         sender,
         Arc::clone(&event_store),
+        &config.id,
     );
     let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = provider
@@ -1773,6 +1777,7 @@ async fn connect_events_persists_cursor_only_after_enqueue_and_resumes_next_poll
     let sink = crate::im_gateway::provider::EventSink::with_durable_store(
         sink_tx,
         Arc::clone(&event_store),
+        &config.id,
     );
     let handle = provider
         .connect_events_with_status(&config, sink, None)

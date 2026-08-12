@@ -378,11 +378,11 @@ Polling --success--> PersistCursorAfterEnqueue --immediate--> Polling
 
 1. 校验 HTTP 与 `ret/errcode`。
 2. normalize 全部消息。
-3. 把事件成功 enqueue 给统一 event loop。
+3. 把完整事件加密写入 durable pending queue，并 enqueue 给统一 event loop；event loop 完成处理后显式 ack 删除 pending entry，重启或重连时先重放尚未 ack 的事件。
 4. 原子保存新 cursor。
 5. 更新内存 cursor。
 
-如果第 3/4 步失败，不推进 cursor；重启后允许重复投递，并依赖稳定 `event_id` 和现有去重窗口实现 at-least-once，而不是冒险丢消息。
+如果第 3/4 步失败，不推进 cursor；已提交 cursor 但尚未处理完成的事件由 encrypted pending queue 重放，并依赖稳定 `event_id` 和现有去重窗口实现 at-least-once，而不是冒险丢消息。pending 文件使用 `LocalSecretKey` 加密完整事件，避免把媒体签名参数写入明文 history。
 
 `-14` 表示当前授权不可继续使用：连接状态改为 `authentication_required`，停止本轮 poll，WebUI 提示重新扫码。Bifrost 不在旧 token 上无限快速重试。
 

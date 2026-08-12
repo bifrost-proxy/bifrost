@@ -282,6 +282,7 @@ pub(super) async fn run_event_loop_with_options(
                 continue;
             }
         };
+        let mut pending_completion = event_store.pending_completion(&event);
         let provider = provider_store
             .get(&event.provider_id)
             .unwrap_or_else(|| provider.clone());
@@ -292,6 +293,7 @@ pub(super) async fn run_event_loop_with_options(
                 event_id = %event.event_id,
                 "dropping inbound event because provider is disabled"
             );
+            pending_completion.complete();
             continue;
         }
 
@@ -308,6 +310,7 @@ pub(super) async fn run_event_loop_with_options(
                 message_id = ?event.source.message_id,
                 "dropping duplicate event"
             );
+            pending_completion.complete();
             continue;
         }
 
@@ -327,11 +330,13 @@ pub(super) async fn run_event_loop_with_options(
                 &message_log_store,
             )
             .await;
+            pending_completion.complete();
             continue;
         }
 
         let dispatch_result = session_mailboxes.dispatch(event);
         let Some(mut event) = dispatch_result.unrouted_event else {
+            pending_completion.defer();
             if dispatch_result.delivered && !dedup_key.is_empty() {
                 dedup.record(&dedup_key);
             }
@@ -377,6 +382,7 @@ pub(super) async fn run_event_loop_with_options(
                         reaction_added: None,
                     };
                     let _ = message_log_store.add(log);
+                    pending_completion.complete();
                     continue;
                 }
             }
@@ -435,9 +441,13 @@ pub(super) async fn run_event_loop_with_options(
                         reaction_added: None,
                     };
                     let _ = message_log_store.add(log);
+                    pending_completion.complete();
                     continue;
                 }
-                Ok(GroupInboundDispatch::AddressedElsewhere) => continue,
+                Ok(GroupInboundDispatch::AddressedElsewhere) => {
+                    pending_completion.complete();
+                    continue;
+                }
                 Err(error) => {
                     if let Err(store_error) = event_store.add(event.clone()) {
                         error!(error = %store_error, "failed to store rejected group trigger");
@@ -456,6 +466,7 @@ pub(super) async fn run_event_loop_with_options(
                         &message_log_store,
                     )
                     .await;
+                    pending_completion.complete();
                     continue;
                 }
             }
@@ -509,6 +520,7 @@ pub(super) async fn run_event_loop_with_options(
                     warn!(turn_id = %turn_id, error = %error, "failed to complete unavailable quoted-message turn");
                 }
             }
+            pending_completion.complete();
             continue;
         }
 
@@ -579,6 +591,7 @@ pub(super) async fn run_event_loop_with_options(
                                 },
                             )
                             .await;
+                            pending_completion.complete();
                             continue;
                         }
 
@@ -606,6 +619,7 @@ pub(super) async fn run_event_loop_with_options(
                                 &event,
                                 "ready",
                             );
+                            pending_completion.complete();
                             continue;
                         }
 
@@ -623,6 +637,7 @@ pub(super) async fn run_event_loop_with_options(
                         let (images, files) =
                             resolve_initial_external_cli_attachments(&client, &provider, &event)
                                 .await;
+                        pending_completion.defer();
                         spawn_external_cli_agent_chat(
                             &mut session_mailboxes,
                             ExternalCliChatTaskContext {
@@ -669,6 +684,7 @@ pub(super) async fn run_event_loop_with_options(
                     warn!(turn_id = %turn_id, error = %error, "failed to release undispatched group turn");
                 }
             }
+            pending_completion.complete();
             continue;
         }
 
@@ -692,6 +708,7 @@ pub(super) async fn run_event_loop_with_options(
                     .as_ref()
                     .is_some_and(|message| !message.images.is_empty() || !message.files.is_empty());
                 if raw_message_text.trim().is_empty() && !has_attachments {
+                    pending_completion.complete();
                     continue;
                 }
                 let message_text = if is_group_event {
@@ -742,6 +759,7 @@ pub(super) async fn run_event_loop_with_options(
                         },
                     )
                     .await;
+                    pending_completion.complete();
                     continue;
                 }
 
@@ -769,6 +787,7 @@ pub(super) async fn run_event_loop_with_options(
                         &event,
                         "ready",
                     );
+                    pending_completion.complete();
                     continue;
                 }
 
@@ -785,6 +804,7 @@ pub(super) async fn run_event_loop_with_options(
                     });
                 let (images, files) =
                     resolve_initial_external_cli_attachments(&client, &provider, &event).await;
+                pending_completion.defer();
                 spawn_external_cli_agent_chat(
                     &mut session_mailboxes,
                     ExternalCliChatTaskContext {
@@ -831,6 +851,7 @@ pub(super) async fn run_event_loop_with_options(
                     .as_ref()
                     .is_some_and(|message| !message.images.is_empty() || !message.files.is_empty());
                 if raw_message_text.trim().is_empty() && !has_attachments {
+                    pending_completion.complete();
                     continue;
                 }
                 let message_text = if is_group_event {
@@ -873,12 +894,14 @@ pub(super) async fn run_event_loop_with_options(
                             &event,
                             "ready",
                         );
+                        pending_completion.complete();
                         continue;
                     }
                 }
 
                 let (images, files) =
                     resolve_initial_external_cli_attachments(&client, &provider, &event).await;
+                pending_completion.defer();
                 spawn_external_cli_agent_chat(
                     &mut session_mailboxes,
                     ExternalCliChatTaskContext {
@@ -913,6 +936,7 @@ pub(super) async fn run_event_loop_with_options(
                 );
             }
         }
+        pending_completion.complete();
     }
 
     if let Err(error) = group_context_store.release_feishu_thread_recovery_claims(

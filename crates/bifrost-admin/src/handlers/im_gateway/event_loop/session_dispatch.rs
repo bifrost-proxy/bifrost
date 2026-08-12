@@ -223,6 +223,7 @@ pub(super) fn spawn_external_cli_agent_chat(
             generation,
             guard_session_manager,
         );
+        let pending_event = ctx.event.clone();
         run_external_cli_agent_chat(
             ExternalCliChatContext {
                 rx: &mut session_rx,
@@ -242,6 +243,14 @@ pub(super) fn spawn_external_cli_agent_chat(
             input,
         )
         .await;
+        if let Err(error) = ctx.event_store.complete_pending(&pending_event) {
+            error!(
+                provider_id = %pending_event.provider_id,
+                event_id = %pending_event.event_id,
+                error = %error,
+                "failed to complete external runner's durable pending event"
+            );
+        }
         close_session_mailbox(&mut session_rx);
         let recovered_events = drain_session_mailbox(&mut session_rx);
         guard.complete(recovered_events);

@@ -1,16 +1,24 @@
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use sha2::{Digest, Sha256};
+use tracing::{error, warn};
 
 use bifrost_core::{BifrostError, Result};
+use bifrost_storage::LocalSecretKey;
 
 use super::types::ImEvent;
 
 const STORE_VERSION: u32 = 1;
 const STORE_FILENAME: &str = "im_gateway_events.json";
+const PENDING_STORE_FILENAME: &str = "im_gateway_pending_events.json";
 const MAX_EVENTS: usize = 1000;
+const MAX_PENDING_EVENTS: usize = 1000;
+const MAX_PENDING_STORE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoreData {
@@ -18,19 +26,40 @@ struct StoreData {
     events: Vec<ImEvent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingStoreData {
+    version: u32,
+    entries: BTreeMap<String, String>,
+}
+
 pub struct ImEventStore {
     file_path: PathBuf,
     data: RwLock<StoreData>,
+    pending_path: PathBuf,
+    pending_key: Option<LocalSecretKey>,
+    pending: RwLock<PendingStoreData>,
 }
 
 impl ImEventStore {
     pub fn new(data_dir: &Path) -> Self {
         let admin_dir = data_dir.join("admin");
         let file_path = admin_dir.join(STORE_FILENAME);
+        let pending_path = admin_dir.join(PENDING_STORE_FILENAME);
         let mut data = Self::load_from_disk(&file_path).unwrap_or_else(|| StoreData {
             version: STORE_VERSION,
             events: Vec::new(),
         });
+        let pending_key = LocalSecretKey::for_data_dir(data_dir)
+            .map_err(|error| {
+                warn!(error = %error, "durable IM pending-event encryption is unavailable");
+                error
+            })
+            .ok();
+        let pending =
+            Self::load_pending_from_disk(&pending_path).unwrap_or_else(|| PendingStoreData {
+                version: STORE_VERSION,
+                entries: BTreeMap::new(),
+            });
         let mut removed_legacy_credentials = false;
         for event in &mut data.events {
             removed_legacy_credentials |= redact_event_for_history_in_place(event);
@@ -38,6 +67,9 @@ impl ImEventStore {
         let store = Self {
             file_path,
             data: RwLock::new(data),
+            pending_path,
+            pending_key,
+            pending: RwLock::new(pending),
         };
         if removed_legacy_credentials {
             let data = store.data.read();
@@ -50,6 +82,81 @@ impl ImEventStore {
             }
         }
         store
+    }
+
+    /// Persist a full-fidelity inbound event before the provider commits its
+    /// remote cursor. Entries are encrypted because Weixin media events can
+    /// contain short-lived signed download credentials that history redacts.
+    pub fn add_pending(&self, event: &ImEvent) -> Result<()> {
+        let key = self.pending_key.as_ref().ok_or_else(|| {
+            BifrostError::Config("durable IM pending-event encryption is unavailable".to_string())
+        })?;
+        let entry_key = pending_event_key(event)?;
+        let mut pending = self.pending.write();
+        if pending.entries.contains_key(&entry_key) {
+            return Ok(());
+        }
+        if pending.entries.len() >= MAX_PENDING_EVENTS {
+            return Err(BifrostError::Config(format!(
+                "durable IM pending-event queue reached its {MAX_PENDING_EVENTS} event limit"
+            )));
+        }
+        let plaintext = serde_json::to_string(event).map_err(|error| {
+            BifrostError::Config(format!("serialize pending IM event: {error}"))
+        })?;
+        let encrypted = key.encrypt_string(&plaintext)?;
+        let mut next = pending.clone();
+        next.version = STORE_VERSION;
+        next.entries.insert(entry_key, encrypted);
+        self.save_pending_locked(&next)?;
+        *pending = next;
+        Ok(())
+    }
+
+    /// Return pending events for one provider in their original arrival order.
+    /// Invalid or undecryptable entries stay on disk and fail closed rather
+    /// than being silently acknowledged.
+    pub fn pending_by_provider(&self, provider_id: &str) -> Vec<ImEvent> {
+        let Some(key) = self.pending_key.as_ref() else {
+            return Vec::new();
+        };
+        let mut events = self
+            .pending
+            .read()
+            .entries
+            .values()
+            .filter_map(|encoded| {
+                let plaintext = key.decrypt_string(encoded).ok()?;
+                if plaintext == *encoded {
+                    return None;
+                }
+                serde_json::from_str::<ImEvent>(&plaintext).ok()
+            })
+            .filter(|event| event.provider_id == provider_id)
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.received_at);
+        events
+    }
+
+    pub fn complete_pending(&self, event: &ImEvent) -> Result<()> {
+        let entry_key = pending_event_key(event)?;
+        let mut pending = self.pending.write();
+        if !pending.entries.contains_key(&entry_key) {
+            return Ok(());
+        }
+        let mut next = pending.clone();
+        next.entries.remove(&entry_key);
+        self.save_pending_locked(&next)?;
+        *pending = next;
+        Ok(())
+    }
+
+    pub fn pending_completion(self: &Arc<Self>, event: &ImEvent) -> PendingEventCompletion {
+        PendingEventCompletion {
+            store: Arc::clone(self),
+            event: event.clone(),
+            armed: true,
+        }
     }
 
     pub fn list(&self) -> Vec<ImEvent> {
@@ -118,6 +225,34 @@ impl ImEventStore {
         Ok(())
     }
 
+    fn save_pending_locked(&self, data: &PendingStoreData) -> Result<()> {
+        let parent = self.pending_path.parent().ok_or_else(|| {
+            BifrostError::Config("pending IM event store path has no parent".to_string())
+        })?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "create pending IM event directory {}: {error}",
+                parent.display()
+            )))
+        })?;
+        let bytes = serde_json::to_vec_pretty(data).map_err(|error| {
+            BifrostError::Config(format!("serialize pending IM event store: {error}"))
+        })?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        harden_private_file(temporary.path())?;
+        temporary.persist(&self.pending_path).map_err(|error| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "replace pending IM event store {}: {}",
+                self.pending_path.display(),
+                error.error
+            )))
+        })?;
+        harden_private_file(&self.pending_path)?;
+        sync_directory(parent)
+    }
+
     fn load_from_disk(file_path: &Path) -> Option<StoreData> {
         if !file_path.exists() {
             return None;
@@ -135,6 +270,93 @@ impl ImEventStore {
             }
         }
     }
+
+    fn load_pending_from_disk(file_path: &Path) -> Option<PendingStoreData> {
+        if !file_path.exists() {
+            return None;
+        }
+        if std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0) > MAX_PENDING_STORE_BYTES {
+            return None;
+        }
+        let bytes = std::fs::read(file_path).ok()?;
+        let data = serde_json::from_slice::<PendingStoreData>(&bytes).ok()?;
+        (data.version == STORE_VERSION).then_some(data)
+    }
+}
+
+pub struct PendingEventCompletion {
+    store: Arc<ImEventStore>,
+    event: ImEvent,
+    armed: bool,
+}
+
+impl PendingEventCompletion {
+    pub fn complete(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Err(error) = self.store.complete_pending(&self.event) {
+            error!(
+                provider_id = %self.event.provider_id,
+                event_id = %self.event.event_id,
+                error = %error,
+                "failed to acknowledge durable pending IM event"
+            );
+        }
+    }
+
+    /// Transfer completion responsibility to another processing context.
+    pub fn defer(&mut self) {
+        self.armed = false;
+    }
+}
+
+fn pending_event_key(event: &ImEvent) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(event.provider_id.trim().as_bytes());
+    hasher.update([0]);
+    if event.event_id.trim().is_empty() {
+        hasher.update(serde_json::to_vec(event).map_err(|error| {
+            BifrostError::Config(format!("serialize pending IM event identity: {error}"))
+        })?);
+    } else {
+        hasher.update(event.event_id.trim().as_bytes());
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(unix)]
+fn harden_private_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "chmod 0600 {}: {error}",
+            path.display()
+        )))
+    })
+}
+
+#[cfg(not(unix))]
+fn harden_private_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "sync pending IM event directory {}: {error}",
+                path.display()
+            )))
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn redact_event_for_history(mut event: ImEvent) -> ImEvent {
@@ -233,6 +455,121 @@ mod tests {
         store.add(event("event-1")).unwrap();
 
         assert_eq!(store.list().len(), 1);
+    }
+
+    #[test]
+    fn pending_events_are_encrypted_replayed_and_completed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ImEventStore::new(temp.path()));
+        let mut pending_event = legacy_credential_event("pending-1");
+        pending_event.provider_id = "weixin-pending".to_string();
+
+        store.add_pending(&pending_event).unwrap();
+        let disk = std::fs::read_to_string(&store.pending_path).unwrap();
+        assert!(!disk.contains("image-query-secret"));
+        assert!(!disk.contains("pending-1"));
+
+        let restarted = Arc::new(ImEventStore::new(temp.path()));
+        let replayed = restarted.pending_by_provider("weixin-pending");
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].event_id, "pending-1");
+        assert_eq!(
+            replayed[0].message.as_ref().unwrap().images[0]
+                .encrypted_query_param
+                .as_deref(),
+            Some("image-query-secret")
+        );
+
+        let mut completion = restarted.pending_completion(&replayed[0]);
+        completion.complete();
+        assert!(restarted.pending_by_provider("weixin-pending").is_empty());
+        restarted.complete_pending(&replayed[0]).unwrap();
+
+        restarted.add_pending(&pending_event).unwrap();
+        let mut deferred = restarted.pending_completion(&pending_event);
+        deferred.defer();
+        drop(deferred);
+        assert_eq!(restarted.pending_by_provider("weixin-pending").len(), 1);
+        restarted.complete_pending(&pending_event).unwrap();
+    }
+
+    #[test]
+    fn pending_event_store_fails_closed_for_missing_key_and_capacity() {
+        let missing_key_dir = tempfile::tempdir().unwrap();
+        let mut missing_key = ImEventStore::new(missing_key_dir.path());
+        missing_key.pending_key = None;
+        assert!(missing_key.add_pending(&event("missing-key")).is_err());
+        assert!(missing_key.pending_by_provider("weixin-main").is_empty());
+
+        let full_dir = tempfile::tempdir().unwrap();
+        let full = ImEventStore::new(full_dir.path());
+        full.pending.write().entries.extend(
+            (0..MAX_PENDING_EVENTS).map(|index| (format!("entry-{index}"), "invalid".to_string())),
+        );
+        assert!(full.add_pending(&event("overflow")).is_err());
+    }
+
+    #[test]
+    fn pending_event_store_reports_path_failures_without_publishing_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_parent = temp.path().join("blocked-parent");
+        std::fs::write(&blocked_parent, b"file").unwrap();
+        let mut store = ImEventStore::new(temp.path());
+        store.pending_path = blocked_parent.join(PENDING_STORE_FILENAME);
+
+        assert!(store.add_pending(&event("blocked-parent")).is_err());
+        assert!(store.pending.read().entries.is_empty());
+
+        let blocked_target = temp.path().join("blocked-target");
+        std::fs::create_dir_all(&blocked_target).unwrap();
+        store.pending_path = blocked_target;
+        assert!(store.add_pending(&event("blocked-target")).is_err());
+        assert!(store.pending.read().entries.is_empty());
+    }
+
+    #[test]
+    fn pending_event_loader_rejects_missing_oversized_invalid_and_wrong_version_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(PENDING_STORE_FILENAME);
+        assert!(ImEventStore::load_pending_from_disk(&path).is_none());
+
+        let oversized = std::fs::File::create(&path).unwrap();
+        oversized.set_len(MAX_PENDING_STORE_BYTES + 1).unwrap();
+        assert!(ImEventStore::load_pending_from_disk(&path).is_none());
+
+        std::fs::write(&path, b"not-json").unwrap();
+        assert!(ImEventStore::load_pending_from_disk(&path).is_none());
+
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&PendingStoreData {
+                version: STORE_VERSION + 1,
+                entries: BTreeMap::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(ImEventStore::load_pending_from_disk(&path).is_none());
+    }
+
+    #[test]
+    fn pending_event_identity_supports_missing_protocol_ids_and_skips_plaintext_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImEventStore::new(temp.path());
+        let mut without_id = event("");
+        without_id.message = Some(super::super::types::ImEventMessage {
+            text: "stable identity".to_string(),
+            ..Default::default()
+        });
+        store.add_pending(&without_id).unwrap();
+        assert_eq!(store.pending_by_provider("weixin-main").len(), 1);
+
+        store
+            .pending
+            .write()
+            .entries
+            .insert("plaintext".to_string(), "not-encrypted".to_string());
+        assert_eq!(store.pending_by_provider("weixin-main").len(), 1);
     }
 
     #[test]

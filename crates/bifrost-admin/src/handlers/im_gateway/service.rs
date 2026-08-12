@@ -614,6 +614,7 @@ impl ImGatewayService {
             let sink = crate::im_gateway::provider::EventSink::with_durable_store(
                 tx,
                 Arc::clone(&event_store),
+                &provider.id,
             );
             let message_log_store = self.message_log_store.clone();
             let group_context_store = self.group_context_store.clone();
@@ -806,6 +807,7 @@ impl ImGatewayService {
                             let sink = crate::im_gateway::provider::EventSink::with_durable_store(
                                 tx,
                                 Arc::clone(&event_store),
+                                &provider.id,
                             );
                             let message_log_store = self.message_log_store.clone();
                             let group_context_store = self.group_context_store.clone();
