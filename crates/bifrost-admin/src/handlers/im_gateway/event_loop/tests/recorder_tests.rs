@@ -759,6 +759,140 @@ async fn exercise_external_runner_control_flow_with_progress(
     (service, temp)
 }
 
+#[tokio::test]
+async fn external_runner_topic_commands_finalize_the_binding() {
+    let server = crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+    let temp = tempfile::tempdir().expect("topic command data dir");
+    let guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider =
+        crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+    provider.id = "provider-topic-command-finalization".to_string();
+    service.provider_store.add(provider.clone()).unwrap();
+
+    let mut config = service.external_cli_config_store.load();
+    let runner_id = config.default_runner_id.clone();
+    config.runners.get_mut(&runner_id).unwrap().enabled = true;
+    service.external_cli_config_store.save(config).unwrap();
+
+    let session_key = crate::im_gateway::group_context::build_group_thread_session_key(
+        &provider.id,
+        "oc_group",
+        "topic-commands",
+    );
+    service
+        .group_context_store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-commands".to_string(),
+                root_message_id: "root-command".to_string(),
+                derived_session_key: session_key.clone(),
+                source_kind: "message_context".to_string(),
+                source_message_id: "root-command".to_string(),
+                source_adapter: None,
+                source_thread_id: None,
+                source_turn_id: None,
+                trigger_message_id: "topic-help".to_string(),
+                initial_message: "/help".to_string(),
+                fallback_message: None,
+                initial_event_json: None,
+                state: "initializing".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let (_tx, mut rx) = mpsc::unbounded_channel();
+    for (index, command) in ["/help", "/clear"].into_iter().enumerate() {
+        service
+            .group_context_store
+            .update_feishu_thread_binding_state(
+                &provider.id,
+                "oc_group",
+                "topic-commands",
+                "initializing",
+                index as u64 + 2,
+            )
+            .unwrap();
+        let mut event = group_test_event(
+            &provider.id,
+            &format!("topic-command-{index}"),
+            command,
+            false,
+            index as u64 + 2,
+        );
+        let message = event.message.as_mut().unwrap();
+        message.root_id = Some("root-command".to_string());
+        message.parent_id = Some("root-command".to_string());
+        message.thread_id = Some("topic-commands".to_string());
+
+        run_external_cli_agent_chat(
+            ExternalCliChatContext {
+                rx: &mut rx,
+                client: &client,
+                provider: &provider,
+                provider_store: &service.provider_store,
+                event: &event,
+                message_log_store: &service.message_log_store,
+                agent_config_store: &service.agent_config_store,
+                external_cli_config_store: &service.external_cli_config_store,
+                agent_session_manager: &service.agent_session_manager,
+                queue_manager: &service.queue_manager,
+                progress_registry: &service.progress_registry,
+                event_store: &service.event_store,
+                group_context_store: &service.group_context_store,
+            },
+            ExternalCliChatInput {
+                message_text: command.to_string(),
+                images: Vec::new(),
+                files: Vec::new(),
+                session_key: session_key.clone(),
+                adapter_override: None,
+                instructions_override: None,
+                delivery_override: None,
+                runner_id_override: None,
+                runner_selected: true,
+                group_turn_id: None,
+                reset_group_context: false,
+                thread_anchor_message_id: None,
+                thread_fallback_message: None,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            service
+                .group_context_store
+                .feishu_thread_binding(&provider.id, "oc_group", "topic-commands")
+                .unwrap()
+                .unwrap()
+                .state,
+            "ready"
+        );
+    }
+    drop(guard);
+}
+
+#[test]
+fn topic_binding_finalization_tolerates_store_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    rusqlite::Connection::open(store.file_path())
+        .unwrap()
+        .execute_batch("DROP TABLE im_feishu_thread_bindings;")
+        .unwrap();
+    let mut event = group_test_event("provider", "topic-finalize-error", "/help", false, 1);
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("root".to_string());
+    message.parent_id = Some("root".to_string());
+    message.thread_id = Some("topic".to_string());
+
+    finalize_current_feishu_thread_binding(&store, "provider", &event, "ready");
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn external_runner_success_control_flow_sends_terminal_card() {
@@ -1233,6 +1367,24 @@ async fn thread_anchor_request_planning_covers_active_wait_fallback_and_missing_
     assert_eq!(request.operation, "fork");
     assert_eq!(request.params["threadId"], "source-thread");
     assert!(request.params["lastTurnId"].is_null());
+
+    let mut incompatible = recorder_test_request("active-incompatible-transport");
+    incompatible.adapter_config.transport =
+        Some(crate::im_gateway::external_cli::ExternalCliTransport::Exec);
+    apply_thread_anchor_to_request(
+        &service.group_context_store,
+        &service.agent_session_manager,
+        provider_id,
+        "active",
+        &mut incompatible,
+        Some("root plus current for incompatible runner"),
+    )
+    .await;
+    assert_eq!(incompatible.operation, "chat");
+    assert_eq!(
+        incompatible.message,
+        "root plus current for incompatible runner"
+    );
 
     active.message_id = "no-thread".to_string();
     active.external_thread_id = None;

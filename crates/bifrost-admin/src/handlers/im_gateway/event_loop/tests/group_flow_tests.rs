@@ -154,6 +154,167 @@ async fn local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch() {
 }
 
 #[tokio::test]
+async fn bound_topic_does_not_capture_messages_addressed_to_another_bot() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let (base_url, identity_server) = spawn_group_lookup_server().await;
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-bound-topic-other-bot".to_string();
+    provider.base_url = Some(base_url);
+    provider.app_id = Some("cli_test".to_string());
+    provider.secret_ref = Some("secret".to_string());
+    let topic_session = crate::im_gateway::group_context::build_group_thread_session_key(
+        &provider.id,
+        "oc_group",
+        "topic-1",
+    );
+    store
+        .claim_feishu_thread_binding(
+            &crate::im_gateway::group_context::FeishuThreadBinding {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                feishu_thread_id: "topic-1".to_string(),
+                root_message_id: "root-card".to_string(),
+                derived_session_key: topic_session,
+                source_kind: "message_context".to_string(),
+                source_message_id: "root-card".to_string(),
+                source_adapter: None,
+                source_thread_id: None,
+                source_turn_id: None,
+                trigger_message_id: "first".to_string(),
+                initial_message: "first".to_string(),
+                fallback_message: None,
+                initial_event_json: None,
+                state: "ready".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+    let mut event = group_test_event(
+        &provider.id,
+        "other-bot-message",
+        "@_user_2 handle this",
+        false,
+        2,
+    );
+    let message = event.message.as_mut().unwrap();
+    message.mentions.push(crate::im_gateway::types::ImMention {
+        key: "@_user_2".to_string(),
+        open_id: Some("ou_other_bot".to_string()),
+        name: Some("Other Bot".to_string()),
+        tenant_key: None,
+        is_bot: true,
+    });
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-1".to_string());
+
+    assert!(matches!(
+        prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+            .await
+            .unwrap(),
+        GroupInboundDispatch::AddressedElsewhere
+    ));
+    assert_eq!(store.message_count(&provider.id, "oc_group").unwrap(), 0);
+
+    let non_feishu_client =
+        ImProviderClient::Weixin(Arc::new(crate::im_gateway::weixin::WeixinProvider::new()));
+    let mut event_without_resolved_identity = event.clone();
+    let unresolved_message = event_without_resolved_identity.message.as_mut().unwrap();
+    unresolved_message.text = "@_user_2 /help".to_string();
+    unresolved_message.mentions[0].is_bot = false;
+    assert!(matches!(
+        prepare_group_inbound_dispatch(
+            &non_feishu_client,
+            &provider,
+            &event_without_resolved_identity,
+            &store,
+            false
+        )
+        .await
+        .unwrap(),
+        GroupInboundDispatch::AddressedElsewhere
+    ));
+    identity_server.abort();
+}
+
+#[tokio::test]
+async fn ordinary_topic_root_accepts_system_command_as_first_message() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-topic-first-command".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    let mut event = group_test_event(&provider.id, "topic-help", "/help", false, 2);
+    let message = event.message.as_mut().unwrap();
+    message.root_id = Some("ordinary-root".to_string());
+    message.parent_id = Some("ordinary-root".to_string());
+    message.thread_id = Some("topic-help".to_string());
+
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+        .await
+        .unwrap()
+        .expect("topic-first system command must initialize a session");
+    assert_eq!(dispatch.message_text, "/help");
+    assert!(dispatch.thread_anchor_message_id.is_none());
+    let binding = store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-help")
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.initial_message, "/help");
+    assert_eq!(binding.source_kind, "message_context");
+}
+
+#[tokio::test]
+async fn unknown_topic_rejects_ambient_and_other_bot_messages_before_initialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let client =
+        ImProviderClient::Weixin(Arc::new(crate::im_gateway::weixin::WeixinProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-unknown-topic-routing".to_string();
+
+    let mut ambient = group_test_event(&provider.id, "ambient-topic", "hello", false, 1);
+    let ambient_message = ambient.message.as_mut().unwrap();
+    ambient_message.root_id = Some("ordinary-root".to_string());
+    ambient_message.parent_id = Some("ordinary-root".to_string());
+    ambient_message.thread_id = Some("topic-routing".to_string());
+    assert!(matches!(
+        prepare_group_inbound_dispatch(&client, &provider, &ambient, &store, false)
+            .await
+            .unwrap(),
+        GroupInboundDispatch::Ambient
+    ));
+
+    let mut other_bot = ambient;
+    let other_bot_message = other_bot.message.as_mut().unwrap();
+    other_bot_message.text = "@_user_2 /help".to_string();
+    other_bot_message
+        .mentions
+        .push(crate::im_gateway::types::ImMention {
+            key: "@_user_2".to_string(),
+            open_id: Some("ou_other_bot".to_string()),
+            name: Some("Other Bot".to_string()),
+            tenant_key: None,
+            is_bot: false,
+        });
+    assert!(matches!(
+        prepare_group_inbound_dispatch(&client, &provider, &other_bot, &store, false)
+            .await
+            .unwrap(),
+        GroupInboundDispatch::AddressedElsewhere
+    ));
+    assert!(store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-routing")
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn topic_initialization_is_recovered_from_persisted_binding_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let client =
@@ -211,6 +372,14 @@ async fn topic_initialization_is_recovered_from_persisted_binding_after_restart(
 fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redelivery() {
     let temp = tempfile::tempdir().unwrap();
     let group_store = ImGroupContextStore::new(temp.path());
+    assert!(group_store
+        .claim_pending_feishu_thread_bindings("provider", " ", 1)
+        .unwrap_err()
+        .contains("must not be empty"));
+    assert!(group_store
+        .release_feishu_thread_recovery_claims("provider", "", 1)
+        .unwrap_err()
+        .contains("must not be empty"));
     let provider_id = "feishu-startup-topic-recovery";
     let mut persisted_event =
         group_test_event(provider_id, "persisted-trigger", "continue", false, 2);
@@ -267,7 +436,8 @@ fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redel
         )
         .unwrap();
 
-    let recovered = recover_pending_feishu_thread_events(provider_id, &group_store).unwrap();
+    let recovered =
+        recover_pending_feishu_thread_events(provider_id, &group_store, "loop-a").unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!(
         recovered[0].source.message_id.as_deref(),
@@ -277,12 +447,12 @@ fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redel
     assert_eq!(recovered_message.images[0].file_key, "image-key");
     assert_eq!(recovered_message.files[0].file_key, "file-key");
     assert!(
-        recover_pending_feishu_thread_events("other-provider", &group_store)
+        recover_pending_feishu_thread_events("other-provider", &group_store, "loop-a")
             .unwrap()
             .is_empty()
     );
     assert!(
-        recover_pending_feishu_thread_events(provider_id, &group_store)
+        recover_pending_feishu_thread_events(provider_id, &group_store, "loop-a")
             .unwrap()
             .is_empty()
     );
@@ -321,7 +491,7 @@ fn startup_recovery_reconstructs_topic_event_when_persisted_json_is_invalid() {
         )
         .unwrap();
 
-    let recovered = recover_pending_feishu_thread_events(provider_id, &store).unwrap();
+    let recovered = recover_pending_feishu_thread_events(provider_id, &store, "loop-a").unwrap();
     assert_eq!(recovered.len(), 1);
     let event = &recovered[0];
     assert_eq!(event.event_id, "recovered:topic-trigger");
@@ -1006,6 +1176,48 @@ async fn group_event_loop_records_ambient_and_releases_turn_when_agent_is_disabl
         )
         .unwrap();
     assert_eq!(turn.message_count, 3);
+}
+
+#[tokio::test]
+async fn event_loop_exit_tolerates_topic_recovery_store_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-recovery-store-failure".to_string();
+    rusqlite::Connection::open(service.group_context_store.file_path())
+        .unwrap()
+        .execute_batch("DROP TABLE im_feishu_thread_bindings;")
+        .unwrap();
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(run_event_loop_with_options(
+        rx,
+        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+        provider,
+        Arc::clone(&service.event_store),
+        Arc::clone(&service.message_log_store),
+        Arc::clone(&service.group_context_store),
+        Arc::clone(&service.route_store),
+        Arc::clone(&service.provider_store),
+        Arc::clone(&service.agent_config_store),
+        Arc::clone(&service.schedule_store),
+        Arc::clone(&service.scheduler),
+        Arc::clone(&service.target_store),
+        Arc::clone(&service.connection_manager),
+        Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
+        Arc::clone(&service.queue_manager),
+        Arc::clone(&service.progress_registry),
+        EventLoopOptions {
+            send_online_notification: false,
+        },
+    ));
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        .await
+        .expect("event loop exit timed out")
+        .expect("event loop panicked");
 }
 
 #[tokio::test]

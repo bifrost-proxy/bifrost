@@ -228,9 +228,11 @@ pub(super) async fn run_event_loop_with_options(
 
     let mut dedup = EventDedup::new();
     let mut session_mailboxes = SessionMailboxRegistry::new();
+    let recovery_owner = uuid::Uuid::new_v4().to_string();
     let mut recovered_session_events = match recover_pending_feishu_thread_events(
         &provider.id,
         &group_context_store,
+        &recovery_owner,
     ) {
         Ok(events) => events,
         Err(error) => {
@@ -598,6 +600,12 @@ pub(super) async fn run_event_loop_with_options(
                         )
                         .await
                         {
+                            external_runner::finalize_current_feishu_thread_binding(
+                                &group_context_store,
+                                &provider.id,
+                                &event,
+                                "ready",
+                            );
                             continue;
                         }
 
@@ -756,6 +764,12 @@ pub(super) async fn run_event_loop_with_options(
                 )
                 .await
                 {
+                    external_runner::finalize_current_feishu_thread_binding(
+                        &group_context_store,
+                        &provider.id,
+                        &event,
+                        "ready",
+                    );
                     continue;
                 }
 
@@ -864,6 +878,12 @@ pub(super) async fn run_event_loop_with_options(
                     )
                     .await
                     {
+                        external_runner::finalize_current_feishu_thread_binding(
+                            &group_context_store,
+                            &provider.id,
+                            &event,
+                            "ready",
+                        );
                         continue;
                     }
                 }
@@ -916,6 +936,13 @@ pub(super) async fn run_event_loop_with_options(
         }
     }
 
+    if let Err(error) = group_context_store.release_feishu_thread_recovery_claims(
+        &provider.id,
+        &recovery_owner,
+        now_ms(),
+    ) {
+        warn!(provider_id = %provider.id, error = %error, "failed to release Feishu topic recovery claims on event-loop exit");
+    }
     info!(
         provider_id = %provider.id,
         "event processing loop ended"
@@ -981,9 +1008,10 @@ fn recover_session_completion(
 fn recover_pending_feishu_thread_events(
     provider_id: &str,
     group_context_store: &ImGroupContextStore,
+    recovery_owner: &str,
 ) -> Result<VecDeque<ImEvent>, String> {
     let events = group_context_store
-        .claim_pending_feishu_thread_bindings(provider_id, now_ms())?
+        .claim_pending_feishu_thread_bindings(provider_id, recovery_owner, now_ms())?
         .into_iter()
         .map(|binding| {
             if let Some(event_json) = binding.initial_event_json.as_deref() {
@@ -1209,6 +1237,18 @@ pub(super) async fn prepare_group_inbound_dispatch(
         if let Some(binding) =
             store.feishu_thread_binding(&event.provider_id, chat_id, thread_id)?
         {
+            if !message.mentions.is_empty() {
+                let bot_identity = match client.feishu() {
+                    Some(feishu) => feishu.fetch_bot_identity(provider).await.ok(),
+                    None => None,
+                };
+                if matches!(
+                    classify_group_message(message, bot_identity.as_ref(), session_busy),
+                    GroupMessageDisposition::AddressedElsewhere
+                ) {
+                    return Ok(GroupInboundDispatch::AddressedElsewhere);
+                }
+            }
             store.record_event(event, "event")?;
             let recovering = event.source.message_id.as_deref()
                 == Some(binding.trigger_message_id.as_str())
@@ -1251,19 +1291,22 @@ pub(super) async fn prepare_group_inbound_dispatch(
         } else {
             None
         };
-        let active_request = if anchor.is_some() {
-            agent_message_text(message)
+        let disposition = classify_group_message(message, bot_identity.as_ref(), session_busy);
+        let (active_request, system_command) = if anchor.is_some()
+            && !matches!(disposition, GroupMessageDisposition::AddressedElsewhere)
+        {
+            (agent_message_text(message), false)
         } else {
-            let disposition = classify_group_message(message, bot_identity.as_ref(), session_busy);
-            let GroupMessageDisposition::AgentTrigger { active_request, .. } = disposition else {
-                return Ok(match disposition {
-                    GroupMessageDisposition::AddressedElsewhere => {
-                        GroupInboundDispatch::AddressedElsewhere
-                    }
-                    _ => GroupInboundDispatch::Ambient,
-                });
-            };
-            active_request
+            match disposition {
+                GroupMessageDisposition::AgentTrigger { active_request, .. } => {
+                    (active_request, false)
+                }
+                GroupMessageDisposition::SystemCommand { command, .. } => (command, true),
+                GroupMessageDisposition::AddressedElsewhere => {
+                    return Ok(GroupInboundDispatch::AddressedElsewhere)
+                }
+                GroupMessageDisposition::Ambient => return Ok(GroupInboundDispatch::Ambient),
+            }
         };
         store.record_event(event, "event")?;
         let (
@@ -1273,7 +1316,16 @@ pub(super) async fn prepare_group_inbound_dispatch(
             source_adapter,
             source_thread_id,
             source_turn_id,
-        ) = if let Some(anchor) = anchor.as_ref() {
+        ) = if system_command {
+            (
+                active_request,
+                None,
+                "message_context".to_string(),
+                None,
+                None,
+                None,
+            )
+        } else if let Some(anchor) = anchor.as_ref() {
             let fallback_message = if anchor.status == "pending" {
                 let feishu = client.feishu().ok_or_else(|| {
                     "Feishu topic root messages require a Feishu provider".to_string()
@@ -1366,6 +1418,13 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 },
                 event.received_at,
             )?;
+        store.initialize_feishu_thread_session_settings(
+            &event.provider_id,
+            chat_id,
+            &binding.derived_session_key,
+            anchor.as_ref().map(|anchor| anchor.runner_id.as_str()),
+            event.received_at,
+        )?;
         return Ok(GroupInboundDispatch::Dispatch(Box::new(
             PreparedInboundDispatch {
                 message_text,

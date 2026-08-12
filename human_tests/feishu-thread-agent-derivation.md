@@ -68,10 +68,26 @@
 
 ### TC-FTD-09：队列、启动恢复与话题失败隔离
 
-操作步骤：运行 `cargo test -p bifrost-admin thread_derivation_anchor_is_consumed_once_for_queued_turns -- --nocapture`、`cargo test -p bifrost-admin thread_anchor_request_planning_covers_active_wait_fallback_and_missing_sources -- --nocapture`、`cargo test -p bifrost-admin traex_checkpoint_requires_app_server_fork_capability -- --nocapture`、`cargo test -p bifrost-admin pending_thread_recovery_is_atomically_claimed_once_per_process -- --nocapture`、`cargo test -p bifrost-admin startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redelivery -- --nocapture`、`cargo test -p bifrost-admin failed_topic_binding_uses_new_message_instead_of_replaying_old_instruction -- --nocapture`、`cargo test -p bifrost-admin thread_progress_card_never_falls_back_to_main_group_send -- --nocapture`、`cargo test -p bifrost-admin topic_terminal_without_progress_card_replies_in_thread_instead_of_main_group -- --nocapture` 和 `cargo test -p bifrost-admin progress_and_terminal_cards_are_both_persisted_as_derivation_anchors -- --nocapture`。
+操作步骤：运行 `cargo test -p bifrost-admin thread_derivation_anchor_is_consumed_once_for_queued_turns -- --nocapture`、`cargo test -p bifrost-admin thread_anchor_request_planning_covers_active_wait_fallback_and_missing_sources -- --nocapture`、`cargo test -p bifrost-admin traex_checkpoint_requires_app_server_fork_capability -- --nocapture`、`cargo test -p bifrost-admin pending_thread_recovery_is_process_safe_and_released_per_loop -- --nocapture`、`cargo test -p bifrost-admin startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redelivery -- --nocapture`、`cargo test -p bifrost-admin event_loop_exit_tolerates_topic_recovery_store_failure -- --nocapture`、`cargo test -p bifrost-admin failed_topic_binding_uses_new_message_instead_of_replaying_old_instruction -- --nocapture`、`cargo test -p bifrost-admin thread_progress_card_never_falls_back_to_main_group_send -- --nocapture`、`cargo test -p bifrost-admin topic_terminal_without_progress_card_replies_in_thread_instead_of_main_group -- --nocapture` 和 `cargo test -p bifrost-admin progress_and_terminal_cards_are_both_persisted_as_derivation_anchors -- --nocapture`。
 
-预期结果：派生锚点只消费一次，后续排队轮次续写派生 thread；等待来源结束时若锚点 ready 则精确 fork，若变为 failed、被删除、查询失败或来源提前退出则立即恢复冻结的 root + current 双消息上下文；Traex exec 不创建伪 checkpoint；进程启动按当前 provider 原子 claim SQLite nonterminal binding，同进程多个 event-loop 只有一个取得记录，并从 binding 内完整事件 JSON 恢复图片/文件，不依赖有界事件历史；failed binding 使用用户的新指令；话题 progress 失败时 terminal 卡仍以 `reply_in_thread=true` 回复原话题，不直接发送到主群；本轮 progress 与 terminal 卡 message_id 均写入可派生锚点。
+预期结果：派生锚点只消费一次，后续排队轮次续写派生 thread；等待来源结束时若锚点 ready 则精确 fork，若变为 failed、被删除、查询失败、来源提前退出或当前 Runner transport 不支持 fork，则立即恢复冻结的 root + current 双消息上下文；Traex exec 不创建伪 checkpoint；进程启动按当前 provider 原子 claim SQLite nonterminal binding，同一 event-loop 不重复取得记录，同进程替换 loop 在旧 loop 退出前不抢占，旧 loop 退出会释放未完成租约，新进程可接管旧进程租约，并从 binding 内完整事件 JSON 恢复图片/文件，不依赖有界事件历史；failed binding 使用用户的新指令；话题 progress 失败时 terminal 卡仍以 `reply_in_thread=true` 回复原话题，不直接发送到主群；本轮 progress 与 terminal 卡 message_id 均写入可派生锚点。
+
+### TC-FTD-10：话题 Session 配置、命令与多 Bot 后续消息
+
+操作步骤：运行 `cargo test -p bifrost-admin topic_sessions_persist_runner_work_dir_and_resolve_group_metadata -- --nocapture`、`cargo test -p bifrost-admin ordinary_topic_root_accepts_system_command_as_first_message -- --nocapture`、`cargo test -p bifrost-admin bound_topic_does_not_capture_messages_addressed_to_another_bot -- --nocapture`、`cargo test -p bifrost-admin unknown_topic_rejects_ambient_and_other_bot_messages_before_initialization -- --nocapture`、`cargo test -p bifrost-admin external_runner_topic_commands_finalize_the_binding -- --nocapture` 和 `cargo test -p bifrost-admin topic_binding_finalization_tolerates_store_failure -- --nocapture`。
+
+预期结果：新话题继承来源 Runner 和群工作目录，话题内 `/runner`、`/cwd` 持久化到话题自身而不污染 provider 默认值或主群，重复初始化不会覆盖话题已有选择；普通根消息下以 `/help` 等 SystemCommand 作为第一条消息时仍创建并终结话题 binding；话题已绑定后，明确 @ 其他 Bot 的后续消息仍由当前 Bot 拒绝认领。
+
+### TC-FTD-11：fork 响应与滚动进度锚点完整性
+
+操作步骤：运行 `cargo test -p bifrost-admin mock_app_server_rejects_fork_response_without_derived_thread_id -- --nocapture`、`cargo test -p bifrost-admin progress_and_terminal_cards_are_both_persisted_as_derivation_anchors -- --nocapture` 和 `cargo test -p bifrost-admin thread_anchor_request_planning_covers_active_wait_fallback_and_missing_sources -- --nocapture`。
+
+预期结果：`thread/fork` 成功响应缺少新 `thread.id` 时硬失败，绝不退回源 thread；一旦 Codex active thread/turn 元数据就绪，当前及后续滚动生成的 progress card 都写入 `active_ready` 锚点；若用户切换到不支持 fork 的 transport，已持久化 ready 锚点不会被错误 resume。
 
 ## 清理步骤
 
 测试脚本退出时终止 fake OpenAPI/Bifrost/Runner 进程并删除临时目录；确认未修改用户数据目录且无测试进程残留。
+
+## 执行记录
+
+- 2026-08-12：PASS — 首轮逐条执行 TC-FTD-04 至 TC-FTD-11 所列 21 个 focused 测试全部通过。Review 发现同进程新旧 event-loop 会互抢 `recovering` 记录，改为“进程 owner + loop owner”租约后立即复跑 TC-FTD-09 的 9 个用例全部通过；第二轮 Review 将话题 Runner 初始化改为保留已有话题选择，并立即复跑 TC-FTD-10 的 3 个用例全部通过。覆盖率补强后又执行 TC-FTD-09/10 的话题命令完成态、其他 Bot/ambient 路由、recovery owner 防御性校验，以及 SQLite 写入/退出失败容错用例，全部通过。TC-FTD-01 至 TC-FTD-03 使用隔离数据目录、fake Feishu OpenAPI 和真实 `target/debug/bifrost` 执行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_feishu_group_session_context.sh`，输出 `[feishu-group-session] PASS`；脚本已清理临时服务与数据目录。

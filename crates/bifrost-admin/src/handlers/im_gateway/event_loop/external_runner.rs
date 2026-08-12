@@ -98,6 +98,16 @@ fn apply_ready_thread_anchor(
     request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
     anchor: crate::im_gateway::group_context::FeishuMessageAnchor,
 ) -> bool {
+    let capability =
+        crate::im_gateway::external_cli::thread_derivation_capability_for_request(request);
+    let can_fork = if anchor.status == "active_ready" {
+        capability.fork_active
+    } else {
+        capability.fork_completed
+    };
+    if !can_fork {
+        return false;
+    }
     let Some(source_thread_id) = anchor.checkpoint_thread_id.or(anchor.external_thread_id) else {
         return false;
     };
@@ -111,6 +121,28 @@ fn apply_ready_thread_anchor(
         },
     );
     true
+}
+
+pub(super) fn finalize_current_feishu_thread_binding(
+    store: &ImGroupContextStore,
+    provider_id: &str,
+    event: &ImEvent,
+    state: &str,
+) {
+    if let (Some(chat_id), Some((thread_id, _))) = (
+        event.source.chat_id.as_deref(),
+        crate::im_gateway::group_context::feishu_thread_parts(event),
+    ) {
+        if let Err(error) = store.update_feishu_thread_binding_state(
+            provider_id,
+            chat_id,
+            thread_id,
+            state,
+            now_ms(),
+        ) {
+            warn!(thread_id, state, error = %error, "failed to finalize Feishu topic binding");
+        }
+    }
 }
 
 fn apply_thread_fallback(
@@ -343,6 +375,12 @@ pub(super) async fn run_external_cli_agent_chat(
             ctx.message_log_store,
         )
         .await;
+        finalize_current_feishu_thread_binding(
+            ctx.group_context_store,
+            &ctx.provider.id,
+            ctx.event,
+            "ready",
+        );
         return;
     }
 
@@ -382,6 +420,12 @@ pub(super) async fn run_external_cli_agent_chat(
                     ctx.message_log_store,
                 )
                 .await;
+                finalize_current_feishu_thread_binding(
+                    ctx.group_context_store,
+                    &ctx.provider.id,
+                    ctx.event,
+                    "ready",
+                );
                 return;
             }
         }
@@ -393,6 +437,12 @@ pub(super) async fn run_external_cli_agent_chat(
             ctx.message_log_store,
         )
         .await;
+        finalize_current_feishu_thread_binding(
+            ctx.group_context_store,
+            &ctx.provider.id,
+            ctx.event,
+            "ready",
+        );
         return;
     }
 
@@ -414,6 +464,12 @@ pub(super) async fn run_external_cli_agent_chat(
             ctx.message_log_store,
         )
         .await;
+        finalize_current_feishu_thread_binding(
+            ctx.group_context_store,
+            &ctx.provider.id,
+            ctx.event,
+            "failed",
+        );
         return;
     }
 
@@ -491,6 +547,12 @@ pub(super) async fn run_external_cli_agent_chat(
             },
         )
         .await;
+        finalize_current_feishu_thread_binding(
+            ctx.group_context_store,
+            &ctx.provider.id,
+            ctx.event,
+            "ready",
+        );
         return;
     };
 
@@ -820,13 +882,12 @@ pub(super) async fn run_external_cli_agent_chat(
                             );
                         }
                     }
-                    if progress_enabled
-                        && crate::im_gateway::external_cli::merge_external_cli_progress_metadata(
+                    if progress_enabled {
+                        let metadata_changed = crate::im_gateway::external_cli::merge_external_cli_progress_metadata(
                             &settings.adapter,
                             &progress_event,
                             &mut progress_runner_metadata,
-                        )
-                    {
+                        );
                         if settings.adapter == "codex" {
                             if let (Some(chat_id), Some(thread_id), Some(turn_id)) = (
                                 current_event.source.chat_id.as_deref(),
@@ -862,16 +923,18 @@ pub(super) async fn run_external_cli_agent_chat(
                                 }
                             }
                         }
-                        let runner_summary = external_cli_progress_runner_summary(
-                            &effective.runner_id,
-                            &settings.adapter,
-                            &request_for_progress,
-                            Some(&progress_runner_metadata),
-                        );
-                        let _ = ctx
-                            .progress_registry
-                            .update_runner_summary(&input.session_key, runner_summary)
-                            .await;
+                        if metadata_changed {
+                            let runner_summary = external_cli_progress_runner_summary(
+                                &effective.runner_id,
+                                &settings.adapter,
+                                &request_for_progress,
+                                Some(&progress_runner_metadata),
+                            );
+                            let _ = ctx
+                                .progress_registry
+                                .update_runner_summary(&input.session_key, runner_summary)
+                                .await;
+                        }
                     }
                     if progress_enabled {
                         if let (Some(progress_tx), Some(agent_event)) = (

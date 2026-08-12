@@ -309,13 +309,20 @@ pub(super) async fn run_command(
         progress_tx.as_ref(),
     )
     .await?;
-    let thread_id = thread_response
+    let response_thread_id = thread_response
         .get("thread")
         .and_then(|thread| thread.get("id"))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .or(existing_thread_id)
-        .ok_or_else(|| "app-server thread response missing thread.id".to_string())?;
+        .map(str::to_string);
+    let thread_id = if matches!(request.operation.as_str(), "fork" | "checkpoint_fork") {
+        response_thread_id.ok_or_else(|| {
+            "app-server thread/fork response missing derived thread.id".to_string()
+        })?
+    } else {
+        response_thread_id
+            .or(existing_thread_id)
+            .ok_or_else(|| "app-server thread response missing thread.id".to_string())?
+    };
 
     if request.operation == "checkpoint_fork" {
         let event = ExternalCliProgressEvent {
@@ -2596,6 +2603,48 @@ for line in sys.stdin:
             .events
             .iter()
             .any(|event| event.content == "derived result"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mock_app_server_rejects_fork_response_without_derived_thread_id() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = temp_dir.path().join("mock-codex-invalid-fork");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json, sys
+def send(value): print(json.dumps(value, separators=(",", ":")), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line); method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize": send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/fork": send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "turn/start": raise RuntimeError("invalid fork must not start a turn")
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let mut request = request(DEFAULT_ADAPTER);
+        request.operation = "fork".to_string();
+        request.params = serde_json::json!({ "threadId": "thread-source" });
+        request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+        request.adapter_config.executable = Some(executable.display().to_string());
+        let error = run_command(
+            "mock-codex-invalid-fork-run",
+            None,
+            &request,
+            "continue".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("thread/fork response missing derived thread.id"));
     }
 
     #[cfg(unix)]

@@ -397,12 +397,16 @@ impl ImGroupContextStore {
     pub fn claim_pending_feishu_thread_bindings(
         &self,
         provider_id: &str,
+        recovery_owner: &str,
         now: u64,
     ) -> Result<Vec<FeishuThreadBinding>, String> {
-        static PROCESS_RECOVERY_OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let owner = PROCESS_RECOVERY_OWNER.get_or_init(|| uuid::Uuid::new_v4().to_string());
-        let recovery_token = format!("{owner}:{}", uuid::Uuid::new_v4());
-        let owner_pattern = format!("{owner}:%");
+        let recovery_owner = recovery_owner.trim();
+        if recovery_owner.is_empty() {
+            return Err("Feishu recovery owner must not be empty".to_string());
+        }
+        let process_owner = feishu_recovery_process_owner();
+        let recovery_token = format!("{process_owner}:{recovery_owner}:{}", uuid::Uuid::new_v4());
+        let process_pattern = format!("{process_owner}:%");
         let mut connection = self.connection.lock();
         let transaction = connection
             .transaction()
@@ -412,10 +416,10 @@ impl ImGroupContextStore {
                 "UPDATE im_feishu_thread_bindings
                  SET state = 'recovering', recovery_token = ?2, updated_at = ?3
                  WHERE provider_id = ?1
-                   AND (state IN ('waiting_source', 'initializing')
-                        OR (state = 'recovering' AND
-                            (recovery_token IS NULL OR recovery_token NOT LIKE ?4)))",
-                params![provider_id, recovery_token, now, owner_pattern],
+                    AND (state IN ('waiting_source', 'initializing')
+                         OR (state = 'recovering' AND
+                             (recovery_token IS NULL OR recovery_token NOT LIKE ?4)))",
+                params![provider_id, recovery_token, now, process_pattern],
             )
             .map_err(|error| format!("claim pending Feishu thread bindings: {error}"))?;
         let mut statement = transaction
@@ -458,6 +462,33 @@ impl ImGroupContextStore {
             .commit()
             .map_err(|error| format!("commit pending Feishu recovery claim: {error}"))?;
         Ok(bindings)
+    }
+
+    pub fn release_feishu_thread_recovery_claims(
+        &self,
+        provider_id: &str,
+        recovery_owner: &str,
+        now: u64,
+    ) -> Result<usize, String> {
+        let recovery_owner = recovery_owner.trim();
+        if recovery_owner.is_empty() {
+            return Err("Feishu recovery owner must not be empty".to_string());
+        }
+        let owner_pattern = format!("{}:{recovery_owner}:%", feishu_recovery_process_owner());
+        let connection = self.connection.lock();
+        connection
+            .execute(
+                "UPDATE im_feishu_thread_bindings
+                 SET state = CASE
+                         WHEN source_kind = 'local_checkpoint' THEN 'waiting_source'
+                         ELSE 'initializing'
+                     END,
+                     recovery_token = NULL,
+                     updated_at = ?3
+                 WHERE provider_id = ?1 AND state = 'recovering' AND recovery_token LIKE ?2",
+                params![provider_id, owner_pattern, now],
+            )
+            .map_err(|error| format!("release Feishu thread recovery claims: {error}"))
     }
 
     pub fn record_event(&self, event: &ImEvent, source: &str) -> Result<u64, String> {
@@ -902,13 +933,19 @@ impl ImGroupContextStore {
         work_dir: &str,
     ) -> Result<bool, String> {
         let connection = self.connection.lock();
-        let changed = connection
+        let group_changed = connection
             .execute(
                 "UPDATE im_group_bindings SET work_dir = ?2, updated_at = ?3 WHERE session_key = ?1",
                 params![session_key, work_dir.trim(), now_ms()],
             )
             .map_err(|error| format!("persist group work directory: {error}"))?;
-        Ok(changed > 0)
+        let topic_changed = connection
+            .execute(
+                "UPDATE im_feishu_thread_bindings SET work_dir = ?2, updated_at = ?3 WHERE derived_session_key = ?1",
+                params![session_key, work_dir.trim(), now_ms()],
+            )
+            .map_err(|error| format!("persist Feishu topic work directory: {error}"))?;
+        Ok(group_changed > 0 || topic_changed > 0)
     }
 
     pub fn set_chat_name(
@@ -977,7 +1014,7 @@ impl ImGroupContextStore {
 
     pub fn work_dir_by_session(&self, session_key: &str) -> Result<Option<PathBuf>, String> {
         let connection = self.connection.lock();
-        let value = connection
+        let group_value = connection
             .query_row(
                 "SELECT work_dir FROM im_group_bindings WHERE session_key = ?1",
                 params![session_key],
@@ -985,9 +1022,19 @@ impl ImGroupContextStore {
             )
             .optional()
             .map_err(|error| format!("read group work directory: {error}"))?
-            .flatten()
-            .map(PathBuf::from);
-        Ok(value)
+            .flatten();
+        if let Some(group_value) = group_value {
+            return Ok(Some(PathBuf::from(group_value)));
+        }
+        connection
+            .query_row(
+                "SELECT work_dir FROM im_feishu_thread_bindings WHERE derived_session_key = ?1",
+                params![session_key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten().map(PathBuf::from))
+            .map_err(|error| format!("read Feishu topic work directory: {error}"))
     }
 
     pub fn set_runner_id_by_session(
@@ -996,18 +1043,24 @@ impl ImGroupContextStore {
         runner_id: &str,
     ) -> Result<bool, String> {
         let connection = self.connection.lock();
-        let changed = connection
+        let group_changed = connection
             .execute(
                 "UPDATE im_group_bindings SET runner_id = ?2, updated_at = ?3 WHERE session_key = ?1",
                 params![session_key, runner_id.trim(), now_ms()],
             )
             .map_err(|error| format!("persist group runner: {error}"))?;
-        Ok(changed > 0)
+        let topic_changed = connection
+            .execute(
+                "UPDATE im_feishu_thread_bindings SET runner_id = ?2, updated_at = ?3 WHERE derived_session_key = ?1",
+                params![session_key, runner_id.trim(), now_ms()],
+            )
+            .map_err(|error| format!("persist Feishu topic runner: {error}"))?;
+        Ok(group_changed > 0 || topic_changed > 0)
     }
 
     pub fn runner_id_by_session(&self, session_key: &str) -> Result<Option<String>, String> {
         let connection = self.connection.lock();
-        connection
+        let group_runner = connection
             .query_row(
                 "SELECT runner_id FROM im_group_bindings WHERE session_key = ?1",
                 params![session_key],
@@ -1015,7 +1068,19 @@ impl ImGroupContextStore {
             )
             .optional()
             .map(|value| value.flatten())
-            .map_err(|error| format!("read group runner: {error}"))
+            .map_err(|error| format!("read group runner: {error}"))?;
+        if group_runner.is_some() {
+            return Ok(group_runner);
+        }
+        connection
+            .query_row(
+                "SELECT runner_id FROM im_feishu_thread_bindings WHERE derived_session_key = ?1",
+                params![session_key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(|error| format!("read Feishu topic runner: {error}"))
     }
 
     pub fn binding_by_session(
@@ -1023,7 +1088,7 @@ impl ImGroupContextStore {
         session_key: &str,
     ) -> Result<Option<GroupSessionBinding>, String> {
         let connection = self.connection.lock();
-        connection
+        let group_binding = connection
             .query_row(
                 "SELECT provider_id, chat_id, chat_name
                  FROM im_group_bindings
@@ -1038,7 +1103,56 @@ impl ImGroupContextStore {
                 },
             )
             .optional()
-            .map_err(|error| format!("read group session binding: {error}"))
+            .map_err(|error| format!("read group session binding: {error}"))?;
+        if group_binding.is_some() {
+            return Ok(group_binding);
+        }
+        connection
+            .query_row(
+                "SELECT topic.provider_id, topic.chat_id, groups.chat_name
+                 FROM im_feishu_thread_bindings topic
+                 LEFT JOIN im_group_bindings groups
+                   ON groups.provider_id = topic.provider_id AND groups.chat_id = topic.chat_id
+                 WHERE topic.derived_session_key = ?1",
+                params![session_key],
+                |row| {
+                    Ok(GroupSessionBinding {
+                        provider_id: row.get(0)?,
+                        chat_id: row.get(1)?,
+                        chat_name: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("read Feishu topic session binding: {error}"))
+    }
+
+    pub fn initialize_feishu_thread_session_settings(
+        &self,
+        provider_id: &str,
+        chat_id: &str,
+        session_key: &str,
+        source_runner_id: Option<&str>,
+        now: u64,
+    ) -> Result<(), String> {
+        let connection = self.connection.lock();
+        connection
+            .execute(
+                "UPDATE im_feishu_thread_bindings
+                 SET work_dir = COALESCE(work_dir, (
+                         SELECT work_dir FROM im_group_bindings
+                         WHERE provider_id = ?1 AND chat_id = ?2
+                     )),
+                     runner_id = COALESCE(runner_id, NULLIF(?4, ''), (
+                         SELECT runner_id FROM im_group_bindings
+                         WHERE provider_id = ?1 AND chat_id = ?2
+                     )),
+                     updated_at = ?5
+                 WHERE provider_id = ?1 AND chat_id = ?2 AND derived_session_key = ?3",
+                params![provider_id, chat_id, session_key, source_runner_id, now],
+            )
+            .map_err(|error| format!("initialize Feishu topic session settings: {error}"))?;
+        Ok(())
     }
 
     pub fn message_count(&self, provider_id: &str, chat_id: &str) -> Result<u64, String> {
@@ -1512,6 +1626,8 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
                 fallback_message TEXT,
                 initial_event_json TEXT,
                 recovery_token TEXT,
+                work_dir TEXT,
+                runner_id TEXT,
                 state TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
@@ -1576,6 +1692,16 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
             "recovery_token",
             "ALTER TABLE im_feishu_thread_bindings ADD COLUMN recovery_token TEXT",
         ),
+        (
+            "im_feishu_thread_bindings",
+            "work_dir",
+            "ALTER TABLE im_feishu_thread_bindings ADD COLUMN work_dir TEXT",
+        ),
+        (
+            "im_feishu_thread_bindings",
+            "runner_id",
+            "ALTER TABLE im_feishu_thread_bindings ADD COLUMN runner_id TEXT",
+        ),
     ] {
         if let Err(error) = connection.execute(sql, []) {
             let duplicate_column = error.to_string().contains("duplicate column name");
@@ -1585,6 +1711,13 @@ fn init_schema(connection: &Connection) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn feishu_recovery_process_owner() -> &'static str {
+    static PROCESS_RECOVERY_OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROCESS_RECOVERY_OWNER
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
 }
 
 fn ensure_binding(
