@@ -76,8 +76,7 @@ pub(super) fn collect_agent_reply_local_attachment_links(
                             } else if is_explicit_attachment_label_or_path(
                                 &label,
                                 &path.to_string_lossy(),
-                            )
-                                && seen.insert(dedupe_key)
+                            ) && seen.insert(dedupe_key)
                             {
                                 attachments.push(AgentReplyLocalAttachment {
                                     label,
