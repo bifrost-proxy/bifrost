@@ -350,6 +350,28 @@ impl SessionQueueManager {
         self.handed_off_guides.remove(session_key);
         self.queues.remove(session_key);
     }
+
+    /// Drop every in-memory delivery artifact owned by a provider that is
+    /// being deleted. Provider IDs are client-controlled and reusable, so
+    /// retaining these queues would let a replacement account inherit work
+    /// from the deleted event pipeline.
+    pub fn clear_provider(&self, provider_id: &str) {
+        let direct_prefix = format!("{}:", provider_id.trim());
+        let group_prefix = format!("im:{}:group:", provider_id.trim());
+        let belongs_to_provider = |session_key: &str| {
+            session_key.starts_with(&direct_prefix) || session_key.starts_with(&group_prefix)
+        };
+        self.guide_slots
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+        self.handed_off_guides
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+        self.live_guide_turns
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+        self.queues
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+        self.pending_turn_events
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+    }
 }
 
 impl Default for SessionQueueManager {
@@ -583,6 +605,26 @@ mod tests {
         let ch = mgr.get_or_create_guide_channel("s1");
         assert!(ch.lock().unwrap().is_empty());
         assert!(mgr.queue_status("s1").is_empty());
+    }
+
+    #[test]
+    fn clear_provider_preserves_other_provider_sessions() {
+        let manager = SessionQueueManager::new();
+        manager
+            .push_queue("provider-a:user", "direct".to_string())
+            .unwrap();
+        manager
+            .push_queue("im:provider-a:group:chat", "group".to_string())
+            .unwrap();
+        manager
+            .push_queue("provider-b:user", "retained".to_string())
+            .unwrap();
+
+        manager.clear_provider("provider-a");
+
+        assert!(manager.queue_status("provider-a:user").is_empty());
+        assert!(manager.queue_status("im:provider-a:group:chat").is_empty());
+        assert_eq!(manager.queue_status("provider-b:user").len(), 1);
     }
 
     /// Test the guide channel shared between producer (IM event loop) and

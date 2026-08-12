@@ -180,6 +180,25 @@
 - 2026-08-12 自动化部分 PASS：渲染单测通过，CRLF/CR 先统一为 LF，单 LF 提升为双 LF，已有段落空行不膨胀；微信 Provider E2E 断言 `sendmessage` payload 中三行 final 文本均由双 LF 分隔，long reply 仍保持 full-first，并可从 fallback 分片完整还原正文。
 - 2026-08-12 真实微信 PASS：18881 `weixin-main` 成功发送“三行 + 段落”代表性文本（idempotency key `weixin-linebreak-live-20260812-2`），Provider 返回 success；随后真实会话收到用户明确确认“换行没问题啊”，同一会话中的列表回复也按行显示。`/help` 的 payload 布局由相同渲染器和 Provider E2E 覆盖。
 
+### TC-WNAE-10：删除 Provider 后复用相同 ID 不继承旧事件管线
+
+**操作步骤：**
+
+1. 创建并连接一个微信 Provider，固定 ID 为 `weixin-reused-id`，发送一条会触发长 Agent turn 的消息。
+2. 在 turn 尚未结束时删除该 Provider，确认删除请求只在旧 transport 与事件管线都停止后返回。
+3. 使用另一微信账号立即创建相同 ID 的 Provider 并连接。
+4. 检查新账号的事件、pending store、消息日志和 Agent turn 记录。
+
+**预期结果：**
+
+- 删除操作取消旧 transport、事件循环及其活动 turn，并清除该 Provider 的 durable pending 事件。
+- 新账号复用相同 ID 时不会重放、执行或回复旧账号的消息。
+- 其他 Provider 的 durable pending 事件不受影响。
+
+**实际执行结果：**
+
+- 2026-08-13 BLOCKED（未执行，不能计为 PASS）：用户明确要求不要运行本地测试、直接推送，因此未执行真实微信删除/复用链路；本轮仅新增远端 CI 可执行的 transport 等待、pipeline 取消和 provider-scoped pending 清理回归测试。
+
 ## 清理步骤
 
 - 删除用于核验官方仓库的 `/tmp/openclaw-weixin.*` 临时目录。

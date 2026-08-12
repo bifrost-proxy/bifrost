@@ -690,6 +690,7 @@ impl ImProvider for FeishuProvider {
         sink: EventSink,
     ) -> Result<ConnectionHandle> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
 
         let config = config.clone();
         let http = self.http.clone();
@@ -703,9 +704,13 @@ impl ImProvider for FeishuProvider {
                 "connect_events spawned via trait - use ImConnectionManager.start_connection for proper secret handling"
             );
             start_long_connection(config, String::new(), sink, shutdown_rx, http, None).await;
+            let _ = stopped_tx.send(());
         });
 
-        Ok(ConnectionHandle { shutdown_tx })
+        Ok(ConnectionHandle {
+            shutdown_tx,
+            stopped_rx: Some(stopped_rx),
+        })
     }
 
     async fn send_card(

@@ -241,15 +241,29 @@ pub(super) async fn handle_provider_by_id(
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
         }
-        Method::DELETE => match service.provider_store.delete(id) {
-            Ok(()) => {
-                service.connection_manager.stop_connection(id);
-                service.remove_event_sink(id);
-                service.weixin_login_pending.write().remove(id);
-                json_response(&serde_json::json!({"success": true}))
+        Method::DELETE => {
+            let _lifecycle = service.provider_connection_lifecycle.lock().await;
+            if service.provider_store.get(id).is_none() {
+                return error_response(StatusCode::NOT_FOUND, "Provider not found");
             }
-            Err(e) => error_response(StatusCode::NOT_FOUND, &e.to_string()),
-        },
+            service
+                .connection_manager
+                .stop_connection_and_wait(id)
+                .await;
+            service.stop_event_pipeline(id).await;
+            service.queue_manager.clear_provider(id);
+            if let Err(error) = service.event_store.clear_pending_by_provider(id) {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+            match service.provider_store.delete(id) {
+                Ok(()) => {
+                    service.mock_event_sinks.write().remove(id);
+                    service.weixin_login_pending.write().remove(id);
+                    json_response(&serde_json::json!({"success": true}))
+                }
+                Err(e) => error_response(StatusCode::NOT_FOUND, &e.to_string()),
+            }
+        }
         _ => method_not_allowed(),
     }
 }
@@ -1062,6 +1076,7 @@ async fn start_provider_event_connection(
     service: &ImGatewayService,
     id: &str,
 ) -> Result<(), String> {
+    let _lifecycle = service.provider_connection_lifecycle.lock().await;
     let Some(mut provider) = service.provider_store.get(id) else {
         return Err("Provider not found".to_string());
     };

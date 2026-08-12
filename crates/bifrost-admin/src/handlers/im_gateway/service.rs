@@ -357,6 +357,11 @@ impl ImProviderClient {
 // ImGatewayService
 // ---------------------------------------------------------------------------
 
+struct ProviderEventPipeline {
+    sink: crate::im_gateway::provider::EventSink,
+    task: tokio::task::JoinHandle<()>,
+}
+
 pub struct ImGatewayService {
     pub(super) data_dir: PathBuf,
     pub provider_store: Arc<ImProviderStore>,
@@ -375,7 +380,8 @@ pub struct ImGatewayService {
     pub external_cli_config_store: Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub queue_manager: Arc<SessionQueueManager>,
     pub progress_registry: Arc<ImAgentProgressRegistry>,
-    event_sinks: Arc<RwLock<HashMap<String, crate::im_gateway::provider::EventSink>>>,
+    event_sinks: Arc<RwLock<HashMap<String, ProviderEventPipeline>>>,
+    pub(super) provider_connection_lifecycle: Arc<AsyncMutex<()>>,
     pub(super) mock_event_sinks: Arc<RwLock<HashMap<String, mpsc::UnboundedSender<ImEvent>>>>,
     pub(super) weixin_login_pending: Arc<RwLock<HashMap<String, PendingWeixinLogin>>>,
     pub(super) feishu_setup_pending: Arc<RwLock<HashMap<String, PendingFeishuSetup>>>,
@@ -434,6 +440,7 @@ impl ImGatewayService {
             queue_manager: Arc::new(SessionQueueManager::new()),
             progress_registry: Arc::new(ImAgentProgressRegistry::new()),
             event_sinks: Arc::new(RwLock::new(HashMap::new())),
+            provider_connection_lifecycle: Arc::new(AsyncMutex::new(())),
             mock_event_sinks: Arc::new(RwLock::new(HashMap::new())),
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
             feishu_setup_pending: Arc::new(RwLock::new(load_pending_feishu_setups(data_dir))),
@@ -463,8 +470,14 @@ impl ImGatewayService {
         provider: &ImProviderConfig,
     ) -> crate::im_gateway::provider::EventSink {
         let mut sinks = self.event_sinks.write();
-        if let Some(sink) = sinks.get(&provider.id).filter(|sink| !sink.is_closed()) {
-            return sink.clone();
+        if let Some(pipeline) = sinks
+            .get(&provider.id)
+            .filter(|pipeline| !pipeline.sink.is_closed() && !pipeline.task.is_finished())
+        {
+            return pipeline.sink.clone();
+        }
+        if let Some(stale) = sinks.remove(&provider.id) {
+            stale.task.abort();
         }
 
         let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
@@ -473,10 +486,8 @@ impl ImGatewayService {
             Arc::clone(&self.event_store),
             &provider.id,
         );
-        sinks.insert(provider.id.clone(), sink.clone());
-        drop(sinks);
-
         let client = self.provider_client(provider);
+        let provider_id = provider.id.clone();
         let provider = provider.clone();
         let event_store = Arc::clone(&self.event_store);
         let message_log_store = Arc::clone(&self.message_log_store);
@@ -492,7 +503,7 @@ impl ImGatewayService {
         let external_cli_config_store = Arc::clone(&self.external_cli_config_store);
         let queue_manager = Arc::clone(&self.queue_manager);
         let progress_registry = Arc::clone(&self.progress_registry);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             run_event_loop(
                 rx,
                 client,
@@ -514,11 +525,28 @@ impl ImGatewayService {
             )
             .await;
         });
+        sinks.insert(
+            provider_id,
+            ProviderEventPipeline {
+                sink: sink.clone(),
+                task,
+            },
+        );
         sink
     }
 
-    pub(super) fn remove_event_sink(&self, provider_id: &str) {
-        self.event_sinks.write().remove(provider_id);
+    /// Cancel a provider's event loop, including any active Agent turn owned
+    /// by that loop, and wait until the task has released its account-bound
+    /// client state. Callers must stop and await the transport first.
+    pub(super) async fn stop_event_pipeline(&self, provider_id: &str) {
+        let pipeline = self.event_sinks.write().remove(provider_id);
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        let ProviderEventPipeline { sink, task } = pipeline;
+        drop(sink);
+        task.abort();
+        let _ = task.await;
     }
 
     pub fn chatgpt_web_startup_auth_runners(&self) -> Vec<ChatGptWebStartupAuthRunner> {
@@ -621,7 +649,11 @@ impl ImGatewayService {
     /// Called on Bifrost startup to restore active connections and send online notifications.
     pub async fn auto_connect_providers(self: &Arc<Self>) {
         let providers = self.provider_store.list();
-        for mut provider in providers {
+        for listed_provider in providers {
+            let _lifecycle = self.provider_connection_lifecycle.lock().await;
+            let Some(mut provider) = self.provider_store.get(&listed_provider.id) else {
+                continue;
+            };
             if !should_run_provider_event_connection(&provider) {
                 info!(
                     provider_id = %provider.id,
@@ -797,6 +829,7 @@ impl ImGatewayService {
                 for (pid, st) in statuses {
                     match st.state {
                         ConnectionState::Disconnected | ConnectionState::Failed => {
+                            let _lifecycle = self.provider_connection_lifecycle.lock().await;
                             let Some(provider) = self.provider_store.get(&pid) else {
                                 debug!(provider_id = %pid, "supervisor: provider no longer configured, skipping");
                                 continue;
@@ -970,19 +1003,27 @@ mod provider_event_connection_tests {
     }
 
     #[tokio::test]
-    async fn reconnect_reuses_one_provider_event_pipeline() {
+    async fn provider_pipeline_is_cancelled_before_same_id_is_reused() {
         let temp_dir = tempfile::tempdir().unwrap();
         let service = ImGatewayService::new(temp_dir.path());
         let provider = provider_with_secret();
 
         let first = service.event_sink_for_provider(&provider);
         let second = service.event_sink_for_provider(&provider);
+        tokio::task::yield_now().await;
         assert!(!first.is_closed());
         assert!(!second.is_closed());
         assert_eq!(service.event_sinks.read().len(), 1);
 
-        service.remove_event_sink(&provider.id);
+        service.stop_event_pipeline(&provider.id).await;
+        assert!(first.is_closed());
+        assert!(second.is_closed());
         assert!(service.event_sinks.read().is_empty());
+
+        let replacement = service.event_sink_for_provider(&provider);
+        assert!(!replacement.is_closed());
+        assert_eq!(service.event_sinks.read().len(), 1);
+        service.stop_event_pipeline(&provider.id).await;
     }
 
     #[tokio::test]

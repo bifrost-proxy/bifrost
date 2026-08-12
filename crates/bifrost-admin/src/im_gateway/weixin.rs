@@ -2129,6 +2129,7 @@ impl WeixinProvider {
             active_channel_runs: Arc::clone(&self.active_channel_runs),
         };
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
         tokio::spawn(async move {
             let mut consecutive_errors = 0u32;
             'polling: loop {
@@ -2264,8 +2265,12 @@ impl WeixinProvider {
                 }
             }
             info!(provider_id = %config.id, "weixin poll connection stopped");
+            let _ = stopped_tx.send(());
         });
-        Ok(ConnectionHandle { shutdown_tx })
+        Ok(ConnectionHandle {
+            shutdown_tx,
+            stopped_rx: Some(stopped_rx),
+        })
     }
 }
 

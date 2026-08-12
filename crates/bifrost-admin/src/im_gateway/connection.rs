@@ -105,7 +105,7 @@ impl ImConnectionManager {
     ) -> Result<()> {
         let provider_id = config.id.clone();
         self.weixin_provider.validate_config(config).await?;
-        self.stop_connection(&provider_id);
+        self.stop_connection_and_wait(&provider_id).await;
         let generation = self.reserve_generation();
 
         let status = ConnectionStatus {
@@ -175,10 +175,11 @@ impl ImConnectionManager {
 
         // Credentials verified — now it's safe to replace any prior
         // connection for this provider.
-        self.stop_connection(&provider_id);
+        self.stop_connection_and_wait(&provider_id).await;
         let generation = self.reserve_generation();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
 
         // Update status to connecting
         let status = ConnectionStatus {
@@ -189,7 +190,10 @@ impl ImConnectionManager {
             last_error: None,
         };
 
-        let handle = ConnectionHandle { shutdown_tx };
+        let handle = ConnectionHandle {
+            shutdown_tx,
+            stopped_rx: Some(stopped_rx),
+        };
 
         {
             let mut conns = self.connections.write();
@@ -247,6 +251,7 @@ impl ImConnectionManager {
                 ConnectionState::Disconnected,
                 Some("connection task ended".to_string()),
             );
+            let _ = stopped_tx.send(());
         });
 
         info!(provider_id = %provider_id, "feishu long connection started");
@@ -264,6 +269,26 @@ impl ImConnectionManager {
         }
     }
 
+    /// Stop a provider connection and wait until its transport task has
+    /// released every event-sink clone. Provider deletion uses this before
+    /// tearing down the corresponding event pipeline so the same provider ID
+    /// cannot be rebound while the old account can still publish events.
+    pub async fn stop_connection_and_wait(&self, provider_id: &str) {
+        let connection = self.connections.write().remove(provider_id);
+        let Some(connection) = connection else {
+            return;
+        };
+        let ConnectionHandle {
+            shutdown_tx,
+            stopped_rx,
+        } = connection.handle;
+        let _ = shutdown_tx.send(());
+        if let Some(stopped_rx) = stopped_rx {
+            let _ = stopped_rx.await;
+        }
+        info!(provider_id = provider_id, "connection stopped");
+    }
+
     /// Get connection status for a specific provider.
     pub fn get_status(&self, provider_id: &str) -> Option<ConnectionStatus> {
         let conns = self.connections.read();
@@ -277,7 +302,10 @@ impl ImConnectionManager {
             provider_id.to_string(),
             ManagedConnection {
                 provider_id: provider_id.to_string(),
-                handle: ConnectionHandle { shutdown_tx },
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: None,
+                },
                 status,
                 generation: self.reserve_generation(),
             },
@@ -337,6 +365,7 @@ impl ImConnectionManager {
                 provider_id: provider_id.to_string(),
                 handle: ConnectionHandle {
                     shutdown_tx: oneshot::channel().0,
+                    stopped_rx: None,
                 },
                 status,
                 generation: self.reserve_generation(),
@@ -412,6 +441,37 @@ mod tests {
         mgr.stop_connection("nonexistent"); // Should not panic
     }
 
+    #[tokio::test]
+    async fn stop_connection_and_wait_observes_transport_shutdown() {
+        let manager = ImConnectionManager::new();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_stopped = Arc::clone(&stopped);
+        tokio::spawn(async move {
+            let _ = shutdown_rx.await;
+            task_stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = stopped_tx.send(());
+        });
+        manager.connections.write().insert(
+            "provider-delete".to_string(),
+            ManagedConnection {
+                provider_id: "provider-delete".to_string(),
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: Some(stopped_rx),
+                },
+                status: ConnectionStatus::default(),
+                generation: 1,
+            },
+        );
+
+        manager.stop_connection_and_wait("provider-delete").await;
+
+        assert!(stopped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(manager.get_status("provider-delete").is_none());
+    }
+
     #[test]
     fn test_stop_all_empty_is_noop() {
         let mgr = ImConnectionManager::new();
@@ -434,7 +494,10 @@ mod tests {
             "feishu-main".to_string(),
             ManagedConnection {
                 provider_id: "feishu-main".to_string(),
-                handle: ConnectionHandle { shutdown_tx },
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: None,
+                },
                 status: ConnectionStatus::default(),
                 generation: 1,
             },
@@ -476,7 +539,10 @@ mod tests {
             "weixin-main".to_string(),
             ManagedConnection {
                 provider_id: "weixin-main".to_string(),
-                handle: ConnectionHandle { shutdown_tx },
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: None,
+                },
                 status: ConnectionStatus::default(),
                 generation: 7,
             },

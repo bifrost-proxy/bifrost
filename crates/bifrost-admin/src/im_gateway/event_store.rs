@@ -151,6 +151,45 @@ impl ImEventStore {
         Ok(())
     }
 
+    /// Remove every durable pending event owned by a provider that is being
+    /// deleted. The scan fails closed on an unreadable entry: otherwise a
+    /// later provider reusing the same client-controlled ID could replay data
+    /// from the deleted account.
+    pub fn clear_pending_by_provider(&self, provider_id: &str) -> Result<usize> {
+        let mut pending = self.pending.write();
+        if pending.entries.is_empty() {
+            return Ok(0);
+        }
+        let key = self.pending_key.as_ref().ok_or_else(|| {
+            BifrostError::Config("durable IM pending-event encryption is unavailable".to_string())
+        })?;
+        let mut remove = Vec::new();
+        for (entry_key, encoded) in &pending.entries {
+            let plaintext = key.decrypt_string(encoded)?;
+            if plaintext == *encoded {
+                return Err(BifrostError::Config(
+                    "durable IM pending-event entry is not encrypted".to_string(),
+                ));
+            }
+            let event = serde_json::from_str::<ImEvent>(&plaintext).map_err(|error| {
+                BifrostError::Config(format!("decode durable IM pending event: {error}"))
+            })?;
+            if event.provider_id == provider_id {
+                remove.push(entry_key.clone());
+            }
+        }
+        if remove.is_empty() {
+            return Ok(0);
+        }
+        let mut next = pending.clone();
+        for entry_key in &remove {
+            next.entries.remove(entry_key);
+        }
+        self.save_pending_locked(&next)?;
+        *pending = next;
+        Ok(remove.len())
+    }
+
     pub fn pending_completion(self: &Arc<Self>, event: &ImEvent) -> PendingEventCompletion {
         PendingEventCompletion {
             store: Arc::clone(self),
@@ -493,6 +532,21 @@ mod tests {
         drop(deferred);
         assert_eq!(restarted.pending_by_provider("weixin-pending").len(), 1);
         restarted.complete_pending(&pending_event).unwrap();
+    }
+
+    #[test]
+    fn deleting_provider_clears_only_its_pending_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImEventStore::new(temp.path());
+        let deleted = event("deleted-event");
+        let mut retained = event("retained-event");
+        retained.provider_id = "other-provider".to_string();
+        store.add_pending(&deleted).unwrap();
+        store.add_pending(&retained).unwrap();
+
+        assert_eq!(store.clear_pending_by_provider("weixin-main").unwrap(), 1);
+        assert!(store.pending_by_provider("weixin-main").is_empty());
+        assert_eq!(store.pending_by_provider("other-provider").len(), 1);
     }
 
     #[test]

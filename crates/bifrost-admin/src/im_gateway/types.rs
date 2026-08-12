@@ -13,6 +13,7 @@ use super::external_cli::ExternalCliDeliveryMode;
 
 pub struct ConnectionHandle {
     pub shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    pub stopped_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl std::fmt::Debug for ConnectionHandle {
