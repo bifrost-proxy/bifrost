@@ -103,7 +103,7 @@ impl WeixinSyncCursorStore {
         harden_private_file(temporary.path())?;
         temporary.persist(&self.path).map_err(|error| {
             BifrostError::Io(std::io::Error::other(format!(
-                "replace weixin sync cursor store {}: {error}",
+                "replace weixin sync cursor store {}: {}",
                 self.path.display(),
                 error.error
             )))
