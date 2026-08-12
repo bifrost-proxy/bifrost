@@ -1,6 +1,13 @@
 import { expect, type Page, test } from "@playwright/test";
 import { openPage } from "./helpers/admin-helpers";
 
+async function selectTaskAction(page: Page, name: string) {
+  await page.getByTestId("asr-task-actions-menu-button").click();
+  const menu = page.locator(".ant-dropdown-menu:visible");
+  await expect(menu).toBeVisible();
+  await menu.getByRole("menuitem").filter({ hasText: name }).click();
+}
+
 async function installAsrMicrophoneMocks(page: Page) {
   await page.route("**/_bifrost/api/asr/status**", async (route) => {
     await route.fulfill({
@@ -900,7 +907,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(taskPage.getByText(/24\.1 KB/)).toBeVisible();
   await expect(taskPage.getByText("Cleanable Originals")).toBeVisible();
   await expect(taskPage.getByText(/1\.21 KB/).first()).toBeVisible();
-  await taskPage.getByRole("button", { name: "Clean originals" }).click();
+  await selectTaskAction(page, "Clean originals");
   await page.getByRole("button", { name: "Continue" }).click();
   const cleanupDialog = page.getByRole("dialog", {
     name: "Final confirmation: clean originals",
@@ -1150,7 +1157,7 @@ test("ASR task detail can queue bulk retry for all failed chunks", async ({ page
   await expect(taskPage.getByText("Directory Task: Bulk retry task")).toBeVisible();
   await expect(taskPage.getByText("(3 failed chunks)")).toBeVisible();
 
-  await taskPage.getByRole("button", { name: "Retry all failed chunks" }).click();
+  await selectTaskAction(page, "Retry all failed chunks");
   await page.getByRole("button", { name: "OK" }).click();
   await expect.poll(() => bulkRetryRequested).toBe(1);
   await expect(page.getByTestId("asr-bulk-retry-status")).toContainText(
@@ -1347,7 +1354,7 @@ test("ASR task files start sequential compression and show overall and per-file 
     filesTable.getByText("Transcription is not complete", { exact: true }),
   ).toBeVisible();
 
-  await taskPage.getByRole("button", { name: "Compress WAVs" }).click();
+  await selectTaskAction(page, "Compress WAVs");
   await page.getByRole("button", { name: "OK" }).click();
 
   await expect.poll(() => compressionStarted).toBe(true);
@@ -1358,7 +1365,13 @@ test("ASR task files start sequential compression and show overall and per-file 
   await expect(compressionSummary).toContainText("Saved 3.42 KB");
   await expect(filesTable.getByText("Compressed", { exact: true })).toHaveCount(2);
   await expect(filesTable.getByText("Uncompressed", { exact: true })).toHaveCount(0);
-  await expect(taskPage.getByRole("button", { name: "Compress WAVs" })).toBeDisabled();
+  await page.getByTestId("asr-task-actions-menu-button").click();
+  await expect(
+    page
+      .locator(".ant-dropdown-menu:visible")
+      .getByRole("menuitem")
+      .filter({ hasText: "Compress WAVs" }),
+  ).toHaveAttribute("aria-disabled", "true");
 });
 
 test("ASR task detail tolerates older responses without daily documents", async ({ page }) => {

@@ -19,6 +19,7 @@ async function findFreePort(): Promise<number> {
 }
 
 const webPort = Number(process.env.WEB_PORT || 0) || (await findFreePort());
+process.env.WEB_PORT = String(webPort);
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({

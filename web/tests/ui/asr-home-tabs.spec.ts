@@ -2,6 +2,33 @@ import { expect, type Page, test } from "@playwright/test";
 import { openPage } from "./helpers/admin-helpers";
 
 async function installAsrHomeTabMocks(page: Page) {
+  await page.addLocatorHandler(
+    page.getByRole("dialog").filter({
+      hasText: "Install Bifrost CA profile on connected iPhone?",
+    }),
+    async (dialog) => {
+      await dialog.getByRole("button", { name: "Not now" }).click();
+    },
+  );
+  await page.route("**/_bifrost/api/mobile-devices**", async (route) => {
+    await route.fulfill({
+      json: {
+        android: { adb_available: false, devices: [], message: "mocked" },
+        ios: {
+          supported: false,
+          devices: [],
+          configurator: {
+            supported: false,
+            cfgutil_available: false,
+            message: "mocked",
+          },
+          message: "mocked",
+        },
+        ios_profile_url: "",
+        ios_profile_qrcode_url: "",
+      },
+    });
+  });
   await page.route("**/_bifrost/api/asr/capabilities", async (route) => {
     await route.fulfill({
       json: {
@@ -499,8 +526,9 @@ test("ASR 目录任务按转录模式只展示实际生效的配置", async ({ p
   });
 });
 
-test("ASR 任务详情深链继续绕过首页 Tab", async ({ page }) => {
+test("ASR 任务详情深链使用单一更多菜单且窄窗口返回按钮保持可见", async ({ page }) => {
   await installAsrHomeTabMocks(page);
+  await page.setViewportSize({ width: 640, height: 720 });
   await page.route("**/_bifrost/api/asr/tasks/task-tabs", async (route) => {
     await route.fulfill({
       json: {
@@ -540,4 +568,28 @@ test("ASR 任务详情深链继续绕过首页 Tab", async ({ page }) => {
   await expect(page.getByTestId("asr-task-detail-page")).toBeVisible();
   await expect(page.getByText("Directory Task: Tabs Detail Task")).toBeVisible();
   await expect(page.getByTestId("asr-home-tabs")).toHaveCount(0);
+
+  const taskPage = page.getByTestId("asr-task-detail-page");
+  const cardHead = taskPage.locator(".ant-card-head");
+  await expect(cardHead.getByRole("button", { name: "Back to directory tasks" })).toBeVisible();
+  await expect(cardHead.getByTestId("asr-task-actions-menu-button")).toBeVisible();
+  await expect(cardHead.getByRole("button")).toHaveCount(2);
+
+  await cardHead.getByTestId("asr-task-actions-menu-button").click();
+  let menu = page.locator(".ant-dropdown-menu:visible");
+  await expect(menu.getByTestId("asr-task-actions-status")).toContainText("TaskReady");
+  await expect(menu.getByRole("menuitem").filter({ hasText: "Refresh" })).toBeVisible();
+  await expect(menu.getByRole("menuitem").filter({ hasText: "Run" })).toBeVisible();
+  await expect(menu.getByRole("menuitem").filter({ hasText: "Pause" })).toBeVisible();
+  await expect(
+    menu.getByRole("menuitem").filter({ hasText: "Compress WAVs" }),
+  ).toHaveAttribute("aria-disabled", "true");
+
+  await page.keyboard.press("Escape");
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await cardHead.getByTestId("asr-task-actions-menu-button").click();
+  menu = page.locator(".ant-dropdown-menu:visible");
+  await expect(menu).toBeVisible();
+  await expect(cardHead.getByRole("button", { name: "Back to directory tasks" })).toBeVisible();
 });
