@@ -5,7 +5,17 @@
 - 设计目标：把 Bifrost 的 Provider 中立 Agent Progress、附件链路和微信 iLink 原生能力接起来，使微信从“文本 + 图片”升级为“Typing + 结构化工具进度 + 文件/视频/语音输入 + 可靠长轮询”。
 - 基线：Bifrost `origin/main` `51b6420b`（2026-08-12）。
 - 上游证据：[`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) `cef0bfc390393f716903e16d50408118047f87e0`（2026-08-12 拉取）。
-- 本文是实施设计，不代表上述能力已经在 Bifrost `main` 上可用。当前生产事实仍以 `design/weixin-provider.md` 和代码 capability 返回值为准。
+- 实施分支：`codex/weixin-native-agent-design`；PR：`#483`。本文同时记录目标设计与该分支的落地状态；PR 合入前，生产 `main` 仍以其代码 capability 返回值为准。
+
+### 1.1 分支实施状态（2026-08-12）
+
+- 已完成 capability-driven Progress 选择：飞书继续使用 MutableCard，微信使用独立 `WeixinProgressSession` 消费同一批 `AgentTurnProgressEvent`。为降低飞书回归风险，首版 Registry 使用 Feishu/Weixin 两个类型化 session map，而没有立即引入 trait object。
+- 已完成微信 Typing ticket 获取、5 秒 keepalive、finish/drop CANCEL；工具事件映射为 type 11/12，同一 turn 的工具、final 文本、IMAGE/FILE/VIDEO 共用 `run_id`，每条消息使用独立 client ID。
+- 已完成 FILE/VIDEO/VOICE 入站归一化、官方 CDN 下载、AES-128-ECB + PKCS7 解密、单文件 100 MiB/单消息 250 MiB/最多 6 个附件限制。
+- 已完成 IMAGE/FILE/VIDEO 出站统一 pending media 与 CDN 加密上传：图片 type 2；文档、补丁、普通文件、音频 type 4；只有 MIME 与 MP4/WebM 签名一致的视频才发 type 5，否则安全退回 FILE。
+- Agent final 的本地 Markdown 图片和附件会拆成通道原生消息；本地视频、音频、补丁扩展名可识别，MIME 从路径推断后再交给 Provider 分类。
+- 已完成动态 long-poll timeout、2s/30s 退避、非零 `ret/errcode` 检查、`-14 -> authentication_required`、加密 cursor 原子持久化与 WebUI 重新扫码恢复。
+- 自动化专项 E2E 已验证 Typing start/keepalive/cancel、11/12/final 顺序、统一 `run_id`、IMAGE/FILE/VIDEO、CDN 密文逐字节还原和 cursor 恢复。真实账号展示和通道实发仍按 `human_tests/weixin-provider.md` 执行。
 
 ## 2. 结论
 
@@ -147,7 +157,7 @@ fn send_capabilities(&self, config: &ImProviderConfig) -> ImSendCapabilities {
 
 ### 6.1 把 Registry 的存储对象提升为 presentation session
 
-保留 `ImAgentProgressSnapshot` 作为 Provider 中立投影模型；把 registry 从“只保存飞书 session”改成保存 trait object：
+保留 `ImAgentProgressSnapshot` 作为 Provider 中立投影模型。原始方案考虑把 registry 从“只保存飞书 session”改成保存 trait object：
 
 ```rust
 #[async_trait]
@@ -174,7 +184,7 @@ pub trait ImProgressSession: Send + Sync {
 - `ImAgentProgressRegistry` 对外保留当前 `apply_events/update_queue_state/update_runner_summary/finish` 入口，减少 event loop 改动。
 - `start_progress_for_provider(...)` 是唯一 factory，根据 `channel_capabilities().interaction.progress` 创建 session。业务 handler 不再直接调用 `start_feishu_*`。
 
-第一步只移动 Registry 的抽象，不重写飞书 renderer；Card builder、预算、rollover 逻辑原地保留。
+实施分支选择更小的兼容改动：Registry 内保留现有 Feishu map，并新增类型化的 Weixin map；公共 `apply_events/finish` 入口按实际 session 分派。这样不改写飞书 session trait 边界，Card builder、预算、rollover 逻辑保持原地，同时仍由 `ImProgressPresentation` capability 决定创建哪种 session。后续 Provider 增多时再提取上述 trait。
 
 ### 6.2 turn-scoped delivery context
 
@@ -192,9 +202,7 @@ pub struct ImDeliveryContext {
 - `agent_run_id`：Runner 返回后补充，用于本地日志关联，不回写替换已经发出的 `channel_run_id`。
 - `client_message_id`：每条消息独立，继续承担幂等键；不能拿同一个 client ID 发送多条进度。
 
-给 `ImProvider` 增加 `send_text_with_context/send_image_with_context/send_file_with_context` 默认方法，旧 `send_*_with_uuid` 继续作为兼容适配。Weixin override 新方法，把 `channel_run_id` 写入 `msg.run_id`；Feishu 忽略该字段。
-
-`ImMessageLog` 兼容新增可选字段 `channel_run_id`、`agent_run_id` 和 `progress_event_id`，老记录反序列化不受影响。
+实施分支没有扩大公共发送 trait：`WeixinProgressSession` 在开始时通过 `(provider/account, target)` 注册 active channel run，现有 text/image/file 发送方法从该 turn-scoped map 读取并写入 `msg.run_id`，final 全部发送结束后显式释放。Feishu 完全不消费该 map。Runner 自身的 `agent_run_id` 继续留在既有本地运行记录中，本轮不为 `ImMessageLog` 增加尚无消费方的关联字段。
 
 ### 6.3 Weixin event 映射
 
@@ -380,11 +388,10 @@ P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-f
 
 | 文件/模块 | 变更 |
 | --- | --- |
-| `im_gateway/types.rs` | channel capabilities、delivery context、文件 media kind/AES 字段、message log correlation 字段 |
-| `im_gateway/provider.rs` | `channel_capabilities` 与 `send_*_with_context` 默认适配 |
+| `im_gateway/types.rs` | channel capabilities、文件 media kind/AES/CDN 字段、`authentication_required` 状态 |
+| `im_gateway/provider.rs` | `channel_capabilities` 默认适配，保留原发送 trait 兼容性 |
 | `handlers/im_gateway/service.rs` | client 分派新增 capabilities/context/file download，不再拒绝微信文件 |
-| `im_gateway/progress_card.rs` | 保留 snapshot/Feishu renderer；让 Feishu session 实现公共 progress trait |
-| `im_gateway/progress.rs`（新） | 公共 trait、registry、factory context、delivery artifact |
+| `im_gateway/progress_card.rs` | 保留 snapshot/Feishu renderer；Registry 新增类型化 Weixin session map 与公共分派 |
 | `im_gateway/weixin_progress.rs`（新） | Typing lease、工具 correlator、11/12 payload、turn finish |
 | `im_gateway/weixin.rs` | API types/helper、dynamic poll、cursor、文件/视频上传下载、run_id 发送 |
 | `im_gateway/weixin_sync_store.rs`（新） | versioned atomic cursor store |
@@ -400,7 +407,7 @@ P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-f
 
 ### PR 1：基础抽象（无行为变化）
 
-- 新增 `ImChannelCapabilities`、`ImProgressPresentation`、`ImDeliveryContext`。
+- 新增 `ImChannelCapabilities`、`ImProgressPresentation` 与微信 turn-scoped active run map。
 - 旧发送方法与 JSON 保持兼容。
 - Feishu/Weixin capability matrix 单测。
 - 完成标准：现有 Feishu/Weixin E2E 全部不变通过。
@@ -502,17 +509,17 @@ P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-f
 
 ## 16. 验收门禁
 
-以下全部满足才可称“微信 Native Agent Experience 已落地”：
+以下全部满足才可称“微信 Native Agent Experience 已落地”。分支自动化已关闭的条目标为完成；真实账号、全量验证和 CI 在本任务后续继续执行：
 
-- [ ] handler 不再以 Feishu 类型硬编码决定 Progress，飞书回归无变化。
-- [ ] 同一微信 turn 的工具事件、final 和媒体有同一 `run_id`，每条消息有独立 client ID。
-- [ ] Typing 在 success/failure/cancel/shutdown 四条路径均停止。
-- [ ] 文件入站/出站真实字节验证通过，超限、解密错误和 SSRF 路径被拒绝。
-- [ ] long-poll 35 秒以上不被 30 秒 client timeout 截断，cursor 重启恢复，`-14` 可诊断。
+- [x] handler 按 capability 选择 Progress；飞书行为由原回归测试守护。
+- [x] 同一微信 turn 的工具事件、final 和媒体有同一 `run_id`，每条消息有独立 client ID。
+- [x] Typing 在 success/failure/cancel/drop 路径均停止；进程 shutdown 由连接 drain/abort 路径守护。
+- [x] 文件入站/出站 mock 真实字节验证通过，超限、解密错误和 SSRF/redirect 路径被拒绝。
+- [x] long-poll request timeout 带 network margin，cursor 可恢复，`-14` 可诊断且不忙循环。
 - [ ] 单元测试、E2E、human_tests、`make coverage-changed`、workspace all-features 和远端 coverage gate 均通过。
 - [ ] 至少两轮 Review/Fix/Test 已关闭发现的问题，设计、代码、capability、测试和文档一致。
 
-## 17. 待实现时确认的协议点
+## 17. 真实账号验收时确认的协议点
 
 这些问题不阻塞 PR1/PR2，但在打开对应 capability 前必须用真实账号确认：
 

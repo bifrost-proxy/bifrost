@@ -1046,7 +1046,11 @@ function ConnectionsPanel({
       if (p.provider_type !== "weixin" || !p.enabled) return false;
       if (autoPromptedWeixinIds.has(p.id)) return false;
       const status = statusMap[p.id]?.state;
-      return !p.secret_configured || status === "failed";
+      return (
+        !p.secret_configured ||
+        status === "failed" ||
+        status === "authentication_required"
+      );
     });
     if (!provider) return;
     void refreshWeixinLogin(provider.id);
@@ -1080,6 +1084,8 @@ function ConnectionsPanel({
         return <Badge status="default" text="Disconnected" />;
       case "failed":
         return <Badge status="error" text="Failed" />;
+      case "authentication_required":
+        return <Badge status="error" text="Scan QR again" />;
       default:
         return <Badge status="default" text="Unknown" />;
     }

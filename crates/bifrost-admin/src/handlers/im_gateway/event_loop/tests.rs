@@ -95,6 +95,7 @@ fn referenced_attachments_are_prepended_before_current_message_attachments() {
             size_bytes: None,
             data_base64: None,
             download_url: None,
+            ..Default::default()
         });
     let dispatch = PreparedInboundDispatch {
         message_text: "inspect".to_string(),
@@ -120,6 +121,7 @@ fn referenced_attachments_are_prepended_before_current_message_attachments() {
             size_bytes: None,
             data_base64: None,
             download_url: None,
+            ..Default::default()
         }],
         attachment_notices: Vec::new(),
     };
@@ -179,6 +181,7 @@ async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks
             size_bytes: Some(4),
             data_base64: Some("ZmlsZQ==".to_string()),
             download_url: None,
+            ..Default::default()
         })
         .collect();
     let (images, files, notices) = hydrate_referenced_group_attachments(
@@ -208,6 +211,7 @@ async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks
                 size_bytes: Some(MAX_FEISHU_REFERENCED_FILE_BYTES + 1),
                 data_base64: None,
                 download_url: None,
+                ..Default::default()
             }],
         },
     )
@@ -225,6 +229,7 @@ async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks
             size_bytes: Some(MAX_FEISHU_REFERENCED_FILE_BYTES),
             data_base64: Some("AA==".to_string()),
             download_url: None,
+            ..Default::default()
         })
         .collect();
     let (_, files, notices) = hydrate_referenced_group_attachments(
@@ -270,6 +275,7 @@ async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks
                 size_bytes: None,
                 data_base64: Some("also not base64".to_string()),
                 download_url: None,
+                ..Default::default()
             }],
         },
     )
@@ -365,6 +371,7 @@ async fn referenced_attachment_hydration_rejects_oversized_downloaded_payloads()
                 size_bytes: None,
                 data_base64: None,
                 download_url: None,
+                ..Default::default()
             }],
         },
     )
@@ -447,6 +454,7 @@ async fn referenced_attachment_hydration_covers_small_limit_error_matrix() {
         size_bytes,
         data_base64: data_base64.map(ToString::to_string),
         download_url: None,
+        ..Default::default()
     };
 
     let (images, files, notices) = hydrate_referenced_group_attachments_with_limits(

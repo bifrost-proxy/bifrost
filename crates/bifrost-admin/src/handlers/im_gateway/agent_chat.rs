@@ -621,6 +621,7 @@ pub(super) async fn resolve_event_files(
     files: &[ImFileAttachment],
 ) -> Vec<crate::im_gateway::external_cli::ExternalCliFileInput> {
     let mut resolved = Vec::new();
+    let mut total_file_bytes = 0u64;
     if files.len() > MAX_AGENT_ATTACHMENTS_PER_MESSAGE {
         warn!(
             provider_id = %provider.id,
@@ -631,7 +632,40 @@ pub(super) async fn resolve_event_files(
         );
     }
     for file in files.iter().take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE) {
+        let file_label = file.name.as_deref().unwrap_or(&file.file_key);
         if let Some(data) = &file.data_base64 {
+            let decoded_size = match preloaded_payload_size(
+                Some(data),
+                "文件",
+                file_label,
+                MAX_FEISHU_REFERENCED_FILE_BYTES,
+            ) {
+                Ok(size) => size.unwrap_or_default(),
+                Err(problem) => {
+                    warn!(
+                        provider_id = %provider.id,
+                        event_id = %event.event_id,
+                        file = %file_label,
+                        problem,
+                        "skipping oversized inline IM file attachment"
+                    );
+                    continue;
+                }
+            };
+            if referenced_file_budget_exceeded_with_limit(
+                total_file_bytes,
+                decoded_size,
+                MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
+            ) {
+                warn!(
+                    provider_id = %provider.id,
+                    event_id = %event.event_id,
+                    file = %file_label,
+                    "skipping IM file attachment because the message total exceeds 250 MiB"
+                );
+                continue;
+            }
+            total_file_bytes = total_file_bytes.saturating_add(decoded_size);
             resolved.push(crate::im_gateway::external_cli::ExternalCliFileInput {
                 mime_type: file
                     .mime_type
@@ -640,6 +674,34 @@ pub(super) async fn resolve_event_files(
                 data: data.clone(),
                 name: file.name.clone(),
             });
+            continue;
+        }
+
+        if file
+            .size_bytes
+            .is_some_and(|size| size > MAX_FEISHU_REFERENCED_FILE_BYTES)
+        {
+            warn!(
+                provider_id = %provider.id,
+                event_id = %event.event_id,
+                file = %file_label,
+                "skipping oversized IM file attachment before download"
+            );
+            continue;
+        }
+        if file.size_bytes.is_some_and(|size| {
+            referenced_file_budget_exceeded_with_limit(
+                total_file_bytes,
+                size,
+                MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
+            )
+        }) {
+            warn!(
+                provider_id = %provider.id,
+                event_id = %event.event_id,
+                file = %file_label,
+                "skipping IM file attachment because the declared message total exceeds 250 MiB"
+            );
             continue;
         }
 
@@ -656,6 +718,29 @@ pub(super) async fn resolve_event_files(
             .await
         {
             Ok((mime_type, bytes)) => {
+                if bytes.len() as u64 > MAX_FEISHU_REFERENCED_FILE_BYTES {
+                    warn!(
+                        provider_id = %provider.id,
+                        message_id = %message_id,
+                        file = %file_label,
+                        "skipping oversized downloaded IM file attachment"
+                    );
+                    continue;
+                }
+                if referenced_file_budget_exceeded_with_limit(
+                    total_file_bytes,
+                    bytes.len() as u64,
+                    MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
+                ) {
+                    warn!(
+                        provider_id = %provider.id,
+                        message_id = %message_id,
+                        file = %file_label,
+                        "skipping downloaded IM file attachment because the message total exceeds 250 MiB"
+                    );
+                    continue;
+                }
+                total_file_bytes = total_file_bytes.saturating_add(bytes.len() as u64);
                 info!(
                     provider_id = %provider.id,
                     message_id = %message_id,
@@ -853,7 +938,7 @@ pub(super) fn referenced_file_budget_exceeded(current_bytes: u64, next_bytes: u6
     )
 }
 
-fn referenced_file_budget_exceeded_with_limit(
+pub(super) fn referenced_file_budget_exceeded_with_limit(
     current_bytes: u64,
     next_bytes: u64,
     max_bytes: u64,
@@ -861,7 +946,7 @@ fn referenced_file_budget_exceeded_with_limit(
     current_bytes.saturating_add(next_bytes) > max_bytes
 }
 
-fn preloaded_payload_size(
+pub(super) fn preloaded_payload_size(
     data: Option<&str>,
     kind: &str,
     label: &str,

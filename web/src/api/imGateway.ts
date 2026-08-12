@@ -7,6 +7,7 @@ export type ConnectionState =
   | "connecting"
   | "connected"
   | "reconnecting"
+  | "authentication_required"
   | "failed";
 
 export interface ImProviderConfig {

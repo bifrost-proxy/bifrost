@@ -1887,7 +1887,7 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
             executable: Some(executable.display().to_string()),
             // This is an integration-style process test that includes executable probing and
             // Python startup. Keep enough scheduling headroom when the workspace suite is busy.
-            timeout_secs: Some(15),
+            timeout_secs: Some(60),
             ..Default::default()
         },
         allow_work_dirs: Vec::new(),

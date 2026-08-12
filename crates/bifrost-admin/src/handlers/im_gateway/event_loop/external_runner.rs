@@ -53,7 +53,7 @@ pub(super) fn apply_session_bound_work_dir(
 }
 
 pub(in crate::handlers::im_gateway) fn resolve_external_cli_delivery_mode(
-    provider: &ImProviderConfig,
+    progress_presentation: crate::im_gateway::types::ImProgressPresentation,
     settings: &crate::im_gateway::external_cli::ExternalCliAgentSettings,
     sources: &std::collections::BTreeMap<String, String>,
     input_override: Option<crate::im_gateway::external_cli::ExternalCliDeliveryMode>,
@@ -61,7 +61,7 @@ pub(in crate::handlers::im_gateway) fn resolve_external_cli_delivery_mode(
     if let Some(delivery_mode) = input_override {
         return delivery_mode;
     }
-    if provider.provider_type == ImProviderType::Feishu
+    if progress_presentation != crate::im_gateway::types::ImProgressPresentation::TextOnly
         && is_im_progress_card_external_adapter(&settings.adapter)
         && sources.get("deliveryMode").map(String::as_str) != Some("channel")
     {
@@ -257,6 +257,10 @@ pub(super) async fn finish_external_runner_progress_and_notify(
     ctx: ExternalRunnerProgressFinishContext<'_>,
     finish: ExternalRunnerProgressFinish<'_>,
 ) {
+    let weixin_channel_run_id = ctx
+        .progress_registry
+        .weixin_channel_run_id(finish.session_key)
+        .await;
     let rendered_final_text = ctx
         .progress_registry
         .render_markdown_images(finish.session_key, finish.final_text, finish.work_dir)
@@ -306,6 +310,19 @@ pub(super) async fn finish_external_runner_progress_and_notify(
         let _ = ctx
             .group_context_store
             .upsert_feishu_message_anchor(&anchor, now_ms());
+    }
+    if let (Some(weixin), Some(channel_run_id), Some(target)) = (
+        ctx.client.weixin(),
+        weixin_channel_run_id,
+        build_agent_reply_target(
+            ctx.provider,
+            ctx.event,
+            "__agent_reply__",
+            "Agent Reply",
+            "interactive",
+        ),
+    ) {
+        weixin.end_channel_run(ctx.provider, &target, &channel_run_id);
     }
 }
 
@@ -479,7 +496,10 @@ pub(super) async fn run_external_cli_agent_chat(
         Some(&effective.runner_id),
     );
     let delivery_mode = resolve_external_cli_delivery_mode(
-        ctx.provider,
+        ctx.client
+            .channel_capabilities(ctx.provider)
+            .interaction
+            .progress,
         &settings,
         &effective.sources,
         input.delivery_override,
@@ -728,63 +748,103 @@ pub(super) async fn run_external_cli_agent_chat(
             delivery_mode,
             crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
         ) {
-            if let (Some(progress_target), Some(feishu)) = (
-                build_agent_reply_target(
-                    ctx.provider,
-                    &current_event,
-                    "__agent_progress__",
-                    "Agent Progress",
-                    "interactive",
-                ),
-                ctx.client.feishu(),
+            if let Some(progress_target) = build_agent_reply_target(
+                ctx.provider,
+                &current_event,
+                "__agent_progress__",
+                "Agent Progress",
+                "interactive",
             ) {
-                let is_feishu_thread =
-                    crate::im_gateway::group_context::feishu_thread_parts(&current_event).is_some();
-                let progress_result = if ctx
-                    .progress_registry
-                    .rollover_existing_replying_to(
-                        &input.session_key,
-                        &current_message,
-                        current_event.source.message_id.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(())
-                } else if is_feishu_thread {
-                    ctx.progress_registry
-                        .start_feishu_replying_in_thread(
-                            &input.session_key,
-                            feishu,
-                            ctx.provider.clone(),
-                            progress_target,
-                            &current_message,
-                            current_event.source.message_id.as_deref(),
-                        )
-                        .await
-                        .map(|_| ())
-                } else {
-                    ctx.progress_registry
-                        .start_feishu_replying_to(
-                            &input.session_key,
-                            feishu,
-                            ctx.provider.clone(),
-                            progress_target,
-                            &current_message,
-                            current_event.source.message_id.as_deref(),
-                        )
-                        .await
-                        .map(|_| ())
+                let presentation = ctx
+                    .client
+                    .channel_capabilities(ctx.provider)
+                    .interaction
+                    .progress;
+                let progress_result: bifrost_core::Result<()> = match presentation {
+                    crate::im_gateway::types::ImProgressPresentation::MutableCard => {
+                        if let Some(feishu) = ctx.client.feishu() {
+                            let is_feishu_thread =
+                                crate::im_gateway::group_context::feishu_thread_parts(
+                                    &current_event,
+                                )
+                                .is_some();
+                            if ctx
+                                .progress_registry
+                                .rollover_existing_replying_to(
+                                    &input.session_key,
+                                    &current_message,
+                                    current_event.source.message_id.as_deref(),
+                                )
+                                .await
+                            {
+                                Ok(())
+                            } else if is_feishu_thread {
+                                ctx.progress_registry
+                                    .start_feishu_replying_in_thread(
+                                        &input.session_key,
+                                        feishu,
+                                        ctx.provider.clone(),
+                                        progress_target.clone(),
+                                        &current_message,
+                                        current_event.source.message_id.as_deref(),
+                                    )
+                                    .await
+                                    .map(|_| ())
+                            } else {
+                                ctx.progress_registry
+                                    .start_feishu_replying_to(
+                                        &input.session_key,
+                                        feishu,
+                                        ctx.provider.clone(),
+                                        progress_target.clone(),
+                                        &current_message,
+                                        current_event.source.message_id.as_deref(),
+                                    )
+                                    .await
+                                    .map(|_| ())
+                            }
+                        } else {
+                            Err(bifrost_core::BifrostError::Config(
+                                "mutable progress provider unavailable".to_string(),
+                            ))
+                        }
+                    }
+                    crate::im_gateway::types::ImProgressPresentation::StructuredEvents => {
+                        if let Some(weixin) = ctx.client.weixin() {
+                            ctx.progress_registry
+                                .start_weixin(
+                                    &input.session_key,
+                                    weixin,
+                                    ctx.provider.clone(),
+                                    progress_target.clone(),
+                                )
+                                .await;
+                            Ok(())
+                        } else {
+                            Err(bifrost_core::BifrostError::Config(
+                                "structured progress provider unavailable".to_string(),
+                            ))
+                        }
+                    }
+                    crate::im_gateway::types::ImProgressPresentation::TextOnly => {
+                        Err(bifrost_core::BifrostError::Config(
+                            "provider has no native progress presentation".to_string(),
+                        ))
+                    }
                 };
                 match progress_result {
                     Ok(_) => {
-                        if let Some(chat_id) = current_event.source.chat_id.as_deref() {
-                            for message_info in ctx
-                                .progress_registry
-                                .message_infos(&input.session_key)
-                                .await
-                            {
-                                if let Some(message_id) = message_info.message_id {
-                                    let _ = ctx.group_context_store.upsert_feishu_message_anchor(
+                        if presentation
+                            == crate::im_gateway::types::ImProgressPresentation::MutableCard
+                        {
+                            if let Some(chat_id) = current_event.source.chat_id.as_deref() {
+                                for message_info in ctx
+                                    .progress_registry
+                                    .message_infos(&input.session_key)
+                                    .await
+                                {
+                                    if let Some(message_id) = message_info.message_id {
+                                        let _ = ctx.group_context_store.upsert_feishu_message_anchor(
                                         &crate::im_gateway::group_context::FeishuMessageAnchor {
                                             provider_id: ctx.provider.id.clone(),
                                             chat_id: chat_id.to_string(),
@@ -803,6 +863,7 @@ pub(super) async fn run_external_cli_agent_chat(
                                         },
                                         now_ms(),
                                     );
+                                    }
                                 }
                             }
                         }

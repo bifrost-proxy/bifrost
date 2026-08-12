@@ -208,6 +208,7 @@ async fn inject_mock_inbound(
                         size_bytes: None,
                         data_base64: Some(data),
                         download_url: None,
+                        ..Default::default()
                     })
                 })
                 .collect(),

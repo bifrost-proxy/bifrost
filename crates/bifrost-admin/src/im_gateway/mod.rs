@@ -24,6 +24,8 @@ pub mod task_executor;
 pub mod types;
 pub mod weixin;
 mod weixin_context_store;
+pub mod weixin_progress;
+mod weixin_sync_store;
 
 pub use agent::{ImAgentConfig, ImAgentConfigStore, ImAgentSessionManager};
 pub use connection::ImConnectionManager;
@@ -41,3 +43,16 @@ pub use schedule_store::ImScheduleStore;
 pub use scheduler::ImScheduler;
 pub use target_store::ImTargetStore;
 pub use types::*;
+pub use weixin_progress::WeixinProgressSession;
+
+#[cfg(test)]
+mod tests {
+    use super::WeixinProgressSession;
+
+    #[test]
+    fn weixin_progress_session_remains_sendable_through_public_gateway_api() {
+        fn assert_send<T: Send>() {}
+
+        assert_send::<WeixinProgressSession>();
+    }
+}

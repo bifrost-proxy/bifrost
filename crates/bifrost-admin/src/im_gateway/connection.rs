@@ -13,7 +13,7 @@ use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ConnectionState, ConnectionStatus, ImProviderConfig, ImProviderType,
 };
-use crate::im_gateway::weixin::WeixinProvider;
+use crate::im_gateway::weixin::{WeixinConnectionStatusEvent, WeixinProvider};
 
 // ---------------------------------------------------------------------------
 // Managed Connection
@@ -110,7 +110,12 @@ impl ImConnectionManager {
             reconnect_count: 0,
             last_error: None,
         };
-        let handle = self.weixin_provider.connect_events(config, sink).await?;
+        let (status_tx, mut status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<WeixinConnectionStatusEvent>();
+        let handle = self
+            .weixin_provider
+            .connect_events_with_status(config, sink, Some(status_tx))
+            .await?;
         {
             let mut conns = self.connections.write();
             conns.insert(
@@ -128,6 +133,18 @@ impl ImConnectionManager {
             ConnectionState::Connected,
             None,
         );
+        let status_connections = self.connections_arc();
+        let status_provider_id = provider_id.clone();
+        tokio::spawn(async move {
+            while let Some(event) = status_rx.recv().await {
+                update_connection_state(
+                    &status_connections,
+                    &status_provider_id,
+                    event.state,
+                    event.error,
+                );
+            }
+        });
         info!(provider_id = %provider_id, "weixin poll connection started");
         Ok(())
     }
@@ -416,5 +433,66 @@ mod tests {
         assert_eq!(connected.state, ConnectionState::Connected);
         assert!(connected.last_connected_at.is_some());
         assert!(connected.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn weixin_manager_starts_polling_and_propagates_auth_expiry_status() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind weixin poll mock");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = vec![0u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let body = br#"{"ret":-14,"errmsg":"authorization expired"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    std::str::from_utf8(body).unwrap()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ImConnectionManager::new_with_data_dir(dir.path());
+        let config = ImProviderConfig {
+            id: "weixin-status".to_string(),
+            provider_type: ImProviderType::Weixin,
+            display_name: "Weixin Status".to_string(),
+            enabled: true,
+            base_url: Some(format!("http://127.0.0.1:{port}")),
+            app_id: Some("bot@im.bot".to_string()),
+            secret_ref: Some("token".to_string()),
+            owner_open_id: Some("owner@im.wechat".to_string()),
+            event_connection_enabled: true,
+            event_types: vec!["message.receive".to_string()],
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
+        manager
+            .start_connection(&config, "", sink)
+            .await
+            .expect("start weixin connection");
+
+        let mut status = manager.get_status(&config.id).unwrap();
+        for _ in 0..50 {
+            if status.state == ConnectionState::AuthenticationRequired {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            status = manager.get_status(&config.id).unwrap();
+        }
+        assert_eq!(status.state, ConnectionState::AuthenticationRequired);
+        assert!(status
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("scan a new QR code")));
+        manager.stop_all();
     }
 }

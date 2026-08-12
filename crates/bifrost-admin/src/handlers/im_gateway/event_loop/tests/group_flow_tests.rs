@@ -407,6 +407,7 @@ fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redel
             size_bytes: Some(4),
             data_base64: Some("ZmlsZQ==".to_string()),
             download_url: None,
+            ..Default::default()
         });
     group_store
         .claim_feishu_thread_binding(

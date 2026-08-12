@@ -4,7 +4,8 @@ use tokio::sync::mpsc;
 use bifrost_core::Result;
 
 use super::types::{
-    ConnectionHandle, ImEvent, ImProviderConfig, ImProviderType, ImSendCapabilities, ImTarget,
+    ConnectionHandle, ImChannelCapabilities, ImConversationCapabilities, ImEvent,
+    ImInteractionCapabilities, ImProviderConfig, ImProviderType, ImSendCapabilities, ImTarget,
     ProviderValidation, SendOptions, SendResult, UploadedImage,
 };
 
@@ -15,6 +16,18 @@ pub trait ImProvider: Send + Sync {
     fn provider_type(&self) -> ImProviderType;
 
     fn send_capabilities(&self, config: &ImProviderConfig) -> ImSendCapabilities;
+
+    fn channel_capabilities(&self, config: &ImProviderConfig) -> ImChannelCapabilities {
+        ImChannelCapabilities {
+            send: self.send_capabilities(config),
+            interaction: ImInteractionCapabilities::default(),
+            conversation: ImConversationCapabilities {
+                direct: true,
+                requires_context: false,
+                ..Default::default()
+            },
+        }
+    }
 
     async fn validate_config(&self, config: &ImProviderConfig) -> Result<ProviderValidation>;
 

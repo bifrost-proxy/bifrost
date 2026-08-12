@@ -3,9 +3,9 @@ use super::*;
 pub(super) const IMAGE_ONLY_AGENT_PROMPT: &str = "请理解这张图片，并根据图片内容回答。";
 pub(super) const MAX_AGENT_ATTACHMENTS_PER_MESSAGE: usize = 6;
 pub(super) const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
-/// Feishu `POST /im/v1/files` rejects files larger than 30 MB (error 234006).
-/// Keep the local preflight at the platform limit so a generated attachment
-/// cannot turn an otherwise successful terminal reply into a doomed upload.
+/// Feishu and the verified Weixin iLink attachment path both use a 30 MiB
+/// preflight limit so a generated attachment cannot turn an otherwise
+/// successful terminal reply into a doomed upload.
 pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 30 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES: u64 = 250 * 1024 * 1024;
@@ -93,6 +93,20 @@ impl ImProviderClient {
             Self::Unsupported(provider_type) => Self::unsupported_capabilities(config, *provider_type),
         }
     }
+    pub(super) fn channel_capabilities(
+        &self,
+        config: &ImProviderConfig,
+    ) -> crate::im_gateway::types::ImChannelCapabilities {
+        match self {
+            Self::Feishu(provider) => provider.channel_capabilities(config),
+            Self::Weixin(provider) => provider.channel_capabilities(config),
+            Self::Unsupported(provider_type) => crate::im_gateway::types::ImChannelCapabilities {
+                send: Self::unsupported_capabilities(config, *provider_type),
+                interaction: Default::default(),
+                conversation: Default::default(),
+            },
+        }
+    }
     pub(super) async fn create_feishu_group_chat(
         &self,
         config: &ImProviderConfig,
@@ -118,6 +132,13 @@ impl ImProviderClient {
             Self::Feishu(provider) => Some(provider.clone()),
             Self::Weixin(_) => None,
             Self::Unsupported(_) => None,
+        }
+    }
+
+    pub(super) fn weixin(&self) -> Option<Arc<WeixinProvider>> {
+        match self {
+            Self::Weixin(provider) => Some(provider.clone()),
+            Self::Feishu(_) | Self::Unsupported(_) => None,
         }
     }
 
@@ -254,9 +275,11 @@ impl ImProviderClient {
                     .upload_file(config, file_name, bytes, mime_type)
                     .await
             }
-            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
-                "weixin provider does not support generic file attachments yet".to_string(),
-            )),
+            Self::Weixin(provider) => {
+                provider
+                    .upload_file(config, file_name, bytes, mime_type)
+                    .await
+            }
             Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
@@ -270,9 +293,7 @@ impl ImProviderClient {
     ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
         match self {
             Self::Feishu(provider) => provider.send_file(config, target, file_key, uuid).await,
-            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
-                "weixin provider does not support generic file attachments yet".to_string(),
-            )),
+            Self::Weixin(provider) => provider.send_file(config, target, file_key, uuid).await,
             Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
@@ -326,9 +347,7 @@ impl ImProviderClient {
                     .download_message_file_resource(config, message_id, &file.file_key)
                     .await
             }
-            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
-                "weixin provider does not support inbound file resource downloads yet".to_string(),
-            )),
+            Self::Weixin(provider) => provider.download_message_file_resource(config, file).await,
             Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
@@ -962,26 +981,53 @@ mod provider_event_connection_tests {
     }
 
     #[tokio::test]
-    async fn weixin_client_rejects_inbound_file_resource_downloads() {
+    async fn weixin_client_dispatches_inbound_file_resource_downloads() {
+        use http_body_util::Full;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock weixin file server");
+        let port = listener.local_addr().expect("mock local addr").port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept file download");
+            let service = service_fn(|_request: Request<hyper::body::Incoming>| async move {
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "text/markdown")
+                        .body(Full::new(bytes::Bytes::from_static(b"hello weixin")))
+                        .unwrap(),
+                )
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+
         let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
-        let provider = provider_with_secret();
+        let mut provider = provider_with_secret();
+        provider.base_url = Some(format!("http://127.0.0.1:{port}"));
         let file = crate::im_gateway::types::ImFileAttachment {
             file_key: "file-key".to_string(),
             name: Some("report.md".to_string()),
             mime_type: Some("text/markdown".to_string()),
             size_bytes: Some(12),
             data_base64: None,
-            download_url: None,
+            download_url: Some(format!("http://127.0.0.1:{port}/file")),
+            ..Default::default()
         };
 
-        let err = client
+        let (mime_type, bytes) = client
             .download_message_file_resource(&provider, "message-id", &file)
             .await
-            .expect_err("weixin does not support file resource downloads");
+            .expect("weixin downloads file resource");
 
-        assert!(err
-            .to_string()
-            .contains("weixin provider does not support inbound file resource downloads yet"));
+        assert_eq!(mime_type, "text/markdown");
+        assert_eq!(bytes, b"hello weixin");
     }
 
     #[tokio::test]
@@ -1056,6 +1102,7 @@ mod provider_event_connection_tests {
             size_bytes: Some(5),
             data_base64: None,
             download_url: None,
+            ..Default::default()
         };
 
         let (mime_type, bytes) = client

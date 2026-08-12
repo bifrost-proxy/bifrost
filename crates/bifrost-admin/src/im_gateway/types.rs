@@ -52,15 +52,12 @@ pub fn normalize_provider_base_url(provider: &mut ImProviderConfig) {
             provider.base_url = Some(normalize_feishu_base_url(provider.base_url.as_deref()));
         }
         ImProviderType::Weixin | ImProviderType::WeChat => {
-            #[cfg(test)]
-            if provider
-                .base_url
-                .as_deref()
-                .is_some_and(|url| url.starts_with("http://127.0.0.1:"))
-            {
-                return;
-            }
-            provider.base_url = Some(normalize_weixin_base_url(provider.base_url.as_deref()));
+            provider.base_url = Some(normalize_weixin_base_url_with_loopback(
+                provider.base_url.as_deref(),
+                cfg!(debug_assertions)
+                    && std::env::var("BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL").as_deref()
+                        == Ok("1"),
+            ));
         }
         ImProviderType::Webhook => {}
     }
@@ -108,6 +105,22 @@ fn is_feishu_base_url(base_url: &str, expected_host: &str) -> bool {
 
 fn normalize_weixin_base_url(_base_url: Option<&str>) -> String {
     WEIXIN_BASE_URL.to_string()
+}
+
+fn normalize_weixin_base_url_with_loopback(base_url: Option<&str>, allow_loopback: bool) -> String {
+    if allow_loopback {
+        if let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) {
+            if url::Url::parse(base_url).is_ok_and(|url| {
+                url.scheme() == "http"
+                    && url
+                        .host_str()
+                        .is_some_and(|host| host == "127.0.0.1" || host == "localhost")
+            }) {
+                return base_url.trim_end_matches('/').to_string();
+            }
+        }
+    }
+    normalize_weixin_base_url(base_url)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +224,54 @@ pub struct ImSendCapabilities {
     pub parts: BTreeMap<String, ImSendPartCapability>,
     #[serde(default)]
     pub requires_context: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImProgressPresentation {
+    MutableCard,
+    StructuredEvents,
+    #[default]
+    TextOnly,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImInteractionCapabilities {
+    #[serde(default)]
+    pub typing: bool,
+    #[serde(default)]
+    pub progress: ImProgressPresentation,
+    #[serde(default)]
+    pub mutable_message: bool,
+    #[serde(default)]
+    pub native_reply: bool,
+    #[serde(default)]
+    pub reactions: bool,
+    #[serde(default)]
+    pub recall: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImConversationCapabilities {
+    #[serde(default)]
+    pub direct: bool,
+    #[serde(default)]
+    pub group: bool,
+    #[serde(default)]
+    pub thread: bool,
+    #[serde(default)]
+    pub mention: bool,
+    #[serde(default)]
+    pub requires_context: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImChannelCapabilities {
+    pub send: ImSendCapabilities,
+    #[serde(default)]
+    pub interaction: ImInteractionCapabilities,
+    #[serde(default)]
+    pub conversation: ImConversationCapabilities,
 }
 
 impl ImSendCapabilities {
@@ -839,6 +900,15 @@ pub enum ImImageSource {
     UploadedImage,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImFileMediaKind {
+    #[default]
+    File,
+    Video,
+    Voice,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImFileAttachment {
     pub file_key: String,
@@ -852,6 +922,18 @@ pub struct ImFileAttachment {
     pub data_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_url: Option<String>,
+    #[serde(default)]
+    pub media_kind: ImFileMediaKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_query_param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aes_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -986,6 +1068,7 @@ pub enum ConnectionState {
     Connecting,
     Connected,
     Reconnecting,
+    AuthenticationRequired,
     Failed,
 }
 
@@ -1111,8 +1194,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn localhost_weixin_base_url_is_preserved_for_provider_tests() {
-        let mut provider = ImProviderConfig {
+    fn localhost_weixin_base_url_requires_explicit_debug_test_opt_in() {
+        let provider = ImProviderConfig {
             id: "weixin-local".to_string(),
             provider_type: ImProviderType::Weixin,
             display_name: "Weixin Local".to_string(),
@@ -1128,9 +1211,18 @@ mod tests {
             updated_at: 0,
         };
 
-        normalize_provider_base_url(&mut provider);
-
-        assert_eq!(provider.base_url.as_deref(), Some("http://127.0.0.1:12345"));
+        assert_eq!(
+            normalize_weixin_base_url_with_loopback(provider.base_url.as_deref(), false),
+            WEIXIN_BASE_URL
+        );
+        assert_eq!(
+            normalize_weixin_base_url_with_loopback(provider.base_url.as_deref(), true),
+            "http://127.0.0.1:12345"
+        );
+        assert_eq!(
+            normalize_weixin_base_url_with_loopback(Some("https://evil.example"), true),
+            WEIXIN_BASE_URL
+        );
     }
 
     #[test]

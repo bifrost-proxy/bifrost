@@ -15,8 +15,9 @@ use bifrost_core::Result;
 
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
-    ConnectionHandle, ConnectionState, ImEvent, ImEventMessage, ImEventSource, ImFileAttachment,
-    ImImageAttachment, ImImageSource, ImMention, ImProviderConfig, ImProviderType,
+    ConnectionHandle, ConnectionState, ImChannelCapabilities, ImConversationCapabilities, ImEvent,
+    ImEventMessage, ImEventSource, ImFileAttachment, ImImageAttachment, ImImageSource,
+    ImInteractionCapabilities, ImMention, ImProgressPresentation, ImProviderConfig, ImProviderType,
     ImSendCapabilities, ImSendPartCapability, ImSendSupportLevel, ImTarget, ProviderValidation,
     SendOptions, SendResult, UploadedImage,
 };
@@ -642,6 +643,27 @@ impl ImProvider for FeishuProvider {
                 ("native_card".into(), native(None)),
             ]),
             requires_context: false,
+        }
+    }
+
+    fn channel_capabilities(&self, config: &ImProviderConfig) -> ImChannelCapabilities {
+        ImChannelCapabilities {
+            send: self.send_capabilities(config),
+            interaction: ImInteractionCapabilities {
+                typing: false,
+                progress: ImProgressPresentation::MutableCard,
+                mutable_message: true,
+                native_reply: true,
+                reactions: true,
+                recall: true,
+            },
+            conversation: ImConversationCapabilities {
+                direct: true,
+                group: true,
+                thread: true,
+                mention: true,
+                requires_context: false,
+            },
         }
     }
 

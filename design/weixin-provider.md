@@ -1,6 +1,6 @@
 # Weixin IM Provider 方案
 
-> 当前文档描述已经在 `main` 落地的微信 Provider 行为。Typing、`run_id`、结构化工具进度、文件/视频/语音和 long-poll 可靠性改造的后续实施方案见 [`weixin-native-agent-experience.md`](./weixin-native-agent-experience.md)；在对应代码与验证合入前，本文件中的 unsupported/current-state 描述继续有效。
+> 当前文档描述 `main` 已有的微信 Provider 基线以及分支 `codex/weixin-native-agent-design` 正在落地的 Native Agent Experience。Typing、统一 `run_id`、结构化工具进度、文件/视频/语音和 long-poll 可靠性实现状态见 [`weixin-native-agent-experience.md`](./weixin-native-agent-experience.md)；PR 合入前，生产 `main` 仍以其代码 capability 为准。
 
 ## 背景
 

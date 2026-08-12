@@ -1078,6 +1078,7 @@ fn group_prompt_renders_mentions_attachments_and_empty_content_safely() {
             size_bytes: Some(12),
             data_base64: None,
             download_url: None,
+            ..Default::default()
         });
     let empty = group_event("a2", "render", "u2", "", Vec::new(), 2);
     let mentions = vec![
