@@ -227,7 +227,13 @@ upload_failure_path.write_text("upload should fail without failing the task", en
 runner_code = r'''
 import json
 import sys
+import time
 prompt = sys.stdin.read()
+if "HEARTBEAT_E2E" in prompt:
+    print(json.dumps({"type": "run_started", "content": "started", "session_id": "heartbeat-session-e2e"}), flush=True)
+    time.sleep(12)
+    print(json.dumps({"type": "assistant_final", "content": "E2E_HEARTBEAT_FINAL"}), flush=True)
+    raise SystemExit(0)
 if "FAIL_TERMINAL_E2E" in prompt:
     print(json.dumps({"type": "run_failed", "content": "E2E_PERMISSION_DENIED"}))
     print("E2E_PERMISSION_DENIED", file=sys.stderr)
@@ -237,7 +243,9 @@ if "ATTACHMENT_FAILURE_E2E" in prompt:
     print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_WITH_ATTACHMENT_FAILURE\n\n[E2E oversized file](%s)\n[E2E upload failure](%s)" % (sys.argv[4], sys.argv[5])}))
     raise SystemExit(0)
 print(json.dumps({"type": "run_started", "content": "started", "session_id": "terminal-session-e2e"}))
+print(json.dumps({"type": "assistant_delta", "content": "**E2E_REASONING_PREFIX**"}))
 print(json.dumps({"type": "assistant_delta", "content": "E2E_LATEST_EXPLANATION\n\n![E2E chart](%s)" % sys.argv[3]}))
+print(json.dumps({"type": "assistant_final", "content": "E2E_LATEST_EXPLANATION\n\n![E2E chart](%s)" % sys.argv[3]}))
 print(json.dumps({"type": "tool_started", "tool_name": "exec_command", "content": "verify archive"}))
 print(json.dumps({"type": "tool_finished", "tool_name": "exec_command", "arguments": "verify archive", "result": "ok", "success": True, "duration_ms": 5}))
 print(json.dumps({"type": "assistant_final", "content": "E2E_FINAL_SUMMARY_SUCCESS\n\n![E2E chart](%s)\n\n[E2E report](%s)\n[E2E archive](%s)\n[E2E config](%s)\n[E2E source file](%s)" % (sys.argv[3], sys.argv[1], sys.argv[2], sys.argv[6], sys.argv[7])}))
@@ -324,6 +332,23 @@ raise SystemExit(1 if any(item.get("running") is True for item in sessions) else
   return 1
 }
 
+wait_session_running() {
+  for _ in $(seq 1 240); do
+    if curl -fsS --noproxy '*' \
+      "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/agent/sessions/all?limit=80" \
+      | python3 -c '
+import json, sys
+sessions = json.load(sys.stdin).get("sessions", [])
+raise SystemExit(0 if any(item.get("running") is True for item in sessions) else 1)
+'; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  tail -160 "$BIFROST_LOG" >&2 || true
+  return 1
+}
+
 wait_message_count() {
   local expected="$1"
   for _ in $(seq 1 240); do
@@ -344,25 +369,32 @@ PY
   return 1
 }
 
+inject terminal-heartbeat "HEARTBEAT_E2E"
+wait_session_running
+wait_session_idle
+wait_message_count 2
 inject terminal-success "run terminal success e2e"
 wait_session_idle
-wait_message_count 5
+wait_message_count 7
 inject terminal-failure "FAIL_TERMINAL_E2E"
 wait_session_idle
-wait_message_count 7
+wait_message_count 9
 inject terminal-attachment-failure "ATTACHMENT_FAILURE_E2E"
 wait_session_idle
-wait_message_count 10
+wait_message_count 12
 
 python3 - "$FEISHU_REQUEST_LOG" <<'PY'
 import json
+import re
 import sys
 
 records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 messages = [record for record in records if "/im/v1/messages" in record["path"]]
-assert len(messages) == 10, messages
+assert len(messages) == 12, messages
 
 (
+    heartbeat_progress,
+    heartbeat_terminal,
     success_progress,
     success_terminal,
     success_report,
@@ -374,18 +406,21 @@ assert len(messages) == 10, messages
     attachment_terminal,
     attachment_notice,
 ) = messages
+assert heartbeat_progress["path"].endswith("/im/v1/messages/terminal-heartbeat/reply"), heartbeat_progress
+assert heartbeat_terminal["path"].endswith("/im/v1/messages/om_1/reply"), heartbeat_terminal
 assert success_progress["path"].endswith("/im/v1/messages/terminal-success/reply"), success_progress
-assert success_terminal["path"].endswith("/im/v1/messages/om_1/reply"), success_terminal
+assert success_terminal["path"].endswith("/im/v1/messages/om_3/reply"), success_terminal
 for index, file_message in enumerate([success_report, success_archive, success_config], 1):
     assert file_message["path"].split("?", 1)[0].endswith("/im/v1/messages"), file_message
     assert file_message["body"]["msg_type"] == "file", file_message
     assert f"file_terminal_e2e_{index}" in file_message["body"]["content"], file_message
 assert failure_progress["path"].endswith("/im/v1/messages/terminal-failure/reply"), failure_progress
-assert failure_terminal["path"].endswith("/im/v1/messages/om_6/reply"), failure_terminal
+assert failure_terminal["path"].endswith("/im/v1/messages/om_8/reply"), failure_terminal
 assert attachment_progress["path"].endswith("/im/v1/messages/terminal-attachment-failure/reply"), attachment_progress
-assert attachment_terminal["path"].endswith("/im/v1/messages/om_8/reply"), attachment_terminal
+assert attachment_terminal["path"].endswith("/im/v1/messages/om_10/reply"), attachment_terminal
 assert attachment_notice["path"].endswith("/im/v1/messages/terminal-attachment-failure/reply"), attachment_notice
 
+heartbeat_card = json.loads(heartbeat_terminal["body"]["content"])
 success_card = json.loads(success_terminal["body"]["content"])
 failure_card = json.loads(failure_terminal["body"]["content"])
 attachment_terminal_card = json.loads(attachment_terminal["body"]["content"])
@@ -394,6 +429,7 @@ supported_locales = {
     "zh_cn", "en_us", "ja_jp", "zh_hk", "zh_tw", "id_id", "vi_vn", "th_th",
     "pt_br", "es_es", "ko_kr", "de_de", "fr_fr", "it_it", "ru_ru", "ms_my",
 }
+assert "E2E_HEARTBEAT_FINAL" in json.dumps(heartbeat_card["body"], ensure_ascii=False), heartbeat_card
 assert success_card["header"]["template"] == "green", success_card
 assert success_card["header"]["title"]["content"] == "Task completed", success_card
 assert set(success_card["header"]["title"]["i18n_content"]) == supported_locales, success_card
@@ -425,12 +461,29 @@ updates = [
     and "data" in record["body"]["card"]
 ]
 rendered_updates = "\n".join(record["body"]["card"]["data"] for record in updates)
+assert "E2E_HEARTBEAT_FINAL" in rendered_updates, rendered_updates
 assert "E2E_FINAL_SUMMARY_SUCCESS" in rendered_updates, rendered_updates
 assert "E2E_PERMISSION_DENIED" in rendered_updates, rendered_updates
 assert "E2E_LATEST_EXPLANATION" in rendered_updates, rendered_updates
 assert "![E2E chart](img_v3_terminal_e2e)" in rendered_updates, rendered_updates
 assert "Session：获取中" in rendered_updates, rendered_updates
 assert "Session：未提供" in rendered_updates, rendered_updates
+
+heartbeat_output_updates = [
+    record for record in records
+    if record["method"] == "PUT"
+    and record["path"].split("?", 1)[0].endswith("/cardkit/v1/cards/card_1/elements/agent_output/content")
+]
+assert heartbeat_output_updates, records
+heartbeat_activity = heartbeat_output_updates[-1]["body"]["content"]
+assert re.search(r"处理中\.\.\. · 耗时：1[0-9] 秒 · 最后更新：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", heartbeat_activity), heartbeat_activity
+heartbeat_status_updates = [
+    record for record in records
+    if record["method"] == "PUT"
+    and record["path"].split("?", 1)[0].endswith("/cardkit/v1/cards/card_1/elements/agent_status_panel")
+]
+assert heartbeat_status_updates, records
+assert "最后更新：" in heartbeat_status_updates[-1]["body"]["element"], heartbeat_status_updates[-1]
 
 def terminal_progress_card(marker):
     candidates = [
@@ -452,11 +505,15 @@ for marker, title in [
     process = next((element for element in elements if element.get("element_id") == "agent_process_panel"), None)
     output = next(element for element in elements if element.get("element_id") == "agent_output")
     assert status["tag"] == "collapsible_panel" and status["expanded"] is False, status
+    assert summary is None, summary
+    assert "**最新进展**" not in json.dumps(progress_card, ensure_ascii=False), progress_card
     if marker == "E2E_FINAL_SUMMARY_SUCCESS":
-        assert summary is not None and "E2E_LATEST_EXPLANATION" in summary["content"], summary
-        assert "本轮工具：成功 1 · 失败 0 · 执行中 0" in summary["content"], summary
         assert process is not None and process["expanded"] is False, process
-        assert elements.index(summary) < elements.index(process), elements
+        assert "当前工具：暂无正在执行的工具" in process["header"]["title"]["content"], process
+        assert "本轮工具：成功 1 · 失败 0 · 执行中 0" in process["header"]["title"]["content"], process
+        process_text = json.dumps(process, ensure_ascii=False)
+        assert process_text.count("E2E_REASONING_PREFIX") == 1, process
+        assert process_text.count("E2E_LATEST_EXPLANATION") == 1, process
     assert output["tag"] == "collapsible_panel" and output["expanded"] is False, output
     assert output["header"]["title"]["content"] == title, output
     assert marker in json.dumps(output, ensure_ascii=False), output

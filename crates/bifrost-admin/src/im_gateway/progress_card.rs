@@ -1,9 +1,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tracing::{info, warn};
 
 use bifrost_agent::{
@@ -46,6 +48,7 @@ const FEISHU_CARD_STANDARD_MAX_BYTES: usize = 24 * 1024;
 const FEISHU_CARD_STANDARD_MAX_COMPONENTS: usize = 180;
 const FEISHU_CARD_RETRY_MAX_BYTES: usize = 16 * 1024;
 const FEISHU_CARD_RETRY_MAX_COMPONENTS: usize = 120;
+const FEISHU_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FeishuCardBudget {
@@ -103,12 +106,15 @@ pub struct ImAgentProgressSnapshot {
     pub phase: ImProgressPhase,
     pub turn_started_at: Option<u64>,
     pub turn_updated_at: Option<u64>,
+    card_started_at_ms: u64,
+    card_updated_at_ms: u64,
     render_total_steps: Option<usize>,
     render_total_tools: Option<usize>,
 }
 
 impl ImAgentProgressSnapshot {
     pub fn new(session_key: impl Into<String>, initial_message: &str) -> Self {
+        let now_ms = current_time_millis();
         Self {
             session_key: session_key.into(),
             title: Some(default_card_title(initial_message)),
@@ -128,9 +134,15 @@ impl ImAgentProgressSnapshot {
             phase: ImProgressPhase::Running,
             turn_started_at: None,
             turn_updated_at: None,
+            card_started_at_ms: now_ms,
+            card_updated_at_ms: now_ms,
             render_total_steps: None,
             render_total_tools: None,
         }
+    }
+
+    fn refresh_card_clock(&mut self, now_ms: u64) {
+        self.card_updated_at_ms = now_ms.max(self.card_started_at_ms);
     }
 
     pub fn apply_event(&mut self, event: AgentTurnProgressEvent) {
@@ -335,6 +347,11 @@ impl ImAgentProgressSnapshot {
             .last_mut()
             .filter(|item| item.kind == ProgressTimelineKind::Thinking)
         {
+            if assistant_text_has_terminal_suffix(&item.detail, &content) {
+                item.summary = truncate_one_line(&item.detail, 120);
+                self.last_thought = Some(item.detail.clone());
+                return;
+            }
             if assistant_texts_overlap(&item.detail, &content) {
                 item.summary = truncate_one_line(&content, 120);
                 item.detail = content.clone();
@@ -782,6 +799,7 @@ pub struct FeishuProgressCardSession {
     reply_in_thread: bool,
     message_history: Vec<ProgressCardMessageInfo>,
     turn_message_start: usize,
+    last_activity_at: Instant,
 }
 
 impl FeishuProgressCardSession {
@@ -804,6 +822,7 @@ impl FeishuProgressCardSession {
             reply_in_thread: false,
             message_history: Vec::new(),
             turn_message_start: 0,
+            last_activity_at: Instant::now(),
         }
     }
 
@@ -946,6 +965,33 @@ impl FeishuProgressCardSession {
         matches!(self.snapshot.phase, ImProgressPhase::Running)
     }
 
+    fn heartbeat_wait(&self, now: Instant) -> Option<Duration> {
+        if !matches!(self.snapshot.phase, ImProgressPhase::Running) || self.handle.is_none() {
+            return None;
+        }
+        Some(
+            FEISHU_PROGRESS_HEARTBEAT_INTERVAL
+                .saturating_sub(now.saturating_duration_since(self.last_activity_at)),
+        )
+    }
+
+    fn mark_card_activity(&mut self) {
+        self.last_activity_at = Instant::now();
+        self.snapshot.refresh_card_clock(current_time_millis());
+    }
+
+    async fn refresh_heartbeat_if_due(&mut self, now: Instant) -> Result<bool> {
+        let Some(wait) = self.heartbeat_wait(now) else {
+            return Ok(false);
+        };
+        if !wait.is_zero() {
+            return Ok(false);
+        }
+        self.mark_card_activity();
+        self.flush_heartbeat_elements().await?;
+        Ok(true)
+    }
+
     async fn rollover_snapshot(&mut self, freeze_notice: &str) -> Result<()> {
         let previous_handle = self.handle.clone();
         let previous_snapshot = self.snapshot.clone();
@@ -1055,6 +1101,7 @@ impl FeishuProgressCardSession {
     }
 
     async fn send_initial_card(&mut self) -> Result<SendResult> {
+        self.mark_card_activity();
         self.generation = self.generation.saturating_add(1);
         self.compact_card_mode = false;
         self.card_budget = FEISHU_CARD_STANDARD_BUDGET;
@@ -1397,6 +1444,50 @@ impl FeishuProgressCardSession {
         Ok(())
     }
 
+    async fn flush_heartbeat_elements(&mut self) -> Result<()> {
+        let Some(handle) = self.handle.as_mut() else {
+            return Ok(());
+        };
+        let output_content = if self.compact_card_mode {
+            format_compact_output_markdown(&self.snapshot)
+        } else {
+            format_output_markdown(&self.snapshot)
+        };
+        let (sequence, uuid) = handle.next_sequence();
+        self.feishu
+            .update_card_element_content(
+                &self.provider,
+                &handle.card_id,
+                OUTPUT_ELEMENT_ID,
+                &output_content,
+                sequence,
+                &uuid,
+            )
+            .await?;
+
+        let status_element = build_status_panel_element(&self.snapshot);
+        let (sequence, uuid) = handle.next_sequence();
+        self.feishu
+            .update_card_element(
+                &self.provider,
+                &handle.card_id,
+                STATUS_PANEL_ELEMENT_ID,
+                status_element,
+                sequence,
+                &uuid,
+            )
+            .await?;
+
+        if self.compact_card_mode {
+            handle.rendered_output_hash = compact_card_hash(&self.snapshot, true);
+            handle.rendered_status_hash = compact_status_hash(&self.snapshot);
+        } else {
+            handle.rendered_output_hash = stable_hash(&output_content);
+            handle.rendered_status_hash = status_hash(&self.snapshot);
+        }
+        Ok(())
+    }
+
     async fn replace_current_card_after_limit(&mut self, force_compact: bool) -> Result<()> {
         let budgeted = if force_compact {
             BudgetedProgressCard {
@@ -1454,6 +1545,7 @@ impl FeishuProgressCardSession {
     }
 
     async fn flush_snapshot_with_limit_rollover(&mut self, freeze_notice: &str) -> Result<()> {
+        self.mark_card_activity();
         match self.flush_snapshot().await {
             Ok(()) => Ok(()),
             Err(error) if is_feishu_card_limit_error(&error) && self.handle.is_some() => {
@@ -1526,6 +1618,65 @@ impl ImAgentProgressRegistry {
         Self::default()
     }
 
+    fn register_feishu_session(
+        &self,
+        session_key: &str,
+        session: Arc<Mutex<FeishuProgressCardSession>>,
+    ) {
+        self.sessions
+            .insert(session_key.to_string(), Arc::clone(&session));
+        self.spawn_feishu_heartbeat(session_key.to_string(), session);
+    }
+
+    fn spawn_feishu_heartbeat(
+        &self,
+        session_key: String,
+        session: Arc<Mutex<FeishuProgressCardSession>>,
+    ) {
+        let sessions = Arc::clone(&self.sessions);
+        tokio::spawn(async move {
+            loop {
+                let is_current = sessions
+                    .get(&session_key)
+                    .map(|entry| Arc::ptr_eq(entry.value(), &session))
+                    .unwrap_or(false);
+                if !is_current {
+                    return;
+                }
+                let wait = {
+                    let guard = session.lock().await;
+                    guard.heartbeat_wait(Instant::now())
+                };
+                let Some(wait) = wait else {
+                    return;
+                };
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
+                }
+
+                let is_current = sessions
+                    .get(&session_key)
+                    .map(|entry| Arc::ptr_eq(entry.value(), &session))
+                    .unwrap_or(false);
+                if !is_current {
+                    return;
+                }
+                let result = session
+                    .lock()
+                    .await
+                    .refresh_heartbeat_if_due(Instant::now())
+                    .await;
+                if let Err(error) = result {
+                    warn!(
+                        session_key = session_key,
+                        error = %error,
+                        "failed to refresh idle Feishu progress card heartbeat"
+                    );
+                }
+            }
+        });
+    }
+
     pub async fn start_feishu(
         &self,
         session_key: &str,
@@ -1557,8 +1708,7 @@ impl ImAgentProgressRegistry {
         );
         session.start().await?;
         let session = Arc::new(Mutex::new(session));
-        self.sessions
-            .insert(session_key.to_string(), Arc::clone(&session));
+        self.register_feishu_session(session_key, Arc::clone(&session));
         Ok(session)
     }
 
@@ -1581,8 +1731,7 @@ impl ImAgentProgressRegistry {
         );
         session.start().await?;
         let session = Arc::new(Mutex::new(session));
-        self.sessions
-            .insert(session_key.to_string(), Arc::clone(&session));
+        self.register_feishu_session(session_key, Arc::clone(&session));
         Ok(session)
     }
 
@@ -1965,7 +2114,7 @@ pub fn build_feishu_compact_progress_card(
     streaming_mode: bool,
 ) -> serde_json::Value {
     let mut elements = vec![build_status_panel_element(snapshot)];
-    if has_process_state(snapshot) {
+    if has_process_state(snapshot) && matches!(snapshot.phase, ImProgressPhase::Running) {
         elements.push(build_process_summary_element(snapshot));
     }
     elements.push(build_compact_notice_element(snapshot));
@@ -2290,7 +2439,7 @@ fn is_feishu_card_id_invalid_error(error: &BifrostError) -> bool {
 
 fn format_output_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
     if snapshot.output.trim().is_empty() {
-        return "处理中...".to_string();
+        return format_running_activity_line(snapshot);
     }
     crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&snapshot.output)
 }
@@ -2357,12 +2506,30 @@ fn format_compact_output_markdown(snapshot: &ImAgentProgressSnapshot) -> String 
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        return format!(
-            "**最新进展**\n\n{}",
-            convert_progress_prose_to_feishu_markdown(thought, Some(600))
-        );
+        let thought = convert_progress_prose_to_feishu_markdown(thought, Some(600));
+        if !matches!(snapshot.phase, ImProgressPhase::Running) {
+            return thought;
+        }
+        // The running compact card already renders this thought in the
+        // dedicated process summary. Keep the bottom element for liveness so
+        // the same prose does not consume vertical space twice.
+        return format_running_activity_line(snapshot);
     }
-    "处理中...".to_string()
+    if matches!(snapshot.phase, ImProgressPhase::Running) {
+        format_running_activity_line(snapshot)
+    } else {
+        "暂无最终结论".to_string()
+    }
+}
+
+fn format_running_activity_line(snapshot: &ImAgentProgressSnapshot) -> String {
+    let elapsed = progress_elapsed_seconds(snapshot)
+        .map(format_progress_elapsed_duration)
+        .unwrap_or_else(|| "0 秒".to_string());
+    format!(
+        "处理中... · 耗时：{elapsed} · 最后更新：{}",
+        format_progress_local_timestamp(snapshot.card_updated_at_ms)
+    )
 }
 
 fn compact_summary(snapshot: &ImAgentProgressSnapshot) -> String {
@@ -2513,7 +2680,9 @@ fn append_process_elements(
     if !has_process_state(snapshot) {
         return;
     }
-    elements.push(build_process_summary_element(snapshot));
+    if matches!(snapshot.phase, ImProgressPhase::Running) {
+        elements.push(build_process_summary_element(snapshot));
+    }
     elements.push(build_process_panel_element(snapshot));
 }
 
@@ -2526,12 +2695,6 @@ fn build_process_summary_element(snapshot: &ImAgentProgressSnapshot) -> serde_js
 }
 
 fn format_process_summary_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
-    let round_start = snapshot
-        .timeline
-        .iter()
-        .rposition(|item| item.kind == ProgressTimelineKind::Thinking)
-        .unwrap_or(0);
-    let round_items = &snapshot.timeline[round_start..];
     let latest_explanation = snapshot
         .timeline
         .iter()
@@ -2539,12 +2702,20 @@ fn format_process_summary_markdown(snapshot: &ImAgentProgressSnapshot) -> String
         .find(|item| item.kind == ProgressTimelineKind::Thinking)
         .map(|item| convert_progress_prose_to_feishu_markdown(&item.detail, Some(360)))
         .unwrap_or_else(|| "等待模型输出下一步说明。".to_string());
+    format!("**最新进展**\n\n{latest_explanation}")
+}
 
+fn process_round_tool_status(snapshot: &ImAgentProgressSnapshot) -> (String, usize, usize, usize) {
+    let round_start = snapshot
+        .timeline
+        .iter()
+        .rposition(|item| item.kind == ProgressTimelineKind::Thinking)
+        .unwrap_or(0);
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut running = 0usize;
     let mut running_tools = Vec::<(String, usize)>::new();
-    for item in round_items
+    for item in snapshot.timeline[round_start..]
         .iter()
         .filter(|item| item.kind == ProgressTimelineKind::Tool)
     {
@@ -2570,9 +2741,9 @@ fn format_process_summary_markdown(snapshot: &ImAgentProgressSnapshot) -> String
         .map(|(name, count)| {
             let name = truncate_one_line(name, 28);
             if *count > 1 {
-                format!("`{name}` ×{count}")
+                format!("{name} ×{count}")
             } else {
-                format!("`{name}`")
+                name
             }
         })
         .collect::<Vec<_>>();
@@ -2584,10 +2755,7 @@ fn format_process_summary_markdown(snapshot: &ImAgentProgressSnapshot) -> String
     if running_tools.len() > 3 {
         current_tools.push_str(&format!("，等 {} 个", running_tools.len() - 3));
     }
-
-    format!(
-        "**最新进展**\n\n{latest_explanation}\n\n当前工具：{current_tools}\n本轮工具：成功 {succeeded} · 失败 {failed} · 执行中 {running}"
-    )
+    (current_tools, succeeded, failed, running)
 }
 
 fn build_process_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
@@ -2812,11 +2980,15 @@ fn format_process_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
         ImProgressPhase::Finished => "执行过程",
         ImProgressPhase::Failed => "失败前过程",
     };
-    if step_count == 0 {
+    let (current_tools, succeeded, failed, running) = process_round_tool_status(snapshot);
+    let process_counts = if step_count == 0 {
         base.to_string()
     } else {
         format!("{base}：共 {step_count} 步 · 工具 {tool_count} 次")
-    }
+    };
+    format!(
+        "{process_counts} · 当前工具：{current_tools} · 本轮工具：成功 {succeeded} · 失败 {failed} · 执行中 {running}"
+    )
 }
 
 fn format_process_tool_panel_title(item: &ProgressTimelineItem) -> String {
@@ -3433,14 +3605,12 @@ fn progress_elapsed_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
 }
 
 fn progress_elapsed_seconds(snapshot: &ImAgentProgressSnapshot) -> Option<u64> {
-    let started_at = snapshot
+    let started_at_ms = snapshot
         .turn_started_at
-        .or_else(|| snapshot.status.as_ref().map(|status| status.started_at))?;
-    let updated_at = snapshot
-        .turn_updated_at
-        .or_else(|| snapshot.status.as_ref().map(|status| status.updated_at))
-        .unwrap_or(started_at);
-    Some(updated_at.saturating_sub(started_at))
+        .or_else(|| snapshot.status.as_ref().map(|status| status.started_at))
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .unwrap_or(snapshot.card_started_at_ms);
+    Some(snapshot.card_updated_at_ms.saturating_sub(started_at_ms) / 1_000)
 }
 
 fn format_progress_elapsed_duration(seconds: u64) -> String {
@@ -3450,26 +3620,30 @@ fn format_progress_elapsed_duration(seconds: u64) -> String {
     let minutes = seconds / 60;
     let remaining_seconds = seconds % 60;
     if minutes < 60 {
-        if remaining_seconds == 0 {
-            return format!("{minutes} 分");
-        }
         return format!("{minutes} 分 {remaining_seconds:02} 秒");
     }
     let hours = minutes / 60;
     let remaining_minutes = minutes % 60;
     if hours < 24 {
-        if remaining_minutes == 0 {
-            return format!("{hours} 小时");
-        }
-        return format!("{hours} 小时 {remaining_minutes:02} 分");
+        return format!("{hours} 小时 {remaining_minutes:02} 分 {remaining_seconds:02} 秒");
     }
     let days = hours / 24;
     let remaining_hours = hours % 24;
-    if remaining_hours == 0 {
-        format!("{days} 天")
-    } else {
-        format!("{days} 天 {remaining_hours} 小时")
-    }
+    format!(
+        "{days} 天 {remaining_hours:02} 小时 {remaining_minutes:02} 分 {remaining_seconds:02} 秒"
+    )
+}
+
+fn format_progress_local_timestamp(timestamp_ms: u64) -> String {
+    let timestamp_ms = i64::try_from(timestamp_ms).unwrap_or(i64::MAX);
+    chrono::DateTime::from_timestamp_millis(timestamp_ms)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| "时间未知".to_string())
 }
 
 fn external_runner_state_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
@@ -3654,9 +3828,9 @@ fn format_tool_details_markdown(
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
         let session_id = external_runner_session_id(snapshot).map(|session_id| truncate_one_line(session_id, 80)).map(|session_id| if session_id.contains('`') { format!(" · Session ID：{}", session_id.replace('`', "\\`")) } else { format!(" · Session ID：`{session_id}`") }).unwrap_or_default();
-        return format!("{}状态：{}{}{}\nRunner：`{}` · Adapter：`{}`{}\n模型：{}{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}", prefix, phase, state_line, elapsed_line, external_runner_id(snapshot), external_runner_adapter(snapshot), session_id, external_runner_model_label(snapshot), reasoning_line, token_line, weekly_line, context_line, external_runner_conversation_ref(snapshot), queue_text, guide_text, external_runner_work_dir(snapshot).unwrap_or("N/A"), tool_line);
+        return append_progress_last_updated(format!("{}状态：{}{}{}\nRunner：`{}` · Adapter：`{}`{}\n模型：{}{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}", prefix, phase, state_line, elapsed_line, external_runner_id(snapshot), external_runner_adapter(snapshot), session_id, external_runner_model_label(snapshot), reasoning_line, token_line, weekly_line, context_line, external_runner_conversation_ref(snapshot), queue_text, guide_text, external_runner_work_dir(snapshot).unwrap_or("N/A"), tool_line), snapshot);
     }
-    match &snapshot.status {
+    let footer = match &snapshot.status {
         Some(status) => {
             let token_text = status
                 .total_tokens_used
@@ -3758,7 +3932,15 @@ fn format_tool_details_markdown(
                 )
             }
         }
-    }
+    };
+    append_progress_last_updated(footer, snapshot)
+}
+
+fn append_progress_last_updated(footer: String, snapshot: &ImAgentProgressSnapshot) -> String {
+    format!(
+        "{footer}\n最后更新：{}",
+        format_progress_local_timestamp(snapshot.card_updated_at_ms)
+    )
 }
 
 fn merge_streaming_assistant_text(existing: &str, incoming: &str) -> String {
@@ -3787,6 +3969,12 @@ fn assistant_texts_overlap(left: &str, right: &str) -> bool {
     let left = assistant_text_comparison_key(left);
     let right = assistant_text_comparison_key(right);
     !left.is_empty() && !right.is_empty() && (left.starts_with(&right) || right.starts_with(&left))
+}
+
+fn assistant_text_has_terminal_suffix(streamed: &str, terminal: &str) -> bool {
+    let streamed = assistant_text_comparison_key(streamed);
+    let terminal = assistant_text_comparison_key(terminal);
+    !terminal.is_empty() && streamed.len() > terminal.len() && streamed.ends_with(&terminal)
 }
 
 fn assistant_texts_equivalent(left: &str, right: &str) -> bool {

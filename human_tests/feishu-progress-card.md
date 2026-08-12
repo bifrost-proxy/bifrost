@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；执行过程默认折叠，折叠栏上方常驻最新公开解释、当前工具和本轮成功/失败/执行中统计，折叠标题区分总体步骤数与工具调用次数。过程输出中的 Markdown 图片需先上传飞书并以 `image_key` 原位渲染。任务结束后，原任务卡的状态摘要、任务计划/实施方案、执行过程和最终结论统一默认折叠；原任务卡结论与另发的完整终态卡复用同一 `image_key`，不补发重复的独立图片消息。随后另发的成功卡显示多语言“任务执行结束 / Task completed”等标题并包含最后一次最终总结，失败卡显示多语言失败标题并包含异常原因；终态卡直接引用刚结束的任务卡，并继续自动上传和发送最终总结显式引用的本地文档与压缩包。卡片折叠面板使用飞书主题自适应默认背景/文本色，需在亮色和暗色主题下保持可读。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
+本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；Codex 依次输出公开 reasoning summary、commentary delta 和相同 commentary final 时，每段过程只展示一次。执行过程默认折叠：运行态“最新进展”只展示最新公开解释，当前工具和本轮成功/失败/执行中统计合并到“执行过程”折叠标题单行展示；最终结论出现后移除“最新进展”。运行中若连续 10 秒没有模型事件，session 保活循环必须局部刷新卡片；底部展示设备本地时间的“处理中... · 耗时：天/时/分/秒 · 最后更新：YYYY-MM-DD HH:mm:ss”，方便判断任务是否仍活跃。过程输出中的 Markdown 图片需先上传飞书并以 `image_key` 原位渲染。任务结束后，原任务卡的状态摘要、任务计划/实施方案、执行过程和最终结论统一默认折叠；原任务卡结论与另发的完整终态卡复用同一 `image_key`，不补发重复的独立图片消息。随后另发的成功卡显示多语言“任务执行结束 / Task completed”等标题并包含最后一次最终总结，失败卡显示多语言失败标题并包含异常原因；终态卡直接引用刚结束的任务卡，并继续自动上传和发送最终总结显式引用的本地文档与压缩包。卡片折叠面板使用飞书主题自适应默认背景/文本色，需在亮色和暗色主题下保持可读。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。Runner/Adapter 状态行还需在目标 Runner 创建 session 后立即展示其 Session ID；Codex 顶部状态展示 thread/session 累计 Token、7 天额度余额和任务耗时；长过程卡片把旧工具退化为名称、状态、耗时组成的步骤摘要，仅保留最近 5 次工具详情，超预算时按“思考/状态 + 对应工具”完整执行段裁剪。
 
 ## 前置条件
 
@@ -197,7 +197,7 @@
 **操作步骤**：
 1. 执行当前轮摘要、Session 三态、主题颜色和归档扩展名单元回归：
    ```bash
-   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib feishu_progress_card_collapses_process_with_current_round_summary -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib feishu_progress_card_collapses_process_with_inline_current_round_status -- --nocapture
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib external_runner_status_title_exposes_session_id_lifecycle -- --nocapture
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib generated_feishu_cards_use_theme_adaptive_colors -- --nocapture
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib agent_reply_collects_local_and_remote_archive_attachments -- --nocapture
@@ -210,8 +210,10 @@
 3. 若当前租户凭据可用，在飞书客户端分别切换亮色/暗色主题，查看运行态摘要、手动展开过程面板、成功终态和失败终态；再触发一次进度更新确认面板仍可操作。若凭据不可用，记录未执行线上截图，使用步骤 1/2 的完整 CardKit JSON 契约作为本地验证证据。
 
 **预期结果**：
-- 运行过程 `agent_process_panel` 初始 `expanded=false`，其前方 `agent_process_sum` 展示最后一次公开解释、最多三个正在运行的工具类型和本轮成功/失败/执行中次数；展开后原时间线与工具详情完整。
-- 折叠标题展示“共 N 步 · 工具 M 次”，不再把工具数误称为全部步骤数。
+- 运行过程 `agent_process_panel` 初始 `expanded=false`，其前方 `agent_process_sum` 只展示最后一次公开解释；当前工具（最多三个类型）和本轮成功/失败/执行中次数合并进过程折叠标题，在一行展示；展开后原时间线与工具详情完整。
+- 运行态精简卡中的最新解释也只出现一次；底部 `agent_output` 只展示“处理中”活动时间行，不重复最新解释。
+- 最终结论或失败结论出现后，standard 与 compact 原任务卡均不再包含 `agent_process_sum` 或“最新进展”；过程面板和最终结论仍保留且默认折叠。
+- 折叠标题展示“共 N 步 · 工具 M 次”及当前轮工具状态，不再把工具数误称为全部步骤数。
 - 外部 Runner Session ID 在 live metadata 到达后立即刷新；无 ID 的运行/终态分别显示“获取中/未提供”。
 - 本地和远程 `tar.gz/tgz/tar.xz/tar.zst/7z/rar` 等显式链接被识别为文件附件；黑盒 E2E 的 `.txt` 与 `.tar.gz` 均真实调用上传并各发送一条文件消息。
 - 所有折叠面板均为 `background_color=default`，标题为 `text_color=default`；payload 不含固定 `grey`、黑白、十六进制或 RGB/RGBA 样式。亮色/暗色客户端均可读；无租户凭据时不伪造线上截图结论。
@@ -299,6 +301,49 @@
 - `.env` 等未列入配置白名单且可能携带敏感凭据的文件不因后缀自动发送；系统不扫描工作目录，只处理最终回复显式链接。
 - 配置附件继续受普通文件、去重、30 MiB 与非阻塞失败规则约束，不改变任务成功状态。
 
+### TC-FPC-16：Codex reasoning 前缀后的 commentary 终态快照不重复
+
+**操作步骤**：
+1. 执行聚焦单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib assistant_final_does_not_repeat_commentary_after_reasoning_prefix -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib assistant_stream_keeps_repeated_tokens_and_word_boundaries -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib assistant_stream_fragments_are_coalesced_and_terminal_duplicate_is_removed -- --nocapture
+   ```
+2. 使用当前源码构建 debug Bifrost，并执行隔离 Service + mock Runner + loopback Feishu OpenAPI 黑盒链路：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+3. 检查终态原任务卡：不再包含 `agent_process_sum` / “最新进展”；`agent_process_panel` 标题单行包含当前工具与本轮三态计数，其详情中的 `E2E_REASONING_PREFIX` 与 `E2E_LATEST_EXPLANATION` 各只出现一次，工具详情和最终结论仍正常。
+
+**预期结果**：
+- `reasoning summary → commentary delta → 相同 commentary final` 归并为一条 thinking item，final 被识别为已经存在的规范化后缀，不再追加第二份 commentary，也不丢失前面的 reasoning summary。
+- 工具事件形成边界后，下一轮相同序列仍独立归并且不重复。
+- 普通 `AssistantDelta` 的合法重复 token 不被全局去重，`"哈" + "哈" + " " + "done"` 仍为 `"哈哈 done"`。
+- mock Feishu 收到的完整 CardKit JSON 中过程面板无重复 marker，终态没有“最新进展”，工具状态合并进过程标题；终态通知、图片上传复用、附件发送和失败降级既有行为不退化。
+
+### TC-FPC-17：10 秒静默保活、精细耗时与设备最后更新时间
+
+**操作步骤**：
+1. 执行进度卡聚焦单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test -p bifrost-admin --lib progress_card -- --nocapture
+   ```
+2. 使用当前源码构建 debug Bifrost，并执行包含静默 Runner 的隔离黑盒链路：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo build --bin bifrost
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+3. mock Runner 先发送 `run_started`，随后静默 12 秒再发送 `E2E_HEARTBEAT_FINAL`；检查 `card_1` 在终态前是否自动收到 `agent_output` 与 `agent_status_panel` 元素更新。
+4. 检查底部活动行和状态摘要中的时间；再检查终态后 session 的保活条件已关闭。
+
+**预期结果**：
+- 任意运行态可见刷新后连续 10 秒无新事件时自动刷新；新模型事件会重置 10 秒静默窗口，不在固定整点无条件刷卡。
+- 保活只更新稳定元素，不新增 thinking/status/tool timeline，不创建新消息或新卡片；同一 session 被替换、完成、失败或没有卡片句柄时停止。
+- 底部单行符合 `处理中... · 耗时：... · 最后更新：YYYY-MM-DD HH:mm:ss`，最后更新时间使用 Bifrost 所在设备本地时区并在每次刷新时推进。
+- 耗时依次显示 `10 秒`、`1 分 05 秒`、`1 小时 03 分 01 秒`、`1 天 01 小时 01 分 01 秒`；不展示 `0 天` 等前导零高位单位，高位出现后保留两位低位字段。
+- 静默 12 秒的真实 Service + mock Runner + mock Feishu 链路至少产生一次 10 秒保活更新，随后终态结论、Reason 去重、终态密度、图片与附件行为继续通过。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
@@ -307,6 +352,12 @@
 ## 执行记录
 
 - 2026-08-12：PASS（TC-FPC-15 配置附件与源码排除）— 在独立 `codex/feishu-config-attachments` worktree、最新 `origin/main@8820d5ef` 上执行。`agent_reply_collects_config_attachments_but_excludes_source_code` 聚焦单测通过，覆盖本地 `next-harness.yaml`、远程 `filename=service.TOML`、YAML/TOML/XML MIME、全部配置扩展名与大小写，以及显式 `source file` 标签、受信下载域名、URL 编码的 `worker%2Epy` 均不能绕过源码拒绝；`.env.production`、`credentials/secrets` 和私钥文件名即使带宽泛 `file` 标签也被拒绝。随后构建当前 debug 二进制并执行隔离 Service + mock Runner + loopback Feishu OpenAPI，黑盒 E2E PASS：成功任务新增 `next-harness.yaml` multipart 上传与 `msg_type=file` 消息，`terminal-e2e-handler.rs` 未进入 `/im/v1/files`，既有 `.txt`、`.tar.gz`、内联图片、30 MiB 预检和上传失败非阻塞提示全部保持通过。第 1 轮 review 补强敏感配置与 URL 编码边界后，聚焦单测和同一黑盒 E2E 均再次通过。首次独立 worktree 构建因磁盘只余 240 MiB 报 `errno=28`；仅清理该 worktree 5.9 GiB 可再生成 target 和共享 target 的 Cargo incremental 缓存后，以 `CARGO_INCREMENTAL=0` 增量构建复跑通过，未删除源码、用户数据、release 产物或现有 debug 二进制。
+
+- 2026-08-12：PASS（TC-FPC-17 静默保活与时间可观测性）— 更新用例后立即执行 111 项 progress card 聚焦单测，结果全通过；覆盖 10 秒静默阈值、9 秒时剩余 1 秒、Finished 后停止、本地 `YYYY-MM-DD HH:mm:ss` 格式，以及秒/分秒/时分秒/天时分秒规则。随后用当前 debug Bifrost 执行隔离 Service + 静默 12 秒 mock Runner + loopback Feishu OpenAPI 黑盒 E2E，结果 PASS：`card_1` 在终态前局部更新 `agent_output` 和 `agent_status_panel`，底部出现 10+ 秒耗时与设备本地最后更新时间，未新增过程条目；12 秒后正常发布 `E2E_HEARTBEAT_FINAL`，既有 Reason 去重、终态隐藏“最新进展”、工具状态单行、图片/附件及失败降级断言全部通过，测试 trap 已清理进程和临时目录。
+
+- 2026-08-12：PASS（TC-FPC-11/16 终态密度与 Reason 去重联合回归）— 更新用例后立即执行 6 项聚焦单测，验证运行态 `agent_process_sum` 只保留最新公开解释，当前工具与本轮成功/失败/执行中统计合并进 `agent_process_panel` 标题单行展示，成功/失败的 standard 与 compact 终态卡均移除 `agent_process_sum` / “最新进展”；Reason/commentary 后缀去重、工具边界和合法重复 token 同时通过。随后以 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1` 构建当前源码的 debug Bifrost，并执行隔离 Service + mock Runner + loopback Feishu OpenAPI 黑盒 E2E，结果 PASS：终态过程标题包含“当前工具：暂无正在执行的工具 · 本轮工具：成功 1 · 失败 0 · 执行中 0”，`E2E_REASONING_PREFIX` 与 `E2E_LATEST_EXPLANATION` 在过程详情各出现一次，图片复用、终态通知、附件发送和非阻塞失败提示保持通过；测试 trap 已清理所属进程和临时目录。
+
+- 2026-08-12：PASS（TC-FPC-16 Codex Reason/commentary 重复回归）— 截图、真实 CardKit payload 和 Codex rollout 共同确认旧卡片把公开 reasoning summary、commentary delta 合并后，又把相同 commentary final 追加成第二条。更新用例后立即逐条执行：`assistant_final_does_not_repeat_commentary_after_reasoning_prefix`、合法重复 token 和既有终态归并 3 个聚焦单测全部通过。隔离 Service + mock Runner + loopback Feishu OpenAPI 黑盒 E2E 首次因独立 worktree 的 Cargo debug 构建占满磁盘而失败（`No space left on device`）；仅清理该 worktree 2.9 GiB 可再生 incremental 缓存后，以 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1` 原命令重跑通过。最终原任务卡 `agent_process_panel` 中 `E2E_REASONING_PREFIX` 与 `E2E_LATEST_EXPLANATION` 各出现一次，折叠摘要、工具详情、图片复用、终态通知、附件发送及非阻塞失败提示均保持通过；测试 trap 已清理隔离服务和临时目录。
 
 - 2026-08-11：PASS（TC-FPC-14 执行过程可读性回归）— 截图与群消息 `om_x100b688669cf78b8c2a0077a2205800` 先确认旧卡将普通单换行折叠为空格，造成 `select_page` / `evaluate_script` 等历史步骤和公开解释粘成一整行。更新用例后立即逐条执行：历史 30 工具窗口、旧工具列表与 300 字符详情裁剪 3 个聚焦单测全部通过；`im_gateway_progress_card_budget_and_codex_resources` renderer E2E 通过，直接断言 `agent_process_log` 中公开解释与 `- \`tool_N\` · 完成 · 10ms` 之间存在空段落，最后一个工具详情保留 `LATEST_MARKER\nSECOND_OUTPUT_LINE`，完整 CardKit JSON 仍小于 24 KiB，最近 5 次可展开详情、主题自适应和裁剪边界不变。首次 E2E 构建因磁盘仅余 396 MiB 在链接阶段报 `errno=28`，仅清理 `bifrost-e2e` 可再生成构建缓存后重跑；随后一次断言误在 JSON 序列化字符串中匹配真实换行，改为读取详情组件 `content` 后复跑通过。当前运行中的正式 Bifrost 仍是修复前二进制，未重启承载本 Agent 的服务，因此未伪造修复后飞书客户端截图结论；线上肉眼复核留待新版本部署后执行。
 
