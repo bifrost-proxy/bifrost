@@ -224,5 +224,11 @@ mod event_sink_tests {
         sink.persist_and_send(event("new")).unwrap();
         assert_eq!(receiver.try_recv().unwrap().event_id, "new");
         assert_eq!(store.pending_by_provider("provider").len(), 2);
+
+        let (closed_sender, closed_receiver) = mpsc::unbounded_channel();
+        drop(closed_receiver);
+        let closed_sink =
+            EventSink::with_durable_store(closed_sender, Arc::clone(&store), "provider");
+        assert!(closed_sink.is_closed());
     }
 }

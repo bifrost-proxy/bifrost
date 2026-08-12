@@ -465,6 +465,7 @@ mod tests {
         pending_event.provider_id = "weixin-pending".to_string();
 
         store.add_pending(&pending_event).unwrap();
+        store.add_pending(&pending_event).unwrap();
         let disk = std::fs::read_to_string(&store.pending_path).unwrap();
         assert!(!disk.contains("image-query-secret"));
         assert!(!disk.contains("pending-1"));
@@ -488,6 +489,7 @@ mod tests {
         restarted.add_pending(&pending_event).unwrap();
         let mut deferred = restarted.pending_completion(&pending_event);
         deferred.defer();
+        deferred.complete();
         drop(deferred);
         assert_eq!(restarted.pending_by_provider("weixin-pending").len(), 1);
         restarted.complete_pending(&pending_event).unwrap();
@@ -525,6 +527,22 @@ mod tests {
         store.pending_path = blocked_target;
         assert!(store.add_pending(&event("blocked-target")).is_err());
         assert!(store.pending.read().entries.is_empty());
+    }
+
+    #[test]
+    fn pending_completion_keeps_event_when_ack_persistence_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Arc::new(ImEventStore::new(temp.path()));
+        let pending_event = event("ack-failure");
+        store.add_pending(&pending_event).unwrap();
+        let blocked_target = temp.path().join("blocked-ack-target");
+        std::fs::create_dir_all(&blocked_target).unwrap();
+        Arc::get_mut(&mut store).unwrap().pending_path = blocked_target;
+
+        let mut completion = store.pending_completion(&pending_event);
+        completion.complete();
+
+        assert_eq!(store.pending_by_provider("weixin-main").len(), 1);
     }
 
     #[test]
