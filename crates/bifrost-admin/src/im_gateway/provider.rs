@@ -60,6 +60,37 @@ impl From<mpsc::UnboundedSender<ImEvent>> for EventSink {
     }
 }
 
+#[cfg(test)]
+mod event_sink_tests {
+    use super::*;
+
+    fn event(event_id: &str) -> ImEvent {
+        ImEvent {
+            event_id: event_id.to_string(),
+            provider_id: "provider".to_string(),
+            provider_type: ImProviderType::Weixin,
+            event_type: "message.receive".to_string(),
+            source: Default::default(),
+            message: None,
+            received_at: 1,
+            raw_digest: None,
+        }
+    }
+
+    #[test]
+    fn send_delivers_open_channel_and_returns_closed_channel_event() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let sink = EventSink::from(sender);
+
+        sink.send(event("delivered")).unwrap();
+        assert_eq!(receiver.try_recv().unwrap().event_id, "delivered");
+
+        drop(receiver);
+        let error = sink.send(event("closed")).unwrap_err();
+        assert_eq!(error.0.event_id, "closed");
+    }
+}
+
 #[async_trait]
 pub trait ImProvider: Send + Sync {
     fn provider_type(&self) -> ImProviderType;

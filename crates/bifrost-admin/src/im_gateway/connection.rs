@@ -460,6 +460,114 @@ mod tests {
         assert!(connected.last_error.is_none());
     }
 
+    #[test]
+    fn generation_guard_ignores_missing_and_stale_connections_then_updates_current_one() {
+        let connections = Arc::new(RwLock::new(HashMap::new()));
+        update_connection_state_if_generation(
+            &connections,
+            "missing",
+            1,
+            ConnectionState::Reconnecting,
+            Some("missing".to_string()),
+        );
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        connections.write().insert(
+            "weixin-main".to_string(),
+            ManagedConnection {
+                provider_id: "weixin-main".to_string(),
+                handle: ConnectionHandle { shutdown_tx },
+                status: ConnectionStatus::default(),
+                generation: 7,
+            },
+        );
+        update_connection_state_if_generation(
+            &connections,
+            "weixin-main",
+            6,
+            ConnectionState::Reconnecting,
+            Some("stale".to_string()),
+        );
+        assert_eq!(
+            connections.read()["weixin-main"].status.state,
+            ConnectionState::Disconnected
+        );
+
+        update_connection_state_if_generation(
+            &connections,
+            "weixin-main",
+            7,
+            ConnectionState::Reconnecting,
+            Some("retry".to_string()),
+        );
+        let status = connections.read()["weixin-main"].status.clone();
+        assert_eq!(status.state, ConnectionState::Reconnecting);
+        assert_eq!(status.reconnect_count, 1);
+        assert_eq!(status.last_error.as_deref(), Some("retry"));
+    }
+
+    #[test]
+    fn mark_failed_inserts_a_fresh_failed_generation() {
+        let manager = ImConnectionManager::new();
+
+        manager.mark_failed("weixin-main", "poll failed".to_string());
+
+        let status = manager.get_status("weixin-main").unwrap();
+        assert_eq!(status.state, ConnectionState::Failed);
+        assert_eq!(status.last_error.as_deref(), Some("poll failed"));
+        assert!(manager.connections.read()["weixin-main"].generation > 0);
+    }
+
+    #[tokio::test]
+    async fn feishu_manager_registers_verified_connection_before_background_polling() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind feishu token mock");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = vec![0u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let body = br#"{"code":0,"tenant_access_token":"token","expire":7200}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    std::str::from_utf8(body).unwrap()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let manager = ImConnectionManager::new();
+        let config = ImProviderConfig {
+            id: "feishu-status".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Feishu Status".to_string(),
+            enabled: true,
+            base_url: Some(format!("http://127.0.0.1:{port}/open-apis")),
+            app_id: Some("app-id".to_string()),
+            secret_ref: Some("app-secret".to_string()),
+            owner_open_id: None,
+            event_connection_enabled: true,
+            event_types: vec!["im.message.receive_v1".to_string()],
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
+
+        manager
+            .start_connection(&config, "app-secret", sink.into())
+            .await
+            .expect("start feishu connection after token validation");
+        assert!(manager.get_status(&config.id).is_some());
+
+        manager.stop_all();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
     #[tokio::test]
     async fn weixin_manager_starts_polling_and_propagates_auth_expiry_status() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

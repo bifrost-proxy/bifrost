@@ -1536,6 +1536,102 @@ async fn connection_recovers_after_sync_cursor_persist_failure() {
 }
 
 #[tokio::test]
+async fn connection_retries_until_inbound_event_is_durably_accepted() {
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use std::sync::Arc;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind durable event server");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let service = service_fn(|_request: Request<Incoming>| async move {
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(200)
+                        .body(Full::new(Bytes::from_static(
+                            br#"{"ret":0,"get_updates_buf":"durable-cursor","msgs":[{"message_id":"durable-event","from_user_id":"user@im.wechat","text":"hello"}]}"#,
+                        )))
+                        .unwrap(),
+                )
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        }
+    });
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
+    let event_store = Arc::new(crate::im_gateway::ImEventStore::new(data_dir.path()));
+    let blocked_store_path = data_dir.path().join("admin").join("im_gateway_events.json");
+    std::fs::create_dir_all(&blocked_store_path).unwrap();
+
+    let mut config = test_provider();
+    config.base_url = Some(format!("http://127.0.0.1:{port}"));
+    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let sink = crate::im_gateway::provider::EventSink::with_durable_store(
+        sender,
+        Arc::clone(&event_store),
+    );
+    let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = provider
+        .connect_events_with_status(&config, sink, Some(status_tx))
+        .await
+        .expect("start durable event recovery connection");
+
+    let reconnecting = tokio::time::timeout(Duration::from_secs(1), status_rx.recv())
+        .await
+        .expect("durable event reconnecting timeout")
+        .expect("durable event reconnecting status");
+    assert_eq!(reconnecting.state, ConnectionState::Reconnecting);
+    assert!(reconnecting
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("im_gateway_events.json")));
+    assert!(event_store.list().is_empty());
+    assert!(provider
+        .sync_cursor_store
+        .as_ref()
+        .unwrap()
+        .get(&config.id, WeixinProvider::account_id(&config))
+        .is_none());
+
+    std::fs::remove_dir(&blocked_store_path).unwrap();
+    let connected = tokio::time::timeout(Duration::from_secs(4), status_rx.recv())
+        .await
+        .expect("durable event connected timeout")
+        .expect("durable event connected status");
+    assert_eq!(connected.state, ConnectionState::Connected);
+    let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("durable event timeout")
+        .expect("durable event");
+    assert_eq!(event.event_id, "durable-event");
+    assert_eq!(event_store.list().len(), 1);
+    assert_eq!(
+        provider
+            .sync_cursor_store
+            .as_ref()
+            .unwrap()
+            .get(&config.id, WeixinProvider::account_id(&config))
+            .as_deref(),
+        Some("durable-cursor")
+    );
+    let _ = handle.shutdown_tx.send(());
+}
+
+#[tokio::test]
 async fn connection_reports_closed_sink_after_transient_poll_error() {
     use bytes::Bytes;
     use http_body_util::Full;

@@ -182,6 +182,48 @@ mod tests {
         }
     }
 
+    fn legacy_credential_event(event_id: &str) -> ImEvent {
+        let mut event = event(event_id);
+        event.raw_digest = Some("raw-secret".to_string());
+        event.message = Some(super::super::types::ImEventMessage {
+            raw_content: Some(serde_json::json!({"credential": "raw-content-secret"})),
+            images: vec![super::super::types::ImImageAttachment {
+                file_key: "image-key".to_string(),
+                data_base64: Some("image-base64-secret".to_string()),
+                download_url: Some("https://example.invalid/image-secret".to_string()),
+                encrypted_query_param: Some("image-query-secret".to_string()),
+                aes_key: Some("image-aes-secret".to_string()),
+                ..Default::default()
+            }],
+            files: vec![super::super::types::ImFileAttachment {
+                file_key: "file-key".to_string(),
+                data_base64: Some("file-base64-secret".to_string()),
+                download_url: Some("https://example.invalid/file-secret".to_string()),
+                encrypted_query_param: Some("file-query-secret".to_string()),
+                aes_key: Some("file-aes-secret".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        event
+    }
+
+    fn write_store_data(temp: &tempfile::TempDir, events: Vec<ImEvent>) -> PathBuf {
+        let admin_dir = temp.path().join("admin");
+        std::fs::create_dir_all(&admin_dir).unwrap();
+        let file_path = admin_dir.join(STORE_FILENAME);
+        std::fs::write(
+            &file_path,
+            serde_json::to_vec_pretty(&StoreData {
+                version: STORE_VERSION,
+                events,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        file_path
+    }
+
     #[test]
     fn add_is_idempotent_for_the_same_provider_event() {
         let temp = tempfile::tempdir().unwrap();
@@ -251,5 +293,63 @@ mod tests {
             }
         );
         assert!(file_path.exists(), "legacy history must not be deleted");
+    }
+
+    #[test]
+    fn loading_legacy_weixin_history_redacts_and_rewrites_media_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = write_store_data(&temp, vec![legacy_credential_event("legacy-secret")]);
+
+        let store = ImEventStore::new(temp.path());
+        let events = store.list();
+        let event = &events[0];
+        let message = event.message.as_ref().unwrap();
+        assert!(event.raw_digest.is_none());
+        assert!(message.raw_content.is_none());
+        assert!(message.images[0].data_base64.is_none());
+        assert!(message.images[0].download_url.is_none());
+        assert!(message.images[0].encrypted_query_param.is_none());
+        assert!(message.images[0].aes_key.is_none());
+        assert!(message.files[0].data_base64.is_none());
+        assert!(message.files[0].download_url.is_none());
+        assert!(message.files[0].encrypted_query_param.is_none());
+        assert!(message.files[0].aes_key.is_none());
+
+        let persisted = std::fs::read_to_string(file_path).unwrap();
+        for credential in [
+            "raw-secret",
+            "raw-content-secret",
+            "image-base64-secret",
+            "image-query-secret",
+            "image-aes-secret",
+            "file-base64-secret",
+            "file-query-secret",
+            "file-aes-secret",
+        ] {
+            assert!(!persisted.contains(credential));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loading_legacy_weixin_history_keeps_redacted_memory_when_rewrite_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = write_store_data(&temp, vec![legacy_credential_event("legacy-readonly")]);
+        let original_mode = std::fs::metadata(&file_path).unwrap().permissions().mode();
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let store = ImEventStore::new(temp.path());
+        assert!(store.list()[0].raw_digest.is_none());
+        assert!(
+            std::fs::read_to_string(&file_path)
+                .unwrap()
+                .contains("raw-secret"),
+            "the read-only legacy file should remain unchanged"
+        );
+
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(original_mode))
+            .unwrap();
     }
 }
