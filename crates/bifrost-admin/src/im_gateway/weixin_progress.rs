@@ -15,6 +15,13 @@ struct PendingToolCall {
     sequence: u64,
 }
 
+pub(super) struct PreparedWeixinProgress {
+    client_msg_id: String,
+    tool_name: String,
+    tool_call_id: Option<String>,
+    finished_status: Option<&'static str>,
+}
+
 pub struct WeixinProgressSession {
     provider: Arc<WeixinProvider>,
     config: ImProviderConfig,
@@ -43,7 +50,7 @@ impl WeixinProgressSession {
             typing_shutdown: None,
             typing_task: None,
         };
-        session.start_typing().await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), session.start_typing()).await;
         session
     }
 
@@ -161,7 +168,11 @@ impl WeixinProgressSession {
         }));
     }
 
-    pub async fn apply_events(&mut self, events: Vec<AgentTurnProgressEvent>) {
+    pub(super) fn prepare_events(
+        &mut self,
+        events: Vec<AgentTurnProgressEvent>,
+    ) -> Vec<PreparedWeixinProgress> {
+        let mut prepared = Vec::new();
         for event in events {
             match event {
                 AgentTurnProgressEvent::ToolStarted {
@@ -175,28 +186,12 @@ impl WeixinProgressSession {
                         self.next_sequence
                     );
                     let client_id = format!("{}-{}-start", self.channel_run_id, self.next_sequence);
-                    if let Err(error) = self
-                        .provider
-                        .send_tool_progress(
-                            &self.config,
-                            &self.target,
-                            WeixinToolProgress {
-                                channel_run_id: &self.channel_run_id,
-                                client_msg_id: &client_id,
-                                tool_name: &tool_name,
-                                tool_call_id: Some(&tool_call_id),
-                                finished_status: None,
-                            },
-                        )
-                        .await
-                    {
-                        warn!(
-                            provider_id = %self.config.id,
-                            tool_name,
-                            error = %error,
-                            "failed to send weixin tool start progress"
-                        );
-                    }
+                    prepared.push(PreparedWeixinProgress {
+                        client_msg_id: client_id,
+                        tool_name: tool_name.clone(),
+                        tool_call_id: Some(tool_call_id.clone()),
+                        finished_status: None,
+                    });
                     self.pending_tools.push_back(PendingToolCall {
                         tool_name,
                         arguments_key: normalize_arguments_key(&arguments),
@@ -234,33 +229,77 @@ impl WeixinProgressSession {
                             }
                         });
                     let client_id = format!("{}-{}-result", self.channel_run_id, pending.sequence);
-                    let status = if log.success { "success" } else { "failed" };
-                    if let Err(error) = self
-                        .provider
-                        .send_tool_progress(
-                            &self.config,
-                            &self.target,
-                            WeixinToolProgress {
-                                channel_run_id: &self.channel_run_id,
-                                client_msg_id: &client_id,
-                                tool_name: &pending.tool_name,
-                                tool_call_id: pending.tool_call_id.as_deref(),
-                                finished_status: Some(status),
-                            },
-                        )
-                        .await
-                    {
-                        warn!(
-                            provider_id = %self.config.id,
-                            tool_name = %pending.tool_name,
-                            error = %error,
-                            "failed to send weixin tool result progress"
-                        );
-                    }
+                    prepared.push(PreparedWeixinProgress {
+                        client_msg_id: client_id,
+                        tool_name: pending.tool_name,
+                        tool_call_id: pending.tool_call_id,
+                        finished_status: Some(if log.success { "success" } else { "failed" }),
+                    });
                 }
                 _ => {}
             }
         }
+        prepared
+    }
+
+    pub(super) fn prepare_delivery(
+        &mut self,
+        events: Vec<AgentTurnProgressEvent>,
+    ) -> (
+        Arc<WeixinProvider>,
+        ImProviderConfig,
+        ImTarget,
+        String,
+        Vec<PreparedWeixinProgress>,
+    ) {
+        let prepared = self.prepare_events(events);
+        (
+            Arc::clone(&self.provider),
+            self.config.clone(),
+            self.target.clone(),
+            self.channel_run_id.clone(),
+            prepared,
+        )
+    }
+
+    pub(super) async fn deliver_prepared(
+        provider: Arc<WeixinProvider>,
+        config: ImProviderConfig,
+        target: ImTarget,
+        channel_run_id: String,
+        prepared: Vec<PreparedWeixinProgress>,
+    ) {
+        for progress in prepared {
+            let finished = progress.finished_status.is_some();
+            if let Err(error) = provider
+                .send_tool_progress(
+                    &config,
+                    &target,
+                    WeixinToolProgress {
+                        channel_run_id: &channel_run_id,
+                        client_msg_id: &progress.client_msg_id,
+                        tool_name: &progress.tool_name,
+                        tool_call_id: progress.tool_call_id.as_deref(),
+                        finished_status: progress.finished_status,
+                    },
+                )
+                .await
+            {
+                warn!(
+                    provider_id = %config.id,
+                    tool_name = %progress.tool_name,
+                    error = %error,
+                    finished,
+                    "failed to send weixin tool progress"
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn apply_events(&mut self, events: Vec<AgentTurnProgressEvent>) {
+        let (provider, config, target, channel_run_id, prepared) = self.prepare_delivery(events);
+        Self::deliver_prepared(provider, config, target, channel_run_id, prepared).await;
     }
 
     pub async fn finish(&mut self) {

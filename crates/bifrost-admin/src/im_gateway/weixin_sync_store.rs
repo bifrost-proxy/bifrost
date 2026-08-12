@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -83,37 +82,30 @@ impl WeixinSyncCursorStore {
         let bytes = serde_json::to_vec_pretty(data).map_err(|error| {
             BifrostError::Config(format!("serialize weixin sync cursor store: {error}"))
         })?;
-        let temporary = self.path.with_extension("json.tmp");
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary).map_err(|error| {
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
             BifrostError::Io(std::io::Error::other(format!(
-                "open weixin sync cursor store {}: {error}",
-                temporary.display()
+                "open temporary weixin sync cursor store in {}: {error}",
+                parent.display()
             )))
         })?;
-        file.write_all(&bytes).map_err(|error| {
+        temporary.write_all(&bytes).map_err(|error| {
             BifrostError::Io(std::io::Error::other(format!(
                 "write weixin sync cursor store {}: {error}",
-                temporary.display()
+                temporary.path().display()
             )))
         })?;
-        file.sync_all().map_err(|error| {
+        temporary.as_file().sync_all().map_err(|error| {
             BifrostError::Io(std::io::Error::other(format!(
                 "sync weixin sync cursor store {}: {error}",
-                temporary.display()
+                temporary.path().display()
             )))
         })?;
-        harden_private_file(&temporary)?;
-        std::fs::rename(&temporary, &self.path).map_err(|error| {
+        harden_private_file(temporary.path())?;
+        temporary.persist(&self.path).map_err(|error| {
             BifrostError::Io(std::io::Error::other(format!(
                 "replace weixin sync cursor store {}: {error}",
-                self.path.display()
+                self.path.display(),
+                error.error
             )))
         })?;
         harden_private_file(&self.path)?;
@@ -226,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn save_reports_parent_open_rename_and_permission_failures() {
+    fn save_reports_parent_replace_and_permission_failures() {
         let no_parent_dir = tempfile::tempdir().unwrap();
         let mut no_parent = WeixinSyncCursorStore::new(no_parent_dir.path()).unwrap();
         no_parent.path = PathBuf::from("/");
@@ -240,16 +232,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("create weixin sync cursor directory"));
-
-        let blocked_temp_dir = tempfile::tempdir().unwrap();
-        let blocked_temp = WeixinSyncCursorStore::new(blocked_temp_dir.path()).unwrap();
-        std::fs::create_dir_all(blocked_temp.path.parent().unwrap()).unwrap();
-        std::fs::create_dir(blocked_temp.path.with_extension("json.tmp")).unwrap();
-        assert!(blocked_temp
-            .put("provider", "account", "cursor")
-            .unwrap_err()
-            .to_string()
-            .contains("open weixin sync cursor store"));
 
         let blocked_rename_dir = tempfile::tempdir().unwrap();
         let blocked_rename = WeixinSyncCursorStore::new(blocked_rename_dir.path()).unwrap();

@@ -1783,7 +1783,16 @@ impl ImAgentProgressRegistry {
             .get(session_key)
             .map(|entry| Arc::clone(entry.value()))
         {
-            session.lock().await.apply_events(events).await;
+            let (provider, config, target, channel_run_id, prepared) =
+                session.lock().await.prepare_delivery(events);
+            WeixinProgressSession::deliver_prepared(
+                provider,
+                config,
+                target,
+                channel_run_id,
+                prepared,
+            )
+            .await;
             return;
         }
         let Some(session) = self.sessions.get(session_key) else {

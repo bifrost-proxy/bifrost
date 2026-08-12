@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -24,6 +25,7 @@ struct ManagedConnection {
     provider_id: String,
     handle: ConnectionHandle,
     status: ConnectionStatus,
+    generation: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -40,6 +42,7 @@ pub struct ImConnectionManager {
     connections: Arc<RwLock<HashMap<String, ManagedConnection>>>,
     feishu_provider: Arc<FeishuProvider>,
     weixin_provider: Arc<WeixinProvider>,
+    next_generation: AtomicU64,
 }
 
 impl Default for ImConnectionManager {
@@ -58,6 +61,7 @@ impl ImConnectionManager {
             connections: Arc::new(RwLock::new(HashMap::new())),
             feishu_provider: Arc::new(FeishuProvider::new()),
             weixin_provider: Arc::new(WeixinProvider::new_with_data_dir(data_dir)),
+            next_generation: AtomicU64::new(0),
         }
     }
 
@@ -102,6 +106,7 @@ impl ImConnectionManager {
         let provider_id = config.id.clone();
         self.weixin_provider.validate_config(config).await?;
         self.stop_connection(&provider_id);
+        let generation = self.reserve_generation();
 
         let status = ConnectionStatus {
             state: ConnectionState::Connecting,
@@ -124,12 +129,14 @@ impl ImConnectionManager {
                     provider_id: provider_id.clone(),
                     handle,
                     status,
+                    generation,
                 },
             );
         }
-        update_connection_state(
+        update_connection_state_if_generation(
             &self.connections,
             &provider_id,
+            generation,
             ConnectionState::Connected,
             None,
         );
@@ -137,9 +144,10 @@ impl ImConnectionManager {
         let status_provider_id = provider_id.clone();
         tokio::spawn(async move {
             while let Some(event) = status_rx.recv().await {
-                update_connection_state(
+                update_connection_state_if_generation(
                     &status_connections,
                     &status_provider_id,
+                    generation,
                     event.state,
                     event.error,
                 );
@@ -168,6 +176,7 @@ impl ImConnectionManager {
         // Credentials verified — now it's safe to replace any prior
         // connection for this provider.
         self.stop_connection(&provider_id);
+        let generation = self.reserve_generation();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -190,6 +199,7 @@ impl ImConnectionManager {
                     provider_id: provider_id.clone(),
                     handle,
                     status,
+                    generation,
                 },
             );
         }
@@ -208,7 +218,13 @@ impl ImConnectionManager {
 
         tokio::spawn(async move {
             while let Some(event) = status_rx.recv().await {
-                update_connection_state(&status_connections, &status_pid, event.state, event.error);
+                update_connection_state_if_generation(
+                    &status_connections,
+                    &status_pid,
+                    generation,
+                    event.state,
+                    event.error,
+                );
             }
         });
 
@@ -224,9 +240,10 @@ impl ImConnectionManager {
             .await;
 
             // Connection ended - update status
-            update_connection_state(
+            update_connection_state_if_generation(
                 &connections,
                 &pid,
+                generation,
                 ConnectionState::Disconnected,
                 Some("connection task ended".to_string()),
             );
@@ -262,6 +279,7 @@ impl ImConnectionManager {
                 provider_id: provider_id.to_string(),
                 handle: ConnectionHandle { shutdown_tx },
                 status,
+                generation: self.reserve_generation(),
             },
         );
     }
@@ -321,6 +339,7 @@ impl ImConnectionManager {
                     shutdown_tx: oneshot::channel().0,
                 },
                 status,
+                generation: self.reserve_generation(),
             },
         );
     }
@@ -332,30 +351,35 @@ impl ImConnectionManager {
     fn connections_arc(&self) -> Arc<RwLock<HashMap<String, ManagedConnection>>> {
         Arc::clone(&self.connections)
     }
+
+    fn reserve_generation(&self) -> u64 {
+        self.next_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Helper for background task status updates
-// ---------------------------------------------------------------------------
-
-fn update_connection_state(
+fn update_connection_state_if_generation(
     connections: &Arc<RwLock<HashMap<String, ManagedConnection>>>,
     provider_id: &str,
+    generation: u64,
     state: ConnectionState,
     error: Option<String>,
 ) {
     let mut conns = connections.write();
-    if let Some(conn) = conns.get_mut(provider_id) {
-        conn.status.state = state;
-        if state == ConnectionState::Connected {
-            conn.status.last_connected_at = Some(current_timestamp_ms());
-            conn.status.last_error = None;
-        } else if let Some(err) = error {
-            conn.status.last_error = Some(err);
-        }
-        if state == ConnectionState::Reconnecting {
-            conn.status.reconnect_count += 1;
-        }
+    let Some(conn) = conns.get_mut(provider_id) else {
+        return;
+    };
+    if conn.generation != generation {
+        return;
+    }
+    conn.status.state = state;
+    if state == ConnectionState::Connected {
+        conn.status.last_connected_at = Some(current_timestamp_ms());
+        conn.status.last_error = None;
+    } else if let Some(err) = error {
+        conn.status.last_error = Some(err);
+    }
+    if state == ConnectionState::Reconnecting {
+        conn.status.reconnect_count += 1;
     }
 }
 
@@ -412,6 +436,7 @@ mod tests {
                 provider_id: "feishu-main".to_string(),
                 handle: ConnectionHandle { shutdown_tx },
                 status: ConnectionStatus::default(),
+                generation: 1,
             },
         );
 

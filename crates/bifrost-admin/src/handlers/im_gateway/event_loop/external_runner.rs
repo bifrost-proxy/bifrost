@@ -10,6 +10,61 @@ struct WeixinCompanionInput {
     has_attachment: bool,
 }
 
+fn enforce_weixin_companion_attachment_budgets(input: &mut ExternalCliChatInput) {
+    if input.images.len() > MAX_AGENT_ATTACHMENTS_PER_MESSAGE {
+        warn!(
+            image_count = input.images.len(),
+            max_images = MAX_AGENT_ATTACHMENTS_PER_MESSAGE,
+            "too many images across coalesced Weixin events; truncating runner input"
+        );
+        input.images.truncate(MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
+    }
+
+    let mut retained_files = Vec::new();
+    let mut total_file_bytes = 0u64;
+    let file_count = input.files.len();
+    for file in std::mem::take(&mut input.files)
+        .into_iter()
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
+    {
+        let label = file.name.as_deref().unwrap_or("attachment");
+        let decoded_size = match preloaded_payload_size(
+            Some(&file.data),
+            "文件",
+            label,
+            MAX_FEISHU_REFERENCED_FILE_BYTES,
+        ) {
+            Ok(Some(size)) => size,
+            Ok(None) => 0,
+            Err(problem) => {
+                warn!(file = %label, problem, "skipping invalid coalesced Weixin file");
+                continue;
+            }
+        };
+        if referenced_file_budget_exceeded_with_limit(
+            total_file_bytes,
+            decoded_size,
+            MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES,
+        ) {
+            warn!(
+                file = %label,
+                "skipping coalesced Weixin file because the batch exceeds 250 MiB"
+            );
+            continue;
+        }
+        total_file_bytes = total_file_bytes.saturating_add(decoded_size);
+        retained_files.push(file);
+    }
+    if file_count > MAX_AGENT_ATTACHMENTS_PER_MESSAGE {
+        warn!(
+            file_count,
+            max_files = MAX_AGENT_ATTACHMENTS_PER_MESSAGE,
+            "too many files across coalesced Weixin events; truncating runner input"
+        );
+    }
+    input.files = retained_files;
+}
+
 fn merge_weixin_companion_batch(
     input: &mut ExternalCliChatInput,
     initial_has_meaningful_text: bool,
@@ -37,6 +92,8 @@ fn merge_weixin_companion_batch(
         input.files.extend(companion.files);
     }
 
+    enforce_weixin_companion_attachment_budgets(input);
+
     if !text_parts.is_empty() {
         input.message_text = text_parts.join("\n\n");
     } else if !input.images.is_empty() {
@@ -45,6 +102,16 @@ fn merge_weixin_companion_batch(
         input.message_text = format!("[附件消息: {} 个]", input.files.len());
     }
     deferred
+}
+
+async fn finish_progress_task(mut task: tokio::task::JoinHandle<()>) {
+    if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
+        .await
+        .is_err()
+    {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 fn event_has_attachments(event: &ImEvent) -> bool {
@@ -1980,7 +2047,7 @@ pub(super) async fn run_external_cli_agent_chat(
                         drop(progress_tx);
                     }
                     if let Some(task) = progress_task.take() {
-                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+                        finish_progress_task(task).await;
                     }
                     finish_external_runner_progress_and_notify(
                         ExternalRunnerProgressFinishContext {
@@ -2100,7 +2167,7 @@ pub(super) async fn run_external_cli_agent_chat(
                         drop(progress_tx);
                     }
                     if let Some(task) = progress_task.take() {
-                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+                        finish_progress_task(task).await;
                     }
                     finish_external_runner_progress_and_notify(
                         ExternalRunnerProgressFinishContext {

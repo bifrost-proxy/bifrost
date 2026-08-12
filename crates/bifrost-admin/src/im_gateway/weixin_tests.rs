@@ -1307,12 +1307,12 @@ async fn poll_once_applies_dynamic_timeout_and_rejects_stale_authorization() {
     config.base_url = Some(format!("http://127.0.0.1:{port}"));
     provider.poll_once(&config).await.expect("first poll");
     assert_eq!(
-        provider.runtime.read()[WeixinProvider::account_id(&config)].long_poll_timeout_ms,
+        provider.runtime.read()[&WeixinProvider::account_runtime_key(&config)].long_poll_timeout_ms,
         MIN_LONG_POLL_TIMEOUT_MS
     );
     provider.poll_once(&config).await.expect("second poll");
     assert_eq!(
-        provider.runtime.read()[WeixinProvider::account_id(&config)].long_poll_timeout_ms,
+        provider.runtime.read()[&WeixinProvider::account_runtime_key(&config)].long_poll_timeout_ms,
         MAX_LONG_POLL_TIMEOUT_MS
     );
     let error = provider

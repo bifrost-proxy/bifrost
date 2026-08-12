@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use bifrost_core::{BifrostError, Result};
 
@@ -26,14 +27,28 @@ impl ImEventStore {
     pub fn new(data_dir: &Path) -> Self {
         let admin_dir = data_dir.join("admin");
         let file_path = admin_dir.join(STORE_FILENAME);
-        let data = Self::load_from_disk(&file_path).unwrap_or_else(|| StoreData {
+        let mut data = Self::load_from_disk(&file_path).unwrap_or_else(|| StoreData {
             version: STORE_VERSION,
             events: Vec::new(),
         });
-        Self {
+        let removed_legacy_credentials = data.events.iter_mut().fold(false, |changed, event| {
+            redact_event_for_history_in_place(event) || changed
+        });
+        let store = Self {
             file_path,
             data: RwLock::new(data),
+        };
+        if removed_legacy_credentials {
+            let data = store.data.read();
+            if let Err(error) = store.save_locked(&data) {
+                warn!(
+                    path = %store.file_path.display(),
+                    error = %error,
+                    "failed to rewrite legacy IM history after removing Weixin media credentials"
+                );
+            }
         }
+        store
     }
 
     pub fn list(&self) -> Vec<ImEvent> {
@@ -52,7 +67,7 @@ impl ImEventStore {
 
     pub fn add(&self, event: ImEvent) -> Result<()> {
         let mut data = self.data.write();
-        data.events.push(event);
+        data.events.push(redact_event_for_history(event));
         self.trim_locked(&mut data);
         self.save_locked(&data)
     }
@@ -107,6 +122,34 @@ impl ImEventStore {
             }
         }
     }
+}
+
+fn redact_event_for_history(mut event: ImEvent) -> ImEvent {
+    redact_event_for_history_in_place(&mut event);
+    event
+}
+
+fn redact_event_for_history_in_place(event: &mut ImEvent) -> bool {
+    if event.provider_type != super::types::ImProviderType::Weixin {
+        return false;
+    }
+    let mut changed = event.raw_digest.take().is_some();
+    if let Some(message) = event.message.as_mut() {
+        changed |= message.raw_content.take().is_some();
+        for image in &mut message.images {
+            changed |= image.data_base64.take().is_some();
+            changed |= image.download_url.take().is_some();
+            changed |= image.encrypted_query_param.take().is_some();
+            changed |= image.aes_key.take().is_some();
+        }
+        for file in &mut message.files {
+            changed |= file.data_base64.take().is_some();
+            changed |= file.download_url.take().is_some();
+            changed |= file.encrypted_query_param.take().is_some();
+            changed |= file.aes_key.take().is_some();
+        }
+    }
+    changed
 }
 
 #[cfg(test)]

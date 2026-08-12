@@ -236,10 +236,15 @@ impl WeixinProvider {
         })
     }
 
-    fn context_token(&self, account_id: &str, user_id: &str) -> Option<String> {
+    fn account_runtime_key(config: &ImProviderConfig) -> String {
+        format!("{}\0{}", config.id.trim(), Self::account_id(config))
+    }
+
+    fn context_token(&self, config: &ImProviderConfig, user_id: &str) -> Option<String> {
+        let account_id = Self::account_id(config);
         self.runtime
             .read()
-            .get(account_id)
+            .get(&Self::account_runtime_key(config))
             .and_then(|runtime| runtime.context_tokens.get(user_id).cloned())
             .or_else(|| {
                 self.context_store
@@ -253,8 +258,7 @@ impl WeixinProvider {
     }
 
     pub fn send_ready_for_user(&self, config: &ImProviderConfig, user_id: &str) -> bool {
-        self.context_token(Self::account_id(config), user_id)
-            .is_some()
+        self.context_token(config, user_id).is_some()
     }
 
     fn user_runtime_key(config: &ImProviderConfig, user_id: &str) -> String {
@@ -316,7 +320,7 @@ impl WeixinProvider {
             }
         }
         let context_token = self
-            .context_token(Self::account_id(config), &target.receive_id)
+            .context_token(config, &target.receive_id)
             .ok_or_else(|| {
                 bifrost_core::BifrostError::Config(
                     "weixin typing requires an inbound context token".to_string(),
@@ -421,7 +425,7 @@ impl WeixinProvider {
         });
         item[item_name] = tool_item;
         let context_token = self
-            .context_token(Self::account_id(config), &target.receive_id)
+            .context_token(config, &target.receive_id)
             .ok_or_else(|| {
                 bifrost_core::BifrostError::Config(
                     "weixin progress requires an inbound context token".to_string(),
@@ -666,10 +670,11 @@ impl WeixinProvider {
     async fn poll_once(&self, config: &ImProviderConfig) -> Result<PollBatch> {
         let base_url = Self::base_url(config);
         let account_id = Self::account_id(config).to_string();
+        let runtime_key = Self::account_runtime_key(config);
         let bot_token = Self::bot_token(config)?;
         let (get_updates_buf, server_timeout_ms) = {
             let runtime = self.runtime.read();
-            let current = runtime.get(&account_id);
+            let current = runtime.get(&runtime_key);
             let cursor = current
                 .map(|runtime| runtime.get_updates_buf.clone())
                 .filter(|cursor| !cursor.is_empty())
@@ -686,7 +691,7 @@ impl WeixinProvider {
             (cursor, timeout)
         };
         let url = format!("{base_url}/ilink/bot/getupdates");
-        let response: serde_json::Value = Self::with_common_headers(
+        let response = Self::with_common_headers(
             self.poll_http.post(url).timeout(Duration::from_millis(
                 Self::long_poll_request_timeout_ms(server_timeout_ms),
             )),
@@ -698,10 +703,18 @@ impl WeixinProvider {
         }))
         .send()
         .await
-        .map_err(|e| bifrost_core::BifrostError::Network(format!("weixin getupdates failed: {e}")))?
-        .json()
-        .await
         .map_err(|e| {
+            bifrost_core::BifrostError::Network(format!("weixin getupdates failed: {e}"))
+        })?;
+        let response_status = response.status();
+        if !response_status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "weixin getupdates HTTP error: status={response_status}, body={}",
+                truncate_chars(&body, 2_000)
+            )));
+        }
+        let response: serde_json::Value = response.json().await.map_err(|e| {
             bifrost_core::BifrostError::Network(format!(
                 "weixin getupdates response parse failed: {e}"
             ))
@@ -728,7 +741,7 @@ impl WeixinProvider {
         {
             self.runtime
                 .write()
-                .entry(account_id.clone())
+                .entry(runtime_key.clone())
                 .or_default()
                 .long_poll_timeout_ms = Self::normalize_long_poll_timeout_ms(timeout);
         }
@@ -763,7 +776,7 @@ impl WeixinProvider {
                         .put(&account_id, &from, context_token)?;
                     self.runtime
                         .write()
-                        .entry(account_id.clone())
+                        .entry(runtime_key.clone())
                         .or_default()
                         .context_tokens
                         .insert(from, context_token.to_string());
@@ -1380,7 +1393,6 @@ impl WeixinProvider {
         client_msg_id: String,
     ) -> Result<SendResult> {
         let base_url = Self::base_url(config);
-        let account_id = Self::account_id(config);
         let bot_token = Self::bot_token(config)?;
         let mut msg = serde_json::json!({
             "from_user_id": "",
@@ -1396,7 +1408,7 @@ impl WeixinProvider {
             }],
         });
         let context_token = self
-            .context_token(account_id, &target.receive_id)
+            .context_token(config, &target.receive_id)
             .ok_or_else(|| {
                 bifrost_core::BifrostError::Config(
                     "weixin provider is connected but not send-ready; send the bot an inbound message first"
@@ -1574,12 +1586,11 @@ impl WeixinProvider {
         media_key: &str,
         expected_kind: Option<OutboundMediaKind>,
     ) -> Result<UploadedOutboundMedia> {
-        // Pending media is single-use. Removing it before network I/O prevents
-        // failed uploads from retaining potentially large generated files.
         let pending = self
             .pending_outbound_media
-            .write()
-            .remove(media_key)
+            .read()
+            .get(media_key)
+            .cloned()
             .ok_or_else(|| {
                 bifrost_core::BifrostError::Config(format!(
                     "weixin outbound media key not found: {media_key}"
@@ -1754,7 +1765,7 @@ impl WeixinProvider {
             )
         });
         let context_token = self
-            .context_token(Self::account_id(config), &target.receive_id)
+            .context_token(config, &target.receive_id)
             .ok_or_else(|| {
                 bifrost_core::BifrostError::Config(
                     "weixin provider is connected but not send-ready; send the bot an inbound message first"
@@ -1798,6 +1809,7 @@ impl WeixinProvider {
                 kind.label()
             )));
         }
+        self.pending_outbound_media.write().remove(media_key);
         debug!(
             provider_id = %config.id,
             target = %target.receive_id,
@@ -2091,16 +2103,17 @@ impl WeixinProvider {
                 };
                 match result {
                     Ok(batch) => {
-                        if consecutive_errors > 0 {
-                            send_connection_status(
-                                status_tx.as_ref(),
-                                ConnectionState::Connected,
-                                None,
-                            );
-                        }
-                        consecutive_errors = 0;
+                        let was_reconnecting = consecutive_errors > 0;
                         for event in batch.events {
                             if sink.send(event).is_err() {
+                                send_connection_status(
+                                    status_tx.as_ref(),
+                                    ConnectionState::Disconnected,
+                                    Some(
+                                        "Weixin event sink closed; inbound polling stopped"
+                                            .to_string(),
+                                    ),
+                                );
                                 break 'polling;
                             }
                         }
@@ -2112,19 +2125,42 @@ impl WeixinProvider {
                                 .expect("sync cursor store checked before connection start")
                                 .put(&config.id, &account_id, &cursor);
                             if let Err(error) = persist_result {
+                                consecutive_errors = consecutive_errors.saturating_add(1);
                                 warn!(
                                     provider_id = %config.id,
                                     error = %error,
                                     "failed to persist weixin sync cursor; cursor not advanced"
                                 );
+                                send_connection_status(
+                                    status_tx.as_ref(),
+                                    ConnectionState::Reconnecting,
+                                    Some(error.to_string()),
+                                );
+                                let delay = if consecutive_errors >= 3 {
+                                    Duration::from_secs(30)
+                                } else {
+                                    Duration::from_secs(2)
+                                };
+                                tokio::select! {
+                                    _ = &mut shutdown_rx => break,
+                                    _ = tokio::time::sleep(delay) => {}
+                                }
                                 continue;
                             }
                             provider
                                 .runtime
                                 .write()
-                                .entry(account_id)
+                                .entry(Self::account_runtime_key(&config))
                                 .or_default()
                                 .get_updates_buf = cursor;
+                        }
+                        consecutive_errors = 0;
+                        if was_reconnecting {
+                            send_connection_status(
+                                status_tx.as_ref(),
+                                ConnectionState::Connected,
+                                None,
+                            );
                         }
                     }
                     Err(error) => {
