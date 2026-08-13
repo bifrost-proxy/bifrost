@@ -8959,7 +8959,7 @@ esac
         .unwrap();
 
         let guard = RunningSourceCompressionGuard::acquire(&task.id).unwrap();
-        run_source_compression_job(task.clone(), targets, guard);
+        run_source_compression_job(task.clone(), targets, guard, None);
 
         let state = load_source_compression_state(&task.id).unwrap();
         assert_eq!(state.status, SourceAudioCompressionStatus::CompletedWithErrors);
@@ -9006,6 +9006,7 @@ esac
             cancelled_task.clone(),
             vec![(source_key(&cancelled_source), cancelled_record)],
             guard,
+            None,
         );
         let cancelled = load_source_compression_state(&cancelled_task.id).unwrap();
         assert_eq!(cancelled.status, SourceAudioCompressionStatus::Cancelled);
@@ -10022,4 +10023,78 @@ esac
 
         assert_eq!(by_speaker["speaker_00"].len(), 8_000);
     }
+
+    #[test]
+    fn task_running_state_observes_process_lock_without_local_marker() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+
+        let guard = TaskRunFileLock::acquire("cross-process-running").unwrap();
+        assert!(task_is_running("cross-process-running"));
+
+        drop(guard);
+        assert!(!task_is_running("cross-process-running"));
+    }
+
+    #[test]
+    fn source_compression_running_state_observes_worker_process_lock() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        RUNNING_SOURCE_COMPRESSION_TASKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+
+        let guard = SourceCompressionFileLock::acquire("compression-worker-lock").unwrap();
+        assert!(source_compression_is_running("compression-worker-lock"));
+
+        drop(guard);
+        assert!(!source_compression_is_running("compression-worker-lock"));
+    }
+
+    #[test]
+    fn stale_file_store_snapshots_merge_under_cross_process_lock() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let task_id = "file-store-cross-process-merge";
+        let audio_dir = temp.path().join("audio");
+        let output_dir = temp.path().join("output");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source_a = audio_dir.join("a.wav");
+        let source_b = audio_dir.join("b.wav");
+        std::fs::write(&source_a, b"a").unwrap();
+        std::fs::write(&source_b, b"b").unwrap();
+
+        let mut first = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        first.files.insert(
+            source_key(&source_a),
+            completed_test_record(task_id, &source_a, &output_dir.join("a")),
+        );
+        let mut stale_second = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        stale_second.files.insert(
+            source_key(&source_b),
+            completed_test_record(task_id, &source_b, &output_dir.join("b")),
+        );
+
+        save_file_store(task_id, &first).unwrap();
+        save_file_store(task_id, &stale_second).unwrap();
+
+        let merged = load_file_store(task_id);
+        assert!(merged.files.contains_key(&source_key(&source_a)));
+        assert!(merged.files.contains_key(&source_key(&source_b)));
+    }
+
 }

@@ -233,6 +233,7 @@ pub(super) async fn run_command(
     stop_marker_path: PathBuf,
     progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
+    let (stdout_path, stderr_path) = external_cli_log_paths(&stop_marker_path);
     validate_app_server_transport(request)?;
     let spec = build_command_spec(request);
     let mut child = spawn_app_server(&spec).await.map_err(|error| {
@@ -266,6 +267,10 @@ pub(super) async fn run_command(
         .stderr
         .take()
         .ok_or_else(|| "app-server stderr unavailable".to_string())?;
+    let (stdout, stdout_tee_task) =
+        tee_external_cli_output(stdout, stdout_path, "app-server stdout").await?;
+    let (stderr, stderr_tee_task) =
+        tee_external_cli_output(stderr, stderr_path, "app-server stderr").await?;
     let stderr_task = tokio::spawn(read_stderr_lines(stderr));
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut stdout_bytes = Vec::new();
@@ -345,6 +350,8 @@ pub(super) async fn run_command(
         let stderr = stderr_task
             .await
             .map_err(|error| format!("join app-server stderr task failed: {error}"))??;
+        join_external_cli_tee(stdout_tee_task, "app-server stdout").await?;
+        join_external_cli_tee(stderr_tee_task, "app-server stderr").await?;
         return Ok(CommandOutput {
             status: ExternalCliRunStatus::Succeeded,
             exit_code: Some(0),
@@ -681,6 +688,8 @@ pub(super) async fn run_command(
     let mut stderr = stderr_task
         .await
         .map_err(|error| format!("join app-server stderr task failed: {error}"))??;
+    join_external_cli_tee(stdout_tee_task, "app-server stdout").await?;
+    join_external_cli_tee(stderr_tee_task, "app-server stderr").await?;
     if let Some(error) = terminal_error {
         if !stderr.is_empty() && !stderr.ends_with(b"\n") {
             stderr.push(b'\n');
@@ -1083,7 +1092,7 @@ async fn write_jsonrpc_frame(
 }
 
 async fn read_until_response(
-    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<DuplexStream>>,
     expected_id: u64,
     root_thread_id: Option<&str>,
     stdout_bytes: &mut Vec<u8>,
@@ -1123,7 +1132,7 @@ async fn read_until_response(
 }
 
 async fn read_handshake_response(
-    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<DuplexStream>>,
     expected_id: u64,
     root_thread_id: Option<&str>,
     stdout_bytes: &mut Vec<u8>,

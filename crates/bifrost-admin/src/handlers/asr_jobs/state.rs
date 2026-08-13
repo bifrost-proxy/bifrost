@@ -18,6 +18,7 @@ static SOURCE_COMPRESSION_CANCEL_REQUESTS: Lazy<StdMutex<HashSet<String>>> =
 static RUNNING_CHUNK_RETRY_TASKS: Lazy<StdMutex<HashSet<String>>> =
     Lazy::new(|| StdMutex::new(HashSet::new()));
 static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+static TASK_STORE_WRITE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static FILE_STORE_WRITE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static RUN_PROGRESS_UPDATE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -68,7 +69,11 @@ impl Drop for RunningTaskGuard {
 }
 
 fn task_is_running(task_id: &str) -> bool {
-    RUNNING_TASKS.lock().unwrap().contains(task_id)
+    if RUNNING_TASKS.lock().unwrap().contains(task_id) {
+        return true;
+    }
+    let lock_path = task_run_lock_path(task_id);
+    lock_path.is_file() && !is_task_run_lock_stale(&lock_path)
 }
 
 struct RunningExternalImportGuard {

@@ -31,6 +31,7 @@ mod send;
 mod storage;
 #[cfg(test)]
 mod tests;
+pub(crate) mod worker;
 
 use artifacts::download_behavior_artifacts_for_conversation;
 pub use browser::kill_all_managed_browsers;
@@ -1873,6 +1874,9 @@ async fn ask_send_and_wait(
 pub async fn auth_status(
     settings: &ExternalCliAgentSettings,
 ) -> Result<ChatGptWebAuthStatus, String> {
+    if !cfg!(test) && !worker::is_browser_worker_process() {
+        return worker::auth_status(settings).await;
+    }
     let config = runtime_config(&settings.adapter_config)?;
     match read_auth_state(&config.state_path).await {
         Ok(state) => auth_status_from_state(&config, &state).await,
@@ -1894,6 +1898,9 @@ pub async fn auth_status(
 pub async fn open_login(
     settings: &ExternalCliAgentSettings,
 ) -> Result<ChatGptWebAuthStatus, String> {
+    if !cfg!(test) && !worker::is_browser_worker_process() {
+        return worker::open_login(settings).await;
+    }
     let config = runtime_config(&settings.adapter_config)?;
     let state = open_login_and_capture(&config).await?;
     auth_status_from_state(&config, &state).await
@@ -1902,6 +1909,9 @@ pub async fn open_login(
 pub async fn stop_login(
     settings: &ExternalCliAgentSettings,
 ) -> Result<ChatGptWebAuthStatus, String> {
+    if !cfg!(test) && !worker::is_browser_worker_process() {
+        return worker::stop_login(settings).await;
+    }
     let config = runtime_config(&settings.adapter_config)?;
     if let Some(session) = login_sessions().get(&login_session_key(&config)) {
         let _ = session.stop.send(());
@@ -1913,6 +1923,9 @@ pub async fn ensure_startup_auth_ready(
     runner_id: &str,
     settings: &ExternalCliAgentSettings,
 ) -> Result<ChatGptWebStartupAuthStatus, String> {
+    if !cfg!(test) && !worker::is_browser_worker_process() {
+        return worker::ensure_startup_auth_ready(runner_id, settings).await;
+    }
     let status = auth_status(settings).await?;
     if status.logged_in {
         return Ok(startup_auth_status_from_auth(

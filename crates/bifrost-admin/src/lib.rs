@@ -48,6 +48,7 @@ pub mod temp_ports;
 mod traffic;
 pub mod traffic_db;
 mod version_check;
+pub mod worker_runtime;
 mod ws_payload_store;
 
 #[cfg(any(test, feature = "test-support"))]

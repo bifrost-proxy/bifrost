@@ -1,7 +1,8 @@
 fn add_task(task: AsrDirectoryTask) -> Result<(), String> {
+    let _guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     store.tasks.push(task);
-    save_tasks(&store)
+    save_tasks_unlocked(&store)
 }
 
 fn load_tasks() -> TaskStore {
@@ -23,12 +24,18 @@ fn load_tasks() -> TaskStore {
     store
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn save_tasks(store: &TaskStore) -> Result<(), String> {
-    let path = task_store_path();
-    atomic_json_write(&path, store)
+    let _guard = acquire_task_store_write_lock()?;
+    save_tasks_unlocked(store)
+}
+
+fn save_tasks_unlocked(store: &TaskStore) -> Result<(), String> {
+    atomic_json_write(&task_store_path(), store)
 }
 
 fn update_task_after_run(id: &str, error: Option<String>) -> Result<AsrDirectoryTask, String> {
+    let _guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let now = now_ms();
     let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
@@ -46,7 +53,7 @@ fn update_task_after_run(id: &str, error: Option<String>) -> Result<AsrDirectory
             .next_run_at_ms(now.saturating_add(60_000), false)
     };
     let updated = task.clone();
-    save_tasks(&store)?;
+    save_tasks_unlocked(&store)?;
     Ok(updated)
 }
 
@@ -59,6 +66,7 @@ fn update_task_paused_with_mode(
     paused: bool,
     mode: AsrTaskPauseMode,
 ) -> Result<AsrDirectoryTask, String> {
+    let _guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let now = now_ms();
     let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
@@ -92,7 +100,7 @@ fn update_task_paused_with_mode(
             .flatten();
     }
     let updated = task.clone();
-    save_tasks(&store)?;
+    save_tasks_unlocked(&store)?;
     Ok(updated)
 }
 
@@ -100,6 +108,7 @@ fn resume_temporary_paused_task_for_schedule(
     id: &str,
     now: u64,
 ) -> Result<Option<AsrDirectoryTask>, String> {
+    let _guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
         return Err(format!("ASR task '{id}' not found"));
@@ -118,7 +127,7 @@ fn resume_temporary_paused_task_for_schedule(
     task.updated_at_ms = now;
     task.last_error = None;
     let updated = task.clone();
-    save_tasks(&store)?;
+    save_tasks_unlocked(&store)?;
     Ok(Some(updated))
 }
 
@@ -132,11 +141,97 @@ fn task_pause_requested(id: &str) -> bool {
 }
 
 fn task_force_pause_requested(id: &str) -> bool {
-    FORCE_PAUSED_TASKS.lock().unwrap().contains(id) && task_pause_requested(id)
+    (FORCE_PAUSED_TASKS.lock().unwrap().contains(id)
+        || worker_force_pause_path(id).is_file())
+        && task_pause_requested(id)
+}
+
+fn worker_force_pause_path(id: &str) -> PathBuf {
+    bifrost_storage::data_dir()
+        .join("runtime/asr-worker/cancel")
+        .join(format!("{id}.cancel"))
+}
+
+pub(crate) fn set_worker_force_pause(id: &str, requested: bool) {
+    let path = worker_force_pause_path(id);
+    if requested {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(error) = std::fs::write(&path, now_ms().to_string()) {
+            warn!(task_id = %id, error = %error, "failed to persist ASR worker cancel marker");
+        }
+    } else if let Err(error) = std::fs::remove_file(&path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            warn!(task_id = %id, error = %error, "failed to clear ASR worker cancel marker");
+        }
+    }
+}
+
+pub(crate) fn cancel_all_worker_tasks() {
+    let task_ids = RUNNING_TASKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for task_id in task_ids {
+        set_worker_force_pause(&task_id, true);
+    }
 }
 
 fn task_store_path() -> PathBuf {
     bifrost_storage::data_dir().join("asr/tasks.json")
+}
+
+fn task_store_lock_path() -> PathBuf {
+    bifrost_storage::data_dir().join("asr/tasks.lock")
+}
+
+struct CrossProcessFileLock {
+    file: std::fs::File,
+}
+
+impl Drop for CrossProcessFileLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+struct TaskStoreWriteGuard {
+    _local: std::sync::MutexGuard<'static, ()>,
+    _cross_process: CrossProcessFileLock,
+}
+
+fn acquire_cross_process_file_lock(
+    path: &Path,
+    label: &str,
+) -> Result<CrossProcessFileLock, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {label} lock dir {}: {error}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("open {label} lock {}: {error}", path.display()))?;
+    file.lock_exclusive()
+        .map_err(|error| format!("lock {label} {}: {error}", path.display()))?;
+    Ok(CrossProcessFileLock { file })
+}
+
+fn acquire_task_store_write_lock() -> Result<TaskStoreWriteGuard, String> {
+    let local = TASK_STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cross_process =
+        acquire_cross_process_file_lock(&task_store_lock_path(), "ASR task store")?;
+    Ok(TaskStoreWriteGuard {
+        _local: local,
+        _cross_process: cross_process,
+    })
 }
 
 fn file_store_path(task_id: &str) -> PathBuf {
@@ -214,6 +309,14 @@ where
     let _guard = RUN_PROGRESS_UPDATE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock_path = run_progress_path(task_id).with_extension("lock");
+    let _cross_process = match acquire_cross_process_file_lock(&lock_path, "ASR run progress") {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!(task_id, %error, "failed to lock ASR run progress");
+            return;
+        }
+    };
     let (progress, _) = load_run_progress(task_id);
     let mut progress = progress.unwrap_or_else(|| start_run_progress(task_id, "background"));
     update(&mut progress);
@@ -286,6 +389,8 @@ fn save_file_store_with_removals(
 ) -> Result<(), String> {
     let _guard = FILE_STORE_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = file_store_path(task_id);
+    let lock_path = path.with_extension("lock");
+    let _cross_process = acquire_cross_process_file_lock(&lock_path, "ASR file store")?;
     let mut merged = match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str::<FileStore>(&content).unwrap_or_else(|_| FileStore {
             version: TASK_STORE_VERSION,
@@ -368,7 +473,7 @@ fn task_with_control_summary(task: AsrDirectoryTask) -> TaskWithSummary {
 }
 
 fn task_with_list_summary(task: AsrDirectoryTask) -> TaskWithSummary {
-    if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
+    if task_is_running(&task.id) {
         task_with_control_summary(task)
     } else {
         task_with_summary(task)
@@ -441,7 +546,7 @@ fn task_watch_snapshot_from_store(
     include_recent: bool,
 ) -> TaskWatchSnapshot {
     let (run_progress, run_progress_warning) = load_run_progress(&task.id);
-    let running = RUNNING_TASKS.lock().unwrap().contains(&task.id);
+    let running = task_is_running(&task.id);
     let visible = visible_file_entries(&task, file_store, None);
     let visible_store = file_store_from_entries(visible.iter().cloned());
     let summary = summarize_task_records(&task, &visible_store, None);
@@ -813,6 +918,13 @@ fn file_status_sort_rank(status: &FileStatus) -> u8 {
 }
 
 fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
+    let _task_store_guard = match acquire_task_store_write_lock() {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!(%error, "failed to lock ASR task store for startup recovery");
+            return Vec::new();
+        }
+    };
     let mut tasks_to_resume = Vec::new();
     let mut task_store = load_tasks();
     let mut task_store_changed = false;
@@ -917,7 +1029,7 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
         }
     }
     if task_store_changed {
-        if let Err(error) = save_tasks(&task_store) {
+        if let Err(error) = save_tasks_unlocked(&task_store) {
             tracing::warn!(
                 error = %error,
                 "failed to persist ASR task recovery metadata"
@@ -1403,7 +1515,7 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         compressible_source_file_count,
         compressed_source_file_count,
         compression_saved_bytes,
-        running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+        running: task_is_running(&task.id),
         max_concurrent_files: normalize_max_concurrent_files(task.max_concurrent_files),
         effective_max_concurrent_files: effective_max_concurrent_files(task),
         diarization_enabled: task.diarization.enabled,
@@ -1577,7 +1689,7 @@ fn summarize_task_records(
         compressible_source_file_count,
         compressed_source_file_count,
         compression_saved_bytes,
-        running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+        running: task_is_running(&task.id),
         max_concurrent_files: normalize_max_concurrent_files(task.max_concurrent_files),
         effective_max_concurrent_files: effective_max_concurrent_files(task),
         diarization_enabled: task.diarization.enabled,

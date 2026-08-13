@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, Write as StdWrite};
+use std::io::Write as StdWrite;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command as StdCommand;
@@ -7,8 +7,8 @@ use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
@@ -39,7 +39,7 @@ const LEGACY_CLAUDE_CODE_RUNNER_ID: &str = "Claude Code";
 const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 2;
-const WORKER_PROTOCOL_VERSION: u32 = 1;
+const WORKER_PROTOCOL_VERSION: u32 = 2;
 const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
@@ -50,6 +50,15 @@ const MAX_PERSISTED_PROGRESS_TITLE_BYTES: usize = 128;
 const MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES: usize = 256;
 const MAX_RETAINED_RUNS: usize = 64;
 const MAX_RETAINED_RUN_BYTES: u64 = 256 * 1024 * 1024;
+const EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES: usize = 1024 * 1024;
+const EXTERNAL_CLI_TEE_BUFFER_BYTES: usize = 64 * 1024;
+const EXTERNAL_CLI_WORKER_REQUEST_MAX_BYTES: u64 = 384 * 1024 * 1024;
+const EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const EXTERNAL_CLI_WORKER_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES: usize = 16 * 1024;
+const EXTERNAL_CLI_WORKER_PROGRESS_TITLE_BYTES: usize = 1024;
+const DEFAULT_EXTERNAL_CLI_MAX_CONCURRENCY: usize = 1;
+const DEFAULT_EXTERNAL_CLI_QUEUE_TIMEOUT_SECS: u64 = 30;
 const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
 #[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
@@ -61,6 +70,8 @@ static ACTIVE_SESSIONS: once_cell::sync::Lazy<dashmap::DashMap<String, String>> 
 static ACTIVE_WORKER_SESSIONS: once_cell::sync::Lazy<
     dashmap::DashMap<String, ExternalCliWorkerControlHandle>,
 > = once_cell::sync::Lazy::new(dashmap::DashMap::new);
+static EXTERNAL_CLI_RUN_SEMAPHORE: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(external_cli_max_concurrency()));
 
 #[derive(Clone)]
 struct ExternalCliWorkerControlHandle {
@@ -185,11 +196,12 @@ pub fn run_worker_stdio() -> Result<(), String> {
 }
 
 async fn run_worker_stdio_async() -> Result<(), String> {
-    let mut stdin = std::io::BufReader::new(std::io::stdin()).lines();
-    let Some(first_line) = stdin
-        .next()
-        .transpose()
-        .map_err(|error| format!("read external runner worker command failed: {error}"))?
+    let mut stdin = std::io::BufReader::new(std::io::stdin());
+    let Some(first_line) = crate::worker_runtime::read_limited_sync_line(
+        &mut stdin,
+        EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES,
+    )
+    .map_err(|error| format!("read external runner worker command failed: {error}"))?
     else {
         return Err("external runner worker expected a run command".to_string());
     };
@@ -204,48 +216,78 @@ async fn run_worker_stdio_async() -> Result<(), String> {
             request.protocol_version
         ));
     }
+    let request_path = validate_external_cli_worker_runtime_path(
+        &request.request_path,
+        &external_cli_worker_request_dir(),
+    )?;
+    let request_file = read_external_cli_worker_json::<ExternalCliWorkerRequestFile>(
+        &request_path,
+        EXTERNAL_CLI_WORKER_REQUEST_MAX_BYTES,
+    );
+    let _ = std::fs::remove_file(&request_path);
+    let request_file = request_file?;
+    let runs_root = request.runs_root.clone();
+    let run_request = request_file.request;
     let (command_tx, mut command_rx) =
-        tokio::sync::mpsc::unbounded_channel::<ExternalCliWorkerCommand>();
-    std::thread::spawn(move || {
-        while let Some(Ok(line)) = stdin.next() {
-            if let Ok(command) = serde_json::from_str::<ExternalCliWorkerCommand>(&line) {
-                let should_stop = matches!(command, ExternalCliWorkerCommand::Stop);
-                if command_tx.send(command).is_err() || should_stop {
-                    break;
-                }
+        tokio::sync::mpsc::channel::<ExternalCliWorkerCommand>(MAX_PENDING_EXTERNAL_GUIDES + 2);
+    std::thread::spawn(move || loop {
+        let line = match crate::worker_runtime::read_limited_sync_line(
+            &mut stdin,
+            EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES,
+        ) {
+            Ok(Some(line)) => line,
+            Ok(None) | Err(_) => break,
+        };
+        let Ok(command) = serde_json::from_str::<ExternalCliWorkerCommand>(&line) else {
+            continue;
+        };
+        let should_stop = matches!(command, ExternalCliWorkerCommand::Stop);
+        if command_tx.blocking_send(command).is_err() || should_stop {
+            break;
+        }
+    });
+    let (event_tx, mut event_rx) = mpsc::channel::<ExternalCliWorkerEvent>(128);
+    let event_writer = std::thread::spawn(move || {
+        while let Some(event) = event_rx.blocking_recv() {
+            if send_external_cli_worker_event(&event).is_err() {
+                break;
             }
         }
     });
-    send_external_cli_worker_event(&ExternalCliWorkerEvent::Started {
-        session_key: request.request.session_key.clone(),
-        pid: std::process::id(),
-    })?;
-    let request = *request;
-    let session_key = request.request.session_key.clone().unwrap_or_default();
-    let supports_live_guide = app_server::resolved_transport(&request.request)
+    queue_external_cli_worker_event(
+        &event_tx,
+        ExternalCliWorkerEvent::Started {
+            session_key: run_request.session_key.clone(),
+            pid: std::process::id(),
+        },
+    )
+    .await?;
+    let session_key = run_request.session_key.clone().unwrap_or_default();
+    let supports_live_guide = app_server::resolved_transport(&run_request)
         .is_ok_and(ExternalCliTransport::supports_live_guide);
-    let runtime = ExternalCliRuntime::new(PathBuf::from(&request.runs_root));
+    let runtime = ExternalCliRuntime::new(PathBuf::from(runs_root));
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_task = tokio::spawn(async move {
-        while let Some(event) = progress_rx.recv().await {
-            let _ = send_external_cli_worker_event(&ExternalCliWorkerEvent::Progress { event });
-        }
-    });
     let run = tokio::spawn(async move {
         runtime
-            .run_in_current_process_with_progress(request.request, Some(progress_tx))
+            .run_in_current_process_with_progress(run_request, Some(progress_tx))
             .await
     });
     tokio::pin!(run);
-    loop {
+    let final_event = loop {
         tokio::select! {
+            progress = progress_rx.recv() => {
+                if let Some(event) = progress {
+                    let _ = event_tx.try_send(ExternalCliWorkerEvent::Progress {
+                        event: compact_external_cli_worker_progress(event),
+                    });
+                }
+            }
             command = command_rx.recv() => {
                 match command {
                     Some(ExternalCliWorkerCommand::Stop) | None => {
                         kill_all_active_runs();
                         run.abort();
-                        send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?;
-                        break;
+                        break ExternalCliWorkerEvent::Stopped;
                     }
                     Some(ExternalCliWorkerCommand::Guide { guide_id, message }) => {
                         let result = if supports_live_guide {
@@ -267,27 +309,53 @@ async fn run_worker_stdio_async() -> Result<(), String> {
                                 ),
                             }
                         };
-                        send_external_cli_worker_event(&ExternalCliWorkerEvent::GuideResult {
-                            result,
-                        })?;
+                        queue_external_cli_worker_event(
+                            &event_tx,
+                            ExternalCliWorkerEvent::GuideResult { result },
+                        )
+                        .await?;
                     }
                     Some(ExternalCliWorkerCommand::Run { .. }) => {}
                 }
             }
             result = &mut run => {
-                match result {
+                break match result {
                     Ok(Ok(result)) => {
-                        let _ = progress_task.await;
-                        send_external_cli_worker_event(&ExternalCliWorkerEvent::Finished { result: Box::new(result) })?
+                        while let Ok(event) = progress_rx.try_recv() {
+                            let _ = event_tx.try_send(ExternalCliWorkerEvent::Progress {
+                                event: compact_external_cli_worker_progress(event),
+                            });
+                        }
+                        let result_path = external_cli_worker_result_dir()
+                            .join(format!("result-{}.json", uuid::Uuid::new_v4()));
+                        write_external_cli_worker_json(
+                            &result_path,
+                            &result,
+                            EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES,
+                        )?;
+                        ExternalCliWorkerEvent::Finished {
+                            result: ExternalCliWorkerResultReference { result_path },
+                        }
                     },
-                    Ok(Err(error)) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error })?,
-                    Err(error) if error.is_cancelled() => send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?,
-                    Err(error) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error: format!("external runner worker task failed: {error}") })?,
-                }
-                break;
+                    Ok(Err(error)) => ExternalCliWorkerEvent::Failed {
+                        error: truncate_utf8_bytes(&error, EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES),
+                    },
+                    Err(error) if error.is_cancelled() => ExternalCliWorkerEvent::Stopped,
+                    Err(error) => ExternalCliWorkerEvent::Failed {
+                        error: truncate_utf8_bytes(
+                            &format!("external runner worker task failed: {error}"),
+                            EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES,
+                        ),
+                    },
+                };
             }
         }
-    }
+    };
+    queue_external_cli_worker_event(&event_tx, final_event).await?;
+    drop(event_tx);
+    event_writer
+        .join()
+        .map_err(|_| "external runner worker event writer panicked".to_string())?;
     Ok(())
 }
 
@@ -1019,7 +1087,19 @@ pub struct ExternalCliRuntime {
 struct ExternalCliWorkerRunRequest {
     protocol_version: u32,
     runs_root: String,
+    request_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalCliWorkerRequestFile {
     request: ExternalCliRunRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalCliWorkerResultReference {
+    result_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1043,7 +1123,7 @@ enum ExternalCliWorkerEvent {
         pid: u32,
     },
     Finished {
-        result: Box<ExternalCliRunResult>,
+        result: ExternalCliWorkerResultReference,
     },
     Progress {
         event: ExternalCliProgressEvent,
@@ -1064,7 +1144,8 @@ struct ExternalCliWorkerClient {
 struct ExternalCliWorkerRun {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
-    events: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    events: tokio::io::BufReader<tokio::process::ChildStdout>,
+    request_path: Option<PathBuf>,
 }
 
 impl ExternalCliWorkerClient {
@@ -1080,30 +1161,54 @@ impl ExternalCliWorkerClient {
         runs_root: PathBuf,
         request: ExternalCliRunRequest,
     ) -> Result<ExternalCliWorkerRun, String> {
-        let mut child = spawn_external_cli_worker_process(&self.executable)?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "external runner worker stdin unavailable".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "external runner worker stdout unavailable".to_string())?;
-        write_external_cli_worker_command(
+        let request_path = external_cli_worker_request_dir()
+            .join(format!("request-{}.json", uuid::Uuid::new_v4()));
+        write_external_cli_worker_json(
+            &request_path,
+            &ExternalCliWorkerRequestFile { request },
+            EXTERNAL_CLI_WORKER_REQUEST_MAX_BYTES,
+        )?;
+        let mut child = match spawn_external_cli_worker_process(&self.executable) {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = std::fs::remove_file(&request_path);
+                return Err(error);
+            }
+        };
+        let Some(mut stdin) = child.stdin.take() else {
+            let _ = std::fs::remove_file(&request_path);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err("external runner worker stdin unavailable".to_string());
+        };
+        let Some(stdout) = child.stdout.take() else {
+            let _ = std::fs::remove_file(&request_path);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err("external runner worker stdout unavailable".to_string());
+        };
+        if let Err(error) = write_external_cli_worker_command(
             &mut stdin,
             &ExternalCliWorkerCommand::Run {
                 request: Box::new(ExternalCliWorkerRunRequest {
                     protocol_version: WORKER_PROTOCOL_VERSION,
                     runs_root: runs_root.display().to_string(),
-                    request,
+                    request_path: request_path.clone(),
                 }),
             },
         )
-        .await?;
+        .await
+        {
+            let _ = std::fs::remove_file(&request_path);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(error);
+        }
         Ok(ExternalCliWorkerRun {
             child,
             stdin,
-            events: tokio::io::BufReader::new(stdout).lines(),
+            events: tokio::io::BufReader::new(stdout),
+            request_path: Some(request_path),
         })
     }
 }
@@ -1142,6 +1247,7 @@ impl ExternalCliWorkerRun {
     }
 
     async fn terminate(mut self) -> Result<(), String> {
+        self.cleanup_request_file();
         let _ = self.request_stop().await;
         match tokio::time::timeout(
             Duration::from_millis(WORKER_STOP_GRACE_MS),
@@ -1162,12 +1268,17 @@ impl ExternalCliWorkerRun {
     }
 
     async fn next_event(&mut self) -> Result<ExternalCliWorkerEvent, String> {
-        let Some(line) = self
-            .events
-            .next_line()
-            .await
-            .map_err(|error| format!("read external runner worker event failed: {error}"))?
-        else {
+        let line = crate::worker_runtime::read_limited_async_line(
+            &mut self.events,
+            EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES,
+        )
+        .await
+        .map_err(|error| {
+            self.cleanup_request_file();
+            format!("read external runner worker event failed: {error}")
+        })?;
+        let Some(line) = line else {
+            self.cleanup_request_file();
             let status = self
                 .child
                 .wait()
@@ -1177,9 +1288,25 @@ impl ExternalCliWorkerRun {
                 "external runner worker exited before final event: {status}"
             ));
         };
-        serde_json::from_str::<ExternalCliWorkerEvent>(&line).map_err(|error| {
+        let event = serde_json::from_str::<ExternalCliWorkerEvent>(&line).map_err(|error| {
             format!("parse external runner worker event failed: {error}; line={line}")
-        })
+        })?;
+        if matches!(event, ExternalCliWorkerEvent::Started { .. }) {
+            self.cleanup_request_file();
+        }
+        Ok(event)
+    }
+
+    fn cleanup_request_file(&mut self) {
+        if let Some(path) = self.request_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for ExternalCliWorkerRun {
+    fn drop(&mut self) {
+        self.cleanup_request_file();
     }
 }
 
@@ -1202,11 +1329,30 @@ impl ExternalCliRuntime {
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
+        if !cfg!(test)
+            && request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID
+            && !crate::im_gateway::chatgpt_web::worker::is_browser_worker_process()
+        {
+            return crate::im_gateway::chatgpt_web::worker::run_via_browser_worker(
+                self.runs_root.clone(),
+                request,
+                progress_tx,
+            )
+            .await;
+        }
         if should_run_external_cli_in_current_process() {
             return self
                 .run_in_current_process_with_progress(request, progress_tx)
                 .await;
         }
+        let queue_timeout_secs = external_cli_queue_timeout_secs();
+        let _run_permit = timeout(
+            Duration::from_secs(queue_timeout_secs),
+            EXTERNAL_CLI_RUN_SEMAPHORE.acquire(),
+        )
+        .await
+        .map_err(|_| format!("external CLI queue timed out after {queue_timeout_secs} seconds"))?
+        .map_err(|_| "external CLI concurrency semaphore is closed".to_string())?;
         let worker_client = ExternalCliWorkerClient::current_exe()?;
         let mut worker = worker_client
             .spawn(self.runs_root.clone(), request.clone())
@@ -1292,7 +1438,18 @@ impl ExternalCliRuntime {
                                 let _ = ack_tx.send(result);
                             }
                         }
-                        Ok(ExternalCliWorkerEvent::Finished { result }) => break Ok(*result),
+                        Ok(ExternalCliWorkerEvent::Finished { result }) => {
+                            let result_path = validate_external_cli_worker_runtime_path(
+                                &result.result_path,
+                                &external_cli_worker_result_dir(),
+                            )?;
+                            let value = read_external_cli_worker_json::<ExternalCliRunResult>(
+                                &result_path,
+                                EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES,
+                            );
+                            let _ = std::fs::remove_file(result_path);
+                            break value;
+                        }
                         Ok(ExternalCliWorkerEvent::Failed { error }) => break Err(error),
                         Ok(ExternalCliWorkerEvent::Stopped) => {
                             break Ok(ExternalCliRunResult::stopped(
@@ -1321,7 +1478,7 @@ impl ExternalCliRuntime {
         result
     }
 
-    async fn run_in_current_process_with_progress(
+    pub(crate) async fn run_in_current_process_with_progress(
         &self,
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
@@ -1588,12 +1745,17 @@ impl ExternalCliRuntime {
                 serde_json::to_string(&saved_files).unwrap_or_else(|_| "[]".to_string()),
             );
         }
-        tokio::fs::write(&stdout_path, &run_output.stdout)
-            .await
-            .map_err(|error| format!("write stdout failed: {error}"))?;
-        tokio::fs::write(&stderr_path, &run_output.stderr)
-            .await
-            .map_err(|error| format!("write stderr failed: {error}"))?;
+        if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+            tokio::fs::write(&stdout_path, &run_output.stdout)
+                .await
+                .map_err(|error| format!("write stdout failed: {error}"))?;
+            tokio::fs::write(&stderr_path, &run_output.stderr)
+                .await
+                .map_err(|error| format!("write stderr failed: {error}"))?;
+        } else {
+            ensure_external_cli_log_exists(&stdout_path, &run_output.stdout).await?;
+            ensure_external_cli_log_exists(&stderr_path, &run_output.stderr).await?;
+        }
         let persisted_events = persisted_event_summaries(&run_output.events);
         write_events_jsonl(&events_path, &persisted_events).await?;
         let artifacts = ExternalCliRunArtifacts {
@@ -4174,6 +4336,7 @@ async fn run_command(
     stop_marker_path: PathBuf,
     progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
+    let (stdout_path, stderr_path) = external_cli_log_paths(&stop_marker_path);
     let mut command = Command::new(&spec.executable);
     command
         .args(&spec.args)
@@ -4213,6 +4376,10 @@ async fn run_command(
         .stderr
         .take()
         .ok_or_else(|| "external cli stderr unavailable".to_string())?;
+    let (stdout, stdout_tee_task) =
+        tee_external_cli_output(stdout, stdout_path.clone(), "stdout").await?;
+    let (stderr, stderr_tee_task) =
+        tee_external_cli_output(stderr, stderr_path.clone(), "stderr").await?;
     let stdout_task = tokio::spawn(read_stdout_events(stdout, progress_tx));
     let stderr_task = tokio::spawn(read_stderr_lines(stderr));
 
@@ -4240,6 +4407,8 @@ async fn run_command(
             let stderr = stderr_task
                 .await
                 .map_err(|error| format!("join external cli stderr task failed: {error}"))??;
+            join_external_cli_tee(stdout_tee_task, "stdout").await?;
+            join_external_cli_tee(stderr_tee_task, "stderr").await?;
             let status = if exit_status.success() {
                 ExternalCliRunStatus::Succeeded
             } else {
@@ -4267,6 +4436,9 @@ async fn run_command(
                 child,
                 stdout_task,
                 stderr_task,
+                stdout_tee_task,
+                stderr_tee_task,
+                stderr_path.clone(),
                 ExternalCliRunStatus::TimedOut,
                 format!(
                     "external cli timed out after {} seconds\n",
@@ -4282,6 +4454,9 @@ async fn run_command(
                 child,
                 stdout_task,
                 stderr_task,
+                stdout_tee_task,
+                stderr_tee_task,
+                stderr_path,
                 ExternalCliRunStatus::Stopped,
                 "external cli stopped by request\n".to_string(),
             )
@@ -4296,6 +4471,9 @@ async fn collect_interrupted_command_output(
     mut child: tokio::process::Child,
     stdout_task: ExternalCliStdoutTask,
     stderr_task: ExternalCliStderrTask,
+    stdout_tee_task: ExternalCliTeeTask,
+    stderr_tee_task: ExternalCliTeeTask,
+    stderr_path: PathBuf,
     status: ExternalCliRunStatus,
     terminal_message: String,
 ) -> Result<CommandOutput, String> {
@@ -4317,6 +4495,9 @@ async fn collect_interrupted_command_output(
     let mut stderr = stderr_task
         .await
         .map_err(|error| format!("join external cli stderr task failed: {error}"))??;
+    join_external_cli_tee(stdout_tee_task, "stdout").await?;
+    join_external_cli_tee(stderr_tee_task, "stderr").await?;
+    append_external_cli_log(&stderr_path, terminal_message.as_bytes()).await?;
     stderr.extend_from_slice(terminal_message.as_bytes());
     ACTIVE_RUNS.remove(run_id);
     remove_active_sessions_for_run(run_id);
@@ -4338,6 +4519,92 @@ enum CommandWaitOutcome {
 type ExternalCliStdoutTask =
     tokio::task::JoinHandle<Result<(Vec<u8>, Vec<ExternalCliProgressEvent>), String>>;
 type ExternalCliStderrTask = tokio::task::JoinHandle<Result<Vec<u8>, String>>;
+type ExternalCliTeeTask = tokio::task::JoinHandle<Result<(), String>>;
+
+fn external_cli_log_paths(stop_marker_path: &Path) -> (PathBuf, PathBuf) {
+    let run_dir = stop_marker_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    (
+        run_dir.join("cli.stdout.log"),
+        run_dir.join("cli.stderr.log"),
+    )
+}
+
+async fn tee_external_cli_output<R>(
+    mut reader: R,
+    path: PathBuf,
+    label: &'static str,
+) -> Result<(DuplexStream, ExternalCliTeeTask), String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| format!("create {label} log dir {}: {error}", parent.display()))?;
+    }
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|error| format!("create {label} log {}: {error}", path.display()))?;
+    let (mut forward, forwarded) = tokio::io::duplex(EXTERNAL_CLI_TEE_BUFFER_BYTES);
+    let task = tokio::spawn(async move {
+        let mut buffer = vec![0_u8; EXTERNAL_CLI_TEE_BUFFER_BYTES];
+        let mut forwarding = true;
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .await
+                .map_err(|error| format!("read external CLI {label}: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read]).await.map_err(|error| {
+                format!("write external CLI {label} log {}: {error}", path.display())
+            })?;
+            if forwarding && forward.write_all(&buffer[..read]).await.is_err() {
+                forwarding = false;
+            }
+        }
+        file.flush().await.map_err(|error| {
+            format!("flush external CLI {label} log {}: {error}", path.display())
+        })?;
+        Ok(())
+    });
+    Ok((forwarded, task))
+}
+
+async fn join_external_cli_tee(task: ExternalCliTeeTask, label: &str) -> Result<(), String> {
+    task.await
+        .map_err(|error| format!("join external CLI {label} tee task failed: {error}"))?
+}
+
+async fn append_external_cli_log(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use tokio::fs::OpenOptions;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .map_err(|error| format!("open external CLI log {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .await
+        .map_err(|error| format!("append external CLI log {}: {error}", path.display()))?;
+    file.flush()
+        .await
+        .map_err(|error| format!("flush external CLI log {}: {error}", path.display()))
+}
+
+async fn ensure_external_cli_log_exists(path: &Path, fallback: &[u8]) -> Result<(), String> {
+    if tokio::fs::try_exists(path).await.unwrap_or(false) {
+        return Ok(());
+    }
+    tokio::fs::write(path, fallback)
+        .await
+        .map_err(|error| format!("write external CLI log {}: {error}", path.display()))
+}
 
 async fn wait_for_stop_marker(path: PathBuf) {
     loop {
@@ -4348,10 +4615,13 @@ async fn wait_for_stop_marker(path: PathBuf) {
     }
 }
 
-async fn read_stdout_events(
-    stdout: tokio::process::ChildStdout,
+async fn read_stdout_events<R>(
+    stdout: R,
     progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
-) -> Result<(Vec<u8>, Vec<ExternalCliProgressEvent>), String> {
+) -> Result<(Vec<u8>, Vec<ExternalCliProgressEvent>), String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut bytes = Vec::new();
     let mut events = Vec::new();
@@ -4449,7 +4719,10 @@ fn enrich_progress_event_observation(
     }
 }
 
-async fn read_stderr_lines(stderr: tokio::process::ChildStderr) -> Result<Vec<u8>, String> {
+async fn read_stderr_lines<R>(stderr: R) -> Result<Vec<u8>, String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     let mut lines = tokio::io::BufReader::new(stderr).lines();
     let mut bytes = Vec::new();
     while let Some(line) = lines
@@ -4683,10 +4956,149 @@ fn remove_active_session_if_owned(session_key: &str, run_id: &str) -> bool {
         .is_some()
 }
 
+fn external_cli_max_concurrency() -> usize {
+    std::env::var("BIFROST_EXTERNAL_CLI_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(16))
+        .unwrap_or(DEFAULT_EXTERNAL_CLI_MAX_CONCURRENCY)
+}
+
+fn external_cli_queue_timeout_secs() -> u64 {
+    std::env::var("BIFROST_EXTERNAL_CLI_QUEUE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(600))
+        .unwrap_or(DEFAULT_EXTERNAL_CLI_QUEUE_TIMEOUT_SECS)
+}
+
+fn compact_external_cli_worker_progress(
+    mut event: ExternalCliProgressEvent,
+) -> ExternalCliProgressEvent {
+    event.content = truncate_utf8_bytes(&event.content, EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES);
+    event.title = event
+        .title
+        .as_deref()
+        .map(|title| truncate_utf8_bytes(title, EXTERNAL_CLI_WORKER_PROGRESS_TITLE_BYTES));
+    if serde_json::to_vec(&event.raw)
+        .map(|bytes| bytes.len() > EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES)
+        .unwrap_or(true)
+    {
+        event.raw = compacted_progress_raw(&event.raw);
+    }
+    event
+}
+
+fn external_cli_worker_runtime_root() -> PathBuf {
+    bifrost_storage::data_dir().join("runtime/external-cli-worker")
+}
+
+fn external_cli_worker_request_dir() -> PathBuf {
+    external_cli_worker_runtime_root().join("requests")
+}
+
+fn external_cli_worker_result_dir() -> PathBuf {
+    external_cli_worker_runtime_root().join("results")
+}
+
+fn write_external_cli_worker_json<T: Serialize>(
+    path: &Path,
+    value: &T,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("serialize {}: {error}", path.display()))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "external CLI worker file exceeds limit: {} > {max_bytes}",
+            bytes.len()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let temp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&temp, bytes).map_err(|error| format!("write {}: {error}", temp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!(
+            "rename {} -> {}: {error}",
+            temp.display(),
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn read_external_cli_worker_json<T: DeserializeOwned>(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<T, String> {
+    let metadata =
+        std::fs::metadata(path).map_err(|error| format!("stat {}: {error}", path.display()))?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "external CLI worker file exceeds limit: {} > {max_bytes}",
+            metadata.len()
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn validate_external_cli_worker_runtime_path(path: &Path, root: &Path) -> Result<PathBuf, String> {
+    let root = std::fs::canonicalize(root)
+        .map_err(|error| format!("canonicalize {}: {error}", root.display()))?;
+    let path = std::fs::canonicalize(path)
+        .map_err(|error| format!("canonicalize {}: {error}", path.display()))?;
+    if !path.starts_with(&root) {
+        return Err(format!(
+            "external CLI worker path {} is outside {}",
+            path.display(),
+            root.display()
+        ));
+    }
+    Ok(path)
+}
+
 fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process::Child, String> {
-    external_cli_worker_process_command(executable)
+    let mut command = external_cli_worker_process_command(executable);
+    if let Ok(stderr) = external_cli_worker_stderr_file() {
+        command.stderr(Stdio::from(stderr));
+    }
+    command
         .spawn()
         .map_err(|error| format!("spawn external runner worker failed: {error}"))
+}
+
+fn external_cli_worker_stderr_file() -> Result<std::fs::File, String> {
+    use std::fs::OpenOptions;
+
+    let log_dir = external_cli_worker_runtime_root().join("logs");
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|error| format!("create external CLI worker log dir: {error}"))?;
+    let log_path = log_dir.join("external-cli-worker.log");
+    if std::fs::metadata(&log_path)
+        .map(|metadata| metadata.len() >= EXTERNAL_CLI_WORKER_LOG_MAX_BYTES)
+        .unwrap_or(false)
+    {
+        let rotated = log_dir.join("external-cli-worker.log.1");
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(&log_path, rotated);
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| format!("open external CLI worker stderr log: {error}"))
 }
 
 fn external_cli_worker_process_command(executable: &Path) -> Command {
@@ -4710,6 +5122,13 @@ async fn write_external_cli_worker_command(
 ) -> Result<(), String> {
     let line = serde_json::to_string(command)
         .map_err(|error| format!("serialize external runner worker command failed: {error}"))?;
+    if line.len() > EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES {
+        return Err(format!(
+            "external runner worker command exceeds hard limit: {} > {} bytes",
+            line.len(),
+            EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES
+        ));
+    }
     stdin
         .write_all(line.as_bytes())
         .await
@@ -4727,6 +5146,13 @@ async fn write_external_cli_worker_command(
 fn send_external_cli_worker_event(event: &ExternalCliWorkerEvent) -> Result<(), String> {
     let line = serde_json::to_string(event)
         .map_err(|error| format!("serialize external runner worker event failed: {error}"))?;
+    if line.len() > EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES {
+        return Err(format!(
+            "external runner worker event exceeds hard limit: {} > {} bytes",
+            line.len(),
+            EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES
+        ));
+    }
     let mut stdout = std::io::stdout().lock();
     stdout
         .write_all(line.as_bytes())
@@ -4737,6 +5163,15 @@ fn send_external_cli_worker_event(event: &ExternalCliWorkerEvent) -> Result<(), 
     stdout
         .flush()
         .map_err(|error| format!("flush external runner worker event failed: {error}"))
+}
+
+async fn queue_external_cli_worker_event(
+    tx: &mpsc::Sender<ExternalCliWorkerEvent>,
+    event: ExternalCliWorkerEvent,
+) -> Result<(), String> {
+    tx.send(event)
+        .await
+        .map_err(|_| "external runner worker event writer closed".to_string())
 }
 
 /// 终止所有正在运行的 external CLI 子进程。在 Bifrost 进程退出时调用，

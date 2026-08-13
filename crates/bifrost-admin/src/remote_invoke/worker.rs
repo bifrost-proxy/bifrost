@@ -380,9 +380,16 @@ impl RemoteInvokeWorker {
             &identity.device_name,
             &identity.platform,
         ));
-        let executor = Arc::new(RemoteInvokeExecutor::new_with_state(
-            admin_host, admin_port, state,
-        ));
+        let executor = if std::env::var("BIFROST_REMOTE_INVOKE_WORKER")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        {
+            Arc::new(RemoteInvokeExecutor::new(admin_host, admin_port))
+        } else {
+            Arc::new(RemoteInvokeExecutor::new_with_state(
+                admin_host, admin_port, state,
+            ))
+        };
         let data_dir = bifrost_storage::data_dir();
         let ssh_key_store = Arc::new(SshKeyStore::new(&data_dir));
         let grant_crypto_store = Arc::new(GrantCryptoStore::new(&data_dir));
@@ -1285,9 +1292,10 @@ impl RemoteInvokeWorker {
 
     fn registration_session_token(&self) -> Option<String> {
         normalize_registration_session_token(
-            self.sync_manager.as_ref().and_then(|manager| {
-                manager.session_token_for_remote(&self.relay_client.base_url())
-            }),
+            self.sync_manager
+                .as_ref()
+                .and_then(|manager| manager.session_token_for_remote(&self.relay_client.base_url()))
+                .or_else(|| std::env::var("BIFROST_REMOTE_SESSION_TOKEN").ok()),
         )
     }
 

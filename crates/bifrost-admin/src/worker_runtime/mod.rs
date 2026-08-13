@@ -1,0 +1,42 @@
+pub mod asr;
+pub mod im_gateway;
+mod process;
+mod protocol;
+pub mod remote_invoke;
+mod supervisor;
+mod worker_stdio;
+
+pub use process::{ManagedWorker, ManagedWorkerSnapshot, WorkerSpawnSpec};
+pub use protocol::{
+    now_ms as worker_now_ms, ParentFrame, WorkerEvent, WorkerFrame, WorkerKind,
+    WorkerLifecycleState, WorkerRequest, WorkerResponse, WORKER_MAX_FRAME_BYTES,
+    WORKER_PROTOCOL_VERSION,
+};
+pub(crate) use protocol::{read_limited_async_line, read_limited_sync_line};
+pub use supervisor::{global_worker_supervisor, SharedWorkerSupervisor, WorkerSupervisor};
+pub use worker_stdio::{run_worker_stdio, WorkerStdioContext};
+
+pub fn run_auxiliary_worker(kind: &str, admin_host: &str, admin_port: u16) -> Result<(), String> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "browser" => crate::im_gateway::chatgpt_web::worker::run_browser_worker_stdio(),
+        "asr" => asr::run_asr_worker_stdio(),
+        "im_gateway" | "im-gateway" => {
+            im_gateway::run_im_gateway_worker_stdio(admin_host, admin_port)
+        }
+        "remote_invoke" | "remote-invoke" => {
+            remote_invoke::run_remote_invoke_worker_stdio(admin_host, admin_port)
+        }
+        other => Err(format!("unsupported auxiliary worker kind '{other}'")),
+    }
+}
+
+pub async fn shutdown_all_workers() {
+    im_gateway::stop_runtime_controller();
+    remote_invoke::stop_runtime_controller();
+    global_worker_supervisor()
+        .stop_all(std::time::Duration::from_secs(5))
+        .await;
+}
+pub async fn worker_snapshots() -> Vec<ManagedWorkerSnapshot> {
+    global_worker_supervisor().snapshots().await
+}

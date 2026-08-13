@@ -68,6 +68,12 @@ pub(super) async fn save_session_conversation(
 }
 
 pub async fn clear_session_conversation(session_key: &str) {
+    if !cfg!(test) && !super::worker::is_browser_worker_process() {
+        if let Err(error) = super::worker::clear_session_conversation(session_key).await {
+            tracing::warn!(session_key, error = %error, "browser worker failed to clear session conversation");
+        }
+        return;
+    }
     let sessions_path = bifrost_agent::config::agent_home_dir()
         .join("im_gateway")
         .join("chatgpt_web")
@@ -112,6 +118,11 @@ pub async fn clear_session_conversation(session_key: &str) {
 }
 
 pub async fn session_conversation_exists(session_key: &str) -> bool {
+    if !cfg!(test) && !super::worker::is_browser_worker_process() {
+        return super::worker::session_conversation_exists(session_key)
+            .await
+            .unwrap_or(false);
+    }
     let sessions_path = bifrost_agent::config::agent_home_dir()
         .join("im_gateway")
         .join("chatgpt_web")
