@@ -374,6 +374,7 @@ dependencies = [
  "dirs 5.0.1",
  "ecb",
  "flate2",
+ "fs2",
  "futures-util",
  "gethostname",
  "http-body-util",

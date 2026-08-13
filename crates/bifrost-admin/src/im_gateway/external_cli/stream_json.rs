@@ -43,6 +43,7 @@ pub(super) async fn run_command(
     stop_marker_path: PathBuf,
     progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
+    let (stdout_path, stderr_path) = external_cli_log_paths(&stop_marker_path);
     let mut command = Command::new(&spec.executable);
     command
         .args(&spec.args)
@@ -86,6 +87,10 @@ pub(super) async fn run_command(
         .stderr
         .take()
         .ok_or_else(|| "stream-json stderr unavailable".to_string())?;
+    let (stdout, stdout_tee_task) =
+        tee_external_cli_output(stdout, stdout_path, "stream-json stdout").await?;
+    let (stderr, stderr_tee_task) =
+        tee_external_cli_output(stderr, stderr_path, "stream-json stderr").await?;
     write_user_frame(&mut stdin, &prompt).await?;
 
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -322,6 +327,8 @@ pub(super) async fn run_command(
         let _ = stderr_task.await;
         b"stream-json runner did not exit after termination\n".to_vec()
     };
+    join_external_cli_tee(stdout_tee_task, "stream-json stdout").await?;
+    join_external_cli_tee(stderr_tee_task, "stream-json stderr").await?;
     if let Some(error) = terminal_error {
         if !stderr.is_empty() && !stderr.ends_with(b"\n") {
             stderr.push(b'\n');

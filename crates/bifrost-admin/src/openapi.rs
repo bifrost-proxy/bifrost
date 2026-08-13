@@ -1311,6 +1311,17 @@ fn generate_paths() -> serde_json::Value {
                 }
             }
         },
+        "/api/diagnostics/workers": {
+            "get": {
+                "tags": ["Diagnostics"],
+                "summary": "Auxiliary worker diagnostics snapshot",
+                "description": "Returns lifecycle, heartbeat, concurrency and failure state for managed auxiliary workers without starting idle workers.",
+                "operationId": "getAuxiliaryWorkerDiagnostics",
+                "responses": {
+                    "200": {"description": "Auxiliary worker diagnostics"}
+                }
+            }
+        },
 
         // ═══════════════════════════════════════════════════════
         // Ports

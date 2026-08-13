@@ -2291,6 +2291,7 @@ fn update_daily_agent_status(
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _task_store_guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
@@ -2302,7 +2303,7 @@ fn update_daily_agent_status(
         agent.last_run_id = Some(run_id.to_string());
     });
     mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
-    save_tasks(&store)
+    save_tasks_unlocked(&store)
 }
 
 fn update_daily_agent_im_error(source_task: &AsrDirectoryTask, error: &str) -> Result<(), String> {
@@ -2311,6 +2312,7 @@ fn update_daily_agent_im_error(source_task: &AsrDirectoryTask, error: &str) -> R
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _task_store_guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
@@ -2319,7 +2321,7 @@ fn update_daily_agent_im_error(source_task: &AsrDirectoryTask, error: &str) -> R
         agent.im_delivery.last_send_error = Some(error.to_string());
     });
     mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
-    save_tasks(&store)
+    save_tasks_unlocked(&store)
 }
 
 fn update_daily_agent_im_sent(source_task: &AsrDirectoryTask) -> Result<(), String> {
@@ -2328,6 +2330,7 @@ fn update_daily_agent_im_sent(source_task: &AsrDirectoryTask) -> Result<(), Stri
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _task_store_guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
@@ -2337,5 +2340,5 @@ fn update_daily_agent_im_sent(source_task: &AsrDirectoryTask) -> Result<(), Stri
         agent.im_delivery.last_send_error = None;
     });
     mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
-    save_tasks(&store)
+    save_tasks_unlocked(&store)
 }

@@ -217,6 +217,17 @@ pub enum Commands {
         #[arg(long, value_hint = ValueHint::FilePath)]
         output: PathBuf,
     },
+    #[command(hide = true)]
+    AuxiliaryWorker {
+        #[arg(long)]
+        kind: String,
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        data_dir: PathBuf,
+        #[arg(long, default_value = "127.0.0.1")]
+        admin_host: String,
+        #[arg(long, default_value_t = 0)]
+        admin_port: u16,
+    },
     #[command(about = "Start the proxy server (default when no subcommand provided)")]
     Start {
         #[arg(short, long, help = "HTTP proxy port (overrides global -p)")]

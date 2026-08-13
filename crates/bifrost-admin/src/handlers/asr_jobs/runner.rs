@@ -103,7 +103,7 @@ fn task_allows_external_device_event_import(task: &AsrDirectoryTask) -> bool {
 
 #[cfg(target_os = "macos")]
 async fn sync_external_device_task(task: AsrDirectoryTask, trigger: &'static str) {
-    if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
+    if task_is_running(&task.id) {
         return;
     }
     match start_external_import_background(task.clone(), trigger) {
@@ -569,6 +569,92 @@ fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), Str
     spawn_directory_task_run_background_for_date(task, None)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrWorkerRunOutcome {
+    pub processed: usize,
+    pub failed: usize,
+    pub status: String,
+}
+
+async fn execute_directory_task_run(
+    task: AsrDirectoryTask,
+    recording_date: Option<NaiveDate>,
+) -> AsrWorkerRunOutcome {
+    let result = run_directory_task_for_date(task.clone(), recording_date).await;
+    let outcome = match &result {
+        Ok((_updated, processed, failed)) => {
+            finish_run_progress(
+                &task.id,
+                "completed",
+                *processed,
+                *failed,
+                Some(format!(
+                    "ASR directory task completed; processed {processed}, failed {failed}."
+                )),
+            );
+            tracing::info!(
+                task_id = %task.id, processed = processed, failed = failed,
+                "ASR directory task completed"
+            );
+            AsrWorkerRunOutcome {
+                processed: *processed,
+                failed: *failed,
+                status: "completed".to_string(),
+            }
+        }
+        Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
+            finish_run_progress(
+                &task.id,
+                "paused",
+                0,
+                0,
+                Some("ASR directory task paused and released compute.".to_string()),
+            );
+            tracing::info!(
+                task_id = %task.id,
+                "ASR directory task paused and released compute"
+            );
+            AsrWorkerRunOutcome {
+                processed: 0,
+                failed: 0,
+                status: "paused".to_string(),
+            }
+        }
+        Err(error) => {
+            let _ = update_task_after_run(&task.id, Some(error.clone()));
+            finish_run_progress(&task.id, "failed", 0, 0, Some(error.clone()));
+            tracing::warn!(
+                task_id = %task.id, error = %error,
+                "ASR directory task failed"
+            );
+            AsrWorkerRunOutcome {
+                processed: 0,
+                failed: 0,
+                status: "failed".to_string(),
+            }
+        }
+    };
+    set_worker_force_pause(&task.id, false);
+    outcome
+}
+
+pub(crate) async fn run_directory_task_in_worker(
+    task_id: &str,
+    recording_date: Option<NaiveDate>,
+) -> Result<AsrWorkerRunOutcome, String> {
+    let task = find_task(task_id).ok_or_else(|| format!("ASR task '{task_id}' not found"))?;
+    if source_compression_is_running(task_id) {
+        return Err("ASR source-audio compression is running".to_string());
+    }
+    set_worker_force_pause(task_id, false);
+    FORCE_PAUSED_TASKS.lock().unwrap().remove(task_id);
+    let running_guard = RunningTaskGuard::acquire(task_id)
+        .map_err(|_| "ASR task is already running".to_string())?;
+    let outcome = execute_directory_task_run(task, recording_date).await;
+    drop(running_guard);
+    Ok(outcome)
+}
+
 fn spawn_directory_task_run_background_for_date(
     task: AsrDirectoryTask,
     recording_date: Option<NaiveDate>,
@@ -576,59 +662,35 @@ fn spawn_directory_task_run_background_for_date(
     if source_compression_is_running(&task.id) {
         return Err("ASR source-audio compression is running".to_string());
     }
+    set_worker_force_pause(&task.id, false);
     FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
     let running_guard = RunningTaskGuard::acquire(&task.id)
         .map_err(|_| "ASR task is already running".to_string())?;
 
     let task_id = task.id.clone();
-    let task_clone = task.clone();
-    tokio::spawn(async move {
-        let running_guard = running_guard;
-        let result = run_directory_task_for_date(task_clone.clone(), recording_date).await;
-        match &result {
-            Ok((_updated, processed, failed)) => {
-                finish_run_progress(
-                    &task_clone.id,
-                    "completed",
-                    *processed,
-                    *failed,
-                    Some(format!(
-                        "ASR directory task completed; processed {processed}, failed {failed}."
-                    )),
-                );
-                tracing::info!(
-                    task_id = %task_clone.id, processed = processed, failed = failed,
-                    "ASR directory task completed"
-                );
-            }
-            Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
-                finish_run_progress(
-                    &task_clone.id,
-                    "paused",
-                    0,
-                    0,
-                    Some("ASR directory task paused and released compute.".to_string()),
-                );
-                tracing::info!(
-                    task_id = %task_clone.id,
-                    "ASR directory task paused and released compute"
-                );
-            }
-            Err(error) => {
-                let _ = update_task_after_run(&task_clone.id, Some(error.clone()));
-                finish_run_progress(
-                    &task_clone.id,
-                    "failed",
-                    0,
-                    0,
-                    Some(error.clone()),
-                );
+    if !cfg!(test) && !crate::worker_runtime::asr::is_asr_worker_process() {
+        tokio::spawn(async move {
+            if let Err(error) =
+                crate::worker_runtime::asr::run_directory_task(&task_id, recording_date).await
+            {
+                let _ = update_task_after_run(&task_id, Some(error.clone()));
+                finish_run_progress(&task_id, "failed", 0, 0, Some(error.clone()));
                 tracing::warn!(
-                    task_id = %task_clone.id, error = %error,
-                    "ASR directory task failed"
+                    task_id = %task_id, error = %error,
+                    "ASR directory worker request failed"
                 );
             }
-        }
+            drop(running_guard);
+            tracing::debug!(
+                task_id = %task_id,
+                "released parent ASR directory task running marker"
+            );
+        });
+        return Ok(());
+    }
+
+    tokio::spawn(async move {
+        let _ = execute_directory_task_run(task, recording_date).await;
         drop(running_guard);
         tracing::debug!(
             task_id = %task_id,

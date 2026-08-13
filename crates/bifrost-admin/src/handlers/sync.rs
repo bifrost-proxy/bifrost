@@ -8,7 +8,6 @@ use super::{
     empty_body, error_response, full_body, json_response, method_not_allowed,
     public_response_builder, BoxBody,
 };
-use crate::remote_invoke::{Identity, RemoteInvokeConfig, RemoteInvokeWorker};
 use crate::state::SharedAdminState;
 
 #[derive(Debug, Serialize)]
@@ -468,63 +467,31 @@ async fn reconcile_remote_invoke_workers(state: &SharedAdminState) {
     let Some(sync_manager) = state.sync_manager.clone() else {
         return;
     };
-    let targets = bifrost_sync::SyncManagerHandle::new(sync_manager.clone())
+    let targets = bifrost_sync::SyncManagerHandle::new(sync_manager)
         .remote_invoke_registration_targets()
-        .await;
-    let desired_urls: Vec<String> = targets
-        .iter()
-        .map(|target| target.remote_base_url.trim_end_matches('/').to_string())
-        .collect();
-
-    state.stop_remote_invoke_workers_except(&desired_urls);
-    if desired_urls.is_empty() {
-        info!("remote invoke workers stopped because no provider session supports registration");
-        return;
-    }
+        .await
+        .into_iter()
+        .map(
+            |target| crate::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                provider_id: target.provider_id,
+                relay_url: target.remote_base_url,
+                session_token: target.session_token,
+            },
+        )
+        .collect::<Vec<_>>();
 
     let Some((admin_host, admin_port)) = state.remote_invoke_admin_endpoint() else {
-        warn!("remote invoke admin endpoint missing; skip provider worker reconcile");
+        warn!("remote invoke admin endpoint missing; skip isolated worker reconcile");
         return;
     };
-    let Some(config_manager) = state.config_manager.clone() else {
-        warn!("config manager missing; skip provider worker reconcile");
-        return;
-    };
-    let identity = match Identity::load_or_create(config_manager.data_dir()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            warn!(error = %error, "remote invoke identity init failed during provider reconcile");
-            return;
-        }
-    };
-
-    for target in targets {
-        let relay_url = target.remote_base_url.trim_end_matches('/').to_string();
-        if state
-            .remote_invoke_worker_for_relay_url(&relay_url)
-            .is_some()
-        {
-            continue;
-        }
-        let worker = RemoteInvokeWorker::new(
-            RemoteInvokeConfig {
-                relay_url: relay_url.clone(),
-                ..Default::default()
-            },
-            identity.clone(),
-            Some(bifrost_sync::SyncManagerHandle::new(sync_manager.clone())),
-            state.clone(),
-            &admin_host,
-            admin_port,
-        );
-        state.upsert_remote_invoke_worker(worker.clone());
-        worker.start();
-        info!(
-            provider_id = %target.provider_id,
-            relay_url = %relay_url,
-            "remote invoke provider worker started"
-        );
-    }
+    let count = targets.len();
+    crate::worker_runtime::remote_invoke::configure_runtime_targets(
+        targets, admin_host, admin_port,
+    );
+    info!(
+        workers = count,
+        "remote invoke isolated worker targets reconciled"
+    );
 }
 
 async fn get_remote_sample(

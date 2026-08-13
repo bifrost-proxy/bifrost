@@ -85,6 +85,52 @@ use service::{
 pub use service::{ImGatewayService, SharedImGatewayService};
 use utils::*;
 
+pub(crate) async fn start_provider_event_connection_runtime(
+    service: &ImGatewayService,
+    provider_id: &str,
+) -> Result<(), String> {
+    providers::start_provider_event_connection(service, provider_id).await
+}
+
+pub(crate) fn provider_runtime_status_value(
+    service: &ImGatewayService,
+    provider_id: &str,
+) -> Result<serde_json::Value, String> {
+    let provider = service
+        .provider_store
+        .get(provider_id)
+        .ok_or_else(|| "Provider not found".to_string())?;
+    let status = service
+        .connection_manager
+        .get_status(provider_id)
+        .unwrap_or_default();
+    let mut value = serde_json::to_value(status)
+        .map_err(|error| format!("serialize provider runtime status: {error}"))?;
+    if provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin {
+        let owner_id = provider.owner_open_id.as_deref().unwrap_or_default();
+        let send_ready = !owner_id.is_empty()
+            && service
+                .connection_manager
+                .weixin_provider()
+                .send_ready_for_user(&provider, owner_id);
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "send_ready".to_string(),
+                serde_json::Value::Bool(send_ready),
+            );
+            if !send_ready {
+                object.insert(
+                    "send_ready_reason".to_string(),
+                    serde_json::Value::String(
+                        "awaiting an inbound message context token".to_string(),
+                    ),
+                );
+            }
+        }
+    }
+    Ok(value)
+}
+
 pub async fn handle_im_gateway(
     req: Request<Incoming>,
     service: Option<SharedImGatewayService>,

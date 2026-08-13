@@ -79,7 +79,7 @@ pub(super) async fn handle_providers(
         }
         // Check for /:id/status
         if let Some(id) = extract_segment_before(id_and_rest, "/status") {
-            return handle_provider_status(&req, service, id);
+            return handle_provider_status(&req, service, id).await;
         }
         // Check for /:id/capabilities
         if let Some(id) = extract_segment_before(id_and_rest, "/capabilities") {
@@ -234,7 +234,13 @@ pub(super) async fn handle_provider_by_id(
             match service.provider_store.update(existing) {
                 Ok(()) => {
                     if disables_provider_connection(&patch) {
-                        service.connection_manager.stop_connection(id);
+                        if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+                            service.connection_manager.stop_connection(id);
+                        } else if let Err(error) =
+                            crate::worker_runtime::im_gateway::disconnect_provider(id).await
+                        {
+                            warn!(provider_id = id, error = %error, "failed to stop isolated IM provider after disabling it");
+                        }
                     }
                     json_response(&serde_json::json!({"success": true}))
                 }
@@ -245,6 +251,7 @@ pub(super) async fn handle_provider_by_id(
             let _lifecycle = service.provider_connection_lifecycle.lock().await;
             if service.provider_store.get(id).is_none() {
                 return error_response(StatusCode::NOT_FOUND, "Provider not found");
+            }
             }
             service
                 .connection_manager
@@ -341,7 +348,7 @@ mod tests {
     }
 }
 
-pub(super) fn handle_provider_status(
+pub(super) async fn handle_provider_status(
     req: &Request<Incoming>,
     service: &ImGatewayService,
     id: &str,
@@ -349,68 +356,28 @@ pub(super) fn handle_provider_status(
     if req.method() != Method::GET {
         return method_not_allowed();
     }
-    let provider = service.provider_store.get(id);
-    let status = service.connection_manager.get_status(id);
-    match status {
-        Some(s) => {
-            let mut value = serde_json::to_value(&s).unwrap_or_default();
-            if let Some(provider) = provider.as_ref() {
-                if provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin {
-                    let owner_id = provider.owner_open_id.as_deref().unwrap_or_default();
-                    let send_ready = !owner_id.is_empty()
-                        && service
-                            .connection_manager
-                            .weixin_provider()
-                            .send_ready_for_user(provider, owner_id);
-                    if let Some(object) = value.as_object_mut() {
-                        object.insert(
-                            "send_ready".to_string(),
-                            serde_json::Value::Bool(send_ready),
-                        );
-                        if !send_ready {
-                            object.insert(
-                                "send_ready_reason".to_string(),
-                                serde_json::Value::String(
-                                    "awaiting an inbound message context token".to_string(),
-                                ),
-                            );
-                        }
-                    }
-                }
+    if !crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+        match crate::worker_runtime::im_gateway::provider_status(id).await {
+            Ok(Some(value)) => return json_response(&value),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(provider_id = id, error = %error, "IM Gateway worker status request failed");
+                return json_response_with_status(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &serde_json::json!({
+                        "message": "IM Gateway runtime is unavailable",
+                        "worker_error": error,
+                    }),
+                );
             }
-            json_response(&value)
         }
-        None => {
-            let Some(provider) = provider else {
-                return error_response(StatusCode::NOT_FOUND, "Provider not found");
-            };
-            let mut value =
-                serde_json::to_value(crate::im_gateway::types::ConnectionStatus::default())
-                    .unwrap_or_default();
-            if provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin {
-                let owner_id = provider.owner_open_id.as_deref().unwrap_or_default();
-                let send_ready = !owner_id.is_empty()
-                    && service
-                        .connection_manager
-                        .weixin_provider()
-                        .send_ready_for_user(&provider, owner_id);
-                if let Some(object) = value.as_object_mut() {
-                    object.insert(
-                        "send_ready".to_string(),
-                        serde_json::Value::Bool(send_ready),
-                    );
-                    if !send_ready {
-                        object.insert(
-                            "send_ready_reason".to_string(),
-                            serde_json::Value::String(
-                                "awaiting an inbound message context token".to_string(),
-                            ),
-                        );
-                    }
-                }
-            }
-            json_response(&value)
+    }
+    match super::provider_runtime_status_value(service, id) {
+        Ok(value) => json_response(&value),
+        Err(error) if error == "Provider not found" => {
+            error_response(StatusCode::NOT_FOUND, &error)
         }
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
 
@@ -874,7 +841,7 @@ async fn maybe_create_pending_feishu_setup_provider(
         .map_err(|error| error.to_string())?;
     pending.created_provider_id = Some(config.id.clone());
     if pending.auto_connect {
-        if let Err(error) = start_provider_event_connection(service, &config.id).await {
+        if let Err(error) = dispatch_provider_event_connection(service, &config.id).await {
             warn!(
                 provider_id = %config.id,
                 error = %error,
@@ -1061,7 +1028,7 @@ pub(super) async fn handle_provider_connect(
         return method_not_allowed();
     }
 
-    match start_provider_event_connection(service, id).await {
+    match dispatch_provider_event_connection(service, id).await {
         Ok(()) => {
             json_response(&serde_json::json!({"success": true, "message": "Connection started"}))
         }
@@ -1072,7 +1039,18 @@ pub(super) async fn handle_provider_connect(
     }
 }
 
-async fn start_provider_event_connection(
+async fn dispatch_provider_event_connection(
+    service: &ImGatewayService,
+    id: &str,
+) -> Result<(), String> {
+    if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+        start_provider_event_connection(service, id).await
+    } else {
+        crate::worker_runtime::im_gateway::connect_provider(id).await
+    }
+}
+
+pub(super) async fn start_provider_event_connection(
     service: &ImGatewayService,
     id: &str,
 ) -> Result<(), String> {
@@ -1151,9 +1129,22 @@ pub(super) async fn handle_provider_disconnect(
         return error_response(StatusCode::NOT_FOUND, "Provider not found");
     }
 
-    service.connection_manager.stop_connection(id);
-    info!(provider_id = id, "provider event connection stopped");
-    json_response(&serde_json::json!({"success": true, "message": "Connection stopped"}))
+    let result = if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+        service.connection_manager.stop_connection(id);
+        Ok(())
+    } else {
+        crate::worker_runtime::im_gateway::disconnect_provider(id).await
+    };
+    match result {
+        Ok(()) => {
+            info!(provider_id = id, "provider event connection stopped");
+            json_response(&serde_json::json!({"success": true, "message": "Connection stopped"}))
+        }
+        Err(error) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("Failed to stop isolated IM Gateway connection: {error}"),
+        ),
+    }
 }
 
 /// GET /providers/:id/messages — list message logs for a provider.

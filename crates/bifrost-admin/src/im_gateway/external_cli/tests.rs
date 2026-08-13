@@ -4454,3 +4454,57 @@ fn thread_derivation_capability_matrix_reserves_claude_extension_point() {
         ThreadDerivationCapability::default()
     );
 }
+
+#[tokio::test]
+async fn external_cli_tee_persists_full_stream_while_forwarding_tail_parser_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let log_path = temp.path().join("stdout.log");
+    let (mut input_tx, input_rx) = tokio::io::duplex(1024);
+    let payload = vec![b'x'; MAX_CAPTURED_STREAM_BYTES * 8];
+    let expected = payload.clone();
+    let writer = tokio::spawn(async move {
+        input_tx.write_all(&payload).await.unwrap();
+        input_tx.shutdown().await.unwrap();
+    });
+
+    let (mut forwarded, tee) = tee_external_cli_output(input_rx, log_path.clone(), "test")
+        .await
+        .unwrap();
+    let mut forwarded_bytes = Vec::new();
+    forwarded.read_to_end(&mut forwarded_bytes).await.unwrap();
+    writer.await.unwrap();
+    join_external_cli_tee(tee, "test").await.unwrap();
+
+    assert_eq!(forwarded_bytes, expected);
+    assert_eq!(std::fs::read(log_path).unwrap(), expected);
+}
+
+#[test]
+fn external_cli_worker_runtime_path_rejects_escape() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let outside = temp.path().join("outside.json");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&outside, b"{}").unwrap();
+
+    let error = validate_external_cli_worker_runtime_path(&outside, &root).unwrap_err();
+    assert!(error.contains("outside"));
+}
+
+#[test]
+fn external_cli_worker_progress_is_bounded() {
+    let event = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: "x".repeat(EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES * 2),
+        title: Some("y".repeat(EXTERNAL_CLI_WORKER_PROGRESS_TITLE_BYTES * 2)),
+        raw: serde_json::json!({"payload": "z".repeat(EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES * 2)}),
+    };
+
+    let compacted = compact_external_cli_worker_progress(event);
+    assert!(compacted.content.len() <= EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES + 3);
+    assert!(compacted.title.unwrap().len() <= EXTERNAL_CLI_WORKER_PROGRESS_TITLE_BYTES + 3);
+    assert_eq!(
+        compacted.raw.get("_bifrost_compacted"),
+        Some(&serde_json::json!(true))
+    );
+}

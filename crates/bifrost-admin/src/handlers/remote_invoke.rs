@@ -21,6 +21,12 @@ pub async fn handle_remote_invoke(
     worker: Option<SharedRemoteInvokeWorker>,
     path: &str,
 ) -> Response<BoxBody> {
+    if !crate::worker_runtime::remote_invoke::is_remote_invoke_worker_process()
+        && crate::worker_runtime::remote_invoke::runtime_configured()
+    {
+        return crate::worker_runtime::remote_invoke::proxy_admin_request(req, path).await;
+    }
+
     let Some(worker) = worker else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "Remote invoke not enabled");
     };
