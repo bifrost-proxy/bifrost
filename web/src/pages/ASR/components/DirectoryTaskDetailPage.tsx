@@ -20,11 +20,13 @@ import {
   Typography,
   theme,
 } from "antd";
+import type { MenuProps } from "antd";
 import {
   ArrowLeftOutlined,
   DeleteOutlined,
   FileZipOutlined,
   LoadingOutlined,
+  MoreOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
@@ -896,181 +898,235 @@ export default function DirectoryTaskDetailPage({
     </Space>
   ) : null;
 
+  const taskActionMenuItems: MenuProps["items"] = taskDetail
+    ? [
+        {
+          type: "group",
+          label: "Status",
+          children: [
+            {
+              key: "task-status",
+              disabled: true,
+              label: (
+                <Space data-testid="asr-task-actions-status">
+                  <Text type="secondary">Task</Text>
+                  <Tag
+                    color={
+                      taskDetail.last_error && !taskDetail.summary.running
+                        ? "error"
+                        : taskDetail.summary.running
+                          ? "processing"
+                          : taskDetail.paused
+                            ? "warning"
+                            : "default"
+                    }
+                  >
+                    {pauseStatusLabel(taskDetail)}
+                  </Tag>
+                </Space>
+              ),
+            },
+            ...(bulkRetry
+              ? [
+                  {
+                    key: "bulk-retry-status",
+                    disabled: true,
+                    label: (
+                      <Space>
+                        <Text type="secondary">Bulk retry</Text>
+                        <Tag color={bulkRetryActive ? "processing" : "default"}>
+                          {bulkRetry.status}
+                        </Tag>
+                      </Space>
+                    ),
+                  },
+                ]
+              : []),
+            ...(sourceCompression
+              ? [
+                  {
+                    key: "source-compression-status",
+                    disabled: true,
+                    label: (
+                      <Space>
+                        <Text type="secondary">Compression</Text>
+                        <Tag color={sourceCompressionActive ? "processing" : "default"}>
+                          {sourceCompression.status}
+                        </Tag>
+                      </Space>
+                    ),
+                  },
+                ]
+              : []),
+          ],
+        },
+        { type: "divider" },
+        {
+          key: "refresh",
+          icon: <ReloadOutlined />,
+          label: "Refresh",
+          onClick: () => onRefreshTask(taskDetail.id),
+        },
+        { type: "divider" },
+        sourceCompressionActive
+          ? {
+              key: "cancel-compression",
+              danger: true,
+              icon: changingSourceCompression ? <LoadingOutlined /> : <StopOutlined />,
+              label:
+                sourceCompression?.status === "cancelling"
+                  ? "Cancelling compression..."
+                  : "Cancel compression",
+              disabled:
+                changingSourceCompression || sourceCompression?.status === "cancelling",
+              onClick: () => void handleCancelSourceCompression(),
+            }
+          : {
+              key: "compress-wavs",
+              icon: changingSourceCompression ? <LoadingOutlined /> : <FileZipOutlined />,
+              label: "Compress WAVs",
+              disabled:
+                compressibleSourceFileCount === 0 ||
+                changingSourceCompression ||
+                taskDetail.summary.running ||
+                bulkRetryActive,
+              onClick: () => {
+                Modal.confirm({
+                  title: `Losslessly compress ${compressibleSourceFileCount} completed WAV file${compressibleSourceFileCount === 1 ? "" : "s"}?`,
+                  content:
+                    "Each WAV is replaced with FLAC only after decoded PCM verification succeeds. Transcripts are kept and partial/failed files are skipped.",
+                  onOk: handleStartSourceCompression,
+                });
+              },
+            },
+        {
+          key: "clean-originals",
+          danger: true,
+          icon: cleaningSourceAudio ? <LoadingOutlined /> : <DeleteOutlined />,
+          label: "Clean originals",
+          disabled:
+            cleanableSourceFileCount === 0 ||
+            cleaningSourceAudio ||
+            taskDetail.summary.running ||
+            bulkRetryActive ||
+            sourceCompressionActive,
+          onClick: () => {
+            Modal.confirm({
+              title: `First confirmation: clean ${cleanableSourceFileCount} original audio file${cleanableSourceFileCount === 1 ? "" : "s"}?`,
+              content:
+                "You will need to type the task name in a final confirmation. Transcript and timeline outputs are kept.",
+              okText: "Continue",
+              onOk: () => setCleanupConfirmOpen(true),
+            });
+          },
+        },
+        {
+          key: "retry-failed-chunks",
+          icon: startingBulkRetry || bulkRetryActive ? <LoadingOutlined /> : <ReloadOutlined />,
+          label: bulkRetryActive ? "Retrying failed chunks..." : "Retry all failed chunks",
+          disabled:
+            failedChunkCount === 0 ||
+            bulkRetryActive ||
+            startingBulkRetry ||
+            sourceCompressionActive,
+          onClick: () => {
+            Modal.confirm({
+              title: `Retry all ${failedChunkCount} failed chunk${failedChunkCount > 1 ? "s" : ""}?`,
+              content: "Files are queued and retried one at a time.",
+              onOk: handleRetryAllFailedChunks,
+            });
+          },
+        },
+        { type: "divider" },
+        {
+          key: "run",
+          icon: taskDetail.summary.running ? <LoadingOutlined /> : <PlayCircleOutlined />,
+          label: "Run",
+          disabled:
+            taskDetail.summary.running ||
+            Boolean(taskDetail.paused) ||
+            sourceCompressionActive,
+          onClick: () => onRunTask(taskDetail.id),
+        },
+        taskDetail.paused
+          ? {
+              key: "resume",
+              icon: <PlayCircleOutlined />,
+              label: "Resume",
+              onClick: () => onResumeTask(taskDetail.id),
+            }
+          : {
+              key: "pause",
+              icon: <PauseCircleOutlined />,
+              label: "Pause",
+              children: [
+                {
+                  key: "pause-temporary",
+                  icon: <PauseCircleOutlined />,
+                  label: "Pause until next schedule",
+                  onClick: () => onPauseTask(taskDetail.id, false, "temporary"),
+                },
+                {
+                  key: "pause-long-term",
+                  icon: <StopOutlined />,
+                  label: "Pause indefinitely",
+                  onClick: () => onPauseTask(taskDetail.id, false, "long_term"),
+                },
+              ],
+            },
+        ...(taskDetail.summary.running && !taskDetail.paused
+          ? [
+              {
+                key: "force-pause",
+                danger: true,
+                icon: <StopOutlined />,
+                label: "Force Pause",
+                onClick: () => {
+                  Modal.confirm({
+                    title: "Force pause this ASR task?",
+                    content:
+                      "The current native ASR process will be terminated and the file will resume from pending later.",
+                    okText: "Force Pause",
+                    okType: "danger",
+                    onOk: () => onPauseTask(taskDetail.id, true, "long_term"),
+                  });
+                },
+              },
+            ]
+          : []),
+      ]
+    : [];
+
   return (
     <div className="asr-task-detail-page" data-testid="asr-task-detail-page">
       <Card
         className="asr-task-detail-card asr-task-detail-card--tabs"
         title={
-          <Space>
+          <Space style={{ minWidth: 0 }}>
             <Button
               icon={<ArrowLeftOutlined />}
               onClick={onBackToTasks}
               aria-label="Back to directory tasks"
             />
-            <span>{taskDetail ? `Directory Task: ${taskDetail.name}` : "Directory Task"}</span>
+            <span
+              style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            >
+              {taskDetail ? `Directory Task: ${taskDetail.name}` : "Directory Task"}
+            </span>
           </Space>
         }
         extra={
           taskDetail ? (
-            <Space>
-              <Button size="small" onClick={() => onRefreshTask(taskDetail.id)}>
-                Refresh
-              </Button>
-              {sourceCompressionActive ? (
-                <Button
-                  size="small"
-                  danger
-                  icon={<StopOutlined />}
-                  loading={changingSourceCompression}
-                  disabled={sourceCompression?.status === "cancelling"}
-                  onClick={handleCancelSourceCompression}
-                >
-                  {sourceCompression?.status === "cancelling"
-                    ? "Cancelling compression..."
-                    : "Cancel compression"}
-                </Button>
-              ) : (
-                <Popconfirm
-                  title={`Losslessly compress ${compressibleSourceFileCount} completed WAV file${compressibleSourceFileCount === 1 ? "" : "s"}?`}
-                  description="Each WAV is replaced with FLAC only after decoded PCM verification succeeds. Transcripts are kept and partial/failed files are skipped."
-                  disabled={
-                    compressibleSourceFileCount === 0 ||
-                    changingSourceCompression ||
-                    taskDetail.summary.running ||
-                    bulkRetryActive
-                  }
-                  onConfirm={handleStartSourceCompression}
-                >
-                  <Button
-                    size="small"
-                    icon={<FileZipOutlined />}
-                    loading={changingSourceCompression}
-                    disabled={
-                      compressibleSourceFileCount === 0 ||
-                      taskDetail.summary.running ||
-                      bulkRetryActive
-                    }
-                  >
-                    Compress WAVs
-                  </Button>
-                </Popconfirm>
-              )}
-              <Popconfirm
-                title={`First confirmation: clean ${cleanableSourceFileCount} original audio file${cleanableSourceFileCount === 1 ? "" : "s"}?`}
-                description="You will need to type the task name in a final confirmation. Transcript and timeline outputs are kept."
-                okText="Continue"
-                disabled={
-                  cleanableSourceFileCount === 0 ||
-                  cleaningSourceAudio ||
-                  taskDetail.summary.running ||
-                  bulkRetryActive ||
-                  sourceCompressionActive
-                }
-                onConfirm={() => setCleanupConfirmOpen(true)}
-              >
-                <Button
-                  size="small"
-                  danger
-                  icon={cleaningSourceAudio ? <LoadingOutlined /> : <DeleteOutlined />}
-                  disabled={
-                    cleanableSourceFileCount === 0 ||
-                    cleaningSourceAudio ||
-                    taskDetail.summary.running ||
-                    bulkRetryActive ||
-                    sourceCompressionActive
-                  }
-                >
-                  Clean originals
-                </Button>
-              </Popconfirm>
-              <Popconfirm
-                title={`Retry all ${failedChunkCount} failed chunk${failedChunkCount > 1 ? "s" : ""}?`}
-                description="Files are queued and retried one at a time."
-                disabled={
-                  failedChunkCount === 0 ||
-                  bulkRetryActive ||
-                  startingBulkRetry ||
-                  sourceCompressionActive
-                }
-                onConfirm={handleRetryAllFailedChunks}
-              >
-                <Button
-                  size="small"
-                  icon={
-                    startingBulkRetry || bulkRetryActive ? (
-                      <LoadingOutlined />
-                    ) : (
-                      <ReloadOutlined />
-                    )
-                  }
-                  disabled={
-                    failedChunkCount === 0 ||
-                    bulkRetryActive ||
-                    startingBulkRetry ||
-                    sourceCompressionActive
-                  }
-                >
-                  {bulkRetryActive ? "Retrying..." : "Retry all failed chunks"}
-                </Button>
-              </Popconfirm>
+            <Dropdown menu={{ items: taskActionMenuItems }} trigger={["click"]} placement="bottomRight">
               <Button
+                type="text"
                 size="small"
-                type="primary"
-                disabled={
-                  taskDetail.summary.running ||
-                  Boolean(taskDetail.paused) ||
-                  sourceCompressionActive
-                }
-                icon={taskDetail.summary.running ? <LoadingOutlined /> : undefined}
-                onClick={() => onRunTask(taskDetail.id)}
-              >
-                {taskDetail.summary.running ? "Running..." : "Run"}
-              </Button>
-              {taskDetail.paused ? (
-                <Button
-                  size="small"
-                  icon={<PlayCircleOutlined />}
-                  onClick={() => onResumeTask(taskDetail.id)}
-                >
-                  Resume
-                </Button>
-              ) : (
-                <Dropdown
-                  trigger={["click"]}
-                  menu={{
-                    items: [
-                      {
-                        key: "temporary",
-                        label: "Pause until next schedule",
-                        icon: <PauseCircleOutlined />,
-                      },
-                      {
-                        key: "long_term",
-                        label: "Pause indefinitely",
-                        icon: <StopOutlined />,
-                      },
-                    ],
-                    onClick: ({ key }) =>
-                      onPauseTask(taskDetail.id, false, key as AsrPauseMode),
-                  }}
-                >
-                  <Button size="small" icon={<PauseCircleOutlined />}>
-                    Pause
-                  </Button>
-                </Dropdown>
-              )}
-              {taskDetail.summary.running && !taskDetail.paused ? (
-                <Popconfirm
-                  title="Force pause this ASR task?"
-                  description="The current native ASR process will be terminated and the file will resume from pending later."
-                  onConfirm={() => onPauseTask(taskDetail.id, true, "long_term")}
-                >
-                  <Button size="small" danger icon={<StopOutlined />}>
-                    Force Pause
-                  </Button>
-                </Popconfirm>
-              ) : null}
-            </Space>
+                icon={<MoreOutlined />}
+                aria-label="More task actions"
+                title="More task actions"
+                data-testid="asr-task-actions-menu-button"
+              />
+            </Dropdown>
           ) : null
         }
       >

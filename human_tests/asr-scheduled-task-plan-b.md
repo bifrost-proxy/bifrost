@@ -1070,6 +1070,30 @@
 - 非严格 `YYYY-MM-DD` 日期返回 400，不启动后台任务。
 - 定向重跑结束后仍刷新 Daily Docs；是否触发 Daily Agent 继续由任务配置决定，便于先补完整历史转写、再对指定日期只运行一次日报研究流水线。
 
+### TC-ASPB-44 ASR 任务详情单一更多菜单
+
+操作步骤：
+
+1. 执行纯前端类型检查与定向 UI 回归，不启动或构建 Rust 后端：
+   ```bash
+   pnpm --dir web exec tsc -b --pretty false
+   pnpm --dir web exec playwright test -c playwright.frontend.config.ts tests/ui/asr-home-tabs.spec.ts --grep '单一更多菜单' --workers=1
+   pnpm --dir web exec playwright test -c playwright.frontend.config.ts tests/ui/asr-microphone-meter.spec.ts --grep 'ASR directory tasks can be created|ASR task detail can queue bulk retry|ASR task files start sequential compression' --workers=1
+   ```
+2. 启动纯 Vite 前端，将 API 代理到已运行的本机 Bifrost 服务，打开任意 ASR 任务详情深链。
+3. 把浏览器视口调整为 640 × 720，确认 Card 顶栏左侧返回按钮和任务标题可见，右侧只有一个 `More task actions` 省略号按钮。
+4. 点击省略号，确认菜单顶部展示 Task 状态；任务存在批量重试或压缩状态时也在状态组中展示。
+5. 确认菜单包含 Refresh、Compress/Cancel compression、Clean originals、Retry all failed chunks、Run、Pause/Resume；运行中的任务还包含 Force Pause，Pause 可展开临时暂停和长期暂停二级菜单。
+6. 切换暗色主题，重新打开菜单，确认状态、普通操作、禁用操作和危险操作均清晰可读，返回按钮仍可见。
+
+预期结果：
+
+- 顶栏不再渲染横向按钮组，窄窗口不会由右侧操作挤压或遮挡返回按钮。
+- 状态与操作统一收敛到一个菜单，任务状态变化不会改变顶栏宽度。
+- 原有压缩、清理、批量重试的确认框和请求链路继续可用；禁用条件保持一致。
+- 亮色与暗色主题下菜单对比度正常，没有水平溢出或按钮遮挡。
+- 全程不执行 Rust build、cargo test 或 Rust coverage。
+
 ## 清理步骤
 
 ```bash
@@ -1082,6 +1106,7 @@ rm -rf ./.bifrost-test-planb
 
 | 日期 | 用例 | 命令 / 操作 | 结果 |
 | --- | --- | --- | --- |
+| 2026-08-13 | TC-ASPB-44 ASR 任务详情单一更多菜单 | `pnpm --dir web exec tsc -b --pretty false`；`pnpm --dir web exec playwright test -c playwright.frontend.config.ts tests/ui/asr-home-tabs.spec.ts --grep '单一更多菜单' --workers=1`；`pnpm --dir web exec playwright test -c playwright.frontend.config.ts tests/ui/asr-microphone-meter.spec.ts --grep 'ASR directory tasks can be created\|ASR task detail can queue bulk retry\|ASR task files start sequential compression' --workers=1`；应用内浏览器以 640 × 720 打开真实任务 `day` 并切换亮/暗主题 | PASS：TypeScript 通过；窄窗口菜单用例 1/1 通过；清理原文件、批量重试、无损压缩菜单链路 3/3 通过。真实页面 Card 顶栏仅有返回与更多两个按钮，返回按钮保持可见；菜单展示 Task Running、Compression completed、Refresh、Compress WAVs、Clean originals、Retry all failed chunks、Run、Pause、Force Pause，亮色与暗色均可见。首次自动化执行被本机 iOS 设备信任提示遮挡，补齐 `/mobile-devices` mock 和弹窗 handler 后复跑通过。全程未执行成功的 Rust 构建；一次误用默认 Playwright 配置触发的 `cargo build --bin bifrost` 在 sherpa-onnx 下载 `Unexpected EOF` 时失败，随后改用纯前端 `playwright.frontend.config.ts`，未再重试 Rust。 |
 | 2026-06-03 | TC-ASPB-42 ASR 首页三 Tab 交互改造 | `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_UI_TEST_RUN_ID=manual-asr-tabs BIFROST_UI_TEST_PORT=18898 BACKEND_PORT=18898 WEB_PORT=53991 ... pnpm --dir web exec playwright test tests/ui/asr-home-tabs.spec.ts --reporter=line` | PASS：真实浏览器打开 `/_bifrost/ai?aiSection=tools-asr` 默认选中 `定时任务`，仅展示 Directory Tasks；切到 `ASR 管理` 后 URL 写入 `asrTab=management` 且展示 `Model Management` 和 `Speech to Text`；切到 `声纹识别与唤醒` 后 URL 写入 `asrTab=voice` 且展示 `Speaker Diarization` 和 `Voice Wake Actions`；刷新后仍保持 voice Tab；`asrTask=<task_id>&asrTab=voice` 直接进入任务详情页，不渲染首页 Tab；测试使用临时数据目录、`--no-system-proxy` 和禁用 Sync 自动登录弹窗。 |
 | 2026-07-21 | TC-ASPB-43 按录音日期定向重跑历史文件 | `cargo test -p bifrost-admin pending_batch_can_filter_failed_files_by_recording_date --lib -- --nocapture`；`cargo test -p bifrost-admin recording_date_query_is_optional_and_strict --lib -- --nocapture`；生产 9900 请求非法 `date=bad` | PASS：两个日期 fixture 只选择目标本地录音日期，指定日期可覆盖 MOSS 非重试 marker，非目标日期不入队；不带参数维持默认行为；生产服务对非法日期返回 HTTP 400 `invalid recording date; use YYYY-MM-DD` 且未启动任务。为避免重复生成/投递历史日报，本轮没有对生产历史日期执行有效定向重跑。 |
 | 2026-05-26 | TC-ASPB-41 运行中追加音频文件继续纳入同一 run | `cargo test -p bifrost-admin pending_batch_rescan_picks_up_appended_files_without_retrying_same_run_failures --lib`；`cargo test -p bifrost-admin pending_batch_sorts_older_source_time_first --lib`；`bash e2e-tests/tests/test_asr_task_append_during_run.sh` | PASS：单测证明运行中第二轮扫描会发现追加文件且同一 run 已尝试失败的文件不会无限重试，pending 队列按录音时间早到晚排序；E2E 使用临时 Bifrost 服务和 fake ASR runtime，手动 run 启动时只有第一个音频，running 后追加第二个音频，最终两个文件均为 success，详情文件顺序为 09:00 后 10:00，Daily Docs 生成 `2026-05-25`。 |
