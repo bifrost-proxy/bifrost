@@ -1100,10 +1100,14 @@ fn pause_task_response(id: &str, force: bool, mode: AsrTaskPauseMode) -> Respons
             if force {
                 FORCE_PAUSED_TASKS.lock().unwrap().insert(id.to_string());
                 set_worker_force_pause(id, true);
-                let task_id = id.to_string();
-                tokio::spawn(async move {
-                    crate::worker_runtime::asr::stop_task(&task_id).await;
-                });
+                if crate::worker_runtime::worker_execution_enabled(
+                    crate::worker_runtime::WorkerKind::Asr,
+                ) {
+                    let task_id = id.to_string();
+                    tokio::spawn(async move {
+                        crate::worker_runtime::asr::stop_task(&task_id).await;
+                    });
+                }
             }
             json_response(&serde_json::json!({
                 "task": task_with_control_summary(task),

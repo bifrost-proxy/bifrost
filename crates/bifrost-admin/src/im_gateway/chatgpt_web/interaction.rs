@@ -68,7 +68,12 @@ pub(super) async fn save_session_conversation(
 }
 
 pub async fn clear_session_conversation(session_key: &str) {
-    if !cfg!(test) && !super::worker::is_browser_worker_process() {
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::Browser,
+        )
+        && !super::worker::is_browser_worker_process()
+    {
         if let Err(error) = super::worker::clear_session_conversation(session_key).await {
             tracing::warn!(session_key, error = %error, "browser worker failed to clear session conversation");
         }
@@ -118,7 +123,12 @@ pub async fn clear_session_conversation(session_key: &str) {
 }
 
 pub async fn session_conversation_exists(session_key: &str) -> bool {
-    if !cfg!(test) && !super::worker::is_browser_worker_process() {
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::Browser,
+        )
+        && !super::worker::is_browser_worker_process()
+    {
         return super::worker::session_conversation_exists(session_key)
             .await
             .unwrap_or(false);

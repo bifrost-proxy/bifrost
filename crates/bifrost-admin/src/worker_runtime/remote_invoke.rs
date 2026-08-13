@@ -82,6 +82,16 @@ pub fn configure_runtime_targets(
     admin_host: String,
     admin_port: u16,
 ) {
+    if !super::worker_execution_enabled(WorkerKind::RemoteInvoke) {
+        stop_runtime_controller();
+        *desired_state().write() = DesiredRemoteState::default();
+        tokio::spawn(async {
+            global_worker_supervisor()
+                .stop_kind(WorkerKind::RemoteInvoke, Duration::from_secs(3))
+                .await;
+        });
+        return;
+    }
     let mut normalized = targets
         .into_iter()
         .filter_map(normalize_target)
@@ -133,7 +143,8 @@ pub fn has_active_client() -> bool {
 }
 
 pub fn runtime_configured() -> bool {
-    !desired_state().read().targets.is_empty()
+    super::worker_execution_enabled(WorkerKind::RemoteInvoke)
+        && !desired_state().read().targets.is_empty()
 }
 
 pub async fn proxy_admin_request(req: Request<Incoming>, _path: &str) -> Response<BoxBody> {

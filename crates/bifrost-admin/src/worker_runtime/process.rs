@@ -13,6 +13,7 @@ use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex, Semaphore};
 use tracing::warn;
 
+use super::jobs;
 use super::protocol::{
     now_ms, parse_worker_frame, read_limited_async_line, serialize_frame, ParentFrame, WorkerEvent,
     WorkerFrame, WorkerHello, WorkerKind, WorkerLifecycleState, WorkerRequest, WorkerResponse,
@@ -311,6 +312,7 @@ impl ManagedWorker {
                         }
                     }
                     Ok(WorkerFrame::Event { event }) => {
+                        jobs::record_event(&event);
                         let _ = worker.events.send(event);
                     }
                     Ok(WorkerFrame::Goodbye { reason, .. }) => {
@@ -446,48 +448,67 @@ impl ManagedWorker {
         payload: serde_json::Value,
         timeout_override: Option<Duration>,
     ) -> Result<serde_json::Value, String> {
+        let operation = operation.into();
+        jobs::begin_request(
+            &self.key,
+            self.kind,
+            &request_id,
+            job_id.as_deref(),
+            &operation,
+        );
         if !matches!(
             self.state(),
             WorkerLifecycleState::Ready | WorkerLifecycleState::Busy
         ) {
-            return Err(format!(
-                "{} worker '{}' is not ready",
-                self.kind.as_str(),
-                self.key
-            ));
+            let error = format!("{} worker '{}' is not ready", self.kind.as_str(), self.key);
+            jobs::mark_failed(&request_id, error.clone());
+            return Err(error);
         }
         let permit = match self.request_slots.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                let queue_guard = AtomicCounterGuard::try_increment_below(
+                let Some(queue_guard) = AtomicCounterGuard::try_increment_below(
                     &self.parent_queued_jobs,
                     self.max_queue_depth,
-                )
-                .ok_or_else(|| {
-                    format!(
+                ) else {
+                    let error = format!(
                         "worker '{}' request queue is full (limit {})",
                         self.key, self.max_queue_depth
-                    )
-                })?;
-                let permit = tokio::time::timeout(
+                    );
+                    jobs::mark_failed(&request_id, error.clone());
+                    return Err(error);
+                };
+                let permit = match tokio::time::timeout(
                     self.queue_wait_timeout,
                     self.request_slots.clone().acquire_owned(),
                 )
                 .await
-                .map_err(|_| format!("worker '{}' request queue timeout", self.key))?
-                .map_err(|_| "worker request queue closed".to_string())?;
+                {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => {
+                        let error = "worker request queue closed".to_string();
+                        jobs::mark_failed(&request_id, error.clone());
+                        return Err(error);
+                    }
+                    Err(_) => {
+                        let error = format!("worker '{}' request queue timeout", self.key);
+                        jobs::mark_failed(&request_id, error.clone());
+                        return Err(error);
+                    }
+                };
                 drop(queue_guard);
                 permit
             }
         };
         let _permit = permit;
+        jobs::mark_running(&request_id);
         let timeout = timeout_override.unwrap_or(self.request_timeout);
         let job_id_for_cancel = job_id.clone();
         let request = WorkerRequest {
             request_id: request_id.clone(),
             job_id,
             deadline_unix_ms: Some(now_ms().saturating_add(timeout.as_millis() as u64)),
-            operation: operation.into(),
+            operation,
             payload,
         };
         let (sender, receiver) = oneshot::channel();
@@ -496,7 +517,9 @@ impl ManagedWorker {
                 entry.insert(sender);
             }
             Entry::Occupied(_) => {
-                return Err(format!("duplicate worker request id '{request_id}'"))
+                let error = format!("duplicate worker request id '{request_id}'");
+                jobs::mark_failed(&request_id, error.clone());
+                return Err(error);
             }
         }
         if let Err(error) = self
@@ -504,12 +527,17 @@ impl ManagedWorker {
             .await
         {
             self.pending.remove(&request_id);
+            jobs::mark_failed(&request_id, error.clone());
             self.mark_failed(error.clone());
             return Err(error);
         }
         let response = match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => return Err("worker response channel closed".to_string()),
+            Ok(Err(_)) => {
+                let error = "worker response channel closed".to_string();
+                jobs::mark_failed(&request_id, error.clone());
+                return Err(error);
+            }
             Err(_) => {
                 self.pending.remove(&request_id);
                 let _ = self
@@ -518,24 +546,29 @@ impl ManagedWorker {
                         job_id: job_id_for_cancel,
                     })
                     .await;
-                return Err(format!(
-                    "worker request '{request_id}' timed out after {timeout:?}"
-                ));
+                let error = format!("worker request '{request_id}' timed out after {timeout:?}");
+                jobs::mark_failed(&request_id, error.clone());
+                return Err(error);
             }
         };
         if response.ok {
+            jobs::mark_succeeded(&request_id);
             Ok(response.payload)
         } else {
-            Err(response
+            let error = response
                 .error
-                .unwrap_or_else(|| "worker request failed".to_string()))
+                .unwrap_or_else(|| "worker request failed".to_string());
+            jobs::mark_failed(&request_id, error.clone());
+            Err(error)
         }
     }
 
     pub async fn cancel_job(&self, job_id: impl Into<String>) -> Result<(), String> {
+        let job_id = job_id.into();
+        jobs::mark_logical_job_cancelling(&self.key, &job_id);
         self.write_parent_frame(&ParentFrame::Cancel {
             request_id: uuid::Uuid::new_v4().to_string(),
-            job_id: Some(job_id.into()),
+            job_id: Some(job_id),
         })
         .await
     }
@@ -619,6 +652,7 @@ impl ManagedWorker {
         stdin.flush().await.map_err(|e| e.to_string())
     }
     fn mark_failed(&self, error: String) {
+        jobs::fail_worker_jobs(&self.key, &error);
         *self.last_error.write() = Some(error);
         self.state.store(
             state_to_u8(WorkerLifecycleState::Degraded),
@@ -627,6 +661,7 @@ impl ManagedWorker {
         self.fail_pending("worker failed");
     }
     fn mark_stopped(&self, reason: Option<String>) {
+        jobs::fail_worker_jobs(&self.key, reason.as_deref().unwrap_or("worker stopped"));
         *self.last_error.write() = reason;
         self.state.store(
             state_to_u8(WorkerLifecycleState::Stopped),

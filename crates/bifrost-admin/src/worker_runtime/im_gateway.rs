@@ -57,6 +57,15 @@ pub(crate) fn is_im_gateway_worker_process() -> bool {
 /// persisted IM configuration and starts/stops the isolated runtime worker;
 /// provider sockets, event loops and scheduler tasks live in the worker.
 pub fn start_runtime_controller(admin_host: String, admin_port: u16) {
+    if !super::worker_execution_enabled(WorkerKind::ImGateway) {
+        stop_runtime_controller();
+        tokio::spawn(async {
+            global_worker_supervisor()
+                .stop_kind(WorkerKind::ImGateway, Duration::from_secs(3))
+                .await;
+        });
+        return;
+    }
     *controller_endpoint().write() = Some(ControllerEndpoint {
         admin_host,
         admin_port,
@@ -97,16 +106,21 @@ pub fn stop_runtime_controller() {
 }
 
 pub fn notify_runtime_config_changed() {
-    controller_notify().notify_waiters();
+    if super::worker_execution_enabled(WorkerKind::ImGateway) {
+        controller_notify().notify_waiters();
+    }
 }
 
 pub fn notify_config_changed() {
-    if !is_im_gateway_worker_process() {
+    if super::worker_execution_enabled(WorkerKind::ImGateway) && !is_im_gateway_worker_process() {
         notify_runtime_config_changed();
     }
 }
 
 pub(crate) async fn connect_provider(provider_id: &str) -> Result<(), String> {
+    if !super::worker_execution_enabled(WorkerKind::ImGateway) {
+        return Err("isolated IM Gateway runtime is disabled by execution mode".to_string());
+    }
     let provider_id = provider_id.trim();
     if provider_id.is_empty() {
         return Err("provider_id cannot be empty".to_string());
@@ -125,6 +139,9 @@ pub(crate) async fn connect_provider(provider_id: &str) -> Result<(), String> {
 }
 
 pub(crate) async fn disconnect_provider(provider_id: &str) -> Result<(), String> {
+    if !super::worker_execution_enabled(WorkerKind::ImGateway) {
+        return Err("isolated IM Gateway runtime is disabled by execution mode".to_string());
+    }
     let provider_id = provider_id.trim();
     if provider_id.is_empty() {
         return Err("provider_id cannot be empty".to_string());
@@ -146,6 +163,9 @@ pub(crate) async fn disconnect_provider(provider_id: &str) -> Result<(), String>
 pub(crate) async fn provider_status(
     provider_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
+    if !super::worker_execution_enabled(WorkerKind::ImGateway) {
+        return Ok(None);
+    }
     let Some(worker) = global_worker_supervisor().get(IM_GATEWAY_WORKER_KEY).await else {
         return Ok(None);
     };

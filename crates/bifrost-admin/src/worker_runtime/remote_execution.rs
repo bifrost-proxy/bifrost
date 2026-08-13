@@ -111,9 +111,7 @@ impl Drop for WorkerShutdownGuard {
 
 pub(crate) fn should_isolate_remote_execution() -> bool {
     super::remote_invoke::is_remote_invoke_worker_process()
-        && std::env::var("BIFROST_REMOTE_EXECUTION_MODE")
-            .map(|value| !value.eq_ignore_ascii_case("legacy"))
-            .unwrap_or(true)
+        && super::worker_execution_enabled(WorkerKind::RemoteExecution)
 }
 
 pub(crate) async fn execute_remote_command<F, Fut>(
