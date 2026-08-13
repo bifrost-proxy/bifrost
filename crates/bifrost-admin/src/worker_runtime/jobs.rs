@@ -201,14 +201,7 @@ pub(crate) fn record_event(event: &WorkerEvent) {
     let Some(job) = state.jobs.get_mut(&job_id) else {
         return;
     };
-    if job.events.len() >= MAX_EVENTS_PER_JOB {
-        job.events.remove(0);
-    }
-    job.events.push(WorkerJobEventRecord {
-        timestamp_ms: worker_now_ms(),
-        event: event.event.clone(),
-        payload: bounded_payload(&event.payload),
-    });
+    append_event(job, event.event.clone(), event.payload.clone());
 }
 
 pub(crate) fn record_named_event(
@@ -251,6 +244,37 @@ pub fn cancel_target(id: &str) -> Option<(String, String)> {
             .clone()
             .unwrap_or_else(|| job.request_id.clone()),
     ))
+}
+
+/// Restore an active job after a cancellation request could not be delivered.
+///
+/// Cancellation is a two-phase operation: the API first marks the job as
+/// `cancelling`, then asks the owning runtime to stop it. A missing worker or
+/// stale external CLI session must not leave the registry stuck in that
+/// transitional state.
+pub fn cancel_rejected(id: &str, error: impl Into<String>) -> bool {
+    let mut state = registry().lock();
+    let Some(job) = state.jobs.get_mut(id) else {
+        return false;
+    };
+    if job.status != WorkerJobStatus::Cancelling {
+        return false;
+    }
+
+    let error = error.into();
+    job.status = if job.started_at_ms.is_some() {
+        WorkerJobStatus::Running
+    } else {
+        WorkerJobStatus::Queued
+    };
+    job.finished_at_ms = None;
+    job.error = None;
+    append_event(
+        job,
+        "cancel_rejected".to_string(),
+        serde_json::json!({"error": error}),
+    );
+    true
 }
 
 pub fn register_artifact(
@@ -298,6 +322,17 @@ pub fn artifact(id: &str, artifact_id: &str) -> Option<WorkerArtifactRecord> {
         .iter()
         .find(|artifact| artifact.artifact_id == artifact_id)
         .cloned()
+}
+
+fn append_event(job: &mut WorkerJobRecord, event: String, payload: serde_json::Value) {
+    if job.events.len() >= MAX_EVENTS_PER_JOB {
+        job.events.remove(0);
+    }
+    job.events.push(WorkerJobEventRecord {
+        timestamp_ms: worker_now_ms(),
+        event,
+        payload: bounded_payload(&payload),
+    });
 }
 
 fn update_status(request_id: &str, status: WorkerJobStatus, error: Option<String>) {
@@ -428,6 +463,55 @@ mod tests {
         assert_eq!(
             get_job("request-2").unwrap().status,
             WorkerJobStatus::Cancelling
+        );
+    }
+
+    #[test]
+    fn rejected_cancel_restores_running_job_and_records_reason() {
+        clear_for_tests();
+        begin_request(
+            "remote_execution:call-running",
+            WorkerKind::RemoteExecution,
+            "request-running",
+            Some("call-running"),
+            "remote.execute",
+        );
+        mark_running("request-running");
+        assert!(cancel_target("request-running").is_some());
+        assert!(cancel_rejected("request-running", "worker disappeared"));
+
+        let job = get_job("request-running").unwrap();
+        assert_eq!(job.status, WorkerJobStatus::Running);
+        assert!(job.finished_at_ms.is_none());
+        assert_eq!(job.events.last().unwrap().event, "cancel_rejected");
+        assert_eq!(
+            job.events.last().unwrap().payload["error"],
+            "worker disappeared"
+        );
+    }
+
+    #[test]
+    fn rejected_cancel_restores_queued_job_but_never_revives_terminal_job() {
+        clear_for_tests();
+        begin_request(
+            "asr:offline-jobs",
+            WorkerKind::Asr,
+            "request-queued",
+            Some("task-queued"),
+            "asr.run_directory_task",
+        );
+        assert!(cancel_target("request-queued").is_some());
+        assert!(cancel_rejected("request-queued", "worker unavailable"));
+        assert_eq!(
+            get_job("request-queued").unwrap().status,
+            WorkerJobStatus::Queued
+        );
+
+        mark_succeeded("request-queued");
+        assert!(!cancel_rejected("request-queued", "late rejection"));
+        assert_eq!(
+            get_job("request-queued").unwrap().status,
+            WorkerJobStatus::Succeeded
         );
     }
 }

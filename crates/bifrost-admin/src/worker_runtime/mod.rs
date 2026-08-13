@@ -10,9 +10,10 @@ mod supervisor;
 mod worker_stdio;
 
 pub use jobs::{
-    artifact as worker_artifact, cancel_target as worker_job_cancel_target, get_job as worker_job,
-    list_jobs as worker_jobs, register_artifact as register_worker_artifact, WorkerArtifactRecord,
-    WorkerJobEventRecord, WorkerJobRecord, WorkerJobStatus,
+    artifact as worker_artifact, cancel_rejected as worker_job_cancel_rejected,
+    cancel_target as worker_job_cancel_target, get_job as worker_job, list_jobs as worker_jobs,
+    register_artifact as register_worker_artifact, WorkerArtifactRecord, WorkerJobEventRecord,
+    WorkerJobRecord, WorkerJobStatus,
 };
 pub(crate) use jobs::{
     begin_request as begin_worker_job, mark_cancelled as mark_worker_job_cancelled,
