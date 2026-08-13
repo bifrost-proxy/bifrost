@@ -1085,12 +1085,14 @@ pub(super) async fn busy_queue_command_preserves_event_files() {
     )
     .await;
 
-    let queue = service.queue_manager.queue_status(&session_key);
-    assert_eq!(queue.len(), 1);
-    assert_eq!(queue[0].message, "please inspect the attachment");
-    assert_eq!(queue[0].files.len(), 1);
-    assert_eq!(queue[0].files[0].mime_type, "text/markdown");
-    assert_eq!(queue[0].files[0].name.as_deref(), Some("queued.md"));
+    let queue = service
+        .queue_manager
+        .pop_queue_item(&session_key)
+        .expect("queued slash-command attachment");
+    assert_eq!(queue.message, "please inspect the attachment");
+    assert_eq!(queue.files.len(), 1);
+    assert_eq!(queue.files[0].mime_type, "text/markdown");
+    assert_eq!(queue.files[0].name.as_deref(), Some("queued.md"));
 }
 
 #[tokio::test]
@@ -5678,11 +5680,13 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         BusyMessageDefaultMode::Queue,
     )
     .await;
-    let file_queue = service.queue_manager.queue_status(&file_session_key);
-    assert_eq!(file_queue.len(), 1);
-    assert_eq!(file_queue[0].message, "[附件消息: 1 个]");
-    assert_eq!(file_queue[0].files.len(), 1);
-    assert_eq!(file_queue[0].files[0].mime_type, "text/markdown");
+    let file_queue = service
+        .queue_manager
+        .pop_queue_item(&file_session_key)
+        .expect("queued inline file");
+    assert_eq!(file_queue.message, "[附件消息: 1 个]");
+    assert_eq!(file_queue.files.len(), 1);
+    assert_eq!(file_queue.files[0].mime_type, "text/markdown");
 
     let mut group_file_event = event_for(
         "inactive-group-file",
@@ -5732,14 +5736,13 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         BusyMessageDefaultMode::Queue,
     )
     .await;
-    let group_file_queue = service.queue_manager.queue_status(&group_file_session_key);
-    assert_eq!(group_file_queue.len(), 1);
-    assert_eq!(group_file_queue[0].files.len(), 1);
-    assert_eq!(
-        group_file_queue[0].files[0].name.as_deref(),
-        Some("group.md")
-    );
-    let group_turn_id = group_file_queue[0]
+    let group_file_queue = service
+        .queue_manager
+        .pop_queue_item(&group_file_session_key)
+        .expect("queued group file");
+    assert_eq!(group_file_queue.files.len(), 1);
+    assert_eq!(group_file_queue.files[0].name.as_deref(), Some("group.md"));
+    let group_turn_id = group_file_queue
         .context
         .as_ref()
         .and_then(|context| context.group_turn_id.as_deref());
@@ -5772,5 +5775,44 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
     assert!(service
         .queue_manager
         .queue_status(&build_session_key(&provider.id, Some("not-owner")))
+        .is_empty());
+
+    let limited_queue_manager = Arc::new(
+        crate::im_gateway::queue_manager::SessionQueueManager::with_attachment_limits(4, 4),
+    );
+    let rejected_attachment = event_for(
+        "inactive-over-budget",
+        "owner-open-id",
+        "queue oversized attachment",
+        vec![crate::im_gateway::types::ImFileAttachment {
+            file_key: "inline-over-budget".to_string(),
+            name: Some("oversized.md".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(8),
+            data_base64: Some("IyBPdmVyIEJ1ZGdldA==".to_string()),
+            download_url: None,
+            ..Default::default()
+        }],
+    );
+    let rejected_session_key = build_session_key(&provider.id, Some("owner-open-id"));
+    handle_concurrent_event_during_chat(
+        &rejected_attachment,
+        &provider,
+        "some-other-active-session",
+        &limited_queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.group_context_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert!(limited_queue_manager
+        .queue_status(&rejected_session_key)
         .is_empty());
 }

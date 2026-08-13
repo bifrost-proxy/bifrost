@@ -12,6 +12,7 @@
 - 已完成 capability-driven Progress 选择：飞书继续使用 MutableCard，微信使用独立 `WeixinProgressSession` 消费同一批 `AgentTurnProgressEvent`。为降低飞书回归风险，首版 Registry 使用 Feishu/Weixin 两个类型化 session map，而没有立即引入 trait object。
 - 已完成微信 Typing ticket 获取、5 秒 keepalive、finish/drop CANCEL；工具事件映射为 type 11/12，同一 turn 的工具、final 文本、IMAGE/FILE/VIDEO 共用 `run_id`，每条消息使用独立 client ID。
 - 已完成 FILE/VIDEO/VOICE 入站归一化、官方 CDN 下载、AES-128-ECB + PKCS7 解密、单文件 100 MiB/单消息 250 MiB/最多 6 个附件限制。
+- 忙碌会话的附件队列按实际 Base64 内存占用执行单会话 64 MiB、全局 256 MiB 双重门禁；状态快照不复制附件正文，出队、删除会话或删除 Provider 时同步释放全局预算。
 - 已完成 IMAGE/FILE/VIDEO 出站统一 pending media 与 CDN 加密上传：图片 type 2；文档、补丁、普通文件、音频 type 4；只有 MIME 与 MP4/WebM 签名一致的视频才发 type 5，否则安全退回 FILE。
 - Agent final 的本地 Markdown 图片和附件会拆成通道原生消息；本地视频、音频、补丁扩展名可识别，MIME 从路径推断后再交给 Provider 分类。
 - 已完成动态 long-poll timeout、2s/30s 退避、非零 `ret/errcode` 检查、`-14 -> authentication_required`、加密 cursor 原子持久化与 WebUI 重新扫码恢复。

@@ -201,6 +201,25 @@
 
 - 2026-08-13 BLOCKED（未执行，不能计为 PASS）：用户明确要求不要运行本地测试、直接推送，因此未执行真实微信删除/复用链路；本轮仅新增远端 CI 可执行的 transport 等待、pipeline 取消和 provider-scoped pending 清理回归测试。
 
+### TC-WNAE-11：忙碌会话附件队列具有内存预算
+
+**操作步骤：**
+
+1. 运行 `cargo test -p bifrost-admin queue_attachment_budgets_bound_retention_and_release_on_removal --lib`，并执行 `concurrent_external_events_cover_active_and_queued_sessions` 回归预算拒绝后的用户回执路径。
+2. 用测试专用小阈值先向一个 session 放入附件，再分别触发单 session 与全局附件预算溢出。
+3. 检查 queue status 快照不包含 Base64 附件正文，实际出队 item 仍保留附件。
+4. 分别删除 queue item、清理 Provider 和清理 session，检查全局附件计数归零后可再次入队。
+
+**预期结果：**
+
+- 单个忙碌 sender 不能超过单 session 附件预算，多个 sender 合计不能超过全局预算。
+- queue/progress 状态快照只复制序号、消息和 reply context，不复制图片或文件 Base64 数据。
+- pop/remove/clear session/clear provider 都释放准确的全局预算，不永久占用额度。
+
+**实际执行结果：**
+
+- 2026-08-13 PENDING：已新增上述回归测试；按用户要求不在本地运行，执行结果以本次推送触发的远端 CI 为准。
+
 ## 清理步骤
 
 - 删除用于核验官方仓库的 `/tmp/openclaw-weixin.*` 临时目录。
