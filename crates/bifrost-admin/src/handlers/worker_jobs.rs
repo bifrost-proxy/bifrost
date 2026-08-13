@@ -9,8 +9,8 @@ use super::{
     BoxBody,
 };
 use crate::worker_runtime::{
-    global_worker_supervisor, worker_artifact, worker_job, worker_job_cancel_target, worker_jobs,
-    WorkerJobStatus, WorkerKind,
+    global_worker_supervisor, worker_artifact, worker_job, worker_job_cancel_rejected,
+    worker_job_cancel_target, worker_jobs, WorkerJobStatus, WorkerKind,
 };
 
 const DEFAULT_JOB_LIMIT: usize = 100;
@@ -141,22 +141,26 @@ async fn cancel_worker_job(job_id: &str) -> Response<BoxBody> {
                 }),
             );
         }
+        let error = "external CLI session is no longer active";
+        worker_job_cancel_rejected(job_id, error);
         return json_response_with_status(
             StatusCode::SERVICE_UNAVAILABLE,
             &serde_json::json!({
                 "accepted": false,
                 "jobId": job_id,
                 "workerKey": worker_key,
-                "error": "external CLI session is no longer active",
+                "error": error,
             }),
         );
     }
 
     let Some(worker) = global_worker_supervisor().get(&worker_key).await else {
+        let error = "worker is not available for cancellation";
+        worker_job_cancel_rejected(job_id, error);
         return json_response_with_status(
             StatusCode::SERVICE_UNAVAILABLE,
             &serde_json::json!({
-                "message": "worker is not available for cancellation",
+                "message": error,
                 "workerKey": worker_key,
                 "jobId": job_id,
             }),
@@ -171,15 +175,18 @@ async fn cancel_worker_job(job_id: &str) -> Response<BoxBody> {
                 "workerKey": worker_key,
             }),
         ),
-        Err(error) => json_response_with_status(
-            StatusCode::SERVICE_UNAVAILABLE,
-            &serde_json::json!({
-                "accepted": false,
-                "jobId": job_id,
-                "workerKey": worker_key,
-                "error": error,
-            }),
-        ),
+        Err(error) => {
+            worker_job_cancel_rejected(job_id, error.clone());
+            json_response_with_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &serde_json::json!({
+                    "accepted": false,
+                    "jobId": job_id,
+                    "workerKey": worker_key,
+                    "error": error,
+                }),
+            )
+        }
     }
 }
 
@@ -306,6 +313,49 @@ mod tests {
         let jobs: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(jobs.as_array().unwrap().len(), 1);
         assert_eq!(jobs[0]["id"], "list-request");
+    }
+
+    #[tokio::test]
+    async fn rejected_external_cli_cancel_restores_running_status() {
+        crate::worker_runtime::jobs::clear_for_tests();
+        let job_id = format!("missing-external-cli-{}", uuid::Uuid::new_v4());
+        crate::worker_runtime::jobs::begin_request(
+            &format!("external_cli:{job_id}"),
+            WorkerKind::ExternalCli,
+            &job_id,
+            Some(&job_id),
+            "external_cli.run",
+        );
+        crate::worker_runtime::jobs::mark_running(&job_id);
+
+        let response = handle_worker_jobs(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/_bifrost/api/worker-jobs/{job_id}/cancel"))
+                .body(())
+                .unwrap(),
+            &format!("/api/worker-jobs/{job_id}/cancel"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let job = worker_job(&job_id).unwrap();
+        assert_eq!(job.status, WorkerJobStatus::Running);
+        assert_eq!(job.events.last().unwrap().event, "cancel_rejected");
+    }
+
+    #[tokio::test]
+    async fn artifact_identifier_cannot_escape_the_job_registry() {
+        crate::worker_runtime::jobs::clear_for_tests();
+        crate::worker_runtime::jobs::begin_request(
+            "asr:artifact-test",
+            WorkerKind::Asr,
+            "artifact-test",
+            Some("artifact-test"),
+            "asr.test",
+        );
+        let response = read_worker_artifact("artifact-test", "../../etc/passwd", None).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let _ = response.into_body().collect().await.unwrap();
     }
 
     #[tokio::test]
