@@ -663,16 +663,48 @@ wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 inject chat-alpha user-alice Alice topic-ignored "普通话题回复" false group card-parent feishu-group-e2e "" card-parent topic-cross-device
 sleep 1
 wait_prompt_count 14
-inject chat-alpha user-alice Alice topic-claimed "@_user_1 基于这条卡片继续" true group card-parent feishu-group-e2e "" card-parent topic-cross-device
+inject chat-alpha user-alice Alice topic-claimed "@_user_1 基于这条卡片继续" true group card-parent feishu-group-e2e ou_bot card-parent topic-cross-device
 wait_prompt_count 15
 wait_run_count 30
 wait_session_idle "im:feishu-group-e2e:group:chat-alpha:thread:topic-cross-device"
 
+# A locally anchored topic still requires an explicit mention of this Bot.
+# Mentioning only a human must stay ambient. Once this Bot is addressed, the
+# slash command belongs to the source session and must not fork a new thread.
+python3 - "$TEST_DIR/admin/im_group_context.db" <<'PY'
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+connection.execute(
+    "INSERT INTO im_feishu_message_anchors ("
+    "provider_id, chat_id, message_id, source_session_key, run_id, runner_id, "
+    "adapter, transport, external_thread_id, external_turn_id, checkpoint_thread_id, "
+    "status, created_at, updated_at"
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    (
+        "feishu-group-e2e", "chat-alpha", "local-command-card",
+        "im:feishu-group-e2e:group:chat-alpha", "run-local-command", "Codex",
+        "codex", "app_server", "source-thread", "source-turn", None,
+        "ready", 1, 1,
+    ),
+)
+connection.commit()
+PY
+inject chat-alpha user-alice Alice topic-human-only-command "/q ask @_user_1 to review" true group local-command-card feishu-group-e2e ou_human local-command-card topic-human-only-command
+sleep 1
+wait_prompt_count 15
+wait_run_count 30
+inject chat-alpha user-alice Alice topic-local-command "@_user_1 /q ask reviewer to review" true group local-command-card feishu-group-e2e ou_bot local-command-card topic-local-command
+wait_prompt_count 16
+wait_run_count 32
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
+
 # If Feishu denies reading the parent, return actionable permission guidance
 # without starting a Runner or pretending that the quoted content was read.
 inject chat-alpha user-alice Alice a14 "@_user_1" true group invisible-parent
-wait_prompt_count 15
-wait_run_count 30
+wait_prompt_count 16
+wait_run_count 32
 
 wait_permission_reply() {
   for _ in $(seq 1 160); do
@@ -706,8 +738,8 @@ inject shared-multi user-alice Alice mb-b-broadcast "/status" false group "" fei
 # loops must consume it just like an unmentioned broadcast slash.
 inject shared-multi user-alice Alice mb-a-human-arg "/q ask @_user_1 to review" true group "" feishu-group-e2e ou_human
 inject shared-multi user-alice Alice mb-b-human-arg "/q ask @_user_1 to review" true group "" feishu-group-e2e-b ou_human
-wait_prompt_count 17
-wait_run_count 34
+wait_prompt_count 18
+wait_run_count 36
 wait_session_idle "im:feishu-group-e2e:group:shared-multi"
 wait_session_idle "im:feishu-group-e2e-b:group:shared-multi"
 inject shared-multi user-alice Alice mb-a-directed "@_user_1 /status" true group "" feishu-group-e2e ou_bot_b
@@ -734,7 +766,7 @@ import sys
 
 prompt_path, run_path, db_path, repo_dir, message_log_path = sys.argv[1:6]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
-assert len(prompts) == 17, prompts
+assert len(prompts) == 18, prompts
 first, second, slash_fallback, third, queued = prompts[:5]
 queued_second = prompts[5]
 concurrent_prompts = prompts[6:9]
@@ -744,7 +776,8 @@ quoted_file_prompt = prompts[11]
 quoted_image_prompt = prompts[12]
 quoted_image_failure_prompt = prompts[13]
 topic_prompt = prompts[14]
-human_argument_prompts = prompts[15:17]
+local_topic_command_prompt = prompts[15]
+human_argument_prompts = prompts[16:18]
 
 assert "群名称：Alpha 发布群" in first, first
 assert "群 ID：chat-alpha" in first, first
@@ -824,11 +857,12 @@ assert "基于这条卡片继续" in topic_prompt, topic_prompt
 assert "先讨论发布窗口" not in topic_prompt and "补充：需要回滚预案" not in topic_prompt, topic_prompt
 assert topic_prompt.count("卡片正文：选择方案 A") == 1, topic_prompt
 assert topic_prompt.count("基于这条卡片继续") == 1, topic_prompt
+assert "ask reviewer to review" in local_topic_command_prompt, local_topic_command_prompt
 assert len(human_argument_prompts) == 2, human_argument_prompts
 assert all("ask <at id=ou_human>" in prompt and "to review" in prompt for prompt in human_argument_prompts), human_argument_prompts
 
 runner_events = [json.loads(line) for line in open(run_path, encoding="utf-8") if line.strip()]
-assert len(runner_events) == 34, runner_events
+assert len(runner_events) == 36, runner_events
 concurrent_events = runner_events[12:18]
 assert [event["phase"] for event in concurrent_events[:3]] == ["start"] * 3, concurrent_events
 assert len({event["pid"] for event in concurrent_events[:3]}) == 3, concurrent_events
@@ -850,7 +884,7 @@ messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages WHERE provider_id = 'feishu-group-e2e' "
     "AND chat_id IN ('chat-alpha', 'chat-beta') GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 26), ("chat-beta", 8)], messages
+assert messages == [("chat-alpha", 27), ("chat-beta", 8)], messages
 topic_bindings = connection.execute(
     "SELECT feishu_thread_id, root_message_id, derived_session_key, source_kind "
     "FROM im_feishu_thread_bindings WHERE provider_id='feishu-group-e2e'"
@@ -860,6 +894,12 @@ assert topic_bindings == [(
     "im:feishu-group-e2e:group:chat-alpha:thread:topic-cross-device",
     "message_context",
 )], topic_bindings
+local_command_binding = connection.execute(
+    "SELECT feishu_thread_id FROM im_feishu_thread_bindings "
+    "WHERE provider_id='feishu-group-e2e' "
+    "AND feishu_thread_id IN ('topic-local-command', 'topic-human-only-command')"
+).fetchall()
+assert local_command_binding == [], local_command_binding
 permission_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE trigger_message_id = 'a14'"
 ).fetchall()

@@ -8,10 +8,11 @@
 
 话题首条回复按本机、当前 provider 的持久化锚点认领：
 
-1. 根消息命中本地 Agent 卡片锚点时，从锚点对应的 Runner checkpoint 派生。
-2. 根消息未命中本地锚点时（含另一设备上的 Bot 输出），按普通消息派生；输入只包含根消息和当前消息，不读取或累计群历史。
-3. 普通消息只有显式 `@当前 Bot` 才认领。未提及当前 Bot、只提及其他 Bot，均忽略。
-4. `(provider_id, chat_id, thread_id)` 唯一约束保证重复事件只初始化一次。
+1. 先完成当前 Bot/其他 Bot mention 归属；话题消息只有显式提及当前 Bot 才允许继续分类和执行。
+2. 根消息命中本地 Agent 卡片锚点时，从锚点对应的 Runner checkpoint 派生。
+3. 根消息未命中本地锚点时（含另一设备上的 Bot 输出），按普通消息派生；输入只包含根消息和当前消息，不读取或累计群历史。
+4. 普通消息和命令都只有显式 `@当前 Bot` 才认领。未提及当前 Bot、只提及人类或其他 Bot，均忽略；同一消息提及多个 Bot 时，每个被提及的 provider 按自身身份独立处理。
+5. `(provider_id, chat_id, thread_id)` 唯一约束保证重复事件只初始化一次。
 
 本版本不在设备间复制 Agent 历史，也不为“同一飞书应用同时运行在两台设备”提供分布式租约。该部署方式可能由两台设备同时认领，需由部署侧避免。
 
@@ -48,10 +49,15 @@ Traex 的 `thread/fork` 没有 `lastTurnId`。每轮终态、源会话开始下�
 
 处理顺序：
 
-1. 查询现有话题绑定；存在则路由到绑定 session。
-2. 查询本地消息锚点；ready 时按 Runner 能力 fork，pending 时按能力直接 fork 或等待源终态。
-3. 没有本地锚点时通过飞书消息读取 API 获取根消息，并验证 `chat_id`，然后构造严格的“根消息 + 当前消息”提示。
-4. 创建独立话题 session，后续同一话题消息只进入该 session，不回到主群 session。
+1. 解析 mention 归属。没有 mention、只有人类 mention 或只 `@其他 Bot` 时，当前 provider 不记录 turn、不启动 Runner，也不创建话题 binding。消息同时提及多个 Bot 时，各 provider 只判断自己的 open_id，所有被点名的 Bot 均可独立进入后续处理。
+2. 对已明确 `@当前 Bot` 的消息分类。当前 Bot mention 只承担路由作用，从命令/请求文本中移除；其他人类或 Bot mention 保留为结构化 `<at id=...>` 参数。
+3. 查询现有话题绑定。绑定存在时继续使用绑定 session；命令文本仍按第 2 步归一化，不因额外 mention 重新派生。
+4. 对尚未绑定的话题，识别出的 SystemCommand、`/g`、`/q` 及其他 slash 输入不创建 binding、不执行 `thread/fork`：本地卡片锚点命中时路由到锚点的 `source_session_key`，无本地锚点时路由到群主 session。
+5. 非命令消息查询本地消息锚点；ready 时按 Runner 能力 fork，pending 时按能力直接 fork 或等待源终态。
+6. 非命令消息没有本地锚点时，通过飞书消息读取 API 获取根消息并验证 `chat_id`，然后构造严格的“根消息 + 当前消息”提示。
+7. 仅为已明确 `@当前 Bot` 的非命令请求创建独立话题 session；后续同一话题仍需再次 `@当前 Bot` 才进入该 session。
+
+显式 mention 门禁避免任何普通话题回复让 Agent Loop 自动重跑或立即进入 Guide；命令优先规则则避免把 `@当前 Bot /status`、`@当前 Bot /q ... @某人` 等控制或排队输入误判为“从卡片新开 Agent 线程”。被当前 Bot 接受的命令事件仍写入群消息账本以便审计，但不写入 `im_feishu_thread_bindings`。
 
 输出卡片在话题内调用飞书 reply API 并设置 `reply_in_thread=true`。已有话题下的回复保持在该话题；普通群消息行为不变。
 
@@ -61,6 +67,7 @@ Traex 的 `thread/fork` 没有 `lastTurnId`。每轮终态、源会话开始下�
 - 本地锚点已失败：降级为普通双消息 fresh start，并记录降级原因。
 - 等待中的源运行失败：将话题 binding 标记失败并给用户明确反馈；不复制部分历史。
 - 进程重启：SQLite 中的 binding/anchor/pending 状态恢复；初始化状态可幂等重试。
+- 若历史 binding 的事件 JSON 损坏，只有同时匹配 `recovered:<trigger_message_id>`、`startup_recovery` 内部标记和该 binding 恢复态的合成 replay 可绕过 mention 门禁；真实飞书入站事件始终必须显式 `@当前 Bot`。
 - 启动恢复租约由“进程 owner + event-loop owner”共同标识：同进程的新旧 loop 短暂重叠时不互抢，旧 loop 正常退出会释放未完成租约；新进程可立即接管旧进程遗留的 `recovering` 记录。
 - 话题 session 独立持久化 Runner 与工作目录；首次派生继承来源 Runner 和主群工作目录，后续 `/runner`、`/cwd` 只修改话题自身，重复初始化也不会覆盖话题已经选择的配置。
 - Claude Code：不声称已验证，能力查询为 unavailable；未来只需实现 capability 与 fork primitive，不改飞书路由。

@@ -1238,6 +1238,40 @@ impl GroupInboundDispatch {
     }
 }
 
+fn topic_command_dispatch(
+    disposition: &crate::im_gateway::group_context::GroupMessageDisposition,
+    message: &crate::im_gateway::types::ImEventMessage,
+) -> Option<(String, bool)> {
+    use crate::im_gateway::group_context::{GroupMessageDisposition, GroupTriggerKind};
+
+    match disposition {
+        GroupMessageDisposition::SystemCommand {
+            command,
+            reset_context,
+        } => Some((
+            crate::im_gateway::group_context::render_message_mentions(command, &message.mentions),
+            *reset_context,
+        )),
+        GroupMessageDisposition::AgentTrigger {
+            kind: GroupTriggerKind::Guide | GroupTriggerKind::Queue | GroupTriggerKind::Slash,
+            active_request,
+            command_prefix,
+        } => {
+            let command = command_prefix
+                .map(|prefix| format!("{prefix} {active_request}"))
+                .unwrap_or_else(|| active_request.clone());
+            Some((
+                crate::im_gateway::group_context::render_message_mentions(
+                    &command,
+                    &message.mentions,
+                ),
+                false,
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub(super) async fn prepare_group_inbound_dispatch(
     client: &ImProviderClient,
     provider: &ImProviderConfig,
@@ -1265,21 +1299,44 @@ pub(super) async fn prepare_group_inbound_dispatch(
             chat_id,
             thread_id,
         );
-        if let Some(binding) =
-            store.feishu_thread_binding(&event.provider_id, chat_id, thread_id)?
-        {
-            if !message.mentions.is_empty() {
-                let bot_identity = match client.feishu() {
-                    Some(feishu) => feishu.fetch_bot_identity(provider).await.ok(),
-                    None => None,
-                };
-                if matches!(
-                    classify_group_message(message, bot_identity.as_ref(), session_busy),
-                    GroupMessageDisposition::AddressedElsewhere
-                ) {
-                    return Ok(GroupInboundDispatch::AddressedElsewhere);
-                }
+        let binding = store.feishu_thread_binding(&event.provider_id, chat_id, thread_id)?;
+        let synthetic_startup_recovery = binding.as_ref().is_some_and(|binding| {
+            event.raw_digest.as_deref() == Some("startup_recovery")
+                && event.event_id == format!("recovered:{}", binding.trigger_message_id)
+                && event.source.message_id.as_deref() == Some(binding.trigger_message_id.as_str())
+                && matches!(binding.state.as_str(), "recovering" | "initializing")
+        });
+        if message.mentions.is_empty() && !synthetic_startup_recovery {
+            return Ok(GroupInboundDispatch::Ambient);
+        }
+        let bot_identity = if !message.mentions.is_empty() {
+            match client.feishu() {
+                Some(feishu) => feishu.fetch_bot_identity(provider).await.ok(),
+                None => None,
             }
+        } else {
+            None
+        };
+        let disposition = classify_group_message(message, bot_identity.as_ref(), session_busy);
+        if !synthetic_startup_recovery
+            && !crate::im_gateway::group_context::message_mentions_current_bot(
+                message,
+                bot_identity.as_ref(),
+            )
+        {
+            return Ok(
+                if matches!(disposition, GroupMessageDisposition::AddressedElsewhere) {
+                    GroupInboundDispatch::AddressedElsewhere
+                } else {
+                    GroupInboundDispatch::Ambient
+                },
+            );
+        }
+        if matches!(disposition, GroupMessageDisposition::AddressedElsewhere) {
+            return Ok(GroupInboundDispatch::AddressedElsewhere);
+        }
+        let topic_command = topic_command_dispatch(&disposition, message);
+        if let Some(binding) = binding {
             store.record_event(event, "event")?;
             let recovering = event.source.message_id.as_deref()
                 == Some(binding.trigger_message_id.as_str())
@@ -1291,12 +1348,23 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 PreparedInboundDispatch {
                     message_text: if recovering {
                         binding.initial_message.clone()
+                    } else if let Some((command, _)) = topic_command.as_ref() {
+                        command.clone()
+                    } else if let GroupMessageDisposition::AgentTrigger { active_request, .. } =
+                        &disposition
+                    {
+                        crate::im_gateway::group_context::render_message_mentions(
+                            active_request,
+                            &message.mentions,
+                        )
                     } else {
                         agent_message_text(message)
                     },
                     session_key: binding.derived_session_key,
                     group_turn_id: None,
-                    reset_group_context: false,
+                    reset_group_context: topic_command
+                        .as_ref()
+                        .is_some_and(|(_, reset_context)| *reset_context),
                     direct_reply: None,
                     thread_anchor_message_id: recovering
                         .then_some(binding.source_message_id.clone()),
@@ -1311,33 +1379,43 @@ pub(super) async fn prepare_group_inbound_dispatch(
         let anchor = store
             .feishu_message_anchor(&event.provider_id, root_message_id)?
             .filter(|anchor| anchor.chat_id == chat_id && anchor.is_derivable());
-
-        let needs_identity =
-            !message.mentions.is_empty() && !message.mentions.iter().any(|mention| mention.is_bot);
-        let bot_identity = if needs_identity {
-            match client.feishu() {
-                Some(feishu) => feishu.fetch_bot_identity(provider).await.ok(),
-                None => None,
+        if let Some((command, reset_context)) = topic_command {
+            store.record_event(event, "event")?;
+            return Ok(GroupInboundDispatch::Dispatch(Box::new(
+                PreparedInboundDispatch {
+                    message_text: command,
+                    session_key: anchor
+                        .as_ref()
+                        .map(|anchor| anchor.source_session_key.clone())
+                        .unwrap_or_else(|| {
+                            crate::im_gateway::group_context::build_group_session_key(
+                                &event.provider_id,
+                                chat_id,
+                            )
+                        }),
+                    group_turn_id: None,
+                    reset_group_context: reset_context,
+                    direct_reply: None,
+                    thread_anchor_message_id: None,
+                    thread_fallback_message: None,
+                    referenced_images: Vec::new(),
+                    referenced_files: Vec::new(),
+                    attachment_notices: Vec::new(),
+                },
+            )));
+        }
+        let active_request = match disposition {
+            GroupMessageDisposition::AgentTrigger { active_request, .. } => {
+                crate::im_gateway::group_context::render_message_mentions(
+                    &active_request,
+                    &message.mentions,
+                )
             }
-        } else {
-            None
-        };
-        let disposition = classify_group_message(message, bot_identity.as_ref(), session_busy);
-        let (active_request, system_command) = if anchor.is_some()
-            && !matches!(disposition, GroupMessageDisposition::AddressedElsewhere)
-        {
-            (agent_message_text(message), false)
-        } else {
-            match disposition {
-                GroupMessageDisposition::AgentTrigger { active_request, .. } => {
-                    (active_request, false)
-                }
-                GroupMessageDisposition::SystemCommand { command, .. } => (command, true),
-                GroupMessageDisposition::AddressedElsewhere => {
-                    return Ok(GroupInboundDispatch::AddressedElsewhere)
-                }
-                GroupMessageDisposition::Ambient => return Ok(GroupInboundDispatch::Ambient),
-            }
+            GroupMessageDisposition::Ambient => return Ok(GroupInboundDispatch::Ambient),
+            GroupMessageDisposition::SystemCommand { .. }
+            | GroupMessageDisposition::AddressedElsewhere => unreachable!(
+                "topic commands and messages addressed elsewhere return before derivation"
+            ),
         };
         store.record_event(event, "event")?;
         let (
@@ -1347,16 +1425,7 @@ pub(super) async fn prepare_group_inbound_dispatch(
             source_adapter,
             source_thread_id,
             source_turn_id,
-        ) = if system_command {
-            (
-                active_request,
-                None,
-                "message_context".to_string(),
-                None,
-                None,
-                None,
-            )
-        } else if let Some(anchor) = anchor.as_ref() {
+        ) = if let Some(anchor) = anchor.as_ref() {
             let fallback_message = if anchor.status == "pending" {
                 let feishu = client.feishu().ok_or_else(|| {
                     "Feishu topic root messages require a Feishu provider".to_string()

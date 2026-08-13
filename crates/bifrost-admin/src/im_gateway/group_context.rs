@@ -1304,10 +1304,7 @@ pub fn classify_group_message(
     session_busy: bool,
 ) -> GroupMessageDisposition {
     let has_mentions = !message.mentions.is_empty();
-    let mentions_bot = message
-        .mentions
-        .iter()
-        .any(|mention| mention_matches_current_bot(mention, bot_identity));
+    let mentions_bot = message_mentions_current_bot(message, bot_identity);
     // A slash command beginning with `/` is broadcast even when its arguments
     // mention human members. Feishu emits no user-vs-bot type for real mention
     // items, so an unmatched real mention only addresses another provider when
@@ -1405,6 +1402,16 @@ fn mention_matches_current_bot(
             .as_deref()
             .is_some_and(|mention_name| mention_name == name)
     })
+}
+
+pub(crate) fn message_mentions_current_bot(
+    message: &ImEventMessage,
+    bot_identity: Option<&FeishuBotIdentity>,
+) -> bool {
+    message
+        .mentions
+        .iter()
+        .any(|mention| mention_matches_current_bot(mention, bot_identity))
 }
 
 fn classify_slash(message: &str, session_busy: bool) -> GroupMessageDisposition {
@@ -1959,7 +1966,7 @@ fn compact_message_body(message: &GroupMessageRecord) -> Option<String> {
     Some(body)
 }
 
-fn render_message_mentions(text: &str, mentions: &[ImMention]) -> String {
+pub(crate) fn render_message_mentions(text: &str, mentions: &[ImMention]) -> String {
     mentions_by_descending_key_len(mentions).into_iter().fold(
         text.to_string(),
         |rendered, mention| {

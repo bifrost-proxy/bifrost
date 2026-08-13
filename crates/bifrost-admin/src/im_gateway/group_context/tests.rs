@@ -532,6 +532,62 @@ fn same_group_multiple_bots_only_trigger_the_matching_provider_identity() {
 }
 
 #[test]
+fn one_message_mentioning_multiple_bots_triggers_each_matching_identity() {
+    let bot_a = FeishuBotIdentity {
+        open_id: "ou_bot_a".to_string(),
+        name: Some("Bot A".to_string()),
+    };
+    let bot_b = FeishuBotIdentity {
+        open_id: "ou_bot_b".to_string(),
+        name: Some("Bot B".to_string()),
+    };
+    let mentions = vec![
+        ImMention {
+            key: "@_user_1".to_string(),
+            open_id: Some("ou_bot_a".to_string()),
+            name: Some("Bot A".to_string()),
+            tenant_key: None,
+            is_bot: false,
+        },
+        ImMention {
+            key: "@_user_2".to_string(),
+            open_id: Some("ou_bot_b".to_string()),
+            name: Some("Bot B".to_string()),
+            tenant_key: None,
+            is_bot: false,
+        },
+    ];
+    let event = group_event(
+        "multi-bot-shared",
+        "shared-chat",
+        "u1",
+        "@_user_1 @_user_2 compare the two plans",
+        mentions,
+        12,
+    );
+    let message = event.message.as_ref().unwrap();
+
+    assert!(message_mentions_current_bot(message, Some(&bot_a)));
+    assert!(message_mentions_current_bot(message, Some(&bot_b)));
+    assert_eq!(
+        classify_group_message(message, Some(&bot_a), false),
+        GroupMessageDisposition::AgentTrigger {
+            kind: GroupTriggerKind::Mention,
+            active_request: "@_user_2 compare the two plans".to_string(),
+            command_prefix: None,
+        }
+    );
+    assert_eq!(
+        classify_group_message(message, Some(&bot_b), false),
+        GroupMessageDisposition::AgentTrigger {
+            kind: GroupTriggerKind::Mention,
+            active_request: "@_user_1 compare the two plans".to_string(),
+            command_prefix: None,
+        }
+    );
+}
+
+#[test]
 fn created_feishu_group_results_are_persisted_by_source_message() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
