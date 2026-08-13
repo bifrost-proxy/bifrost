@@ -30,11 +30,28 @@ function normalizeVisibleText(value) {
     .replace(/[\u200B-\u200D\uFEFF]/g, "")
     .replace(/\s+/g, " ")
     .replace(/\s+([，。！？；：、,.!?;:])/g, "$1")
+    .replace(/、\s+/g, "、")
     .trim();
 }
 
+function restoreZhihuWrappedUrls(html) {
+  return String(html).replace(/<a\b[^>]*\bhref=(?:"([^"]*)"|'([^']*)')[^>]*>([\s\S]*?)<\/a>/gi, (tag, doubleHref, singleHref, body) => {
+    if (!/class=(?:"[^"]*\b(?:visible|invisible|ellipsis)\b[^"]*"|'[^']*\b(?:visible|invisible|ellipsis)\b[^']*')/i.test(body)) {
+      return tag;
+    }
+    try {
+      const url = new URL(decodeEntities(doubleHref ?? singleHref ?? ""));
+      if (url.protocol !== "https:" || url.hostname !== "link.zhihu.com") return tag;
+      const target = url.searchParams.get("target");
+      return target && /^https?:\/\//i.test(target) ? target : tag;
+    } catch {
+      return tag;
+    }
+  });
+}
+
 export function htmlToText(html) {
-  return normalizeVisibleText(decodeEntities(String(html ?? ""))
+  return normalizeVisibleText(decodeEntities(restoreZhihuWrappedUrls(html ?? ""))
     .replace(/<!--[^]*?-->/g, " ")
     .replace(/<img\b[^>]*>/gi, " ")
     .replace(/<(?:br|hr)\s*\/?>/gi, " ")

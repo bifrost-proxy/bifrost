@@ -21,6 +21,8 @@ Read this file only when debugging a request, authentication, or response-shape 
    - `data.extra_info.pc_business_params` is a JSON string whose `title` and `content` must match.
    - Response: `code: 0`; parse JSON string `data.result`; `publish.id` is the article ID.
 
+The stable publish body schema is implemented directly in `buildPublishPayload`. Bifrost provides only the authenticated request headers and endpoint-specific signing values. Do not decode or clone the captured publish request body at runtime.
+
 ## Authentication material
 
 Use captured values only in memory:

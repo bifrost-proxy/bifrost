@@ -173,16 +173,42 @@ export function markdownToHtml(markdown) {
 }
 
 export function markdownToText(markdown) {
-  return String(markdown)
-    .replace(/\x60{3}[^\n]*\n([\s\S]*?)\x60{3}/g, "$1")
-    .replace(/~~~[^\n]*\n([\s\S]*?)~~~/g, "$1")
+  const codeTokens = [];
+  const holdCode = (value) => {
+    const token = "\u0000CODE" + codeTokens.length + "\u0000";
+    codeTokens.push(value);
+    return token;
+  };
+  const lines = String(markdown).replace(/\r\n/g, "\n").split("\n");
+  const visibleLines = [];
+  let fence = null;
+  let codeLines = [];
+  for (const line of lines) {
+    const fenceMatch = line.match(/^\s*(\x60{3,}|~{3,})[^\n]*$/);
+    if (fenceMatch && (!fence || fence === fenceMatch[1][0])) {
+      if (!fence) {
+        fence = fenceMatch[1][0];
+        codeLines = [];
+      } else {
+        visibleLines.push(holdCode(codeLines.join("\n")));
+        fence = null;
+        codeLines = [];
+      }
+      continue;
+    }
+    if (fence) codeLines.push(line);
+    else visibleLines.push(line);
+  }
+  let value = visibleLines.join("\n")
+    .replace(/\x60([^\x60]*)\x60/g, (_, code) => holdCode(code))
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/^\s{0,3}#{1,6}\s+/gm, "")
     .replace(/^\s*>\s?/gm, "")
     .replace(/^\s*(?:[-+*]|\d+[.)])\s+/gm, "")
-    .replace(/\x60([^\x60]*)\x60/g, "$1")
-    .replace(/[*_~]/g, "")
+    .replace(/[*_~]/g, "");
+  value = value.replace(/\u0000CODE(\d+)\u0000/g, (_, index) => codeTokens[Number(index)]);
+  return value
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -400,30 +426,6 @@ export function extractContext(traffic) {
   return { sourceId: traffic.id, headers, cookieNames: names };
 }
 
-export function decodeTrafficBody(body, label = "Bifrost body") {
-  if (body === undefined || body === null) throw new PublishError(label + " 不存在");
-  let value = body;
-  if (typeof body === "object" && Object.hasOwn(body, "success")) {
-    if (!body.success) throw new PublishError(label + " 读取失败");
-    value = body.data;
-    if (body.encoding === "base64" && typeof value === "string") {
-      value = Buffer.from(value, "base64").toString("utf8");
-    }
-  }
-  if (Buffer.isBuffer(value)) value = value.toString("utf8");
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    try {
-      return JSON.parse(trimmed);
-    } catch (error) {
-      throw new PublishError(label + " 不是有效 JSON: " + error.message);
-    }
-  }
-  if (value && typeof value === "object") return value;
-  throw new PublishError(label + " 格式不受支持");
-}
-
 const DROPPED_HEADERS = new Set([
   "accept-encoding", "connection", "content-length", "host", "http2-settings",
   "proxy-authorization", "proxy-connection", "te", "transfer-encoding", "upgrade",
@@ -492,9 +494,8 @@ export class BifrostClient {
       Number(right.seq ?? right.sequence ?? 0) - Number(left.seq ?? left.sequence ?? 0));
   }
 
-  getTraffic(id, bodies = false) {
+  getTraffic(id) {
     const args = ["traffic", "get", String(id)];
-    if (bodies) args.push("--request-body", "--response-body");
     args.push("--format", "json");
     return JSON.parse(this.run(args));
   }
@@ -511,7 +512,7 @@ export class BifrostClient {
     return null;
   }
 
-  findTemplates() {
+  findContexts() {
     const create = this.latestContext(
       "zhuanlan.zhihu.com", "/api/articles/drafts", "POST",
       (item) => item.path === "/api/articles/drafts",
@@ -520,26 +521,14 @@ export class BifrostClient {
       "zhuanlan.zhihu.com", "/draft", "PATCH",
       (item) => /^\/api\/articles\/\d+\/draft$/.test(item.path),
     );
-    let publish = null;
-    let publishTemplate = null;
-    for (const candidate of this.search("www.zhihu.com", "/api/v4/content/publish", "POST")) {
-      if (candidate.path !== "/api/v4/content/publish") continue;
-      try {
-        const traffic = this.getTraffic(candidate.id, true);
-        publish = extractContext(traffic);
-        publishTemplate = decodeTrafficBody(traffic.request_body, "知乎发布请求模板");
-        if (publishTemplate?.action === "article" && publishTemplate?.data) break;
-        publish = null;
-        publishTemplate = null;
-      } catch {
-        publish = null;
-        publishTemplate = null;
-      }
+    const publish = this.latestContext(
+      "www.zhihu.com", "/api/v4/content/publish", "POST",
+      (item) => item.path === "/api/v4/content/publish",
+    );
+    if (!update || !publish) {
+      throw new PublishError("Bifrost 中缺少完整的知乎保存或发布鉴权上下文；请在知乎编辑器正常保存并发布一次后重试");
     }
-    if (!update || !publish || !publishTemplate) {
-      throw new PublishError("Bifrost 中缺少完整的知乎保存或发布请求；请在知乎编辑器正常保存并发布一次后重试");
-    }
-    return { create, update, publish, publishTemplate };
+    return { create, update, publish };
   }
 
   findPublicContext() {
@@ -548,8 +537,8 @@ export class BifrostClient {
       (item) => /^\/p\/\d+/.test(item.path),
     );
     if (context) return context;
-    const templates = this.findTemplates();
-    return templates.create ?? templates.update;
+    const contexts = this.findContexts();
+    return contexts.create ?? contexts.update;
   }
 }
 
@@ -589,50 +578,46 @@ export async function apiRequest(base, method, endpoint, context, body, label = 
   return readJsonResponse(response, label);
 }
 
-export function buildPublishPayload(template, article, draftId, now = Date.now(), options = {}) {
-  const payload = structuredClone(template);
-  if (payload?.action !== "article" || !payload.data) throw new PublishError("知乎发布请求模板结构已变化");
-  payload.action = "article";
-  payload.data.draft = {
-    ...(payload.data.draft ?? {}),
-    disabled: 1,
-    id: String(draftId),
-    isPublished: Boolean(options.isPublished),
-  };
-  payload.data.title = { ...(payload.data.title ?? {}), title: article.title };
-  payload.data.hybrid = {
-    ...(payload.data.hybrid ?? {}),
-    html: article.html,
-    textLength: Array.from(article.text).length,
-  };
-  payload.data.commentsPermission = { comment_permission: article.commentPermission };
-  payload.data.creationStatement = {
+export function buildPublishPayload(article, draftId, now = Date.now(), options = {}) {
+  const business = {
     disclaimer_type: article.disclaimerType,
     disclaimer_status: article.disclaimerStatus,
+    table_of_contents_enabled: article.tableOfContents,
+    content: article.html,
+    title: article.title,
+    commercial_report_info: { commercial_types: [] },
+    commercial_zhitask_bind_info: null,
+    canReward: article.canReward,
   };
-  payload.data.contentsTables = { table_of_contents_enabled: article.tableOfContents };
-  payload.data.appreciate = { ...(payload.data.appreciate ?? {}), can_reward: article.canReward };
-  payload.data.publish = {
-    ...(payload.data.publish ?? {}),
-    traceId: String(now) + "," + crypto.randomUUID(),
+  return {
+    action: "article",
+    data: {
+      publish: { traceId: String(now) + "," + crypto.randomUUID() },
+      extra_info: {
+        publisher: "pc",
+        pc_business_params: JSON.stringify(business),
+      },
+      draft: {
+        disabled: 1,
+        id: String(draftId),
+        isPublished: Boolean(options.isPublished),
+      },
+      commentsPermission: { comment_permission: article.commentPermission },
+      creationStatement: {
+        disclaimer_type: article.disclaimerType,
+        disclaimer_status: article.disclaimerStatus,
+      },
+      contentsTables: { table_of_contents_enabled: article.tableOfContents },
+      commercialReportInfo: { isReport: 0 },
+      appreciate: { can_reward: article.canReward, tagline: "" },
+      hybridInfo: {},
+      hybrid: {
+        html: article.html,
+        textLength: Array.from(article.text).length,
+      },
+      title: { title: article.title },
+    },
   };
-  const extra = payload.data.extra_info ?? {};
-  let business = {};
-  if (typeof extra.pc_business_params === "string" && extra.pc_business_params.trim()) {
-    try {
-      business = JSON.parse(extra.pc_business_params);
-    } catch {
-      throw new PublishError("知乎发布请求模板中的 pc_business_params 无效");
-    }
-  }
-  business.title = article.title;
-  business.content = article.html;
-  payload.data.extra_info = {
-    ...extra,
-    publisher: extra.publisher ?? "pc",
-    pc_business_params: JSON.stringify(business),
-  };
-  return payload;
 }
 
 function defaultStateFile() {
@@ -714,6 +699,23 @@ export async function publishArticle(options, dependencies = {}) {
       candidate && candidate.content_hash === sourceHash && (candidate.draft_id || candidate.article_id)) ?? null;
   }
   if (options.forceNew) entry = null;
+  if (options.articleId) {
+    if (!options.updateExisting) throw new PublishError("--article-id 必须与 --update-existing 一起使用");
+    if (entry?.article_id && String(entry.article_id) !== options.articleId) {
+      throw new PublishError("--article-id 与状态文件中已记录的文章 ID 不一致");
+    }
+    entry = {
+      ...entry,
+      article_path: articlePath,
+      content_hash: sourceHash,
+      replaced_draft_id: entry?.draft_id && String(entry.draft_id) !== options.articleId
+        ? String(entry.draft_id)
+        : (entry?.replaced_draft_id ?? null),
+      draft_id: options.articleId,
+      article_id: options.articleId,
+      url: publicUrl(options.articleId),
+    };
+  }
   if (options.mode === "dry-run") {
     const imageSummary = summarizeArticleImages(article);
     let action = "create_draft";
@@ -744,16 +746,16 @@ export async function publishArticle(options, dependencies = {}) {
     };
   }
   const bifrost = dependencies.bifrost ?? new BifrostClient();
-  let templates = bifrost.findTemplates();
+  let contexts = bifrost.findContexts();
   const log = dependencies.log ?? ((message) => process.stderr.write("[zhihu-publish] " + message + "\n"));
-  log("已从 Bifrost 读取知乎请求模板（Cookie " + templates.update.cookieNames.length + " 项，敏感值未输出）");
-  if (!(await validateAuth(options.mainBase, templates.publish))) {
+  log("已从 Bifrost 读取知乎鉴权上下文（Cookie " + contexts.update.cookieNames.length + " 项，敏感值未输出；发布结构由脚本内置）");
+  if (!(await validateAuth(options.mainBase, contexts.publish))) {
     throw new PublishError("Bifrost 最近流量中的知乎登录态已失效；请正常访问知乎后重试", { authFailure: true });
   }
 
   let draftId = entry?.draft_id ? String(entry.draft_id) : (options.updateExisting && entry?.article_id ? String(entry.article_id) : null);
-  if (!draftId && !templates.create) {
-    throw new PublishError("Bifrost 中没有创建草稿请求模板；请在知乎新建文章并保存一次后重试");
+  if (!draftId && !contexts.create) {
+    throw new PublishError("Bifrost 中没有创建草稿的鉴权上下文；请在知乎新建文章并保存一次后重试");
   }
 
   const processedArticle = await withAuthRetry((current) => processArticleImages(
@@ -763,13 +765,13 @@ export async function publishArticle(options, dependencies = {}) {
 
   async function withAuthRetry(operation) {
     try {
-      return await operation(templates);
+      return await operation(contexts);
     } catch (error) {
       if (!(error instanceof PublishError) || !error.authFailure) throw error;
       log("知乎登录态请求失败，重新读取一次最新 Bifrost 流量后重试");
-      templates = bifrost.findTemplates();
-      if (!(await validateAuth(options.mainBase, templates.publish))) throw error;
-      return operation(templates);
+      contexts = bifrost.findContexts();
+      if (!(await validateAuth(options.mainBase, contexts.publish))) throw error;
+      return operation(contexts);
     }
   }
 
@@ -817,6 +819,7 @@ export async function publishArticle(options, dependencies = {}) {
     },
     "保存知乎正文",
   ));
+  if (options.articleId) state[key] = { ...entry, updated_at: new Date().toISOString() };
   state[key].content_hash = sourceHash;
   state[key].updated_at = new Date().toISOString();
   saveState(options.stateFile, state);
@@ -826,7 +829,7 @@ export async function publishArticle(options, dependencies = {}) {
 
   const published = await withAuthRetry((current) => apiRequest(
     options.mainBase, "POST", "/api/v4/content/publish", current.publish,
-    buildPublishPayload(current.publishTemplate, processedArticle, draftId, Date.now(), {
+    buildPublishPayload(processedArticle, draftId, Date.now(), {
       isPublished: Boolean(options.updateExisting && entry?.article_id),
     }), "发布知乎文章",
   ));
@@ -862,6 +865,7 @@ export function parseArgs(argv) {
     mode: null,
     forceNew: false,
     updateExisting: false,
+    articleId: null,
     stateFile: defaultStateFile(),
     columnBase: process.env.ZHIHU_COLUMN_BASE || COLUMN_BASE,
     mainBase: process.env.ZHIHU_MAIN_BASE || MAIN_BASE,
@@ -884,6 +888,7 @@ export function parseArgs(argv) {
     else if (arg === "--check-auth") setMode("check-auth");
     else if (arg === "--force-new") options.forceNew = true;
     else if (arg === "--update-existing") options.updateExisting = true;
+    else if (arg === "--article-id") options.articleId = valueAfter(index++, arg);
     else if (arg === "--state-file") options.stateFile = path.resolve(valueAfter(index++, arg));
     else if (arg === "--column-base") options.columnBase = valueAfter(index++, arg);
     else if (arg === "--main-base") options.mainBase = valueAfter(index++, arg);
@@ -891,6 +896,10 @@ export function parseArgs(argv) {
     else throw new PublishError("未知参数: " + arg);
   }
   if (options.forceNew && options.updateExisting) throw new PublishError("--force-new 与 --update-existing 不能同时使用");
+  if (options.articleId && (!/^\d+$/.test(options.articleId) || options.articleId === "0")) {
+    throw new PublishError("--article-id 必须是非零数字");
+  }
+  if (options.articleId && !options.updateExisting) throw new PublishError("--article-id 必须与 --update-existing 一起使用");
   return options;
 }
 
@@ -904,6 +913,7 @@ function printHelp() {
 Options:
   --force-new         忽略已发布记录，创建另一篇文章
   --update-existing   明确更新状态文件中已发布的同一篇文章
+  --article-id ID     与 --update-existing 配合，将已知知乎文章纳入幂等状态
   --state-file PATH  覆盖默认幂等状态文件
   --column-base URL  测试专用专栏 API 根地址
   --main-base URL    测试专用知乎主站 API 根地址
@@ -912,17 +922,18 @@ Options:
 
 async function checkAuth(options, dependencies = {}) {
   const bifrost = dependencies.bifrost ?? new BifrostClient();
-  const templates = bifrost.findTemplates();
-  const authenticated = await validateAuth(options.mainBase, templates.publish);
+  const contexts = bifrost.findContexts();
+  const authenticated = await validateAuth(options.mainBase, contexts.publish);
   if (!authenticated) throw new PublishError("Bifrost 最近流量中的知乎登录态已失效", { authFailure: true });
   return {
     status: "authenticated",
     sources: {
-      create: templates.create?.sourceId ?? null,
-      update: templates.update.sourceId,
-      publish: templates.publish.sourceId,
+      create: contexts.create?.sourceId ?? null,
+      update: contexts.update.sourceId,
+      publish: contexts.publish.sourceId,
     },
-    cookie_names: templates.publish.cookieNames,
+    cookie_names: contexts.publish.cookieNames,
+    publish_schema: "built_in",
   };
 }
 
