@@ -6,6 +6,12 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 pub const WORKER_PROTOCOL_VERSION: u32 = 1;
 pub const WORKER_MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const WORKER_HEARTBEAT_INTERVAL_SECS: u64 = 10;
+pub const WORKER_MAX_ID_BYTES: usize = 128;
+pub const WORKER_MAX_OPERATION_BYTES: usize = 128;
+pub const WORKER_MAX_EVENT_BYTES: usize = 128;
+pub const WORKER_MAX_CAPABILITIES: usize = 64;
+pub const WORKER_MAX_CAPABILITY_BYTES: usize = 128;
+pub const WORKER_MAX_ERROR_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,7 +183,10 @@ pub fn parse_worker_frame(line: &str) -> Result<WorkerFrame, String> {
             line.len()
         ));
     }
-    serde_json::from_str(line).map_err(|error| format!("parse worker frame failed: {error}"))
+    let frame: WorkerFrame = serde_json::from_str(line)
+        .map_err(|error| format!("parse worker frame failed: {error}"))?;
+    validate_worker_frame(&frame)?;
+    Ok(frame)
 }
 
 pub fn parse_parent_frame(line: &str) -> Result<ParentFrame, String> {
@@ -187,7 +196,125 @@ pub fn parse_parent_frame(line: &str) -> Result<ParentFrame, String> {
             line.len()
         ));
     }
-    serde_json::from_str(line).map_err(|error| format!("parse parent frame failed: {error}"))
+    let frame: ParentFrame = serde_json::from_str(line)
+        .map_err(|error| format!("parse parent frame failed: {error}"))?;
+    validate_parent_frame(&frame)?;
+    Ok(frame)
+}
+
+fn validate_worker_frame(frame: &WorkerFrame) -> Result<(), String> {
+    match frame {
+        WorkerFrame::Hello { hello } => {
+            validate_required_metadata(
+                "worker instance id",
+                &hello.worker_instance_id,
+                WORKER_MAX_ID_BYTES,
+            )?;
+            validate_metadata("build version", &hello.build_version, WORKER_MAX_ID_BYTES)?;
+            validate_required_metadata("startup token", &hello.startup_token, WORKER_MAX_ID_BYTES)?;
+            if hello.capabilities.len() > WORKER_MAX_CAPABILITIES {
+                return Err(format!(
+                    "worker capabilities exceed hard limit: {} > {}",
+                    hello.capabilities.len(),
+                    WORKER_MAX_CAPABILITIES
+                ));
+            }
+            for capability in &hello.capabilities {
+                validate_required_metadata(
+                    "worker capability",
+                    capability,
+                    WORKER_MAX_CAPABILITY_BYTES,
+                )?;
+            }
+        }
+        WorkerFrame::Ready { worker_instance_id }
+        | WorkerFrame::Goodbye {
+            worker_instance_id, ..
+        } => validate_required_metadata(
+            "worker instance id",
+            worker_instance_id,
+            WORKER_MAX_ID_BYTES,
+        )?,
+        WorkerFrame::Heartbeat { heartbeat } => validate_required_metadata(
+            "worker instance id",
+            &heartbeat.worker_instance_id,
+            WORKER_MAX_ID_BYTES,
+        )?,
+        WorkerFrame::Response { response } => {
+            validate_required_metadata("request id", &response.request_id, WORKER_MAX_ID_BYTES)?;
+            if let Some(error) = response.error.as_deref() {
+                validate_metadata("worker error", error, WORKER_MAX_ERROR_BYTES)?;
+            }
+        }
+        WorkerFrame::Event { event } => {
+            validate_optional_id("request id", event.request_id.as_deref())?;
+            validate_optional_id("job id", event.job_id.as_deref())?;
+            validate_required_metadata("event", &event.event, WORKER_MAX_EVENT_BYTES)?;
+        }
+        WorkerFrame::ConfigApplied { request_id, .. } => {
+            validate_required_metadata("request id", request_id, WORKER_MAX_ID_BYTES)?;
+        }
+    }
+    if let WorkerFrame::Goodbye {
+        reason: Some(reason),
+        ..
+    } = frame
+    {
+        validate_metadata("goodbye reason", reason, WORKER_MAX_ERROR_BYTES)?;
+    }
+    Ok(())
+}
+
+fn validate_parent_frame(frame: &ParentFrame) -> Result<(), String> {
+    match frame {
+        ParentFrame::Request { request } => {
+            validate_required_metadata("request id", &request.request_id, WORKER_MAX_ID_BYTES)?;
+            validate_optional_id("job id", request.job_id.as_deref())?;
+            validate_required_metadata(
+                "operation",
+                &request.operation,
+                WORKER_MAX_OPERATION_BYTES,
+            )?;
+        }
+        ParentFrame::Cancel { request_id, job_id } => {
+            validate_required_metadata("request id", request_id, WORKER_MAX_ID_BYTES)?;
+            validate_optional_id("job id", job_id.as_deref())?;
+        }
+        ParentFrame::ConfigApply { request_id, .. }
+        | ParentFrame::Ping { request_id }
+        | ParentFrame::Shutdown { request_id } => {
+            validate_required_metadata("request id", request_id, WORKER_MAX_ID_BYTES)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_id(label: &str, value: Option<&str>) -> Result<(), String> {
+    if let Some(value) = value {
+        validate_required_metadata(label, value, WORKER_MAX_ID_BYTES)?;
+    }
+    Ok(())
+}
+
+fn validate_required_metadata(label: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    validate_metadata(label, value, max_bytes)
+}
+
+fn validate_metadata(label: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    if value.len() > max_bytes {
+        return Err(format!(
+            "{label} exceeds hard limit: {} > {} bytes",
+            value.len(),
+            max_bytes
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{label} contains control characters"));
+    }
+    Ok(())
 }
 
 pub(crate) fn read_limited_sync_line<R: BufRead>(
@@ -325,5 +452,54 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn oversized_request_metadata_is_rejected() {
+        let frame = ParentFrame::Request {
+            request: WorkerRequest {
+                request_id: "request-1".to_string(),
+                job_id: None,
+                deadline_unix_ms: None,
+                operation: "x".repeat(WORKER_MAX_OPERATION_BYTES + 1),
+                payload: serde_json::Value::Null,
+            },
+        };
+        let line = serde_json::to_string(&frame).unwrap();
+        let error = parse_parent_frame(&line).unwrap_err();
+        assert!(error.contains("operation exceeds hard limit"));
+    }
+
+    #[test]
+    fn control_characters_in_event_metadata_are_rejected() {
+        let frame = WorkerFrame::Event {
+            event: WorkerEvent {
+                request_id: None,
+                job_id: None,
+                event: "progress\nspoof".to_string(),
+                payload: serde_json::Value::Null,
+            },
+        };
+        let line = serde_json::to_string(&frame).unwrap();
+        let error = parse_worker_frame(&line).unwrap_err();
+        assert!(error.contains("control characters"));
+    }
+
+    #[test]
+    fn excessive_capability_count_is_rejected() {
+        let frame = WorkerFrame::Hello {
+            hello: WorkerHello {
+                protocol_version: WORKER_PROTOCOL_VERSION,
+                worker_kind: WorkerKind::Browser,
+                worker_instance_id: "instance-1".to_string(),
+                pid: 1,
+                build_version: "test".to_string(),
+                startup_token: "token".to_string(),
+                capabilities: vec!["capability".to_string(); WORKER_MAX_CAPABILITIES + 1],
+            },
+        };
+        let line = serde_json::to_string(&frame).unwrap();
+        let error = parse_worker_frame(&line).unwrap_err();
+        assert!(error.contains("capabilities exceed hard limit"));
     }
 }

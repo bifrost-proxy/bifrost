@@ -6,9 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::{mapref::entry::Entry, DashMap};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use once_cell::sync::Lazy;
+use sysinfo::{Pid, ProcessesToUpdate, System};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex, Semaphore};
+use tracing::warn;
 
 use super::protocol::{
     now_ms, parse_worker_frame, read_limited_async_line, serialize_frame, ParentFrame, WorkerEvent,
@@ -18,6 +21,11 @@ use super::protocol::{
 
 pub const WORKER_STARTUP_TOKEN_ENV: &str = "BIFROST_WORKER_STARTUP_TOKEN";
 pub const WORKER_KIND_ENV: &str = "BIFROST_WORKER_KIND";
+const WORKER_STDERR_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const WORKER_STDERR_READ_BYTES: usize = 16 * 1024;
+
+static WORKER_PROCESS_SYSTEM: Lazy<parking_lot::Mutex<System>> =
+    Lazy::new(|| parking_lot::Mutex::new(System::new_all()));
 
 #[derive(Debug, Clone)]
 pub struct WorkerSpawnSpec {
@@ -30,6 +38,7 @@ pub struct WorkerSpawnSpec {
     pub request_timeout: Duration,
     pub heartbeat_timeout: Duration,
     pub max_concurrency: usize,
+    pub max_queue_depth: usize,
     pub queue_wait_timeout: Duration,
     pub stderr_path: Option<PathBuf>,
 }
@@ -51,13 +60,14 @@ impl WorkerSpawnSpec {
             request_timeout: Duration::from_secs(60),
             heartbeat_timeout: Duration::from_secs(35),
             max_concurrency: 1,
+            max_queue_depth: 32,
             queue_wait_timeout: Duration::from_secs(30),
             stderr_path: None,
         }
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedWorkerSnapshot {
     pub key: String,
@@ -66,12 +76,18 @@ pub struct ManagedWorkerSnapshot {
     pub pid: Option<u32>,
     pub worker_instance_id: Option<String>,
     pub last_heartbeat_ms: Option<u64>,
+    pub worker_reported_heartbeat_ms: Option<u64>,
     pub heartbeat_age_ms: Option<u64>,
     pub started_at_ms: u64,
     pub restart_count: u64,
     pub active_jobs: usize,
     pub queued_jobs: usize,
     pub max_concurrency: usize,
+    pub max_queue_depth: usize,
+    pub rss_bytes: Option<u64>,
+    pub virtual_memory_bytes: Option<u64>,
+    pub cpu_usage_percent: Option<f32>,
+    pub open_file_descriptors: Option<usize>,
     pub backoff_until_ms: Option<u64>,
     pub circuit_open_until_ms: Option<u64>,
     pub last_error: Option<String>,
@@ -87,6 +103,7 @@ pub struct ManagedWorker {
     events: broadcast::Sender<WorkerEvent>,
     state: AtomicU8,
     last_heartbeat_ms: AtomicU64,
+    worker_reported_heartbeat_ms: AtomicU64,
     active_jobs: AtomicUsize,
     queued_jobs: AtomicUsize,
     parent_queued_jobs: AtomicUsize,
@@ -95,6 +112,7 @@ pub struct ManagedWorker {
     heartbeat_timeout: Duration,
     queue_wait_timeout: Duration,
     max_concurrency: usize,
+    max_queue_depth: usize,
     request_slots: Arc<Semaphore>,
     last_error: parking_lot::RwLock<Option<String>>,
 }
@@ -103,9 +121,22 @@ struct AtomicCounterGuard<'a> {
     counter: &'a AtomicUsize,
 }
 impl<'a> AtomicCounterGuard<'a> {
-    fn increment(counter: &'a AtomicUsize) -> Self {
-        counter.fetch_add(1, Ordering::AcqRel);
-        Self { counter }
+    fn try_increment_below(counter: &'a AtomicUsize, limit: usize) -> Option<Self> {
+        let mut current = counter.load(Ordering::Acquire);
+        loop {
+            if current >= limit {
+                return None;
+            }
+            match counter.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(Self { counter }),
+                Err(actual) => current = actual,
+            }
+        }
     }
 }
 impl Drop for AtomicCounterGuard<'_> {
@@ -128,9 +159,10 @@ impl ManagedWorker {
             command.env(key, value);
         }
         configure_process_group(&mut command);
-        command.stderr(match spec.stderr_path.as_deref() {
-            Some(path) => stderr_file(path)?,
-            None => Stdio::null(),
+        command.stderr(if spec.stderr_path.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
         });
 
         let mut child = command.spawn().map_err(|error| {
@@ -141,6 +173,9 @@ impl ManagedWorker {
             )
         })?;
         let pid = child.id();
+        if let (Some(stderr), Some(path)) = (child.stderr.take(), spec.stderr_path.clone()) {
+            spawn_stderr_logger(stderr, path);
+        }
         let startup_result = async {
             let stdin = child
                 .stdin
@@ -200,6 +235,7 @@ impl ManagedWorker {
             events,
             state: AtomicU8::new(state_to_u8(WorkerLifecycleState::Ready)),
             last_heartbeat_ms: AtomicU64::new(now_ms()),
+            worker_reported_heartbeat_ms: AtomicU64::new(0),
             active_jobs: AtomicUsize::new(0),
             queued_jobs: AtomicUsize::new(0),
             parent_queued_jobs: AtomicUsize::new(0),
@@ -208,6 +244,7 @@ impl ManagedWorker {
             heartbeat_timeout: spec.heartbeat_timeout,
             queue_wait_timeout: spec.queue_wait_timeout,
             max_concurrency: spec.max_concurrency.max(1),
+            max_queue_depth: spec.max_queue_depth,
             request_slots: Arc::new(Semaphore::new(spec.max_concurrency.max(1))),
             last_error: parking_lot::RwLock::new(None),
         });
@@ -242,8 +279,9 @@ impl ManagedWorker {
                 match parse_worker_frame(&line) {
                     Ok(WorkerFrame::Heartbeat { heartbeat }) => {
                         if heartbeat.worker_instance_id == worker.hello.worker_instance_id {
+                            worker.last_heartbeat_ms.store(now_ms(), Ordering::Release);
                             worker
-                                .last_heartbeat_ms
+                                .worker_reported_heartbeat_ms
                                 .store(heartbeat.timestamp_ms, Ordering::Release);
                             worker
                                 .active_jobs
@@ -417,15 +455,30 @@ impl ManagedWorker {
                 self.key
             ));
         }
-        let queue_guard = AtomicCounterGuard::increment(&self.parent_queued_jobs);
-        let permit = tokio::time::timeout(
-            self.queue_wait_timeout,
-            self.request_slots.clone().acquire_owned(),
-        )
-        .await
-        .map_err(|_| format!("worker '{}' request queue timeout", self.key))?
-        .map_err(|_| "worker request queue closed".to_string())?;
-        drop(queue_guard);
+        let permit = match self.request_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let queue_guard = AtomicCounterGuard::try_increment_below(
+                    &self.parent_queued_jobs,
+                    self.max_queue_depth,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "worker '{}' request queue is full (limit {})",
+                        self.key, self.max_queue_depth
+                    )
+                })?;
+                let permit = tokio::time::timeout(
+                    self.queue_wait_timeout,
+                    self.request_slots.clone().acquire_owned(),
+                )
+                .await
+                .map_err(|_| format!("worker '{}' request queue timeout", self.key))?
+                .map_err(|_| "worker request queue closed".to_string())?;
+                drop(queue_guard);
+                permit
+            }
+        };
         let _permit = permit;
         let timeout = timeout_override.unwrap_or(self.request_timeout);
         let job_id_for_cancel = job_id.clone();
@@ -524,6 +577,7 @@ impl ManagedWorker {
         backoff_until_ms: Option<u64>,
         circuit_open_until_ms: Option<u64>,
     ) -> ManagedWorkerSnapshot {
+        let metrics = self.pid().and_then(process_metrics);
         ManagedWorkerSnapshot {
             key: self.key.clone(),
             worker_kind: self.kind,
@@ -531,6 +585,10 @@ impl ManagedWorker {
             pid: self.pid(),
             worker_instance_id: Some(self.hello.worker_instance_id.clone()),
             last_heartbeat_ms: Some(self.last_heartbeat_ms.load(Ordering::Acquire)),
+            worker_reported_heartbeat_ms: Some(
+                self.worker_reported_heartbeat_ms.load(Ordering::Acquire),
+            )
+            .filter(|timestamp| *timestamp > 0),
             heartbeat_age_ms: Some(self.heartbeat_age().as_millis() as u64),
             started_at_ms: self.started_at_ms,
             restart_count,
@@ -538,6 +596,11 @@ impl ManagedWorker {
             queued_jobs: self.queued_jobs.load(Ordering::Acquire)
                 + self.parent_queued_jobs.load(Ordering::Acquire),
             max_concurrency: self.max_concurrency,
+            max_queue_depth: self.max_queue_depth,
+            rss_bytes: metrics.as_ref().map(|metrics| metrics.rss_bytes),
+            virtual_memory_bytes: metrics.as_ref().map(|metrics| metrics.virtual_memory_bytes),
+            cpu_usage_percent: metrics.as_ref().map(|metrics| metrics.cpu_usage_percent),
+            open_file_descriptors: metrics.and_then(|metrics| metrics.open_file_descriptors),
             backoff_until_ms,
             circuit_open_until_ms,
             last_error: self.last_error.read().clone(),
@@ -606,26 +669,143 @@ fn validate_hello(
     Ok(())
 }
 
-fn stderr_file(path: &Path) -> Result<Stdio, String> {
-    const MAX_BYTES: u64 = 32 * 1024 * 1024;
+#[derive(Debug, Clone, Copy)]
+struct WorkerProcessMetrics {
+    rss_bytes: u64,
+    virtual_memory_bytes: u64,
+    cpu_usage_percent: f32,
+    open_file_descriptors: Option<usize>,
+}
+
+fn process_metrics(pid: u32) -> Option<WorkerProcessMetrics> {
+    let pid_value = Pid::from_u32(pid);
+    let mut system = WORKER_PROCESS_SYSTEM.lock();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid_value]));
+    let process = system.process(pid_value)?;
+    Some(WorkerProcessMetrics {
+        rss_bytes: process.memory(),
+        virtual_memory_bytes: process.virtual_memory(),
+        cpu_usage_percent: process.cpu_usage(),
+        open_file_descriptors: open_file_descriptor_count(pid),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn open_file_descriptor_count(pid: u32) -> Option<usize> {
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .ok()
+        .map(|entries| entries.filter_map(Result::ok).count())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_file_descriptor_count(_: u32) -> Option<usize> {
+    None
+}
+
+fn spawn_stderr_logger(stderr: ChildStderr, path: PathBuf) {
+    tokio::spawn(async move {
+        if let Err(error) = run_stderr_logger(stderr, &path, WORKER_STDERR_MAX_BYTES).await {
+            warn!(path = %path.display(), error, "worker stderr logger stopped");
+        }
+    });
+}
+
+async fn run_stderr_logger(
+    mut stderr: ChildStderr,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let (mut file, mut current_bytes) = open_bounded_log(path, max_bytes).await?;
+    let mut buffer = vec![0u8; WORKER_STDERR_READ_BYTES];
+    loop {
+        let read = stderr
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("read worker stderr failed: {error}"))?;
+        if read == 0 {
+            file.flush().await.map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        write_bounded_log_chunk(
+            path,
+            &mut file,
+            &mut current_bytes,
+            &buffer[..read],
+            max_bytes,
+        )
+        .await?;
+    }
+}
+
+async fn open_bounded_log(path: &Path, max_bytes: u64) -> Result<(tokio::fs::File, u64), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| error.to_string())?;
     }
-    if std::fs::metadata(path)
-        .map(|m| m.len() >= MAX_BYTES)
-        .unwrap_or(false)
-    {
-        let rotated = path.with_extension("log.1");
-        let _ = std::fs::remove_file(&rotated);
-        std::fs::rename(path, rotated).map_err(|e| e.to_string())?;
+    let mut current_bytes = tokio::fs::metadata(path)
+        .await
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if current_bytes >= max_bytes {
+        rotate_log(path).await?;
+        current_bytes = 0;
     }
-    Ok(Stdio::from(
-        std::fs::OpenOptions::new()
+    let file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok((file, current_bytes))
+}
+
+async fn write_bounded_log_chunk(
+    path: &Path,
+    file: &mut tokio::fs::File,
+    current_bytes: &mut u64,
+    chunk: &[u8],
+    max_bytes: u64,
+) -> Result<(), String> {
+    if max_bytes == 0 {
+        return Ok(());
+    }
+    if current_bytes.saturating_add(chunk.len() as u64) > max_bytes {
+        file.flush().await.map_err(|error| error.to_string())?;
+        rotate_log(path).await?;
+        *file = tokio::fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open(path)
-            .map_err(|e| e.to_string())?,
-    ))
+            .await
+            .map_err(|error| error.to_string())?;
+        *current_bytes = 0;
+    }
+    let retained = if chunk.len() as u64 > max_bytes {
+        &chunk[chunk.len() - max_bytes as usize..]
+    } else {
+        chunk
+    };
+    file.write_all(retained)
+        .await
+        .map_err(|error| error.to_string())?;
+    *current_bytes = current_bytes.saturating_add(retained.len() as u64);
+    Ok(())
+}
+
+async fn rotate_log(path: &Path) -> Result<(), String> {
+    let rotated = path.with_extension("log.1");
+    match tokio::fs::remove_file(&rotated).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    match tokio::fs::rename(path, &rotated).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[cfg(unix)]
@@ -691,5 +871,46 @@ fn u8_to_state(value: u8) -> WorkerLifecycleState {
         7 => WorkerLifecycleState::CircuitOpen,
         8 => WorkerLifecycleState::Disabled,
         _ => WorkerLifecycleState::Degraded,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_counter_respects_hard_limit() {
+        let counter = AtomicUsize::new(0);
+        let first = AtomicCounterGuard::try_increment_below(&counter, 1).unwrap();
+        assert!(AtomicCounterGuard::try_increment_below(&counter, 1).is_none());
+        drop(first);
+        assert!(AtomicCounterGuard::try_increment_below(&counter, 1).is_some());
+    }
+
+    #[tokio::test]
+    async fn bounded_log_rotates_while_process_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.stderr.log");
+        let (mut file, mut current_bytes) = open_bounded_log(&path, 16).await.unwrap();
+        write_bounded_log_chunk(&path, &mut file, &mut current_bytes, b"1234567890", 16)
+            .await
+            .unwrap();
+        write_bounded_log_chunk(&path, &mut file, &mut current_bytes, b"abcdefghij", 16)
+            .await
+            .unwrap();
+        file.flush().await.unwrap();
+
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"abcdefghij");
+        assert_eq!(
+            tokio::fs::read(path.with_extension("log.1")).await.unwrap(),
+            b"1234567890"
+        );
+    }
+
+    #[test]
+    fn process_metrics_are_available_for_current_process() {
+        let metrics = process_metrics(std::process::id()).expect("current process metrics");
+        assert!(metrics.rss_bytes > 0);
+        assert!(metrics.virtual_memory_bytes > 0);
     }
 }
