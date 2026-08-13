@@ -220,6 +220,32 @@
 
 - 2026-08-13 PENDING：已新增上述回归测试；按用户要求不在本地运行，执行结果以本次推送触发的远端 CI 为准。
 
+### TC-WNAE-12：最终回复裸路径复用微信原生图片、文件和媒体链路
+
+**操作步骤：**
+
+1. 执行共享路径解析聚焦单测：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_reply_ -- --nocapture
+   ```
+2. 使用当前 debug 二进制执行真实 Bifrost Service + mock iLink/CDN：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_PORT=18937 bash e2e-tests/tests/test_weixin_provider_e2e.sh
+   ```
+3. 检查 mock Runner 的 final 只输出 PNG、Markdown 文档和 MP4 的裸绝对路径，不使用 Markdown 图片或链接语法。
+4. 核对 `sendmessage` 的 IMAGE/FILE/VIDEO item、统一 `run_id` 与 CDN upload；使用请求 AES key 解密三份密文并与原始 fixture 逐字节比较。
+
+**预期结果：**
+
+- 微信与飞书共享同一个路径发现结果，不需要 Provider 专属 Markdown 解析分支。
+- 裸 PNG 进入微信 type 2 IMAGE，裸 Markdown 文档进入 type 4 FILE，裸 MP4 经 MIME + 签名检查后进入 type 5 VIDEO。
+- 三份 CDN 密文解密后逐字节等于原文件；最终文本、Typing、工具进度、client ID 和 `run_id` 语义保持不变。
+- 路径提取只决定 artifact 分类，发送仍复用微信既有 iLink CDN 加密上传和原生媒体协议。
+
+**实际执行结果：**
+
+- 2026-08-13 PASS：更新用例后立即执行共享 `agent_reply_` 聚焦测试；两轮 review 补齐路径、SVG 与安全边界后最终复跑 29/29 通过。随后使用当前 debug 二进制、18937 隔离端口和临时数据目录执行完整 Weixin Provider E2E，输出 `[weixin-provider] PASS`。mock Runner final 中 PNG、Markdown 和 MP4 均为裸绝对路径，无 Markdown 图片/链接语法；请求记录包含 type 2 IMAGE、type 4 FILE、type 5 VIDEO，统一 `run_id` 与不重复 client ID 保持通过，三份 CDN 密文经 AES-128-ECB 解密后逐字节等于 fixture。测试 trap 已清理隔离服务、mock iLink 和临时目录。
+
 ## 清理步骤
 
 - 删除用于核验官方仓库的 `/tmp/openclaw-weixin.*` 临时目录。

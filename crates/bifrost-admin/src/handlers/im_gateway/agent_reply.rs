@@ -59,6 +59,7 @@ pub(super) fn local_image_fallback_markdown(alt: &str, _url: &str) -> String {
     format!("[{} 未能上传]", label)
 }
 
+#[cfg(test)]
 pub(super) fn collect_agent_reply_local_images(
     markdown: &str,
     base_dir: Option<&Path>,
@@ -193,7 +194,7 @@ pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
     Vec<AgentReplyLocalAttachment>,
     Vec<String>,
 ) {
-    let mut images = collect_agent_reply_local_images(markdown, base_dir);
+    let mut images = Vec::new();
     let mut attachments = Vec::new();
     let mut attachment_notices = Vec::new();
     let mut remote_urls_to_strip = HashSet::new();
@@ -518,11 +519,12 @@ fn strip_agent_reply_resolved_images_in_line(
     while pos < line.len() {
         if line.as_bytes()[pos] == b'!' && pos + 1 < line.len() && line.as_bytes()[pos + 1] == b'['
         {
-            if let Some((_alt, url, end)) =
+            if let Some((alt, url, end)) =
                 crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 2)
             {
                 let destination = markdown_image_destination(&url);
-                if resolve_agent_reply_image_path(destination, base_dir).is_some()
+                if resolve_agent_reply_artifact_path(destination, base_dir)
+                    .is_some_and(|path| is_allowed_agent_reply_local_artifact(&path, &alt, true))
                     || remote_urls.contains(destination)
                 {
                     pos = end;
@@ -704,6 +706,7 @@ pub(super) fn provider_agent_work_dir(provider: &ImProviderConfig) -> Option<Pat
         .map(PathBuf::from)
 }
 
+#[cfg(test)]
 pub(super) fn resolve_agent_reply_image_path(
     raw_url: &str,
     base_dir: Option<&Path>,
@@ -735,6 +738,7 @@ pub(super) fn resolve_agent_reply_image_path(
     Some(original_path)
 }
 
+#[cfg(test)]
 fn resolve_local_markdown_path(destination: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = destination.strip_prefix("file://") {
         return Some(PathBuf::from(path));
@@ -748,12 +752,13 @@ fn resolve_local_markdown_path(destination: &str, base_dir: Option<&Path>) -> Op
     }
 }
 
-fn strip_trailing_source_position(destination: &str) -> Option<&str> {
+pub(super) fn strip_trailing_source_position(destination: &str) -> Option<&str> {
     let (path, position) = destination.rsplit_once(':')?;
     (!path.is_empty() && !position.is_empty() && position.bytes().all(|byte| byte.is_ascii_digit()))
         .then_some(path)
 }
 
+#[cfg(test)]
 pub(super) fn is_local_markdown_image_candidate(raw_url: &str) -> bool {
     let destination = markdown_image_destination(raw_url);
     !destination.is_empty()

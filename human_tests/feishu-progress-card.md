@@ -241,10 +241,10 @@
 **预期结果**：
 - 本地相对路径按 Runner work dir 解析，远程 HTTP 图片先下载再上传；既有 `img_*` 不重复上传，fenced code block 中的图片示例不上传，缺图只在原位置降级成“未能上传”文案。
 - 图片语法跨多个流式 delta 时，在闭合后按累计 Markdown 上传；远程响应超过 10 MiB 时在读取完整 body 前拒绝，不向飞书上传。
-- mock `/im/v1/images` 仅收到一次 `terminal-e2e-chart.png` multipart 上传，并返回 `img_v3_terminal_e2e`。
+- mock `/im/v1/images` 收到内联 `terminal-e2e-chart.png` 与普通 SVG 链接同名的 `terminal-e2e-flow.png` 预览，并返回 `img_v3_terminal_e2e`。
 - 运行中过程卡、原任务卡最终结论和独立 `Task completed` 终态卡的 Markdown 均包含 `![E2E chart](img_v3_terminal_e2e)`；原本地绝对路径不进入 CardKit payload。
-- 成功任务消息数为 5（progress、terminal、`.txt`、`.tar.gz`、`.yaml`），失败任务消息数仍为 2；所有消息均无 `msg_type=image`，证明没有重复补发独立图片消息。
-- 普通 `.txt`、`.tar.gz` 和 `.yaml` 分别调用 `/im/v1/files` 并发送 `msg_type=file`，图片内联不破坏非图片附件；`.rs` 源码链接不调用上传接口。
+- 显式 Markdown 图片继续只内联复用，不补发独立图片；普通 SVG 链接的同名 PNG 预览发送一条 `msg_type=image`，SVG 本体发送一条 `msg_type=file`。
+- 普通 `.txt`、`.tar.gz`、`.yaml` 和 `.svg` 分别调用 `/im/v1/files` 并发送 `msg_type=file`，图片内联不破坏非图片附件；`.rs` 源码链接不调用上传接口。
 - 无真实租户凭据时，本地完整 HTTP/CardKit payload 契约必须通过，并明确将飞书客户端肉眼渲染标记为未执行，而不是假设通过。
 
 ### TC-FPC-13：出站文件 30 MiB 平台上限与非阻塞失败提示
@@ -366,12 +366,35 @@
 - 相对路径按 Runner 工作目录解析，`file://` 路径同样兼容；缺失文件和远程 URL 不会被误当成本地附件。
 - 测试只启动临时数据目录、动态端口的隔离 Bifrost 与 loopback mock Feishu，结束后由 trap 清理，不操作当前运行服务。
 
+### TC-FPC-19：最终回复按真实路径发现全类型文件，不依赖 Markdown 格式
+
+**操作步骤**：
+1. 执行路径解析聚焦单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_reply_ -- --nocapture
+   ```
+2. 使用当前 debug 二进制执行隔离 Service + mock Runner + loopback Feishu OpenAPI：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
+   ```
+3. 核对原始复现场景中的普通 Markdown 链接：技术方案 `.md`、两张流程图 `.svg` 及同名 `.png` 均真实存在；再核对裸绝对路径、工作目录相对路径、反引号内含空格路径、`:line[:column]`、重复路径、缺失文件、目录、代码块、源码与敏感配置。
+4. 检查 mock 请求：普通 SVG 链接产生同名 PNG 图片预览和 SVG 文件消息；裸 `.txt` 路径、归档、YAML 和带位置后缀的 Markdown 文档分别按文件发送。
+
+**预期结果**：
+- 文件发现不要求 `![...](...)` 或 `[...] (...)` 特定格式；绝对路径、相对 Runner work dir 路径及常见包裹形式只要解析到真实普通文件且命中既有扩展白名单，就进入原生发送队列。
+- PNG/JPEG/GIF/WEBP/BMP 走图片消息；文档、配置、Office、归档、patch/diff、音频、视频和 SVG 走既有文件/媒体模式。
+- SVG 有同名 PNG 时发送 PNG 预览，同时保留 SVG 文件；飞书不把 `image/svg+xml` 错传给不支持 SVG 的图片 API。
+- canonical path 去重；缺失文件、目录、fenced code block 中的示例、源码和 `.env*`/credentials/secrets/私钥不发送。
+- 显式 Markdown 图片仍在 CardKit 原位复用 `image_key`；新增路径发现不破坏终态卡、失败通知和 30 MiB 非阻塞门禁。
+
 ## 清理步骤
 
 1. 确认没有残留 `bifrost-e2e` 或测试启动的 Bifrost 进程。
 2. 删除测试过程中生成的临时目录。
 
 ## 执行记录
+
+- 2026-08-13：PASS（TC-FPC-19 路径驱动全类型 artifact）— 更新用例后立即执行 `agent_reply_` 聚焦测试；第一轮 review 补齐父目录、ASCII/中文标签与标点、canonical symlink 拒绝、缺失/未知 Markdown 图片保留，第二轮补齐裸 SVG 不隐式预览及 SVG 预览 symlink 拒绝，最终复跑 29/29 通过。原始 MD + 两个 SVG 普通链接解析为技术方案文件、两个 SVG 文件及两个同名 PNG 预览，裸绝对/相对/包裹路径、去重、缺失/目录/code fence、源码和敏感配置拒绝均通过。随后用当前 debug 二进制执行隔离 Service + mock Runner + loopback Feishu OpenAPI，黑盒 E2E PASS：显式 chart 继续 CardKit 内联，普通 SVG 链接额外上传同名 PNG 并发送一条 image message，SVG 本体与裸 report、归档、YAML、带行号 Markdown 分别发送 file message；`.rs` 未上传，30 MiB 和上传错误仍汇总为非阻塞提示。测试 trap 已清理进程和临时目录。
 
 - 2026-08-12：PASS（TC-FPC-18 Codex 本地文件链接行号后缀附件回归）— 更新用例后立即执行聚焦单测与隔离黑盒链路。单测覆盖绝对路径 `:line`、带空格路径 `:line:column`、相对路径、`file://`、真实存在的 `literal.md:7` 优先、缺失文件和远程 URL；隔离 Service + mock Runner + loopback Feishu OpenAPI 验证 `[完整方案](.../方案.md:1)` 最终调用 `/im/v1/files` 上传真实 `方案.md`，未上传 `方案.md:1`，并发送对应 `msg_type=file` 消息。既有终态卡、图片、报告/归档/配置附件、源码排除、30 MiB 预检、上传失败非阻塞提示和 10 秒静默保活断言继续通过；测试 trap 已清理所属进程和临时目录，未操作当前运行服务。
 
