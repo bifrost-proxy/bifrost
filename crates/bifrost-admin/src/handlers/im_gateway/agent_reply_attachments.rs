@@ -31,15 +31,38 @@ pub(super) fn collect_agent_reply_local_attachment_links(
     images: &mut Vec<AgentReplyLocalImage>,
     attachments: &mut Vec<AgentReplyLocalAttachment>,
 ) {
-    if !markdown.contains('[') {
-        return;
-    }
+    collect_agent_reply_local_artifacts(markdown, base_dir, images, attachments);
+}
 
-    let mut seen = HashSet::new();
+#[derive(Debug)]
+struct AgentReplyLocalArtifactCandidate {
+    label: String,
+    raw_path: String,
+    markdown_link: bool,
+}
+
+/// Discover local artifacts mentioned by an Agent reply without requiring a
+/// specific Markdown shape. Only explicit path tokens are considered; fenced
+/// code blocks and directories are ignored.
+pub(super) fn collect_agent_reply_local_artifacts(
+    text: &str,
+    base_dir: Option<&Path>,
+    images: &mut Vec<AgentReplyLocalImage>,
+    attachments: &mut Vec<AgentReplyLocalAttachment>,
+) {
+    let mut seen = images
+        .iter()
+        .map(|image| canonical_artifact_key(&image.path))
+        .chain(
+            attachments
+                .iter()
+                .map(|attachment| canonical_artifact_key(&attachment.path)),
+        )
+        .collect::<HashSet<_>>();
     let mut inside_code_block = false;
     let mut code_fence: Option<String> = None;
 
-    for line in markdown.split('\n') {
+    for line in text.split('\n') {
         let trimmed = line.trim_start();
         if inside_code_block {
             if let Some(ref fence) = code_fence {
@@ -57,46 +80,300 @@ pub(super) fn collect_agent_reply_local_attachment_links(
             continue;
         }
 
-        let mut pos = 0;
-        while pos < line.len() {
-            if line.as_bytes()[pos] == b'['
-                && (pos == 0 || line.as_bytes()[pos.saturating_sub(1)] != b'!')
-            {
-                if let Some((label, url, end)) =
-                    crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 1)
-                {
-                    let destination = markdown_image_destination(&url);
-                    if is_local_markdown_image_candidate(destination) {
-                        if let Some(path) = resolve_agent_reply_image_path(destination, base_dir) {
-                            let dedupe_key = path.canonicalize().unwrap_or_else(|_| path.clone());
-                            if is_image_mime_or_path(None, &path) {
-                                if seen.insert(dedupe_key) {
-                                    images.push(AgentReplyLocalImage { alt: label, path });
-                                }
-                            } else if is_explicit_attachment_label_or_path(
-                                &label,
-                                &path.to_string_lossy(),
-                            ) && seen.insert(dedupe_key)
-                            {
-                                attachments.push(AgentReplyLocalAttachment {
-                                    label,
-                                    mime_type: mime_guess::from_path(&path)
-                                        .first_raw()
-                                        .map(str::to_string),
-                                    path,
-                                });
-                            }
-                        }
+        for candidate in collect_local_artifact_candidates_from_line(line) {
+            let Some(path) = resolve_agent_reply_artifact_path(&candidate.raw_path, base_dir)
+            else {
+                continue;
+            };
+            let key = canonical_artifact_key(&path);
+            if !is_allowed_agent_reply_local_artifact(
+                &path,
+                &candidate.label,
+                candidate.markdown_link,
+            ) {
+                continue;
+            }
+            if seen.contains(&key) {
+                continue;
+            }
+
+            let path_text = path.to_string_lossy();
+            if image_extension_from_path(&path_text).is_some() {
+                seen.insert(key);
+                images.push(AgentReplyLocalImage {
+                    alt: candidate.label,
+                    path,
+                });
+                continue;
+            }
+
+            let is_svg = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+            if is_svg && candidate.markdown_link {
+                let png_preview = path.with_extension("png");
+                if png_preview.is_file() {
+                    let preview_key = canonical_artifact_key(&png_preview);
+                    if !is_denied_agent_reply_attachment_path(
+                        preview_key.to_string_lossy().as_ref(),
+                    ) && seen.insert(preview_key)
+                    {
+                        images.push(AgentReplyLocalImage {
+                            alt: candidate.label.clone(),
+                            path: png_preview,
+                        });
                     }
-                    pos = end;
-                    continue;
                 }
             }
 
-            let ch = line[pos..].chars().next().unwrap();
-            pos += ch.len_utf8();
+            seen.insert(key);
+            attachments.push(AgentReplyLocalAttachment {
+                label: candidate.label,
+                mime_type: mime_guess::from_path(&path).first_raw().map(str::to_string),
+                path,
+            });
         }
     }
+}
+
+fn canonical_artifact_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn collect_local_artifact_candidates_from_line(
+    line: &str,
+) -> Vec<AgentReplyLocalArtifactCandidate> {
+    let mut candidates = Vec::new();
+    let mut pos = 0;
+    while pos < line.len() {
+        let is_image = line.as_bytes()[pos] == b'!'
+            && pos + 1 < line.len()
+            && line.as_bytes()[pos + 1] == b'[';
+        let is_link = line.as_bytes()[pos] == b'['
+            && (pos == 0 || line.as_bytes()[pos.saturating_sub(1)] != b'!');
+        if is_image || is_link {
+            let label_start = if is_image { pos + 2 } else { pos + 1 };
+            if let Some((label, raw_path, end)) =
+                crate::im_gateway::markdown_converter::parse_image_syntax(line, label_start)
+            {
+                candidates.push(AgentReplyLocalArtifactCandidate {
+                    label,
+                    raw_path,
+                    markdown_link: true,
+                });
+                pos = end;
+                continue;
+            }
+        }
+        let ch = line[pos..].chars().next().expect("valid UTF-8 boundary");
+        pos += ch.len_utf8();
+    }
+
+    collect_wrapped_local_artifact_candidates(line, &mut candidates);
+    for token in line.split_whitespace() {
+        let raw_path = bare_artifact_path_from_token(token);
+        if raw_path.is_empty() {
+            continue;
+        }
+        candidates.push(AgentReplyLocalArtifactCandidate {
+            label: artifact_label_from_path(raw_path),
+            raw_path: raw_path.to_string(),
+            markdown_link: false,
+        });
+    }
+    candidates
+}
+
+fn collect_wrapped_local_artifact_candidates(
+    line: &str,
+    candidates: &mut Vec<AgentReplyLocalArtifactCandidate>,
+) {
+    for (open, close) in [('`', '`'), ('"', '"'), ('\'', '\''), ('<', '>')] {
+        let mut remainder = line;
+        while let Some(start) = remainder.find(open) {
+            let after_open = &remainder[start + open.len_utf8()..];
+            let Some(end) = after_open.find(close) else {
+                break;
+            };
+            let raw_path = after_open[..end].trim();
+            if !raw_path.is_empty() {
+                candidates.push(AgentReplyLocalArtifactCandidate {
+                    label: artifact_label_from_path(raw_path),
+                    raw_path: raw_path.to_string(),
+                    markdown_link: false,
+                });
+            }
+            remainder = &after_open[end + close.len_utf8()..];
+        }
+    }
+}
+
+fn bare_artifact_path_from_token(token: &str) -> &str {
+    let token = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '`' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    });
+    if let Some(index) = token.find("file://") {
+        return &token[index..];
+    }
+    if token.starts_with("./") || token.starts_with("../") {
+        return token;
+    }
+    if let Some(colon) = token.find(':') {
+        let slash = token.find('/').unwrap_or(token.len());
+        let prefix = &token[..colon];
+        if colon < slash
+            && prefix.len() > 1
+            && !matches!(
+                prefix.to_ascii_lowercase().as_str(),
+                "http" | "https" | "file"
+            )
+        {
+            return token[colon + 1..].trim_start_matches(|ch: char| {
+                matches!(ch, '(' | '[' | '{' | '<' | '（' | '【' | '｛')
+            });
+        }
+    }
+    if let Some(index) = token.rfind('：') {
+        return token[index + '：'.len_utf8()..].trim_start_matches(|ch: char| {
+            matches!(ch, '(' | '[' | '{' | '<' | '（' | '【' | '｛')
+        });
+    }
+    if let Some(index) = token.rfind('=') {
+        return token[index + 1..].trim_start_matches(|ch: char| {
+            matches!(ch, '(' | '[' | '{' | '<' | '（' | '【' | '｛')
+        });
+    }
+    if let Some(index) = token.find('/') {
+        let prefix = &token[..index];
+        if prefix.ends_with("http:") || prefix.ends_with("https:") {
+            return token;
+        }
+        if index == 0 || prefix.contains(':') {
+            return &token[index..];
+        }
+    }
+    token
+        .rsplit_once('：')
+        .map(|(_, path)| path)
+        .or_else(|| token.rsplit_once('=').map(|(_, path)| path))
+        .unwrap_or(token)
+}
+
+fn artifact_label_from_path(raw_path: &str) -> String {
+    let normalized = markdown_image_destination(raw_path);
+    Path::new(normalized)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("附件")
+        .to_string()
+}
+
+pub(super) fn resolve_agent_reply_artifact_path(
+    raw_path: &str,
+    base_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let destination = markdown_image_destination(raw_path);
+    if destination.is_empty()
+        || destination.starts_with("http://")
+        || destination.starts_with("https://")
+        || looks_like_feishu_image_key(destination)
+    {
+        return None;
+    }
+
+    let decoded = urlencoding::decode(destination).ok();
+    let mut candidate = decoded.as_deref().unwrap_or(destination).trim();
+    candidate = candidate.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '`' | '"'
+                | '\''
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '｛'
+                | '｝'
+        )
+    });
+
+    for _ in 0..4 {
+        if let Some(path) = resolve_existing_artifact_path(candidate, base_dir) {
+            return Some(path);
+        }
+        if let Some(stripped) = strip_trailing_source_position(candidate) {
+            candidate = stripped;
+            continue;
+        }
+        let stripped = candidate.trim_end_matches(|ch: char| {
+            matches!(
+                ch,
+                ',' | ';'
+                    | '.'
+                    | '!'
+                    | '?'
+                    | ')'
+                    | ']'
+                    | '}'
+                    | '）'
+                    | '】'
+                    | '｝'
+                    | '，'
+                    | '。'
+                    | '；'
+                    | '！'
+                    | '？'
+                    | '：'
+            )
+        });
+        if stripped == candidate {
+            break;
+        }
+        candidate = stripped;
+    }
+    None
+}
+
+pub(super) fn is_allowed_agent_reply_local_artifact(
+    path: &Path,
+    label: &str,
+    markdown_link: bool,
+) -> bool {
+    let canonical = canonical_artifact_key(path);
+    let path_text = path.to_string_lossy();
+    let canonical_text = canonical.to_string_lossy();
+    !is_denied_agent_reply_attachment_path(&path_text)
+        && !is_denied_agent_reply_attachment_path(&canonical_text)
+        && (image_extension_from_path(&path_text).is_some()
+            || attachment_extension_from_path(&path_text).is_some()
+            || (markdown_link && is_explicit_attachment_label_or_path(label, &path_text)))
+}
+
+fn resolve_existing_artifact_path(candidate: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
+    let path = if let Some(path) = candidate.strip_prefix("file://") {
+        PathBuf::from(path)
+    } else {
+        let path = PathBuf::from(candidate);
+        if path.is_absolute() {
+            path
+        } else {
+            base_dir?.join(path)
+        }
+    };
+    path.is_file().then_some(path)
 }
 
 pub(super) fn collect_agent_reply_remote_attachment_links(
@@ -425,6 +702,7 @@ pub(super) fn attachment_extension_from_path(path: &str) -> Option<&'static str>
         "xlsx" => Some("xlsx"),
         "ppt" => Some("ppt"),
         "pptx" => Some("pptx"),
+        "svg" => Some("svg"),
         "patch" => Some("patch"),
         "diff" => Some("diff"),
         "mp4" => Some("mp4"),
@@ -592,8 +870,8 @@ fn extension_from_attachment_url(url: &Url) -> Option<&'static str> {
 
 pub(super) fn is_image_mime_or_path(mime_type: Option<&str>, path: &Path) -> bool {
     mime_type
-        .map(|value| value.to_ascii_lowercase().starts_with("image/"))
-        .unwrap_or(false)
+        .and_then(image_extension_from_content_type)
+        .is_some()
         || image_extension_from_path(path.to_string_lossy().as_ref()).is_some()
 }
 

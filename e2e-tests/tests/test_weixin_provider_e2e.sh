@@ -451,7 +451,7 @@ time.sleep(5.2)
 print(json.dumps({"type": "tool_finished", "tool_name": "exec_command", "arguments": "verify weixin attachments", "result": "ok", "success": True, "duration_ms": 5200}))
 print(json.dumps({
     "type": "assistant_final",
-    "content": "WEIXIN_NATIVE_E2E_FINAL\nWEIXIN_NATIVE_E2E_SECOND_LINE\n\n![Weixin chart](%s)\n\n[Weixin report](%s)\n[Weixin video](%s)" % (sys.argv[1], sys.argv[2], sys.argv[3]),
+    "content": "WEIXIN_NATIVE_E2E_FINAL\nWEIXIN_NATIVE_E2E_SECOND_LINE\n\nImage: %s\nReport: %s\nVideo: %s" % (sys.argv[1], sys.argv[2], sys.argv[3]),
 }))
 '''
 request("/chat/config", {

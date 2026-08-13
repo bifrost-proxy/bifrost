@@ -2330,6 +2330,287 @@ pub(super) fn agent_reply_collects_config_attachments_but_excludes_source_code()
     );
     assert_eq!(extension_from_content_type("text/toml"), Some("toml"));
     assert_eq!(extension_from_content_type("application/xml"), Some("xml"));
+    assert_eq!(attachment_extension_from_path("diagram.svg"), Some("svg"));
+    assert!(!is_image_mime_or_path(
+        Some("image/svg+xml"),
+        std::path::Path::new("diagram.svg")
+    ));
+}
+
+#[tokio::test]
+pub(super) async fn agent_reply_resolves_original_design_links_without_markdown_image_syntax() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let docs = temp.path().join("docs/design");
+    let assets = docs.join("assets");
+    std::fs::create_dir_all(&assets).expect("create assets dir");
+
+    let design = docs.join("2026-08-13-ncl-static-review-runtime-readiness.md");
+    let current_svg = assets.join("ncl-static-review-current-flow.svg");
+    let current_png = assets.join("ncl-static-review-current-flow.png");
+    let target_svg = assets.join("ncl-static-review-target-flow.svg");
+    let target_png = assets.join("ncl-static-review-target-flow.png");
+    for path in [
+        &design,
+        &current_svg,
+        &current_png,
+        &target_svg,
+        &target_png,
+    ] {
+        std::fs::write(path, b"artifact").expect("write artifact");
+    }
+    let markdown = format!(
+        "[完整技术方案]({})\n[现状流程图]({})\n[目标流程图]({})\n![缺失图片](missing.png)",
+        design.display(),
+        current_svg.display(),
+        target_svg.display(),
+    );
+    let (text, images, attachments, notices) =
+        prepare_agent_reply_text_and_images_with_downloads(&markdown, Some(temp.path())).await;
+
+    assert_eq!(text, markdown);
+    assert!(notices.is_empty());
+    assert_eq!(
+        images
+            .iter()
+            .map(|image| image.path.clone())
+            .collect::<Vec<_>>(),
+        vec![current_png, target_png]
+    );
+    assert_eq!(
+        attachments
+            .iter()
+            .map(|attachment| attachment.path.clone())
+            .collect::<Vec<_>>(),
+        vec![design, current_svg, target_svg]
+    );
+}
+
+#[test]
+pub(super) fn agent_reply_bare_svg_is_sent_as_file_without_implicit_preview() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let svg = temp.path().join("diagram.svg");
+    let png = temp.path().join("diagram.png");
+    std::fs::write(&svg, b"<svg/>").expect("write svg");
+    std::fs::write(&png, b"png").expect("write png");
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_artifacts(
+        svg.to_string_lossy().as_ref(),
+        Some(temp.path()),
+        &mut images,
+        &mut attachments,
+    );
+
+    assert!(images.is_empty());
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].path, svg);
+}
+
+#[cfg(unix)]
+#[test]
+pub(super) fn agent_reply_svg_preview_rejects_symlink_to_source_code() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let svg = temp.path().join("diagram.svg");
+    let source = temp.path().join("implementation.rs");
+    let preview = temp.path().join("diagram.png");
+    std::fs::write(&svg, b"<svg/>").expect("write svg");
+    std::fs::write(&source, b"fn secret() {}").expect("write source");
+    std::os::unix::fs::symlink(&source, &preview).expect("create preview symlink");
+    let markdown = format!("[流程图]({})", svg.display());
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_artifacts(
+        &markdown,
+        Some(temp.path()),
+        &mut images,
+        &mut attachments,
+    );
+
+    assert!(images.is_empty());
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].path, svg);
+}
+
+#[test]
+pub(super) fn agent_reply_resolves_bare_absolute_relative_and_wrapped_artifact_paths() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let docs = temp.path().join("docs");
+    std::fs::create_dir_all(&docs).expect("create docs dir");
+    let image = temp.path().join("preview.png");
+    let report = docs.join("report.pdf");
+    let config = temp.path().join("runner.yaml");
+    let workbook = docs.join("review workbook.xlsx");
+    let fenced = docs.join("example.zip");
+    let source = docs.join("main.rs");
+    let secret = docs.join(".env.production");
+    for path in [
+        &image, &report, &config, &workbook, &fenced, &source, &secret,
+    ] {
+        std::fs::write(path, b"artifact").expect("write artifact");
+    }
+    let markdown = format!(
+        concat!(
+            "图片：{}\n",
+            "报告：docs/report.pdf\n",
+            "配置：<./runner.yaml>\n",
+            "表格：`docs/review workbook.xlsx`\n",
+            "重复：{} 和 docs/report.pdf:12:3\n",
+            "缺失：docs/missing.zip\n",
+            "源码：docs/main.rs\n",
+            "秘密：docs/.env.production\n",
+            "目录：docs\n",
+            "```text\n",
+            "docs/example.zip\n",
+            "```\n"
+        ),
+        image.display(),
+        report.display(),
+    );
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_artifacts(
+        &markdown,
+        Some(temp.path()),
+        &mut images,
+        &mut attachments,
+    );
+
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].path, image);
+    assert_eq!(
+        attachments
+            .iter()
+            .map(|attachment| attachment.path.clone())
+            .collect::<Vec<_>>(),
+        vec![report, config, workbook]
+    );
+}
+
+#[test]
+pub(super) fn agent_reply_path_resolver_deduplicates_markdown_and_bare_candidates() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let archive = temp.path().join("bundle.tar.gz");
+    std::fs::write(&archive, b"archive").expect("write archive");
+    let markdown = format!(
+        "[下载]({0})\n`{0}`\n{0}\n./bundle.tar.gz",
+        archive.display()
+    );
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_artifacts(
+        &markdown,
+        Some(temp.path()),
+        &mut images,
+        &mut attachments,
+    );
+
+    assert!(images.is_empty());
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].path, archive);
+}
+
+#[test]
+pub(super) fn agent_reply_path_resolver_handles_parent_paths_and_trailing_prose_punctuation() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let work_dir = temp.path().join("work");
+    std::fs::create_dir(&work_dir).expect("create work dir");
+    let parent = temp.path().join("parent.csv");
+    let punctuated = temp.path().join("punctuated.pdf");
+    std::fs::write(&parent, b"parent").expect("write parent");
+    std::fs::write(&punctuated, b"punctuated").expect("write punctuated");
+    let markdown = format!(
+        "父目录：../parent.csv\n句末：（{}）。",
+        punctuated.display()
+    );
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_artifacts(&markdown, Some(&work_dir), &mut images, &mut attachments);
+
+    assert!(images.is_empty());
+    assert_eq!(attachments.len(), 2);
+    assert_eq!(
+        attachments[0]
+            .path
+            .canonicalize()
+            .expect("canonical parent"),
+        parent.canonicalize().expect("canonical expected parent")
+    );
+    assert_eq!(attachments[1].path, punctuated);
+}
+
+#[test]
+pub(super) fn agent_reply_path_resolver_handles_ascii_labels_and_wrapped_bare_paths() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let docs = temp.path().join("docs");
+    std::fs::create_dir(&docs).expect("create docs dir");
+    let labeled = docs.join("report.pdf");
+    let wrapped = temp.path().join("wrapped.csv");
+    std::fs::write(&labeled, b"report").expect("write report");
+    std::fs::write(&wrapped, b"wrapped").expect("write wrapped");
+    let markdown = format!("Report:docs/report.pdf\n（{}）。", wrapped.display());
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_artifacts(
+        &markdown,
+        Some(temp.path()),
+        &mut images,
+        &mut attachments,
+    );
+
+    assert!(images.is_empty());
+    assert_eq!(
+        attachments
+            .iter()
+            .map(|attachment| attachment.path.clone())
+            .collect::<Vec<_>>(),
+        vec![labeled, wrapped]
+    );
+}
+
+#[tokio::test]
+pub(super) async fn agent_reply_keeps_denied_or_unknown_markdown_images_in_text() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let source = temp.path().join("implementation.rs");
+    let unknown = temp.path().join("payload.bin");
+    std::fs::write(&source, b"fn secret() {}").expect("write source");
+    std::fs::write(&unknown, b"unknown").expect("write unknown");
+    let markdown = "![source](implementation.rs)\n![unknown](payload.bin)";
+
+    let (text, images, attachments, notices) =
+        prepare_agent_reply_text_and_images_with_downloads(markdown, Some(temp.path())).await;
+
+    assert_eq!(text, markdown);
+    assert!(images.is_empty());
+    assert!(attachments.is_empty());
+    assert!(notices.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+pub(super) fn agent_reply_path_resolver_rejects_safe_named_symlink_to_denied_target() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let source = temp.path().join("implementation.rs");
+    let disguised = temp.path().join("report.pdf");
+    std::fs::write(&source, b"fn secret() {}").expect("write source");
+    std::os::unix::fs::symlink(&source, &disguised).expect("create symlink");
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_artifacts(
+        disguised.to_string_lossy().as_ref(),
+        Some(temp.path()),
+        &mut images,
+        &mut attachments,
+    );
+
+    assert!(images.is_empty());
+    assert!(attachments.is_empty());
 }
 
 #[test]
