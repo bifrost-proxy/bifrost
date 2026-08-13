@@ -17,6 +17,7 @@ Copy [article.template.md](references/article.template.md) and fill `title`. The
 - Keep one source file per intended article so duplicate prevention remains stable.
 - Existing frontmatter fields for another platform are allowed and ignored.
 - The renderer supports headings, paragraphs, lists, links, images, inline code, fenced code blocks, blockquotes, emphasis, and horizontal rules.
+- Images may use HTTP(S), a local JPEG/PNG/GIF/WebP/BMP path relative to the article, an absolute local image path, or a matching base64 data URI. Live writes transfer every non-Zhihu image to Zhihu first; SVG and files over 20 MiB are rejected.
 
 Read [traffic-contract.md](references/traffic-contract.md) only when diagnosing a Zhihu API or capture change.
 
@@ -30,7 +31,7 @@ Always run a dry run before a live write:
   --dry-run
 ```
 
-Confirm the title, Markdown/HTML character counts, action, and duplicate state.
+Confirm the title, Markdown/HTML character counts, action, duplicate state, and image counts. Dry-run never uploads an image.
 
 Check the captured login/template state without exposing credentials:
 
@@ -62,6 +63,17 @@ The script performs the captured workflow:
 
 Treat `already_published` as successful duplicate prevention. Do not use `--force-new` unless the user explicitly wants a second post from the same source.
 
+To change the same already-published article, require explicit user intent and pass `--update-existing`:
+
+```bash
+.agents/skills/zhihu-publish/scripts/zhihu-publish \
+  --article /absolute/path/article.md \
+  --publish \
+  --update-existing
+```
+
+The live workflow uploads remote images through `POST /api/uploaded_images`, uploads local/data images as multipart `picture`, accepts only HTTPS URLs on Zhihu's allowlisted upload hosts (`*.zhimg.com` or the exact `pic-private.zhihu.com` host), and emits standalone images as `<figure>` nodes before saving or publishing. The private upload URL is temporary; Zhihu must rewrite the published article to stable `*.zhimg.com` content.
+
 ## Verify the live article
 
 After publishing, compare the rendered title and body with the source without browser automation:
@@ -71,7 +83,7 @@ After publishing, compare the rendered title and body with the source without br
   --article /absolute/path/article.md
 ```
 
-The verifier reuses safe, local Bifrost request context to load Zhihu, normalizes rendered text, rejects a duplicated title at the start of the body, and returns `status=verified` only for an exact normalized match.
+The verifier reuses safe, local Bifrost request context to load Zhihu, normalizes rendered text, rejects a duplicated title at the start of the body, and requires the expected image count with every public image hosted on stable HTTPS `*.zhimg.com`. It returns `status=verified` only when text and images both match.
 
 ## Authentication recovery
 

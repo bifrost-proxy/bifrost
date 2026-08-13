@@ -9,6 +9,11 @@ import { pathToFileURL } from "node:url";
 
 const COLUMN_BASE = "https://zhuanlan.zhihu.com";
 const MAIN_BASE = "https://www.zhihu.com";
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const IMAGE_MIME_BY_EXTENSION = new Map([
+  [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"], [".png", "image/png"],
+  [".gif", "image/gif"], [".webp", "image/webp"], [".bmp", "image/bmp"],
+]);
 
 export class PublishError extends Error {
   constructor(message, options = {}) {
@@ -57,6 +62,15 @@ function safeUrl(value) {
   }
 }
 
+function imageSource(value) {
+  const source = String(value).trim();
+  if (!source) return null;
+  if (/^https?:\/\//i.test(source)) return safeUrl(source);
+  if (/^data:image\/(?:jpeg|png|gif|webp|bmp);base64,/i.test(source)) return source;
+  if (/^[a-z][a-z\d+.-]*:/i.test(source)) return null;
+  return source;
+}
+
 function renderInline(source) {
   const tokens = [];
   const hold = (html) => {
@@ -67,8 +81,9 @@ function renderInline(source) {
   let value = String(source);
   value = value.replace(/\x60([^\x60]+)\x60/g, (_, code) => hold("<code>" + escapeHtml(code) + "</code>"));
   value = value.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, rawUrl) => {
-    const url = safeUrl(rawUrl.trim());
-    return url ? hold('<img src="' + escapeHtml(url) + '" alt="' + escapeHtml(alt) + '">') : escapeHtml(alt);
+    const source = imageSource(rawUrl);
+    if (!source) throw new PublishError("图片地址仅支持 HTTP(S)、本地图片路径或 data image URI");
+    return hold('<img src="' + escapeHtml(source) + '" alt="' + escapeHtml(alt) + '">');
   });
   value = value.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, rawUrl) => {
     const url = safeUrl(rawUrl.trim());
@@ -203,6 +218,164 @@ export function parseArticle(source) {
   };
   if (!article.commentPermission) throw new PublishError("comment_permission 不能为空");
   return article;
+}
+
+function decodeHtmlAttribute(value) {
+  return String(value)
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+export function extractHtmlImages(html) {
+  const images = [];
+  for (const match of String(html).matchAll(/<img\b[^>]*\bsrc=(?:"([^"]*)"|'([^']*)')[^>]*>/gi)) {
+    images.push({ html: match[0], src: decodeHtmlAttribute(match[1] ?? match[2] ?? "") });
+  }
+  return images;
+}
+
+export function isZhihuImageUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && (
+      url.hostname === "zhimg.com" || url.hostname.endsWith(".zhimg.com")
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isZhihuUploadImageUrl(value) {
+  if (isZhihuImageUrl(value)) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "pic-private.zhihu.com";
+  } catch {
+    return false;
+  }
+}
+
+function validateUploadedImageUrl(value) {
+  const url = String(value ?? "").trim();
+  if (!isZhihuUploadImageUrl(url)) {
+    throw new PublishError("知乎图片上传响应缺少有效的 HTTPS 官方图片地址");
+  }
+  return url;
+}
+
+function uploadHeaders(context, overrides = {}) {
+  const headers = filteredHeaders(context);
+  for (const name of Object.keys(headers)) {
+    if (name === "content-type" || name.startsWith("x-zse-") || name.startsWith("x-zst-")) delete headers[name];
+  }
+  return { ...headers, ...overrides };
+}
+
+export async function uploadRemoteImage(columnBase, context, source, fetchImpl = fetch) {
+  const url = new URL(source);
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new PublishError("远程图片必须使用 HTTP(S)");
+  const response = await fetchImpl(new URL("/api/uploaded_images", columnBase), {
+    method: "POST",
+    headers: uploadHeaders(context, {
+      accept: "application/json, text/plain, */*",
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      "x-requested-with": "fetch",
+    }),
+    body: new URLSearchParams({ url: url.toString(), source: "article" }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const payload = await readJsonResponse(response, "转存知乎远程图片");
+  return validateUploadedImageUrl(payload.src ?? payload.data?.src);
+}
+
+function sniffImageMime(buffer, fallback = "") {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (buffer.length >= 6 && ["GIF87a", "GIF89a"].includes(buffer.subarray(0, 6).toString("ascii"))) return "image/gif";
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  if (buffer.length >= 2 && buffer.subarray(0, 2).toString("ascii") === "BM") return "image/bmp";
+  return fallback;
+}
+
+function validateImageBuffer(buffer, expectedMime = "") {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new PublishError("图片内容为空");
+  if (buffer.length > MAX_IMAGE_BYTES) throw new PublishError("图片超过 20 MiB 限制");
+  const mime = sniffImageMime(buffer);
+  if (!mime || (expectedMime && mime !== expectedMime)) throw new PublishError("图片格式与内容不匹配或不受支持");
+  return mime;
+}
+
+export async function uploadBinaryImage(columnBase, context, buffer, filename, expectedMime = "", fetchImpl = fetch) {
+  const mime = validateImageBuffer(buffer, expectedMime);
+  const form = new FormData();
+  form.append("picture", new Blob([buffer], { type: mime }), filename || "image" + ([...IMAGE_MIME_BY_EXTENSION].find(([, value]) => value === mime)?.[0] ?? ""));
+  form.append("source", "article");
+  const response = await fetchImpl(new URL("/api/uploaded_images", columnBase), {
+    method: "POST",
+    headers: uploadHeaders(context, { accept: "application/json, text/plain, */*", "x-requested-with": "fetch" }),
+    body: form,
+    signal: AbortSignal.timeout(30_000),
+  });
+  const payload = await readJsonResponse(response, "上传知乎本地图片");
+  return validateUploadedImageUrl(payload.src ?? payload.data?.src);
+}
+
+function loadImageSource(source, articlePath) {
+  if (/^data:image\//i.test(source)) {
+    const match = source.match(/^data:(image\/(?:jpeg|png|gif|webp|bmp));base64,([a-z\d+/=\s]+)$/i);
+    if (!match) throw new PublishError("data image URI 必须是受支持格式的 base64 数据");
+    return { buffer: Buffer.from(match[2].replace(/\s/g, ""), "base64"), filename: "inline", mime: match[1].toLowerCase() };
+  }
+  const filePath = path.isAbsolute(source) ? source : path.resolve(path.dirname(articlePath), source);
+  const extension = path.extname(filePath).toLowerCase();
+  const mime = IMAGE_MIME_BY_EXTENSION.get(extension);
+  if (!mime) throw new PublishError("本地图片仅支持 JPEG、PNG、GIF、WebP 或 BMP: " + source);
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (error) {
+    throw new PublishError("无法读取本地图片 " + source + ": " + error.message);
+  }
+  if (!stat.isFile()) throw new PublishError("本地图片路径不是文件: " + source);
+  if (stat.size > MAX_IMAGE_BYTES) throw new PublishError("图片超过 20 MiB 限制: " + source);
+  return { buffer: fs.readFileSync(filePath), filename: path.basename(filePath), mime };
+}
+
+export function summarizeArticleImages(article) {
+  const summary = { image_count: 0, remote_images: 0, local_images: 0, data_images: 0, zhihu_images: 0 };
+  for (const { src } of extractHtmlImages(article.html)) {
+    summary.image_count += 1;
+    if (isZhihuUploadImageUrl(src)) summary.zhihu_images += 1;
+    else if (/^https?:\/\//i.test(src)) summary.remote_images += 1;
+    else if (/^data:image\//i.test(src)) summary.data_images += 1;
+    else summary.local_images += 1;
+  }
+  return summary;
+}
+
+export async function processArticleImages(article, articlePath, columnBase, context, fetchImpl = fetch) {
+  const images = extractHtmlImages(article.html);
+  const replacements = new Map();
+  for (const { src } of images) {
+    if (replacements.has(src)) continue;
+    if (isZhihuImageUrl(src)) replacements.set(src, src);
+    else if (/^https?:\/\//i.test(src)) replacements.set(src, await uploadRemoteImage(columnBase, context, src, fetchImpl));
+    else {
+      const local = loadImageSource(src, articlePath);
+      replacements.set(src, await uploadBinaryImage(columnBase, context, local.buffer, local.filename, local.mime, fetchImpl));
+    }
+  }
+  let html = article.html.replace(/<img\b[^>]*\bsrc=(?:"([^"]*)"|'([^']*)')[^>]*>/gi, (tag, doubleSrc, singleSrc) => {
+    const original = decodeHtmlAttribute(doubleSrc ?? singleSrc ?? "");
+    const replacement = replacements.get(original);
+    if (!replacement) throw new PublishError("图片处理结果缺失");
+    return tag.replace(/\bsrc=(?:"[^"]*"|'[^']*')/i, 'src="' + escapeHtml(replacement) + '"');
+  });
+  html = html.replace(/<p>\s*(<img\b[^>]*>)\s*<\/p>/gi, '<figure data-size="normal">$1</figure>');
+  return { ...article, html, imageSummary: summarizeArticleImages({ html }) };
 }
 
 function headerMap(headers) {
@@ -363,8 +536,8 @@ export class BifrostClient {
         publishTemplate = null;
       }
     }
-    if (!create || !update || !publish || !publishTemplate) {
-      throw new PublishError("Bifrost 中缺少完整的知乎创建、保存或发布请求；请在知乎编辑器正常保存/发布一次后重试");
+    if (!update || !publish || !publishTemplate) {
+      throw new PublishError("Bifrost 中缺少完整的知乎保存或发布请求；请在知乎编辑器正常保存并发布一次后重试");
     }
     return { create, update, publish, publishTemplate };
   }
@@ -376,7 +549,7 @@ export class BifrostClient {
     );
     if (context) return context;
     const templates = this.findTemplates();
-    return templates.create;
+    return templates.create ?? templates.update;
   }
 }
 
@@ -416,11 +589,16 @@ export async function apiRequest(base, method, endpoint, context, body, label = 
   return readJsonResponse(response, label);
 }
 
-export function buildPublishPayload(template, article, draftId, now = Date.now()) {
+export function buildPublishPayload(template, article, draftId, now = Date.now(), options = {}) {
   const payload = structuredClone(template);
   if (payload?.action !== "article" || !payload.data) throw new PublishError("知乎发布请求模板结构已变化");
   payload.action = "article";
-  payload.data.draft = { ...(payload.data.draft ?? {}), disabled: 1, id: String(draftId), isPublished: false };
+  payload.data.draft = {
+    ...(payload.data.draft ?? {}),
+    disabled: 1,
+    id: String(draftId),
+    isPublished: Boolean(options.isPublished),
+  };
   payload.data.title = { ...(payload.data.title ?? {}), title: article.title };
   payload.data.hybrid = {
     ...(payload.data.hybrid ?? {}),
@@ -537,8 +715,10 @@ export async function publishArticle(options, dependencies = {}) {
   }
   if (options.forceNew) entry = null;
   if (options.mode === "dry-run") {
+    const imageSummary = summarizeArticleImages(article);
     let action = "create_draft";
-    if (entry?.article_id && entry.content_hash === sourceHash) action = "already_published";
+    if (entry?.article_id && options.updateExisting) action = "update_existing_article";
+    else if (entry?.article_id && entry.content_hash === sourceHash) action = "already_published";
     else if (entry?.article_id) action = "published_source_changed";
     else if (entry?.draft_id) action = "update_existing_draft";
     return {
@@ -549,12 +729,13 @@ export async function publishArticle(options, dependencies = {}) {
       text_characters: Array.from(article.text).length,
       action,
       duplicate: Boolean(entry?.article_id && entry.content_hash === sourceHash),
+      ...imageSummary,
     };
   }
-  if (entry?.article_id && entry.content_hash !== sourceHash) {
+  if (entry?.article_id && entry.content_hash !== sourceHash && !options.updateExisting) {
     throw new PublishError("该源文件已有已发布记录，但正文已变化；为避免误发重复文章，请使用新文件或在明确需要第二篇时传 --force-new");
   }
-  if (entry?.article_id) {
+  if (entry?.article_id && !options.updateExisting) {
     return {
       status: "already_published",
       title: article.title,
@@ -565,10 +746,20 @@ export async function publishArticle(options, dependencies = {}) {
   const bifrost = dependencies.bifrost ?? new BifrostClient();
   let templates = bifrost.findTemplates();
   const log = dependencies.log ?? ((message) => process.stderr.write("[zhihu-publish] " + message + "\n"));
-  log("已从 Bifrost 读取知乎请求模板（Cookie " + templates.create.cookieNames.length + " 项，敏感值未输出）");
+  log("已从 Bifrost 读取知乎请求模板（Cookie " + templates.update.cookieNames.length + " 项，敏感值未输出）");
   if (!(await validateAuth(options.mainBase, templates.publish))) {
     throw new PublishError("Bifrost 最近流量中的知乎登录态已失效；请正常访问知乎后重试", { authFailure: true });
   }
+
+  let draftId = entry?.draft_id ? String(entry.draft_id) : (options.updateExisting && entry?.article_id ? String(entry.article_id) : null);
+  if (!draftId && !templates.create) {
+    throw new PublishError("Bifrost 中没有创建草稿请求模板；请在知乎新建文章并保存一次后重试");
+  }
+
+  const processedArticle = await withAuthRetry((current) => processArticleImages(
+    article, articlePath, options.columnBase, current.update, dependencies.fetch ?? fetch,
+  ));
+  log("图片处理完成（共 " + processedArticle.imageSummary.image_count + " 张，均已转换为知乎图床地址）");
 
   async function withAuthRetry(operation) {
     try {
@@ -582,11 +773,10 @@ export async function publishArticle(options, dependencies = {}) {
     }
   }
 
-  let draftId = entry?.draft_id ? String(entry.draft_id) : null;
   if (!draftId) {
     const created = await withAuthRetry((current) => apiRequest(
       options.columnBase, "POST", "/api/articles/drafts", current.create,
-      { title: article.title, delta_time: 0, can_reward: article.canReward }, "创建知乎草稿",
+      { title: processedArticle.title, delta_time: 0, can_reward: processedArticle.canReward }, "创建知乎草稿",
     ));
     draftId = String(created.id ?? created.data?.id ?? "");
     if (!/^\d+$/.test(draftId)) throw new PublishError("创建知乎草稿成功但响应缺少草稿 ID");
@@ -620,10 +810,10 @@ export async function publishArticle(options, dependencies = {}) {
   await withAuthRetry((current) => apiRequest(
     options.columnBase, "PATCH", "/api/articles/" + draftId + "/draft", current.update,
     {
-      content: article.html,
-      table_of_contents: article.tableOfContents,
+      content: processedArticle.html,
+      table_of_contents: processedArticle.tableOfContents,
       delta_time: 0,
-      can_reward: article.canReward,
+      can_reward: processedArticle.canReward,
     },
     "保存知乎正文",
   ));
@@ -631,14 +821,22 @@ export async function publishArticle(options, dependencies = {}) {
   state[key].updated_at = new Date().toISOString();
   saveState(options.stateFile, state);
   if (options.mode === "draft-only") {
-    return { status: "draft_saved", title: article.title, draft_id: draftId };
+    return { status: options.updateExisting ? "updated_draft_saved" : "draft_saved", title: processedArticle.title, draft_id: draftId };
   }
 
   const published = await withAuthRetry((current) => apiRequest(
     options.mainBase, "POST", "/api/v4/content/publish", current.publish,
-    buildPublishPayload(current.publishTemplate, article, draftId), "发布知乎文章",
+    buildPublishPayload(current.publishTemplate, processedArticle, draftId, Date.now(), {
+      isPublished: Boolean(options.updateExisting && entry?.article_id),
+    }), "发布知乎文章",
   ));
-  const articleId = parsePublishedId(published);
+  let articleId;
+  try {
+    articleId = parsePublishedId(published);
+  } catch (error) {
+    if (!options.updateExisting || !entry?.article_id) throw error;
+    articleId = String(entry.article_id);
+  }
   const url = publicUrl(articleId);
   state[key] = {
     ...state[key],
@@ -648,7 +846,14 @@ export async function publishArticle(options, dependencies = {}) {
     published_at: new Date().toISOString(),
   };
   saveState(options.stateFile, state);
-  return { status: "published", title: article.title, draft_id: draftId, article_id: articleId, url };
+  return {
+    status: options.updateExisting ? "updated" : "published",
+    title: processedArticle.title,
+    draft_id: draftId,
+    article_id: articleId,
+    url,
+    image_count: processedArticle.imageSummary.image_count,
+  };
 }
 
 export function parseArgs(argv) {
@@ -656,6 +861,7 @@ export function parseArgs(argv) {
     article: null,
     mode: null,
     forceNew: false,
+    updateExisting: false,
     stateFile: defaultStateFile(),
     columnBase: process.env.ZHIHU_COLUMN_BASE || COLUMN_BASE,
     mainBase: process.env.ZHIHU_MAIN_BASE || MAIN_BASE,
@@ -677,12 +883,14 @@ export function parseArgs(argv) {
     else if (arg === "--publish") setMode("publish");
     else if (arg === "--check-auth") setMode("check-auth");
     else if (arg === "--force-new") options.forceNew = true;
+    else if (arg === "--update-existing") options.updateExisting = true;
     else if (arg === "--state-file") options.stateFile = path.resolve(valueAfter(index++, arg));
     else if (arg === "--column-base") options.columnBase = valueAfter(index++, arg);
     else if (arg === "--main-base") options.mainBase = valueAfter(index++, arg);
     else if (arg === "--help" || arg === "-h") options.help = true;
     else throw new PublishError("未知参数: " + arg);
   }
+  if (options.forceNew && options.updateExisting) throw new PublishError("--force-new 与 --update-existing 不能同时使用");
   return options;
 }
 
@@ -695,6 +903,7 @@ function printHelp() {
 
 Options:
   --force-new         忽略已发布记录，创建另一篇文章
+  --update-existing   明确更新状态文件中已发布的同一篇文章
   --state-file PATH  覆盖默认幂等状态文件
   --column-base URL  测试专用专栏 API 根地址
   --main-base URL    测试专用知乎主站 API 根地址
@@ -709,7 +918,7 @@ async function checkAuth(options, dependencies = {}) {
   return {
     status: "authenticated",
     sources: {
-      create: templates.create.sourceId,
+      create: templates.create?.sourceId ?? null,
       update: templates.update.sourceId,
       publish: templates.publish.sourceId,
     },

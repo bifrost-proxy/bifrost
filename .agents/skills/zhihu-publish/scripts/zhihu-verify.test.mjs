@@ -22,6 +22,8 @@ const markdown = [
   "",
   "你好 **Bifrost**。",
   "",
+  "![示意图](https://example.com/demo.png)",
+  "",
   "1. 第一项",
   "2. [第二项](https://example.com)",
 ].join("\n");
@@ -34,8 +36,18 @@ test("HTML and Markdown normalize to the same visible text", () => {
 
 test("comparison is exact and rejects duplicated body title", () => {
   const article = parseArticle(markdown);
-  assert.equal(compareArticle(article, { title: article.title, content: article.html }).matches, true);
-  const mismatch = compareArticle(article, { title: article.title, content: "<p>测试文章</p>" + article.html });
+  const hostedHtml = article.html.replace("https://example.com/demo.png", "https://pic4.zhimg.com/demo.png");
+  const success = compareArticle(article, { title: article.title, content: hostedHtml });
+  assert.equal(success.matches, true);
+  assert.equal(success.checks.image_count_match, true);
+  assert.equal(success.checks.images_hosted_by_zhihu, true);
+  const missingImage = compareArticle(article, { title: article.title, content: hostedHtml.replace(/<p><img[^>]+><\/p>/, "") });
+  assert.equal(missingImage.matches, false);
+  assert.equal(missingImage.checks.image_count_match, false);
+  const externalImage = compareArticle(article, { title: article.title, content: article.html });
+  assert.equal(externalImage.matches, false);
+  assert.equal(externalImage.checks.images_hosted_by_zhihu, false);
+  const mismatch = compareArticle(article, { title: article.title, content: "<p>测试文章</p>" + hostedHtml });
   assert.equal(mismatch.matches, false);
   assert.equal(mismatch.checks.unexpected_duplicate_title, true);
   assert.equal(typeof mismatch.first_difference.index, "number");
@@ -51,10 +63,11 @@ test("verification target only accepts Zhihu or explicit loopback", () => {
 
 test("mock E2E verifies the API title and body without a browser", async (context) => {
   const article = parseArticle(markdown);
+  const hostedHtml = article.html.replace("https://example.com/demo.png", "https://pic4.zhimg.com/demo.png");
   const server = http.createServer((request, response) => {
     response.setHeader("content-type", "application/json");
     if (request.url === "/api/articles/123") {
-      response.end(JSON.stringify({ id: 123, title: article.title, content: article.html }));
+      response.end(JSON.stringify({ id: 123, title: article.title, content: hostedHtml }));
     } else {
       response.statusCode = 404;
       response.end("{}");
@@ -79,5 +92,7 @@ test("mock E2E verifies the API title and body without a browser", async (contex
   });
   assert.equal(result.status, "verified");
   assert.equal(result.comparison.matches, true);
+  assert.equal(result.comparison.actual.image_count, 1);
+  assert.deepEqual(result.comparison.actual.image_hosts, ["pic4.zhimg.com"]);
   assert.equal(result.source_id, "loopback");
 });

@@ -7,7 +7,9 @@ import { pathToFileURL } from "node:url";
 import {
   BifrostClient,
   PublishError,
+  extractHtmlImages,
   filteredHeaders,
+  isZhihuImageUrl,
   parseArticle,
 } from "./zhihu-publish.mjs";
 
@@ -75,6 +77,17 @@ export function compareArticle(article, remote) {
   const titleMatch = expectedTitle === actualTitle;
   const bodyMatch = expectedBody === actualBody;
   const duplicatedTitle = !expectedBody.startsWith(expectedTitle) && actualBody.startsWith(expectedTitle);
+  const expectedImages = extractHtmlImages(article.html);
+  const actualImages = extractHtmlImages(remote.content);
+  const imageCountMatch = expectedImages.length === actualImages.length;
+  const imagesHostedByZhihu = actualImages.every(({ src }) => isZhihuImageUrl(src));
+  const actualImageHosts = [...new Set(actualImages.map(({ src }) => {
+    try {
+      return new URL(src).hostname;
+    } catch {
+      return "invalid";
+    }
+  }))].sort();
   let firstDifference = null;
   if (!bodyMatch) {
     let index = 0;
@@ -87,14 +100,25 @@ export function compareArticle(article, remote) {
     };
   }
   return {
-    matches: titleMatch && bodyMatch && !duplicatedTitle,
+    matches: titleMatch && bodyMatch && !duplicatedTitle && imageCountMatch && imagesHostedByZhihu,
     checks: {
       title_match: titleMatch,
       body_match: bodyMatch,
       unexpected_duplicate_title: duplicatedTitle,
+      image_count_match: imageCountMatch,
+      images_hosted_by_zhihu: imagesHostedByZhihu,
     },
-    expected: { title: expectedTitle, body_characters: Array.from(expectedBody).length },
-    actual: { title: actualTitle, body_characters: Array.from(actualBody).length },
+    expected: {
+      title: expectedTitle,
+      body_characters: Array.from(expectedBody).length,
+      image_count: expectedImages.length,
+    },
+    actual: {
+      title: actualTitle,
+      body_characters: Array.from(actualBody).length,
+      image_count: actualImages.length,
+      image_hosts: actualImageHosts,
+    },
     first_difference: firstDifference,
   };
 }
