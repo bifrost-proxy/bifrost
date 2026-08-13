@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zhihu Publisher"
+  short_description: "Publish and verify Zhihu articles through Bifrost traffic"
+  default_prompt: "Use $zhihu-publish to safely publish this Markdown article to Zhihu and verify the live title and body without browser automation."
