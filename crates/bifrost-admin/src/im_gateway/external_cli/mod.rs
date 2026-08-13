@@ -1357,8 +1357,94 @@ impl ExternalCliRuntime {
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
+        let delegates_to_browser_worker = !cfg!(test)
+            && request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID
+            && crate::worker_runtime::worker_execution_enabled(
+                crate::worker_runtime::WorkerKind::Browser,
+            )
+            && !crate::im_gateway::chatgpt_web::worker::is_browser_worker_process();
+        if delegates_to_browser_worker {
+            return self.run_with_progress_inner(request, progress_tx).await;
+        }
+
+        let registry_id = uuid::Uuid::new_v4().to_string();
+        let logical_job_id = request.session_key.clone();
+        let worker_kind = if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+            crate::worker_runtime::WorkerKind::Browser
+        } else {
+            crate::worker_runtime::WorkerKind::ExternalCli
+        };
+        let worker_key = format!("{}:{}", worker_kind.as_str(), registry_id);
+        crate::worker_runtime::begin_worker_job(
+            &worker_key,
+            worker_kind,
+            &registry_id,
+            logical_job_id.as_deref(),
+            &format!("external_cli.run:{}", request.adapter),
+        );
+        crate::worker_runtime::mark_worker_job_running(&registry_id);
+
+        let (registry_progress_tx, mut registry_progress_rx) =
+            mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
+        let registry_id_for_progress = registry_id.clone();
+        let progress_forwarder = tokio::spawn(async move {
+            while let Some(event) = registry_progress_rx.recv().await {
+                let payload = serde_json::to_value(&event).unwrap_or_else(
+                    |error| serde_json::json!({ "serializationError": error.to_string() }),
+                );
+                crate::worker_runtime::record_worker_job_event(
+                    &registry_id_for_progress,
+                    "progress",
+                    payload,
+                );
+                if let Some(progress_tx) = progress_tx.as_ref() {
+                    let _ = progress_tx.try_send(event);
+                }
+            }
+        });
+
+        let result = self
+            .run_with_progress_inner(request, Some(registry_progress_tx))
+            .await;
+        let _ = progress_forwarder.await;
+        match &result {
+            Ok(run) => {
+                register_external_cli_job_artifacts(&registry_id, &run.artifacts);
+                match &run.status {
+                    ExternalCliRunStatus::Succeeded => {
+                        crate::worker_runtime::mark_worker_job_succeeded(&registry_id)
+                    }
+                    ExternalCliRunStatus::Stopped => {
+                        crate::worker_runtime::mark_worker_job_cancelled(
+                            &registry_id,
+                            Some("external CLI run stopped".to_string()),
+                        )
+                    }
+                    ExternalCliRunStatus::Failed | ExternalCliRunStatus::TimedOut => {
+                        crate::worker_runtime::mark_worker_job_failed(
+                            &registry_id,
+                            run.response.clone(),
+                        )
+                    }
+                }
+            }
+            Err(error) => {
+                crate::worker_runtime::mark_worker_job_failed(&registry_id, error.clone())
+            }
+        }
+        result
+    }
+
+    async fn run_with_progress_inner(
+        &self,
+        request: ExternalCliRunRequest,
+        progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
+    ) -> Result<ExternalCliRunResult, String> {
         if !cfg!(test)
             && request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID
+            && crate::worker_runtime::worker_execution_enabled(
+                crate::worker_runtime::WorkerKind::Browser,
+            )
             && !crate::im_gateway::chatgpt_web::worker::is_browser_worker_process()
         {
             return crate::im_gateway::chatgpt_web::worker::run_via_browser_worker(
@@ -1827,7 +1913,53 @@ impl ExternalCliRuntime {
     }
 }
 
+fn register_external_cli_job_artifacts(registry_id: &str, artifacts: &ExternalCliRunArtifacts) {
+    let candidates = [
+        ("prompt", artifacts.prompt.as_str(), Some("text/plain")),
+        (
+            "command_snapshot",
+            artifacts.command_snapshot.as_str(),
+            Some("application/json"),
+        ),
+        ("stdout", artifacts.stdout.as_str(), Some("text/plain")),
+        ("stderr", artifacts.stderr.as_str(), Some("text/plain")),
+        (
+            "normalized_events",
+            artifacts.normalized_events.as_str(),
+            Some("application/x-ndjson"),
+        ),
+        (
+            "last_message",
+            artifacts.last_message.as_str(),
+            Some("text/plain"),
+        ),
+    ];
+    for (name, path, media_type) in candidates {
+        if path.trim().is_empty() {
+            continue;
+        }
+        if let Err(error) = crate::worker_runtime::register_worker_artifact(
+            registry_id,
+            name,
+            path,
+            media_type.map(ToString::to_string),
+        ) {
+            tracing::debug!(
+                registry_id,
+                artifact = name,
+                error = %error,
+                "external CLI artifact was not registered"
+            );
+        }
+    }
+}
+
 fn should_run_external_cli_in_current_process() -> bool {
+    if !crate::worker_runtime::worker_execution_enabled(
+        crate::worker_runtime::WorkerKind::ExternalCli,
+    ) {
+        return true;
+    }
     #[cfg(test)]
     {
         std::env::var_os("BIFROST_FORCE_EXTERNAL_CLI_WORKER").is_none()

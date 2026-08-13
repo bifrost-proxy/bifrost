@@ -28,7 +28,7 @@ use bifrost_core::{
 use bifrost_proxy::{AccessMode, ProxyConfig, ProxyServer};
 use bifrost_storage::{
     set_data_dir, ConfigChangeEvent, ConfigManager, RulesChangeOrigin, TrafficConfigUpdate,
-    MAX_TRAFFIC_MAX_RECORDS,
+    DEFAULT_REMOTE_BASE_URL, MAX_TRAFFIC_MAX_RECORDS,
 };
 use bifrost_sync::SyncManager;
 use bifrost_tls::{get_platform_name, CertInstaller, CertStatus};
@@ -139,9 +139,9 @@ fn foreground_runtime_start_mode() -> RuntimeStartMode {
 }
 
 fn spawn_remote_invoke_worker_startup_task(
-    _shared_config_manager: Arc<ConfigManager>,
+    shared_config_manager: Arc<ConfigManager>,
     sync_manager: Arc<SyncManager>,
-    _admin_state: Arc<AdminState>,
+    admin_state: Arc<AdminState>,
     admin_host: String,
     admin_port: u16,
 ) {
@@ -149,34 +149,139 @@ fn spawn_remote_invoke_worker_startup_task(
         target: "bifrost_cli::startup",
         admin_host = %admin_host,
         admin_port = admin_port,
-        "remote invoke worker initialization scheduled"
+        mode = bifrost_admin::worker_runtime::execution_mode(
+            bifrost_admin::worker_runtime::WorkerKind::RemoteInvoke,
+        ).as_str(),
+        "remote invoke runtime initialization scheduled"
     );
     tokio::spawn(async move {
         let started_at = Instant::now();
-        let registration_targets = bifrost_sync::SyncManagerHandle::new(sync_manager)
+        if bifrost_admin::worker_runtime::worker_execution_enabled(
+            bifrost_admin::worker_runtime::WorkerKind::RemoteInvoke,
+        ) {
+            let registration_targets = bifrost_sync::SyncManagerHandle::new(sync_manager)
+                .remote_invoke_registration_targets()
+                .await;
+            let targets = registration_targets
+                .into_iter()
+                .map(
+                    |target| bifrost_admin::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                        provider_id: target.provider_id,
+                        relay_url: target.remote_base_url,
+                        session_token: target.session_token,
+                    },
+                )
+                .collect::<Vec<_>>();
+            let count = targets.len();
+            bifrost_admin::worker_runtime::remote_invoke::configure_runtime_targets(
+                targets, admin_host, admin_port,
+            );
+            tracing::info!(
+                target: "bifrost_cli::startup",
+                workers = count,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "remote invoke isolated worker targets configured"
+            );
+            return;
+        }
+
+        let default_relay_url = shared_config_manager
+            .try_config()
+            .map(|config| config.sync.remote_base_url.clone())
+            .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
+        let registration_targets = bifrost_sync::SyncManagerHandle::new(sync_manager.clone())
             .remote_invoke_registration_targets()
             .await;
-        let targets = registration_targets
-            .into_iter()
-            .map(
-                |target| bifrost_admin::worker_runtime::remote_invoke::RemoteInvokeTarget {
-                    provider_id: target.provider_id,
-                    relay_url: target.remote_base_url,
-                    session_token: target.session_token,
-                },
-            )
-            .collect::<Vec<_>>();
-        let count = targets.len();
-        bifrost_admin::worker_runtime::remote_invoke::configure_runtime_targets(
-            targets, admin_host, admin_port,
-        );
-        tracing::info!(
-            target: "bifrost_cli::startup",
-            workers = count,
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            "remote invoke isolated worker targets configured"
-        );
+        let relay_urls = if registration_targets.is_empty() {
+            vec![default_relay_url]
+        } else {
+            registration_targets
+                .into_iter()
+                .map(|target| target.remote_base_url)
+                .collect::<Vec<_>>()
+        };
+        let data_dir = shared_config_manager.data_dir().to_path_buf();
+        let admin_state_for_worker = admin_state.clone();
+        let sync_manager_for_worker = sync_manager.clone();
+        let worker_result = tokio::task::spawn_blocking(move || {
+            let identity = bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir)
+                .map_err(|error| error.to_string())?;
+            let workers = relay_urls
+                .into_iter()
+                .map(|relay_url| {
+                    bifrost_admin::RemoteInvokeWorker::new(
+                        bifrost_admin::RemoteInvokeConfig {
+                            relay_url,
+                            ..Default::default()
+                        },
+                        identity.clone(),
+                        Some(bifrost_sync::SyncManagerHandle::new(
+                            sync_manager_for_worker.clone(),
+                        )),
+                        admin_state_for_worker.clone(),
+                        &admin_host,
+                        admin_port,
+                    )
+                })
+                .collect::<Vec<_>>();
+            Ok::<_, String>(workers)
+        })
+        .await;
+
+        match worker_result {
+            Ok(Ok(workers)) => {
+                admin_state.set_remote_invoke_workers(workers.clone());
+                for worker in &workers {
+                    worker.start();
+                }
+                tracing::info!(
+                    target: "bifrost_cli::startup",
+                    workers = workers.len(),
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "legacy in-process remote invoke runtimes initialized"
+                );
+            }
+            Ok(Err(error)) => tracing::info!(
+                target: "bifrost_cli::startup",
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "remote invoke identity init failed; feature disabled"
+            ),
+            Err(error) => tracing::warn!(
+                target: "bifrost_cli::startup",
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "remote invoke initialization task failed"
+            ),
+        }
     });
+}
+
+fn start_im_gateway_runtime(admin_state: &Arc<AdminState>, admin_host: String, admin_port: u16) {
+    if bifrost_admin::worker_runtime::worker_execution_enabled(
+        bifrost_admin::worker_runtime::WorkerKind::ImGateway,
+    ) {
+        bifrost_admin::worker_runtime::im_gateway::start_runtime_controller(admin_host, admin_port);
+        if let Some(im_service) = admin_state.im_gateway_service() {
+            im_service.spawn_feishu_setup_supervisor();
+        }
+        return;
+    }
+
+    bifrost_admin::worker_runtime::im_gateway::stop_runtime_controller();
+    if let Some(im_service) = admin_state.im_gateway_service() {
+        im_service.start_scheduler();
+        if !bifrost_admin::worker_runtime::worker_execution_enabled(
+            bifrost_admin::worker_runtime::WorkerKind::Browser,
+        ) {
+            im_service.spawn_chatgpt_web_startup_auth_check();
+        }
+        im_service.spawn_feishu_setup_supervisor();
+        let im_service_clone = im_service.clone();
+        tokio::spawn(async move {
+            im_service_clone.auto_connect_providers().await;
+        });
+    }
 }
 
 fn parse_yes_no_answer(input: &str) -> Option<bool> {
@@ -2369,15 +2474,11 @@ pub fn run_foreground(
             let connection_cleanup_task =
                 bifrost_admin::start_connection_cleanup_task(admin_state.connection_monitor.clone());
 
-            // Keep IM configuration and Admin APIs in the main process, but move
-            // provider connections, event loops and schedules to a conditional worker.
-            bifrost_admin::worker_runtime::im_gateway::start_runtime_controller(
+            start_im_gateway_runtime(
+                &admin_state,
                 remote_invoke_admin_host.clone(),
                 config.port,
             );
-            if let Some(im_service) = admin_state.im_gateway_service() {
-                im_service.spawn_feishu_setup_supervisor();
-            }
 
             let metrics_collector = admin_state.metrics_collector.clone();
             let rules_storage_for_resolver = admin_state.rules_storage.clone();
@@ -3566,15 +3667,11 @@ pub fn run_daemon(
                     };
                     let system_proxy_port = config.port;
 
-                    // Keep IM configuration and Admin APIs in the daemon, but move
-                    // provider connections, event loops and schedules to a conditional worker.
-                    bifrost_admin::worker_runtime::im_gateway::start_runtime_controller(
+                    start_im_gateway_runtime(
+                        &admin_state,
                         system_proxy_host.clone(),
                         system_proxy_port,
                     );
-                    if let Some(im_service) = admin_state.im_gateway_service() {
-                        im_service.spawn_feishu_setup_supervisor();
-                    }
 
                     let metrics_collector = admin_state.metrics_collector.clone();
                     let rules_storage_for_resolver = admin_state.rules_storage.clone();

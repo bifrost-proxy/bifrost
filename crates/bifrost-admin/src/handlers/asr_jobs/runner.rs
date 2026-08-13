@@ -668,7 +668,10 @@ fn spawn_directory_task_run_background_for_date(
         .map_err(|_| "ASR task is already running".to_string())?;
 
     let task_id = task.id.clone();
-    if !cfg!(test) && !crate::worker_runtime::asr::is_asr_worker_process() {
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
+        && !crate::worker_runtime::asr::is_asr_worker_process()
+    {
         tokio::spawn(async move {
             if let Err(error) =
                 crate::worker_runtime::asr::run_directory_task(&task_id, recording_date).await

@@ -1,5 +1,10 @@
 use super::*;
 
+fn use_isolated_im_gateway_runtime() -> bool {
+    crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::ImGateway)
+        && !crate::worker_runtime::im_gateway::is_im_gateway_worker_process()
+}
+
 // ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
@@ -234,7 +239,7 @@ pub(super) async fn handle_provider_by_id(
             match service.provider_store.update(existing) {
                 Ok(()) => {
                     if disables_provider_connection(&patch) {
-                        if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+                        if !use_isolated_im_gateway_runtime() {
                             service.connection_manager.stop_connection(id);
                         } else if let Err(error) =
                             crate::worker_runtime::im_gateway::disconnect_provider(id).await
@@ -252,7 +257,16 @@ pub(super) async fn handle_provider_by_id(
             if service.provider_store.get(id).is_none() {
                 return error_response(StatusCode::NOT_FOUND, "Provider not found");
             }
+            if use_isolated_im_gateway_runtime() {
+                if let Err(error) =
+                    crate::worker_runtime::im_gateway::disconnect_provider(id).await
+                {
+                    warn!(provider_id = id, error = %error, "failed to stop isolated IM provider before deletion");
+                }
             }
+            // Always drain any local compatibility/test runtime state as well.
+            // In isolated mode these managers are normally idle; in legacy mode
+            // and tests this preserves the main branch deletion guarantees.
             service
                 .connection_manager
                 .stop_connection_and_wait(id)
@@ -356,7 +370,7 @@ pub(super) async fn handle_provider_status(
     if req.method() != Method::GET {
         return method_not_allowed();
     }
-    if !crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+    if use_isolated_im_gateway_runtime() {
         match crate::worker_runtime::im_gateway::provider_status(id).await {
             Ok(Some(value)) => return json_response(&value),
             Ok(None) => {}
@@ -1043,10 +1057,10 @@ async fn dispatch_provider_event_connection(
     service: &ImGatewayService,
     id: &str,
 ) -> Result<(), String> {
-    if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
-        start_provider_event_connection(service, id).await
-    } else {
+    if use_isolated_im_gateway_runtime() {
         crate::worker_runtime::im_gateway::connect_provider(id).await
+    } else {
+        start_provider_event_connection(service, id).await
     }
 }
 
@@ -1129,11 +1143,11 @@ pub(super) async fn handle_provider_disconnect(
         return error_response(StatusCode::NOT_FOUND, "Provider not found");
     }
 
-    let result = if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+    let result = if use_isolated_im_gateway_runtime() {
+        crate::worker_runtime::im_gateway::disconnect_provider(id).await
+    } else {
         service.connection_manager.stop_connection(id);
         Ok(())
-    } else {
-        crate::worker_runtime::im_gateway::disconnect_provider(id).await
     };
     match result {
         Ok(()) => {

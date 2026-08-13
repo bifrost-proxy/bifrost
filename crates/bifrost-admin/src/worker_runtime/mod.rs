@@ -1,5 +1,7 @@
 pub mod asr;
 pub mod im_gateway;
+mod jobs;
+mod mode;
 mod process;
 mod protocol;
 pub mod remote_execution;
@@ -7,6 +9,17 @@ pub mod remote_invoke;
 mod supervisor;
 mod worker_stdio;
 
+pub use jobs::{
+    artifact as worker_artifact, cancel_target as worker_job_cancel_target, get_job as worker_job,
+    list_jobs as worker_jobs, register_artifact as register_worker_artifact, WorkerArtifactRecord,
+    WorkerJobEventRecord, WorkerJobRecord, WorkerJobStatus,
+};
+pub(crate) use jobs::{
+    begin_request as begin_worker_job, mark_cancelled as mark_worker_job_cancelled,
+    mark_failed as mark_worker_job_failed, mark_running as mark_worker_job_running,
+    mark_succeeded as mark_worker_job_succeeded, record_named_event as record_worker_job_event,
+};
+pub use mode::{execution_mode, execution_mode_env, worker_execution_enabled, ExecutionMode};
 pub use process::{ManagedWorker, ManagedWorkerSnapshot, WorkerSpawnSpec};
 pub use protocol::{
     now_ms as worker_now_ms, ParentFrame, WorkerEvent, WorkerFrame, WorkerKind,

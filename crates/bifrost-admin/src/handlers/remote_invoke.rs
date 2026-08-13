@@ -21,7 +21,9 @@ pub async fn handle_remote_invoke(
     worker: Option<SharedRemoteInvokeWorker>,
     path: &str,
 ) -> Response<BoxBody> {
-    if !crate::worker_runtime::remote_invoke::is_remote_invoke_worker_process()
+    if crate::worker_runtime::worker_execution_enabled(
+        crate::worker_runtime::WorkerKind::RemoteInvoke,
+    ) && !crate::worker_runtime::remote_invoke::is_remote_invoke_worker_process()
         && crate::worker_runtime::remote_invoke::runtime_configured()
     {
         return crate::worker_runtime::remote_invoke::proxy_admin_request(req, path).await;

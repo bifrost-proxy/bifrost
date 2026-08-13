@@ -307,7 +307,10 @@ fn start_source_compression_background(
     }
 
     let response = state.clone();
-    if !cfg!(test) && !crate::worker_runtime::asr::is_asr_worker_process() {
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
+        && !crate::worker_runtime::asr::is_asr_worker_process()
+    {
         let task_id = task.id.clone();
         tokio::spawn(async move {
             if let Err(error) = crate::worker_runtime::asr::run_source_compression(&task_id).await {
@@ -907,7 +910,9 @@ fn cancel_source_compression(task_id: &str) -> Option<SourceAudioCompressionStat
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(task_id.to_string());
     set_worker_source_compression_cancel(task_id, true);
-    if !crate::worker_runtime::asr::is_asr_worker_process() {
+    if crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
+        && !crate::worker_runtime::asr::is_asr_worker_process()
+    {
         let task_id = task_id.to_string();
         tokio::spawn(async move {
             crate::worker_runtime::asr::stop_source_compression(&task_id).await;

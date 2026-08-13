@@ -53,6 +53,7 @@ use crate::handlers::{
     voice::handle_voice,
     websocket::handle_websocket_upgrade,
     whitelist::handle_whitelist_request,
+    worker_jobs::handle_worker_jobs,
     workers::handle_workers,
     BoxBody,
 };
@@ -294,6 +295,8 @@ impl AdminRouter {
             handle_metrics(req, state, path).await
         } else if path.starts_with("/api/diagnostics") {
             handle_diagnostics(req, state, path).await
+        } else if path.starts_with("/api/worker-jobs") {
+            handle_worker_jobs(req, path).await
         } else if path.starts_with("/api/workers") {
             handle_workers(req, path).await
         } else if path.starts_with("/api/mobile-devices") {

@@ -1874,7 +1874,12 @@ async fn ask_send_and_wait(
 pub async fn auth_status(
     settings: &ExternalCliAgentSettings,
 ) -> Result<ChatGptWebAuthStatus, String> {
-    if !cfg!(test) && !worker::is_browser_worker_process() {
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::Browser,
+        )
+        && !worker::is_browser_worker_process()
+    {
         return worker::auth_status(settings).await;
     }
     let config = runtime_config(&settings.adapter_config)?;
@@ -1898,7 +1903,12 @@ pub async fn auth_status(
 pub async fn open_login(
     settings: &ExternalCliAgentSettings,
 ) -> Result<ChatGptWebAuthStatus, String> {
-    if !cfg!(test) && !worker::is_browser_worker_process() {
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::Browser,
+        )
+        && !worker::is_browser_worker_process()
+    {
         return worker::open_login(settings).await;
     }
     let config = runtime_config(&settings.adapter_config)?;
@@ -1909,7 +1919,12 @@ pub async fn open_login(
 pub async fn stop_login(
     settings: &ExternalCliAgentSettings,
 ) -> Result<ChatGptWebAuthStatus, String> {
-    if !cfg!(test) && !worker::is_browser_worker_process() {
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::Browser,
+        )
+        && !worker::is_browser_worker_process()
+    {
         return worker::stop_login(settings).await;
     }
     let config = runtime_config(&settings.adapter_config)?;
@@ -1923,7 +1938,12 @@ pub async fn ensure_startup_auth_ready(
     runner_id: &str,
     settings: &ExternalCliAgentSettings,
 ) -> Result<ChatGptWebStartupAuthStatus, String> {
-    if !cfg!(test) && !worker::is_browser_worker_process() {
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::Browser,
+        )
+        && !worker::is_browser_worker_process()
+    {
         return worker::ensure_startup_auth_ready(runner_id, settings).await;
     }
     let status = auth_status(settings).await?;
