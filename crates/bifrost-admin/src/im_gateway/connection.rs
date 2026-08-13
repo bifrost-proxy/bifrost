@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -13,7 +14,7 @@ use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ConnectionState, ConnectionStatus, ImProviderConfig, ImProviderType,
 };
-use crate::im_gateway::weixin::WeixinProvider;
+use crate::im_gateway::weixin::{WeixinConnectionStatusEvent, WeixinProvider};
 
 // ---------------------------------------------------------------------------
 // Managed Connection
@@ -24,6 +25,7 @@ struct ManagedConnection {
     provider_id: String,
     handle: ConnectionHandle,
     status: ConnectionStatus,
+    generation: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -40,6 +42,7 @@ pub struct ImConnectionManager {
     connections: Arc<RwLock<HashMap<String, ManagedConnection>>>,
     feishu_provider: Arc<FeishuProvider>,
     weixin_provider: Arc<WeixinProvider>,
+    next_generation: AtomicU64,
 }
 
 impl Default for ImConnectionManager {
@@ -58,6 +61,7 @@ impl ImConnectionManager {
             connections: Arc::new(RwLock::new(HashMap::new())),
             feishu_provider: Arc::new(FeishuProvider::new()),
             weixin_provider: Arc::new(WeixinProvider::new_with_data_dir(data_dir)),
+            next_generation: AtomicU64::new(0),
         }
     }
 
@@ -101,7 +105,8 @@ impl ImConnectionManager {
     ) -> Result<()> {
         let provider_id = config.id.clone();
         self.weixin_provider.validate_config(config).await?;
-        self.stop_connection(&provider_id);
+        self.stop_connection_and_wait(&provider_id).await;
+        let generation = self.reserve_generation();
 
         let status = ConnectionStatus {
             state: ConnectionState::Connecting,
@@ -110,7 +115,12 @@ impl ImConnectionManager {
             reconnect_count: 0,
             last_error: None,
         };
-        let handle = self.weixin_provider.connect_events(config, sink).await?;
+        let (status_tx, mut status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<WeixinConnectionStatusEvent>();
+        let handle = self
+            .weixin_provider
+            .connect_events_with_status(config, sink, Some(status_tx))
+            .await?;
         {
             let mut conns = self.connections.write();
             conns.insert(
@@ -119,15 +129,30 @@ impl ImConnectionManager {
                     provider_id: provider_id.clone(),
                     handle,
                     status,
+                    generation,
                 },
             );
         }
-        update_connection_state(
+        update_connection_state_if_generation(
             &self.connections,
             &provider_id,
+            generation,
             ConnectionState::Connected,
             None,
         );
+        let status_connections = self.connections_arc();
+        let status_provider_id = provider_id.clone();
+        tokio::spawn(async move {
+            while let Some(event) = status_rx.recv().await {
+                update_connection_state_if_generation(
+                    &status_connections,
+                    &status_provider_id,
+                    generation,
+                    event.state,
+                    event.error,
+                );
+            }
+        });
         info!(provider_id = %provider_id, "weixin poll connection started");
         Ok(())
     }
@@ -150,9 +175,11 @@ impl ImConnectionManager {
 
         // Credentials verified — now it's safe to replace any prior
         // connection for this provider.
-        self.stop_connection(&provider_id);
+        self.stop_connection_and_wait(&provider_id).await;
+        let generation = self.reserve_generation();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
 
         // Update status to connecting
         let status = ConnectionStatus {
@@ -163,7 +190,10 @@ impl ImConnectionManager {
             last_error: None,
         };
 
-        let handle = ConnectionHandle { shutdown_tx };
+        let handle = ConnectionHandle {
+            shutdown_tx,
+            stopped_rx: Some(stopped_rx),
+        };
 
         {
             let mut conns = self.connections.write();
@@ -173,6 +203,7 @@ impl ImConnectionManager {
                     provider_id: provider_id.clone(),
                     handle,
                     status,
+                    generation,
                 },
             );
         }
@@ -191,7 +222,13 @@ impl ImConnectionManager {
 
         tokio::spawn(async move {
             while let Some(event) = status_rx.recv().await {
-                update_connection_state(&status_connections, &status_pid, event.state, event.error);
+                update_connection_state_if_generation(
+                    &status_connections,
+                    &status_pid,
+                    generation,
+                    event.state,
+                    event.error,
+                );
             }
         });
 
@@ -207,12 +244,14 @@ impl ImConnectionManager {
             .await;
 
             // Connection ended - update status
-            update_connection_state(
+            update_connection_state_if_generation(
                 &connections,
                 &pid,
+                generation,
                 ConnectionState::Disconnected,
                 Some("connection task ended".to_string()),
             );
+            let _ = stopped_tx.send(());
         });
 
         info!(provider_id = %provider_id, "feishu long connection started");
@@ -230,6 +269,26 @@ impl ImConnectionManager {
         }
     }
 
+    /// Stop a provider connection and wait until its transport task has
+    /// released every event-sink clone. Provider deletion uses this before
+    /// tearing down the corresponding event pipeline so the same provider ID
+    /// cannot be rebound while the old account can still publish events.
+    pub async fn stop_connection_and_wait(&self, provider_id: &str) {
+        let connection = self.connections.write().remove(provider_id);
+        let Some(connection) = connection else {
+            return;
+        };
+        let ConnectionHandle {
+            shutdown_tx,
+            stopped_rx,
+        } = connection.handle;
+        let _ = shutdown_tx.send(());
+        if let Some(stopped_rx) = stopped_rx {
+            let _ = stopped_rx.await;
+        }
+        info!(provider_id = provider_id, "connection stopped");
+    }
+
     /// Get connection status for a specific provider.
     pub fn get_status(&self, provider_id: &str) -> Option<ConnectionStatus> {
         let conns = self.connections.read();
@@ -243,8 +302,12 @@ impl ImConnectionManager {
             provider_id.to_string(),
             ManagedConnection {
                 provider_id: provider_id.to_string(),
-                handle: ConnectionHandle { shutdown_tx },
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: None,
+                },
                 status,
+                generation: self.reserve_generation(),
             },
         );
     }
@@ -302,8 +365,10 @@ impl ImConnectionManager {
                 provider_id: provider_id.to_string(),
                 handle: ConnectionHandle {
                     shutdown_tx: oneshot::channel().0,
+                    stopped_rx: None,
                 },
                 status,
+                generation: self.reserve_generation(),
             },
         );
     }
@@ -315,30 +380,35 @@ impl ImConnectionManager {
     fn connections_arc(&self) -> Arc<RwLock<HashMap<String, ManagedConnection>>> {
         Arc::clone(&self.connections)
     }
+
+    fn reserve_generation(&self) -> u64 {
+        self.next_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Helper for background task status updates
-// ---------------------------------------------------------------------------
-
-fn update_connection_state(
+fn update_connection_state_if_generation(
     connections: &Arc<RwLock<HashMap<String, ManagedConnection>>>,
     provider_id: &str,
+    generation: u64,
     state: ConnectionState,
     error: Option<String>,
 ) {
     let mut conns = connections.write();
-    if let Some(conn) = conns.get_mut(provider_id) {
-        conn.status.state = state;
-        if state == ConnectionState::Connected {
-            conn.status.last_connected_at = Some(current_timestamp_ms());
-            conn.status.last_error = None;
-        } else if let Some(err) = error {
-            conn.status.last_error = Some(err);
-        }
-        if state == ConnectionState::Reconnecting {
-            conn.status.reconnect_count += 1;
-        }
+    let Some(conn) = conns.get_mut(provider_id) else {
+        return;
+    };
+    if conn.generation != generation {
+        return;
+    }
+    conn.status.state = state;
+    if state == ConnectionState::Connected {
+        conn.status.last_connected_at = Some(current_timestamp_ms());
+        conn.status.last_error = None;
+    } else if let Some(err) = error {
+        conn.status.last_error = Some(err);
+    }
+    if state == ConnectionState::Reconnecting {
+        conn.status.reconnect_count += 1;
     }
 }
 
@@ -371,6 +441,37 @@ mod tests {
         mgr.stop_connection("nonexistent"); // Should not panic
     }
 
+    #[tokio::test]
+    async fn stop_connection_and_wait_observes_transport_shutdown() {
+        let manager = ImConnectionManager::new();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_stopped = Arc::clone(&stopped);
+        tokio::spawn(async move {
+            let _ = shutdown_rx.await;
+            task_stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = stopped_tx.send(());
+        });
+        manager.connections.write().insert(
+            "provider-delete".to_string(),
+            ManagedConnection {
+                provider_id: "provider-delete".to_string(),
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: Some(stopped_rx),
+                },
+                status: ConnectionStatus::default(),
+                generation: 1,
+            },
+        );
+
+        manager.stop_connection_and_wait("provider-delete").await;
+
+        assert!(stopped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(manager.get_status("provider-delete").is_none());
+    }
+
     #[test]
     fn test_stop_all_empty_is_noop() {
         let mgr = ImConnectionManager::new();
@@ -393,8 +494,12 @@ mod tests {
             "feishu-main".to_string(),
             ManagedConnection {
                 provider_id: "feishu-main".to_string(),
-                handle: ConnectionHandle { shutdown_tx },
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: None,
+                },
                 status: ConnectionStatus::default(),
+                generation: 1,
             },
         );
 
@@ -416,5 +521,177 @@ mod tests {
         assert_eq!(connected.state, ConnectionState::Connected);
         assert!(connected.last_connected_at.is_some());
         assert!(connected.last_error.is_none());
+    }
+
+    #[test]
+    fn generation_guard_ignores_missing_and_stale_connections_then_updates_current_one() {
+        let connections = Arc::new(RwLock::new(HashMap::new()));
+        update_connection_state_if_generation(
+            &connections,
+            "missing",
+            1,
+            ConnectionState::Reconnecting,
+            Some("missing".to_string()),
+        );
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        connections.write().insert(
+            "weixin-main".to_string(),
+            ManagedConnection {
+                provider_id: "weixin-main".to_string(),
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: None,
+                },
+                status: ConnectionStatus::default(),
+                generation: 7,
+            },
+        );
+        update_connection_state_if_generation(
+            &connections,
+            "weixin-main",
+            6,
+            ConnectionState::Reconnecting,
+            Some("stale".to_string()),
+        );
+        assert_eq!(
+            connections.read()["weixin-main"].status.state,
+            ConnectionState::Disconnected
+        );
+
+        update_connection_state_if_generation(
+            &connections,
+            "weixin-main",
+            7,
+            ConnectionState::Reconnecting,
+            Some("retry".to_string()),
+        );
+        let status = connections.read()["weixin-main"].status.clone();
+        assert_eq!(status.state, ConnectionState::Reconnecting);
+        assert_eq!(status.reconnect_count, 1);
+        assert_eq!(status.last_error.as_deref(), Some("retry"));
+    }
+
+    #[test]
+    fn mark_failed_inserts_a_fresh_failed_generation() {
+        let manager = ImConnectionManager::new();
+
+        manager.mark_failed("weixin-main", "poll failed".to_string());
+
+        let status = manager.get_status("weixin-main").unwrap();
+        assert_eq!(status.state, ConnectionState::Failed);
+        assert_eq!(status.last_error.as_deref(), Some("poll failed"));
+        assert!(manager.connections.read()["weixin-main"].generation > 0);
+    }
+
+    #[tokio::test]
+    async fn feishu_manager_registers_verified_connection_before_background_polling() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind feishu token mock");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = vec![0u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let body = br#"{"code":0,"tenant_access_token":"token","expire":7200}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    std::str::from_utf8(body).unwrap()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let manager = ImConnectionManager::new();
+        let config = ImProviderConfig {
+            id: "feishu-status".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Feishu Status".to_string(),
+            enabled: true,
+            base_url: Some(format!("http://127.0.0.1:{port}/open-apis")),
+            app_id: Some("app-id".to_string()),
+            secret_ref: Some("app-secret".to_string()),
+            owner_open_id: None,
+            event_connection_enabled: true,
+            event_types: vec!["im.message.receive_v1".to_string()],
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
+
+        manager
+            .start_connection(&config, "app-secret", sink.into())
+            .await
+            .expect("start feishu connection after token validation");
+        assert!(manager.get_status(&config.id).is_some());
+
+        manager.stop_all();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    #[tokio::test]
+    async fn weixin_manager_starts_polling_and_propagates_auth_expiry_status() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind weixin poll mock");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = vec![0u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let body = br#"{"ret":-14,"errmsg":"authorization expired"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    std::str::from_utf8(body).unwrap()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ImConnectionManager::new_with_data_dir(dir.path());
+        let config = ImProviderConfig {
+            id: "weixin-status".to_string(),
+            provider_type: ImProviderType::Weixin,
+            display_name: "Weixin Status".to_string(),
+            enabled: true,
+            base_url: Some(format!("http://127.0.0.1:{port}")),
+            app_id: Some("bot@im.bot".to_string()),
+            secret_ref: Some("token".to_string()),
+            owner_open_id: Some("owner@im.wechat".to_string()),
+            event_connection_enabled: true,
+            event_types: vec!["message.receive".to_string()],
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
+        manager
+            .start_connection(&config, "", sink.into())
+            .await
+            .expect("start weixin connection");
+
+        let mut status = manager.get_status(&config.id).unwrap();
+        for _ in 0..50 {
+            if status.state == ConnectionState::AuthenticationRequired {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            status = manager.get_status(&config.id).unwrap();
+        }
+        assert_eq!(status.state, ConnectionState::AuthenticationRequired);
+        assert!(status
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("scan a new QR code")));
+        manager.stop_all();
     }
 }

@@ -1,4 +1,28 @@
 use super::*;
+
+#[tokio::test]
+async fn initial_external_attachments_are_deferred_for_weixin_and_empty_without_message() {
+    let temp = tempfile::tempdir().expect("initial attachment data dir");
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let client = ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider()));
+    let mut provider = crate::handlers::im_gateway::tests::test_provider();
+    provider.id = "weixin-main".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    let mut event = group_test_event("weixin-initial", "message", "caption", false, 1);
+
+    let (images, files) =
+        resolve_initial_external_cli_attachments(&client, &provider, &event).await;
+    assert!(images.is_empty());
+    assert!(files.is_empty());
+
+    provider.provider_type = ImProviderType::Feishu;
+    event.message = None;
+    let (images, files) =
+        resolve_initial_external_cli_attachments(&client, &provider, &event).await;
+    assert!(images.is_empty());
+    assert!(files.is_empty());
+}
+
 #[test]
 fn queued_event_restores_the_triggering_reply_target() {
     let base = group_test_event("feishu-queue", "m1", "first", false, 1);
@@ -95,6 +119,7 @@ fn referenced_attachments_are_prepended_before_current_message_attachments() {
             size_bytes: None,
             data_base64: None,
             download_url: None,
+            ..Default::default()
         });
     let dispatch = PreparedInboundDispatch {
         message_text: "inspect".to_string(),
@@ -120,6 +145,7 @@ fn referenced_attachments_are_prepended_before_current_message_attachments() {
             size_bytes: None,
             data_base64: None,
             download_url: None,
+            ..Default::default()
         }],
         attachment_notices: Vec::new(),
     };
@@ -179,6 +205,7 @@ async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks
             size_bytes: Some(4),
             data_base64: Some("ZmlsZQ==".to_string()),
             download_url: None,
+            ..Default::default()
         })
         .collect();
     let (images, files, notices) = hydrate_referenced_group_attachments(
@@ -208,6 +235,7 @@ async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks
                 size_bytes: Some(MAX_FEISHU_REFERENCED_FILE_BYTES + 1),
                 data_base64: None,
                 download_url: None,
+                ..Default::default()
             }],
         },
     )
@@ -225,6 +253,7 @@ async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks
             size_bytes: Some(MAX_FEISHU_REFERENCED_FILE_BYTES),
             data_base64: Some("AA==".to_string()),
             download_url: None,
+            ..Default::default()
         })
         .collect();
     let (_, files, notices) = hydrate_referenced_group_attachments(
@@ -270,6 +299,7 @@ async fn referenced_attachment_hydration_truncates_preloaded_payloads_and_checks
                 size_bytes: None,
                 data_base64: Some("also not base64".to_string()),
                 download_url: None,
+                ..Default::default()
             }],
         },
     )
@@ -365,6 +395,7 @@ async fn referenced_attachment_hydration_rejects_oversized_downloaded_payloads()
                 size_bytes: None,
                 data_base64: None,
                 download_url: None,
+                ..Default::default()
             }],
         },
     )
@@ -447,6 +478,7 @@ async fn referenced_attachment_hydration_covers_small_limit_error_matrix() {
         size_bytes,
         data_base64: data_base64.map(ToString::to_string),
         download_url: None,
+        ..Default::default()
     };
 
     let (images, files, notices) = hydrate_referenced_group_attachments_with_limits(

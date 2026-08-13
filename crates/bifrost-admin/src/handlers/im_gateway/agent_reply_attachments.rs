@@ -69,19 +69,22 @@ pub(super) fn collect_agent_reply_local_attachment_links(
                     if is_local_markdown_image_candidate(destination) {
                         if let Some(path) = resolve_agent_reply_image_path(destination, base_dir) {
                             let dedupe_key = path.canonicalize().unwrap_or_else(|_| path.clone());
-                            if seen.insert(dedupe_key) {
-                                if is_image_mime_or_path(None, &path) {
+                            if is_image_mime_or_path(None, &path) {
+                                if seen.insert(dedupe_key) {
                                     images.push(AgentReplyLocalImage { alt: label, path });
-                                } else if is_explicit_attachment_label_or_path(
-                                    &label,
-                                    &path.to_string_lossy(),
-                                ) {
-                                    attachments.push(AgentReplyLocalAttachment {
-                                        label,
-                                        path,
-                                        mime_type: None,
-                                    });
                                 }
+                            } else if is_explicit_attachment_label_or_path(
+                                &label,
+                                &path.to_string_lossy(),
+                            ) && seen.insert(dedupe_key)
+                            {
+                                attachments.push(AgentReplyLocalAttachment {
+                                    label,
+                                    mime_type: mime_guess::from_path(&path)
+                                        .first_raw()
+                                        .map(str::to_string),
+                                    path,
+                                });
                             }
                         }
                     }
@@ -324,7 +327,7 @@ pub(super) async fn download_remote_attachment_with_limit(
 
 fn remote_attachment_size_error(max_bytes: u64) -> bifrost_core::BifrostError {
     let max_mib = max_bytes / 1024 / 1024;
-    bifrost_core::BifrostError::Config(format!("远程附件超过飞书上传文件 {max_mib} MiB 上限"))
+    bifrost_core::BifrostError::Config(format!("远程附件超过 IM 通道上传文件 {max_mib} MiB 上限"))
 }
 
 pub(super) fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
@@ -353,6 +356,12 @@ pub(super) fn extension_from_content_type(content_type: &str) -> Option<&'static
             "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
                 Some("pptx")
             }
+            "video/mp4" => Some("mp4"),
+            "video/webm" => Some("webm"),
+            "audio/mpeg" => Some("mp3"),
+            "audio/mp4" | "audio/x-m4a" => Some("m4a"),
+            "audio/wav" | "audio/x-wav" => Some("wav"),
+            "audio/ogg" => Some("ogg"),
             _ => None,
         }
     })
@@ -416,6 +425,19 @@ pub(super) fn attachment_extension_from_path(path: &str) -> Option<&'static str>
         "xlsx" => Some("xlsx"),
         "ppt" => Some("ppt"),
         "pptx" => Some("pptx"),
+        "patch" => Some("patch"),
+        "diff" => Some("diff"),
+        "mp4" => Some("mp4"),
+        "webm" => Some("webm"),
+        "mov" => Some("mov"),
+        "m4v" => Some("m4v"),
+        "mp3" => Some("mp3"),
+        "m4a" => Some("m4a"),
+        "wav" => Some("wav"),
+        "ogg" => Some("ogg"),
+        "opus" => Some("opus"),
+        "flac" => Some("flac"),
+        "aac" => Some("aac"),
         _ => None,
     }
 }
@@ -601,12 +623,12 @@ async fn upload_agent_reply_file_for_im(
     if metadata.len() == 0 {
         let path = attachment.path.display();
         return Err(bifrost_core::BifrostError::Config(format!(
-            "飞书不允许上传空文件：{path}"
+            "IM 通道不允许上传空文件：{path}"
         )));
     }
     if metadata.len() > MAX_AGENT_REPLY_ATTACHMENT_BYTES {
         return Err(bifrost_core::BifrostError::Config(format!(
-            "文件超过飞书上传文件 {} MiB 上限：{}",
+            "文件超过 IM 通道上传文件 {} MiB 上限：{}",
             MAX_AGENT_REPLY_ATTACHMENT_BYTES / 1024 / 1024,
             attachment.path.display()
         )));

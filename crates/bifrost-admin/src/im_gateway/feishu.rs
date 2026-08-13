@@ -15,8 +15,9 @@ use bifrost_core::Result;
 
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
-    ConnectionHandle, ConnectionState, ImEvent, ImEventMessage, ImEventSource, ImFileAttachment,
-    ImImageAttachment, ImImageSource, ImMention, ImProviderConfig, ImProviderType,
+    ConnectionHandle, ConnectionState, ImChannelCapabilities, ImConversationCapabilities, ImEvent,
+    ImEventMessage, ImEventSource, ImFileAttachment, ImImageAttachment, ImImageSource,
+    ImInteractionCapabilities, ImMention, ImProgressPresentation, ImProviderConfig, ImProviderType,
     ImSendCapabilities, ImSendPartCapability, ImSendSupportLevel, ImTarget, ProviderValidation,
     SendOptions, SendResult, UploadedImage,
 };
@@ -645,6 +646,27 @@ impl ImProvider for FeishuProvider {
         }
     }
 
+    fn channel_capabilities(&self, config: &ImProviderConfig) -> ImChannelCapabilities {
+        ImChannelCapabilities {
+            send: self.send_capabilities(config),
+            interaction: ImInteractionCapabilities {
+                typing: false,
+                progress: ImProgressPresentation::MutableCard,
+                mutable_message: true,
+                native_reply: true,
+                reactions: true,
+                recall: true,
+            },
+            conversation: ImConversationCapabilities {
+                direct: true,
+                group: true,
+                thread: true,
+                mention: true,
+                requires_context: false,
+            },
+        }
+    }
+
     async fn validate_config(&self, config: &ImProviderConfig) -> Result<ProviderValidation> {
         let mut errors = Vec::new();
 
@@ -668,6 +690,7 @@ impl ImProvider for FeishuProvider {
         sink: EventSink,
     ) -> Result<ConnectionHandle> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
 
         let config = config.clone();
         let http = self.http.clone();
@@ -681,9 +704,13 @@ impl ImProvider for FeishuProvider {
                 "connect_events spawned via trait - use ImConnectionManager.start_connection for proper secret handling"
             );
             start_long_connection(config, String::new(), sink, shutdown_rx, http, None).await;
+            let _ = stopped_tx.send(());
         });
 
-        Ok(ConnectionHandle { shutdown_tx })
+        Ok(ConnectionHandle {
+            shutdown_tx,
+            stopped_rx: Some(stopped_rx),
+        })
     }
 
     async fn send_card(

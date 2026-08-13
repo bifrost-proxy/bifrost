@@ -17,6 +17,8 @@ use bifrost_core::{BifrostError, Result};
 use super::feishu::FeishuProvider;
 use super::queue_manager::QueueItem;
 use super::types::{ImProviderConfig, ImTarget, SendResult};
+use super::weixin::WeixinProvider;
+use super::weixin_progress::WeixinProgressSession;
 
 #[path = "feishu_markdown.rs"]
 pub(crate) mod feishu_markdown;
@@ -1619,6 +1621,7 @@ impl FeishuProgressCardSession {
 #[derive(Clone, Default)]
 pub struct ImAgentProgressRegistry {
     sessions: Arc<DashMap<String, Arc<Mutex<FeishuProgressCardSession>>>>,
+    weixin_sessions: Arc<DashMap<String, Arc<Mutex<WeixinProgressSession>>>>,
 }
 
 impl ImAgentProgressRegistry {
@@ -1697,6 +1700,33 @@ impl ImAgentProgressRegistry {
             .await
     }
 
+    pub async fn start_weixin(
+        &self,
+        session_key: &str,
+        weixin: Arc<WeixinProvider>,
+        provider: ImProviderConfig,
+        target: ImTarget,
+    ) -> Arc<Mutex<WeixinProgressSession>> {
+        if let Some((_, existing)) = self.weixin_sessions.remove(session_key) {
+            existing.lock().await.finish().await;
+        }
+        let session = Arc::new(Mutex::new(
+            WeixinProgressSession::start(weixin, provider, target).await,
+        ));
+        self.weixin_sessions
+            .insert(session_key.to_string(), Arc::clone(&session));
+        session
+    }
+
+    pub async fn weixin_channel_run_id(&self, session_key: &str) -> Option<String> {
+        let session = self
+            .weixin_sessions
+            .get(session_key)
+            .map(|entry| Arc::clone(entry.value()))?;
+        let channel_run_id = session.lock().await.channel_run_id().to_string();
+        Some(channel_run_id)
+    }
+
     pub async fn start_feishu_replying_to(
         &self,
         session_key: &str,
@@ -1748,6 +1778,23 @@ impl ImAgentProgressRegistry {
     }
 
     pub async fn apply_events(&self, session_key: &str, events: Vec<AgentTurnProgressEvent>) {
+        if let Some(session) = self
+            .weixin_sessions
+            .get(session_key)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            let (provider, config, target, channel_run_id, prepared) =
+                session.lock().await.prepare_delivery(events);
+            WeixinProgressSession::deliver_prepared(
+                provider,
+                config,
+                target,
+                channel_run_id,
+                prepared,
+            )
+            .await;
+            return;
+        }
         let Some(session) = self.sessions.get(session_key) else {
             return;
         };
@@ -1829,6 +1876,9 @@ impl ImAgentProgressRegistry {
         guide_pending: bool,
         notice: Option<String>,
     ) -> bool {
+        if self.weixin_sessions.contains_key(session_key) {
+            return true;
+        }
         let Some(session) = self.sessions.get(session_key) else {
             return false;
         };
@@ -1856,6 +1906,9 @@ impl ImAgentProgressRegistry {
         session_key: &str,
         runner: ProgressRunnerSummary,
     ) -> bool {
+        if self.weixin_sessions.contains_key(session_key) {
+            return true;
+        }
         let Some(session) = self.sessions.get(session_key) else {
             return false;
         };
@@ -1884,6 +1937,10 @@ impl ImAgentProgressRegistry {
         output: Option<String>,
         failed: bool,
     ) -> Option<ProgressCardMessageInfo> {
+        if let Some((_, session)) = self.weixin_sessions.remove(session_key) {
+            session.lock().await.finish().await;
+            return None;
+        }
         let session = self.sessions.get(session_key)?;
         let session = Arc::clone(session.value());
         let (feishu, provider, base_dir) = {

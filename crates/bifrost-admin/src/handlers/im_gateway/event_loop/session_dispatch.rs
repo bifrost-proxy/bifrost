@@ -121,7 +121,6 @@ impl SessionMailboxRegistry {
         recovered_events
     }
 
-    #[cfg(test)]
     pub(super) fn contains(&self, session_key: &str) -> bool {
         self.active.contains_key(session_key)
     }
@@ -206,15 +205,25 @@ pub(super) fn spawn_external_cli_agent_chat(
     let generation = registry.reserve_generation();
     let completion_tx = registry.completion_sender();
     let (session_tx, mut session_rx) = mpsc::unbounded_channel();
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
     let guard_session_manager = Arc::clone(&ctx.agent_session_manager);
     let guard_session_key = session_key.clone();
     let task = tokio::spawn(async move {
+        // `tokio::spawn` may start on another worker immediately. Hold the task
+        // until the sender is visible in the registry so an adjacent Weixin
+        // event cannot bypass the mailbox while the first attachment starts
+        // downloading.
+        if start_rx.await.is_err() {
+            return;
+        }
+        let completion_session_key = guard_session_key.clone();
         let guard = SessionTaskCompletionGuard::new(
             completion_tx,
             guard_session_key,
             generation,
             guard_session_manager,
         );
+        let pending_event = ctx.event.clone();
         run_external_cli_agent_chat(
             ExternalCliChatContext {
                 rx: &mut session_rx,
@@ -234,11 +243,38 @@ pub(super) fn spawn_external_cli_agent_chat(
             input,
         )
         .await;
+        let initial_event_queued = ctx.queue_manager.contains_event(&pending_event.event_id);
+        if !initial_event_queued {
+            for companion_event in ctx
+                .queue_manager
+                .take_pending_turn_events(&completion_session_key)
+            {
+                if let Err(error) = ctx.event_store.complete_pending(&companion_event) {
+                    error!(
+                        provider_id = %companion_event.provider_id,
+                        event_id = %companion_event.event_id,
+                        error = %error,
+                        "failed to complete merged companion event after runner task"
+                    );
+                }
+            }
+        }
+        if !initial_event_queued {
+            if let Err(error) = ctx.event_store.complete_pending(&pending_event) {
+                error!(
+                    provider_id = %pending_event.provider_id,
+                    event_id = %pending_event.event_id,
+                    error = %error,
+                    "failed to complete external runner's durable pending event"
+                );
+            }
+        }
         close_session_mailbox(&mut session_rx);
         let recovered_events = drain_session_mailbox(&mut session_rx);
         guard.complete(recovered_events);
     });
     registry.register(session_key, generation, session_tx, task.abort_handle());
+    let _ = start_tx.send(());
 }
 
 #[cfg(test)]

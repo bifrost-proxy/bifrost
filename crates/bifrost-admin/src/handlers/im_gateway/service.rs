@@ -3,9 +3,9 @@ use super::*;
 pub(super) const IMAGE_ONLY_AGENT_PROMPT: &str = "请理解这张图片，并根据图片内容回答。";
 pub(super) const MAX_AGENT_ATTACHMENTS_PER_MESSAGE: usize = 6;
 pub(super) const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
-/// Feishu `POST /im/v1/files` rejects files larger than 30 MB (error 234006).
-/// Keep the local preflight at the platform limit so a generated attachment
-/// cannot turn an otherwise successful terminal reply into a doomed upload.
+/// Feishu and the verified Weixin iLink attachment path both use a 30 MiB
+/// preflight limit so a generated attachment cannot turn an otherwise
+/// successful terminal reply into a doomed upload.
 pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 30 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES: u64 = 250 * 1024 * 1024;
@@ -93,6 +93,20 @@ impl ImProviderClient {
             Self::Unsupported(provider_type) => Self::unsupported_capabilities(config, *provider_type),
         }
     }
+    pub(super) fn channel_capabilities(
+        &self,
+        config: &ImProviderConfig,
+    ) -> crate::im_gateway::types::ImChannelCapabilities {
+        match self {
+            Self::Feishu(provider) => provider.channel_capabilities(config),
+            Self::Weixin(provider) => provider.channel_capabilities(config),
+            Self::Unsupported(provider_type) => crate::im_gateway::types::ImChannelCapabilities {
+                send: Self::unsupported_capabilities(config, *provider_type),
+                interaction: Default::default(),
+                conversation: Default::default(),
+            },
+        }
+    }
     pub(super) async fn create_feishu_group_chat(
         &self,
         config: &ImProviderConfig,
@@ -118,6 +132,13 @@ impl ImProviderClient {
             Self::Feishu(provider) => Some(provider.clone()),
             Self::Weixin(_) => None,
             Self::Unsupported(_) => None,
+        }
+    }
+
+    pub(super) fn weixin(&self) -> Option<Arc<WeixinProvider>> {
+        match self {
+            Self::Weixin(provider) => Some(provider.clone()),
+            Self::Feishu(_) | Self::Unsupported(_) => None,
         }
     }
 
@@ -254,9 +275,11 @@ impl ImProviderClient {
                     .upload_file(config, file_name, bytes, mime_type)
                     .await
             }
-            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
-                "weixin provider does not support generic file attachments yet".to_string(),
-            )),
+            Self::Weixin(provider) => {
+                provider
+                    .upload_file(config, file_name, bytes, mime_type)
+                    .await
+            }
             Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
@@ -270,9 +293,7 @@ impl ImProviderClient {
     ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
         match self {
             Self::Feishu(provider) => provider.send_file(config, target, file_key, uuid).await,
-            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
-                "weixin provider does not support generic file attachments yet".to_string(),
-            )),
+            Self::Weixin(provider) => provider.send_file(config, target, file_key, uuid).await,
             Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
@@ -326,9 +347,7 @@ impl ImProviderClient {
                     .download_message_file_resource(config, message_id, &file.file_key)
                     .await
             }
-            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
-                "weixin provider does not support inbound file resource downloads yet".to_string(),
-            )),
+            Self::Weixin(provider) => provider.download_message_file_resource(config, file).await,
             Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
@@ -337,6 +356,11 @@ impl ImProviderClient {
 // ---------------------------------------------------------------------------
 // ImGatewayService
 // ---------------------------------------------------------------------------
+
+struct ProviderEventPipeline {
+    sink: crate::im_gateway::provider::EventSink,
+    task: tokio::task::JoinHandle<()>,
+}
 
 pub struct ImGatewayService {
     pub(super) data_dir: PathBuf,
@@ -356,6 +380,8 @@ pub struct ImGatewayService {
     pub external_cli_config_store: Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub queue_manager: Arc<SessionQueueManager>,
     pub progress_registry: Arc<ImAgentProgressRegistry>,
+    event_sinks: Arc<RwLock<HashMap<String, ProviderEventPipeline>>>,
+    pub(super) provider_connection_lifecycle: Arc<AsyncMutex<()>>,
     pub(super) mock_event_sinks: Arc<RwLock<HashMap<String, mpsc::UnboundedSender<ImEvent>>>>,
     pub(super) weixin_login_pending: Arc<RwLock<HashMap<String, PendingWeixinLogin>>>,
     pub(super) feishu_setup_pending: Arc<RwLock<HashMap<String, PendingFeishuSetup>>>,
@@ -413,6 +439,8 @@ impl ImGatewayService {
             ),
             queue_manager: Arc::new(SessionQueueManager::new()),
             progress_registry: Arc::new(ImAgentProgressRegistry::new()),
+            event_sinks: Arc::new(RwLock::new(HashMap::new())),
+            provider_connection_lifecycle: Arc::new(AsyncMutex::new(())),
             mock_event_sinks: Arc::new(RwLock::new(HashMap::new())),
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
             feishu_setup_pending: Arc::new(RwLock::new(load_pending_feishu_setups(data_dir))),
@@ -432,6 +460,93 @@ impl ImGatewayService {
                 ImProviderClient::Unsupported(provider.provider_type)
             }
         }
+    }
+
+    /// Return the single long-lived event pipeline for this provider. Transport
+    /// reconnects reuse its sink so pending events are not replayed into a
+    /// second loop while the first loop still owns active Agent turns.
+    pub(super) fn event_sink_for_provider(
+        &self,
+        provider: &ImProviderConfig,
+    ) -> crate::im_gateway::provider::EventSink {
+        let mut sinks = self.event_sinks.write();
+        if let Some(pipeline) = sinks
+            .get(&provider.id)
+            .filter(|pipeline| !pipeline.sink.is_closed() && !pipeline.task.is_finished())
+        {
+            return pipeline.sink.clone();
+        }
+        if let Some(stale) = sinks.remove(&provider.id) {
+            stale.task.abort();
+        }
+
+        let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
+        let sink = crate::im_gateway::provider::EventSink::with_durable_store(
+            tx,
+            Arc::clone(&self.event_store),
+            &provider.id,
+        );
+        let client = self.provider_client(provider);
+        let provider_id = provider.id.clone();
+        let provider = provider.clone();
+        let event_store = Arc::clone(&self.event_store);
+        let message_log_store = Arc::clone(&self.message_log_store);
+        let group_context_store = Arc::clone(&self.group_context_store);
+        let route_store = Arc::clone(&self.route_store);
+        let provider_store = Arc::clone(&self.provider_store);
+        let agent_config_store = Arc::clone(&self.agent_config_store);
+        let schedule_store = Arc::clone(&self.schedule_store);
+        let scheduler = Arc::clone(&self.scheduler);
+        let target_store = Arc::clone(&self.target_store);
+        let connection_manager = Arc::clone(&self.connection_manager);
+        let agent_session_manager = Arc::clone(&self.agent_session_manager);
+        let external_cli_config_store = Arc::clone(&self.external_cli_config_store);
+        let queue_manager = Arc::clone(&self.queue_manager);
+        let progress_registry = Arc::clone(&self.progress_registry);
+        let task = tokio::spawn(async move {
+            run_event_loop(
+                rx,
+                client,
+                provider,
+                event_store,
+                message_log_store,
+                group_context_store,
+                route_store,
+                provider_store,
+                agent_config_store,
+                schedule_store,
+                scheduler,
+                target_store,
+                connection_manager,
+                agent_session_manager,
+                external_cli_config_store,
+                queue_manager,
+                progress_registry,
+            )
+            .await;
+        });
+        sinks.insert(
+            provider_id,
+            ProviderEventPipeline {
+                sink: sink.clone(),
+                task,
+            },
+        );
+        sink
+    }
+
+    /// Cancel a provider's event loop, including any active Agent turn owned
+    /// by that loop, and wait until the task has released its account-bound
+    /// client state. Callers must stop and await the transport first.
+    pub(super) async fn stop_event_pipeline(&self, provider_id: &str) {
+        let pipeline = self.event_sinks.write().remove(provider_id);
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        let ProviderEventPipeline { sink, task } = pipeline;
+        drop(sink);
+        task.abort();
+        let _ = task.await;
     }
 
     pub fn chatgpt_web_startup_auth_runners(&self) -> Vec<ChatGptWebStartupAuthRunner> {
@@ -534,7 +649,11 @@ impl ImGatewayService {
     /// Called on Bifrost startup to restore active connections and send online notifications.
     pub async fn auto_connect_providers(self: &Arc<Self>) {
         let providers = self.provider_store.list();
-        for mut provider in providers {
+        for listed_provider in providers {
+            let _lifecycle = self.provider_connection_lifecycle.lock().await;
+            let Some(mut provider) = self.provider_store.get(&listed_provider.id) else {
+                continue;
+            };
             if !should_run_provider_event_connection(&provider) {
                 info!(
                     provider_id = %provider.id,
@@ -585,53 +704,12 @@ impl ImGatewayService {
 
             let app_secret = provider.secret_ref.clone().unwrap_or_default();
 
-            // Create event channel
-            let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
-
-            // Spawn the event processing loop
-            let client = self.provider_client(&provider);
-            let provider_for_loop = provider.clone();
-            let event_store = self.event_store.clone();
-            let message_log_store = self.message_log_store.clone();
-            let group_context_store = self.group_context_store.clone();
-            let route_store = self.route_store.clone();
-            let provider_store = self.provider_store.clone();
-            let agent_config_store = self.agent_config_store.clone();
-            let schedule_store = self.schedule_store.clone();
-            let scheduler = self.scheduler.clone();
-            let target_store = self.target_store.clone();
-            let connection_manager = self.connection_manager.clone();
-            let agent_session_manager = self.agent_session_manager.clone();
-            let external_cli_config_store = self.external_cli_config_store.clone();
-            let queue_manager = self.queue_manager.clone();
-            let progress_registry = self.progress_registry.clone();
-            tokio::spawn(async move {
-                run_event_loop(
-                    rx,
-                    client,
-                    provider_for_loop,
-                    event_store,
-                    message_log_store,
-                    group_context_store,
-                    route_store,
-                    provider_store,
-                    agent_config_store,
-                    schedule_store,
-                    scheduler,
-                    target_store,
-                    connection_manager,
-                    agent_session_manager,
-                    external_cli_config_store,
-                    queue_manager,
-                    progress_registry,
-                )
-                .await;
-            });
+            let sink = self.event_sink_for_provider(&provider);
 
             // Start the long connection
             match self
                 .connection_manager
-                .start_connection(&provider, &app_secret, tx)
+                .start_connection(&provider, &app_secret, sink)
                 .await
             {
                 Ok(()) => {
@@ -751,6 +829,7 @@ impl ImGatewayService {
                 for (pid, st) in statuses {
                     match st.state {
                         ConnectionState::Disconnected | ConnectionState::Failed => {
+                            let _lifecycle = self.provider_connection_lifecycle.lock().await;
                             let Some(provider) = self.provider_store.get(&pid) else {
                                 debug!(provider_id = %pid, "supervisor: provider no longer configured, skipping");
                                 continue;
@@ -776,48 +855,10 @@ impl ImGatewayService {
                                 prev_state = ?st.state,
                                 "supervisor: attempting reconnect"
                             );
-                            let (tx, rx) = mpsc::unbounded_channel::<ImEvent>();
-                            let client = self.provider_client(&provider);
-                            let provider_for_loop = provider.clone();
-                            let event_store = self.event_store.clone();
-                            let message_log_store = self.message_log_store.clone();
-                            let group_context_store = self.group_context_store.clone();
-                            let route_store = self.route_store.clone();
-                            let provider_store = self.provider_store.clone();
-                            let agent_config_store = self.agent_config_store.clone();
-                            let schedule_store = self.schedule_store.clone();
-                            let scheduler = self.scheduler.clone();
-                            let target_store = self.target_store.clone();
-                            let connection_manager = self.connection_manager.clone();
-                            let agent_session_manager = self.agent_session_manager.clone();
-                            let external_cli_config_store = self.external_cli_config_store.clone();
-                            let queue_manager = self.queue_manager.clone();
-                            let progress_registry = self.progress_registry.clone();
-                            tokio::spawn(async move {
-                                run_event_loop(
-                                    rx,
-                                    client,
-                                    provider_for_loop,
-                                    event_store,
-                                    message_log_store,
-                                    group_context_store,
-                                    route_store,
-                                    provider_store,
-                                    agent_config_store,
-                                    schedule_store,
-                                    scheduler,
-                                    target_store,
-                                    connection_manager,
-                                    agent_session_manager,
-                                    external_cli_config_store,
-                                    queue_manager,
-                                    progress_registry,
-                                )
-                                .await;
-                            });
+                            let sink = self.event_sink_for_provider(&provider);
                             if let Err(e) = self
                                 .connection_manager
-                                .start_connection(&provider, &app_secret, tx)
+                                .start_connection(&provider, &app_secret, sink)
                                 .await
                             {
                                 warn!(
@@ -962,26 +1003,77 @@ mod provider_event_connection_tests {
     }
 
     #[tokio::test]
-    async fn weixin_client_rejects_inbound_file_resource_downloads() {
-        let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+    async fn provider_pipeline_is_cancelled_before_same_id_is_reused() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = ImGatewayService::new(temp_dir.path());
         let provider = provider_with_secret();
+
+        let first = service.event_sink_for_provider(&provider);
+        let second = service.event_sink_for_provider(&provider);
+        tokio::task::yield_now().await;
+        assert!(!first.is_closed());
+        assert!(!second.is_closed());
+        assert_eq!(service.event_sinks.read().len(), 1);
+
+        service.stop_event_pipeline(&provider.id).await;
+        assert!(first.is_closed());
+        assert!(second.is_closed());
+        assert!(service.event_sinks.read().is_empty());
+
+        let replacement = service.event_sink_for_provider(&provider);
+        assert!(!replacement.is_closed());
+        assert_eq!(service.event_sinks.read().len(), 1);
+        service.stop_event_pipeline(&provider.id).await;
+    }
+
+    #[tokio::test]
+    async fn weixin_client_dispatches_inbound_file_resource_downloads() {
+        use http_body_util::Full;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock weixin file server");
+        let port = listener.local_addr().expect("mock local addr").port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept file download");
+            let service = service_fn(|_request: Request<hyper::body::Incoming>| async move {
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "text/markdown")
+                        .body(Full::new(bytes::Bytes::from_static(b"hello weixin")))
+                        .unwrap(),
+                )
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+
+        let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+        let mut provider = provider_with_secret();
+        provider.base_url = Some(format!("http://127.0.0.1:{port}"));
         let file = crate::im_gateway::types::ImFileAttachment {
             file_key: "file-key".to_string(),
             name: Some("report.md".to_string()),
             mime_type: Some("text/markdown".to_string()),
             size_bytes: Some(12),
             data_base64: None,
-            download_url: None,
+            download_url: Some(format!("http://127.0.0.1:{port}/file")),
+            ..Default::default()
         };
 
-        let err = client
+        let (mime_type, bytes) = client
             .download_message_file_resource(&provider, "message-id", &file)
             .await
-            .expect_err("weixin does not support file resource downloads");
+            .expect("weixin downloads file resource");
 
-        assert!(err
-            .to_string()
-            .contains("weixin provider does not support inbound file resource downloads yet"));
+        assert_eq!(mime_type, "text/markdown");
+        assert_eq!(bytes, b"hello weixin");
     }
 
     #[tokio::test]
@@ -1056,6 +1148,7 @@ mod provider_event_connection_tests {
             size_bytes: Some(5),
             data_base64: None,
             download_url: None,
+            ..Default::default()
         };
 
         let (mime_type, bytes) = client

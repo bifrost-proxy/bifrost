@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use parking_lot::RwLock;
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tracing::{debug, error, info, warn};
 
 use crate::handlers::{

@@ -18,6 +18,52 @@ pub(super) async fn handle_concurrent_event_during_chat(
     external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     active_session_default_mode: BusyMessageDefaultMode,
 ) {
+    handle_concurrent_event_during_chat_inner(
+        event,
+        provider,
+        active_session_key,
+        queue_manager,
+        client,
+        message_log_store,
+        agent_session_manager,
+        progress_registry,
+        agent_config_store,
+        provider_store,
+        event_store,
+        group_context_store,
+        external_cli_config_store,
+        active_session_default_mode,
+    )
+    .await;
+    if !queue_manager.contains_event(&event.event_id) {
+        if let Err(error) = event_store.complete_pending(event) {
+            error!(
+                provider_id = %event.provider_id,
+                event_id = %event.event_id,
+                error = %error,
+                "failed to complete concurrently handled durable pending event"
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_concurrent_event_during_chat_inner(
+    event: &ImEvent,
+    provider: &ImProviderConfig,
+    active_session_key: &str,
+    queue_manager: &Arc<SessionQueueManager>,
+    client: &ImProviderClient,
+    message_log_store: &Arc<ImMessageLogStore>,
+    agent_session_manager: &Arc<ImAgentSessionManager>,
+    progress_registry: &Arc<ImAgentProgressRegistry>,
+    agent_config_store: &Arc<ImAgentConfigStore>,
+    provider_store: &Arc<ImProviderStore>,
+    event_store: &Arc<ImEventStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
+    external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    active_session_default_mode: BusyMessageDefaultMode,
+) {
     let provider = provider_store
         .get(&event.provider_id)
         .unwrap_or_else(|| provider.clone());
@@ -215,20 +261,45 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 group_turn_id: Some(group_turn_id),
             }
         });
-        let _ = queue_manager.push_queue_with_attachments_and_context(
+        let queued = queue_manager.push_queue_with_attachments_and_context(
             &session_key,
             message_text,
             images,
             files,
             context,
         );
-        send_agent_reply(
-            client,
-            &provider,
-            event,
-            "⏳ 消息已排队，将在当前任务完成后处理。",
-            message_log_store,
-        )
-        .await;
+        match queued {
+            Ok(_) => {
+                send_agent_reply(
+                    client,
+                    &provider,
+                    event,
+                    "⏳ 消息已排队，将在当前任务完成后处理。",
+                    message_log_store,
+                )
+                .await;
+            }
+            Err(error) => {
+                if let Some(turn_id) = group_turn_id.as_deref() {
+                    if let Err(release_error) =
+                        group_context_store.release_turn(turn_id, error, now_ms())
+                    {
+                        warn!(
+                            turn_id = %turn_id,
+                            error = %release_error,
+                            "failed to release group turn rejected by queue budget"
+                        );
+                    }
+                }
+                send_agent_reply(
+                    client,
+                    &provider,
+                    event,
+                    &format!("排队失败: {error}"),
+                    message_log_store,
+                )
+                .await;
+            }
+        }
     }
 }

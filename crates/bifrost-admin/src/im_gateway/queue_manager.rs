@@ -9,9 +9,11 @@
 use dashmap::DashMap;
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::im_gateway::external_cli::ExternalCliFileInput;
+use crate::im_gateway::types::ImEvent;
 use bifrost_agent::session::{GuideChannel, GuideMessageChannel};
 
 /// IM reply and group-turn state that must follow a queued message.
@@ -40,12 +42,30 @@ pub struct QueueItem {
     pub context: Option<QueueItemContext>,
 }
 
+impl QueueItem {
+    /// Queue status only needs ordering and reply context. Omitting attachment
+    /// payloads prevents progress snapshots and API responses from cloning the
+    /// retained Base64 data after every insertion.
+    fn status_snapshot(&self) -> Self {
+        Self {
+            seq: self.seq,
+            message: self.message.clone(),
+            images: Vec::new(),
+            files: Vec::new(),
+            context: self.context.clone(),
+        }
+    }
+}
+
 /// Per-session queue state.
 struct SessionQueue {
     /// Auto-incrementing sequence counter.
     next_seq: u64,
     /// FIFO queue of pending messages.
     items: VecDeque<QueueItem>,
+    /// Base64 attachment bytes retained by this queue. This counts the actual
+    /// in-memory string payload rather than decoded bytes.
+    attachment_bytes: usize,
 }
 
 impl Default for SessionQueue {
@@ -53,6 +73,7 @@ impl Default for SessionQueue {
         Self {
             next_seq: 1,
             items: VecDeque::new(),
+            attachment_bytes: 0,
         }
     }
 }
@@ -73,10 +94,28 @@ pub struct SessionQueueManager {
 
     /// Queue-mode FIFO: processed sequentially after each turn completes.
     queues: DashMap<String, SessionQueue>,
+
+    /// Base64 attachment bytes retained by all queue-mode sessions. The
+    /// per-session limit prevents one sender from monopolizing memory while
+    /// this global limit bounds aggregate retention across many senders.
+    queued_attachment_bytes: AtomicUsize,
+
+    max_session_attachment_bytes: usize,
+    max_global_attachment_bytes: usize,
+
+    /// Companion events merged into the active turn. Completion ownership is
+    /// retained until the runner task returns normally.
+    pending_turn_events: DashMap<String, Vec<ImEvent>>,
 }
 
 /// Maximum number of queued messages per session.
 const MAX_QUEUE_SIZE: usize = 10;
+/// Keep one busy sender from retaining multiple large Base64 payloads. A
+/// single 30 MiB decoded attachment requires roughly 40 MiB when Base64
+/// encoded, so 64 MiB still admits the normal generated-attachment ceiling.
+const MAX_SESSION_QUEUE_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
+/// Bound aggregate queue attachment retention across all active sessions.
+const MAX_GLOBAL_QUEUE_ATTACHMENT_BYTES: usize = 256 * 1024 * 1024;
 
 impl SessionQueueManager {
     pub fn new() -> Self {
@@ -85,6 +124,22 @@ impl SessionQueueManager {
             handed_off_guides: DashMap::new(),
             live_guide_turns: DashMap::new(),
             queues: DashMap::new(),
+            queued_attachment_bytes: AtomicUsize::new(0),
+            max_session_attachment_bytes: MAX_SESSION_QUEUE_ATTACHMENT_BYTES,
+            max_global_attachment_bytes: MAX_GLOBAL_QUEUE_ATTACHMENT_BYTES,
+            pending_turn_events: DashMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_attachment_limits(
+        max_session_attachment_bytes: usize,
+        max_global_attachment_bytes: usize,
+    ) -> Self {
+        Self {
+            max_session_attachment_bytes,
+            max_global_attachment_bytes,
+            ..Self::new()
         }
     }
 
@@ -246,15 +301,28 @@ impl SessionQueueManager {
         files: Vec<ExternalCliFileInput>,
         context: Option<QueueItemContext>,
     ) -> Result<Vec<QueueItem>, &'static str> {
+        let attachment_bytes =
+            queue_attachment_bytes(&images, &files).ok_or("排队附件大小溢出，请缩小附件后重试")?;
         let mut entry = self.queues.entry(session_key.to_string()).or_default();
         let queue = entry.value_mut();
 
         if queue.items.len() >= MAX_QUEUE_SIZE {
             return Err("排队已满（最多 10 条），请等待当前消息处理完成");
         }
+        if queue
+            .attachment_bytes
+            .checked_add(attachment_bytes)
+            .is_none_or(|total| total > self.max_session_attachment_bytes)
+        {
+            return Err("排队附件过大（单会话最多保留 64 MiB），请等待当前消息处理完成");
+        }
+        if !self.reserve_global_attachment_bytes(attachment_bytes) {
+            return Err("排队附件总量已达上限，请等待其他消息处理完成");
+        }
 
         let seq = queue.next_seq;
         queue.next_seq += 1;
+        queue.attachment_bytes += attachment_bytes;
         queue.items.push_back(QueueItem {
             seq,
             message: msg,
@@ -263,7 +331,7 @@ impl SessionQueueManager {
             context,
         });
 
-        Ok(queue.items.iter().cloned().collect())
+        Ok(queue.items.iter().map(QueueItem::status_snapshot).collect())
     }
 
     /// Remove a queued message by sequence number.
@@ -277,7 +345,11 @@ impl SessionQueueManager {
         if let Some(mut entry) = self.queues.get_mut(session_key) {
             let queue = entry.value_mut();
             let position = queue.items.iter().position(|item| item.seq == seq)?;
-            return queue.items.remove(position);
+            let item = queue.items.remove(position)?;
+            let attachment_bytes = queue_item_attachment_bytes(&item);
+            queue.attachment_bytes = queue.attachment_bytes.saturating_sub(attachment_bytes);
+            self.release_global_attachment_bytes(attachment_bytes);
+            return Some(item);
         }
         None
     }
@@ -290,7 +362,12 @@ impl SessionQueueManager {
     /// Pop the next queued message with attachments (FIFO).
     pub fn pop_queue_item(&self, session_key: &str) -> Option<QueueItem> {
         if let Some(mut entry) = self.queues.get_mut(session_key) {
-            return entry.value_mut().items.pop_front();
+            let queue = entry.value_mut();
+            let item = queue.items.pop_front()?;
+            let attachment_bytes = queue_item_attachment_bytes(&item);
+            queue.attachment_bytes = queue.attachment_bytes.saturating_sub(attachment_bytes);
+            self.release_global_attachment_bytes(attachment_bytes);
+            return Some(item);
         }
         None
     }
@@ -299,7 +376,47 @@ impl SessionQueueManager {
     pub fn queue_status(&self, session_key: &str) -> Vec<QueueItem> {
         self.queues
             .get(session_key)
-            .map(|entry| entry.value().items.iter().cloned().collect())
+            .map(|entry| {
+                entry
+                    .value()
+                    .items
+                    .iter()
+                    .map(QueueItem::status_snapshot)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Return whether a durable inbound event is still owned by an in-memory
+    /// queue item. Such events must not be acknowledged until that item has
+    /// actually run.
+    pub fn contains_event(&self, event_id: &str) -> bool {
+        !event_id.is_empty()
+            && self.queues.iter().any(|entry| {
+                entry.value().items.iter().any(|item| {
+                    item.context
+                        .as_ref()
+                        .is_some_and(|context| context.event_id == event_id)
+                })
+            })
+    }
+
+    pub fn track_pending_turn_event(&self, session_key: &str, event: ImEvent) {
+        let mut events = self
+            .pending_turn_events
+            .entry(session_key.to_string())
+            .or_default();
+        if !events.iter().any(|existing| {
+            existing.provider_id == event.provider_id && existing.event_id == event.event_id
+        }) {
+            events.push(event);
+        }
+    }
+
+    pub fn take_pending_turn_events(&self, session_key: &str) -> Vec<ImEvent> {
+        self.pending_turn_events
+            .remove(session_key)
+            .map(|(_, events)| events)
             .unwrap_or_default()
     }
 
@@ -309,8 +426,81 @@ impl SessionQueueManager {
     pub fn clear_session(&self, session_key: &str) {
         self.guide_slots.remove(session_key);
         self.handed_off_guides.remove(session_key);
-        self.queues.remove(session_key);
+        if let Some((_, queue)) = self.queues.remove(session_key) {
+            self.release_global_attachment_bytes(queue.attachment_bytes);
+        }
     }
+
+    /// Drop every in-memory delivery artifact owned by a provider that is
+    /// being deleted. Provider IDs are client-controlled and reusable, so
+    /// retaining these queues would let a replacement account inherit work
+    /// from the deleted event pipeline.
+    pub fn clear_provider(&self, provider_id: &str) {
+        let direct_prefix = format!("{}:", provider_id.trim());
+        let group_prefix = format!("im:{}:group:", provider_id.trim());
+        let belongs_to_provider = |session_key: &str| {
+            session_key.starts_with(&direct_prefix) || session_key.starts_with(&group_prefix)
+        };
+        self.guide_slots
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+        self.handed_off_guides
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+        self.live_guide_turns
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+        let queue_keys: Vec<String> = self
+            .queues
+            .iter()
+            .filter(|entry| belongs_to_provider(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect();
+        for session_key in queue_keys {
+            if let Some((_, queue)) = self.queues.remove(&session_key) {
+                self.release_global_attachment_bytes(queue.attachment_bytes);
+            }
+        }
+        self.pending_turn_events
+            .retain(|session_key, _| !belongs_to_provider(session_key));
+    }
+
+    fn reserve_global_attachment_bytes(&self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        self.queued_attachment_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|total| *total <= self.max_global_attachment_bytes)
+            })
+            .is_ok()
+    }
+
+    fn release_global_attachment_bytes(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let _ = self.queued_attachment_bytes.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| Some(current.saturating_sub(bytes)),
+        );
+    }
+}
+
+fn queue_attachment_bytes(
+    images: &[bifrost_agent::ChatImageInput],
+    files: &[ExternalCliFileInput],
+) -> Option<usize> {
+    images
+        .iter()
+        .map(|image| image.data.len())
+        .chain(files.iter().map(|file| file.data.len()))
+        .try_fold(0usize, usize::checked_add)
+}
+
+fn queue_item_attachment_bytes(item: &QueueItem) -> usize {
+    queue_attachment_bytes(&item.images, &item.files)
+        .expect("queued attachment bytes were validated before insertion")
 }
 
 impl Default for SessionQueueManager {
@@ -475,6 +665,122 @@ mod tests {
     }
 
     #[test]
+    fn queue_attachment_budgets_bound_retention_and_release_on_removal() {
+        let mgr = SessionQueueManager::with_attachment_limits(8, 12);
+        mgr.push_queue_with_images(
+            "provider-a:user",
+            "first".into(),
+            vec![bifrost_agent::ChatImageInput {
+                mime_type: "image/png".to_string(),
+                data: "12345678".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let status = mgr.queue_status("provider-a:user");
+        assert_eq!(status.len(), 1);
+        assert!(status[0].images.is_empty());
+        assert!(status[0].files.is_empty());
+        assert_eq!(mgr.queued_attachment_bytes.load(Ordering::Acquire), 8);
+
+        let session_overflow = mgr.push_queue_with_attachments(
+            "provider-a:user",
+            "too much for one sender".into(),
+            Vec::new(),
+            vec![ExternalCliFileInput {
+                mime_type: "text/plain".to_string(),
+                data: "x".to_string(),
+                name: None,
+            }],
+        );
+        assert!(session_overflow.is_err());
+
+        let global_overflow = mgr.push_queue_with_attachments(
+            "provider-b:user",
+            "too much globally".into(),
+            Vec::new(),
+            vec![ExternalCliFileInput {
+                mime_type: "text/plain".to_string(),
+                data: "12345".to_string(),
+                name: None,
+            }],
+        );
+        assert!(global_overflow.is_err());
+
+        let removed = mgr
+            .remove_queue_item("provider-a:user", 1)
+            .expect("remove retained image");
+        assert_eq!(removed.images[0].data, "12345678");
+        assert_eq!(mgr.queued_attachment_bytes.load(Ordering::Acquire), 0);
+
+        mgr.push_queue_with_attachments(
+            "provider-b:user",
+            "fits after release".into(),
+            Vec::new(),
+            vec![ExternalCliFileInput {
+                mime_type: "text/plain".to_string(),
+                data: "12345".to_string(),
+                name: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(mgr.queued_attachment_bytes.load(Ordering::Acquire), 5);
+        mgr.clear_provider("provider-b");
+        assert_eq!(mgr.queued_attachment_bytes.load(Ordering::Acquire), 0);
+
+        mgr.push_queue_with_attachments(
+            "provider-c:user",
+            "clear one session".into(),
+            Vec::new(),
+            vec![ExternalCliFileInput {
+                mime_type: "text/plain".to_string(),
+                data: "12345".to_string(),
+                name: None,
+            }],
+        )
+        .unwrap();
+        mgr.clear_session("provider-c:user");
+        assert_eq!(mgr.queued_attachment_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn durable_event_ownership_follows_queue_and_active_turn() {
+        let mgr = SessionQueueManager::new();
+        mgr.push_queue_with_attachments_and_context(
+            "s1",
+            "queued".into(),
+            Vec::new(),
+            Vec::new(),
+            Some(QueueItemContext {
+                event_id: "queued-event".into(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert!(mgr.contains_event("queued-event"));
+        assert!(!mgr.contains_event(""));
+        mgr.pop_queue_item("s1").unwrap();
+        assert!(!mgr.contains_event("queued-event"));
+
+        let pending = ImEvent {
+            event_id: "companion-event".into(),
+            provider_id: "weixin-main".into(),
+            provider_type: crate::im_gateway::types::ImProviderType::Weixin,
+            event_type: "message.receive".into(),
+            source: crate::im_gateway::types::ImEventSource::default(),
+            message: None,
+            received_at: 1,
+            raw_digest: None,
+        };
+        mgr.track_pending_turn_event("s1", pending.clone());
+        mgr.track_pending_turn_event("s1", pending);
+        let pending = mgr.take_pending_turn_events("s1");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].event_id, "companion-event");
+        assert!(mgr.take_pending_turn_events("s1").is_empty());
+    }
+
+    #[test]
     fn test_queue_remove() {
         let mgr = SessionQueueManager::new();
         mgr.push_queue("s1", "a".into()).unwrap();
@@ -507,6 +813,26 @@ mod tests {
         let ch = mgr.get_or_create_guide_channel("s1");
         assert!(ch.lock().unwrap().is_empty());
         assert!(mgr.queue_status("s1").is_empty());
+    }
+
+    #[test]
+    fn clear_provider_preserves_other_provider_sessions() {
+        let manager = SessionQueueManager::new();
+        manager
+            .push_queue("provider-a:user", "direct".to_string())
+            .unwrap();
+        manager
+            .push_queue("im:provider-a:group:chat", "group".to_string())
+            .unwrap();
+        manager
+            .push_queue("provider-b:user", "retained".to_string())
+            .unwrap();
+
+        manager.clear_provider("provider-a");
+
+        assert!(manager.queue_status("provider-a:user").is_empty());
+        assert!(manager.queue_status("im:provider-a:group:chat").is_empty());
+        assert_eq!(manager.queue_status("provider-b:user").len(), 1);
     }
 
     /// Test the guide channel shared between producer (IM event loop) and

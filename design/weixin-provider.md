@@ -1,5 +1,7 @@
 # Weixin IM Provider 方案
 
+> 当前文档描述 `main` 已有的微信 Provider 基线以及分支 `codex/weixin-native-agent-design` 正在落地的 Native Agent Experience。Typing、统一 `run_id`、结构化工具进度、文件/视频/语音和 long-poll 可靠性实现状态见 [`weixin-native-agent-experience.md`](./weixin-native-agent-experience.md)；PR 合入前，生产 `main` 仍以其代码 capability 为准。
+
 ## 背景
 
 微信接入作为 IM Gateway 原生 `weixin` provider 存在（`crates/bifrost-admin/src/im_gateway/weixin.rs`）。Provider 负责扫码登录、长轮询收消息、把微信消息归一化成 `ImEvent`、触发现有 Agent 路由，并把 Agent 回复回写到微信 ClawBot。所有 `/status`、`/help`、guide、queue、最终回复、图片多模态等能力复用 IM Gateway 与 Agent 现有通道能力。

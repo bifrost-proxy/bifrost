@@ -6,6 +6,7 @@ use std::time::Duration;
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyInit};
 use async_trait::async_trait;
 use base64::Engine as _;
+use futures_util::StreamExt;
 use parking_lot::RwLock;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -16,20 +17,40 @@ use bifrost_core::Result;
 
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
-    ConnectionHandle, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment, ImImageSource,
-    ImMessageReference, ImProviderConfig, ImProviderType, ImSendCapabilities, ImSendPartCapability,
-    ImSendSupportLevel, ImTarget, ProviderValidation, SendOptions, SendResult, UploadedImage,
+    ConnectionHandle, ConnectionState, ImChannelCapabilities, ImConversationCapabilities, ImEvent,
+    ImEventMessage, ImEventSource, ImFileAttachment, ImFileMediaKind, ImImageAttachment,
+    ImImageSource, ImInteractionCapabilities, ImMessageReference, ImProgressPresentation,
+    ImProviderConfig, ImProviderType, ImSendCapabilities, ImSendPartCapability, ImSendSupportLevel,
+    ImTarget, ProviderValidation, SendOptions, SendResult, UploadedImage,
 };
 use crate::im_gateway::weixin_context_store::WeixinContextStore;
+use crate::im_gateway::weixin_sync_store::WeixinSyncCursorStore;
 
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 const DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
-const DEFAULT_POLL_INTERVAL_MS: u64 = 3_000;
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_LONG_POLL_TIMEOUT_MS: u64 = 35_000;
+const MIN_LONG_POLL_TIMEOUT_MS: u64 = 5_000;
+const MAX_LONG_POLL_TIMEOUT_MS: u64 = 120_000;
+const LONG_POLL_NETWORK_MARGIN_MS: u64 = 5_000;
 const LOGIN_HTTP_TIMEOUT: Duration = Duration::from_secs(75);
 const LOGIN_QR_EXPIRES_IN_SECONDS: u64 = 60;
 const TEXT_RETRY_CHUNK_MAX_CHARS: usize = 1_000;
 const TEXT_RETRY_CHUNK_MAX_BYTES: usize = 3_000;
+const MAX_OUTBOUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_OUTBOUND_FILE_BYTES: usize = 30 * 1024 * 1024;
+const MAX_PENDING_OUTBOUND_MEDIA_ITEMS: usize = 256;
+const MAX_PENDING_OUTBOUND_MEDIA_BYTES: usize = 256 * 1024 * 1024;
+const PENDING_OUTBOUND_MEDIA_TTL_MS: u64 = 10 * 60 * 1_000;
+const MAX_INBOUND_MEDIA_BYTES: usize = 100 * 1024 * 1024;
+
+pub(crate) struct WeixinToolProgress<'a> {
+    pub channel_run_id: &'a str,
+    pub client_msg_id: &'a str,
+    pub tool_name: &'a str,
+    pub tool_call_id: Option<&'a str>,
+    pub finished_status: Option<&'a str>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,21 +74,82 @@ pub struct WeixinLoginAccount {
 struct AccountRuntime {
     get_updates_buf: String,
     context_tokens: HashMap<String, String>,
+    long_poll_timeout_ms: u64,
+}
+
+#[derive(Debug)]
+struct PollBatch {
+    events: Vec<ImEvent>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct WeixinConnectionStatusEvent {
+    pub(crate) state: ConnectionState,
+    pub(crate) error: Option<String>,
+}
+
+pub(crate) type WeixinConnectionStatusTx =
+    tokio::sync::mpsc::UnboundedSender<WeixinConnectionStatusEvent>;
+
+#[derive(Clone)]
+struct CachedTypingTicket {
+    ticket: String,
+    expires_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutboundMediaKind {
+    Image,
+    File,
+    Video,
+}
+
+impl OutboundMediaKind {
+    fn upload_media_type(self) -> u8 {
+        match self {
+            Self::Image => 1,
+            Self::Video => 2,
+            Self::File => 3,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::File => "file",
+            Self::Video => "video",
+        }
+    }
 }
 
 #[derive(Clone)]
-struct OutboundImage {
+struct PendingOutboundMedia {
+    kind: OutboundMediaKind,
     file_name: String,
     bytes: Vec<u8>,
     mime_type: Option<String>,
+    created_at_ms: u64,
+}
+
+struct UploadedOutboundMedia {
+    pending: PendingOutboundMedia,
+    download_param: String,
+    aeskey_hex: String,
+    ciphertext_size: usize,
 }
 
 pub struct WeixinProvider {
     http: reqwest::Client,
+    media_http: reqwest::Client,
+    poll_http: reqwest::Client,
     login_http: reqwest::Client,
     runtime: Arc<RwLock<HashMap<String, AccountRuntime>>>,
     context_store: Option<Arc<WeixinContextStore>>,
-    outbound_images: Arc<RwLock<HashMap<String, OutboundImage>>>,
+    sync_cursor_store: Option<Arc<WeixinSyncCursorStore>>,
+    pending_outbound_media: Arc<RwLock<HashMap<String, PendingOutboundMedia>>>,
+    typing_tickets: Arc<RwLock<HashMap<String, CachedTypingTicket>>>,
+    active_channel_runs: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl Default for WeixinProvider {
@@ -107,8 +189,18 @@ impl WeixinProvider {
             .timeout(login_timeout)
             .build()
             .unwrap_or_default();
+        let media_http = bifrost_core::outbound_reqwest_client_builder()
+            .timeout(default_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default();
+        let poll_http = bifrost_core::outbound_reqwest_client_builder()
+            .build()
+            .unwrap_or_default();
         Self {
             http,
+            media_http,
+            poll_http,
             login_http,
             runtime: Arc::new(RwLock::new(HashMap::new())),
             context_store: match WeixinContextStore::new(data_dir) {
@@ -118,7 +210,16 @@ impl WeixinProvider {
                     None
                 }
             },
-            outbound_images: Arc::new(RwLock::new(HashMap::new())),
+            sync_cursor_store: match WeixinSyncCursorStore::new(data_dir) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(error) => {
+                    warn!(%error, "failed to initialize encrypted Weixin sync cursor store");
+                    None
+                }
+            },
+            pending_outbound_media: Arc::new(RwLock::new(HashMap::new())),
+            typing_tickets: Arc::new(RwLock::new(HashMap::new())),
+            active_channel_runs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -142,10 +243,15 @@ impl WeixinProvider {
         })
     }
 
-    fn context_token(&self, account_id: &str, user_id: &str) -> Option<String> {
+    fn account_runtime_key(config: &ImProviderConfig) -> String {
+        format!("{}\0{}", config.id.trim(), Self::account_id(config))
+    }
+
+    fn context_token(&self, config: &ImProviderConfig, user_id: &str) -> Option<String> {
+        let account_id = Self::account_id(config);
         self.runtime
             .read()
-            .get(account_id)
+            .get(&Self::account_runtime_key(config))
             .and_then(|runtime| runtime.context_tokens.get(user_id).cloned())
             .or_else(|| {
                 self.context_store
@@ -159,8 +265,222 @@ impl WeixinProvider {
     }
 
     pub fn send_ready_for_user(&self, config: &ImProviderConfig, user_id: &str) -> bool {
-        self.context_token(Self::account_id(config), user_id)
-            .is_some()
+        self.context_token(config, user_id).is_some()
+    }
+
+    fn user_runtime_key(config: &ImProviderConfig, user_id: &str) -> String {
+        format!(
+            "{}\0{}\0{}",
+            config.id.trim(),
+            Self::account_id(config),
+            user_id.trim()
+        )
+    }
+
+    pub(crate) fn begin_channel_run(&self, config: &ImProviderConfig, target: &ImTarget) -> String {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        self.active_channel_runs.write().insert(
+            Self::user_runtime_key(config, &target.receive_id),
+            run_id.clone(),
+        );
+        run_id
+    }
+
+    fn active_channel_run_id(&self, config: &ImProviderConfig, user_id: &str) -> Option<String> {
+        self.active_channel_runs
+            .read()
+            .get(&Self::user_runtime_key(config, user_id))
+            .cloned()
+    }
+
+    pub(crate) fn end_channel_run(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        channel_run_id: &str,
+    ) {
+        let key = Self::user_runtime_key(config, &target.receive_id);
+        let mut runs = self.active_channel_runs.write();
+        if runs
+            .get(&key)
+            .is_some_and(|active| active == channel_run_id)
+        {
+            runs.remove(&key);
+        }
+    }
+
+    pub(crate) fn invalidate_typing_ticket(&self, config: &ImProviderConfig, target: &ImTarget) {
+        self.typing_tickets
+            .write()
+            .remove(&Self::user_runtime_key(config, &target.receive_id));
+    }
+
+    pub(crate) async fn typing_ticket(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+    ) -> Result<String> {
+        let key = Self::user_runtime_key(config, &target.receive_id);
+        if let Some(cached) = self.typing_tickets.read().get(&key).cloned() {
+            if cached.expires_at_ms > now_ms() {
+                return Ok(cached.ticket);
+            }
+        }
+        let context_token = self
+            .context_token(config, &target.receive_id)
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Config(
+                    "weixin typing requires an inbound context token".to_string(),
+                )
+            })?;
+        let response = Self::with_common_headers(
+            self.http
+                .post(format!("{}/ilink/bot/getconfig", Self::base_url(config))),
+            Self::bot_token(config)?,
+        )
+        .json(&serde_json::json!({
+            "ilink_user_id": target.receive_id,
+            "context_token": context_token,
+            "base_info": { "channel_version": "1.0.3" }
+        }))
+        .send()
+        .await
+        .map_err(|error| {
+            bifrost_core::BifrostError::Network(format!("weixin getconfig failed: {error}"))
+        })?;
+        let response = Self::read_json_response_or_empty(response, "getconfig").await?;
+        if let Some(error) = Self::send_error_message(&response) {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "weixin getconfig failed: {error}"
+            )));
+        }
+        let ticket = response
+            .get("typing_ticket")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Network(
+                    "weixin getconfig response missing typing_ticket".to_string(),
+                )
+            })?
+            .to_string();
+        self.typing_tickets.write().insert(
+            key,
+            CachedTypingTicket {
+                ticket: ticket.clone(),
+                expires_at_ms: now_ms().saturating_add(20 * 60 * 60 * 1_000),
+            },
+        );
+        Ok(ticket)
+    }
+
+    pub(crate) async fn send_typing_status(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        ticket: &str,
+        status: u8,
+    ) -> Result<()> {
+        let response = Self::with_common_headers(
+            self.http
+                .post(format!("{}/ilink/bot/sendtyping", Self::base_url(config))),
+            Self::bot_token(config)?,
+        )
+        .json(&serde_json::json!({
+            "ilink_user_id": target.receive_id,
+            "typing_ticket": ticket,
+            "status": status,
+            "base_info": { "channel_version": "1.0.3" }
+        }))
+        .send()
+        .await
+        .map_err(|error| {
+            bifrost_core::BifrostError::Network(format!("weixin sendtyping failed: {error}"))
+        })?;
+        let response = Self::read_json_response_or_empty(response, "sendtyping").await?;
+        if let Some(error) = Self::send_error_message(&response) {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "weixin sendtyping failed: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn send_tool_progress(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        progress: WeixinToolProgress<'_>,
+    ) -> Result<SendResult> {
+        let (item_type, item_name, completed) = if progress.finished_status.is_some() {
+            (12, "tool_call_result_item", true)
+        } else {
+            (11, "tool_call_start_item", false)
+        };
+        let mut tool_item = serde_json::json!({ "tool_name": progress.tool_name });
+        if let Some(tool_call_id) = progress.tool_call_id {
+            tool_item["tool_call_id"] = serde_json::Value::String(tool_call_id.to_string());
+        }
+        if let Some(status) = progress.finished_status {
+            tool_item["status"] = serde_json::Value::String(status.to_string());
+        }
+        let mut item = serde_json::json!({
+            "type": item_type,
+            "create_time_ms": now_ms(),
+            "is_completed": completed
+        });
+        item[item_name] = tool_item;
+        let context_token = self
+            .context_token(config, &target.receive_id)
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Config(
+                    "weixin progress requires an inbound context token".to_string(),
+                )
+            })?;
+        let payload = serde_json::json!({
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": target.receive_id,
+                "client_id": progress.client_msg_id,
+                "message_type": 2,
+                "message_state": 2,
+                "item_list": [item],
+                "context_token": context_token,
+                "run_id": progress.channel_run_id
+            },
+            "base_info": { "channel_version": "1.0.3" }
+        });
+        let response = Self::with_common_headers(
+            self.http
+                .post(format!("{}/ilink/bot/sendmessage", Self::base_url(config))),
+            Self::bot_token(config)?,
+        )
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "weixin send tool progress failed: {error}"
+            ))
+        })?;
+        let response = Self::read_json_response_or_empty(response, "send tool progress").await?;
+        if let Some(error) = Self::send_error_message(&response) {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "weixin send tool progress failed: {error}"
+            )));
+        }
+        Ok(SendResult {
+            message_id: response
+                .get("message_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .or_else(|| Some(progress.client_msg_id.to_string())),
+            request_id: response
+                .get("request_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        })
     }
 
     #[cfg(test)]
@@ -195,6 +515,14 @@ impl WeixinProvider {
     fn random_wechat_uin() -> String {
         let value: u32 = rand::random();
         base64::engine::general_purpose::STANDARD.encode(value.to_string())
+    }
+
+    fn normalize_long_poll_timeout_ms(timeout_ms: u64) -> u64 {
+        timeout_ms.clamp(MIN_LONG_POLL_TIMEOUT_MS, MAX_LONG_POLL_TIMEOUT_MS)
+    }
+
+    fn long_poll_request_timeout_ms(server_timeout_ms: u64) -> u64 {
+        server_timeout_ms.saturating_add(LONG_POLL_NETWORK_MARGIN_MS)
     }
 
     pub async fn start_login(&self, base_url: Option<&str>) -> Result<WeixinLoginStart> {
@@ -346,50 +674,90 @@ impl WeixinProvider {
         })
     }
 
-    async fn poll_once(&self, config: &ImProviderConfig) -> Result<Vec<ImEvent>> {
+    async fn poll_once(&self, config: &ImProviderConfig) -> Result<PollBatch> {
         let base_url = Self::base_url(config);
         let account_id = Self::account_id(config).to_string();
+        let runtime_key = Self::account_runtime_key(config);
         let bot_token = Self::bot_token(config)?;
-        let get_updates_buf = self
-            .runtime
-            .read()
-            .get(&account_id)
-            .map(|runtime| runtime.get_updates_buf.clone())
-            .unwrap_or_default();
+        let (get_updates_buf, server_timeout_ms) = {
+            let runtime = self.runtime.read();
+            let current = runtime.get(&runtime_key);
+            let cursor = current
+                .map(|runtime| runtime.get_updates_buf.clone())
+                .filter(|cursor| !cursor.is_empty())
+                .or_else(|| {
+                    self.sync_cursor_store
+                        .as_ref()
+                        .and_then(|store| store.get(&config.id, &account_id))
+                })
+                .unwrap_or_default();
+            let timeout = current
+                .map(|runtime| runtime.long_poll_timeout_ms)
+                .filter(|timeout| *timeout > 0)
+                .unwrap_or(DEFAULT_LONG_POLL_TIMEOUT_MS);
+            (cursor, timeout)
+        };
         let url = format!("{base_url}/ilink/bot/getupdates");
-        let response: serde_json::Value = self
-            .http
-            .post(url)
-            .header("content-type", "application/json")
-            .header("iLink-App-ClientVersion", "1")
-            .header("AuthorizationType", "ilink_bot_token")
-            .header("Authorization", format!("Bearer {bot_token}"))
-            .json(&serde_json::json!({ "get_updates_buf": get_updates_buf }))
-            .send()
-            .await
-            .map_err(|e| {
-                bifrost_core::BifrostError::Network(format!("weixin getupdates failed: {e}"))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                bifrost_core::BifrostError::Network(format!(
-                    "weixin getupdates response parse failed: {e}"
-                ))
-            })?;
-
-        if let Some(next_buf) = response
+        let response = Self::with_common_headers(
+            self.poll_http.post(url).timeout(Duration::from_millis(
+                Self::long_poll_request_timeout_ms(server_timeout_ms),
+            )),
+            bot_token,
+        )
+        .json(&serde_json::json!({
+            "get_updates_buf": get_updates_buf,
+            "base_info": { "channel_version": "1.0.3" }
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            bifrost_core::BifrostError::Network(format!("weixin getupdates failed: {e}"))
+        })?;
+        let response_status = response.status();
+        if !response_status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "weixin getupdates HTTP error: status={response_status}, body={}",
+                truncate_chars(&body, 2_000)
+            )));
+        }
+        let response: serde_json::Value = response.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "weixin getupdates response parse failed: {e}"
+            ))
+        })?;
+        if let Some(error) = Self::send_error_message(&response) {
+            let authentication_required = response
+                .get("ret")
+                .or_else(|| response.get("errcode"))
+                .and_then(|value| value.as_i64())
+                == Some(-14);
+            let prefix = if authentication_required {
+                "weixin authentication required"
+            } else {
+                "weixin getupdates failed"
+            };
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "{prefix}: {error}"
+            )));
+        }
+        if let Some(timeout) = response
+            .get("longpolling_timeout_ms")
+            .or_else(|| response.get("long_polling_timeout_ms"))
+            .and_then(|value| value.as_u64())
+        {
+            self.runtime
+                .write()
+                .entry(runtime_key.clone())
+                .or_default()
+                .long_poll_timeout_ms = Self::normalize_long_poll_timeout_ms(timeout);
+        }
+        let next_cursor = response
             .get("get_updates_buf")
             .or_else(|| response.get("next_get_updates_buf"))
             .or_else(|| response.get("sync_buf"))
             .and_then(|v| v.as_str())
-        {
-            self.runtime
-                .write()
-                .entry(account_id.clone())
-                .or_default()
-                .get_updates_buf = next_buf.to_string();
-        }
+            .map(str::to_string);
         let updates = response
             .get("updates")
             .or_else(|| response.get("messages"))
@@ -415,7 +783,7 @@ impl WeixinProvider {
                         .put(&account_id, &from, context_token)?;
                     self.runtime
                         .write()
-                        .entry(account_id.clone())
+                        .entry(runtime_key.clone())
                         .or_default()
                         .context_tokens
                         .insert(from, context_token.to_string());
@@ -423,7 +791,10 @@ impl WeixinProvider {
             }
             events.push(Self::normalize_update(config, &account_id, update));
         }
-        Ok(events)
+        Ok(PollBatch {
+            events,
+            next_cursor,
+        })
     }
 
     fn normalize_update(
@@ -446,9 +817,26 @@ impl WeixinProvider {
         )
         .unwrap_or_else(|| format!("weixin-{}-{:016x}", account_id, stable_hash(&raw_json)));
         let images = Self::message_images(&update);
+        let files = Self::message_files(&update);
         let reply_to = Self::message_reference(&update);
         let mut text = Self::message_text(&update);
-        if text.trim().is_empty() && images.is_empty() {
+        let voice_transcripts = Self::message_voice_transcripts(&update);
+        if !voice_transcripts.is_empty() {
+            if !text.trim().is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str("【语音转写】\n");
+            text.push_str(&voice_transcripts.join("\n"));
+        } else if files
+            .iter()
+            .any(|file| file.media_kind == ImFileMediaKind::Voice)
+        {
+            if !text.trim().is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str("【语音消息未转写，已作为音频附件提供】");
+        }
+        if text.trim().is_empty() && images.is_empty() && files.is_empty() {
             text = truncate_chars(&raw_json, 2_000);
         }
         let raw_type = Self::string_or_number_field(
@@ -479,7 +867,7 @@ impl WeixinProvider {
                 text,
                 mentions: Vec::new(),
                 images,
-                files: Vec::new(),
+                files,
                 reply_to,
                 raw_type: Some(raw_type),
                 raw_content: Some(update),
@@ -588,6 +976,174 @@ impl WeixinProvider {
         images
     }
 
+    fn message_voice_transcripts(value: &serde_json::Value) -> Vec<String> {
+        let mut transcripts = Vec::new();
+        let mut collect = |item: &serde_json::Value| {
+            if item.get("type").and_then(|value| value.as_i64()) != Some(3) {
+                return;
+            }
+            if let Some(text) = item
+                .pointer("/voice_item/text")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                transcripts.push(text.to_string());
+            }
+        };
+        if let Some(items) = value.get("item_list").and_then(|items| items.as_array()) {
+            for item in items {
+                collect(item);
+                if let Some(reference) = item.pointer("/ref_msg/message_item") {
+                    collect(reference);
+                }
+            }
+        } else {
+            collect(value);
+        }
+        transcripts
+    }
+
+    fn message_files(value: &serde_json::Value) -> Vec<ImFileAttachment> {
+        let mut files = Vec::new();
+        if let Some(items) = value.get("item_list").and_then(|items| items.as_array()) {
+            for item in items {
+                Self::push_file_from_item(item, &mut files);
+                if let Some(reference) = item.pointer("/ref_msg/message_item") {
+                    Self::push_file_from_item(reference, &mut files);
+                }
+            }
+        } else {
+            Self::push_file_from_item(value, &mut files);
+        }
+        files
+    }
+
+    fn push_file_from_item(item: &serde_json::Value, files: &mut Vec<ImFileAttachment>) {
+        let Some(item_type) = item.get("type").and_then(|value| value.as_i64()) else {
+            return;
+        };
+        let (media_kind, media_path, default_name, default_mime) = match item_type {
+            3 => {
+                let transcript = item
+                    .pointer("/voice_item/text")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if transcript.is_some() {
+                    return;
+                }
+                (
+                    ImFileMediaKind::Voice,
+                    "/voice_item",
+                    "voice.silk",
+                    "audio/silk",
+                )
+            }
+            4 => (
+                ImFileMediaKind::File,
+                "/file_item",
+                "attachment.bin",
+                "application/octet-stream",
+            ),
+            5 => (
+                ImFileMediaKind::Video,
+                "/video_item",
+                "video.mp4",
+                "video/mp4",
+            ),
+            _ => return,
+        };
+        let Some(media_item) = item.pointer(media_path) else {
+            return;
+        };
+        let media = media_item.get("media");
+        let download_url = media
+            .and_then(|value| value.get("full_url"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+            .map(str::to_string);
+        let encrypted_query_param = media
+            .and_then(|value| value.get("encrypt_query_param"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if download_url.is_none() && encrypted_query_param.is_none() {
+            return;
+        }
+        let aes_key = media
+            .and_then(|value| value.get("aes_key"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let name = media_item
+            .get("file_name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default_name)
+            .to_string();
+        let mime_type = match media_kind {
+            ImFileMediaKind::File => mime_guess::from_path(&name)
+                .first_raw()
+                .unwrap_or(default_mime)
+                .to_string(),
+            _ => default_mime.to_string(),
+        };
+        let file_key = Self::string_or_number_field(item, &["msg_id", "message_id", "id"])
+            .unwrap_or_else(|| format!("weixin-media-{:016x}", stable_hash(&item.to_string())));
+        if files.iter().any(|file| file.file_key == file_key) {
+            return;
+        }
+        let size_bytes = match media_kind {
+            ImFileMediaKind::File => Self::u64_field(media_item, &["len"]),
+            ImFileMediaKind::Video => Self::u64_field(media_item, &["video_size"]),
+            ImFileMediaKind::Voice => None,
+        };
+        let duration_ms = match media_kind {
+            ImFileMediaKind::Video => Self::u64_field(media_item, &["play_length"]),
+            ImFileMediaKind::Voice => Self::u64_field(media_item, &["playtime"]),
+            ImFileMediaKind::File => None,
+        };
+        let codec = (media_kind == ImFileMediaKind::Voice).then(|| {
+            Self::u64_field(media_item, &["encode_type"])
+                .map(Self::voice_codec_name)
+                .unwrap_or("unknown")
+                .to_string()
+        });
+        files.push(ImFileAttachment {
+            file_key,
+            name: Some(name),
+            mime_type: Some(mime_type),
+            size_bytes,
+            data_base64: None,
+            download_url,
+            media_kind,
+            encrypted_query_param,
+            aes_key,
+            transcript: None,
+            duration_ms,
+            codec,
+        });
+    }
+
+    fn voice_codec_name(encode_type: u64) -> &'static str {
+        match encode_type {
+            1 => "pcm",
+            2 => "adpcm",
+            3 => "feature",
+            4 => "speex",
+            5 => "amr",
+            6 => "silk",
+            7 => "mp3",
+            8 => "ogg-speex",
+            _ => "unknown",
+        }
+    }
+
     fn push_image_from_item(item: &serde_json::Value, images: &mut Vec<ImImageAttachment>) {
         let item_type = item.get("type").and_then(|v| v.as_i64());
         if item_type != Some(2) && item.get("image_item").is_none() {
@@ -625,8 +1181,6 @@ impl WeixinProvider {
             return;
         }
         let file_key = Self::string_or_number_field(item, &["msg_id", "message_id", "id"])
-            .or_else(|| encrypted_query_param.clone())
-            .or_else(|| download_url.clone())
             .unwrap_or_else(|| format!("weixin-image-{:016x}", stable_hash(&item.to_string())));
         if images.iter().any(|image| image.file_key == file_key) {
             return;
@@ -806,8 +1360,32 @@ impl WeixinProvider {
         chunks
             .into_iter()
             .enumerate()
-            .map(|(idx, chunk)| format!("[{}/{}]\n{}", idx + 1, total, chunk))
+            .map(|(idx, chunk)| format!("[{}/{}]\n\n{}", idx + 1, total, chunk))
             .collect()
+    }
+
+    /// Weixin's native text bubble collapses a single LF as inline whitespace,
+    /// while an empty line is rendered as a visible paragraph break. Promote
+    /// single line breaks without expanding existing paragraph spacing.
+    fn render_text_for_weixin(text: &str) -> String {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut rendered = String::with_capacity(normalized.len());
+        let mut chars = normalized.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\n' {
+                rendered.push(ch);
+                continue;
+            }
+            let mut newline_count = 1;
+            while chars.peek() == Some(&'\n') {
+                chars.next();
+                newline_count += 1;
+            }
+            for _ in 0..newline_count.max(2) {
+                rendered.push('\n');
+            }
+        }
+        rendered
     }
 
     async fn send_text_once(
@@ -818,7 +1396,6 @@ impl WeixinProvider {
         client_msg_id: String,
     ) -> Result<SendResult> {
         let base_url = Self::base_url(config);
-        let account_id = Self::account_id(config);
         let bot_token = Self::bot_token(config)?;
         let mut msg = serde_json::json!({
             "from_user_id": "",
@@ -834,7 +1411,7 @@ impl WeixinProvider {
             }],
         });
         let context_token = self
-            .context_token(account_id, &target.receive_id)
+            .context_token(config, &target.receive_id)
             .ok_or_else(|| {
                 bifrost_core::BifrostError::Config(
                     "weixin provider is connected but not send-ready; send the bot an inbound message first"
@@ -842,6 +1419,9 @@ impl WeixinProvider {
                 )
             })?;
         msg["context_token"] = serde_json::Value::String(context_token);
+        if let Some(run_id) = self.active_channel_run_id(config, &target.receive_id) {
+            msg["run_id"] = serde_json::Value::String(run_id);
+        }
         let payload = serde_json::json!({
             "msg": msg,
             "base_info": {
@@ -886,11 +1466,18 @@ impl WeixinProvider {
         text: &str,
         client_msg_id: &str,
     ) -> Result<SendResult> {
-        let chunks = Self::split_text_messages_for_retry(text);
+        let rendered_text = Self::render_text_for_weixin(text);
+        let original_error = match self
+            .send_text_once(config, target, &rendered_text, client_msg_id.to_string())
+            .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error @ bifrost_core::BifrostError::Network(_)) => error,
+            Err(error) => return Err(error),
+        };
+        let chunks = Self::split_text_messages_for_retry(&rendered_text);
         if chunks.len() <= 1 {
-            return self
-                .send_text_once(config, target, text, client_msg_id.to_string())
-                .await;
+            return Err(original_error);
         }
 
         let mut first_message_id = None;
@@ -902,7 +1489,7 @@ impl WeixinProvider {
                 .await
                 .map_err(|error| {
                     bifrost_core::BifrostError::Network(format!(
-                        "weixin sendmessage chunk {}/{} failed: {error}",
+                        "weixin full message failed ({original_error}); fallback chunk {}/{} failed: {error}",
                         idx + 1,
                         chunks.len()
                     ))
@@ -956,36 +1543,82 @@ impl WeixinProvider {
             })
     }
 
-    async fn upload_outbound_image_for_target(
+    fn classify_outbound_file(bytes: &[u8], mime_type: Option<&str>) -> OutboundMediaKind {
+        let mime_type = mime_type
+            .and_then(|value| value.split(';').next())
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+        let is_mp4 = bytes.len() >= 12 && &bytes[4..8] == b"ftyp";
+        let is_webm = bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]);
+        match mime_type.as_deref() {
+            Some("video/mp4") if is_mp4 => OutboundMediaKind::Video,
+            Some("video/webm") if is_webm => OutboundMediaKind::Video,
+            _ => OutboundMediaKind::File,
+        }
+    }
+
+    fn insert_pending_outbound_media(&self, pending: PendingOutboundMedia) -> Result<String> {
+        let now = now_ms();
+        let mut store = self.pending_outbound_media.write();
+        store.retain(|_, media| {
+            now.saturating_sub(media.created_at_ms) <= PENDING_OUTBOUND_MEDIA_TTL_MS
+        });
+        let pending_bytes = store.values().map(|media| media.bytes.len()).sum::<usize>();
+        if store.len() >= MAX_PENDING_OUTBOUND_MEDIA_ITEMS
+            || pending_bytes.saturating_add(pending.bytes.len()) > MAX_PENDING_OUTBOUND_MEDIA_BYTES
+        {
+            return Err(bifrost_core::BifrostError::Config(
+                "weixin pending outbound media cache is full; retry after pending sends finish"
+                    .to_string(),
+            ));
+        }
+        let key = format!(
+            "weixin-outbound-{}-{}-{}",
+            pending.kind.label(),
+            now,
+            uuid::Uuid::new_v4()
+        );
+        store.insert(key.clone(), pending);
+        Ok(key)
+    }
+
+    async fn upload_outbound_media_for_target(
         &self,
         config: &ImProviderConfig,
         target: &ImTarget,
-        image_key: &str,
-    ) -> Result<serde_json::Value> {
-        let image = self
-            .outbound_images
+        media_key: &str,
+        expected_kind: Option<OutboundMediaKind>,
+    ) -> Result<UploadedOutboundMedia> {
+        let pending = self
+            .pending_outbound_media
             .read()
-            .get(image_key)
+            .get(media_key)
             .cloned()
             .ok_or_else(|| {
                 bifrost_core::BifrostError::Config(format!(
-                    "weixin outbound image key not found: {image_key}"
+                    "weixin outbound media key not found: {media_key}"
                 ))
             })?;
+        if expected_kind.is_some_and(|kind| kind != pending.kind) {
+            return Err(bifrost_core::BifrostError::Config(format!(
+                "weixin outbound media kind mismatch for {}",
+                pending.file_name
+            )));
+        }
         let base_url = Self::base_url(config);
         let bot_token = Self::bot_token(config)?;
         let mut aes_key = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut aes_key);
         let aeskey_hex = Self::bytes_to_hex(&aes_key);
-        let ciphertext = Self::encrypt_aes_128_ecb(&image.bytes, &aes_key)?;
-        let rawfilemd5 = format!("{:x}", md5::compute(&image.bytes));
+        let ciphertext = Self::encrypt_aes_128_ecb(&pending.bytes, &aes_key)?;
+        let rawfilemd5 = format!("{:x}", md5::compute(&pending.bytes));
         let filekey = format!("bifrost-{}-{}", now_ms(), uuid::Uuid::new_v4());
 
         let get_upload_payload = serde_json::json!({
             "filekey": filekey,
-            "media_type": 1,
+            "media_type": pending.kind.upload_media_type(),
             "to_user_id": target.receive_id,
-            "rawsize": image.bytes.len(),
+            "rawsize": pending.bytes.len(),
             "rawfilemd5": rawfilemd5,
             "filesize": ciphertext.len(),
             "no_need_thumb": true,
@@ -1033,7 +1666,10 @@ impl WeixinProvider {
             .send()
             .await
             .map_err(|e| {
-                bifrost_core::BifrostError::Network(format!("weixin CDN image upload failed: {e}"))
+                bifrost_core::BifrostError::Network(format!(
+                    "weixin CDN {} upload failed: {e}",
+                    pending.kind.label()
+                ))
             })?;
         let cdn_status = cdn_response.status();
         let download_param = cdn_response
@@ -1046,37 +1682,155 @@ impl WeixinProvider {
         if !cdn_status.is_success() {
             let body = cdn_response.text().await.unwrap_or_default();
             return Err(bifrost_core::BifrostError::Network(format!(
-                "weixin CDN image upload error: status={cdn_status}, body={body}"
+                "weixin CDN {} upload error: status={cdn_status}, body={body}",
+                pending.kind.label()
             )));
         }
         let download_param = download_param.ok_or_else(|| {
-            bifrost_core::BifrostError::Network(
-                "weixin CDN image upload missing x-encrypted-param header".to_string(),
-            )
+            bifrost_core::BifrostError::Network(format!(
+                "weixin CDN {} upload missing x-encrypted-param header",
+                pending.kind.label()
+            ))
         })?;
 
         debug!(
             provider_id = %config.id,
             target = %target.receive_id,
-            file_name = %image.file_name,
-            mime_type = image.mime_type.as_deref().unwrap_or("unknown"),
-            rawsize = image.bytes.len(),
+            media_kind = pending.kind.label(),
+            file_name = %pending.file_name,
+            mime_type = pending.mime_type.as_deref().unwrap_or("unknown"),
+            rawsize = pending.bytes.len(),
             ciphertext_size = ciphertext.len(),
-            "weixin outbound image uploaded to CDN"
+            "weixin outbound media uploaded to CDN"
         );
 
-        // Release the image bytes from memory now that upload is complete
-        self.outbound_images.write().remove(image_key);
+        Ok(UploadedOutboundMedia {
+            pending,
+            download_param,
+            aeskey_hex,
+            ciphertext_size: ciphertext.len(),
+        })
+    }
 
-        Ok(serde_json::json!({
-            "media": {
-                "encrypt_query_param": download_param,
-                "aes_key": base64::engine::general_purpose::STANDARD.encode(aeskey_hex.as_bytes()),
-                "encrypt_type": 1
-            },
-            "aeskey": aeskey_hex,
-            "mid_size": ciphertext.len()
-        }))
+    fn outbound_media_item(uploaded: &UploadedOutboundMedia) -> serde_json::Value {
+        let media = serde_json::json!({
+            "encrypt_query_param": uploaded.download_param,
+            "aes_key": base64::engine::general_purpose::STANDARD
+                .encode(uploaded.aeskey_hex.as_bytes()),
+            "encrypt_type": 1
+        });
+        match uploaded.pending.kind {
+            OutboundMediaKind::Image => serde_json::json!({
+                "type": 2,
+                "image_item": {
+                    "media": media,
+                    "aeskey": uploaded.aeskey_hex,
+                    "mid_size": uploaded.ciphertext_size
+                }
+            }),
+            OutboundMediaKind::File => serde_json::json!({
+                "type": 4,
+                "file_item": {
+                    "media": media,
+                    "file_name": uploaded.pending.file_name,
+                    "len": uploaded.pending.bytes.len().to_string()
+                }
+            }),
+            OutboundMediaKind::Video => serde_json::json!({
+                "type": 5,
+                "video_item": {
+                    "media": media,
+                    "video_size": uploaded.ciphertext_size
+                }
+            }),
+        }
+    }
+
+    async fn send_outbound_media(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        media_key: &str,
+        expected_kind: Option<OutboundMediaKind>,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        let uploaded = self
+            .upload_outbound_media_for_target(config, target, media_key, expected_kind)
+            .await?;
+        let item = Self::outbound_media_item(&uploaded);
+        let kind = uploaded.pending.kind;
+        let client_msg_id = uuid.map(str::to_string).unwrap_or_else(|| {
+            format!(
+                "bifrost-weixin-{}-{}-{}",
+                kind.label(),
+                now_ms(),
+                uuid::Uuid::new_v4()
+            )
+        });
+        let context_token = self
+            .context_token(config, &target.receive_id)
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Config(
+                    "weixin provider is connected but not send-ready; send the bot an inbound message first"
+                        .to_string(),
+                )
+            })?;
+        let mut msg = serde_json::json!({
+            "from_user_id": "",
+            "to_user_id": target.receive_id,
+            "client_id": client_msg_id,
+            "message_type": 2,
+            "message_state": 2,
+            "item_list": [item],
+            "context_token": context_token
+        });
+        if let Some(run_id) = self.active_channel_run_id(config, &target.receive_id) {
+            msg["run_id"] = serde_json::Value::String(run_id);
+        }
+        let payload = serde_json::json!({
+            "msg": msg,
+            "base_info": {
+                "channel_version": "1.0.3"
+            }
+        });
+        let response = Self::with_common_headers(
+            self.http
+                .post(format!("{}/ilink/bot/sendmessage", Self::base_url(config))),
+            Self::bot_token(config)?,
+        )
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| {
+            bifrost_core::BifrostError::Network(format!("weixin send {} failed: {e}", kind.label()))
+        })?;
+        let response =
+            Self::read_json_response_or_empty(response, &format!("send {}", kind.label())).await?;
+        if let Some(error) = Self::send_error_message(&response) {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "weixin send {} failed: {error}",
+                kind.label()
+            )));
+        }
+        self.pending_outbound_media.write().remove(media_key);
+        debug!(
+            provider_id = %config.id,
+            target = %target.receive_id,
+            media_kind = kind.label(),
+            "weixin media message sent"
+        );
+        Ok(SendResult {
+            message_id: response
+                .get("message_id")
+                .or_else(|| response.get("msgid"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .or(Some(client_msg_id)),
+            request_id: response
+                .get("request_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        })
     }
 
     fn card_to_text(card: &serde_json::Value) -> String {
@@ -1101,14 +1855,71 @@ impl WeixinProvider {
 
     pub async fn download_message_image_resource(
         &self,
-        _config: &ImProviderConfig,
+        config: &ImProviderConfig,
         image: &ImImageAttachment,
     ) -> Result<(String, Vec<u8>)> {
-        let url = image
-            .download_url
+        debug!(
+            file_key = %image.file_key,
+            has_aes_key = image.aes_key.is_some(),
+            "downloading weixin message image resource"
+        );
+        let (header_mime, bytes) = self
+            .download_and_decrypt_media(
+                config,
+                image.download_url.as_deref(),
+                image.encrypted_query_param.as_deref(),
+                image.aes_key.as_deref(),
+                &image.file_key,
+            )
+            .await?;
+        let mime_type = image
+            .mime_type
             .clone()
+            .or_else(|| header_mime.filter(|value| value.starts_with("image/")))
+            .unwrap_or_else(|| "image/png".to_string());
+        Ok((mime_type, bytes))
+    }
+
+    pub async fn download_message_file_resource(
+        &self,
+        config: &ImProviderConfig,
+        file: &ImFileAttachment,
+    ) -> Result<(String, Vec<u8>)> {
+        debug!(
+            file_key = %file.file_key,
+            media_kind = ?file.media_kind,
+            has_aes_key = file.aes_key.is_some(),
+            "downloading weixin message file resource"
+        );
+        let (header_mime, bytes) = self
+            .download_and_decrypt_media(
+                config,
+                file.download_url.as_deref(),
+                file.encrypted_query_param.as_deref(),
+                file.aes_key.as_deref(),
+                &file.file_key,
+            )
+            .await?;
+        let mime_type = file
+            .mime_type
+            .clone()
+            .or(header_mime)
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        Ok((mime_type, bytes))
+    }
+
+    async fn download_and_decrypt_media(
+        &self,
+        config: &ImProviderConfig,
+        download_url: Option<&str>,
+        encrypted_query_param: Option<&str>,
+        aes_key: Option<&str>,
+        label: &str,
+    ) -> Result<(Option<String>, Vec<u8>)> {
+        let url = download_url
+            .map(str::to_string)
             .or_else(|| {
-                image.encrypted_query_param.as_ref().map(|param| {
+                encrypted_query_param.map(|param| {
                     format!(
                         "{}/download?encrypted_query_param={}",
                         DEFAULT_CDN_BASE_URL,
@@ -1118,50 +1929,114 @@ impl WeixinProvider {
             })
             .ok_or_else(|| {
                 bifrost_core::BifrostError::Config(format!(
-                    "weixin image {} has no download URL or CDN query param",
-                    image.file_key
+                    "weixin media {label} has no download URL or CDN query param"
                 ))
             })?;
-        debug!(
-            file_key = %image.file_key,
-            has_aes_key = image.aes_key.is_some(),
-            "downloading weixin message image resource"
-        );
-        let resp = self.http.get(&url).send().await.map_err(|e| {
-            bifrost_core::BifrostError::Network(format!(
-                "weixin message image download failed: {e}"
-            ))
-        })?;
-        let status = resp.status();
-        let header_mime = resp
+        let mut current_url = Self::validate_media_download_url(config, &url)?;
+        let mut redirect_count = 0usize;
+        let response = loop {
+            let response = self
+                .media_http
+                .get(current_url.clone())
+                .send()
+                .await
+                .map_err(|error| {
+                    bifrost_core::BifrostError::Network(format!(
+                        "weixin media {label} download failed: {error}"
+                    ))
+                })?;
+            if !response.status().is_redirection() {
+                break response;
+            }
+            if redirect_count >= 5 {
+                return Err(bifrost_core::BifrostError::Network(format!(
+                    "weixin media {label} exceeded redirect limit"
+                )));
+            }
+            redirect_count += 1;
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    bifrost_core::BifrostError::Network(format!(
+                        "weixin media {label} redirect omitted Location"
+                    ))
+                })?;
+            let next_url = current_url.join(location).map_err(|error| {
+                bifrost_core::BifrostError::Config(format!(
+                    "weixin media {label} redirect URL is invalid: {error}"
+                ))
+            })?;
+            current_url = Self::validate_media_download_url(config, next_url.as_str())?;
+        };
+        let status = response.status();
+        let header_mime = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
-            .filter(|value| value.starts_with("image/"))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(str::to_string);
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = response.text().await.unwrap_or_default();
             return Err(bifrost_core::BifrostError::Network(format!(
-                "weixin message image download error: status={status}, body={body}"
+                "weixin media {label} download error: status={status}, body={body}"
             )));
         }
-        let bytes = resp.bytes().await.map_err(|e| {
-            bifrost_core::BifrostError::Network(format!(
-                "weixin message image body read failed: {e}"
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_INBOUND_MEDIA_BYTES as u64)
+        {
+            return Err(bifrost_core::BifrostError::Config(format!(
+                "weixin media {label} exceeds {} MiB download limit",
+                MAX_INBOUND_MEDIA_BYTES / 1024 / 1024
+            )));
+        }
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                bifrost_core::BifrostError::Network(format!(
+                    "weixin media {label} body read failed: {error}"
+                ))
+            })?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_INBOUND_MEDIA_BYTES {
+                return Err(bifrost_core::BifrostError::Config(format!(
+                    "weixin media {label} exceeds {} MiB download limit",
+                    MAX_INBOUND_MEDIA_BYTES / 1024 / 1024
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let bytes = if let Some(aes_key) = aes_key {
+            Self::decrypt_aes_128_ecb(&bytes, aes_key, label)?
+        } else {
+            bytes
+        };
+        Ok((header_mime, bytes))
+    }
+
+    fn validate_media_download_url(config: &ImProviderConfig, url: &str) -> Result<reqwest::Url> {
+        let parsed = reqwest::Url::parse(url).map_err(|error| {
+            bifrost_core::BifrostError::Config(format!(
+                "weixin media download URL is invalid: {error}"
             ))
         })?;
-        let bytes = if let Some(aes_key) = image.aes_key.as_deref() {
-            Self::decrypt_aes_128_ecb(bytes.as_ref(), aes_key, &image.file_key)?
-        } else {
-            bytes.to_vec()
-        };
-        let mime_type = image
-            .mime_type
-            .clone()
-            .or(header_mime)
-            .unwrap_or_else(|| "image/png".to_string());
-        Ok((mime_type, bytes))
+        let host = parsed.host_str().unwrap_or_default();
+        let official_cdn = host == "novac2c.cdn.weixin.qq.com" && parsed.scheme() == "https";
+        let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+        let base_is_loopback = reqwest::Url::parse(Self::base_url(config))
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"));
+        if official_cdn || (loopback && base_is_loopback) {
+            return Ok(parsed);
+        }
+        Err(bifrost_core::BifrostError::Config(
+            "weixin media download URL host is not allowed".to_string(),
+        ))
     }
 
     fn decrypt_aes_128_ecb(ciphertext: &[u8], aes_key: &str, label: &str) -> Result<Vec<u8>> {
@@ -1170,13 +2045,13 @@ impl WeixinProvider {
         Aes128EcbDec::new_from_slice(&key)
             .map_err(|e| {
                 bifrost_core::BifrostError::Config(format!(
-                    "weixin image {label} AES key init failed: {e}"
+                    "weixin media {label} AES key init failed: {e}"
                 ))
             })?
             .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
             .map_err(|e| {
                 bifrost_core::BifrostError::Network(format!(
-                    "weixin image {label} AES decrypt failed: {e}"
+                    "weixin media {label} AES decrypt failed: {e}"
                 ))
             })
     }
@@ -1186,7 +2061,7 @@ impl WeixinProvider {
         if trimmed.len() == 32 && trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
             return Self::hex_to_bytes(trimmed).ok_or_else(|| {
                 bifrost_core::BifrostError::Config(format!(
-                    "weixin image {label} AES hex key parse failed"
+                    "weixin media {label} AES hex key parse failed"
                 ))
             });
         }
@@ -1194,7 +2069,7 @@ impl WeixinProvider {
             .decode(trimmed)
             .map_err(|e| {
                 bifrost_core::BifrostError::Config(format!(
-                    "weixin image {label} AES key base64 decode failed: {e}"
+                    "weixin media {label} AES key base64 decode failed: {e}"
                 ))
             })?;
         if decoded.len() == 16 {
@@ -1210,7 +2085,7 @@ impl WeixinProvider {
             }
         }
         Err(bifrost_core::BifrostError::Config(format!(
-            "weixin image {label} AES key must decode to 16 raw bytes or 32-char hex string, got {} bytes",
+            "weixin media {label} AES key must decode to 16 raw bytes or 32-char hex string, got {} bytes",
             decoded.len()
         )))
     }
@@ -1224,6 +2099,188 @@ impl WeixinProvider {
             bytes.push(u8::from_str_radix(&hex[idx..idx + 2], 16).ok()?);
         }
         Some(bytes)
+    }
+}
+
+impl WeixinProvider {
+    pub(crate) async fn connect_events_with_status(
+        &self,
+        config: &ImProviderConfig,
+        sink: EventSink,
+        status_tx: Option<WeixinConnectionStatusTx>,
+    ) -> Result<ConnectionHandle> {
+        Self::bot_token(config)?;
+        if self.sync_cursor_store.is_none() {
+            return Err(bifrost_core::BifrostError::Config(
+                "encrypted Weixin sync cursor store is unavailable".to_string(),
+            ));
+        }
+        let config = config.clone();
+        let provider = Self {
+            http: self.http.clone(),
+            media_http: self.media_http.clone(),
+            poll_http: self.poll_http.clone(),
+            login_http: self.login_http.clone(),
+            runtime: Arc::clone(&self.runtime),
+            context_store: self.context_store.clone(),
+            sync_cursor_store: self.sync_cursor_store.clone(),
+            pending_outbound_media: Arc::clone(&self.pending_outbound_media),
+            typing_tickets: Arc::clone(&self.typing_tickets),
+            active_channel_runs: Arc::clone(&self.active_channel_runs),
+        };
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut consecutive_errors = 0u32;
+            'polling: loop {
+                let result = tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    result = provider.poll_once(&config) => result,
+                };
+                match result {
+                    Ok(batch) => {
+                        let was_reconnecting = consecutive_errors > 0;
+                        let mut delivery_error = None;
+                        for event in batch.events {
+                            if let Err(error) = sink.persist_and_send(event) {
+                                delivery_error = Some(error);
+                                break;
+                            }
+                        }
+                        if let Some(error) = delivery_error {
+                            if sink.is_closed() {
+                                send_connection_status(
+                                    status_tx.as_ref(),
+                                    ConnectionState::Disconnected,
+                                    Some(
+                                        "Weixin event sink closed; inbound polling stopped"
+                                            .to_string(),
+                                    ),
+                                );
+                                break 'polling;
+                            }
+                            consecutive_errors = consecutive_errors.saturating_add(1);
+                            warn!(
+                                provider_id = %config.id,
+                                error = %error,
+                                "failed to durably accept Weixin event; cursor not advanced"
+                            );
+                            send_connection_status(
+                                status_tx.as_ref(),
+                                ConnectionState::Reconnecting,
+                                Some(error.to_string()),
+                            );
+                            let delay = if consecutive_errors >= 3 {
+                                Duration::from_secs(30)
+                            } else {
+                                Duration::from_secs(2)
+                            };
+                            tokio::select! {
+                                _ = &mut shutdown_rx => break,
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                            continue;
+                        }
+                        if let Some(cursor) = batch.next_cursor {
+                            let account_id = Self::account_id(&config).to_string();
+                            let persist_result = provider
+                                .sync_cursor_store
+                                .as_ref()
+                                .expect("sync cursor store checked before connection start")
+                                .put(&config.id, &account_id, &cursor);
+                            if let Err(error) = persist_result {
+                                consecutive_errors = consecutive_errors.saturating_add(1);
+                                warn!(
+                                    provider_id = %config.id,
+                                    error = %error,
+                                    "failed to persist weixin sync cursor; cursor not advanced"
+                                );
+                                send_connection_status(
+                                    status_tx.as_ref(),
+                                    ConnectionState::Reconnecting,
+                                    Some(error.to_string()),
+                                );
+                                let delay = if consecutive_errors >= 3 {
+                                    Duration::from_secs(30)
+                                } else {
+                                    Duration::from_secs(2)
+                                };
+                                tokio::select! {
+                                    _ = &mut shutdown_rx => break,
+                                    _ = tokio::time::sleep(delay) => {}
+                                }
+                                continue;
+                            }
+                            provider
+                                .runtime
+                                .write()
+                                .entry(Self::account_runtime_key(&config))
+                                .or_default()
+                                .get_updates_buf = cursor;
+                        }
+                        consecutive_errors = 0;
+                        if was_reconnecting {
+                            send_connection_status(
+                                status_tx.as_ref(),
+                                ConnectionState::Connected,
+                                None,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                        let authentication_required =
+                            error.to_string().contains("authentication required");
+                        warn!(
+                            provider_id = %config.id,
+                            consecutive_errors,
+                            error = %error,
+                            "weixin poll failed"
+                        );
+                        if authentication_required {
+                            send_connection_status(
+                                status_tx.as_ref(),
+                                ConnectionState::AuthenticationRequired,
+                                Some(
+                                    "Weixin authorization expired; scan a new QR code".to_string(),
+                                ),
+                            );
+                            break;
+                        }
+                        send_connection_status(
+                            status_tx.as_ref(),
+                            ConnectionState::Reconnecting,
+                            Some(error.to_string()),
+                        );
+                        let delay = if consecutive_errors >= 3 {
+                            Duration::from_secs(30)
+                        } else {
+                            Duration::from_secs(2)
+                        };
+                        tokio::select! {
+                            _ = &mut shutdown_rx => break,
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                    }
+                }
+            }
+            info!(provider_id = %config.id, "weixin poll connection stopped");
+            let _ = stopped_tx.send(());
+        });
+        Ok(ConnectionHandle {
+            shutdown_tx,
+            stopped_rx: Some(stopped_rx),
+        })
+    }
+}
+
+fn send_connection_status(
+    status_tx: Option<&WeixinConnectionStatusTx>,
+    state: ConnectionState,
+    error: Option<String>,
+) {
+    if let Some(status_tx) = status_tx {
+        let _ = status_tx.send(WeixinConnectionStatusEvent { state, error });
     }
 }
 
@@ -1263,18 +2320,35 @@ impl ImProvider for WeixinProvider {
                     },
                 ),
                 ("image".into(), native(Some(10 * 1024 * 1024))),
-                (
-                    "file".into(),
-                    unsupported(
-                        "Weixin generic file sending is not verified by the iLink protocol",
-                    ),
-                ),
+                ("file".into(), native(Some(30 * 1024 * 1024))),
+                ("video".into(), native(Some(30 * 1024 * 1024))),
                 (
                     "native_card".into(),
                     unsupported("Weixin does not support Feishu native cards"),
                 ),
             ]),
             requires_context: true,
+        }
+    }
+
+    fn channel_capabilities(&self, config: &ImProviderConfig) -> ImChannelCapabilities {
+        ImChannelCapabilities {
+            send: self.send_capabilities(config),
+            interaction: ImInteractionCapabilities {
+                typing: true,
+                progress: ImProgressPresentation::StructuredEvents,
+                mutable_message: false,
+                native_reply: false,
+                reactions: false,
+                recall: false,
+            },
+            conversation: ImConversationCapabilities {
+                direct: true,
+                group: false,
+                thread: false,
+                mention: false,
+                requires_context: true,
+            },
         }
     }
 
@@ -1294,43 +2368,7 @@ impl ImProvider for WeixinProvider {
         config: &ImProviderConfig,
         sink: EventSink,
     ) -> Result<ConnectionHandle> {
-        Self::bot_token(config)?;
-        let config = config.clone();
-        let provider = Self {
-            http: self.http.clone(),
-            login_http: self.login_http.clone(),
-            runtime: Arc::clone(&self.runtime),
-            context_store: self.context_store.clone(),
-            outbound_images: Arc::clone(&self.outbound_images),
-        };
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    _ = interval.tick() => {
-                        match provider.poll_once(&config).await {
-                            Ok(events) => {
-                                for event in events {
-                                    let _ = sink.send(event);
-                                }
-                            }
-                            Err(error) => {
-                                warn!(
-                                    provider_id = %config.id,
-                                    error = %error,
-                                    "weixin poll failed"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            info!(provider_id = %config.id, "weixin poll connection stopped");
-        });
-        Ok(ConnectionHandle { shutdown_tx })
+        self.connect_events_with_status(config, sink, None).await
     }
 
     async fn send_card(
@@ -1368,19 +2406,19 @@ impl ImProvider for WeixinProvider {
                 "weixin outbound image upload requires non-empty bytes".to_string(),
             ));
         }
-        let image_key = format!(
-            "weixin-outbound-image-{}-{}",
-            now_ms(),
-            uuid::Uuid::new_v4()
-        );
-        self.outbound_images.write().insert(
-            image_key.clone(),
-            OutboundImage {
-                file_name: file_name.trim().to_string(),
-                bytes,
-                mime_type: mime_type.map(str::to_string),
-            },
-        );
+        if bytes.len() > MAX_OUTBOUND_IMAGE_BYTES {
+            return Err(bifrost_core::BifrostError::Config(format!(
+                "weixin outbound image exceeds {} MiB limit",
+                MAX_OUTBOUND_IMAGE_BYTES / 1024 / 1024
+            )));
+        }
+        let image_key = self.insert_pending_outbound_media(PendingOutboundMedia {
+            kind: OutboundMediaKind::Image,
+            file_name: file_name.trim().to_string(),
+            bytes,
+            mime_type: mime_type.map(str::to_string),
+            created_at_ms: now_ms(),
+        })?;
         Ok(UploadedImage {
             image_key,
             request_id: None,
@@ -1394,70 +2432,59 @@ impl ImProvider for WeixinProvider {
         image_key: &str,
         uuid: Option<&str>,
     ) -> Result<SendResult> {
-        let base_url = Self::base_url(config);
-        let account_id = Self::account_id(config);
-        let bot_token = Self::bot_token(config)?;
-        let image_item = self
-            .upload_outbound_image_for_target(config, target, image_key)
-            .await?;
-        let client_msg_id = uuid.map(str::to_string).unwrap_or_else(|| {
-            format!("bifrost-weixin-image-{}-{}", now_ms(), uuid::Uuid::new_v4())
-        });
-        let mut msg = serde_json::json!({
-            "from_user_id": "",
-            "to_user_id": target.receive_id,
-            "client_id": client_msg_id,
-            "message_type": 2,
-            "message_state": 2,
-            "item_list": [{
-                "type": 2,
-                "image_item": image_item
-            }],
-        });
-        let context_token = self
-            .context_token(account_id, &target.receive_id)
-            .ok_or_else(|| {
-                bifrost_core::BifrostError::Config(
-                    "weixin provider is connected but not send-ready; send the bot an inbound message first"
-                        .to_string(),
-                )
-            })?;
-        msg["context_token"] = serde_json::Value::String(context_token);
-        let payload = serde_json::json!({
-            "msg": msg,
-            "base_info": {
-                "channel_version": "1.0.3"
-            }
-        });
-        let response = Self::with_common_headers(
-            self.http.post(format!("{base_url}/ilink/bot/sendmessage")),
-            bot_token,
+        self.send_outbound_media(
+            config,
+            target,
+            image_key,
+            Some(OutboundMediaKind::Image),
+            uuid,
         )
-        .json(&payload)
-        .send()
         .await
-        .map_err(|e| {
-            bifrost_core::BifrostError::Network(format!("weixin send image failed: {e}"))
-        })?;
-        let response = Self::read_json_response_or_empty(response, "send image").await?;
-        if let Some(error) = Self::send_error_message(&response) {
-            return Err(bifrost_core::BifrostError::Network(format!(
-                "weixin send image failed: {error}"
+    }
+
+    async fn upload_file(
+        &self,
+        _config: &ImProviderConfig,
+        file_name: &str,
+        bytes: Vec<u8>,
+        mime_type: Option<&str>,
+    ) -> Result<String> {
+        if bytes.is_empty() {
+            return Err(bifrost_core::BifrostError::Config(
+                "weixin outbound file upload requires non-empty bytes".to_string(),
+            ));
+        }
+        if bytes.len() > MAX_OUTBOUND_FILE_BYTES {
+            return Err(bifrost_core::BifrostError::Config(format!(
+                "weixin outbound file exceeds {} MiB limit",
+                MAX_OUTBOUND_FILE_BYTES / 1024 / 1024
             )));
         }
-        debug!(provider_id = %config.id, target = %target.receive_id, "weixin image message sent");
-        Ok(SendResult {
-            message_id: response
-                .get("message_id")
-                .or_else(|| response.get("msgid"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or(Some(client_msg_id)),
-            request_id: response
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+        let kind = Self::classify_outbound_file(&bytes, mime_type);
+        self.insert_pending_outbound_media(PendingOutboundMedia {
+            kind,
+            file_name: file_name
+                .trim()
+                .split(['/', '\\'])
+                .next_back()
+                .filter(|value| !value.is_empty())
+                .unwrap_or("attachment.bin")
+                .to_string(),
+            bytes,
+            mime_type: mime_type.map(str::to_string),
+            created_at_ms: now_ms(),
         })
+    }
+
+    async fn send_file(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        file_key: &str,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        self.send_outbound_media(config, target, file_key, None, uuid)
+            .await
     }
 
     async fn send_native_card(

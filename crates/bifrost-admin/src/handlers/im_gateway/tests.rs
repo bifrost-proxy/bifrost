@@ -776,6 +776,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
                 size_bytes: Some(12),
                 data_base64: None,
                 download_url: None,
+                ..Default::default()
             },
             crate::im_gateway::types::ImFileAttachment {
                 file_key: "file-v3-2".to_string(),
@@ -784,6 +785,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
                 size_bytes: Some(20),
                 data_base64: None,
                 download_url: None,
+                ..Default::default()
             },
         ],
         raw_type: Some("file".to_string()),
@@ -815,6 +817,7 @@ pub(super) async fn resolve_event_files_handles_inline_limits_and_missing_messag
     };
     let mut files = Vec::new();
     for index in 0..(MAX_AGENT_ATTACHMENTS_PER_MESSAGE + 1) {
+        let inline_data = base64::engine::general_purpose::STANDARD.encode(format!("file-{index}"));
         files.push(crate::im_gateway::types::ImFileAttachment {
             file_key: format!("file-{index}"),
             name: Some(format!("file-{index}.txt")),
@@ -825,11 +828,12 @@ pub(super) async fn resolve_event_files_handles_inline_limits_and_missing_messag
             },
             size_bytes: None,
             data_base64: if index < MAX_AGENT_ATTACHMENTS_PER_MESSAGE - 1 {
-                Some(format!("ZmlsZS0{index}="))
+                Some(inline_data)
             } else {
                 None
             },
             download_url: None,
+            ..Default::default()
         });
     }
 
@@ -838,8 +842,57 @@ pub(super) async fn resolve_event_files_handles_inline_limits_and_missing_messag
     assert_eq!(resolved.len(), MAX_AGENT_ATTACHMENTS_PER_MESSAGE - 1);
     assert_eq!(resolved[0].mime_type, "application/octet-stream");
     assert_eq!(resolved[0].name.as_deref(), Some("file-0.txt"));
-    assert_eq!(resolved[0].data, "ZmlsZS00="); // inline base64 is preserved until runner save time
+    assert_eq!(resolved[0].data, "ZmlsZS0w"); // inline base64 is preserved until runner save time
     assert_eq!(resolved[1].mime_type, "text/plain");
+
+    let invalid_and_oversized = vec![
+        crate::im_gateway::types::ImFileAttachment {
+            file_key: "invalid-inline".to_string(),
+            name: Some("invalid.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: None,
+            data_base64: Some("not-base64!?".to_string()),
+            download_url: None,
+            ..Default::default()
+        },
+        crate::im_gateway::types::ImFileAttachment {
+            file_key: "oversized-declared".to_string(),
+            name: Some("huge.bin".to_string()),
+            mime_type: Some("application/octet-stream".to_string()),
+            size_bytes: Some(MAX_FEISHU_REFERENCED_FILE_BYTES + 1),
+            data_base64: None,
+            download_url: None,
+            ..Default::default()
+        },
+    ];
+    assert!(
+        resolve_event_files(&client, &provider, &event, &invalid_and_oversized)
+            .await
+            .is_empty()
+    );
+}
+
+#[test]
+pub(super) fn inbound_file_size_helpers_enforce_single_and_message_limits() {
+    assert_eq!(
+        preloaded_payload_size(Some("YWJjZA=="), "文件", "small.txt", 4),
+        Ok(Some(4))
+    );
+    let oversized = preloaded_payload_size(Some("YWJjZA=="), "文件", "large.txt", 3)
+        .expect_err("decoded file above the per-file limit must be rejected");
+    assert!(oversized.contains("large.txt"));
+    assert!(oversized.contains("上限"));
+    let invalid = preloaded_payload_size(Some("%%%"), "文件", "invalid.txt", 4)
+        .expect_err("invalid base64 must be rejected");
+    assert!(invalid.contains("不是有效 Base64"));
+
+    assert!(!referenced_file_budget_exceeded_with_limit(7, 3, 10));
+    assert!(referenced_file_budget_exceeded_with_limit(7, 4, 10));
+    assert!(referenced_file_budget_exceeded_with_limit(
+        u64::MAX,
+        1,
+        u64::MAX - 1
+    ));
 }
 
 #[tokio::test]
@@ -870,6 +923,7 @@ pub(super) async fn resolve_event_files_download_errors_are_not_returned_to_runn
         size_bytes: Some(5),
         data_base64: None,
         download_url: None,
+        ..Default::default()
     }];
 
     let resolved = resolve_event_files(&client, &provider, &event, &files).await;
@@ -959,6 +1013,7 @@ pub(super) async fn resolve_event_files_downloads_message_resources() {
         size_bytes: Some(8),
         data_base64: None,
         download_url: None,
+        ..Default::default()
     }];
 
     let resolved = resolve_event_files(&client, &provider, &event, &files).await;
@@ -998,6 +1053,7 @@ pub(super) async fn busy_queue_command_preserves_event_files() {
                 size_bytes: Some(8),
                 data_base64: Some("IyBRdWV1ZWQ=".to_string()),
                 download_url: None,
+                ..Default::default()
             }],
             raw_type: Some("file".to_string()),
             ..Default::default()
@@ -1029,12 +1085,14 @@ pub(super) async fn busy_queue_command_preserves_event_files() {
     )
     .await;
 
-    let queue = service.queue_manager.queue_status(&session_key);
-    assert_eq!(queue.len(), 1);
-    assert_eq!(queue[0].message, "please inspect the attachment");
-    assert_eq!(queue[0].files.len(), 1);
-    assert_eq!(queue[0].files[0].mime_type, "text/markdown");
-    assert_eq!(queue[0].files[0].name.as_deref(), Some("queued.md"));
+    let queue = service
+        .queue_manager
+        .pop_queue_item(&session_key)
+        .expect("queued slash-command attachment");
+    assert_eq!(queue.message, "please inspect the attachment");
+    assert_eq!(queue.files.len(), 1);
+    assert_eq!(queue.files[0].mime_type, "text/markdown");
+    assert_eq!(queue.files[0].name.as_deref(), Some("queued.md"));
 }
 
 #[tokio::test]
@@ -1442,6 +1500,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
             size_bytes: Some(12),
             data_base64: None,
             download_url: None,
+            ..Default::default()
         }],
         raw_type: Some("file".to_string()),
         ..Default::default()
@@ -1610,7 +1669,7 @@ pub(super) async fn agent_reply_download_link_with_image_content_type_uses_image
 }
 
 #[tokio::test(flavor = "current_thread")]
-pub(super) async fn agent_reply_rejects_remote_file_above_feishu_upload_limit_before_body_read() {
+pub(super) async fn agent_reply_rejects_remote_file_above_im_upload_limit_before_body_read() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind oversized attachment server");
@@ -1646,7 +1705,7 @@ pub(super) async fn agent_reply_rejects_remote_file_above_feishu_upload_limit_be
 
     assert_eq!(MAX_AGENT_REPLY_ATTACHMENT_BYTES, 30 * 1024 * 1024);
     assert!(
-        error.to_string().contains("飞书上传文件 30 MiB 上限"),
+        error.to_string().contains("IM 通道上传文件 30 MiB 上限"),
         "unexpected oversized attachment error: {error}"
     );
     server.await.expect("oversized attachment server");
@@ -1943,8 +2002,8 @@ pub(super) async fn agent_reply_attachment_failures_are_logged_and_reported_with
     assert_eq!(notice.status, MessageStatus::Success);
     let content = notice.content.as_deref().expect("notice content");
     assert!(content.contains("附件发送提示（不影响任务结论）"));
-    assert!(content.contains("飞书不允许上传空文件"));
-    assert!(content.contains("飞书上传文件 30 MiB 上限"));
+    assert!(content.contains("IM 通道不允许上传空文件"));
+    assert!(content.contains("IM 通道上传文件 30 MiB 上限"));
     assert!(content.contains("远程附件下载失败"));
 }
 
@@ -2027,6 +2086,12 @@ pub(super) fn agent_reply_collects_local_and_remote_archive_attachments() {
         ("application/x-7z-compressed", "7z"),
         ("application/vnd.rar", "rar"),
         ("application/x-rar-compressed", "rar"),
+        ("video/mp4", "mp4"),
+        ("video/webm", "webm"),
+        ("audio/mpeg", "mp3"),
+        ("audio/mp4", "m4a"),
+        ("audio/wav", "wav"),
+        ("audio/ogg", "ogg"),
     ] {
         assert_eq!(extension_from_content_type(content_type), Some(extension));
     }
@@ -2096,6 +2161,68 @@ pub(super) fn agent_reply_resolves_codex_source_positions_for_local_attachments(
             literal_colon,
         ]
     );
+}
+
+#[test]
+pub(super) fn agent_reply_collects_local_video_audio_and_patch_attachments_with_mime() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let video = temp.path().join("demo.mp4");
+    let audio = temp.path().join("summary.m4a");
+    let patch = temp.path().join("changes.patch");
+    let ordinary_file = temp.path().join("artifact.bin");
+    let image = temp.path().join("screenshot.png");
+    std::fs::write(&video, b"\0\0\0\x18ftypisomvideo").expect("write video");
+    std::fs::write(&audio, b"audio").expect("write audio");
+    std::fs::write(&patch, b"diff --git a/a b/a\n").expect("write patch");
+    std::fs::write(&ordinary_file, b"ordinary file").expect("write ordinary file");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\n").expect("write image");
+    let markdown = format!(
+        "[Video]({})\n[Audio]({})\n[Patch]({})\n[Result]({})\n[Download file]({})\n[Screenshot]({})\n[Screenshot duplicate]({})",
+        video.display(),
+        audio.display(),
+        patch.display(),
+        ordinary_file.display(),
+        ordinary_file.display(),
+        image.display(),
+        image.display(),
+    );
+    let mut images = Vec::new();
+    let mut attachments = Vec::new();
+
+    collect_agent_reply_local_attachment_links(
+        &markdown,
+        Some(temp.path()),
+        &mut images,
+        &mut attachments,
+    );
+
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].path, image);
+    assert_eq!(attachments.len(), 4);
+    assert_eq!(attachments[0].path, video);
+    assert_eq!(attachments[0].mime_type.as_deref(), Some("video/mp4"));
+    assert_eq!(attachments[1].path, audio);
+    assert!(attachments[1]
+        .mime_type
+        .as_deref()
+        .is_some_and(|mime| mime.starts_with("audio/")));
+    assert_eq!(attachments[2].path, patch);
+    assert!(matches!(
+        attachments[2].mime_type.as_deref(),
+        Some("text/x-patch" | "text/plain") | None
+    ));
+    assert_eq!(attachments[3].path, ordinary_file);
+    for (path, extension) in [
+        ("demo.mp4", "mp4"),
+        ("demo.webm", "webm"),
+        ("voice.mp3", "mp3"),
+        ("voice.m4a", "m4a"),
+        ("voice.opus", "opus"),
+        ("changes.patch", "patch"),
+        ("changes.diff", "diff"),
+    ] {
+        assert_eq!(attachment_extension_from_path(path), Some(extension));
+    }
 }
 
 #[test]
@@ -2534,6 +2661,12 @@ pub(super) async fn idempotent_weixin_send_commits_successful_provider_ack() {
     use http_body_util::BodyExt;
     use sha2::Digest;
 
+    let _test_guard = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let _loopback_guard = EnvVarGuard::set("BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL", "1");
+
     let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake Weixin provider");
@@ -2799,6 +2932,105 @@ pub(super) async fn provider_status_reports_weixin_send_readiness_and_missing_pr
 }
 
 #[tokio::test(flavor = "current_thread")]
+pub(super) async fn provider_delete_stops_pipeline_and_clears_reusable_id_state() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-reused-id".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    provider.app_id = Some("account-old".to_string());
+    provider.secret_ref = Some("bot-token".to_string());
+    provider.event_types = vec!["message.receive".to_string()];
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("provider should be saved");
+
+    let old_sink = service.event_sink_for_provider(&provider);
+    let pending = ImEvent {
+        event_id: "old-account-event".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Weixin,
+        event_type: "message.receive".to_string(),
+        source: Default::default(),
+        message: None,
+        received_at: 1,
+        raw_digest: None,
+    };
+    service
+        .event_store
+        .add_pending(&pending)
+        .expect("old account event should be durable");
+    service
+        .queue_manager
+        .push_queue("weixin-reused-id:user", "old queued turn".to_string())
+        .expect("old account queue should be populated");
+    service
+        .queue_manager
+        .push_queue("other-provider:user", "retained turn".to_string())
+        .expect("other provider queue should be populated");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/im-gateway/providers/{}/connect",
+            provider.id
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("connect provider");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    server.await.expect("provider connect server task");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .delete(format!(
+            "http://{address}/api/im-gateway/providers/{}",
+            provider.id
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("delete provider");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    server.await.expect("provider delete server task");
+
+    assert!(old_sink.is_closed());
+    assert!(service.provider_store.get(&provider.id).is_none());
+    assert!(service
+        .event_store
+        .pending_by_provider(&provider.id)
+        .is_empty());
+    assert!(service
+        .queue_manager
+        .queue_status("weixin-reused-id:user")
+        .is_empty());
+    assert_eq!(
+        service
+            .queue_manager
+            .queue_status("other-provider:user")
+            .len(),
+        1
+    );
+
+    let (address, server) = spawn_im_gateway_http(service).await;
+    let response = reqwest::Client::new()
+        .delete(format!(
+            "http://{address}/api/im-gateway/providers/{}",
+            provider.id
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("delete missing provider");
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    server.await.expect("missing provider delete server task");
+}
+
+#[tokio::test(flavor = "current_thread")]
 pub(super) async fn idempotent_message_send_rejects_oversized_key_and_not_ready_weixin() {
     use sha2::Digest;
 
@@ -2941,7 +3173,6 @@ pub(super) async fn sent_outbox_message_is_replayed_without_contacting_provider(
 #[test]
 pub(super) fn feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override()
 {
-    let provider = test_provider();
     let settings = crate::im_gateway::external_cli::ExternalCliAgentSettings {
         adapter: crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string(),
         delivery_mode: crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply,
@@ -2951,7 +3182,12 @@ pub(super) fn feishu_codex_like_external_runner_defaults_to_progress_card_withou
         std::collections::BTreeMap::from([("deliveryMode".to_string(), "runner".to_string())]);
 
     assert_eq!(
-        resolve_external_cli_delivery_mode(&provider, &settings, &runner_sources, None),
+        resolve_external_cli_delivery_mode(
+            crate::im_gateway::types::ImProgressPresentation::MutableCard,
+            &settings,
+            &runner_sources,
+            None
+        ),
         crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
     );
 
@@ -2961,19 +3197,29 @@ pub(super) fn feishu_codex_like_external_runner_defaults_to_progress_card_withou
         ..Default::default()
     };
     assert_eq!(
-        resolve_external_cli_delivery_mode(&provider, &codex_settings, &runner_sources, None),
+        resolve_external_cli_delivery_mode(
+            crate::im_gateway::types::ImProgressPresentation::MutableCard,
+            &codex_settings,
+            &runner_sources,
+            None
+        ),
         crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
     );
 
     let channel_sources =
         std::collections::BTreeMap::from([("deliveryMode".to_string(), "channel".to_string())]);
     assert_eq!(
-        resolve_external_cli_delivery_mode(&provider, &settings, &channel_sources, None),
+        resolve_external_cli_delivery_mode(
+            crate::im_gateway::types::ImProgressPresentation::MutableCard,
+            &settings,
+            &channel_sources,
+            None
+        ),
         crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply
     );
     assert_eq!(
         resolve_external_cli_delivery_mode(
-            &provider,
+            crate::im_gateway::types::ImProgressPresentation::MutableCard,
             &settings,
             &runner_sources,
             Some(crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm),
@@ -2981,11 +3227,14 @@ pub(super) fn feishu_codex_like_external_runner_defaults_to_progress_card_withou
         crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm
     );
 
-    let mut weixin_provider = test_provider();
-    weixin_provider.provider_type = ImProviderType::Weixin;
     assert_eq!(
-        resolve_external_cli_delivery_mode(&weixin_provider, &settings, &runner_sources, None),
-        crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply
+        resolve_external_cli_delivery_mode(
+            crate::im_gateway::types::ImProgressPresentation::StructuredEvents,
+            &settings,
+            &runner_sources,
+            None
+        ),
+        crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
     );
 }
 
@@ -3140,8 +3389,33 @@ pub(super) fn outbound_capabilities_distinguish_feishu_and_weixin() {
     );
     assert_eq!(
         weixin_caps.part("file").expect("file capability").support,
-        crate::im_gateway::types::ImSendSupportLevel::Unsupported
+        crate::im_gateway::types::ImSendSupportLevel::Native
     );
+    assert_eq!(
+        weixin_caps.part("video").expect("video capability").support,
+        crate::im_gateway::types::ImSendSupportLevel::Native
+    );
+    let default_caps = crate::im_gateway::provider::ImProvider::channel_capabilities(
+        &DefaultMethodProvider,
+        &weixin_config,
+    );
+    assert!(default_caps.conversation.direct);
+    assert!(!default_caps.conversation.requires_context);
+    let weixin_channel = weixin.channel_capabilities(&weixin_config);
+    assert_eq!(
+        weixin_channel.interaction.progress,
+        crate::im_gateway::types::ImProgressPresentation::StructuredEvents
+    );
+    assert!(weixin_channel.interaction.typing);
+    assert!(weixin_channel.conversation.direct);
+    assert!(weixin_channel.conversation.requires_context);
+    assert!(weixin.weixin().is_some());
+    assert!(weixin.feishu().is_none());
+
+    let unsupported = ImProviderClient::Unsupported(ImProviderType::Webhook);
+    let unsupported_channel = unsupported.channel_capabilities(&weixin_config);
+    assert!(unsupported_channel.send.parts.is_empty());
+    assert!(unsupported.weixin().is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3202,6 +3476,14 @@ pub(super) async fn outbound_capabilities_endpoint_and_unsupported_dispatch_are_
     .await
     .is_err());
     let concrete_weixin = WeixinProvider::new();
+    assert_eq!(
+        concrete_weixin
+            .send_capabilities(&provider)
+            .parts
+            .get("file")
+            .map(|part| part.support),
+        Some(crate::im_gateway::types::ImSendSupportLevel::Native)
+    );
     assert!(crate::im_gateway::provider::ImProvider::send_native_card(
         &concrete_weixin,
         &provider,
@@ -3320,6 +3602,7 @@ pub(super) async fn outbound_capabilities_endpoint_and_unsupported_dispatch_are_
         size_bytes: None,
         data_base64: None,
         download_url: None,
+        ..Default::default()
     };
     assert!(unsupported
         .download_message_file_resource(&provider, "om_message", &file)
@@ -3531,7 +3814,7 @@ pub(super) async fn outbound_target_validation_and_upload_error_matrix() {
         (
             "?provider_id=weixin-upload&kind=file&file_name=a.txt",
             vec![1],
-            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::OK,
         ),
         (
             "?provider_id=webhook-upload&kind=image&file_name=a.png",
@@ -3964,20 +4247,20 @@ pub(super) async fn outbound_bundle_validation_destination_and_provider_defaults
         created_at: 0,
         updated_at: 0,
     };
-    assert!(crate::im_gateway::provider::ImProvider::upload_file(
+    let pending_file_key = crate::im_gateway::provider::ImProvider::upload_file(
         &weixin_provider,
         &weixin,
         "a.txt",
         vec![1],
-        Some("text/plain")
+        Some("text/plain"),
     )
     .await
-    .is_err());
+    .expect("Weixin accepts outbound files before target-specific CDN upload");
     assert!(crate::im_gateway::provider::ImProvider::send_file(
         &weixin_provider,
         &weixin,
         &target,
-        "file-key",
+        &pending_file_key,
         None
     )
     .await
@@ -4118,13 +4401,14 @@ pub(super) fn outbound_bundle_part_validation_rejects_empty_and_unsafe_payloads(
 }
 
 #[tokio::test(flavor = "current_thread")]
-pub(super) async fn outbound_weixin_bundle_degrades_markdown_and_reports_unsupported_file() {
+pub(super) async fn outbound_weixin_bundle_degrades_markdown_and_reports_unknown_file_key() {
     use http_body_util::BodyExt;
 
     let _test_guard = IM_GATEWAY_TEST_ENV_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
+    let _loopback_guard = EnvVarGuard::set("BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL", "1");
 
     let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -4214,7 +4498,7 @@ pub(super) async fn outbound_weixin_bundle_degrades_markdown_and_reports_unsuppo
     assert_eq!(body["receipts"][1]["status"], "failed");
     assert!(body["receipts"][1]["error"]
         .as_str()
-        .is_some_and(|value| value.contains("not verified")));
+        .is_some_and(|value| value.contains("media key not found")));
 
     server.await.expect("gateway server");
     tokio::time::timeout(std::time::Duration::from_secs(5), provider_server)
@@ -5375,6 +5659,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
             size_bytes: Some(8),
             data_base64: Some("IyBSZXBvcnQ=".to_string()),
             download_url: None,
+            ..Default::default()
         }],
     );
     let file_session_key = build_session_key(&provider.id, Some("inactive-file-owner"));
@@ -5395,11 +5680,13 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         BusyMessageDefaultMode::Queue,
     )
     .await;
-    let file_queue = service.queue_manager.queue_status(&file_session_key);
-    assert_eq!(file_queue.len(), 1);
-    assert_eq!(file_queue[0].message, "[附件消息: 1 个]");
-    assert_eq!(file_queue[0].files.len(), 1);
-    assert_eq!(file_queue[0].files[0].mime_type, "text/markdown");
+    let file_queue = service
+        .queue_manager
+        .pop_queue_item(&file_session_key)
+        .expect("queued inline file");
+    assert_eq!(file_queue.message, "[附件消息: 1 个]");
+    assert_eq!(file_queue.files.len(), 1);
+    assert_eq!(file_queue.files[0].mime_type, "text/markdown");
 
     let mut group_file_event = event_for(
         "inactive-group-file",
@@ -5412,6 +5699,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
             size_bytes: Some(8),
             data_base64: Some("IyBHcm91cA==".to_string()),
             download_url: None,
+            ..Default::default()
         }],
     );
     group_file_event.source.chat_id = Some("chat-group-file".to_string());
@@ -5448,14 +5736,13 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         BusyMessageDefaultMode::Queue,
     )
     .await;
-    let group_file_queue = service.queue_manager.queue_status(&group_file_session_key);
-    assert_eq!(group_file_queue.len(), 1);
-    assert_eq!(group_file_queue[0].files.len(), 1);
-    assert_eq!(
-        group_file_queue[0].files[0].name.as_deref(),
-        Some("group.md")
-    );
-    let group_turn_id = group_file_queue[0]
+    let group_file_queue = service
+        .queue_manager
+        .pop_queue_item(&group_file_session_key)
+        .expect("queued group file");
+    assert_eq!(group_file_queue.files.len(), 1);
+    assert_eq!(group_file_queue.files[0].name.as_deref(), Some("group.md"));
+    let group_turn_id = group_file_queue
         .context
         .as_ref()
         .and_then(|context| context.group_turn_id.as_deref());
@@ -5488,5 +5775,44 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
     assert!(service
         .queue_manager
         .queue_status(&build_session_key(&provider.id, Some("not-owner")))
+        .is_empty());
+
+    let limited_queue_manager = Arc::new(
+        crate::im_gateway::queue_manager::SessionQueueManager::with_attachment_limits(4, 4),
+    );
+    let rejected_attachment = event_for(
+        "inactive-over-budget",
+        "owner-open-id",
+        "queue oversized attachment",
+        vec![crate::im_gateway::types::ImFileAttachment {
+            file_key: "inline-over-budget".to_string(),
+            name: Some("oversized.md".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(8),
+            data_base64: Some("IyBPdmVyIEJ1ZGdldA==".to_string()),
+            download_url: None,
+            ..Default::default()
+        }],
+    );
+    let rejected_session_key = build_session_key(&provider.id, Some("owner-open-id"));
+    handle_concurrent_event_during_chat(
+        &rejected_attachment,
+        &provider,
+        "some-other-active-session",
+        &limited_queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.group_context_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert!(limited_queue_manager
+        .queue_status(&rejected_session_key)
         .is_empty());
 }

@@ -366,6 +366,14 @@ jobs:
             sudo apt-get install --yes --no-install-recommends ffmpeg
           fi
           ffmpeg -version
+      - name: Build test-enabled native Weixin E2E binary
+        run: SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+      - name: Native Weixin provider E2E
+        shell: bash
+        env:
+          BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost
+          SKIP_BUILD: "true"
+        run: bash e2e-tests/tests/test_weixin_provider_e2e.sh
       - name: E2E shell tests
         shell: bash
         run: bash scripts/ci/run-e2e-shell.sh
