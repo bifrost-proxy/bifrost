@@ -671,9 +671,11 @@ pub(super) async fn handle_chat_gateway(
                         let request_snapshot = current_request.clone();
                         let streams_progress =
                             current_request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
-                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<
                             crate::im_gateway::external_cli::ExternalCliProgressEvent,
-                        >();
+                        >(
+                            crate::im_gateway::external_cli::EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY,
+                        );
                         let http_progress_tx = tx.clone();
                         let progress_request = request_snapshot.clone();
                         let progress_runner_id = runner_id_for_state.clone();
@@ -1266,9 +1268,11 @@ async fn runner_call_stream_response(
             "web_runner_call_started",
         );
         let streams_progress = request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<
             crate::im_gateway::external_cli::ExternalCliProgressEvent,
-        >();
+        >(
+            crate::im_gateway::external_cli::EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY,
+        );
         let call_progress_tx = tx.clone();
         let progress_request = request_snapshot.clone();
         let progress_runner_id = effective.runner_id.clone();

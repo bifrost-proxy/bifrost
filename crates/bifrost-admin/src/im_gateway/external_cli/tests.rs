@@ -1994,7 +1994,8 @@ async fn external_cli_runtime_streams_stdout_before_process_exit() {
         inject_bifrost_tools: false,
         skill_paths: Vec::new(),
     };
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, mut progress_rx) =
+        tokio::sync::mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
     let run = tokio::spawn(async move {
         runtime
             .run_with_progress(request, Some(progress_tx))

@@ -57,8 +57,11 @@ const EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const EXTERNAL_CLI_WORKER_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES: usize = 16 * 1024;
 const EXTERNAL_CLI_WORKER_PROGRESS_TITLE_BYTES: usize = 1024;
+const EXTERNAL_CLI_WORKER_HEARTBEAT_INTERVAL_SECS: u64 = 10;
+const EXTERNAL_CLI_WORKER_HEARTBEAT_TIMEOUT_SECS: u64 = 45;
 const DEFAULT_EXTERNAL_CLI_MAX_CONCURRENCY: usize = 1;
 const DEFAULT_EXTERNAL_CLI_QUEUE_TIMEOUT_SECS: u64 = 30;
+pub const EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY: usize = 256;
 const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
 #[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
@@ -266,21 +269,34 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     let supports_live_guide = app_server::resolved_transport(&run_request)
         .is_ok_and(ExternalCliTransport::supports_live_guide);
     let runtime = ExternalCliRuntime::new(PathBuf::from(runs_root));
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let (progress_tx, mut progress_rx) = mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
     let run = tokio::spawn(async move {
         runtime
             .run_in_current_process_with_progress(run_request, Some(progress_tx))
             .await
     });
     tokio::pin!(run);
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(
+        EXTERNAL_CLI_WORKER_HEARTBEAT_INTERVAL_SECS,
+    ));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut progress_open = true;
     let final_event = loop {
         tokio::select! {
-            progress = progress_rx.recv() => {
-                if let Some(event) = progress {
-                    let _ = event_tx.try_send(ExternalCliWorkerEvent::Progress {
-                        event: compact_external_cli_worker_progress(event),
-                    });
+            progress = progress_rx.recv(), if progress_open => {
+                match progress {
+                    Some(event) => {
+                        let _ = event_tx.try_send(ExternalCliWorkerEvent::Progress {
+                            event: compact_external_cli_worker_progress(event),
+                        });
+                    }
+                    None => progress_open = false,
                 }
+            }
+            _ = heartbeat.tick() => {
+                let _ = event_tx.try_send(ExternalCliWorkerEvent::Heartbeat {
+                    timestamp_ms: now_ms(),
+                });
             }
             command = command_rx.recv() => {
                 match command {
@@ -1128,6 +1144,9 @@ enum ExternalCliWorkerEvent {
     Progress {
         event: ExternalCliProgressEvent,
     },
+    Heartbeat {
+        timestamp_ms: u64,
+    },
     Failed {
         error: String,
     },
@@ -1268,11 +1287,20 @@ impl ExternalCliWorkerRun {
     }
 
     async fn next_event(&mut self) -> Result<ExternalCliWorkerEvent, String> {
-        let line = crate::worker_runtime::read_limited_async_line(
-            &mut self.events,
-            EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES,
+        let line = tokio::time::timeout(
+            Duration::from_secs(EXTERNAL_CLI_WORKER_HEARTBEAT_TIMEOUT_SECS),
+            crate::worker_runtime::read_limited_async_line(
+                &mut self.events,
+                EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES,
+            ),
         )
         .await
+        .map_err(|_| {
+            self.cleanup_request_file();
+            format!(
+                "external runner worker heartbeat timed out after {EXTERNAL_CLI_WORKER_HEARTBEAT_TIMEOUT_SECS} seconds"
+            )
+        })?
         .map_err(|error| {
             self.cleanup_request_file();
             format!("read external runner worker event failed: {error}")
@@ -1327,7 +1355,7 @@ impl ExternalCliRuntime {
     pub async fn run_with_progress(
         &self,
         request: ExternalCliRunRequest,
-        progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+        progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
         if !cfg!(test)
             && request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID
@@ -1430,9 +1458,10 @@ impl ExternalCliRuntime {
                         Ok(ExternalCliWorkerEvent::Started { .. }) => {}
                         Ok(ExternalCliWorkerEvent::Progress { event }) => {
                             if let Some(progress_tx) = progress_tx.as_ref() {
-                                let _ = progress_tx.send(event);
+                                let _ = progress_tx.try_send(event);
                             }
                         }
+                        Ok(ExternalCliWorkerEvent::Heartbeat { .. }) => {}
                         Ok(ExternalCliWorkerEvent::GuideResult { result }) => {
                             if let Some(ack_tx) = pending_guides.remove(&result.guide_id) {
                                 let _ = ack_tx.send(result);
@@ -1481,7 +1510,7 @@ impl ExternalCliRuntime {
     pub(crate) async fn run_in_current_process_with_progress(
         &self,
         request: ExternalCliRunRequest,
-        progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+        progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
         validate_run_request(&request)?;
         validate_work_dir(&request)?;
@@ -4334,7 +4363,7 @@ async fn run_command(
     spec: CommandSpec,
     prompt: String,
     stop_marker_path: PathBuf,
-    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
     let (stdout_path, stderr_path) = external_cli_log_paths(&stop_marker_path);
     let mut command = Command::new(&spec.executable);
@@ -4617,7 +4646,7 @@ async fn wait_for_stop_marker(path: PathBuf) {
 
 async fn read_stdout_events<R>(
     stdout: R,
-    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<(Vec<u8>, Vec<ExternalCliProgressEvent>), String>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -4639,7 +4668,7 @@ where
             for mut event in expand_subagent_progress_event(event) {
                 enrich_progress_event_observation(&mut event, observed_at, &mut tool_started_at);
                 if let Some(progress_tx) = progress_tx.as_ref() {
-                    let _ = progress_tx.send(event.clone());
+                    let _ = progress_tx.try_send(event.clone());
                 }
                 if events.len() == MAX_CAPTURED_EVENTS {
                     events.remove(0);

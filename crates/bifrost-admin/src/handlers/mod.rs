@@ -48,6 +48,7 @@ pub mod voice;
 pub mod voice_stateful;
 pub mod websocket;
 pub mod whitelist;
+pub mod workers;
 
 use bytes::Bytes;
 use http_body_util::BodyExt;

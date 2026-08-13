@@ -21,6 +21,7 @@ pub enum WorkerKind {
     Asr,
     ImGateway,
     RemoteInvoke,
+    RemoteExecution,
 }
 
 impl WorkerKind {
@@ -31,6 +32,19 @@ impl WorkerKind {
             Self::Asr => "asr",
             Self::ImGateway => "im_gateway",
             Self::RemoteInvoke => "remote_invoke",
+            Self::RemoteExecution => "remote_execution",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "external_cli" => Some(Self::ExternalCli),
+            "browser" => Some(Self::Browser),
+            "asr" => Some(Self::Asr),
+            "im_gateway" => Some(Self::ImGateway),
+            "remote_invoke" => Some(Self::RemoteInvoke),
+            "remote_execution" => Some(Self::RemoteExecution),
+            _ => None,
         }
     }
 }
@@ -243,7 +257,7 @@ fn validate_worker_frame(frame: &WorkerFrame) -> Result<(), String> {
         WorkerFrame::Response { response } => {
             validate_required_metadata("request id", &response.request_id, WORKER_MAX_ID_BYTES)?;
             if let Some(error) = response.error.as_deref() {
-                validate_metadata("worker error", error, WORKER_MAX_ERROR_BYTES)?;
+                validate_bounded_text("worker error", error, WORKER_MAX_ERROR_BYTES)?;
             }
         }
         WorkerFrame::Event { event } => {
@@ -260,7 +274,7 @@ fn validate_worker_frame(frame: &WorkerFrame) -> Result<(), String> {
         ..
     } = frame
     {
-        validate_metadata("goodbye reason", reason, WORKER_MAX_ERROR_BYTES)?;
+        validate_bounded_text("goodbye reason", reason, WORKER_MAX_ERROR_BYTES)?;
     }
     Ok(())
 }
@@ -304,15 +318,20 @@ fn validate_required_metadata(label: &str, value: &str, max_bytes: usize) -> Res
 }
 
 fn validate_metadata(label: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    validate_bounded_text(label, value, max_bytes)?;
+    if value.chars().any(char::is_control) {
+        return Err(format!("{label} contains control characters"));
+    }
+    Ok(())
+}
+
+fn validate_bounded_text(label: &str, value: &str, max_bytes: usize) -> Result<(), String> {
     if value.len() > max_bytes {
         return Err(format!(
             "{label} exceeds hard limit: {} > {} bytes",
             value.len(),
             max_bytes
         ));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(format!("{label} contains control characters"));
     }
     Ok(())
 }

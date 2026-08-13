@@ -41,7 +41,7 @@ pub(super) async fn run_command(
     spec: CommandSpec,
     prompt: String,
     stop_marker_path: PathBuf,
-    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
     let (stdout_path, stderr_path) = external_cli_log_paths(&stop_marker_path);
     let mut command = Command::new(&spec.executable);
@@ -214,7 +214,7 @@ pub(super) async fn run_command(
                                 &mut tool_started_at,
                             );
                             if let Some(progress_tx) = progress_tx.as_ref() {
-                                let _ = progress_tx.send(event.clone());
+                                let _ = progress_tx.try_send(event.clone());
                             }
                             events.push(event);
                         }
@@ -756,7 +756,7 @@ sys.stdin.readline()
 sys.stderr.write("mock stderr without newline")
 "#,
         );
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let (progress_tx, mut progress_rx) = mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
         let output = run_command(
             "mock-stream-json-eof-run",
             None,
@@ -1244,7 +1244,7 @@ print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text"
 print(json.dumps({"type":"result","subtype":"error_max_turns","is_error":True,"result":"failed"}), flush=True)
 "#,
         );
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let (progress_tx, mut progress_rx) = mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
         let output = run_command(
             "mock-stream-json-failed-result-run",
             None,

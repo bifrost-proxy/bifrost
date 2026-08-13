@@ -75,7 +75,7 @@ pub(crate) fn is_browser_worker_process() -> bool {
 pub(crate) async fn run_via_browser_worker(
     runs_root: PathBuf,
     request: ExternalCliRunRequest,
-    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<ExternalCliRunResult, String> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let request_path = request_dir().join(format!("request-{request_id}.json"));
@@ -113,7 +113,7 @@ pub(crate) async fn run_via_browser_worker(
                     Ok(event) if event.request_id.as_deref() == Some(request_id.as_str()) && event.event == "progress" => {
                         if let Some(progress_tx) = progress_tx.as_ref() {
                             if let Ok(progress) = serde_json::from_value::<ExternalCliProgressEvent>(event.payload) {
-                                let _ = progress_tx.send(progress);
+                                let _ = progress_tx.try_send(progress);
                             }
                         }
                     }
@@ -376,7 +376,8 @@ async fn handle_worker_request(
                 read_json_file::<BrowserRunFileRequest>(&request_path, BROWSER_REQUEST_MAX_BYTES);
             let _ = std::fs::remove_file(&request_path);
             let request = request?;
-            let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+            let (progress_tx, mut progress_rx) =
+                mpsc::channel(super::super::external_cli::EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
             let progress_context = context.clone();
             let progress_request_id = request_id.to_string();
             let progress_task = tokio::spawn(async move {

@@ -53,6 +53,7 @@ use crate::handlers::{
     voice::handle_voice,
     websocket::handle_websocket_upgrade,
     whitelist::handle_whitelist_request,
+    workers::handle_workers,
     BoxBody,
 };
 use crate::push::SharedPushManager;
@@ -293,6 +294,8 @@ impl AdminRouter {
             handle_metrics(req, state, path).await
         } else if path.starts_with("/api/diagnostics") {
             handle_diagnostics(req, state, path).await
+        } else if path.starts_with("/api/workers") {
+            handle_workers(req, path).await
         } else if path.starts_with("/api/mobile-devices") {
             handle_mobile_devices(req, state, path, peer_addr).await
         } else if path.starts_with("/api/trust-probe") {

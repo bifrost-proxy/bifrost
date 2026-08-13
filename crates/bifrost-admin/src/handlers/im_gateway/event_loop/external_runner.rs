@@ -2008,8 +2008,9 @@ pub(super) async fn run_external_cli_agent_chat(
         let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
             crate::im_gateway::external_cli::default_runs_root(),
         );
-        let (external_progress_tx, mut external_progress_rx) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (external_progress_tx, mut external_progress_rx) = tokio::sync::mpsc::channel(
+            crate::im_gateway::external_cli::EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY,
+        );
         let request_for_progress = request.clone();
         // Keep the runner control loop independently polled while this task
         // handles a default Guide message (or a legacy inbound /g). Awaiting the

@@ -1322,6 +1322,36 @@ fn generate_paths() -> serde_json::Value {
                 }
             }
         },
+        "/api/workers": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "List auxiliary workers",
+                "operationId": "listAuxiliaryWorkers",
+                "responses": {"200": {"description": "Worker snapshots"}}
+            }
+        },
+        "/api/workers/{kind}": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "List one auxiliary worker kind",
+                "operationId": "getAuxiliaryWorkerKind",
+                "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Worker snapshots"}, "404": {"description": "Unknown worker kind"}}
+            }
+        },
+        "/api/workers/{kind}/{action}": {
+            "post": {
+                "tags": ["Workers"],
+                "summary": "Control auxiliary worker lifecycle",
+                "description": "Action is start, stop, restart, or reset-circuit. Start and restart only operate on worker instances already registered by their owning capability.",
+                "operationId": "controlAuxiliaryWorkerKind",
+                "parameters": [
+                    {"name": "kind", "in": "path", "required": true, "schema": {"type": "string"}},
+                    {"name": "action", "in": "path", "required": true, "schema": {"type": "string", "enum": ["start", "stop", "restart", "reset-circuit"]}}
+                ],
+                "responses": {"200": {"description": "Lifecycle action result"}, "404": {"description": "Unknown worker kind"}, "503": {"description": "All requested worker actions failed"}}
+            }
+        },
 
         // ═══════════════════════════════════════════════════════
         // Ports

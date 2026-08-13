@@ -16,6 +16,8 @@ use super::protocol::{
     WORKER_HEARTBEAT_INTERVAL_SECS, WORKER_MAX_FRAME_BYTES, WORKER_PROTOCOL_VERSION,
 };
 
+const WORKER_MAX_IN_FLIGHT_REQUESTS: usize = 128;
+
 struct RunningJob {
     job_id: Option<String>,
     handle: JoinHandle<()>,
@@ -272,6 +274,17 @@ where
                         .await;
                     continue;
                 }
+                if jobs.len() >= WORKER_MAX_IN_FLIGHT_REQUESTS {
+                    context
+                        .response(
+                            request_id,
+                            Err(format!(
+                                "worker in-flight request limit reached ({WORKER_MAX_IN_FLIGHT_REQUESTS})"
+                            )),
+                        )
+                        .await;
+                    continue;
+                }
                 let handler = handler.clone();
                 let context = context.clone();
                 let failure_request_id = request_id.clone();
@@ -466,5 +479,10 @@ mod tests {
             event: "progress".to_string(),
             payload: serde_json::json!({"content": "progress"}),
         }));
+    }
+
+    #[test]
+    fn worker_in_flight_request_limit_is_bounded() {
+        assert_eq!(WORKER_MAX_IN_FLIGHT_REQUESTS, 128);
     }
 }
