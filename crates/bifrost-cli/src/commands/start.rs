@@ -257,7 +257,7 @@ fn spawn_remote_invoke_worker_startup_task(
     });
 }
 
-fn start_im_gateway_runtime(admin_state: &Arc<AdminState>, admin_host: String, admin_port: u16) {
+fn start_im_gateway_runtime(admin_state: &AdminState, admin_host: String, admin_port: u16) {
     if bifrost_admin::worker_runtime::worker_execution_enabled(
         bifrost_admin::worker_runtime::WorkerKind::ImGateway,
     ) {
