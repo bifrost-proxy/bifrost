@@ -91,6 +91,7 @@
 2. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_weixin_provider_e2e.sh`。
 3. 核对 mock 请求记录中的 Typing、type 11/12、final TEXT、IMAGE、FILE、VIDEO、client ID 和 `run_id`。
 4. 使用请求携带的 AES key 解密 CDN upload，逐字节比对图片、Markdown 文档和 MP4 fixture。
+5. 核对 Linux `E2E Shell` CI 显式执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`，并通过 `BIFROST_BIN=target/debug/bifrost` 单独运行本用例；共享 release 二进制路径仍须安全 SKIP loopback iLink。
 
 **预期结果：**
 
@@ -103,6 +104,7 @@
 
 - 2026-08-12 PASS：使用最新 debug 二进制执行专项 E2E，观察到 Typing start/keepalive/CANCEL、type 11/12/final TEXT/IMAGE/FILE/VIDEO；本 turn 全部消息 `run_id` 唯一一致、client ID 无重复，CANCEL 早于 final。图片、Markdown 文档和 MP4 三个 CDN 密文经 AES-128-ECB 解密后逐字节等于 fixture。
 - 2026-08-13 PASS：CI release 二进制注入场景输出 `SKIP fake iLink: release build rejects Weixin loopback by design` 后安全退出，避免把 mock 请求规范化到腾讯正式地址；最新 debug 二进制在 18938 隔离端口重跑完整 Provider E2E 仍输出 `[weixin-provider] PASS`。`test_coverage_pipeline_contract.sh` 同步验证 release guard、断网代理和 loopback 例外边界。
+- 2026-08-13 PENDING：本轮为 Linux `E2E Shell` 增加独立 debug/test-enabled 构建与原生 Provider E2E 步骤，避免共享 release 二进制触发安全 SKIP 后漏测 native flow；执行结果以本次推送触发的远端 CI 为准，本地未重复运行。
 
 ### TC-WNAE-06：本地视频、音频和补丁链接进入附件链路
 

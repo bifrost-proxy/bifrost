@@ -68,6 +68,23 @@ while IFS= read -r weixin_loopback_test; do
   grep -Fq 'NO_PROXY=127.0.0.1,localhost' "$weixin_loopback_test"
 done < <(rg -l 'BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL=1' e2e-tests/tests --glob 'test_*.sh')
 
+# The shared shell suite intentionally injects a production release binary,
+# which must keep skipping debug-only loopback iLink traffic. Linux CI must
+# therefore build a separate test-enabled binary and run the native flow with
+# that explicit debug path.
+linux_shell_job="$(
+  awk '
+    /^  e2e-shell:$/ { in_job = 1 }
+    in_job && /^  [[:alnum:]_-]+:$/ && $0 != "  e2e-shell:" { exit }
+    in_job { print }
+  ' "$ci_workflow"
+)"
+grep -Fq -- '- name: Build test-enabled native Weixin E2E binary' <<<"$linux_shell_job"
+grep -Fq 'run: SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost' <<<"$linux_shell_job"
+grep -Fq -- '- name: Native Weixin provider E2E' <<<"$linux_shell_job"
+grep -Fq 'BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost' <<<"$linux_shell_job"
+grep -Fq 'run: bash e2e-tests/tests/test_weixin_provider_e2e.sh' <<<"$linux_shell_job"
+
 grep -Fq 'cargo llvm-cov show-env --sh' "$coverage_all"
 grep -Fq 'unit-integration.json' "$coverage_all"
 grep -Fq 'e2e.json' "$coverage_all"
