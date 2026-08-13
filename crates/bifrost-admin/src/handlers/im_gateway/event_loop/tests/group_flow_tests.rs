@@ -108,7 +108,7 @@ async fn prepare_group_dispatch_covers_ambient_commands_triggers_and_duplicates(
 }
 
 #[tokio::test]
-async fn local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch() {
+async fn local_ready_topic_anchor_requires_current_bot_mention() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
     let client =
@@ -141,16 +141,169 @@ async fn local_ready_topic_anchor_is_claimed_without_mention_or_root_fetch() {
     message.parent_id = Some("root-card".to_string());
     message.thread_id = Some("topic-1".to_string());
 
+    assert!(matches!(
+        prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+            .await
+            .unwrap(),
+        GroupInboundDispatch::Ambient
+    ));
+    assert!(store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-1")
+        .unwrap()
+        .is_none());
+
+    let message = event.message.as_mut().unwrap();
+    message.text = "@_user_1 continue here".to_string();
+    message.mentions.push(crate::im_gateway::types::ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_bot".to_string()),
+        name: Some("Bifrost".to_string()),
+        tenant_key: None,
+        is_bot: true,
+    });
     let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
         .await
         .unwrap()
-        .expect("local anchor owns its topic without requiring an @ mention");
+        .expect("an explicitly mentioned bot owns its anchored topic");
     assert_eq!(dispatch.message_text, "continue here");
     assert_eq!(
         dispatch.thread_anchor_message_id.as_deref(),
         Some("root-card")
     );
     assert!(dispatch.thread_fallback_message.is_none());
+}
+
+#[tokio::test]
+async fn local_topic_commands_use_source_session_without_claiming_a_thread() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-local-topic-command".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    store
+        .upsert_feishu_message_anchor(
+            &crate::im_gateway::group_context::FeishuMessageAnchor {
+                provider_id: provider.id.clone(),
+                chat_id: "oc_group".to_string(),
+                message_id: "root-command-card".to_string(),
+                source_session_key: "source-session".to_string(),
+                run_id: Some("run".to_string()),
+                runner_id: "Codex".to_string(),
+                adapter: "codex".to_string(),
+                transport: "app_server".to_string(),
+                external_thread_id: Some("codex-thread".to_string()),
+                external_turn_id: Some("codex-turn".to_string()),
+                checkpoint_thread_id: None,
+                status: "ready".to_string(),
+            },
+            1,
+        )
+        .unwrap();
+
+    let mut status = group_test_event(&provider.id, "topic-status", "@_user_1 /status", true, 2);
+    let message = status.message.as_mut().unwrap();
+    message.root_id = Some("root-command-card".to_string());
+    message.parent_id = Some("root-command-card".to_string());
+    message.thread_id = Some("topic-status".to_string());
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &status, &store, false)
+        .await
+        .unwrap()
+        .expect("the command must target the source session");
+    assert_eq!(dispatch.message_text, "/status");
+    assert_eq!(dispatch.session_key, "source-session");
+    assert!(dispatch.thread_anchor_message_id.is_none());
+    assert!(store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-status")
+        .unwrap()
+        .is_none());
+
+    let mut queue = group_test_event(
+        &provider.id,
+        "topic-queue",
+        "/q ask @_user_2 to review",
+        false,
+        3,
+    );
+    let message = queue.message.as_mut().unwrap();
+    message.mentions.push(crate::im_gateway::types::ImMention {
+        key: "@_user_2".to_string(),
+        open_id: Some("ou_human".to_string()),
+        name: Some("Reviewer".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    });
+    message.root_id = Some("root-command-card".to_string());
+    message.parent_id = Some("root-command-card".to_string());
+    message.thread_id = Some("topic-queue".to_string());
+    assert!(matches!(
+        prepare_group_inbound_dispatch(&client, &provider, &queue, &store, false)
+            .await
+            .unwrap(),
+        GroupInboundDispatch::Ambient
+    ));
+    assert!(store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-queue")
+        .unwrap()
+        .is_none());
+
+    let message = queue.message.as_mut().unwrap();
+    message.text = "@_user_1 /q ask @_user_2 to review".to_string();
+    message.mentions.push(crate::im_gateway::types::ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_bot".to_string()),
+        name: Some("Bifrost".to_string()),
+        tenant_key: None,
+        is_bot: true,
+    });
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &queue, &store, false)
+        .await
+        .unwrap()
+        .expect("the command runs only after the current bot is mentioned");
+    assert_eq!(
+        dispatch.message_text,
+        "/q ask <at id=ou_human>Reviewer</at> to review"
+    );
+    assert_eq!(dispatch.session_key, "source-session");
+    assert!(dispatch.thread_anchor_message_id.is_none());
+    assert!(store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-queue")
+        .unwrap()
+        .is_none());
+
+    let mut guide = group_test_event(
+        &provider.id,
+        "topic-guide",
+        "@_user_1 /g ask @_user_2 to summarize",
+        true,
+        4,
+    );
+    let message = guide.message.as_mut().unwrap();
+    message.mentions.push(crate::im_gateway::types::ImMention {
+        key: "@_user_2".to_string(),
+        open_id: Some("ou_human".to_string()),
+        name: Some("Reviewer".to_string()),
+        tenant_key: None,
+        is_bot: false,
+    });
+    message.root_id = Some("root-command-card".to_string());
+    message.parent_id = Some("root-command-card".to_string());
+    message.thread_id = Some("topic-guide".to_string());
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &guide, &store, false)
+        .await
+        .unwrap()
+        .expect("a guide command must stay on the source session");
+    assert_eq!(
+        dispatch.message_text,
+        "/g ask <at id=ou_human>Reviewer</at> to summarize"
+    );
+    assert_eq!(dispatch.session_key, "source-session");
+    assert!(dispatch.thread_anchor_message_id.is_none());
+    assert!(store
+        .feishu_thread_binding(&provider.id, "oc_group", "topic-guide")
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -219,6 +372,49 @@ async fn bound_topic_does_not_capture_messages_addressed_to_another_bot() {
     ));
     assert_eq!(store.message_count(&provider.id, "oc_group").unwrap(), 0);
 
+    let mut unmentioned = group_test_event(
+        &provider.id,
+        "unmentioned-bound-message",
+        "continue without a mention",
+        false,
+        3,
+    );
+    let message = unmentioned.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-1".to_string());
+    assert!(matches!(
+        prepare_group_inbound_dispatch(&client, &provider, &unmentioned, &store, false)
+            .await
+            .unwrap(),
+        GroupInboundDispatch::Ambient
+    ));
+
+    let mut current_bot = group_test_event(
+        &provider.id,
+        "current-bot-command",
+        "@_user_1 /status",
+        true,
+        4,
+    );
+    let message = current_bot.message.as_mut().unwrap();
+    message.root_id = Some("root-card".to_string());
+    message.parent_id = Some("root-card".to_string());
+    message.thread_id = Some("topic-1".to_string());
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, &current_bot, &store, false)
+        .await
+        .unwrap()
+        .expect("an existing topic keeps using its bound session");
+    assert_eq!(dispatch.message_text, "/status");
+    assert_eq!(
+        dispatch.session_key,
+        crate::im_gateway::group_context::build_group_thread_session_key(
+            &provider.id,
+            "oc_group",
+            "topic-1",
+        )
+    );
+
     let non_feishu_client =
         ImProviderClient::Weixin(Arc::new(crate::im_gateway::weixin::WeixinProvider::new()));
     let mut event_without_resolved_identity = event.clone();
@@ -241,7 +437,7 @@ async fn bound_topic_does_not_capture_messages_addressed_to_another_bot() {
 }
 
 #[tokio::test]
-async fn ordinary_topic_root_accepts_system_command_as_first_message() {
+async fn ordinary_topic_root_requires_mention_before_routing_command_to_group() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
     let client =
@@ -255,18 +451,35 @@ async fn ordinary_topic_root_accepts_system_command_as_first_message() {
     message.parent_id = Some("ordinary-root".to_string());
     message.thread_id = Some("topic-help".to_string());
 
+    assert!(matches!(
+        prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+            .await
+            .unwrap(),
+        GroupInboundDispatch::Ambient
+    ));
+    let message = event.message.as_mut().unwrap();
+    message.text = "@_user_1 /help".to_string();
+    message.mentions.push(crate::im_gateway::types::ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_bot".to_string()),
+        name: Some("Bifrost".to_string()),
+        tenant_key: None,
+        is_bot: true,
+    });
     let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
         .await
         .unwrap()
-        .expect("topic-first system command must initialize a session");
+        .expect("an explicitly addressed topic command must use the group session");
     assert_eq!(dispatch.message_text, "/help");
+    assert_eq!(
+        dispatch.session_key,
+        crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group")
+    );
     assert!(dispatch.thread_anchor_message_id.is_none());
-    let binding = store
+    assert!(store
         .feishu_thread_binding(&provider.id, "oc_group", "topic-help")
         .unwrap()
-        .unwrap();
-    assert_eq!(binding.initial_message, "/help");
-    assert_eq!(binding.source_kind, "message_context");
+        .is_none());
 }
 
 #[tokio::test]
@@ -322,7 +535,13 @@ async fn topic_initialization_is_recovered_from_persisted_binding_after_restart(
     let mut provider = recorder_test_provider();
     provider.id = "feishu-topic-recovery".to_string();
     provider.base_url = Some("http://127.0.0.1:9".to_string());
-    let mut event = group_test_event(&provider.id, "topic-trigger", "continue here", false, 2);
+    let mut event = group_test_event(
+        &provider.id,
+        "topic-trigger",
+        "@_user_1 continue here",
+        true,
+        2,
+    );
     let message = event.message.as_mut().unwrap();
     message.root_id = Some("root-card".to_string());
     message.parent_id = Some("root-card".to_string());
@@ -381,8 +600,13 @@ fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redel
         .unwrap_err()
         .contains("must not be empty"));
     let provider_id = "feishu-startup-topic-recovery";
-    let mut persisted_event =
-        group_test_event(provider_id, "persisted-trigger", "continue", false, 2);
+    let mut persisted_event = group_test_event(
+        provider_id,
+        "persisted-trigger",
+        "@_user_1 continue",
+        true,
+        2,
+    );
     let persisted_message = persisted_event.message.as_mut().unwrap();
     persisted_message.root_id = Some("root-card".to_string());
     persisted_message.parent_id = Some("root-card".to_string());
@@ -444,6 +668,7 @@ fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redel
         Some("persisted-trigger")
     );
     let recovered_message = recovered[0].message.as_ref().unwrap();
+    assert_eq!(recovered_message.mentions.len(), 1);
     assert_eq!(recovered_message.images[0].file_key, "image-key");
     assert_eq!(recovered_message.files[0].file_key, "file-key");
     assert!(
@@ -458,8 +683,8 @@ fn startup_recovery_replays_persisted_pending_topic_trigger_without_feishu_redel
     );
 }
 
-#[test]
-fn startup_recovery_reconstructs_topic_event_when_persisted_json_is_invalid() {
+#[tokio::test]
+async fn startup_recovery_reconstructs_topic_event_when_persisted_json_is_invalid() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
     let provider_id = "feishu-startup-topic-fallback";
@@ -503,6 +728,20 @@ fn startup_recovery_reconstructs_topic_event_when_persisted_json_is_invalid() {
     assert_eq!(message.root_id.as_deref(), Some("root-card"));
     assert_eq!(message.parent_id.as_deref(), Some("root-card"));
     assert_eq!(message.thread_id.as_deref(), Some("topic-fallback"));
+
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = provider_id.to_string();
+    let dispatch = prepare_group_inbound_dispatch(&client, &provider, event, &store, false)
+        .await
+        .unwrap()
+        .expect("a synthetic replay of an already claimed binding must resume");
+    assert_eq!(dispatch.message_text, "root plus current");
+    assert_eq!(
+        dispatch.thread_anchor_message_id.as_deref(),
+        Some("root-card")
+    );
 }
 
 #[tokio::test]
@@ -585,8 +824,8 @@ async fn pending_local_topic_anchor_freezes_root_fallback_while_source_runs() {
     let mut event = group_test_event(
         &provider.id,
         "topic-current",
-        "continue after completion",
-        false,
+        "@_user_1 continue after completion",
+        true,
         3,
     );
     let message = event.message.as_mut().unwrap();
@@ -654,7 +893,13 @@ async fn failed_topic_binding_uses_new_message_instead_of_replaying_old_instruct
             1,
         )
         .unwrap();
-    let mut retry = group_test_event(&provider.id, "new-trigger", "retry with X", false, 3);
+    let mut retry = group_test_event(
+        &provider.id,
+        "new-trigger",
+        "@_user_1 retry with X",
+        true,
+        3,
+    );
     let message = retry.message.as_mut().unwrap();
     message.root_id = Some("root-card".to_string());
     message.parent_id = Some("old-trigger".to_string());
