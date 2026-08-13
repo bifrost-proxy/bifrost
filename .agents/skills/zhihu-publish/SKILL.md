@@ -1,11 +1,11 @@
 ---
 name: zhihu-publish
-description: Publish Markdown articles to Zhihu Columns through credentials and request templates recovered locally from Bifrost traffic, save drafts, prevent duplicate posts, and verify the live title/body without browser automation. Use when the user asks to create, preview, save, publish, repost, or验收 a 知乎/知乎专栏/Zhihu article, or automate future Zhihu article releases from Markdown.
+description: Publish Markdown articles to Zhihu Columns through authentication context recovered locally from Bifrost traffic and a built-in publish payload schema, save drafts, prevent duplicate posts, and verify the live title/body without browser automation. Use when the user asks to create, preview, save, publish, repost, or验收 a 知乎/知乎专栏/Zhihu article, or automate future Zhihu article releases from Markdown.
 ---
 
 # Zhihu Publish
 
-Use the bundled scripts for deterministic publishing. Do not operate Chrome or another browser through UI automation. Read authentication and request templates locally from Bifrost traffic only.
+Use the bundled scripts for deterministic publishing. Do not operate Chrome or another browser through UI automation. Read only authentication and endpoint-specific signing context from Bifrost traffic. The stable publish payload schema is built into the script; never read a captured request body as a reusable template.
 
 Never print or save Cookie values, XSRF tokens, `x-zse-*`, `x-zst-*`, raw request headers, or unredacted Bifrost traffic.
 
@@ -33,7 +33,7 @@ Always run a dry run before a live write:
 
 Confirm the title, Markdown/HTML character counts, action, duplicate state, and image counts. Dry-run never uploads an image.
 
-Check the captured login/template state without exposing credentials:
+Check the captured authentication/signing state without exposing credentials:
 
 ```bash
 .agents/skills/zhihu-publish/scripts/zhihu-publish --check-auth
@@ -56,9 +56,9 @@ Use `--draft-only` for a Zhihu draft. Use `--publish` only when the user explici
 The script performs the captured workflow:
 
 1. Find recent Zhihu draft and publish requests with `bifrost search`.
-2. Read their headers and publish payload locally with `bifrost traffic get`.
+2. Read only their authentication and endpoint-specific signing headers locally with `bifrost traffic get`.
 3. Create or resume a draft, then update title and HTML content.
-4. Rebuild the captured publish payload with the new draft ID, title, and content.
+4. Assemble the built-in publish payload schema with the new draft ID, title, content, disclosure settings, and trace ID.
 5. Publish and store only IDs, URL, and a content hash in local state.
 
 Treat `already_published` as successful duplicate prevention. Do not use `--force-new` unless the user explicitly wants a second post from the same source.
@@ -70,6 +70,16 @@ To change the same already-published article, require explicit user intent and p
   --article /absolute/path/article.md \
   --publish \
   --update-existing
+```
+
+To adopt a known existing Zhihu article into the local idempotency state, require explicit user intent and pass its numeric ID. This is useful for replacing a temporary protocol-probe article without editing the state file by hand:
+
+```bash
+.agents/skills/zhihu-publish/scripts/zhihu-publish \
+  --article /absolute/path/article.md \
+  --publish \
+  --update-existing \
+  --article-id 1234567890
 ```
 
 The live workflow uploads remote images through `POST /api/uploaded_images`, uploads local/data images as multipart `picture`, accepts only HTTPS URLs on Zhihu's allowlisted upload hosts (`*.zhimg.com` or the exact `pic-private.zhihu.com` host), and emits standalone images as `<figure>` nodes before saving or publishing. The private upload URL is temporary; Zhihu must rewrite the published article to stable `*.zhimg.com` content.
@@ -100,7 +110,7 @@ bifrost capture wait \
   --format json
 ```
 
-A formal publish also needs a recent `POST www.zhihu.com/api/v4/content/publish` capture because Zhihu supplies endpoint-specific signing headers and payload fields.
+A formal publish also needs a recent `POST www.zhihu.com/api/v4/content/publish` capture because Zhihu supplies endpoint-specific signing headers. Its request body is not read or reused.
 
 ## Safety and validation
 

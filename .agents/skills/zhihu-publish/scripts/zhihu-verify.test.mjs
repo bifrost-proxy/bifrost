@@ -32,6 +32,36 @@ test("HTML and Markdown normalize to the same visible text", () => {
   const article = parseArticle(markdown);
   assert.equal(htmlToText(article.html), article.text);
   assert.equal(htmlToText('<p>A&nbsp;B &#x4F60;&#22909;</p><img alt="图">'), "A B 你好");
+  assert.equal(htmlToText("<p><code>client_app</code>、 <code>client_process</code></p>"), "client_app、client_process");
+  assert.equal(htmlToText('<p><a href="https://link.zhihu.com/?target=https%3A//github.com/bifrost-proxy/bifrost"><span class="invisible">https://</span><span class="visible">github.com/bifrost-prox</span><span class="invisible">y/bifrost</span><span class="ellipsis"></span></a></p>'), "https://github.com/bifrost-proxy/bifrost");
+});
+
+test("Markdown normalization preserves underscores inside inline and fenced code", () => {
+  const article = parseArticle([
+    "---", 'title: "代码标识符"', "---",
+    "普通 *强调* 与 `client_app`。",
+    "",
+    "```text",
+    "client_process client_pid",
+    "```",
+  ].join("\n"));
+  assert.equal(article.text, "普通 强调 与 client_app。 client_process client_pid");
+  assert.equal(htmlToText(article.html), article.text);
+});
+
+test("Markdown normalization ignores language labels on permissive closing fences", () => {
+  const article = parseArticle([
+    "---", 'title: "流程图"', "---",
+    "```text",
+    "飞书",
+    "```text",
+    "↓",
+    "```",
+    "Bifrost",
+    "```text",
+  ].join("\n"));
+  assert.equal(article.text, "飞书 ↓ Bifrost");
+  assert.equal(htmlToText(article.html), article.text);
 });
 
 test("comparison is exact and rejects duplicated body title", () => {

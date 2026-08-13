@@ -9,7 +9,6 @@ import {
   PublishError,
   buildPublishPayload,
   cookieNames,
-  decodeTrafficBody,
   extractContext,
   isAuthFailure,
   isZhihuImageUrl,
@@ -57,33 +56,17 @@ function context(id = "REQ-test") {
   };
 }
 
-function fakeBifrost(template, includeCreate = true) {
+function fakeBifrost(includeCreate = true) {
   return {
-    findTemplates() {
+    findContexts() {
       return {
         create: includeCreate ? context("REQ-create") : null,
         update: context("REQ-update"),
         publish: context("REQ-publish"),
-        publishTemplate: structuredClone(template),
       };
     },
   };
 }
-
-const template = {
-  action: "article",
-  data: {
-    publish: { traceId: "old" },
-    extra_info: { publisher: "pc", pc_business_params: JSON.stringify({ scene: "editor" }) },
-    draft: { disabled: 1, id: "1", isPublished: false },
-    commentsPermission: { comment_permission: "anyone" },
-    creationStatement: { disclaimer_type: "none", disclaimer_status: "close" },
-    contentsTables: { table_of_contents_enabled: false },
-    appreciate: { can_reward: false, tagline: "" },
-    hybrid: { html: "old", textLength: 3 },
-    title: { title: "old" },
-  },
-};
 
 test("parseArticle accepts extra platform frontmatter and renders HTML", () => {
   const article = parseArticle(source());
@@ -106,12 +89,7 @@ test("parseArticle rejects missing title and unclosed code fence", () => {
   assert.throws(() => parseArticle("---\ntitle: x\n---\n```js\nbody"), /代码块未闭合/);
 });
 
-test("captured body and authentication context are decoded safely", () => {
-  assert.deepEqual(decodeTrafficBody({ success: true, encoding: "text", data: '{"id":1}' }), { id: 1 });
-  assert.deepEqual(
-    decodeTrafficBody({ success: true, encoding: "base64", data: Buffer.from('{"id":2}').toString("base64") }),
-    { id: 2 },
-  );
+test("captured authentication context exposes only required metadata", () => {
   const captured = extractContext({
     id: "REQ-1",
     request_headers: [
@@ -137,6 +115,9 @@ test("API bases and authentication failure classification are conservative", () 
   assert.equal(isZhihuImageUrl("http://pic4.zhimg.com/demo.gif"), false);
   assert.equal(isZhihuUploadImageUrl("https://pic-private.zhihu.com.evil.example/demo.gif"), false);
   assert.throws(() => parseArgs(["--publish", "--force-new", "--update-existing"]), /不能同时使用/);
+  assert.throws(() => parseArgs(["--publish", "--article-id", "7001"]), /必须与 --update-existing/);
+  assert.throws(() => parseArgs(["--publish", "--update-existing", "--article-id", "invalid"]), /非零数字/);
+  assert.equal(parseArgs(["--publish", "--update-existing", "--article-id", "7001"]).articleId, "7001");
 });
 
 test("image processing uploads remote, local, and data images and wraps standalone figures", async (contextHandle) => {
@@ -198,9 +179,9 @@ test("image upload rejects unsafe response hosts and unsupported local content",
   );
 });
 
-test("publish payload replaces every dynamic article field", () => {
+test("publish payload is assembled from the built-in stable schema", () => {
   const article = parseArticle(source());
-  const payload = buildPublishPayload(template, article, "9001", 1234);
+  const payload = buildPublishPayload(article, "9001", 1234);
   assert.equal(payload.data.draft.id, "9001");
   assert.equal(payload.data.title.title, article.title);
   assert.equal(payload.data.hybrid.html, article.html);
@@ -209,7 +190,10 @@ test("publish payload replaces every dynamic article field", () => {
   const business = JSON.parse(payload.data.extra_info.pc_business_params);
   assert.equal(business.title, article.title);
   assert.equal(business.content, article.html);
-  assert.equal(business.scene, "editor");
+  assert.deepEqual(business.commercial_report_info, { commercial_types: [] });
+  assert.equal(business.commercial_zhitask_bind_info, null);
+  assert.deepEqual(payload.data.commercialReportInfo, { isReport: 0 });
+  assert.deepEqual(payload.data.hybridInfo, {});
 });
 
 test("mock E2E creates, saves, publishes, persists state, and prevents duplicates", async (contextHandle) => {
@@ -226,7 +210,7 @@ test("mock E2E creates, saves, publishes, persists state, and prevents duplicate
     if (request.url === "/api/v4/me") response.end(JSON.stringify({ id: "user-1", name: "tester" }));
     else if (request.url === "/api/uploaded_images") response.end(JSON.stringify({ src: "https://pic4.zhimg.com/demo.gif" }));
     else if (request.url === "/api/articles/drafts") response.end(JSON.stringify({ id: "9001" }));
-    else if (request.url === "/api/articles/9001/draft") response.end("{}");
+    else if (/^\/api\/articles\/(?:9001|7001)\/draft$/.test(request.url)) response.end("{}");
     else if (request.url === "/api/v4/content/publish") {
       response.end(JSON.stringify(parsedBody?.data?.draft?.isPublished
         ? { code: 0, data: {} }
@@ -257,7 +241,7 @@ test("mock E2E creates, saves, publishes, persists state, and prevents duplicate
     columnBase: base,
     mainBase: base,
   };
-  const first = await publishArticle(options, { bifrost: fakeBifrost(template), log: () => {} });
+  const first = await publishArticle(options, { bifrost: fakeBifrost(), log: () => {} });
   assert.deepEqual(first, {
     status: "published",
     title: "测试文章",
@@ -283,19 +267,31 @@ test("mock E2E creates, saves, publishes, persists state, and prevents duplicate
   assert.equal(loadState(stateFile)[Object.keys(loadState(stateFile))[0]].article_id, "8001");
 
   const before = requests.length;
-  const duplicate = await publishArticle(options, { bifrost: fakeBifrost(template), log: () => {} });
+  const duplicate = await publishArticle(options, { bifrost: fakeBifrost(), log: () => {} });
   assert.equal(duplicate.status, "already_published");
   assert.equal(requests.length, before);
 
   const updated = await publishArticle(
     { ...options, updateExisting: true },
-    { bifrost: fakeBifrost(template, false), log: () => {} },
+    { bifrost: fakeBifrost(false), log: () => {} },
   );
   assert.equal(updated.status, "updated");
   assert.equal(updated.article_id, "8001");
   assert.equal(requests.at(-1).body.data.draft.isPublished, true);
   assert.equal(requests.filter((item) => item.url === "/api/articles/drafts").length, 1);
-  const afterUpdate = requests.length;
+
+  const adoptedPath = path.join(temporary, "adopted.md");
+  fs.writeFileSync(adoptedPath, source("接管临时文章"));
+  const adopted = await publishArticle(
+    { ...options, article: adoptedPath, articleId: "7001", updateExisting: true },
+    { bifrost: fakeBifrost(false), log: () => {} },
+  );
+  assert.equal(adopted.status, "updated");
+  assert.equal(adopted.article_id, "7001");
+  assert.equal(requests.at(-1).body.data.draft.id, "7001");
+  assert.equal(requests.at(-1).body.data.draft.isPublished, true);
+  assert.equal(requests.filter((item) => item.url === "/api/articles/drafts").length, 1);
+  const afterAdoption = requests.length;
 
   const preview = await publishArticle({ ...options, mode: "dry-run" });
   assert.equal(preview.status, "dry_run");
@@ -304,14 +300,53 @@ test("mock E2E creates, saves, publishes, persists state, and prevents duplicate
 
   fs.writeFileSync(articlePath, source("正文已修改"));
   await assert.rejects(
-    publishArticle(options, { bifrost: fakeBifrost(template), log: () => {} }),
+    publishArticle(options, { bifrost: fakeBifrost(), log: () => {} }),
     /已有已发布记录，但正文已变化/,
   );
-  assert.equal(requests.length, afterUpdate);
+  assert.equal(requests.length, afterAdoption);
 });
 
 test("non-authentication API errors remain actionable", () => {
   const error = new PublishError("invalid title", { status: 400, code: 100, authFailure: false });
   assert.equal(error.authFailure, false);
   assert.equal(error.status, 400);
+});
+
+test("adopting a missing article does not overwrite idempotency state", async (contextHandle) => {
+  const server = http.createServer(async (request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/api/v4/me") response.end(JSON.stringify({ id: "user-1" }));
+    else {
+      response.statusCode = 404;
+      response.end(JSON.stringify({ code: 4041, message: "文章未找到" }));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  contextHandle.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "zhihu-publish-adopt-test-"));
+  contextHandle.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const articlePath = path.join(temporary, "article.md");
+  const stateFile = path.join(temporary, "state.json");
+  fs.writeFileSync(articlePath, source());
+  const originalState = { preserved: { draft_id: "9001", article_id: null } };
+  fs.writeFileSync(stateFile, JSON.stringify(originalState));
+  const address = server.address();
+  const base = `http://127.0.0.1:${address.port}`;
+  await assert.rejects(
+    publishArticle({
+      article: articlePath,
+      articleId: "7001",
+      mode: "publish",
+      forceNew: false,
+      updateExisting: true,
+      stateFile,
+      columnBase: base,
+      mainBase: base,
+    }, { bifrost: fakeBifrost(false), log: () => {} }),
+    /文章未找到/,
+  );
+  assert.deepEqual(loadState(stateFile), originalState);
 });
