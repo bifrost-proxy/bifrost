@@ -308,6 +308,17 @@ impl RemoteInvokeExecutor {
         F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        if crate::worker_runtime::remote_execution::should_isolate_remote_execution() {
+            return crate::worker_runtime::remote_execution::execute_remote_command(
+                command,
+                &self.admin_host,
+                self.admin_port,
+                stdin_rx,
+                &mut on_stdout,
+            )
+            .await
+            .map_err(BifrostError::Config);
+        }
         // Auto-trigger keep-awake on every remote call (all kinds, including
         // read-only). Manager internally decides whether to acquire based
         // on mode; on non-macOS this is a cheap no-op.

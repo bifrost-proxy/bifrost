@@ -154,7 +154,8 @@ impl ManagedWorker {
             .env(WORKER_STARTUP_TOKEN_ENV, &startup_token)
             .env(WORKER_KIND_ENV, spec.kind.as_str())
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped());
+            .stdout(Stdio::piped())
+            .kill_on_drop(true);
         for (key, value) in &spec.env {
             command.env(key, value);
         }
@@ -810,16 +811,12 @@ async fn rotate_log(path: &Path) -> Result<(), String> {
 
 #[cfg(unix)]
 fn configure_process_group(command: &mut Command) {
-    if std::env::var_os(WORKER_KIND_ENV).is_none() {
-        command.process_group(0);
-    }
+    command.process_group(0);
 }
 #[cfg(windows)]
 fn configure_process_group(command: &mut Command) {
     use std::os::windows::process::CommandExt;
-    if std::env::var_os(WORKER_KIND_ENV).is_none() {
-        command.creation_flags(0x0000_0200);
-    }
+    command.creation_flags(0x0000_0200);
 }
 #[cfg(not(any(unix, windows)))]
 fn configure_process_group(_: &mut Command) {}

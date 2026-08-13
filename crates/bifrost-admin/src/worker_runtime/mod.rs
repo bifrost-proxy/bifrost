@@ -2,6 +2,7 @@ pub mod asr;
 pub mod im_gateway;
 mod process;
 mod protocol;
+pub mod remote_execution;
 pub mod remote_invoke;
 mod supervisor;
 mod worker_stdio;
@@ -25,6 +26,9 @@ pub fn run_auxiliary_worker(kind: &str, admin_host: &str, admin_port: u16) -> Re
         }
         "remote_invoke" | "remote-invoke" => {
             remote_invoke::run_remote_invoke_worker_stdio(admin_host, admin_port)
+        }
+        "remote_execution" | "remote-execution" => {
+            remote_execution::run_remote_execution_worker_stdio(admin_host, admin_port)
         }
         other => Err(format!("unsupported auxiliary worker kind '{other}'")),
     }

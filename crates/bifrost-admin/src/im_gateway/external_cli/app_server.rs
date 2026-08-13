@@ -231,7 +231,7 @@ pub(super) async fn run_command(
     request: &ExternalCliRunRequest,
     prompt: String,
     stop_marker_path: PathBuf,
-    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
     let (stdout_path, stderr_path) = external_cli_log_paths(&stop_marker_path);
     validate_app_server_transport(request)?;
@@ -337,7 +337,7 @@ pub(super) async fn run_command(
             raw: serde_json::json!({ "threadId": thread_id }),
         };
         if let Some(progress_tx) = progress_tx.as_ref() {
-            let _ = progress_tx.send(event.clone());
+            let _ = progress_tx.try_send(event.clone());
         }
         events.push(event);
         if pid != 0 {
@@ -395,7 +395,7 @@ pub(super) async fn run_command(
         }),
     };
     if let Some(progress_tx) = progress_tx.as_ref() {
-        let _ = progress_tx.send(turn_started_event.clone());
+        let _ = progress_tx.try_send(turn_started_event.clone());
     }
     events.push(turn_started_event);
 
@@ -455,7 +455,7 @@ pub(super) async fn run_command(
                         if let Some(response) = frame.get("result").cloned() {
                             let event = account_rate_limits_event(response);
                             if let Some(progress_tx) = progress_tx.as_ref() {
-                                let _ = progress_tx.send(event.clone());
+                                let _ = progress_tx.try_send(event.clone());
                             }
                             events.push(event);
                         } else if let Some(error) = frame.get("error") {
@@ -504,7 +504,7 @@ pub(super) async fn run_command(
                             &frame,
                         );
                         if let Some(progress_tx) = progress_tx.as_ref() {
-                            let _ = progress_tx.send(retry_event.clone());
+                            let _ = progress_tx.try_send(retry_event.clone());
                         }
                         events.push(retry_event);
                         if let Some(session_key) = session_key {
@@ -569,7 +569,7 @@ pub(super) async fn run_command(
                     for event in frame_events {
                         turn_has_side_effects |= progress_event_has_retry_side_effect(&event);
                         if let Some(progress_tx) = progress_tx.as_ref() {
-                            let _ = progress_tx.send(event.clone());
+                            let _ = progress_tx.try_send(event.clone());
                         }
                         if event.event_type == ExternalCliProgressEventType::RunFinished
                             || event.event_type == ExternalCliProgressEventType::RunFailed
@@ -1097,7 +1097,7 @@ async fn read_until_response(
     root_thread_id: Option<&str>,
     stdout_bytes: &mut Vec<u8>,
     events: &mut Vec<ExternalCliProgressEvent>,
-    progress_tx: Option<&mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    progress_tx: Option<&mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<serde_json::Value, String> {
     loop {
         let line = lines
@@ -1124,7 +1124,7 @@ async fn read_until_response(
         }
         for event in progress_events_from_app_server_frame(&frame) {
             if let Some(progress_tx) = progress_tx {
-                let _ = progress_tx.send(event.clone());
+                let _ = progress_tx.try_send(event.clone());
             }
             events.push(event);
         }
@@ -1137,7 +1137,7 @@ async fn read_handshake_response(
     root_thread_id: Option<&str>,
     stdout_bytes: &mut Vec<u8>,
     events: &mut Vec<ExternalCliProgressEvent>,
-    progress_tx: Option<&mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    progress_tx: Option<&mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<serde_json::Value, String> {
     timeout(
         Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
@@ -2498,7 +2498,7 @@ for line in sys.stdin:
         request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
         request.adapter_config.executable = Some(executable.display().to_string());
         let session_key = "mock-app-server-session";
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let (progress_tx, mut progress_rx) = mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
         let run_task = tokio::spawn({
             let stop_marker = temp_dir.path().join("stop");
             async move {

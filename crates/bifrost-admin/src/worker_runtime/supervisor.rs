@@ -17,6 +17,7 @@ const BACKOFF_MAX_MS: u64 = 30 * 1_000;
 struct WorkerRecord {
     kind: WorkerKind,
     worker: Option<Arc<ManagedWorker>>,
+    last_spec: Option<WorkerSpawnSpec>,
     restart_count: u64,
     last_error: Option<String>,
     failures: VecDeque<u64>,
@@ -29,6 +30,7 @@ impl WorkerRecord {
         Self {
             kind,
             worker: None,
+            last_spec: None,
             restart_count: 0,
             last_error: None,
             failures: VecDeque::new(),
@@ -118,6 +120,7 @@ impl WorkerSupervisor {
             .clone();
         let mut record = record.lock().await;
         record.kind = spec.kind;
+        record.last_spec = Some(spec.clone());
         if let Some(worker) = record.worker.as_ref() {
             if worker.is_healthy().await {
                 return Ok(worker.clone());
@@ -179,6 +182,87 @@ impl WorkerSupervisor {
             false
         }
     }
+    pub async fn start_kind(&self, kind: WorkerKind) -> Vec<(String, Result<(), String>)> {
+        let specs = self.specs_for_kind(kind).await;
+        let mut results = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let key = spec.key.clone();
+            let result = self.get_or_start(spec).await.map(|_| ());
+            results.push((key, result));
+        }
+        results
+    }
+
+    pub async fn restart_key(&self, key: &str) -> Result<Arc<ManagedWorker>, String> {
+        let record = self
+            .workers
+            .read()
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("worker '{key}' is not registered"))?;
+        let spec = record
+            .lock()
+            .await
+            .last_spec
+            .clone()
+            .ok_or_else(|| format!("worker '{key}' has no restart specification"))?;
+        self.restart(spec).await
+    }
+
+    pub async fn restart_kind(&self, kind: WorkerKind) -> Vec<(String, Result<(), String>)> {
+        let specs = self.specs_for_kind(kind).await;
+        let mut results = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let key = spec.key.clone();
+            let result = self.restart(spec).await.map(|_| ());
+            results.push((key, result));
+        }
+        results
+    }
+
+    pub async fn reset_circuit(&self, key: &str) -> bool {
+        let Some(record) = self.workers.read().get(key).cloned() else {
+            return false;
+        };
+        record.lock().await.clear_gate();
+        true
+    }
+
+    pub async fn reset_circuit_kind(&self, kind: WorkerKind) -> usize {
+        let records = self.records_for_kind(kind).await;
+        for (_, record) in &records {
+            record.lock().await.clear_gate();
+        }
+        records.len()
+    }
+
+    async fn specs_for_kind(&self, kind: WorkerKind) -> Vec<WorkerSpawnSpec> {
+        let records = self.records_for_kind(kind).await;
+        let mut specs = Vec::new();
+        for (_, record) in records {
+            if let Some(spec) = record.lock().await.last_spec.clone() {
+                specs.push(spec);
+            }
+        }
+        specs
+    }
+
+    async fn records_for_kind(&self, kind: WorkerKind) -> Vec<(String, Arc<Mutex<WorkerRecord>>)> {
+        let records = self
+            .workers
+            .read()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let mut matches = Vec::new();
+        for (key, record) in records {
+            if record.lock().await.kind == kind {
+                matches.push((key, record));
+            }
+        }
+        matches
+    }
+
     pub async fn stop_kind(&self, kind: WorkerKind, grace: Duration) -> usize {
         let records = self
             .workers
@@ -272,5 +356,8 @@ mod tests {
             record.failure(format!("failure-{index}"));
         }
         assert!(record.circuit_open_until_ms.is_some());
+        record.clear_gate();
+        assert!(record.circuit_open_until_ms.is_none());
+        assert!(record.failures.is_empty());
     }
 }
