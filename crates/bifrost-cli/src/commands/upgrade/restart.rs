@@ -529,6 +529,16 @@ try {
       Write-UpgradeLog "ERROR: failed to restore previous CLI: $($_.Exception.Message)"
     }
   }
+  if (Test-Path -LiteralPath $PendingPath) {
+    try {
+      Invoke-FileOperationWithRetry "removing failed replacement staging file" {
+        Remove-Item -LiteralPath $PendingPath -Force
+      }
+      Write-UpgradeLog "removed failed replacement staging file"
+    } catch {
+      Write-UpgradeLog "WARNING: failed to remove replacement staging file: $($_.Exception.Message)"
+    }
+  }
   Write-UpgradeProgress "failed" "Upgrade failed" $errorMessage
   Write-UpgradeLog "ERROR: $errorMessage"
   Write-DeferredStatus "error: $errorMessage"
