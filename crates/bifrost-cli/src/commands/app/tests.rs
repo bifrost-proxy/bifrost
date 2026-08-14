@@ -384,7 +384,9 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
     let _owner = crate::commands::upgrade_background::try_acquire_upgrade_lock(lock_dir.path())
         .expect("open parent lock")
         .expect("own parent lock");
-    let command = desktop_managed_cli_upgrade_command(Path::new("/tmp/bifrost"), "0.0.156");
+    let deferred_status = lock_dir.path().join("deferred.status");
+    let command =
+        desktop_managed_cli_upgrade_command(Path::new("/tmp/bifrost"), "0.0.156", &deferred_status);
     let args: Vec<_> = command
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -414,6 +416,11 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
         envs.get(DESKTOP_MANAGED_TARGET_ENV).map(String::as_str),
         Some("0.0.156")
     );
+    assert_eq!(
+        envs.get(DESKTOP_MANAGED_DEFERRED_STATUS_ENV)
+            .map(String::as_str),
+        Some(deferred_status.to_string_lossy().as_ref())
+    );
     let expected_owner_pid = std::process::id().to_string();
     assert_eq!(
         envs.get(PARENT_UPGRADE_LOCK_OWNER_PID_ENV)
@@ -440,10 +447,32 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
             &cli,
             "0.0.156",
             "desktop",
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .expect("run fake cli")
         .success());
+
+        let deferred_cli = dir.path().join("deferred-upgrade-bifrost");
+        std::fs::write(
+            &deferred_cli,
+            "#!/bin/sh\nprintf pending > \"$BIFROST_DESKTOP_MANAGED_DEFERRED_STATUS\"\n(sleep 0.15; printf ok > \"$BIFROST_DESKTOP_MANAGED_DEFERRED_STATUS\") &\nexit 0\n",
+        )
+        .expect("write deferred fake cli");
+        std::fs::set_permissions(&deferred_cli, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod deferred fake cli");
+        let started = Instant::now();
+        assert!(run_desktop_managed_cli_upgrade(
+            &deferred_cli,
+            "0.0.156",
+            "desktop",
+            Duration::from_secs(10),
+        )
+        .expect("wait for deferred fake CLI helper")
+        .success());
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "parent returned before deferred helper terminal status"
+        );
         verify_installed_cli_target_version(&cli, "0.0.156")
             .expect("fake CLI reports pinned version");
         assert!(verify_installed_cli_target_version_with_timeout(
@@ -493,7 +522,176 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
             Duration::from_millis(50),
         )
         .expect_err("hung CLI version probe must time out");
-        assert!(version_timeout.to_string().contains("timed out"));
+        let version_timeout = version_timeout.to_string();
+        assert!(version_timeout.contains("timed out after"));
+        assert!(!version_timeout.contains("timed out after 0 seconds"));
+
+        let deferred_status = dir.path().join("helper.status");
+        std::fs::write(&deferred_status, "pending").expect("write pending helper status");
+        let status_for_helper = deferred_status.clone();
+        let helper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            std::fs::write(status_for_helper, "ok").expect("finish helper status");
+        });
+        let mut heartbeat = Instant::now() + Duration::from_secs(10);
+        wait_for_desktop_managed_deferred_install(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(2),
+            &mut heartbeat,
+        )
+        .expect("parent waits for deferred helper terminal state");
+        helper.join().expect("helper status writer");
+
+        std::fs::write(&deferred_status, "pending").expect("write heartbeat helper status");
+        let status_for_heartbeat = deferred_status.clone();
+        let helper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(75));
+            std::fs::write(status_for_heartbeat, "ok").expect("finish heartbeat helper status");
+        });
+        let mut immediate_heartbeat = Instant::now();
+        wait_for_desktop_managed_deferred_install(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(2),
+            &mut immediate_heartbeat,
+        )
+        .expect("pending helper publishes a waiting heartbeat");
+        helper.join().expect("heartbeat helper status writer");
+        assert!(immediate_heartbeat > Instant::now());
+
+        std::fs::write(&deferred_status, "error: access denied")
+            .expect("write failed helper status");
+        let helper_error = wait_for_desktop_managed_deferred_install(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(1),
+            &mut heartbeat,
+        )
+        .expect_err("helper failure must propagate without a version-probe timeout");
+        assert!(helper_error.to_string().contains("access denied"));
+
+        std::fs::write(&deferred_status, "unexpected").expect("write unknown helper status");
+        let unknown_error = wait_for_desktop_managed_deferred_install(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(1),
+            &mut heartbeat,
+        )
+        .expect_err("unknown helper status must fail closed");
+        assert!(unknown_error.to_string().contains("unknown status"));
+
+        std::fs::write(&deferred_status, "pending:999999").expect("write exited helper status");
+        let exited_helper_error = wait_for_desktop_managed_deferred_install(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(1),
+            &mut heartbeat,
+        )
+        .expect_err("an exited helper without a terminal status must fail immediately");
+        assert!(exited_helper_error
+            .to_string()
+            .contains("exited without publishing a terminal status"));
+
+        std::fs::write(&deferred_status, "pending:not-a-pid").expect("write invalid helper status");
+        let invalid_pid_error = wait_for_desktop_managed_deferred_install_with_mode(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(1),
+            &mut heartbeat,
+            true,
+            Duration::from_secs(1),
+        )
+        .expect_err("an invalid helper PID must fail closed");
+        assert!(invalid_pid_error
+            .to_string()
+            .contains("invalid pending status"));
+
+        std::fs::write(&deferred_status, format!("pending:{}", std::process::id()))
+            .expect("write live helper status");
+        let live_helper_timeout = wait_for_desktop_managed_deferred_install_with_mode(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now(),
+            &mut heartbeat,
+            true,
+            Duration::from_secs(1),
+        )
+        .expect_err("a live helper still respects the parent deadline");
+        assert!(live_helper_timeout.to_string().contains("did not finish"));
+
+        std::fs::write(&deferred_status, "awaiting").expect("write awaiting helper status");
+        let handshake_error = wait_for_desktop_managed_deferred_install_with_mode(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(1),
+            &mut heartbeat,
+            true,
+            Duration::ZERO,
+        )
+        .expect_err("a missing helper PID must fail after the handshake deadline");
+        assert!(handshake_error
+            .to_string()
+            .contains("did not publish its process identity"));
+
+        std::fs::write(&deferred_status, "pending").expect("write stuck helper status");
+        let timeout_error = wait_for_desktop_managed_deferred_install(
+            &deferred_status,
+            "0.0.156",
+            "desktop",
+            Instant::now(),
+            &mut heartbeat,
+        )
+        .expect_err("stuck helper must respect the parent deadline");
+        assert!(timeout_error.to_string().contains("did not finish"));
+
+        let missing_cli = dir.path().join("missing-bifrost");
+        let spawn_status = dir.path().join("spawn.status");
+        let spawn_error = run_desktop_managed_cli_upgrade_with_status_path(
+            &missing_cli,
+            "0.0.156",
+            "desktop",
+            Duration::from_secs(1),
+            spawn_status.clone(),
+        )
+        .expect_err("missing CLI must fail to spawn");
+        assert!(matches!(spawn_error, BifrostError::Io(_)));
+        assert!(
+            !spawn_status.exists(),
+            "failed spawn status must be cleaned"
+        );
+
+        let invalid_parent = dir.path().join("not-a-directory");
+        std::fs::write(&invalid_parent, "file").expect("write invalid status parent");
+        let parent_error = run_desktop_managed_cli_upgrade_with_status_path(
+            &cli,
+            "0.0.156",
+            "desktop",
+            Duration::from_secs(1),
+            invalid_parent.join("status"),
+        )
+        .expect_err("status path below a file must fail before spawning");
+        assert!(matches!(parent_error, BifrostError::Io(_)));
+
+        let timeout_status = dir.path().join("timeout.status");
+        let timeout_error = run_desktop_managed_cli_upgrade_with_status_path(
+            &slow_cli,
+            "0.0.156",
+            "desktop",
+            Duration::from_millis(50),
+            timeout_status.clone(),
+        )
+        .expect_err("hung child must time out through explicit status path");
+        assert!(timeout_error.to_string().contains("timed out"));
+        assert!(!timeout_status.exists(), "timeout status must be cleaned");
         std::env::set_var("PATH", dir.path());
         std::env::set_var("BIFROST_INSTALL_DIR", dir.path());
         upgrade_cli_if_present("desktop", "0.0.156")

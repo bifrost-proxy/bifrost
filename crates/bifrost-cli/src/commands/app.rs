@@ -20,8 +20,9 @@ use crate::cli::AppCommands;
 
 use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::{
-    download_progress_line, handle_app_managed_upgrade, DESKTOP_MANAGED_SKIP_APP_ENV,
-    DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV, DESKTOP_UPGRADE_HANDOFF_ENV,
+    download_progress_line, handle_app_managed_upgrade, DESKTOP_MANAGED_DEFERRED_STATUS_ENV,
+    DESKTOP_MANAGED_SKIP_APP_ENV, DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV,
+    DESKTOP_UPGRADE_HANDOFF_ENV,
 };
 #[cfg(test)]
 use super::upgrade_background::{PARENT_UPGRADE_LOCK_OWNER_PID_ENV, PARENT_UPGRADE_LOCK_TOKEN_ENV};
@@ -447,7 +448,11 @@ fn upgrade_cli_if_present(progress_source: &str, target_version: &str) -> Result
     Ok(())
 }
 
-fn desktop_managed_cli_upgrade_command(cli_path: &Path, target_version: &str) -> Command {
+fn desktop_managed_cli_upgrade_command(
+    cli_path: &Path,
+    target_version: &str,
+    deferred_status_path: &Path,
+) -> Command {
     let mut command = Command::new(cli_path);
     command
         .arg("upgrade")
@@ -455,11 +460,123 @@ fn desktop_managed_cli_upgrade_command(cli_path: &Path, target_version: &str) ->
         .env(DESKTOP_MANAGED_SKIP_APP_ENV, "1")
         .env(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1")
         .env(DESKTOP_MANAGED_TARGET_ENV, target_version)
+        .env(DESKTOP_MANAGED_DEFERRED_STATUS_ENV, deferred_status_path)
         .envs(
             crate::commands::upgrade_background::parent_upgrade_lock_child_environment(&data_dir()),
         )
         .stdin(Stdio::null());
+    hide_windows_console(&mut command);
     command
+}
+
+#[cfg(windows)]
+fn hide_windows_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_windows_console(_command: &mut Command) {}
+
+fn desktop_managed_deferred_status_path() -> PathBuf {
+    data_dir().join(format!(
+        ".desktop-cli-upgrade-{}.status",
+        std::process::id()
+    ))
+}
+
+fn wait_for_desktop_managed_deferred_install(
+    status_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    deadline: Instant,
+    next_heartbeat: &mut Instant,
+) -> Result<(), BifrostError> {
+    wait_for_desktop_managed_deferred_install_with_mode(
+        status_path,
+        target_version,
+        progress_source,
+        deadline,
+        next_heartbeat,
+        cfg!(windows),
+        Duration::from_secs(10),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_for_desktop_managed_deferred_install_with_mode(
+    status_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    deadline: Instant,
+    next_heartbeat: &mut Instant,
+    require_helper_pid: bool,
+    handshake_timeout: Duration,
+) -> Result<(), BifrostError> {
+    let handshake_deadline = Instant::now() + handshake_timeout;
+    loop {
+        let status = fs::read_to_string(status_path).unwrap_or_default();
+        let status = status.trim();
+        match status {
+            "ok" => return Ok(()),
+            "awaiting" if !require_helper_pid => return Ok(()),
+            "pending" if !require_helper_pid => {}
+            "awaiting" | "pending" | "" => {
+                if require_helper_pid && Instant::now() >= handshake_deadline {
+                    return Err(BifrostError::Config(
+                        "Windows upgrade helper did not publish its process identity".to_string(),
+                    ));
+                }
+            }
+            status if status.starts_with("pending:") => {
+                let helper_pid = status
+                    .strip_prefix("pending:")
+                    .and_then(|pid| pid.parse::<u32>().ok())
+                    .ok_or_else(|| {
+                        BifrostError::Config(format!(
+                            "Windows upgrade helper wrote an invalid pending status: {status}"
+                        ))
+                    })?;
+                if !crate::process::is_process_running(helper_pid) {
+                    return Err(BifrostError::Config(format!(
+                        "Windows upgrade helper process {helper_pid} exited without publishing a terminal status"
+                    )));
+                }
+            }
+            status if let Some(error) = status.strip_prefix("error:") => {
+                return Err(BifrostError::Config(format!(
+                    "Windows upgrade helper failed: {}",
+                    error.trim()
+                )));
+            }
+            status => {
+                return Err(BifrostError::Config(format!(
+                    "Windows upgrade helper wrote an unknown status: {status}"
+                )));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(BifrostError::Config(
+                "Windows upgrade helper did not finish before the installed CLI upgrade timeout"
+                    .to_string(),
+            ));
+        }
+        if Instant::now() >= *next_heartbeat {
+            write_app_progress(
+                UpgradePhase::Installing,
+                "Waiting for Windows to replace the installed CLI…",
+                Some(target_version.to_string()),
+                progress_source,
+                None,
+                None,
+            );
+            *next_heartbeat = Instant::now() + DESKTOP_MANAGED_CLI_HEARTBEAT;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn run_desktop_managed_cli_upgrade(
@@ -468,17 +585,60 @@ fn run_desktop_managed_cli_upgrade(
     progress_source: &str,
     timeout: Duration,
 ) -> Result<std::process::ExitStatus, BifrostError> {
-    let mut child = desktop_managed_cli_upgrade_command(cli_path, target_version)
-        .spawn()
-        .map_err(BifrostError::Io)?;
+    run_desktop_managed_cli_upgrade_with_status_path(
+        cli_path,
+        target_version,
+        progress_source,
+        timeout,
+        desktop_managed_deferred_status_path(),
+    )
+}
+
+fn run_desktop_managed_cli_upgrade_with_status_path(
+    cli_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    timeout: Duration,
+    deferred_status_path: PathBuf,
+) -> Result<std::process::ExitStatus, BifrostError> {
+    if let Some(parent) = deferred_status_path.parent() {
+        fs::create_dir_all(parent).map_err(BifrostError::Io)?;
+    }
+    fs::write(&deferred_status_path, "awaiting").map_err(BifrostError::Io)?;
+    let mut child =
+        match desktop_managed_cli_upgrade_command(cli_path, target_version, &deferred_status_path)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = fs::remove_file(&deferred_status_path);
+                return Err(BifrostError::Io(error));
+            }
+        };
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
+            Ok(Some(status)) => {
+                let result = if status.success() {
+                    wait_for_desktop_managed_deferred_install(
+                        &deferred_status_path,
+                        target_version,
+                        progress_source,
+                        deadline,
+                        &mut next_heartbeat,
+                    )
+                    .map(|()| status)
+                } else {
+                    Ok(status)
+                };
+                let _ = fs::remove_file(&deferred_status_path);
+                return result;
+            }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = fs::remove_file(&deferred_status_path);
                 return Err(BifrostError::Config(format!(
                     "installed CLI upgrade timed out after {} seconds",
                     timeout.as_secs()
@@ -558,15 +718,16 @@ fn read_installed_cli_version_with_timeout(
 ) -> Result<String, BifrostError> {
     let mut stdout =
         tempfile::tempfile().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
-    let mut child = Command::new(cli_path)
+    let mut command = Command::new(cli_path);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
             BifrostError::Io(std::io::Error::other(error))
         })?))
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(BifrostError::Io)?;
+        .stderr(Stdio::null());
+    hide_windows_console(&mut command);
+    let mut child = command.spawn().map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -576,7 +737,7 @@ fn read_installed_cli_version_with_timeout(
                 let _ = child.wait();
                 return Err(BifrostError::Config(format!(
                     "installed CLI version verification timed out after {} seconds",
-                    timeout.as_secs()
+                    timeout.as_secs_f64()
                 )));
             }
             Ok(None) => thread::sleep(Duration::from_millis(25)),

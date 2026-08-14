@@ -292,6 +292,7 @@ pub(super) fn schedule_windows_deferred_install(
     let args_path = target_dir.join(format!(".bifrost-upgrade-{}.args", suffix));
     let log_path = target_dir.join(format!(".bifrost-upgrade-{}.log", suffix));
     let ready_path = target_dir.join(format!(".bifrost-upgrade-{}.ok", suffix));
+    let deferred_status_path = env::var_os(DESKTOP_MANAGED_DEFERRED_STATUS_ENV).map(PathBuf::from);
     let progress_dir = get_bifrost_dir()?;
     let progress_path = progress_dir.join(bifrost_core::upgrade_progress::PROGRESS_FILE_NAME);
     let progress_snapshot = bifrost_core::upgrade_progress::read_progress(&progress_dir);
@@ -314,6 +315,7 @@ param(
   [string]$TargetPath,
   [string]$RestartArgsPath,
   [string]$ReadyPath,
+  [string]$StatusPath,
   [string]$LogPath,
   [string]$ProgressPath,
   [string]$TargetVersion,
@@ -325,6 +327,34 @@ $ErrorActionPreference = "Stop"
 function Write-UpgradeLog([string]$Message) {
   $timestamp = (Get-Date).ToString("o")
   Add-Content -LiteralPath $LogPath -Value "$timestamp $Message"
+}
+
+function Write-DeferredStatus([string]$Status) {
+  if (-not $StatusPath) { return }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  $statusTmpPath = "$StatusPath.tmp.$PID"
+  try {
+    [System.IO.File]::WriteAllText($statusTmpPath, $Status, $utf8NoBom)
+    Invoke-FileOperationWithRetry "publishing deferred status" {
+      Move-Item -LiteralPath $statusTmpPath -Destination $StatusPath -Force
+    }
+  } finally {
+    Remove-Item -LiteralPath $statusTmpPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Invoke-FileOperationWithRetry([string]$Description, [scriptblock]$Operation) {
+  for ($attempt = 0; $attempt -lt 240; $attempt++) {
+    try {
+      & $Operation
+      return
+    } catch {
+      $win32Code = $_.Exception.HResult -band 0xFFFF
+      if (($win32Code -notin @(5, 32, 33)) -or $attempt -eq 239) { throw }
+      Write-UpgradeLog "retrying $Description after Windows file sharing error $win32Code"
+      Start-Sleep -Milliseconds (25 + (($attempt % 10) * 10))
+    }
+  }
 }
 
 function Read-JsonWithRetry([string]$Path) {
@@ -405,6 +435,7 @@ $backupPath = "$TargetPath.upgrade-backup"
 $replacementVerified = $false
 
 try {
+  Write-DeferredStatus "pending:$PID"
   Write-UpgradeLog "waiting for parent pid $ParentPid"
   $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
   if ($parent) {
@@ -421,17 +452,27 @@ try {
   if (Test-Path -LiteralPath $backupPath) {
     Write-UpgradeLog "recovering interrupted replacement from $backupPath"
     if (Test-Path -LiteralPath $TargetPath) {
-      Remove-Item -LiteralPath $TargetPath -Force
+      Invoke-FileOperationWithRetry "removing interrupted target" {
+        Remove-Item -LiteralPath $TargetPath -Force
+      }
     }
-    Move-Item -LiteralPath $backupPath -Destination $TargetPath -Force
+    Invoke-FileOperationWithRetry "restoring interrupted backup" {
+      Move-Item -LiteralPath $backupPath -Destination $TargetPath -Force
+    }
   }
 
   Write-UpgradeLog "replacing $TargetPath"
   if (Test-Path -LiteralPath $TargetPath) {
-    Copy-Item -LiteralPath $TargetPath -Destination $backupPath -Force
-    Remove-Item -LiteralPath $TargetPath -Force
+    Invoke-FileOperationWithRetry "creating CLI backup" {
+      Copy-Item -LiteralPath $TargetPath -Destination $backupPath -Force
+    }
+    Invoke-FileOperationWithRetry "removing old CLI" {
+      Remove-Item -LiteralPath $TargetPath -Force
+    }
   }
-  Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force
+  Invoke-FileOperationWithRetry "installing replacement CLI" {
+    Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force
+  }
 
   $versionOutput = ((& $TargetPath --version 2>&1) | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) {
@@ -464,6 +505,7 @@ try {
   }
 
   Set-Content -LiteralPath $ReadyPath -Value "ok"
+  Write-DeferredStatus "ok"
   Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
   Write-UpgradeProgress "completed" "Upgrade complete" $null
   Write-UpgradeLog "done"
@@ -475,9 +517,13 @@ try {
   if (-not $replacementVerified -and (Test-Path -LiteralPath $backupPath)) {
     try {
       if (Test-Path -LiteralPath $TargetPath) {
-        Remove-Item -LiteralPath $TargetPath -Force
+        Invoke-FileOperationWithRetry "removing failed replacement" {
+          Remove-Item -LiteralPath $TargetPath -Force
+        }
       }
-      Move-Item -LiteralPath $backupPath -Destination $TargetPath -Force
+      Invoke-FileOperationWithRetry "restoring previous CLI" {
+        Move-Item -LiteralPath $backupPath -Destination $TargetPath -Force
+      }
       Write-UpgradeLog "restored previous CLI after replacement failure"
     } catch {
       Write-UpgradeLog "ERROR: failed to restore previous CLI: $($_.Exception.Message)"
@@ -485,6 +531,7 @@ try {
   }
   Write-UpgradeProgress "failed" "Upgrade failed" $errorMessage
   Write-UpgradeLog "ERROR: $errorMessage"
+  Write-DeferredStatus "error: $errorMessage"
   exit 1
 }
 "#,
@@ -505,6 +552,12 @@ try {
         .arg(&args_path)
         .arg("-ReadyPath")
         .arg(&ready_path)
+        .arg("-StatusPath")
+        .arg(
+            deferred_status_path
+                .as_deref()
+                .unwrap_or_else(|| Path::new("")),
+        )
         .arg("-LogPath")
         .arg(&log_path)
         .arg("-ProgressPath")
@@ -523,6 +576,13 @@ try {
         // the foreground (see the unix restart path for the full rationale).
         .env_remove(crate::commands::start::DETACHED_DAEMON_CHILD_ENV);
 
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    if let Some(status_path) = &deferred_status_path {
+        fs::write(status_path, "pending").map_err(BifrostError::Io)?;
+    }
     command.spawn().map_err(BifrostError::Io)?;
     mark_deferred_install_scheduled();
     println!(
