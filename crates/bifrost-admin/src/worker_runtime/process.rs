@@ -120,6 +120,7 @@ pub struct ManagedWorker {
     max_concurrency: usize,
     max_queue_depth: usize,
     request_slots: Arc<Semaphore>,
+    control_slots: Arc<Semaphore>,
     last_error: parking_lot::RwLock<Option<String>>,
 }
 
@@ -272,6 +273,7 @@ impl ManagedWorker {
             max_concurrency: spec.max_concurrency.max(1),
             max_queue_depth: spec.max_queue_depth,
             request_slots: Arc::new(Semaphore::new(spec.max_concurrency.max(1))),
+            control_slots: Arc::new(Semaphore::new(8)),
             last_error: parking_lot::RwLock::new(None),
         });
         Self::spawn_stdout_reader(&worker, stdout);
@@ -478,12 +480,34 @@ impl ManagedWorker {
         payload: serde_json::Value,
         timeout_override: Option<Duration>,
     ) -> Result<serde_json::Value, String> {
-        self.request_with_id(
+        self.request_with_id_inner(
             uuid::Uuid::new_v4().to_string(),
             None,
-            operation,
+            operation.into(),
             payload,
             timeout_override,
+            false,
+        )
+        .await
+    }
+
+    /// Send a low-volume control request without waiting behind the worker's
+    /// primary execution semaphore. This is reserved for operations such as
+    /// status/cancel controls that must remain reachable while a long-running
+    /// request occupies the worker's normal slot.
+    pub async fn request_control(
+        &self,
+        operation: impl Into<String>,
+        payload: serde_json::Value,
+        timeout_override: Option<Duration>,
+    ) -> Result<serde_json::Value, String> {
+        self.request_with_id_inner(
+            uuid::Uuid::new_v4().to_string(),
+            None,
+            operation.into(),
+            payload,
+            timeout_override,
+            true,
         )
         .await
     }
@@ -496,7 +520,26 @@ impl ManagedWorker {
         payload: serde_json::Value,
         timeout_override: Option<Duration>,
     ) -> Result<serde_json::Value, String> {
-        let operation = operation.into();
+        self.request_with_id_inner(
+            request_id,
+            job_id,
+            operation.into(),
+            payload,
+            timeout_override,
+            false,
+        )
+        .await
+    }
+
+    async fn request_with_id_inner(
+        &self,
+        request_id: String,
+        job_id: Option<String>,
+        operation: String,
+        payload: serde_json::Value,
+        timeout_override: Option<Duration>,
+        control_lane: bool,
+    ) -> Result<serde_json::Value, String> {
         jobs::begin_request(
             &self.key,
             self.kind,
@@ -522,53 +565,80 @@ impl ManagedWorker {
             dispatched: &self.dispatched_requests,
         };
 
-        let permit = match self.request_slots.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                let Some(queue_guard) = AtomicCounterGuard::try_increment_below(
-                    &self.parent_queued_jobs,
-                    self.max_queue_depth,
-                ) else {
-                    let error = format!(
-                        "worker '{}' request queue is full (limit {})",
-                        self.key, self.max_queue_depth
-                    );
+        let permit = if control_lane {
+            let acquire = self.control_slots.clone().acquire_owned();
+            tokio::pin!(acquire);
+            let queue_timeout = tokio::time::sleep(Duration::from_secs(5));
+            tokio::pin!(queue_timeout);
+            tokio::select! {
+                result = &mut acquire => result.map_err(|_| "worker control queue closed".to_string())?,
+                _ = &mut queue_timeout => {
+                    let error = format!("worker '{}' control queue timeout", self.key);
                     jobs::mark_failed(&request_id, error.clone());
                     return Err(error);
-                };
-                let acquire = self.request_slots.clone().acquire_owned();
-                tokio::pin!(acquire);
-                let queue_timeout = tokio::time::sleep(self.queue_wait_timeout);
-                tokio::pin!(queue_timeout);
-                let permit = tokio::select! {
-                    result = &mut acquire => match result {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            let error = "worker request queue closed".to_string();
+                },
+                changed = cancel_rx.changed() => {
+                    if changed.is_ok() && *cancel_rx.borrow() {
+                        jobs::mark_cancelled(
+                            &request_id,
+                            Some("worker control request cancelled while queued".to_string()),
+                        );
+                        return Err("worker control request cancelled while queued".to_string());
+                    }
+                    let error = "worker control request cancellation channel closed".to_string();
+                    jobs::mark_failed(&request_id, error.clone());
+                    return Err(error);
+                },
+            }
+        } else {
+            match self.request_slots.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let Some(queue_guard) = AtomicCounterGuard::try_increment_below(
+                        &self.parent_queued_jobs,
+                        self.max_queue_depth,
+                    ) else {
+                        let error = format!(
+                            "worker '{}' request queue is full (limit {})",
+                            self.key, self.max_queue_depth
+                        );
+                        jobs::mark_failed(&request_id, error.clone());
+                        return Err(error);
+                    };
+                    let acquire = self.request_slots.clone().acquire_owned();
+                    tokio::pin!(acquire);
+                    let queue_timeout = tokio::time::sleep(self.queue_wait_timeout);
+                    tokio::pin!(queue_timeout);
+                    let permit = tokio::select! {
+                        result = &mut acquire => match result {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                let error = "worker request queue closed".to_string();
+                                jobs::mark_failed(&request_id, error.clone());
+                                return Err(error);
+                            }
+                        },
+                        _ = &mut queue_timeout => {
+                            let error = format!("worker '{}' request queue timeout", self.key);
                             jobs::mark_failed(&request_id, error.clone());
                             return Err(error);
-                        }
-                    },
-                    _ = &mut queue_timeout => {
-                        let error = format!("worker '{}' request queue timeout", self.key);
-                        jobs::mark_failed(&request_id, error.clone());
-                        return Err(error);
-                    },
-                    changed = cancel_rx.changed() => {
-                        if changed.is_ok() && *cancel_rx.borrow() {
-                            jobs::mark_cancelled(
-                                &request_id,
-                                Some("worker request cancelled while queued".to_string()),
-                            );
-                            return Err("worker request cancelled while queued".to_string());
-                        }
-                        let error = "worker request cancellation channel closed".to_string();
-                        jobs::mark_failed(&request_id, error.clone());
-                        return Err(error);
-                    },
-                };
-                drop(queue_guard);
-                permit
+                        },
+                        changed = cancel_rx.changed() => {
+                            if changed.is_ok() && *cancel_rx.borrow() {
+                                jobs::mark_cancelled(
+                                    &request_id,
+                                    Some("worker request cancelled while queued".to_string()),
+                                );
+                                return Err("worker request cancelled while queued".to_string());
+                            }
+                            let error = "worker request cancellation channel closed".to_string();
+                            jobs::mark_failed(&request_id, error.clone());
+                            return Err(error);
+                        },
+                    };
+                    drop(queue_guard);
+                    permit
+                }
             }
         };
         let _permit = permit;

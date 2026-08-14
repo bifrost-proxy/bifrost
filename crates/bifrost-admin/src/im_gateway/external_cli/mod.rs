@@ -55,6 +55,7 @@ const EXTERNAL_CLI_TEE_BUFFER_BYTES: usize = 64 * 1024;
 const EXTERNAL_CLI_WORKER_REQUEST_MAX_BYTES: u64 = 384 * 1024 * 1024;
 const EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const EXTERNAL_CLI_WORKER_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES: usize = 16 * 1024;
 const EXTERNAL_CLI_WORKER_PROGRESS_TITLE_BYTES: usize = 1024;
 const EXTERNAL_CLI_WORKER_HEARTBEAT_INTERVAL_SECS: u64 = 10;
@@ -1459,6 +1460,12 @@ impl ExternalCliRuntime {
                 .run_in_current_process_with_progress(request, progress_tx)
                 .await;
         }
+        // Preserve the historical same-session replacement behavior: stop the
+        // prior worker before waiting for the global concurrency slot, otherwise
+        // a concurrency=1 replacement can queue behind the very run it must stop.
+        if let Some(session_key) = request.session_key.as_deref() {
+            let _ = request_worker_session_stop(session_key).await;
+        }
         let queue_timeout_secs = external_cli_queue_timeout_secs();
         let _run_permit = timeout(
             Duration::from_secs(queue_timeout_secs),
@@ -1914,7 +1921,10 @@ impl ExternalCliRuntime {
 }
 
 fn register_external_cli_job_artifacts(registry_id: &str, artifacts: &ExternalCliRunArtifacts) {
+    let result_path = PathBuf::from(&artifacts.run_dir).join("result.json");
+    let result_path = result_path.to_string_lossy().into_owned();
     let candidates = [
+        ("result", result_path.as_str(), Some("application/json")),
         ("prompt", artifacts.prompt.as_str(), Some("text/plain")),
         (
             "command_snapshot",
@@ -4707,13 +4717,14 @@ where
             .await
             .map_err(|error| format!("create {label} log dir {}: {error}", parent.display()))?;
     }
-    let mut file = tokio::fs::File::create(&path)
-        .await
-        .map_err(|error| format!("create {label} log {}: {error}", path.display()))?;
+    let std_file = open_private_file(&path, true, false)?;
+    let mut file = tokio::fs::File::from_std(std_file);
     let (mut forward, forwarded) = tokio::io::duplex(EXTERNAL_CLI_TEE_BUFFER_BYTES);
     let task = tokio::spawn(async move {
         let mut buffer = vec![0_u8; EXTERNAL_CLI_TEE_BUFFER_BYTES];
         let mut forwarding = true;
+        let mut persisted = 0_u64;
+        let mut quota_warned = false;
         loop {
             let read = reader
                 .read(&mut buffer)
@@ -4722,9 +4733,24 @@ where
             if read == 0 {
                 break;
             }
-            file.write_all(&buffer[..read]).await.map_err(|error| {
-                format!("write external CLI {label} log {}: {error}", path.display())
-            })?;
+            let remaining = EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES.saturating_sub(persisted);
+            let persist_len = usize::try_from(remaining.min(read as u64)).unwrap_or(read);
+            if persist_len > 0 {
+                file.write_all(&buffer[..persist_len])
+                    .await
+                    .map_err(|error| {
+                        format!("write external CLI {label} log {}: {error}", path.display())
+                    })?;
+                persisted = persisted.saturating_add(persist_len as u64);
+            }
+            if persist_len < read && !quota_warned {
+                quota_warned = true;
+                tracing::warn!(
+                    path = %path.display(),
+                    max_bytes = EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES,
+                    "external CLI log quota reached; continuing to drain without persisting excess output"
+                );
+            }
             if forwarding && forward.write_all(&buffer[..read]).await.is_err() {
                 forwarding = false;
             }
@@ -4742,16 +4768,36 @@ async fn join_external_cli_tee(task: ExternalCliTeeTask, label: &str) -> Result<
         .map_err(|error| format!("join external CLI {label} tee task failed: {error}"))?
 }
 
-async fn append_external_cli_log(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use tokio::fs::OpenOptions;
-
-    let mut file = OpenOptions::new()
+fn open_private_file(path: &Path, truncate: bool, append: bool) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .write(true)
         .create(true)
-        .append(true)
+        .truncate(truncate)
+        .append(append);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
         .open(path)
+        .map_err(|error| format!("open private file {}: {error}", path.display()))
+}
+
+async fn append_external_cli_log(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let current = tokio::fs::metadata(path)
         .await
-        .map_err(|error| format!("open external CLI log {}: {error}", path.display()))?;
-    file.write_all(bytes)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let remaining = EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES.saturating_sub(current);
+    if remaining == 0 {
+        return Ok(());
+    }
+    let write_len = usize::try_from(remaining.min(bytes.len() as u64)).unwrap_or(bytes.len());
+    let std_file = open_private_file(path, false, true)?;
+    let mut file = tokio::fs::File::from_std(std_file);
+    file.write_all(&bytes[..write_len])
         .await
         .map_err(|error| format!("append external CLI log {}: {error}", path.display()))?;
     file.flush()
@@ -4763,9 +4809,17 @@ async fn ensure_external_cli_log_exists(path: &Path, fallback: &[u8]) -> Result<
     if tokio::fs::try_exists(path).await.unwrap_or(false) {
         return Ok(());
     }
-    tokio::fs::write(path, fallback)
+    let std_file = open_private_file(path, true, false)?;
+    let mut file = tokio::fs::File::from_std(std_file);
+    let write_len = fallback
+        .len()
+        .min(EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES as usize);
+    file.write_all(&fallback[..write_len])
         .await
-        .map_err(|error| format!("write external CLI log {}: {error}", path.display()))
+        .map_err(|error| format!("write external CLI log {}: {error}", path.display()))?;
+    file.flush()
+        .await
+        .map_err(|error| format!("flush external CLI log {}: {error}", path.display()))
 }
 
 async fn wait_for_stop_marker(path: PathBuf) {
@@ -5165,30 +5219,68 @@ fn external_cli_worker_result_dir() -> PathBuf {
     external_cli_worker_runtime_root().join("results")
 }
 
+struct LimitedExternalCliJsonWriter<W> {
+    inner: W,
+    written: u64,
+    max_bytes: u64,
+}
+
+impl<W: StdWrite> StdWrite for LimitedExternalCliJsonWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.written.saturating_add(buf.len() as u64) > self.max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "external CLI worker JSON exceeds configured limit",
+            ));
+        }
+        let written = self.inner.write(buf)?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn open_private_temp_file(path: &Path) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|error| format!("create {}: {error}", path.display()))
+}
+
 fn write_external_cli_worker_json<T: Serialize>(
     path: &Path,
     value: &T,
     max_bytes: u64,
 ) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|error| format!("serialize {}: {error}", path.display()))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(format!(
-            "external CLI worker file exceeds limit: {} > {max_bytes}",
-            bytes.len()
-        ));
-    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
     let temp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&temp, bytes).map_err(|error| format!("write {}: {error}", temp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+    let file = open_private_temp_file(&temp)?;
+    let mut writer = LimitedExternalCliJsonWriter {
+        inner: file,
+        written: 0,
+        max_bytes,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("serialize {}: {error}", path.display()));
     }
+    if let Err(error) = writer.flush() {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("flush {}: {error}", temp.display()));
+    }
+    drop(writer);
     if let Err(error) = std::fs::rename(&temp, path) {
         let _ = std::fs::remove_file(&temp);
         return Err(format!(

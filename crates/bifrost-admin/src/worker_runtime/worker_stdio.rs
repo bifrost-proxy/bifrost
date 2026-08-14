@@ -238,10 +238,12 @@ where
                     Some(job_id) => abort_job_by_id(&mut jobs, job_id).await,
                     None => abort_request(&mut jobs, &request_id).await,
                 };
-                if let Err(error) =
-                    handler(ParentFrame::Cancel { request_id, job_id }, context.clone()).await
-                {
-                    eprintln!("worker cancel handler failed: {error}");
+                if !aborted_request_ids.is_empty() {
+                    if let Err(error) =
+                        handler(ParentFrame::Cancel { request_id, job_id }, context.clone()).await
+                    {
+                        eprintln!("worker cancel handler failed: {error}");
+                    }
                 }
                 for aborted_request_id in aborted_request_ids {
                     context.cancelled_response(aborted_request_id).await;

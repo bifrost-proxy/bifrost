@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -127,13 +128,28 @@ pub(crate) async fn run_via_browser_worker(
         }
     };
     let _ = std::fs::remove_file(&request_path);
+    touch();
     let value = response?;
     let reference: BrowserResultReference = serde_json::from_value(value)
         .map_err(|error| format!("parse browser worker result reference: {error}"))?;
     let result_path = validate_runtime_path(&reference.result_path, &result_dir())?;
     let result = read_json_file::<ExternalCliRunResult>(&result_path, BROWSER_RESULT_MAX_BYTES);
     let _ = std::fs::remove_file(result_path);
-    result
+    let result = result?;
+    match result.status {
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Failed
+        | crate::im_gateway::external_cli::ExternalCliRunStatus::TimedOut => {
+            crate::worker_runtime::mark_worker_job_failed(&request_id, result.response.clone());
+        }
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Stopped => {
+            crate::worker_runtime::mark_worker_job_cancelled(
+                &request_id,
+                Some("browser run stopped".to_string()),
+            );
+        }
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded => {}
+    }
+    Ok(result)
 }
 
 pub(crate) async fn auth_status(
@@ -214,7 +230,13 @@ async fn request_json<T: Serialize, R: DeserializeOwned>(
     let worker = ensure_worker().await?;
     let payload = serde_json::to_value(value)
         .map_err(|error| format!("serialize {operation} payload: {error}"))?;
-    let response = worker.request(operation, payload, None).await?;
+    let response = if matches!(operation, "browser.auth_status" | "browser.stop_login") {
+        worker.request_control(operation, payload, None).await
+    } else {
+        worker.request(operation, payload, None).await
+    };
+    touch();
+    let response = response?;
     serde_json::from_value(response).map_err(|error| format!("parse {operation} response: {error}"))
 }
 
@@ -479,26 +501,64 @@ fn result_dir() -> PathBuf {
     runtime_root().join("results")
 }
 
-fn write_json_file<T: Serialize>(path: &Path, value: &T, max_bytes: u64) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|error| format!("serialize {}: {error}", path.display()))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(format!(
-            "browser worker file exceeds limit: {} > {max_bytes}",
-            bytes.len()
-        ));
+struct LimitedJsonWriter<W> {
+    inner: W,
+    written: u64,
+    max_bytes: u64,
+}
+
+impl<W: Write> Write for LimitedJsonWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.written.saturating_add(buf.len() as u64) > self.max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "browser worker JSON exceeds configured limit",
+            ));
+        }
+        let written = self.inner.write(buf)?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
     }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn open_private_temp(path: &Path) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|error| format!("create {}: {error}", path.display()))
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T, max_bytes: u64) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
     let temp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&temp, bytes).map_err(|error| format!("write {}: {error}", temp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+    let file = open_private_temp(&temp)?;
+    let mut writer = LimitedJsonWriter {
+        inner: file,
+        written: 0,
+        max_bytes,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("serialize {}: {error}", path.display()));
     }
+    if let Err(error) = writer.flush() {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("flush {}: {error}", temp.display()));
+    }
+    drop(writer);
     if let Err(error) = std::fs::rename(&temp, path) {
         let _ = std::fs::remove_file(&temp);
         return Err(format!(
