@@ -1313,6 +1313,14 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn companion_target_without_cli_upgrade<'a>(current: &'a str, discovered: &'a str) -> &'a str {
+    if is_newer_version(current, discovered) {
+        discovered
+    } else {
+        current
+    }
+}
+
 fn handle_upgrade_inner(
     behavior: UpgradeBehavior,
     pinned_target: Option<String>,
@@ -1399,7 +1407,13 @@ fn handle_upgrade_inner(
             .bright_green()
             .bold()
         );
-        return finish_already_latest_upgrade(&cache.latest_version, behavior);
+        // A fallback source can legitimately know only an older release. The
+        // CLI is already newer in that case, so companion convergence must use
+        // the running version instead of downgrading the desktop app.
+        return finish_already_latest_upgrade(
+            companion_target_without_cli_upgrade(current_version, &cache.latest_version),
+            behavior,
+        );
     }
 
     print_update_info(current_version, &cache);

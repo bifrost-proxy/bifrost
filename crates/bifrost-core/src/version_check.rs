@@ -8,6 +8,7 @@ pub const GITHUB_RELEASES_API_URL: &str =
     "https://api.github.com/repos/bifrost-proxy/bifrost/releases/latest";
 pub const GITHUB_RELEASES_API_LIST_URL: &str =
     "https://api.github.com/repos/bifrost-proxy/bifrost/releases";
+pub const GITHUB_RELEASES_HTML_URL: &str = "https://github.com/bifrost-proxy/bifrost/releases";
 const GITHUB_RELEASE_API_URLS: (&str, &str) =
     (GITHUB_RELEASES_API_URL, GITHUB_RELEASES_API_LIST_URL);
 pub const GITHUB_TAGS_API_URL: &str = "https://api.github.com/repos/bifrost-proxy/bifrost/tags";
@@ -17,6 +18,7 @@ const HIGHLIGHTS_TIMEOUT_SECS: u64 = 5;
 pub const MAX_RETRIES: u32 = 2;
 pub const RETRY_DELAY_MS: u64 = 500;
 pub const GITHUB_RELEASES_PER_PAGE: usize = 100;
+const GITHUB_RELEASES_HTML_MAX_PAGES: usize = 20;
 const MAX_RELEASE_HIGHLIGHTS: usize = 50;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -245,16 +247,94 @@ fn github_releases_api_list_url_from(base_url: &str, page: usize) -> String {
     )
 }
 
+fn github_releases_html_page_url_from(base_url: &str, page: usize) -> String {
+    if page <= 1 {
+        return base_url.to_string();
+    }
+    let separator = if base_url.contains('?') { '&' } else { '?' };
+    format!("{base_url}{separator}page={page}")
+}
+
+fn release_versions_from_html(html: &str) -> Vec<String> {
+    const RELEASE_TAG_MARKER: &str = "/bifrost-proxy/bifrost/releases/tag/";
+    let mut versions = Vec::new();
+    let mut remaining = html;
+    while let Some(offset) = remaining.find(RELEASE_TAG_MARKER) {
+        let tag_start = offset + RELEASE_TAG_MARKER.len();
+        let tag_tail = &remaining[tag_start..];
+        let tag_end = tag_tail
+            .find(|character: char| {
+                character.is_ascii_whitespace()
+                    || matches!(character, '"' | '\'' | '<' | '>' | '?' | '#')
+            })
+            .unwrap_or(tag_tail.len());
+        let tag = &tag_tail[..tag_end];
+        if let Some(version) = bifrost_version_from_release_tag(tag) {
+            if !versions.contains(&version) {
+                versions.push(version);
+            }
+        }
+        remaining = &tag_tail[tag_end..];
+    }
+    versions
+}
+
+fn pick_latest_release_version_from_html_for_channel(
+    html: &str,
+    channel: &ReleaseChannel,
+) -> Option<String> {
+    release_versions_from_html(html)
+        .into_iter()
+        .filter(|version| release_channel(version) == *channel)
+        .max_by(|left, right| compare_versions(left, right))
+}
+
 fn published_release_request_error(error: &GithubRequestError) -> FetchError {
     if matches!(error, GithubRequestError::Status(status) if *status == reqwest::StatusCode::FORBIDDEN)
     {
         FetchError::Network(
-            "all release-based version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string(),
+            "GitHub releases API rate limited the unauthenticated request".to_string(),
         )
     } else {
         let reason = classify_github_request_error(error);
         FetchError::Network(format!("{reason}: {error}"))
     }
+}
+
+fn fetch_latest_release_from_html_sync_for_channel(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    channel: &ReleaseChannel,
+) -> Result<(String, Vec<String>), FetchError> {
+    for page in 1..=GITHUB_RELEASES_HTML_MAX_PAGES {
+        let url = github_releases_html_page_url_from(base_url, page);
+        let response = fetch_with_retry(client, &url).map_err(|error| {
+            let reason = classify_github_request_error(&error);
+            FetchError::Network(format!(
+                "GitHub releases HTML fallback failed: {reason}: {error}"
+            ))
+        })?;
+        let html = response.text().map_err(|error| {
+            FetchError::Parse(format!(
+                "failed to read GitHub releases HTML page {page}: {error}"
+            ))
+        })?;
+        let versions = release_versions_from_html(&html);
+        if versions.is_empty() {
+            break;
+        }
+        if let Some(version) = pick_latest_release_version_from_html_for_channel(&html, channel) {
+            return Ok((version, Vec::new()));
+        }
+    }
+
+    let label = match channel {
+        ReleaseChannel::Stable => "stable",
+        ReleaseChannel::Prerelease(label) => label,
+    };
+    Err(FetchError::Parse(format!(
+        "no published Bifrost releases found in releases HTML for channel {label}"
+    )))
 }
 
 fn fetch_latest_published_release_sync(
@@ -355,6 +435,31 @@ async fn fetch_latest_published_release_async_for_channel(
     let version = release_version_for_channel(&release, channel)?;
     let highlights = parse_release_highlights(release.body.as_deref());
     Some((version, highlights))
+}
+
+async fn fetch_latest_release_from_html_async_for_channel(
+    client: &reqwest::Client,
+    base_url: &str,
+    channel: &ReleaseChannel,
+) -> Option<(String, Vec<String>)> {
+    for page in 1..=GITHUB_RELEASES_HTML_MAX_PAGES {
+        let response = client
+            .get(github_releases_html_page_url_from(base_url, page))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let html = response.text().await.ok()?;
+        if release_versions_from_html(&html).is_empty() {
+            return None;
+        }
+        if let Some(version) = pick_latest_release_version_from_html_for_channel(&html, channel) {
+            return Some((version, Vec::new()));
+        }
+    }
+    None
 }
 
 pub fn make_release_tag(version: &str) -> String {
@@ -780,6 +885,18 @@ fn fetch_latest_release_sync_for_current_from(
     current_version: &str,
     prerelease_url: &str,
 ) -> Result<(String, Vec<String>), FetchError> {
+    fetch_latest_release_sync_for_current_from_sources(
+        current_version,
+        prerelease_url,
+        GITHUB_RELEASES_HTML_URL,
+    )
+}
+
+fn fetch_latest_release_sync_for_current_from_sources(
+    current_version: &str,
+    prerelease_url: &str,
+    releases_html_url: &str,
+) -> Result<(String, Vec<String>), FetchError> {
     let channel = release_channel(current_version);
     if channel == ReleaseChannel::Stable {
         return fetch_latest_release_sync();
@@ -790,7 +907,25 @@ fn fetch_latest_release_sync_for_current_from(
         .user_agent("bifrost-cli")
         .build()
         .map_err(|e| FetchError::Network(format!("failed to build GitHub HTTP client: {e}")))?;
-    fetch_latest_published_release_sync_for_channel(&client, prerelease_url, &channel)
+    match fetch_latest_published_release_sync_for_channel(&client, prerelease_url, &channel) {
+        Ok(release) => Ok(release),
+        Err(api_error) => {
+            debug!(
+                error = %api_error,
+                "prerelease API discovery failed, trying public releases HTML"
+            );
+            fetch_latest_release_from_html_sync_for_channel(
+                &client,
+                releases_html_url,
+                &channel,
+            )
+            .map_err(|html_error| {
+                FetchError::Network(format!(
+                    "failed to check prerelease channel via GitHub API ({api_error}) and releases HTML ({html_error})"
+                ))
+            })
+        }
+    }
 }
 
 fn fetch_latest_release_from_api_sync(
@@ -937,6 +1072,19 @@ async fn fetch_latest_release_async_for_current_from(
     current_version: &str,
     prerelease_url: &str,
 ) -> Option<(String, Vec<String>)> {
+    fetch_latest_release_async_for_current_from_sources(
+        current_version,
+        prerelease_url,
+        GITHUB_RELEASES_HTML_URL,
+    )
+    .await
+}
+
+async fn fetch_latest_release_async_for_current_from_sources(
+    current_version: &str,
+    prerelease_url: &str,
+    releases_html_url: &str,
+) -> Option<(String, Vec<String>)> {
     let channel = release_channel(current_version);
     if channel == ReleaseChannel::Stable {
         return fetch_latest_release_async().await;
@@ -947,7 +1095,15 @@ async fn fetch_latest_release_async_for_current_from(
         .user_agent("bifrost-admin")
         .build()
         .ok()?;
-    fetch_latest_published_release_async_for_channel(&client, prerelease_url, &channel).await
+    match fetch_latest_published_release_async_for_channel(&client, prerelease_url, &channel).await
+    {
+        Some(release) => Some(release),
+        None => {
+            debug!("prerelease API discovery failed, trying public releases HTML (async)");
+            fetch_latest_release_from_html_async_for_channel(&client, releases_html_url, &channel)
+                .await
+        }
+    }
 }
 
 async fn fetch_latest_release_from_api_async(
@@ -1522,6 +1678,79 @@ mod tests {
                 vec!["async alpha".to_string()]
             )
         );
+    }
+
+    #[test]
+    fn releases_html_parser_selects_the_latest_matching_prerelease_channel() {
+        let html = r#"
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.9">alpha 9</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.10">alpha 10</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.182-beta.1">beta</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.182">stable</a>
+            <a href="/someone/else/releases/tag/v99.0.0-alpha.1">unrelated</a>
+        "#;
+
+        assert_eq!(
+            release_versions_from_html(html),
+            vec![
+                "0.0.181-alpha.9".to_string(),
+                "0.0.181-alpha.10".to_string(),
+                "0.0.182-beta.1".to_string(),
+                "0.0.182".to_string(),
+            ]
+        );
+        assert_eq!(
+            pick_latest_release_version_from_html_for_channel(
+                html,
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            )
+            .as_deref(),
+            Some("0.0.181-alpha.10")
+        );
+    }
+
+    #[test]
+    fn prerelease_sync_falls_back_to_public_html_when_api_is_rate_limited() {
+        let html = r#"
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.8">alpha 8</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.9">alpha 9</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-beta.10">beta</a>
+        "#;
+        let base_url = spawn_release_page_server(vec![
+            (403, "rate limited".to_string()),
+            (403, "rate limited".to_string()),
+            (403, "rate limited".to_string()),
+            (200, html.to_string()),
+        ]);
+
+        let selected = fetch_latest_release_sync_for_current_from_sources(
+            "0.0.181-alpha.8",
+            &base_url,
+            &base_url,
+        )
+        .expect("HTML fallback should bypass API rate limiting");
+        assert_eq!(selected, ("0.0.181-alpha.9".to_string(), Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn prerelease_async_falls_back_to_public_html_when_api_is_rate_limited() {
+        let html = r#"
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.9">alpha 9</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.182-rc.1">rc</a>
+        "#;
+        let base_url = spawn_release_page_server(vec![
+            (403, "rate limited".to_string()),
+            (200, html.to_string()),
+        ]);
+
+        let selected = fetch_latest_release_async_for_current_from_sources(
+            "0.0.181-alpha.8",
+            &base_url,
+            &base_url,
+        )
+        .await
+        .expect("async HTML fallback should bypass API rate limiting");
+        assert_eq!(selected, ("0.0.181-alpha.9".to_string(), Vec::new()));
     }
 
     #[test]

@@ -3,6 +3,18 @@ use super::*;
 mod download_helpers;
 
 #[test]
+fn older_discovery_result_cannot_downgrade_the_desktop_companion() {
+    assert_eq!(
+        companion_target_without_cli_upgrade("0.0.181-alpha.9", "0.0.181-alpha.7"),
+        "0.0.181-alpha.9"
+    );
+    assert_eq!(
+        companion_target_without_cli_upgrade("0.0.181-alpha.9", "0.0.181-alpha.10"),
+        "0.0.181-alpha.10"
+    );
+}
+
+#[test]
 fn windows_upgrade_handoff_uses_staged_target_and_original_parent_pid() {
     let deferred = WindowsDeferredInstall {
         staged_binary: PathBuf::from(
