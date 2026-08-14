@@ -6,7 +6,6 @@
 export const BASE = "/im-gateway";
 
 export interface AgentConfig {
-  enabled: boolean;
   runner?: string;
   model?: string;
   model_provider?: string;
@@ -34,7 +33,10 @@ export interface SkillInfo {
 }
 
 export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  | JsonPrimitive
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
 export type SkillScope = "repo" | "user" | "global" | "system";
 export type ShellKind = "bash" | "sh" | "zsh" | "power_shell";
@@ -50,7 +52,12 @@ export type ToolBinding =
   | { kind: "registry"; name: string }
   | { kind: "mcp"; server: string; tool: string }
   | { kind: "memory"; op: MemoryOp }
-  | { kind: "owned"; name: string; description: string; input_schema: JsonValue };
+  | {
+      kind: "owned";
+      name: string;
+      description: string;
+      input_schema: JsonValue;
+    };
 
 export type TriggerRule =
   | { kind: "description_match" }

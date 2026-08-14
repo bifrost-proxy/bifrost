@@ -357,5 +357,6 @@ GET /api/im-gateway/agent/session-summaries?limit=30&cursor=...&status=...&runne
 - Agent 运行记录保持信息终点，无行点击、详情链接、overflow action 或写操作；旧 chat/session/historyPath 链接 replace 到摘要列表。
 - 旧 Agent Chat 浏览器规格已移除，由新的 `web/tests/ui/ai-layout-redesign.spec.ts` 覆盖当前产品信息架构；底层外部 Runner 与 IM session 基础设施保留。
 - 旧聊天工作台、消息渲染、线程面板、会话列表/详情及其专用测试已从前端删除；Agent 配置仅保留 General、Skills、Runners，旧链接继续安全重定向到 Run Records。
+- Agent Configuration 按使用优先级展示 Runners、General、Skills；外部 Runner 模式不再展示无实际作用的 `Enable Agent` 总开关。
 - AI 模块新增文案统一使用系统默认英文；首页、详情页头与详情内容区统一为 1120px 最大宽度并水平居中。
 - 真实场景记录位于 `human_tests/webui-ai-module-hub.md`。实现验证包含前端类型/单元/E2E、后端单元与白名单契约、Rust changed coverage 和远端 CI。

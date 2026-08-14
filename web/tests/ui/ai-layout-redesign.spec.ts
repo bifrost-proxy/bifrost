@@ -254,6 +254,15 @@ test("module details use dedicated routes and always return to AI home", async (
       await expect(
         page.getByTestId("agent-settings-section-sessions"),
       ).toHaveCount(0);
+      await expect(page.getByText("Enable Agent", { exact: true })).toHaveCount(
+        0,
+      );
+      const sectionOrder = await page
+        .locator("[data-agent-section]")
+        .evaluateAll((sections) =>
+          sections.map((section) => section.getAttribute("data-agent-section")),
+        );
+      expect(sectionOrder).toEqual(["runners", "general", "skills"]);
     }
     await page.getByTestId("ai-home-link").click();
     await expect(page).toHaveURL(/\/_bifrost\/ai$/);

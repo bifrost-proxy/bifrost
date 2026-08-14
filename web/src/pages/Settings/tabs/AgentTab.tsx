@@ -14,23 +14,17 @@ import {
   Select,
   Space,
   Spin,
-  Switch,
-  Tag,
   Typography,
   message,
 } from "antd";
-import {
-  ReloadOutlined,
-  ReadOutlined,
-  RobotOutlined,
-} from "@ant-design/icons";
+import { ReloadOutlined, ReadOutlined, RobotOutlined } from "@ant-design/icons";
 import { get, patch } from "../../../api/client";
-import {
-  BASE,
-  type AgentConfig,
-} from "./agent/types";
+import { BASE, type AgentConfig } from "./agent/types";
 import * as imGatewayApi from "../../../api/imGateway";
-import type { ExternalCliGatewayConfig, ImProviderConfig } from "../../../api/imGateway";
+import type {
+  ExternalCliGatewayConfig,
+  ImProviderConfig,
+} from "../../../api/imGateway";
 import SkillsSection from "./agent/SkillsSection";
 import LongTextModalField from "./agent/LongTextModalField";
 import ExternalCliPanel from "./imGateway/ExternalCliPanel";
@@ -42,9 +36,12 @@ const { Text } = Typography;
 export default function AgentTab() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [loading, setLoading] = useState(false);
-  const [runnerConfig, setRunnerConfig] = useState<ExternalCliGatewayConfig | null>(null);
+  const [runnerConfig, setRunnerConfig] =
+    useState<ExternalCliGatewayConfig | null>(null);
   const [imProviders, setImProviders] = useState<ImProviderConfig[]>([]);
-  const updateTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const updateTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>(
+    {},
+  );
   const pendingFieldValues = useRef<Record<string, unknown>>({});
 
   const fetchConfig = useCallback(async () => {
@@ -85,33 +82,30 @@ export default function AgentTab() {
     };
   }, []);
 
-  const patchField = useCallback(
-    async (field: string, value: unknown) => {
-      pendingFieldValues.current[field] = value;
-      try {
-        const updated = await patch<AgentConfig>(`${BASE}/agent`, {
-          [field]: value,
-        });
-        setConfig((prev) => {
-          const next = { ...updated } as AgentConfig;
-          if (Object.is(pendingFieldValues.current[field], value)) {
-            delete pendingFieldValues.current[field];
-          }
-          for (const [pendingField, pendingValue] of Object.entries(
-            pendingFieldValues.current,
-          )) {
-            (next as unknown as Record<string, unknown>)[pendingField] =
-              pendingValue === null ? undefined : pendingValue;
-          }
-          return prev ? next : updated;
-        });
-        message.success(`Updated ${field.replace(/_/g, " ")}`);
-      } catch {
-        message.error(`Failed to update ${field.replace(/_/g, " ")}`);
-      }
-    },
-    [],
-  );
+  const patchField = useCallback(async (field: string, value: unknown) => {
+    pendingFieldValues.current[field] = value;
+    try {
+      const updated = await patch<AgentConfig>(`${BASE}/agent`, {
+        [field]: value,
+      });
+      setConfig((prev) => {
+        const next = { ...updated } as AgentConfig;
+        if (Object.is(pendingFieldValues.current[field], value)) {
+          delete pendingFieldValues.current[field];
+        }
+        for (const [pendingField, pendingValue] of Object.entries(
+          pendingFieldValues.current,
+        )) {
+          (next as unknown as Record<string, unknown>)[pendingField] =
+            pendingValue === null ? undefined : pendingValue;
+        }
+        return prev ? next : updated;
+      });
+      message.success(`Updated ${field.replace(/_/g, " ")}`);
+    } catch {
+      message.error(`Failed to update ${field.replace(/_/g, " ")}`);
+    }
+  }, []);
 
   const debouncedPatch = useCallback(
     (field: string, value: unknown, delay = 600) => {
@@ -135,7 +129,8 @@ export default function AgentTab() {
     return runnerIds.map((id) => ({ label: id, value: id }));
   }, [runnerConfig?.runners]);
 
-  const selectedRunnerValue = config?.runner || runnerConfig?.defaultRunnerId || runnerOptions[0]?.value;
+  const selectedRunnerValue =
+    config?.runner || runnerConfig?.defaultRunnerId || runnerOptions[0]?.value;
 
   const handleDefaultRunnerChange = async (value: string) => {
     setConfig((prev) => (prev ? { ...prev, runner: value } : prev));
@@ -151,11 +146,6 @@ export default function AgentTab() {
         message.error("Failed to update default runner");
       }
     }
-  };
-
-  const handleSwitchChange = (field: string, value: boolean) => {
-    setConfig((prev) => (prev ? { ...prev, [field]: value } : prev));
-    patchField(field, value);
   };
 
   if (loading && !config) {
@@ -177,29 +167,44 @@ export default function AgentTab() {
     >
       <div
         data-testid="agent-settings-section-content"
-        style={{ height: "100%", minHeight: 0, overflowY: "auto", overflowX: "hidden" }}
+        style={{
+          height: "100%",
+          minHeight: 0,
+          overflowY: "auto",
+          overflowX: "hidden",
+        }}
       >
         <Row gutter={[16, 16]}>
-        {/* General Settings */}
-        <Col
-          xs={24}
-          id="agent-settings-general"
-          data-agent-section="general"
-          data-testid="agent-settings-section-general"
-        >
-          <Card
-            title={
-              <Space>
-                <RobotOutlined />
-                <span>General</span>
-              </Space>
-            }
-            size="small"
-            extra={
-              <Space>
-                <Tag color={config.enabled ? "green" : "default"}>
-                  {config.enabled ? "Enabled" : "Disabled"}
-                </Tag>
+          {/* Runners */}
+          <Col
+            xs={24}
+            id="agent-settings-runners"
+            data-agent-section="runners"
+            data-testid="agent-settings-section-runners"
+          >
+            <ExternalCliPanel
+              providers={imProviders}
+              loading={loading}
+              onRefresh={fetchRunnerConfig}
+            />
+          </Col>
+
+          {/* General Settings */}
+          <Col
+            xs={24}
+            id="agent-settings-general"
+            data-agent-section="general"
+            data-testid="agent-settings-section-general"
+          >
+            <Card
+              title={
+                <Space>
+                  <RobotOutlined />
+                  <span>General</span>
+                </Space>
+              }
+              size="small"
+              extra={
                 <Button
                   icon={<ReloadOutlined />}
                   onClick={fetchConfig}
@@ -208,134 +213,111 @@ export default function AgentTab() {
                 >
                   Refresh
                 </Button>
+              }
+            >
+              <Space direction="vertical" style={{ width: "100%" }}>
+                <Row justify="space-between" align="middle" gutter={16}>
+                  <Col flex="none">
+                    <Text>Default Runner</Text>
+                  </Col>
+                  <Col flex="auto" style={{ textAlign: "right" }}>
+                    <Select
+                      value={selectedRunnerValue}
+                      onChange={(val) => void handleDefaultRunnerChange(val)}
+                      options={runnerOptions}
+                      style={{ minWidth: 220, maxWidth: 300 }}
+                      size="small"
+                    />
+                  </Col>
+                </Row>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Selects the default runner for IM agent messages. Custom
+                  runners are managed in this Agent Runners section.
+                </Text>
+
+                <Divider style={{ margin: "12px 0" }} />
+
+                <Row justify="space-between" align="middle" gutter={16}>
+                  <Col flex="none">
+                    <Text>Working Directory</Text>
+                  </Col>
+                  <Col flex="auto" style={{ textAlign: "right" }}>
+                    <Input
+                      value={config.work_dir || ""}
+                      onChange={(e) =>
+                        handleStringChange("work_dir", e.target.value)
+                      }
+                      placeholder="/path/to/workdir"
+                      style={{ maxWidth: 480 }}
+                      size="small"
+                    />
+                  </Col>
+                </Row>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Default working directory passed to external runners
+                </Text>
+
+                <Divider style={{ margin: "12px 0" }} />
+
+                <LongTextModalField
+                  label="Base Instructions / System Prompt"
+                  value={config.base_instructions ?? ""}
+                  onChange={(value) =>
+                    handleStringChange("base_instructions", value)
+                  }
+                  placeholder="Optional instructions for external runners"
+                  description="Sent only with the first message of a new external-runner session. When empty, Bifrost adds nothing."
+                  testId="settings-agent-base-instructions"
+                />
+
+                <Divider style={{ margin: "12px 0" }} />
+
+                <LongTextModalField
+                  label="Developer Instructions"
+                  value={config.developer_instructions || ""}
+                  onChange={(value) =>
+                    handleStringChange("developer_instructions", value)
+                  }
+                  placeholder="Optional developer-level instructions"
+                  description="Sent with every external-runner message after the optional base instructions. Empty values add nothing."
+                  testId="settings-agent-developer-instructions"
+                />
+
+                <Divider style={{ margin: "12px 0" }} />
+
+                <LongTextModalField
+                  label="User Instructions"
+                  value={config.user_instructions || ""}
+                  onChange={(value) =>
+                    handleStringChange("user_instructions", value)
+                  }
+                  placeholder="Optional user-level instructions"
+                  description="Sent with every external-runner message after developer instructions. Empty values add nothing."
+                  testId="settings-agent-user-instructions"
+                />
               </Space>
-            }
+            </Card>
+          </Col>
+
+          {/* Skills */}
+          <Col
+            xs={24}
+            id="agent-settings-skills"
+            data-agent-section="skills"
+            data-testid="agent-settings-section-skills"
           >
-            <Space direction="vertical" style={{ width: "100%" }}>
-              <Row justify="space-between" align="middle">
-                <Col>
-                  <Text>Enable Agent</Text>
-                </Col>
-                <Col>
-                  <Switch
-                    checked={config.enabled}
-                    onChange={(checked) => handleSwitchChange("enabled", checked)}
-                  />
-                </Col>
-              </Row>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Enable or disable external runner sessions
-              </Text>
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <Row justify="space-between" align="middle" gutter={16}>
-                <Col flex="none">
-                  <Text>Default Runner</Text>
-                </Col>
-                <Col flex="auto" style={{ textAlign: "right" }}>
-                  <Select
-                    value={selectedRunnerValue}
-                    onChange={(val) => void handleDefaultRunnerChange(val)}
-                    options={runnerOptions}
-                    style={{ minWidth: 220, maxWidth: 300 }}
-                    size="small"
-                  />
-                </Col>
-              </Row>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Selects the default runner for IM agent messages. Custom runners are managed in this Agent Runners section.
-              </Text>
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <Row justify="space-between" align="middle" gutter={16}>
-                <Col flex="none">
-                  <Text>Working Directory</Text>
-                </Col>
-                <Col flex="auto" style={{ textAlign: "right" }}>
-                  <Input
-                    value={config.work_dir || ""}
-                    onChange={(e) => handleStringChange("work_dir", e.target.value)}
-                    placeholder="/path/to/workdir"
-                    style={{ maxWidth: 480 }}
-                    size="small"
-                  />
-                </Col>
-              </Row>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Default working directory passed to external runners
-              </Text>
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <LongTextModalField
-                label="Base Instructions / System Prompt"
-                value={config.base_instructions ?? ""}
-                onChange={(value) => handleStringChange("base_instructions", value)}
-                placeholder="Optional instructions for external runners"
-                description="Sent only with the first message of a new external-runner session. When empty, Bifrost adds nothing."
-                testId="settings-agent-base-instructions"
-              />
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <LongTextModalField
-                label="Developer Instructions"
-                value={config.developer_instructions || ""}
-                onChange={(value) => handleStringChange("developer_instructions", value)}
-                placeholder="Optional developer-level instructions"
-                description="Sent with every external-runner message after the optional base instructions. Empty values add nothing."
-                testId="settings-agent-developer-instructions"
-              />
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <LongTextModalField
-                label="User Instructions"
-                value={config.user_instructions || ""}
-                onChange={(value) => handleStringChange("user_instructions", value)}
-                placeholder="Optional user-level instructions"
-                description="Sent with every external-runner message after developer instructions. Empty values add nothing."
-                testId="settings-agent-user-instructions"
-              />
-            </Space>
-          </Card>
-        </Col>
-
-        {/* Skills */}
-        <Col
-          xs={24}
-          id="agent-settings-skills"
-          data-agent-section="skills"
-          data-testid="agent-settings-section-skills"
-        >
-          <Card
-            title={
-              <Space>
-                <ReadOutlined />
-                <span>Skills</span>
-              </Space>
-            }
-            size="small"
-          >
-            <SkillsSection />
-          </Card>
-        </Col>
-
-        {/* Runners */}
-        <Col
-          xs={24}
-          id="agent-settings-runners"
-          data-agent-section="runners"
-          data-testid="agent-settings-section-runners"
-        >
-          <ExternalCliPanel
-            providers={imProviders}
-            loading={loading}
-            onRefresh={fetchRunnerConfig}
-          />
-        </Col>
+            <Card
+              title={
+                <Space>
+                  <ReadOutlined />
+                  <span>Skills</span>
+                </Space>
+              }
+              size="small"
+            >
+              <SkillsSection />
+            </Card>
+          </Col>
         </Row>
       </div>
     </div>
