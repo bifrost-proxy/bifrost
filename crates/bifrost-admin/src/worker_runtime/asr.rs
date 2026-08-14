@@ -49,7 +49,7 @@ pub(crate) async fn run_directory_task(
     let request_id = uuid::Uuid::new_v4().to_string();
     let result = worker
         .request_with_id(
-            request_id,
+            request_id.clone(),
             Some(format!("task:{task_id}")),
             "asr.run_directory_task",
             serde_json::to_value(RunDirectoryTaskRequest {
@@ -62,7 +62,20 @@ pub(crate) async fn run_directory_task(
         .await;
     touch();
     let result = result?;
-    serde_json::from_value(result).map_err(|error| format!("parse ASR worker result: {error}"))
+    let parsed: RunDirectoryTaskResult = serde_json::from_value(result)
+        .map_err(|error| format!("parse ASR worker result: {error}"))?;
+    if parsed.status == "failed" {
+        super::mark_worker_job_failed(
+            &request_id,
+            format!("ASR directory task '{task_id}' failed"),
+        );
+    } else if parsed.status == "paused" {
+        super::mark_worker_job_cancelled(
+            &request_id,
+            Some(format!("ASR directory task '{task_id}' paused")),
+        );
+    }
+    Ok(parsed)
 }
 
 pub(crate) async fn run_source_compression(task_id: &str) -> Result<serde_json::Value, String> {

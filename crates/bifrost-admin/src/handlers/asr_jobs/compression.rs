@@ -16,13 +16,11 @@ impl SourceCompressionFileLock {
         match create_task_run_lock(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !is_task_run_lock_stale(&path) {
-                    return Err("ASR source-audio compression is already running".to_string());
-                }
-                let _ = std::fs::remove_file(&path);
-                create_task_run_lock(&path).map_err(|create_error| {
-                    format!("recreate source compression lock: {create_error}")
-                })?;
+                replace_stale_task_run_lock(
+                    &path,
+                    "ASR source-audio compression is already running",
+                    "source compression lock",
+                )?;
             }
             Err(error) => return Err(format!("create source compression lock: {error}")),
         }

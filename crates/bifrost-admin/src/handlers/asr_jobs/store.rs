@@ -2004,18 +2004,11 @@ impl TaskRunFileLock {
         match create_task_run_lock(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !is_task_run_lock_stale(&path) {
-                    return Err("ASR task is already running".to_string());
-                }
-                warn!(
-                    lock_path = %path.display(),
-                    "Removing stale ASR task run lock"
-                );
-                std::fs::remove_file(&path).map_err(|remove_error| {
-                    format!("remove stale ASR task lock: {remove_error}")
-                })?;
-                create_task_run_lock(&path)
-                    .map_err(|create_error| format!("recreate ASR task lock: {create_error}"))?;
+                replace_stale_task_run_lock(
+                    &path,
+                    "ASR task is already running",
+                    "ASR task run lock",
+                )?;
             }
             Err(error) => return Err(format!("create ASR task lock: {error}")),
         }
@@ -2054,6 +2047,36 @@ fn create_task_run_lock(path: &Path) -> std::io::Result<()> {
         })
 }
 
+fn replace_stale_task_run_lock(
+    path: &Path,
+    busy_message: &str,
+    label: &str,
+) -> Result<(), String> {
+    let takeover_path = path.with_extension("takeover.lock");
+    let takeover = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&takeover_path)
+        .map_err(|error| format!("open {label} takeover lock: {error}"))?;
+    takeover
+        .lock_exclusive()
+        .map_err(|error| format!("lock {label} takeover: {error}"))?;
+
+    let result = if path.exists() && !is_task_run_lock_stale(path) {
+        Err(busy_message.to_string())
+    } else {
+        if path.exists() {
+            warn!(lock_path = %path.display(), "Removing stale {label}");
+            std::fs::remove_file(path)
+                .map_err(|error| format!("remove stale {label}: {error}"))?;
+        }
+        create_task_run_lock(path).map_err(|error| format!("recreate {label}: {error}"))
+    };
+    let _ = FileExt::unlock(&takeover);
+    result
+}
+
 fn is_task_run_lock_stale(path: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
         return true;
@@ -2061,13 +2084,9 @@ fn is_task_run_lock_stale(path: &Path) -> bool {
     let Ok(lock) = serde_json::from_str::<TaskRunLockFile>(&content) else {
         return true;
     };
-    // Safety net: treat locks older than 12 hours as stale regardless of
-    // PID liveness, to prevent permanently stuck tasks after edge-case
-    // crashes or PID recycling.
-    let age_ms = now_ms().saturating_sub(lock.acquired_at_ms);
-    if age_ms > 12 * 60 * 60 * 1000 {
-        return true;
-    }
+    // A live process instance always owns its lock, regardless of wall-clock
+    // duration. Long offline transcriptions can legitimately exceed twelve
+    // hours, and treating a live owner as stale would allow concurrent writers.
     !process_instance_is_alive(lock.pid, lock.process_start_time)
 }
 
