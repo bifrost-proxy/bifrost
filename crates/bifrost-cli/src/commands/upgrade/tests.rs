@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn windows_upgrade_file_cleanup_retries_sharing_errors() {
+    let path = Path::new("C:/fixture/.bifrost.exe.pending.42");
+    let mut attempts = 0;
+    let mut delays = Vec::new();
+
+    remove_windows_upgrade_file_with(
+        path,
+        |actual_path| {
+            assert_eq!(actual_path, path);
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::from_raw_os_error(32))
+            } else {
+                Ok(())
+            }
+        },
+        |delay| delays.push(delay),
+        true,
+    )
+    .expect("sharing violation is retried until cleanup succeeds");
+
+    assert_eq!(attempts, 3);
+    assert_eq!(
+        delays,
+        [Duration::from_millis(25), Duration::from_millis(35)]
+    );
+}
+
+#[test]
+fn windows_upgrade_file_cleanup_handles_missing_and_terminal_errors() {
+    remove_windows_upgrade_file_with(
+        Path::new("missing"),
+        |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+        |_| panic!("missing file must not sleep"),
+        true,
+    )
+    .expect("missing cleanup target is already clean");
+
+    let error = remove_windows_upgrade_file_with(
+        Path::new("denied"),
+        |_| Err(io::Error::from_raw_os_error(5)),
+        |_| panic!("non-Windows cleanup must not retry"),
+        false,
+    )
+    .expect_err("terminal cleanup error remains visible");
+    assert!(error.to_string().contains("denied"));
+}
+
+#[test]
 fn test_detect_install_method_returns_valid_variant() {
     let method = detect_install_method();
     match method {

@@ -376,6 +376,9 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "Write-DeferredStatus \"ok\"",
         "Write-DeferredStatus \"error: $errorMessage\"",
         "Write-DeferredStatus \"pending:$PID\"",
+        "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
+        "foreach ($cleanupPath in @($RestartArgsPath, $PSCommandPath))",
+        "Invoke-FileOperationWithRetry \"removing helper scratch file\"",
         "command.creation_flags(CREATE_NO_WINDOW)",
         "Write-UpgradeProgress \"completed\" \"Upgrade complete\" $null",
         "Write-UpgradeProgress \"failed\" \"Upgrade failed\" $errorMessage",
@@ -409,6 +412,39 @@ fn successful_windows_helper_schedule_transfers_staging_ownership() {
     cleanup_staged_binary_after_schedule(&staged, Ok(())).expect("successful schedule");
 
     assert!(staged.exists(), "spawned helper owns the staged binary");
+}
+
+#[test]
+fn failed_windows_helper_schedule_preserves_setup_and_cleanup_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let error = cleanup_staged_binary_after_schedule::<()>(
+        dir.path(),
+        Err(BifrostError::Config("helper setup failed".to_string())),
+    )
+    .expect_err("cleanup failure remains visible with the setup failure");
+
+    let message = error.to_string();
+    assert!(message.contains("helper setup failed"));
+    assert!(message.contains("additionally failed to clean staged Windows upgrade binary"));
+}
+
+#[test]
+fn windows_helper_artifact_cleanup_attempts_every_path_before_returning_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let removable = dir.path().join("removable.args");
+    std::fs::write(&removable, "restart args").expect("write removable fixture");
+
+    let error = cleanup_windows_upgrade_artifacts(&[dir.path(), &removable])
+        .expect_err("a directory cannot be removed with remove_file");
+
+    assert!(error
+        .to_string()
+        .contains(&dir.path().display().to_string()));
+    assert!(
+        !removable.exists(),
+        "later artifacts must still be cleaned after an earlier failure"
+    );
 }
 #[test]
 fn background_upgrade_restarts_when_disk_binary_is_already_latest() {

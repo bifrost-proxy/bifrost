@@ -665,6 +665,7 @@ fn run_desktop_managed_cli_upgrade_with_status_path(
     let helper_dir = cli_path.parent().unwrap_or_else(|| Path::new("."));
     let legacy_ready_path = helper_dir.join(format!(".bifrost-upgrade-{helper_suffix}.ok"));
     let legacy_log_path = helper_dir.join(format!(".bifrost-upgrade-{helper_suffix}.log"));
+    let legacy_staging_path = legacy_deferred_staging_path(cli_path, &helper_suffix);
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now();
     loop {
@@ -685,7 +686,8 @@ fn run_desktop_managed_cli_upgrade_with_status_path(
                     )
                     .map(|()| status)
                 } else {
-                    Ok(status)
+                    super::upgrade::remove_windows_upgrade_file_with_retry(&legacy_staging_path)
+                        .map(|()| status)
                 };
                 let _ = fs::remove_file(&deferred_status_path);
                 let _ = fs::remove_file(&legacy_ready_path);
@@ -695,6 +697,7 @@ fn run_desktop_managed_cli_upgrade_with_status_path(
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = fs::remove_file(&deferred_status_path);
+                super::upgrade::remove_windows_upgrade_file_with_retry(&legacy_staging_path)?;
                 return Err(BifrostError::Config(format!(
                     "installed CLI upgrade timed out after {} seconds",
                     timeout.as_secs()
@@ -717,6 +720,14 @@ fn run_desktop_managed_cli_upgrade_with_status_path(
             Err(error) => return Err(BifrostError::Io(error)),
         }
     }
+}
+
+fn legacy_deferred_staging_path(cli_path: &Path, helper_suffix: &str) -> PathBuf {
+    let file_name = cli_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bifrost.exe");
+    cli_path.with_file_name(format!(".{file_name}.pending.{helper_suffix}"))
 }
 
 fn verify_installed_cli_target_version(

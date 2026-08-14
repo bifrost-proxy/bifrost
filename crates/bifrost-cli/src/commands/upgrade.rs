@@ -50,6 +50,7 @@ const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 30;
 const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
 const UPGRADE_COMMAND_SPAWN_MAX_ATTEMPTS: u32 = 8;
 const UPGRADE_COMMAND_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
+const WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS: usize = 40;
 #[cfg(unix)]
 const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
@@ -73,6 +74,50 @@ pub(crate) const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HA
 pub(crate) const WEBVIEW_UPGRADE_ORIGIN_ENV: &str = "BIFROST_WEBVIEW_UPGRADE_ORIGIN_INTERNAL";
 static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
 static DESKTOP_HANDOFF_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn remove_windows_upgrade_file_with_retry(path: &Path) -> Result<(), BifrostError> {
+    remove_windows_upgrade_file_with(
+        path,
+        |candidate| fs::remove_file(candidate),
+        thread::sleep,
+        cfg!(windows),
+    )
+}
+
+fn remove_windows_upgrade_file_with<Remove, Sleep>(
+    path: &Path,
+    mut remove: Remove,
+    mut sleep: Sleep,
+    retry_sharing_errors: bool,
+) -> Result<(), BifrostError>
+where
+    Remove: FnMut(&Path) -> io::Result<()>,
+    Sleep: FnMut(Duration),
+{
+    for attempt in 0..WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if retry_sharing_errors
+                    && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                    && attempt + 1 < WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS =>
+            {
+                sleep(Duration::from_millis(25 + (attempt as u64 % 10) * 10));
+            }
+            Err(error) => {
+                return Err(BifrostError::Io(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to clean Windows upgrade artifact {}: {error}",
+                        path.display()
+                    ),
+                )))
+            }
+        }
+    }
+    unreachable!("bounded cleanup loop always returns")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimedCommandStatus {

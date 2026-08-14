@@ -158,6 +158,20 @@ fn non_windows_desktop_install_is_never_deferred() {
 
 #[test]
 fn pending_desktop_handoff_lock_conflict_preserves_restarting_progress() {
+    const CHILD_ENV: &str = "BIFROST_TEST_PENDING_DESKTOP_HANDOFF_CHILD";
+    const TEST_NAME: &str =
+        "commands::app::tests::pending_desktop_handoff_lock_conflict_preserves_restarting_progress";
+    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env_remove("BIFROST_DATA_DIR")
+            .status()
+            .expect("spawn isolated pending desktop handoff test");
+        assert!(status.success(), "isolated pending handoff test failed");
+        return;
+    }
+
     let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().expect("tempdir");
     let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
@@ -366,15 +380,16 @@ fn direct_app_upgrade_pins_cli_to_the_resolved_app_target() {
 fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
     const CHILD_ENV: &str = "BIFROST_TEST_DESKTOP_MANAGED_CLI_CHILD";
     if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
         let status = Command::new(std::env::current_exe().expect("current test executable"))
-                .args([
-                    "--exact",
-                    "commands::app::tests::desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core",
-                    "--nocapture",
-                ])
-                .env(CHILD_ENV, "1")
-                .status()
-                .expect("spawn isolated desktop-managed CLI test");
+            .args([
+                "--exact",
+                "commands::app::tests::desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated desktop-managed CLI test");
         assert!(status.success(), "isolated desktop-managed CLI test failed");
         return;
     }
@@ -737,6 +752,39 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
         .expect_err("hung child must time out through explicit status path");
         assert!(timeout_error.to_string().contains("timed out"));
         assert!(!timeout_status.exists(), "timeout status must be cleaned");
+
+        let failed_cli = dir.path().join("failed-bifrost");
+        std::fs::write(
+            &failed_cli,
+            "#!/bin/sh\npending=\"$(dirname \"$0\")/.$(basename \"$0\").pending.$$\"\nprintf replacement > \"$pending\"\nexit 1\n",
+        )
+        .expect("write failed fake cli");
+        std::fs::set_permissions(&failed_cli, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod failed fake cli");
+        let failed_status = dir.path().join("failed.status");
+        let failed_child = run_desktop_managed_cli_upgrade_with_status_path(
+            &failed_cli,
+            "0.0.156",
+            "desktop",
+            Duration::from_secs(10),
+            failed_status.clone(),
+        )
+        .expect("failed legacy child remains an exit status after cleanup");
+        assert!(!failed_child.success());
+        assert!(
+            !failed_status.exists(),
+            "failed child status must be cleaned"
+        );
+        assert!(
+            !std::fs::read_dir(dir.path())
+                .expect("read temp dir")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".failed-bifrost.pending.")),
+            "failed legacy child staging must be cleaned by the parent"
+        );
         std::env::set_var("PATH", dir.path());
         std::env::set_var("BIFROST_INSTALL_DIR", dir.path());
         upgrade_cli_if_present("desktop", "0.0.156")

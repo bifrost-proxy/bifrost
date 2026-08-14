@@ -285,10 +285,30 @@ pub(super) fn cleanup_staged_binary_after_schedule<T>(
     staged_binary: &Path,
     result: Result<T, BifrostError>,
 ) -> Result<T, BifrostError> {
-    if result.is_err() {
-        let _ = fs::remove_file(staged_binary);
+    match result {
+        Ok(value) => Ok(value),
+        Err(schedule_error) => match remove_windows_upgrade_file_with_retry(staged_binary) {
+            Ok(()) => Err(schedule_error),
+            Err(cleanup_error) => Err(BifrostError::Config(format!(
+                "{schedule_error}; additionally failed to clean staged Windows upgrade binary: {cleanup_error}"
+            ))),
+        },
     }
-    result
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn cleanup_windows_upgrade_artifacts(paths: &[&Path]) -> Result<(), BifrostError> {
+    let mut failures = Vec::new();
+    for path in paths {
+        if let Err(error) = remove_windows_upgrade_file_with_retry(path) {
+            failures.push(error.to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(BifrostError::Config(failures.join("; ")))
+    }
 }
 
 #[cfg(windows)]
@@ -320,13 +340,14 @@ fn schedule_windows_deferred_install_inner(
     let publish_progress =
         !crate::commands::upgrade_background::parent_upgrade_lock_is_valid(&progress_dir);
 
-    if let Some(args) = restart_args {
-        fs::write(&args_path, args.join("\n")).map_err(BifrostError::Io)?;
-    } else {
-        let _ = fs::remove_file(&args_path);
-    }
+    let setup_result = (|| -> Result<(), BifrostError> {
+        if let Some(args) = restart_args {
+            fs::write(&args_path, args.join("\n")).map_err(BifrostError::Io)?;
+        } else {
+            let _ = fs::remove_file(&args_path);
+        }
 
-    fs::write(
+        fs::write(
         &script_path,
         r#"
 param(
@@ -561,59 +582,91 @@ try {
   }
   Write-UpgradeProgress "failed" "Upgrade failed" $errorMessage
   Write-UpgradeLog "ERROR: $errorMessage"
+  Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
   Write-DeferredStatus "error: $errorMessage"
   exit 1
+} finally {
+  # The deferred status write itself can fail when antivirus or another reader
+  # briefly holds the file. Keep helper-owned scratch cleanup unconditional.
+  foreach ($cleanupPath in @($RestartArgsPath, $PSCommandPath)) {
+    if (-not $cleanupPath) { continue }
+    try {
+      if (Test-Path -LiteralPath $cleanupPath) {
+        Invoke-FileOperationWithRetry "removing helper scratch file" {
+          Remove-Item -LiteralPath $cleanupPath -Force
+        }
+      }
+    } catch {
+      try {
+        Write-UpgradeLog "WARNING: failed to remove helper scratch file ${cleanupPath}: $($_.Exception.Message)"
+      } catch {}
+    }
+  }
 }
 "#,
-    )
-    .map_err(BifrostError::Io)?;
-
-    let mut command = Command::new("powershell");
-    command
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(&script_path)
-        .arg("-ParentPid")
-        .arg(parent_pid.to_string())
-        .arg("-PendingPath")
-        .arg(&deferred_install.staged_binary)
-        .arg("-TargetPath")
-        .arg(&deferred_install.target_path)
-        .arg("-RestartArgsPath")
-        .arg(&args_path)
-        .arg("-ReadyPath")
-        .arg(&ready_path)
-        .arg("-StatusPath")
-        .arg(
-            deferred_status_path
-                .as_deref()
-                .unwrap_or_else(|| Path::new("")),
         )
-        .arg("-LogPath")
-        .arg(&log_path)
-        .arg("-ProgressPath")
-        .arg(&progress_path)
-        .arg("-TargetVersion")
-        .arg(&deferred_install.target_version)
-        .arg("-Source")
-        .arg(progress_source)
-        .arg("-PublishProgress")
-        .arg(if publish_progress { "1" } else { "0" })
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        // The helper relaunches bifrost with `start -d`; strip the detached-daemon
-        // marker so the relaunched proxy detaches properly instead of running in
-        // the foreground (see the unix restart path for the full rationale).
-        .env_remove(crate::commands::start::DETACHED_DAEMON_CHILD_ENV);
+        .map_err(BifrostError::Io)?;
 
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
+        let mut command = Command::new("powershell");
+        command
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script_path)
+            .arg("-ParentPid")
+            .arg(parent_pid.to_string())
+            .arg("-PendingPath")
+            .arg(&deferred_install.staged_binary)
+            .arg("-TargetPath")
+            .arg(&deferred_install.target_path)
+            .arg("-RestartArgsPath")
+            .arg(&args_path)
+            .arg("-ReadyPath")
+            .arg(&ready_path)
+            .arg("-StatusPath")
+            .arg(
+                deferred_status_path
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("")),
+            )
+            .arg("-LogPath")
+            .arg(&log_path)
+            .arg("-ProgressPath")
+            .arg(&progress_path)
+            .arg("-TargetVersion")
+            .arg(&deferred_install.target_version)
+            .arg("-Source")
+            .arg(progress_source)
+            .arg("-PublishProgress")
+            .arg(if publish_progress { "1" } else { "0" })
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // The helper relaunches bifrost with `start -d`; strip the detached-daemon
+            // marker so the relaunched proxy detaches properly instead of running in
+            // the foreground (see the unix restart path for the full rationale).
+            .env_remove(crate::commands::start::DETACHED_DAEMON_CHILD_ENV);
 
-    if let Some(status_path) = &deferred_status_path {
-        fs::write(status_path, "pending").map_err(BifrostError::Io)?;
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+
+        if let Some(status_path) = &deferred_status_path {
+            fs::write(status_path, "pending").map_err(BifrostError::Io)?;
+        }
+        command.spawn().map_err(BifrostError::Io)?;
+        Ok(())
+    })();
+    if let Err(error) = setup_result {
+        let mut cleanup_paths = vec![&script_path, &args_path, &ready_path, &log_path];
+        if let Some(status_path) = deferred_status_path.as_ref() {
+            cleanup_paths.push(status_path);
+        }
+        if let Err(cleanup_error) = cleanup_windows_upgrade_artifacts(&cleanup_paths) {
+            return Err(BifrostError::Config(format!(
+                "{error}; additionally failed to clean Windows upgrade helper artifacts: {cleanup_error}"
+            )));
+        }
+        return Err(error);
     }
-    command.spawn().map_err(BifrostError::Io)?;
     mark_deferred_install_scheduled();
     println!(
         "{} {}",
