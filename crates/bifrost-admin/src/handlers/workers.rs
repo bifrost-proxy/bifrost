@@ -96,7 +96,7 @@ pub async fn handle_workers<B>(req: Request<B>, path: &str) -> Response<BoxBody>
         }
         (&Method::POST, Some("stop")) => {
             let affected = global_worker_supervisor()
-                .stop_kind(kind, Duration::from_secs(5))
+                .suspend_kind(kind, Duration::from_secs(5))
                 .await;
             json_response(&WorkerActionResponse {
                 worker_kind: kind,

@@ -1,8 +1,19 @@
 use super::*;
 
 fn use_isolated_im_gateway_runtime() -> bool {
-    crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::ImGateway)
-        && !crate::worker_runtime::im_gateway::is_im_gateway_worker_process()
+    // Handler unit tests construct an in-process service with deterministic
+    // provider state. Worker isolation is covered by dedicated worker/E2E tests;
+    // routing these unit tests through a child process would replace that state.
+    #[cfg(test)]
+    {
+        false
+    }
+    #[cfg(not(test))]
+    {
+        crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::ImGateway,
+        ) && !crate::worker_runtime::im_gateway::is_im_gateway_worker_process()
+    }
 }
 
 // ---------------------------------------------------------------------------
