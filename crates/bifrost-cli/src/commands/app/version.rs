@@ -35,7 +35,60 @@ pub(super) fn verify_installed_desktop_target_version(
 }
 
 pub(super) fn versions_equal(installed: &str, target: &str) -> bool {
-    normalize_version(installed) == normalize_version(target)
+    let installed = normalize_version(installed);
+    let target = normalize_version(target);
+    installed == target || windows_msi_safe_version(target).as_deref() == Some(installed)
+}
+
+fn windows_msi_safe_version(version: &str) -> Option<String> {
+    let version = normalize_version(version);
+    let without_build = version.split('+').next()?;
+    let Some((core, prerelease)) = without_build.split_once('-') else {
+        return Some(without_build.to_string());
+    };
+    let identifiers: Vec<_> = prerelease
+        .split(['.', '-'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let first = identifiers.first()?.to_ascii_lowercase();
+
+    if first.chars().all(|ch| ch.is_ascii_digit()) {
+        let value = first.parse::<u32>().ok()?;
+        return (value <= 65_535).then(|| format!("{core}-{value}"));
+    }
+
+    let alphabetic_end = first
+        .find(|ch: char| !ch.is_ascii_alphabetic())
+        .unwrap_or(first.len());
+    let has_valid_label_shape = alphabetic_end > 0
+        && first[alphabetic_end..]
+            .chars()
+            .all(|ch| ch.is_ascii_digit());
+    let label = if has_valid_label_shape {
+        &first[..alphabetic_end]
+    } else {
+        first.as_str()
+    };
+    let inline_sequence = (has_valid_label_shape && alphabetic_end < first.len())
+        .then(|| first[alphabetic_end..].parse::<u32>().ok())
+        .flatten();
+    let explicit_sequence = identifiers
+        .iter()
+        .skip(1)
+        .find_map(|part| part.parse::<u32>().ok());
+    let channel_base = match label {
+        "alpha" => Some(10_000),
+        "beta" => Some(20_000),
+        "rc" => Some(30_000),
+        _ => None,
+    };
+    let fallback_hash = prerelease.bytes().map(u32::from).sum::<u32>() % 10_000;
+    let base = channel_base.unwrap_or(40_000);
+    let sequence = inline_sequence
+        .or(explicit_sequence)
+        .unwrap_or_else(|| channel_base.map(|_| 0).unwrap_or(fallback_hash))
+        .min(9_999);
+    Some(format!("{core}-{}", base + sequence))
 }
 
 pub(super) fn normalize_version(version: &str) -> &str {

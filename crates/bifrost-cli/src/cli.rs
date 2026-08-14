@@ -502,6 +502,29 @@ previous runtime settings."
         #[arg(long, hide = true, requires = "running_proxy_pid")]
         running_proxy_port: Option<u16>,
     },
+    #[command(
+        hide = true,
+        about = "Schedule a deferred Windows CLI replacement from the staged target binary"
+    )]
+    WindowsUpgradeHandoff {
+        #[arg(long, hide = true)]
+        parent_pid: u32,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        pending_path: PathBuf,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        target_path: PathBuf,
+        #[arg(long, hide = true)]
+        target_version: String,
+        #[arg(
+            long,
+            hide = true,
+            action = ArgAction::Append,
+            allow_hyphen_values = true
+        )]
+        restart_arg: Vec<String>,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        deferred_status_path: Option<PathBuf>,
+    },
     #[command(visible_alias = "cfg", about = "Manage runtime configuration")]
     Config {
         #[command(subcommand)]

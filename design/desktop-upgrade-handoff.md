@@ -221,6 +221,17 @@ stateDiagram-v2
   `BIFROST_VERSION` injection used by release builds. Before exercising replacement, the target
   executable must pass both `bifrost --version` and a real `/api/system.version` core probe; CLI-only
   byte rewriting is not accepted as proof that the upgrade package contains the requested core.
+- Windows CLI self-replacement delegates helper generation to the staged target executable through
+  a hidden `windows-upgrade-handoff` command. The old executable only downloads and starts the staged
+  target, so retry/cleanup fixes shipped in the target release are already active during the first
+  upgrade into that release. The handoff validates that it is executing from
+  `.bifrost.exe.pending.<old-pid>` beside the sole allowed `bifrost.exe` target, rejects PID zero,
+  cross-directory paths, arbitrary target names, and malformed target versions, then creates the
+  no-window PowerShell helper that waits for the original updater PID.
+- Windows Desktop release versions use Tauri/MSI-safe fourth components. Post-install comparison
+  maps semantic prereleases with the same algorithm as `scripts/sync-tauri-version.mjs` (`alpha`,
+  `beta`, `rc`, numeric and fallback channels), so `0.0.181-10008` is accepted as the packaged form
+  of `0.0.181-alpha.8` without weakening pinned-target verification.
 - The command that opens the new App explicitly removes all helper-only environment variables, for
   both macOS `.app` targets and direct executable targets.
 - A real macOS update relaunch creates one new stable App process instead of a recursive Dock-icon
@@ -242,5 +253,17 @@ stateDiagram-v2
 - Windows deferred CLI replacement updates the installed App to the same pinned target first,
   keeps an executable backup during replacement, verifies `bifrost --version`, and restores the
   previous executable before publishing `failed` when replacement verification fails.
+- Release-level Windows acceptance is always a clean-install transition, never an in-place retry on
+  an already contaminated VM: uninstall every registered Bifrost MSI/legacy installer, terminate
+  Bifrost processes, remove Program Files/LocalAppData/user data and all upgrade helper artifacts,
+  install the immediately previous version, and let that previous executable initiate the update.
+  A release is not accepted until both a locked-file failure/rollback run and an unlocked success
+  run finish with one installer registration and no pending/backup/helper/status residue. The first
+  fixed release is additionally followed by a fixed-release-to-next-release transition to prove the
+  staged-target handoff itself, rather than only compatibility with the legacy helper.
+- The Windows helper removes its ready marker and transaction log after publishing the durable
+  terminal status, in addition to deleting its argument file and PowerShell script. Direct CLI
+  upgrades and failed transactions therefore do not accumulate helper artifacts when no Desktop
+  observer is present.
 - Windows Installer registration is still maintained by MSI/EXE itself; the updater transaction
   guarantees that the previous launchable App files are restored when package verification fails.

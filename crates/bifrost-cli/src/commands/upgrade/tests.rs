@@ -1,6 +1,240 @@
 use super::*;
 
 #[test]
+fn windows_upgrade_handoff_uses_staged_target_and_original_parent_pid() {
+    let deferred = WindowsDeferredInstall {
+        staged_binary: PathBuf::from(
+            r"C:\Users\tester\AppData\Local\bifrost\bin\.bifrost.exe.pending.42",
+        ),
+        target_path: PathBuf::from(r"C:\Users\tester\AppData\Local\bifrost\bin\bifrost.exe"),
+        target_version: "0.0.181-alpha.8".to_string(),
+    };
+    let restart = vec![
+        "start".to_string(),
+        "-d".to_string(),
+        "--proxy-bypass".to_string(),
+        "localhost,127.0.0.1".to_string(),
+    ];
+    let status = Path::new(r"C:\Users\tester\AppData\Local\Temp\upgrade.status");
+    let args = windows_upgrade_handoff_args(&deferred, Some(&restart), 9876, Some(status));
+    let args: Vec<_> = args
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(args[0], "windows-upgrade-handoff");
+    assert_eq!(args[1..3], ["--parent-pid", "9876"]);
+    assert!(args.windows(2).any(|pair| {
+        pair[0] == "--pending-path" && pair[1] == deferred.staged_binary.to_string_lossy()
+    }));
+    assert!(args.windows(2).any(|pair| {
+        pair[0] == "--target-path" && pair[1] == deferred.target_path.to_string_lossy()
+    }));
+    assert!(args
+        .windows(2)
+        .any(|pair| { pair[0] == "--target-version" && pair[1] == deferred.target_version }));
+    assert_eq!(
+        args.iter()
+            .filter(|arg| arg.as_str() == "--restart-arg")
+            .count(),
+        restart.len()
+    );
+    assert!(args.windows(2).any(|pair| {
+        pair[0] == "--deferred-status-path" && pair[1] == status.to_string_lossy()
+    }));
+}
+
+#[test]
+fn windows_upgrade_handoff_spawn_retries_sharing_violations() {
+    let mut attempts = 0;
+    let value = spawn_windows_upgrade_handoff_with_retry(|| {
+        attempts += 1;
+        if attempts < 4 {
+            Err(io::Error::from_raw_os_error(32))
+        } else {
+            Ok("scheduled")
+        }
+    })
+    .expect("freshly copied staged binary eventually becomes executable");
+    assert_eq!(value, "scheduled");
+    assert_eq!(attempts, 4);
+}
+
+#[test]
+fn windows_upgrade_handoff_spawn_fails_fast_for_non_sharing_errors() {
+    let mut attempts = 0;
+    let error = spawn_windows_upgrade_handoff_with_retry::<()>(|| {
+        attempts += 1;
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked"))
+    })
+    .expect_err("non-Windows-style errors must not be retried");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn windows_upgrade_handoff_command_is_hidden_and_preserves_hyphenated_restart_args() {
+    use clap::{CommandFactory, Parser};
+
+    let cli = crate::cli::Cli::parse_from([
+        "bifrost",
+        "windows-upgrade-handoff",
+        "--parent-pid",
+        "4321",
+        "--pending-path",
+        r"C:\bifrost\.bifrost.exe.pending.42",
+        "--target-path",
+        r"C:\bifrost\bifrost.exe",
+        "--target-version",
+        "0.0.181-alpha.8",
+        "--restart-arg",
+        "start",
+        "--restart-arg",
+        "--no-system-proxy",
+    ]);
+    let Some(crate::cli::Commands::WindowsUpgradeHandoff {
+        parent_pid,
+        restart_arg,
+        ..
+    }) = cli.command
+    else {
+        panic!("expected hidden Windows handoff command")
+    };
+    assert_eq!(parent_pid, 4321);
+    assert_eq!(restart_arg, ["start", "--no-system-proxy"]);
+
+    let help = crate::cli::Cli::command().render_help().to_string();
+    assert!(!help.contains("windows-upgrade-handoff"));
+}
+
+#[test]
+fn windows_upgrade_handoff_request_accepts_only_the_running_staged_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("bifrost.exe");
+    let pending = dir.path().join(".bifrost.exe.pending.4321");
+    std::fs::write(&pending, b"replacement").expect("write pending binary");
+
+    validate_windows_upgrade_handoff_request(4321, &pending, &target, "0.0.181-alpha.8", &pending)
+        .expect("valid staged handoff");
+
+    let wrong_pending = dir.path().join(".bifrost.exe.pending.9999");
+    std::fs::write(&wrong_pending, b"replacement").expect("write wrongly named pending binary");
+    let error = validate_windows_upgrade_handoff_request(
+        4321,
+        &wrong_pending,
+        &target,
+        "0.0.181-alpha.8",
+        &wrong_pending,
+    )
+    .expect_err("pending name must be derived from target and parent PID");
+    assert!(error.to_string().contains("must be named"));
+
+    let arbitrary_target = dir.path().join("updater.exe");
+    let arbitrary_pending = dir.path().join(".updater.exe.pending.4321");
+    std::fs::write(&arbitrary_pending, b"replacement").expect("write arbitrary pending binary");
+    let error = validate_windows_upgrade_handoff_request(
+        4321,
+        &arbitrary_pending,
+        &arbitrary_target,
+        "0.0.181-alpha.8",
+        &arbitrary_pending,
+    )
+    .expect_err("handoff must not become an arbitrary executable replacement primitive");
+    assert!(error.to_string().contains("only replace bifrost.exe"));
+
+    let other_exe = dir.path().join("other-staged.exe");
+    std::fs::write(&other_exe, b"other").expect("write other executable");
+    let error = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &target,
+        "0.0.181-alpha.8",
+        &other_exe,
+    )
+    .expect_err("handoff must execute from pending binary");
+    assert!(error.to_string().contains("must run from the staged"));
+}
+
+#[test]
+fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let other_dir = tempfile::tempdir().expect("other tempdir");
+    let pending = dir.path().join(".bifrost.exe.pending.4321");
+    std::fs::write(&pending, b"replacement").expect("write pending binary");
+
+    let zero_pid = validate_windows_upgrade_handoff_request(
+        0,
+        &pending,
+        &dir.path().join("bifrost.exe"),
+        "0.0.181-alpha.8",
+        &pending,
+    )
+    .expect_err("zero PID must be rejected");
+    assert!(zero_pid.to_string().contains("non-zero parent PID"));
+
+    let invalid_version = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &dir.path().join("bifrost.exe"),
+        "0.0.181\n-Command",
+        &pending,
+    )
+    .expect_err("control characters in target version must be rejected");
+    assert!(invalid_version
+        .to_string()
+        .contains("invalid target version"));
+
+    let cross_directory = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &other_dir.path().join("bifrost.exe"),
+        "0.0.181-alpha.8",
+        &pending,
+    )
+    .expect_err("cross-directory replacement must be rejected");
+    assert!(cross_directory
+        .to_string()
+        .contains("must share the same directory"));
+
+    let missing_target_name = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        Path::new(""),
+        "0.0.181-alpha.8",
+        &pending,
+    )
+    .expect_err("target path without a file name must be rejected");
+    assert!(missing_target_name.to_string().contains("valid file name"));
+
+    let relative_pending = Path::new(".bifrost.exe.pending.4321");
+    let relative_target = Path::new("bifrost.exe");
+    let missing_pending_parent = validate_windows_upgrade_handoff_request(
+        4321,
+        relative_pending,
+        relative_target,
+        "0.0.181-alpha.8",
+        relative_pending,
+    )
+    .expect_err("relative staging path without a parent must be rejected");
+    assert!(missing_pending_parent
+        .to_string()
+        .contains("staging path has no parent"));
+
+    let pending_with_parent = Path::new("dir/.bifrost.exe.pending.4321");
+    let missing_target_parent = validate_windows_upgrade_handoff_request(
+        4321,
+        pending_with_parent,
+        relative_target,
+        "0.0.181-alpha.8",
+        pending_with_parent,
+    )
+    .expect_err("relative target path without a parent must be rejected");
+    assert!(missing_target_parent
+        .to_string()
+        .contains("target path has no parent"));
+}
+
+#[test]
 fn windows_upgrade_file_cleanup_retries_sharing_errors() {
     let path = Path::new("C:/fixture/.bifrost.exe.pending.42");
     let mut attempts = 0;

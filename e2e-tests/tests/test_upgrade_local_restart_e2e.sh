@@ -5,6 +5,10 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
 : "${BIFROST_DAEMON_READY_TIMEOUT_SECS:=90}"
 export BIFROST_DAEMON_READY_TIMEOUT_SECS
+# This test intentionally owns an isolated updater and daemon. It must not
+# inherit the production external-runner delegation marker from an agent host.
+BIFROST_EXTERNAL_CLI_WORKER=0
+export BIFROST_EXTERNAL_CLI_WORKER
 
 set -uo pipefail
 
@@ -280,6 +284,7 @@ assert_target_binary_core_version() {
     port="$(allocate_free_port)"
     start_log="${TEST_ROOT}/target-preflight-start.log"
 
+    env -u BIFROST_DETACHED_DAEMON_CHILD \
     BIFROST_DATA_DIR="$data_dir_for_process" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     "$binary" start -p "$port" --host 127.0.0.1 --daemon \
@@ -479,6 +484,7 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
 
     local bifrost_data_dir
     bifrost_data_dir="$(bifrost_process_path "$TEST_DATA_DIR")"
+    env -u BIFROST_DETACHED_DAEMON_CHILD \
     BIFROST_DATA_DIR="$bifrost_data_dir" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     "$start_bin" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \

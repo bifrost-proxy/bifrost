@@ -1164,6 +1164,19 @@ fn versions_equal_accepts_optional_v_prefix() {
     assert!(versions_equal("0.0.139", "v0.0.139"));
     assert!(versions_equal(" v0.0.139 ", "0.0.139"));
     assert!(!versions_equal("0.0.138", "0.0.139"));
+    assert!(versions_equal("0.0.181-10007", "0.0.181-alpha.7"));
+    assert!(versions_equal("0.0.181-10000", "0.0.181-alpha"));
+    assert!(versions_equal("0.0.181-20012", "v0.0.181-beta.12"));
+    assert!(versions_equal("0.0.181-30003", "0.0.181-rc3"));
+    assert!(versions_equal("0.0.181-7", "0.0.181-7"));
+    assert!(versions_equal("0.0.181-7", "0.0.181-00007"));
+    assert!(versions_equal("0.0.181-40007", "0.0.181-preview.7"));
+    assert!(versions_equal("0.0.181-40007", "0.0.181-preview.7+build.2"));
+    assert!(versions_equal("0.0.181", "0.0.181+build.2"));
+    assert!(!versions_equal("0.0.181-10006", "0.0.181-alpha.7"));
+    assert!(!versions_equal("0.0.181-40006", "0.0.181-preview.7"));
+    assert!(!versions_equal("0.0.181-70000", "0.0.181-70000+build.2"));
+    assert!(versions_equal("0.0.181-40770", "0.0.181-preview"));
 }
 
 #[test]

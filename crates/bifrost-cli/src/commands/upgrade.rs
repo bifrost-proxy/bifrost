@@ -196,7 +196,7 @@ enum UpgradeInstallOutcome {
     DeferredWindows(WindowsDeferredInstall),
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowsDeferredInstall {
     staged_binary: PathBuf,
@@ -1496,6 +1496,8 @@ fn handle_upgrade_inner(
 }
 
 mod restart;
+#[cfg_attr(not(windows), allow(unused_imports))]
+pub(crate) use restart::handle_windows_upgrade_handoff;
 use restart::*;
 
 #[cfg(test)]

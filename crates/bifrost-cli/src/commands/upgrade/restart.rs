@@ -276,8 +276,227 @@ pub(super) fn schedule_windows_deferred_install(
     deferred_install: WindowsDeferredInstall,
     restart_args: Option<&[String]>,
 ) -> Result<(), BifrostError> {
-    let result = schedule_windows_deferred_install_inner(&deferred_install, restart_args);
+    let result = schedule_windows_deferred_install_via_staged_binary(
+        &deferred_install,
+        restart_args,
+        std::process::id(),
+    );
     cleanup_staged_binary_after_schedule(&deferred_install.staged_binary, result)
+}
+
+#[cfg(windows)]
+fn schedule_windows_deferred_install_via_staged_binary(
+    deferred_install: &WindowsDeferredInstall,
+    restart_args: Option<&[String]>,
+    parent_pid: u32,
+) -> Result<(), BifrostError> {
+    let deferred_status_path = env::var_os(DESKTOP_MANAGED_DEFERRED_STATUS_ENV).map(PathBuf::from);
+    let args = windows_upgrade_handoff_args(
+        deferred_install,
+        restart_args,
+        parent_pid,
+        deferred_status_path.as_deref(),
+    );
+    let mut command = Command::new(&deferred_install.staged_binary);
+    command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove(crate::commands::start::DETACHED_DAEMON_CHILD_ENV);
+
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output =
+        spawn_windows_upgrade_handoff_with_retry(|| command.output()).map_err(BifrostError::Io)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(BifrostError::Config(format!(
+            "staged Windows upgrade handoff failed with status {}{}",
+            output.status,
+            (!detail.is_empty())
+                .then(|| format!(": {detail}"))
+                .unwrap_or_default()
+        )));
+    }
+    mark_deferred_install_scheduled();
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn windows_upgrade_handoff_args(
+    deferred_install: &WindowsDeferredInstall,
+    restart_args: Option<&[String]>,
+    parent_pid: u32,
+    deferred_status_path: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![
+        "windows-upgrade-handoff".into(),
+        "--parent-pid".into(),
+        parent_pid.to_string().into(),
+        "--pending-path".into(),
+        deferred_install.staged_binary.as_os_str().to_owned(),
+        "--target-path".into(),
+        deferred_install.target_path.as_os_str().to_owned(),
+        "--target-version".into(),
+        deferred_install.target_version.clone().into(),
+    ];
+    for restart_arg in restart_args.into_iter().flatten() {
+        args.push("--restart-arg".into());
+        args.push(restart_arg.into());
+    }
+    if let Some(path) = deferred_status_path {
+        args.push("--deferred-status-path".into());
+        args.push(path.as_os_str().to_owned());
+    }
+    args
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn spawn_windows_upgrade_handoff_with_retry<T>(
+    mut spawn: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    for attempt in 0..WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS {
+        match spawn() {
+            Ok(output) => return Ok(output),
+            Err(error)
+                if matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                    && attempt + 1 < WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS =>
+            {
+                thread::sleep(Duration::from_millis(25 + (attempt as u64 % 10) * 10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded Windows handoff spawn loop always returns")
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn handle_windows_upgrade_handoff(
+    parent_pid: u32,
+    pending_path: PathBuf,
+    target_path: PathBuf,
+    target_version: String,
+    restart_args: Vec<String>,
+    deferred_status_path: Option<PathBuf>,
+) -> Result<(), BifrostError> {
+    #[cfg(windows)]
+    {
+        validate_windows_upgrade_handoff_request(
+            parent_pid,
+            &pending_path,
+            &target_path,
+            &target_version,
+            &env::current_exe().map_err(BifrostError::Io)?,
+        )?;
+        let deferred_install = WindowsDeferredInstall {
+            staged_binary: pending_path,
+            target_path,
+            target_version,
+        };
+        let restart_args = (!restart_args.is_empty()).then_some(restart_args.as_slice());
+        schedule_windows_deferred_install_inner(
+            &deferred_install,
+            restart_args,
+            parent_pid,
+            deferred_status_path,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            parent_pid,
+            pending_path,
+            target_path,
+            target_version,
+            restart_args,
+            deferred_status_path,
+        );
+        Err(BifrostError::Config(
+            "Windows upgrade handoff is only available on Windows".to_string(),
+        ))
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn validate_windows_upgrade_handoff_request(
+    parent_pid: u32,
+    pending_path: &Path,
+    target_path: &Path,
+    target_version: &str,
+    current_exe: &Path,
+) -> Result<(), BifrostError> {
+    if parent_pid == 0 {
+        return Err(BifrostError::Config(
+            "Windows upgrade handoff requires a non-zero parent PID".to_string(),
+        ));
+    }
+
+    let target_version = target_version.trim();
+    if target_version.is_empty()
+        || target_version.len() > 128
+        || !target_version
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'))
+    {
+        return Err(BifrostError::Config(
+            "Windows upgrade handoff received an invalid target version".to_string(),
+        ));
+    }
+
+    let target_name = target_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            BifrostError::Config("Windows upgrade target has no valid file name".to_string())
+        })?;
+    if !target_name.eq_ignore_ascii_case("bifrost.exe") {
+        return Err(BifrostError::Config(
+            "Windows upgrade handoff may only replace bifrost.exe".to_string(),
+        ));
+    }
+    let expected_pending_name = format!(".{target_name}.pending.{parent_pid}");
+    if pending_path.file_name().and_then(|name| name.to_str())
+        != Some(expected_pending_name.as_str())
+    {
+        return Err(BifrostError::Config(format!(
+            "Windows upgrade staging file must be named {expected_pending_name}"
+        )));
+    }
+
+    let pending_parent = pending_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            BifrostError::Config("Windows upgrade staging path has no parent directory".to_string())
+        })?;
+    let target_parent = target_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            BifrostError::Config("Windows upgrade target path has no parent directory".to_string())
+        })?;
+    let canonical_pending_parent = fs::canonicalize(pending_parent).map_err(BifrostError::Io)?;
+    let canonical_target_parent = fs::canonicalize(target_parent).map_err(BifrostError::Io)?;
+    if canonical_pending_parent != canonical_target_parent {
+        return Err(BifrostError::Config(
+            "Windows upgrade staging and target paths must share the same directory".to_string(),
+        ));
+    }
+
+    let canonical_pending = fs::canonicalize(pending_path).map_err(BifrostError::Io)?;
+    let canonical_current_exe = fs::canonicalize(current_exe).map_err(BifrostError::Io)?;
+    if canonical_pending != canonical_current_exe {
+        return Err(BifrostError::Config(
+            "Windows upgrade handoff must run from the staged replacement binary".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(any(windows, test))]
@@ -315,8 +534,9 @@ pub(super) fn cleanup_windows_upgrade_artifacts(paths: &[&Path]) -> Result<(), B
 fn schedule_windows_deferred_install_inner(
     deferred_install: &WindowsDeferredInstall,
     restart_args: Option<&[String]>,
+    parent_pid: u32,
+    deferred_status_path: Option<PathBuf>,
 ) -> Result<(), BifrostError> {
-    let parent_pid = std::process::id();
     let target_dir = deferred_install
         .target_path
         .parent()
@@ -332,7 +552,6 @@ fn schedule_windows_deferred_install_inner(
     let args_path = target_dir.join(format!(".bifrost-upgrade-{}.args", suffix));
     let log_path = target_dir.join(format!(".bifrost-upgrade-{}.log", suffix));
     let ready_path = target_dir.join(format!(".bifrost-upgrade-{}.ok", suffix));
-    let deferred_status_path = env::var_os(DESKTOP_MANAGED_DEFERRED_STATUS_ENV).map(PathBuf::from);
     let progress_dir = get_bifrost_dir()?;
     let progress_path = progress_dir.join(bifrost_core::upgrade_progress::PROGRESS_FILE_NAME);
     let progress_snapshot = bifrost_core::upgrade_progress::read_progress(&progress_dir);
@@ -588,7 +807,7 @@ try {
 } finally {
   # The deferred status write itself can fail when antivirus or another reader
   # briefly holds the file. Keep helper-owned scratch cleanup unconditional.
-  foreach ($cleanupPath in @($RestartArgsPath, $PSCommandPath)) {
+  foreach ($cleanupPath in @($RestartArgsPath, $ReadyPath, $PSCommandPath)) {
     if (-not $cleanupPath) { continue }
     try {
       if (Test-Path -LiteralPath $cleanupPath) {
@@ -601,6 +820,12 @@ try {
         Write-UpgradeLog "WARNING: failed to remove helper scratch file ${cleanupPath}: $($_.Exception.Message)"
       } catch {}
     }
+  }
+  # The log is useful only while the helper is active. Remove it last so every
+  # prior cleanup failure can still be diagnosed during the transaction while
+  # successful and failed terminal states both leave no upgrade artifacts.
+  if ($LogPath) {
+    Remove-Item -LiteralPath $LogPath -Force -ErrorAction SilentlyContinue
   }
 }
 "#,
