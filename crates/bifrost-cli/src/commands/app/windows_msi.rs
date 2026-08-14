@@ -194,12 +194,37 @@ fn windows_msi_command(args: &[OsString], scope: WindowsMsiScope) -> Command {
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn windows_msi_argument_line(args: &[OsString]) -> String {
     args.iter()
-        .map(|arg| {
-            let value = arg.to_string_lossy();
-            format!("\"{}\"", value.replace('"', "\\\""))
-        })
+        .map(|arg| windows_quote_command_line_arg(&arg.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_quote_command_line_arg(value: &str) -> String {
+    if !value.is_empty() && !value.chars().any(|ch| matches!(ch, ' ' | '\t' | '"')) {
+        return value.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for ch in value.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -352,5 +377,39 @@ fn extract_msi_product_code(uninstall_string: &str) -> Option<String> {
         Some(product_code.to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod argument_line_tests {
+    use super::*;
+
+    #[test]
+    fn msi_argument_line_only_quotes_values_that_need_it() {
+        let args = vec![
+            OsString::from("/i"),
+            OsString::from(r"C:\Program Files\Bifrost\bifrost desktop.msi"),
+            OsString::from("/qn"),
+            OsString::from("/norestart"),
+            OsString::from("ALLUSERS=1"),
+            OsString::from("/l*v"),
+            OsString::from(r"C:\Temp Files\bifrost msi.log"),
+        ];
+
+        assert_eq!(
+            windows_msi_argument_line(&args),
+            r#"/i "C:\Program Files\Bifrost\bifrost desktop.msi" /qn /norestart ALLUSERS=1 /l*v "C:\Temp Files\bifrost msi.log""#
+        );
+    }
+
+    #[test]
+    fn windows_argument_quoting_handles_empty_quotes_and_trailing_backslashes() {
+        assert_eq!(windows_quote_command_line_arg(""), r#""""#);
+        assert_eq!(windows_quote_command_line_arg("plain"), "plain");
+        assert_eq!(windows_quote_command_line_arg(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(
+            windows_quote_command_line_arg(r#"C:\Program Files\Bifrost\"#),
+            r#""C:\Program Files\Bifrost\\""#
+        );
     }
 }
