@@ -261,6 +261,15 @@ stateDiagram-v2
   run finish with one installer registration and no pending/backup/helper/status residue. The first
   fixed release is additionally followed by a fixed-release-to-next-release transition to prove the
   staged-target handoff itself, rather than only compatibility with the legacy helper.
+- Release discovery follows the running binary's semantic channel. A stable binary queries only
+  published stable releases. An `alpha` binary scans published prereleases and selects only the
+  newest `alpha` release; `beta`, `rc`, draft, and stable releases are excluded. Prerelease ordering
+  uses semantic numeric identifiers, so `alpha.10` is newer than `alpha.9`. Cached results are
+  reusable only when their channel matches the running binary, including stale-cache fallback.
+  The first binary containing this discovery fix must be installed explicitly; acceptance then
+  publishes one more adjacent alpha and proves the fixed alpha discovers and upgrades to it through
+  the default `bifrost upgrade` command. The stable path uses the same replacement/handoff flow but
+  never opts into prereleases.
 - The Windows helper removes its ready marker and transaction log after publishing the durable
   terminal status, in addition to deleting its argument file and PowerShell script. Direct CLI
   upgrades and failed transactions therefore do not accumulate helper artifacts when no Desktop

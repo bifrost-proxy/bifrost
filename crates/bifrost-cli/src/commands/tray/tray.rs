@@ -2567,6 +2567,10 @@ fn write_version_cache(data_dir: &Path, cache: &bifrost_core::version_check::Ver
 fn version_cache_is_fresh(cache: &bifrost_core::version_check::VersionCache) -> bool {
     chrono::Utc::now().signed_duration_since(cache.checked_at)
         < chrono::Duration::seconds(TRAY_UPDATE_CACHE_MAX_AGE_SECS)
+        && bifrost_core::version_check::same_release_channel(
+            env!("CARGO_PKG_VERSION"),
+            &cache.latest_version,
+        )
 }
 
 fn should_fetch_update_cache(data_dir: &Path) -> bool {
@@ -2581,7 +2585,9 @@ fn refresh_update_cache_from_github(data_dir: &Path) -> bool {
         return false;
     }
 
-    match bifrost_core::version_check::fetch_latest_release_sync() {
+    match bifrost_core::version_check::fetch_latest_release_sync_for_current(env!(
+        "CARGO_PKG_VERSION"
+    )) {
         Ok((latest, highlights)) => {
             let cache = bifrost_core::version_check::VersionCache {
                 latest_version: latest,

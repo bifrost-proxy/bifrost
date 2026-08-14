@@ -41,6 +41,12 @@ pub struct GitHubTag {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseChannel {
+    Stable,
+    Prerelease(String),
+}
+
 #[derive(Debug)]
 pub enum FetchError {
     Network(String),
@@ -103,14 +109,129 @@ pub fn stable_bifrost_release_version(release: &GitHubRelease) -> Option<String>
     (!version.contains('-')).then_some(version)
 }
 
-pub fn pick_latest_bifrost_release(releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
+fn decode_msi_prerelease(value: u32) -> Option<(&'static str, u32)> {
+    match value {
+        10_000..=19_999 => Some(("alpha", value - 10_000)),
+        20_000..=29_999 => Some(("beta", value - 20_000)),
+        30_000..=39_999 => Some(("rc", value - 30_000)),
+        _ => None,
+    }
+}
+
+fn canonical_release_version(version: &str) -> String {
+    let normalized = version.trim().trim_start_matches('v');
+
+    let msi_parts: Vec<_> = normalized.split('.').collect();
+    if msi_parts.len() == 4
+        && msi_parts.iter().all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        })
+    {
+        if let Ok(encoded) = msi_parts[3].parse::<u32>() {
+            if let Some((channel, sequence)) = decode_msi_prerelease(encoded) {
+                let core = msi_parts[..3].join(".");
+                return if sequence == 0 {
+                    format!("{core}-{channel}")
+                } else {
+                    format!("{core}-{channel}.{sequence}")
+                };
+            }
+        }
+    }
+
+    if let Some((core, prerelease)) = normalized.split_once('-') {
+        if let Ok(encoded) = prerelease.parse::<u32>() {
+            if let Some((channel, sequence)) = decode_msi_prerelease(encoded) {
+                return if sequence == 0 {
+                    format!("{core}-{channel}")
+                } else {
+                    format!("{core}-{channel}.{sequence}")
+                };
+            }
+        }
+
+        let first_end = prerelease.find(['.', '-']).unwrap_or(prerelease.len());
+        let first = &prerelease[..first_end];
+        let label_end = first
+            .find(|character: char| !character.is_ascii_alphabetic())
+            .unwrap_or(first.len());
+        if label_end > 0
+            && label_end < first.len()
+            && first[label_end..]
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
+            return format!(
+                "{core}-{}.{}{}",
+                &first[..label_end],
+                &first[label_end..],
+                &prerelease[first_end..]
+            );
+        }
+    }
+
+    normalized.to_string()
+}
+
+pub fn release_channel(version: &str) -> ReleaseChannel {
+    let canonical = canonical_release_version(version);
+    let version = canonical.as_str();
+    let Some((_, prerelease)) = version.split_once('-') else {
+        return ReleaseChannel::Stable;
+    };
+    let first = prerelease.split(['.', '-']).next().unwrap_or_default();
+    let label_end = first
+        .find(|ch: char| !ch.is_ascii_alphabetic())
+        .unwrap_or(first.len());
+    let label = first[..label_end].to_ascii_lowercase();
+    if label.is_empty() {
+        ReleaseChannel::Prerelease(prerelease.to_ascii_lowercase())
+    } else {
+        ReleaseChannel::Prerelease(label)
+    }
+}
+
+pub fn same_release_channel(current: &str, candidate: &str) -> bool {
+    let current = canonical_release_version(current);
+    let candidate = canonical_release_version(candidate);
+    semver::Version::parse(&current).is_ok()
+        && semver::Version::parse(&candidate).is_ok()
+        && release_channel(&current) == release_channel(&candidate)
+}
+
+fn release_version_for_channel(
+    release: &GitHubRelease,
+    channel: &ReleaseChannel,
+) -> Option<String> {
+    if release.draft {
+        return None;
+    }
+    let version = bifrost_version_from_release_tag(&release.tag_name)?;
+    match channel {
+        ReleaseChannel::Stable => {
+            (!release.prerelease && !version.contains('-')).then_some(version)
+        }
+        ReleaseChannel::Prerelease(_) => {
+            (release.prerelease && release_channel(&version) == *channel).then_some(version)
+        }
+    }
+}
+
+pub fn pick_latest_bifrost_release_for_channel(
+    releases: Vec<GitHubRelease>,
+    channel: &ReleaseChannel,
+) -> Option<GitHubRelease> {
     releases
         .into_iter()
         .filter_map(|release| {
-            stable_bifrost_release_version(&release).map(|version| (release, version))
+            release_version_for_channel(&release, channel).map(|version| (release, version))
         })
         .max_by(|(_, a), (_, b)| compare_versions(a, b))
         .map(|(release, _)| release)
+}
+
+pub fn pick_latest_bifrost_release(releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
+    pick_latest_bifrost_release_for_channel(releases, &ReleaseChannel::Stable)
 }
 
 pub fn github_releases_api_list_url(page: usize) -> String {
@@ -140,6 +261,14 @@ fn fetch_latest_published_release_sync(
     client: &reqwest::blocking::Client,
     base_url: &str,
 ) -> Result<(String, Vec<String>), FetchError> {
+    fetch_latest_published_release_sync_for_channel(client, base_url, &ReleaseChannel::Stable)
+}
+
+fn fetch_latest_published_release_sync_for_channel(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    channel: &ReleaseChannel,
+) -> Result<(String, Vec<String>), FetchError> {
     let mut published_releases = Vec::new();
     let mut page = 1;
     loop {
@@ -167,11 +296,18 @@ fn fetch_latest_published_release_sync(
         page += 1;
     }
 
-    let release = pick_latest_bifrost_release(published_releases).ok_or_else(|| {
-        FetchError::Parse("no published stable Bifrost releases found".to_string())
-    })?;
-    let version = stable_bifrost_release_version(&release)
-        .expect("published release picker only returns stable Bifrost releases");
+    let release =
+        pick_latest_bifrost_release_for_channel(published_releases, channel).ok_or_else(|| {
+            let message = match channel {
+                ReleaseChannel::Stable => "no published stable Bifrost releases found".to_string(),
+                ReleaseChannel::Prerelease(label) => {
+                    format!("no published Bifrost releases found for prerelease channel {label}")
+                }
+            };
+            FetchError::Parse(message)
+        })?;
+    let version = release_version_for_channel(&release, channel)
+        .expect("published release picker only returns releases from the requested channel");
     let highlights = parse_release_highlights(release.body.as_deref());
     Ok((version, highlights))
 }
@@ -179,6 +315,15 @@ fn fetch_latest_published_release_sync(
 async fn fetch_latest_published_release_async(
     client: &reqwest::Client,
     base_url: &str,
+) -> Option<(String, Vec<String>)> {
+    fetch_latest_published_release_async_for_channel(client, base_url, &ReleaseChannel::Stable)
+        .await
+}
+
+async fn fetch_latest_published_release_async_for_channel(
+    client: &reqwest::Client,
+    base_url: &str,
+    channel: &ReleaseChannel,
 ) -> Option<(String, Vec<String>)> {
     let mut published_releases = Vec::new();
     let mut page = 1;
@@ -206,8 +351,8 @@ async fn fetch_latest_published_release_async(
         page += 1;
     }
 
-    let release = pick_latest_bifrost_release(published_releases)?;
-    let version = stable_bifrost_release_version(&release)?;
+    let release = pick_latest_bifrost_release_for_channel(published_releases, channel)?;
+    let version = release_version_for_channel(&release, channel)?;
     let highlights = parse_release_highlights(release.body.as_deref());
     Some((version, highlights))
 }
@@ -238,36 +383,49 @@ pub fn pick_latest_tag(tags: Vec<GitHubTag>) -> Option<String> {
 }
 
 pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse_version = |s: &str| -> (u32, u32, u32, String) {
-        let (version_part, prerelease) = if let Some(idx) = s.find('-') {
-            (&s[..idx], s[idx + 1..].to_string())
-        } else {
-            (s, String::new())
+    fn normalize(version: &str) -> &str {
+        version.trim().trim_start_matches('v')
+    }
+
+    fn compare_legacy(a: &str, b: &str) -> std::cmp::Ordering {
+        let parse = |version: &str| {
+            let (version, prerelease) = version
+                .split_once('-')
+                .map_or((version, String::new()), |(version, prerelease)| {
+                    (version, prerelease.to_string())
+                });
+            let parts: Vec<u32> = version
+                .split('.')
+                .filter_map(|part| part.parse().ok())
+                .collect();
+            (
+                parts.first().copied().unwrap_or(0),
+                parts.get(1).copied().unwrap_or(0),
+                parts.get(2).copied().unwrap_or(0),
+                prerelease,
+            )
         };
 
-        let parts: Vec<u32> = version_part
-            .split('.')
-            .filter_map(|p| p.parse().ok())
-            .collect();
+        let (a_major, a_minor, a_patch, a_prerelease) = parse(a);
+        let (b_major, b_minor, b_patch, b_prerelease) = parse(b);
+        match (a_major, a_minor, a_patch).cmp(&(b_major, b_minor, b_patch)) {
+            std::cmp::Ordering::Equal => match (a_prerelease.is_empty(), b_prerelease.is_empty()) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => a_prerelease.cmp(&b_prerelease),
+            },
+            ordering => ordering,
+        }
+    }
 
-        (
-            parts.first().copied().unwrap_or(0),
-            parts.get(1).copied().unwrap_or(0),
-            parts.get(2).copied().unwrap_or(0),
-            prerelease,
-        )
-    };
-
-    let (a_major, a_minor, a_patch, a_pre) = parse_version(a);
-    let (b_major, b_minor, b_patch, b_pre) = parse_version(b);
-
-    match (a_major, a_minor, a_patch).cmp(&(b_major, b_minor, b_patch)) {
-        std::cmp::Ordering::Equal => match (a_pre.is_empty(), b_pre.is_empty()) {
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
-            _ => a_pre.cmp(&b_pre),
-        },
-        other => other,
+    let canonical_a = canonical_release_version(a);
+    let canonical_b = canonical_release_version(b);
+    match (
+        semver::Version::parse(&canonical_a),
+        semver::Version::parse(&canonical_b),
+    ) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        _ => compare_legacy(normalize(a), normalize(b)),
     }
 }
 
@@ -612,6 +770,29 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
     fetch_latest_release_from_api_sync(&client, GITHUB_RELEASE_API_URLS)
 }
 
+pub fn fetch_latest_release_sync_for_current(
+    current_version: &str,
+) -> Result<(String, Vec<String>), FetchError> {
+    fetch_latest_release_sync_for_current_from(current_version, GITHUB_RELEASES_API_LIST_URL)
+}
+
+fn fetch_latest_release_sync_for_current_from(
+    current_version: &str,
+    prerelease_url: &str,
+) -> Result<(String, Vec<String>), FetchError> {
+    let channel = release_channel(current_version);
+    if channel == ReleaseChannel::Stable {
+        return fetch_latest_release_sync();
+    }
+
+    let client = crate::github_blocking_reqwest_client_builder()
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .user_agent("bifrost-cli")
+        .build()
+        .map_err(|e| FetchError::Network(format!("failed to build GitHub HTTP client: {e}")))?;
+    fetch_latest_published_release_sync_for_channel(&client, prerelease_url, &channel)
+}
+
 fn fetch_latest_release_from_api_sync(
     client: &reqwest::blocking::Client,
     (latest_url, releases_url): (&str, &str),
@@ -744,6 +925,29 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
     debug!("redirect-based version detection failed, falling back to GitHub API");
 
     fetch_latest_release_from_api_async(&client, GITHUB_RELEASE_API_URLS).await
+}
+
+pub async fn fetch_latest_release_async_for_current(
+    current_version: &str,
+) -> Option<(String, Vec<String>)> {
+    fetch_latest_release_async_for_current_from(current_version, GITHUB_RELEASES_API_LIST_URL).await
+}
+
+async fn fetch_latest_release_async_for_current_from(
+    current_version: &str,
+    prerelease_url: &str,
+) -> Option<(String, Vec<String>)> {
+    let channel = release_channel(current_version);
+    if channel == ReleaseChannel::Stable {
+        return fetch_latest_release_async().await;
+    }
+
+    let client = crate::github_reqwest_client_builder()
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .user_agent("bifrost-admin")
+        .build()
+        .ok()?;
+    fetch_latest_published_release_async_for_channel(&client, prerelease_url, &channel).await
 }
 
 async fn fetch_latest_release_from_api_async(
@@ -1171,6 +1375,152 @@ mod tests {
         assert_eq!(
             stable_bifrost_release_version(&picked),
             Some("1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn prerelease_channel_tracks_only_its_published_channel_and_orders_numbers() {
+        let release = |tag_name: &str, draft: bool, prerelease: bool| GitHubRelease {
+            tag_name: tag_name.to_string(),
+            body: Some(format!("notes for {tag_name}")),
+            draft,
+            prerelease,
+        };
+
+        assert_eq!(release_channel("0.0.181"), ReleaseChannel::Stable);
+        assert_eq!(
+            release_channel("v0.0.181-alpha.1"),
+            ReleaseChannel::Prerelease("alpha".to_string())
+        );
+        assert_eq!(
+            release_channel("0.0.181-alpha10"),
+            ReleaseChannel::Prerelease("alpha".to_string())
+        );
+        assert_eq!(
+            release_channel("0.0.181-10008"),
+            ReleaseChannel::Prerelease("alpha".to_string())
+        );
+        assert_eq!(
+            release_channel("0.0.181.10008"),
+            ReleaseChannel::Prerelease("alpha".to_string())
+        );
+        assert_eq!(canonical_release_version("v0.0.181.10000"), "0.0.181-alpha");
+        assert_eq!(canonical_release_version("0.0.181.20000"), "0.0.181-beta");
+        assert_eq!(canonical_release_version("0.0.181.30001"), "0.0.181-rc.1");
+        assert_eq!(canonical_release_version("0.0.181-10000"), "0.0.181-alpha");
+        assert_eq!(canonical_release_version("0.0.181-20002"), "0.0.181-beta.2");
+        assert_eq!(canonical_release_version("0.0.181-30003"), "0.0.181-rc.3");
+        assert_eq!(
+            canonical_release_version("0.0.181-alpha10"),
+            "0.0.181-alpha.10"
+        );
+        assert_eq!(
+            canonical_release_version("0.0.181-alpha.10"),
+            "0.0.181-alpha.10"
+        );
+        assert_eq!(canonical_release_version("0.0.181-9999"), "0.0.181-9999");
+        assert_eq!(canonical_release_version("0.0.181.9999"), "0.0.181.9999");
+        assert_eq!(
+            release_channel("0.0.181-1"),
+            ReleaseChannel::Prerelease("1".to_string())
+        );
+        assert!(same_release_channel("0.0.181-alpha.1", "0.0.181-alpha.10"));
+        assert!(!same_release_channel("0.0.181-alpha.1", "0.0.181-beta.1"));
+
+        let picked = pick_latest_bifrost_release_for_channel(
+            vec![
+                release("v0.0.181-alpha.9", false, true),
+                release("v0.0.181-alpha.10", false, true),
+                release("v0.0.181-alpha.99", false, false),
+                release("v0.0.181-beta.99", false, true),
+                release("v9.0.0", false, true),
+                release("v9.0.0", false, false),
+                release("v0.0.182-alpha.1", true, true),
+            ],
+            &ReleaseChannel::Prerelease("alpha".to_string()),
+        )
+        .expect("latest published alpha release");
+        assert_eq!(picked.tag_name, "v0.0.181-alpha.10");
+        assert_eq!(
+            compare_versions("0.0.181-alpha.10", "0.0.181-alpha.9"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("0.0.181-10008", "0.0.181-alpha.8"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("0.0.181.10009", "0.0.181-alpha.8"),
+            std::cmp::Ordering::Greater
+        );
+        assert!(same_release_channel("0.0.181.10008", "0.0.181-alpha.9"));
+        assert!(!same_release_channel("not-a-version", "also-invalid"));
+    }
+
+    #[test]
+    fn prerelease_release_scan_returns_latest_alpha_instead_of_stable_latest() {
+        let base_url = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[
+                    ("v0.0.180", false, false, "stable"),
+                    (
+                        "v0.0.181-alpha.8",
+                        false,
+                        true,
+                        "## Highlights\n- alpha eight",
+                    ),
+                    (
+                        "v0.0.181-alpha.9",
+                        false,
+                        true,
+                        "## Highlights\n- alpha nine",
+                    ),
+                    ("v0.0.181-beta.1", false, true, "beta"),
+                ]),
+            ),
+            (200, "[]".to_string()),
+        ]);
+
+        let selected =
+            fetch_latest_release_sync_for_current_from("0.0.181-alpha.8", &base_url).unwrap();
+        assert_eq!(
+            selected,
+            (
+                "0.0.181-alpha.9".to_string(),
+                vec!["alpha nine".to_string()]
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn prerelease_async_release_scan_uses_the_current_alpha_channel() {
+        let base_url = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[
+                    ("v0.0.181", false, false, "stable"),
+                    (
+                        "v0.0.182-alpha.1",
+                        false,
+                        true,
+                        "## Highlights\n- async alpha",
+                    ),
+                    ("v0.0.183-beta.1", false, true, "beta"),
+                ]),
+            ),
+            (200, "[]".to_string()),
+        ]);
+
+        let selected = fetch_latest_release_async_for_current_from("0.0.181-alpha.9", &base_url)
+            .await
+            .expect("latest async alpha release");
+        assert_eq!(
+            selected,
+            (
+                "0.0.182-alpha.1".to_string(),
+                vec!["async alpha".to_string()]
+            )
         );
     }
 
