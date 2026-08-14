@@ -637,10 +637,55 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
             true,
             Duration::ZERO,
         )
-        .expect_err("a missing helper PID must fail after the handshake deadline");
-        assert!(handshake_error
+        .expect_err("a legacy helper without a terminal artifact must respect the deadline");
+        assert!(handshake_error.to_string().contains("did not finish"));
+
+        let legacy_status = dir.path().join("legacy.status");
+        let legacy_ready = dir.path().join("legacy.ok");
+        let legacy_log = dir.path().join("legacy.log");
+        std::fs::write(&legacy_status, "awaiting").expect("write legacy awaiting status");
+        let ready_for_helper = legacy_ready.clone();
+        let legacy_helper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            std::fs::write(ready_for_helper, "ok").expect("write legacy ready marker");
+        });
+        wait_for_desktop_managed_deferred_install_with_artifacts(
+            &legacy_status,
+            &legacy_ready,
+            &legacy_log,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(1),
+            &mut heartbeat,
+            true,
+            Duration::ZERO,
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("legacy helper ready marker completes the wait");
+        legacy_helper.join().expect("legacy helper");
+
+        std::fs::remove_file(&legacy_ready).expect("remove legacy ready marker");
+        std::fs::write(
+            &legacy_log,
+            "timestamp waiting\ntimestamp ERROR: access denied by legacy helper\n",
+        )
+        .expect("write legacy failure log");
+        let legacy_error = wait_for_desktop_managed_deferred_install_with_artifacts(
+            &legacy_status,
+            &legacy_ready,
+            &legacy_log,
+            "0.0.156",
+            "desktop",
+            Instant::now() + Duration::from_secs(1),
+            &mut heartbeat,
+            true,
+            Duration::ZERO,
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect_err("legacy helper error must propagate");
+        assert!(legacy_error
             .to_string()
-            .contains("did not publish its process identity"));
+            .contains("access denied by legacy helper"));
 
         std::fs::write(&deferred_status, "pending").expect("write stuck helper status");
         let timeout_error = wait_for_desktop_managed_deferred_install(
@@ -697,6 +742,73 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
         upgrade_cli_if_present("desktop", "0.0.156")
             .expect("desktop orchestrator upgrades located CLI");
         std::env::remove_var("BIFROST_INSTALL_DIR");
+    }
+}
+
+#[test]
+fn configured_cli_install_precedes_path_copy() {
+    const CHILD_ENV: &str = "BIFROST_TEST_CONFIGURED_CLI_PRIORITY_CHILD";
+    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "commands::app::tests::configured_cli_install_precedes_path_copy",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated candidate priority test");
+        assert!(status.success(), "isolated candidate priority test failed");
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let configured_dir = temp.path().join("configured");
+    let path_dir = temp.path().join("path");
+    fs::create_dir_all(&configured_dir).expect("configured dir");
+    fs::create_dir_all(&path_dir).expect("path dir");
+    let configured_cli = configured_dir.join(cli_binary_name());
+    let path_cli = path_dir.join(cli_binary_name());
+    fs::write(&configured_cli, b"configured").expect("configured cli");
+    fs::write(&path_cli, b"path").expect("path cli");
+    std::env::set_var("BIFROST_INSTALL_DIR", &configured_dir);
+    std::env::set_var("PATH", &path_dir);
+
+    assert_eq!(find_standalone_cli_install(), Some(configured_cli));
+}
+
+#[cfg(windows)]
+#[test]
+fn official_windows_cli_precedes_path_copies() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let local_app_data = temp.path().join("local-app-data");
+    let cargo_bin = temp.path().join("cargo-bin");
+    let previous_local_app_data = std::env::var_os("LOCALAPPDATA");
+    let previous_path = std::env::var_os("PATH");
+    let previous_install_dir = std::env::var_os("BIFROST_INSTALL_DIR");
+    std::env::set_var("LOCALAPPDATA", &local_app_data);
+    std::env::set_var("PATH", &cargo_bin);
+    std::env::remove_var("BIFROST_INSTALL_DIR");
+
+    let candidates = standalone_cli_candidates();
+    assert_eq!(
+        candidates[0],
+        local_app_data.join("bifrost/bin/bifrost.exe")
+    );
+    assert_eq!(candidates[2], cargo_bin.join("bifrost.exe"));
+
+    match previous_local_app_data {
+        Some(value) => std::env::set_var("LOCALAPPDATA", value),
+        None => std::env::remove_var("LOCALAPPDATA"),
+    }
+    match previous_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+    match previous_install_dir {
+        Some(value) => std::env::set_var("BIFROST_INSTALL_DIR", value),
+        None => std::env::remove_var("BIFROST_INSTALL_DIR"),
     }
 }
 

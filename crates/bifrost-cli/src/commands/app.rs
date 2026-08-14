@@ -8,7 +8,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgress};
 use bifrost_core::version_check::make_release_tag;
@@ -487,6 +487,7 @@ fn desktop_managed_deferred_status_path() -> PathBuf {
     ))
 }
 
+#[cfg(test)]
 fn wait_for_desktop_managed_deferred_install(
     status_path: &Path,
     target_version: &str,
@@ -506,6 +507,7 @@ fn wait_for_desktop_managed_deferred_install(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn wait_for_desktop_managed_deferred_install_with_mode(
     status_path: &Path,
     target_version: &str,
@@ -514,6 +516,33 @@ fn wait_for_desktop_managed_deferred_install_with_mode(
     next_heartbeat: &mut Instant,
     require_helper_pid: bool,
     handshake_timeout: Duration,
+) -> Result<(), BifrostError> {
+    wait_for_desktop_managed_deferred_install_with_artifacts(
+        status_path,
+        Path::new(""),
+        Path::new(""),
+        target_version,
+        progress_source,
+        deadline,
+        next_heartbeat,
+        require_helper_pid,
+        handshake_timeout,
+        SystemTime::UNIX_EPOCH,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_for_desktop_managed_deferred_install_with_artifacts(
+    status_path: &Path,
+    legacy_ready_path: &Path,
+    legacy_log_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    deadline: Instant,
+    next_heartbeat: &mut Instant,
+    require_helper_pid: bool,
+    handshake_timeout: Duration,
+    legacy_artifact_not_before: SystemTime,
 ) -> Result<(), BifrostError> {
     let handshake_deadline = Instant::now() + handshake_timeout;
     loop {
@@ -525,9 +554,19 @@ fn wait_for_desktop_managed_deferred_install_with_mode(
             "pending" if !require_helper_pid => {}
             "awaiting" | "pending" | "" => {
                 if require_helper_pid && Instant::now() >= handshake_deadline {
-                    return Err(BifrostError::Config(
-                        "Windows upgrade helper did not publish its process identity".to_string(),
-                    ));
+                    if file_modified_at_or_after(legacy_ready_path, legacy_artifact_not_before) {
+                        return Ok(());
+                    }
+                    if file_modified_at_or_after(legacy_log_path, legacy_artifact_not_before) {
+                        let log = fs::read_to_string(legacy_log_path).unwrap_or_default();
+                        if let Some(error) = log.lines().rev().find_map(|line| {
+                            line.split_once("ERROR: ").map(|(_, error)| error.trim())
+                        }) {
+                            return Err(BifrostError::Config(format!(
+                                "legacy Windows upgrade helper failed: {error}"
+                            )));
+                        }
+                    }
                 }
             }
             status if status.starts_with("pending:") => {
@@ -579,6 +618,12 @@ fn wait_for_desktop_managed_deferred_install_with_mode(
     }
 }
 
+fn file_modified_at_or_after(path: &Path, not_before: SystemTime) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified >= not_before)
+}
+
 fn run_desktop_managed_cli_upgrade(
     cli_path: &Path,
     target_version: &str,
@@ -605,6 +650,7 @@ fn run_desktop_managed_cli_upgrade_with_status_path(
         fs::create_dir_all(parent).map_err(BifrostError::Io)?;
     }
     fs::write(&deferred_status_path, "awaiting").map_err(BifrostError::Io)?;
+    let legacy_artifact_not_before = SystemTime::now();
     let mut child =
         match desktop_managed_cli_upgrade_command(cli_path, target_version, &deferred_status_path)
             .spawn()
@@ -615,24 +661,34 @@ fn run_desktop_managed_cli_upgrade_with_status_path(
                 return Err(BifrostError::Io(error));
             }
         };
+    let helper_suffix = child.id().to_string();
+    let helper_dir = cli_path.parent().unwrap_or_else(|| Path::new("."));
+    let legacy_ready_path = helper_dir.join(format!(".bifrost-upgrade-{helper_suffix}.ok"));
+    let legacy_log_path = helper_dir.join(format!(".bifrost-upgrade-{helper_suffix}.log"));
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let result = if status.success() {
-                    wait_for_desktop_managed_deferred_install(
+                    wait_for_desktop_managed_deferred_install_with_artifacts(
                         &deferred_status_path,
+                        &legacy_ready_path,
+                        &legacy_log_path,
                         target_version,
                         progress_source,
                         deadline,
                         &mut next_heartbeat,
+                        cfg!(windows),
+                        Duration::from_secs(10),
+                        legacy_artifact_not_before,
                     )
                     .map(|()| status)
                 } else {
                     Ok(status)
                 };
                 let _ = fs::remove_file(&deferred_status_path);
+                let _ = fs::remove_file(&legacy_ready_path);
                 return result;
             }
             Ok(None) if Instant::now() >= deadline => {
@@ -759,16 +815,43 @@ fn find_standalone_cli_install() -> Option<PathBuf> {
     let current_exe = env::current_exe()
         .ok()
         .map(|path| fs::canonicalize(&path).unwrap_or(path));
+    standalone_cli_candidates().into_iter().find(|candidate| {
+        if !candidate.is_file() {
+            return false;
+        }
+        let canonical = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.clone());
+        current_exe
+            .as_ref()
+            .map(|current| &canonical != current)
+            .unwrap_or(true)
+    })
+}
+
+fn standalone_cli_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+
+    // Prefer Bifrost's documented install locations over arbitrary PATH entries.
+    // Developer toolchains and old manual installs commonly leave another
+    // `bifrost` earlier on PATH; the desktop updater must not upgrade that copy
+    // while leaving the official standalone CLI stale.
+    if let Some(dir) = env::var_os("BIFROST_INSTALL_DIR") {
+        candidates.push(PathBuf::from(dir).join(cli_binary_name()));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local_app_data).join("bifrost/bin/bifrost.exe"));
+        }
+        if let Some(user_profile) = env::var_os("USERPROFILE") {
+            candidates.push(PathBuf::from(user_profile).join(".local/bin/bifrost.exe"));
+        }
+    }
 
     if let Some(paths) = env::var_os("PATH") {
         for dir in env::split_paths(&paths) {
             candidates.push(dir.join(cli_binary_name()));
         }
-    }
-
-    if let Some(dir) = env::var_os("BIFROST_INSTALL_DIR") {
-        candidates.push(PathBuf::from(dir).join(cli_binary_name()));
     }
 
     #[cfg(unix)]
@@ -783,26 +866,7 @@ fn find_standalone_cli_install() -> Option<PathBuf> {
         candidates.push(PathBuf::from("/usr/local/bin/bifrost"));
     }
 
-    #[cfg(windows)]
-    {
-        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-            candidates.push(PathBuf::from(local_app_data).join("bifrost/bin/bifrost.exe"));
-        }
-        if let Some(user_profile) = env::var_os("USERPROFILE") {
-            candidates.push(PathBuf::from(user_profile).join(".local/bin/bifrost.exe"));
-        }
-    }
-
-    candidates.into_iter().find(|candidate| {
-        if !candidate.is_file() {
-            return false;
-        }
-        let canonical = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.clone());
-        current_exe
-            .as_ref()
-            .map(|current| &canonical != current)
-            .unwrap_or(true)
-    })
+    candidates
 }
 
 fn cli_binary_name() -> &'static str {
