@@ -353,6 +353,8 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "Invoke-FileOperationWithRetry \"installing replacement CLI\"",
         "Invoke-FileOperationWithRetry \"restoring previous CLI\"",
         "Invoke-FileOperationWithRetry \"removing failed replacement staging file\"",
+        "let result = schedule_windows_deferred_install_inner(&deferred_install, restart_args);",
+        "let _ = fs::remove_file(&deferred_install.staged_binary);",
         "installed CLI reports '$versionOutput' instead of target",
         "restored previous CLI after replacement failure",
         "[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)",

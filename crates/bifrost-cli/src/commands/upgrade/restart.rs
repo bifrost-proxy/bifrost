@@ -276,6 +276,18 @@ pub(super) fn schedule_windows_deferred_install(
     deferred_install: WindowsDeferredInstall,
     restart_args: Option<&[String]>,
 ) -> Result<(), BifrostError> {
+    let result = schedule_windows_deferred_install_inner(&deferred_install, restart_args);
+    if result.is_err() {
+        let _ = fs::remove_file(&deferred_install.staged_binary);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn schedule_windows_deferred_install_inner(
+    deferred_install: &WindowsDeferredInstall,
+    restart_args: Option<&[String]>,
+) -> Result<(), BifrostError> {
     let parent_pid = std::process::id();
     let target_dir = deferred_install
         .target_path
