@@ -380,21 +380,40 @@ pub(super) fn desktop_app_install_candidates() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut candidates = Vec::new();
-        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-            candidates.push(
-                PathBuf::from(local_app_data)
-                    .join("Bifrost")
-                    .join("bifrost-desktop.exe"),
-            );
-        }
-        candidates
+        windows_desktop_app_install_candidates_from_roots(
+            [
+                "LOCALAPPDATA",
+                "ProgramFiles",
+                "ProgramW6432",
+                "ProgramFiles(x86)",
+            ]
+            .into_iter()
+            .filter_map(env::var_os)
+            .map(PathBuf::from),
+        )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Vec::new()
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn windows_desktop_app_install_candidates_from_roots(
+    roots: impl IntoIterator<Item = PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        let candidate = root.join("Bifrost").join("bifrost-desktop.exe");
+        if !candidates
+            .iter()
+            .any(|existing| windows_paths_match(existing, &candidate))
+        {
+            candidates.push(candidate);
+        }
+    }
+    candidates
 }
 
 pub(super) fn resolve_desktop_app_path(app_dir: &Path) -> PathBuf {

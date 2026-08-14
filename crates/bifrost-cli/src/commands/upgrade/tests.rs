@@ -15,6 +15,31 @@ fn older_discovery_result_cannot_downgrade_the_desktop_companion() {
 }
 
 #[test]
+fn windows_desktop_discovery_includes_per_user_and_machine_msi_locations() {
+    let candidates = windows_desktop_app_install_candidates_from_roots([
+        PathBuf::from(r"C:\Users\tester\AppData\Local"),
+        PathBuf::from(r"C:\Program Files"),
+        PathBuf::from(r"c:/program files"),
+        PathBuf::from(r"C:\Program Files (x86)"),
+    ]);
+
+    assert_eq!(
+        candidates,
+        vec![
+            PathBuf::from(r"C:\Users\tester\AppData\Local")
+                .join("Bifrost")
+                .join("bifrost-desktop.exe"),
+            PathBuf::from(r"C:\Program Files")
+                .join("Bifrost")
+                .join("bifrost-desktop.exe"),
+            PathBuf::from(r"C:\Program Files (x86)")
+                .join("Bifrost")
+                .join("bifrost-desktop.exe"),
+        ]
+    );
+}
+
+#[test]
 fn windows_upgrade_handoff_uses_staged_target_and_original_parent_pid() {
     let deferred = WindowsDeferredInstall {
         staged_binary: PathBuf::from(
