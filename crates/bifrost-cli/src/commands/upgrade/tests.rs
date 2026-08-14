@@ -297,9 +297,7 @@ fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_t
         .to_string()
         .contains("must share the same directory"));
 
-    let foreign_handoff_ready = other_dir
-        .path()
-        .join(".bifrost-upgrade-handoff.4321.ready");
+    let foreign_handoff_ready = other_dir.path().join(".bifrost-upgrade-handoff.4321.ready");
     let foreign_ready_error = validate_windows_upgrade_handoff_request(
         4321,
         &pending,

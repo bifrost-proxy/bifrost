@@ -34,6 +34,8 @@ pub(crate) use version::installed_desktop_app_is_target_version;
 #[cfg(test)]
 use version::installed_desktop_app_version;
 use version::{normalize_version, verify_installed_desktop_target_version, versions_equal};
+mod windows_msi;
+use windows_msi::*;
 
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_APP_NAME: &str = "Bifrost";
@@ -926,8 +928,8 @@ fn uninstall_app(app_dir: Option<PathBuf>, dry_run: bool, _yes: bool) -> Result<
             return Ok(());
         }
 
-        if let Some(product_code) = find_windows_msi_product_code_for_install_dir(&install_dir) {
-            run_windows_msi_uninstall(&product_code)?;
+        if let Some(registration) = find_windows_msi_registration_for_install_dir(&install_dir) {
+            run_windows_msi_uninstall(&registration.product_code, registration.scope)?;
             println!("{}", "✓ Desktop app uninstalled.".bright_green());
             return Ok(());
         }
@@ -1191,7 +1193,7 @@ fn install_desktop_package(
     match extension.as_str() {
         "dmg" => install_macos_dmg(package, install_path, target_version, progress_source),
         "exe" => run_windows_installer(package, &["/S"], target_version, progress_source),
-        "msi" => run_windows_msi(package, target_version, progress_source),
+        "msi" => run_windows_msi(package, install_dir, target_version, progress_source),
         "zip" => install_windows_zip(package, install_path),
         _ => Err(BifrostError::Config(format!(
             "unsupported desktop package type: {}",
@@ -1356,262 +1358,6 @@ fn clear_macos_xattrs(path: &Path) {
 
 #[cfg(not(target_os = "macos"))]
 fn clear_macos_xattrs(_path: &Path) {}
-
-#[cfg(target_os = "windows")]
-fn run_windows_installer(
-    package: &Path,
-    args: &[&str],
-    target_version: &str,
-    progress_source: &str,
-) -> Result<(), BifrostError> {
-    let mut command = Command::new(package);
-    command.args(args);
-    let status = run_desktop_install_command(command, target_version, progress_source)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(BifrostError::Config(format!(
-            "desktop installer exited with status {status}"
-        )))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn run_windows_installer(
-    _package: &Path,
-    _args: &[&str],
-    _target_version: &str,
-    _progress_source: &str,
-) -> Result<(), BifrostError> {
-    Err(BifrostError::Config(
-        "Windows desktop packages can only be installed on Windows".to_string(),
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn run_windows_msi(
-    package: &Path,
-    target_version: &str,
-    progress_source: &str,
-) -> Result<(), BifrostError> {
-    let log_path = windows_msi_log_path(package);
-    let args = windows_msi_install_args(package, &log_path);
-    let mut command = Command::new("msiexec");
-    command.args(&args);
-    let status = run_desktop_install_command(command, target_version, progress_source)?;
-    if status.success() {
-        let _ = fs::remove_file(&log_path);
-        Ok(())
-    } else {
-        let log_summary = read_windows_msi_log_summary(&log_path);
-        Err(BifrostError::Config(format!(
-            "msiexec exited with status {status}; log: {}{}",
-            log_path.display(),
-            log_summary
-                .map(|summary| format!("; {summary}"))
-                .unwrap_or_default()
-        )))
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn run_windows_msi_uninstall(product_code: &str) -> Result<(), BifrostError> {
-    let log_path = env::temp_dir().join(format!(
-        "bifrost-desktop-msi-uninstall-{}-{}.log",
-        std::process::id(),
-        product_code.trim_matches(|ch| ch == '{' || ch == '}')
-    ));
-    let args = windows_msi_uninstall_args(product_code, &log_path);
-    let status = Command::new("msiexec")
-        .args(&args)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(BifrostError::Io)?;
-    if status.success() {
-        let _ = fs::remove_file(&log_path);
-        Ok(())
-    } else {
-        let log_summary = read_windows_msi_log_summary(&log_path);
-        Err(BifrostError::Config(format!(
-            "msiexec uninstall exited with status {status}; log: {}{}",
-            log_path.display(),
-            log_summary
-                .map(|summary| format!("; {summary}"))
-                .unwrap_or_default()
-        )))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn run_windows_msi(
-    _package: &Path,
-    _target_version: &str,
-    _progress_source: &str,
-) -> Result<(), BifrostError> {
-    Err(BifrostError::Config(
-        "MSI desktop packages can only be installed on Windows".to_string(),
-    ))
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_msi_install_args(package: &Path, log_path: &Path) -> Vec<OsString> {
-    [
-        OsString::from("/i"),
-        package.as_os_str().to_os_string(),
-        OsString::from("/qn"),
-        OsString::from("/norestart"),
-        // Tauri's WiX bundle sets ALLUSERS=1 by default, which makes silent
-        // installs require elevation. The CLI installs into the current user's
-        // LocalAppData path, so force MSI into a per-user install context.
-        OsString::from("ALLUSERS=2"),
-        OsString::from("MSIINSTALLPERUSER=1"),
-        OsString::from("/l*v"),
-        log_path.as_os_str().to_os_string(),
-    ]
-    .into()
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_msi_uninstall_args(product_code: &str, log_path: &Path) -> Vec<OsString> {
-    [
-        OsString::from("/x"),
-        OsString::from(product_code),
-        OsString::from("/qn"),
-        OsString::from("/norestart"),
-        OsString::from("ALLUSERS=2"),
-        OsString::from("MSIINSTALLPERUSER=1"),
-        OsString::from("/l*v"),
-        log_path.as_os_str().to_os_string(),
-    ]
-    .into()
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_msi_log_path(package: &Path) -> PathBuf {
-    let package_name = package
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("desktop")
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    env::temp_dir().join(format!(
-        "bifrost-desktop-msi-{}-{package_name}.log",
-        std::process::id()
-    ))
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn read_windows_msi_log_summary(log_path: &Path) -> Option<String> {
-    let contents = fs::read_to_string(log_path).ok()?;
-    let interesting = contents
-        .lines()
-        .rev()
-        .find(|line| {
-            line.contains("Error ")
-                || line.contains("Return value 3")
-                || line.contains("Installation failed")
-                || line.contains("Product: Bifrost")
-        })
-        .map(str::trim)
-        .filter(|line| !line.is_empty())?;
-    Some(format!("MSI detail: {interesting}"))
-}
-
-#[cfg(target_os = "windows")]
-fn find_windows_msi_product_code_for_install_dir(install_dir: &Path) -> Option<String> {
-    const UNINSTALL_HIVES: [&str; 2] = [
-        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
-        r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall",
-    ];
-
-    let expected_install_dir = normalize_windows_path_for_compare(install_dir);
-    for hive in UNINSTALL_HIVES {
-        let output = Command::new("reg")
-            .args(["query", hive, "/s"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            continue;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(product_code) =
-            parse_windows_msi_product_code_for_install_dir(&stdout, &expected_install_dir)
-        {
-            return Some(product_code);
-        }
-    }
-    None
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn parse_windows_msi_product_code_for_install_dir(
-    reg_output: &str,
-    expected_install_dir: &str,
-) -> Option<String> {
-    let mut display_name = None;
-    let mut uninstall_string = None;
-    let mut install_location = None;
-
-    for line in reg_output.lines().chain(std::iter::once("")) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("HKEY_") {
-            if display_name.as_deref() == Some(WINDOWS_APP_NAME)
-                && install_location
-                    .as_deref()
-                    .map(normalize_windows_path_for_compare_str)
-                    .as_deref()
-                    == Some(expected_install_dir)
-            {
-                if let Some(product_code) = uninstall_string
-                    .as_deref()
-                    .and_then(extract_msi_product_code)
-                {
-                    return Some(product_code);
-                }
-            }
-            display_name = None;
-            uninstall_string = None;
-            install_location = None;
-            continue;
-        }
-
-        if let Some(value) = parse_reg_value(trimmed, "DisplayName") {
-            display_name = Some(value.to_string());
-        } else if let Some(value) = parse_reg_value(trimmed, "UninstallString") {
-            uninstall_string = Some(value.to_string());
-        } else if let Some(value) = parse_reg_value(trimmed, "InstallLocation") {
-            install_location = Some(value.to_string());
-        }
-    }
-
-    None
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn parse_reg_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    let rest = line.strip_prefix(key)?.trim_start();
-    let rest = rest.strip_prefix("REG_SZ")?.trim_start();
-    Some(rest.trim())
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn extract_msi_product_code(uninstall_string: &str) -> Option<String> {
-    let start = uninstall_string.find('{')?;
-    let end = uninstall_string[start..].find('}')? + start;
-    let product_code = &uninstall_string[start..=end];
-    if product_code.len() == 38 {
-        Some(product_code.to_string())
-    } else {
-        None
-    }
-}
 
 #[cfg(any(target_os = "windows", test))]
 fn normalize_windows_path_for_compare(path: &Path) -> String {

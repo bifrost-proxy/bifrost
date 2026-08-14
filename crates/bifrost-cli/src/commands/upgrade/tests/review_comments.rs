@@ -364,7 +364,7 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "cleanup_staged_binary_after_schedule(&deferred_install.staged_binary, result)",
         "installed CLI reports '$versionOutput' instead of target",
         "restored previous CLI after replacement failure",
-        "foreach ($cleanupPath in @($RestartArgsPath, $ReadyPath, $PSCommandPath))",
+        "foreach ($cleanupPath in @($RestartArgsPath, $ReadyPath, $HandoffReadyPath, $PSCommandPath))",
         "Remove-Item -LiteralPath $LogPath -Force -ErrorAction SilentlyContinue",
         "[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)",
         "$ProgressPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))",
