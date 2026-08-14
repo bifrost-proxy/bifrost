@@ -966,6 +966,21 @@ fn windows_machine_msi_args_preserve_machine_scope_and_quote_paths() {
     assert!(!rendered.iter().any(|arg| arg == "ALLUSERS=2"));
     assert!(!rendered.iter().any(|arg| arg == "MSIINSTALLPERUSER=1"));
 
+    let uninstall_args = windows_msi_uninstall_args(
+        "{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}",
+        &log,
+        WindowsMsiScope::Machine,
+    );
+    let rendered_uninstall = uninstall_args
+        .iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    assert!(rendered_uninstall.iter().any(|arg| arg == "ALLUSERS=1"));
+    assert!(!rendered_uninstall.iter().any(|arg| arg == "ALLUSERS=2"));
+    assert!(!rendered_uninstall
+        .iter()
+        .any(|arg| arg == "MSIINSTALLPERUSER=1"));
+
     let line = windows_msi_argument_line(&args);
     assert!(line.contains(r#""C:\Users\eden\Desktop Files\bifrost desktop.msi""#));
     assert!(line.contains(r#""C:\Users\eden\AppData\Local\Temp\bifrost msi.log""#));
@@ -1003,7 +1018,7 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
     DisplayName    REG_SZ    Bifrost
     DisplayVersion    REG_SZ    0.0.139
     InstallLocation    REG_SZ    C:\Users\eden\AppData\Local\Bifrost\
-    UninstallString    REG_SZ    MsiExec.exe /X{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}
+    UninstallString    REG_EXPAND_SZ    MsiExec.exe /X{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}
 "#;
 
     assert_eq!(

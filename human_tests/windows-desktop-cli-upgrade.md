@@ -62,6 +62,28 @@
 - 不残留 pending、backup、helper 脚本、args、ready、status 或 log 临时文件。
 - helper 等待的是原 updater PID，更新期间没有版本探测风暴或可见终端窗口。
 
+## TC-WDU-05：机器级 MSI 保持作用域并通过 UAC 完成相邻 alpha 升级
+
+1. 完整卸载 Windows 上的 CLI、Desktop 与 MSI 注册，并清理 pending、backup、helper、
+   status、ready 与安装日志等升级残留。
+2. 以 `ALLUSERS=1` 安装 `v0.0.181-alpha.14` ARM64 Desktop MSI，并把同版本独立 CLI
+   安装到 `%LOCALAPPDATA%\bifrost\bin\bifrost.exe`；确认只有一条 HKLM MSI 注册。
+3. 不设置版本或资产测试覆盖变量，直接由 alpha.14 执行 `bifrost upgrade -y`，在
+   machine-wide MSI 安装需要提权时批准 Windows UAC。
+4. 等待升级终态，检查 CLI、Desktop、运行中 core、HKLM MSI 注册、handoff 父 PID、
+   升级残留和进程事件。
+
+预期：
+
+- alpha 通道发现相邻公开版本 `v0.0.181-alpha.15`，CLI 资产与 Desktop MSI 下载成功。
+- 升级识别旧 Desktop 为 machine-wide，不传 `MSIINSTALLPERUSER=1`，通过 UAC 以
+  `ALLUSERS=1` 安装；MSI 返回真实退出码且不再出现 HKLM `Error 1406` / `1603`。
+- CLI 为 alpha.15，Desktop ProductVersion 为 `0.0.181-10015`，MSI DisplayVersion 为
+  `0.0.181.10015`，运行中 core/status 也报告 alpha.15。
+- MSI 注册仍恰好一条且位于 HKLM，不新增 HKCU per-user 注册。
+- helper 等待原 updater PID，升级完成后无 pending、backup、helper、args、ready、status
+  或 log 残留，也不启动 Windows Terminal。
+
 ## 执行记录
 
 - 2026-08-14：已在 Windows 11 ARM64 VM 使用 0.0.179 复现 issue #494。Desktop 在 deferred helper 替换 CLI 前约 60 秒内启动约 312 次 `bifrost.exe --version` 并高频创建 `conhost.exe`，helper 删除目标 exe 时返回 Access Denied，留下 pending 与 backup。
@@ -69,3 +91,11 @@
   API 返回 403，暴露 prerelease discovery 缺少公开 HTML fallback。`alpha.10` 已包含 fallback
   与 Desktop 防降级，待其 ARM64 CLI/MSI 发布后以干净安装为基线，通过默认命令更新到
   相邻 `alpha.11`，补录 TC-WDU-04 的版本、helper 日志、进程统计及残留检查结果。
+- 2026-08-15：已完整清理 VM，并安装唯一的 machine-wide alpha.13 MSI
+  (`DisplayVersion=0.0.181.10013`) 与独立 alpha.13 CLI；待 alpha.14 ARM64 Desktop 资产公开后
+  按 TC-WDU-05 执行真实相邻版本升级。
+- 2026-08-15：真实执行 alpha.13 → alpha.14。alpha 通道发现、CLI/MSI 下载与 CLI 替换均成功，
+  但 Desktop MSI 返回 1603；日志确认错误参数仍为 `ALLUSERS=2 MSIINSTALLPERUSER=1`，并出现
+  HKLM `Error 1406`。根因是真实 MSI 注册的 `UninstallString` 为 `REG_EXPAND_SZ`，而 alpha.14
+  作用域识别只接受 `REG_SZ`，导致已匹配的 HKLM `InstallLocation` 无法解析 ProductCode；升级
+  事务已回滚至 alpha.13。修复进入 alpha.15，TC-WDU-05 调整为干净 alpha.14 → alpha.15。

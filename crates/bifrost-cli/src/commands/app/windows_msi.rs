@@ -336,7 +336,10 @@ pub(super) fn parse_windows_msi_product_code_for_install_dir(
 #[cfg(any(target_os = "windows", test))]
 fn parse_reg_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let rest = line.strip_prefix(key)?.trim_start();
-    let rest = rest.strip_prefix("REG_SZ")?.trim_start();
+    let rest = rest
+        .strip_prefix("REG_EXPAND_SZ")
+        .or_else(|| rest.strip_prefix("REG_SZ"))?
+        .trim_start();
     Some(rest.trim())
 }
 
