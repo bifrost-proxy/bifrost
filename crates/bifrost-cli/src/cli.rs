@@ -524,6 +524,8 @@ previous runtime settings."
         restart_arg: Vec<String>,
         #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
         deferred_status_path: Option<PathBuf>,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        handoff_ready_path: PathBuf,
     },
     #[command(visible_alias = "cfg", about = "Manage runtime configuration")]
     Config {

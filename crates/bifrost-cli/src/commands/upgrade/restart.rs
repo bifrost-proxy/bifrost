@@ -291,23 +291,29 @@ fn schedule_windows_deferred_install_via_staged_binary(
     parent_pid: u32,
 ) -> Result<(), BifrostError> {
     let deferred_status_path = env::var_os(DESKTOP_MANAGED_DEFERRED_STATUS_ENV).map(PathBuf::from);
+    let target_dir = deferred_install.target_path.parent().ok_or_else(|| {
+        BifrostError::Config(format!(
+            "Cannot determine install directory for {}",
+            deferred_install.target_path.display()
+        ))
+    })?;
+    let handoff_ready_path =
+        target_dir.join(format!(".bifrost-upgrade-handoff.{parent_pid}.ready"));
+    remove_windows_upgrade_file_with_retry(&handoff_ready_path)?;
     let args = windows_upgrade_handoff_args(
         deferred_install,
         restart_args,
         parent_pid,
         deferred_status_path.as_deref(),
+        &handoff_ready_path,
     );
     let mut command = Command::new(&deferred_install.staged_binary);
     command
         .args(&args)
         .stdin(Stdio::null())
-        // Do not use piped output for this short-lived handoff process. On
-        // Windows a descendant may inherit the pipe handles, which makes
-        // `Command::output()` wait for the deferred PowerShell helper. That
-        // helper intentionally waits for this updater PID to exit, creating a
-        // 120-second parent/helper deadlock and forcing the replacement to
-        // roll back. NUL handles let us wait for the staged process itself
-        // without tying its lifetime to the detached helper.
+        // Do not use piped output for this short-lived handoff process. The
+        // staged target and its PowerShell descendant must outlive this updater,
+        // so every inherited standard handle is detached from the caller.
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env_remove(crate::commands::start::DETACHED_DAEMON_CHILD_ENV);
@@ -316,13 +322,37 @@ fn schedule_windows_deferred_install_via_staged_binary(
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let status =
-        spawn_windows_upgrade_handoff_with_retry(|| command.status()).map_err(BifrostError::Io)?;
-    if !status.success() {
-        return Err(BifrostError::Config(format!(
-            "staged Windows upgrade handoff failed with status {status}"
-        )));
+    let mut child =
+        spawn_windows_upgrade_handoff_with_retry(|| command.spawn()).map_err(BifrostError::Io)?;
+    let outcome = wait_for_windows_upgrade_handoff_ready_with(
+        WINDOWS_UPGRADE_HANDOFF_READY_MAX_ATTEMPTS,
+        || handoff_ready_file_is_set(&handoff_ready_path),
+        || child.try_wait(),
+        |status| status.success(),
+        thread::sleep,
+    )
+    .map_err(BifrostError::Io)?;
+    match outcome {
+        WindowsUpgradeHandoffReady::Ready => {}
+        WindowsUpgradeHandoffReady::Failed(status) => {
+            let _ = remove_windows_upgrade_file_with_retry(&handoff_ready_path);
+            return Err(BifrostError::Config(format!(
+                "staged Windows upgrade handoff failed with status {status}"
+            )));
+        }
+        WindowsUpgradeHandoffReady::TimedOut(status) => {
+            if status.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = remove_windows_upgrade_file_with_retry(&handoff_ready_path);
+            return Err(BifrostError::Config(
+                "staged Windows upgrade handoff did not start its deferred helper within 10 seconds"
+                    .to_string(),
+            ));
+        }
     }
+    remove_windows_upgrade_file_with_retry(&handoff_ready_path)?;
     mark_deferred_install_scheduled();
     Ok(())
 }
@@ -333,6 +363,7 @@ pub(super) fn windows_upgrade_handoff_args(
     restart_args: Option<&[String]>,
     parent_pid: u32,
     deferred_status_path: Option<&Path>,
+    handoff_ready_path: &Path,
 ) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         "windows-upgrade-handoff".into(),
@@ -344,6 +375,8 @@ pub(super) fn windows_upgrade_handoff_args(
         deferred_install.target_path.as_os_str().to_owned(),
         "--target-version".into(),
         deferred_install.target_version.clone().into(),
+        "--handoff-ready-path".into(),
+        handoff_ready_path.as_os_str().to_owned(),
     ];
     for restart_arg in restart_args.into_iter().flatten() {
         args.push("--restart-arg".into());
@@ -354,6 +387,49 @@ pub(super) fn windows_upgrade_handoff_args(
         args.push(path.as_os_str().to_owned());
     }
     args
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WindowsUpgradeHandoffReady<T> {
+    Ready,
+    Failed(T),
+    TimedOut(Option<T>),
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn wait_for_windows_upgrade_handoff_ready_with<T>(
+    max_attempts: usize,
+    mut is_ready: impl FnMut() -> io::Result<bool>,
+    mut try_wait: impl FnMut() -> io::Result<Option<T>>,
+    mut is_success: impl FnMut(&T) -> bool,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<WindowsUpgradeHandoffReady<T>> {
+    let mut successful_exit = None;
+    for _ in 0..max_attempts {
+        if is_ready()? {
+            return Ok(WindowsUpgradeHandoffReady::Ready);
+        }
+        if successful_exit.is_none() {
+            if let Some(status) = try_wait()? {
+                if !is_success(&status) {
+                    return Ok(WindowsUpgradeHandoffReady::Failed(status));
+                }
+                successful_exit = Some(status);
+            }
+        }
+        sleep(Duration::from_millis(WINDOWS_UPGRADE_HANDOFF_READY_POLL_MS));
+    }
+    Ok(WindowsUpgradeHandoffReady::TimedOut(successful_exit))
+}
+
+#[cfg(windows)]
+fn handoff_ready_file_is_set(path: &Path) -> io::Result<bool> {
+    match fs::read_to_string(path) {
+        Ok(value) => Ok(value.trim() == "scheduled"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -383,6 +459,7 @@ pub(crate) fn handle_windows_upgrade_handoff(
     target_version: String,
     restart_args: Vec<String>,
     deferred_status_path: Option<PathBuf>,
+    handoff_ready_path: PathBuf,
 ) -> Result<(), BifrostError> {
     #[cfg(windows)]
     {
@@ -392,6 +469,7 @@ pub(crate) fn handle_windows_upgrade_handoff(
             &target_path,
             &target_version,
             &env::current_exe().map_err(BifrostError::Io)?,
+            &handoff_ready_path,
         )?;
         let deferred_install = WindowsDeferredInstall {
             staged_binary: pending_path,
@@ -404,6 +482,7 @@ pub(crate) fn handle_windows_upgrade_handoff(
             restart_args,
             parent_pid,
             deferred_status_path,
+            handoff_ready_path,
         )
     }
     #[cfg(not(windows))]
@@ -415,6 +494,7 @@ pub(crate) fn handle_windows_upgrade_handoff(
             target_version,
             restart_args,
             deferred_status_path,
+            handoff_ready_path,
         );
         Err(BifrostError::Config(
             "Windows upgrade handoff is only available on Windows".to_string(),
@@ -429,6 +509,7 @@ pub(super) fn validate_windows_upgrade_handoff_request(
     target_path: &Path,
     target_version: &str,
     current_exe: &Path,
+    handoff_ready_path: &Path,
 ) -> Result<(), BifrostError> {
     if parent_pid == 0 {
         return Err(BifrostError::Config(
@@ -487,6 +568,27 @@ pub(super) fn validate_windows_upgrade_handoff_request(
             "Windows upgrade staging and target paths must share the same directory".to_string(),
         ));
     }
+    let handoff_ready_parent = handoff_ready_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            BifrostError::Config(
+                "Windows upgrade handoff ready path has no parent directory".to_string(),
+            )
+        })?;
+    let canonical_handoff_ready_parent =
+        fs::canonicalize(handoff_ready_parent).map_err(BifrostError::Io)?;
+    let expected_handoff_ready_name = format!(".bifrost-upgrade-handoff.{parent_pid}.ready");
+    if canonical_handoff_ready_parent != canonical_target_parent
+        || handoff_ready_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(expected_handoff_ready_name.as_str())
+    {
+        return Err(BifrostError::Config(format!(
+            "Windows upgrade handoff ready path must be {expected_handoff_ready_name} beside bifrost.exe"
+        )));
+    }
 
     let canonical_pending = fs::canonicalize(pending_path).map_err(BifrostError::Io)?;
     let canonical_current_exe = fs::canonicalize(current_exe).map_err(BifrostError::Io)?;
@@ -536,6 +638,7 @@ fn schedule_windows_deferred_install_inner(
     restart_args: Option<&[String]>,
     parent_pid: u32,
     deferred_status_path: Option<PathBuf>,
+    handoff_ready_path: PathBuf,
 ) -> Result<(), BifrostError> {
     let target_dir = deferred_install
         .target_path
@@ -576,6 +679,7 @@ param(
   [string]$RestartArgsPath,
   [string]$ReadyPath,
   [string]$StatusPath,
+  [string]$HandoffReadyPath,
   [string]$LogPath,
   [string]$ProgressPath,
   [string]$TargetVersion,
@@ -695,6 +799,8 @@ $backupPath = "$TargetPath.upgrade-backup"
 $replacementVerified = $false
 
 try {
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($HandoffReadyPath, "scheduled", $utf8NoBom)
   Write-DeferredStatus "pending:$PID"
   Write-UpgradeLog "waiting for parent pid $ParentPid"
   $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
@@ -807,7 +913,7 @@ try {
 } finally {
   # The deferred status write itself can fail when antivirus or another reader
   # briefly holds the file. Keep helper-owned scratch cleanup unconditional.
-  foreach ($cleanupPath in @($RestartArgsPath, $ReadyPath, $PSCommandPath)) {
+  foreach ($cleanupPath in @($RestartArgsPath, $ReadyPath, $HandoffReadyPath, $PSCommandPath)) {
     if (-not $cleanupPath) { continue }
     try {
       if (Test-Path -LiteralPath $cleanupPath) {
@@ -852,6 +958,8 @@ try {
                     .as_deref()
                     .unwrap_or_else(|| Path::new("")),
             )
+            .arg("-HandoffReadyPath")
+            .arg(&handoff_ready_path)
             .arg("-LogPath")
             .arg(&log_path)
             .arg("-ProgressPath")
@@ -886,6 +994,7 @@ try {
             args_path.as_path(),
             ready_path.as_path(),
             log_path.as_path(),
+            handoff_ready_path.as_path(),
         ];
         if let Some(status_path) = deferred_status_path.as_ref() {
             cleanup_paths.push(status_path.as_path());

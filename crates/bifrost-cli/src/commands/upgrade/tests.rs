@@ -55,7 +55,10 @@ fn windows_upgrade_handoff_uses_staged_target_and_original_parent_pid() {
         "localhost,127.0.0.1".to_string(),
     ];
     let status = Path::new(r"C:\Users\tester\AppData\Local\Temp\upgrade.status");
-    let args = windows_upgrade_handoff_args(&deferred, Some(&restart), 9876, Some(status));
+    let handoff_ready =
+        Path::new(r"C:\Users\tester\AppData\Local\bifrost\bin\.bifrost-upgrade-handoff.9876.ready");
+    let args =
+        windows_upgrade_handoff_args(&deferred, Some(&restart), 9876, Some(status), handoff_ready);
     let args: Vec<_> = args
         .iter()
         .map(|value| value.to_string_lossy().into_owned())
@@ -80,6 +83,9 @@ fn windows_upgrade_handoff_uses_staged_target_and_original_parent_pid() {
     );
     assert!(args.windows(2).any(|pair| {
         pair[0] == "--deferred-status-path" && pair[1] == status.to_string_lossy()
+    }));
+    assert!(args.windows(2).any(|pair| {
+        pair[0] == "--handoff-ready-path" && pair[1] == handoff_ready.to_string_lossy()
     }));
 }
 
@@ -112,6 +118,45 @@ fn windows_upgrade_handoff_spawn_fails_fast_for_non_sharing_errors() {
 }
 
 #[test]
+fn windows_upgrade_handoff_waits_for_helper_ready_after_staged_child_exits() {
+    let mut ready_checks = 0;
+    let mut wait_checks = 0;
+    let mut sleeps = 0;
+    let outcome = wait_for_windows_upgrade_handoff_ready_with(
+        5,
+        || {
+            ready_checks += 1;
+            Ok(ready_checks == 3)
+        },
+        || {
+            wait_checks += 1;
+            Ok((wait_checks == 1).then_some(0))
+        },
+        |status| *status == 0,
+        |_| sleeps += 1,
+    )
+    .expect("poll helper readiness");
+
+    assert_eq!(outcome, WindowsUpgradeHandoffReady::Ready);
+    assert_eq!(wait_checks, 1, "successful child exit is remembered");
+    assert_eq!(sleeps, 2);
+}
+
+#[test]
+fn windows_upgrade_handoff_reports_staged_child_failure_before_timeout() {
+    let outcome = wait_for_windows_upgrade_handoff_ready_with(
+        5,
+        || Ok(false),
+        || Ok(Some(17)),
+        |status| *status == 0,
+        |_| panic!("failed staged child must not be retried"),
+    )
+    .expect("poll staged child");
+
+    assert_eq!(outcome, WindowsUpgradeHandoffReady::Failed(17));
+}
+
+#[test]
 fn windows_upgrade_handoff_command_is_hidden_and_preserves_hyphenated_restart_args() {
     use clap::{CommandFactory, Parser};
 
@@ -126,6 +171,8 @@ fn windows_upgrade_handoff_command_is_hidden_and_preserves_hyphenated_restart_ar
         r"C:\bifrost\bifrost.exe",
         "--target-version",
         "0.0.181-alpha.8",
+        "--handoff-ready-path",
+        r"C:\bifrost\.bifrost-upgrade-handoff.4321.ready",
         "--restart-arg",
         "start",
         "--restart-arg",
@@ -151,10 +198,18 @@ fn windows_upgrade_handoff_request_accepts_only_the_running_staged_binary() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("bifrost.exe");
     let pending = dir.path().join(".bifrost.exe.pending.4321");
+    let handoff_ready = dir.path().join(".bifrost-upgrade-handoff.4321.ready");
     std::fs::write(&pending, b"replacement").expect("write pending binary");
 
-    validate_windows_upgrade_handoff_request(4321, &pending, &target, "0.0.181-alpha.8", &pending)
-        .expect("valid staged handoff");
+    validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &target,
+        "0.0.181-alpha.8",
+        &pending,
+        &handoff_ready,
+    )
+    .expect("valid staged handoff");
 
     let wrong_pending = dir.path().join(".bifrost.exe.pending.9999");
     std::fs::write(&wrong_pending, b"replacement").expect("write wrongly named pending binary");
@@ -164,6 +219,7 @@ fn windows_upgrade_handoff_request_accepts_only_the_running_staged_binary() {
         &target,
         "0.0.181-alpha.8",
         &wrong_pending,
+        &handoff_ready,
     )
     .expect_err("pending name must be derived from target and parent PID");
     assert!(error.to_string().contains("must be named"));
@@ -177,6 +233,7 @@ fn windows_upgrade_handoff_request_accepts_only_the_running_staged_binary() {
         &arbitrary_target,
         "0.0.181-alpha.8",
         &arbitrary_pending,
+        &handoff_ready,
     )
     .expect_err("handoff must not become an arbitrary executable replacement primitive");
     assert!(error.to_string().contains("only replace bifrost.exe"));
@@ -189,6 +246,7 @@ fn windows_upgrade_handoff_request_accepts_only_the_running_staged_binary() {
         &target,
         "0.0.181-alpha.8",
         &other_exe,
+        &handoff_ready,
     )
     .expect_err("handoff must execute from pending binary");
     assert!(error.to_string().contains("must run from the staged"));
@@ -199,6 +257,7 @@ fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_t
     let dir = tempfile::tempdir().expect("tempdir");
     let other_dir = tempfile::tempdir().expect("other tempdir");
     let pending = dir.path().join(".bifrost.exe.pending.4321");
+    let handoff_ready = dir.path().join(".bifrost-upgrade-handoff.4321.ready");
     std::fs::write(&pending, b"replacement").expect("write pending binary");
 
     let zero_pid = validate_windows_upgrade_handoff_request(
@@ -207,6 +266,7 @@ fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_t
         &dir.path().join("bifrost.exe"),
         "0.0.181-alpha.8",
         &pending,
+        &handoff_ready,
     )
     .expect_err("zero PID must be rejected");
     assert!(zero_pid.to_string().contains("non-zero parent PID"));
@@ -217,6 +277,7 @@ fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_t
         &dir.path().join("bifrost.exe"),
         "0.0.181\n-Command",
         &pending,
+        &handoff_ready,
     )
     .expect_err("control characters in target version must be rejected");
     assert!(invalid_version
@@ -229,11 +290,28 @@ fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_t
         &other_dir.path().join("bifrost.exe"),
         "0.0.181-alpha.8",
         &pending,
+        &handoff_ready,
     )
     .expect_err("cross-directory replacement must be rejected");
     assert!(cross_directory
         .to_string()
         .contains("must share the same directory"));
+
+    let foreign_handoff_ready = other_dir
+        .path()
+        .join(".bifrost-upgrade-handoff.4321.ready");
+    let foreign_ready_error = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &dir.path().join("bifrost.exe"),
+        "0.0.181-alpha.8",
+        &pending,
+        &foreign_handoff_ready,
+    )
+    .expect_err("handoff readiness marker cannot target another directory");
+    assert!(foreign_ready_error
+        .to_string()
+        .contains("ready path must be"));
 
     let missing_target_name = validate_windows_upgrade_handoff_request(
         4321,
@@ -241,6 +319,7 @@ fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_t
         Path::new(""),
         "0.0.181-alpha.8",
         &pending,
+        &handoff_ready,
     )
     .expect_err("target path without a file name must be rejected");
     assert!(missing_target_name.to_string().contains("valid file name"));
@@ -253,6 +332,7 @@ fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_t
         relative_target,
         "0.0.181-alpha.8",
         relative_pending,
+        &handoff_ready,
     )
     .expect_err("relative staging path without a parent must be rejected");
     assert!(missing_pending_parent
@@ -266,6 +346,7 @@ fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_t
         relative_target,
         "0.0.181-alpha.8",
         pending_with_parent,
+        &handoff_ready,
     )
     .expect_err("relative target path without a parent must be rejected");
     assert!(missing_target_parent

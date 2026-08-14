@@ -112,6 +112,7 @@ fn handle_windows_upgrade_handoff_command(command: Commands) -> Result<(), Bifro
         target_version,
         restart_arg,
         deferred_status_path,
+        handoff_ready_path,
     } = command
     else {
         return Err(BifrostError::Config(
@@ -125,6 +126,7 @@ fn handle_windows_upgrade_handoff_command(command: Commands) -> Result<(), Bifro
         target_version,
         restart_arg,
         deferred_status_path,
+        handoff_ready_path,
     )
 }
 
@@ -986,6 +988,7 @@ mod tests {
                 target_version: "0.0.181-alpha.8".to_string(),
                 restart_arg: Vec::new(),
                 deferred_status_path: None,
+                handoff_ready_path: "handoff.ready".into(),
             })
         ));
         assert!(should_run_update_notice(
@@ -1139,6 +1142,7 @@ mod tests {
                     target_version: "0.0.181-alpha.8".to_string(),
                     restart_arg: vec!["start".to_string()],
                     deferred_status_path: None,
+                    handoff_ready_path: "handoff.ready".into(),
                 })
                 .expect_err("Windows-only command must fail closed on other hosts");
             assert!(error.to_string().contains("only available on Windows"));

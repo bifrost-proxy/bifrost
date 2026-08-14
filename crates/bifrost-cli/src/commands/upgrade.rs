@@ -55,6 +55,10 @@ const UPGRADE_COMMAND_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
 // bounded, but allow roughly 34 seconds so a failed upgrade does not leave a
 // staged executable or helper scratch files behind.
 const WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS: usize = 480;
+#[cfg(windows)]
+const WINDOWS_UPGRADE_HANDOFF_READY_MAX_ATTEMPTS: usize = 400;
+#[cfg(any(windows, test))]
+const WINDOWS_UPGRADE_HANDOFF_READY_POLL_MS: u64 = 25;
 #[cfg(unix)]
 const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;

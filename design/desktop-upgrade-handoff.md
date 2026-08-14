@@ -227,7 +227,13 @@ stateDiagram-v2
   upgrade into that release. The handoff validates that it is executing from
   `.bifrost.exe.pending.<old-pid>` beside the sole allowed `bifrost.exe` target, rejects PID zero,
   cross-directory paths, arbitrary target names, and malformed target versions, then creates the
-  no-window PowerShell helper that waits for the original updater PID.
+  no-window PowerShell helper that waits for the original updater PID. The old updater does not wait
+  for the staged process to exit, because that process and its PowerShell descendant both participate
+  in replacing the updater executable. Instead, it polls a validated sibling
+  `.bifrost-upgrade-handoff.<old-pid>.ready` marker written by the PowerShell helper before the helper
+  starts waiting. A bounded 10-second handshake proves the detached helper is alive without forming
+  an updater → staged target → helper → updater wait cycle; all participants remove the marker on
+  success, failure, or timeout.
 - Windows Desktop release versions use Tauri/MSI-safe fourth components. Post-install comparison
   maps semantic prereleases with the same algorithm as `scripts/sync-tauri-version.mjs` (`alpha`,
   `beta`, `rc`, numeric and fallback channels), so `0.0.181-10008` is accepted as the packaged form

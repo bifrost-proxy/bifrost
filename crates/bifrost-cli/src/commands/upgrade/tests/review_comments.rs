@@ -356,7 +356,9 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "schedule_windows_deferred_install_via_staged_binary(",
         ".stdout(Stdio::null())",
         ".stderr(Stdio::null())",
-        "spawn_windows_upgrade_handoff_with_retry(|| command.status())",
+        "spawn_windows_upgrade_handoff_with_retry(|| command.spawn())",
+        "wait_for_windows_upgrade_handoff_ready_with(",
+        "[System.IO.File]::WriteAllText($HandoffReadyPath, \"scheduled\", $utf8NoBom)",
         "validate_windows_upgrade_handoff_request(",
         "schedule_windows_deferred_install_inner(",
         "cleanup_staged_binary_after_schedule(&deferred_install.staged_binary, result)",
@@ -392,8 +394,9 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         assert!(source.contains(contract), "missing contract: {contract}");
     }
     assert!(
-        !source.contains("spawn_windows_upgrade_handoff_with_retry(|| command.output())"),
-        "Windows staged handoff must not wait for inherited descendant pipe handles"
+        !source.contains("spawn_windows_upgrade_handoff_with_retry(|| command.output())")
+            && !source.contains("spawn_windows_upgrade_handoff_with_retry(|| command.status())"),
+        "Windows staged handoff must not wait for the child or inherited descendant pipe handles"
     );
 }
 
