@@ -4,6 +4,19 @@ use std::process::{Command, Stdio};
 
 use bifrost_core::BifrostError;
 
+#[cfg(any(target_os = "windows", test))]
+pub(super) const WINDOWS_DESKTOP_VERSION_PATH_ENV: &str = "BIFROST_DESKTOP_VERSION_PATH";
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn windows_desktop_version_probe_script() -> &'static str {
+    r#"
+$path = $env:BIFROST_DESKTOP_VERSION_PATH
+if (-not $path) { exit 2 }
+$info = (Get-Item -LiteralPath $path).VersionInfo
+if ($info.ProductVersion) { $info.ProductVersion } elseif ($info.FileVersion) { $info.FileVersion }
+"#
+}
+
 pub(crate) fn installed_desktop_app_is_target_version(
     install_path: &Path,
     target_version: &str,
@@ -134,11 +147,6 @@ fn read_windows_app_version(install_path: &Path) -> Option<String> {
     if !install_path.is_file() {
         return None;
     }
-    let script = r#"
-param([string]$Path)
-$info = (Get-Item -LiteralPath $Path).VersionInfo
-if ($info.ProductVersion) { $info.ProductVersion } elseif ($info.FileVersion) { $info.FileVersion }
-"#;
     let powershell = if Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", "$PSVersionTable.PSVersion"])
         .stdout(Stdio::null())
@@ -152,10 +160,10 @@ if ($info.ProductVersion) { $info.ProductVersion } elseif ($info.FileVersion) { 
         "pwsh"
     };
     let output = Command::new(powershell)
+        .env(WINDOWS_DESKTOP_VERSION_PATH_ENV, install_path)
         .arg("-NoProfile")
         .arg("-Command")
-        .arg(script)
-        .arg(install_path)
+        .arg(windows_desktop_version_probe_script())
         .output()
         .ok()?;
     if !output.status.success() {

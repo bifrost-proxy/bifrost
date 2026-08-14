@@ -1225,6 +1225,18 @@ fn versions_equal_accepts_optional_v_prefix() {
 }
 
 #[test]
+fn windows_desktop_version_probe_reads_path_from_scoped_environment() {
+    let script = version::windows_desktop_version_probe_script();
+    assert!(script.contains("$env:BIFROST_DESKTOP_VERSION_PATH"));
+    assert!(script.contains("Get-Item -LiteralPath $path"));
+    assert!(!script.contains("param([string]$Path)"));
+    assert_eq!(
+        version::WINDOWS_DESKTOP_VERSION_PATH_ENV,
+        "BIFROST_DESKTOP_VERSION_PATH"
+    );
+}
+
+#[test]
 fn macos_post_install_version_verification_rejects_stale_bundle() {
     let temp = tempfile::tempdir().expect("tempdir");
     let app = temp.path().join(MACOS_APP_BUNDLE);
