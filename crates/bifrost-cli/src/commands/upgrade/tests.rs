@@ -30,6 +30,35 @@ fn windows_upgrade_file_cleanup_retries_sharing_errors() {
 }
 
 #[test]
+fn windows_upgrade_file_cleanup_outlasts_the_previous_short_retry_budget() {
+    let path = Path::new("C:/fixture/.bifrost.exe.pending.42");
+    let mut attempts = 0;
+    let mut delays = Vec::new();
+
+    remove_windows_upgrade_file_with(
+        path,
+        |_| {
+            attempts += 1;
+            if attempts < WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS {
+                Err(io::Error::from_raw_os_error(32))
+            } else {
+                Ok(())
+            }
+        },
+        |delay| delays.push(delay),
+        true,
+    )
+    .expect("cleanup must outlast transient scanners that exceed the old budget");
+
+    assert_eq!(attempts, WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS);
+    assert_eq!(delays.len(), WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS - 1);
+    assert!(
+        delays.iter().copied().sum::<Duration>() >= Duration::from_secs(30),
+        "cleanup retry budget must cover long-lived antivirus and indexer handles"
+    );
+}
+
+#[test]
 fn windows_upgrade_file_cleanup_handles_missing_and_terminal_errors() {
     remove_windows_upgrade_file_with(
         Path::new("missing"),

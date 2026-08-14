@@ -50,7 +50,11 @@ const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 30;
 const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
 const UPGRADE_COMMAND_SPAWN_MAX_ATTEMPTS: u32 = 8;
 const UPGRADE_COMMAND_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
-const WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS: usize = 40;
+// Antivirus and indexers can retain handles to a freshly copied executable for
+// substantially longer than an ordinary sharing-conflict retry. Keep cleanup
+// bounded, but allow roughly 34 seconds so a failed upgrade does not leave a
+// staged executable or helper scratch files behind.
+const WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS: usize = 480;
 #[cfg(unix)]
 const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
