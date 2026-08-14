@@ -17,7 +17,7 @@ import {
   Typography,
   message,
 } from "antd";
-import { ReloadOutlined, ReadOutlined, RobotOutlined } from "@ant-design/icons";
+import { ReloadOutlined, RobotOutlined } from "@ant-design/icons";
 import { get, patch } from "../../../api/client";
 import { BASE, type AgentConfig } from "./agent/types";
 import * as imGatewayApi from "../../../api/imGateway";
@@ -25,7 +25,6 @@ import type {
   ExternalCliGatewayConfig,
   ImProviderConfig,
 } from "../../../api/imGateway";
-import SkillsSection from "./agent/SkillsSection";
 import LongTextModalField from "./agent/LongTextModalField";
 import ExternalCliPanel from "./imGateway/ExternalCliPanel";
 
@@ -296,26 +295,6 @@ export default function AgentTab() {
                   testId="settings-agent-user-instructions"
                 />
               </Space>
-            </Card>
-          </Col>
-
-          {/* Skills */}
-          <Col
-            xs={24}
-            id="agent-settings-skills"
-            data-agent-section="skills"
-            data-testid="agent-settings-section-skills"
-          >
-            <Card
-              title={
-                <Space>
-                  <ReadOutlined />
-                  <span>Skills</span>
-                </Space>
-              }
-              size="small"
-            >
-              <SkillsSection />
             </Card>
           </Col>
         </Row>

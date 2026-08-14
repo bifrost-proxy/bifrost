@@ -275,15 +275,7 @@ function ProviderFieldList({
 
 function ResponsiveCardGrid({ children }: { children: ReactNode }) {
   return (
-    <div
-      data-testid="settings-im-card-grid"
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 340px), 1fr))",
-        gap: 12,
-        width: "100%",
-      }}
-    >
+    <div className="settings-im-card-grid" data-testid="settings-im-card-grid">
       {children}
     </div>
   );

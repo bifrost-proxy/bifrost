@@ -182,6 +182,8 @@
 .detailBody {
   width: min(1120px, calc(100% - 48px));
   margin: 0 auto;
+  padding-top: 24px;
+  box-sizing: border-box;
   min-height: 0;
   flex: 1;
   overflow: hidden;
@@ -193,7 +195,7 @@
 
 .runPage {
   width: 100%;
-  padding: 22px 0 40px;
+  padding: 0 0 40px;
 }
 
 .runOverview {
@@ -351,6 +353,10 @@
   .detailHeaderContent {
     padding: 12px 0;
     gap: 8px;
+  }
+
+  .detailBody {
+    padding-top: 16px;
   }
 
   .detailBreadcrumb,

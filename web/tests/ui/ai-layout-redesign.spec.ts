@@ -1,16 +1,17 @@
 import { expect, test, type Page } from "@playwright/test";
 import { openPage } from "./helpers/admin-helpers";
 
+const runSnapshotTime = Math.floor(Date.now() / 1000);
 const runItems = [
   {
     session_key: "run-newer",
     status: "running",
     title: "Summarize weekly project progress",
     runner_id: "codex",
-    duration_secs: 95,
+    duration_secs: 0,
     user_message_count: 4,
     source: "feishu",
-    start_time: 1_800_000_200,
+    start_time: runSnapshotTime - 10 * 60,
   },
   {
     session_key: "run-older",
@@ -19,8 +20,8 @@ const runItems = [
     runner_id: "claude",
     duration_secs: 300,
     user_message_count: 2,
-    source: "web",
-    start_time: 1_800_000_100,
+    source: "weixin",
+    start_time: runSnapshotTime - 20 * 60,
   },
 ];
 
@@ -111,6 +112,14 @@ async function routeAiHubApis(page: Page, requestedPaths: string[]) {
           event_connection_enabled: false,
           event_types: [],
         },
+        {
+          id: "feishu-backup",
+          provider_type: "feishu",
+          display_name: "Feishu Backup",
+          enabled: true,
+          event_connection_enabled: true,
+          event_types: [],
+        },
       ]),
     });
   });
@@ -154,7 +163,7 @@ async function routeAiHubApis(page: Page, requestedPaths: string[]) {
               : [],
           },
           next_cursor: null,
-          updated_at: 1_800_000_300,
+          updated_at: runSnapshotTime,
         }),
       });
     },
@@ -237,13 +246,33 @@ test("module details use dedicated routes and always return to AI home", async (
     );
     expect(Math.abs(headerBounds!.x - hubBounds!.x)).toBeLessThanOrEqual(2);
     expect(Math.abs(bodyBounds!.x - hubBounds!.x)).toBeLessThanOrEqual(2);
+    const bodyPaddingTop = await page
+      .getByTestId("ai-detail-body")
+      .evaluate((element) => parseFloat(getComputedStyle(element).paddingTop));
+    expect(bodyPaddingTop).toBeGreaterThanOrEqual(24);
+    if (path === "channels") {
+      const providerCards = page.locator(
+        '[data-testid^="settings-im-provider-card-"]',
+      );
+      await expect(providerCards).toHaveCount(3);
+      const providerBoxes = await Promise.all(
+        [0, 1, 2].map((index) => providerCards.nth(index).boundingBox()),
+      );
+      expect(providerBoxes.every(Boolean)).toBe(true);
+      expect(
+        Math.abs(providerBoxes[0]!.y - providerBoxes[1]!.y),
+      ).toBeLessThanOrEqual(2);
+      expect(providerBoxes[2]!.y).toBeGreaterThan(
+        providerBoxes[0]!.y + providerBoxes[0]!.height,
+      );
+    }
     if (path === "agents") {
       await expect(
         page.getByTestId("agent-settings-section-general"),
       ).toBeVisible();
       await expect(
         page.getByTestId("agent-settings-section-skills"),
-      ).toBeVisible();
+      ).toHaveCount(0);
       await expect(
         page.getByTestId("agent-settings-section-runners"),
       ).toBeVisible();
@@ -262,7 +291,7 @@ test("module details use dedicated routes and always return to AI home", async (
         .evaluateAll((sections) =>
           sections.map((section) => section.getAttribute("data-agent-section")),
         );
-      expect(sectionOrder).toEqual(["runners", "general", "skills"]);
+      expect(sectionOrder).toEqual(["runners", "general"]);
     }
     await page.getByTestId("ai-home-link").click();
     await expect(page).toHaveURL(/\/_bifrost\/ai$/);
@@ -284,12 +313,18 @@ test("run records are newest-first summaries without drilldown or detail request
   await expect(table).toContainText("codex");
   await expect(table).toContainText("4");
   await expect(table).toContainText("Feishu");
+  await expect(table).toContainText("Weixin");
   const rows = table.locator("tbody tr");
   await expect(rows.nth(0)).toContainText("Summarize weekly project progress");
+  await expect(rows.nth(0)).toContainText(/10m \d+s/);
   await expect(rows.nth(1)).toContainText("Generate release summary");
   await expect(rows.locator("a")).toHaveCount(0);
   await expect(page.getByText("消息正文", { exact: true })).toHaveCount(0);
   await expect(page.getByText("思考过程", { exact: true })).toHaveCount(0);
+
+  await page.reload();
+  await expect(table).toBeVisible();
+  await expect(rows.nth(0)).toContainText(/10m \d+s/);
 
   await page.locator('[aria-label="Run filters"] .ant-select').first().click();
   await page
@@ -325,6 +360,22 @@ test("mobile layout is single-column and uses non-interactive summary cards", as
   expect(boxes.every(Boolean)).toBe(true);
   expect(boxes[1]!.y).toBeGreaterThan(boxes[0]!.y + boxes[0]!.height);
 
+  await openPage(page, "ai/channels");
+  const providerCards = page.locator(
+    '[data-testid^="settings-im-provider-card-"]',
+  );
+  await expect(providerCards).toHaveCount(3);
+  const providerBoxes = await Promise.all(
+    [0, 1, 2].map((index) => providerCards.nth(index).boundingBox()),
+  );
+  expect(providerBoxes.every(Boolean)).toBe(true);
+  expect(providerBoxes[1]!.y).toBeGreaterThan(
+    providerBoxes[0]!.y + providerBoxes[0]!.height,
+  );
+  expect(providerBoxes[2]!.y).toBeGreaterThan(
+    providerBoxes[1]!.y + providerBoxes[1]!.height,
+  );
+
   await openPage(page, "ai/runs");
   await expect(page.getByTestId("agent-run-summary-list")).toBeVisible();
   await expect(page.getByTestId("agent-run-summary-table")).toHaveCount(0);
@@ -338,6 +389,7 @@ test("mobile layout is single-column and uses non-interactive summary cards", as
 
 test("AI hub follows both light and dark system themes", async ({ page }) => {
   const backgrounds: string[] = [];
+  const providerBackgrounds: string[] = [];
   for (const mode of ["light", "dark"] as const) {
     await page.addInitScript((themeMode) => {
       window.localStorage.setItem(
@@ -354,8 +406,20 @@ test("AI hub follows both light and dark system themes", async ({ page }) => {
       ),
     );
     await expect(card).toBeVisible();
+
+    await openPage(page, "ai/channels");
+    const providerCard = page.getByTestId(
+      "settings-im-provider-card-feishu-main",
+    );
+    await expect(providerCard).toBeVisible();
+    providerBackgrounds.push(
+      await providerCard.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      ),
+    );
   }
   expect(backgrounds[0]).not.toBe(backgrounds[1]);
+  expect(providerBackgrounds[0]).not.toBe(providerBackgrounds[1]);
 });
 
 test("legacy chat and detail links resolve to the summary-only run list", async ({

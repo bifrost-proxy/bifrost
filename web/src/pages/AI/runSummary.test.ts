@@ -23,11 +23,12 @@ describe("run summary formatting", () => {
     expect(formatRunDuration(7320)).toBe("2h 2m");
   });
 
-  it("advances only running durations from the snapshot timestamp", () => {
-    expect(liveRunDuration(runningItem, 200, 215)).toBe(80);
-    expect(
-      liveRunDuration({ ...runningItem, status: "completed" }, 200, 215),
-    ).toBe(65);
+  it("calculates running duration from the execution start time", () => {
+    expect(liveRunDuration(runningItem, 215)).toBe(115);
+    expect(liveRunDuration({ ...runningItem, status: "completed" }, 215)).toBe(
+      65,
+    );
+    expect(liveRunDuration({ ...runningItem, start_time: 0 }, 215)).toBe(65);
   });
 
   it("uses friendly source labels and a stable fallback", () => {

@@ -301,7 +301,7 @@ function AIHubPage() {
             testId="ai-module-card-agents"
             icon={<RobotOutlined />}
             title="Agent Configuration"
-            description="Configure external runners, working directories, instructions, and skills."
+            description="Configure external runners, working directories, and instructions."
             loading={snapshot.loading}
             error={snapshot.errors.has("agents")}
             metrics={[
@@ -527,9 +527,7 @@ function RunRecordsPage() {
       title: "Duration",
       width: 132,
       render: (_, item) =>
-        formatRunDuration(
-          liveRunDuration(item, response?.updated_at || nowSeconds, nowSeconds),
-        ),
+        formatRunDuration(liveRunDuration(item, nowSeconds)),
     },
     {
       title: "User messages",
@@ -685,11 +683,7 @@ function RunRecordsPage() {
                       <dt>Duration</dt>
                       <dd>
                         {formatRunDuration(
-                          liveRunDuration(
-                            item,
-                            response?.updated_at || nowSeconds,
-                            nowSeconds,
-                          ),
+                          liveRunDuration(item, nowSeconds),
                         )}
                       </dd>
                     </div>
@@ -787,7 +781,7 @@ export default function AI() {
         element={
           <AIDetailPage
             title="Agent Configuration"
-            description="Configure external runners, working directories, instructions, and skills."
+            description="Configure external runners, working directories, and instructions."
           >
             <AgentTab />
           </AIDetailPage>

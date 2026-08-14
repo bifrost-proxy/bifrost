@@ -26,7 +26,7 @@
 
 - 保留现有 ASR 深链与详情能力。
 - 保留现有 IM Provider、Targets、Routes、Schedules、History 等配置能力。
-- 保留外部 Runner 配置、默认 Runner 和可用状态管理。
+- 保留外部 Runner 配置、默认 Runner 和可用状态管理；Skills 由用户在外部 Agent 环境自行维护，不在 Bifrost WebUI 中管理。
 - 旧 AI URL 不出现空白页；历史 Chat 深链归一化到运行记录列表，并可用标题或 session key 定位对应摘要。
 - 首页卡片的加载、空、错误和能力不可用状态不改变卡片尺寸，避免页面抖动。
 
@@ -80,7 +80,7 @@
 | --- | --- | --- | --- |
 | ASR | 语音识别、转写任务与语音资源 | 服务状态、处理中任务数、最近完成时间 | 复用现有 ASR 工作台 |
 | IM 通道 | 连接飞书、微信等消息来源 | 已连接/总通道、异常数、通道类型 | 复用现有 IM Gateway 管理页 |
-| Agent 配置 | 管理外部 Runner 与运行策略 | 已启用 Runner 数、默认 Runner、配置健康状态 | 聚合外部 Runner 与 Agent 运行策略配置 |
+| Agent 配置 | 管理外部 Runner 与运行策略 | 已启用 Runner 数、默认 Runner、配置健康状态 | 聚合外部 Runner 与 Agent 运行策略配置，不提供 Skills 管理 |
 | 运行记录 | 查看外部 Agent 线程的摘要 | 正在运行数、累计记录数、当前/近期 Runner | 打开只读线程摘要列表 |
 
 ### 摘要密度规则
@@ -132,11 +132,11 @@ Runner     Codex · Claude Code · Trae X
 | 字段 | 展示规则 | 数据缺失 |
 | --- | --- | --- |
 | 状态 | `运行中`、`已完成`、`失败`、`已停止`；显式文字 + 状态点 | `未知`，中性色 |
-| 标题 | 用户首条消息生成的安全摘要或外部来源提供的标题，单行省略 | `未命名线程` |
+| 标题 | 优先使用外部线程标题；IM 群聊为空时使用群名称，单聊为空时使用对应机器人/Provider 展示名，单行省略 | `未命名线程` |
 | Runner | 配置中的展示名，如 `Codex`、`Claude Code`、`Trae X` | `未知 Runner` |
 | 运行时长 | 运行中用当前时间减开始时间动态更新；结束后使用冻结值 | `—` |
 | 用户消息 | 只统计 user role 数量，不等同于全部 message/turn 数 | `—` |
-| 来源 | `Web`、`飞书`、`微信`、`API`、`定时任务`、`ASR` 等标准枚举 | `其他` |
+| 来源 | `Web`、`飞书`、`微信`、`API`、`定时任务`、`ASR` 等标准枚举；IM 会话按 Provider 类型归类，不把群聊/单聊误标为 API | `其他` |
 | 开始时间 | 当天显示 `14:32`，更早显示 `08-13 21:07`；完整时间放在 `title`/tooltip | `—` |
 
 ### 排序、筛选与分页
@@ -178,6 +178,12 @@ Runner     Codex · Claude Code · Trae X
 - 从首页点击卡片：普通 push navigation，浏览器返回可回到首页原滚动位置。
 - 直接打开详情深链：`AI 首页` 永远回 `/ai`，不依赖 history 是否存在。
 - 从旧 Chat 深链进入：replace 到 `/ai/runs`，尽量把旧 `session` 转为标题搜索或定位提示，但不再打开消息详情。
+
+### 详情内容区节奏
+
+- 详情页头与正文继续使用和 AI 首页一致的 1120px 最大宽度并水平居中。
+- 桌面详情正文与页头分隔线之间保留 24px 顶部留白，窄屏保留 16px，避免首个工具栏或卡片紧贴页头。
+- IM Channels 的 Provider 卡片在桌面和中等宽度下每行最多两张；第三张开始换行。窄屏降为单列，卡片内部字段和操作保持可读。
 
 ## 响应式方案
 
@@ -253,9 +259,9 @@ GET /api/im-gateway/agent/session-summaries?limit=30&cursor=...&status=...&runne
 ### 数据边界
 
 - 摘要表/索引只持久化上述字段，不持久化 message body 或运行详情。
-- `title` 优先由外部来源/Runner 直接提供；若只能由首条用户消息生成，只允许在消息入站时做一次内存内摘要，写入前截断并执行现有敏感信息处理，不得为了生成或刷新标题回读已落盘消息。
+- `title` 优先由外部来源/Runner 直接提供；IM 群聊缺少标题时查询已缓存的群名称，IM 单聊缺少标题时使用 Provider 展示名。非 IM 来源若只能由首条用户消息生成，只允许在消息入站时做一次内存内摘要，写入前截断并执行现有敏感信息处理，不得为了生成或刷新标题回读已落盘消息。
 - `user_message_count` 在运行时累加，列表不通过读取消息记录实时计算。
-- `duration_secs` 在结束时冻结；运行中可只返回 `start_time`，前端自行计算。
+- `duration_secs` 在结束时冻结；运行中由服务端以响应时刻减 `start_time` 计算，前端继续以当前时间减同一 `start_time` 每秒更新。刷新或重新进入页面不得从零重新计时。
 - 聚合与 items 使用同一筛选口径；首页请求不带筛选时展示全局摘要。
 - WebUI 只能调用专用摘要接口。迁移期即使服务端仍需读取现有 session state，也必须在服务端完成白名单 projection；禁止把 `sessions/all`、`SessionDetail` 或其它完整会话对象发送到浏览器后再裁剪。
 
@@ -356,7 +362,8 @@ GET /api/im-gateway/agent/session-summaries?limit=30&cursor=...&status=...&runne
 - 新增 `/api/im-gateway/agent/session-summaries`，服务端先做固定字段 projection 再响应；WebUI 不再调用 `sessions/all`、history 或单线程详情。
 - Agent 运行记录保持信息终点，无行点击、详情链接、overflow action 或写操作；旧 chat/session/historyPath 链接 replace 到摘要列表。
 - 旧 Agent Chat 浏览器规格已移除，由新的 `web/tests/ui/ai-layout-redesign.spec.ts` 覆盖当前产品信息架构；底层外部 Runner 与 IM session 基础设施保留。
-- 旧聊天工作台、消息渲染、线程面板、会话列表/详情及其专用测试已从前端删除；Agent 配置仅保留 General、Skills、Runners，旧链接继续安全重定向到 Run Records。
-- Agent Configuration 按使用优先级展示 Runners、General、Skills；外部 Runner 模式不再展示无实际作用的 `Enable Agent` 总开关。
+- 旧聊天工作台、消息渲染、线程面板、会话列表/详情及其专用测试已从前端删除；Agent 配置仅保留 Runners 与 General，旧链接继续安全重定向到 Run Records。
+- Agent Configuration 按使用优先级展示 Runners、General；外部 Runner 模式不再展示无实际作用的 `Enable Agent` 总开关，也不提供由用户自行维护的 Skills 管理入口。
 - AI 模块新增文案统一使用系统默认英文；首页、详情页头与详情内容区统一为 1120px 最大宽度并水平居中。
+- AI 详情正文增加桌面 24px、窄屏 16px 顶部留白；IM Channels Provider 卡片限制为桌面两列、窄屏单列，宽屏不再扩成三列。
 - 真实场景记录位于 `human_tests/webui-ai-module-hub.md`。实现验证包含前端类型/单元/E2E、后端单元与白名单契约、Rust changed coverage 和远端 CI。

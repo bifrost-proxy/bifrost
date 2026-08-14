@@ -30,11 +30,11 @@ export function formatRunDuration(seconds: number): string {
 
 export function liveRunDuration(
   item: AgentRunSummaryItem,
-  snapshotUpdatedAt: number,
   nowSeconds: number,
 ): number {
   if (item.status !== "running") return item.duration_secs;
-  return item.duration_secs + Math.max(0, nowSeconds - snapshotUpdatedAt);
+  if (!item.start_time) return item.duration_secs;
+  return Math.max(0, nowSeconds - item.start_time);
 }
 
 export function runSourceLabel(source: string): string {
