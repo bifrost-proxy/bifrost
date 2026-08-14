@@ -277,8 +277,16 @@ pub(super) fn schedule_windows_deferred_install(
     restart_args: Option<&[String]>,
 ) -> Result<(), BifrostError> {
     let result = schedule_windows_deferred_install_inner(&deferred_install, restart_args);
+    cleanup_staged_binary_after_schedule(&deferred_install.staged_binary, result)
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn cleanup_staged_binary_after_schedule<T>(
+    staged_binary: &Path,
+    result: Result<T, BifrostError>,
+) -> Result<T, BifrostError> {
     if result.is_err() {
-        let _ = fs::remove_file(&deferred_install.staged_binary);
+        let _ = fs::remove_file(staged_binary);
     }
     result
 }

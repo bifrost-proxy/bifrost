@@ -354,7 +354,7 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "Invoke-FileOperationWithRetry \"restoring previous CLI\"",
         "Invoke-FileOperationWithRetry \"removing failed replacement staging file\"",
         "let result = schedule_windows_deferred_install_inner(&deferred_install, restart_args);",
-        "let _ = fs::remove_file(&deferred_install.staged_binary);",
+        "cleanup_staged_binary_after_schedule(&deferred_install.staged_binary, result)",
         "installed CLI reports '$versionOutput' instead of target",
         "restored previous CLI after replacement failure",
         "[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)",
@@ -382,6 +382,33 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
     ] {
         assert!(source.contains(contract), "missing contract: {contract}");
     }
+}
+
+#[test]
+fn failed_windows_helper_schedule_removes_staged_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let staged = dir.path().join(".bifrost.exe.pending.1234");
+    std::fs::write(&staged, b"replacement").expect("write staged binary");
+
+    let error = cleanup_staged_binary_after_schedule::<()>(
+        &staged,
+        Err(BifrostError::Config("helper setup failed".to_string())),
+    )
+    .expect_err("schedule error remains visible");
+
+    assert!(error.to_string().contains("helper setup failed"));
+    assert!(!staged.exists(), "failed scheduling must not leak staging");
+}
+
+#[test]
+fn successful_windows_helper_schedule_transfers_staging_ownership() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let staged = dir.path().join(".bifrost.exe.pending.1234");
+    std::fs::write(&staged, b"replacement").expect("write staged binary");
+
+    cleanup_staged_binary_after_schedule(&staged, Ok(())).expect("successful schedule");
+
+    assert!(staged.exists(), "spawned helper owns the staged binary");
 }
 #[test]
 fn background_upgrade_restarts_when_disk_binary_is_already_latest() {
