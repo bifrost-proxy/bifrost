@@ -1708,6 +1708,24 @@ pub fn compose_external_cli_message_instructions(
     user_instructions: Option<&str>,
     runner_instructions: Option<&str>,
 ) -> Option<String> {
+    compose_external_cli_message_instructions_with_channel_context(
+        include_base_instructions,
+        base_instructions,
+        developer_instructions,
+        user_instructions,
+        runner_instructions,
+        None,
+    )
+}
+
+pub fn compose_external_cli_message_instructions_with_channel_context(
+    include_base_instructions: bool,
+    base_instructions: Option<&str>,
+    developer_instructions: Option<&str>,
+    user_instructions: Option<&str>,
+    runner_instructions: Option<&str>,
+    trusted_channel_instructions: Option<&str>,
+) -> Option<String> {
     let instructions = [
         include_base_instructions
             .then_some(base_instructions)
@@ -1715,6 +1733,7 @@ pub fn compose_external_cli_message_instructions(
         developer_instructions,
         user_instructions,
         runner_instructions,
+        trusted_channel_instructions,
     ]
     .into_iter()
     .flatten()

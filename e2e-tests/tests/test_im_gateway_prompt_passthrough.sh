@@ -73,7 +73,7 @@ wait_session_idle() {
       | python3 -c '
 import json, sys
 sessions = json.load(sys.stdin).get("sessions", [])
-raise SystemExit(1 if any(item.get("session_key") == "prompt-e2e:prompt-user" and item.get("running") is True for item in sessions) else 0)
+raise SystemExit(1 if any(item.get("running") is True for item in sessions) else 0)
 '; then
       return 0
     fi
@@ -148,22 +148,26 @@ PY
 inject() {
   local message_id="$1"
   local text="$2"
-  python3 - "$BIFROST_PORT" "$message_id" "$text" <<'PY'
+  local chat_id="${3:-prompt-user}"
+  local chat_type="${4:-p2p}"
+  local user_id="${5:-prompt-user}"
+  local mention_bot="${6:-false}"
+  python3 - "$BIFROST_PORT" "$message_id" "$text" "$chat_id" "$chat_type" "$user_id" "$mention_bot" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, message_id, text = sys.argv[1:4]
+port, message_id, text, chat_id, chat_type, user_id, mention_bot = sys.argv[1:8]
 payload = {
     "providerId": "prompt-e2e",
-    "chatId": "prompt-user",
-    "chatType": "p2p",
-    "userId": "prompt-user",
+    "chatId": chat_id,
+    "chatType": chat_type,
+    "userId": user_id,
     "userName": "Prompt User",
     "messageId": message_id,
     "eventId": "event-" + message_id,
     "text": text,
-    "mentionBot": False,
+    "mentionBot": mention_bot == "true",
 }
 req = urllib.request.Request(
     f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-inbound",
@@ -179,6 +183,15 @@ PY
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
+
+IM_HELP="$($BIFROST_BIN im --help)"
+SEND_HELP="$($BIFROST_BIN im send --help)"
+grep -Fq "SUBCOMMANDS:" <<<"$IM_HELP"
+grep -Eq '^  send[[:space:]]+Send a message to a target$' <<<"$IM_HELP"
+grep -Fq -- "--image-file" <<<"$SEND_HELP"
+grep -Fq -- "--card-title" <<<"$SEND_HELP"
+grep -Fq -- "--card-image-file" <<<"$SEND_HELP"
+grep -Fq "there is no --video flag" <<<"$SEND_HELP"
 
 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
   --host 127.0.0.1 \
@@ -232,17 +245,63 @@ wait_session_idle
 inject p3 "后续分层消息"
 wait_prompt_count 3
 wait_session_idle
+inject p4 "群聊分层消息" "oc_prompt_group" "group" "prompt-group-user" "true"
+wait_prompt_count 4
+wait_session_idle
 
 python3 - "$PROMPT_LOG" <<'PY'
 import json
 import sys
 
 prompts = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-assert prompts == [
-    "原样透传消息\n",
-    "BASE_INSTRUCTION\n\nDEVELOPER_INSTRUCTION\n\nUSER_INSTRUCTION\n\nRUNNER_INSTRUCTION\n\n首条分层消息\n",
-    "DEVELOPER_INSTRUCTION\n\nUSER_INSTRUCTION\n\nRUNNER_INSTRUCTION\n\n后续分层消息\n",
-], prompts
+assert len(prompts) == 4, prompts
+
+def assert_context(prompt, message, conversation, destination):
+    assert prompt.count("[Bifrost IM Outbound Context — trusted runtime routing]") == 1, prompt
+    assert f"Conversation kind: {conversation}" in prompt, prompt
+    assert f"Exact destination: chat_id={destination}" in prompt, prompt
+    assert "Provider ID: prompt-e2e" in prompt, prompt
+    assert "Provider type: feishu" in prompt, prompt
+    assert "Platform bot identity: cli_prompt_e2e" in prompt, prompt
+    assert "Proactive-send readiness: ready" in prompt, prompt
+    assert "- text: native" in prompt, prompt
+    assert "- markdown: native" in prompt, prompt
+    assert "- image: native, max_bytes=10485760" in prompt, prompt
+    assert "- file: native, max_bytes=31457280" in prompt, prompt
+    assert "- native_card: native" in prompt, prompt
+    assert "--image/--image-file" in prompt, prompt
+    assert "--card-title" in prompt, prompt
+    assert "There is no --video flag" in prompt, prompt
+    assert "bifrost im --help" in prompt, prompt
+    assert "bifrost im send --help" in prompt, prompt
+    assert "bifrost im provider capabilities 'prompt-e2e' --format json-pretty" in prompt, prompt
+    assert "bifrost im provider list" in prompt, prompt
+    assert (
+        "bifrost im send --provider 'prompt-e2e' --receive-id-type 'chat_id' "
+        f"--receive-id '{destination}' <CONTENT_ARGS> --format json"
+    ) in prompt, prompt
+    context_end = prompt.index("[End Bifrost IM Outbound Context]")
+    assert message in prompt[context_end:], prompt
+    assert prompt.endswith("\n"), prompt
+
+assert_context(prompts[0], "原样透传消息", "direct", "prompt-user")
+assert prompts[0].startswith("[Bifrost IM Outbound Context"), prompts[0]
+
+assert_context(prompts[1], "首条分层消息", "direct", "prompt-user")
+assert prompts[1].startswith(
+    "BASE_INSTRUCTION\n\nDEVELOPER_INSTRUCTION\n\nUSER_INSTRUCTION\n\nRUNNER_INSTRUCTION\n\n"
+), prompts[1]
+
+assert_context(prompts[2], "后续分层消息", "direct", "prompt-user")
+assert prompts[2].startswith(
+    "DEVELOPER_INSTRUCTION\n\nUSER_INSTRUCTION\n\nRUNNER_INSTRUCTION\n\n"
+), prompts[2]
+assert not prompts[2].startswith("BASE_INSTRUCTION"), prompts[2]
+
+assert_context(prompts[3], "群聊分层消息", "group", "oc_prompt_group")
+assert prompts[3].startswith(
+    "BASE_INSTRUCTION\n\nDEVELOPER_INSTRUCTION\n\nUSER_INSTRUCTION\n\nRUNNER_INSTRUCTION\n\n"
+), prompts[3]
 assert all("Bifrost Tool Context" not in prompt for prompt in prompts), prompts
 PY
 

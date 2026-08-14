@@ -38,6 +38,7 @@ mod agent_chat_concurrent;
 mod agent_chat_model_commands;
 mod agent_chat_progress;
 mod agent_chat_thread_commands;
+mod agent_outbound_context;
 mod agent_reply;
 mod agent_reply_attachments;
 mod agent_reply_target;
@@ -62,6 +63,7 @@ use agent_chat_model_commands::*;
 #[cfg(test)]
 use agent_chat_progress::*;
 use agent_chat_thread_commands::*;
+use agent_outbound_context::*;
 use agent_reply::*;
 use agent_reply_attachments::*;
 use agent_reply_target::*;

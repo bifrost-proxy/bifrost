@@ -792,8 +792,8 @@ bifrost im messages list --provider feishu-main --direction inbound
 - Feishu / Weixin / WeChat provider 的 `base_url` 由 provider 类型固定管理。不要建议传 `--base-url`；CLI 会拒绝该参数。
 - 已有 App ID / Secret 时可以手动配置，但 secret 应使用 `env:NAME`，避免写入 shell history 或最终报告。
 - `bifrost im send` 的第一个位置参数是 provider 名称；兼容形式是 `--provider <ID>`。群内 Agent 若只拿到飞书机器人 App ID/名称和群 ID，可省略 provider，使用 `--bot-id <APP_ID> --chat-id <chat_id>`，或名称唯一时使用 `--bot-name <精确名称> --chat-id <chat_id>`；机器人名称重名会明确失败，应改用 bot ID。直接 provider 选择与 bot 选择器互斥。未指定目的地时发送给 owner；`--target <别名>` 使用已配置 target；其他直达地址使用成对的 `--receive-id-type` 与 `--receive-id`。不要猜 provider、机器人、群 ID 或用户 ID。
-- 内容参数可以重复并按命令行顺序发送：`--text`、`--markdown` / `--markdown-file`、`--image` / `--image-key`、`--file` / `--file-key`、`--card-file` / `--card-json`。图片和文件通过本地 Admin API 以二进制上传，不把内容写成 base64 JSON。
-- 发送前先运行 `bifrost im provider list` 与 `bifrost im provider capabilities <ID>`。飞书原生支持文本、Markdown 卡片、图片、文件和原生卡片；微信原生支持文本和图片，Markdown 会降级为可读纯文本，通用文件与飞书卡片不支持，而且机器人必须先收到该用户的一条消息以建立发送上下文。
+- 内容参数可以重复并按命令行顺序发送：`--text`、`--markdown` / `--markdown-file`、`--image` / `--image-file` / `--image-key`、`--file` / `--file-key`、`--card-file` / `--card-json`，以及快速卡片参数 `--card-title`、`--card-text`、`--card-image-file` / `--card-image-key`、`--card-image-alt`。视频能力没有独立 `--video` 参数，应使用 `--file` 交给 provider 按媒体类型识别。图片和文件通过本地 Admin API 以二进制上传，不把内容写成 base64 JSON。
+- 遇到参数、能力或发送错误时，依次执行 `bifrost im --help`、`bifrost im send --help`、`bifrost im provider capabilities <ID> --format json-pretty`、`bifrost im provider list`。CLI help 与 provider 运行时 capabilities 是权威依据，不要猜测或改走其他 IM connector。当前飞书原生支持文本、Markdown 卡片、图片、文件和原生卡片；当前微信原生支持文本、图片、文件和视频，Markdown 会降级为可读纯文本、飞书原生卡片不支持，而且机器人必须先收到该用户的一条消息以建立发送上下文；后续能力变化一律以运行时输出为准。
 - IM 外发会影响真实人员和群聊。只有用户已明确要求发送且 provider 与目的地都能从上下文唯一确定时才执行；否则先确认。用户只要求设计、开发或测试时，只能使用本地假服务，不能向真实 IM 通道试发。
 - 每次发送都检查 bundle 级 `status` 与逐项 receipt。`partial_success` 代表只有部分内容成功，必须向用户明确列出失败项和 provider 返回原因，不能笼统声称消息已发出。需要安全重试时传稳定的 `--idempotency-key`。
 - IM 通道上线通知会自动附带 runner-aware 帮助。所有外部 Runner 支持 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop`；Codex / Traex / Claude Code 等 Runner 只在适配器支持时展示 `/models`、`/model`、`/efforts`、`/effort`。
