@@ -263,6 +263,20 @@ impl WorkerSupervisor {
         matches
     }
 
+    pub async fn unregister(&self, key: &str, grace: Duration) -> bool {
+        let record = self.workers.write().remove(key);
+        let Some(record) = record else {
+            return false;
+        };
+        let worker = record.lock().await.worker.take();
+        if let Some(worker) = worker {
+            if let Err(error) = worker.shutdown(grace).await {
+                tracing::warn!(worker_key = key, error = %error, "failed to stop unregistered worker");
+            }
+        }
+        true
+    }
+
     pub async fn stop_kind(&self, kind: WorkerKind, grace: Duration) -> usize {
         let records = self
             .workers

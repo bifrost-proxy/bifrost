@@ -92,16 +92,15 @@ pub fn configure_runtime_targets(
         });
         return;
     }
-    let mut normalized = targets
+    // Preserve the caller's priority order (internal before cloud) while
+    // deduplicating relay URLs first-wins. Provider-id sorting changes which
+    // target becomes PRIMARY_RELAY and can also leave duplicate URLs apart.
+    let mut seen_relays = HashSet::new();
+    let normalized = targets
         .into_iter()
         .filter_map(normalize_target)
+        .filter(|target| seen_relays.insert(target.relay_url.clone()))
         .collect::<Vec<_>>();
-    normalized.sort_by(|left, right| {
-        left.provider_id
-            .cmp(&right.provider_id)
-            .then(left.relay_url.cmp(&right.relay_url))
-    });
-    normalized.dedup_by(|left, right| left.relay_url == right.relay_url);
     *desired_state().write() = DesiredRemoteState {
         targets: normalized,
         admin_host,
@@ -147,7 +146,7 @@ pub fn runtime_configured() -> bool {
         && !desired_state().read().targets.is_empty()
 }
 
-pub async fn proxy_admin_request(req: Request<Incoming>, _path: &str) -> Response<BoxBody> {
+pub async fn proxy_admin_request(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
     let client = match primary_client() {
         Some(client) => client,
         None => {
@@ -166,11 +165,12 @@ pub async fn proxy_admin_request(req: Request<Incoming>, _path: &str) -> Respons
     }
 
     let method = req.method().clone();
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map(|value| value.as_str().to_string())
-        .unwrap_or_else(|| req.uri().path().to_string());
+    // AdminRouter passes `path` after stripping the public /_bifrost prefix.
+    // Preserve only the original query string when forwarding to the worker.
+    let path_and_query = match req.uri().query() {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path.to_string(),
+    };
     let content_type = req.headers().get(CONTENT_TYPE).cloned();
     let accept = req.headers().get(ACCEPT).cloned();
     let body = match collect_request_body(req).await {
@@ -234,17 +234,20 @@ pub async fn proxy_admin_request(req: Request<Incoming>, _path: &str) -> Respons
 }
 
 async fn collect_request_body(req: Request<Incoming>) -> Result<Bytes, String> {
-    let body = req
-        .collect()
-        .await
-        .map_err(|error| format!("read Remote Invoke request body: {error}"))?
-        .to_bytes();
-    if body.len() > MAX_PROXY_REQUEST_BYTES {
-        return Err(format!(
-            "Remote Invoke request body exceeds {MAX_PROXY_REQUEST_BYTES} bytes"
-        ));
+    let mut body = req.into_body();
+    let mut output = BytesMut::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| format!("read Remote Invoke request body: {error}"))?;
+        if let Some(data) = frame.data_ref() {
+            if output.len().saturating_add(data.len()) > MAX_PROXY_REQUEST_BYTES {
+                return Err(format!(
+                    "Remote Invoke request body exceeds {MAX_PROXY_REQUEST_BYTES} bytes"
+                ));
+            }
+            output.extend_from_slice(data);
+        }
     }
-    Ok(body)
+    Ok(output.freeze())
 }
 
 async fn collect_response_body(response: reqwest::Response) -> Result<Bytes, String> {
@@ -288,7 +291,7 @@ async fn reconcile_runtime_targets() -> Result<(), String> {
         };
         if let Some(client) = client {
             global_worker_supervisor()
-                .stop(client.worker.key(), Duration::from_secs(10))
+                .unregister(client.worker.key(), Duration::from_secs(10))
                 .await;
         }
     }
