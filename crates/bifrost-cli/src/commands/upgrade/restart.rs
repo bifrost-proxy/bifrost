@@ -656,9 +656,14 @@ try {
         Ok(())
     })();
     if let Err(error) = setup_result {
-        let mut cleanup_paths = vec![&script_path, &args_path, &ready_path, &log_path];
+        let mut cleanup_paths: Vec<&Path> = vec![
+            script_path.as_path(),
+            args_path.as_path(),
+            ready_path.as_path(),
+            log_path.as_path(),
+        ];
         if let Some(status_path) = deferred_status_path.as_ref() {
-            cleanup_paths.push(status_path);
+            cleanup_paths.push(status_path.as_path());
         }
         if let Err(cleanup_error) = cleanup_windows_upgrade_artifacts(&cleanup_paths) {
             return Err(BifrostError::Config(format!(
