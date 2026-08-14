@@ -79,6 +79,10 @@ pub(crate) async fn run_via_browser_worker(
     progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<ExternalCliRunResult, String> {
     let request_id = uuid::Uuid::new_v4().to_string();
+    let logical_job_id = request
+        .session_key
+        .clone()
+        .unwrap_or_else(|| request_id.clone());
     let request_path = request_dir().join(format!("request-{request_id}.json"));
     write_json_file(
         &request_path,
@@ -96,7 +100,7 @@ pub(crate) async fn run_via_browser_worker(
     let mut events = worker.subscribe_events();
     let request_future = worker.request_with_id(
         request_id.clone(),
-        Some(request_id.clone()),
+        Some(logical_job_id),
         "browser.run",
         serde_json::to_value(BrowserRunReference {
             request_path: request_path.clone(),
@@ -150,6 +154,33 @@ pub(crate) async fn run_via_browser_worker(
         crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded => {}
     }
     Ok(result)
+}
+
+pub(crate) async fn stop_session_run(session_key: &str) -> bool {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return false;
+    }
+    let Some(worker) = global_worker_supervisor().get(BROWSER_WORKER_KEY).await else {
+        return false;
+    };
+    let jobs = crate::worker_runtime::worker_jobs();
+    let Some(job) = jobs.into_iter().find(|job| {
+        job.worker_key == BROWSER_WORKER_KEY
+            && job.logical_job_id.as_deref() == Some(session_key)
+            && !matches!(
+                job.status,
+                crate::worker_runtime::WorkerJobStatus::Succeeded
+                    | crate::worker_runtime::WorkerJobStatus::Failed
+                    | crate::worker_runtime::WorkerJobStatus::Cancelled
+            )
+    }) else {
+        return false;
+    };
+    worker
+        .cancel_request(&job.request_id, session_key)
+        .await
+        .unwrap_or(false)
 }
 
 pub(crate) async fn auth_status(

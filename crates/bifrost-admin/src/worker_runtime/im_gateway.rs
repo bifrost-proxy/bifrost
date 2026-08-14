@@ -182,7 +182,10 @@ async fn request_provider(
     worker
         .request_with_id(
             uuid::Uuid::new_v4().to_string(),
-            Some(provider_id.to_string()),
+            Some(format!(
+                "provider:{}",
+                &blake3::hash(provider_id.as_bytes()).to_hex()[..24]
+            )),
             operation,
             serde_json::to_value(ProviderRequest {
                 provider_id: provider_id.to_string(),
@@ -209,13 +212,14 @@ async fn reconcile_runtime(last_signature: &mut Option<String>) -> Result<(), St
         .clone()
         .ok_or_else(|| "IM Gateway worker controller endpoint is not configured".to_string())?;
     let changed = *last_signature != signature;
+    let broker = super::im_broker::ensure_main_broker().await?;
     let worker = if changed {
         global_worker_supervisor()
-            .restart(spawn_spec(&endpoint)?)
+            .restart(spawn_spec(&endpoint, &broker)?)
             .await?
     } else {
         global_worker_supervisor()
-            .get_or_start(spawn_spec(&endpoint)?)
+            .get_or_start(spawn_spec(&endpoint, &broker)?)
             .await?
     };
     *last_signature = signature;
@@ -241,8 +245,9 @@ async fn ensure_worker_from_controller() -> Result<Arc<ManagedWorker>, String> {
         .read()
         .clone()
         .ok_or_else(|| "IM Gateway worker controller endpoint is not configured".to_string())?;
+    let broker = super::im_broker::ensure_main_broker().await?;
     global_worker_supervisor()
-        .get_or_start(spawn_spec(&endpoint)?)
+        .get_or_start(spawn_spec(&endpoint, &broker)?)
         .await
 }
 
@@ -287,7 +292,10 @@ fn runtime_signature() -> Result<Option<String>, String> {
     Ok(Some(blake3::hash(&bytes).to_hex().to_string()))
 }
 
-fn spawn_spec(endpoint: &ControllerEndpoint) -> Result<WorkerSpawnSpec, String> {
+fn spawn_spec(
+    endpoint: &ControllerEndpoint,
+    broker: &super::im_broker::BrokerEndpoint,
+) -> Result<WorkerSpawnSpec, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("resolve IM Gateway worker executable: {error}"))?;
     let executable = labeled_worker_executable(&executable, "bifrost-im-gateway-worker");
@@ -310,6 +318,7 @@ fn spawn_spec(endpoint: &ControllerEndpoint) -> Result<WorkerSpawnSpec, String> 
     );
     spec.env
         .insert(IM_GATEWAY_WORKER_ENV.to_string(), "1".to_string());
+    super::im_broker::configure_worker_env(&mut spec, broker);
     spec.max_concurrency = 8;
     spec.startup_timeout = Duration::from_secs(20);
     spec.request_timeout = Duration::from_secs(WORKER_REQUEST_TIMEOUT_SECS);

@@ -43,7 +43,7 @@ pub(crate) struct RemoteExecutionEnvelope {
 }
 
 impl RemoteExecutionEnvelope {
-    fn from_command(command: &RemoteCommand) -> Self {
+    pub(crate) fn from_command(command: &RemoteCommand) -> Self {
         Self {
             command: command.clone(),
             grant_id: command.grant_id.clone(),
@@ -53,12 +53,32 @@ impl RemoteExecutionEnvelope {
         }
     }
 
-    fn into_command(mut self) -> RemoteCommand {
+    pub(crate) fn into_command(mut self) -> RemoteCommand {
         self.command.grant_id = self.grant_id;
         self.command.caller_fingerprint = self.caller_fingerprint;
         self.command.ssh_fingerprint = self.ssh_fingerprint;
         self.command.file_access = self.file_access;
         self.command
+    }
+
+    pub(crate) fn grant_id(&self) -> Option<&str> {
+        self.grant_id.as_deref()
+    }
+
+    pub(crate) fn caller_fingerprint(&self) -> Option<&str> {
+        self.caller_fingerprint.as_deref()
+    }
+
+    pub(crate) fn ssh_fingerprint(&self) -> Option<&str> {
+        self.ssh_fingerprint.as_deref()
+    }
+
+    pub(crate) fn file_access(&self) -> FileAccessScope {
+        self.file_access
+    }
+
+    pub(crate) fn command_kind(&self) -> crate::remote_invoke::types::CommandKind {
+        self.command.kind
     }
 }
 
@@ -88,15 +108,17 @@ struct ExecutionInputPayload {
 struct WorkerShutdownGuard {
     worker: Option<Arc<ManagedWorker>>,
     worker_key: String,
+    stderr_path: PathBuf,
 }
 
 impl WorkerShutdownGuard {
-    fn new(worker: Arc<ManagedWorker>) -> Self {
+    fn new(worker: Arc<ManagedWorker>, stderr_path: PathBuf) -> Self {
         let worker_key = worker.key().to_string();
         ACTIVE_EXECUTION_WORKERS.insert(worker_key.clone(), worker.clone());
         Self {
             worker: Some(worker),
             worker_key,
+            stderr_path,
         }
     }
 
@@ -112,10 +134,14 @@ impl Drop for WorkerShutdownGuard {
         let Some(worker) = self.worker.take() else {
             return;
         };
+        let stderr_path = self.stderr_path.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _ = worker.shutdown(Duration::from_secs(1)).await;
+                let _ = tokio::fs::remove_file(stderr_path).await;
             });
+        } else {
+            let _ = std::fs::remove_file(stderr_path);
         }
     }
 }
@@ -151,14 +177,12 @@ where
     Fut: Future<Output = BifrostResult<()>>,
 {
     let execution_id = uuid::Uuid::new_v4().to_string();
-    let worker = ManagedWorker::spawn(spawn_spec(
-        &execution_id,
-        admin_host,
-        admin_port,
-        command.timeout_ms,
-    )?)
-    .await?;
-    let mut shutdown_guard = WorkerShutdownGuard::new(worker.clone());
+    let spec = spawn_spec(&execution_id, admin_host, admin_port, command.timeout_ms)?;
+    let stderr_path = spec.stderr_path.clone().unwrap_or_else(|| {
+        remote_execution_runtime_root().join(format!("{execution_id}.stderr.log"))
+    });
+    let worker = ManagedWorker::spawn(spec).await?;
+    let mut shutdown_guard = WorkerShutdownGuard::new(worker.clone(), stderr_path.clone());
 
     worker
         .request(
@@ -231,6 +255,7 @@ where
     let response: RemoteInvokeResponse = serde_json::from_value(run_value)
         .map_err(|error| format!("parse remote execution response: {error}"))?;
     worker.shutdown(Duration::from_secs(3)).await?;
+    let _ = tokio::fs::remove_file(stderr_path).await;
     shutdown_guard.disarm();
     Ok(response)
 }
@@ -320,7 +345,9 @@ fn spawn_spec(
     spec.env_remove.extend([
         "BIFROST_REMOTE_SESSION_TOKEN".to_string(),
         "BIFROST_REMOTE_WORKER_HTTP_TOKEN".to_string(),
-        super::process::WORKER_STARTUP_TOKEN_ENV.to_string(),
+        super::remote_broker::BROKER_ADDR_ENV.to_string(),
+        super::remote_broker::BROKER_TOKEN_ENV.to_string(),
+        super::remote_broker::BROKER_RELAY_ENV.to_string(),
     ]);
     spec.max_concurrency = 8;
     spec.max_queue_depth = 64;

@@ -929,9 +929,6 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
     let mut task_store = load_tasks();
     let mut task_store_changed = false;
     for task in task_store.tasks.iter_mut() {
-        if task_is_running(&task.id) {
-            continue;
-        }
         // Daily Agent runs are in-process children of the previous daemon.
         // After startup, any persisted "running" child status is stale even if
         // an ASR task lock file still exists and is not yet considered stale.
@@ -946,6 +943,9 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
                 task.updated_at_ms = now_ms();
                 task_store_changed = true;
             }
+        }
+        if task_is_running(&task.id) {
+            continue;
         }
         let lock_path = task_run_lock_path(&task.id);
         let lock_exists = lock_path.exists();

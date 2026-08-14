@@ -64,7 +64,7 @@ async fn managed_asr_worker_starts_handles_request_and_shuts_down() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_execution_worker_streams_stdout_and_exits_cleanly() {
     let temp = tempfile::tempdir().expect("create remote execution test data dir");
-    let mut metadata = serde_json::json!({
+    let metadata = serde_json::json!({
         "exec_mode": "shell_text",
         "allowed_shell_patterns": ["^(?s:.*)$"],
         "max_timeout_ms": 10_000

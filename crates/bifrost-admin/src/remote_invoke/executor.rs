@@ -308,16 +308,19 @@ impl RemoteInvokeExecutor {
         F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        if crate::worker_runtime::remote_execution::should_isolate_remote_execution() {
-            return crate::worker_runtime::remote_execution::execute_remote_command(
+        if crate::worker_runtime::remote_broker::broker_client_configured() {
+            return crate::worker_runtime::remote_broker::execute_via_main_broker(
                 command,
-                &self.admin_host,
-                self.admin_port,
                 stdin_rx,
                 &mut on_stdout,
             )
             .await
             .map_err(BifrostError::Config);
+        }
+        if crate::worker_runtime::remote_execution::should_isolate_remote_execution() {
+            return Err(BifrostError::Config(
+                "Remote Invoke worker execution broker is not configured".to_string(),
+            ));
         }
         // Auto-trigger keep-awake on every remote call (all kinds, including
         // read-only). Manager internally decides whether to acquire based

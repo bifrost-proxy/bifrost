@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{sleep, timeout};
 
 use bifrost_agent::{PlanStep, PlanStepStatus};
@@ -74,6 +74,9 @@ static ACTIVE_SESSIONS: once_cell::sync::Lazy<dashmap::DashMap<String, String>> 
 static ACTIVE_WORKER_SESSIONS: once_cell::sync::Lazy<
     dashmap::DashMap<String, ExternalCliWorkerControlHandle>,
 > = once_cell::sync::Lazy::new(dashmap::DashMap::new);
+static QUEUED_WORKER_SESSIONS: once_cell::sync::Lazy<
+    dashmap::DashMap<String, QueuedExternalCliWorkerControl>,
+> = once_cell::sync::Lazy::new(dashmap::DashMap::new);
 static EXTERNAL_CLI_RUN_SEMAPHORE: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(external_cli_max_concurrency()));
 
@@ -81,6 +84,26 @@ static EXTERNAL_CLI_RUN_SEMAPHORE: once_cell::sync::Lazy<tokio::sync::Semaphore>
 struct ExternalCliWorkerControlHandle {
     pid: u32,
     control_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerControlRequest>,
+}
+
+#[derive(Clone)]
+struct QueuedExternalCliWorkerControl {
+    queue_id: String,
+    cancel_tx: watch::Sender<bool>,
+}
+
+struct QueuedExternalCliWorkerGuard {
+    session_key: Option<String>,
+    queue_id: String,
+}
+
+impl Drop for QueuedExternalCliWorkerGuard {
+    fn drop(&mut self) {
+        let Some(session_key) = self.session_key.as_deref() else {
+            return;
+        };
+        QUEUED_WORKER_SESSIONS.remove_if(session_key, |_, entry| entry.queue_id == self.queue_id);
+    }
 }
 
 enum ExternalCliWorkerControlRequest {
@@ -116,6 +139,10 @@ pub async fn request_worker_session_stop(session_key: &str) -> bool {
     let session_key = session_key.trim();
     if session_key.is_empty() {
         return false;
+    }
+    if let Some(queued) = QUEUED_WORKER_SESSIONS.get(session_key) {
+        let _ = queued.cancel_tx.send(true);
+        return true;
     }
     let Some((_, handle)) = ACTIVE_WORKER_SESSIONS.remove(session_key) else {
         return false;
@@ -1336,6 +1363,10 @@ impl ExternalCliWorkerRun {
 impl Drop for ExternalCliWorkerRun {
     fn drop(&mut self) {
         self.cleanup_request_file();
+        if let Some(pid) = self.child.id() {
+            let _ = terminate_process(pid);
+        }
+        let _ = self.child.start_kill();
     }
 }
 
@@ -1358,6 +1389,17 @@ impl ExternalCliRuntime {
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
+        if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+            if !crate::worker_runtime::im_broker::client_configured() {
+                return Err("IM Gateway worker Agent broker is not configured".to_string());
+            }
+            return crate::worker_runtime::im_broker::run_via_main_broker(
+                self.runs_root.clone(),
+                request,
+                progress_tx,
+            )
+            .await;
+        }
         let delegates_to_browser_worker = !cfg!(test)
             && request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID
             && crate::worker_runtime::worker_execution_enabled(
@@ -1467,13 +1509,41 @@ impl ExternalCliRuntime {
             let _ = request_worker_session_stop(session_key).await;
         }
         let queue_timeout_secs = external_cli_queue_timeout_secs();
-        let _run_permit = timeout(
-            Duration::from_secs(queue_timeout_secs),
-            EXTERNAL_CLI_RUN_SEMAPHORE.acquire(),
-        )
-        .await
-        .map_err(|_| format!("external CLI queue timed out after {queue_timeout_secs} seconds"))?
-        .map_err(|_| "external CLI concurrency semaphore is closed".to_string())?;
+        let queue_id = uuid::Uuid::new_v4().to_string();
+        let (queue_cancel_tx, mut queue_cancel_rx) = watch::channel(false);
+        let queue_guard = QueuedExternalCliWorkerGuard {
+            session_key: request.session_key.clone(),
+            queue_id: queue_id.clone(),
+        };
+        if let Some(session_key) = request.session_key.as_deref() {
+            QUEUED_WORKER_SESSIONS.insert(
+                session_key.to_string(),
+                QueuedExternalCliWorkerControl {
+                    queue_id,
+                    cancel_tx: queue_cancel_tx,
+                },
+            );
+        }
+        let acquire = EXTERNAL_CLI_RUN_SEMAPHORE.acquire();
+        tokio::pin!(acquire);
+        let queue_timeout = tokio::time::sleep(Duration::from_secs(queue_timeout_secs));
+        tokio::pin!(queue_timeout);
+        let _run_permit = tokio::select! {
+            result = &mut acquire => result
+                .map_err(|_| "external CLI concurrency semaphore is closed".to_string())?,
+            _ = &mut queue_timeout => {
+                return Err(format!(
+                    "external CLI queue timed out after {queue_timeout_secs} seconds"
+                ));
+            }
+            changed = queue_cancel_rx.changed() => {
+                if changed.is_ok() && *queue_cancel_rx.borrow() {
+                    return Err("external CLI run cancelled while queued".to_string());
+                }
+                return Err("external CLI queue cancellation channel closed".to_string());
+            }
+        };
+        drop(queue_guard);
         let worker_client = ExternalCliWorkerClient::current_exe()?;
         let mut worker = worker_client
             .spawn(self.runs_root.clone(), request.clone())

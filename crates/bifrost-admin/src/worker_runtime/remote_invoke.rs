@@ -51,11 +51,12 @@ pub struct RemoteInvokeTarget {
     pub session_token: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 struct DesiredRemoteState {
     targets: Vec<RemoteInvokeTarget>,
     admin_host: String,
     admin_port: u16,
+    state: Option<crate::state::SharedAdminState>,
 }
 
 struct RemoteWorkerClient {
@@ -81,6 +82,7 @@ pub fn configure_runtime_targets(
     targets: Vec<RemoteInvokeTarget>,
     admin_host: String,
     admin_port: u16,
+    state: crate::state::SharedAdminState,
 ) {
     if !super::worker_execution_enabled(WorkerKind::RemoteInvoke) {
         stop_runtime_controller();
@@ -105,6 +107,7 @@ pub fn configure_runtime_targets(
         targets: normalized,
         admin_host,
         admin_port,
+        state: Some(state),
     };
     CONTROLLER_STOPPING.store(false, Ordering::Release);
     controller_notify().notify_waiters();
@@ -296,6 +299,10 @@ async fn reconcile_runtime_targets() -> Result<(), String> {
         }
     }
 
+    let state = desired
+        .state
+        .clone()
+        .ok_or_else(|| "Remote Invoke main broker state is not configured".to_string())?;
     for target in &desired.targets {
         let fingerprint = target_fingerprint(target, &desired.admin_host, desired.admin_port)?;
         let existing = {
@@ -319,7 +326,14 @@ async fn reconcile_runtime_targets() -> Result<(), String> {
                 .stop(client.worker.key(), Duration::from_secs(10))
                 .await;
         }
-        match start_target_worker(target.clone(), &desired.admin_host, desired.admin_port).await {
+        match start_target_worker(
+            target.clone(),
+            &desired.admin_host,
+            desired.admin_port,
+            state.clone(),
+        )
+        .await
+        {
             Ok(client) => {
                 ACTIVE_CLIENTS
                     .write()
@@ -347,10 +361,13 @@ async fn start_target_worker(
     target: RemoteInvokeTarget,
     admin_host: &str,
     admin_port: u16,
+    state: crate::state::SharedAdminState,
 ) -> Result<RemoteWorkerClient, String> {
     let http_token = uuid::Uuid::new_v4().to_string();
     let fingerprint = target_fingerprint(&target, admin_host, admin_port)?;
-    let spec = spawn_spec(&target, admin_host, admin_port, &http_token)?;
+    let broker =
+        super::remote_broker::ensure_main_broker(state, admin_host.to_string(), admin_port).await?;
+    let spec = spawn_spec(&target, admin_host, admin_port, &http_token, &broker)?;
     let worker = global_worker_supervisor().get_or_start(spec).await?;
     let value = worker
         .request(
@@ -374,6 +391,7 @@ fn spawn_spec(
     admin_host: &str,
     admin_port: u16,
     http_token: &str,
+    broker: &super::remote_broker::BrokerEndpoint,
 ) -> Result<WorkerSpawnSpec, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("resolve Remote Invoke worker executable: {error}"))?;
@@ -405,6 +423,7 @@ fn spawn_spec(
     );
     spec.env
         .insert(REMOTE_HTTP_TOKEN_ENV.to_string(), http_token.to_string());
+    super::remote_broker::configure_worker_env(&mut spec, broker, &target.relay_url);
     spec.max_concurrency = 16;
     spec.startup_timeout = Duration::from_secs(20);
     spec.request_timeout = Duration::from_secs(120);

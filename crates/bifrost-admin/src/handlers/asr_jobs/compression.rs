@@ -912,9 +912,11 @@ fn cancel_source_compression(task_id: &str) -> Option<SourceAudioCompressionStat
         && !crate::worker_runtime::asr::is_asr_worker_process()
     {
         let task_id = task_id.to_string();
-        tokio::spawn(async move {
-            crate::worker_runtime::asr::stop_source_compression(&task_id).await;
-        });
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                crate::worker_runtime::asr::stop_source_compression(&task_id).await;
+            });
+        }
     }
     update_source_compression_state(task_id, |state| {
         state.status = SourceAudioCompressionStatus::Cancelling;

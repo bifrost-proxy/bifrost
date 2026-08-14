@@ -494,6 +494,7 @@ async fn reconcile_remote_invoke_workers(state: &SharedAdminState) {
             isolated_targets,
             admin_host,
             admin_port,
+            state.clone(),
         );
         state.stop_remote_invoke_workers_except(&[]);
         info!(

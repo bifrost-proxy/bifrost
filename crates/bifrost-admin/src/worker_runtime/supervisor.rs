@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -93,6 +93,7 @@ impl WorkerRecord {
 #[derive(Default)]
 pub struct WorkerSupervisor {
     workers: RwLock<HashMap<String, Arc<Mutex<WorkerRecord>>>>,
+    suspended_kinds: RwLock<HashSet<WorkerKind>>,
 }
 pub type SharedWorkerSupervisor = Arc<WorkerSupervisor>;
 static GLOBAL: OnceLock<SharedWorkerSupervisor> = OnceLock::new();
@@ -112,6 +113,12 @@ impl WorkerSupervisor {
         worker.is_healthy().await.then_some(worker)
     }
     pub async fn get_or_start(&self, spec: WorkerSpawnSpec) -> Result<Arc<ManagedWorker>, String> {
+        if self.is_kind_suspended(spec.kind) {
+            return Err(format!(
+                "{} workers are manually stopped; start or restart the worker kind to resume",
+                spec.kind.as_str()
+            ));
+        }
         let record = self
             .workers
             .write()
@@ -183,6 +190,7 @@ impl WorkerSupervisor {
         }
     }
     pub async fn start_kind(&self, kind: WorkerKind) -> Vec<(String, Result<(), String>)> {
+        self.resume_kind(kind);
         let specs = self.specs_for_kind(kind).await;
         let mut results = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -210,6 +218,7 @@ impl WorkerSupervisor {
     }
 
     pub async fn restart_kind(&self, kind: WorkerKind) -> Vec<(String, Result<(), String>)> {
+        self.resume_kind(kind);
         let specs = self.specs_for_kind(kind).await;
         let mut results = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -275,6 +284,19 @@ impl WorkerSupervisor {
             }
         }
         true
+    }
+
+    pub fn is_kind_suspended(&self, kind: WorkerKind) -> bool {
+        self.suspended_kinds.read().contains(&kind)
+    }
+
+    pub fn resume_kind(&self, kind: WorkerKind) {
+        self.suspended_kinds.write().remove(&kind);
+    }
+
+    pub async fn suspend_kind(&self, kind: WorkerKind, grace: Duration) -> usize {
+        self.suspended_kinds.write().insert(kind);
+        self.stop_kind(kind, grace).await
     }
 
     pub async fn stop_kind(&self, kind: WorkerKind, grace: Duration) -> usize {
@@ -363,6 +385,17 @@ mod tests {
         let supervisor = WorkerSupervisor::new();
         assert!(supervisor.snapshots().await.is_empty());
     }
+    #[tokio::test]
+    async fn suspended_kind_rejects_lazy_restart_until_resumed() {
+        let supervisor = WorkerSupervisor::new();
+        supervisor
+            .suspend_kind(WorkerKind::Browser, Duration::ZERO)
+            .await;
+        assert!(supervisor.is_kind_suspended(WorkerKind::Browser));
+        supervisor.resume_kind(WorkerKind::Browser);
+        assert!(!supervisor.is_kind_suspended(WorkerKind::Browser));
+    }
+
     #[test]
     fn repeated_failure_opens_circuit() {
         let mut record = WorkerRecord::new(WorkerKind::Browser);
