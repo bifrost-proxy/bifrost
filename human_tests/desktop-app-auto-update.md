@@ -823,6 +823,7 @@ bifrost app uninstall
 
 | 日期 | 用例 | 执行命令 / 证据 | 结果 |
 | --- | --- | --- | --- |
+| 2026-08-15 | TC-DAU-04G2 alpha.8 干净安装基线 | Parallels Windows 11 ARM64 VM：SYSTEM/HKCU 双阶段清理返回 `system_msi_entries=0`、`all_uninstall_entries=0`、进程与残留目录均为 0；Release run `31815005722` 的 ARM64 CLI/MSI workflow artifacts 通过 SHA-256 校验后安装；CLI=`bifrost 0.0.181-alpha.8`，Desktop ProductVersion=`0.0.181-10008`，MSI DisplayVersion=`0.0.181.10008`，唯一 ProductCode=`{581E598F-99BD-4700-BA49-57EB820C7290}` | BASELINE PASS：已从彻底清理状态安装首个同时包含 channel discovery 与 staged-target handoff 的 alpha；等待发布 alpha.9 后执行默认 `bifrost upgrade -y` 完成相邻版本验证 |
 | 2026-07-05 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | 待复测：本轮新增 04C，验证已安装桌面端等于目标版本时跳过下载和重装 |
 | 2026-07-05 | TC-DAU-05 | `cargo test -p bifrost-admin handlers::system::tests --lib` | PASS：7/7 通过，覆盖 desktop alias、spawn args、CLI install 临时目录与 skip skills |
 | 2026-07-05 | TC-DAU-06 | `pnpm --dir web run test:unit -- src/stores/useVersionStore.test.ts` + 代码 review | PASS：Vitest 22 files / 93 tests 通过；新增 desktop shell 单测确认 `checkVersion/startUpgrade` 使用 `desktop` channel，代码确认桌面缓存窗口为 6 小时，非桌面仍使用 `cli` channel；桌面安装按钮位于 `desktopMode` 分支 |
