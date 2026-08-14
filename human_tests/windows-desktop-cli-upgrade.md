@@ -45,7 +45,27 @@
 - 不继续执行 60 秒高频版本探测，不误报 `installed CLI version verification timed out`。
 - 可恢复时旧 CLI 从 backup 恢复，日志记录恢复结果。
 
+## TC-WDU-04：GitHub API 限流时保持 alpha 相邻版本发现
+
+1. 完整卸载 Windows 上的 CLI、Desktop 与 MSI 注册，清理升级残留后安装
+   `v0.0.181-alpha.10` ARM64 CLI/MSI。
+2. 确认 GitHub Releases API 返回 403 rate limit，同时公开 Releases HTML 可访问。
+3. 不设置任何测试版覆盖环境变量，直接由 alpha.10 执行 `bifrost upgrade -y`。
+4. 等待更新到相邻发布的 `v0.0.181-alpha.11`，检查 CLI、Desktop、运行中 core、
+   MSI 注册和升级临时文件。
+
+预期：
+
+- prerelease API 失败时通过公开 Releases HTML 发现同名 alpha channel 的下一版本。
+- `alpha.10` 的语义版本排序高于 `alpha.9`，不会被稳定版或 beta/rc 串台。
+- CLI、Desktop 与运行中 core 均为 alpha.11；MSI 注册恰好一个。
+- 不残留 pending、backup、helper 脚本、args、ready、status 或 log 临时文件。
+- helper 等待的是原 updater PID，更新期间没有版本探测风暴或可见终端窗口。
+
 ## 执行记录
 
 - 2026-08-14：已在 Windows 11 ARM64 VM 使用 0.0.179 复现 issue #494。Desktop 在 deferred helper 替换 CLI 前约 60 秒内启动约 312 次 `bifrost.exe --version` 并高频创建 `conhost.exe`，helper 删除目标 exe 时返回 Access Denied，留下 pending 与 backup。
-- 修复后结果：待 `v0.0.181-alpha.1` ARM64 CLI/MSI 资产发布后补录 TC-WDU-01～03 的版本、helper 日志、进程统计及残留文件检查结果。
+- 2026-08-15：`alpha.8` 已验证 stable/alpha channel 隔离；Windows VM 上 GitHub Releases
+  API 返回 403，暴露 prerelease discovery 缺少公开 HTML fallback。`alpha.10` 已包含 fallback
+  与 Desktop 防降级，待其 ARM64 CLI/MSI 发布后以干净安装为基线，通过默认命令更新到
+  相邻 `alpha.11`，补录 TC-WDU-04 的版本、helper 日志、进程统计及残留检查结果。
