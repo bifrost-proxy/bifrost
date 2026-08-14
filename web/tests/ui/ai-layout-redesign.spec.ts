@@ -1,31 +1,35 @@
 import { expect, test, type Page } from "@playwright/test";
 import { openPage } from "./helpers/admin-helpers";
 
-async function routeAiLayoutApis(page: Page) {
-  const imProviders = [
-    {
-      id: "feishu-main",
-      provider_type: "feishu",
-      display_name: "Feishu Main",
-      app_id: "cli_a1234567890",
-      secret_configured: true,
-      owner_open_id: "ou_mock_owner",
-      enabled: true,
-      event_connection_enabled: true,
-      agent_config: { runner: "codex", work_dir: "/tmp/default-agent" },
-    },
-    {
-      id: "weixin-main",
-      provider_type: "weixin",
-      display_name: "Weixin Main",
-      app_id: "wx_a1234567890",
-      secret_configured: false,
-      owner_open_id: "",
-      enabled: false,
-      event_connection_enabled: false,
-      agent_config: { runner: "claude_runner" },
-    },
-  ];
+const runItems = [
+  {
+    session_key: "run-newer",
+    status: "running",
+    title: "Summarize weekly project progress",
+    runner_id: "codex",
+    duration_secs: 95,
+    user_message_count: 4,
+    source: "feishu",
+    start_time: 1_800_000_200,
+  },
+  {
+    session_key: "run-older",
+    status: "completed",
+    title: "Generate release summary",
+    runner_id: "claude",
+    duration_secs: 300,
+    user_message_count: 2,
+    source: "web",
+    start_time: 1_800_000_100,
+  },
+];
+
+async function routeAiHubApis(page: Page, requestedPaths: string[]) {
+  page.on("request", (request) => {
+    if (request.url().includes("/api/im-gateway/agent/")) {
+      requestedPaths.push(new URL(request.url()).pathname);
+    }
+  });
   await page.route("**/_bifrost/api/asr/capabilities", async (route) => {
     await route.fulfill({
       status: 200,
@@ -35,62 +39,79 @@ async function routeAiLayoutApis(page: Page) {
         arch: "aarch64",
         supported_target: "macos-aarch64",
         qwen3_asr: { enabled: true, hidden: false, platform_supported: true },
+        local_transcription: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        speech_workbench: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        directory_tasks: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        speaker_diarization: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        voiceprint: { enabled: true, hidden: false, platform_supported: true },
+        voice_wake_asr: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
       }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/events**", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "text/event-stream",
-      body: 'retry: 60000\nevent: connected\ndata: {"eventType":"connected"}\n\n',
-    });
-  });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+  await page.route("**/_bifrost/api/asr/tasks", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        sessions: [
-          {
-            session_key: "history-thread-1",
-            status: "ended",
-            running: false,
-            title: "Existing thread",
-            source: "admin-api",
-            runner_type: "codex",
-            runner_id: "codex",
-            work_dir: "/tmp/workspace",
-            start_time: 1_779_700_000,
-            last_active_time: 1_779_700_100,
-            duration_secs: 100,
-          },
+        tasks: [
+          { id: "task-1", name: "会议录音", summary: { running: true } },
+          { id: "task-2", name: "访谈", summary: { running: false } },
         ],
       }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/history-thread-1", async (route) => {
+  await page.route(
+    "**/_bifrost/api/im-gateway/providers/*/status",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "connected", reconnect_count: 0 }),
+      });
+    },
+  );
+  await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({
-        session_key: "history-thread-1",
-        title: "Existing thread",
-        source: "admin-api",
-        runner_type: "codex",
-        runner_id: "codex",
-        work_dir: "/tmp/workspace",
-        messages: [
-          { role: "user", content: "Existing prompt" },
-          { role: "assistant", content: "Existing answer" },
-        ],
-      }),
-    });
-  });
-  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ work_dir: "/tmp/default-agent-workspace" }),
+      body: JSON.stringify([
+        {
+          id: "feishu-main",
+          provider_type: "feishu",
+          display_name: "飞书主通道",
+          enabled: true,
+          event_connection_enabled: true,
+          event_types: [],
+        },
+        {
+          id: "weixin-main",
+          provider_type: "weixin",
+          display_name: "微信通道",
+          enabled: false,
+          event_connection_enabled: false,
+          event_types: [],
+        },
+      ]),
     });
   });
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
@@ -101,399 +122,223 @@ async function routeAiLayoutApis(page: Page) {
         version: 1,
         defaultRunnerId: "codex",
         runners: {
-          codex: { enabled: true, adapter: "codex" },
-          claude_runner: { enabled: true, adapter: "claude_code" },
-          traex_runner: { enabled: true, adapter: "traex" },
+          codex: { enabled: true, adapter: "codex", adapterConfig: {} },
+          claude: { enabled: true, adapter: "claude_code", adapterConfig: {} },
         },
         channels: {},
       }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
-    const body = route.request().postDataJSON() as Record<string, unknown>;
-    expect(body.runnerId).toBe("claude_runner");
-    expect(body.message).toBe("Summarize current workspace status");
-    await route.fulfill({
-      status: 200,
-      contentType: "application/x-ndjson",
-      body:
-        '{"eventType":"run_started"}\n' +
-        '{"eventType":"title_updated","title":"Workspace summary"}\n' +
-        '{"eventType":"run_finished","response":"Summary complete"}\n',
-    });
-  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/session-summaries**",
+    async (route) => {
+      const url = new URL(route.request().url());
+      const status = url.searchParams.get("status");
+      const filtered = status
+        ? runItems.filter((item) => item.status === status)
+        : runItems;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items:
+            url.searchParams.get("limit") === "1"
+              ? filtered.slice(0, 1)
+              : filtered,
+          summary: {
+            running_count: filtered.filter((item) => item.status === "running")
+              .length,
+            total_count: filtered.length,
+            active_runners: filtered.some((item) => item.status === "running")
+              ? [{ runner_id: "codex", count: 1 }]
+              : [],
+          },
+          next_cursor: null,
+          updated_at: 1_800_000_300,
+        }),
+      });
+    },
+  );
   await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({
-        work_dir: "/tmp/default-agent",
-        model_providers: {},
-        mcp_servers: {},
-      }),
+      body: JSON.stringify({ work_dir: "/tmp/agent", history: {} }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/providers/*/status", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ state: "disconnected", reconnect_count: 0 }),
-    });
-  });
-  await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(imProviders),
-    });
-  });
-  for (const path of ["targets", "routes", "schedules", "history/events", "history/runs"]) {
-    await page.route(`**/_bifrost/api/im-gateway/${path}`, async (route) => {
-      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-    });
-  }
-}
-
-async function expectCenteredTrack(
-  page: Page,
-  contentTestId: string,
-  trackTestId: string,
-  expectedTopGap = 24,
-  expectedMaxWidth = 1120,
-) {
-  const contentBox = await page.getByTestId(contentTestId).boundingBox();
-  const trackBox = await page.getByTestId(trackTestId).boundingBox();
-  expect(contentBox).not.toBeNull();
-  expect(trackBox).not.toBeNull();
-  expect(trackBox!.width).toBeLessThanOrEqual(expectedMaxWidth + 1);
-  expect(trackBox!.width).toBeLessThanOrEqual(contentBox!.width);
-  expect(Math.round(trackBox!.y - contentBox!.y)).toBe(expectedTopGap);
-  const leftGap = trackBox!.x - contentBox!.x;
-  const rightGap = contentBox!.x + contentBox!.width - (trackBox!.x + trackBox!.width);
-  expect(Math.abs(leftGap - rightGap)).toBeLessThanOrEqual(2);
-}
-
-async function expectWorkbenchTrack(
-  page: Page,
-  contentTestId: string,
-  trackTestId: string,
-) {
-  const contentBox = await page.getByTestId(contentTestId).boundingBox();
-  const trackBox = await page.getByTestId(trackTestId).boundingBox();
-  expect(contentBox).not.toBeNull();
-  expect(trackBox).not.toBeNull();
-  await expectCenteredTrack(page, contentTestId, trackTestId, 24, 920);
-  expect(trackBox!.width).toBeLessThan(contentBox!.width - 40);
 }
 
 test.beforeEach(async ({ page }) => {
-  await routeAiLayoutApis(page);
+  await routeAiHubApis(page, []);
 });
 
-test("AI layout defaults to new chat with centered composer and runner picker", async ({ page }) => {
-  await openPage(page, "ai");
-
-  await expect(page.getByTestId("ai-nav-new-chat")).toHaveAttribute("aria-current", "true");
-  await expect(page.getByTestId("agent-chat-new-inline-header")).toContainText("How can Bifrost help?");
-  await expect(page.getByTestId("agent-chat-thread-list")).toBeVisible();
-  await expect(page.locator('[data-testid="agent-chat-thread-item"][data-selected="true"]')).toHaveCount(0);
-  const landing = page.getByTestId("ai-new-chat-landing");
-  await expect(landing.getByTestId("agent-chat-inline-runner")).toContainText("Codex Runner");
-
-  const sidebarBox = await page.getByTestId("ai-section-nav").boundingBox();
-  expect(sidebarBox?.width).toBeGreaterThanOrEqual(210);
-  expect(sidebarBox?.width).toBeLessThanOrEqual(230);
-  const landingBox = await landing.boundingBox();
-  expect(landingBox?.width).toBeGreaterThan(500);
-  const inputPill = landing.getByTestId("agent-chat-new-input-pill");
-  const inputPillBox = await inputPill.boundingBox();
-  expect(inputPillBox?.height).toBeGreaterThanOrEqual(110);
-  expect(inputPillBox?.height).toBeLessThanOrEqual(140);
-  const composerRadius = await landing.getByTestId("agent-chat-new-input-pill").evaluate((element) => {
-    return window.getComputedStyle(element).borderRadius;
-  });
-  expect(Number.parseFloat(composerRadius)).toBeGreaterThanOrEqual(16);
-
-  const inputBox = await landing.getByTestId("agent-chat-input").boundingBox();
-  const toolbarBox = await landing.getByTestId("agent-chat-new-toolbar").boundingBox();
-  const runnerBox = await landing.getByTestId("agent-chat-new-runner-row").boundingBox();
-  const sendBox = await landing.getByTestId("agent-chat-send").boundingBox();
-  expect(inputBox).not.toBeNull();
-  expect(toolbarBox).not.toBeNull();
-  expect(runnerBox).not.toBeNull();
-  expect(sendBox).not.toBeNull();
-  expect(inputBox!.y + inputBox!.height).toBeLessThanOrEqual(toolbarBox!.y + 4);
-  expect(runnerBox!.y).toBeGreaterThanOrEqual(toolbarBox!.y - 1);
-  expect(sendBox!.y).toBeGreaterThanOrEqual(toolbarBox!.y - 1);
-  expect(sendBox!.y + sendBox!.height).toBeLessThanOrEqual(toolbarBox!.y + toolbarBox!.height + 1);
-
-  await landing.getByTestId("agent-chat-inline-runner").click();
-  const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last();
-  await expect(dropdown.getByText("Codex Runner", { exact: true })).toBeVisible();
-  await expect(dropdown.getByText("Claude Code", { exact: true })).toBeVisible();
-  await dropdown.getByText("Claude Code", { exact: true }).click();
-
-  await landing.getByTestId("agent-chat-input").fill("Summarize current workspace status");
-  await landing.getByTestId("agent-chat-send").click();
-  await expect(page.getByTestId("agent-chat-messages")).toContainText("Summary complete");
-  await expect(page).toHaveURL(/session=admin-chat-/);
-  await expect(page).not.toHaveURL(/mode=new/);
-});
-
-test("AI left rail switches ASR, IM, Settings, and history threads", async ({ page }) => {
-  await openPage(page, "ai");
-
-  await expect(page.getByTestId("ai-nav-tools-videos")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Videos", exact: true })).toHaveCount(0);
-
-  const existingThread = page.getByTestId("agent-chat-thread-item").filter({ hasText: "Existing thread" });
-  const beforeSelectBox = await existingThread.boundingBox();
-  expect(beforeSelectBox).not.toBeNull();
-  expect(beforeSelectBox!.height).toBeGreaterThanOrEqual(35);
-  expect(beforeSelectBox!.height).toBeLessThanOrEqual(37);
-
-  await existingThread.click();
-  await expect(page.getByTestId("ai-nav-new-chat")).not.toHaveAttribute("aria-current", "true");
-  await expect(page.getByTestId("agent-chat-messages")).toContainText("Existing answer");
-  const afterSelectBox = await existingThread.boundingBox();
-  expect(afterSelectBox).not.toBeNull();
-  expect(afterSelectBox!.height).toBe(beforeSelectBox!.height);
-
-  const contentBox = await page.getByTestId("ai-section-content").boundingBox();
-  const chatTitleBox = await page.getByTestId("agent-chat-title").boundingBox();
-  const composerBox = await page.getByTestId("agent-chat-composer-track").boundingBox();
-  const messageTrackBox = await page.getByTestId("agent-chat-message-track").boundingBox();
-  expect(contentBox).not.toBeNull();
-  expect(chatTitleBox).not.toBeNull();
-  expect(composerBox).not.toBeNull();
-  expect(messageTrackBox).not.toBeNull();
-  expect(Math.round(chatTitleBox!.y - contentBox!.y)).toBeGreaterThanOrEqual(24);
-  expect(Math.round(messageTrackBox!.y - contentBox!.y)).toBeGreaterThan(24);
-  expect(composerBox!.width).toBeGreaterThan(Math.min(940, contentBox!.width - 80));
-
-  await page.getByTestId("ai-nav-new-chat").click();
-  await expect(page.getByTestId("agent-chat-new-inline-header")).toContainText("How can Bifrost help?");
-
-  await page.getByTestId("ai-nav-tools-asr").click();
-  await expect(page).toHaveURL(/view=asr/);
-  await expect(page.getByTestId("ai-nav-tools-asr")).toHaveAttribute("aria-current", "true");
-  await expectWorkbenchTrack(page, "ai-asr-content", "ai-asr-track");
-
-  await page.getByTestId("ai-nav-im").click();
-  await expect(page).toHaveURL(/view=im/);
-  await expect(page.getByTestId("ai-nav-im")).toHaveAttribute("aria-current", "true");
-  await expectWorkbenchTrack(page, "ai-im-content", "ai-im-track");
-  await expect(page.getByTestId("settings-im-card-grid")).toBeVisible();
-  await expect(page.getByTestId("settings-im-provider-card-feishu-main")).toBeVisible();
-  await expect(page.getByTestId("settings-im-provider-card-weixin-main")).toBeVisible();
-  const imGridDisplay = await page.getByTestId("settings-im-card-grid").evaluate((element) => {
-    return window.getComputedStyle(element).display;
-  });
-  expect(imGridDisplay).toBe("grid");
-
-  await page.getByTestId("ai-nav-settings").click();
-  await expect(page).toHaveURL(/view=settings/);
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-  await expect(page.getByTestId("ai-nav-settings")).toHaveAttribute("aria-current", "true");
-  await expect(page.getByRole("tab")).toHaveCount(3);
-  await expect(page.getByRole("tab", { name: "Agent" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("tab", { name: "Runner" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "IM" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Chat" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Back" })).toHaveCount(0);
-  await expect(page.getByText("Session Detail")).toHaveCount(0);
-  await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-model")).toHaveCount(0);
-  await expect(page.getByTestId("agent-settings-section-runtime")).toHaveCount(0);
-  await expect(page.getByTestId("agent-settings-section-mcp-servers")).toHaveCount(0);
-  await expect(page.getByTestId("agent-settings-section-runners")).toHaveCount(0);
-  await expectCenteredTrack(page, "ai-settings-content", "ai-settings-track");
-
-  await page.getByRole("tab", { name: "Runner" }).click();
-  await expect(page).toHaveURL(/settings=agent/);
-  await expect(page).toHaveURL(/agentSection=runners/);
-  await expect(page.getByTestId("agent-settings-section-runners")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-general")).toHaveCount(0);
-
-  await page.getByRole("tab", { name: "IM" }).click();
-  await expect(page).toHaveURL(/imGatewaySection=targets/);
-  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
-  await expect(page.getByTestId("settings-im-card-grid")).toHaveCount(0);
-  await expect(page.getByTestId("im-gateway-section-targets")).toBeVisible();
-  await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
-  await expect(page.getByTestId("im-gateway-section-schedules")).toBeVisible();
-  await expect(page.getByTestId("im-gateway-section-history")).toBeVisible();
-});
-
-test("AI layout maps legacy links into the new shell", async ({ page }) => {
-  await openPage(page, "ai?aiSection=agent-model&agentSection=model");
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Agent" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
-
-  await openPage(page, "ai?settings=agent&agentSection=runners");
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Runner" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByTestId("agent-settings-section-runners")).toBeVisible();
-
-  await openPage(page, "ai?aiSection=tools-asr");
-  await expect(page.getByTestId("ai-nav-tools-asr")).toHaveAttribute("aria-current", "true");
-
-  await openPage(page, "ai?aiSection=im-gateway-routes&imGatewaySection=routes");
-  await expect(page.getByTestId("ai-nav-im")).toHaveAttribute("aria-current", "true");
-  await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
-
-  await openPage(page, "ai?view=settings&settings=im&imGatewaySection=connections");
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-  await expect(page).toHaveURL(/imGatewaySection=targets/);
-  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
-  await expect(page.getByTestId("im-gateway-section-targets")).toBeVisible();
-});
-
-test("AI removes Videos navigation and retires old Videos routes in both themes", async ({
+test("AI home presents four stable module cards with operational summaries", async ({
   page,
 }) => {
+  await openPage(page, "ai");
+
+  const hub = page.getByTestId("ai-module-hub");
+  await expect(hub).toBeVisible();
+  await expect(page.getByTestId("ai-module-card-asr")).toContainText("2");
+  await expect(page.getByTestId("ai-module-card-asr")).toContainText("1");
+  await expect(page.getByTestId("ai-module-card-channels")).toContainText(
+    "Connected",
+  );
+  await expect(page.getByTestId("ai-module-card-agents")).toContainText(
+    "codex",
+  );
+  await expect(page.getByTestId("ai-module-card-runs")).toContainText("2");
+  await expect(page.getByTestId("ai-module-card-runs")).toContainText(
+    "codex × 1",
+  );
+  await expect(page.getByText("New Chat", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Threads", { exact: true })).toHaveCount(0);
+
+  const first = await page.getByTestId("ai-module-card-asr").boundingBox();
+  const second = await page
+    .getByTestId("ai-module-card-channels")
+    .boundingBox();
+  const third = await page.getByTestId("ai-module-card-agents").boundingBox();
+  expect(first).not.toBeNull();
+  expect(second).not.toBeNull();
+  expect(third).not.toBeNull();
+  expect(Math.abs(first!.y - second!.y)).toBeLessThanOrEqual(2);
+  expect(third!.y).toBeGreaterThan(first!.y + first!.height);
+});
+
+test("module details use dedicated routes and always return to AI home", async ({
+  page,
+}) => {
+  for (const [card, path, title] of [
+    ["ai-module-card-asr", "asr", "ASR"],
+    ["ai-module-card-channels", "channels", "IM Channels"],
+    ["ai-module-card-agents", "agents", "Agent Configuration"],
+    ["ai-module-card-runs", "runs", "Agent Runs"],
+  ]) {
+    await openPage(page, "ai");
+    const hubBounds = await page.getByTestId("ai-hub-content").boundingBox();
+    await page.getByTestId(card).click();
+    await expect(page).toHaveURL(new RegExp(`/_bifrost/ai/${path}`));
+    await expect(
+      page.getByRole("heading", { name: title, exact: true }),
+    ).toBeVisible();
+    const headerBounds = await page
+      .getByTestId("ai-detail-content")
+      .boundingBox();
+    const bodyBounds = await page.getByTestId("ai-detail-body").boundingBox();
+    expect(hubBounds).not.toBeNull();
+    expect(headerBounds).not.toBeNull();
+    expect(bodyBounds).not.toBeNull();
+    expect(
+      Math.abs(headerBounds!.width - hubBounds!.width),
+    ).toBeLessThanOrEqual(2);
+    expect(Math.abs(bodyBounds!.width - hubBounds!.width)).toBeLessThanOrEqual(
+      2,
+    );
+    expect(Math.abs(headerBounds!.x - hubBounds!.x)).toBeLessThanOrEqual(2);
+    expect(Math.abs(bodyBounds!.x - hubBounds!.x)).toBeLessThanOrEqual(2);
+    await page.getByTestId("ai-home-link").click();
+    await expect(page).toHaveURL(/\/_bifrost\/ai$/);
+    await expect(page.getByTestId("ai-module-hub")).toBeVisible();
+  }
+});
+
+test("run records are newest-first summaries without drilldown or detail requests", async ({
+  page,
+}) => {
+  const requestedPaths: string[] = [];
+  await page.unrouteAll({ behavior: "wait" });
+  await routeAiHubApis(page, requestedPaths);
+  await openPage(page, "ai/runs");
+
+  const table = page.getByTestId("agent-run-summary-table");
+  await expect(table).toContainText("Summarize weekly project progress");
+  await expect(table).toContainText("Generate release summary");
+  await expect(table).toContainText("codex");
+  await expect(table).toContainText("4");
+  await expect(table).toContainText("Feishu");
+  const rows = table.locator("tbody tr");
+  await expect(rows.nth(0)).toContainText("Summarize weekly project progress");
+  await expect(rows.nth(1)).toContainText("Generate release summary");
+  await expect(rows.locator("a")).toHaveCount(0);
+  await expect(page.getByText("消息正文", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("思考过程", { exact: true })).toHaveCount(0);
+
+  await page.locator('[aria-label="Run filters"] .ant-select').first().click();
+  await page
+    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .last()
+    .getByText("Running", { exact: true })
+    .click();
+  await expect(page).toHaveURL(/status=running/);
+  await expect(rows).toHaveCount(1);
+  expect(requestedPaths.some((path) => path.includes("/sessions/all"))).toBe(
+    false,
+  );
+  expect(
+    requestedPaths.some((path) => path.includes("/sessions/history")),
+  ).toBe(false);
+  expect(requestedPaths.some((path) => /\/sessions\/[^/]+$/.test(path))).toBe(
+    false,
+  );
+});
+
+test("mobile layout is single-column and uses non-interactive summary cards", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openPage(page, "ai");
+  const cards = [
+    page.getByTestId("ai-module-card-asr"),
+    page.getByTestId("ai-module-card-channels"),
+    page.getByTestId("ai-module-card-agents"),
+    page.getByTestId("ai-module-card-runs"),
+  ];
+  const boxes = await Promise.all(cards.map((card) => card.boundingBox()));
+  expect(boxes.every(Boolean)).toBe(true);
+  expect(boxes[1]!.y).toBeGreaterThan(boxes[0]!.y + boxes[0]!.height);
+
+  await openPage(page, "ai/runs");
+  await expect(page.getByTestId("agent-run-summary-list")).toBeVisible();
+  await expect(page.getByTestId("agent-run-summary-table")).toHaveCount(0);
+  await expect(page.getByTestId("agent-run-summary-list")).toContainText(
+    "Started",
+  );
+  await expect(
+    page.getByTestId("agent-run-summary-list").locator("a, button"),
+  ).toHaveCount(0);
+});
+
+test("AI hub follows both light and dark system themes", async ({ page }) => {
+  const backgrounds: string[] = [];
   for (const mode of ["light", "dark"] as const) {
     await page.addInitScript((themeMode) => {
-      localStorage.setItem(
+      window.localStorage.setItem(
         "bifrost-theme",
         JSON.stringify({ state: { mode: themeMode }, version: 0 }),
       );
     }, mode);
-    await openPage(page, "ai?view=videos");
-
-    await expect(page.locator("html")).toHaveAttribute("data-theme", mode);
-    await expect(page.getByTestId("ai-nav-tools-videos")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Videos", exact: true })).toHaveCount(0);
-    await expect(page.getByTestId("videos-tool-page")).toHaveCount(0);
-    await expect(page.getByTestId("ai-nav-new-chat")).toHaveAttribute("aria-current", "true");
-    await expect(page.getByTestId("ai-new-chat-landing")).toBeVisible();
-  }
-
-  await openPage(page, "ai?aiSection=tools-videos");
-  await expect(page.getByTestId("ai-nav-new-chat")).toHaveAttribute("aria-current", "true");
-  await expect(page.getByTestId("ai-new-chat-landing")).toBeVisible();
-  await expect(page.getByTestId("ai-videos-content")).toHaveCount(0);
-});
-
-test("AI Settings clears conversation route state and only shows configuration tabs", async ({ page }) => {
-  await openPage(page, "ai?view=settings&settings=agent&agentSection=chat&session=history-thread-1");
-
-  await expect(page).toHaveURL(/view=settings/);
-  await expect(page).not.toHaveURL(/session=history-thread-1/);
-  await expect(page).not.toHaveURL(/agentSection=chat/);
-  await expect(page).toHaveURL(/agentSection=general/);
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-  await expect(page.getByRole("tab")).toHaveCount(3);
-  await expect(page.getByRole("tab", { name: "Agent" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("tab", { name: "Chat" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Back" })).toHaveCount(0);
-  await expect(page.getByText("Session Detail")).toHaveCount(0);
-  await expect(page.getByText("Messages", { exact: true })).toHaveCount(0);
-
-  await openPage(page, "ai?view=chat&session=history-thread-1");
-  await expect(page.getByTestId("agent-chat-messages")).toContainText("Existing answer");
-
-  await page.getByTestId("ai-nav-settings").click();
-
-  await expect(page).toHaveURL(/view=settings/);
-  await expect(page).not.toHaveURL(/session=history-thread-1/);
-  await expect(page).not.toHaveURL(/historyPath=/);
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Agent" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("tab", { name: "Chat" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Back" })).toHaveCount(0);
-  await expect(page.getByText("Session Detail")).toHaveCount(0);
-  await expect(page.getByText("Messages", { exact: true })).toHaveCount(0);
-  await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-model")).toHaveCount(0);
-
-  await page.getByRole("tab", { name: "Runner" }).click();
-  await expect(page).toHaveURL(/settings=agent/);
-  await expect(page).toHaveURL(/agentSection=runners/);
-  await expect(page.getByTestId("agent-settings-section-runners")).toBeVisible();
-
-  await page.getByRole("tab", { name: "IM" }).click();
-  await expect(page).toHaveURL(/settings=im/);
-  await expect(page).toHaveURL(/imGatewaySection=targets/);
-  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
-  await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
-});
-
-test("AI Settings does not trap left rail navigation", async ({ page }) => {
-  await openPage(page, "ai?view=settings&settings=agent&agentSection=model");
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
-
-  await page.getByTestId("ai-nav-tools-asr").click();
-  await expect(page).toHaveURL(/view=asr/);
-  await expect(page).not.toHaveURL(/settings=/);
-  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
-  await expect(page.getByTestId("ai-nav-tools-asr")).toHaveAttribute("aria-current", "true");
-
-  await page.getByTestId("ai-nav-settings").click();
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-
-  await page.getByTestId("ai-nav-im").click();
-  await expect(page).toHaveURL(/view=im/);
-  await expect(page).not.toHaveURL(/settings=/);
-  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
-  await expect(page.getByTestId("ai-nav-im")).toHaveAttribute("aria-current", "true");
-
-  await page.getByTestId("ai-nav-settings").click();
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-
-  await page.getByTestId("ai-nav-new-chat").click();
-  await expect(page).toHaveURL(/view=chat/);
-  await expect(page).toHaveURL(/mode=new/);
-  await expect(page).not.toHaveURL(/settings=/);
-  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
-  await expect(page.getByTestId("agent-chat-new-inline-header")).toContainText("How can Bifrost help?");
-
-  await page.getByTestId("ai-nav-settings").click();
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-
-  await page.getByTestId("agent-chat-thread-item").filter({ hasText: "Existing thread" }).click();
-  await expect(page).toHaveURL(/view=chat/);
-  await expect(page).toHaveURL(/session=history-thread-1/);
-  await expect(page).not.toHaveURL(/settings=/);
-  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
-  await expect(page.getByTestId("agent-chat-messages")).toContainText("Existing answer");
-});
-
-test("AI chat session links open the existing conversation layout", async ({ page }) => {
-  await openPage(page, "ai?view=chat&session=history-thread-1");
-
-  await expect(page.getByTestId("ai-new-chat-landing")).toHaveCount(0);
-  await expect(page.getByTestId("ai-nav-new-chat")).not.toHaveAttribute("aria-current", "true");
-  await expect(page.getByTestId("agent-chat-messages")).toContainText("Existing answer");
-  await expect(page.getByTestId("agent-chat-composer-track")).toBeVisible();
-  await expect(page.getByTestId("agent-chat-settings-open")).toBeVisible();
-  await expect(page.getByTestId("agent-chat-new")).toHaveCount(0);
-  await expect(page.getByTestId("agent-chat-thread-item").filter({ hasText: "Existing thread" })).toHaveAttribute("data-selected", "true");
-});
-
-test("AI layout stays usable on narrow viewports", async ({ page }) => {
-  for (const viewport of [
-    { width: 768, height: 900 },
-    { width: 390, height: 844 },
-  ]) {
-    await page.setViewportSize(viewport);
     await openPage(page, "ai");
-
-    await expect(page.getByTestId("ai-nav-new-chat")).toBeVisible();
-    const landing = page.getByTestId("ai-new-chat-landing");
-    await expect(landing.getByTestId("agent-chat-input")).toBeVisible();
-    await expect(landing.getByTestId("agent-chat-inline-runner")).toBeVisible();
-    await landing.getByTestId("agent-chat-inline-runner").click();
-    await expect(page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last()).toBeVisible();
-    await page.keyboard.press("Escape");
-
-    const hasHorizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
-    expect(hasHorizontalOverflow).toBe(false);
-
-    await page.getByTestId("ai-nav-settings").click();
-    await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-    await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", mode);
+    const card = page.getByTestId("ai-module-card-asr");
+    backgrounds.push(
+      await card.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      ),
+    );
+    await expect(card).toBeVisible();
   }
+  expect(backgrounds[0]).not.toBe(backgrounds[1]);
+});
+
+test("legacy chat and detail links resolve to the summary-only run list", async ({
+  page,
+}) => {
+  await openPage(
+    page,
+    "ai?session=legacy-secret-session&historyPath=%2Ftmp%2Fsecret.jsonl",
+  );
+  await expect(page).toHaveURL(/\/_bifrost\/ai\/runs\?q=legacy-secret-session/);
+  await expect(page.getByTestId("agent-run-summaries")).toBeVisible();
+  await expect(page.getByTestId("agent-chat-messages")).toHaveCount(0);
 });

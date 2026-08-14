@@ -341,7 +341,7 @@ GET /api/im-gateway/agent/session-summaries?limit=30&cursor=...&status=...&runne
 
 ### 真实场景
 
-实现阶段属于用户可感知的主导航和运行记录行为变化，需要新增 `human_tests/ai-module-hub.md`，逐条真实执行首页入口、四详情返回、真实 session 摘要、无详情请求、窄屏和双主题用例。本设计阶段只产出方案和视觉稿，不修改运行时，因此不提前创建占位 human test。
+实现阶段属于用户可感知的主导航和运行记录行为变化，需要新增 `human_tests/webui-ai-module-hub.md`，逐条真实执行首页入口、四详情返回、真实 session 摘要、无详情请求、窄屏和双主题用例。
 
 ## 风险与待确认项
 
@@ -350,6 +350,11 @@ GET /api/im-gateway/agent/session-summaries?limit=30&cursor=...&status=...&runne
 - 旧 Chat 深链是否需要显示一次性的“详情已下线”提示，可以在实现阶段决定；默认建议只提示一次，不保留详情能力。
 - 运行失败状态若当前摘要源无法可靠区分 `失败/停止/完成`，第一版只显示 `运行中/已结束`，不要根据缺失详情猜测结果。
 
-## 本轮设计验证边界
+## 实现状态（2026-08-14）
 
-本轮只新增设计文档与 SVG 视觉稿，属于文档/流程与纯视觉方案变更。适用验证为 Markdown 结构、图片引用、SVG XML、设计规范一致性和两轮 review。Rust、前端编译、E2E、coverage、`human_tests/` 与仓库级 local CI 均不适用；这些在进入实现阶段后按实际生产代码影响面启用。
+- Phase 1–4 已落地：`/ai` 四卡首页、四个详情路由、统一返回导航、15 秒摘要刷新、窄屏布局和亮/暗主题均已实现。
+- 新增 `/api/im-gateway/agent/session-summaries`，服务端先做固定字段 projection 再响应；WebUI 不再调用 `sessions/all`、history 或单线程详情。
+- Agent 运行记录保持信息终点，无行点击、详情链接、overflow action 或写操作；旧 chat/session/historyPath 链接 replace 到摘要列表。
+- 旧 Agent Chat 浏览器规格已移除，由新的 `web/tests/ui/ai-layout-redesign.spec.ts` 覆盖当前产品信息架构；底层外部 Runner 与 IM session 基础设施保留。
+- AI 模块新增文案统一使用系统默认英文；首页、详情页头与详情内容区统一为 1120px 最大宽度并水平居中。
+- 真实场景记录位于 `human_tests/webui-ai-module-hub.md`。实现验证包含前端类型/单元/E2E、后端单元与白名单契约、Rust changed coverage 和远端 CI。

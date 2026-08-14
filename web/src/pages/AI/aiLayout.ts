@@ -1,90 +1,60 @@
-import { formatRunnerOptionLabel, type RunnerConfigPayload, type RunnerOption } from "./AgentChatSection.helpers";
+import {
+  formatRunnerOptionLabel,
+  type RunnerConfigPayload,
+  type RunnerOption,
+} from "./AgentChatSection.helpers";
 
-export type AiMainView = "chat" | "asr" | "im" | "settings";
-export type AiChatMode = "new" | "thread";
-export type AiSettingsTarget = "agent" | "im" | "chat" | null;
+export type AiModulePath =
+  | "/ai"
+  | "/ai/asr"
+  | "/ai/channels"
+  | "/ai/agents"
+  | "/ai/runs";
 
-export type AiRouteState = {
-  view: AiMainView;
-  chatMode: AiChatMode;
-  settings: AiSettingsTarget;
-  agentSection?: string;
-  imGatewaySection?: string;
-};
+const MODULE_PATHS = new Set<AiModulePath>([
+  "/ai",
+  "/ai/asr",
+  "/ai/channels",
+  "/ai/agents",
+  "/ai/runs",
+]);
 
-const MAIN_VIEWS = new Set<AiMainView>(["chat", "asr", "im", "settings"]);
-
-export function resolveAiRouteState(params: URLSearchParams): AiRouteState {
-  const legacyAiSection = params.get("aiSection");
-  const explicitView = params.get("view");
-  let view: AiMainView =
-    explicitView && MAIN_VIEWS.has(explicitView as AiMainView)
-      ? (explicitView as AiMainView)
-      : "chat";
-  let settings = normalizeSettingsTarget(params.get("settings"));
-  let agentSection = params.get("agentSection") || undefined;
-  let imGatewaySection = params.get("imGatewaySection") || undefined;
-
-  if (legacyAiSection) {
-    if (legacyAiSection === "tools-asr") {
-      view = "asr";
-    } else if (legacyAiSection.startsWith("im-gateway-")) {
-      view = "im";
-      imGatewaySection ||= legacyAiSection.slice("im-gateway-".length);
-    } else if (legacyAiSection.startsWith("agent-")) {
-      const legacyAgentSection = legacyAiSection.slice("agent-".length);
-      if (legacyAgentSection === "chat") {
-        view = "chat";
-      } else {
-        view = "settings";
-        settings = "agent";
-        agentSection ||= legacyAgentSection;
-      }
-    }
-  }
-
-  if (agentSection && !settings && legacyAiSection?.startsWith("agent-") && legacyAiSection !== "agent-chat") {
-    settings = "agent";
-  }
-  if (settings === "chat") {
-    settings = "agent";
-    agentSection = "general";
-  }
-  if (settings === "agent" && agentSection === "chat") {
-    agentSection = "general";
-  }
-  if (settings === "im" && (!imGatewaySection || imGatewaySection === "connections")) {
-    imGatewaySection = "targets";
-  }
-  const settingsOwnsRoute = !explicitView || explicitView === "settings";
-  if (settings && settingsOwnsRoute) {
-    view = "settings";
-  }
-  if (imGatewaySection && settings === "im" && settingsOwnsRoute) {
-    view = "settings";
-  }
-
-  const hasThreadTarget = Boolean(params.get("session") || params.get("historyPath"));
-  const legacyChatRoute = legacyAiSection === "agent-chat";
-  const chatMode: AiChatMode =
-    view === "chat" &&
-    !hasThreadTarget &&
-    (params.get("mode") === "new" || (!params.get("mode") && !legacyChatRoute))
-      ? "new"
-      : "thread";
-
-  return {
-    view,
-    chatMode,
-    settings,
-    agentSection,
-    imGatewaySection,
-  };
+export function normalizeAiModulePath(pathname: string): AiModulePath {
+  const normalized = pathname.replace(/\/+$/, "") || "/ai";
+  return MODULE_PATHS.has(normalized as AiModulePath)
+    ? (normalized as AiModulePath)
+    : "/ai";
 }
 
-function normalizeSettingsTarget(value: string | null): AiSettingsTarget {
-  if (value === "agent" || value === "im" || value === "chat") {
-    return value;
+export function resolveLegacyAiDestination(
+  params: URLSearchParams,
+): AiModulePath | null {
+  const view = params.get("view");
+  const section = params.get("aiSection");
+  const settings = params.get("settings");
+
+  if (view === "asr" || section === "tools-asr") return "/ai/asr";
+  if (
+    view === "im" ||
+    settings === "im" ||
+    section?.startsWith("im-gateway-")
+  ) {
+    return "/ai/channels";
+  }
+  if (
+    view === "chat" ||
+    params.has("session") ||
+    params.has("historyPath") ||
+    section === "agent-chat"
+  ) {
+    return "/ai/runs";
+  }
+  if (
+    view === "settings" ||
+    settings === "agent" ||
+    section?.startsWith("agent-")
+  ) {
+    return "/ai/agents";
   }
   return null;
 }
@@ -107,7 +77,9 @@ function runnerRank(option: RunnerOption) {
   return 20;
 }
 
-export function buildRunnerOptions(payload?: RunnerConfigPayload): RunnerOption[] {
+export function buildRunnerOptions(
+  payload?: RunnerConfigPayload,
+): RunnerOption[] {
   const custom = Object.entries(payload?.runners || {})
     .filter(([, settings]) => settings.enabled !== false)
     .map(([id, settings]) => ({
@@ -133,8 +105,9 @@ function dedupeRunnerOptions(options: RunnerOption[]) {
 
 export function selectDefaultRunner(options: RunnerOption[]) {
   return (
-    options.find((option) => option.adapter === "codex" || option.value === "codex") ||
-    options[0] ||
-    { label: "Codex Runner", value: "Codex", adapter: "codex" }
+    options.find(
+      (option) => option.adapter === "codex" || option.value === "codex",
+    ) ||
+    options[0] || { label: "Codex Runner", value: "Codex", adapter: "codex" }
   );
 }

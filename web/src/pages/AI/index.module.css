@@ -1,0 +1,381 @@
+.hubPage,
+.detailPage {
+  min-height: 100%;
+}
+
+.hubPage {
+  overflow-y: auto;
+}
+
+.hubContent {
+  width: min(1120px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 44px 0 56px;
+}
+
+.hubHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+.moduleGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.moduleCard {
+  position: relative;
+  display: flex;
+  min-height: 248px;
+  padding: 22px;
+  overflow: hidden;
+  color: inherit;
+  text-decoration: none;
+  background: var(--ai-card-bg);
+  border: 1px solid var(--ai-card-border);
+  border-radius: 8px;
+  outline: none;
+  flex-direction: column;
+  gap: 18px;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.moduleCard:hover,
+.moduleCard:focus-visible {
+  color: inherit;
+  border-color: var(--ai-card-hover-border);
+  box-shadow: var(--ai-card-hover-shadow);
+}
+
+.moduleCard:focus-visible {
+  outline: 2px solid var(--ai-card-hover-border);
+  outline-offset: 2px;
+}
+
+.moduleCardHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.moduleIcon {
+  display: inline-flex;
+  width: 42px;
+  height: 42px;
+  color: var(--ai-card-icon-color);
+  font-size: 20px;
+  background: var(--ai-card-icon-bg);
+  border-radius: 8px;
+  align-items: center;
+  justify-content: center;
+}
+
+.moduleBadge {
+  flex: 1;
+}
+
+.moduleArrow {
+  color: var(--ai-card-description);
+  transition: transform 160ms ease;
+}
+
+.moduleCard:hover .moduleArrow,
+.moduleCard:focus-visible .moduleArrow {
+  color: var(--ai-card-icon-color);
+  transform: translateX(3px);
+}
+
+.moduleTitle {
+  margin-bottom: 6px;
+  color: var(--ai-card-title);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 26px;
+}
+
+.moduleDescription {
+  min-height: 44px;
+  color: var(--ai-card-description);
+  font-size: 13px;
+  line-height: 22px;
+}
+
+.moduleMetrics {
+  display: grid;
+  min-height: 65px;
+  margin-top: auto;
+  padding: 12px;
+  background: var(--ai-card-metric-bg);
+  border-radius: 6px;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.moduleMetric {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.moduleMetricValue {
+  overflow: hidden;
+  color: var(--ai-card-metric-value);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.moduleMetricLabel {
+  color: var(--ai-card-metric-label);
+  font-size: 12px;
+}
+
+.detailPage {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.detailHeader {
+  z-index: 2;
+  flex: 0 0 auto;
+  border-bottom: 1px solid;
+}
+
+.detailHeaderContent {
+  display: flex;
+  width: min(1120px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 16px 0;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detailBreadcrumb {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+}
+
+.backLink {
+  display: inline-flex;
+  min-width: max-content;
+  font-weight: 500;
+  align-items: center;
+  gap: 6px;
+}
+
+.detailBody {
+  width: min(1120px, calc(100% - 48px));
+  margin: 0 auto;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.detailBodyScroll {
+  overflow-y: auto;
+}
+
+.runPage {
+  width: 100%;
+  padding: 22px 0 40px;
+}
+
+.runOverview {
+  display: grid;
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  background: var(--ai-bg-container);
+  border: 1px solid var(--ai-border-secondary);
+  border-radius: 8px;
+  grid-template-columns: 140px 180px minmax(260px, 1fr);
+  gap: 20px;
+}
+
+.runOverview > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.overviewValue {
+  color: var(--ai-text);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 30px;
+}
+
+.overviewLabel {
+  color: var(--ai-text-secondary);
+  font-size: 12px;
+}
+
+.activeRunners {
+  justify-content: center;
+}
+
+.runFilters {
+  display: grid;
+  margin-bottom: 16px;
+  grid-template-columns: minmax(220px, 1fr) 140px 160px 140px auto;
+  gap: 10px;
+}
+
+.searchInput {
+  min-width: 0;
+}
+
+.mobileRunList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mobileRunCard {
+  padding: 14px;
+  background: var(--ai-bg-container);
+  border: 1px solid var(--ai-border-secondary);
+  border-radius: 8px;
+}
+
+.mobileRunTitle {
+  display: flex;
+  margin-bottom: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mobileRunFacts {
+  display: grid;
+  margin: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mobileRunFacts div {
+  min-width: 0;
+}
+
+.mobileRunFacts dt {
+  color: var(--ai-text-tertiary);
+  font-size: 11px;
+}
+
+.mobileRunFacts dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--ai-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loadMore {
+  display: flex;
+  padding-top: 18px;
+  justify-content: center;
+}
+
+.runPage :global(.ant-table-tbody > tr > td) {
+  transition: none;
+}
+
+.runPage :global(.ant-table-tbody > tr:hover > td) {
+  background: var(--ai-bg-container) !important;
+}
+
+@media (max-width: 1023px) {
+  .moduleGrid {
+    gap: 16px;
+  }
+}
+
+@media (max-width: 900px) {
+  .runFilters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .searchInput {
+    grid-column: 1 / -1;
+  }
+
+  .runOverview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .activeRunners {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 720px) {
+  .hubContent {
+    width: min(100% - 28px, 560px);
+    padding: 26px 0 36px;
+  }
+
+  .hubHeading {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .moduleGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .moduleCard {
+    min-height: 226px;
+  }
+
+  .detailHeaderContent,
+  .detailBody {
+    width: calc(100% - 28px);
+  }
+
+  .detailHeaderContent {
+    padding: 12px 0;
+    gap: 8px;
+  }
+
+  .detailBreadcrumb,
+  .backLink {
+    min-height: 40px;
+  }
+
+  .detailCrumbCurrent {
+    display: none;
+  }
+
+  .runFilters,
+  .runOverview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .searchInput,
+  .activeRunners {
+    grid-column: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .moduleCard,
+  .moduleArrow {
+    transition: none;
+  }
+}

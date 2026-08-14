@@ -1,144 +1,45 @@
 import { describe, expect, it } from "vitest";
 import {
   buildRunnerOptions,
-  resolveAiRouteState,
+  normalizeAiModulePath,
+  resolveLegacyAiDestination,
   selectDefaultRunner,
 } from "./aiLayout";
-import { isSelectedThread, type AgentThreadSummary } from "./AgentChatSection.helpers";
 
 function params(query = "") {
   return new URLSearchParams(query);
 }
 
-describe("resolveAiRouteState", () => {
-  it("defaults /ai to new chat mode", () => {
-    expect(resolveAiRouteState(params())).toMatchObject({
-      view: "chat",
-      chatMode: "new",
-      settings: null,
-    });
+describe("AI module routing", () => {
+  it("keeps only supported module paths", () => {
+    expect(normalizeAiModulePath("/ai/runs/")).toBe("/ai/runs");
+    expect(normalizeAiModulePath("/ai/removed-detail")).toBe("/ai");
   });
 
-  it("keeps a targeted session in thread mode", () => {
-    expect(resolveAiRouteState(params("session=admin-chat-1"))).toMatchObject({
-      view: "chat",
-      chatMode: "thread",
-    });
-  });
-
-  it("maps legacy agent chat links to chat", () => {
+  it("maps legacy feature links to module detail pages", () => {
+    expect(resolveLegacyAiDestination(params("view=asr"))).toBe("/ai/asr");
     expect(
-      resolveAiRouteState(params("aiSection=agent-chat&agentSection=chat")),
-    ).toMatchObject({
-      view: "chat",
-      chatMode: "thread",
-      settings: null,
-      agentSection: "chat",
-    });
+      resolveLegacyAiDestination(params("aiSection=im-gateway-routes")),
+    ).toBe("/ai/channels");
+    expect(resolveLegacyAiDestination(params("settings=agent"))).toBe(
+      "/ai/agents",
+    );
   });
 
-  it("maps legacy agent config sections into settings", () => {
+  it("maps removed chat and session details to summary-only runs", () => {
+    expect(resolveLegacyAiDestination(params("view=chat&mode=new"))).toBe(
+      "/ai/runs",
+    );
+    expect(resolveLegacyAiDestination(params("session=admin-chat-1"))).toBe(
+      "/ai/runs",
+    );
     expect(
-      resolveAiRouteState(params("aiSection=agent-model&agentSection=model")),
-    ).toMatchObject({
-      view: "settings",
-      settings: "agent",
-      agentSection: "model",
-    });
+      resolveLegacyAiDestination(params("historyPath=%2Ftmp%2Fsecret.jsonl")),
+    ).toBe("/ai/runs");
   });
 
-  it("keeps chat out of settings routes", () => {
-    expect(
-      resolveAiRouteState(params("settings=agent&agentSection=chat&session=admin-chat-1")),
-    ).toMatchObject({
-      view: "settings",
-      settings: "agent",
-      agentSection: "general",
-    });
-    expect(
-      resolveAiRouteState(params("settings=chat&session=admin-chat-1")),
-    ).toMatchObject({
-      view: "settings",
-      settings: "agent",
-      agentSection: "general",
-    });
-  });
-
-  it("lets explicit main views override stale settings params", () => {
-    expect(
-      resolveAiRouteState(params("view=asr&settings=agent&agentSection=model")),
-    ).toMatchObject({
-      view: "asr",
-    });
-    expect(
-      resolveAiRouteState(params("view=im&settings=agent&agentSection=model")),
-    ).toMatchObject({
-      view: "im",
-    });
-    expect(
-      resolveAiRouteState(params("view=chat&settings=agent&agentSection=runners&mode=new")),
-    ).toMatchObject({
-      view: "chat",
-      chatMode: "new",
-    });
-  });
-
-  it("maps legacy ASR and IM sections", () => {
-    expect(resolveAiRouteState(params("aiSection=tools-asr")).view).toBe("asr");
-    expect(
-      resolveAiRouteState(params("aiSection=im-gateway-routes")),
-    ).toMatchObject({
-      view: "im",
-      imGatewaySection: "routes",
-    });
-  });
-
-  it("falls removed Videos routes back to new chat", () => {
-    expect(resolveAiRouteState(params("view=videos"))).toMatchObject({
-      view: "chat",
-      chatMode: "new",
-    });
-    expect(resolveAiRouteState(params("aiSection=tools-videos"))).toMatchObject({
-      view: "chat",
-      chatMode: "new",
-    });
-  });
-
-  it("normalizes settings IM away from the deprecated Connections entry", () => {
-    expect(resolveAiRouteState(params("settings=im"))).toMatchObject({
-      view: "settings",
-      settings: "im",
-      imGatewaySection: "targets",
-    });
-    expect(
-      resolveAiRouteState(params("view=settings&settings=im&imGatewaySection=connections")),
-    ).toMatchObject({
-      view: "settings",
-      settings: "im",
-      imGatewaySection: "targets",
-    });
-  });
-});
-
-describe("thread selection", () => {
-  it("selects history threads under the new chat view when historyPath is present", () => {
-    const thread: AgentThreadSummary = {
-      session_key: "admin-chat-1",
-      status: "ended",
-      history_path: "/tmp/history.jsonl",
-    };
-
-    expect(isSelectedThread(thread, "admin-chat-1", "/tmp/history.jsonl", "chat")).toBe(true);
-  });
-
-  it("keeps legacy history view selection compatible", () => {
-    const thread: AgentThreadSummary = {
-      session_key: "admin-chat-1",
-      status: "ended",
-      history_path: "/tmp/history.jsonl",
-    };
-
-    expect(isSelectedThread(thread, "admin-chat-1", undefined, "history")).toBe(true);
+  it("leaves a clean AI home URL on the hub", () => {
+    expect(resolveLegacyAiDestination(params())).toBeNull();
   });
 });
 
@@ -196,7 +97,9 @@ describe("runner options", () => {
       },
     });
 
-    expect(options.some((option) => option.value === "codex_runner")).toBe(false);
+    expect(options.some((option) => option.value === "codex_runner")).toBe(
+      false,
+    );
     expect(options.map((option) => option.label)).toContain("Trae X");
   });
 });
