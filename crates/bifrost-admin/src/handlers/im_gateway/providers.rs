@@ -258,8 +258,7 @@ pub(super) async fn handle_provider_by_id(
                 return error_response(StatusCode::NOT_FOUND, "Provider not found");
             }
             if use_isolated_im_gateway_runtime() {
-                if let Err(error) =
-                    crate::worker_runtime::im_gateway::disconnect_provider(id).await
+                if let Err(error) = crate::worker_runtime::im_gateway::disconnect_provider(id).await
                 {
                     warn!(provider_id = id, error = %error, "failed to stop isolated IM provider before deletion");
                 }

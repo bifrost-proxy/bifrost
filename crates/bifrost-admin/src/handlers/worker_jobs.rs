@@ -118,6 +118,52 @@ async fn cancel_worker_job(job_id: &str) -> Response<BoxBody> {
         );
     };
 
+    if job.worker_kind == WorkerKind::RemoteExecution {
+        match crate::worker_runtime::remote_execution::cancel_registered_execution(
+            &worker_key,
+            &job.request_id,
+            &logical_job_id,
+        )
+        .await
+        {
+            Ok(true) => {
+                return json_response_with_status(
+                    StatusCode::ACCEPTED,
+                    &serde_json::json!({
+                        "accepted": true,
+                        "jobId": job_id,
+                        "workerKey": worker_key,
+                    }),
+                );
+            }
+            Ok(false) => {
+                let error = "remote execution worker is no longer active".to_string();
+                worker_job_cancel_rejected(job_id, error.clone());
+                return json_response_with_status(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &serde_json::json!({
+                        "accepted": false,
+                        "jobId": job_id,
+                        "workerKey": worker_key,
+                        "error": error,
+                    }),
+                );
+            }
+            Err(error) => {
+                worker_job_cancel_rejected(job_id, error.clone());
+                return json_response_with_status(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &serde_json::json!({
+                        "accepted": false,
+                        "jobId": job_id,
+                        "workerKey": worker_key,
+                        "error": error,
+                    }),
+                );
+            }
+        }
+    }
+
     if job.worker_kind == WorkerKind::ExternalCli {
         let worker_stopped =
             crate::im_gateway::external_cli::request_worker_session_stop(&logical_job_id).await;
@@ -166,8 +212,11 @@ async fn cancel_worker_job(job_id: &str) -> Response<BoxBody> {
             }),
         );
     };
-    match worker.cancel_job(logical_job_id).await {
-        Ok(()) => json_response_with_status(
+    match worker
+        .cancel_request(&job.request_id, &logical_job_id)
+        .await
+    {
+        Ok(true) => json_response_with_status(
             StatusCode::ACCEPTED,
             &serde_json::json!({
                 "accepted": true,
@@ -175,6 +224,19 @@ async fn cancel_worker_job(job_id: &str) -> Response<BoxBody> {
                 "workerKey": worker_key,
             }),
         ),
+        Ok(false) => {
+            let error = "worker request is no longer active".to_string();
+            worker_job_cancel_rejected(job_id, error.clone());
+            json_response_with_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &serde_json::json!({
+                    "accepted": false,
+                    "jobId": job_id,
+                    "workerKey": worker_key,
+                    "error": error,
+                }),
+            )
+        }
         Err(error) => {
             worker_job_cancel_rejected(job_id, error.clone());
             json_response_with_status(
@@ -223,7 +285,58 @@ async fn read_worker_artifact(
         );
     }
     let read_len = requested_limit.min(total.saturating_sub(offset));
-    let mut file = match tokio::fs::File::open(artifact.path()).await {
+    let canonical_root = match tokio::fs::canonicalize(artifact.root()).await {
+        Ok(root) if root.is_dir() => root,
+        Ok(_) => {
+            return error_response(
+                StatusCode::GONE,
+                "worker artifact spool root is no longer a directory",
+            )
+        }
+        Err(error) => {
+            return error_response(
+                StatusCode::GONE,
+                &format!("worker artifact spool root is no longer available: {error}"),
+            )
+        }
+    };
+    let canonical_path = match tokio::fs::canonicalize(artifact.path()).await {
+        Ok(path) if path.starts_with(&canonical_root) => path,
+        Ok(_) => {
+            return error_response(
+                StatusCode::GONE,
+                "worker artifact escaped its registered spool root",
+            )
+        }
+        Err(error) => {
+            return error_response(
+                StatusCode::GONE,
+                &format!("worker artifact is no longer available: {error}"),
+            )
+        }
+    };
+    let metadata = match tokio::fs::metadata(&canonical_path).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => {
+            return error_response(
+                StatusCode::GONE,
+                "worker artifact is no longer a regular file",
+            )
+        }
+        Err(error) => {
+            return error_response(
+                StatusCode::GONE,
+                &format!("worker artifact metadata is no longer available: {error}"),
+            )
+        }
+    };
+    if metadata.len() != total {
+        return error_response(
+            StatusCode::GONE,
+            "worker artifact changed after it was registered",
+        );
+    }
+    let mut file = match tokio::fs::File::open(&canonical_path).await {
         Ok(file) => file,
         Err(error) => {
             return error_response(
@@ -290,15 +403,15 @@ mod tests {
 
     #[tokio::test]
     async fn job_list_can_filter_by_kind_and_status() {
-        crate::worker_runtime::jobs::clear_for_tests();
-        crate::worker_runtime::jobs::begin_request(
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        crate::worker_runtime::begin_worker_job(
             "asr:offline-jobs",
             WorkerKind::Asr,
             "list-request",
             Some("task-list"),
             "asr.run_directory_task",
         );
-        crate::worker_runtime::jobs::mark_running("list-request");
+        crate::worker_runtime::mark_worker_job_running("list-request");
         let response = handle_worker_jobs(
             Request::builder()
                 .method(Method::GET)
@@ -317,16 +430,16 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_external_cli_cancel_restores_running_status() {
-        crate::worker_runtime::jobs::clear_for_tests();
+        crate::worker_runtime::clear_worker_jobs_for_tests();
         let job_id = format!("missing-external-cli-{}", uuid::Uuid::new_v4());
-        crate::worker_runtime::jobs::begin_request(
+        crate::worker_runtime::begin_worker_job(
             &format!("external_cli:{job_id}"),
             WorkerKind::ExternalCli,
             &job_id,
             Some(&job_id),
             "external_cli.run",
         );
-        crate::worker_runtime::jobs::mark_running(&job_id);
+        crate::worker_runtime::mark_worker_job_running(&job_id);
 
         let response = handle_worker_jobs(
             Request::builder()
@@ -345,8 +458,8 @@ mod tests {
 
     #[tokio::test]
     async fn artifact_identifier_cannot_escape_the_job_registry() {
-        crate::worker_runtime::jobs::clear_for_tests();
-        crate::worker_runtime::jobs::begin_request(
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        crate::worker_runtime::begin_worker_job(
             "asr:artifact-test",
             WorkerKind::Asr,
             "artifact-test",

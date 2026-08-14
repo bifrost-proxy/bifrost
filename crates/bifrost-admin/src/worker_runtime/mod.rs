@@ -9,6 +9,8 @@ pub mod remote_invoke;
 mod supervisor;
 mod worker_stdio;
 
+#[cfg(test)]
+pub(crate) use jobs::clear_for_tests as clear_worker_jobs_for_tests;
 pub use jobs::{
     artifact as worker_artifact, cancel_rejected as worker_job_cancel_rejected,
     cancel_target as worker_job_cancel_target, get_job as worker_job, list_jobs as worker_jobs,
