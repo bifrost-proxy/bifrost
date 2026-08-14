@@ -237,6 +237,24 @@ test("module details use dedicated routes and always return to AI home", async (
     );
     expect(Math.abs(headerBounds!.x - hubBounds!.x)).toBeLessThanOrEqual(2);
     expect(Math.abs(bodyBounds!.x - hubBounds!.x)).toBeLessThanOrEqual(2);
+    if (path === "agents") {
+      await expect(
+        page.getByTestId("agent-settings-section-general"),
+      ).toBeVisible();
+      await expect(
+        page.getByTestId("agent-settings-section-skills"),
+      ).toBeVisible();
+      await expect(
+        page.getByTestId("agent-settings-section-runners"),
+      ).toBeVisible();
+      await expect(page.getByTestId("agent-chat-section")).toHaveCount(0);
+      await expect(
+        page.getByTestId("agent-settings-section-history"),
+      ).toHaveCount(0);
+      await expect(
+        page.getByTestId("agent-settings-section-sessions"),
+      ).toHaveCount(0);
+    }
     await page.getByTestId("ai-home-link").click();
     await expect(page).toHaveURL(/\/_bifrost\/ai$/);
     await expect(page.getByTestId("ai-module-hub")).toBeVisible();

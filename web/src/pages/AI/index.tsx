@@ -52,7 +52,6 @@ import {
 import ASR from "../ASR";
 import AgentTab from "../Settings/tabs/AgentTab";
 import ImGatewayTab from "../Settings/tabs/ImGatewayTab";
-import type { AgentSectionId } from "../Settings/tabs/aiSections";
 import { resolveLegacyAiDestination } from "./aiLayout";
 import {
   formatRunDuration,
@@ -65,12 +64,6 @@ import styles from "./index.module.css";
 
 const { Text, Title, Paragraph } = Typography;
 const { useBreakpoint } = Grid;
-const AGENT_CONFIG_SECTIONS: AgentSectionId[] = [
-  "general",
-  "skills",
-  "runners",
-];
-
 interface ModuleMetric {
   label: string;
   value: ReactNode;
@@ -796,7 +789,7 @@ export default function AI() {
             title="Agent Configuration"
             description="Configure external runners, working directories, instructions, and skills."
           >
-            <AgentTab hideSectionNav visibleSections={AGENT_CONFIG_SECTIONS} />
+            <AgentTab />
           </AIDetailPage>
         }
       />

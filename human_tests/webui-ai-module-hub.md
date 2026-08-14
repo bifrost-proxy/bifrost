@@ -57,10 +57,12 @@
 ### TC-AIH-06 旧链接收口
 
 1. 打开带 `session` 和 `historyPath` 的旧 `/ai` 链接。
+2. 确认 Agent Configuration 只展示 General、Skills、Runners，不出现 Chat、History、Sessions 或消息详情组件。
 
-预期：重定向到 `/ai/runs`，只用 session key 作为摘要搜索词；不再渲染消息详情。
+预期：重定向到 `/ai/runs`，只用 session key 作为摘要搜索词；不再渲染消息详情，旧聊天和会话详情前端代码不再构建。
 
 ## 执行记录
 
 - 2026-08-14：使用隔离 Vite 前端与 Playwright Chromium 执行 `node_modules/.bin/playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，TC-AIH-01 至 TC-AIH-06 全部通过（`6 passed`）。首次执行为 `5 passed / 1 failed`，失败原因是测试点击 Ant Select 占位文字时被 combobox 输入层拦截；改用可交互 Select 容器和可见下拉层后，专项复测 `1 passed`，完整复测 `6 passed (25.0s)`。网络断言确认页面未请求 `/sessions/all`、`/sessions/history` 或单线程详情。
 - 2026-08-14：根据体验反馈补充默认英文 UI 与详情宽度对齐；自动用例新增英文文案、1120px 同宽和水平居中断言，最终完整复测 `6 passed (53.2s)`。
+- 2026-08-14：删除旧聊天工作台、线程/消息渲染、会话列表与会话详情前端代码后，复查源码无残余引用；Agent Configuration 自动断言仅保留 General、Skills、Runners。再次执行完整 AI Hub Playwright，结果 `6 passed (20.9s)`。

@@ -1,20 +1,3 @@
-export type AgentSectionId =
-  | "chat"
-  | "general"
-  | "history"
-  | "skills"
-  | "runners"
-  | "sessions";
-
-export const AGENT_SECTION_NAV: Array<{ id: AgentSectionId; label: string }> = [
-  { id: "chat", label: "Chat" },
-  { id: "general", label: "General" },
-  { id: "history", label: "History" },
-  { id: "skills", label: "Skills" },
-  { id: "runners", label: "Runners" },
-  { id: "sessions", label: "Sessions" },
-];
-
 export type ImGatewaySectionId =
   | "connections"
   | "targets"

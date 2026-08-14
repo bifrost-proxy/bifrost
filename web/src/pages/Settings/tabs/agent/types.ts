@@ -5,11 +5,6 @@
 // API base path
 export const BASE = "/im-gateway";
 
-export interface HistoryConfig {
-  persistence?: "save-all" | "none";
-  max_bytes?: number;
-}
-
 export interface AgentConfig {
   enabled: boolean;
   runner?: string;
@@ -28,33 +23,6 @@ export interface AgentConfig {
   session_ttl_secs?: number;
   work_dir?: string;
   resolved_work_dir?: string;
-  // History & Session (Codex-compatible)
-  history?: HistoryConfig;
-  ephemeral?: boolean;
-}
-
-export interface SessionInfo {
-  session_key: string;
-  message_count?: number;
-  total_tokens_used?: number;
-  created_at?: number;
-  last_active_at?: number;
-  compaction_count?: number;
-  estimated_tokens?: number;
-  history_version?: number;
-  work_dir?: string;
-  source?: string;
-}
-
-export interface SessionMessage {
-  role: string;
-  content: string;
-  content_parts?: unknown[];
-  tool_calls?: string[];
-}
-
-export interface SessionDetail extends SessionInfo {
-  messages: SessionMessage[];
 }
 
 export interface SkillInfo {
@@ -165,43 +133,4 @@ export interface SkillTestReport {
   tool_calls: JsonValue[];
   duration_ms: number;
   exit_code?: number | null;
-}
-
-export interface HistoryFileInfo {
-  path: string;
-  filename: string;
-  session_key: string;
-  timestamp: number;
-  // New fields from backend summary scan
-  total_tokens?: number;
-  user_turns?: number;
-  assistant_turns?: number;
-  tool_calls?: number;
-  event_count?: number;
-  work_dir?: string;
-  source?: string;
-  start_time?: number;
-  end_time?: number;
-  duration_secs?: number;
-}
-
-export interface HistoryMessage {
-  role: string;
-  content: string | null;
-}
-
-export interface ConversationEvent {
-  timestamp: number;
-  event_type:
-    | "session_start"
-    | "user_message"
-    | "assistant_message"
-    | "tool_call"
-    | "tool_result"
-    | "compaction"
-    | "session_end"
-    | "mcp_tools_loaded"
-    | "skills_loaded";
-  session_key: string;
-  content: unknown;
 }

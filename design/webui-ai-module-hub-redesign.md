@@ -291,7 +291,7 @@ GET /api/im-gateway/agent/session-summaries?limit=30&cursor=...&status=...&runne
 - `web/src/pages/AI/components/AIDetailHeader.tsx`：统一 `AI 首页` 返回导航。
 - `web/src/pages/AI/RunRecordsPage.tsx`：筛选、摘要表格/窄屏列表、分页；不依赖 `AgentChatSection`。
 - `web/src/pages/AI/runSummary.ts`：状态、时长、来源、Runner 名称格式化和 API projection 类型。
-- 现有 `AgentChatSection*`：从新导航完全移除；若其它内部链路仍引用，可分阶段删除，不再作为 AI 页面子路由。
+- 旧 `AgentChatSection*`、会话列表和会话详情组件：在确认没有其它前端入口复用后删除；外部 Runner、IM 通道及摘要 API 保留。
 
 ## 实施阶段
 
@@ -356,5 +356,6 @@ GET /api/im-gateway/agent/session-summaries?limit=30&cursor=...&status=...&runne
 - 新增 `/api/im-gateway/agent/session-summaries`，服务端先做固定字段 projection 再响应；WebUI 不再调用 `sessions/all`、history 或单线程详情。
 - Agent 运行记录保持信息终点，无行点击、详情链接、overflow action 或写操作；旧 chat/session/historyPath 链接 replace 到摘要列表。
 - 旧 Agent Chat 浏览器规格已移除，由新的 `web/tests/ui/ai-layout-redesign.spec.ts` 覆盖当前产品信息架构；底层外部 Runner 与 IM session 基础设施保留。
+- 旧聊天工作台、消息渲染、线程面板、会话列表/详情及其专用测试已从前端删除；Agent 配置仅保留 General、Skills、Runners，旧链接继续安全重定向到 Run Records。
 - AI 模块新增文案统一使用系统默认英文；首页、详情页头与详情内容区统一为 1120px 最大宽度并水平居中。
 - 真实场景记录位于 `human_tests/webui-ai-module-hub.md`。实现验证包含前端类型/单元/E2E、后端单元与白名单契约、Rust changed coverage 和远端 CI。
