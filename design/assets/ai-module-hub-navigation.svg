@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Bifrost AI 模块中心信息架构</title>
+  <desc id="desc">AI 首页通过四张卡片进入 ASR、IM 通道、Agent 配置和只读运行记录，所有详情都可返回 AI 首页，运行记录不再下钻。</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .title { fill: #111816; font-size: 24px; font-weight: 700; }
+    .subtitle { fill: #5d6965; font-size: 13px; }
+    .eyebrow { fill: #3578e5; font-size: 11px; font-weight: 700; letter-spacing: 1.2px; }
+    .node-title { fill: #111816; font-size: 16px; font-weight: 700; }
+    .node-copy { fill: #5d6965; font-size: 12px; }
+    .small { fill: #5d6965; font-size: 11px; }
+  </style>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#3578e5"/>
+    </marker>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#12221e" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="720" fill="#f7f8f4"/>
+  <text x="64" y="62" class="title">AI 模块中心 · 信息架构</text>
+  <text x="64" y="88" class="subtitle">首页负责模块切换；详情承载单一任务；运行记录停在摘要层。</text>
+
+  <rect x="64" y="122" width="1072" height="526" rx="12" fill="#ffffff" stroke="#dce4df"/>
+
+  <g filter="url(#shadow)">
+    <rect x="436" y="154" width="328" height="98" rx="8" fill="#ffffff" stroke="#3578e5" stroke-width="2"/>
+    <rect x="456" y="174" width="52" height="52" rx="8" fill="#edf4ff" stroke="#bfd3f6"/>
+    <path d="M471 200h22M482 189v22" stroke="#3578e5" stroke-width="2" stroke-linecap="round"/>
+    <text x="528" y="184" class="eyebrow">MODULE HOME</text>
+    <text x="528" y="207" class="node-title">AI 首页</text>
+    <text x="528" y="228" class="node-copy">四张平级入口卡片 · /ai</text>
+  </g>
+
+  <path d="M600 252 V296 H218 V332" fill="none" stroke="#3578e5" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <path d="M600 252 V296 H476 V332" fill="none" stroke="#3578e5" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <path d="M600 252 V296 H724 V332" fill="none" stroke="#3578e5" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <path d="M600 252 V296 H982 V332" fill="none" stroke="#3578e5" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <g>
+    <rect x="116" y="332" width="204" height="132" rx="8" fill="#ffffff" stroke="#dce4df" stroke-width="1.5"/>
+    <circle cx="146" cy="364" r="16" fill="#e8f7f3"/>
+    <path d="M140 365c0 8 12 8 12 0v-5c0-8-12-8-12 0v5zM146 373v7M140 380h12" fill="none" stroke="#13a58f" stroke-width="1.8" stroke-linecap="round"/>
+    <text x="172" y="369" class="node-title">ASR</text>
+    <text x="136" y="403" class="node-copy">语音识别与转写任务</text>
+    <text x="136" y="425" class="small">详情：复用现有工作台</text>
+    <text x="136" y="447" class="small">路径：/ai/asr</text>
+  </g>
+
+  <g>
+    <rect x="374" y="332" width="204" height="132" rx="8" fill="#ffffff" stroke="#dce4df" stroke-width="1.5"/>
+    <circle cx="404" cy="364" r="16" fill="#edf4ff"/>
+    <path d="M397 357h14a4 4 0 0 1 4 4v7a4 4 0 0 1-4 4h-7l-5 4v-4h-2a4 4 0 0 1-4-4v-7a4 4 0 0 1 4-4z" fill="none" stroke="#3578e5" stroke-width="1.6" stroke-linejoin="round"/>
+    <text x="430" y="369" class="node-title">IM 通道</text>
+    <text x="394" y="403" class="node-copy">飞书、微信等消息来源</text>
+    <text x="394" y="425" class="small">详情：Provider 与路由配置</text>
+    <text x="394" y="447" class="small">路径：/ai/channels</text>
+  </g>
+
+  <g>
+    <rect x="622" y="332" width="204" height="132" rx="8" fill="#ffffff" stroke="#dce4df" stroke-width="1.5"/>
+    <circle cx="652" cy="364" r="16" fill="#fff4e8"/>
+    <circle cx="652" cy="364" r="6" fill="none" stroke="#d57926" stroke-width="1.6"/>
+    <path d="M652 352v4M652 372v4M640 364h4M660 364h4M644 356l3 3M657 369l3 3M660 356l-3 3M647 369l-3 3" stroke="#d57926" stroke-width="1.6" stroke-linecap="round"/>
+    <text x="678" y="369" class="node-title">Agent 配置</text>
+    <text x="642" y="403" class="node-copy">外部 Runner 与运行策略</text>
+    <text x="642" y="425" class="small">详情：配置与健康状态</text>
+    <text x="642" y="447" class="small">路径：/ai/agents</text>
+  </g>
+
+  <g>
+    <rect x="880" y="332" width="204" height="132" rx="8" fill="#ffffff" stroke="#dce4df" stroke-width="1.5"/>
+    <circle cx="910" cy="364" r="16" fill="#f0f4f3"/>
+    <circle cx="910" cy="364" r="9" fill="none" stroke="#111816" stroke-width="1.6"/>
+    <path d="M910 359v6l4 3" fill="none" stroke="#111816" stroke-width="1.6" stroke-linecap="round"/>
+    <text x="936" y="369" class="node-title">运行记录</text>
+    <text x="900" y="403" class="node-copy">线程级只读运行摘要</text>
+    <text x="900" y="425" class="small">详情：倒序摘要列表</text>
+    <text x="900" y="447" class="small">路径：/ai/runs</text>
+  </g>
+
+  <g>
+    <rect x="850" y="514" width="264" height="96" rx="8" fill="#f0f4f3" stroke="#c5d2cb" stroke-dasharray="6 4"/>
+    <text x="870" y="541" class="eyebrow" fill="#5d6965">INFORMATION ENDPOINT</text>
+    <text x="870" y="565" class="node-title">摘要列表即终点</text>
+    <text x="870" y="587" class="node-copy">无行点击 · 无消息详情 · 无运行日志</text>
+    <path d="M982 464 V504" fill="none" stroke="#3578e5" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  </g>
+
+  <g>
+    <path d="M320 486 H826" stroke="#13a58f" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <path d="M320 486 l10-6v12z" fill="#13a58f"/>
+    <text x="442" y="512" class="small" fill="#13a58f">每个详情页左上角统一提供 “← AI 首页”</text>
+  </g>
+
+  <rect x="88" y="672" width="10" height="10" rx="2" fill="#3578e5"/>
+  <text x="106" y="681" class="small">蓝色：导航进入</text>
+  <line x1="222" y1="677" x2="252" y2="677" stroke="#13a58f" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="264" y="681" class="small">绿色虚线：统一返回首页</text>
+</svg>
