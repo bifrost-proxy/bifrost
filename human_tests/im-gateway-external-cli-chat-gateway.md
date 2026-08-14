@@ -1559,12 +1559,12 @@
 3. mock 进程实际 PATH 包含临时 `HOME/.local/bin`，版本探测返回 `traex 0.0.0-desktop-path-mock`，最终响应为 `BIFROST_DESKTOP_PATH_TRAEX_OK`。
 4. 测试结束后临时 Service、mock 进程和临时目录全部清理，用户现有 CLI-owned 或 Desktop-owned Service 均不受影响。
 
-### TC-IEC-69: 空指令原样透传与 Base 首条生命周期
+### TC-IEC-69: IM 动态外发上下文与 Base 首条生命周期
 
 前置条件：
 
 1. 当前源码已构建为 `target/debug/bifrost`。
-2. 测试只使用临时数据目录、动态端口、mock Feishu Provider 和捕获 stdin 的 mock Runner，不停止或替换用户当前 Bifrost Service。
+2. 测试只使用临时数据目录、动态端口、mock Feishu Provider 和捕获 stdin 的 mock Runner，不停止或替换用户当前 Bifrost Service，也不向真实 IM 通道发送消息。
 
 操作步骤：
 
@@ -1573,30 +1573,26 @@
    SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
      bash e2e-tests/tests/test_im_gateway_prompt_passthrough.sh
    ```
-2. 脚本先把 Agent Base / Developer / User Instructions 与 Runner Instructions 全部保存为空，同时故意保留旧配置 `injectBifrostTools:true`，再通过 mock IM inbound 发送 `原样透传消息`。
-3. 脚本随后配置 `BASE_INSTRUCTION`、`DEVELOPER_INSTRUCTION`、`USER_INSTRUCTION`、`RUNNER_INSTRUCTION`，发送 `/clear` 后连续发送 `首条分层消息` 与 `后续分层消息`。
-4. 检查 mock Runner 捕获的三条 stdin JSONL，逐字比较 prompt。
-5. 执行 focused 单元回归：
+2. 脚本先验证 `bifrost im --help` 与 `bifrost im send --help`，确认 send help 覆盖 `--image-file`、快速卡片参数和“视频通过 `--file`、不存在 `--video`”的说明。
+3. 脚本把 Agent Base / Developer / User Instructions 与 Runner Instructions 全部保存为空，同时故意保留旧配置 `injectBifrostTools:true`，再通过 mock IM inbound 发送 P2P 消息。
+4. 脚本随后配置 `BASE_INSTRUCTION`、`DEVELOPER_INSTRUCTION`、`USER_INSTRUCTION`、`RUNNER_INSTRUCTION`，发送 `/clear` 后连续发送 P2P 首条、P2P 后续消息和一个新群聊消息。
+5. 检查 mock Runner 捕获的四条 stdin JSONL：逐条验证动态上下文只出现一次，Provider ID 为 `prompt-e2e`，平台 bot identity 为 `cli_prompt_e2e`，P2P 目的地为 `chat_id=prompt-user`，群目的地为 `chat_id=oc_prompt_group`，conversation kind、Feishu 全部 part 能力、canonical send 命令和四条 help/capabilities 诊断命令完整。
+6. 检查普通 final 自动投递、防重复发送、禁止 Lark IM/平台 connector、委派时保留 provider/target、禁止泄露 secret/token、发送失败不能声称成功等规则均存在。
+7. 执行 focused 单元回归：
    ```bash
-   cargo test -p bifrost-admin compose_message_instructions
-   cargo test -p bifrost-admin build_prompt_does_not_inject_legacy_bifrost_tool_context
-   cargo test -p bifrost-admin chat_gateway_agent_instructions_include_base_only_on_first_message
-   ```
-6. 执行 Settings focused UI 回归：
-   ```bash
-   pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts \
-     -g "Settings Agent 三层 instructions|Agent Runners 新增弹窗" \
-     --reporter=line
+   cargo test -p bifrost-admin agent_outbound_context -- --nocapture
+   cargo test -p bifrost-admin compose_message_instructions -- --nocapture
+   cargo test -p bifrost-admin build_prompt_does_not_inject_legacy_bifrost_tool_context -- --nocapture
    ```
 
 预期结果：
 
 1. 隔离脚本输出 `[im-prompt-passthrough] PASS`，并清理临时 Service 与数据目录。
-2. 第一条 stdin 精确等于 `原样透传消息\n`，不存在 `Bifrost Tool Context` 或其他 Bifrost 自动前缀。
-3. `/clear` 后首条 stdin 精确按 `Base -> Developer -> User -> Runner -> 原消息` 排列。
-4. 同会话第二条 stdin 不再包含 Base，但 Developer / User / Runner 仍按消息传入。
-5. Settings 不再展示 `Inject Bifrost Tools`，并明确说明 Base 只用于新会话首条、其他三层是消息级；空值不增加内容。
-6. focused Rust 与 Playwright 回归全部通过。
+2. 所有真实 IM turn 均按 `Base（仅新会话首条） -> Developer -> User -> Runner -> 动态 IM Context -> 通道消息` 排列；同会话后续不含 Base，新群会话重新包含 Base。
+3. P2P 与群聊使用各自精确 chat ID，均使用当前 Provider ID 和 App ID；模板不存在 provider secret、access token、cookie 或微信 context token。
+4. Feishu 能力逐项显示 text/Markdown/image/file/native card 为 native，图片与文件上限分别为 10 MiB 与 30 MiB；全局内容形式同时说明文本、Markdown、图片、文件、卡片、快速卡片与视频映射。
+5. 模板明确普通 final 由 Gateway 自动投递，只有用户要求独立主动发送时才使用 canonical `bifrost im send --provider ...`，不得改走 Lark IM 或平台 connector。
+6. 四条诊断命令完整，旧静态 `Bifrost Tool Context` 仍不存在，focused Rust 回归全部通过。
 
 ### TC-IEC-70: IM Codex Fast 模式按 Session 切换
 
@@ -1636,6 +1632,7 @@
 
 ## 最近执行记录
 
+- 2026-08-14：PASS — 更新 TC-IEC-69 后立即执行真实隔离链路。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_prompt_passthrough.sh` 输出 `[im-prompt-passthrough] PASS`；临时 Bifrost、mock Feishu Provider 与捕获 stdin 的 mock Runner 验证 4 个 turn：空配置 P2P、带四层 Instructions 的 P2P 首条/后续、新群聊首条。四条 prompt 均只含一个可信动态外发上下文，精确绑定 `provider=prompt-e2e`、`app_id=cli_prompt_e2e` 和各自 chat ID，列全 Feishu content capabilities、CLI 内容/目的地形式、canonical send 命令及 help/capabilities 诊断流程；群消息既保留精确 routing block，也保留既有群名/群 ID/@发送者上下文增强。focused Rust 回归 `agent_outbound_context` 4/4、`compose_message_instructions` 3/3、`build_prompt_does_not_inject_legacy_bifrost_tool_context` 1/1 全部通过，临时服务与数据目录已清理。
 - 2026-08-09：PASS — 在最终收紧“完整数据只供实时 UI、外部执行器历史不保存 content/参数/结果/增量/计划”后，立即重新执行 TC-IEC-43/44/46/48：`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 输出 `[im-gateway-external-runner-image-input] PASS`。真实临时服务完成普通图片两轮、Traex-compatible、image-only runner-call 和纯文件 IM inbound；完整 prompt 仅进入 runner stdin，`prompt.md` 为计数摘要，`runtime_snapshot.json` 不含参数值，normalized events/result 仅含工具标识与状态，session 不含 assistant delta/plan/工具参数/工具结果，脚本已清理隔离数据与进程。
 - 2026-08-09：PASS — 按新的外部执行器持久化边界立即复测 TC-IEC-43/44/46/48 与 TC-IEC-68。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 输出 `[im-gateway-external-runner-image-input] PASS`，验证实时 runner stdin 仍收到完整图片/文件 prompt，而 `prompt.md` 只保存字节数和附件数摘要、runtime snapshot 只保存 flag/键名、历史 raw 不含工具 command/result、final response 不重复落盘；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_desktop_path_traex.sh` 输出 `[im-gateway-desktop-path-traex] PASS`，确认精简 PATH 下 `--listen` flag 保留且不落参数值。两条脚本均使用隔离数据目录并完成清理，未调用真实模型。
 - 2026-08-05：PASS — 修复 Codex Runner 被 Bifrost 隐式设为 Fast 的回归并立即执行 TC-IEC-70。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_codex_fast_slash.sh` 输出 `[im-codex-fast] PASS`；隔离 IM mock-inbound 链路先发送 `/fast status`，回复明确为“未显式设置 service tier，将使用 Codex 自身默认模式”且不执行 Runner，随后首个普通 Codex `exec` argv 不含任何 `service_tier=`。用户显式执行 `/fast off` 与裸 `/fast` 后，后续 argv 才分别包含 `service_tier="default"` 与 `service_tier="fast"`；忙碌切换、排队读取最新 session、Traex 拒绝路径均继续通过。六条 focused Rust 回归逐条通过，覆盖 parser、session 覆盖静态配置、默认 tier 解析为空、App Server 默认 thread/turn 省略 `serviceTier`、帮助文案与群聊 slash 分类。首轮远端 Linux E2E 正确暴露新增默认 turn 后仍沿用“argv 日志为空”的旧断言；修正为只统计真实 `exec` 次数并断言 `0 -> 1 -> 1` 后，本地完整脚本再次通过，确保 `/fast status` 和 `/fast off` 本身均不触发额外 Runner。

@@ -1506,9 +1506,14 @@ fn print_im_send_help() {
     println!("CONTENT (repeatable, sent in argument order):");
     println!("    --text <TEXT>");
     println!("    --markdown <MARKDOWN> | --markdown-file <PATH>");
-    println!("    --image <PATH> | --image-key <KEY>");
+    println!("    --image <PATH> | --image-file <PATH> | --image-key <KEY>");
     println!("    --file <PATH> | --file-key <KEY>");
     println!("    --card-file <PATH> | --card-json <JSON>");
+    println!("    --card-title <TITLE> [--card-text <MARKDOWN>]");
+    println!("    [--card-image-file <PATH> | --card-image-key <KEY>] [--card-image-alt <TEXT>]");
+    println!(
+        "    Video-capable providers accept video paths through --file; there is no --video flag"
+    );
     println!();
     println!("OPTIONS:");
     println!("    --provider <ID>                 Compatibility form for PROVIDER");

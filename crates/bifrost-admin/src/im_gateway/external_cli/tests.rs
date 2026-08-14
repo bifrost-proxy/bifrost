@@ -2796,6 +2796,36 @@ fn compose_message_instructions_ignores_empty_values() {
 }
 
 #[test]
+fn compose_message_instructions_puts_trusted_channel_context_last() {
+    let instructions = compose_external_cli_message_instructions_with_channel_context(
+        true,
+        Some("base"),
+        Some("developer"),
+        Some("user"),
+        Some("runner"),
+        Some("trusted IM route"),
+    );
+
+    assert_eq!(
+        instructions.as_deref(),
+        Some("base\n\ndeveloper\n\nuser\n\nrunner\n\ntrusted IM route")
+    );
+}
+
+#[test]
+fn prompt_persistence_summary_does_not_store_dynamic_routing_context() {
+    let summary = prompt_persistence_summary(
+        "Provider ID: secret-provider\nExact destination: chat_id=secret-chat",
+        0,
+        0,
+    );
+
+    assert!(summary.contains("\"bytes\""));
+    assert!(!summary.contains("secret-provider"));
+    assert!(!summary.contains("secret-chat"));
+}
+
+#[test]
 fn default_gateway_config_contains_enabled_codex_and_traex_runners() {
     let config = ExternalCliGatewayConfig::default();
 

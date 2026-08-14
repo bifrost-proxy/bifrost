@@ -193,7 +193,7 @@ Admin API 测试脚本位于 `tests/` 目录，用于测试 Bifrost 的管理 AP
 | `test_cert_admin_api.sh`      | 7      | 证书信息、下载、二维码               |
 | `test_proxy_admin_api.sh`     | 6      | 系统代理状态、设置                   |
 | `test_system_admin_api.sh`    | 10     | 系统信息、概览、指标历史             |
-| `test_im_gateway_prompt_passthrough.sh` | 3 | IM 空指令原样透传、Base 首轮生命周期、消息级指令组合 |
+| `test_im_gateway_prompt_passthrough.sh` | 4 | IM 动态外发上下文、飞书 P2P/群精确路由、Base 首轮生命周期、消息级指令组合与 CLI help 完整性 |
 | `test_im_gateway_local_session_resume.sh` | 10 | Codex、Traex、Claude Code 本地 session 列表、选择、provider 隔离与下一轮原生 resume 参数 |
 | `test_feishu_group_session_context.sh` | 1 | 飞书群/私聊隔离、多机器人路由、引用消息图片与文件自动落盘，并向 Runner 注入会话附件绝对路径 |
 | `test_feishu_progress_terminal_notification.sh` | 1 | 飞书任务过程卡成功/失败终态折叠、独立终态卡引用链、本地文件自动上传发送，以及出站 30 MiB 上限/上传失败的非阻塞提示 |
