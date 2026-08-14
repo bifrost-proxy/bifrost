@@ -354,6 +354,9 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "Invoke-FileOperationWithRetry \"restoring previous CLI\"",
         "Invoke-FileOperationWithRetry \"removing failed replacement staging file\"",
         "schedule_windows_deferred_install_via_staged_binary(",
+        ".stdout(Stdio::null())",
+        ".stderr(Stdio::null())",
+        "spawn_windows_upgrade_handoff_with_retry(|| command.status())",
         "validate_windows_upgrade_handoff_request(",
         "schedule_windows_deferred_install_inner(",
         "cleanup_staged_binary_after_schedule(&deferred_install.staged_binary, result)",
@@ -388,6 +391,10 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
     ] {
         assert!(source.contains(contract), "missing contract: {contract}");
     }
+    assert!(
+        !source.contains("spawn_windows_upgrade_handoff_with_retry(|| command.output())"),
+        "Windows staged handoff must not wait for inherited descendant pipe handles"
+    );
 }
 
 #[test]

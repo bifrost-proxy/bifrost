@@ -190,6 +190,26 @@ mod tests {
         assert_eq!(response.latest_version.as_deref(), Some("0.0.145"));
     }
 
+    #[tokio::test]
+    async fn check_reuses_fresh_cache_only_for_the_running_channel() {
+        let cached = VersionCache {
+            latest_version: "0.0.181-alpha.11".to_string(),
+            release_highlights: vec!["cached alpha".to_string()],
+            checked_at: Utc::now(),
+        };
+        let checker = VersionChecker {
+            cache: RwLock::new(Some(cached)),
+        };
+
+        let response = checker
+            .check_with_current_version(false, "0.0.181-alpha.10".to_string())
+            .await;
+
+        assert!(response.has_update);
+        assert_eq!(response.latest_version.as_deref(), Some("0.0.181-alpha.11"));
+        assert_eq!(response.release_highlights, vec!["cached alpha"]);
+    }
+
     #[test]
     fn test_parse_release_highlights() {
         let body = r#"## ✨ Highlights

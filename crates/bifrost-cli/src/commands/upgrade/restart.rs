@@ -301,26 +301,26 @@ fn schedule_windows_deferred_install_via_staged_binary(
     command
         .args(&args)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // Do not use piped output for this short-lived handoff process. On
+        // Windows a descendant may inherit the pipe handles, which makes
+        // `Command::output()` wait for the deferred PowerShell helper. That
+        // helper intentionally waits for this updater PID to exit, creating a
+        // 120-second parent/helper deadlock and forcing the replacement to
+        // roll back. NUL handles let us wait for the staged process itself
+        // without tying its lifetime to the detached helper.
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .env_remove(crate::commands::start::DETACHED_DAEMON_CHILD_ENV);
 
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let output =
-        spawn_windows_upgrade_handoff_with_retry(|| command.output()).map_err(BifrostError::Io)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() { stderr } else { stdout };
+    let status =
+        spawn_windows_upgrade_handoff_with_retry(|| command.status()).map_err(BifrostError::Io)?;
+    if !status.success() {
         return Err(BifrostError::Config(format!(
-            "staged Windows upgrade handoff failed with status {}{}",
-            output.status,
-            (!detail.is_empty())
-                .then(|| format!(": {detail}"))
-                .unwrap_or_default()
+            "staged Windows upgrade handoff failed with status {status}"
         )));
     }
     mark_deferred_install_scheduled();

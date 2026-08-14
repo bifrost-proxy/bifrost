@@ -264,6 +264,7 @@ mod tests {
         assert!(is_cache_valid_for_current(&alpha, "0.0.181-alpha.8"));
         assert!(!is_cache_valid_for_current(&stable, "0.0.181-alpha.8"));
         assert!(!is_cache_valid_for_current(&alpha, "0.0.180"));
+        assert!(is_cache_valid(&stable));
     }
 
     #[test]
