@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use base64::Engine;
 use bifrost_core::Result as BifrostResult;
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::remote_invoke::types::{FileAccessScope, RemoteCommand};
 use crate::remote_invoke::{RemoteInvokeExecutor, RemoteInvokeResponse};
@@ -22,6 +24,9 @@ const REMOTE_EXECUTION_CHUNK_BYTES: usize = 48 * 1024;
 const REMOTE_EXECUTION_INPUT_CHUNK_BYTES: usize = 64 * 1024;
 const REMOTE_EXECUTION_INPUT_QUEUE: usize = 32;
 const REMOTE_EXECUTION_EVENT: &str = "remote_execution.stdout";
+
+static ACTIVE_EXECUTION_WORKERS: Lazy<DashMap<String, Arc<ManagedWorker>>> =
+    Lazy::new(DashMap::new);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,22 +87,28 @@ struct ExecutionInputPayload {
 
 struct WorkerShutdownGuard {
     worker: Option<Arc<ManagedWorker>>,
+    worker_key: String,
 }
 
 impl WorkerShutdownGuard {
     fn new(worker: Arc<ManagedWorker>) -> Self {
+        let worker_key = worker.key().to_string();
+        ACTIVE_EXECUTION_WORKERS.insert(worker_key.clone(), worker.clone());
         Self {
             worker: Some(worker),
+            worker_key,
         }
     }
 
     fn disarm(&mut self) {
+        ACTIVE_EXECUTION_WORKERS.remove(&self.worker_key);
         self.worker = None;
     }
 }
 
 impl Drop for WorkerShutdownGuard {
     fn drop(&mut self) {
+        ACTIVE_EXECUTION_WORKERS.remove(&self.worker_key);
         let Some(worker) = self.worker.take() else {
             return;
         };
@@ -107,6 +118,20 @@ impl Drop for WorkerShutdownGuard {
             });
         }
     }
+}
+
+pub(crate) async fn cancel_registered_execution(
+    worker_key: &str,
+    request_id: &str,
+    logical_job_id: &str,
+) -> Result<bool, String> {
+    let Some(worker) = ACTIVE_EXECUTION_WORKERS
+        .get(worker_key)
+        .map(|entry| entry.clone())
+    else {
+        return Ok(false);
+    };
+    worker.cancel_request(request_id, logical_job_id).await
 }
 
 pub(crate) fn should_isolate_remote_execution() -> bool {
@@ -134,7 +159,6 @@ where
     )?)
     .await?;
     let mut shutdown_guard = WorkerShutdownGuard::new(worker.clone());
-    let mut events = worker.subscribe_events();
 
     worker
         .request(
@@ -162,8 +186,9 @@ where
     let envelope = serde_json::to_value(RemoteExecutionEnvelope::from_command(command))
         .map_err(|error| format!("serialize remote execution request: {error}"))?;
     let run_request_id = format!("remote-execution-{execution_id}");
+    let mut events = worker.subscribe_request_events(run_request_id.clone(), 32);
     let run_future = worker.request_with_id(
-        run_request_id,
+        run_request_id.clone(),
         Some(execution_id.clone()),
         "remote_execution.run",
         envelope,
@@ -179,11 +204,11 @@ where
                 match input_result {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
-                        let _ = worker.cancel_job(execution_id.clone()).await;
+                        let _ = worker.cancel_request(&run_request_id, &execution_id).await;
                         return Err(error);
                     }
                     Err(error) => {
-                        let _ = worker.cancel_job(execution_id.clone()).await;
+                        let _ = worker.cancel_request(&run_request_id, &execution_id).await;
                         return Err(format!("remote execution stdin task failed: {error}"));
                     }
                 }
@@ -195,8 +220,9 @@ where
     };
 
     while let Ok(event) = events.try_recv() {
-        handle_stdout_event(Ok(event), &execution_id, on_stdout).await?;
+        handle_stdout_event(Some(event), &execution_id, on_stdout).await?;
     }
+    worker.remove_request_event_sink(&run_request_id);
     if !input_done {
         input_task.abort();
         let _ = input_task.await;
@@ -210,7 +236,7 @@ where
 }
 
 async fn handle_stdout_event<F, Fut>(
-    event: Result<WorkerEvent, broadcast::error::RecvError>,
+    event: Option<WorkerEvent>,
     execution_id: &str,
     on_stdout: &mut F,
 ) -> Result<(), String>
@@ -218,17 +244,7 @@ where
     F: FnMut(Vec<u8>) -> Fut,
     Fut: Future<Output = BifrostResult<()>>,
 {
-    let event = match event {
-        Ok(event) => event,
-        Err(broadcast::error::RecvError::Lagged(count)) => {
-            return Err(format!(
-                "remote execution stdout consumer lagged by {count} events"
-            ));
-        }
-        Err(broadcast::error::RecvError::Closed) => {
-            return Err("remote execution event channel closed".to_string());
-        }
-    };
+    let event = event.ok_or_else(|| "remote execution event channel closed".to_string())?;
     if event.event != REMOTE_EXECUTION_EVENT || event.job_id.as_deref() != Some(execution_id) {
         return Ok(());
     }
@@ -301,6 +317,11 @@ fn spawn_spec(
     );
     spec.env
         .insert(REMOTE_EXECUTION_PARENT_ENV.to_string(), "0".to_string());
+    spec.env_remove.extend([
+        "BIFROST_REMOTE_SESSION_TOKEN".to_string(),
+        "BIFROST_REMOTE_WORKER_HTTP_TOKEN".to_string(),
+        super::process::WORKER_STARTUP_TOKEN_ENV.to_string(),
+    ]);
     spec.max_concurrency = 8;
     spec.max_queue_depth = 64;
     spec.startup_timeout = Duration::from_secs(15);

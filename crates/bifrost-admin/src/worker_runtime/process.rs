@@ -10,7 +10,7 @@ use once_cell::sync::Lazy;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, Command};
-use tokio::sync::{broadcast, oneshot, Mutex, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Semaphore};
 use tracing::warn;
 
 use super::jobs;
@@ -35,6 +35,7 @@ pub struct WorkerSpawnSpec {
     pub executable: PathBuf,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub env_remove: Vec<String>,
     pub startup_timeout: Duration,
     pub request_timeout: Duration,
     pub heartbeat_timeout: Duration,
@@ -57,6 +58,7 @@ impl WorkerSpawnSpec {
             executable: executable.into(),
             args,
             env: BTreeMap::new(),
+            env_remove: Vec::new(),
             startup_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(60),
             heartbeat_timeout: Duration::from_secs(35),
@@ -101,6 +103,9 @@ pub struct ManagedWorker {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
     pending: DashMap<String, oneshot::Sender<WorkerResponse>>,
+    request_cancellations: DashMap<String, watch::Sender<bool>>,
+    dispatched_requests: DashMap<String, ()>,
+    request_event_sinks: DashMap<String, mpsc::Sender<WorkerEvent>>,
     events: broadcast::Sender<WorkerEvent>,
     state: AtomicU8,
     last_heartbeat_ms: AtomicU64,
@@ -146,6 +151,19 @@ impl Drop for AtomicCounterGuard<'_> {
     }
 }
 
+struct RequestTrackingGuard<'a> {
+    request_id: String,
+    cancellations: &'a DashMap<String, watch::Sender<bool>>,
+    dispatched: &'a DashMap<String, ()>,
+}
+
+impl Drop for RequestTrackingGuard<'_> {
+    fn drop(&mut self) {
+        self.cancellations.remove(&self.request_id);
+        self.dispatched.remove(&self.request_id);
+    }
+}
+
 impl ManagedWorker {
     pub async fn spawn(spec: WorkerSpawnSpec) -> Result<Arc<Self>, String> {
         let startup_token = uuid::Uuid::new_v4().to_string();
@@ -159,6 +177,9 @@ impl ManagedWorker {
             .kill_on_drop(true);
         for (key, value) in &spec.env {
             command.env(key, value);
+        }
+        for key in &spec.env_remove {
+            command.env_remove(key);
         }
         configure_process_group(&mut command);
         command.stderr(if spec.stderr_path.is_some() {
@@ -234,6 +255,9 @@ impl ManagedWorker {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             pending: DashMap::new(),
+            request_cancellations: DashMap::new(),
+            dispatched_requests: DashMap::new(),
+            request_event_sinks: DashMap::new(),
             events,
             state: AtomicU8::new(state_to_u8(WorkerLifecycleState::Ready)),
             last_heartbeat_ms: AtomicU64::new(now_ms()),
@@ -312,6 +336,15 @@ impl ManagedWorker {
                         }
                     }
                     Ok(WorkerFrame::Event { event }) => {
+                        if let Some(request_id) = event.request_id.as_deref() {
+                            let sink = worker
+                                .request_event_sinks
+                                .get(request_id)
+                                .map(|entry| entry.clone());
+                            if let Some(sink) = sink {
+                                let _ = sink.send(event.clone()).await;
+                            }
+                        }
                         jobs::record_event(&event);
                         let _ = worker.events.send(event);
                     }
@@ -412,6 +445,21 @@ impl ManagedWorker {
         self.events.subscribe()
     }
 
+    pub fn subscribe_request_events(
+        &self,
+        request_id: impl Into<String>,
+        capacity: usize,
+    ) -> mpsc::Receiver<WorkerEvent> {
+        let request_id = request_id.into();
+        let (sender, receiver) = mpsc::channel(capacity.max(1));
+        self.request_event_sinks.insert(request_id, sender);
+        receiver
+    }
+
+    pub fn remove_request_event_sink(&self, request_id: &str) {
+        self.request_event_sinks.remove(request_id);
+    }
+
     pub async fn is_healthy(&self) -> bool {
         if !matches!(
             self.state(),
@@ -464,6 +512,16 @@ impl ManagedWorker {
             jobs::mark_failed(&request_id, error.clone());
             return Err(error);
         }
+
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        self.request_cancellations
+            .insert(request_id.clone(), cancel_tx);
+        let _tracking = RequestTrackingGuard {
+            request_id: request_id.clone(),
+            cancellations: &self.request_cancellations,
+            dispatched: &self.dispatched_requests,
+        };
+
         let permit = match self.request_slots.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -478,29 +536,50 @@ impl ManagedWorker {
                     jobs::mark_failed(&request_id, error.clone());
                     return Err(error);
                 };
-                let permit = match tokio::time::timeout(
-                    self.queue_wait_timeout,
-                    self.request_slots.clone().acquire_owned(),
-                )
-                .await
-                {
-                    Ok(Ok(permit)) => permit,
-                    Ok(Err(_)) => {
-                        let error = "worker request queue closed".to_string();
-                        jobs::mark_failed(&request_id, error.clone());
-                        return Err(error);
-                    }
-                    Err(_) => {
+                let acquire = self.request_slots.clone().acquire_owned();
+                tokio::pin!(acquire);
+                let queue_timeout = tokio::time::sleep(self.queue_wait_timeout);
+                tokio::pin!(queue_timeout);
+                let permit = tokio::select! {
+                    result = &mut acquire => match result {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let error = "worker request queue closed".to_string();
+                            jobs::mark_failed(&request_id, error.clone());
+                            return Err(error);
+                        }
+                    },
+                    _ = &mut queue_timeout => {
                         let error = format!("worker '{}' request queue timeout", self.key);
                         jobs::mark_failed(&request_id, error.clone());
                         return Err(error);
-                    }
+                    },
+                    changed = cancel_rx.changed() => {
+                        if changed.is_ok() && *cancel_rx.borrow() {
+                            jobs::mark_cancelled(
+                                &request_id,
+                                Some("worker request cancelled while queued".to_string()),
+                            );
+                            return Err("worker request cancelled while queued".to_string());
+                        }
+                        let error = "worker request cancellation channel closed".to_string();
+                        jobs::mark_failed(&request_id, error.clone());
+                        return Err(error);
+                    },
                 };
                 drop(queue_guard);
                 permit
             }
         };
         let _permit = permit;
+        if *cancel_rx.borrow() {
+            jobs::mark_cancelled(
+                &request_id,
+                Some("worker request cancelled before dispatch".to_string()),
+            );
+            return Err("worker request cancelled before dispatch".to_string());
+        }
+
         jobs::mark_running(&request_id);
         let timeout = timeout_override.unwrap_or(self.request_timeout);
         let job_id_for_cancel = job_id.clone();
@@ -522,6 +601,14 @@ impl ManagedWorker {
                 return Err(error);
             }
         }
+        if *cancel_rx.borrow() {
+            self.pending.remove(&request_id);
+            jobs::mark_cancelled(
+                &request_id,
+                Some("worker request cancelled before dispatch".to_string()),
+            );
+            return Err("worker request cancelled before dispatch".to_string());
+        }
         if let Err(error) = self
             .write_parent_frame(&ParentFrame::Request { request })
             .await
@@ -531,6 +618,16 @@ impl ManagedWorker {
             self.mark_failed(error.clone());
             return Err(error);
         }
+        self.dispatched_requests.insert(request_id.clone(), ());
+        if *cancel_rx.borrow() {
+            let _ = self
+                .write_parent_frame(&ParentFrame::Cancel {
+                    request_id: request_id.clone(),
+                    job_id: job_id_for_cancel.clone(),
+                })
+                .await;
+        }
+
         let response = match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
@@ -551,6 +648,13 @@ impl ManagedWorker {
                 return Err(error);
             }
         };
+        if response.cancelled {
+            let error = response
+                .error
+                .unwrap_or_else(|| "worker request cancelled".to_string());
+            jobs::mark_cancelled(&request_id, Some(error.clone()));
+            return Err(error);
+        }
         if response.ok {
             jobs::mark_succeeded(&request_id);
             Ok(response.payload)
@@ -563,14 +667,37 @@ impl ManagedWorker {
         }
     }
 
+    pub async fn cancel_request(
+        &self,
+        request_id: &str,
+        logical_job_id: &str,
+    ) -> Result<bool, String> {
+        let Some(sender) = self
+            .request_cancellations
+            .get(request_id)
+            .map(|entry| entry.clone())
+        else {
+            return Ok(false);
+        };
+        let _ = sender.send(true);
+        if self.dispatched_requests.contains_key(request_id) {
+            self.write_parent_frame(&ParentFrame::Cancel {
+                request_id: request_id.to_string(),
+                job_id: Some(logical_job_id.to_string()),
+            })
+            .await?;
+        }
+        Ok(true)
+    }
+
     pub async fn cancel_job(&self, job_id: impl Into<String>) -> Result<(), String> {
         let job_id = job_id.into();
         jobs::mark_logical_job_cancelling(&self.key, &job_id);
-        self.write_parent_frame(&ParentFrame::Cancel {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            job_id: Some(job_id),
-        })
-        .await
+        let request_ids = jobs::active_request_ids(&self.key, &job_id);
+        for request_id in request_ids {
+            let _ = self.cancel_request(&request_id, &job_id).await?;
+        }
+        Ok(())
     }
 
     pub async fn shutdown(&self, grace: Duration) -> Result<(), String> {
@@ -680,6 +807,7 @@ impl ManagedWorker {
                 let _ = sender.send(WorkerResponse {
                     request_id: key,
                     ok: false,
+                    cancelled: false,
                     payload: serde_json::Value::Null,
                     error: Some(message.to_string()),
                 });

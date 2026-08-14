@@ -55,12 +55,14 @@ impl WorkerStdioContext {
             Ok(payload) => WorkerResponse {
                 request_id,
                 ok: true,
+                cancelled: false,
                 payload,
                 error: None,
             },
             Err(error) => WorkerResponse {
                 request_id,
                 ok: false,
+                cancelled: false,
                 payload: serde_json::Value::Null,
                 error: Some(error),
             },
@@ -75,6 +77,20 @@ impl WorkerStdioContext {
             frame = WorkerFrame::Response { response };
         }
         let _ = self.output_tx.send(frame).await;
+    }
+
+    pub async fn cancelled_response(&self, request_id: String) {
+        let response = WorkerResponse {
+            request_id,
+            ok: false,
+            cancelled: true,
+            payload: serde_json::Value::Null,
+            error: Some("worker request cancelled".to_string()),
+        };
+        let _ = self
+            .output_tx
+            .send(WorkerFrame::Response { response })
+            .await;
     }
 
     pub async fn event(&self, event: WorkerEvent) {
@@ -218,19 +234,22 @@ where
                     .await;
             }
             ParentFrame::Cancel { request_id, job_id } => {
-                match job_id.as_deref() {
+                let aborted_request_ids = match job_id.as_deref() {
                     Some(job_id) => abort_job_by_id(&mut jobs, job_id).await,
-                    None => abort_jobs(&mut jobs).await,
-                }
+                    None => abort_request(&mut jobs, &request_id).await,
+                };
                 if let Err(error) =
                     handler(ParentFrame::Cancel { request_id, job_id }, context.clone()).await
                 {
                     eprintln!("worker cancel handler failed: {error}");
                 }
+                for aborted_request_id in aborted_request_ids {
+                    context.cancelled_response(aborted_request_id).await;
+                }
             }
             ParentFrame::Shutdown { request_id } => {
                 context.shutdown.store(true, Ordering::Release);
-                abort_jobs(&mut jobs).await;
+                let _ = abort_jobs(&mut jobs).await;
                 if let Err(error) = handler(
                     ParentFrame::Shutdown {
                         request_id: request_id.clone(),
@@ -312,7 +331,7 @@ where
     }
 
     context.shutdown.store(true, Ordering::Release);
-    abort_jobs(&mut jobs).await;
+    let _ = abort_jobs(&mut jobs).await;
     if !shutdown_handled {
         let _ = handler(
             ParentFrame::Shutdown {
@@ -350,26 +369,39 @@ fn frame_job_id(frame: &ParentFrame) -> Option<String> {
     }
 }
 
-async fn abort_job_by_id(jobs: &mut HashMap<String, RunningJob>, job_id: &str) {
+async fn abort_request(jobs: &mut HashMap<String, RunningJob>, request_id: &str) -> Vec<String> {
+    let Some(job) = jobs.remove(request_id) else {
+        return Vec::new();
+    };
+    job.handle.abort();
+    let _ = job.handle.await;
+    vec![request_id.to_string()]
+}
+
+async fn abort_job_by_id(jobs: &mut HashMap<String, RunningJob>, job_id: &str) -> Vec<String> {
     let request_ids = jobs
         .iter()
         .filter_map(|(request_id, job)| {
             (job.job_id.as_deref() == Some(job_id)).then(|| request_id.clone())
         })
         .collect::<Vec<_>>();
-    for request_id in request_ids {
-        if let Some(job) = jobs.remove(&request_id) {
+    for request_id in &request_ids {
+        if let Some(job) = jobs.remove(request_id) {
             job.handle.abort();
             let _ = job.handle.await;
         }
     }
+    request_ids
 }
 
-async fn abort_jobs(jobs: &mut HashMap<String, RunningJob>) {
-    for (_, job) in jobs.drain() {
+async fn abort_jobs(jobs: &mut HashMap<String, RunningJob>) -> Vec<String> {
+    let mut request_ids = Vec::with_capacity(jobs.len());
+    for (request_id, job) in jobs.drain() {
+        request_ids.push(request_id);
         job.handle.abort();
         let _ = job.handle.await;
     }
+    request_ids
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -418,11 +450,12 @@ mod tests {
             },
         );
 
-        abort_job_by_id(&mut jobs, "task:a").await;
+        let aborted = abort_job_by_id(&mut jobs, "task:a").await;
 
+        assert_eq!(aborted, vec!["request-a".to_string()]);
         assert!(!jobs.contains_key("request-a"));
         assert!(jobs.contains_key("request-b"));
-        abort_jobs(&mut jobs).await;
+        let _ = abort_jobs(&mut jobs).await;
         assert!(jobs.is_empty());
     }
 

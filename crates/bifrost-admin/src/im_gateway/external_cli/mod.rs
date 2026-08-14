@@ -1941,6 +1941,7 @@ fn register_external_cli_job_artifacts(registry_id: &str, artifacts: &ExternalCl
         if let Err(error) = crate::worker_runtime::register_worker_artifact(
             registry_id,
             name,
+            &artifacts.run_dir,
             path,
             media_type.map(ToString::to_string),
         ) {

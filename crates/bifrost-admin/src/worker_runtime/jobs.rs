@@ -47,10 +47,16 @@ pub struct WorkerArtifactRecord {
     pub media_type: Option<String>,
     pub created_at_ms: u64,
     #[serde(skip)]
+    root: PathBuf,
+    #[serde(skip)]
     path: PathBuf,
 }
 
 impl WorkerArtifactRecord {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -231,6 +237,20 @@ pub fn get_job(id: &str) -> Option<WorkerJobRecord> {
     registry().lock().jobs.get(id).cloned()
 }
 
+pub(crate) fn active_request_ids(worker_key: &str, logical_job_id: &str) -> Vec<String> {
+    let state = registry().lock();
+    state
+        .jobs
+        .values()
+        .filter(|job| {
+            job.worker_key == worker_key
+                && job.logical_job_id.as_deref() == Some(logical_job_id)
+                && !job.status.is_terminal()
+        })
+        .map(|job| job.request_id.clone())
+        .collect()
+}
+
 pub fn cancel_target(id: &str) -> Option<(String, String)> {
     let mut state = registry().lock();
     let job = state.jobs.get_mut(id)?;
@@ -280,13 +300,24 @@ pub fn cancel_rejected(id: &str, error: impl Into<String>) -> bool {
 pub fn register_artifact(
     request_id: &str,
     name: impl Into<String>,
+    root: impl AsRef<Path>,
     path: impl AsRef<Path>,
     media_type: Option<String>,
 ) -> Result<WorkerArtifactRecord, String> {
+    let canonical_root = root
+        .as_ref()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize worker artifact root: {error}"))?;
+    if !canonical_root.is_dir() {
+        return Err("worker artifact root must be a directory".to_string());
+    }
     let canonical = path
         .as_ref()
         .canonicalize()
         .map_err(|error| format!("canonicalize worker artifact: {error}"))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err("worker artifact must stay inside its job spool root".to_string());
+    }
     let metadata = std::fs::metadata(&canonical)
         .map_err(|error| format!("read worker artifact metadata: {error}"))?;
     if !metadata.is_file() {
@@ -298,6 +329,7 @@ pub fn register_artifact(
         size_bytes: metadata.len(),
         media_type,
         created_at_ms: worker_now_ms(),
+        root: canonical_root,
         path: canonical,
     };
     let mut state = registry().lock();
@@ -349,6 +381,9 @@ fn update_status(request_id: &str, status: WorkerJobStatus, error: Option<String
     }
     job.status = status;
     job.error = error;
+    if status.is_terminal() {
+        prune_history(&mut state);
+    }
 }
 
 fn prune_history(state: &mut RegistryState) {
@@ -359,10 +394,10 @@ fn prune_history(state: &mut RegistryState) {
                 .get(id)
                 .is_none_or(|job| job.status.is_terminal())
         });
-        let removed = removable_index
-            .and_then(|index| state.order.remove(index))
-            .or_else(|| state.order.pop_front());
-        let Some(id) = removed else {
+        let Some(id) = removable_index.and_then(|index| state.order.remove(index)) else {
+            // Do not evict a live job merely to enforce the terminal history cap.
+            // The registry may temporarily exceed MAX_JOB_HISTORY while all jobs
+            // are active; the next terminal transition prunes history again.
             break;
         };
         if let Some(job) = state.jobs.remove(&id) {
@@ -437,13 +472,21 @@ mod tests {
         let artifact = register_artifact(
             "request-3",
             "stdout",
+            temp.path(),
             &artifact_path,
             Some("text/plain".to_string()),
         )
         .unwrap();
         assert_eq!(artifact.size_bytes, 21);
         assert_eq!(get_job("request-3").unwrap().artifacts.len(), 1);
-        assert!(register_artifact("request-3", "directory", temp.path(), None).is_err());
+        assert!(
+            register_artifact("request-3", "directory", temp.path(), temp.path(), None,).is_err()
+        );
+
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        assert!(
+            register_artifact("request-3", "outside", temp.path(), outside.path(), None,).is_err()
+        );
     }
 
     #[test]
@@ -513,5 +556,22 @@ mod tests {
             get_job("request-queued").unwrap().status,
             WorkerJobStatus::Succeeded
         );
+    }
+    #[test]
+    fn active_jobs_are_never_evicted_by_history_pruning() {
+        clear_for_tests();
+        for index in 0..=MAX_JOB_HISTORY {
+            let request_id = format!("active-{index}");
+            begin_request(
+                "asr:history-test",
+                WorkerKind::Asr,
+                &request_id,
+                Some(&request_id),
+                "asr.test",
+            );
+            mark_running(&request_id);
+        }
+        assert_eq!(list_jobs().len(), MAX_JOB_HISTORY + 1);
+        assert!(get_job("active-0").is_some());
     }
 }

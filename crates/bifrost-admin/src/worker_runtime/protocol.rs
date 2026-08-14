@@ -107,6 +107,8 @@ pub struct WorkerResponse {
     pub request_id: String,
     pub ok: bool,
     #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default)]
     pub payload: serde_json::Value,
     #[serde(default)]
     pub error: Option<String>,
