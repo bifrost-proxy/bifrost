@@ -2,6 +2,7 @@ mod desktop_companion;
 mod external_worker;
 mod install_method;
 mod local_assets;
+mod tuning;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use desktop_companion::DESKTOP_UPGRADE_SHUTDOWN_ARG;
 use desktop_companion::*;
@@ -11,6 +12,9 @@ pub(crate) use desktop_companion::{
 };
 use install_method::*;
 use local_assets::*;
+use tuning::DownloadTuning;
+#[cfg(test)]
+use tuning::{parse_positive_u64, parse_positive_usize};
 
 use bifrost_core::BifrostError;
 use colored::Colorize;
@@ -217,14 +221,6 @@ fn windows_deferred_desktop_companion_executable(
     &deferred_install.staged_binary
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DownloadTuning {
-    connect_timeout_secs: u64,
-    download_timeout_secs: u64,
-    mirror_probe_timeout_secs: u64,
-    download_tries: usize,
-}
-
 pub(crate) fn take_deferred_install_scheduled() -> bool {
     DEFERRED_INSTALL_SCHEDULED.swap(false, Ordering::SeqCst)
 }
@@ -244,59 +240,6 @@ fn mark_desktop_handoff_scheduled() {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn mark_deferred_install_scheduled() {
     DEFERRED_INSTALL_SCHEDULED.store(true, Ordering::SeqCst);
-}
-
-impl Default for DownloadTuning {
-    fn default() -> Self {
-        Self {
-            connect_timeout_secs: DOWNLOAD_CONNECT_TIMEOUT_SECS,
-            download_timeout_secs: DOWNLOAD_TIMEOUT_SECS,
-            mirror_probe_timeout_secs: MIRROR_PROBE_TIMEOUT_SECS,
-            download_tries: DOWNLOAD_TRIES,
-        }
-    }
-}
-
-impl DownloadTuning {
-    fn from_env() -> Self {
-        Self {
-            connect_timeout_secs: positive_env_u64(
-                "BIFROST_DOWNLOAD_CONNECT_TIMEOUT",
-                DOWNLOAD_CONNECT_TIMEOUT_SECS,
-            ),
-            download_timeout_secs: positive_env_u64(
-                "BIFROST_DOWNLOAD_TIMEOUT",
-                DOWNLOAD_TIMEOUT_SECS,
-            ),
-            mirror_probe_timeout_secs: positive_env_u64(
-                "BIFROST_MIRROR_PROBE_TIMEOUT",
-                MIRROR_PROBE_TIMEOUT_SECS,
-            ),
-            download_tries: positive_env_usize("BIFROST_DOWNLOAD_TRIES", DOWNLOAD_TRIES),
-        }
-    }
-}
-
-fn parse_positive_u64(value: Option<&str>, default: u64) -> u64 {
-    value
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
-fn parse_positive_usize(value: Option<&str>, default: usize) -> usize {
-    value
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
-fn positive_env_u64(name: &str, default: u64) -> u64 {
-    parse_positive_u64(env::var(name).ok().as_deref(), default)
-}
-
-fn positive_env_usize(name: &str, default: usize) -> usize {
-    parse_positive_usize(env::var(name).ok().as_deref(), default)
 }
 
 fn get_target_triple() -> Option<&'static str> {
