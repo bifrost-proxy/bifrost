@@ -989,10 +989,10 @@ fn windows_machine_msi_args_preserve_machine_scope_and_quote_paths() {
         .iter()
         .any(|arg| arg == "MSIINSTALLPERUSER=1"));
 
-    let line = windows_msi_argument_line(&args);
-    assert!(line.contains(r#""C:\Users\eden\Desktop Files\bifrost desktop.msi""#));
-    assert!(line.contains(r#""C:\Users\eden\AppData\Local\Temp\bifrost msi.log""#));
-    assert!(line.contains(r#""INSTALLDIR=C:\Program Files\Bifrost""#));
+    let argument_list = windows_msi_powershell_argument_list(&args);
+    assert!(argument_list.contains(r#"'"C:\Users\eden\Desktop Files\bifrost desktop.msi"'"#));
+    assert!(argument_list.contains(r#"'"C:\Users\eden\AppData\Local\Temp\bifrost msi.log"'"#));
+    assert!(argument_list.contains(r#"'INSTALLDIR="C:\Program Files\Bifrost"'"#));
     assert_eq!(powershell_single_quoted("a'b"), "'a''b'");
     let registration = WindowsMsiRegistration {
         product_code: "{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}".to_string(),

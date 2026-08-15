@@ -188,11 +188,7 @@ fn windows_msi_command(args: &[OsString], scope: WindowsMsiScope) -> Command {
     // ShellExecute's `runas` verb is most reliably exposed through
     // Start-Process. Keep the UAC prompt attached to the interactive user,
     // wait for the elevated msiexec, and propagate its real exit code.
-    let argument_line = windows_msi_argument_line(args);
-    let script = format!(
-        "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -ArgumentList {} -Wait -PassThru; exit $p.ExitCode",
-        powershell_single_quoted(&argument_line)
-    );
+    let script = windows_msi_elevation_script(args);
     let mut command = Command::new("powershell");
     command
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
@@ -201,11 +197,46 @@ fn windows_msi_command(args: &[OsString], scope: WindowsMsiScope) -> Command {
 }
 
 #[cfg(any(target_os = "windows", test))]
-pub(super) fn windows_msi_argument_line(args: &[OsString]) -> String {
-    args.iter()
-        .map(|arg| windows_quote_command_line_arg(&arg.to_string_lossy()))
+pub(super) fn windows_msi_elevation_script(args: &[OsString]) -> String {
+    let argument_list = windows_msi_powershell_argument_list(args);
+    format!(
+        "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -ArgumentList {} -Wait -PassThru; exit $p.ExitCode",
+        argument_list
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn windows_msi_powershell_argument_list(args: &[OsString]) -> String {
+    // Start-Process joins ArgumentList elements before launching msiexec.
+    // Preserve literal quotes inside each path/property element: msiexec's
+    // parser does not treat one pre-rendered command-line string equivalently.
+    let args = args
+        .iter()
+        .map(|arg| {
+            let value = arg.to_string_lossy();
+            powershell_single_quoted(&windows_msi_start_process_arg(&value))
+        })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(", ");
+    format!("@({args})")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_msi_start_process_arg(value: &str) -> String {
+    if let Some((name, property_value)) = value.split_once('=') {
+        let is_msi_property = !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+        if is_msi_property
+            && property_value
+                .chars()
+                .any(|ch| matches!(ch, ' ' | '\t' | '"'))
+        {
+            return format!("{name}={}", windows_quote_command_line_arg(property_value));
+        }
+    }
+    windows_quote_command_line_arg(value)
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -394,21 +425,26 @@ mod argument_line_tests {
     use super::*;
 
     #[test]
-    fn msi_argument_line_only_quotes_values_that_need_it() {
+    fn msi_elevation_script_uses_literal_quotes_in_a_powershell_argument_array() {
         let args = vec![
             OsString::from("/i"),
             OsString::from(r"C:\Program Files\Bifrost\bifrost desktop.msi"),
             OsString::from("/qn"),
             OsString::from("/norestart"),
             OsString::from("ALLUSERS=1"),
+            OsString::from(r"INSTALLDIR=C:\Program Files\Bifrost"),
             OsString::from("/l*v"),
             OsString::from(r"C:\Temp Files\bifrost msi.log"),
         ];
 
+        let argument_list = windows_msi_powershell_argument_list(&args);
         assert_eq!(
-            windows_msi_argument_line(&args),
-            r#"/i "C:\Program Files\Bifrost\bifrost desktop.msi" /qn /norestart ALLUSERS=1 /l*v "C:\Temp Files\bifrost msi.log""#
+            argument_list,
+            r#"@('/i', '"C:\Program Files\Bifrost\bifrost desktop.msi"', '/qn', '/norestart', 'ALLUSERS=1', 'INSTALLDIR="C:\Program Files\Bifrost"', '/l*v', '"C:\Temp Files\bifrost msi.log"')"#
         );
+        let script = windows_msi_elevation_script(&args);
+        assert!(script.contains(&format!("-ArgumentList {argument_list}")));
+        assert!(!script.contains("-ArgumentList '/i "));
     }
 
     #[test]
