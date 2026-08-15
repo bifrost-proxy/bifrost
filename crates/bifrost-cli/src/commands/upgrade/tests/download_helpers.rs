@@ -10,7 +10,9 @@ fn download_progress_line_without_total_omits_percentage() {
 }
 
 fn with_mirror_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let _guard = crate::commands::UPGRADE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let key = "BIFROST_GITHUB_MIRROR";
     let prev = std::env::var(key).ok();
     match value {
@@ -84,7 +86,9 @@ fn version_comparison_is_newer_version_behaviour() {
 fn full_manual_upgrade_uses_the_pinned_archive_and_verified_finish_path() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let _guard = crate::commands::UPGRADE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp = tempfile::tempdir().expect("tempdir");
     let target_triple = get_target_triple().expect("supported test target");
     let version = "99.0.1";
@@ -141,7 +145,9 @@ fn full_manual_upgrade_uses_the_pinned_archive_and_verified_finish_path() {
 
 #[test]
 fn restart_and_download_helpers_cover_terminal_paths() {
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let _guard = crate::commands::UPGRADE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp = tempfile::tempdir().expect("tempdir");
     let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
     let previous_archive = std::env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE");
@@ -196,7 +202,9 @@ fn restart_and_download_helpers_cover_terminal_paths() {
 fn download_selection_success_and_free_restart_port_are_exercised() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let _guard = crate::commands::UPGRADE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp = tempfile::tempdir().expect("tempdir");
     let previous_mirror = std::env::var_os("BIFROST_GITHUB_MIRROR");
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");

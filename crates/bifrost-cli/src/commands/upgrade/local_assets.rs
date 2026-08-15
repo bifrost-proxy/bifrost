@@ -397,15 +397,18 @@ mod tests {
 
     #[test]
     fn prepare_discovers_current_target_and_scopes_all_release_overrides() {
-        let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+        let _guard = crate::commands::UPGRADE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = tempfile::tempdir().expect("assets dir");
         let target = get_target_triple().expect("supported test target");
         let version = "0.0.181-local.10";
         create_archive(root.path(), version, target);
-        let desktop_name = local_desktop_asset_name(version, target)
-            .expect("desktop package is supported on the test target");
-        let desktop = root.path().join(desktop_name);
-        fs::write(&desktop, b"local desktop fixture").expect("write desktop fixture");
+        let expected_desktop = local_desktop_asset_name(version, target).map(|desktop_name| {
+            let desktop = root.path().join(desktop_name);
+            fs::write(&desktop, b"local desktop fixture").expect("write desktop fixture");
+            canonicalize_local_asset_root(&desktop).expect("canonical desktop package")
+        });
         let previous = LOCAL_ASSET_ENV_KEYS
             .iter()
             .map(|key| (*key, env::var_os(key)))
@@ -420,11 +423,7 @@ mod tests {
                 .expect("desktop package is present");
             assert_eq!(
                 env::var_os("BIFROST_APP_UPGRADE_TEST_PACKAGE").as_deref(),
-                Some(
-                    canonicalize_local_asset_root(&desktop)
-                        .expect("canonical desktop package")
-                        .as_os_str()
-                )
+                expected_desktop.as_deref().map(Path::as_os_str)
             );
         }
         assert!(!LocalUpgradeContext::prepare(None)
