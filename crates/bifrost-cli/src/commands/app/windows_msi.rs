@@ -56,7 +56,7 @@ pub(super) fn run_windows_msi(
     let scope = find_windows_msi_registration_for_install_dir(install_dir)
         .map(|registration| registration.scope)
         .unwrap_or(WindowsMsiScope::PerUser);
-    let args = windows_msi_install_args(package, &log_path, scope);
+    let args = windows_msi_install_args(package, install_dir, &log_path, scope);
     let mut command = windows_msi_command(&args, scope);
     let status = run_desktop_install_command(command, target_version, progress_source)?;
     if status.success() {
@@ -119,6 +119,7 @@ pub(super) fn run_windows_msi(
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn windows_msi_install_args(
     package: &Path,
+    install_dir: &Path,
     log_path: &Path,
     scope: WindowsMsiScope,
 ) -> Vec<OsString> {
@@ -141,6 +142,14 @@ pub(super) fn windows_msi_install_args(
             args.push(OsString::from("ALLUSERS=1"));
         }
     }
+    // A machine-wide upgrade is launched from the interactive administrator's
+    // token so UAC stays visible. WiX may otherwise resolve INSTALLDIR back to
+    // that user's LocalAppData even while ALLUSERS=1 writes an HKLM product
+    // registration. Pin the already-discovered install directory so scope and
+    // files remain together for both machine-wide and per-user upgrades.
+    let mut install_dir_property = OsString::from("INSTALLDIR=");
+    install_dir_property.push(install_dir.as_os_str());
+    args.push(install_dir_property);
     args.extend([OsString::from("/l*v"), log_path.as_os_str().to_os_string()]);
     args
 }

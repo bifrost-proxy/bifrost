@@ -66,20 +66,21 @@
 
 1. 完整卸载 Windows 上的 CLI、Desktop 与 MSI 注册，并清理 pending、backup、helper、
    status、ready 与安装日志等升级残留。
-2. 以 `ALLUSERS=1` 安装 `v0.0.181-alpha.14` ARM64 Desktop MSI，并把同版本独立 CLI
+2. 以 `ALLUSERS=1` 安装 `v0.0.181-alpha.20` ARM64 Desktop MSI，并把同版本独立 CLI
    安装到 `%LOCALAPPDATA%\bifrost\bin\bifrost.exe`；确认只有一条 HKLM MSI 注册。
-3. 不设置版本或资产测试覆盖变量，直接由 alpha.14 执行 `bifrost upgrade -y`，在
+3. 不设置版本或资产测试覆盖变量，直接由 alpha.20 执行 `bifrost upgrade -y`，在
    machine-wide MSI 安装需要提权时批准 Windows UAC。
 4. 等待升级终态，检查 CLI、Desktop、运行中 core、HKLM MSI 注册、handoff 父 PID、
    升级残留和进程事件。
 
 预期：
 
-- alpha 通道发现相邻公开版本 `v0.0.181-alpha.15`，CLI 资产与 Desktop MSI 下载成功。
+- alpha 通道发现相邻公开版本 `v0.0.181-alpha.21`，CLI 资产与 Desktop MSI 下载成功。
 - 升级识别旧 Desktop 为 machine-wide，不传 `MSIINSTALLPERUSER=1`，通过 UAC 以
-  `ALLUSERS=1` 安装；MSI 返回真实退出码且不再出现 HKLM `Error 1406` / `1603`。
-- CLI 为 alpha.15，Desktop ProductVersion 为 `0.0.181-10015`，MSI DisplayVersion 为
-  `0.0.181.10015`，运行中 core/status 也报告 alpha.15。
+  `ALLUSERS=1` 安装，并把 `INSTALLDIR` 固定为既有的 `C:\Program Files\Bifrost`；MSI
+  返回真实退出码且不再出现 1639、HKLM `Error 1406` 或 1603。
+- CLI 为 alpha.21，Desktop ProductVersion 为 `0.0.181-10021`，MSI DisplayVersion 为
+  `0.0.181.10021`，运行中 core/status 也报告 alpha.21。
 - MSI 注册仍恰好一条且位于 HKLM，不新增 HKCU per-user 注册。
 - helper 等待原 updater PID，升级完成后无 pending、backup、helper、args、ready、status
   或 log 残留，也不启动 Windows Terminal。
@@ -99,3 +100,17 @@
   HKLM `Error 1406`。根因是真实 MSI 注册的 `UninstallString` 为 `REG_EXPAND_SZ`，而 alpha.14
   作用域识别只接受 `REG_SZ`，导致已匹配的 HKLM `InstallLocation` 无法解析 ProductCode；升级
   事务已回滚至 alpha.13。修复进入 alpha.15，TC-WDU-05 调整为干净 alpha.14 → alpha.15。
+- 2026-08-15：后续相邻版本验证继续暴露 Windows 更新链的时序问题。alpha.14 → alpha.15
+  修复了 `REG_EXPAND_SZ` 解析；alpha.15 → alpha.16 的真实 `msiexec` 命令却把 `/i`、`/qn`、
+  `/norestart`、`ALLUSERS=1` 和 `/l*v` 全部包在双引号中，Windows Installer 显示帮助并返回
+  1639。Alpha.17 修正 Desktop ProductVersion 探针路径，Alpha.18 修正 MSI 参数转义。
+- 2026-08-15：真实执行 alpha.17 → alpha.18 时确认 CLI 自替换是 deferred 的：父 updater
+  退出前启动的 Desktop 子升级仍加载 alpha.17 的旧二进制，所以命令行仍为 `"/i" ...
+  "/qn"`，不能用这一跳证明 alpha.18 中的新逻辑。按照相邻版本原则，最终回归改为完整清理后
+  安装 alpha.18，再默认升级到 alpha.19。
+- 2026-08-15：针对 alpha.18 的实机定向探针确认参数转义修复生效，但 machine-wide 安装
+  仍出现目录漂移：MSI 写入 HKLM alpha.18 注册，`InstallLocation` 却变为当前管理员的
+  `%LOCALAPPDATA%\Bifrost`，原有 `C:\Program Files\Bifrost\bifrost-desktop.exe` 被移除。
+  根因是提权后的 WiX 会重新解析默认 `INSTALLDIR`；修复为安装时显式传入已发现的既有安装
+  目录。由于 alpha.19 不含这段修复，最终有效相邻版本回归必须使用均已包含修复的
+  alpha.20 → alpha.21。

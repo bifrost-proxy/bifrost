@@ -908,8 +908,9 @@ fn desktop_download_progress_writes_refresh_and_final_line() {
 #[test]
 fn windows_msi_args_force_per_user_install_and_write_log() {
     let package = PathBuf::from(r"C:\Users\eden\AppData\Local\Temp\bifrost desktop.msi");
+    let install_dir = PathBuf::from(r"C:\Users\eden\AppData\Local\Bifrost");
     let log = PathBuf::from(r"C:\Users\eden\AppData\Local\Temp\bifrost-msi.log");
-    let args = windows_msi_install_args(&package, &log, WindowsMsiScope::PerUser);
+    let args = windows_msi_install_args(&package, &install_dir, &log, WindowsMsiScope::PerUser);
     let args = args
         .iter()
         .map(|arg| arg.to_string_lossy().to_string())
@@ -921,6 +922,9 @@ fn windows_msi_args_force_per_user_install_and_write_log() {
     assert!(args.iter().any(|arg| arg == "/norestart"));
     assert!(args.iter().any(|arg| arg == "ALLUSERS=2"));
     assert!(args.iter().any(|arg| arg == "MSIINSTALLPERUSER=1"));
+    assert!(args
+        .iter()
+        .any(|arg| arg == &format!("INSTALLDIR={}", install_dir.display())));
     assert!(args.iter().any(|arg| arg == "/l*v"));
     assert_eq!(
         args.last().expect("log path argument"),
@@ -955,8 +959,9 @@ fn windows_msi_uninstall_args_force_per_user_uninstall_and_write_log() {
 #[test]
 fn windows_machine_msi_args_preserve_machine_scope_and_quote_paths() {
     let package = PathBuf::from(r"C:\Users\eden\Desktop Files\bifrost desktop.msi");
+    let install_dir = PathBuf::from(r"C:\Program Files\Bifrost");
     let log = PathBuf::from(r"C:\Users\eden\AppData\Local\Temp\bifrost msi.log");
-    let args = windows_msi_install_args(&package, &log, WindowsMsiScope::Machine);
+    let args = windows_msi_install_args(&package, &install_dir, &log, WindowsMsiScope::Machine);
     let rendered = args
         .iter()
         .map(|arg| arg.to_string_lossy().to_string())
@@ -965,6 +970,9 @@ fn windows_machine_msi_args_preserve_machine_scope_and_quote_paths() {
     assert!(rendered.iter().any(|arg| arg == "ALLUSERS=1"));
     assert!(!rendered.iter().any(|arg| arg == "ALLUSERS=2"));
     assert!(!rendered.iter().any(|arg| arg == "MSIINSTALLPERUSER=1"));
+    assert!(rendered
+        .iter()
+        .any(|arg| arg == &format!("INSTALLDIR={}", install_dir.display())));
 
     let uninstall_args = windows_msi_uninstall_args(
         "{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}",
@@ -984,6 +992,7 @@ fn windows_machine_msi_args_preserve_machine_scope_and_quote_paths() {
     let line = windows_msi_argument_line(&args);
     assert!(line.contains(r#""C:\Users\eden\Desktop Files\bifrost desktop.msi""#));
     assert!(line.contains(r#""C:\Users\eden\AppData\Local\Temp\bifrost msi.log""#));
+    assert!(line.contains(r#""INSTALLDIR=C:\Program Files\Bifrost""#));
     assert_eq!(powershell_single_quoted("a'b"), "'a''b'");
     let registration = WindowsMsiRegistration {
         product_code: "{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}".to_string(),
