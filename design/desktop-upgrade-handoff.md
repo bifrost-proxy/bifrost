@@ -210,8 +210,11 @@ stateDiagram-v2
 - Before invoking a Windows MSI/EXE installer, the updater snapshots the existing desktop install
   directory outside the install target. The install and pinned-target version probe form one
   transaction: installer failure or post-install version mismatch restores the complete previous
-  directory; a failed first install is removed. Rollback failure is reported together with the
-  original install error instead of being hidden.
+  directory; a failed first install is removed. If a failed installer did not change any file, the
+  updater compares the installed tree with its snapshot, reports that the previous App is unchanged,
+  and skips a redundant write back into a protected machine-wide directory. A real content change,
+  including equal-length byte changes, still takes the restore path. Rollback failure is reported
+  together with the original install error instead of being hidden.
 - The deferred Windows helper owns the same transaction across App processes: it must not remove the
   pending guard, updater package, or install snapshot merely because the installer exits successfully.
   It commits only after the relaunched App/core reports `Completed`; on version mismatch, early App
@@ -221,10 +224,25 @@ stateDiagram-v2
   `BIFROST_VERSION` injection used by release builds. Before exercising replacement, the target
   executable must pass both `bifrost --version` and a real `/api/system.version` core probe; CLI-only
   byte rewriting is not accepted as proof that the upgrade package contains the requested core.
+- `bifrost upgrade --local-assets <DIR>` is the release-rehearsal source. It accepts exactly one
+  release-named CLI archive for the running target and the same-version Desktop package, rejects
+  empty files and symlinks, then feeds those files into the normal extraction, atomic replacement,
+  Desktop install, version verification, restart, and rollback flow. The override environment is
+  scoped to the upgrade process and inherited by the staged Windows handoff, so local mode changes
+  only asset discovery rather than creating a second installer implementation. A legacy installed
+  CLI that predates the flag may use `scripts/windows/invoke-local-upgrade.ps1`; that wrapper waits
+  for the executable hash to change before its single version probe so the test harness cannot lock
+  the file being replaced.
+- `scripts/windows/build-local-upgrade-assets.ps1` creates the CLI archive and Desktop package with
+  the exact release filenames and version injection on the Windows VM. It snapshots and restores
+  tracked Cargo/Tauri metadata byte-for-byte, allowing repeated `local.N` builds without publishing
+  a tag or contaminating the source diff.
 - Windows CLI self-replacement delegates helper generation to the staged target executable through
-  a hidden `windows-upgrade-handoff` command. The old executable only downloads and starts the staged
-  target, so retry/cleanup fixes shipped in the target release are already active during the first
-  upgrade into that release. The handoff validates that it is executing from
+  a hidden `windows-upgrade-handoff` command. Once the running updater contains this handoff, its
+  staged target owns retry/cleanup fixes before replacing the installed CLI. Compatibility fixes for
+  earlier updaters cannot rely on that handoff: those binaries may still start the Desktop companion
+  from the old installed CLI, so the first fixed Desktop MSI must be correct independently. The
+  handoff validates that it is executing from
   `.bifrost.exe.pending.<old-pid>` beside the sole allowed `bifrost.exe` target, rejects PID zero,
   cross-directory paths, arbitrary target names, and malformed target versions, then creates the
   no-window PowerShell helper that waits for the original updater PID. The old updater does not wait
@@ -242,8 +260,16 @@ stateDiagram-v2
   HKLM products keep `ALLUSERS=1`; HKCU products keep `ALLUSERS=2 MSIINSTALLPERUSER=1`. Elevated
   machine-wide replacement also passes `INSTALLDIR=<existing directory>` explicitly, because WiX can
   otherwise resolve its default directory against the interactive administrator's LocalAppData while
-  still writing an HKLM product registration. The updater passes MSI switches as native switches and
-  quotes only arguments that require Windows command-line quoting, including paths with spaces.
+  still writing an HKLM product registration. Tauri's upstream WiX template runs `AppSearch` after
+  parsing command-line properties and searches directly into `INSTALLDIR`, which overwrites an explicit
+  machine path with either the default value or `InstallDir` under
+  `HKCU\Software\bifrost\Bifrost`. Bifrost's version-pinned WiX template searches those values into
+  `PREVINSTALLDIR` instead, marks public `INSTALLDIR` as `Secure` so it crosses the elevated MSI
+  client/server boundary, then copies the prior value only when the caller did not provide a directory.
+  This keeps interactive installs at their previous custom directory while making an explicit updater
+  directory authoritative inside the MSI itself, including upgrades initiated by older CLIs. The
+  updater passes MSI switches as native switches and quotes only arguments that require Windows
+  command-line quoting, including paths with spaces.
 - The command that opens the new App explicitly removes all helper-only environment variables, for
   both macOS `.app` targets and direct executable targets.
 - A real macOS update relaunch creates one new stable App process instead of a recursive Dock-icon
@@ -273,6 +299,13 @@ stateDiagram-v2
   run finish with one installer registration and no pending/backup/helper/status residue. The first
   fixed release is additionally followed by a fixed-release-to-next-release transition to prove the
   staged-target handoff itself, rather than only compatibility with the legacy helper.
+- Before creating that release, the same commit must pass the local Windows asset matrix: a stale
+  HKCU AppSearch directory with a machine-wide MSI, an invalid-package rollback, and a transient
+  target-file lock followed by an unlocked success. Publishing another tag is not a debugging loop;
+  the final remote run is allowed only after local versions converge with one HKLM registration,
+  Program Files ownership, no terminal window, and no helper/pending/backup residue.
+- Because the WiX template is copied from `@tauri-apps/cli` 2.10.1, upgrading the Tauri CLI requires
+  an explicit template comparison and Windows MSI rebuild before accepting the dependency update.
 - Release discovery follows the running binary's semantic channel. A stable binary queries only
   published stable releases. An `alpha` binary scans published prereleases and selects only the
   newest `alpha` release; `beta`, `rc`, draft, and stable releases are excluded. Prerelease ordering

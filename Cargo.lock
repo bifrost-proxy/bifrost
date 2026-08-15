@@ -503,6 +503,7 @@ dependencies = [
  "crossterm 0.28.1",
  "dialoguer",
  "dirs 5.0.1",
+ "dunce",
  "fontdue",
  "fs2",
  "futures",

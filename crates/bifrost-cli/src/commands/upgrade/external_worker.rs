@@ -299,7 +299,7 @@ mod tests {
                     }
                 }
             });
-            let result = super::super::handle_upgrade(true);
+            let result = super::super::handle_upgrade(true, None);
             server.join().expect("join mock Admin");
             result
         }

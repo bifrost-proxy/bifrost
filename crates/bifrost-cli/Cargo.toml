@@ -84,6 +84,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+dunce = "1"
 
 # --- System tray helper (in-process via `bifrost __tray`) ---
 [target.'cfg(not(target_os = "linux"))'.dependencies]

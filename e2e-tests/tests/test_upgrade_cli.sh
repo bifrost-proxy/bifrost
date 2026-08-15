@@ -128,10 +128,11 @@ test_upgrade_help() {
        "$result" == *"upgrade bifrost to the latest version"* ]] || missing+=(description)
     [[ "$result" != *"--yes"* && "$result" != *"-y"* ]] || missing+=(removed-yes)
     [[ "$result" == *"--help"* || "$result" == *"-h"* ]] || missing+=(help-option)
+    [[ "$result" == *"--local-assets"* ]] || missing+=(local-assets)
     [[ "$result" != *"--restart"* ]] || missing+=(removed-restart)
 
     if [[ ${#missing[@]} -eq 0 ]]; then
-        pass "upgrade --help 显示正确的帮助信息且不包含 -y/--yes 或 --restart"
+        pass "upgrade --help 显示本地制品入口且不包含 -y/--yes 或 --restart"
     else
         fail "upgrade --help 断言失败 (missing: $(IFS=,; echo "${missing[*]}")): $result"
     fi

@@ -51,6 +51,62 @@ impl WindowsDesktopInstallSnapshot {
         }
         remove_path_if_exists(&failed)
     }
+
+    fn installed_tree_is_unchanged(&self) -> bool {
+        self.had_previous_install
+            && paths_have_same_contents(&self.install_dir, self.backup.path()).unwrap_or(false)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn paths_have_same_contents(left: &Path, right: &Path) -> io::Result<bool> {
+    let left_metadata = fs::symlink_metadata(left)?;
+    let right_metadata = fs::symlink_metadata(right)?;
+    if left_metadata.file_type() != right_metadata.file_type() {
+        return Ok(false);
+    }
+
+    if left_metadata.is_file() {
+        if left_metadata.len() != right_metadata.len() {
+            return Ok(false);
+        }
+        let mut left_file = fs::File::open(left)?;
+        let mut right_file = fs::File::open(right)?;
+        let mut left_buffer = [0_u8; 64 * 1024];
+        let mut right_buffer = [0_u8; 64 * 1024];
+        loop {
+            let left_read = left_file.read(&mut left_buffer)?;
+            let right_read = right_file.read(&mut right_buffer)?;
+            if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+                return Ok(false);
+            }
+            if left_read == 0 {
+                return Ok(true);
+            }
+        }
+    }
+
+    if left_metadata.is_dir() {
+        let mut left_entries = fs::read_dir(left)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut right_entries = fs::read_dir(right)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<Vec<_>>>()?;
+        left_entries.sort();
+        right_entries.sort();
+        if left_entries != right_entries {
+            return Ok(false);
+        }
+        for name in left_entries {
+            if !paths_have_same_contents(&left.join(&name), &right.join(name))? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -80,6 +136,9 @@ pub(super) fn finish_windows_desktop_install_transaction<T>(
     let had_previous_install = snapshot.had_previous_install;
     match install_result {
         Ok(value) => Ok(value),
+        Err(install_error) if snapshot.installed_tree_is_unchanged() => Err(BifrostError::Config(
+            format!("{install_error}; previous desktop app unchanged"),
+        )),
         Err(install_error) => match snapshot.restore() {
             Ok(()) => Err(BifrostError::Config(format!(
                 "{install_error}; {}",

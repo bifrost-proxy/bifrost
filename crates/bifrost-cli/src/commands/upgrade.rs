@@ -1,6 +1,7 @@
 mod desktop_companion;
 mod external_worker;
 mod install_method;
+mod local_assets;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use desktop_companion::DESKTOP_UPGRADE_SHUTDOWN_ARG;
 use desktop_companion::*;
@@ -9,6 +10,7 @@ pub(crate) use desktop_companion::{
     shutdown_running_desktop_for_app_upgrade,
 };
 use install_method::*;
+use local_assets::*;
 
 use bifrost_core::BifrostError;
 use colored::Colorize;
@@ -1274,13 +1276,15 @@ pub(crate) fn handle_background_upgrade(
     handle_upgrade_inner(UpgradeBehavior::background(), target_version)
 }
 
-pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
-    if external_worker::is_external_cli_worker() {
+pub fn handle_upgrade(_yes: bool, local_assets: Option<PathBuf>) -> Result<(), BifrostError> {
+    let local_assets = LocalUpgradeContext::prepare(local_assets)?;
+    if external_worker::is_external_cli_worker() && !local_assets.is_active() {
         return external_worker::delegate_upgrade();
     }
 
     let skip_app = env_flag(DESKTOP_MANAGED_SKIP_APP_ENV);
     let skip_restart = env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV);
+    local_assets.require_desktop_package_if_needed(skip_app)?;
     let pinned_target = env::var(DESKTOP_MANAGED_TARGET_ENV).ok();
     let data_dir = get_bifrost_dir()?;
     let managed_child = super::upgrade_background::parent_upgrade_lock_is_valid(&data_dir)

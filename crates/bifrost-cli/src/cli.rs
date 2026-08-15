@@ -478,6 +478,12 @@ previous runtime settings."
     Upgrade {
         #[arg(short = 'y', long, hide = true)]
         yes: bool,
+        #[arg(
+            long,
+            value_hint = ValueHint::DirPath,
+            help = "Use release-formatted assets from a local directory instead of GitHub (explicit test mode)"
+        )]
+        local_assets: Option<PathBuf>,
     },
     #[command(about = "Install, uninstall, or upgrade the Bifrost desktop app")]
     App {

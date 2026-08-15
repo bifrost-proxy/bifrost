@@ -19,6 +19,11 @@
       "../../assets/bifrost.icns",
       "../../assets/bifrost.ico"
     ],
+    "windows": {
+      "wix": {
+        "template": "wix/main.wxs"
+      }
+    },
     "resources": [
       "resources/bin/*"
     ],

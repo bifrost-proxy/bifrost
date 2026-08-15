@@ -2942,7 +2942,10 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn handle_devtools_network_traffic_returns_503_when_db_missing() {
-        let state = Arc::new(AdminState::new(0));
+        let temp_dir = tempfile::tempdir().expect("create isolated rules directory");
+        let rules_storage = bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules"))
+            .expect("create isolated RulesStorage");
+        let state = Arc::new(AdminState::new_for_test(0, rules_storage));
         let (status, body) = devtools_http_request(
             state,
             "GET",

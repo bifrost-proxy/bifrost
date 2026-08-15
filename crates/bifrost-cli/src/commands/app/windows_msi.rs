@@ -57,7 +57,7 @@ pub(super) fn run_windows_msi(
         .map(|registration| registration.scope)
         .unwrap_or(WindowsMsiScope::PerUser);
     let args = windows_msi_install_args(package, install_dir, &log_path, scope);
-    let mut command = windows_msi_command(&args, scope);
+    let command = windows_msi_command(&args, scope);
     let status = run_desktop_install_command(command, target_version, progress_source)?;
     if status.success() {
         let _ = fs::remove_file(&log_path);
