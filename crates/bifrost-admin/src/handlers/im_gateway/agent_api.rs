@@ -175,17 +175,23 @@ pub(super) async fn handle_agent(
     }
 
     // GET /agent/sessions/all — unified list of active + history sessions
-    if rest == "/sessions/all" {
+    // GET /agent/session-summaries — privacy-safe projection for the AI hub
+    if rest == "/sessions/all" || rest == "/session-summaries" {
         if req.method() != Method::GET {
             return method_not_allowed();
         }
+        let summary_request = rest == "/session-summaries";
         let query_params = parse_query_params(req.uri().query().unwrap_or_default());
         let list_limit = query_params
             .get("limit")
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
             .map(|value| value.min(200));
-        let history_scan_limit = list_limit.map(|limit| limit.saturating_mul(4).max(100));
+        let history_scan_limit = if summary_request {
+            None
+        } else {
+            list_limit.map(|limit| limit.saturating_mul(4).max(100))
+        };
         let active_sessions = service.agent_session_manager.list_sessions();
         let running_turns = service.agent_session_manager.list_active_turn_statuses();
         let active_info_by_key: std::collections::HashMap<String, bifrost_agent::SessionInfo> =
@@ -274,12 +280,13 @@ pub(super) async fn handle_agent(
                     .or_else(|| info.and_then(|item| item.runner_id.clone())),
                 history.map(|(_, summary)| summary),
             );
-            let external_detail =
-                if is_external_runner_metadata(runner_type.as_deref(), runner_id.as_deref()) {
-                    external_runner_session_detail(&s.session_key).await
-                } else {
-                    None
-                };
+            let external_detail = if !summary_request
+                && is_external_runner_metadata(runner_type.as_deref(), runner_id.as_deref())
+            {
+                external_runner_session_detail(&s.session_key).await
+            } else {
+                None
+            };
             let total_tokens_used = s.total_tokens_used.or_else(|| {
                 external_detail
                     .as_ref()
@@ -293,7 +300,6 @@ pub(super) async fn handle_agent(
                     .map(|detail| detail.estimated_tokens)
                     .unwrap_or_default()
             };
-            let duration_secs = s.updated_at.saturating_sub(s.started_at);
             let queue_snapshot = queue_snapshot_payload(&service.queue_manager, &s.session_key);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
@@ -303,10 +309,11 @@ pub(super) async fn handle_agent(
                 "source": info.map(|item| item.source.clone()).unwrap_or_else(|| "admin-api".to_string()),
                 "work_dir": s.work_dir.or_else(|| info.and_then(|item| item.work_dir.clone())),
                 "turns": s.message_count.max(info.map(|item| item.message_count).unwrap_or(0)),
+                "user_message_count": s.user_turn_count.max(info.map(|item| item.user_turn_count).unwrap_or(0)),
                 "tokens": total_tokens_used,
                 "start_time": s.started_at,
                 "last_active_time": s.updated_at,
-                "duration_secs": duration_secs,
+                "duration_secs": s.updated_at.saturating_sub(s.started_at),
                 "compaction_count": s.compaction_count,
                 "estimated_tokens": estimated_tokens,
                 "context_window_tokens": s.context_window_tokens,
@@ -321,7 +328,8 @@ pub(super) async fn handle_agent(
                 "model_reasoning_summary": s.model_reasoning_summary.or_else(|| external_detail.as_ref().and_then(|detail| detail.model_reasoning_summary.clone())).or_else(|| info.and_then(|item| item.model_reasoning_summary.clone())),
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
-                "title": info.and_then(|item| item.title.clone()),
+                "title": history.and_then(|(_, summary)| summary.title.clone()),
+                "title_fallback": info.and_then(|item| item.title.clone()),
                 "history_path": history.map(|(path, _)| path.display().to_string()),
                 "has_timeline": history.is_some(),
                 "timeline_event_count": history.map(|(_, summary)| summary.event_count).unwrap_or(0),
@@ -347,12 +355,13 @@ pub(super) async fn handle_agent(
                 s.runner_id,
                 history.map(|(_, summary)| summary),
             );
-            let external_detail =
-                if is_external_runner_metadata(runner_type.as_deref(), runner_id.as_deref()) {
-                    external_runner_session_detail(&s.session_key).await
-                } else {
-                    None
-                };
+            let external_detail = if !summary_request
+                && is_external_runner_metadata(runner_type.as_deref(), runner_id.as_deref())
+            {
+                external_runner_session_detail(&s.session_key).await
+            } else {
+                None
+            };
             let total_tokens_used = s.total_tokens_used.or_else(|| {
                 external_detail
                     .as_ref()
@@ -378,6 +387,7 @@ pub(super) async fn handle_agent(
                 "source": s.source,
                 "work_dir": s.work_dir,
                 "turns": s.message_count,
+                "user_message_count": s.user_turn_count,
                 "tokens": total_tokens_used,
                 "start_time": s.created_at,
                 "last_active_time": s.last_active_at,
@@ -393,7 +403,8 @@ pub(super) async fn handle_agent(
                 "model_reasoning_summary": s.model_reasoning_summary.or_else(|| external_detail.as_ref().and_then(|detail| detail.model_reasoning_summary.clone())),
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
-                "title": s.title,
+                "title": history.and_then(|(_, summary)| summary.title.clone()),
+                "title_fallback": s.title,
                 "history_path": s.history_path.or_else(|| history.map(|(path, _)| path.display().to_string())),
                 "has_timeline": s.has_timeline || history.is_some(),
                 "timeline_event_count": if s.timeline_event_count > 0 {
@@ -429,7 +440,7 @@ pub(super) async fn handle_agent(
                 summary.runner_type.as_deref(),
                 summary.runner_id.as_deref(),
             );
-            let external_detail = if is_external_runner {
+            let external_detail = if !summary_request && is_external_runner {
                 external_runner_session_detail(&session_key).await
             } else {
                 None
@@ -463,6 +474,7 @@ pub(super) async fn handle_agent(
                 "source": summary.source,
                 "work_dir": summary.work_dir,
                 "turns": (summary.user_turns as usize) + (summary.assistant_turns as usize),
+                "user_message_count": summary.user_turns,
                 "tokens": total_tokens_used,
                 "estimated_tokens": estimated_tokens,
                 "start_time": summary.start_time,
@@ -483,7 +495,8 @@ pub(super) async fn handle_agent(
                 "model_reasoning_effort": external_detail.as_ref().and_then(|detail| detail.model_reasoning_effort.clone()),
                 "model_reasoning_summary": external_detail.as_ref().and_then(|detail| detail.model_reasoning_summary.clone()),
                 "run_state": history_session_list_run_state(&summary),
-                "title": summary.title.or(summary.first_user_message),
+                "title": summary.title,
+                "title_fallback": summary.first_user_message,
             }));
         }
 
@@ -517,6 +530,15 @@ pub(super) async fn handle_agent(
             } else {
                 state.messages.len()
             };
+            let user_message_count = if state.messages.is_empty() {
+                usize::from(state.last_user_message.is_some())
+            } else {
+                state
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == "user")
+                    .count()
+            };
             let history = history_by_key.get(&state.session_key);
             let projection =
                 persisted_session_projection(&state, history.map(|(_, summary)| summary));
@@ -542,6 +564,7 @@ pub(super) async fn handle_agent(
                 "source": "admin-api",
                 "work_dir": state.work_dir,
                 "turns": turn_count,
+                "user_message_count": user_message_count,
                 "tokens": serde_json::Value::Null,
                 "start_time": first_message_time,
                 "last_active_time": last_active_time,
@@ -555,7 +578,8 @@ pub(super) async fn handle_agent(
                 "history_path": history_path,
                 "has_timeline": has_timeline,
                 "timeline_event_count": timeline_event_count,
-                "title": state.title.or(state.last_user_message),
+                "title": state.title,
+                "title_fallback": state.last_user_message,
             }));
         }
 
@@ -572,6 +596,15 @@ pub(super) async fn handle_agent(
             t_b.cmp(&t_a)
         });
         dedupe_unified_sessions_by_key(&mut unified);
+        if summary_request {
+            enrich_session_summaries_with_im_context(&mut unified, service);
+            return json_response(&session_summaries_response(&unified, &query_params));
+        }
+        for item in &mut unified {
+            if let Some(object) = item.as_object_mut() {
+                object.remove("user_message_count");
+            }
+        }
         if let Some(limit) = list_limit {
             unified.truncate(limit);
         }
@@ -997,6 +1030,295 @@ fn dedupe_unified_sessions_by_key(unified: &mut Vec<serde_json::Value>) {
         };
         seen_session_keys.insert(session_key.to_string())
     });
+}
+
+fn session_summary_im_context(
+    session_key: &str,
+    service: &ImGatewayService,
+) -> Option<(&'static str, String)> {
+    let store = &service.provider_store;
+    let (provider, chat_id) = session_key
+        .strip_prefix("im:")
+        .and_then(|key| key.split_once(":group:"))
+        .and_then(|(provider_id, tail)| {
+            store.get(provider_id).map(|provider| {
+                (
+                    provider,
+                    Some(tail.split(":thread:").next().unwrap_or(tail)),
+                )
+            })
+        })
+        .or_else(|| {
+            session_key
+                .split_once(':')
+                .and_then(|(provider_id, _)| store.get(provider_id))
+                .map(|provider| (provider, None))
+        })?;
+    let source = match provider.provider_type {
+        ImProviderType::Feishu => "feishu",
+        ImProviderType::Weixin | ImProviderType::WeChat => "weixin",
+        ImProviderType::Webhook => "api",
+    };
+    let title = chat_id
+        .and_then(|chat_id| {
+            service
+                .group_context_store
+                .chat_name(&provider.id, chat_id)
+                .ok()
+                .flatten()
+        })
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| {
+            let display_name = provider.display_name.trim();
+            (!display_name.is_empty()).then(|| display_name.to_string())
+        })
+        .unwrap_or_else(|| provider.id.clone())
+        .trim()
+        .to_string();
+    Some((source, title))
+}
+
+fn enrich_session_summaries_with_im_context(
+    unified: &mut [serde_json::Value],
+    service: &ImGatewayService,
+) {
+    for object in unified
+        .iter_mut()
+        .filter_map(serde_json::Value::as_object_mut)
+    {
+        let context = object
+            .get("session_key")
+            .and_then(|value| value.as_str())
+            .and_then(|session_key| session_summary_im_context(session_key, service));
+        let Some((source, fallback_title)) = context else {
+            continue;
+        };
+        object.insert("source".to_string(), serde_json::json!(source));
+        let has_title = object
+            .get("title")
+            .and_then(|value| value.as_str())
+            .is_some_and(|title| !title.trim().is_empty());
+        if !has_title {
+            object.insert("title".to_string(), serde_json::json!(fallback_title));
+        }
+        object.remove("title_fallback");
+    }
+}
+
+fn session_summaries_response(
+    unified: &[serde_json::Value],
+    query: &std::collections::HashMap<String, String>,
+) -> serde_json::Value {
+    let requested_status = query.get("status").map(|value| value.to_ascii_lowercase());
+    let requested_runner = query.get("runner").map(|value| value.to_ascii_lowercase());
+    let requested_source = query.get("source").map(|value| value.to_ascii_lowercase());
+    let search = query
+        .get("q")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(30)
+        .min(200);
+    let updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut items = unified
+        .iter()
+        .map(|item| session_summary_projection_at(item, updated_at))
+        .filter(|item| {
+            requested_status.as_deref().is_none_or(|status| {
+                item.get("status").and_then(|value| value.as_str()) == Some(status)
+            })
+        })
+        .filter(|item| {
+            requested_runner.as_deref().is_none_or(|runner| {
+                item.get("runner_id")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.eq_ignore_ascii_case(runner))
+                    .unwrap_or(false)
+            })
+        })
+        .filter(|item| {
+            requested_source.as_deref().is_none_or(|source| {
+                item.get("source")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.eq_ignore_ascii_case(source))
+                    .unwrap_or(false)
+            })
+        })
+        .filter(|item| {
+            search.as_deref().is_none_or(|search| {
+                ["title", "runner_id", "source", "session_key"]
+                    .iter()
+                    .filter_map(|field| item.get(field).and_then(|value| value.as_str()))
+                    .any(|value| value.to_ascii_lowercase().contains(search))
+            })
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        let left_time = left
+            .get("start_time")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default();
+        let right_time = right
+            .get("start_time")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default();
+        right_time.cmp(&left_time).then_with(|| {
+            right
+                .get("session_key")
+                .and_then(|value| value.as_str())
+                .cmp(&left.get("session_key").and_then(|value| value.as_str()))
+        })
+    });
+
+    let total_count = items.len();
+    let running_count = items
+        .iter()
+        .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("running"))
+        .count();
+    let mut active_runner_counts = std::collections::BTreeMap::<String, usize>::new();
+    for item in &items {
+        if item.get("status").and_then(|value| value.as_str()) != Some("running") {
+            continue;
+        }
+        if let Some(runner) = item.get("runner_id").and_then(|value| value.as_str()) {
+            *active_runner_counts.entry(runner.to_string()).or_default() += 1;
+        }
+    }
+    let active_runners = active_runner_counts
+        .into_iter()
+        .map(|(runner_id, count)| serde_json::json!({ "runner_id": runner_id, "count": count }))
+        .collect::<Vec<_>>();
+
+    let start_index = query
+        .get("cursor")
+        .and_then(|cursor| {
+            items
+                .iter()
+                .position(|item| {
+                    item.get("session_key").and_then(|value| value.as_str())
+                        == Some(cursor.as_str())
+                })
+                .map(|index| index + 1)
+        })
+        .unwrap_or_default();
+    let page = items
+        .into_iter()
+        .skip(start_index)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let has_more = page.len() > limit;
+    let page = page.into_iter().take(limit).collect::<Vec<_>>();
+    let next_cursor = if has_more {
+        page.last()
+            .and_then(|item| item.get("session_key"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::Null
+    };
+    serde_json::json!({
+        "items": page,
+        "summary": {
+            "running_count": running_count,
+            "total_count": total_count,
+            "active_runners": active_runners,
+        },
+        "next_cursor": next_cursor,
+        "updated_at": updated_at,
+    })
+}
+
+fn session_summary_projection_at(item: &serde_json::Value, now: u64) -> serde_json::Value {
+    let running = item
+        .get("running")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let raw_state = item
+        .get("run_state")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let status = if running || raw_state == "running" {
+        "running"
+    } else if matches!(raw_state, "failed" | "error") {
+        "failed"
+    } else if matches!(raw_state, "stopped" | "cancelled" | "canceled" | "aborted") {
+        "stopped"
+    } else {
+        "completed"
+    };
+    let title = item
+        .get("title")
+        .and_then(|value| value.as_str())
+        .map(clean_session_summary_title)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            item.get("title_fallback")
+                .and_then(|value| value.as_str())
+                .map(clean_session_summary_title)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "Untitled thread".to_string());
+    let runner_id = item
+        .get("runner_id")
+        .and_then(|value| value.as_str())
+        .or_else(|| item.get("runner_type").and_then(|value| value.as_str()))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("built-in");
+    let source = normalize_session_summary_source(
+        item.get("source")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    );
+    let start_time = item
+        .get("start_time")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let duration_secs = if status == "running" && start_time > 0 {
+        now.saturating_sub(start_time)
+    } else {
+        item.get("duration_secs")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default()
+    };
+
+    serde_json::json!({
+        "session_key": item.get("session_key").and_then(|value| value.as_str()).unwrap_or_default(),
+        "status": status,
+        "title": title,
+        "runner_id": runner_id,
+        "duration_secs": duration_secs,
+        "user_message_count": item.get("user_message_count").and_then(|value| value.as_u64()).unwrap_or_default(),
+        "source": source,
+        "start_time": start_time,
+    })
+}
+
+fn clean_session_summary_title(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+fn normalize_session_summary_source(source: &str) -> &str {
+    match source.trim().to_ascii_lowercase().as_str() {
+        "admin-api" | "web" => "web",
+        "feishu" | "lark" => "feishu",
+        "weixin" | "wechat" => "weixin",
+        "schedule" | "scheduled" => "schedule",
+        "asr" => "asr",
+        _ => "api",
+    }
 }
 
 fn is_runner_call_session_key(session_key: &str) -> bool {
@@ -3162,6 +3484,7 @@ mod coverage_boost_v2 {
             "active-external-session"
         );
         assert_eq!(body["sessions"][0]["running"], true);
+        assert!(body["sessions"][0].get("user_message_count").is_none());
         service
             .agent_session_manager
             .clear_active_session_preview("active-external-session");
@@ -3174,6 +3497,508 @@ mod coverage_boost_v2 {
 
         let (status, body) =
             agent_request_json(service, Method::POST, "/agent/sessions/all", None).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body["status"], 405);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_session_summaries_empty_returns_summary_contract() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::GET, "/agent/session-summaries", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"], json!([]));
+        assert_eq!(body["summary"]["running_count"], 0);
+        assert_eq!(body["summary"]["total_count"], 0);
+        assert_eq!(body["summary"]["active_runners"], json!([]));
+        assert!(body["updated_at"].as_u64().is_some());
+        assert!(body["next_cursor"].is_null());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_session_summaries_projects_only_allowlisted_fields() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        assert!(service
+            .agent_session_manager
+            .try_start_external_session_preview(
+                "summary-active-session",
+                Some("  Active\n external   runner  ".to_string()),
+                Some("/tmp/secret-workdir".to_string()),
+                Some("codex".to_string()),
+                Some("codex".to_string()),
+                Some("Codex".to_string()),
+            ));
+
+        let (status, body) = agent_request_json(
+            service.clone(),
+            Method::GET,
+            "/agent/session-summaries?status=running&runner=codex&limit=1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["summary"]["running_count"], 1);
+        assert_eq!(body["summary"]["total_count"], 1);
+        let item = body["items"][0].as_object().expect("summary item");
+        let fields = item
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            fields,
+            std::collections::HashSet::from([
+                "session_key",
+                "status",
+                "title",
+                "runner_id",
+                "duration_secs",
+                "user_message_count",
+                "source",
+                "start_time",
+            ])
+        );
+        assert_eq!(item["title"], "Active external runner");
+        assert!(!body.to_string().contains("secret-workdir"));
+        assert!(!body.to_string().contains("messages"));
+        service
+            .agent_session_manager
+            .clear_active_session_preview("summary-active-session");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_session_summaries_counts_running_turn_user_messages() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let key = "summary-running-turn";
+        let _session = service.agent_session_manager.take_session(key);
+        let mut active = service
+            .agent_session_manager
+            .get_active_turn_status(key)
+            .expect("active turn status");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time")
+            .as_secs();
+        active.runner_type = Some("codex".to_string());
+        active.runner_id = Some("codex".to_string());
+        active.message_count = 5;
+        active.user_turn_count = 3;
+        active.started_at = now.saturating_sub(15);
+        active.updated_at = now;
+        service
+            .agent_session_manager
+            .update_active_turn_status_from_worker(active);
+
+        let (status, body) = agent_request_json(
+            service.clone(),
+            Method::GET,
+            "/agent/session-summaries?q=running-turn",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["summary"]["running_count"], 1);
+        assert_eq!(body["summary"]["active_runners"][0]["runner_id"], "codex");
+        assert_eq!(body["items"][0]["user_message_count"], 3);
+        let duration = body["items"][0]["duration_secs"]
+            .as_u64()
+            .expect("running duration");
+        assert!((15..=17).contains(&duration));
+        service.agent_session_manager.release_active(key);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_session_summaries_counts_history_and_persisted_user_messages() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let data_dir = bifrost_agent::config::agent_home_dir();
+
+        let history_key = "summary-history-count";
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, history_key);
+        recorder
+            .record_session_start(history_key, json!({"source": "feishu"}))
+            .expect("start history");
+        recorder
+            .record_user_message(history_key, "first")
+            .expect("first user message");
+        recorder
+            .record_assistant_message(history_key, "answer")
+            .expect("assistant message");
+        recorder
+            .record_user_message(history_key, "second")
+            .expect("second user message");
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: "summary-persisted-fallback".to_string(),
+                adapter: "codex".to_string(),
+                runner_id: Some("codex".to_string()),
+                last_user_message: Some("fallback user".to_string()),
+                last_response: Some("fallback assistant".to_string()),
+                status: Some("succeeded".to_string()),
+                updated_at: 20_000,
+                ..Default::default()
+            },
+        )
+        .expect("persist fallback state");
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: "summary-persisted-messages".to_string(),
+                adapter: "chatgpt_web".to_string(),
+                runner_id: Some("chatgpt".to_string()),
+                title: Some("Persisted messages".to_string()),
+                latest_run_id: Some("run-summary-messages".to_string()),
+                status: Some("succeeded".to_string()),
+                updated_at: 30_000,
+                messages: vec![
+                    crate::im_gateway::session_state::ImAgentSessionMessage {
+                        role: "user".to_string(),
+                        content: "one".to_string(),
+                        timestamp: Some(10),
+                        content_parts: None,
+                    },
+                    crate::im_gateway::session_state::ImAgentSessionMessage {
+                        role: "assistant".to_string(),
+                        content: "answer".to_string(),
+                        timestamp: Some(20),
+                        content_parts: None,
+                    },
+                    crate::im_gateway::session_state::ImAgentSessionMessage {
+                        role: "user".to_string(),
+                        content: "two".to_string(),
+                        timestamp: Some(30),
+                        content_parts: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .expect("persist message state");
+
+        let (status, body) =
+            agent_request_json(service, Method::GET, "/agent/session-summaries", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().expect("summary items");
+        let user_count = |key: &str| {
+            items
+                .iter()
+                .find(|item| item["session_key"] == key)
+                .and_then(|item| item["user_message_count"].as_u64())
+        };
+        assert_eq!(user_count(history_key), Some(2));
+        assert_eq!(user_count("summary-persisted-fallback"), Some(1));
+        assert_eq!(user_count("summary-persisted-messages"), Some(2));
+    }
+
+    #[test]
+    fn session_summaries_filter_sort_and_cursor_are_stable() {
+        let sessions = vec![
+            json!({
+                "session_key": "older",
+                "running": false,
+                "run_state": "completed",
+                "title": "Older",
+                "runner_id": "claude",
+                "source": "lark",
+                "start_time": 10,
+                "duration_secs": 2,
+                "user_message_count": 1,
+            }),
+            json!({
+                "session_key": "newer",
+                "running": true,
+                "run_state": "running",
+                "title": "Newer",
+                "runner_id": "codex",
+                "source": "admin-api",
+                "start_time": 20,
+                "duration_secs": 3,
+                "user_message_count": 2,
+            }),
+        ];
+        let first = session_summaries_response(
+            &sessions,
+            &std::collections::HashMap::from([("limit".to_string(), "1".to_string())]),
+        );
+        assert_eq!(first["items"][0]["session_key"], "newer");
+        assert_eq!(first["next_cursor"], "newer");
+        assert_eq!(first["summary"]["total_count"], 2);
+
+        let second = session_summaries_response(
+            &sessions,
+            &std::collections::HashMap::from([
+                ("limit".to_string(), "1".to_string()),
+                ("cursor".to_string(), "newer".to_string()),
+            ]),
+        );
+        assert_eq!(second["items"][0]["session_key"], "older");
+        assert!(second["next_cursor"].is_null());
+    }
+
+    #[test]
+    fn session_summaries_filters_source_search_and_tie_breaks_by_key() {
+        let sessions = vec![
+            json!({
+                "session_key": "alpha",
+                "running": false,
+                "run_state": "failed",
+                "title": "Deploy failure",
+                "runner_id": "codex",
+                "source": "feishu",
+                "start_time": 42,
+            }),
+            json!({
+                "session_key": "beta",
+                "running": false,
+                "run_state": "stopped",
+                "title": "Deploy stopped",
+                "runner_id": "codex",
+                "source": "feishu",
+                "start_time": 42,
+            }),
+            json!({
+                "session_key": "gamma",
+                "running": false,
+                "run_state": "completed",
+                "title": "Unrelated",
+                "runner_id": "claude",
+                "source": "web",
+                "start_time": 50,
+            }),
+        ];
+        let response = session_summaries_response(
+            &sessions,
+            &std::collections::HashMap::from([
+                ("source".to_string(), "FEISHU".to_string()),
+                ("q".to_string(), "deploy".to_string()),
+            ]),
+        );
+
+        assert_eq!(response["summary"]["total_count"], 2);
+        assert_eq!(response["items"][0]["session_key"], "beta");
+        assert_eq!(response["items"][0]["status"], "stopped");
+        assert_eq!(response["items"][1]["session_key"], "alpha");
+        assert_eq!(response["items"][1]["status"], "failed");
+    }
+
+    #[test]
+    fn session_summary_projection_falls_back_to_runner_type_when_id_is_null() {
+        let item = session_summary_projection_at(
+            &json!({
+                "session_key": "runner-type-fallback",
+                "running": false,
+                "run_state": "completed",
+                "runner_id": null,
+                "runner_type": "codex",
+            }),
+            0,
+        );
+
+        assert_eq!(item["runner_id"], "codex");
+        assert_eq!(item["title"], "Untitled thread");
+    }
+
+    #[test]
+    fn running_session_summary_duration_uses_execution_start_time() {
+        let running = session_summary_projection_at(
+            &json!({
+                "session_key": "running-duration",
+                "running": true,
+                "run_state": "running",
+                "start_time": 100,
+                "duration_secs": 0,
+            }),
+            145,
+        );
+        let completed = session_summary_projection_at(
+            &json!({
+                "session_key": "completed-duration",
+                "running": false,
+                "run_state": "completed",
+                "start_time": 100,
+                "duration_secs": 12,
+            }),
+            145,
+        );
+
+        assert_eq!(running["duration_secs"], 45);
+        assert_eq!(completed["duration_secs"], 12);
+    }
+
+    #[test]
+    fn im_session_summaries_use_provider_source_and_context_titles() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let feishu = ImProviderConfig {
+            id: "feishu-main".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Release Bot".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: Some("cli_release".to_string()),
+            secret_ref: None,
+            owner_open_id: None,
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let weixin = ImProviderConfig {
+            id: "weixin-main".to_string(),
+            provider_type: ImProviderType::Weixin,
+            display_name: "Weixin Bot".to_string(),
+            app_id: None,
+            ..feishu.clone()
+        };
+        let webhook = ImProviderConfig {
+            id: "webhook-main".to_string(),
+            provider_type: ImProviderType::Webhook,
+            display_name: " ".to_string(),
+            app_id: None,
+            ..feishu.clone()
+        };
+        service
+            .provider_store
+            .add(feishu)
+            .expect("add Feishu provider");
+        service
+            .provider_store
+            .add(weixin)
+            .expect("add Weixin provider");
+        service
+            .provider_store
+            .add(webhook)
+            .expect("add webhook provider");
+
+        let event = crate::im_gateway::types::ImEvent {
+            event_id: "om_group".to_string(),
+            provider_id: "feishu-main".to_string(),
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("oc_engineering".to_string()),
+                chat_type: Some("group".to_string()),
+                user_id: Some("ou_member".to_string()),
+                message_id: Some("om_group".to_string()),
+                ..Default::default()
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: "hello".to_string(),
+                raw_type: Some("text".to_string()),
+                ..Default::default()
+            }),
+            received_at: 100,
+            raw_digest: None,
+        };
+        service
+            .group_context_store
+            .record_event(&event, "test")
+            .expect("record group event");
+        service
+            .group_context_store
+            .set_chat_name("feishu-main", "oc_engineering", "Engineering", 101)
+            .expect("set group name");
+
+        let mut items = vec![
+            json!({
+                "session_key": "im:feishu-main:group:oc_engineering",
+                "source": "admin-api",
+                "title": null,
+                "title_fallback": "first message",
+            }),
+            json!({
+                "session_key": "feishu-main:ou_member",
+                "source": "admin-api",
+                "title": null,
+                "title_fallback": "direct message",
+            }),
+            json!({
+                "session_key": "weixin-main:wx_member",
+                "source": "admin-api",
+                "title": null,
+            }),
+            json!({
+                "session_key": "im:feishu-main:group:oc_engineering:thread:omt_topic",
+                "source": "admin-api",
+                "title": "Explicit topic title",
+            }),
+            json!({
+                "session_key": "webhook-main:external_user",
+                "source": "admin-api",
+                "title": "  ",
+            }),
+            json!({
+                "session_key": "im:feishu-main:group:oc_unknown",
+                "source": "admin-api",
+                "title": null,
+            }),
+            json!({
+                "session_key": "im:missing-provider:group:oc_unknown",
+                "source": "admin-api",
+                "title": null,
+            }),
+            json!({
+                "session_key": "unknown-provider:user",
+                "source": "admin-api",
+                "title": null,
+            }),
+            json!({ "source": "admin-api" }),
+            json!(42),
+        ];
+        enrich_session_summaries_with_im_context(&mut items, &service);
+
+        assert_eq!(items[0]["source"], "feishu");
+        assert_eq!(items[0]["title"], "Engineering");
+        assert!(items[0].get("title_fallback").is_none());
+        assert_eq!(items[1]["source"], "feishu");
+        assert_eq!(items[1]["title"], "Release Bot");
+        assert_eq!(items[2]["source"], "weixin");
+        assert_eq!(items[2]["title"], "Weixin Bot");
+        assert_eq!(items[3]["title"], "Explicit topic title");
+        assert_eq!(items[4]["source"], "api");
+        assert_eq!(items[4]["title"], "webhook-main");
+        assert_eq!(items[5]["title"], "Release Bot");
+        assert_eq!(items[6]["source"], "admin-api");
+        assert_eq!(items[7]["source"], "admin-api");
+        assert_eq!(items[8]["source"], "admin-api");
+        assert_eq!(items[9], 42);
+    }
+
+    #[test]
+    fn session_summary_projection_covers_default_state_title_and_source_fallbacks() {
+        let item = session_summary_projection_at(
+            &json!({
+                "session_key": "fallbacks",
+                "running": false,
+                "run_state": "unknown",
+                "title": " ",
+                "title_fallback": "  first\nmessage  ",
+                "source": "custom-source",
+                "start_time": 0,
+            }),
+            145,
+        );
+
+        assert_eq!(item["status"], "completed");
+        assert_eq!(item["title"], "first message");
+        assert_eq!(item["source"], "api");
+        assert_eq!(item["duration_secs"], 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_session_summaries_method_not_allowed_for_post() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::POST, "/agent/session-summaries", None).await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(body["status"], 405);
     }

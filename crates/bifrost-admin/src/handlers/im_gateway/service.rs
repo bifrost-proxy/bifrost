@@ -107,6 +107,17 @@ impl ImProviderClient {
             },
         }
     }
+    pub(super) fn proactive_send_ready(
+        &self,
+        config: &ImProviderConfig,
+        target: &crate::im_gateway::types::ImTarget,
+    ) -> bool {
+        match self {
+            Self::Feishu(_) => true,
+            Self::Weixin(provider) => provider.send_ready(config, target),
+            Self::Unsupported(_) => false,
+        }
+    }
     pub(super) async fn create_feishu_group_chat(
         &self,
         config: &ImProviderConfig,

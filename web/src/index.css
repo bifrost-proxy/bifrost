@@ -92,6 +92,20 @@ mark.mark-current {
   line-height: 1.35;
 }
 
+[data-theme] .settings-im-card-grid {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 767px) {
+  [data-theme] .settings-im-card-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+}
+
 [data-theme] .im-provider-edit-summary.ant-descriptions {
   margin-bottom: 10px;
 }
