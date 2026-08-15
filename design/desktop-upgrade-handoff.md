@@ -238,6 +238,12 @@ stateDiagram-v2
   maps semantic prereleases with the same algorithm as `scripts/sync-tauri-version.mjs` (`alpha`,
   `beta`, `rc`, numeric and fallback channels), so `0.0.181-10008` is accepted as the packaged form
   of `0.0.181-alpha.8` without weakening pinned-target verification.
+- An existing Windows MSI registration is authoritative for both install scope and install location.
+  HKLM products keep `ALLUSERS=1`; HKCU products keep `ALLUSERS=2 MSIINSTALLPERUSER=1`. Elevated
+  machine-wide replacement also passes `INSTALLDIR=<existing directory>` explicitly, because WiX can
+  otherwise resolve its default directory against the interactive administrator's LocalAppData while
+  still writing an HKLM product registration. The updater passes MSI switches as native switches and
+  quotes only arguments that require Windows command-line quoting, including paths with spaces.
 - The command that opens the new App explicitly removes all helper-only environment variables, for
   both macOS `.app` targets and direct executable targets.
 - A real macOS update relaunch creates one new stable App process instead of a recursive Dock-icon
