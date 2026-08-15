@@ -174,7 +174,7 @@ fn spawn_remote_invoke_worker_startup_task(
                 .collect::<Vec<_>>();
             let count = targets.len();
             bifrost_admin::worker_runtime::remote_invoke::configure_runtime_targets(
-                targets, admin_host, admin_port,
+                targets, admin_host, admin_port, admin_state.clone(),
             );
             tracing::info!(
                 target: "bifrost_cli::startup",
