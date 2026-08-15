@@ -1221,6 +1221,9 @@ pub(crate) fn handle_background_upgrade(
 
 pub fn handle_upgrade(_yes: bool, local_assets: Option<PathBuf>) -> Result<(), BifrostError> {
     let local_assets = LocalUpgradeContext::prepare(local_assets)?;
+    if local_assets.is_active() {
+        ensure_local_assets_install_method_is_safe(&detect_install_method())?;
+    }
     if external_worker::is_external_cli_worker() && !local_assets.is_active() {
         return external_worker::delegate_upgrade();
     }

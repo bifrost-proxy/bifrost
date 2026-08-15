@@ -232,7 +232,10 @@ stateDiagram-v2
   only asset discovery rather than creating a second installer implementation. A legacy installed
   CLI that predates the flag may use `scripts/windows/invoke-local-upgrade.ps1`; that wrapper waits
   for the executable hash to change before its single version probe so the test harness cannot lock
-  the file being replaced.
+  the file being replaced. Local rehearsal fails closed when the running CLI belongs to Homebrew,
+  npm, or pnpm: those managers own their install trees and cannot consume the release archive
+  directory without contacting their package source. Normal upgrades without `--local-assets`
+  retain the package-manager path; local rehearsal must use a standalone or install-script binary.
 - `scripts/windows/build-local-upgrade-assets.ps1` creates the CLI archive and Desktop package with
   the exact release filenames and version injection on the Windows VM. It snapshots and restores
   tracked Cargo/Tauri metadata byte-for-byte, allowing repeated `local.N` builds without publishing

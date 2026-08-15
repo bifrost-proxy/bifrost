@@ -209,6 +209,23 @@ impl LocalUpgradeContext {
     }
 }
 
+pub(super) fn ensure_local_assets_install_method_is_safe(
+    install_method: &InstallMethod,
+) -> Result<(), BifrostError> {
+    match install_method {
+        InstallMethod::Script | InstallMethod::Manual(_) => Ok(()),
+        InstallMethod::Homebrew | InstallMethod::Npm | InstallMethod::Pnpm => {
+            Err(BifrostError::Config(format!(
+            "--local-assets cannot update a {install_method}-owned CLI without contacting its package source. Run the rehearsal from a standalone or install-script binary instead; normal upgrades without --local-assets continue to use {install_method}."
+        )))
+        }
+        InstallMethod::Unknown => Err(BifrostError::Config(
+            "--local-assets requires a standalone or install-script Bifrost CLI, but the current executable's installation method could not be determined."
+                .to_string(),
+        )),
+    }
+}
+
 fn local_desktop_asset_name(version: &str, target: &str) -> Option<String> {
     let extension = if target.ends_with("-pc-windows-msvc") {
         "msi"
@@ -277,6 +294,33 @@ mod tests {
         let archive = root.join(format!("bifrost-v{version}-{target}.zip"));
         fs::write(&archive, b"local archive fixture").expect("write archive fixture");
         archive
+    }
+
+    #[test]
+    fn local_assets_reject_package_manager_owned_installations_before_upgrade() {
+        for method in [
+            InstallMethod::Homebrew,
+            InstallMethod::Npm,
+            InstallMethod::Pnpm,
+        ] {
+            let error = ensure_local_assets_install_method_is_safe(&method)
+                .expect_err("local assets must not invoke a remote package manager");
+            assert!(error
+                .to_string()
+                .contains("without contacting its package source"));
+            assert!(error.to_string().contains("without --local-assets"));
+        }
+
+        assert!(ensure_local_assets_install_method_is_safe(&InstallMethod::Script).is_ok());
+        assert!(
+            ensure_local_assets_install_method_is_safe(&InstallMethod::Manual(PathBuf::from(
+                "/tmp/bifrost"
+            )))
+            .is_ok()
+        );
+        let unknown = ensure_local_assets_install_method_is_safe(&InstallMethod::Unknown)
+            .expect_err("unknown local install targets must fail closed");
+        assert!(unknown.to_string().contains("could not be determined"));
     }
 
     #[test]
