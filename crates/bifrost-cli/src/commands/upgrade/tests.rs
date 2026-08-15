@@ -90,6 +90,27 @@ fn windows_upgrade_handoff_uses_staged_target_and_original_parent_pid() {
 }
 
 #[test]
+fn windows_deferred_desktop_companion_runs_from_the_staged_replacement() {
+    let deferred = WindowsDeferredInstall {
+        staged_binary: PathBuf::from(
+            r"C:\Users\tester\AppData\Local\bifrost\bin\.bifrost.exe.pending.42",
+        ),
+        target_path: PathBuf::from(r"C:\Users\tester\AppData\Local\bifrost\bin\bifrost.exe"),
+        target_version: "0.0.181-alpha.23".to_string(),
+    };
+
+    assert_eq!(
+        windows_deferred_desktop_companion_executable(&deferred),
+        deferred.staged_binary.as_path()
+    );
+    assert_ne!(
+        windows_deferred_desktop_companion_executable(&deferred),
+        deferred.target_path.as_path(),
+        "the old running target cannot execute fixes from the downloaded version"
+    );
+}
+
+#[test]
 fn windows_upgrade_handoff_spawn_retries_sharing_violations() {
     let mut attempts = 0;
     let value = spawn_windows_upgrade_handoff_with_retry(|| {

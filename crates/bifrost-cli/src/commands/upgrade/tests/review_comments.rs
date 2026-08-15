@@ -345,7 +345,7 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         include_str!("../restart.rs")
     );
     for contract in [
-        "update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;",
+        "windows_deferred_desktop_companion_executable(&deferred_install)",
         "stop_tray_helper_before_windows_deferred_install(&data_dir);",
         "Wait-TargetPathWritable $TargetPath 120",
         "function Invoke-FileOperationWithRetry",

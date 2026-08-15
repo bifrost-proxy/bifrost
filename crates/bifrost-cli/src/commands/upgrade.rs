@@ -208,6 +208,13 @@ struct WindowsDeferredInstall {
     target_version: String,
 }
 
+#[cfg(any(windows, test))]
+fn windows_deferred_desktop_companion_executable(
+    deferred_install: &WindowsDeferredInstall,
+) -> &Path {
+    &deferred_install.staged_binary
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DownloadTuning {
     connect_timeout_secs: u64,
@@ -1498,11 +1505,16 @@ fn handle_upgrade_inner(
         #[cfg(windows)]
         UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
             // The helper cannot replace the running CLI until this process
-            // exits, but the installed App can and must be brought to the same
-            // pinned target before we schedule that handoff. Otherwise Windows
-            // would report a completed CLI update while silently leaving the
-            // App on the old version.
-            update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;
+            // exits. Run the App companion from the staged replacement binary,
+            // not from the still-running old target: the App update may depend
+            // on fixes that only exist in the version being installed. After
+            // that child exits, the same staged binary remains available for
+            // the CLI handoff.
+            update_desktop_companion(
+                windows_deferred_desktop_companion_executable(&deferred_install),
+                &cache.latest_version,
+                behavior,
+            )?;
             maybe_restart_running_proxy_after_windows_deferred_install(
                 deferred_install,
                 behavior.restart_proxy,
