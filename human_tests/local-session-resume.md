@@ -175,6 +175,7 @@
 
 - 卡片 clear 后继续发送文本 `/model gpt-unit` 和 `/effort high`，原文本命令链路仍能
   恢复两个 override。
+- 飞书发送 `/models`、`/efforts` 仍返回原文本目录内容，不生成 callback 按钮。
 - 测试只启动一个当前构建的 Bifrost，使用动态端口、临时 `BIFROST_DATA_DIR`、
   `--no-system-proxy`、托盘禁用、Sync 登录弹窗禁用和 system proxy lifecycle helper
   禁用护栏。
@@ -208,7 +209,8 @@
   session；其他用户、错误 chat、过期 callback 和伪造 `/stop now` 均返回 HTTP 400，
   未篡改单聊或群聊状态。
 - 2026-08-17，TC-LSR-07：PASS。clear 后发送带参数文本 `/model gpt-unit` 与
-  `/effort high` 能恢复 override；测试使用动态端口、临时数据目录、双启动护栏和
-  `--no-system-proxy`；发现 system proxy lifecycle helper 会在父进程退出后重建空
-  `.system_proxy.lock`，增加 helper 禁用护栏后复跑输出 `[feishu-slash-choice] PASS`，
-  并用 `find` 确认隔离测试目录完全清理。
+  `/effort high` 能恢复 override；`/models`、`/efforts` 仍返回不含 callback 按钮的
+  文本目录；测试使用动态端口、临时数据目录、双启动护栏和 `--no-system-proxy`；
+  发现 system proxy lifecycle helper 会在父进程退出后重建空 `.system_proxy.lock`，
+  增加 helper 禁用护栏后复跑输出 `[feishu-slash-choice] PASS`，并用 `find` 确认隔离
+  测试目录完全清理。

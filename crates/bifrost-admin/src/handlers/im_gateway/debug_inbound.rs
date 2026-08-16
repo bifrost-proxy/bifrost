@@ -730,30 +730,53 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let io = TokioIo::new(stream);
-            let handler = service_fn(move |request| {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let io = TokioIo::new(stream);
                 let service = service.clone();
-                async move {
-                    let path = request.uri().path().to_string();
-                    Ok::<_, std::convert::Infallible>(
-                        crate::handlers::im_gateway::handle_im_gateway(
-                            request,
-                            Some(service),
-                            &path,
+                let handler = service_fn(move |request| {
+                    let service = service.clone();
+                    async move {
+                        let path = request.uri().path().to_string();
+                        Ok::<_, std::convert::Infallible>(
+                            crate::handlers::im_gateway::handle_im_gateway(
+                                request,
+                                Some(service),
+                                &path,
+                            )
+                            .await,
                         )
-                        .await,
-                    )
-                }
-            });
-            http1::Builder::new()
-                .keep_alive(false)
-                .serve_connection(io, handler)
-                .await
-                .unwrap();
+                    }
+                });
+                http1::Builder::new()
+                    .keep_alive(false)
+                    .serve_connection(io, handler)
+                    .await
+                    .unwrap();
+            }
         });
 
-        let response = reqwest::Client::new()
+        let client = reqwest::Client::new();
+        let endpoint = format!("http://{address}/api/im-gateway/debug/mock-card-action");
+        let response = client
+            .get(&endpoint)
+            .header("connection", "close")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+
+        let response = client
+            .post(&endpoint)
+            .header("connection", "close")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let response = client
             .post(format!(
                 "http://{address}/api/im-gateway/debug/mock-card-action"
             ))

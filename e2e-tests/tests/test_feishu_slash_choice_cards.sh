@@ -65,6 +65,36 @@ wait_capture_count() {
   return 1
 }
 
+wait_capture_source() {
+  local source_message_id="$1"
+  for _ in $(seq 1 240); do
+    if [[ -f "$FEISHU_DRY_RUN" ]] && python3 - "$FEISHU_DRY_RUN" "$source_message_id" <<'PY'
+import json
+import pathlib
+import sys
+
+path, source_message_id = pathlib.Path(sys.argv[1]), sys.argv[2]
+rows = [
+    json.loads(line)
+    for line in path.read_text(encoding="utf-8").splitlines()
+]
+raise SystemExit(0 if any(
+    row.get("kind") == "card"
+    and row.get("sourceMessageId") == source_message_id
+    for row in rows
+) else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "[feishu-slash-choice] missing capture for $source_message_id" >&2
+  [[ -f "$FEISHU_DRY_RUN" ]] && sed -n '1,240p' "$FEISHU_DRY_RUN" >&2 || true
+  tail -160 "$BIFROST_LOG" >&2 || true
+  return 1
+}
+
 wait_state_value() {
   local field="$1"
   local expected="$2"
@@ -582,9 +612,15 @@ def inject(message_id, text):
 
 inject("om_model_text", "/model gpt-unit")
 inject("om_effort_text", "/effort high")
+inject("om_models_text", "/models")
+inject("om_efforts_text", "/efforts")
 PY
 wait_session_field "feishu-choice-e2e:ou_owner" modelOverride "gpt-unit"
 wait_session_field "feishu-choice-e2e:ou_owner" reasoningEffortOverride "high"
+wait_capture_source "om_model_text"
+wait_capture_source "om_effort_text"
+wait_capture_source "om_models_text"
+wait_capture_source "om_efforts_text"
 
 python3 - "$TEST_DIR" "$FEISHU_DRY_RUN" <<'PY'
 import json
@@ -639,6 +675,28 @@ commands = {
 assert "/resume 11111111-1111-1111-1111-111111111111" in commands, commands
 assert "/model gpt-unit" in commands and "/model clear" in commands, commands
 assert "/effort high" in commands and "/effort clear" in commands, commands
+
+for source_message_id, expected_text in [
+    ("om_models_text", "gpt-unit"),
+    ("om_efforts_text", "high"),
+]:
+    row = next(
+        item for item in rows
+        if item.get("kind") == "card"
+        and item.get("sourceMessageId") == source_message_id
+    )
+    serialized = json.dumps(row["card"], ensure_ascii=False)
+    assert expected_text in serialized, row
+    assert not any(
+        child.get("tag") == "button"
+        and any(
+            behavior.get("type") == "callback"
+            for behavior in child.get("behaviors", [])
+        )
+        for element in row["card"]["body"]["elements"]
+        for column in element.get("columns", [])
+        for child in column.get("elements", [])
+    ), row
 PY
 
 echo "[feishu-slash-choice] PASS"
