@@ -85,6 +85,22 @@ grep -Fq -- '- name: Native Weixin provider E2E' <<<"$linux_shell_job"
 grep -Fq 'BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost' <<<"$linux_shell_job"
 grep -Fq 'run: bash e2e-tests/tests/test_weixin_provider_e2e.sh' <<<"$linux_shell_job"
 
+# The coverage job runs the proxy shell manifest itself, so it must provision
+# every external tool required by those scenarios instead of depending on the
+# separately isolated shell E2E job.
+coverage_job="$(
+  awk '
+    /^  coverage:$/ { in_job = 1 }
+    in_job && /^  [[:alnum:]_-]+:$/ && $0 != "  coverage:" { exit }
+    in_job { print }
+  ' "$ci_workflow"
+)"
+grep -Fq -- '- name: Install sync-server dependencies' <<<"$coverage_job"
+grep -Fq 'working-directory: packages/bifrost-sync-server' <<<"$coverage_job"
+grep -Fq -- '- name: Build sync-server (TypeScript -> dist/cli.js)' <<<"$coverage_job"
+grep -Fq -- '- name: Install FFmpeg for ASR source compression E2E' <<<"$coverage_job"
+grep -Fq 'sudo apt-get install --yes --no-install-recommends ffmpeg' <<<"$coverage_job"
+
 grep -Fq 'cargo llvm-cov show-env --sh' "$coverage_all"
 grep -Fq 'unit-integration.json' "$coverage_all"
 grep -Fq 'e2e.json' "$coverage_all"

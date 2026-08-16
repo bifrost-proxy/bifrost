@@ -175,6 +175,19 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
         working-directory: web
+      - name: Install sync-server dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: packages/bifrost-sync-server
+      - name: Build sync-server (TypeScript -> dist/cli.js)
+        run: pnpm run build
+        working-directory: packages/bifrost-sync-server
+      - name: Install FFmpeg for ASR source compression E2E
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
