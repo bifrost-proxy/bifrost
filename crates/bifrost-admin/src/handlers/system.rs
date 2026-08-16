@@ -30,6 +30,7 @@ use crate::metrics::SystemInfo;
 use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
 
+mod skill_install;
 mod version_companion;
 use version_companion::{
     desktop_app_version_for_version_check, resolve_upgrade_target,
@@ -431,10 +432,9 @@ fn install_cli_from_current_exe(
     if request.install_skills.unwrap_or(true) {
         let install_result =
             run_desktop_install_skill(&install_path, DESKTOP_INSTALL_SKILL_TIMEOUT);
-        apply_desktop_install_skill_result(
-            &mut response,
+        (response.skills_installed, response.skills_message) = skill_install::install_result_fields(
             install_result,
-            current_desktop_ai_skills_installed(),
+            skill_install::current_installed(),
         );
     } else {
         response.skills_installed = None;
@@ -442,43 +442,6 @@ fn install_cli_from_current_exe(
     }
 
     Ok(response)
-}
-
-fn apply_desktop_install_skill_result(
-    response: &mut CliInstallResponse,
-    install_result: std::io::Result<DesktopInstallSkillStatus>,
-    detected_skills_installed: Option<bool>,
-) {
-    match install_result {
-        Ok(DesktopInstallSkillStatus::Success) => {
-            let skills_installed = detected_skills_installed.unwrap_or(false);
-            response.skills_installed = Some(skills_installed);
-            response.skills_message = Some(if skills_installed {
-                "Bifrost AI skills installed from embedded desktop bundle".to_string()
-            } else {
-                "install-skill completed, but the full AI skill bundle could not be verified; retry with `bifrost install-skill --tool all -y`".to_string()
-            });
-        }
-        Ok(DesktopInstallSkillStatus::Failed(message)) => {
-            response.skills_installed = Some(false);
-            response.skills_message = Some(format!(
-                "{message}; retry with `bifrost install-skill --tool all -y`"
-            ));
-        }
-        Ok(DesktopInstallSkillStatus::TimedOut) => {
-            response.skills_installed = Some(false);
-            response.skills_message = Some(format!(
-                "install-skill timed out after {}s; retry with `bifrost install-skill --tool all -y`",
-                DESKTOP_INSTALL_SKILL_TIMEOUT.as_secs()
-            ));
-        }
-        Err(error) => {
-            response.skills_installed = Some(false);
-            response.skills_message = Some(format!(
-                "install-skill failed: {error}; retry with `bifrost install-skill --tool all -y`"
-            ));
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -534,7 +497,7 @@ fn build_cli_install_status(
         None => std::env::current_exe()?,
     };
     let in_path = path_contains_dir(&install_dir);
-    let skills_installed = current_desktop_ai_skills_installed();
+    let skills_installed = skill_install::current_installed();
     Ok(CliInstallResponse {
         installed: install_path.exists(),
         install_path: install_path.display().to_string(),
@@ -547,41 +510,9 @@ fn build_cli_install_status(
             Some(cli_path_hint(&install_dir))
         },
         skills_installed,
-        skills_message: desktop_ai_skills_status_message(skills_installed),
+        skills_message: skill_install::status_message(skills_installed),
         dry_run,
     })
-}
-
-fn desktop_ai_skills_status_message(skills_installed: Option<bool>) -> Option<String> {
-    (skills_installed == Some(true)).then(|| "Bifrost AI skills are installed".to_string())
-}
-
-fn current_desktop_ai_skills_installed() -> Option<bool> {
-    let home = dirs::home_dir();
-    let override_dir = std::env::var_os("BIFROST_INSTALL_SKILL_DIR").map(PathBuf::from);
-    desktop_ai_skills_installed(home.as_deref(), override_dir.as_deref())
-}
-
-fn desktop_ai_skills_installed(home: Option<&Path>, override_dir: Option<&Path>) -> Option<bool> {
-    let skill_files = if let Some(primary_dir) = override_dir {
-        let sibling_root = primary_dir.parent().unwrap_or_else(|| Path::new("."));
-        vec![
-            primary_dir.join("SKILL.md"),
-            sibling_root.join("bifrost-remote").join("SKILL.md"),
-        ]
-    } else {
-        let home = home?;
-        [home.join(".agents/skills"), home.join(".claude/skills")]
-            .into_iter()
-            .flat_map(|root| {
-                ["bifrost", "bifrost-remote"]
-                    .into_iter()
-                    .map(move |skill| root.join(skill).join("SKILL.md"))
-            })
-            .collect()
-    };
-
-    Some(skill_files.iter().all(|path| path.is_file()))
 }
 
 fn resolve_cli_install_dir(override_dir: Option<PathBuf>) -> PathBuf {
@@ -1021,15 +952,13 @@ fn upgrade_log_stdio() -> Stdio {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_desktop_install_skill_result, build_cli_install_status,
-        check_unified_version_for_channel, check_version, desktop_ai_skills_installed,
-        desktop_ai_skills_status_message, desktop_core_env_enabled,
-        desktop_version_check_uses_standalone_cli, effective_upgrade_channel,
-        install_binary_atomically, install_cli_from_current_exe, merge_companion_update,
-        normalize_progress, parse_upgrade_channel, spawn_upgrade_process, start_upgrade,
-        upgrade_process_args, upgrade_process_environment, upgrade_request_plan,
+        build_cli_install_status, check_unified_version_for_channel, check_version,
+        desktop_core_env_enabled, desktop_version_check_uses_standalone_cli,
+        effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
+        merge_companion_update, normalize_progress, parse_upgrade_channel, spawn_upgrade_process,
+        start_upgrade, upgrade_process_args, upgrade_process_environment, upgrade_request_plan,
         upgrade_start_lock, validate_upgrade_request_channel, validated_webview_upgrade_origin,
-        CliInstallRequest, DesktopInstallSkillStatus, StatusCode, UpgradeChannel,
+        CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -1453,124 +1382,6 @@ mod tests {
         );
         assert!(status.path_hint.is_some());
         assert!(status.dry_run);
-    }
-
-    #[test]
-    fn desktop_ai_skills_installed_requires_the_complete_bundle() {
-        let home = tempfile::tempdir().expect("temp home");
-        let universal_root = home.path().join(".agents/skills");
-        let claude_root = home.path().join(".claude/skills");
-
-        assert_eq!(
-            desktop_ai_skills_installed(Some(home.path()), None),
-            Some(false)
-        );
-        assert_eq!(desktop_ai_skills_installed(None, None), None);
-
-        for root in [&universal_root, &claude_root] {
-            for skill in ["bifrost", "bifrost-remote"] {
-                let skill_dir = root.join(skill);
-                std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-                std::fs::write(skill_dir.join("SKILL.md"), "---\nname: test\n---\n")
-                    .expect("write skill");
-            }
-        }
-
-        assert_eq!(
-            desktop_ai_skills_installed(Some(home.path()), None),
-            Some(true)
-        );
-
-        std::fs::remove_file(claude_root.join("bifrost-remote/SKILL.md"))
-            .expect("remove one skill");
-        assert_eq!(
-            desktop_ai_skills_installed(Some(home.path()), None),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn desktop_ai_skills_installed_honors_the_installer_override_dir() {
-        let root = tempfile::tempdir().expect("temp skill root");
-        let primary = root.path().join("bifrost");
-        let remote = root.path().join("bifrost-remote");
-        std::fs::create_dir_all(&primary).expect("create primary skill dir");
-        std::fs::create_dir_all(&remote).expect("create remote skill dir");
-        std::fs::write(primary.join("SKILL.md"), "primary").expect("write primary skill");
-        std::fs::write(remote.join("SKILL.md"), "remote").expect("write remote skill");
-
-        assert_eq!(
-            desktop_ai_skills_installed(None, Some(primary.as_path())),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn desktop_skill_install_success_requires_verified_files() {
-        let dir = tempfile::tempdir().expect("temp install dir");
-        let current_exe = std::env::current_exe().expect("current exe");
-        let mut response =
-            build_cli_install_status(Some(dir.path().to_path_buf()), Some(current_exe), true)
-                .expect("build status");
-
-        apply_desktop_install_skill_result(
-            &mut response,
-            Ok(DesktopInstallSkillStatus::Success),
-            Some(true),
-        );
-        assert_eq!(response.skills_installed, Some(true));
-        assert_eq!(
-            response.skills_message.as_deref(),
-            Some("Bifrost AI skills installed from embedded desktop bundle")
-        );
-
-        apply_desktop_install_skill_result(
-            &mut response,
-            Ok(DesktopInstallSkillStatus::Success),
-            None,
-        );
-        assert_eq!(response.skills_installed, Some(false));
-        assert!(response
-            .skills_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("could not be verified"));
-        assert!(response
-            .skills_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("bifrost install-skill --tool all -y"));
-
-        apply_desktop_install_skill_result(
-            &mut response,
-            Ok(DesktopInstallSkillStatus::TimedOut),
-            Some(true),
-        );
-        assert_eq!(response.skills_installed, Some(false));
-        assert!(response
-            .skills_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("timed out after 20s"));
-
-        apply_desktop_install_skill_result(
-            &mut response,
-            Err(std::io::Error::other("spawn failed")),
-            Some(true),
-        );
-        assert_eq!(response.skills_installed, Some(false));
-        assert!(response
-            .skills_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("install-skill failed: spawn failed"));
-
-        assert_eq!(
-            desktop_ai_skills_status_message(Some(true)).as_deref(),
-            Some("Bifrost AI skills are installed")
-        );
-        assert_eq!(desktop_ai_skills_status_message(Some(false)), None);
-        assert_eq!(desktop_ai_skills_status_message(None), None);
     }
 
     #[test]
