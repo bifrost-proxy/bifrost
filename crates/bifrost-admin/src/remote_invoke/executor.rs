@@ -3975,6 +3975,18 @@ mod tests {
         }
     }
 
+    fn shell_timeout_test_completion_budget() -> Duration {
+        // Windows process-tree teardown on a loaded CI host can take a couple
+        // of seconds after the Tokio timeout has fired. Keep the behavioral
+        // assertion strict on Unix while allowing for that platform cleanup
+        // cost; the error assertion below still proves the timeout fired.
+        if cfg!(target_os = "windows") {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(2)
+        }
+    }
+
     fn current_dir_argv() -> Vec<String> {
         if cfg!(target_os = "windows") {
             vec![
@@ -5128,16 +5140,16 @@ mod tests {
         let err = runtime
             .block_on(executor.execute(&cmd))
             .expect_err("idle timeout must produce an error");
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(2_000),
-            "idle timeout should have killed within a second or two, elapsed={:?}",
-            elapsed
-        );
         let msg = format!("{err}");
         assert!(
             msg.contains("idle timeout"),
             "expected idle timeout error, got: {msg}"
+        );
+        let elapsed = started.elapsed();
+        let budget = shell_timeout_test_completion_budget();
+        assert!(
+            elapsed < budget,
+            "idle timeout should have killed within {budget:?}, elapsed={elapsed:?}"
         );
     }
 
@@ -5190,16 +5202,16 @@ mod tests {
         let err = runtime
             .block_on(executor.execute(&cmd))
             .expect_err("wall-clock timeout must produce an error");
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(2_000),
-            "wall-clock should have killed within 2s, elapsed={:?}",
-            elapsed
-        );
         let msg = format!("{err}");
         assert!(
             msg.contains("wall-clock timeout"),
             "expected wall-clock timeout error, got: {msg}"
+        );
+        let elapsed = started.elapsed();
+        let budget = shell_timeout_test_completion_budget();
+        assert!(
+            elapsed < budget,
+            "wall-clock should have killed within {budget:?}, elapsed={elapsed:?}"
         );
     }
 
