@@ -127,14 +127,22 @@ BIFROST_PID=$!
 READY_URL="http://127.0.0.1:$ADMIN_PORT/_bifrost/api/proxy/address"
 wait_for_http_ready "$READY_URL" 45 0.2 || fail "bifrost did not become ready"
 
-# No optional worker or browser may be eagerly launched by `bifrost start`.
+# Remote Invoke keeps one tokenless standby worker so its loopback Admin API is
+# available before sync login. It must remain idle and isolated from the proxy;
+# every other optional worker stays lazy.
 curl -fsS --noproxy '*' \
   "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/workers" \
   >"$TEST_ROOT/workers.json"
-"$PYTHON_BIN" - "$TEST_ROOT/workers.json" <<'PY'
+"$PYTHON_BIN" - "$TEST_ROOT/workers.json" "$BIFROST_PID" <<'PY'
 import json, sys
 workers = json.load(open(sys.argv[1], encoding="utf-8"))
-assert workers == [], workers
+assert len(workers) == 1, workers
+worker = workers[0]
+assert worker["workerKind"] == "remote_invoke", workers
+assert worker["state"] == "ready", workers
+assert worker["pid"] != int(sys.argv[2]), workers
+assert worker["activeJobs"] == 0, workers
+assert worker["queuedJobs"] == 0, workers
 PY
 
 curl -fsS --noproxy '*' \

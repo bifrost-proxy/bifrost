@@ -60,7 +60,10 @@ const EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES: usize = 16 * 1024;
 const EXTERNAL_CLI_WORKER_PROGRESS_TITLE_BYTES: usize = 1024;
 const EXTERNAL_CLI_WORKER_HEARTBEAT_INTERVAL_SECS: u64 = 10;
 const EXTERNAL_CLI_WORKER_HEARTBEAT_TIMEOUT_SECS: u64 = 45;
-const DEFAULT_EXTERNAL_CLI_MAX_CONCURRENCY: usize = 1;
+// Preserve cross-session parallelism from the legacy in-process runtime while
+// keeping the isolated worker fan-out bounded. A single global slot lets one
+// long-running agent block every unrelated IM conversation.
+const DEFAULT_EXTERNAL_CLI_MAX_CONCURRENCY: usize = 4;
 const DEFAULT_EXTERNAL_CLI_QUEUE_TIMEOUT_SECS: u64 = 30;
 pub const EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY: usize = 256;
 const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;

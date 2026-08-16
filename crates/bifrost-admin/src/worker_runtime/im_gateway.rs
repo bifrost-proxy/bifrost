@@ -1365,6 +1365,8 @@ mod tests {
     #[tokio::test]
     async fn parent_im_api_round_trips_provider_and_send_through_isolated_worker() {
         let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        let data_dir = tempfile::tempdir().unwrap();
+        let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(data_dir.path());
         crate::worker_runtime::clear_worker_jobs_for_tests();
         let _lock = LEASE_TEST_LOCK.lock().await;
         MANUAL_PROVIDER_LEASES.clear();
@@ -1461,6 +1463,8 @@ done
     #[tokio::test]
     async fn parent_im_api_contains_worker_failures_invalid_payloads_and_missing_controller() {
         let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        let data_dir = tempfile::tempdir().unwrap();
+        let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(data_dir.path());
         crate::worker_runtime::clear_worker_jobs_for_tests();
         let _lock = LEASE_TEST_LOCK.lock().await;
         MANUAL_PROVIDER_LEASES.clear();
