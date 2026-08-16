@@ -175,6 +175,7 @@ impl ImProviderStore {
         let lock_path = parent.join(format!("{STORE_FILENAME}.lock"));
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)

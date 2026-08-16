@@ -67,6 +67,14 @@ struct SessionRequest {
     session_key: String,
 }
 
+struct RemoveFileOnDrop(PathBuf);
+
+impl Drop for RemoveFileOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 pub(crate) fn is_browser_worker_process() -> bool {
     std::env::var(BROWSER_WORKER_ENV)
         .ok()
@@ -89,13 +97,11 @@ pub(crate) async fn run_via_browser_worker(
         &BrowserRunFileRequest { runs_root, request },
         BROWSER_REQUEST_MAX_BYTES,
     )?;
+    let _request_cleanup = RemoveFileOnDrop(request_path.clone());
 
     let worker = match ensure_worker().await {
         Ok(worker) => worker,
-        Err(error) => {
-            let _ = std::fs::remove_file(&request_path);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     let mut events = worker.subscribe_events();
     let request_future = worker.request_with_id(
@@ -131,7 +137,6 @@ pub(crate) async fn run_via_browser_worker(
             }
         }
     };
-    let _ = std::fs::remove_file(&request_path);
     touch();
     let value = response?;
     let reference: BrowserResultReference = serde_json::from_value(value)
@@ -637,6 +642,10 @@ fn labeled_worker_executable(executable: &Path, alias_name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
+    use crate::worker_runtime::WorkerFrame;
+
     use super::*;
 
     #[test]
@@ -651,5 +660,255 @@ mod tests {
         assert!(compact.content.len() <= MAX_PROGRESS_CONTENT_BYTES + 3);
         assert!(compact.title.unwrap().len() <= MAX_PROGRESS_TITLE_BYTES + 3);
         assert_eq!(compact.raw, serde_json::json!({"truncated": true}));
+    }
+
+    #[test]
+    fn request_cleanup_guard_removes_abandoned_spool() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("request.json");
+        std::fs::write(&path, b"request").unwrap();
+        drop(RemoveFileOnDrop(path.clone()));
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn session_controls_and_worker_frame_matrix_are_bounded() {
+        assert!(!stop_session_run("   ").await);
+        assert!(!stop_session_run("missing-session").await);
+
+        let (context, mut output_rx) = WorkerStdioContext::test_context(WorkerKind::Browser);
+        assert!(handle_worker_request(
+            "unsupported",
+            "browser.unsupported",
+            serde_json::Value::Null,
+            context.clone(),
+        )
+        .await
+        .unwrap_err()
+        .contains("unsupported"));
+
+        for operation in [
+            "browser.run",
+            "browser.auth_status",
+            "browser.open_login",
+            "browser.stop_login",
+            "browser.ensure_startup_auth_ready",
+            "browser.clear_session_conversation",
+            "browser.session_conversation_exists",
+        ] {
+            assert!(handle_worker_request(
+                "invalid-payload",
+                operation,
+                serde_json::json!({"invalid": true}),
+                context.clone(),
+            )
+            .await
+            .is_err());
+        }
+
+        let exists = handle_worker_request(
+            "exists",
+            "browser.session_conversation_exists",
+            serde_json::json!({"sessionKey": "missing-session"}),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(exists, serde_json::Value::Bool(false));
+        let cleared = handle_worker_request(
+            "clear",
+            "browser.clear_session_conversation",
+            serde_json::json!({"sessionKey": "missing-session"}),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleared["cleared"], true);
+
+        handle_worker_frame(
+            ParentFrame::ConfigApply {
+                request_id: "config".to_string(),
+                generation: 7,
+                payload: serde_json::Value::Null,
+            },
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output_rx.recv().await.unwrap() else {
+            panic!("expected config response")
+        };
+        assert!(response.ok);
+        assert_eq!(response.payload["generation"], 7);
+
+        handle_worker_frame(
+            ParentFrame::Ping {
+                request_id: "ping".to_string(),
+            },
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        handle_worker_frame(
+            ParentFrame::Cancel {
+                request_id: "cancel".to_string(),
+                job_id: None,
+            },
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        handle_worker_frame(
+            ParentFrame::Shutdown {
+                request_id: "shutdown".to_string(),
+            },
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        handle_worker_frame(
+            ParentFrame::Request {
+                request: crate::worker_runtime::WorkerRequest {
+                    request_id: "request".to_string(),
+                    job_id: None,
+                    deadline_unix_ms: None,
+                    operation: "browser.unsupported".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+            },
+            context,
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output_rx.recv().await.unwrap() else {
+            panic!("expected request response")
+        };
+        assert!(!response.ok);
+    }
+
+    #[test]
+    fn browser_spool_helpers_cover_success_limits_and_path_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("value.json");
+        write_json_file(&path, &serde_json::json!({"ok": true}), 128).unwrap();
+        let value: serde_json::Value = read_json_file(&path, 128).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(
+            validate_runtime_path(&path, &root).unwrap(),
+            std::fs::canonicalize(&path).unwrap()
+        );
+
+        let outside = temp.path().join("outside.json");
+        std::fs::write(&outside, b"{}").unwrap();
+        assert!(validate_runtime_path(&outside, &root)
+            .unwrap_err()
+            .contains("outside"));
+        assert!(validate_runtime_path(&root.join("missing"), &root).is_err());
+        assert!(read_json_file::<serde_json::Value>(&root.join("missing"), 128).is_err());
+
+        std::fs::write(&path, b"not-json").unwrap();
+        assert!(read_json_file::<serde_json::Value>(&path, 128).is_err());
+        std::fs::write(&path, vec![b'x'; 32]).unwrap();
+        assert!(read_json_file::<serde_json::Value>(&path, 8)
+            .unwrap_err()
+            .contains("exceeds limit"));
+
+        let oversized = root.join("oversized.json");
+        assert!(write_json_file(&oversized, &"x".repeat(64), 8)
+            .unwrap_err()
+            .contains("serialize"));
+        assert!(!oversized.exists());
+
+        let destination_dir = root.join("destination-dir");
+        std::fs::create_dir(&destination_dir).unwrap();
+        assert!(
+            write_json_file(&destination_dir, &serde_json::json!({}), 128)
+                .unwrap_err()
+                .contains("rename")
+        );
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = LimitedJsonWriter {
+                inner: &mut bytes,
+                written: 0,
+                max_bytes: 4,
+            };
+            assert_eq!(writer.write(b"1234").unwrap(), 4);
+            writer.flush().unwrap();
+            assert_eq!(
+                writer.write(b"5").unwrap_err().kind(),
+                std::io::ErrorKind::FileTooLarge
+            );
+        }
+        assert_eq!(bytes, b"1234");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_browser_control_api_round_trips_through_isolated_worker() {
+        let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let script = r#"
+printf '{"type":"hello","hello":{"protocolVersion":1,"workerKind":"browser","workerInstanceId":"browser-api-test","pid":%s,"buildVersion":"test","startupToken":"%s","capabilities":[]}}\n' "$$" "$BIFROST_WORKER_STARTUP_TOKEN"
+printf '{"type":"ready","worker_instance_id":"browser-api-test"}\n'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*)
+      request_id=$(printf '%s' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'browser.ensure_startup_auth_ready'*)
+          payload='{"runnerId":"chatgpt","state":"ready","loggedIn":true,"openedLogin":false,"dryRun":false,"profileDir":"/tmp/profile","statePath":"/tmp/state","message":null}'
+          ;;
+        *'browser.session_conversation_exists'*)
+          payload='true'
+          ;;
+        *'browser.clear_session_conversation'*)
+          payload='{"cleared":true}'
+          ;;
+        *)
+          payload='{"state":"ready","loggedIn":true,"identityComplete":true,"accountCheckOk":true,"accountStatus":200,"cookieCount":2,"capturedHeaderNames":["authorization"],"profileDir":"/tmp/profile","statePath":"/tmp/state","message":null}'
+          ;;
+      esac
+      printf '{"type":"response","response":{"requestId":"%s","ok":true,"cancelled":false,"payload":%s,"error":null}}\n' "$request_id" "$payload"
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"browser-api-test","reason":"test complete"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec = WorkerSpawnSpec::new(
+            BROWSER_WORKER_KEY,
+            WorkerKind::Browser,
+            "/bin/sh",
+            vec!["-c".to_string(), script.to_string()],
+        );
+        spec.startup_timeout = Duration::from_secs(2);
+        spec.request_timeout = Duration::from_secs(2);
+        spec.heartbeat_timeout = Duration::from_secs(10);
+        let supervisor = global_worker_supervisor();
+        supervisor.get_or_start(spec).await.unwrap();
+
+        let settings = ExternalCliAgentSettings::default();
+        assert!(auth_status(&settings).await.unwrap().logged_in);
+        assert!(open_login(&settings).await.unwrap().logged_in);
+        assert!(stop_login(&settings).await.unwrap().logged_in);
+        let startup = ensure_startup_auth_ready("chatgpt", &settings)
+            .await
+            .unwrap();
+        assert_eq!(startup.runner_id, "chatgpt");
+        assert!(startup.logged_in);
+        assert!(session_conversation_exists("session-1").await.unwrap());
+        clear_session_conversation("session-1").await.unwrap();
+
+        assert!(
+            supervisor
+                .unregister(BROWSER_WORKER_KEY, Duration::from_secs(1))
+                .await
+        );
     }
 }

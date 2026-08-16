@@ -503,7 +503,7 @@ P1 再评估 4000 soft limit。没有真实账号上限证据前，不把 full-f
 每个修改生产 Rust 的 PR 都必须：
 
 1. 先补对应单测/E2E。
-2. 推送前执行无 filter 的 `make coverage-changed`，changed-lines 达到 95%。
+2. 推送前执行无 filter 的 `make coverage-changed`，changed-lines 达到 90%。
 3. 远端通过 `bash scripts/ci/coverage-all.sh --json --gate` 的 crate/workspace 门禁。
 4. `weixin.rs` 若继续膨胀会降低可测性，因此 poll、sync store、progress、media 应按上文拆模块。
 

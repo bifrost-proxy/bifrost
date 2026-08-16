@@ -104,4 +104,4 @@ Settings 同时支持 Rules、Domain、App、Client IP 与 Global 五层 TLS 解
 
 ## 覆盖率门禁
 
-本地不运行高成本 `make coverage` 或 `coverage-all.sh --gate`。推送后由 CI 的 `bash scripts/ci/coverage-all.sh --json --gate`、各 crate 棘轮阈值及 changed-lines 95% 门禁兜底。
+本地不运行高成本 `make coverage` 或 `coverage-all.sh --gate`。推送后由 CI 的 `bash scripts/ci/coverage-all.sh --json --gate`、各 crate 棘轮阈值及 changed-lines 90% 门禁兜底。

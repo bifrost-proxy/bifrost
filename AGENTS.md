@@ -90,7 +90,7 @@ Bifrost 的公开入口站点与文档站涉及两个仓库。任何首页、文
 
 ## Rust 生产代码门禁：单元 + E2E 代码覆盖率 90%
 
-**本节只适用于修改 `crates/*/src/**/*.rs` 生产 Rust 代码或明确影响 Rust 运行时的任务。** 适用任务最终必须通过 CI 中的 `bash scripts/ci/coverage-all.sh --json --gate` 覆盖率门禁，并通过 `scripts/ci/coverage-thresholds.toml` 中各 crate 的覆盖率下限（棘轮门禁，目标 90%）与工作区聚合下限校验。本地不默认执行高成本的全 workspace `make coverage` / `coverage-all.sh --gate`；推送前必须执行低成本 `make coverage-changed`，自动仅插桩变更 crate，并按 CI 同源算法检查当前工作区 changed-lines 95% 门禁。详细机制见 `design/coverage-90.md`。
+**本节只适用于修改 `crates/*/src/**/*.rs` 生产 Rust 代码或明确影响 Rust 运行时的任务。** 适用任务最终必须通过 CI 中的 `bash scripts/ci/coverage-all.sh --json --gate` 覆盖率门禁，并通过 `scripts/ci/coverage-thresholds.toml` 中各 crate 的覆盖率下限（棘轮门禁，目标 90%）与工作区聚合下限校验。本地不默认执行高成本的全 workspace `make coverage` / `coverage-all.sh --gate`；推送前必须执行低成本 `make coverage-changed`，自动仅插桩变更 crate，并按 CI 同源算法检查当前工作区 changed-lines 90% 门禁。详细机制见 `design/coverage-90.md`。
 
 强制规则：
 

@@ -407,4 +407,60 @@ mod tests {
         assert!(record.circuit_open_until_ms.is_none());
         assert!(record.failures.is_empty());
     }
+
+    #[test]
+    fn expired_failures_backoff_and_circuit_are_pruned_together() {
+        let mut record = WorkerRecord::new(WorkerKind::Asr);
+        record.failures.push_back(1);
+        record.backoff_until_ms = Some(2);
+        record.circuit_open_until_ms = Some(3);
+        record.refresh(FAILURE_WINDOW_MS + 10);
+        assert!(record.failures.is_empty());
+        assert!(record.backoff_until_ms.is_none());
+        assert!(record.circuit_open_until_ms.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_failure_and_unhealthy_replacement_update_restart_gates() {
+        let supervisor = WorkerSupervisor::new();
+        let missing = WorkerSpawnSpec::new(
+            "missing-worker",
+            WorkerKind::Asr,
+            "/definitely/missing/bifrost-worker",
+            Vec::new(),
+        );
+        assert!(supervisor.get_or_start(missing).await.is_err());
+        assert!(supervisor.reset_circuit("missing-worker").await);
+
+        let tail = "sleep 5";
+        let mut spec =
+            super::super::test_shell_worker_spec("unhealthy-replacement", WorkerKind::Asr, tail);
+        spec.heartbeat_timeout = Duration::from_millis(20);
+        let worker = supervisor.get_or_start(spec.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while worker.state() != WorkerLifecycleState::Degraded {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let error = match supervisor.get_or_start(spec).await {
+            Ok(_) => panic!("unhealthy worker unexpectedly restarted during backoff"),
+            Err(error) => error,
+        };
+        assert!(error.contains("backoff"), "{error}");
+        let snapshot = supervisor
+            .snapshots()
+            .await
+            .into_iter()
+            .find(|snapshot| snapshot.key == "unhealthy-replacement")
+            .unwrap();
+        assert_eq!(snapshot.state, WorkerLifecycleState::Backoff);
+        assert!(
+            supervisor
+                .unregister("unhealthy-replacement", Duration::ZERO)
+                .await
+        );
+    }
 }

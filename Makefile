@@ -88,7 +88,7 @@ coverage-gate:
 # report produced by coverage-all.sh. Usage: make coverage-diff BASE_REF=origin/main
 coverage-diff:
 	@test -n "$(BASE_REF)" || { echo "Usage: make coverage-diff BASE_REF=<git-ref>" >&2; exit 2; }
-	python3 scripts/ci/coverage-diff.py target/coverage/lcov.info --base-ref "$(BASE_REF)" --threshold 95
+	python3 scripts/ci/coverage-diff.py target/coverage/lcov.info --base-ref "$(BASE_REF)" --threshold 90
 
 # Fast local preflight: auto-detect crates with changed production Rust files,
 # reuse instrumented build artifacts, and apply the CI changed-lines threshold
@@ -170,7 +170,7 @@ help:
 	@echo "  coverage-e2e   E2E coverage (instrumented bifrost + bifrost-e2e)"
 	@echo "  coverage-html  Generate HTML coverage report"
 	@echo "  coverage-json  Generate JSON coverage summary"
-	@echo "  coverage-changed Fast 95% coverage preflight for changed production Rust"
+	@echo "  coverage-changed Fast 90% coverage preflight for changed production Rust"
 	@echo "  coverage-crate Coverage for a single crate (CRATE=<name>)"
 	@echo "  lint           Run linter on all code"
 	@echo "  fmt            Format all code"

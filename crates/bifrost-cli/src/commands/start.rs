@@ -174,7 +174,10 @@ fn spawn_remote_invoke_worker_startup_task(
                 .collect::<Vec<_>>();
             let count = targets.len();
             bifrost_admin::worker_runtime::remote_invoke::configure_runtime_targets(
-                targets, admin_host, admin_port, admin_state.clone(),
+                targets,
+                admin_host,
+                admin_port,
+                admin_state.clone(),
             );
             tracing::info!(
                 target: "bifrost_cli::startup",
@@ -263,6 +266,9 @@ fn start_im_gateway_runtime(admin_state: &AdminState, admin_host: String, admin_
     ) {
         bifrost_admin::worker_runtime::im_gateway::start_runtime_controller(admin_host, admin_port);
         if let Some(im_service) = admin_state.im_gateway_service() {
+            // Browser authentication is a main-process control-plane action;
+            // the heavy browser work is delegated to the Browser worker.
+            im_service.spawn_chatgpt_web_startup_auth_check();
             im_service.spawn_feishu_setup_supervisor();
         }
         return;
@@ -271,11 +277,10 @@ fn start_im_gateway_runtime(admin_state: &AdminState, admin_host: String, admin_
     bifrost_admin::worker_runtime::im_gateway::stop_runtime_controller();
     if let Some(im_service) = admin_state.im_gateway_service() {
         im_service.start_scheduler();
-        if !bifrost_admin::worker_runtime::worker_execution_enabled(
-            bifrost_admin::worker_runtime::WorkerKind::Browser,
-        ) {
-            im_service.spawn_chatgpt_web_startup_auth_check();
-        }
+        // The check itself is cheap when no ChatGPT Web runner exists. When a
+        // runner is configured it delegates to the isolated Browser worker,
+        // preserving lazy startup without silently skipping login readiness.
+        im_service.spawn_chatgpt_web_startup_auth_check();
         im_service.spawn_feishu_setup_supervisor();
         let im_service_clone = im_service.clone();
         tokio::spawn(async move {
@@ -4955,7 +4960,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn forked_daemon_child_clears_inherited_external_worker_marker() {
-        let _guard = data_dir_test_lock();
+        let _guard = crate::commands::UPGRADE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _worker_marker = ScopedEnvVar::set(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
 
         clear_external_cli_worker_marker_for_forked_daemon();

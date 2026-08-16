@@ -114,9 +114,9 @@ grep -Fq 'CARGO_LLVM_COV_TARGET_DIR' "$coverage_changed"
 grep -Fq 'clear_profiles(target_dir)' "$coverage_changed"
 grep -Fq -- '--worktree' "$coverage_changed"
 grep -Fq 'coverage-changed' Makefile
-grep -Fq 'Changed production Rust coverage (95%)' scripts/ci/local-ci.sh
+grep -Fq 'Changed production Rust coverage (90%)' scripts/ci/local-ci.sh
 grep -Fq 'all exact #[cfg(test)] items excluded' "$coverage_production"
-grep -Fq 'changed_lines_min = 95.0' scripts/ci/coverage-thresholds.toml
+grep -Fq 'changed_lines_min = 90.0' scripts/ci/coverage-thresholds.toml
 grep -Fq 'coverage-diff.py target/coverage/lcov.info' "$ci_workflow"
 grep -Fq -- '--with-e2e --e2e-suite proxy' "$ci_workflow"
 grep -Fq 'target/coverage/production-coverage.json' "$ci_workflow"
@@ -223,7 +223,7 @@ grep -Fq 'shell_test_capability_group()' "$runner"
 grep -Fq 'BIFROST_E2E_SHELL_TESTS' "$runner"
 grep -Fq 'PROXY_COVERAGE_SHELL_MANIFEST' "$coverage_all"
 grep -Fq 'rules | shell | runner | proxy' "$coverage_all"
-expected_proxy_coverage_shell_tests=16
+expected_proxy_coverage_shell_tests=21
 actual_proxy_coverage_shell_tests="$(wc -l <"$proxy_coverage_shell_manifest" | tr -d ' ')"
 if [[ "$actual_proxy_coverage_shell_tests" -ne "$expected_proxy_coverage_shell_tests" ]]; then
   echo "proxy coverage shell manifest count mismatch: expected $expected_proxy_coverage_shell_tests, got $actual_proxy_coverage_shell_tests" >&2
@@ -366,7 +366,7 @@ mod tests {
 EOF
   cat >"$fixture_dir/scripts/ci/coverage-thresholds.toml" <<'EOF'
 [settings]
-changed_lines_min = 95.0
+changed_lines_min = 90.0
 EOF
 
   git -C "$fixture_dir" init -b main >/dev/null

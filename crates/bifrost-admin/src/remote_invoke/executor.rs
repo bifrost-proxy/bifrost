@@ -6229,6 +6229,14 @@ mod coverage_boost {
         expected_request_line: &'static str,
         response_body: &'static str,
     ) -> (u16, tokio::task::JoinHandle<()>) {
+        serve_single_http_response_with_status(expected_request_line, "200 OK", response_body).await
+    }
+
+    async fn serve_single_http_response_with_status(
+        expected_request_line: &'static str,
+        response_status: &'static str,
+        response_body: &'static str,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fake admin server");
@@ -6258,7 +6266,7 @@ mod coverage_boost {
             let request_line = request.lines().next().unwrap_or_default();
             assert_eq!(request_line, expected_request_line);
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(),
                 response_body
             );
@@ -6298,6 +6306,71 @@ mod coverage_boost {
             Some(true)
         );
         server.await.expect("fake admin server completes");
+    }
+
+    #[tokio::test]
+    async fn execute_power_admin_fallback_covers_mutations_validation_and_http_errors() {
+        for (command_name, endpoint) in [("on", "on"), ("off", "off")] {
+            let request_line =
+                Box::leak(format!("POST /_bifrost/api/power/{endpoint} HTTP/1.1").into_boxed_str());
+            let (port, server) = serve_single_http_response(request_line, r#"{"ok":true}"#).await;
+            let executor = RemoteInvokeExecutor::new("127.0.0.1", port);
+            let command = RemoteCommand {
+                command: command_name.to_string(),
+                ..Default::default()
+            };
+            assert!(executor.execute_power_op_via_admin(&command).await.is_ok());
+            server.await.unwrap();
+        }
+
+        let (port, server) = serve_single_http_response(
+            "POST /_bifrost/api/power/mode HTTP/1.1",
+            r#"{"mode":"always"}"#,
+        )
+        .await;
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", port);
+        let set_mode = RemoteCommand {
+            command: "set_mode".to_string(),
+            args_json: Some(r#"{"mode":"always"}"#.to_string()),
+            ..Default::default()
+        };
+        assert!(executor
+            .execute_power_op_via_admin(&set_mode)
+            .await
+            .unwrap()
+            .contains("always"));
+        server.await.unwrap();
+
+        for command in [
+            RemoteCommand {
+                command: "set_mode".to_string(),
+                ..Default::default()
+            },
+            RemoteCommand {
+                command: "unknown".to_string(),
+                ..Default::default()
+            },
+        ] {
+            assert!(executor.execute_power_op_via_admin(&command).await.is_err());
+        }
+
+        let (port, server) = serve_single_http_response_with_status(
+            "POST /_bifrost/api/power/off HTTP/1.1",
+            "503 Service Unavailable",
+            "temporarily unavailable",
+        )
+        .await;
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", port);
+        let error = executor
+            .execute_power_op_via_admin(&RemoteCommand {
+                command: "off".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("503 Service Unavailable"), "{error}");
+        server.await.unwrap();
     }
 
     #[tokio::test]

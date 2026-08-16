@@ -269,7 +269,7 @@ negative cache，也不复用跨连接的最终进程结论。TLS 应用 include
 - 单元测试：多连接并发 snapshot miss 只执行一次 scanner，全部读取同一 generation；
 - E2E/human test：高并发 CONNECT 下扫描次数受控，同时 Chrome/Edge include 仍解包、
   exclude 仍透传、unknown 仍按既有安全语义透传；
-- CI：changed-lines 95% 与 `coverage-all.sh --json --gate` 90% 门禁保持全绿。
+- CI：changed-lines 与 `coverage-all.sh --json --gate` 均按 90% 目标保持全绿。
 
 ## Phase 7 —— 消除 10k cache 悬崖与跨协议连接级归因
 

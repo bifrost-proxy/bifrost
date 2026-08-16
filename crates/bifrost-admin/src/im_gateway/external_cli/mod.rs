@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as StdWrite;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
@@ -179,6 +179,25 @@ pub async fn request_worker_session_stop(session_key: &str) -> bool {
     true
 }
 
+pub async fn stop_all_worker_sessions() -> usize {
+    let keys = QUEUED_WORKER_SESSIONS
+        .iter()
+        .map(|entry| entry.key().clone())
+        .chain(
+            ACTIVE_WORKER_SESSIONS
+                .iter()
+                .map(|entry| entry.key().clone()),
+        )
+        .collect::<HashSet<_>>();
+    let mut stopped = 0;
+    for key in keys {
+        if request_worker_session_stop(&key).await {
+            stopped += 1;
+        }
+    }
+    stopped
+}
+
 pub async fn request_worker_session_guide(
     session_key: &str,
     guide_id: String,
@@ -261,20 +280,18 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     let run_request = request_file.request;
     let (command_tx, mut command_rx) =
         tokio::sync::mpsc::channel::<ExternalCliWorkerCommand>(MAX_PENDING_EXTERNAL_GUIDES + 2);
-    std::thread::spawn(move || loop {
-        let line = match crate::worker_runtime::read_limited_sync_line(
+    std::thread::spawn(move || {
+        while let Ok(Some(line)) = crate::worker_runtime::read_limited_sync_line(
             &mut stdin,
             EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES,
         ) {
-            Ok(Some(line)) => line,
-            Ok(None) | Err(_) => break,
-        };
-        let Ok(command) = serde_json::from_str::<ExternalCliWorkerCommand>(&line) else {
-            continue;
-        };
-        let should_stop = matches!(command, ExternalCliWorkerCommand::Stop);
-        if command_tx.blocking_send(command).is_err() || should_stop {
-            break;
+            let Ok(command) = serde_json::from_str::<ExternalCliWorkerCommand>(&line) else {
+                continue;
+            };
+            let should_stop = matches!(command, ExternalCliWorkerCommand::Stop);
+            if command_tx.blocking_send(command).is_err() || should_stop {
+                break;
+            }
         }
     });
     let (event_tx, mut event_rx) = mpsc::channel::<ExternalCliWorkerEvent>(128);
@@ -1407,11 +1424,16 @@ impl ExternalCliRuntime {
             )
             && !crate::im_gateway::chatgpt_web::worker::is_browser_worker_process();
         if delegates_to_browser_worker {
-            return self.run_with_progress_inner(request, progress_tx).await;
+            return self
+                .run_with_progress_inner(request, progress_tx, None)
+                .await;
         }
 
         let registry_id = uuid::Uuid::new_v4().to_string();
-        let logical_job_id = request.session_key.clone();
+        let logical_job_id = request
+            .session_key
+            .clone()
+            .unwrap_or_else(|| registry_id.clone());
         let worker_kind = if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
             crate::worker_runtime::WorkerKind::Browser
         } else {
@@ -1422,10 +1444,9 @@ impl ExternalCliRuntime {
             &worker_key,
             worker_kind,
             &registry_id,
-            logical_job_id.as_deref(),
+            Some(&logical_job_id),
             &format!("external_cli.run:{}", request.adapter),
         );
-        crate::worker_runtime::mark_worker_job_running(&registry_id);
 
         let (registry_progress_tx, mut registry_progress_rx) =
             mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
@@ -1447,7 +1468,7 @@ impl ExternalCliRuntime {
         });
 
         let result = self
-            .run_with_progress_inner(request, Some(registry_progress_tx))
+            .run_with_progress_inner(request, Some(registry_progress_tx), Some(&registry_id))
             .await;
         let _ = progress_forwarder.await;
         match &result {
@@ -1471,6 +1492,9 @@ impl ExternalCliRuntime {
                     }
                 }
             }
+            Err(error) if error == "external CLI run cancelled while queued" => {
+                crate::worker_runtime::mark_worker_job_cancelled(&registry_id, Some(error.clone()))
+            }
             Err(error) => {
                 crate::worker_runtime::mark_worker_job_failed(&registry_id, error.clone())
             }
@@ -1482,6 +1506,7 @@ impl ExternalCliRuntime {
         &self,
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
+        registry_id: Option<&str>,
     ) -> Result<ExternalCliRunResult, String> {
         if !cfg!(test)
             && request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID
@@ -1498,9 +1523,20 @@ impl ExternalCliRuntime {
             .await;
         }
         if should_run_external_cli_in_current_process() {
+            if let Some(registry_id) = registry_id {
+                crate::worker_runtime::mark_worker_job_running(registry_id);
+            }
             return self
                 .run_in_current_process_with_progress(request, progress_tx)
                 .await;
+        }
+        if crate::worker_runtime::global_worker_supervisor()
+            .is_kind_suspended(crate::worker_runtime::WorkerKind::ExternalCli)
+        {
+            return Err(
+                "external_cli workers are manually stopped; start the worker kind to resume"
+                    .to_string(),
+            );
         }
         // Preserve the historical same-session replacement behavior: stop the
         // prior worker before waiting for the global concurrency slot, otherwise
@@ -1510,12 +1546,16 @@ impl ExternalCliRuntime {
         }
         let queue_timeout_secs = external_cli_queue_timeout_secs();
         let queue_id = uuid::Uuid::new_v4().to_string();
+        let control_key = request
+            .session_key
+            .clone()
+            .or_else(|| registry_id.map(str::to_string));
         let (queue_cancel_tx, mut queue_cancel_rx) = watch::channel(false);
         let queue_guard = QueuedExternalCliWorkerGuard {
-            session_key: request.session_key.clone(),
+            session_key: control_key.clone(),
             queue_id: queue_id.clone(),
         };
-        if let Some(session_key) = request.session_key.as_deref() {
+        if let Some(session_key) = control_key.as_deref() {
             QUEUED_WORKER_SESSIONS.insert(
                 session_key.to_string(),
                 QueuedExternalCliWorkerControl {
@@ -1544,6 +1584,9 @@ impl ExternalCliRuntime {
             }
         };
         drop(queue_guard);
+        if let Some(registry_id) = registry_id {
+            crate::worker_runtime::mark_worker_job_running(registry_id);
+        }
         let worker_client = ExternalCliWorkerClient::current_exe()?;
         let mut worker = worker_client
             .spawn(self.runs_root.clone(), request.clone())
@@ -1552,13 +1595,13 @@ impl ExternalCliRuntime {
         let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<
             ExternalCliWorkerControlRequest,
         >(MAX_PENDING_EXTERNAL_GUIDES);
-        if let (Some(session_key), Some(pid)) = (request.session_key.as_deref(), worker_pid) {
+        if let (Some(session_key), Some(pid)) = (control_key.as_deref(), worker_pid) {
             ACTIVE_WORKER_SESSIONS.insert(
                 session_key.to_string(),
                 ExternalCliWorkerControlHandle { pid, control_tx },
             );
         }
-        let session_key = request.session_key.clone();
+        let session_key = control_key;
         let mut pending_guides = HashMap::<String, oneshot::Sender<ExternalCliGuideResult>>::new();
         let mut control_open = true;
         let result = loop {
@@ -2007,11 +2050,6 @@ fn register_external_cli_job_artifacts(registry_id: &str, artifacts: &ExternalCl
             "normalized_events",
             artifacts.normalized_events.as_str(),
             Some("application/x-ndjson"),
-        ),
-        (
-            "last_message",
-            artifacts.last_message.as_str(),
-            Some("text/plain"),
         ),
     ];
     for (name, path, media_type) in candidates {
@@ -4676,11 +4714,13 @@ async fn run_command(
                 run_id,
                 pid,
                 child,
-                stdout_task,
-                stderr_task,
-                stdout_tee_task,
-                stderr_tee_task,
-                stderr_path.clone(),
+                InterruptedCommandTasks {
+                    stdout_task,
+                    stderr_task,
+                    stdout_tee_task,
+                    stderr_tee_task,
+                    stderr_path: stderr_path.clone(),
+                },
                 ExternalCliRunStatus::TimedOut,
                 format!(
                     "external cli timed out after {} seconds\n",
@@ -4694,11 +4734,13 @@ async fn run_command(
                 run_id,
                 pid,
                 child,
-                stdout_task,
-                stderr_task,
-                stdout_tee_task,
-                stderr_tee_task,
-                stderr_path,
+                InterruptedCommandTasks {
+                    stdout_task,
+                    stderr_task,
+                    stdout_tee_task,
+                    stderr_tee_task,
+                    stderr_path,
+                },
                 ExternalCliRunStatus::Stopped,
                 "external cli stopped by request\n".to_string(),
             )
@@ -4707,18 +4749,29 @@ async fn run_command(
     }
 }
 
-async fn collect_interrupted_command_output(
-    run_id: &str,
-    pid: u32,
-    mut child: tokio::process::Child,
+struct InterruptedCommandTasks {
     stdout_task: ExternalCliStdoutTask,
     stderr_task: ExternalCliStderrTask,
     stdout_tee_task: ExternalCliTeeTask,
     stderr_tee_task: ExternalCliTeeTask,
     stderr_path: PathBuf,
+}
+
+async fn collect_interrupted_command_output(
+    run_id: &str,
+    pid: u32,
+    mut child: tokio::process::Child,
+    tasks: InterruptedCommandTasks,
     status: ExternalCliRunStatus,
     terminal_message: String,
 ) -> Result<CommandOutput, String> {
+    let InterruptedCommandTasks {
+        stdout_task,
+        stderr_task,
+        stdout_tee_task,
+        stderr_tee_task,
+        stderr_path,
+    } = tasks;
     let stopped = matches!(status, ExternalCliRunStatus::Stopped);
     if pid != 0 {
         if let Err(error) = terminate_process(pid) {

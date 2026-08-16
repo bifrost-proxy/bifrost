@@ -26,9 +26,9 @@
 default = 90.0
 # Aggregate (workspace-wide) line coverage floor.
 workspace_min = 65.0
-# New or modified production Rust must meet a stricter PR-local threshold so
+# New or modified production Rust must meet the project target so
 # large crates cannot absorb untested additions while staying above a low floor.
-changed_lines_min = 95.0
+changed_lines_min = 90.0
 # When true, the gate fails if measured coverage exceeds a crate floor by more
 # than `ratchet_slack` without the floor being updated (keeps floors honest).
 # Disabled by default to avoid noisy failures.

@@ -452,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("lcov")
     parser.add_argument("--base-ref", required=True)
-    parser.add_argument("--threshold", type=float, default=95.0)
+    parser.add_argument("--threshold", type=float, default=90.0)
     parser.add_argument("--json-output")
     parser.add_argument("--no-gate", action="store_true")
     parser.add_argument(

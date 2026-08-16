@@ -115,9 +115,16 @@ async fn spawn_im_gateway_http(
             let service = service.clone();
             async move {
                 let path = request.uri().path().to_string();
-                Ok::<_, std::convert::Infallible>(
-                    handle_im_gateway(request, Some(service), &path).await,
-                )
+                let response = match path.as_str() {
+                    "/api/im-gateway/messages/send" => {
+                        messages::handle_messages_send_in_process(request, &service).await
+                    }
+                    "/api/im-gateway/messages/upload" => {
+                        messages::handle_messages_upload_in_process(request, &service).await
+                    }
+                    _ => handle_im_gateway(request, Some(service), &path).await,
+                };
+                Ok::<_, std::convert::Infallible>(response)
             }
         });
         let _ = http1::Builder::new()

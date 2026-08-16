@@ -676,12 +676,26 @@ fn spawn_directory_task_run_background_for_date(
             if let Err(error) =
                 crate::worker_runtime::asr::run_directory_task(&task_id, recording_date).await
             {
-                let _ = update_task_after_run(&task_id, Some(error.clone()));
-                finish_run_progress(&task_id, "failed", 0, 0, Some(error.clone()));
-                tracing::warn!(
-                    task_id = %task_id, error = %error,
-                    "ASR directory worker request failed"
-                );
+                if find_task(&task_id).is_some_and(|task| task.paused) {
+                    finish_run_progress(
+                        &task_id,
+                        "paused",
+                        0,
+                        0,
+                        Some("ASR directory task paused and released compute.".to_string()),
+                    );
+                    tracing::info!(
+                        task_id = %task_id,
+                        "ASR directory worker cancellation preserved paused task state"
+                    );
+                } else {
+                    let _ = update_task_after_run(&task_id, Some(error.clone()));
+                    finish_run_progress(&task_id, "failed", 0, 0, Some(error.clone()));
+                    tracing::warn!(
+                        task_id = %task_id, error = %error,
+                        "ASR directory worker request failed"
+                    );
+                }
             }
             drop(running_guard);
             tracing::debug!(

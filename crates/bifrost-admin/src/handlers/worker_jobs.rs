@@ -403,6 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn job_list_can_filter_by_kind_and_status() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
         crate::worker_runtime::clear_worker_jobs_for_tests();
         crate::worker_runtime::begin_worker_job(
             "asr:offline-jobs",
@@ -430,6 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_external_cli_cancel_restores_running_status() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
         crate::worker_runtime::clear_worker_jobs_for_tests();
         let job_id = format!("missing-external-cli-{}", uuid::Uuid::new_v4());
         crate::worker_runtime::begin_worker_job(
@@ -458,6 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn artifact_identifier_cannot_escape_the_job_registry() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
         crate::worker_runtime::clear_worker_jobs_for_tests();
         crate::worker_runtime::begin_worker_job(
             "asr:artifact-test",
@@ -473,6 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_job_returns_not_found() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
         let response = handle_worker_jobs(
             Request::builder()
                 .method(Method::GET)
@@ -484,5 +488,314 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let _ = response.into_body().collect().await.unwrap();
+    }
+
+    async fn request(method: Method, uri: &str, path: &str) -> Response<BoxBody> {
+        handle_worker_jobs(
+            Request::builder().method(method).uri(uri).body(()).unwrap(),
+            path,
+        )
+        .await
+    }
+
+    fn begin_job(id: &str, kind: WorkerKind) {
+        crate::worker_runtime::begin_worker_job(
+            &format!("{}:{id}", kind.as_str()),
+            kind,
+            id,
+            Some(id),
+            "coverage.operation",
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_validation_and_inactive_cancellation_matrix() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+
+        assert_eq!(
+            request(Method::POST, "/worker-jobs", "/api/worker-jobs")
+                .await
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        for query in ["status=bogus", "kind=bogus"] {
+            assert_eq!(
+                request(
+                    Method::GET,
+                    &format!("/worker-jobs?{query}"),
+                    "/api/worker-jobs",
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            request(
+                Method::GET,
+                "/worker-jobs/missing/events",
+                "/api/worker-jobs/missing/events",
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                Method::GET,
+                "/worker-jobs/missing/artifacts",
+                "/api/worker-jobs/missing/artifacts",
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                Method::POST,
+                "/worker-jobs/missing/cancel",
+                "/api/worker-jobs/missing/cancel",
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                Method::POST,
+                "/worker-jobs/missing/events",
+                "/api/worker-jobs/missing/events",
+            )
+            .await
+            .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            request(
+                Method::GET,
+                "/worker-jobs/missing/extra/path",
+                "/api/worker-jobs/missing/extra/path",
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        begin_job("terminal", WorkerKind::Asr);
+        crate::worker_runtime::mark_worker_job_succeeded("terminal");
+        assert_eq!(
+            request(
+                Method::POST,
+                "/worker-jobs/terminal/cancel",
+                "/api/worker-jobs/terminal/cancel",
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+
+        begin_job("inactive-asr", WorkerKind::Asr);
+        crate::worker_runtime::mark_worker_job_running("inactive-asr");
+        assert_eq!(
+            request(
+                Method::POST,
+                "/worker-jobs/inactive-asr/cancel",
+                "/api/worker-jobs/inactive-asr/cancel",
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        begin_job("inactive-remote-exec", WorkerKind::RemoteExecution);
+        crate::worker_runtime::mark_worker_job_running("inactive-remote-exec");
+        assert_eq!(
+            request(
+                Method::POST,
+                "/worker-jobs/inactive-remote-exec/cancel",
+                "/api/worker-jobs/inactive-remote-exec/cancel",
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_worker_cancellation_reports_acknowledged_and_stale_requests() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let key = format!("asr:cancel-handler-{}", uuid::Uuid::new_v4());
+        let tail = r#"
+wait_id=''
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*)
+      wait_id=$(printf '%s' "$line" | sed -n -e 's/.*"requestId":"\([^"]*\)".*/\1/p' -e 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      ;;
+    *'"type":"cancel"'*)
+      printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":true,"payload":null,"error":"cancel acknowledged"}}\n' "$wait_id"
+      wait_id=''
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec = crate::worker_runtime::test_shell_worker_spec(&key, WorkerKind::Asr, tail);
+        spec.request_timeout = std::time::Duration::from_secs(2);
+        spec.heartbeat_timeout = std::time::Duration::from_secs(3);
+        let supervisor = global_worker_supervisor();
+        supervisor.resume_kind(WorkerKind::Asr);
+        let worker = supervisor.get_or_start(spec).await.unwrap();
+        let request_id = format!("cancel-request-{}", uuid::Uuid::new_v4());
+        let request_job_id = request_id.clone();
+        let pending_job_id = request_job_id.clone();
+        let request_worker = worker.clone();
+        let pending = tokio::spawn(async move {
+            request_worker
+                .request_with_id(
+                    request_id,
+                    Some(pending_job_id),
+                    "operation.wait",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while worker_job(&request_job_id)
+                .is_none_or(|job| job.status != WorkerJobStatus::Running)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let path = format!("/api/worker-jobs/{request_job_id}/cancel");
+        assert_eq!(
+            request(Method::POST, &path, &path).await.status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(pending.await.unwrap().unwrap_err(), "cancel acknowledged");
+
+        let stale_id = format!("stale-request-{}", uuid::Uuid::new_v4());
+        crate::worker_runtime::begin_worker_job(
+            &key,
+            WorkerKind::Asr,
+            &stale_id,
+            Some(&stale_id),
+            "operation.wait",
+        );
+        crate::worker_runtime::mark_worker_job_running(&stale_id);
+        let stale_path = format!("/api/worker-jobs/{stale_id}/cancel");
+        assert_eq!(
+            request(Method::POST, &stale_path, &stale_path)
+                .await
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            worker_job(&stale_id).unwrap().status,
+            WorkerJobStatus::Running
+        );
+        supervisor
+            .unregister(&key, std::time::Duration::from_secs(1))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn artifact_reads_cover_ranges_and_filesystem_invalidation() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("spool");
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("result.txt");
+        std::fs::write(&path, b"0123456789").unwrap();
+        begin_job("artifact-matrix", WorkerKind::ExternalCli);
+        let artifact = crate::worker_runtime::register_worker_artifact(
+            "artifact-matrix",
+            "result",
+            &root,
+            &path,
+            Some("text/plain".to_string()),
+        )
+        .unwrap();
+
+        let endpoint = format!(
+            "/api/worker-jobs/artifact-matrix/artifacts/{}",
+            artifact.artifact_id
+        );
+        let response = read_worker_artifact(
+            "artifact-matrix",
+            &artifact.artifact_id,
+            Some("offset=2&limit=4"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "2345"
+        );
+        assert_eq!(
+            read_worker_artifact("artifact-matrix", &artifact.artifact_id, Some("tail=3"),)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        for query in ["limit=0", "limit=1048577"] {
+            assert_eq!(
+                read_worker_artifact("artifact-matrix", &artifact.artifact_id, Some(query))
+                    .await
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            read_worker_artifact("artifact-matrix", &artifact.artifact_id, Some("offset=11"),)
+                .await
+                .status(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+        assert_eq!(
+            request(Method::POST, &endpoint, &endpoint,).await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+
+        std::fs::write(&path, b"changed-size").unwrap();
+        assert_eq!(
+            read_worker_artifact("artifact-matrix", &artifact.artifact_id, None)
+                .await
+                .status(),
+            StatusCode::GONE
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            read_worker_artifact("artifact-matrix", &artifact.artifact_id, None)
+                .await
+                .status(),
+            StatusCode::GONE
+        );
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(
+            read_worker_artifact("artifact-matrix", &artifact.artifact_id, None)
+                .await
+                .status(),
+            StatusCode::GONE
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+        std::fs::write(&root, b"not-a-directory").unwrap();
+        assert_eq!(
+            read_worker_artifact("artifact-matrix", &artifact.artifact_id, None)
+                .await
+                .status(),
+            StatusCode::GONE
+        );
     }
 }

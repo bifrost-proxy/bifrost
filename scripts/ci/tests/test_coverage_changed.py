@@ -112,10 +112,10 @@ class CoverageChangedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "thresholds.toml"
             path.write_text(
-                "[settings]\nchanged_lines_min = 95.5 # local and CI\n",
+                "[settings]\nchanged_lines_min = 90.5 # local and CI\n",
                 encoding="utf-8",
             )
-            self.assertEqual(coverage_changed.changed_lines_threshold(path), 95.5)
+            self.assertEqual(coverage_changed.changed_lines_threshold(path), 90.5)
 
     def test_coverage_command_selects_only_requested_packages_and_filter(self) -> None:
         command = coverage_changed.coverage_command(

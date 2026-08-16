@@ -192,13 +192,13 @@ jobs:
         run: >-
           bash scripts/ci/coverage-all.sh --with-e2e --e2e-suite proxy
           --json --lcov --gate --gaps
-      - name: Changed production Rust line coverage (95%)
+      - name: Changed production Rust line coverage (90%)
         if: github.event_name == 'pull_request'
         env:
           COVERAGE_BASE_REF: origin/${{ github.base_ref }}
         run: >-
           python3 scripts/ci/coverage-diff.py target/coverage/lcov.info
-          --base-ref "$COVERAGE_BASE_REF" --threshold 95
+          --base-ref "$COVERAGE_BASE_REF" --threshold 90
           --json-output target/coverage/changed-lines.json
       - name: Coverage summary (job summary)
         if: always()

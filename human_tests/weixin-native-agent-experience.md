@@ -59,7 +59,7 @@
 
 - Reliability 在依赖其稳定性的 Progress/媒体之前。
 - 每阶段可以独立 review、测试和回滚。
-- 生产 Rust 实现明确受 changed-lines 95% 与 CI 90% 门禁约束。
+- 生产 Rust 实现明确受 changed-lines 90% 与 CI 90% 门禁约束。
 
 **实际执行结果：**
 

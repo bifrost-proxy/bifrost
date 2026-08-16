@@ -11,8 +11,6 @@ pub mod remote_invoke;
 mod supervisor;
 mod worker_stdio;
 
-#[cfg(test)]
-pub(crate) use jobs::clear_for_tests as clear_worker_jobs_for_tests;
 pub use jobs::{
     artifact as worker_artifact, cancel_rejected as worker_job_cancel_rejected,
     cancel_target as worker_job_cancel_target, get_job as worker_job, list_jobs as worker_jobs,
@@ -24,7 +22,15 @@ pub(crate) use jobs::{
     mark_failed as mark_worker_job_failed, mark_running as mark_worker_job_running,
     mark_succeeded as mark_worker_job_succeeded, record_named_event as record_worker_job_event,
 };
+#[cfg(test)]
+pub(crate) use jobs::{
+    clear_for_tests as clear_worker_jobs_for_tests,
+    test_guard_async as worker_jobs_test_guard_async,
+    test_guard_async as worker_runtime_test_guard_async,
+};
 pub use mode::{execution_mode, execution_mode_env, worker_execution_enabled, ExecutionMode};
+#[cfg(all(test, unix))]
+pub(crate) use process::test_shell_worker_spec;
 pub use process::{ManagedWorker, ManagedWorkerSnapshot, WorkerSpawnSpec};
 pub use protocol::{
     now_ms as worker_now_ms, ParentFrame, WorkerEvent, WorkerFrame, WorkerKind,
