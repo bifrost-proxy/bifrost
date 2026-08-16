@@ -223,6 +223,12 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
             }
             result = &mut run => {
                 let result = result.map_err(|error| format!("IM Agent broker task join failed: {error}"))?;
+                // The command can finish in the same scheduler turn that its
+                // final progress events reach this queue. Preserve wire order
+                // by flushing those events before the terminal result frame.
+                while let Ok(event) = progress_rx.try_recv() {
+                    write_frame(&mut write_half, &BrokerResponse::Progress { event }).await?;
+                }
                 match result {
                     Ok(result) => write_frame(
                         &mut write_half,
