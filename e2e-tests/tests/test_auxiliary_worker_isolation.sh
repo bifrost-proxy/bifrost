@@ -33,6 +33,7 @@ trap cleanup EXIT INT TERM
 
 fail() {
   echo "[auxiliary-worker-isolation] ERROR: $*" >&2
+  [[ -f "$ECHO_LOG" ]] && tail -80 "$ECHO_LOG" >&2 || true
   [[ -f "$BIFROST_LOG" ]] && tail -160 "$BIFROST_LOG" >&2 || true
   exit 1
 }
@@ -92,14 +93,14 @@ for line in sys.stdin:
 PY
 chmod +x "$MOCK_CODEX"
 
-ADMIN_PORT="$(allocate_free_port)"
-ECHO_PORT="$(allocate_free_port)"
+ADMIN_PORT="${ADMIN_PORT:-$(allocate_free_port)}"
+ECHO_PORT="${ECHO_HTTP_PORT:-$(allocate_free_port)}"
 PYTHON_BIN="$(python3_cmd)"
 
 "$PYTHON_BIN" "$REPO_DIR/e2e-tests/mock_servers/http_echo_server.py" "$ECHO_PORT" \
   >"$ECHO_LOG" 2>&1 &
 ECHO_PID=$!
-for _ in $(seq 1 100); do
+for _ in $(seq 1 450); do
   if grep -q '^READY$' "$ECHO_LOG" 2>/dev/null; then
     break
   fi
