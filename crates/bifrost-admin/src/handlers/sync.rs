@@ -475,16 +475,31 @@ async fn reconcile_remote_invoke_workers(state: &SharedAdminState) {
     if crate::worker_runtime::worker_execution_enabled(
         crate::worker_runtime::WorkerKind::RemoteInvoke,
     ) {
-        let isolated_targets = targets
+        let mut isolated_targets = targets
             .into_iter()
             .map(
                 |target| crate::worker_runtime::remote_invoke::RemoteInvokeTarget {
                     provider_id: target.provider_id,
                     relay_url: target.remote_base_url,
                     session_token: target.session_token,
+                    allow_missing_session_token: false,
                 },
             )
             .collect::<Vec<_>>();
+        if isolated_targets.is_empty() {
+            let relay_url = state
+                .config_manager
+                .as_ref()
+                .and_then(|manager| manager.try_config())
+                .map(|config| config.sync.remote_base_url.clone())
+                .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
+            isolated_targets.push(crate::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                provider_id: "standby".to_string(),
+                relay_url,
+                session_token: String::new(),
+                allow_missing_session_token: true,
+            });
+        }
         let Some((admin_host, admin_port)) = state.remote_invoke_admin_endpoint() else {
             warn!("remote invoke admin endpoint missing; skip isolated worker reconcile");
             return;

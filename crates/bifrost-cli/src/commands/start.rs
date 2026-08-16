@@ -159,19 +159,34 @@ fn spawn_remote_invoke_worker_startup_task(
         if bifrost_admin::worker_runtime::worker_execution_enabled(
             bifrost_admin::worker_runtime::WorkerKind::RemoteInvoke,
         ) {
+            let default_relay_url = shared_config_manager
+                .try_config()
+                .map(|config| config.sync.remote_base_url.clone())
+                .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
             let registration_targets = bifrost_sync::SyncManagerHandle::new(sync_manager)
                 .remote_invoke_registration_targets()
                 .await;
-            let targets = registration_targets
+            let mut targets = registration_targets
                 .into_iter()
                 .map(
                     |target| bifrost_admin::worker_runtime::remote_invoke::RemoteInvokeTarget {
                         provider_id: target.provider_id,
                         relay_url: target.remote_base_url,
                         session_token: target.session_token,
+                        allow_missing_session_token: false,
                     },
                 )
                 .collect::<Vec<_>>();
+            if targets.is_empty() {
+                targets.push(
+                    bifrost_admin::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                        provider_id: "standby".to_string(),
+                        relay_url: default_relay_url,
+                        session_token: String::new(),
+                        allow_missing_session_token: true,
+                    },
+                );
+            }
             let count = targets.len();
             bifrost_admin::worker_runtime::remote_invoke::configure_runtime_targets(
                 targets,

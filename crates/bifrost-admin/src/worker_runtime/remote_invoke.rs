@@ -49,6 +49,8 @@ pub struct RemoteInvokeTarget {
     pub provider_id: String,
     pub relay_url: String,
     pub session_token: String,
+    #[serde(default)]
+    pub allow_missing_session_token: bool,
 }
 
 #[derive(Clone, Default)]
@@ -612,7 +614,7 @@ fn normalize_target(mut target: RemoteInvokeTarget) -> Option<RemoteInvokeTarget
     target.session_token = target.session_token.trim().to_string();
     if target.provider_id.is_empty()
         || target.relay_url.is_empty()
-        || target.session_token.is_empty()
+        || (target.session_token.is_empty() && !target.allow_missing_session_token)
     {
         None
     } else {
@@ -675,6 +677,7 @@ mod tests {
             provider_id: "provider".to_string(),
             relay_url: "https://relay.example.test".to_string(),
             session_token: "session".to_string(),
+            allow_missing_session_token: false,
         }
     }
 
@@ -699,6 +702,7 @@ mod tests {
             provider_id: "provider".to_string(),
             relay_url: " ".to_string(),
             session_token: "token".to_string(),
+            allow_missing_session_token: false,
         })
         .is_none());
     }
@@ -709,6 +713,7 @@ mod tests {
             provider_id: " provider ".to_string(),
             relay_url: "https://relay.example.test///".to_string(),
             session_token: " token ".to_string(),
+            allow_missing_session_token: false,
         })
         .unwrap();
         assert_eq!(target.provider_id, "provider");
@@ -793,6 +798,36 @@ mod tests {
             },
         ] {
             assert!(normalize_target(target).is_none());
+        }
+    }
+
+    #[test]
+    fn standby_target_allows_only_the_session_token_to_be_missing() {
+        let target = normalize_target(RemoteInvokeTarget {
+            provider_id: "standby".to_string(),
+            relay_url: "https://relay.example.test/".to_string(),
+            session_token: "  ".to_string(),
+            allow_missing_session_token: true,
+        })
+        .expect("standby target should keep the admin API available before login");
+        assert_eq!(target.relay_url, "https://relay.example.test");
+        assert!(target.session_token.is_empty());
+
+        for invalid in [
+            RemoteInvokeTarget {
+                provider_id: " ".to_string(),
+                relay_url: "https://relay.example.test".to_string(),
+                session_token: String::new(),
+                allow_missing_session_token: true,
+            },
+            RemoteInvokeTarget {
+                provider_id: "standby".to_string(),
+                relay_url: " ".to_string(),
+                session_token: String::new(),
+                allow_missing_session_token: true,
+            },
+        ] {
+            assert!(normalize_target(invalid).is_none());
         }
     }
 
