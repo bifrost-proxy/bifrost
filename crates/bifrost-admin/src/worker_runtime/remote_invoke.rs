@@ -796,6 +796,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn empty_reconciliation_requires_main_broker_state() {
         use http_body_util::Full;
