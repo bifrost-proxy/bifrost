@@ -3365,7 +3365,13 @@ mod coverage_boost_v2 {
             let _ = target.accept().await;
         });
         let (mut handler, mut client) = make_handler_with_opts(false, None, None, 30, None).await;
-        let state = Arc::new(AdminState::new(19458));
+        // Keep rules storage scoped to this test. Other workspace tests may
+        // replace the process-wide data directory while running in parallel,
+        // and `AdminState::new` would then race with their temporary cleanup.
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19458)
+            .build();
+        let state = harness.state();
         state
             .breakpoint_manager
             .update_settings(BreakpointSettings {

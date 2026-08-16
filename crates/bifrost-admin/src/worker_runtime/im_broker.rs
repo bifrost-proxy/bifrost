@@ -14,12 +14,17 @@ pub(crate) const BROKER_TOKEN_ENV: &str = "BIFROST_IM_AGENT_BROKER_TOKEN";
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 16;
 
-static ENDPOINT: OnceLock<BrokerEndpoint> = OnceLock::new();
+static SERVER: OnceLock<tokio::sync::Mutex<Option<BrokerServer>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub(crate) struct BrokerEndpoint {
     pub addr: String,
     pub token: String,
+}
+
+struct BrokerServer {
+    endpoint: BrokerEndpoint,
+    task: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,13 +41,19 @@ enum BrokerRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BrokerResponse {
     Progress { event: ExternalCliProgressEvent },
-    Result { result: ExternalCliRunResult },
+    Result { result: Box<ExternalCliRunResult> },
     Error { error: String },
 }
 
 pub(crate) async fn ensure_main_broker() -> Result<BrokerEndpoint, String> {
-    if let Some(endpoint) = ENDPOINT.get() {
-        return Ok(endpoint.clone());
+    let mut server = broker_server().lock().await;
+    if let Some(existing) = server.as_ref() {
+        if !existing.task.is_finished() {
+            return Ok(existing.endpoint.clone());
+        }
+    }
+    if let Some(stale) = server.take() {
+        stale.task.abort();
     }
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -56,7 +67,7 @@ pub(crate) async fn ensure_main_broker() -> Result<BrokerEndpoint, String> {
     };
     let endpoint_for_task = endpoint.clone();
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let (stream, peer) = match listener.accept().await {
                 Ok(value) => value,
@@ -85,10 +96,15 @@ pub(crate) async fn ensure_main_broker() -> Result<BrokerEndpoint, String> {
             });
         }
     });
-    ENDPOINT
-        .set(endpoint.clone())
-        .map_err(|_| "IM Agent broker endpoint raced during initialization".to_string())?;
+    *server = Some(BrokerServer {
+        endpoint: endpoint.clone(),
+        task,
+    });
     Ok(endpoint)
+}
+
+fn broker_server() -> &'static tokio::sync::Mutex<Option<BrokerServer>> {
+    SERVER.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
 pub(crate) fn configure_worker_env(spec: &mut super::WorkerSpawnSpec, endpoint: &BrokerEndpoint) {
@@ -137,7 +153,7 @@ pub(crate) async fn run_via_main_broker(
                     let _ = progress_tx.try_send(event);
                 }
             }
-            BrokerResponse::Result { result } => return Ok(result),
+            BrokerResponse::Result { result } => return Ok(*result),
             BrokerResponse::Error { error } => return Err(error),
         }
     }
@@ -195,10 +211,12 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
                     }
                     Ok(Some(_)) => {
                         run.abort();
+                        cancel_brokered_session(session_key.as_deref(), &adapter).await;
                         return Err("unexpected extra IM Agent broker request frame".to_string());
                     }
                     Err(error) => {
                         run.abort();
+                        cancel_brokered_session(session_key.as_deref(), &adapter).await;
                         return Err(format!("read IM Agent broker client state: {error}"));
                     }
                 }
@@ -206,7 +224,13 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
             result = &mut run => {
                 let result = result.map_err(|error| format!("IM Agent broker task join failed: {error}"))?;
                 match result {
-                    Ok(result) => write_frame(&mut write_half, &BrokerResponse::Result { result }).await?,
+                    Ok(result) => write_frame(
+                        &mut write_half,
+                        &BrokerResponse::Result {
+                            result: Box::new(result),
+                        },
+                    )
+                    .await?,
                     Err(error) => write_frame(&mut write_half, &BrokerResponse::Error { error }).await?,
                 }
                 return Ok(());
@@ -247,4 +271,322 @@ where
         .flush()
         .await
         .map_err(|error| format!("flush IM Agent broker frame: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn request() -> ExternalCliRunRequest {
+        serde_json::from_value(serde_json::json!({ "message": "hello" })).unwrap()
+    }
+
+    fn result() -> ExternalCliRunResult {
+        serde_json::from_value(serde_json::json!({
+            "runId": "run-1",
+            "sessionKey": "session-1",
+            "runtime": "external_cli",
+            "adapter": "codex",
+            "status": "succeeded",
+            "exitCode": 0,
+            "response": "done",
+            "startedAt": 1,
+            "finishedAt": 2,
+            "durationMs": 1,
+            "artifacts": {
+                "runDir": "", "prompt": "", "commandSnapshot": "",
+                "stdout": "", "stderr": "", "normalizedEvents": "", "lastMessage": ""
+            },
+            "events": []
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn endpoint_and_worker_environment_are_stable() {
+        let _lock = ENV_LOCK.lock().await;
+        let endpoint = ensure_main_broker().await.unwrap();
+        assert!(endpoint.addr.starts_with("127.0.0.1:"));
+        assert!(!endpoint.token.is_empty());
+        assert_eq!(ensure_main_broker().await.unwrap().addr, endpoint.addr);
+
+        let mut spec = super::super::WorkerSpawnSpec::new(
+            "im",
+            super::super::WorkerKind::ImGateway,
+            "bifrost",
+            Vec::new(),
+        );
+        configure_worker_env(&mut spec, &endpoint);
+        assert_eq!(spec.env.get(BROKER_ADDR_ENV), Some(&endpoint.addr));
+        assert_eq!(spec.env.get(BROKER_TOKEN_ENV), Some(&endpoint.token));
+
+        let stale = broker_server().lock().await.take().unwrap();
+        stale.task.abort();
+        let _ = stale.task.await;
+        let recovered = ensure_main_broker().await.unwrap();
+        assert_ne!(recovered.token, endpoint.token);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn main_broker_runs_external_cli_in_main_process_and_streams_progress() {
+        let _lock = ENV_LOCK.lock().await;
+        std::env::remove_var("BIFROST_IM_GATEWAY_WORKER");
+        let temp = tempfile::tempdir().unwrap();
+        let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp.path());
+        let endpoint = ensure_main_broker().await.unwrap();
+        std::env::set_var(BROKER_ADDR_ENV, &endpoint.addr);
+        std::env::set_var(BROKER_TOKEN_ENV, &endpoint.token);
+        let request: ExternalCliRunRequest = serde_json::from_value(serde_json::json!({
+            "message": "run through the main-process broker",
+            "adapter": "mock",
+            "sessionKey": "brokered-im-session",
+            "adapterConfig": {
+                "executable": "sh",
+                "args": [
+                    "-c",
+                    "cat >/dev/null; printf '%s\\n' '{\"type\":\"assistant_delta\",\"delta\":\"broker working\"}' '{\"type\":\"assistant_final\",\"content\":\"broker done\"}'"
+                ],
+                "timeoutSecs": 10
+            }
+        }))
+        .unwrap();
+        let (progress_tx, mut progress_rx) = mpsc::channel(8);
+
+        let result = run_via_main_broker(temp.path().join("runs"), request, Some(progress_tx))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result.status,
+            crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
+        ));
+        assert_eq!(result.response, "broker done");
+        let mut contents = Vec::new();
+        while let Ok(event) = progress_rx.try_recv() {
+            contents.push(event.content);
+        }
+        assert!(contents
+            .iter()
+            .any(|content| content.contains("broker working")));
+        assert!(std::path::Path::new(&result.artifacts.run_dir).is_dir());
+
+        std::env::remove_var(BROKER_ADDR_ENV);
+        std::env::remove_var(BROKER_TOKEN_ENV);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_forwards_progress_and_handles_result_error_and_missing_config() {
+        let _lock = ENV_LOCK.lock().await;
+
+        async fn bind() -> TcpListener {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            std::env::set_var(BROKER_ADDR_ENV, listener.local_addr().unwrap().to_string());
+            std::env::set_var(BROKER_TOKEN_ENV, "token");
+            listener
+        }
+
+        let listener = bind().await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let line = super::super::read_limited_async_line(&mut reader, MAX_FRAME_BYTES)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                serde_json::from_str::<BrokerRequest>(&line).unwrap(),
+                BrokerRequest::Run { token, runs_root, .. }
+                    if token == "token" && runs_root.ends_with("runs")
+            ));
+            write_frame(
+                &mut write_half,
+                &BrokerResponse::Progress {
+                    event: ExternalCliProgressEvent {
+                        event_type:
+                            crate::im_gateway::external_cli::ExternalCliProgressEventType::Status,
+                        content: "working".to_string(),
+                        title: None,
+                        raw: serde_json::Value::Null,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut write_half,
+                &BrokerResponse::Result {
+                    result: Box::new(result()),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let (progress_tx, mut progress_rx) = mpsc::channel(1);
+        let value = run_via_main_broker(
+            std::path::PathBuf::from("runs"),
+            request(),
+            Some(progress_tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value.run_id, "run-1");
+        assert_eq!(progress_rx.recv().await.unwrap().content, "working");
+        server.await.unwrap();
+
+        let listener = bind().await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let _ = super::super::read_limited_async_line(&mut reader, MAX_FRAME_BYTES)
+                .await
+                .unwrap();
+            write_frame(
+                &mut write_half,
+                &BrokerResponse::Error {
+                    error: "rejected".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        assert_eq!(
+            run_via_main_broker(std::path::PathBuf::new(), request(), None)
+                .await
+                .unwrap_err(),
+            "rejected"
+        );
+        server.await.unwrap();
+
+        std::env::remove_var(BROKER_ADDR_ENV);
+        assert!(
+            run_via_main_broker(std::path::PathBuf::new(), request(), None)
+                .await
+                .unwrap_err()
+                .contains(BROKER_ADDR_ENV)
+        );
+        std::env::remove_var(BROKER_TOKEN_ENV);
+        assert!(!client_configured());
+    }
+
+    #[tokio::test]
+    async fn server_rejects_closed_malformed_and_bad_token_clients() {
+        async fn pair() -> (TcpStream, TcpStream) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+            (client.unwrap(), accepted.unwrap().0)
+        }
+
+        let (client, server) = pair().await;
+        drop(client);
+        assert!(serve_connection(server, "token")
+            .await
+            .unwrap_err()
+            .contains("closed before request"));
+
+        let (mut client, server) = pair().await;
+        client.write_all(b"bad-json\n").await.unwrap();
+        assert!(serve_connection(server, "token")
+            .await
+            .unwrap_err()
+            .contains("parse IM Agent"));
+
+        let (mut client, server) = pair().await;
+        write_frame(
+            &mut client,
+            &BrokerRequest::Run {
+                token: "wrong".to_string(),
+                runs_root: String::new(),
+                request: Box::new(request()),
+            },
+        )
+        .await
+        .unwrap();
+        serve_connection(server, "token").await.unwrap();
+        let mut reader = BufReader::new(client);
+        let line = super::super::read_limited_async_line(&mut reader, MAX_FRAME_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<BrokerResponse>(&line).unwrap(),
+            BrokerResponse::Error { error } if error.contains("capability token")
+        ));
+
+        cancel_brokered_session(None, "codex").await;
+        let oversized = BrokerResponse::Error {
+            error: "x".repeat(MAX_FRAME_BYTES),
+        };
+        assert!(write_frame(&mut tokio::io::sink(), &oversized)
+            .await
+            .unwrap_err()
+            .contains("exceeds"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_cancels_runs_when_clients_disconnect_or_send_extra_frames() {
+        let _lock = ENV_LOCK.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp.path());
+
+        async fn pair() -> (TcpStream, TcpStream) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+            (client.unwrap(), accepted.unwrap().0)
+        }
+
+        fn holding_request(session_key: &str) -> ExternalCliRunRequest {
+            serde_json::from_value(serde_json::json!({
+                "message": "hold until broker cancellation",
+                "adapter": "mock",
+                "sessionKey": session_key,
+                "adapterConfig": {
+                    "executable": "sh",
+                    "args": ["-c", "cat >/dev/null; sleep 10"],
+                    "timeoutSecs": 15
+                }
+            }))
+            .unwrap()
+        }
+
+        let (mut client, server) = pair().await;
+        write_frame(
+            &mut client,
+            &BrokerRequest::Run {
+                token: "token".to_string(),
+                runs_root: temp.path().join("runs-disconnect").display().to_string(),
+                request: Box::new(holding_request("broker-disconnect")),
+            },
+        )
+        .await
+        .unwrap();
+        drop(client);
+        let error = serve_connection(server, "token").await.unwrap_err();
+        assert!(error.contains("client disconnected"), "{error}");
+
+        let (mut client, server) = pair().await;
+        write_frame(
+            &mut client,
+            &BrokerRequest::Run {
+                token: "token".to_string(),
+                runs_root: temp.path().join("runs-extra").display().to_string(),
+                request: Box::new(holding_request("broker-extra-frame")),
+            },
+        )
+        .await
+        .unwrap();
+        client.write_all(b"{}\n").await.unwrap();
+        let error = serve_connection(server, "token").await.unwrap_err();
+        assert!(error.contains("unexpected extra"), "{error}");
+
+        cancel_brokered_session(Some("missing-chatgpt-session"), "chatgpt-web").await;
+        cancel_brokered_session(Some("missing-cli-session"), "codex").await;
+    }
 }

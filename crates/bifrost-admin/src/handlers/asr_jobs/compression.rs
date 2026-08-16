@@ -1,5 +1,6 @@
 struct RunningSourceCompressionGuard {
     task_id: String,
+    owns_cancel_marker: bool,
 }
 
 struct SourceCompressionFileLock {
@@ -102,7 +103,12 @@ impl RunningSourceCompressionGuard {
         running.insert(task_id.to_string());
         Ok(Self {
             task_id: task_id.to_string(),
+            owns_cancel_marker: true,
         })
+    }
+
+    fn relinquish_cancel_marker(&mut self) {
+        self.owns_cancel_marker = false;
     }
 }
 
@@ -116,7 +122,9 @@ impl Drop for RunningSourceCompressionGuard {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.task_id);
-        set_worker_source_compression_cancel(&self.task_id, false);
+        if self.owns_cancel_marker {
+            set_worker_source_compression_cancel(&self.task_id, false);
+        }
     }
 }
 
@@ -257,8 +265,17 @@ fn start_source_compression_background(
         return Err("ASR failed-chunk retry is running; wait for it to finish".to_string());
     }
 
+    let use_worker = !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
+        && !crate::worker_runtime::asr::is_asr_worker_process();
     set_worker_source_compression_cancel(&task.id, false);
-    let guard = RunningSourceCompressionGuard::acquire(&task.id)?;
+    let mut guard = RunningSourceCompressionGuard::acquire(&task.id)?;
+    if use_worker {
+        // The detached worker-side blocking task owns this shared marker. The
+        // parent request future can finish as soon as cancellation is
+        // acknowledged and must not clear the marker while compression exits.
+        guard.relinquish_cancel_marker();
+    }
     recover_source_compression_backups(&task)?;
     let store = load_file_store(&task.id);
     let targets = store
@@ -305,10 +322,7 @@ fn start_source_compression_background(
     }
 
     let response = state.clone();
-    if !cfg!(test)
-        && crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
-        && !crate::worker_runtime::asr::is_asr_worker_process()
-    {
+    if use_worker {
         let task_id = task.id.clone();
         tokio::spawn(async move {
             if let Err(error) = crate::worker_runtime::asr::run_source_compression(&task_id).await {
@@ -333,7 +347,6 @@ pub(crate) async fn run_source_compression_in_worker(
     task_id: &str,
 ) -> Result<serde_json::Value, String> {
     let task = find_task(task_id).ok_or_else(|| format!("ASR task '{task_id}' not found"))?;
-    set_worker_source_compression_cancel(task_id, false);
     let guard = RunningSourceCompressionGuard::acquire(task_id)?;
     let process_lock = SourceCompressionFileLock::acquire(task_id)?;
     recover_source_compression_backups(&task)?;

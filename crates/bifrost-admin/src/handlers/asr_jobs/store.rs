@@ -213,6 +213,7 @@ fn acquire_cross_process_file_lock(
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)
@@ -2057,6 +2058,7 @@ fn replace_stale_task_run_lock(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&takeover_path)
         .map_err(|error| format!("open {label} takeover lock: {error}"))?;
     takeover

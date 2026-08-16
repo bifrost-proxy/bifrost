@@ -121,8 +121,8 @@ fn validate_target(
 // Messages
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-pub(super) struct SendMessageRequest {
+#[derive(Debug, Deserialize, serde::Serialize)]
+pub(crate) struct SendMessageRequest {
     #[serde(default)]
     pub(super) provider_id: Option<String>,
     #[serde(default)]
@@ -259,6 +259,22 @@ pub(super) async fn handle_messages_send(
     req: Request<Incoming>,
     service: &ImGatewayService,
 ) -> Response<BoxBody> {
+    handle_messages_send_with_delegation(req, service, true).await
+}
+
+#[cfg(test)]
+pub(super) async fn handle_messages_send_in_process(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+) -> Response<BoxBody> {
+    handle_messages_send_with_delegation(req, service, false).await
+}
+
+async fn handle_messages_send_with_delegation(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+    delegate_to_worker: bool,
+) -> Response<BoxBody> {
     if req.method() != Method::POST {
         return method_not_allowed();
     }
@@ -268,6 +284,22 @@ pub(super) async fn handle_messages_send(
         Err(resp) => return resp,
     };
 
+    if delegate_to_worker
+        && crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::ImGateway,
+        )
+        && !crate::worker_runtime::im_gateway::is_im_gateway_worker_process()
+    {
+        return crate::worker_runtime::im_gateway::send_message(body).await;
+    }
+
+    handle_messages_send_body(service, body).await
+}
+
+pub(crate) async fn handle_messages_send_body(
+    service: &ImGatewayService,
+    body: SendMessageRequest,
+) -> Response<BoxBody> {
     if !body.parts.is_empty() || body.destination.is_some() {
         return handle_message_bundle_send(service, body).await;
     }
@@ -475,9 +507,40 @@ pub(super) async fn handle_messages_send(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct UploadMessageMetadata {
+    pub(crate) provider_id: String,
+    pub(crate) kind: String,
+    pub(crate) file_name: String,
+    pub(crate) mime_type: Option<String>,
+    pub(crate) image_type: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct UploadMessageRequest {
+    pub(crate) metadata: UploadMessageMetadata,
+    pub(crate) body: Vec<u8>,
+}
+
 pub(super) async fn handle_messages_upload(
     req: Request<Incoming>,
     service: &ImGatewayService,
+) -> Response<BoxBody> {
+    handle_messages_upload_with_delegation(req, service, true).await
+}
+
+#[cfg(test)]
+pub(super) async fn handle_messages_upload_in_process(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+) -> Response<BoxBody> {
+    handle_messages_upload_with_delegation(req, service, false).await
+}
+
+async fn handle_messages_upload_with_delegation(
+    req: Request<Incoming>,
+    service: &ImGatewayService,
+    delegate_to_worker: bool,
 ) -> Response<BoxBody> {
     if req.method() != Method::POST {
         return method_not_allowed();
@@ -568,6 +631,30 @@ pub(super) async fn handle_messages_upload(
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string)
         });
+    let metadata = UploadMessageMetadata {
+        provider_id: provider_id.to_string(),
+        kind: kind.to_string(),
+        file_name: file_name.to_string(),
+        mime_type,
+        image_type: params
+            .get("image_type")
+            .cloned()
+            .unwrap_or_else(|| "message".to_string()),
+    };
+    if delegate_to_worker
+        && crate::worker_runtime::worker_execution_enabled(
+            crate::worker_runtime::WorkerKind::ImGateway,
+        )
+        && !crate::worker_runtime::im_gateway::is_im_gateway_worker_process()
+    {
+        return crate::worker_runtime::im_gateway::upload_message_stream(
+            metadata,
+            req.into_body(),
+            max_bytes,
+        )
+        .await;
+    }
+
     let body = match http_body_util::Limited::new(req.into_body(), max_bytes as usize)
         .collect()
         .await
@@ -590,17 +677,66 @@ pub(super) async fn handle_messages_upload(
         );
     }
 
-    let result = if kind == "image" {
+    let upload = UploadMessageRequest {
+        metadata,
+        body: body.to_vec(),
+    };
+    handle_messages_upload_body(service, upload).await
+}
+
+pub(crate) async fn handle_messages_upload_body(
+    service: &ImGatewayService,
+    upload: UploadMessageRequest,
+) -> Response<BoxBody> {
+    let metadata = upload.metadata;
+    let Some(provider) = service.provider_store.get(&metadata.provider_id) else {
+        return error_response(StatusCode::NOT_FOUND, "Provider not found");
+    };
+    if !provider.enabled {
+        return error_response(StatusCode::BAD_REQUEST, "Provider is disabled");
+    }
+    let client = service.provider_client(&provider);
+    let capabilities = client.send_capabilities(&provider);
+    let Some(capability) = capabilities.part(&metadata.kind) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "provider '{}' does not support {} uploads",
+                metadata.provider_id, metadata.kind
+            ),
+        );
+    };
+    if capability.support == crate::im_gateway::types::ImSendSupportLevel::Unsupported {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            capability
+                .reason
+                .as_deref()
+                .unwrap_or("upload type is unsupported by this provider"),
+        );
+    }
+    let max_bytes = capability.max_bytes.unwrap_or(10 * 1024 * 1024);
+    if upload.body.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "upload body must not be empty");
+    }
+    if upload.body.len() as u64 > max_bytes {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!(
+                "{} upload exceeds the {max_bytes} byte limit",
+                metadata.kind
+            ),
+        );
+    }
+
+    let result = if metadata.kind == "image" {
         client
             .upload_image(
                 &provider,
-                params
-                    .get("image_type")
-                    .map(String::as_str)
-                    .unwrap_or("message"),
-                file_name,
-                body.to_vec(),
-                mime_type.as_deref(),
+                &metadata.image_type,
+                &metadata.file_name,
+                upload.body,
+                metadata.mime_type.as_deref(),
             )
             .await
             .map(|uploaded| {
@@ -612,7 +748,12 @@ pub(super) async fn handle_messages_upload(
             })
     } else {
         client
-            .upload_file(&provider, file_name, body.to_vec(), mime_type.as_deref())
+            .upload_file(
+                &provider,
+                &metadata.file_name,
+                upload.body,
+                metadata.mime_type.as_deref(),
+            )
             .await
             .map(|file_key| serde_json::json!({ "kind": "file", "key": file_key }))
     };
@@ -621,7 +762,7 @@ pub(super) async fn handle_messages_upload(
         Ok(value) => json_response(&value),
         Err(error) => error_response(
             StatusCode::BAD_GATEWAY,
-            &format!("failed to upload {kind}: {error}"),
+            &format!("failed to upload {}: {error}", metadata.kind),
         ),
     }
 }

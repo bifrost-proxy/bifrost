@@ -1,13 +1,19 @@
 use super::*;
 use std::ffi::OsStr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
-static EXTERNAL_CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-fn external_cli_env_guard() -> std::sync::MutexGuard<'static, ()> {
+static EXTERNAL_CLI_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+fn external_cli_env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     EXTERNAL_CLI_ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .blocking_lock()
+}
+
+async fn external_cli_env_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
+    EXTERNAL_CLI_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .unwrap()
+        .await
 }
 
 struct EnvGuard {
@@ -136,6 +142,7 @@ fn signal_process_group_reports_not_found_after_child_exits() {
 #[cfg(unix)]
 #[tokio::test]
 async fn stale_external_worker_entry_does_not_kill_pid_when_stop_receiver_is_gone() {
+    let _registry_guard = external_cli_env_guard_async().await;
     use std::os::unix::process::CommandExt;
     use std::process::Command as StdProcessCommand;
 
@@ -171,6 +178,7 @@ async fn stale_external_worker_entry_does_not_kill_pid_when_stop_receiver_is_gon
 #[cfg(unix)]
 #[tokio::test]
 async fn acknowledged_external_worker_stop_does_not_kill_pid() {
+    let _registry_guard = external_cli_env_guard_async().await;
     use std::os::unix::process::CommandExt;
     use std::process::Command as StdProcessCommand;
 
@@ -206,6 +214,58 @@ async fn acknowledged_external_worker_stop_does_not_kill_pid() {
     );
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[tokio::test]
+async fn sessionless_registry_job_can_cancel_while_queued() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let registry_id = format!("sessionless-{}", uuid::Uuid::new_v4());
+    let queue_id = uuid::Uuid::new_v4().to_string();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    QUEUED_WORKER_SESSIONS.insert(
+        registry_id.clone(),
+        QueuedExternalCliWorkerControl {
+            queue_id,
+            cancel_tx,
+        },
+    );
+
+    assert!(request_worker_session_stop(&registry_id).await);
+    assert!(*cancel_rx.borrow());
+    QUEUED_WORKER_SESSIONS.remove(&registry_id);
+}
+
+#[tokio::test]
+async fn stop_all_worker_sessions_cancels_queued_and_acknowledged_active_entries() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let queued_key = format!("queued-stop-all-{}", uuid::Uuid::new_v4());
+    let active_key = format!("active-stop-all-{}", uuid::Uuid::new_v4());
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    QUEUED_WORKER_SESSIONS.insert(
+        queued_key.clone(),
+        QueuedExternalCliWorkerControl {
+            queue_id: uuid::Uuid::new_v4().to_string(),
+            cancel_tx,
+        },
+    );
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
+    ACTIVE_WORKER_SESSIONS.insert(
+        active_key.clone(),
+        ExternalCliWorkerControlHandle { pid: 1, control_tx },
+    );
+    let acknowledge = tokio::spawn(async move {
+        if let Some(ExternalCliWorkerControlRequest::Stop { ack_tx }) = control_rx.recv().await {
+            let _ = ack_tx.send(());
+        }
+    });
+
+    let stopped = stop_all_worker_sessions().await;
+
+    assert!(stopped >= 2);
+    assert!(*cancel_rx.borrow());
+    acknowledge.await.unwrap();
+    QUEUED_WORKER_SESSIONS.remove(&queued_key);
+    ACTIVE_WORKER_SESSIONS.remove(&active_key);
 }
 
 #[test]
@@ -2619,6 +2679,7 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
 
 #[tokio::test]
 async fn worker_guide_rejects_saturated_control_channel_without_waiting() {
+    let _registry_guard = external_cli_env_guard_async().await;
     let session_key = format!("saturated-guide-session-{}", uuid::Uuid::new_v4());
     let (control_tx, _control_rx) = tokio::sync::mpsc::channel(1);
     let (stop_ack_tx, _stop_ack_rx) = oneshot::channel();
@@ -4508,4 +4569,143 @@ fn external_cli_worker_progress_is_bounded() {
         compacted.raw.get("_bifrost_compacted"),
         Some(&serde_json::json!(true))
     );
+}
+
+#[test]
+fn external_cli_worker_json_spool_enforces_atomicity_limits_and_confinement() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("runtime");
+    let path = root.join("request.json");
+    let value = serde_json::json!({"request": "ok"});
+
+    write_external_cli_worker_json(&path, &value, 1024).unwrap();
+    let restored: serde_json::Value = read_external_cli_worker_json(&path, 1024).unwrap();
+    assert_eq!(restored, value);
+    assert_eq!(
+        validate_external_cli_worker_runtime_path(&path, &root).unwrap(),
+        std::fs::canonicalize(&path).unwrap()
+    );
+
+    let too_small = root.join("too-small.json");
+    let error = write_external_cli_worker_json(&too_small, &value, 2).unwrap_err();
+    assert!(error.contains("exceeds configured limit"));
+    assert!(!too_small.exists());
+    assert!(!root.read_dir().unwrap().flatten().any(|entry| entry
+        .file_name()
+        .to_string_lossy()
+        .contains("too-small.tmp")));
+
+    assert!(read_external_cli_worker_json::<serde_json::Value>(&path, 2)
+        .unwrap_err()
+        .contains("exceeds limit"));
+    let invalid = root.join("invalid.json");
+    std::fs::write(&invalid, b"not-json").unwrap();
+    assert!(
+        read_external_cli_worker_json::<serde_json::Value>(&invalid, 1024)
+            .unwrap_err()
+            .contains("parse")
+    );
+    assert!(
+        read_external_cli_worker_json::<serde_json::Value>(&root.join("missing.json"), 1024,)
+            .unwrap_err()
+            .contains("stat")
+    );
+    assert!(
+        validate_external_cli_worker_runtime_path(&path, &root.join("missing-root"))
+            .unwrap_err()
+            .contains("canonicalize")
+    );
+    assert!(
+        validate_external_cli_worker_runtime_path(&root.join("missing-path"), &root)
+            .unwrap_err()
+            .contains("canonicalize")
+    );
+
+    let duplicate_temp = root.join("duplicate.tmp");
+    std::fs::write(&duplicate_temp, b"existing").unwrap();
+    assert!(open_private_temp_file(&duplicate_temp)
+        .unwrap_err()
+        .contains("create"));
+}
+
+#[tokio::test]
+async fn external_cli_log_helpers_cover_create_append_quota_and_forward_drop() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("run.log");
+    ensure_external_cli_log_exists(&log, b"fallback")
+        .await
+        .unwrap();
+    ensure_external_cli_log_exists(&log, b"must-not-overwrite")
+        .await
+        .unwrap();
+    append_external_cli_log(&log, b"-tail").await.unwrap();
+    assert_eq!(tokio::fs::read(&log).await.unwrap(), b"fallback-tail");
+
+    let quota = temp.path().join("quota.log");
+    let file = std::fs::File::create(&quota).unwrap();
+    file.set_len(EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES).unwrap();
+    append_external_cli_log(&quota, b"ignored").await.unwrap();
+    assert_eq!(
+        std::fs::metadata(&quota).unwrap().len(),
+        EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES
+    );
+
+    let directory = temp.path().join("directory");
+    std::fs::create_dir(&directory).unwrap();
+    assert!(open_private_file(&directory, true, false)
+        .unwrap_err()
+        .contains("open private file"));
+
+    let (mut input_tx, input_rx) = tokio::io::duplex(64);
+    let dropped_log = temp.path().join("dropped-forward.log");
+    let (forwarded, tee) = tee_external_cli_output(input_rx, dropped_log.clone(), "drop")
+        .await
+        .unwrap();
+    drop(forwarded);
+    input_tx.write_all(b"still-persisted").await.unwrap();
+    input_tx.shutdown().await.unwrap();
+    join_external_cli_tee(tee, "drop").await.unwrap();
+    assert_eq!(std::fs::read(dropped_log).unwrap(), b"still-persisted");
+
+    let panicked = tokio::spawn(async {
+        panic!("expected tee panic");
+        #[allow(unreachable_code)]
+        Ok::<(), String>(())
+    });
+    assert!(join_external_cli_tee(panicked, "panic")
+        .await
+        .unwrap_err()
+        .contains("join external CLI panic tee task failed"));
+
+    let marker = temp.path().join("stop.marker");
+    std::fs::write(&marker, b"").unwrap();
+    wait_for_stop_marker(marker).await;
+}
+
+#[test]
+fn queued_worker_guard_removes_only_the_owned_registration() {
+    let _registry_guard = external_cli_env_guard();
+    let session = format!("guard-{}", uuid::Uuid::new_v4());
+    let (cancel_tx, _cancel_rx) = watch::channel(false);
+    QUEUED_WORKER_SESSIONS.insert(
+        session.clone(),
+        QueuedExternalCliWorkerControl {
+            queue_id: "newer".to_string(),
+            cancel_tx,
+        },
+    );
+    drop(QueuedExternalCliWorkerGuard {
+        session_key: None,
+        queue_id: "ignored".to_string(),
+    });
+    drop(QueuedExternalCliWorkerGuard {
+        session_key: Some(session.clone()),
+        queue_id: "older".to_string(),
+    });
+    assert!(QUEUED_WORKER_SESSIONS.contains_key(&session));
+    drop(QueuedExternalCliWorkerGuard {
+        session_key: Some(session.clone()),
+        queue_id: "newer".to_string(),
+    });
+    assert!(!QUEUED_WORKER_SESSIONS.contains_key(&session));
 }

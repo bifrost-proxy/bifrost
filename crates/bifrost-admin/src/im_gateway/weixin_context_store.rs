@@ -40,6 +40,14 @@ impl WeixinContextStore {
     }
 
     pub(super) fn get(&self, account_id: &str, user_id: &str) -> Option<String> {
+        // In worker mode inbound events persist context tokens from the IM
+        // runtime process while Admin sends may still use the main-process
+        // provider instance. Refresh the tiny encrypted store before lookup so
+        // the control plane observes worker-owned context updates.
+        if self.path.exists() {
+            let latest = Self::load(&self.path)?;
+            *self.data.write() = latest;
+        }
         let key = entry_key(account_id, user_id);
         let encoded = self.data.read().entries.get(&key)?.clone();
         let decrypted = self.key.decrypt_string(&encoded).ok()?;
@@ -186,6 +194,20 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn existing_instance_observes_context_written_by_worker_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = WeixinContextStore::new(dir.path()).unwrap();
+        let worker = WeixinContextStore::new(dir.path()).unwrap();
+
+        worker.put("account", "owner", "worker-context").unwrap();
+
+        assert_eq!(
+            main.get("account", "owner").as_deref(),
+            Some("worker-context")
+        );
     }
 
     #[test]

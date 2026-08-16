@@ -225,7 +225,9 @@ mod tests {
 
     #[test]
     fn marker_accepts_documented_truthy_values() {
-        let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+        let _guard = crate::commands::UPGRADE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var_os(EXTERNAL_CLI_WORKER_ENV);
 
         for value in ["1", "true", "yes"] {
@@ -244,7 +246,9 @@ mod tests {
 
     #[test]
     fn handle_upgrade_uses_live_admin_without_inline_fallback() {
-        let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+        let _guard = crate::commands::UPGRADE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         fn serve_request(listener: &TcpListener, status: &str, body: &str) -> String {
             let (mut stream, _) = listener.accept().expect("accept Admin request");

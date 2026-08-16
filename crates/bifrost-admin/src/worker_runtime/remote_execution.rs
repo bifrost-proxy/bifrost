@@ -563,6 +563,22 @@ fn validate_execution_id(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker_runtime::{WorkerFrame, WorkerLifecycleState, WorkerRequest};
+
+    async fn dispatch_worker_frame(
+        frame: ParentFrame,
+        context: Arc<WorkerStdioContext>,
+        state: Arc<RemoteExecutionRuntime>,
+        admin_host: &str,
+        admin_port: u16,
+    ) -> Result<(), String> {
+        let admin_host = admin_host.to_string();
+        tokio::spawn(async move {
+            handle_worker_frame(frame, context, state, &admin_host, admin_port).await
+        })
+        .await
+        .expect("Remote Execution worker dispatch task")
+    }
 
     #[test]
     fn execution_envelope_preserves_runtime_security_context() {
@@ -584,5 +600,381 @@ mod tests {
     fn execution_id_rejects_path_like_values() {
         assert!(validate_execution_id("../../escape").is_err());
         assert!(validate_execution_id("valid-id-1").is_ok());
+    }
+
+    #[test]
+    fn execution_id_spawn_and_isolation_contract_are_bounded() {
+        for invalid in ["", "bad_value", "x/y"] {
+            assert!(validate_execution_id(invalid).is_err());
+        }
+        assert!(validate_execution_id(&"x".repeat(129)).is_err());
+
+        let spec = spawn_spec("execution-1", "127.0.0.1", 9876, Some(1)).unwrap();
+        assert_eq!(spec.key, "remote_execution:execution-1");
+        assert_eq!(spec.kind, WorkerKind::RemoteExecution);
+        assert_eq!(spec.max_concurrency, 8);
+        assert_eq!(spec.max_queue_depth, 64);
+        assert_eq!(spec.request_timeout, Duration::from_secs(31));
+        assert_eq!(
+            spec.env
+                .get(REMOTE_EXECUTION_PARENT_ENV)
+                .map(String::as_str),
+            Some("0")
+        );
+        assert!(spec
+            .env_remove
+            .iter()
+            .any(|value| value == "BIFROST_REMOTE_SESSION_TOKEN"));
+        assert!(spec
+            .stderr_path
+            .unwrap()
+            .ends_with("execution-1.stderr.log"));
+        assert!(remote_execution_runtime_root().ends_with("workers/remote-execution"));
+        let _ = should_isolate_remote_execution();
+    }
+
+    #[tokio::test]
+    async fn stdout_events_validate_identity_payload_and_consumer_errors() {
+        let event = |job_id: Option<&str>, event: &str, payload: serde_json::Value| WorkerEvent {
+            request_id: Some("request".to_string()),
+            job_id: job_id.map(ToString::to_string),
+            event: event.to_string(),
+            payload,
+        };
+        let mut output = Vec::new();
+        handle_stdout_event(
+            Some(event(
+                Some("execution"),
+                REMOTE_EXECUTION_EVENT,
+                serde_json::json!({
+                    "dataBase64": base64::engine::general_purpose::STANDARD.encode(b"stdout")
+                }),
+            )),
+            "execution",
+            &mut |chunk| {
+                output.extend(chunk);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, b"stdout");
+
+        for ignored in [
+            event(Some("other"), REMOTE_EXECUTION_EVENT, serde_json::json!({})),
+            event(Some("execution"), "other", serde_json::json!({})),
+        ] {
+            handle_stdout_event(Some(ignored), "execution", &mut |_| {
+                std::future::ready(Ok(()))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(
+            handle_stdout_event(None, "execution", &mut |_| { std::future::ready(Ok(())) })
+                .await
+                .unwrap_err()
+                .contains("channel closed")
+        );
+        assert!(handle_stdout_event(
+            Some(event(
+                Some("execution"),
+                REMOTE_EXECUTION_EVENT,
+                serde_json::json!({})
+            )),
+            "execution",
+            &mut |_| std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap_err()
+        .contains("missing dataBase64"));
+        assert!(handle_stdout_event(
+            Some(event(
+                Some("execution"),
+                REMOTE_EXECUTION_EVENT,
+                serde_json::json!({"dataBase64": "%%%"})
+            )),
+            "execution",
+            &mut |_| std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap_err()
+        .contains("decode remote execution stdout"));
+    }
+
+    #[tokio::test]
+    async fn worker_dispatch_covers_prepared_input_run_errors_and_controls() {
+        let state = Arc::new(RemoteExecutionRuntime::default());
+        let (context, mut output) = WorkerStdioContext::test_context(WorkerKind::RemoteExecution);
+        let request =
+            |id: &str, operation: &str, payload: serde_json::Value, job_id: Option<&str>| {
+                ParentFrame::Request {
+                    request: WorkerRequest {
+                        request_id: id.to_string(),
+                        job_id: job_id.map(ToString::to_string),
+                        deadline_unix_ms: None,
+                        operation: operation.to_string(),
+                        payload,
+                    },
+                }
+            };
+
+        dispatch_worker_frame(
+            request(
+                "prepare",
+                "remote_execution.prepare",
+                serde_json::json!({"executionId": "exec-1"}),
+                None,
+            ),
+            context.clone(),
+            state.clone(),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output.recv().await.unwrap() else {
+            panic!("expected prepare response")
+        };
+        assert_eq!(response.payload["prepared"], true);
+
+        dispatch_worker_frame(
+            request(
+                "stdin",
+                "remote_execution.stdin",
+                serde_json::json!({
+                    "executionId": "exec-1",
+                    "dataBase64": base64::engine::general_purpose::STANDARD.encode(b"input")
+                }),
+                None,
+            ),
+            context.clone(),
+            state.clone(),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output.recv().await.unwrap() else {
+            panic!("expected stdin response")
+        };
+        assert_eq!(response.payload["accepted"], true);
+
+        dispatch_worker_frame(
+            request(
+                "close",
+                "remote_execution.stdin_close",
+                serde_json::json!({"executionId": "exec-1"}),
+                None,
+            ),
+            context.clone(),
+            state.clone(),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output.recv().await.unwrap() else {
+            panic!("expected close response")
+        };
+        assert_eq!(response.payload["closed"], true);
+
+        for (frame, expected) in [
+            (
+                request(
+                    "bad-base64",
+                    "remote_execution.stdin",
+                    serde_json::json!({"executionId": "exec-1", "dataBase64": "%%%"}),
+                    None,
+                ),
+                "decode execution stdin",
+            ),
+            (
+                request(
+                    "unprepared",
+                    "remote_execution.stdin",
+                    serde_json::json!({"executionId": "missing", "dataBase64": ""}),
+                    None,
+                ),
+                "not prepared",
+            ),
+            (
+                request(
+                    "run-no-job",
+                    "remote_execution.run",
+                    serde_json::json!({}),
+                    None,
+                ),
+                "requires job id",
+            ),
+            (
+                request(
+                    "unknown",
+                    "remote_execution.unknown",
+                    serde_json::json!({}),
+                    None,
+                ),
+                "unsupported",
+            ),
+        ] {
+            let error =
+                dispatch_worker_frame(frame, context.clone(), state.clone(), "127.0.0.1", 0)
+                    .await
+                    .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+
+        state.inputs.lock().await.insert(
+            "cancel-me".to_string(),
+            PreparedInput {
+                sender: None,
+                receiver: None,
+            },
+        );
+        dispatch_worker_frame(
+            ParentFrame::Cancel {
+                request_id: "cancel".to_string(),
+                job_id: Some("cancel-me".to_string()),
+            },
+            context.clone(),
+            state.clone(),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(!state.inputs.lock().await.contains_key("cancel-me"));
+
+        dispatch_worker_frame(
+            ParentFrame::ConfigApply {
+                request_id: "config".to_string(),
+                generation: 1,
+                payload: serde_json::Value::Null,
+            },
+            context.clone(),
+            state.clone(),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output.recv().await.unwrap() else {
+            panic!("expected config response")
+        };
+        assert!(response.error.unwrap().contains("no mutable configuration"));
+
+        for frame in [
+            ParentFrame::Ping {
+                request_id: "ping".to_string(),
+            },
+            ParentFrame::Shutdown {
+                request_id: "shutdown".to_string(),
+            },
+        ] {
+            dispatch_worker_frame(frame, context.clone(), state.clone(), "127.0.0.1", 0)
+                .await
+                .unwrap();
+        }
+        assert!(state.inputs.lock().await.is_empty());
+        assert!(!cancel_registered_execution("missing", "request", "job")
+            .await
+            .unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_forwards_chunked_stdin_cancels_registered_runs_and_cleans_up() {
+        let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let tail = r#"
+run_id=''
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*)
+      request_id=$(printf '%s' "$line" | sed -n -e 's/.*"requestId":"\([^"]*\)".*/\1/p' -e 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'remote_execution.run'*) run_id="$request_id" ;;
+        *) printf '{"type":"response","response":{"requestId":"%s","ok":true,"cancelled":false,"payload":{"accepted":true},"error":null}}\n' "$request_id" ;;
+      esac
+      ;;
+    *'"type":"cancel"'*)
+      printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":true,"payload":null,"error":"cancel acknowledged"}}\n' "$run_id"
+      run_id=''
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let key = format!("remote_execution:test-{}", uuid::Uuid::new_v4());
+        let mut spec =
+            crate::worker_runtime::test_shell_worker_spec(&key, WorkerKind::RemoteExecution, tail);
+        spec.request_timeout = Duration::from_secs(2);
+        spec.heartbeat_timeout = Duration::from_secs(3);
+        let worker = ManagedWorker::spawn(spec).await.unwrap();
+
+        let (stdin_tx, stdin_rx) = mpsc::channel(1);
+        stdin_tx
+            .send(vec![b'x'; REMOTE_EXECUTION_INPUT_CHUNK_BYTES * 2 + 7])
+            .await
+            .unwrap();
+        drop(stdin_tx);
+        forward_stdin(
+            worker.clone(),
+            "execution-chunks".to_string(),
+            Some(stdin_rx),
+        )
+        .await
+        .unwrap();
+        forward_stdin(worker.clone(), "execution-empty".to_string(), None)
+            .await
+            .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let stderr_path = temp.path().join("worker.stderr.log");
+        std::fs::write(&stderr_path, b"temporary worker log").unwrap();
+        let shutdown_guard = WorkerShutdownGuard::new(worker.clone(), stderr_path.clone());
+        let request_id = "registered-cancel-request".to_string();
+        let request_worker = worker.clone();
+        let pending = tokio::spawn(async move {
+            request_worker
+                .request_with_id(
+                    request_id,
+                    Some("registered-cancel-job".to_string()),
+                    "remote_execution.run",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while crate::worker_runtime::worker_job("registered-cancel-request")
+                .is_none_or(|job| job.status != crate::worker_runtime::WorkerJobStatus::Running)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(cancel_registered_execution(
+            &key,
+            "registered-cancel-request",
+            "registered-cancel-job"
+        )
+        .await
+        .unwrap());
+        assert_eq!(pending.await.unwrap().unwrap_err(), "cancel acknowledged");
+
+        drop(shutdown_guard);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while stderr_path.exists() || worker.state() != WorkerLifecycleState::Stopped {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!ACTIVE_EXECUTION_WORKERS.contains_key(&key));
     }
 }

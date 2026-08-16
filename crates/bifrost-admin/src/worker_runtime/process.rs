@@ -156,12 +156,18 @@ struct RequestTrackingGuard<'a> {
     request_id: String,
     cancellations: &'a DashMap<String, watch::Sender<bool>>,
     dispatched: &'a DashMap<String, ()>,
+    pending: &'a DashMap<String, oneshot::Sender<WorkerResponse>>,
 }
 
 impl Drop for RequestTrackingGuard<'_> {
     fn drop(&mut self) {
         self.cancellations.remove(&self.request_id);
         self.dispatched.remove(&self.request_id);
+        self.pending.remove(&self.request_id);
+        jobs::mark_cancelled_if_active(
+            &self.request_id,
+            "worker request caller dropped before a terminal response",
+        );
     }
 }
 
@@ -171,17 +177,20 @@ impl ManagedWorker {
         let mut command = Command::new(&spec.executable);
         command
             .args(&spec.args)
-            .env(WORKER_STARTUP_TOKEN_ENV, &startup_token)
-            .env(WORKER_KIND_ENV, spec.kind.as_str())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
-        for (key, value) in &spec.env {
-            command.env(key, value);
-        }
         for key in &spec.env_remove {
             command.env_remove(key);
         }
+        for (key, value) in &spec.env {
+            command.env(key, value);
+        }
+        // Capability-specific specs cannot remove or override credentials
+        // generated for this worker instance.
+        command
+            .env(WORKER_STARTUP_TOKEN_ENV, &startup_token)
+            .env(WORKER_KIND_ENV, spec.kind.as_str());
         configure_process_group(&mut command);
         command.stderr(if spec.stderr_path.is_some() {
             Stdio::piped()
@@ -540,6 +549,21 @@ impl ManagedWorker {
         timeout_override: Option<Duration>,
         control_lane: bool,
     ) -> Result<serde_json::Value, String> {
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        match self.request_cancellations.entry(request_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(cancel_tx);
+            }
+            Entry::Occupied(_) => {
+                return Err(format!("duplicate worker request id '{request_id}'"));
+            }
+        }
+        let _tracking = RequestTrackingGuard {
+            request_id: request_id.clone(),
+            cancellations: &self.request_cancellations,
+            dispatched: &self.dispatched_requests,
+            pending: &self.pending,
+        };
         jobs::begin_request(
             &self.key,
             self.kind,
@@ -555,15 +579,6 @@ impl ManagedWorker {
             jobs::mark_failed(&request_id, error.clone());
             return Err(error);
         }
-
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
-        self.request_cancellations
-            .insert(request_id.clone(), cancel_tx);
-        let _tracking = RequestTrackingGuard {
-            request_id: request_id.clone(),
-            cancellations: &self.request_cancellations,
-            dispatched: &self.dispatched_requests,
-        };
 
         let permit = if control_lane {
             let acquire = self.control_slots.clone().acquire_owned();
@@ -850,7 +865,11 @@ impl ManagedWorker {
     }
     fn mark_failed(&self, error: String) {
         jobs::fail_worker_jobs(&self.key, &error);
-        *self.last_error.write() = Some(error);
+        let mut last_error = self.last_error.write();
+        if last_error.is_none() {
+            *last_error = Some(error);
+        }
+        drop(last_error);
         self.state.store(
             state_to_u8(WorkerLifecycleState::Degraded),
             Ordering::Release,
@@ -1057,14 +1076,13 @@ fn configure_process_group(_: &mut Command) {}
 #[cfg(unix)]
 async fn terminate_child_tree(child: &mut Child) {
     if let Some(pid) = child.id() {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .status();
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        if child.try_wait().ok().flatten().is_none() {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &format!("-{pid}")])
-                .status();
+        if let Ok(pid) = i32::try_from(pid) {
+            let process_group = nix::unistd::Pid::from_raw(pid);
+            let _ = nix::sys::signal::killpg(process_group, nix::sys::signal::Signal::SIGTERM);
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = nix::sys::signal::killpg(process_group, nix::sys::signal::Signal::SIGKILL);
+            }
         }
     }
     let _ = child.start_kill();
@@ -1104,9 +1122,33 @@ fn u8_to_state(value: u8) -> WorkerLifecycleState {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn test_shell_worker_spec(key: &str, kind: WorkerKind, tail: &str) -> WorkerSpawnSpec {
+    let hello = format!(
+        r#"printf '{{"type":"hello","hello":{{"protocolVersion":1,"workerKind":"{}","workerInstanceId":"fake-instance","pid":%s,"buildVersion":"test","startupToken":"%s","capabilities":[]}}}}\n' "$$" "$BIFROST_WORKER_STARTUP_TOKEN""#,
+        kind.as_str()
+    );
+    let ready = r#"printf '{"type":"ready","worker_instance_id":"fake-instance"}\n'"#;
+    let mut spec = WorkerSpawnSpec::new(
+        key,
+        kind,
+        "/bin/sh",
+        vec!["-c".to_string(), format!("{hello}; {ready}; {tail}")],
+    );
+    spec.startup_timeout = Duration::from_secs(2);
+    spec.request_timeout = Duration::from_millis(100);
+    spec.heartbeat_timeout = Duration::from_millis(300);
+    spec
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn shell_worker_spec(key: &str, tail: &str) -> WorkerSpawnSpec {
+        test_shell_worker_spec(key, WorkerKind::Asr, tail)
+    }
 
     #[test]
     fn queue_counter_respects_hard_limit() {
@@ -1115,6 +1157,43 @@ mod tests {
         assert!(AtomicCounterGuard::try_increment_below(&counter, 1).is_none());
         drop(first);
         assert!(AtomicCounterGuard::try_increment_below(&counter, 1).is_some());
+    }
+
+    #[test]
+    fn request_tracking_drop_removes_pending_and_finalizes_job() {
+        let _guard = jobs::test_guard();
+        jobs::clear_for_tests();
+        jobs::begin_request(
+            "browser:test",
+            WorkerKind::Browser,
+            "request-drop",
+            None,
+            "browser.run",
+        );
+        jobs::mark_running("request-drop");
+        let cancellations = DashMap::new();
+        let dispatched = DashMap::new();
+        let pending = DashMap::new();
+        let (response_tx, _response_rx) = oneshot::channel();
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        cancellations.insert("request-drop".to_string(), cancel_tx);
+        dispatched.insert("request-drop".to_string(), ());
+        pending.insert("request-drop".to_string(), response_tx);
+
+        drop(RequestTrackingGuard {
+            request_id: "request-drop".to_string(),
+            cancellations: &cancellations,
+            dispatched: &dispatched,
+            pending: &pending,
+        });
+
+        assert!(cancellations.is_empty());
+        assert!(dispatched.is_empty());
+        assert!(pending.is_empty());
+        assert_eq!(
+            jobs::get_job("request-drop").unwrap().status,
+            jobs::WorkerJobStatus::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -1142,5 +1221,599 @@ mod tests {
         let metrics = process_metrics(std::process::id()).expect("current process metrics");
         assert!(metrics.rss_bytes > 0);
         assert!(metrics.virtual_memory_bytes > 0);
+        assert!(metrics.cpu_usage_percent >= 0.0);
+        #[cfg(target_os = "linux")]
+        assert!(metrics.open_file_descriptors.is_some());
+        #[cfg(not(target_os = "linux"))]
+        assert!(metrics.open_file_descriptors.is_none());
+        assert!(process_metrics(u32::MAX).is_none());
+    }
+
+    #[test]
+    fn spawn_spec_defaults_and_atomic_counter_zero_limit_are_stable() {
+        let spec = WorkerSpawnSpec::new(
+            "worker-key",
+            WorkerKind::Browser,
+            "/tmp/bifrost-worker",
+            vec!["--worker".to_string()],
+        );
+        assert_eq!(spec.key, "worker-key");
+        assert_eq!(spec.kind, WorkerKind::Browser);
+        assert_eq!(spec.executable, PathBuf::from("/tmp/bifrost-worker"));
+        assert_eq!(spec.max_concurrency, 1);
+        assert_eq!(spec.max_queue_depth, 32);
+        assert!(spec.env.is_empty());
+        assert!(spec.env_remove.is_empty());
+        assert!(spec.stderr_path.is_none());
+
+        let counter = AtomicUsize::new(0);
+        assert!(AtomicCounterGuard::try_increment_below(&counter, 0).is_none());
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn worker_hello_validation_rejects_each_identity_mismatch() {
+        let spec = WorkerSpawnSpec::new("key", WorkerKind::Asr, "worker", Vec::new());
+        let hello = WorkerHello {
+            protocol_version: WORKER_PROTOCOL_VERSION,
+            worker_kind: WorkerKind::Asr,
+            worker_instance_id: "instance".to_string(),
+            pid: 42,
+            build_version: "test".to_string(),
+            startup_token: "token".to_string(),
+            capabilities: vec!["test".to_string()],
+        };
+        assert!(validate_hello(&hello, &spec, "token", Some(42)).is_ok());
+
+        let mut invalid = hello.clone();
+        invalid.protocol_version += 1;
+        assert!(validate_hello(&invalid, &spec, "token", Some(42)).is_err());
+        invalid = hello.clone();
+        invalid.worker_kind = WorkerKind::Browser;
+        assert!(validate_hello(&invalid, &spec, "token", Some(42)).is_err());
+        invalid = hello.clone();
+        invalid.startup_token = "wrong".to_string();
+        assert!(validate_hello(&invalid, &spec, "token", Some(42)).is_err());
+        invalid = hello.clone();
+        invalid.pid = 43;
+        assert!(validate_hello(&invalid, &spec, "token", Some(42)).is_err());
+        invalid = hello;
+        invalid.worker_instance_id = "   ".to_string();
+        assert!(validate_hello(&invalid, &spec, "token", None).is_err());
+    }
+
+    #[test]
+    fn lifecycle_state_encoding_round_trips_and_unknown_degrades() {
+        for state in [
+            WorkerLifecycleState::Stopped,
+            WorkerLifecycleState::Starting,
+            WorkerLifecycleState::Ready,
+            WorkerLifecycleState::Busy,
+            WorkerLifecycleState::Degraded,
+            WorkerLifecycleState::Stopping,
+            WorkerLifecycleState::Backoff,
+            WorkerLifecycleState::CircuitOpen,
+            WorkerLifecycleState::Disabled,
+        ] {
+            assert_eq!(u8_to_state(state_to_u8(state)), state);
+        }
+        assert_eq!(u8_to_state(u8::MAX), WorkerLifecycleState::Degraded);
+    }
+
+    #[tokio::test]
+    async fn bounded_log_helpers_cover_empty_existing_and_rotated_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.log");
+        rotate_log(&missing).await.unwrap();
+
+        let path = dir.path().join("worker.log");
+        tokio::fs::write(&path, b"existing").await.unwrap();
+        let (mut file, mut current_bytes) = open_bounded_log(&path, 128).await.unwrap();
+        assert_eq!(current_bytes, 8);
+        write_bounded_log_chunk(&path, &mut file, &mut current_bytes, b"-more", 128)
+            .await
+            .unwrap();
+        file.flush().await.unwrap();
+        assert_eq!(current_bytes, 13);
+
+        rotate_log(&path).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(path.with_extension("log.1")).await.unwrap(),
+            b"existing-more"
+        );
+
+        let zero = dir.path().join("zero.log");
+        let (mut file, mut bytes) = open_bounded_log(&zero, 0).await.unwrap();
+        write_bounded_log_chunk(&zero, &mut file, &mut bytes, b"ignored", 0)
+            .await
+            .unwrap();
+        file.flush().await.unwrap();
+        assert!(tokio::fs::read(&zero).await.unwrap().is_empty());
+
+        let retained = dir.path().join("retained.log");
+        let (mut file, mut bytes) = open_bounded_log(&retained, 4).await.unwrap();
+        write_bounded_log_chunk(&retained, &mut file, &mut bytes, b"123456", 4)
+            .await
+            .unwrap();
+        file.flush().await.unwrap();
+        assert_eq!(tokio::fs::read(retained).await.unwrap(), b"3456");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_spawn_rejects_process_and_handshake_failures() {
+        let missing = WorkerSpawnSpec::new(
+            "missing",
+            WorkerKind::Asr,
+            "/definitely/missing/bifrost-worker",
+            Vec::new(),
+        );
+        assert!(ManagedWorker::spawn(missing)
+            .await
+            .err()
+            .unwrap()
+            .contains("spawn asr worker"));
+
+        let mut exited = WorkerSpawnSpec::new(
+            "exited",
+            WorkerKind::Asr,
+            "/bin/sh",
+            vec!["-c".to_string(), "exit 0".to_string()],
+        );
+        exited.startup_timeout = Duration::from_secs(1);
+        assert!(ManagedWorker::spawn(exited)
+            .await
+            .err()
+            .unwrap()
+            .contains("before hello"));
+
+        let mut wrong_first = WorkerSpawnSpec::new(
+            "wrong-first",
+            WorkerKind::Asr,
+            "/bin/sh",
+            vec![
+                "-c".to_string(),
+                r#"printf '{"type":"ready","worker_instance_id":"fake"}\n'"#.to_string(),
+            ],
+        );
+        wrong_first.startup_timeout = Duration::from_secs(1);
+        assert!(ManagedWorker::spawn(wrong_first)
+            .await
+            .err()
+            .unwrap()
+            .contains("first worker frame must be hello"));
+
+        let mut wrong_ready = shell_worker_spec("wrong-ready", "sleep 1");
+        wrong_ready.args[1] = wrong_ready.args[1].replace(
+            r#""worker_instance_id":"fake-instance""#,
+            r#""worker_instance_id":"other""#,
+        );
+        let error = ManagedWorker::spawn(wrong_ready).await.err().unwrap();
+        assert!(
+            error.contains("second worker frame must be ready"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_worker_timeout_invalid_output_and_heartbeat_failure_are_contained() {
+        let worker = ManagedWorker::spawn(shell_worker_spec("timeout", "sleep 5"))
+            .await
+            .unwrap();
+        let error = worker
+            .request(
+                "never.responds",
+                serde_json::Value::Null,
+                Some(Duration::from_millis(75)),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        worker.shutdown(Duration::ZERO).await.unwrap();
+
+        let malformed = ManagedWorker::spawn(shell_worker_spec(
+            "malformed",
+            "printf 'not-json\\n'; sleep 1",
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(malformed.state(), WorkerLifecycleState::Degraded);
+        assert!(malformed.snapshot(0, None, None).last_error.is_some());
+        let _ = malformed.shutdown(Duration::ZERO).await;
+
+        let duplicate = ManagedWorker::spawn(shell_worker_spec(
+            "duplicate",
+            r#"printf '{"type":"hello","hello":{"protocolVersion":1,"workerKind":"asr","workerInstanceId":"duplicate","pid":1,"buildVersion":"test","startupToken":"duplicate","capabilities":[]}}\n'; sleep 1"#,
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(duplicate.state(), WorkerLifecycleState::Degraded);
+        assert!(duplicate
+            .snapshot(0, None, None)
+            .last_error
+            .unwrap()
+            .contains("duplicate worker hello"));
+        let _ = duplicate.shutdown(Duration::ZERO).await;
+
+        let heartbeat = ManagedWorker::spawn(shell_worker_spec("heartbeat", "sleep 5"))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(heartbeat.state(), WorkerLifecycleState::Degraded);
+        assert!(heartbeat
+            .snapshot(0, None, None)
+            .last_error
+            .unwrap()
+            .contains("heartbeat timed out"));
+        let _ = heartbeat.shutdown(Duration::ZERO).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn responsive_worker_covers_success_failure_events_and_dispatched_cancel() {
+        let _guard = jobs::test_guard_async().await;
+        jobs::clear_for_tests();
+        let tail = r#"
+printf '{"type":"heartbeat","heartbeat":{"workerInstanceId":"fake-instance","timestampMs":42,"activeJobs":1,"queuedJobs":2}}\n'
+wait_id=''
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*)
+      request_id=$(printf '%s' "$line" | sed -n -e 's/.*"requestId":"\([^"]*\)".*/\1/p' -e 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'operation.wait'*) wait_id="$request_id" ;;
+        *'operation.fail'*)
+          printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":false,"payload":null,"error":null}}\n' "$request_id"
+          ;;
+        *'operation.cancelled'*)
+          printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":true,"payload":null,"error":null}}\n' "$request_id"
+          ;;
+        *)
+          printf '{"type":"event","event":{"requestId":"%s","jobId":"job-ok","event":"progress","payload":{"step":1}}}\n' "$request_id"
+          printf '{"type":"response","response":{"requestId":"%s","ok":true,"cancelled":false,"payload":{"value":7},"error":null}}\n' "$request_id"
+          ;;
+      esac
+      ;;
+    *'"type":"cancel"'*)
+      if [ -n "$wait_id" ]; then
+        printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":true,"payload":null,"error":"cancel acknowledged"}}\n' "$wait_id"
+        wait_id=''
+      fi
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec = shell_worker_spec("responsive", tail);
+        spec.request_timeout = Duration::from_secs(1);
+        spec.heartbeat_timeout = Duration::from_secs(2);
+        let worker = ManagedWorker::spawn(spec).await.unwrap();
+        let mut all_events = worker.subscribe_events();
+        let mut request_events = worker.subscribe_request_events("request-ok", 2);
+
+        let response = worker
+            .request_with_id(
+                "request-ok".to_string(),
+                Some("job-ok".to_string()),
+                "operation.ok",
+                serde_json::Value::Null,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response["value"], 7);
+        assert_eq!(request_events.recv().await.unwrap().event, "progress");
+        assert_eq!(all_events.recv().await.unwrap().event, "progress");
+        worker.remove_request_event_sink("request-ok");
+        assert!(worker.is_healthy().await);
+        assert_eq!(worker.key(), "responsive");
+        assert_eq!(worker.kind(), WorkerKind::Asr);
+        assert_eq!(worker.instance_id(), "fake-instance");
+        let snapshot = worker.snapshot(3, Some(4), Some(5));
+        assert_eq!(snapshot.restart_count, 3);
+        assert_eq!(snapshot.worker_reported_heartbeat_ms, Some(42));
+        assert_eq!(snapshot.active_jobs, 1);
+        assert_eq!(snapshot.queued_jobs, 2);
+
+        let error = worker
+            .request("operation.fail", serde_json::Value::Null, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "worker request failed");
+        let error = worker
+            .request_control("operation.cancelled", serde_json::Value::Null, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "worker request cancelled");
+        assert!(!worker.cancel_request("missing", "missing").await.unwrap());
+
+        let pending_worker = worker.clone();
+        let pending = tokio::spawn(async move {
+            pending_worker
+                .request_with_id(
+                    "request-wait".to_string(),
+                    Some("job-wait".to_string()),
+                    "operation.wait",
+                    serde_json::Value::Null,
+                    Some(Duration::from_secs(1)),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(worker
+            .cancel_request("request-wait", "job-wait")
+            .await
+            .unwrap());
+        assert_eq!(pending.await.unwrap().unwrap_err(), "cancel acknowledged");
+
+        worker.cancel_job("missing-logical-job").await.unwrap();
+        worker.shutdown(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(worker.state(), WorkerLifecycleState::Stopped);
+        assert!(!worker.is_healthy().await);
+        worker.shutdown(Duration::ZERO).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_request_queue_covers_full_cancel_timeout_and_duplicate_ids() {
+        let _guard = jobs::test_guard_async().await;
+        jobs::clear_for_tests();
+        let tail = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"cancel"'*)
+      request_id=$(printf '%s' "$line" | sed -n -e 's/.*"requestId":"\([^"]*\)".*/\1/p' -e 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":true,"payload":null,"error":"cancel acknowledged"}}\n' "$request_id"
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec = shell_worker_spec("queued-worker", tail);
+        spec.max_concurrency = 1;
+        spec.max_queue_depth = 1;
+        spec.queue_wait_timeout = Duration::from_millis(150);
+        spec.request_timeout = Duration::from_secs(2);
+        spec.heartbeat_timeout = Duration::from_secs(3);
+        let worker = ManagedWorker::spawn(spec).await.unwrap();
+
+        let hold_worker = worker.clone();
+        let hold = tokio::spawn(async move {
+            hold_worker
+                .request_with_id(
+                    "queue-hold".to_string(),
+                    Some("queue-hold-job".to_string()),
+                    "operation.wait",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !worker.dispatched_requests.contains_key("queue-hold") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let queued_worker = worker.clone();
+        let queued = tokio::spawn(async move {
+            queued_worker
+                .request_with_id(
+                    "queue-cancel".to_string(),
+                    Some("queue-cancel-job".to_string()),
+                    "operation.wait",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while worker.parent_queued_jobs.load(Ordering::Acquire) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let full_error = worker
+            .request_with_id(
+                "queue-full".to_string(),
+                None,
+                "operation.wait",
+                serde_json::Value::Null,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(full_error.contains("request queue is full"), "{full_error}");
+        assert!(worker
+            .cancel_request("queue-cancel", "queue-cancel-job")
+            .await
+            .unwrap());
+        assert!(queued
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("cancelled while queued"));
+
+        let timeout_error = worker
+            .request_with_id(
+                "queue-timeout".to_string(),
+                None,
+                "operation.wait",
+                serde_json::Value::Null,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            timeout_error.contains("request queue timeout"),
+            "{timeout_error}"
+        );
+        assert!(worker
+            .cancel_request("queue-hold", "queue-hold-job")
+            .await
+            .unwrap());
+        let hold_error = hold.await.unwrap().unwrap_err();
+        assert_eq!(
+            hold_error,
+            "cancel acknowledged",
+            "worker snapshot: {:?}",
+            worker.snapshot(0, None, None)
+        );
+        worker.shutdown(Duration::from_secs(1)).await.unwrap();
+
+        let mut duplicate_spec = shell_worker_spec("duplicate-request-worker", tail);
+        duplicate_spec.max_concurrency = 2;
+        duplicate_spec.request_timeout = Duration::from_secs(2);
+        duplicate_spec.heartbeat_timeout = Duration::from_secs(3);
+        let duplicate_worker = ManagedWorker::spawn(duplicate_spec).await.unwrap();
+        let first_worker = duplicate_worker.clone();
+        let first = tokio::spawn(async move {
+            first_worker
+                .request_with_id(
+                    "duplicate-request".to_string(),
+                    Some("duplicate-job".to_string()),
+                    "operation.wait",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !duplicate_worker
+                .dispatched_requests
+                .contains_key("duplicate-request")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let duplicate_error = duplicate_worker
+            .request_with_id(
+                "duplicate-request".to_string(),
+                Some("duplicate-job".to_string()),
+                "operation.wait",
+                serde_json::Value::Null,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(duplicate_error.contains("duplicate worker request id"));
+        assert!(duplicate_worker
+            .cancel_request("duplicate-request", "duplicate-job")
+            .await
+            .unwrap());
+        assert_eq!(first.await.unwrap().unwrap_err(), "cancel acknowledged");
+        duplicate_worker
+            .shutdown(Duration::from_secs(1))
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_queue_cancellation_timeout_and_worker_exit_fail_pending_requests() {
+        let _guard = jobs::test_guard_async().await;
+        jobs::clear_for_tests();
+        let tail = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec = shell_worker_spec("control-queue-worker", tail);
+        spec.request_timeout = Duration::from_secs(8);
+        spec.heartbeat_timeout = Duration::from_secs(10);
+        let worker = ManagedWorker::spawn(spec).await.unwrap();
+        let held_controls = worker
+            .control_slots
+            .clone()
+            .acquire_many_owned(8)
+            .await
+            .unwrap();
+        let queued_worker = worker.clone();
+        let queued = tokio::spawn(async move {
+            queued_worker
+                .request_with_id_inner(
+                    "queued-control-cancel".to_string(),
+                    Some("queued-control-job".to_string()),
+                    "operation.control".to_string(),
+                    serde_json::Value::Null,
+                    None,
+                    true,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !worker
+                .request_cancellations
+                .contains_key("queued-control-cancel")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(worker
+            .cancel_request("queued-control-cancel", "queued-control-job")
+            .await
+            .unwrap());
+        assert!(queued
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("control request cancelled while queued"));
+
+        let timeout_error = worker
+            .request_with_id_inner(
+                "queued-control-timeout".to_string(),
+                None,
+                "operation.control".to_string(),
+                serde_json::Value::Null,
+                None,
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(timeout_error.contains("control queue timeout"));
+        drop(held_controls);
+        worker.shutdown(Duration::from_secs(1)).await.unwrap();
+
+        let exit_tail = r#"
+IFS= read -r line
+exit 7
+"#;
+        let mut exit_spec = shell_worker_spec("exit-with-pending", exit_tail);
+        exit_spec.request_timeout = Duration::from_secs(3);
+        exit_spec.heartbeat_timeout = Duration::from_secs(5);
+        let exit_worker = ManagedWorker::spawn(exit_spec).await.unwrap();
+        let error = exit_worker
+            .request_with_id(
+                "pending-at-exit".to_string(),
+                Some("pending-at-exit-job".to_string()),
+                "operation.exit".to_string(),
+                serde_json::Value::Null,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("worker failed"), "{error}");
+        let _ = exit_worker.shutdown(Duration::ZERO).await;
     }
 }

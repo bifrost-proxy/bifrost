@@ -201,6 +201,8 @@ Admin API 测试脚本位于 `tests/` 目录，用于测试 Bifrost 的管理 AP
 | `test_im_outbound_send_e2e.sh` | 1 | IM provider 能力发现、provider/飞书 bot ID/名称选择、owner/target/直达群聊、Markdown/图片/文件/原生卡片有序发送、raw binary upload、危险附件文件名拒绝与严格 CLI 参数校验 |
 | `test_im_gateway_subagent_event_boundary.sh` | 3 | Codex/Traex 根 thread/turn 隔离与 Claude Code 普通工具事件；子协作完成不提前结束根任务 |
 | `test_process_resolution_performance.sh` | 8 | 管理请求跳过进程识别、外部 Admin-like path 防误伤、诊断计数、主指标隔离、普通代理回归、并发连接共享 snapshot generation、有界缓存诊断与可选 18k 高基数真实连接压力 |
+| `test_auxiliary_worker_isolation.sh` | 13 | 六类附加能力 lazy worker、NDJSON/大帧边界、Job/Artifact、External CLI 取消，以及逐 worker kill 后代理存活 |
+| `test_remote_invoke_ssh_e2e.sh` | 1 | 本地 relay、SSH grant 权限升降级、File/Shell/Query stdout、Remote Execution、双 caller、traffic/search/replay 与 revoke |
 | `test_scripts_admin_api.sh`   | 12     | 脚本 CRUD、列表、内置脚本            |
 | `test_replay_rules.sh`        | 28     | Replay custom rules、请求/响应修改矩阵 |
 | `test_host_rule_path_rewrite.sh` | 4 | Host path 前缀、精确 path、正则精确资源与正则 origin-only 转发回归 |

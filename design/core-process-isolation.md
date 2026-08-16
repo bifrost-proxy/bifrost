@@ -1006,6 +1006,7 @@ IM Worker 负责：
 - reconnect；
 - scheduler tick；
 - provider API；
+- Admin 发消息与附件上传的实际 provider 调用（主进程只传私有 spool 文件引用）；
 - message dedupe runtime；
 - durable inbox/outbox journal；
 - progress/card update 调度；
@@ -1018,7 +1019,7 @@ IM Worker 不是无条件随主进程启动。
 启动条件：
 
 ```text
-存在 provider：enabled && event_connection_enabled
+存在任一 enabled provider（包括仅用于 outbound send/upload 的 provider）
 或存在 enabled schedule
 或用户显式 start
 ```
@@ -1672,11 +1673,12 @@ API 收到任务
 1. Control/Runtime facade；
 2. provider 长连接移入 worker；
 3. scheduler/reconnect/event loop 移入 worker；
-4. bounded provider queue；
-5. runtime inbox/outbox journal；
-6. config generation；
-7. capability reverse RPC；
-8. worker crash/reconnect 恢复。
+4. Admin send/upload provider 调用移入 worker，大 payload 只传私有 spool 引用；
+5. bounded provider queue；
+6. runtime inbox/outbox journal；
+7. config generation；
+8. capability reverse RPC；
+9. worker crash/reconnect 恢复。
 
 ### Remote Invoke
 
@@ -1782,6 +1784,7 @@ API 收到任务
 - config generation mismatch；
 - secret reload；
 - outbox recovery；
+- Admin send/upload 不回落主进程；
 - capability request timeout；
 - External CLI/Browser unavailable。
 

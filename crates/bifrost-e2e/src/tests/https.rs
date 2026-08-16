@@ -4,6 +4,30 @@ use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
 use std::time::Duration;
 
+const START_PROXY_MAX_ATTEMPTS: usize = 5;
+
+async fn start_proxy_with_owned_rules(rules: Vec<String>) -> Result<(u16, ProxyInstance), String> {
+    for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
+        let port = portpicker::pick_unused_port().ok_or("Failed to pick unused port")?;
+        let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+        match ProxyInstance::start(port, rule_refs).await {
+            Ok(proxy) => return Ok((port, proxy)),
+            Err(error)
+                if is_bind_race(&error.to_string()) && attempt < START_PROXY_MAX_ATTEMPTS =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(format!("Failed to start proxy: {error}")),
+        }
+    }
+
+    Err("Failed to start proxy after retrying port bind races".to_string())
+}
+
+fn is_bind_race(error: &str) -> bool {
+    error.contains("Failed to bind") || error.contains("already listening on this port")
+}
+
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
         TestCase::standalone(
@@ -59,12 +83,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
 
 async fn test_https_tunnel_passthrough() -> Result<(), String> {
     let mock = HttpbinMockServer::start().await;
-    let port = portpicker::pick_unused_port().unwrap();
     let rules = mock.http_rules();
-    let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
-    let _proxy = ProxyInstance::start(port, rule_refs)
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(rules).await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -90,13 +110,11 @@ async fn test_https_tunnel_with_host_rule() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "https_redirected");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!("secure.test.local host://127.0.0.1:{}", mock.port)],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![format!(
+        "secure.test.local host://127.0.0.1:{}",
+        mock.port
+    )])
+    .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -120,16 +138,11 @@ async fn test_https_curl_insecure_flag() -> Result<(), String> {
     let mock = HttpsMockServer::start("insecure-flag.test").await;
     mock.set_response(200, "insecure_flag_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!(
-            "insecure-flag.test host://127.0.0.1:{}",
-            mock.port
-        )],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![format!(
+        "insecure-flag.test host://127.0.0.1:{}",
+        mock.port
+    )])
+    .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -154,12 +167,8 @@ async fn test_https_curl_insecure_flag() -> Result<(), String> {
 
 async fn test_https_tunnel_public_site() -> Result<(), String> {
     let mock = HttpbinMockServer::start().await;
-    let port = portpicker::pick_unused_port().unwrap();
     let rules = mock.http_rules();
-    let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
-    let _proxy = ProxyInstance::start(port, rule_refs)
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(rules).await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 

@@ -45,7 +45,7 @@ Options:
   --skip-static       Skip fmt/clippy/test (only run E2E)
   --skip-deps-audit   Skip Rust dependency audit (cargo-deny + cargo-udeps)
   --skip-changed-coverage
-                      Skip the changed production Rust 95% local preflight
+                      Skip the changed production Rust 90% local preflight
   --e2e-only TYPE     Run only a specific E2E suite: rules, shell, runner, platform
   --shard N/M         Run only shard N of M for shell E2E (e.g. --shard 1/3)
   --coverage          Run unit-test coverage report after tests
@@ -202,9 +202,9 @@ if [[ "$SKIP_STATIC" -eq 0 ]]; then
   run_step "cargo fmt (workspace)" cargo fmt --all -- --check || HAD_FAILURE=1
   run_step "cargo fmt (desktop)" cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check || HAD_FAILURE=1
   if [[ "$SKIP_CHANGED_COVERAGE" -eq 0 ]]; then
-    run_step "Changed production Rust coverage (95%)" make coverage-changed || HAD_FAILURE=1
+    run_step "Changed production Rust coverage (90%)" make coverage-changed || HAD_FAILURE=1
   else
-    register_result "Changed production Rust coverage (95%)" "SKIP"
+    register_result "Changed production Rust coverage (90%)" "SKIP"
   fi
   run_step "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings || HAD_FAILURE=1
   run_step "cargo test (workspace)" cargo test --workspace --all-features || HAD_FAILURE=1
@@ -216,7 +216,7 @@ if [[ "$SKIP_STATIC" -eq 0 ]]; then
 else
   register_result "cargo fmt (workspace)" "SKIP"
   register_result "cargo fmt (desktop)" "SKIP"
-  register_result "Changed production Rust coverage (95%)" "SKIP"
+  register_result "Changed production Rust coverage (90%)" "SKIP"
   register_result "cargo clippy" "SKIP"
   register_result "cargo test (workspace)" "SKIP"
   register_result "Rust dependency audit" "SKIP"

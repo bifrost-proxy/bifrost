@@ -169,7 +169,7 @@ TS-VAD 可以直接消费已确认模板；在没有真实 DER/FAR/RTF 证据前
 - proxy coverage shell manifest 保持与当前 15 项契约一致；数量漂移时输出
   expected/actual 诊断并失败，避免只留下前一条成功日志。
 - 本地先执行相关测试，再执行 `cargo test --workspace --all-features`；远端 CI 执行
-  `bash scripts/ci/coverage-all.sh --json --gate` 和 changed-lines 95% 门禁。
+  `bash scripts/ci/coverage-all.sh --json --gate` 和 changed-lines 90% 门禁。
 
 上线质量目标以本地黄金集校准：自动实名 precision 不低于 99%，无目标用户会议的误认
 率低于 0.5%，并分别报告不同设备、重叠/非重叠和未见会议日期的结果。

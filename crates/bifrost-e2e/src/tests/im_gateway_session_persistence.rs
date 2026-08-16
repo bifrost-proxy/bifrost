@@ -1,6 +1,5 @@
 //! E2E tests for IM Gateway session persistence across service restarts.
 
-use crate::assertions::assert_status;
 use crate::{ProxyInstance, TestCase};
 use bifrost_admin::im_gateway::session_state::{self, ImAgentSessionState};
 use bifrost_admin::{AdminState, ImGatewayService};
@@ -17,9 +16,26 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let port = pick_unused_port()?;
                 let data_dir =
                     std::env::temp_dir().join(format!("bifrost_e2e_chatgpt_web_resume_{port}"));
+                if data_dir.exists() {
+                    std::fs::remove_dir_all(&data_dir).map_err(|error| {
+                        format!(
+                            "remove stale chatgpt_web E2E data dir {} failed: {error}",
+                            data_dir.display()
+                        )
+                    })?;
+                }
                 let _env_guard = DataDirEnvGuard::new(&data_dir);
                 let _e2e_guard = EnvVarGuard::set("BIFROST_E2E", "1");
                 let _mock_guard = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", "1");
+                // This case validates in-process conversation persistence. The
+                // dedicated auxiliary-worker E2Es cover Browser process
+                // isolation; the custom E2E runner is not the `bifrost` CLI
+                // executable and therefore cannot bootstrap a worker through
+                // `current_exe()`.
+                let _browser_mode_guard =
+                    EnvVarGuard::set("BIFROST_BROWSER_EXECUTION_MODE", "legacy");
+                let _external_cli_mode_guard =
+                    EnvVarGuard::set("BIFROST_EXTERNAL_CLI_EXECUTION_MODE", "legacy");
                 let (_proxy, admin_state) =
                     start_im_gateway_admin_with_data_dir(port, data_dir.clone()).await?;
 
@@ -57,7 +73,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .send()
                     .await
                     .map_err(|e| format!("PATCH chat gateway config failed: {e}"))?;
-                assert_status(&config_response, 200)?;
+                assert_response_status(config_response, 200).await?;
 
                 session_state::remember_session_state(ImAgentSessionState {
                     session_key: session_key.to_string(),
@@ -84,7 +100,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .send()
                     .await
                     .map_err(|e| format!("POST chatgpt_web resume request failed: {e}"))?;
-                assert_status(&resume_response, 200)?;
+                assert_response_status(resume_response, 200).await?;
 
                 let resume_snapshot = latest_chat_run_snapshot(&data_dir)?;
                 let restored_conversation =
@@ -106,7 +122,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .send()
                     .await
                     .map_err(|e| format!("POST chatgpt_web reset failed: {e}"))?;
-                assert_status(&reset_response, 200)?;
+                assert_response_status(reset_response, 200).await?;
 
                 admin_state.set_im_gateway_service(Arc::new(
                     ImGatewayService::new_with_agent_proxy_port(&data_dir, Some(port)),
@@ -123,7 +139,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .send()
                     .await
                     .map_err(|e| format!("POST chatgpt_web fresh request failed: {e}"))?;
-                assert_status(&fresh_response, 200)?;
+                assert_response_status(fresh_response, 200).await?;
 
                 let fresh_snapshot = latest_chat_run_snapshot(&data_dir)?;
                 let fresh_conversation =
@@ -139,6 +155,21 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
     ];
     tests.into_iter().map(TestCase::serial).collect()
+}
+
+async fn assert_response_status(response: reqwest::Response, expected: u16) -> Result<(), String> {
+    let actual = response.status().as_u16();
+    if actual == expected {
+        return Ok(());
+    }
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
+    let body = bifrost_core::text::truncate_chars_with_suffix(&body, 1_024, "...");
+    Err(format!(
+        "Expected status {expected}, got {actual}; response body: {body}"
+    ))
 }
 
 fn snapshot_has_param_key(snapshot: &serde_json::Value, expected: &str) -> bool {

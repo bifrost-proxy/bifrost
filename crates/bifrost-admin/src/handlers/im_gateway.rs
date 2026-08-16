@@ -73,6 +73,10 @@ use busy_message_mode::*;
 use event_loop::*;
 #[allow(unused_imports)]
 use messages::*;
+pub(crate) use messages::{
+    handle_messages_send_body, handle_messages_upload_body, SendMessageRequest,
+    UploadMessageMetadata, UploadMessageRequest,
+};
 use providers::*;
 use schedules::*;
 use service::{
@@ -96,17 +100,16 @@ pub(crate) fn provider_runtime_status_value(
     service: &ImGatewayService,
     provider_id: &str,
 ) -> Result<serde_json::Value, String> {
-    let provider = service
-        .provider_store
-        .get(provider_id)
-        .ok_or_else(|| "Provider not found".to_string())?;
-    let status = service
-        .connection_manager
-        .get_status(provider_id)
-        .unwrap_or_default();
-    let mut value = serde_json::to_value(status)
+    let provider = service.provider_store.get(provider_id);
+    let status = service.connection_manager.get_status(provider_id);
+    if provider.is_none() && status.is_none() {
+        return Err("Provider not found".to_string());
+    }
+    let mut value = serde_json::to_value(status.unwrap_or_default())
         .map_err(|error| format!("serialize provider runtime status: {error}"))?;
-    if provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin {
+    if let Some(provider) = provider.filter(|provider| {
+        provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin
+    }) {
         let owner_id = provider.owner_open_id.as_deref().unwrap_or_default();
         let send_ready = !owner_id.is_empty()
             && service

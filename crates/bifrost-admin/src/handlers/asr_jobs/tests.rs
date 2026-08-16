@@ -4777,6 +4777,11 @@ mod tests {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let runtime_guard = runtime.enter();
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let task = AsrDirectoryTask {
@@ -4816,13 +4821,21 @@ mod tests {
             .insert("force-pause-task".to_string());
         assert!(!task_force_pause_requested("force-pause-task"));
 
-        update_task_paused("force-pause-task", true).unwrap();
+        let response = pause_task_response(
+            "force-pause-task",
+            true,
+            AsrTaskPauseMode::LongTerm,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(runtime_guard);
+        runtime.block_on(tokio::task::yield_now());
         assert!(task_force_pause_requested("force-pause-task"));
 
         FORCE_PAUSED_TASKS
             .lock()
             .unwrap()
             .remove("force-pause-task");
+        set_worker_force_pause("force-pause-task", false);
     }
 
     #[test]
@@ -9889,6 +9902,85 @@ esac
     }
 
     #[test]
+    fn parent_compression_guard_does_not_clear_worker_cancel_marker() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let task_id = "compression-worker-cancel-marker";
+
+        set_worker_source_compression_cancel(task_id, true);
+        let mut guard = RunningSourceCompressionGuard::acquire(task_id).unwrap();
+        guard.relinquish_cancel_marker();
+        drop(guard);
+
+        assert!(worker_source_compression_cancel_path(task_id).is_file());
+        set_worker_source_compression_cancel(task_id, false);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn worker_directory_run_preserves_exclusion_pause_and_completion_states() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        assert!(run_directory_task_in_worker("missing", None)
+            .await
+            .unwrap_err()
+            .contains("not found"));
+
+        let task_id = "worker-directory-run";
+        let task = test_directory_task(task_id, audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let compression = RunningSourceCompressionGuard::acquire(task_id).unwrap();
+        assert!(run_directory_task_in_worker(task_id, None)
+            .await
+            .unwrap_err()
+            .contains("compression"));
+        drop(compression);
+
+        let running = RunningTaskGuard::acquire(task_id).unwrap();
+        assert!(run_directory_task_in_worker(task_id, None)
+            .await
+            .unwrap_err()
+            .contains("already running"));
+        drop(running);
+
+        let mut paused = task.clone();
+        paused.paused = true;
+        paused.paused_at_ms = Some(now_ms());
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![paused],
+        })
+        .unwrap();
+        let paused_outcome = run_directory_task_in_worker(task_id, None).await.unwrap();
+        assert_eq!(paused_outcome.status, "paused");
+        assert_eq!(paused_outcome.processed, 0);
+        assert_eq!(paused_outcome.failed, 0);
+        assert!(find_task(task_id).unwrap().paused);
+
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task],
+        })
+        .unwrap();
+        let completed = run_directory_task_in_worker(task_id, None).await.unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.processed, 0);
+        assert_eq!(completed.failed, 0);
+        assert!(!task_is_running(task_id));
+        assert!(serde_json::to_value(completed).unwrap().is_object());
+    }
+
+    #[test]
     fn compressed_source_matches_original_import_target_identity() {
         let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
@@ -10097,4 +10189,35 @@ esac
         assert!(merged.files.contains_key(&source_key(&source_b)));
     }
 
+    #[test]
+    fn source_compression_lock_and_bulk_cancel_markers_are_process_safe() {
+        let _lock = test_data_dir_lock();
+        let dir = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(dir.path());
+        let first = SourceCompressionFileLock::acquire("compression-lock").unwrap();
+        let duplicate = match SourceCompressionFileLock::acquire("compression-lock") {
+            Ok(_) => panic!("duplicate compression lock unexpectedly acquired"),
+            Err(error) => error,
+        };
+        assert!(duplicate.contains("already running"), "{duplicate}");
+        drop(first);
+        drop(SourceCompressionFileLock::acquire("compression-lock").unwrap());
+
+        let task_ids = ["bulk-cancel-a", "bulk-cancel-b"];
+        {
+            let mut running = RUNNING_SOURCE_COMPRESSION_TASKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            running.extend(task_ids.iter().map(|task_id| task_id.to_string()));
+        }
+        cancel_all_worker_source_compressions();
+        for task_id in task_ids {
+            assert!(worker_source_compression_cancel_path(task_id).is_file());
+            set_worker_source_compression_cancel(task_id, false);
+            RUNNING_SOURCE_COMPRESSION_TASKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(task_id);
+        }
+    }
 }

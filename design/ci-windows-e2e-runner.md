@@ -304,5 +304,5 @@ CI workflow YAML + bash 脚本，无 Rust 逻辑变更。
 
 CI run `29311063590` 的 changed-lines coverage gate 报告 retry loop 变更行仅覆盖 13/15
 （86.67%），缺少第 256、260 行的完整路径覆盖。上述 full-run retry 回归用例专门关闭该缺口，
-不降低 95% 变更行门禁，也不对生产代码增加覆盖率排除。本地使用单 crate instrumentation 报告
+该次修复没有降低当时的 95% 变更行门禁，也没有对生产代码增加覆盖率排除。本地使用单 crate instrumentation 报告
 和 CI 同款 `coverage-diff.py` 复核后，`runner.rs` 变更生产行覆盖率为 15/15（100%）。

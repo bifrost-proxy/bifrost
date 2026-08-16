@@ -18,7 +18,21 @@
 SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
   bash e2e-tests/tests/test_auxiliary_worker_isolation.sh
+
+# ASR 的真实 ffmpeg 压缩链路
+SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+  bash e2e-tests/tests/test_asr_source_compression.sh
+
+# IM Gateway 的本地 Weixin mock provider 链路
+SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+  bash e2e-tests/tests/test_weixin_provider_e2e.sh
+
+# Remote Invoke 的本地 relay、SSH grant 和 Remote Execution 链路
+SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+  bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
 ```
+
+以上命令构成合入门禁，均不依赖真实账号或云端 relay。真实浏览器账号、真实 ASR 模型、外部 IM 平台断网风暴和长时间资源压力属于发布前扩展 soak，不得在未执行时记为本用例通过。
 
 ## 测试用例
 
@@ -33,9 +47,9 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
 ### TC-AWI-02：回滚模式可观测
 
 1. 调用 `GET /_bifrost/api/workers/modes`。
-2. 分别以 `BIFROST_ASR_EXECUTION_MODE=legacy` 和默认环境启动临时实例。
+2. 检查六类 worker 的默认模式与对应环境变量名称。
 
-预期：默认六类能力均为 `worker`；显式设置后只有 ASR 报告 `legacy`，其他能力不受影响；环境变量名称可从接口读取。
+预期：默认六类能力均为 `worker`；每类的回滚环境变量名称可从接口读取，且均以 `BIFROST_` 开头。
 
 ### TC-AWI-03：真实 Worker 握手与关闭
 
@@ -43,7 +57,7 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
 2. 校验 Hello 中的协议版本、kind、PID、instance ID 和随机启动 token。
 3. 发送 Ping，再发送 Shutdown。
 
-预期：两类 worker 均完成 `Hello → Ready → Response(pong) → Response(shutdown) → Goodbye/退出`；stdout 只包含 NDJSON 协议帧。
+预期：两类 worker 均完成 `Hello → Ready → Response(pong) → Response(shutdown) → 退出`；Hello 中的 kind、PID、instance ID、token 和协议版本均正确；stdout 只包含 NDJSON 协议帧。
 
 ### TC-AWI-04：IPC 大帧拒绝
 
@@ -63,68 +77,69 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
 
 ### TC-AWI-06：生命周期控制
 
-1. 调用 `/api/workers/{kind}/stop`、`restart`、`reset-circuit`。
-2. 在能力尚未使用、没有 spawn spec 时调用 `start`。
-3. 实际使用一次能力后再次调用 stop/restart。
+1. 在能力尚未使用、没有 spawn spec 时调用 `/api/workers/asr/start`。
+2. 调用 `/api/workers/asr/reset-circuit`。
+3. 检查主进程、代理请求和 worker job API。
 
-预期：无 spawn spec 时 start 返回 409，不伪造成功；有 spawn spec 后能按 kind 控制；操作不影响其他 worker 和代理。
+预期：无 spawn spec 时 start 返回 409，不伪造成功；reset-circuit 成功；操作不影响主进程、代理或 job API。
 
 ### TC-AWI-07：Job、事件与 Artifact 边界
 
-1. 运行 External CLI、Browser 或 ASR 任务。
+1. 通过 Admin API 运行真实的 External CLI per-job worker。
 2. 调用 `/api/worker-jobs`、`/{jobId}/events` 和 `/{jobId}/artifacts`。
 3. 用 offset/limit 和 tail 读取 artifact。
 4. 尝试读取未注册路径、目录、超出范围 offset 和超过 1 MiB 的单次范围。
 
-预期：任务状态按 queued/running/terminal 演进；事件和 artifact 数量受限；仅显式注册的规范普通文件可读；非法范围被拒绝；主进程不一次性加载完整大文件。
+预期：任务进入 succeeded 终态并保留开始/结束时间；事件和 artifact 数量受限；result/stdout/stderr/normalized_events 均已注册；仅显式注册的规范普通文件可读；非法范围被拒绝；主进程不一次性加载完整大文件。
 
 ### TC-AWI-08：External CLI 输出洪水与取消
 
-1. 使用测试 runner 连续输出超过 stderr/stdout 内存 tail 限制的数据。
-2. 观察增量日志、job events 和内存。
-3. 在运行中调用 job cancel。
+1. 使用测试 runner 生成大于 320 KiB 的最终结果，检查完整 result artifact 和受限范围读取。
+2. 再启动一个持续等待的 sessionless External CLI job。
+3. 在 queued/running 阶段调用 job cancel，并等待调用线程和 job 进入终态。
 
-预期：完整输出增量落盘，内存只保留受限 tail；progress 队列饱和时允许丢弃进度但最终状态可靠；取消后进程树被回收。
+预期：大结果完整落盘且可分页读取；取消请求返回 202；sessionless job 稳定映射到同一 logical job，并最终为 cancelled；子进程树被回收；代理继续可用。
 
-### TC-AWI-09：Browser crash、CDP hang 与空闲退出
+### TC-AWI-09：Browser Worker 操作与故障隔离
 
-1. 触发 Browser worker lazy 启动。
-2. 分别终止 Chromium 子进程、让 CDP 请求超时、终止 worker。
-3. 等待默认 idle timeout。
+1. 通过隐藏 worker 入口启动 Browser worker。
+2. 执行 `browser.clear_session_conversation` 并校验响应。
+3. 在持续代理探测期间终止记录到的 Browser worker PID。
 
-预期：当前 job 失败或超时；Chromium 孤儿进程被清理；主进程继续工作；后续请求可重新拉起 worker；空闲后 worker 退出但 profile 保留。
+预期：Browser 操作在独立 PID 内完成；终止 worker 不改变 Bifrost 主进程 PID；后续代理请求仍返回 200。
 
-### TC-AWI-10：ASR 资源与恢复
+### TC-AWI-10：ASR Worker 与真实压缩链路
 
-1. 运行含 ffmpeg、模型推理和 diarization 的离线任务。
-2. 分别模拟 ffmpeg timeout、模型失败、worker kill、取消和高 CPU。
-3. 重启后检查 checkpoint 和任务状态。
+1. 对不存在的 task 调用 `asr.run_directory_task`，校验有界失败响应。
+2. 运行 `test_asr_source_compression.sh`，让 ASR worker 通过真实 ffmpeg 把 WAV 压缩为 FLAC，并验证哈希与错误保留。
+3. 在持续代理探测期间终止记录到的 ASR worker PID。
 
-预期：重任务只存在于 ASR worker；任务被标记 interrupted/failed/cancelled；checkpoint 不重复提交已完成输出；代理延迟和错误率保持在设计门禁内。
+预期：任务执行和 ffmpeg 均位于 ASR worker 边界；成功产物与失败信息正确持久化；终止 worker 后代理仍返回 200。
 
-### TC-AWI-11：IM Gateway 重连与事件风暴
+### TC-AWI-11：IM Gateway Worker 与 provider 链路
 
-1. 启用测试 provider 和 schedule，使 IM Gateway worker 按配置启动。
-2. 断开 provider、注入突发事件、触发 scheduler reentry，再终止 worker。
-3. 检查 inbox/outbox journal 和恢复结果。
+1. 启动 IM Gateway worker，调用 `im.runtime_status`。
+2. 通过 worker 的 `im.send_message` 与 `im.upload_message` 文件引用协议执行缺失 provider 校验，确认请求文件在 worker 读取后删除。
+3. 运行 `test_weixin_provider_e2e.sh` 的本地 mock provider 全链路，并通过 Admin 消息发送接口验证实时上下文仍由 IM worker 使用。
+4. 在持续代理探测期间终止记录到的 IM Gateway worker PID。
 
-预期：重连有退避；事件队列和 journal 有界且可恢复；同一事件不重复执行；主进程只保留配置控制面。
+预期：provider 状态、消息收发、附件上传、上下文持久化与恢复均通过；Admin 发送和上传不会回落到主进程 provider；worker 终止不影响主进程和代理；主进程只保留配置、文件引用与 broker 控制面。
 
 ### TC-AWI-12：Remote Invoke 与执行 Worker
 
-1. 建立测试 relay/pairing。
-2. 执行 shell 命令并持续发送 stdin/接收 stdout。
-3. 模拟 relay disconnect、输出洪水、worker restart 和 shell 卡死。
+1. 启动本地 relay，建立 SSH pairing/grant。
+2. 执行 File、Shell、Query、traffic/search/replay、detached job 与 stdin/exit-code 链路，并多次切换 grant scope/file access。
+3. 直接校验 Remote Execution worker 的 prepare/stdin/stdin_close 协议；分别终止 Remote Invoke 与 Remote Execution worker PID 后探测代理。
 
-预期：relay worker 不直接执行命令；每个调用由 Remote Execution worker 承担；stdin/stdout 有背压；取消或超时回收完整进程树；duplicate frame 不重复执行。
+预期：relay transport 与命令执行跨进程隔离；主进程 broker 对每次调用重新鉴权；非 Shell 与 Shell stdout 均不丢最后一帧；权限升降级立即生效；两个 worker 任一退出均不影响代理。
 
-### TC-AWI-13：主进程联合 Chaos
+### TC-AWI-13：主进程确定性联合 Chaos
 
-1. 在持续代理流量下并发运行 External CLI、Browser、ASR、IM 和 Remote。
-2. 轮流 kill worker、填满其事件队列、制造慢磁盘与超时。
-3. 记录代理 P50/P95、错误率、RSS、FD 和主进程 PID。
+1. 同时启动 Browser、ASR、IM Gateway、Remote Invoke 与 Remote Execution worker，并保留各自 PID。
+2. 先完成一次代理请求，再按 PID 逐个终止五个 worker；每次终止后立即再发代理请求。
+3. 最后执行 External CLI 大结果与取消场景，再次探测代理并检查主进程 PID。
 
-预期：附加能力按自身故障语义降级；代理主进程不退出、不重启；代理错误率增量不超过技术方案门禁；主进程 RSS/FD 不随 worker 输出无界增长。
+预期：所有代理探测均返回 200；Bifrost 主进程不退出、不重启；worker 故障和 External CLI 取消不跨越到代理故障域。
 
 ## 清理步骤
 

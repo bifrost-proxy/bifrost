@@ -62,6 +62,8 @@ fn parse_execution_mode(value: &str) -> Option<ExecutionMode> {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn parses_supported_execution_mode_aliases() {
         assert_eq!(parse_execution_mode("legacy"), Some(ExecutionMode::Legacy));
@@ -96,5 +98,24 @@ mod tests {
         for (kind, expected) in cases {
             assert_eq!(execution_mode_env(kind), expected);
         }
+    }
+
+    #[test]
+    fn execution_mode_defaults_to_isolation_and_accepts_explicit_fallbacks() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env_name = execution_mode_env(WorkerKind::Browser);
+        std::env::remove_var(env_name);
+        assert_eq!(execution_mode(WorkerKind::Browser), ExecutionMode::Worker);
+        assert!(worker_execution_enabled(WorkerKind::Browser));
+        assert_eq!(ExecutionMode::Worker.as_str(), "worker");
+
+        std::env::set_var(env_name, "legacy");
+        assert_eq!(execution_mode(WorkerKind::Browser), ExecutionMode::Legacy);
+        assert!(!worker_execution_enabled(WorkerKind::Browser));
+        assert_eq!(ExecutionMode::Legacy.as_str(), "legacy");
+
+        std::env::set_var(env_name, "invalid");
+        assert_eq!(execution_mode(WorkerKind::Browser), ExecutionMode::Worker);
+        std::env::remove_var(env_name);
     }
 }

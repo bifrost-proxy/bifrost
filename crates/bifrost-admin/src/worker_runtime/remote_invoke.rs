@@ -149,7 +149,11 @@ pub fn runtime_configured() -> bool {
         && !desired_state().read().targets.is_empty()
 }
 
-pub async fn proxy_admin_request(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
+pub async fn proxy_admin_request<B>(req: Request<B>, path: &str) -> Response<BoxBody>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
     let client = match primary_client() {
         Some(client) => client,
         None => {
@@ -159,6 +163,18 @@ pub async fn proxy_admin_request(req: Request<Incoming>, path: &str) -> Response
             )
         }
     };
+    proxy_admin_request_with_client(req, path, client).await
+}
+
+async fn proxy_admin_request_with_client<B>(
+    req: Request<B>,
+    path: &str,
+    client: Arc<RemoteWorkerClient>,
+) -> Response<BoxBody>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
     if !client.worker.is_healthy().await {
         controller_notify().notify_waiters();
         return error_response(
@@ -236,7 +252,11 @@ pub async fn proxy_admin_request(req: Request<Incoming>, path: &str) -> Response
     })
 }
 
-async fn collect_request_body(req: Request<Incoming>) -> Result<Bytes, String> {
+async fn collect_request_body<B>(req: Request<B>) -> Result<Bytes, String>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
     let mut body = req.into_body();
     let mut output = BytesMut::new();
     while let Some(frame) = body.frame().await {
@@ -646,6 +666,32 @@ fn labeled_worker_executable(executable: &Path, alias_name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker_runtime::{WorkerFrame, WorkerRequest};
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn target() -> RemoteInvokeTarget {
+        RemoteInvokeTarget {
+            provider_id: "provider".to_string(),
+            relay_url: "https://relay.example.test".to_string(),
+            session_token: "session".to_string(),
+        }
+    }
+
+    fn worker(temp: &std::path::Path) -> Arc<RemoteInvokeWorker> {
+        let identity = Identity::load_or_create(temp).unwrap();
+        RemoteInvokeWorker::new(
+            RemoteInvokeConfig {
+                relay_url: "http://127.0.0.1:9".to_string(),
+                ..Default::default()
+            },
+            identity,
+            None,
+            Arc::new(crate::state::AdminState::new(0)),
+            "127.0.0.1",
+            0,
+        )
+    }
 
     #[test]
     fn target_normalization_rejects_incomplete_values() {
@@ -682,5 +728,381 @@ mod tests {
         let value = serde_json::to_value(RemoteEndpointResponse { port: 12345 }).unwrap();
         let parsed: RemoteEndpointResponse = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.port, 12345);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mode_fingerprint_spawn_and_controller_state_are_deterministic() {
+        let _runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
+        let _lock = ENV_LOCK.lock().await;
+        std::env::remove_var(REMOTE_INVOKE_WORKER_ENV);
+        assert!(!is_remote_invoke_worker_process());
+        std::env::set_var(REMOTE_INVOKE_WORKER_ENV, "TRUE");
+        assert!(is_remote_invoke_worker_process());
+
+        let target = target();
+        let first = target_fingerprint(&target, " 127.0.0.1 ", 8080).unwrap();
+        let second = target_fingerprint(&target, "127.0.0.1", 8080).unwrap();
+        assert_eq!(first, second);
+        assert_ne!(
+            first,
+            target_fingerprint(&target, "127.0.0.1", 8081).unwrap()
+        );
+
+        let broker = super::super::remote_broker::BrokerEndpoint {
+            addr: "127.0.0.1:1234".to_string(),
+            token: "broker-token".to_string(),
+        };
+        let spec = spawn_spec(&target, "127.0.0.1", 8080, "http-token", &broker).unwrap();
+        assert_eq!(spec.kind, WorkerKind::RemoteInvoke);
+        assert_eq!(spec.max_concurrency, 16);
+        assert_eq!(
+            spec.env.get(REMOTE_SESSION_TOKEN_ENV).map(String::as_str),
+            Some("session")
+        );
+        assert_eq!(
+            spec.env.get(REMOTE_HTTP_TOKEN_ENV).map(String::as_str),
+            Some("http-token")
+        );
+        assert!(spec
+            .stderr_path
+            .unwrap()
+            .ends_with(format!("{}.log", short_hash("https://relay.example.test"))));
+        assert!(runtime_root().ends_with("runtime/remote-invoke-worker"));
+        assert!(Arc::ptr_eq(&controller_notify(), &controller_notify()));
+
+        stop_runtime_controller();
+        assert!(!has_active_client());
+        assert!(primary_client().is_none());
+        std::env::remove_var(REMOTE_INVOKE_WORKER_ENV);
+    }
+
+    #[test]
+    fn target_normalization_rejects_each_missing_authority_field() {
+        for target in [
+            RemoteInvokeTarget {
+                provider_id: " ".to_string(),
+                ..target()
+            },
+            RemoteInvokeTarget {
+                relay_url: String::new(),
+                ..target()
+            },
+            RemoteInvokeTarget {
+                session_token: "\t".to_string(),
+                ..target()
+            },
+        ] {
+            assert!(normalize_target(target).is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_reconciliation_requires_main_broker_state() {
+        use http_body_util::Full;
+
+        let _runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
+        let _lock = ENV_LOCK.lock().await;
+        stop_runtime_controller();
+        *desired_state().write() = DesiredRemoteState::default();
+        let error = reconcile_runtime_targets().await.unwrap_err();
+        assert!(error.contains("main broker state is not configured"));
+        assert!(!runtime_configured());
+        let response = proxy_admin_request(
+            Request::builder()
+                .uri("/_bifrost/api/remote-invoke/status")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+            "/api/remote-invoke/status",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let key = format!("remote_invoke:stale-test-{}", uuid::Uuid::new_v4());
+        let tail = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let spec =
+            crate::worker_runtime::test_shell_worker_spec(&key, WorkerKind::RemoteInvoke, tail);
+        let worker = global_worker_supervisor().get_or_start(spec).await.unwrap();
+        let stale_relay = "https://stale-relay.example.test".to_string();
+        ACTIVE_CLIENTS.write().insert(
+            stale_relay.clone(),
+            Arc::new(RemoteWorkerClient {
+                worker,
+                http_port: 9,
+                http_token: "stale-token".to_string(),
+                fingerprint: "stale-fingerprint".to_string(),
+            }),
+        );
+        *PRIMARY_RELAY.write() = Some(stale_relay);
+        *desired_state().write() = DesiredRemoteState {
+            state: Some(Arc::new(crate::state::AdminState::new(9))),
+            ..Default::default()
+        };
+        reconcile_runtime_targets().await.unwrap();
+        assert!(ACTIVE_CLIENTS.read().is_empty());
+        assert!(PRIMARY_RELAY.read().is_none());
+        assert!(global_worker_supervisor().get(&key).await.is_none());
+        *desired_state().write() = DesiredRemoteState::default();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_mode_stops_the_isolated_runtime_controller() {
+        let _runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
+        let _lock = ENV_LOCK.lock().await;
+        stop_runtime_controller();
+        std::env::set_var("BIFROST_REMOTE_INVOKE_EXECUTION_MODE", "legacy");
+        configure_runtime_targets(
+            vec![target()],
+            "127.0.0.1".to_string(),
+            9,
+            Arc::new(crate::state::AdminState::new(9)),
+        );
+        tokio::task::yield_now().await;
+        assert!(!runtime_configured());
+        assert!(desired_state().read().targets.is_empty());
+        std::env::remove_var("BIFROST_REMOTE_INVOKE_EXECUTION_MODE");
+        global_worker_supervisor().resume_kind(WorkerKind::RemoteInvoke);
+    }
+
+    #[tokio::test]
+    async fn worker_dispatch_and_http_capability_guard_cover_control_surface() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker = worker(temp.path());
+        let (context, mut output) = WorkerStdioContext::test_context(WorkerKind::RemoteInvoke);
+
+        for (request_id, operation) in [
+            ("endpoint", "remote.endpoint"),
+            ("status", "remote.runtime_status"),
+            ("unsupported", "remote.unknown"),
+        ] {
+            handle_worker_frame(
+                ParentFrame::Request {
+                    request: WorkerRequest {
+                        request_id: request_id.to_string(),
+                        job_id: None,
+                        deadline_unix_ms: None,
+                        operation: operation.to_string(),
+                        payload: serde_json::Value::Null,
+                    },
+                },
+                context.clone(),
+                worker.clone(),
+                43210,
+            )
+            .await
+            .unwrap();
+            let WorkerFrame::Response { response } = output.recv().await.unwrap() else {
+                panic!("expected worker response")
+            };
+            assert_eq!(response.request_id, request_id);
+            if request_id == "endpoint" {
+                assert_eq!(response.payload["port"], 43210);
+            } else if request_id == "status" {
+                assert_eq!(response.payload["relayUrl"], "http://127.0.0.1:9");
+            } else {
+                assert!(!response.ok);
+            }
+        }
+
+        handle_worker_frame(
+            ParentFrame::ConfigApply {
+                request_id: "config".to_string(),
+                generation: 11,
+                payload: serde_json::Value::Null,
+            },
+            context.clone(),
+            worker.clone(),
+            0,
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output.recv().await.unwrap() else {
+            panic!("expected config response")
+        };
+        assert_eq!(response.payload["generation"], 11);
+
+        for frame in [
+            ParentFrame::Cancel {
+                request_id: "cancel".to_string(),
+                job_id: None,
+            },
+            ParentFrame::Ping {
+                request_id: "ping".to_string(),
+            },
+        ] {
+            handle_worker_frame(frame, context.clone(), worker.clone(), 0)
+                .await
+                .unwrap();
+        }
+
+        let (port, http_task) =
+            start_worker_http_server(worker.clone(), "secret-token".to_string())
+                .await
+                .unwrap();
+        let response = bifrost_core::direct_reqwest_client_builder()
+            .build()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/remote/status"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        http_task.abort();
+
+        handle_worker_frame(
+            ParentFrame::Shutdown {
+                request_id: "shutdown".to_string(),
+            },
+            context,
+            worker,
+            0,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn main_proxy_forwards_headers_query_and_body_to_healthy_isolated_worker() {
+        use http_body_util::Full;
+
+        let _runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
+        let script = r#"
+printf '{"type":"hello","hello":{"protocolVersion":1,"workerKind":"remote_invoke","workerInstanceId":"remote-proxy-test","pid":%s,"buildVersion":"test","startupToken":"%s","capabilities":[]}}\n' "$$" "$BIFROST_WORKER_STARTUP_TOKEN"
+printf '{"type":"ready","worker_instance_id":"remote-proxy-test"}\n'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"remote-proxy-test","reason":"test complete"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let worker_key = format!("remote-proxy-test-{}", uuid::Uuid::new_v4());
+        let mut spec = WorkerSpawnSpec::new(
+            &worker_key,
+            WorkerKind::RemoteInvoke,
+            "/bin/sh",
+            vec!["-c".to_string(), script.to_string()],
+        );
+        spec.startup_timeout = Duration::from_secs(2);
+        // The full instrumented suite can pause this test while thousands of
+        // other async tests contend for CPU. Keep the fake worker healthy long
+        // enough that the assertion below exercises the HTTP failure path,
+        // rather than the independent heartbeat-unhealthy path.
+        spec.heartbeat_timeout = Duration::from_secs(120);
+        let worker = global_worker_supervisor().get_or_start(spec).await.unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|req: Request<Incoming>| async move {
+                assert_eq!(req.uri().path(), "/api/remote-invoke/calls");
+                assert_eq!(req.uri().query(), Some("limit=2"));
+                assert_eq!(
+                    req.headers()
+                        .get("x-bifrost-worker-token")
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    "http-token"
+                );
+                assert_eq!(
+                    req.into_body().collect().await.unwrap().to_bytes(),
+                    "request-body"
+                );
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::CREATED)
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(CONTENT_DISPOSITION, "attachment; filename=result.json")
+                        .body(Full::new(Bytes::from_static(b"{\"forwarded\":true}")))
+                        .unwrap(),
+                )
+            });
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+
+        let client = Arc::new(RemoteWorkerClient {
+            worker: worker.clone(),
+            http_port: port,
+            http_token: "http-token".to_string(),
+            fingerprint: "fingerprint".to_string(),
+        });
+        let response = proxy_admin_request_with_client(
+            Request::builder()
+                .method(hyper::Method::POST)
+                .uri("/_bifrost/api/remote-invoke/calls?limit=2")
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "application/json")
+                .body(Full::new(Bytes::from_static(b"request-body")))
+                .unwrap(),
+            "/api/remote-invoke/calls",
+            client.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert!(response.headers().contains_key(CONTENT_DISPOSITION));
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "{\"forwarded\":true}"
+        );
+        server.await.unwrap();
+
+        let failed = proxy_admin_request_with_client(
+            Request::builder()
+                .method(hyper::Method::GET)
+                .uri("/_bifrost/api/remote-invoke/calls")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+            "/api/remote-invoke/calls",
+            client.clone(),
+        )
+        .await;
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+
+        let oversized = proxy_admin_request_with_client(
+            Request::builder()
+                .method(hyper::Method::POST)
+                .uri("/_bifrost/api/remote-invoke/calls")
+                .body(Full::new(Bytes::from(vec![0; MAX_PROXY_REQUEST_BYTES + 1])))
+                .unwrap(),
+            "/api/remote-invoke/calls",
+            client.clone(),
+        )
+        .await;
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        global_worker_supervisor()
+            .unregister(&worker_key, Duration::from_secs(1))
+            .await;
+        let unhealthy = proxy_admin_request_with_client(
+            Request::builder()
+                .method(hyper::Method::GET)
+                .uri("/_bifrost/api/remote-invoke/calls")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+            "/api/remote-invoke/calls",
+            client,
+        )
+        .await;
+        assert_eq!(unhealthy.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

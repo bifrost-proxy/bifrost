@@ -154,6 +154,21 @@ pub(crate) fn mark_cancelled(request_id: &str, error: Option<String>) {
     update_status(request_id, WorkerJobStatus::Cancelled, error);
 }
 
+pub(crate) fn mark_cancelled_if_active(request_id: &str, error: impl Into<String>) -> bool {
+    let mut state = registry().lock();
+    let Some(job) = state.jobs.get_mut(request_id) else {
+        return false;
+    };
+    if job.status.is_terminal() {
+        return false;
+    }
+    job.status = WorkerJobStatus::Cancelled;
+    job.finished_at_ms = Some(worker_now_ms());
+    job.error = Some(error.into());
+    prune_history(&mut state);
+    true
+}
+
 pub(crate) fn mark_logical_job_cancelling(worker_key: &str, logical_job_id: &str) -> usize {
     let mut state = registry().lock();
     let mut affected = 0;
@@ -426,11 +441,28 @@ pub(crate) fn clear_for_tests() {
 }
 
 #[cfg(test)]
+fn test_lock() -> &'static tokio::sync::Mutex<()> {
+    static TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+pub(crate) fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    test_lock().blocking_lock()
+}
+
+#[cfg(test)]
+pub(crate) async fn test_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
+    test_lock().lock().await
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn records_lifecycle_events_and_bounded_payloads() {
+        let _guard = test_guard();
         clear_for_tests();
         begin_request(
             "asr:offline-jobs",
@@ -458,6 +490,7 @@ mod tests {
 
     #[test]
     fn registers_only_explicit_regular_file_artifacts() {
+        let _guard = test_guard();
         clear_for_tests();
         begin_request(
             "external_cli:request-3",
@@ -491,6 +524,7 @@ mod tests {
 
     #[test]
     fn cancel_target_uses_logical_job_id() {
+        let _guard = test_guard();
         clear_for_tests();
         begin_request(
             "remote_execution:call-1",
@@ -511,6 +545,7 @@ mod tests {
 
     #[test]
     fn rejected_cancel_restores_running_job_and_records_reason() {
+        let _guard = test_guard();
         clear_for_tests();
         begin_request(
             "remote_execution:call-running",
@@ -535,6 +570,7 @@ mod tests {
 
     #[test]
     fn rejected_cancel_restores_queued_job_but_never_revives_terminal_job() {
+        let _guard = test_guard();
         clear_for_tests();
         begin_request(
             "asr:offline-jobs",
@@ -557,8 +593,29 @@ mod tests {
             WorkerJobStatus::Succeeded
         );
     }
+
+    #[test]
+    fn dropped_request_only_cancels_nonterminal_job() {
+        let _guard = test_guard();
+        clear_for_tests();
+        begin_request(
+            "browser:test",
+            WorkerKind::Browser,
+            "request-active",
+            None,
+            "browser.run",
+        );
+        mark_running("request-active");
+        assert!(mark_cancelled_if_active("request-active", "caller dropped"));
+        assert_eq!(
+            get_job("request-active").unwrap().status,
+            WorkerJobStatus::Cancelled
+        );
+        assert!(!mark_cancelled_if_active("request-active", "late drop"));
+    }
     #[test]
     fn active_jobs_are_never_evicted_by_history_pruning() {
+        let _guard = test_guard();
         clear_for_tests();
         for index in 0..=MAX_JOB_HISTORY {
             let request_id = format!("active-{index}");
@@ -573,5 +630,153 @@ mod tests {
         }
         assert_eq!(list_jobs().len(), MAX_JOB_HISTORY + 1);
         assert!(get_job("active-0").is_some());
+    }
+
+    #[test]
+    fn registry_edge_paths_preserve_active_jobs_and_bound_history() {
+        let _guard = test_guard();
+        clear_for_tests();
+
+        begin_request(
+            "worker:edge",
+            WorkerKind::Browser,
+            "request-edge",
+            Some("logical-edge"),
+            "browser.edge",
+        );
+        begin_request(
+            "worker:edge",
+            WorkerKind::Browser,
+            "request-edge",
+            Some("logical-edge"),
+            "browser.duplicate",
+        );
+        assert_eq!(get_job("request-edge").unwrap().operation, "browser.edge");
+
+        record_event(&WorkerEvent {
+            request_id: None,
+            job_id: Some("logical-edge".to_string()),
+            event: "logical-progress".to_string(),
+            payload: serde_json::json!({"step": 1}),
+        });
+        record_event(&WorkerEvent {
+            request_id: None,
+            job_id: Some("missing-logical-job".to_string()),
+            event: "ignored".to_string(),
+            payload: serde_json::Value::Null,
+        });
+        assert_eq!(get_job("request-edge").unwrap().events.len(), 1);
+        assert_eq!(
+            mark_logical_job_cancelling("worker:edge", "logical-edge"),
+            1
+        );
+        assert_eq!(
+            active_request_ids("worker:edge", "logical-edge"),
+            vec!["request-edge".to_string()]
+        );
+        assert!(!cancel_rejected("missing-request", "missing worker"));
+        assert!(!mark_cancelled_if_active(
+            "missing-request",
+            "missing worker"
+        ));
+
+        fail_worker_jobs("worker:edge", "worker exited");
+        let failed = get_job("request-edge").unwrap();
+        assert_eq!(failed.status, WorkerJobStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("worker exited"));
+        assert!(active_request_ids("worker:edge", "logical-edge").is_empty());
+        assert_eq!(
+            mark_logical_job_cancelling("worker:edge", "logical-edge"),
+            0
+        );
+        assert!(cancel_target("request-edge").is_none());
+
+        begin_request(
+            "worker:cancel",
+            WorkerKind::RemoteInvoke,
+            "request-cancelled",
+            None,
+            "remote.cancel",
+        );
+        mark_cancelled("request-cancelled", Some("cancelled by caller".to_string()));
+        assert_eq!(
+            get_job("request-cancelled").unwrap().status,
+            WorkerJobStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn events_artifacts_and_terminal_history_enforce_resource_limits() {
+        let _guard = test_guard();
+        clear_for_tests();
+        begin_request(
+            "worker:limits",
+            WorkerKind::ExternalCli,
+            "request-limits",
+            None,
+            "external_cli.run",
+        );
+
+        for index in 0..=MAX_EVENTS_PER_JOB {
+            record_named_event(
+                "request-limits",
+                format!("event-{index}"),
+                serde_json::json!({"index": index}),
+            );
+        }
+        let job = get_job("request-limits").unwrap();
+        assert_eq!(job.events.len(), MAX_EVENTS_PER_JOB);
+        assert_eq!(job.events[0].event, "event-1");
+
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_path = temp.path().join("artifact.txt");
+        std::fs::write(&artifact_path, b"artifact").unwrap();
+        assert!(
+            register_artifact("missing-job", "missing", temp.path(), &artifact_path, None,)
+                .is_err()
+        );
+        let root_file = tempfile::NamedTempFile::new().unwrap();
+        assert!(register_artifact(
+            "request-limits",
+            "bad-root",
+            root_file.path(),
+            root_file.path(),
+            None,
+        )
+        .is_err());
+        for index in 0..MAX_ARTIFACTS_PER_JOB {
+            register_artifact(
+                "request-limits",
+                format!("artifact-{index}"),
+                temp.path(),
+                &artifact_path,
+                None,
+            )
+            .unwrap();
+        }
+        assert!(register_artifact(
+            "request-limits",
+            "overflow",
+            temp.path(),
+            &artifact_path,
+            None,
+        )
+        .unwrap_err()
+        .contains("artifact limit"));
+
+        mark_succeeded("request-limits");
+        for index in 0..MAX_JOB_HISTORY {
+            let request_id = format!("terminal-{index}");
+            begin_request(
+                "worker:history",
+                WorkerKind::Asr,
+                &request_id,
+                None,
+                "asr.history",
+            );
+            mark_failed(&request_id, "expected failure");
+        }
+        assert!(list_jobs().len() <= MAX_JOB_HISTORY);
+        assert!(get_job("request-limits").is_none());
     }
 }

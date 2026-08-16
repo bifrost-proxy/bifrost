@@ -131,6 +131,7 @@ impl ImRouteStore {
                 self.file_path.display()
             )))
         })?;
+        crate::worker_runtime::im_gateway::notify_config_changed();
         Ok(())
     }
 

@@ -13,6 +13,28 @@ pub const WORKER_MAX_CAPABILITIES: usize = 64;
 pub const WORKER_MAX_CAPABILITY_BYTES: usize = 128;
 pub const WORKER_MAX_ERROR_BYTES: usize = 16 * 1024;
 
+pub(crate) fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    if max_bytes == 0 {
+        return String::new();
+    }
+    let suffix = "...";
+    let mut end = max_bytes.saturating_sub(suffix.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == 0 {
+        let mut end = max_bytes;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        return value[..end].to_string();
+    }
+    format!("{}{}", &value[..end], suffix)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerKind {
@@ -464,6 +486,41 @@ mod tests {
     }
 
     #[test]
+    fn truncates_worker_error_at_utf8_boundary() {
+        let value = format!("{}tail", "é".repeat(WORKER_MAX_ERROR_BYTES));
+        let truncated = truncate_utf8_bytes(&value, WORKER_MAX_ERROR_BYTES);
+        assert!(truncated.len() <= WORKER_MAX_ERROR_BYTES);
+        assert!(truncated.ends_with("..."));
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn truncation_handles_zero_and_tiny_multibyte_limits() {
+        assert_eq!(truncate_utf8_bytes("abc", 0), "");
+        assert_eq!(truncate_utf8_bytes("éclair", 1), "");
+        assert_eq!(truncate_utf8_bytes("éclair", 2), "é");
+    }
+
+    #[test]
+    fn every_worker_kind_has_a_stable_round_trip_name() {
+        for kind in [
+            WorkerKind::ExternalCli,
+            WorkerKind::Browser,
+            WorkerKind::Asr,
+            WorkerKind::ImGateway,
+            WorkerKind::RemoteInvoke,
+            WorkerKind::RemoteExecution,
+        ] {
+            assert_eq!(WorkerKind::parse(kind.as_str()), Some(kind));
+            assert_eq!(
+                WorkerKind::parse(&kind.as_str().replace('_', "-")),
+                Some(kind)
+            );
+        }
+        assert_eq!(WorkerKind::parse("unknown"), None);
+    }
+
+    #[test]
     fn bounded_reader_rejects_unterminated_frame() {
         let limit = 64;
         let mut reader = std::io::BufReader::new(Cursor::new(vec![b'x'; limit + 1]));
@@ -522,5 +579,206 @@ mod tests {
         let line = serde_json::to_string(&frame).unwrap();
         let error = parse_worker_frame(&line).unwrap_err();
         assert!(error.contains("capabilities exceed hard limit"));
+    }
+
+    #[test]
+    fn worker_frame_metadata_validation_covers_all_frame_variants() {
+        let invalid_frames = [
+            WorkerFrame::Hello {
+                hello: WorkerHello {
+                    protocol_version: WORKER_PROTOCOL_VERSION,
+                    worker_kind: WorkerKind::Browser,
+                    worker_instance_id: " ".to_string(),
+                    pid: 1,
+                    build_version: "test".to_string(),
+                    startup_token: "token".to_string(),
+                    capabilities: Vec::new(),
+                },
+            },
+            WorkerFrame::Hello {
+                hello: WorkerHello {
+                    protocol_version: WORKER_PROTOCOL_VERSION,
+                    worker_kind: WorkerKind::Browser,
+                    worker_instance_id: "instance".to_string(),
+                    pid: 1,
+                    build_version: "test".to_string(),
+                    startup_token: "token".to_string(),
+                    capabilities: vec![" ".to_string()],
+                },
+            },
+            WorkerFrame::Ready {
+                worker_instance_id: "".to_string(),
+            },
+            WorkerFrame::Heartbeat {
+                heartbeat: WorkerHeartbeat {
+                    worker_instance_id: "\n".to_string(),
+                    timestamp_ms: 1,
+                    active_jobs: 0,
+                    queued_jobs: 0,
+                },
+            },
+            WorkerFrame::Response {
+                response: WorkerResponse {
+                    request_id: "".to_string(),
+                    ok: false,
+                    cancelled: false,
+                    payload: serde_json::Value::Null,
+                    error: None,
+                },
+            },
+            WorkerFrame::Response {
+                response: WorkerResponse {
+                    request_id: "request".to_string(),
+                    ok: false,
+                    cancelled: false,
+                    payload: serde_json::Value::Null,
+                    error: Some("x".repeat(WORKER_MAX_ERROR_BYTES + 1)),
+                },
+            },
+            WorkerFrame::Event {
+                event: WorkerEvent {
+                    request_id: Some("".to_string()),
+                    job_id: None,
+                    event: "progress".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+            },
+            WorkerFrame::Event {
+                event: WorkerEvent {
+                    request_id: None,
+                    job_id: Some("".to_string()),
+                    event: "progress".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+            },
+            WorkerFrame::Event {
+                event: WorkerEvent {
+                    request_id: None,
+                    job_id: None,
+                    event: "".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+            },
+            WorkerFrame::ConfigApplied {
+                request_id: "".to_string(),
+                generation: 1,
+            },
+            WorkerFrame::Goodbye {
+                worker_instance_id: "instance".to_string(),
+                reason: Some("x".repeat(WORKER_MAX_ERROR_BYTES + 1)),
+            },
+        ];
+
+        for frame in invalid_frames {
+            let line = serde_json::to_string(&frame).unwrap();
+            assert!(parse_worker_frame(&line).is_err(), "accepted {frame:?}");
+        }
+    }
+
+    #[test]
+    fn parent_frame_metadata_validation_covers_all_control_variants() {
+        let invalid_frames = [
+            ParentFrame::Request {
+                request: WorkerRequest {
+                    request_id: "".to_string(),
+                    job_id: None,
+                    deadline_unix_ms: None,
+                    operation: "run".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+            },
+            ParentFrame::Request {
+                request: WorkerRequest {
+                    request_id: "request".to_string(),
+                    job_id: Some("".to_string()),
+                    deadline_unix_ms: None,
+                    operation: "run".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+            },
+            ParentFrame::Cancel {
+                request_id: "request".to_string(),
+                job_id: Some(" ".to_string()),
+            },
+            ParentFrame::ConfigApply {
+                request_id: "".to_string(),
+                generation: 1,
+                payload: serde_json::Value::Null,
+            },
+            ParentFrame::Ping {
+                request_id: "".to_string(),
+            },
+            ParentFrame::Shutdown {
+                request_id: "".to_string(),
+            },
+        ];
+
+        for frame in invalid_frames {
+            let line = serde_json::to_string(&frame).unwrap();
+            assert!(parse_parent_frame(&line).is_err(), "accepted {frame:?}");
+        }
+    }
+
+    #[test]
+    fn bounded_readers_cover_eof_crlf_utf8_and_limit_errors() {
+        let mut empty = std::io::BufReader::new(Cursor::new(Vec::<u8>::new()));
+        assert_eq!(read_limited_sync_line(&mut empty, 8).unwrap(), None);
+
+        let mut unterminated = std::io::BufReader::new(Cursor::new(b"abc".to_vec()));
+        assert_eq!(
+            read_limited_sync_line(&mut unterminated, 8)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+
+        let mut crlf = std::io::BufReader::new(Cursor::new(b"abc\r\n".to_vec()));
+        assert_eq!(
+            read_limited_sync_line(&mut crlf, 8).unwrap(),
+            Some("abc".to_string())
+        );
+
+        let mut invalid_utf8 = std::io::BufReader::new(Cursor::new(vec![0xff, b'\n']));
+        assert_eq!(
+            read_limited_sync_line(&mut invalid_utf8, 8)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[tokio::test]
+    async fn async_bounded_reader_covers_eof_and_both_limit_paths() {
+        let mut empty = tokio::io::BufReader::new(Cursor::new(Vec::<u8>::new()));
+        assert_eq!(read_limited_async_line(&mut empty, 8).await.unwrap(), None);
+
+        let mut unterminated = tokio::io::BufReader::new(Cursor::new(b"abc".to_vec()));
+        assert_eq!(
+            read_limited_async_line(&mut unterminated, 8)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+
+        let mut newline_overflow =
+            tokio::io::BufReader::with_capacity(32, Cursor::new(b"123456789\n".to_vec()));
+        assert_eq!(
+            read_limited_async_line(&mut newline_overflow, 8)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut chunk_overflow =
+            tokio::io::BufReader::with_capacity(4, Cursor::new(b"123456789\n".to_vec()));
+        assert_eq!(
+            read_limited_async_line(&mut chunk_overflow, 8)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }
