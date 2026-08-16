@@ -9,6 +9,7 @@ pub(super) const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 30 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES: u64 = 250 * 1024 * 1024;
+const FEISHU_DRY_RUN_FILE_ENV: &str = "BIFROST_FEISHU_DRY_RUN_FILE";
 
 pub(super) static AGENT_REPLY_IMAGE_UPLOAD_CACHE: OnceLock<
     Mutex<HashMap<AgentReplyImageCacheKey, String>>,
@@ -160,6 +161,13 @@ impl ImProviderClient {
         card: serde_json::Value,
         opts: crate::im_gateway::types::SendOptions,
     ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        if matches!(self, Self::Feishu(_)) {
+            if let Some(result) =
+                capture_feishu_card_dry_run(config, target, None, &card, opts.uuid.as_deref())
+            {
+                return result;
+            }
+        }
         match self {
             Self::Feishu(provider) => provider.send_card(config, target, card, opts).await,
             Self::Weixin(provider) => provider.send_card(config, target, card, opts).await,
@@ -184,6 +192,17 @@ impl ImProviderClient {
         card: serde_json::Value,
         opts: crate::im_gateway::types::SendOptions,
     ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        if matches!(self, Self::Feishu(_)) {
+            if let Some(result) = capture_feishu_card_dry_run(
+                config,
+                target,
+                source_message_id,
+                &card,
+                opts.uuid.as_deref(),
+            ) {
+                return result;
+            }
+        }
         match (
             self,
             source_message_id.map(str::trim).filter(|id| !id.is_empty()),
@@ -315,6 +334,13 @@ impl ImProviderClient {
         message_id: &str,
         reaction: &str,
     ) -> bifrost_core::Result<bool> {
+        if matches!(self, Self::Feishu(_)) {
+            if let Some(result) = capture_feishu_reaction_dry_run(config, message_id, reaction) {
+                return result
+                    .map(|_| true)
+                    .map_err(bifrost_core::BifrostError::Config);
+            }
+        }
         match self {
             Self::Feishu(provider) => {
                 provider.add_reaction(config, message_id, reaction).await?;
@@ -362,6 +388,77 @@ impl ImProviderClient {
             Self::Unsupported(provider_type) => Self::unsupported(*provider_type),
         }
     }
+}
+
+fn capture_feishu_card_dry_run(
+    config: &ImProviderConfig,
+    target: &ImTarget,
+    source_message_id: Option<&str>,
+    card: &serde_json::Value,
+    uuid: Option<&str>,
+) -> Option<bifrost_core::Result<crate::im_gateway::types::SendResult>> {
+    let path = std::env::var_os(FEISHU_DRY_RUN_FILE_ENV)?;
+    let message_id = format!("dry-run-{}", uuid_short());
+    Some(
+        append_feishu_dry_run(
+            Path::new(&path),
+            &serde_json::json!({
+                "kind": "card",
+                "timestamp": now_ms(),
+                "providerId": config.id,
+                "receiveIdType": target.receive_id_type,
+                "receiveId": target.receive_id,
+                "sourceMessageId": source_message_id,
+                "uuid": uuid,
+                "messageId": message_id,
+                "card": card
+            }),
+        )
+        .map(|_| crate::im_gateway::types::SendResult {
+            message_id: Some(message_id),
+            request_id: None,
+        })
+        .map_err(bifrost_core::BifrostError::Config),
+    )
+}
+
+fn capture_feishu_reaction_dry_run(
+    config: &ImProviderConfig,
+    message_id: &str,
+    reaction: &str,
+) -> Option<Result<(), String>> {
+    let path = std::env::var_os(FEISHU_DRY_RUN_FILE_ENV)?;
+    Some(append_feishu_dry_run(
+        Path::new(&path),
+        &serde_json::json!({
+            "kind": "reaction",
+            "timestamp": now_ms(),
+            "providerId": config.id,
+            "messageId": message_id,
+            "reaction": reaction
+        }),
+    ))
+}
+
+fn append_feishu_dry_run(path: &Path, row: &serde_json::Value) -> Result<(), String> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create Feishu dry-run directory: {error}"))?;
+    }
+    let mut bytes = serde_json::to_vec(row)
+        .map_err(|error| format!("serialize Feishu dry-run row: {error}"))?;
+    bytes.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("open Feishu dry-run file: {error}"))?;
+    file.write_all(&bytes)
+        .map_err(|error| format!("write Feishu dry-run row: {error}"))?;
+    file.flush()
+        .map_err(|error| format!("flush Feishu dry-run row: {error}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -963,6 +1060,29 @@ pub(super) fn should_run_provider_event_connection(provider: &ImProviderConfig) 
 mod provider_event_connection_tests {
     use super::*;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        old_value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let old_value = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.old_value.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     fn write_legacy_history(data_dir: &Path, filename: &str) -> PathBuf {
         let path = data_dir.join("agent/sessions/2026/07/21").join(filename);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -991,6 +1111,92 @@ mod provider_event_connection_tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn feishu_dry_run_writer_appends_complete_ndjson_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested/feishu.jsonl");
+        let row = serde_json::json!({
+            "kind": "card",
+            "providerId": "feishu-main",
+            "card": {"schema": "2.0"}
+        });
+
+        append_feishu_dry_run(&path, &row).unwrap();
+        append_feishu_dry_run(
+            &path,
+            &serde_json::json!({"kind": "reaction", "reaction": "OK"}),
+        )
+        .unwrap();
+
+        let rows = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], row);
+        assert_eq!(rows[1]["kind"], "reaction");
+        assert_eq!(rows[1]["reaction"], "OK");
+    }
+
+    #[tokio::test]
+    async fn feishu_client_dry_run_captures_direct_card_and_reaction() {
+        let _lock = crate::im_gateway::external_cli::local_session_test_env_lock()
+            .lock()
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("capture/feishu.jsonl");
+        let _guard = EnvVarGuard::set(FEISHU_DRY_RUN_FILE_ENV, &path);
+        let config = crate::handlers::im_gateway::tests::test_provider();
+        let target = ImTarget {
+            id: "target".to_string(),
+            provider_id: config.id.clone(),
+            display_name: "Target".to_string(),
+            receive_id_type: "open_id".to_string(),
+            receive_id: "ou_target".to_string(),
+            default_msg_type: "interactive".to_string(),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let client =
+            ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+        let result = client
+            .send_card(
+                &config,
+                &target,
+                serde_json::json!({"schema": "2.0"}),
+                crate::im_gateway::types::SendOptions {
+                    uuid: Some("unit-card".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result
+            .message_id
+            .as_deref()
+            .is_some_and(|message_id| message_id.starts_with("dry-run-")));
+        assert!(client
+            .add_reaction(&config, "om_source", "DONE")
+            .await
+            .unwrap());
+
+        let rows = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["kind"], "card");
+        assert_eq!(rows[0]["receiveId"], "ou_target");
+        assert_eq!(rows[0]["sourceMessageId"], serde_json::Value::Null);
+        assert_eq!(rows[0]["uuid"], "unit-card");
+        assert_eq!(rows[1]["kind"], "reaction");
+        assert_eq!(rows[1]["messageId"], "om_source");
+        assert_eq!(rows[1]["reaction"], "DONE");
     }
 
     #[test]

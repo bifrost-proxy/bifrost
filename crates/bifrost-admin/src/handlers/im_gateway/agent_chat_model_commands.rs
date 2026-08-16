@@ -59,6 +59,14 @@ pub(super) async fn handle_im_resume_command(
         &command,
         crate::im_gateway::external_cli::ExternalCliResumeSlashCommand::Pick(_)
     );
+    if matches!(
+        &command,
+        crate::im_gateway::external_cli::ExternalCliResumeSlashCommand::List
+    ) && ctx.provider.provider_type == ImProviderType::Feishu
+    {
+        send_feishu_resume_choice(&adapter, &ctx).await;
+        return true;
+    }
     let selection = crate::im_gateway::external_cli::LocalSessionSelectionContext {
         session_key: session_key.to_string(),
         runner_id: effective.runner_id.clone(),
@@ -185,12 +193,20 @@ pub(super) async fn handle_im_model_command(
                         );
                     (resolved.model, resolved.model_source)
                 });
-            crate::im_gateway::external_cli::format_external_cli_model_status(
+            let status = crate::im_gateway::external_cli::format_external_cli_model_status(
                 &effective.settings.adapter,
                 model.as_deref(),
                 source.as_deref(),
                 &effective.runner_id,
-            )
+            );
+            if ctx.provider.provider_type == ImProviderType::Feishu {
+                match send_feishu_model_choice(&effective, &status, adapter_label, &ctx).await {
+                    FeishuChoiceDelivery::Sent => return true,
+                    FeishuChoiceDelivery::Fallback(reply) => reply,
+                }
+            } else {
+                status
+            }
         }
         crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Clear => {
             persist_im_model_override(
@@ -383,12 +399,28 @@ pub(super) async fn handle_im_effort_command(
                         resolved_model_config.reasoning_source.clone(),
                     )
                 });
-            crate::im_gateway::external_cli::format_external_cli_effort_status(
+            let status = crate::im_gateway::external_cli::format_external_cli_effort_status(
                 &effective.settings.adapter,
                 effort.as_deref(),
                 source.as_deref(),
                 &effective.runner_id,
-            )
+            );
+            if ctx.provider.provider_type == ImProviderType::Feishu {
+                match send_feishu_effort_choice(
+                    &effective,
+                    &resolved_model_config,
+                    &model_catalog,
+                    &status,
+                    &ctx,
+                )
+                .await
+                {
+                    FeishuChoiceDelivery::Sent => return true,
+                    FeishuChoiceDelivery::Fallback(reply) => reply,
+                }
+            } else {
+                status
+            }
         }
         crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::Clear => {
             persist_im_reasoning_effort_override(

@@ -4,7 +4,8 @@
 
 验证 Agent Chat 与 IM external runner 的统一 `/resume` 指令：按当前 Runner 列出最近
 20 个本地 session（`id / title / datetime`），使用 `/resume <id>` 选择后，下一条普通
-消息通过 provider 原生 resume 参数继续本地会话。
+消息通过 provider 原生 resume 参数继续本地会话；同时验证飞书中的 `/resume`、
+`/model`、`/effort` 返回 Card 2.0 按钮，用户点击后直接执行选择，不需要复制粘贴参数。
 
 ## 前置条件
 
@@ -112,9 +113,79 @@
 - 说明文字包含“列出最近 20 个本地会话”。
 - 原有 `/models` 与 `/model` 仍存在。
 
+### TC-LSR-05：飞书三类 Slash 选择卡片与单聊点击闭环
+
+操作步骤：
+
+1. 执行：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_feishu_slash_choice_cards.sh
+   ```
+
+2. 检查脚本退出码、最终输出和隔离服务断言。
+
+预期结果：
+
+- 脚本输出 `[feishu-slash-choice] PASS`，退出码为 0。
+- 飞书单聊发送无参数 `/resume`、`/model`、`/effort` 后分别产生 Card 2.0 卡片。
+- `/resume` 卡片明确提示“点击下方按钮”，不再要求复制 `/resume <id>`。
+- 卡片按钮都有唯一 `element_id`，使用 `behaviors.callback`，且 `/model`、`/effort`
+  均提供清除 Runner 默认值按钮。
+- 点击三个候选按钮后，当前单聊 session 分别写入完整本地 session id、`gpt-unit`
+  model override 和 `high` reasoning effort override。
+- 点击 `/model clear`、`/effort clear` 后两个 override 被清除。
+
+### TC-LSR-06：飞书群聊绑定与越权回调安全回归
+
+操作步骤：
+
+1. 执行：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_feishu_slash_choice_cards.sh
+   ```
+
+2. 检查群聊 session 与拒绝回调断言。
+
+预期结果：
+
+- 群聊 `/model` 卡片 callback 绑定 `chatType=group` 和原群 `chatId`。
+- 群聊点击 `/model gpt-unit` 后只更新
+  `im:<provider-id>:group:<chat-id>` 对应 session，不串到单聊 session。
+- 其他用户、其他 chat、过期 callback 和伪造 `/stop now` 命令均返回 HTTP 400。
+- 所有被拒绝的 callback 都不修改单聊或群聊 session 状态。
+
+### TC-LSR-07：带参数文本命令兼容与测试环境隔离
+
+操作步骤：
+
+1. 执行：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_feishu_slash_choice_cards.sh
+   ```
+
+2. 检查最后的文本命令恢复状态、启动参数和清理结果。
+
+预期结果：
+
+- 卡片 clear 后继续发送文本 `/model gpt-unit` 和 `/effort high`，原文本命令链路仍能
+  恢复两个 override。
+- 测试只启动一个当前构建的 Bifrost，使用动态端口、临时 `BIFROST_DATA_DIR`、
+  `--no-system-proxy`、托盘禁用、Sync 登录弹窗禁用和 system proxy lifecycle helper
+  禁用护栏。
+- 飞书发送走显式 dry-run 文件，不外呼正式飞书 API，不修改正式 9900 服务。
+- 退出后脚本只按本次记录的 PID 清理服务并删除临时目录。
+
 ## 清理步骤
 
 - E2E trap 自动停止隔离 Bifrost 进程并删除 `.bifrost-e2e-local-resume.*`。
+- 飞书选择卡片 E2E trap 自动停止隔离 Bifrost 进程并删除
+  `.bifrost-e2e-feishu-choice.*`。
 - 删除 TC-LSR-03 的临时 snapshot 目录。
 - 确认没有测试端口监听和 mock runner 残留。
 
@@ -130,3 +201,14 @@
 - 2026-08-07，TC-LSR-04：PASS。第一次执行暴露测试 fixture 同时配置 Codex 时产品默认
   选择 Codex、且 `/model` substring locator 同时匹配 `/models` 的测试缺陷；修正 fixture 为
   仅 Claude Code、locator 取精确目标后复跑，结果 1 passed（7.6s）。
+- 2026-08-17，TC-LSR-05：PASS。隔离 Bifrost 依次生成 `/resume`、`/model`、
+  `/effort` Card 2.0；三个候选按钮实点后状态正确，`/model clear` 与
+  `/effort clear` 实点后对应 override 被移除。
+- 2026-08-17，TC-LSR-06：PASS。群聊 `/model gpt-unit` 按钮实点只更新群级
+  session；其他用户、错误 chat、过期 callback 和伪造 `/stop now` 均返回 HTTP 400，
+  未篡改单聊或群聊状态。
+- 2026-08-17，TC-LSR-07：PASS。clear 后发送带参数文本 `/model gpt-unit` 与
+  `/effort high` 能恢复 override；测试使用动态端口、临时数据目录、双启动护栏和
+  `--no-system-proxy`；发现 system proxy lifecycle helper 会在父进程退出后重建空
+  `.system_proxy.lock`，增加 helper 禁用护栏后复跑输出 `[feishu-slash-choice] PASS`，
+  并用 `find` 确认隔离测试目录完全清理。

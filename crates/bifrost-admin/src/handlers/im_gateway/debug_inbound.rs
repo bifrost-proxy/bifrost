@@ -62,6 +62,15 @@ struct MockInboundFile {
     data: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MockCardActionRequest {
+    provider_id: String,
+    payload: serde_json::Value,
+    #[serde(default)]
+    now_ms: Option<u64>,
+}
+
 pub(super) async fn handle_debug(
     req: Request<Incoming>,
     service: &SharedImGatewayService,
@@ -70,6 +79,7 @@ pub(super) async fn handle_debug(
     let rest = rest.trim_end_matches('/');
     match rest {
         "/mock-inbound" => handle_mock_inbound(req, service).await,
+        "/mock-card-action" => handle_mock_card_action(req, service).await,
         _ => error_response(StatusCode::NOT_FOUND, "IM Gateway debug endpoint not found"),
     }
 }
@@ -87,6 +97,71 @@ async fn handle_mock_inbound(
         Err(response) => return response,
     };
     inject_mock_inbound(body, service).await
+}
+
+async fn handle_mock_card_action(
+    req: Request<Incoming>,
+    service: &SharedImGatewayService,
+) -> Response<BoxBody> {
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+    let body: MockCardActionRequest = match read_body_json(req).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    inject_mock_card_action(body, service).await
+}
+
+async fn inject_mock_card_action(
+    body: MockCardActionRequest,
+    service: &SharedImGatewayService,
+) -> Response<BoxBody> {
+    let provider_id = body.provider_id.trim();
+    if provider_id.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "providerId is required");
+    }
+    let Some(provider) = service.provider_store.get(provider_id) else {
+        return error_response(StatusCode::NOT_FOUND, "provider not found");
+    };
+    if provider.provider_type != ImProviderType::Feishu {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "mock card action requires a Feishu provider",
+        );
+    }
+    let event = match crate::im_gateway::feishu::card_action::normalize_feishu_card_action(
+        &body.payload,
+        provider_id,
+        body.now_ms.unwrap_or_else(now_ms),
+    ) {
+        Ok(Some(event)) => event,
+        Ok(None) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "payload is not a card.action.trigger event",
+            );
+        }
+        Err(reason) => return error_response(StatusCode::BAD_REQUEST, &reason),
+    };
+    let event_id = event.event_id.clone();
+    let chat_id = event.source.chat_id.clone();
+    let sender_id = event.source.user_id.clone();
+    let tx = ensure_mock_event_sink(service, &provider);
+    if tx.send(event).is_err() {
+        service.mock_event_sinks.write().remove(&provider.id);
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mock inbound sink is closed",
+        );
+    }
+    json_response(&serde_json::json!({
+        "success": true,
+        "providerId": provider.id,
+        "eventId": event_id,
+        "senderId": sender_id,
+        "chatId": chat_id
+    }))
 }
 
 async fn inject_mock_inbound(
@@ -324,6 +399,9 @@ fn ensure_mock_event_sink(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
 
     fn request(provider_id: &str, text: &str) -> MockInboundRequest {
         MockInboundRequest {
@@ -362,6 +440,38 @@ mod tests {
             agent_config: None,
             created_at: 0,
             updated_at: 0,
+        }
+    }
+
+    fn card_action_request(provider_id: &str, command: &str) -> MockCardActionRequest {
+        MockCardActionRequest {
+            provider_id: provider_id.to_string(),
+            now_ms: Some(10_000),
+            payload: serde_json::json!({
+                "header": {
+                    "event_id": "evt_choice",
+                    "event_type": "card.action.trigger"
+                },
+                "event": {
+                    "operator": {"open_id": "ou_owner"},
+                    "action": {
+                        "tag": "button",
+                        "value": {
+                            "bifrostAction": "slash_choice",
+                            "providerId": provider_id,
+                            "chatId": "oc_choice",
+                            "chatType": "p2p",
+                            "userId": "ou_owner",
+                            "command": command,
+                            "expiresAtMs": 20_000
+                        }
+                    },
+                    "context": {
+                        "open_message_id": "om_card",
+                        "open_chat_id": "oc_choice"
+                    }
+                }
+            }),
         }
     }
 
@@ -504,5 +614,187 @@ mod tests {
             Some("IyBSZXBvcnQ=")
         );
         assert!(message.files[0].download_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn mock_card_action_validates_and_injects_normalized_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        service
+            .provider_store
+            .add(provider("debug-card-provider"))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-card-provider".to_string(), tx);
+
+        assert_eq!(
+            inject_mock_card_action(
+                card_action_request("debug-card-provider", "/model gpt-5.4"),
+                &service
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let event = rx.try_recv().expect("mock card action");
+        assert_eq!(event.event_id, "evt_choice");
+        assert_eq!(event.source.message_id, None);
+        assert_eq!(
+            event.message.expect("normalized message").text,
+            "/model gpt-5.4"
+        );
+
+        let mut forbidden = card_action_request("debug-card-provider", "/stop now");
+        forbidden.payload["event"]["action"]["value"]["command"] =
+            serde_json::Value::String("/stop now".to_string());
+        assert_eq!(
+            inject_mock_card_action(forbidden, &service).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(rx.try_recv().is_err());
+
+        assert_eq!(
+            inject_mock_card_action(card_action_request(" ", "/model sonnet"), &service)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            inject_mock_card_action(card_action_request("missing", "/model sonnet"), &service)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let mut weixin = provider("debug-card-weixin");
+        weixin.provider_type = ImProviderType::Weixin;
+        service.provider_store.add(weixin).unwrap();
+        assert_eq!(
+            inject_mock_card_action(
+                card_action_request("debug-card-weixin", "/model sonnet"),
+                &service
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut wrong_event = card_action_request("debug-card-provider", "/model sonnet");
+        wrong_event.payload["header"]["event_type"] =
+            serde_json::Value::String("im.message.receive_v1".to_string());
+        assert_eq!(
+            inject_mock_card_action(wrong_event, &service)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-card-provider".to_string(), closed_tx);
+        assert_eq!(
+            inject_mock_card_action(
+                card_action_request("debug-card-provider", "/effort high"),
+                &service
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(!service
+            .mock_event_sinks
+            .read()
+            .contains_key("debug-card-provider"));
+    }
+
+    #[tokio::test]
+    async fn mock_card_action_http_route_normalizes_click() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        service
+            .provider_store
+            .add(provider("debug-http-provider"))
+            .unwrap();
+        let mut config = service.agent_config_store.load();
+        config.enabled = false;
+        service.agent_config_store.save(&config).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let handler = service_fn(move |request| {
+                let service = service.clone();
+                async move {
+                    let path = request.uri().path().to_string();
+                    Ok::<_, std::convert::Infallible>(
+                        crate::handlers::im_gateway::handle_im_gateway(
+                            request,
+                            Some(service),
+                            &path,
+                        )
+                        .await,
+                    )
+                }
+            });
+            http1::Builder::new()
+                .keep_alive(false)
+                .serve_connection(io, handler)
+                .await
+                .unwrap();
+        });
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{address}/api/im-gateway/debug/mock-card-action"
+            ))
+            .header("connection", "close")
+            .json(&serde_json::json!({
+                "providerId": "debug-http-provider",
+                "nowMs": 10_000,
+                "payload": {
+                    "header": {
+                        "event_id": "evt_http_choice",
+                        "event_type": "card.action.trigger"
+                    },
+                    "event": {
+                        "operator": {"open_id": "ou_owner"},
+                        "action": {
+                            "tag": "button",
+                            "value": {
+                                "bifrostAction": "slash_choice",
+                                "providerId": "debug-http-provider",
+                                "chatId": "oc_choice",
+                                "chatType": "p2p",
+                                "userId": "ou_owner",
+                                "command": "/model sonnet",
+                                "expiresAtMs": 20_000
+                            }
+                        },
+                        "context": {
+                            "open_message_id": "om_card",
+                            "open_chat_id": "oc_choice"
+                        }
+                    }
+                }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["eventId"], "evt_http_choice");
+        assert_eq!(body["senderId"], "ou_owner");
+        assert_eq!(body["chatId"], "oc_choice");
+        server.await.unwrap();
     }
 }
