@@ -30,6 +30,7 @@ use crate::metrics::SystemInfo;
 use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
 
+mod skill_install;
 mod version_companion;
 use version_companion::{
     desktop_app_version_for_version_check, resolve_upgrade_target,
@@ -429,32 +430,12 @@ fn install_cli_from_current_exe(
     response.installed = install_path.exists();
 
     if request.install_skills.unwrap_or(true) {
-        match run_desktop_install_skill(&install_path, DESKTOP_INSTALL_SKILL_TIMEOUT) {
-            Ok(DesktopInstallSkillStatus::Success) => {
-                response.skills_installed = Some(true);
-                response.skills_message =
-                    Some("Bifrost AI skills installed from embedded desktop bundle".to_string());
-            }
-            Ok(DesktopInstallSkillStatus::Failed(message)) => {
-                response.skills_installed = Some(false);
-                response.skills_message = Some(format!(
-                    "{message}; retry with `bifrost install-skill --tool all -y`"
-                ));
-            }
-            Ok(DesktopInstallSkillStatus::TimedOut) => {
-                response.skills_installed = Some(false);
-                response.skills_message = Some(format!(
-                    "install-skill timed out after {}s; retry with `bifrost install-skill --tool all -y`",
-                    DESKTOP_INSTALL_SKILL_TIMEOUT.as_secs()
-                ));
-            }
-            Err(error) => {
-                response.skills_installed = Some(false);
-                response.skills_message = Some(format!(
-                    "install-skill failed: {error}; retry with `bifrost install-skill --tool all -y`"
-                ));
-            }
-        }
+        let install_result =
+            run_desktop_install_skill(&install_path, DESKTOP_INSTALL_SKILL_TIMEOUT);
+        (response.skills_installed, response.skills_message) = skill_install::install_result_fields(
+            install_result,
+            skill_install::current_installed(),
+        );
     } else {
         response.skills_installed = None;
         response.skills_message = Some("Bifrost AI skill installation skipped".to_string());
@@ -516,6 +497,7 @@ fn build_cli_install_status(
         None => std::env::current_exe()?,
     };
     let in_path = path_contains_dir(&install_dir);
+    let skills_installed = skill_install::current_installed();
     Ok(CliInstallResponse {
         installed: install_path.exists(),
         install_path: install_path.display().to_string(),
@@ -527,8 +509,8 @@ fn build_cli_install_status(
         } else {
             Some(cli_path_hint(&install_dir))
         },
-        skills_installed: None,
-        skills_message: None,
+        skills_installed,
+        skills_message: skill_install::status_message(skills_installed),
         dry_run,
     })
 }
