@@ -807,6 +807,30 @@
 - 所有 `.app`、marker、data-dir 和进程都位于 `mktemp` 测试目录并由 trap 定向清理，不改
   `/Applications`，不停止正式 `9900/9901` Service。
 
+### TC-DAU-19 Settings 刷新后保持 AI Skills 已安装状态
+
+操作步骤：
+
+1. 使用隔离的 `BIFROST_DATA_DIR`、`BIFROST_INSTALL_DIR` 和 `BIFROST_INSTALL_SKILL_DIR` 启动当前分支 Bifrost。
+2. 调用 `POST /_bifrost/api/system/cli-install`，请求体设置 `install_skills=true`，确认安装主 `bifrost` 与 `bifrost-remote` skill 文件。
+3. 再调用 `GET /_bifrost/api/system/cli-install`，模拟离开 Settings 后重新进入或点击 Refresh。
+4. 执行前端状态单测，确认 `installed=true, skills_installed=true` 对应 `Reinstall AI Skills`，不是 `Install AI Skills`。
+5. 删除任一必需 `SKILL.md` 后执行状态检测单测，确认完整性检查回落为未安装。
+
+预期结果：
+
+- Skills 安装成功后，后续 GET 仍返回 `skills_installed=true`，状态不会只保存在当前 React 页面内。
+- Settings 重新进入或刷新后展示 `AI skills installed`，按钮文案为 `Reinstall AI Skills`。
+- 默认安装完整性同时检查 Universal Agent Skills 与 Claude Code 下的 `bifrost`、`bifrost-remote` 四个文件；隔离测试 override 路径检查对应主/远程两个文件。
+- 缺少任一必需文件时不误报已安装，用户仍可执行安装修复。
+
+**回归目的**：覆盖 issue #497 报告的 Windows 11 安装 AI Skills 后切换页面再返回 Settings 又显示 `Install AI Skills` 的问题。
+
+**执行结果（2026-08-16，本地隔离 API + 单元测试）**：
+- ✅ PASS：`cargo test -p bifrost-admin desktop_ai_skills_installed --lib` 2/2 通过，覆盖完整 bundle、缺失文件与 override 路径。
+- ✅ PASS：`BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` 40/40 通过；使用隔离目录完成真实 POST → skill 文件落盘 → GET，刷新后的响应保持 `skills_installed=true`。
+- ✅ PASS：`pnpm --dir web run test:unit -- src/pages/Settings/tabs/ProxyTab.test.ts` 通过；`installed=true, skills_installed=true` 映射为 `Reinstall AI Skills`。
+
 ## 清理步骤
 
 ```bash
@@ -823,6 +847,7 @@ bifrost app uninstall
 
 | 日期 | 用例 | 执行命令 / 证据 | 结果 |
 | --- | --- | --- | --- |
+| 2026-08-16 | TC-DAU-19 | `cargo test -p bifrost-admin desktop_ai_skills_installed --lib`；`BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh`；`pnpm --dir web run test:unit -- src/pages/Settings/tabs/ProxyTab.test.ts` | PASS：完整/缺失/override 状态检测 2/2，通过真实隔离 POST→落盘→GET 40/40，刷新后保持 `skills_installed=true`，前端映射为 `Reinstall AI Skills`。 |
 | 2026-08-15 | TC-DAU-04G2 alpha.8 干净安装基线 | Parallels Windows 11 ARM64 VM：SYSTEM/HKCU 双阶段清理返回 `system_msi_entries=0`、`all_uninstall_entries=0`、进程与残留目录均为 0；Release run `31815005722` 的 ARM64 CLI/MSI workflow artifacts 通过 SHA-256 校验后安装；CLI=`bifrost 0.0.181-alpha.8`，Desktop ProductVersion=`0.0.181-10008`，MSI DisplayVersion=`0.0.181.10008`，唯一 ProductCode=`{581E598F-99BD-4700-BA49-57EB820C7290}` | BASELINE PASS：已从彻底清理状态安装首个同时包含 channel discovery 与 staged-target handoff 的 alpha；等待发布 alpha.9 后执行默认 `bifrost upgrade -y` 完成相邻版本验证 |
 | 2026-07-05 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | 待复测：本轮新增 04C，验证已安装桌面端等于目标版本时跳过下载和重装 |
 | 2026-07-05 | TC-DAU-05 | `cargo test -p bifrost-admin handlers::system::tests --lib` | PASS：7/7 通过，覆盖 desktop alias、spawn args、CLI install 临时目录与 skip skills |

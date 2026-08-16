@@ -21,7 +21,7 @@ async function fulfillJson(route: Route, body: unknown) {
   });
 }
 
-async function mockAdminApi(page: Page) {
+async function mockAdminApi(page: Page, activeSummary?: unknown) {
   const longHeaderValue = "ppe_old_" + "x".repeat(160);
   await page.route("**/_bifrost/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -108,7 +108,7 @@ async function mockAdminApi(page: Page) {
       return;
     }
     if (apiPath === "/rules/active-summary") {
-      await fulfillJson(route, {
+      await fulfillJson(route, activeSummary ?? {
         total: 2,
         rules: [
           {
@@ -216,6 +216,25 @@ async function mockAdminApi(page: Page) {
     await fulfillJson(route, { success: true });
   });
 }
+
+test("Rules 状态胶囊在没有活跃规则时不遮挡全局页面控件", async ({ page }) => {
+  await mockAdminApi(page, {
+    total: 0,
+    rules: [],
+    variable_conflicts: [],
+    merged_content: "",
+  });
+
+  await page.goto("/_bifrost/traffic");
+
+  await expect(page.getByTestId("rules-dynamic-island-trigger")).toHaveCount(0);
+  await expect(page.getByText("Add Filter")).toBeVisible();
+  await expect(page.getByText("Fuzzy Search")).toBeVisible();
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.getByTestId("rules-dynamic-island-trigger")).toHaveCount(0);
+  await expect(page.getByText("Add Filter")).toBeVisible();
+});
 
 test("Rules 状态胶囊在全局页面可见、可拖拽，并能跳转到 Rules 详情", async ({
   page,

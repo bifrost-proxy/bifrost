@@ -212,6 +212,10 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
     }
   }
 
+  if (activeRules.length === 0 && variableConflicts.length === 0) {
+    return null;
+  }
+
   return (
     <div
       ref={containerRef}
@@ -506,32 +510,6 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
               )}
             </div>
           )}
-        </div>
-      )}
-
-      {expanded && activeRules.length === 0 && variableConflicts.length === 0 && (
-        <div
-          style={{
-            position: "absolute",
-            top: panelOpensUp ? undefined : "100%",
-            bottom: panelOpensUp ? "100%" : undefined,
-            left: "50%",
-            transform: "translateX(-50%)",
-            marginTop: panelOpensUp ? undefined : 4,
-            marginBottom: panelOpensUp ? 4 : undefined,
-            minWidth: 200,
-            backgroundColor: token.colorBgElevated,
-            border: `1px solid ${token.colorBorderSecondary}`,
-            borderRadius: 12,
-            boxShadow: token.boxShadowSecondary,
-            padding: "16px 20px",
-            textAlign: "center",
-            fontSize: 13,
-            color: token.colorTextDescription,
-          }}
-          data-testid="rules-dynamic-island-empty"
-        >
-          No active rules
         </div>
       )}
     </div>

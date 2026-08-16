@@ -222,6 +222,13 @@ fi
 
 api_status_response="$(curl -fsS "http://127.0.0.1:${API_PORT}/_bifrost/api/system/cli-install")"
 assert_contains_text "$api_status_response" "install_path" "CLI install status endpoint returns install metadata"
+api_status_skills_installed="$(read_json_field "$api_status_response" skills_installed)"
+if [[ "$api_status_skills_installed" == "True" || "$api_status_skills_installed" == "true" ]]; then
+    _log_pass "CLI install status preserves installed AI skills after refresh"
+else
+    _log_fail "CLI install status preserves installed AI skills after refresh" "true" "$api_status_response"
+    exit 1
+fi
 BIFROST_DATA_DIR="$API_DATA_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
 if [[ -n "$API_PID" ]]; then
     wait "$API_PID" 2>/dev/null || true

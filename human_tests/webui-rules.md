@@ -983,6 +983,29 @@
 
 ---
 
+### TC-WRU-50：Rules 状态胶囊在无活跃规则时不遮挡页面控件
+
+**前置条件**：
+1. Active Rules Summary 返回 `rules=[]`、`variable_conflicts=[]`。
+2. 打开 Traffic、Settings 等任意主页面。
+
+**操作步骤**：
+1. 观察页面顶部导航、筛选器和主要操作区。
+2. 确认页面中不存在显示 `0 active` 的 Rules 状态胶囊。
+3. 在 Traffic 页面确认 `Add Filter` 与 `Fuzzy Search` 可见、可操作。
+4. 切换亮色/暗色主题后重复检查。
+5. 启用至少一条规则并刷新，确认胶囊重新出现且显示真实活跃规则数。
+
+**预期结果**：
+- 没有活跃规则且没有变量冲突时，不渲染全局 Rules 状态胶囊，不遮挡任何页面控件。
+- 亮色与暗色主题行为一致。
+- 存在活跃规则或变量冲突时仍保留胶囊、拖拽、详情展开和 Rules 深链能力。
+
+**回归目的**：覆盖 issue #497 报告的 Windows 11 桌面端 `0 active` 胶囊固定遮挡 Settings 导航和 Activity/Traffic 筛选器问题。
+
+**执行结果（2026-08-16，本地纯前端 Playwright）**：
+- ✅ PASS：执行 `pnpm --dir web exec playwright test tests/ui/rules-dynamic-island-global.spec.ts --config=playwright.frontend.config.ts`，2/2 通过。空摘要场景在主题切换前后均无胶囊，`Add Filter` / `Fuzzy Search` 可见；活跃规则场景仍通过拖拽、展开、Merged Rules 和深链跳转断言。
+
 ## 清理
 
 测试完成后清理临时数据：
