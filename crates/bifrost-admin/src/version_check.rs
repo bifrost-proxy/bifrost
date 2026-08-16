@@ -48,13 +48,15 @@ impl VersionChecker {
         if !force_refresh {
             let cache = self.cache.read().await;
             if let Some(ref c) = *cache {
-                if is_cache_valid(c) {
+                if is_cache_valid(c)
+                    && version_check::same_release_channel(&current_version, &c.latest_version)
+                {
                     return self.build_response(&current_version, Some(c.clone()));
                 }
             }
         }
 
-        match version_check::fetch_latest_release_async().await {
+        match version_check::fetch_latest_release_async_for_current(&current_version).await {
             Some((latest, highlights)) => {
                 let cache = VersionCache {
                     latest_version: latest,
@@ -72,7 +74,10 @@ impl VersionChecker {
             }
             None => {
                 let cache = self.cache.read().await;
-                self.build_response(&current_version, cache.clone())
+                let cache = cache.clone().filter(|cached| {
+                    version_check::same_release_channel(&current_version, &cached.latest_version)
+                });
+                self.build_response(&current_version, cache)
             }
         }
     }
@@ -183,6 +188,26 @@ mod tests {
         assert!(response.has_update);
         assert_eq!(response.current_version, "0.0.144");
         assert_eq!(response.latest_version.as_deref(), Some("0.0.145"));
+    }
+
+    #[tokio::test]
+    async fn check_reuses_fresh_cache_only_for_the_running_channel() {
+        let cached = VersionCache {
+            latest_version: "0.0.181-alpha.11".to_string(),
+            release_highlights: vec!["cached alpha".to_string()],
+            checked_at: Utc::now(),
+        };
+        let checker = VersionChecker {
+            cache: RwLock::new(Some(cached)),
+        };
+
+        let response = checker
+            .check_with_current_version(false, "0.0.181-alpha.10".to_string())
+            .await;
+
+        assert!(response.has_update);
+        assert_eq!(response.latest_version.as_deref(), Some("0.0.181-alpha.11"));
+        assert_eq!(response.release_highlights, vec!["cached alpha"]);
     }
 
     #[test]

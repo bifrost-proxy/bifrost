@@ -1,5 +1,456 @@
 use super::*;
 
+mod download_helpers;
+
+#[test]
+fn older_discovery_result_cannot_downgrade_the_desktop_companion() {
+    assert_eq!(
+        companion_target_without_cli_upgrade("0.0.181-alpha.9", "0.0.181-alpha.7"),
+        "0.0.181-alpha.9"
+    );
+    assert_eq!(
+        companion_target_without_cli_upgrade("0.0.181-alpha.9", "0.0.181-alpha.10"),
+        "0.0.181-alpha.10"
+    );
+}
+
+#[test]
+fn windows_desktop_discovery_includes_per_user_and_machine_msi_locations() {
+    let candidates = windows_desktop_app_install_candidates_from_roots([
+        PathBuf::from(r"C:\Users\tester\AppData\Local"),
+        PathBuf::from(r"C:\Program Files"),
+        PathBuf::from(r"c:/program files"),
+        PathBuf::from(r"C:\Program Files (x86)"),
+    ]);
+
+    assert_eq!(
+        candidates,
+        vec![
+            PathBuf::from(r"C:\Users\tester\AppData\Local")
+                .join("Bifrost")
+                .join("bifrost-desktop.exe"),
+            PathBuf::from(r"C:\Program Files")
+                .join("Bifrost")
+                .join("bifrost-desktop.exe"),
+            PathBuf::from(r"C:\Program Files (x86)")
+                .join("Bifrost")
+                .join("bifrost-desktop.exe"),
+        ]
+    );
+}
+
+#[test]
+fn windows_upgrade_handoff_uses_staged_target_and_original_parent_pid() {
+    let deferred = WindowsDeferredInstall {
+        staged_binary: PathBuf::from(
+            r"C:\Users\tester\AppData\Local\bifrost\bin\.bifrost.exe.pending.42",
+        ),
+        target_path: PathBuf::from(r"C:\Users\tester\AppData\Local\bifrost\bin\bifrost.exe"),
+        target_version: "0.0.181-alpha.8".to_string(),
+    };
+    let restart = vec![
+        "start".to_string(),
+        "-d".to_string(),
+        "--proxy-bypass".to_string(),
+        "localhost,127.0.0.1".to_string(),
+    ];
+    let status = Path::new(r"C:\Users\tester\AppData\Local\Temp\upgrade.status");
+    let handoff_ready =
+        Path::new(r"C:\Users\tester\AppData\Local\bifrost\bin\.bifrost-upgrade-handoff.9876.ready");
+    let args =
+        windows_upgrade_handoff_args(&deferred, Some(&restart), 9876, Some(status), handoff_ready);
+    let args: Vec<_> = args
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(args[0], "windows-upgrade-handoff");
+    assert_eq!(args[1..3], ["--parent-pid", "9876"]);
+    assert!(args.windows(2).any(|pair| {
+        pair[0] == "--pending-path" && pair[1] == deferred.staged_binary.to_string_lossy()
+    }));
+    assert!(args.windows(2).any(|pair| {
+        pair[0] == "--target-path" && pair[1] == deferred.target_path.to_string_lossy()
+    }));
+    assert!(args
+        .windows(2)
+        .any(|pair| { pair[0] == "--target-version" && pair[1] == deferred.target_version }));
+    assert_eq!(
+        args.iter()
+            .filter(|arg| arg.as_str() == "--restart-arg")
+            .count(),
+        restart.len()
+    );
+    assert!(args.windows(2).any(|pair| {
+        pair[0] == "--deferred-status-path" && pair[1] == status.to_string_lossy()
+    }));
+    assert!(args.windows(2).any(|pair| {
+        pair[0] == "--handoff-ready-path" && pair[1] == handoff_ready.to_string_lossy()
+    }));
+}
+
+#[test]
+fn windows_deferred_desktop_companion_runs_from_the_staged_replacement() {
+    let deferred = WindowsDeferredInstall {
+        staged_binary: PathBuf::from(
+            r"C:\Users\tester\AppData\Local\bifrost\bin\.bifrost.exe.pending.42",
+        ),
+        target_path: PathBuf::from(r"C:\Users\tester\AppData\Local\bifrost\bin\bifrost.exe"),
+        target_version: "0.0.181-alpha.23".to_string(),
+    };
+
+    assert_eq!(
+        windows_deferred_desktop_companion_executable(&deferred),
+        deferred.staged_binary.as_path()
+    );
+    assert_ne!(
+        windows_deferred_desktop_companion_executable(&deferred),
+        deferred.target_path.as_path(),
+        "the old running target cannot execute fixes from the downloaded version"
+    );
+}
+
+#[test]
+fn windows_upgrade_handoff_spawn_retries_sharing_violations() {
+    let mut attempts = 0;
+    let value = spawn_windows_upgrade_handoff_with_retry(|| {
+        attempts += 1;
+        if attempts < 4 {
+            Err(io::Error::from_raw_os_error(32))
+        } else {
+            Ok("scheduled")
+        }
+    })
+    .expect("freshly copied staged binary eventually becomes executable");
+    assert_eq!(value, "scheduled");
+    assert_eq!(attempts, 4);
+}
+
+#[test]
+fn windows_upgrade_handoff_spawn_fails_fast_for_non_sharing_errors() {
+    let mut attempts = 0;
+    let error = spawn_windows_upgrade_handoff_with_retry::<()>(|| {
+        attempts += 1;
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked"))
+    })
+    .expect_err("non-Windows-style errors must not be retried");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn windows_upgrade_handoff_waits_for_helper_ready_after_staged_child_exits() {
+    let mut ready_checks = 0;
+    let mut wait_checks = 0;
+    let mut sleeps = 0;
+    let outcome = wait_for_windows_upgrade_handoff_ready_with(
+        5,
+        || {
+            ready_checks += 1;
+            Ok(ready_checks == 3)
+        },
+        || {
+            wait_checks += 1;
+            Ok((wait_checks == 1).then_some(0))
+        },
+        |status| *status == 0,
+        |_| sleeps += 1,
+    )
+    .expect("poll helper readiness");
+
+    assert_eq!(outcome, WindowsUpgradeHandoffReady::Ready);
+    assert_eq!(wait_checks, 1, "successful child exit is remembered");
+    assert_eq!(sleeps, 2);
+}
+
+#[test]
+fn windows_upgrade_handoff_reports_staged_child_failure_before_timeout() {
+    let outcome = wait_for_windows_upgrade_handoff_ready_with(
+        5,
+        || Ok(false),
+        || Ok(Some(17)),
+        |status| *status == 0,
+        |_| panic!("failed staged child must not be retried"),
+    )
+    .expect("poll staged child");
+
+    assert_eq!(outcome, WindowsUpgradeHandoffReady::Failed(17));
+}
+
+#[test]
+fn windows_upgrade_handoff_command_is_hidden_and_preserves_hyphenated_restart_args() {
+    use clap::{CommandFactory, Parser};
+
+    let cli = crate::cli::Cli::parse_from([
+        "bifrost",
+        "windows-upgrade-handoff",
+        "--parent-pid",
+        "4321",
+        "--pending-path",
+        r"C:\bifrost\.bifrost.exe.pending.42",
+        "--target-path",
+        r"C:\bifrost\bifrost.exe",
+        "--target-version",
+        "0.0.181-alpha.8",
+        "--handoff-ready-path",
+        r"C:\bifrost\.bifrost-upgrade-handoff.4321.ready",
+        "--restart-arg",
+        "start",
+        "--restart-arg",
+        "--no-system-proxy",
+    ]);
+    let Some(crate::cli::Commands::WindowsUpgradeHandoff {
+        parent_pid,
+        restart_arg,
+        ..
+    }) = cli.command
+    else {
+        panic!("expected hidden Windows handoff command")
+    };
+    assert_eq!(parent_pid, 4321);
+    assert_eq!(restart_arg, ["start", "--no-system-proxy"]);
+
+    let help = crate::cli::Cli::command().render_help().to_string();
+    assert!(!help.contains("windows-upgrade-handoff"));
+}
+
+#[test]
+fn windows_upgrade_handoff_request_accepts_only_the_running_staged_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("bifrost.exe");
+    let pending = dir.path().join(".bifrost.exe.pending.4321");
+    let handoff_ready = dir.path().join(".bifrost-upgrade-handoff.4321.ready");
+    std::fs::write(&pending, b"replacement").expect("write pending binary");
+
+    validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &target,
+        "0.0.181-alpha.8",
+        &pending,
+        &handoff_ready,
+    )
+    .expect("valid staged handoff");
+
+    let wrong_pending = dir.path().join(".bifrost.exe.pending.9999");
+    std::fs::write(&wrong_pending, b"replacement").expect("write wrongly named pending binary");
+    let error = validate_windows_upgrade_handoff_request(
+        4321,
+        &wrong_pending,
+        &target,
+        "0.0.181-alpha.8",
+        &wrong_pending,
+        &handoff_ready,
+    )
+    .expect_err("pending name must be derived from target and parent PID");
+    assert!(error.to_string().contains("must be named"));
+
+    let arbitrary_target = dir.path().join("updater.exe");
+    let arbitrary_pending = dir.path().join(".updater.exe.pending.4321");
+    std::fs::write(&arbitrary_pending, b"replacement").expect("write arbitrary pending binary");
+    let error = validate_windows_upgrade_handoff_request(
+        4321,
+        &arbitrary_pending,
+        &arbitrary_target,
+        "0.0.181-alpha.8",
+        &arbitrary_pending,
+        &handoff_ready,
+    )
+    .expect_err("handoff must not become an arbitrary executable replacement primitive");
+    assert!(error.to_string().contains("only replace bifrost.exe"));
+
+    let other_exe = dir.path().join("other-staged.exe");
+    std::fs::write(&other_exe, b"other").expect("write other executable");
+    let error = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &target,
+        "0.0.181-alpha.8",
+        &other_exe,
+        &handoff_ready,
+    )
+    .expect_err("handoff must execute from pending binary");
+    assert!(error.to_string().contains("must run from the staged"));
+}
+
+#[test]
+fn windows_upgrade_handoff_request_rejects_unsafe_metadata_and_cross_directory_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let other_dir = tempfile::tempdir().expect("other tempdir");
+    let pending = dir.path().join(".bifrost.exe.pending.4321");
+    let handoff_ready = dir.path().join(".bifrost-upgrade-handoff.4321.ready");
+    std::fs::write(&pending, b"replacement").expect("write pending binary");
+
+    let zero_pid = validate_windows_upgrade_handoff_request(
+        0,
+        &pending,
+        &dir.path().join("bifrost.exe"),
+        "0.0.181-alpha.8",
+        &pending,
+        &handoff_ready,
+    )
+    .expect_err("zero PID must be rejected");
+    assert!(zero_pid.to_string().contains("non-zero parent PID"));
+
+    let invalid_version = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &dir.path().join("bifrost.exe"),
+        "0.0.181\n-Command",
+        &pending,
+        &handoff_ready,
+    )
+    .expect_err("control characters in target version must be rejected");
+    assert!(invalid_version
+        .to_string()
+        .contains("invalid target version"));
+
+    let cross_directory = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &other_dir.path().join("bifrost.exe"),
+        "0.0.181-alpha.8",
+        &pending,
+        &handoff_ready,
+    )
+    .expect_err("cross-directory replacement must be rejected");
+    assert!(cross_directory
+        .to_string()
+        .contains("must share the same directory"));
+
+    let foreign_handoff_ready = other_dir.path().join(".bifrost-upgrade-handoff.4321.ready");
+    let foreign_ready_error = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        &dir.path().join("bifrost.exe"),
+        "0.0.181-alpha.8",
+        &pending,
+        &foreign_handoff_ready,
+    )
+    .expect_err("handoff readiness marker cannot target another directory");
+    assert!(foreign_ready_error
+        .to_string()
+        .contains("ready path must be"));
+
+    let missing_target_name = validate_windows_upgrade_handoff_request(
+        4321,
+        &pending,
+        Path::new(""),
+        "0.0.181-alpha.8",
+        &pending,
+        &handoff_ready,
+    )
+    .expect_err("target path without a file name must be rejected");
+    assert!(missing_target_name.to_string().contains("valid file name"));
+
+    let relative_pending = Path::new(".bifrost.exe.pending.4321");
+    let relative_target = Path::new("bifrost.exe");
+    let missing_pending_parent = validate_windows_upgrade_handoff_request(
+        4321,
+        relative_pending,
+        relative_target,
+        "0.0.181-alpha.8",
+        relative_pending,
+        &handoff_ready,
+    )
+    .expect_err("relative staging path without a parent must be rejected");
+    assert!(missing_pending_parent
+        .to_string()
+        .contains("staging path has no parent"));
+
+    let pending_with_parent = Path::new("dir/.bifrost.exe.pending.4321");
+    let missing_target_parent = validate_windows_upgrade_handoff_request(
+        4321,
+        pending_with_parent,
+        relative_target,
+        "0.0.181-alpha.8",
+        pending_with_parent,
+        &handoff_ready,
+    )
+    .expect_err("relative target path without a parent must be rejected");
+    assert!(missing_target_parent
+        .to_string()
+        .contains("target path has no parent"));
+}
+
+#[test]
+fn windows_upgrade_file_cleanup_retries_sharing_errors() {
+    let path = Path::new("C:/fixture/.bifrost.exe.pending.42");
+    let mut attempts = 0;
+    let mut delays = Vec::new();
+
+    remove_windows_upgrade_file_with(
+        path,
+        |actual_path| {
+            assert_eq!(actual_path, path);
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::from_raw_os_error(32))
+            } else {
+                Ok(())
+            }
+        },
+        |delay| delays.push(delay),
+        true,
+    )
+    .expect("sharing violation is retried until cleanup succeeds");
+
+    assert_eq!(attempts, 3);
+    assert_eq!(
+        delays,
+        [Duration::from_millis(25), Duration::from_millis(35)]
+    );
+}
+
+#[test]
+fn windows_upgrade_file_cleanup_outlasts_the_previous_short_retry_budget() {
+    let path = Path::new("C:/fixture/.bifrost.exe.pending.42");
+    let mut attempts = 0;
+    let mut delays = Vec::new();
+
+    remove_windows_upgrade_file_with(
+        path,
+        |_| {
+            attempts += 1;
+            if attempts < WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS {
+                Err(io::Error::from_raw_os_error(32))
+            } else {
+                Ok(())
+            }
+        },
+        |delay| delays.push(delay),
+        true,
+    )
+    .expect("cleanup must outlast transient scanners that exceed the old budget");
+
+    assert_eq!(attempts, WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS);
+    assert_eq!(delays.len(), WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS - 1);
+    assert!(
+        delays.iter().copied().sum::<Duration>() >= Duration::from_secs(30),
+        "cleanup retry budget must cover long-lived antivirus and indexer handles"
+    );
+}
+
+#[test]
+fn windows_upgrade_file_cleanup_handles_missing_and_terminal_errors() {
+    remove_windows_upgrade_file_with(
+        Path::new("missing"),
+        |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+        |_| panic!("missing file must not sleep"),
+        true,
+    )
+    .expect("missing cleanup target is already clean");
+
+    let error = remove_windows_upgrade_file_with(
+        Path::new("denied"),
+        |_| Err(io::Error::from_raw_os_error(5)),
+        |_| panic!("non-Windows cleanup must not retry"),
+        false,
+    )
+    .expect_err("terminal cleanup error remains visible");
+    assert!(error.to_string().contains("denied"));
+}
+
 #[test]
 fn test_detect_install_method_returns_valid_variant() {
     let method = detect_install_method();
@@ -304,7 +755,7 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
         std::process::id().to_string(),
     );
     assert!(
-        handle_upgrade(true).is_err(),
+        handle_upgrade(true, None).is_err(),
         "forged owner credentials must not bypass lock"
     );
     std::env::set_var(DESKTOP_MANAGED_SKIP_APP_ENV, "yes");
@@ -313,7 +764,7 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
     assert!(env_flag(DESKTOP_MANAGED_SKIP_APP_ENV));
     assert!(env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV));
     assert!(
-        handle_upgrade(true).is_err(),
+        handle_upgrade(true, None).is_err(),
         "managed flags plus forged credentials must not bypass lock"
     );
     drop(parent_lock);
@@ -507,6 +958,7 @@ fn script_installs_use_the_target_aware_atomic_upgrade_path() {
 }
 
 mod cli_alias;
+mod command_helpers;
 mod review_comments;
 mod spawn_retry;
 mod upgrade_recovery;
@@ -979,472 +1431,4 @@ fn upgrade_desktop_app_install_path_uses_override_dir() {
     assert_eq!(path, temp.path().join("bifrost-desktop.exe"));
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     assert_eq!(path, temp.path().join("Bifrost"));
-}
-
-#[test]
-fn upgrade_desktop_app_failure_reason_prefers_stderr() {
-    let output = TimedCommandOutput {
-        status: TimedCommandStatus::Failure,
-        stdout: "stdout detail".to_string(),
-        stderr: "stderr detail".to_string(),
-    };
-
-    assert_eq!(summarize_command_output(&output), "stderr detail");
-}
-
-#[test]
-#[cfg(unix)]
-fn upgrade_command_status_with_timeout_reports_success_and_failure() {
-    assert_eq!(
-        command_status_with_timeout(
-            Path::new("/bin/sh"),
-            &["-c", "exit 0"],
-            Duration::from_secs(1)
-        )
-        .unwrap(),
-        TimedCommandStatus::Success
-    );
-
-    assert_eq!(
-        command_status_with_timeout(
-            Path::new("/bin/sh"),
-            &["-c", "exit 7"],
-            Duration::from_secs(1)
-        )
-        .unwrap(),
-        TimedCommandStatus::Failure
-    );
-
-    assert_eq!(
-        command_status_with_timeout_and_heartbeat(
-            Path::new("/bin/sh"),
-            // Other tests temporarily replace the process-wide PATH. Use an
-            // absolute executable so parallel runs cannot make this probe fail.
-            &["-c", "/bin/sleep 0.08"],
-            Duration::from_secs(1),
-            Duration::from_millis(10),
-            false,
-        )
-        .unwrap(),
-        TimedCommandStatus::Success
-    );
-
-    let output = command_output_with_timeout_and_heartbeat(
-        Path::new("/bin/sh"),
-        &["-c".to_string(), "/bin/sleep 0.08; echo ready".to_string()],
-        Duration::from_secs(1),
-        Duration::from_millis(10),
-    )
-    .unwrap();
-    assert_eq!(output.status, TimedCommandStatus::Success);
-    assert_eq!(output.stdout.trim(), "ready");
-
-    let handoff_output = command_output_with_timeout_and_env(
-        Path::new("/bin/sh"),
-        &[
-            "-c".to_string(),
-            format!("test \"${DESKTOP_UPGRADE_HANDOFF_ENV}\" = 1"),
-        ],
-        Duration::from_secs(1),
-        Duration::from_millis(10),
-        &[(DESKTOP_UPGRADE_HANDOFF_ENV, "1")],
-        None,
-    )
-    .unwrap();
-    assert_eq!(handoff_output.status, TimedCommandStatus::Success);
-}
-
-#[test]
-#[cfg(unix)]
-fn upgrade_command_status_with_timeout_does_not_block_on_hung_child() {
-    let started = Instant::now();
-    let status = command_status_with_timeout(
-        Path::new("/bin/sh"),
-        &["-c", "/bin/sleep 5"],
-        Duration::from_millis(50),
-    )
-    .unwrap();
-
-    assert_eq!(status, TimedCommandStatus::TimedOut);
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "timeout helper should return promptly"
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn installed_cli_version_must_match_the_pinned_target() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let missing = temp.path().join("missing");
-    assert!(verify_installed_cli_target_version(&missing, "0.0.156").is_err());
-    let matching = temp.path().join("matching");
-    let stale = temp.path().join("stale");
-    let failing = temp.path().join("failing");
-    fs::write(&matching, "#!/bin/sh\necho 'bifrost 0.0.156'\n").unwrap();
-    fs::write(&stale, "#!/bin/sh\necho 'bifrost 0.0.155'\n").unwrap();
-    fs::write(&failing, "#!/bin/sh\necho broken >&2\nexit 7\n").unwrap();
-    fs::set_permissions(&matching, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::set_permissions(&stale, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
-
-    verify_installed_cli_target_version(&matching, "0.0.156")
-        .expect("matching installed CLI version");
-    assert!(verify_installed_cli_target_version(&stale, "0.0.156").is_err());
-    assert!(verify_installed_cli_target_version(&failing, "0.0.156").is_err());
-}
-
-#[test]
-fn upgrade_download_tuning_parses_positive_values() {
-    let tuning = DownloadTuning {
-        connect_timeout_secs: parse_positive_u64(Some("7"), DOWNLOAD_CONNECT_TIMEOUT_SECS),
-        download_timeout_secs: parse_positive_u64(Some("90"), DOWNLOAD_TIMEOUT_SECS),
-        mirror_probe_timeout_secs: parse_positive_u64(Some("3"), MIRROR_PROBE_TIMEOUT_SECS),
-        download_tries: parse_positive_usize(Some("4"), DOWNLOAD_TRIES),
-    };
-
-    assert_eq!(
-        tuning,
-        DownloadTuning {
-            connect_timeout_secs: 7,
-            download_timeout_secs: 90,
-            mirror_probe_timeout_secs: 3,
-            download_tries: 4,
-        }
-    );
-}
-
-#[test]
-fn upgrade_download_tuning_rejects_invalid_values() {
-    assert_eq!(parse_positive_u64(Some("0"), 5), 5);
-    assert_eq!(parse_positive_u64(Some("abc"), 5), 5);
-    assert_eq!(parse_positive_usize(Some("0"), 2), 2);
-    assert_eq!(parse_positive_usize(Some("abc"), 2), 2);
-}
-
-#[test]
-fn parse_positive_u64_parses_and_trims() {
-    assert_eq!(parse_positive_u64(Some("42"), 7), 42);
-    assert_eq!(parse_positive_u64(Some(" 5 "), 7), 5);
-}
-
-#[test]
-fn parse_positive_u64_uses_default_for_zero_invalid_and_none() {
-    assert_eq!(parse_positive_u64(Some("0"), 7), 7);
-    assert_eq!(parse_positive_u64(Some("abc"), 7), 7);
-    assert_eq!(parse_positive_u64(None, 7), 7);
-}
-
-#[test]
-fn parse_positive_usize_parses_and_trims() {
-    assert_eq!(parse_positive_usize(Some("3"), 1), 3);
-    assert_eq!(parse_positive_usize(Some(" 8 "), 1), 8);
-}
-
-#[test]
-fn parse_positive_usize_uses_default_for_zero_invalid_and_none() {
-    assert_eq!(parse_positive_usize(Some("0"), 2), 2);
-    assert_eq!(parse_positive_usize(Some("zzz"), 2), 2);
-    assert_eq!(parse_positive_usize(None, 2), 2);
-}
-
-#[test]
-fn musl_fallback_triple_is_defined_for_gnu_targets() {
-    assert_eq!(
-        get_musl_fallback_triple("x86_64-unknown-linux-gnu").as_deref(),
-        Some("x86_64-unknown-linux-musl")
-    );
-    assert_eq!(
-        get_musl_fallback_triple("aarch64-unknown-linux-gnu").as_deref(),
-        Some("aarch64-unknown-linux-musl")
-    );
-}
-
-#[test]
-fn musl_fallback_triple_is_none_for_other_targets() {
-    assert!(get_musl_fallback_triple("x86_64-apple-darwin").is_none());
-}
-
-#[test]
-fn human_bytes_formats_small_values() {
-    assert_eq!(human_bytes(0), "0 B");
-    assert_eq!(human_bytes(1), "1 B");
-    assert_eq!(human_bytes(1023), "1023 B");
-}
-
-#[test]
-fn human_bytes_formats_larger_units() {
-    assert_eq!(human_bytes(1024), "1.0 KiB");
-    assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
-    assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GiB");
-}
-
-#[test]
-fn download_progress_line_without_total_omits_percentage() {
-    let started = Instant::now() - Duration::from_secs(1);
-    let line = download_progress_line(2048, None, started);
-    assert!(line.contains("Downloading…"));
-    assert!(line.contains("2.0 KiB"));
-    assert!(!line.contains("%"));
-}
-
-fn with_mirror_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
-    let key = "BIFROST_GITHUB_MIRROR";
-    let prev = std::env::var(key).ok();
-    match value {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
-    let result = f();
-    match prev {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
-    result
-}
-
-#[test]
-fn github_mirror_bases_respects_preferred_env() {
-    with_mirror_env(Some("https://example.com/github"), || {
-        let bases = github_mirror_bases();
-        assert!(!bases.is_empty());
-        assert_eq!(bases[0], "https://example.com/github");
-        assert!(bases.iter().any(|b| b.contains("github.com")));
-    });
-}
-
-#[test]
-fn ordered_download_bases_without_preferred_env_keeps_fallbacks() {
-    with_mirror_env(None, || {
-        let tuning = DownloadTuning {
-            connect_timeout_secs: 1,
-            download_timeout_secs: 1,
-            mirror_probe_timeout_secs: 1,
-            download_tries: 1,
-        };
-        let bases = ordered_download_bases("nonexistent/coverage-fixture", tuning);
-        assert!(!bases.is_empty());
-        assert!(bases.iter().any(|base| base.contains("github.com")));
-    });
-}
-
-#[test]
-fn mirror_display_name_strips_scheme_and_path() {
-    assert_eq!(
-        mirror_display_name("https://ghfast.top/https://github.com"),
-        "ghfast.top"
-    );
-    assert_eq!(mirror_display_name("http://foo.bar/"), "foo.bar");
-    assert_eq!(mirror_display_name("plain-host"), "plain-host");
-}
-
-#[test]
-fn github_path_url_normalizes_slashes() {
-    assert_eq!(
-        github_path_url("https://github.com/", "/owner/repo/releases"),
-        "https://github.com/owner/repo/releases"
-    );
-    assert_eq!(
-        github_path_url("https://github.com", "owner/repo"),
-        "https://github.com/owner/repo"
-    );
-}
-
-#[test]
-fn version_comparison_is_newer_version_behaviour() {
-    assert!(is_newer_version("0.0.1", "0.0.2"));
-    assert!(!is_newer_version("0.1.0", "0.1.0"));
-    assert!(!is_newer_version("0.2.0", "0.1.9"));
-}
-
-#[cfg(unix)]
-#[test]
-fn full_manual_upgrade_uses_the_pinned_archive_and_verified_finish_path() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let target_triple = get_target_triple().expect("supported test target");
-    let version = "99.0.1";
-    let archive_root = temp
-        .path()
-        .join(format!("bifrost-v{version}-{target_triple}"));
-    fs::create_dir_all(&archive_root).expect("create archive root");
-    let archived_binary = archive_root.join("bifrost");
-    fs::write(
-        &archived_binary,
-        format!("#!/bin/sh\necho 'bifrost {version}'\n"),
-    )
-    .expect("write archived CLI");
-    fs::set_permissions(&archived_binary, fs::Permissions::from_mode(0o755))
-        .expect("chmod archived CLI");
-    let archive = temp.path().join("bifrost.tar.gz");
-    let status = Command::new("tar")
-        .args(["-czf"])
-        .arg(&archive)
-        .arg("-C")
-        .arg(temp.path())
-        .arg(archive_root.file_name().expect("archive root name"))
-        .status()
-        .expect("create fixture archive");
-    assert!(status.success());
-
-    let install_target = temp.path().join("installed-bifrost");
-    fs::write(&install_target, "#!/bin/sh\necho 'bifrost 0.0.1'\n").expect("write old CLI");
-    fs::set_permissions(&install_target, fs::Permissions::from_mode(0o755)).expect("chmod old CLI");
-    let previous_archive = std::env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE");
-    let previous_target = std::env::var_os(UPGRADE_TEST_INSTALL_TARGET_ENV);
-    std::env::set_var("BIFROST_UPGRADE_TEST_ARCHIVE", &archive);
-    std::env::set_var(UPGRADE_TEST_INSTALL_TARGET_ENV, &install_target);
-
-    handle_upgrade_inner(
-        UpgradeBehavior::interactive(true, true),
-        Some(version.to_string()),
-    )
-    .expect("pinned manual upgrade");
-    assert!(fs::read_to_string(&install_target)
-        .expect("read installed CLI")
-        .contains(version));
-    assert!(!binary_backup_path(&install_target).exists());
-
-    match previous_archive {
-        Some(value) => std::env::set_var("BIFROST_UPGRADE_TEST_ARCHIVE", value),
-        None => std::env::remove_var("BIFROST_UPGRADE_TEST_ARCHIVE"),
-    }
-    match previous_target {
-        Some(value) => std::env::set_var(UPGRADE_TEST_INSTALL_TARGET_ENV, value),
-        None => std::env::remove_var(UPGRADE_TEST_INSTALL_TARGET_ENV),
-    }
-}
-
-#[test]
-fn restart_and_download_helpers_cover_terminal_paths() {
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
-    let previous_archive = std::env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE");
-    std::env::set_var("BIFROST_DATA_DIR", temp.path());
-
-    wait_for_restart_ports_release(&[]).expect("no restart ports");
-    default_restart_system_proxy_config().expect("default proxy config");
-    assert!(!release_archive_ext_candidates().is_empty());
-    let _ = tar_supports_xz();
-    assert!(test_upgrade_archive_override()
-        .expect("missing archive override")
-        .is_none());
-    std::env::set_var(
-        "BIFROST_UPGRADE_TEST_ARCHIVE",
-        temp.path().join("invalid.txt"),
-    );
-    assert!(test_upgrade_archive_override().is_err());
-
-    let tuning = DownloadTuning {
-        connect_timeout_secs: 1,
-        download_timeout_secs: 1,
-        mirror_probe_timeout_secs: 1,
-        download_tries: 2,
-    };
-    assert!(!probe_github_url("http://127.0.0.1:9/not-running", tuning));
-    assert!(download_file_with_progress(
-        "http://127.0.0.1:9/not-running",
-        &temp.path().join("download"),
-        tuning,
-    )
-    .is_err());
-    print_update_info(
-        "0.0.155",
-        &VersionCache {
-            latest_version: "0.0.156".to_string(),
-            release_highlights: vec!["restart ownership".to_string()],
-            checked_at: chrono::Utc::now(),
-        },
-    );
-
-    match previous_data_dir {
-        Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
-        None => std::env::remove_var("BIFROST_DATA_DIR"),
-    }
-    match previous_archive {
-        Some(value) => std::env::set_var("BIFROST_UPGRADE_TEST_ARCHIVE", value),
-        None => std::env::remove_var("BIFROST_UPGRADE_TEST_ARCHIVE"),
-    }
-}
-
-#[test]
-fn download_selection_success_and_free_restart_port_are_exercised() {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let previous_mirror = std::env::var_os("BIFROST_GITHUB_MIRROR");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
-    let address = listener.local_addr().expect("fixture address");
-    let server = std::thread::spawn(move || {
-        for _ in 0..3 {
-            let (mut stream, _) = listener.accept().expect("accept fixture request");
-            let mut request = [0_u8; 2048];
-            let read = stream.read(&mut request).expect("read fixture request");
-            let request = String::from_utf8_lossy(&request[..read]);
-            let body = if request.starts_with("HEAD ") {
-                ""
-            } else {
-                "fixture"
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write fixture response");
-        }
-    });
-    let base = format!("http://{address}");
-    std::env::set_var("BIFROST_GITHUB_MIRROR", &base);
-    let tuning = DownloadTuning {
-        connect_timeout_secs: 1,
-        download_timeout_secs: 2,
-        mirror_probe_timeout_secs: 1,
-        download_tries: 1,
-    };
-    assert_eq!(
-        select_fastest_github_base_from(
-            vec!["http://127.0.0.1:9".to_string(), base.clone()],
-            "fixture",
-            tuning,
-        )
-        .as_deref(),
-        Some(base.as_str())
-    );
-    assert_eq!(
-        ordered_download_bases_from(
-            vec!["http://127.0.0.1:9".to_string(), base.clone()],
-            "fixture",
-            tuning,
-        )
-        .first(),
-        Some(&base)
-    );
-    assert_eq!(
-        ordered_download_bases("fixture", tuning).first(),
-        Some(&base)
-    );
-    let output = temp.path().join("downloaded");
-    download_file_with_progress(&format!("{base}/fixture"), &output, tuning)
-        .expect("download fixture");
-    assert_eq!(fs::read_to_string(output).expect("read fixture"), "fixture");
-    server.join().expect("fixture server");
-    // Port 0 asks the OS for a fresh ephemeral port on every bind probe. Using
-    // a previously bound-and-dropped concrete port is racy on Windows: another
-    // parallel test can claim it, and Windows may temporarily delay reuse even
-    // when netstat shows no listener.
-    wait_for_restart_ports_release(&[0]).expect("OS-selected fixture port");
-    match previous_mirror {
-        Some(value) => std::env::set_var("BIFROST_GITHUB_MIRROR", value),
-        None => std::env::remove_var("BIFROST_GITHUB_MIRROR"),
-    }
 }

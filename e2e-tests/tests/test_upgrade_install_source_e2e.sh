@@ -147,6 +147,50 @@ assert_update_alias_help
 run_source_case npm update
 run_source_case pnpm upgrade
 
+case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64|Darwin-aarch64) LOCAL_TARGET="aarch64-apple-darwin" ;;
+    Darwin-x86_64) LOCAL_TARGET="x86_64-apple-darwin" ;;
+    Linux-arm64|Linux-aarch64) LOCAL_TARGET="aarch64-unknown-linux-gnu" ;;
+    Linux-x86_64) LOCAL_TARGET="x86_64-unknown-linux-gnu" ;;
+    *) LOCAL_TARGET="" ;;
+esac
+
+if [[ -n "$LOCAL_TARGET" ]]; then
+    LOCAL_ASSETS_DIR="$TEST_ROOT/local-assets"
+    LOCAL_ARCHIVE_ROOT="$TEST_ROOT/local-archive/bifrost-v$TARGET_VERSION-$LOCAL_TARGET"
+    LOCAL_INSTALL_BINARY="$TEST_ROOT/npm-local/node_modules/@bifrost-proxy/bifrost-$LOCAL_TARGET/bin/bifrost"
+    mkdir -p "$LOCAL_ASSETS_DIR" "$LOCAL_ARCHIVE_ROOT" "$(dirname "$LOCAL_INSTALL_BINARY")" "$TEST_ROOT/data-local"
+    cp "$BIFROST_BIN" "$LOCAL_INSTALL_BINARY"
+    chmod +x "$LOCAL_INSTALL_BINARY"
+    cp "$FAKE_NEW_BINARY" "$LOCAL_ARCHIVE_ROOT/bifrost"
+    tar -C "$TEST_ROOT/local-archive" -czf \
+        "$LOCAL_ASSETS_DIR/bifrost-v$TARGET_VERSION-$LOCAL_TARGET.tar.gz" \
+        "bifrost-v$TARGET_VERSION-$LOCAL_TARGET"
+    : > "$FAKE_PM_LOG"
+
+    set +e
+    LOCAL_OUTPUT=$(PATH="$FAKE_BIN:/usr/bin:/bin" \
+        BIFROST_DATA_DIR="$TEST_ROOT/data-local" \
+        BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-app" \
+        BIFROST_CLI_INSTALL_SOURCE=npm \
+        BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP=1 \
+        BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART=1 \
+        "$LOCAL_INSTALL_BINARY" upgrade --local-assets "$LOCAL_ASSETS_DIR" 2>&1)
+    LOCAL_STATUS=$?
+    set -e
+
+    if [[ $LOCAL_STATUS -eq 0 \
+        || "$LOCAL_OUTPUT" != *"--local-assets cannot update a npm-owned CLI"* \
+        || -s "$FAKE_PM_LOG" ]]; then
+        echo "FAIL local assets did not fail closed for an npm-owned installation" >&2
+        echo "$LOCAL_OUTPUT" >&2
+        echo "package-manager log:" >&2
+        cat "$FAKE_PM_LOG" >&2
+        exit 1
+    fi
+    echo "PASS local assets fail closed before contacting npm or overwriting its package tree"
+fi
+
 FAIL_INSTALL_BINARY="$TEST_ROOT/npm-failure/node_modules/@bifrost-proxy/bifrost-darwin-arm64/bin/bifrost"
 mkdir -p "$(dirname "$FAIL_INSTALL_BINARY")" "$TEST_ROOT/data-failure"
 cp "$BIFROST_BIN" "$FAIL_INSTALL_BINARY"

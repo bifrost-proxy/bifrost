@@ -8,7 +8,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgress};
 use bifrost_core::version_check::make_release_tag;
@@ -20,8 +20,9 @@ use crate::cli::AppCommands;
 
 use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::{
-    download_progress_line, handle_app_managed_upgrade, DESKTOP_MANAGED_SKIP_APP_ENV,
-    DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV, DESKTOP_UPGRADE_HANDOFF_ENV,
+    download_progress_line, handle_app_managed_upgrade, DESKTOP_MANAGED_DEFERRED_STATUS_ENV,
+    DESKTOP_MANAGED_SKIP_APP_ENV, DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV,
+    DESKTOP_UPGRADE_HANDOFF_ENV,
 };
 #[cfg(test)]
 use super::upgrade_background::{PARENT_UPGRADE_LOCK_OWNER_PID_ENV, PARENT_UPGRADE_LOCK_TOKEN_ENV};
@@ -33,6 +34,8 @@ pub(crate) use version::installed_desktop_app_is_target_version;
 #[cfg(test)]
 use version::installed_desktop_app_version;
 use version::{normalize_version, verify_installed_desktop_target_version, versions_equal};
+mod windows_msi;
+use windows_msi::*;
 
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_APP_NAME: &str = "Bifrost";
@@ -447,7 +450,11 @@ fn upgrade_cli_if_present(progress_source: &str, target_version: &str) -> Result
     Ok(())
 }
 
-fn desktop_managed_cli_upgrade_command(cli_path: &Path, target_version: &str) -> Command {
+fn desktop_managed_cli_upgrade_command(
+    cli_path: &Path,
+    target_version: &str,
+    deferred_status_path: &Path,
+) -> Command {
     let mut command = Command::new(cli_path);
     command
         .arg("upgrade")
@@ -455,11 +462,168 @@ fn desktop_managed_cli_upgrade_command(cli_path: &Path, target_version: &str) ->
         .env(DESKTOP_MANAGED_SKIP_APP_ENV, "1")
         .env(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1")
         .env(DESKTOP_MANAGED_TARGET_ENV, target_version)
+        .env(DESKTOP_MANAGED_DEFERRED_STATUS_ENV, deferred_status_path)
         .envs(
             crate::commands::upgrade_background::parent_upgrade_lock_child_environment(&data_dir()),
         )
         .stdin(Stdio::null());
+    hide_windows_console(&mut command);
     command
+}
+
+#[cfg(windows)]
+fn hide_windows_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_windows_console(_command: &mut Command) {}
+
+fn desktop_managed_deferred_status_path() -> PathBuf {
+    data_dir().join(format!(
+        ".desktop-cli-upgrade-{}.status",
+        std::process::id()
+    ))
+}
+
+#[cfg(test)]
+fn wait_for_desktop_managed_deferred_install(
+    status_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    deadline: Instant,
+    next_heartbeat: &mut Instant,
+) -> Result<(), BifrostError> {
+    wait_for_desktop_managed_deferred_install_with_mode(
+        status_path,
+        target_version,
+        progress_source,
+        deadline,
+        next_heartbeat,
+        cfg!(windows),
+        Duration::from_secs(10),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn wait_for_desktop_managed_deferred_install_with_mode(
+    status_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    deadline: Instant,
+    next_heartbeat: &mut Instant,
+    require_helper_pid: bool,
+    handshake_timeout: Duration,
+) -> Result<(), BifrostError> {
+    wait_for_desktop_managed_deferred_install_with_artifacts(
+        status_path,
+        Path::new(""),
+        Path::new(""),
+        target_version,
+        progress_source,
+        deadline,
+        next_heartbeat,
+        require_helper_pid,
+        handshake_timeout,
+        SystemTime::UNIX_EPOCH,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_for_desktop_managed_deferred_install_with_artifacts(
+    status_path: &Path,
+    legacy_ready_path: &Path,
+    legacy_log_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    deadline: Instant,
+    next_heartbeat: &mut Instant,
+    require_helper_pid: bool,
+    handshake_timeout: Duration,
+    legacy_artifact_not_before: SystemTime,
+) -> Result<(), BifrostError> {
+    let handshake_deadline = Instant::now() + handshake_timeout;
+    loop {
+        let status = fs::read_to_string(status_path).unwrap_or_default();
+        let status = status.trim();
+        match status {
+            "ok" => return Ok(()),
+            "awaiting" if !require_helper_pid => return Ok(()),
+            "pending" if !require_helper_pid => {}
+            "awaiting" | "pending" | "" => {
+                if require_helper_pid && Instant::now() >= handshake_deadline {
+                    if file_modified_at_or_after(legacy_ready_path, legacy_artifact_not_before) {
+                        return Ok(());
+                    }
+                    if file_modified_at_or_after(legacy_log_path, legacy_artifact_not_before) {
+                        let log = fs::read_to_string(legacy_log_path).unwrap_or_default();
+                        if let Some(error) = log.lines().rev().find_map(|line| {
+                            line.split_once("ERROR: ").map(|(_, error)| error.trim())
+                        }) {
+                            return Err(BifrostError::Config(format!(
+                                "legacy Windows upgrade helper failed: {error}"
+                            )));
+                        }
+                    }
+                }
+            }
+            status if status.starts_with("pending:") => {
+                let helper_pid = status
+                    .strip_prefix("pending:")
+                    .and_then(|pid| pid.parse::<u32>().ok())
+                    .ok_or_else(|| {
+                        BifrostError::Config(format!(
+                            "Windows upgrade helper wrote an invalid pending status: {status}"
+                        ))
+                    })?;
+                if !crate::process::is_process_running(helper_pid) {
+                    return Err(BifrostError::Config(format!(
+                        "Windows upgrade helper process {helper_pid} exited without publishing a terminal status"
+                    )));
+                }
+            }
+            status if let Some(error) = status.strip_prefix("error:") => {
+                return Err(BifrostError::Config(format!(
+                    "Windows upgrade helper failed: {}",
+                    error.trim()
+                )));
+            }
+            status => {
+                return Err(BifrostError::Config(format!(
+                    "Windows upgrade helper wrote an unknown status: {status}"
+                )));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(BifrostError::Config(
+                "Windows upgrade helper did not finish before the installed CLI upgrade timeout"
+                    .to_string(),
+            ));
+        }
+        if Instant::now() >= *next_heartbeat {
+            write_app_progress(
+                UpgradePhase::Installing,
+                "Waiting for Windows to replace the installed CLI…",
+                Some(target_version.to_string()),
+                progress_source,
+                None,
+                None,
+            );
+            *next_heartbeat = Instant::now() + DESKTOP_MANAGED_CLI_HEARTBEAT;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn file_modified_at_or_after(path: &Path, not_before: SystemTime) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified >= not_before)
 }
 
 fn run_desktop_managed_cli_upgrade(
@@ -468,17 +632,74 @@ fn run_desktop_managed_cli_upgrade(
     progress_source: &str,
     timeout: Duration,
 ) -> Result<std::process::ExitStatus, BifrostError> {
-    let mut child = desktop_managed_cli_upgrade_command(cli_path, target_version)
-        .spawn()
-        .map_err(BifrostError::Io)?;
+    run_desktop_managed_cli_upgrade_with_status_path(
+        cli_path,
+        target_version,
+        progress_source,
+        timeout,
+        desktop_managed_deferred_status_path(),
+    )
+}
+
+fn run_desktop_managed_cli_upgrade_with_status_path(
+    cli_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    timeout: Duration,
+    deferred_status_path: PathBuf,
+) -> Result<std::process::ExitStatus, BifrostError> {
+    if let Some(parent) = deferred_status_path.parent() {
+        fs::create_dir_all(parent).map_err(BifrostError::Io)?;
+    }
+    fs::write(&deferred_status_path, "awaiting").map_err(BifrostError::Io)?;
+    let legacy_artifact_not_before = SystemTime::now();
+    let mut child =
+        match desktop_managed_cli_upgrade_command(cli_path, target_version, &deferred_status_path)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = fs::remove_file(&deferred_status_path);
+                return Err(BifrostError::Io(error));
+            }
+        };
+    let helper_suffix = child.id().to_string();
+    let helper_dir = cli_path.parent().unwrap_or_else(|| Path::new("."));
+    let legacy_ready_path = helper_dir.join(format!(".bifrost-upgrade-{helper_suffix}.ok"));
+    let legacy_log_path = helper_dir.join(format!(".bifrost-upgrade-{helper_suffix}.log"));
+    let legacy_staging_path = legacy_deferred_staging_path(cli_path, &helper_suffix);
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
+            Ok(Some(status)) => {
+                let result = if status.success() {
+                    wait_for_desktop_managed_deferred_install_with_artifacts(
+                        &deferred_status_path,
+                        &legacy_ready_path,
+                        &legacy_log_path,
+                        target_version,
+                        progress_source,
+                        deadline,
+                        &mut next_heartbeat,
+                        cfg!(windows),
+                        Duration::from_secs(10),
+                        legacy_artifact_not_before,
+                    )
+                    .map(|()| status)
+                } else {
+                    super::upgrade::remove_windows_upgrade_file_with_retry(&legacy_staging_path)
+                        .map(|()| status)
+                };
+                let _ = fs::remove_file(&deferred_status_path);
+                let _ = fs::remove_file(&legacy_ready_path);
+                return result;
+            }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = fs::remove_file(&deferred_status_path);
+                super::upgrade::remove_windows_upgrade_file_with_retry(&legacy_staging_path)?;
                 return Err(BifrostError::Config(format!(
                     "installed CLI upgrade timed out after {} seconds",
                     timeout.as_secs()
@@ -501,6 +722,14 @@ fn run_desktop_managed_cli_upgrade(
             Err(error) => return Err(BifrostError::Io(error)),
         }
     }
+}
+
+fn legacy_deferred_staging_path(cli_path: &Path, helper_suffix: &str) -> PathBuf {
+    let file_name = cli_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bifrost.exe");
+    cli_path.with_file_name(format!(".{file_name}.pending.{helper_suffix}"))
 }
 
 fn verify_installed_cli_target_version(
@@ -558,15 +787,16 @@ fn read_installed_cli_version_with_timeout(
 ) -> Result<String, BifrostError> {
     let mut stdout =
         tempfile::tempfile().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
-    let mut child = Command::new(cli_path)
+    let mut command = Command::new(cli_path);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
             BifrostError::Io(std::io::Error::other(error))
         })?))
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(BifrostError::Io)?;
+        .stderr(Stdio::null());
+    hide_windows_console(&mut command);
+    let mut child = command.spawn().map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -576,7 +806,7 @@ fn read_installed_cli_version_with_timeout(
                 let _ = child.wait();
                 return Err(BifrostError::Config(format!(
                     "installed CLI version verification timed out after {} seconds",
-                    timeout.as_secs()
+                    timeout.as_secs_f64()
                 )));
             }
             Ok(None) => thread::sleep(Duration::from_millis(25)),
@@ -598,16 +828,43 @@ fn find_standalone_cli_install() -> Option<PathBuf> {
     let current_exe = env::current_exe()
         .ok()
         .map(|path| fs::canonicalize(&path).unwrap_or(path));
+    standalone_cli_candidates().into_iter().find(|candidate| {
+        if !candidate.is_file() {
+            return false;
+        }
+        let canonical = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.clone());
+        current_exe
+            .as_ref()
+            .map(|current| &canonical != current)
+            .unwrap_or(true)
+    })
+}
+
+fn standalone_cli_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+
+    // Prefer Bifrost's documented install locations over arbitrary PATH entries.
+    // Developer toolchains and old manual installs commonly leave another
+    // `bifrost` earlier on PATH; the desktop updater must not upgrade that copy
+    // while leaving the official standalone CLI stale.
+    if let Some(dir) = env::var_os("BIFROST_INSTALL_DIR") {
+        candidates.push(PathBuf::from(dir).join(cli_binary_name()));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local_app_data).join("bifrost/bin/bifrost.exe"));
+        }
+        if let Some(user_profile) = env::var_os("USERPROFILE") {
+            candidates.push(PathBuf::from(user_profile).join(".local/bin/bifrost.exe"));
+        }
+    }
 
     if let Some(paths) = env::var_os("PATH") {
         for dir in env::split_paths(&paths) {
             candidates.push(dir.join(cli_binary_name()));
         }
-    }
-
-    if let Some(dir) = env::var_os("BIFROST_INSTALL_DIR") {
-        candidates.push(PathBuf::from(dir).join(cli_binary_name()));
     }
 
     #[cfg(unix)]
@@ -622,26 +879,7 @@ fn find_standalone_cli_install() -> Option<PathBuf> {
         candidates.push(PathBuf::from("/usr/local/bin/bifrost"));
     }
 
-    #[cfg(windows)]
-    {
-        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-            candidates.push(PathBuf::from(local_app_data).join("bifrost/bin/bifrost.exe"));
-        }
-        if let Some(user_profile) = env::var_os("USERPROFILE") {
-            candidates.push(PathBuf::from(user_profile).join(".local/bin/bifrost.exe"));
-        }
-    }
-
-    candidates.into_iter().find(|candidate| {
-        if !candidate.is_file() {
-            return false;
-        }
-        let canonical = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.clone());
-        current_exe
-            .as_ref()
-            .map(|current| &canonical != current)
-            .unwrap_or(true)
-    })
+    candidates
 }
 
 fn cli_binary_name() -> &'static str {
@@ -690,8 +928,8 @@ fn uninstall_app(app_dir: Option<PathBuf>, dry_run: bool, _yes: bool) -> Result<
             return Ok(());
         }
 
-        if let Some(product_code) = find_windows_msi_product_code_for_install_dir(&install_dir) {
-            run_windows_msi_uninstall(&product_code)?;
+        if let Some(registration) = find_windows_msi_registration_for_install_dir(&install_dir) {
+            run_windows_msi_uninstall(&registration.product_code, registration.scope)?;
             println!("{}", "✓ Desktop app uninstalled.".bright_green());
             return Ok(());
         }
@@ -955,7 +1193,7 @@ fn install_desktop_package(
     match extension.as_str() {
         "dmg" => install_macos_dmg(package, install_path, target_version, progress_source),
         "exe" => run_windows_installer(package, &["/S"], target_version, progress_source),
-        "msi" => run_windows_msi(package, target_version, progress_source),
+        "msi" => run_windows_msi(package, install_dir, target_version, progress_source),
         "zip" => install_windows_zip(package, install_path),
         _ => Err(BifrostError::Config(format!(
             "unsupported desktop package type: {}",
@@ -1120,262 +1358,6 @@ fn clear_macos_xattrs(path: &Path) {
 
 #[cfg(not(target_os = "macos"))]
 fn clear_macos_xattrs(_path: &Path) {}
-
-#[cfg(target_os = "windows")]
-fn run_windows_installer(
-    package: &Path,
-    args: &[&str],
-    target_version: &str,
-    progress_source: &str,
-) -> Result<(), BifrostError> {
-    let mut command = Command::new(package);
-    command.args(args);
-    let status = run_desktop_install_command(command, target_version, progress_source)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(BifrostError::Config(format!(
-            "desktop installer exited with status {status}"
-        )))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn run_windows_installer(
-    _package: &Path,
-    _args: &[&str],
-    _target_version: &str,
-    _progress_source: &str,
-) -> Result<(), BifrostError> {
-    Err(BifrostError::Config(
-        "Windows desktop packages can only be installed on Windows".to_string(),
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn run_windows_msi(
-    package: &Path,
-    target_version: &str,
-    progress_source: &str,
-) -> Result<(), BifrostError> {
-    let log_path = windows_msi_log_path(package);
-    let args = windows_msi_install_args(package, &log_path);
-    let mut command = Command::new("msiexec");
-    command.args(&args);
-    let status = run_desktop_install_command(command, target_version, progress_source)?;
-    if status.success() {
-        let _ = fs::remove_file(&log_path);
-        Ok(())
-    } else {
-        let log_summary = read_windows_msi_log_summary(&log_path);
-        Err(BifrostError::Config(format!(
-            "msiexec exited with status {status}; log: {}{}",
-            log_path.display(),
-            log_summary
-                .map(|summary| format!("; {summary}"))
-                .unwrap_or_default()
-        )))
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn run_windows_msi_uninstall(product_code: &str) -> Result<(), BifrostError> {
-    let log_path = env::temp_dir().join(format!(
-        "bifrost-desktop-msi-uninstall-{}-{}.log",
-        std::process::id(),
-        product_code.trim_matches(|ch| ch == '{' || ch == '}')
-    ));
-    let args = windows_msi_uninstall_args(product_code, &log_path);
-    let status = Command::new("msiexec")
-        .args(&args)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(BifrostError::Io)?;
-    if status.success() {
-        let _ = fs::remove_file(&log_path);
-        Ok(())
-    } else {
-        let log_summary = read_windows_msi_log_summary(&log_path);
-        Err(BifrostError::Config(format!(
-            "msiexec uninstall exited with status {status}; log: {}{}",
-            log_path.display(),
-            log_summary
-                .map(|summary| format!("; {summary}"))
-                .unwrap_or_default()
-        )))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn run_windows_msi(
-    _package: &Path,
-    _target_version: &str,
-    _progress_source: &str,
-) -> Result<(), BifrostError> {
-    Err(BifrostError::Config(
-        "MSI desktop packages can only be installed on Windows".to_string(),
-    ))
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_msi_install_args(package: &Path, log_path: &Path) -> Vec<OsString> {
-    [
-        OsString::from("/i"),
-        package.as_os_str().to_os_string(),
-        OsString::from("/qn"),
-        OsString::from("/norestart"),
-        // Tauri's WiX bundle sets ALLUSERS=1 by default, which makes silent
-        // installs require elevation. The CLI installs into the current user's
-        // LocalAppData path, so force MSI into a per-user install context.
-        OsString::from("ALLUSERS=2"),
-        OsString::from("MSIINSTALLPERUSER=1"),
-        OsString::from("/l*v"),
-        log_path.as_os_str().to_os_string(),
-    ]
-    .into()
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_msi_uninstall_args(product_code: &str, log_path: &Path) -> Vec<OsString> {
-    [
-        OsString::from("/x"),
-        OsString::from(product_code),
-        OsString::from("/qn"),
-        OsString::from("/norestart"),
-        OsString::from("ALLUSERS=2"),
-        OsString::from("MSIINSTALLPERUSER=1"),
-        OsString::from("/l*v"),
-        log_path.as_os_str().to_os_string(),
-    ]
-    .into()
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_msi_log_path(package: &Path) -> PathBuf {
-    let package_name = package
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("desktop")
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    env::temp_dir().join(format!(
-        "bifrost-desktop-msi-{}-{package_name}.log",
-        std::process::id()
-    ))
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn read_windows_msi_log_summary(log_path: &Path) -> Option<String> {
-    let contents = fs::read_to_string(log_path).ok()?;
-    let interesting = contents
-        .lines()
-        .rev()
-        .find(|line| {
-            line.contains("Error ")
-                || line.contains("Return value 3")
-                || line.contains("Installation failed")
-                || line.contains("Product: Bifrost")
-        })
-        .map(str::trim)
-        .filter(|line| !line.is_empty())?;
-    Some(format!("MSI detail: {interesting}"))
-}
-
-#[cfg(target_os = "windows")]
-fn find_windows_msi_product_code_for_install_dir(install_dir: &Path) -> Option<String> {
-    const UNINSTALL_HIVES: [&str; 2] = [
-        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
-        r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall",
-    ];
-
-    let expected_install_dir = normalize_windows_path_for_compare(install_dir);
-    for hive in UNINSTALL_HIVES {
-        let output = Command::new("reg")
-            .args(["query", hive, "/s"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            continue;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(product_code) =
-            parse_windows_msi_product_code_for_install_dir(&stdout, &expected_install_dir)
-        {
-            return Some(product_code);
-        }
-    }
-    None
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn parse_windows_msi_product_code_for_install_dir(
-    reg_output: &str,
-    expected_install_dir: &str,
-) -> Option<String> {
-    let mut display_name = None;
-    let mut uninstall_string = None;
-    let mut install_location = None;
-
-    for line in reg_output.lines().chain(std::iter::once("")) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("HKEY_") {
-            if display_name.as_deref() == Some(WINDOWS_APP_NAME)
-                && install_location
-                    .as_deref()
-                    .map(normalize_windows_path_for_compare_str)
-                    .as_deref()
-                    == Some(expected_install_dir)
-            {
-                if let Some(product_code) = uninstall_string
-                    .as_deref()
-                    .and_then(extract_msi_product_code)
-                {
-                    return Some(product_code);
-                }
-            }
-            display_name = None;
-            uninstall_string = None;
-            install_location = None;
-            continue;
-        }
-
-        if let Some(value) = parse_reg_value(trimmed, "DisplayName") {
-            display_name = Some(value.to_string());
-        } else if let Some(value) = parse_reg_value(trimmed, "UninstallString") {
-            uninstall_string = Some(value.to_string());
-        } else if let Some(value) = parse_reg_value(trimmed, "InstallLocation") {
-            install_location = Some(value.to_string());
-        }
-    }
-
-    None
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn parse_reg_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    let rest = line.strip_prefix(key)?.trim_start();
-    let rest = rest.strip_prefix("REG_SZ")?.trim_start();
-    Some(rest.trim())
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn extract_msi_product_code(uninstall_string: &str) -> Option<String> {
-    let start = uninstall_string.find('{')?;
-    let end = uninstall_string[start..].find('}')? + start;
-    let product_code = &uninstall_string[start..=end];
-    if product_code.len() == 38 {
-        Some(product_code.to_string())
-    } else {
-        None
-    }
-}
 
 #[cfg(any(target_os = "windows", test))]
 fn normalize_windows_path_for_compare(path: &Path) -> String {

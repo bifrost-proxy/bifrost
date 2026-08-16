@@ -4287,6 +4287,9 @@ mod coverage_boost {
 
     #[test]
     fn command_succeeds_handles_existing_and_missing_commands() {
+        #[cfg(windows)]
+        assert!(command_succeeds("cmd", &["/C", "exit", "0"]));
+        #[cfg(not(windows))]
         assert!(command_succeeds("true", &[]));
         assert!(!command_succeeds("definitely-not-a-command", &[]));
     }

@@ -345,12 +345,27 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         include_str!("../restart.rs")
     );
     for contract in [
-        "update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;",
+        "windows_deferred_desktop_companion_executable(&deferred_install)",
         "stop_tray_helper_before_windows_deferred_install(&data_dir);",
         "Wait-TargetPathWritable $TargetPath 120",
-        "Copy-Item -LiteralPath $TargetPath -Destination $backupPath -Force",
+        "function Invoke-FileOperationWithRetry",
+        "Invoke-FileOperationWithRetry \"removing old CLI\"",
+        "Invoke-FileOperationWithRetry \"installing replacement CLI\"",
+        "Invoke-FileOperationWithRetry \"restoring previous CLI\"",
+        "Invoke-FileOperationWithRetry \"removing failed replacement staging file\"",
+        "schedule_windows_deferred_install_via_staged_binary(",
+        ".stdout(Stdio::null())",
+        ".stderr(Stdio::null())",
+        "spawn_windows_upgrade_handoff_with_retry(|| command.spawn())",
+        "wait_for_windows_upgrade_handoff_ready_with(",
+        "[System.IO.File]::WriteAllText($HandoffReadyPath, \"scheduled\", $utf8NoBom)",
+        "validate_windows_upgrade_handoff_request(",
+        "schedule_windows_deferred_install_inner(",
+        "cleanup_staged_binary_after_schedule(&deferred_install.staged_binary, result)",
         "installed CLI reports '$versionOutput' instead of target",
         "restored previous CLI after replacement failure",
+        "foreach ($cleanupPath in @($RestartArgsPath, $ReadyPath, $HandoffReadyPath, $PSCommandPath))",
+        "Remove-Item -LiteralPath $LogPath -Force -ErrorAction SilentlyContinue",
         "[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)",
         "$ProgressPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))",
         "for ($attempt = 0; $attempt -lt 100; $attempt++)",
@@ -367,11 +382,82 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "if ($PublishProgress -eq 0)",
         ".arg(\"-PublishProgress\")",
         "mark_deferred_install_scheduled();",
+        "Write-DeferredStatus \"ok\"",
+        "Write-DeferredStatus \"error: $errorMessage\"",
+        "Write-DeferredStatus \"pending:$PID\"",
+        "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
+        "Invoke-FileOperationWithRetry \"removing helper scratch file\"",
+        "command.creation_flags(CREATE_NO_WINDOW)",
         "Write-UpgradeProgress \"completed\" \"Upgrade complete\" $null",
         "Write-UpgradeProgress \"failed\" \"Upgrade failed\" $errorMessage",
     ] {
         assert!(source.contains(contract), "missing contract: {contract}");
     }
+    assert!(
+        !source.contains("spawn_windows_upgrade_handoff_with_retry(|| command.output())")
+            && !source.contains("spawn_windows_upgrade_handoff_with_retry(|| command.status())"),
+        "Windows staged handoff must not wait for the child or inherited descendant pipe handles"
+    );
+}
+
+#[test]
+fn failed_windows_helper_schedule_removes_staged_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let staged = dir.path().join(".bifrost.exe.pending.1234");
+    std::fs::write(&staged, b"replacement").expect("write staged binary");
+
+    let error = cleanup_staged_binary_after_schedule::<()>(
+        &staged,
+        Err(BifrostError::Config("helper setup failed".to_string())),
+    )
+    .expect_err("schedule error remains visible");
+
+    assert!(error.to_string().contains("helper setup failed"));
+    assert!(!staged.exists(), "failed scheduling must not leak staging");
+}
+
+#[test]
+fn successful_windows_helper_schedule_transfers_staging_ownership() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let staged = dir.path().join(".bifrost.exe.pending.1234");
+    std::fs::write(&staged, b"replacement").expect("write staged binary");
+
+    cleanup_staged_binary_after_schedule(&staged, Ok(())).expect("successful schedule");
+
+    assert!(staged.exists(), "spawned helper owns the staged binary");
+}
+
+#[test]
+fn failed_windows_helper_schedule_preserves_setup_and_cleanup_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let error = cleanup_staged_binary_after_schedule::<()>(
+        dir.path(),
+        Err(BifrostError::Config("helper setup failed".to_string())),
+    )
+    .expect_err("cleanup failure remains visible with the setup failure");
+
+    let message = error.to_string();
+    assert!(message.contains("helper setup failed"));
+    assert!(message.contains("additionally failed to clean staged Windows upgrade binary"));
+}
+
+#[test]
+fn windows_helper_artifact_cleanup_attempts_every_path_before_returning_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let removable = dir.path().join("removable.args");
+    std::fs::write(&removable, "restart args").expect("write removable fixture");
+
+    let error = cleanup_windows_upgrade_artifacts(&[dir.path(), &removable])
+        .expect_err("a directory cannot be removed with remove_file");
+
+    assert!(error
+        .to_string()
+        .contains(&dir.path().display().to_string()));
+    assert!(
+        !removable.exists(),
+        "later artifacts must still be cleaned after an earlier failure"
+    );
 }
 #[test]
 fn background_upgrade_restarts_when_disk_binary_is_already_latest() {

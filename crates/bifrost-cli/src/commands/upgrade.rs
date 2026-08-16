@@ -1,6 +1,8 @@
 mod desktop_companion;
 mod external_worker;
 mod install_method;
+mod local_assets;
+mod tuning;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use desktop_companion::DESKTOP_UPGRADE_SHUTDOWN_ARG;
 use desktop_companion::*;
@@ -9,6 +11,10 @@ pub(crate) use desktop_companion::{
     shutdown_running_desktop_for_app_upgrade,
 };
 use install_method::*;
+use local_assets::*;
+use tuning::DownloadTuning;
+#[cfg(test)]
+use tuning::{parse_positive_u64, parse_positive_usize};
 
 use bifrost_core::BifrostError;
 use colored::Colorize;
@@ -50,6 +56,15 @@ const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 30;
 const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
 const UPGRADE_COMMAND_SPAWN_MAX_ATTEMPTS: u32 = 8;
 const UPGRADE_COMMAND_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
+// Antivirus and indexers can retain handles to a freshly copied executable for
+// substantially longer than an ordinary sharing-conflict retry. Keep cleanup
+// bounded, but allow roughly 34 seconds so a failed upgrade does not leave a
+// staged executable or helper scratch files behind.
+const WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS: usize = 480;
+#[cfg(windows)]
+const WINDOWS_UPGRADE_HANDOFF_READY_MAX_ATTEMPTS: usize = 400;
+#[cfg(any(windows, test))]
+const WINDOWS_UPGRADE_HANDOFF_READY_POLL_MS: u64 = 25;
 #[cfg(unix)]
 const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
@@ -67,10 +82,56 @@ pub(crate) const DESKTOP_MANAGED_SKIP_RESTART_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART";
 pub(crate) const DESKTOP_MANAGED_TARGET_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION";
+pub(crate) const DESKTOP_MANAGED_DEFERRED_STATUS_ENV: &str =
+    "BIFROST_DESKTOP_MANAGED_DEFERRED_STATUS";
 pub(crate) const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
 pub(crate) const WEBVIEW_UPGRADE_ORIGIN_ENV: &str = "BIFROST_WEBVIEW_UPGRADE_ORIGIN_INTERNAL";
 static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
 static DESKTOP_HANDOFF_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn remove_windows_upgrade_file_with_retry(path: &Path) -> Result<(), BifrostError> {
+    remove_windows_upgrade_file_with(
+        path,
+        |candidate| fs::remove_file(candidate),
+        thread::sleep,
+        cfg!(windows),
+    )
+}
+
+fn remove_windows_upgrade_file_with<Remove, Sleep>(
+    path: &Path,
+    mut remove: Remove,
+    mut sleep: Sleep,
+    retry_sharing_errors: bool,
+) -> Result<(), BifrostError>
+where
+    Remove: FnMut(&Path) -> io::Result<()>,
+    Sleep: FnMut(Duration),
+{
+    for attempt in 0..WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if retry_sharing_errors
+                    && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                    && attempt + 1 < WINDOWS_UPGRADE_CLEANUP_MAX_ATTEMPTS =>
+            {
+                sleep(Duration::from_millis(25 + (attempt as u64 % 10) * 10));
+            }
+            Err(error) => {
+                return Err(BifrostError::Io(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to clean Windows upgrade artifact {}: {error}",
+                        path.display()
+                    ),
+                )))
+            }
+        }
+    }
+    unreachable!("bounded cleanup loop always returns")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimedCommandStatus {
@@ -145,7 +206,7 @@ enum UpgradeInstallOutcome {
     DeferredWindows(WindowsDeferredInstall),
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowsDeferredInstall {
     staged_binary: PathBuf,
@@ -153,12 +214,11 @@ struct WindowsDeferredInstall {
     target_version: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DownloadTuning {
-    connect_timeout_secs: u64,
-    download_timeout_secs: u64,
-    mirror_probe_timeout_secs: u64,
-    download_tries: usize,
+#[cfg(any(windows, test))]
+fn windows_deferred_desktop_companion_executable(
+    deferred_install: &WindowsDeferredInstall,
+) -> &Path {
+    &deferred_install.staged_binary
 }
 
 pub(crate) fn take_deferred_install_scheduled() -> bool {
@@ -180,59 +240,6 @@ fn mark_desktop_handoff_scheduled() {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn mark_deferred_install_scheduled() {
     DEFERRED_INSTALL_SCHEDULED.store(true, Ordering::SeqCst);
-}
-
-impl Default for DownloadTuning {
-    fn default() -> Self {
-        Self {
-            connect_timeout_secs: DOWNLOAD_CONNECT_TIMEOUT_SECS,
-            download_timeout_secs: DOWNLOAD_TIMEOUT_SECS,
-            mirror_probe_timeout_secs: MIRROR_PROBE_TIMEOUT_SECS,
-            download_tries: DOWNLOAD_TRIES,
-        }
-    }
-}
-
-impl DownloadTuning {
-    fn from_env() -> Self {
-        Self {
-            connect_timeout_secs: positive_env_u64(
-                "BIFROST_DOWNLOAD_CONNECT_TIMEOUT",
-                DOWNLOAD_CONNECT_TIMEOUT_SECS,
-            ),
-            download_timeout_secs: positive_env_u64(
-                "BIFROST_DOWNLOAD_TIMEOUT",
-                DOWNLOAD_TIMEOUT_SECS,
-            ),
-            mirror_probe_timeout_secs: positive_env_u64(
-                "BIFROST_MIRROR_PROBE_TIMEOUT",
-                MIRROR_PROBE_TIMEOUT_SECS,
-            ),
-            download_tries: positive_env_usize("BIFROST_DOWNLOAD_TRIES", DOWNLOAD_TRIES),
-        }
-    }
-}
-
-fn parse_positive_u64(value: Option<&str>, default: u64) -> u64 {
-    value
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
-fn parse_positive_usize(value: Option<&str>, default: usize) -> usize {
-    value
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
-fn positive_env_u64(name: &str, default: u64) -> u64 {
-    parse_positive_u64(env::var(name).ok().as_deref(), default)
-}
-
-fn positive_env_usize(name: &str, default: usize) -> usize {
-    parse_positive_usize(env::var(name).ok().as_deref(), default)
 }
 
 fn get_target_triple() -> Option<&'static str> {
@@ -1212,13 +1219,18 @@ pub(crate) fn handle_background_upgrade(
     handle_upgrade_inner(UpgradeBehavior::background(), target_version)
 }
 
-pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
-    if external_worker::is_external_cli_worker() {
+pub fn handle_upgrade(_yes: bool, local_assets: Option<PathBuf>) -> Result<(), BifrostError> {
+    let local_assets = LocalUpgradeContext::prepare(local_assets)?;
+    if local_assets.is_active() {
+        ensure_local_assets_install_method_is_safe(&detect_install_method())?;
+    }
+    if external_worker::is_external_cli_worker() && !local_assets.is_active() {
         return external_worker::delegate_upgrade();
     }
 
     let skip_app = env_flag(DESKTOP_MANAGED_SKIP_APP_ENV);
     let skip_restart = env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV);
+    local_assets.require_desktop_package_if_needed(skip_app)?;
     let pinned_target = env::var(DESKTOP_MANAGED_TARGET_ENV).ok();
     let data_dir = get_bifrost_dir()?;
     let managed_child = super::upgrade_background::parent_upgrade_lock_is_valid(&data_dir)
@@ -1260,6 +1272,14 @@ fn env_flag(name: &str) -> bool {
     env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
+}
+
+fn companion_target_without_cli_upgrade<'a>(current: &'a str, discovered: &'a str) -> &'a str {
+    if is_newer_version(current, discovered) {
+        discovered
+    } else {
+        current
+    }
 }
 
 fn handle_upgrade_inner(
@@ -1348,7 +1368,13 @@ fn handle_upgrade_inner(
             .bright_green()
             .bold()
         );
-        return finish_already_latest_upgrade(&cache.latest_version, behavior);
+        // A fallback source can legitimately know only an older release. The
+        // CLI is already newer in that case, so companion convergence must use
+        // the running version instead of downgrading the desktop app.
+        return finish_already_latest_upgrade(
+            companion_target_without_cli_upgrade(current_version, &cache.latest_version),
+            behavior,
+        );
     }
 
     print_update_info(current_version, &cache);
@@ -1429,11 +1455,16 @@ fn handle_upgrade_inner(
         #[cfg(windows)]
         UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
             // The helper cannot replace the running CLI until this process
-            // exits, but the installed App can and must be brought to the same
-            // pinned target before we schedule that handoff. Otherwise Windows
-            // would report a completed CLI update while silently leaving the
-            // App on the old version.
-            update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;
+            // exits. Run the App companion from the staged replacement binary,
+            // not from the still-running old target: the App update may depend
+            // on fixes that only exist in the version being installed. After
+            // that child exits, the same staged binary remains available for
+            // the CLI handoff.
+            update_desktop_companion(
+                windows_deferred_desktop_companion_executable(&deferred_install),
+                &cache.latest_version,
+                behavior,
+            )?;
             maybe_restart_running_proxy_after_windows_deferred_install(
                 deferred_install,
                 behavior.restart_proxy,
@@ -1445,6 +1476,8 @@ fn handle_upgrade_inner(
 }
 
 mod restart;
+#[cfg_attr(not(windows), allow(unused_imports))]
+pub(crate) use restart::handle_windows_upgrade_handoff;
 use restart::*;
 
 #[cfg(test)]

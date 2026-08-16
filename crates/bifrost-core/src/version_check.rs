@@ -8,6 +8,7 @@ pub const GITHUB_RELEASES_API_URL: &str =
     "https://api.github.com/repos/bifrost-proxy/bifrost/releases/latest";
 pub const GITHUB_RELEASES_API_LIST_URL: &str =
     "https://api.github.com/repos/bifrost-proxy/bifrost/releases";
+pub const GITHUB_RELEASES_HTML_URL: &str = "https://github.com/bifrost-proxy/bifrost/releases";
 const GITHUB_RELEASE_API_URLS: (&str, &str) =
     (GITHUB_RELEASES_API_URL, GITHUB_RELEASES_API_LIST_URL);
 pub const GITHUB_TAGS_API_URL: &str = "https://api.github.com/repos/bifrost-proxy/bifrost/tags";
@@ -17,6 +18,7 @@ const HIGHLIGHTS_TIMEOUT_SECS: u64 = 5;
 pub const MAX_RETRIES: u32 = 2;
 pub const RETRY_DELAY_MS: u64 = 500;
 pub const GITHUB_RELEASES_PER_PAGE: usize = 100;
+const GITHUB_RELEASES_HTML_MAX_PAGES: usize = 20;
 const MAX_RELEASE_HIGHLIGHTS: usize = 50;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -39,6 +41,12 @@ pub struct GitHubRelease {
 #[derive(Debug, Deserialize)]
 pub struct GitHubTag {
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseChannel {
+    Stable,
+    Prerelease(String),
 }
 
 #[derive(Debug)]
@@ -103,14 +111,129 @@ pub fn stable_bifrost_release_version(release: &GitHubRelease) -> Option<String>
     (!version.contains('-')).then_some(version)
 }
 
-pub fn pick_latest_bifrost_release(releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
+fn decode_msi_prerelease(value: u32) -> Option<(&'static str, u32)> {
+    match value {
+        10_000..=19_999 => Some(("alpha", value - 10_000)),
+        20_000..=29_999 => Some(("beta", value - 20_000)),
+        30_000..=39_999 => Some(("rc", value - 30_000)),
+        _ => None,
+    }
+}
+
+fn canonical_release_version(version: &str) -> String {
+    let normalized = version.trim().trim_start_matches('v');
+
+    let msi_parts: Vec<_> = normalized.split('.').collect();
+    if msi_parts.len() == 4
+        && msi_parts.iter().all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        })
+    {
+        if let Ok(encoded) = msi_parts[3].parse::<u32>() {
+            if let Some((channel, sequence)) = decode_msi_prerelease(encoded) {
+                let core = msi_parts[..3].join(".");
+                return if sequence == 0 {
+                    format!("{core}-{channel}")
+                } else {
+                    format!("{core}-{channel}.{sequence}")
+                };
+            }
+        }
+    }
+
+    if let Some((core, prerelease)) = normalized.split_once('-') {
+        if let Ok(encoded) = prerelease.parse::<u32>() {
+            if let Some((channel, sequence)) = decode_msi_prerelease(encoded) {
+                return if sequence == 0 {
+                    format!("{core}-{channel}")
+                } else {
+                    format!("{core}-{channel}.{sequence}")
+                };
+            }
+        }
+
+        let first_end = prerelease.find(['.', '-']).unwrap_or(prerelease.len());
+        let first = &prerelease[..first_end];
+        let label_end = first
+            .find(|character: char| !character.is_ascii_alphabetic())
+            .unwrap_or(first.len());
+        if label_end > 0
+            && label_end < first.len()
+            && first[label_end..]
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
+            return format!(
+                "{core}-{}.{}{}",
+                &first[..label_end],
+                &first[label_end..],
+                &prerelease[first_end..]
+            );
+        }
+    }
+
+    normalized.to_string()
+}
+
+pub fn release_channel(version: &str) -> ReleaseChannel {
+    let canonical = canonical_release_version(version);
+    let version = canonical.as_str();
+    let Some((_, prerelease)) = version.split_once('-') else {
+        return ReleaseChannel::Stable;
+    };
+    let first = prerelease.split(['.', '-']).next().unwrap_or_default();
+    let label_end = first
+        .find(|ch: char| !ch.is_ascii_alphabetic())
+        .unwrap_or(first.len());
+    let label = first[..label_end].to_ascii_lowercase();
+    if label.is_empty() {
+        ReleaseChannel::Prerelease(prerelease.to_ascii_lowercase())
+    } else {
+        ReleaseChannel::Prerelease(label)
+    }
+}
+
+pub fn same_release_channel(current: &str, candidate: &str) -> bool {
+    let current = canonical_release_version(current);
+    let candidate = canonical_release_version(candidate);
+    semver::Version::parse(&current).is_ok()
+        && semver::Version::parse(&candidate).is_ok()
+        && release_channel(&current) == release_channel(&candidate)
+}
+
+fn release_version_for_channel(
+    release: &GitHubRelease,
+    channel: &ReleaseChannel,
+) -> Option<String> {
+    if release.draft {
+        return None;
+    }
+    let version = bifrost_version_from_release_tag(&release.tag_name)?;
+    match channel {
+        ReleaseChannel::Stable => {
+            (!release.prerelease && !version.contains('-')).then_some(version)
+        }
+        ReleaseChannel::Prerelease(_) => {
+            (release.prerelease && release_channel(&version) == *channel).then_some(version)
+        }
+    }
+}
+
+pub fn pick_latest_bifrost_release_for_channel(
+    releases: Vec<GitHubRelease>,
+    channel: &ReleaseChannel,
+) -> Option<GitHubRelease> {
     releases
         .into_iter()
         .filter_map(|release| {
-            stable_bifrost_release_version(&release).map(|version| (release, version))
+            release_version_for_channel(&release, channel).map(|version| (release, version))
         })
         .max_by(|(_, a), (_, b)| compare_versions(a, b))
         .map(|(release, _)| release)
+}
+
+pub fn pick_latest_bifrost_release(releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
+    pick_latest_bifrost_release_for_channel(releases, &ReleaseChannel::Stable)
 }
 
 pub fn github_releases_api_list_url(page: usize) -> String {
@@ -124,11 +247,53 @@ fn github_releases_api_list_url_from(base_url: &str, page: usize) -> String {
     )
 }
 
+fn github_releases_html_page_url_from(base_url: &str, page: usize) -> String {
+    if page <= 1 {
+        return base_url.to_string();
+    }
+    let separator = if base_url.contains('?') { '&' } else { '?' };
+    format!("{base_url}{separator}page={page}")
+}
+
+fn release_versions_from_html(html: &str) -> Vec<String> {
+    const RELEASE_TAG_MARKER: &str = "/bifrost-proxy/bifrost/releases/tag/";
+    let mut versions = Vec::new();
+    let mut remaining = html;
+    while let Some(offset) = remaining.find(RELEASE_TAG_MARKER) {
+        let tag_start = offset + RELEASE_TAG_MARKER.len();
+        let tag_tail = &remaining[tag_start..];
+        let tag_end = tag_tail
+            .find(|character: char| {
+                character.is_ascii_whitespace()
+                    || matches!(character, '"' | '\'' | '<' | '>' | '?' | '#')
+            })
+            .unwrap_or(tag_tail.len());
+        let tag = &tag_tail[..tag_end];
+        if let Some(version) = bifrost_version_from_release_tag(tag) {
+            if !versions.contains(&version) {
+                versions.push(version);
+            }
+        }
+        remaining = &tag_tail[tag_end..];
+    }
+    versions
+}
+
+fn pick_latest_release_version_from_html_for_channel(
+    html: &str,
+    channel: &ReleaseChannel,
+) -> Option<String> {
+    release_versions_from_html(html)
+        .into_iter()
+        .filter(|version| release_channel(version) == *channel)
+        .max_by(|left, right| compare_versions(left, right))
+}
+
 fn published_release_request_error(error: &GithubRequestError) -> FetchError {
     if matches!(error, GithubRequestError::Status(status) if *status == reqwest::StatusCode::FORBIDDEN)
     {
         FetchError::Network(
-            "all release-based version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string(),
+            "GitHub releases API rate limited the unauthenticated request".to_string(),
         )
     } else {
         let reason = classify_github_request_error(error);
@@ -136,9 +301,53 @@ fn published_release_request_error(error: &GithubRequestError) -> FetchError {
     }
 }
 
+fn fetch_latest_release_from_html_sync_for_channel(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    channel: &ReleaseChannel,
+) -> Result<(String, Vec<String>), FetchError> {
+    for page in 1..=GITHUB_RELEASES_HTML_MAX_PAGES {
+        let url = github_releases_html_page_url_from(base_url, page);
+        let response = fetch_with_retry(client, &url).map_err(|error| {
+            let reason = classify_github_request_error(&error);
+            FetchError::Network(format!(
+                "GitHub releases HTML fallback failed: {reason}: {error}"
+            ))
+        })?;
+        let html = response.text().map_err(|error| {
+            FetchError::Parse(format!(
+                "failed to read GitHub releases HTML page {page}: {error}"
+            ))
+        })?;
+        let versions = release_versions_from_html(&html);
+        if versions.is_empty() {
+            break;
+        }
+        if let Some(version) = pick_latest_release_version_from_html_for_channel(&html, channel) {
+            return Ok((version, Vec::new()));
+        }
+    }
+
+    let label = match channel {
+        ReleaseChannel::Stable => "stable",
+        ReleaseChannel::Prerelease(label) => label,
+    };
+    Err(FetchError::Parse(format!(
+        "no published Bifrost releases found in releases HTML for channel {label}"
+    )))
+}
+
 fn fetch_latest_published_release_sync(
     client: &reqwest::blocking::Client,
     base_url: &str,
+) -> Result<(String, Vec<String>), FetchError> {
+    fetch_latest_published_release_sync_for_channel(client, base_url, &ReleaseChannel::Stable)
+}
+
+fn fetch_latest_published_release_sync_for_channel(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    channel: &ReleaseChannel,
 ) -> Result<(String, Vec<String>), FetchError> {
     let mut published_releases = Vec::new();
     let mut page = 1;
@@ -167,11 +376,18 @@ fn fetch_latest_published_release_sync(
         page += 1;
     }
 
-    let release = pick_latest_bifrost_release(published_releases).ok_or_else(|| {
-        FetchError::Parse("no published stable Bifrost releases found".to_string())
-    })?;
-    let version = stable_bifrost_release_version(&release)
-        .expect("published release picker only returns stable Bifrost releases");
+    let release =
+        pick_latest_bifrost_release_for_channel(published_releases, channel).ok_or_else(|| {
+            let message = match channel {
+                ReleaseChannel::Stable => "no published stable Bifrost releases found".to_string(),
+                ReleaseChannel::Prerelease(label) => {
+                    format!("no published Bifrost releases found for prerelease channel {label}")
+                }
+            };
+            FetchError::Parse(message)
+        })?;
+    let version = release_version_for_channel(&release, channel)
+        .expect("published release picker only returns releases from the requested channel");
     let highlights = parse_release_highlights(release.body.as_deref());
     Ok((version, highlights))
 }
@@ -179,6 +395,15 @@ fn fetch_latest_published_release_sync(
 async fn fetch_latest_published_release_async(
     client: &reqwest::Client,
     base_url: &str,
+) -> Option<(String, Vec<String>)> {
+    fetch_latest_published_release_async_for_channel(client, base_url, &ReleaseChannel::Stable)
+        .await
+}
+
+async fn fetch_latest_published_release_async_for_channel(
+    client: &reqwest::Client,
+    base_url: &str,
+    channel: &ReleaseChannel,
 ) -> Option<(String, Vec<String>)> {
     let mut published_releases = Vec::new();
     let mut page = 1;
@@ -206,10 +431,35 @@ async fn fetch_latest_published_release_async(
         page += 1;
     }
 
-    let release = pick_latest_bifrost_release(published_releases)?;
-    let version = stable_bifrost_release_version(&release)?;
+    let release = pick_latest_bifrost_release_for_channel(published_releases, channel)?;
+    let version = release_version_for_channel(&release, channel)?;
     let highlights = parse_release_highlights(release.body.as_deref());
     Some((version, highlights))
+}
+
+async fn fetch_latest_release_from_html_async_for_channel(
+    client: &reqwest::Client,
+    base_url: &str,
+    channel: &ReleaseChannel,
+) -> Option<(String, Vec<String>)> {
+    for page in 1..=GITHUB_RELEASES_HTML_MAX_PAGES {
+        let response = client
+            .get(github_releases_html_page_url_from(base_url, page))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let html = response.text().await.ok()?;
+        if release_versions_from_html(&html).is_empty() {
+            return None;
+        }
+        if let Some(version) = pick_latest_release_version_from_html_for_channel(&html, channel) {
+            return Some((version, Vec::new()));
+        }
+    }
+    None
 }
 
 pub fn make_release_tag(version: &str) -> String {
@@ -238,36 +488,49 @@ pub fn pick_latest_tag(tags: Vec<GitHubTag>) -> Option<String> {
 }
 
 pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse_version = |s: &str| -> (u32, u32, u32, String) {
-        let (version_part, prerelease) = if let Some(idx) = s.find('-') {
-            (&s[..idx], s[idx + 1..].to_string())
-        } else {
-            (s, String::new())
+    fn normalize(version: &str) -> &str {
+        version.trim().trim_start_matches('v')
+    }
+
+    fn compare_legacy(a: &str, b: &str) -> std::cmp::Ordering {
+        let parse = |version: &str| {
+            let (version, prerelease) = version
+                .split_once('-')
+                .map_or((version, String::new()), |(version, prerelease)| {
+                    (version, prerelease.to_string())
+                });
+            let parts: Vec<u32> = version
+                .split('.')
+                .filter_map(|part| part.parse().ok())
+                .collect();
+            (
+                parts.first().copied().unwrap_or(0),
+                parts.get(1).copied().unwrap_or(0),
+                parts.get(2).copied().unwrap_or(0),
+                prerelease,
+            )
         };
 
-        let parts: Vec<u32> = version_part
-            .split('.')
-            .filter_map(|p| p.parse().ok())
-            .collect();
+        let (a_major, a_minor, a_patch, a_prerelease) = parse(a);
+        let (b_major, b_minor, b_patch, b_prerelease) = parse(b);
+        match (a_major, a_minor, a_patch).cmp(&(b_major, b_minor, b_patch)) {
+            std::cmp::Ordering::Equal => match (a_prerelease.is_empty(), b_prerelease.is_empty()) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => a_prerelease.cmp(&b_prerelease),
+            },
+            ordering => ordering,
+        }
+    }
 
-        (
-            parts.first().copied().unwrap_or(0),
-            parts.get(1).copied().unwrap_or(0),
-            parts.get(2).copied().unwrap_or(0),
-            prerelease,
-        )
-    };
-
-    let (a_major, a_minor, a_patch, a_pre) = parse_version(a);
-    let (b_major, b_minor, b_patch, b_pre) = parse_version(b);
-
-    match (a_major, a_minor, a_patch).cmp(&(b_major, b_minor, b_patch)) {
-        std::cmp::Ordering::Equal => match (a_pre.is_empty(), b_pre.is_empty()) {
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
-            _ => a_pre.cmp(&b_pre),
-        },
-        other => other,
+    let canonical_a = canonical_release_version(a);
+    let canonical_b = canonical_release_version(b);
+    match (
+        semver::Version::parse(&canonical_a),
+        semver::Version::parse(&canonical_b),
+    ) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        _ => compare_legacy(normalize(a), normalize(b)),
     }
 }
 
@@ -612,6 +875,59 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
     fetch_latest_release_from_api_sync(&client, GITHUB_RELEASE_API_URLS)
 }
 
+pub fn fetch_latest_release_sync_for_current(
+    current_version: &str,
+) -> Result<(String, Vec<String>), FetchError> {
+    fetch_latest_release_sync_for_current_from(current_version, GITHUB_RELEASES_API_LIST_URL)
+}
+
+fn fetch_latest_release_sync_for_current_from(
+    current_version: &str,
+    prerelease_url: &str,
+) -> Result<(String, Vec<String>), FetchError> {
+    fetch_latest_release_sync_for_current_from_sources(
+        current_version,
+        prerelease_url,
+        GITHUB_RELEASES_HTML_URL,
+    )
+}
+
+fn fetch_latest_release_sync_for_current_from_sources(
+    current_version: &str,
+    prerelease_url: &str,
+    releases_html_url: &str,
+) -> Result<(String, Vec<String>), FetchError> {
+    let channel = release_channel(current_version);
+    if channel == ReleaseChannel::Stable {
+        return fetch_latest_release_sync();
+    }
+
+    let client = crate::github_blocking_reqwest_client_builder()
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .user_agent("bifrost-cli")
+        .build()
+        .map_err(|e| FetchError::Network(format!("failed to build GitHub HTTP client: {e}")))?;
+    match fetch_latest_published_release_sync_for_channel(&client, prerelease_url, &channel) {
+        Ok(release) => Ok(release),
+        Err(api_error) => {
+            debug!(
+                error = %api_error,
+                "prerelease API discovery failed, trying public releases HTML"
+            );
+            fetch_latest_release_from_html_sync_for_channel(
+                &client,
+                releases_html_url,
+                &channel,
+            )
+            .map_err(|html_error| {
+                FetchError::Network(format!(
+                    "failed to check prerelease channel via GitHub API ({api_error}) and releases HTML ({html_error})"
+                ))
+            })
+        }
+    }
+}
+
 fn fetch_latest_release_from_api_sync(
     client: &reqwest::blocking::Client,
     (latest_url, releases_url): (&str, &str),
@@ -744,6 +1060,50 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
     debug!("redirect-based version detection failed, falling back to GitHub API");
 
     fetch_latest_release_from_api_async(&client, GITHUB_RELEASE_API_URLS).await
+}
+
+pub async fn fetch_latest_release_async_for_current(
+    current_version: &str,
+) -> Option<(String, Vec<String>)> {
+    fetch_latest_release_async_for_current_from(current_version, GITHUB_RELEASES_API_LIST_URL).await
+}
+
+async fn fetch_latest_release_async_for_current_from(
+    current_version: &str,
+    prerelease_url: &str,
+) -> Option<(String, Vec<String>)> {
+    fetch_latest_release_async_for_current_from_sources(
+        current_version,
+        prerelease_url,
+        GITHUB_RELEASES_HTML_URL,
+    )
+    .await
+}
+
+async fn fetch_latest_release_async_for_current_from_sources(
+    current_version: &str,
+    prerelease_url: &str,
+    releases_html_url: &str,
+) -> Option<(String, Vec<String>)> {
+    let channel = release_channel(current_version);
+    if channel == ReleaseChannel::Stable {
+        return fetch_latest_release_async().await;
+    }
+
+    let client = crate::github_reqwest_client_builder()
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .user_agent("bifrost-admin")
+        .build()
+        .ok()?;
+    match fetch_latest_published_release_async_for_channel(&client, prerelease_url, &channel).await
+    {
+        Some(release) => Some(release),
+        None => {
+            debug!("prerelease API discovery failed, trying public releases HTML (async)");
+            fetch_latest_release_from_html_async_for_channel(&client, releases_html_url, &channel)
+                .await
+        }
+    }
 }
 
 async fn fetch_latest_release_from_api_async(
@@ -1074,6 +1434,25 @@ mod tests {
         format!("http://{address}/releases")
     }
 
+    fn spawn_truncated_release_page_server() -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 128\r\nConnection: close\r\n\r\nshort",
+                )
+                .unwrap();
+        });
+        format!("http://{address}/releases")
+    }
+
     fn release_page_json(releases: &[(&str, bool, bool, &str)]) -> String {
         serde_json::to_string(
             &releases
@@ -1175,6 +1554,452 @@ mod tests {
     }
 
     #[test]
+    fn prerelease_channel_tracks_only_its_published_channel_and_orders_numbers() {
+        let release = |tag_name: &str, draft: bool, prerelease: bool| GitHubRelease {
+            tag_name: tag_name.to_string(),
+            body: Some(format!("notes for {tag_name}")),
+            draft,
+            prerelease,
+        };
+
+        assert_eq!(release_channel("0.0.181"), ReleaseChannel::Stable);
+        assert_eq!(
+            release_channel("v0.0.181-alpha.1"),
+            ReleaseChannel::Prerelease("alpha".to_string())
+        );
+        assert_eq!(
+            release_channel("0.0.181-alpha10"),
+            ReleaseChannel::Prerelease("alpha".to_string())
+        );
+        assert_eq!(
+            release_channel("0.0.181-10008"),
+            ReleaseChannel::Prerelease("alpha".to_string())
+        );
+        assert_eq!(
+            release_channel("0.0.181.10008"),
+            ReleaseChannel::Prerelease("alpha".to_string())
+        );
+        assert_eq!(canonical_release_version("v0.0.181.10000"), "0.0.181-alpha");
+        assert_eq!(canonical_release_version("0.0.181.20000"), "0.0.181-beta");
+        assert_eq!(canonical_release_version("0.0.181.30001"), "0.0.181-rc.1");
+        assert_eq!(canonical_release_version("0.0.181-10000"), "0.0.181-alpha");
+        assert_eq!(canonical_release_version("0.0.181-20002"), "0.0.181-beta.2");
+        assert_eq!(canonical_release_version("0.0.181-30003"), "0.0.181-rc.3");
+        assert_eq!(
+            canonical_release_version("0.0.181-alpha10"),
+            "0.0.181-alpha.10"
+        );
+        assert_eq!(
+            canonical_release_version("0.0.181-alpha.10"),
+            "0.0.181-alpha.10"
+        );
+        assert_eq!(canonical_release_version("0.0.181-9999"), "0.0.181-9999");
+        assert_eq!(canonical_release_version("0.0.181.9999"), "0.0.181.9999");
+        assert_eq!(
+            release_channel("0.0.181-1"),
+            ReleaseChannel::Prerelease("1".to_string())
+        );
+        assert!(same_release_channel("0.0.181-alpha.1", "0.0.181-alpha.10"));
+        assert!(!same_release_channel("0.0.181-alpha.1", "0.0.181-beta.1"));
+
+        let picked = pick_latest_bifrost_release_for_channel(
+            vec![
+                release("v0.0.181-alpha.9", false, true),
+                release("v0.0.181-alpha.10", false, true),
+                release("v0.0.181-alpha.99", false, false),
+                release("v0.0.181-beta.99", false, true),
+                release("v9.0.0", false, true),
+                release("v9.0.0", false, false),
+                release("v0.0.182-alpha.1", true, true),
+            ],
+            &ReleaseChannel::Prerelease("alpha".to_string()),
+        )
+        .expect("latest published alpha release");
+        assert_eq!(picked.tag_name, "v0.0.181-alpha.10");
+        assert_eq!(
+            compare_versions("0.0.181-alpha.10", "0.0.181-alpha.9"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("0.0.181-10008", "0.0.181-alpha.8"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("0.0.181.10009", "0.0.181-alpha.8"),
+            std::cmp::Ordering::Greater
+        );
+        assert!(same_release_channel("0.0.181.10008", "0.0.181-alpha.9"));
+        assert!(!same_release_channel("not-a-version", "also-invalid"));
+    }
+
+    #[test]
+    fn release_channel_normalization_covers_msi_and_legacy_edge_cases() {
+        assert_eq!(decode_msi_prerelease(9_999), None);
+        assert_eq!(decode_msi_prerelease(40_000), None);
+        assert_eq!(
+            canonical_release_version(" v0.0.181.10001 "),
+            "0.0.181-alpha.1"
+        );
+        assert_eq!(canonical_release_version("0.0.181.20001"), "0.0.181-beta.1");
+        assert_eq!(canonical_release_version("0.0.181.30000"), "0.0.181-rc");
+        assert_eq!(
+            canonical_release_version("0.0.181.999999999999999999999999999999999"),
+            "0.0.181.999999999999999999999999999999999"
+        );
+        assert_eq!(
+            canonical_release_version("0.0.181-alpha10-x"),
+            "0.0.181-alpha.10-x"
+        );
+        assert_eq!(
+            canonical_release_version("0.0.181-alpha-x"),
+            "0.0.181-alpha-x"
+        );
+        assert_eq!(canonical_release_version("0.0.181-123x"), "0.0.181-123x");
+        assert_eq!(
+            release_channel("0.0.181-123x"),
+            ReleaseChannel::Prerelease("123x".into())
+        );
+
+        assert_eq!(
+            compare_versions("1.foo.3-alpha", "1.foo.2-beta"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("1.0.0-invalid_legacy", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("1.0.0", "1.0.0-invalid_legacy"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("1.0.0-invalid_2", "1.0.0-invalid_10"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn release_picker_covers_stable_prerelease_and_invalid_candidates() {
+        let release = |tag_name: &str, draft: bool, prerelease: bool| GitHubRelease {
+            tag_name: tag_name.to_string(),
+            body: None,
+            draft,
+            prerelease,
+        };
+        let stable = ReleaseChannel::Stable;
+        let alpha = ReleaseChannel::Prerelease("alpha".to_string());
+
+        assert_eq!(
+            release_version_for_channel(&release("v1.2.3", false, false), &stable).as_deref(),
+            Some("1.2.3")
+        );
+        assert!(
+            release_version_for_channel(&release("v1.2.3-alpha.1", false, true), &stable).is_none()
+        );
+        assert_eq!(
+            release_version_for_channel(&release("v1.2.3-alpha.1", false, true), &alpha).as_deref(),
+            Some("1.2.3-alpha.1")
+        );
+        assert!(
+            release_version_for_channel(&release("v1.2.3-beta.1", false, true), &alpha).is_none()
+        );
+        assert!(release_version_for_channel(&release("invalid", false, true), &alpha).is_none());
+        assert!(
+            release_version_for_channel(&release("v1.2.3-alpha.2", true, true), &alpha).is_none()
+        );
+    }
+
+    #[test]
+    fn prerelease_release_scan_returns_latest_alpha_instead_of_stable_latest() {
+        let base_url = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[
+                    ("v0.0.180", false, false, "stable"),
+                    (
+                        "v0.0.181-alpha.8",
+                        false,
+                        true,
+                        "## Highlights\n- alpha eight",
+                    ),
+                    (
+                        "v0.0.181-alpha.9",
+                        false,
+                        true,
+                        "## Highlights\n- alpha nine",
+                    ),
+                    ("v0.0.181-beta.1", false, true, "beta"),
+                ]),
+            ),
+            (200, "[]".to_string()),
+        ]);
+
+        let selected =
+            fetch_latest_release_sync_for_current_from("0.0.181-alpha.8", &base_url).unwrap();
+        assert_eq!(
+            selected,
+            (
+                "0.0.181-alpha.9".to_string(),
+                vec!["alpha nine".to_string()]
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn prerelease_async_release_scan_uses_the_current_alpha_channel() {
+        let base_url = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[
+                    ("v0.0.181", false, false, "stable"),
+                    (
+                        "v0.0.182-alpha.1",
+                        false,
+                        true,
+                        "## Highlights\n- async alpha",
+                    ),
+                    ("v0.0.183-beta.1", false, true, "beta"),
+                ]),
+            ),
+            (200, "[]".to_string()),
+        ]);
+
+        let selected = fetch_latest_release_async_for_current_from("0.0.181-alpha.9", &base_url)
+            .await
+            .expect("latest async alpha release");
+        assert_eq!(
+            selected,
+            (
+                "0.0.182-alpha.1".to_string(),
+                vec!["async alpha".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn releases_html_parser_selects_the_latest_matching_prerelease_channel() {
+        let html = r#"
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.9">alpha 9</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.9">duplicate</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.10">alpha 10</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.182-beta.1">beta</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.182">stable</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/not-a-bifrost-tag">invalid</a>
+            <a href="/someone/else/releases/tag/v99.0.0-alpha.1">unrelated</a>
+        "#;
+
+        assert_eq!(
+            release_versions_from_html(html),
+            vec![
+                "0.0.181-alpha.9".to_string(),
+                "0.0.181-alpha.10".to_string(),
+                "0.0.182-beta.1".to_string(),
+                "0.0.182".to_string(),
+            ]
+        );
+        assert_eq!(
+            pick_latest_release_version_from_html_for_channel(
+                html,
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            )
+            .as_deref(),
+            Some("0.0.181-alpha.10")
+        );
+    }
+
+    #[test]
+    fn prerelease_sync_falls_back_to_public_html_when_api_is_rate_limited() {
+        let html = r#"
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.8">alpha 8</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.9">alpha 9</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-beta.10">beta</a>
+        "#;
+        let base_url = spawn_release_page_server(vec![
+            (403, "rate limited".to_string()),
+            (403, "rate limited".to_string()),
+            (403, "rate limited".to_string()),
+            (200, html.to_string()),
+        ]);
+
+        let selected = fetch_latest_release_sync_for_current_from_sources(
+            "0.0.181-alpha.8",
+            &base_url,
+            &base_url,
+        )
+        .expect("HTML fallback should bypass API rate limiting");
+        assert_eq!(selected, ("0.0.181-alpha.9".to_string(), Vec::new()));
+    }
+
+    #[test]
+    fn releases_html_sync_fallback_paginates_and_reports_terminal_failures() {
+        let client = crate::github_blocking_reqwest_client_builder()
+            .build()
+            .unwrap();
+        let beta_only = r#"<a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-beta.1">beta</a>"#;
+        let alpha = r#"<a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.11">alpha</a>"#;
+        let paginated =
+            spawn_release_page_server(vec![(200, beta_only.to_string()), (200, alpha.to_string())]);
+        assert_eq!(
+            fetch_latest_release_from_html_sync_for_channel(
+                &client,
+                &format!("{paginated}?tab=all"),
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            )
+            .unwrap(),
+            ("0.0.181-alpha.11".to_string(), Vec::new())
+        );
+
+        let empty = spawn_release_page_server(vec![(200, "<html>none</html>".to_string())]);
+        assert!(matches!(
+            fetch_latest_release_from_html_sync_for_channel(
+                &client,
+                &empty,
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            ),
+            Err(FetchError::Parse(message)) if message.contains("channel alpha")
+        ));
+
+        let no_stable = spawn_release_page_server(vec![
+            (200, beta_only.to_string()),
+            (200, "<html>none</html>".to_string()),
+        ]);
+        assert!(matches!(
+            fetch_latest_release_from_html_sync_for_channel(
+                &client,
+                &no_stable,
+                &ReleaseChannel::Stable,
+            ),
+            Err(FetchError::Parse(message)) if message.contains("channel stable")
+        ));
+
+        let failed = spawn_release_page_server(vec![
+            (500, "failure one".to_string()),
+            (500, "failure two".to_string()),
+            (500, "failure three".to_string()),
+        ]);
+        assert!(matches!(
+            fetch_latest_release_from_html_sync_for_channel(
+                &client,
+                &failed,
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            ),
+            Err(FetchError::Network(message)) if message.contains("HTML fallback failed")
+        ));
+
+        let truncated = spawn_truncated_release_page_server();
+        assert!(matches!(
+            fetch_latest_release_from_html_sync_for_channel(
+                &client,
+                &truncated,
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            ),
+            Err(FetchError::Parse(message)) if message.contains("failed to read GitHub releases HTML page 1")
+        ));
+
+        let exhausted = spawn_release_page_server(
+            (0..GITHUB_RELEASES_HTML_MAX_PAGES)
+                .map(|_| (200, beta_only.to_string()))
+                .collect(),
+        );
+        assert!(matches!(
+            fetch_latest_release_from_html_sync_for_channel(
+                &client,
+                &exhausted,
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            ),
+            Err(FetchError::Parse(message)) if message.contains("channel alpha")
+        ));
+
+        let combined_failure = spawn_release_page_server(vec![
+            (403, "rate limited one".to_string()),
+            (403, "rate limited two".to_string()),
+            (403, "rate limited three".to_string()),
+            (500, "html failure one".to_string()),
+            (500, "html failure two".to_string()),
+            (500, "html failure three".to_string()),
+        ]);
+        assert!(matches!(
+            fetch_latest_release_sync_for_current_from_sources(
+                "0.0.181-alpha.10",
+                &combined_failure,
+                &combined_failure,
+            ),
+            Err(FetchError::Network(message))
+                if message.contains("GitHub API") && message.contains("releases HTML")
+        ));
+    }
+
+    #[tokio::test]
+    async fn prerelease_async_falls_back_to_public_html_when_api_is_rate_limited() {
+        let html = r#"
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.9">alpha 9</a>
+            <a href="/bifrost-proxy/bifrost/releases/tag/v0.0.182-rc.1">rc</a>
+        "#;
+        let base_url = spawn_release_page_server(vec![
+            (403, "rate limited".to_string()),
+            (200, html.to_string()),
+        ]);
+
+        let selected = fetch_latest_release_async_for_current_from_sources(
+            "0.0.181-alpha.8",
+            &base_url,
+            &base_url,
+        )
+        .await
+        .expect("async HTML fallback should bypass API rate limiting");
+        assert_eq!(selected, ("0.0.181-alpha.9".to_string(), Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn releases_html_async_fallback_covers_pagination_and_error_exits() {
+        let client = crate::github_reqwest_client_builder().build().unwrap();
+        let beta_only = r#"<a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-beta.1">beta</a>"#;
+        let alpha = r#"<a href="/bifrost-proxy/bifrost/releases/tag/v0.0.181-alpha.12">alpha</a>"#;
+        let paginated =
+            spawn_release_page_server(vec![(200, beta_only.to_string()), (200, alpha.to_string())]);
+        assert_eq!(
+            fetch_latest_release_from_html_async_for_channel(
+                &client,
+                &paginated,
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            )
+            .await,
+            Some(("0.0.181-alpha.12".to_string(), Vec::new()))
+        );
+
+        let failed = spawn_release_page_server(vec![(500, "failure".to_string())]);
+        assert!(fetch_latest_release_from_html_async_for_channel(
+            &client,
+            &failed,
+            &ReleaseChannel::Prerelease("alpha".to_string()),
+        )
+        .await
+        .is_none());
+
+        let empty = spawn_release_page_server(vec![(200, "<html>none</html>".to_string())]);
+        assert!(fetch_latest_release_from_html_async_for_channel(
+            &client,
+            &empty,
+            &ReleaseChannel::Prerelease("alpha".to_string()),
+        )
+        .await
+        .is_none());
+
+        let exhausted = spawn_release_page_server(
+            (0..GITHUB_RELEASES_HTML_MAX_PAGES)
+                .map(|_| (200, beta_only.to_string()))
+                .collect(),
+        );
+        assert!(fetch_latest_release_from_html_async_for_channel(
+            &client,
+            &exhausted,
+            &ReleaseChannel::Prerelease("alpha".to_string()),
+        )
+        .await
+        .is_none());
+    }
+
+    #[test]
     fn test_github_releases_api_list_url_is_explicitly_paginated_without_a_fixed_cap() {
         assert_eq!(
             github_releases_api_list_url(0),
@@ -1232,6 +2057,16 @@ mod tests {
         assert!(matches!(
             fetch_latest_published_release_sync(&client, &empty),
             Err(FetchError::Parse(message)) if message.contains("no published stable")
+        ));
+
+        let empty_alpha = spawn_release_page_server(vec![(200, "[]".to_string())]);
+        assert!(matches!(
+            fetch_latest_published_release_sync_for_channel(
+                &client,
+                &empty_alpha,
+                &ReleaseChannel::Prerelease("alpha".to_string()),
+            ),
+            Err(FetchError::Parse(message)) if message.contains("prerelease channel alpha")
         ));
     }
 

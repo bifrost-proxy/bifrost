@@ -211,6 +211,39 @@
 - CLI 调用 MSI 时使用 per-user 安装属性，并在失败时输出 MSI 日志路径。
 - CLI 显示、重启和卸载使用真实 Tauri MSI 目标路径，不再指向 `%LOCALAPPDATA%\Programs\Bifrost\Bifrost.exe`。
 
+### TC-DAU-04G2 Windows 干净安装后由上一版本真实更新
+
+操作步骤：
+
+1. 每一轮都从干净系统状态开始。先以管理员/SYSTEM 上下文终止所有 Bifrost 相关进程，枚举并静默卸载 HKLM 中所有 `Bifrost` MSI 产品；再以桌面登录用户上下文卸载 HKCU legacy NSIS 项，清理 `%LOCALAPPDATA%\Bifrost`、`%USERPROFILE%\.bifrost`、CLI 安装目录，以及 `.bifrost-upgrade-*`、`.bifrost.exe.pending.*`、`*.upgrade-backup`、deferred status/ready/args/log 等升级残留。
+2. 断言清理完成：Bifrost 进程数为 0，HKLM/HKCU 卸载注册数为 0，安装目录和升级残留数为 0。任一项非 0，本轮作废，不得继续计为通过。
+3. 安装“上一版本”的真实 ARM64 Windows MSI，并在当前桌面用户下安装同版本 CLI。断言 MSI 注册只有一个，CLI 与 Desktop 均报告上一版本。
+4. 由上一版本 CLI 自身执行默认 `bifrost upgrade -y`，不得追加隐藏 channel 参数，不得用新版本二进制直接覆盖，也不得预先安装目标版本。稳定版只允许发现稳定版；`alpha.N` 只允许发现同名 `alpha` channel 的更新，不能复用稳定版或 beta/rc 的缓存结果。
+5. 等待更新完成并检查：CLI、Desktop 与运行中 core 都为目标版本；MSI 注册仍只有一个；无 `.pending`、`.upgrade-backup`、helper `.ps1/.args/.ok/.status/.log` 临时文件；无旧版进程或终端闪窗。
+6. 旧 alpha 本身若没有 prerelease discovery 能力，只允许把首个包含通道修复与 staged-target handoff 的 alpha 作为手工安装基线；随后必须再发布相邻的下一个 alpha，完整重复步骤 1–5，从首个修复 alpha 通过默认命令更新到下一个 alpha，证明 alpha discovery 与 staged 新二进制 helper 同时生效。
+
+预期结果：
+
+- “上一版本 → 下一版本”在完全清理、重新安装后的真实用户路径中成功，不依赖上一轮残留状态。
+- 首个旧版本兼容升级与“修复版 → 下一版”两段都通过；后者必须在 helper log 中显示等待的 PID 是原 updater PID。
+- `alpha.8` 能发现 `alpha.9`，且 `alpha.10` 的排序高于 `alpha.9`；alpha 不会被稳定版 `/releases/latest` 或其它 prerelease channel 误判为“已是最新”。正式版仍只跟随正式版。
+- 更新后只保留一个有效 MSI 注册和一套当前版本文件，升级临时资产为 0。
+
+### TC-DAU-04G3 Windows 锁文件失败回滚也必须零残留
+
+操作步骤：
+
+1. 完整执行 TC-DAU-04G2 的步骤 1–3，从干净系统重新安装上一版本，不复用成功升级后的系统状态。
+2. 在上一版本触发升级前，使用独立进程以拒绝共享的方式锁住 deferred status 或目标替换路径，锁定时间超过旧 helper 的短清理窗口。
+3. 由上一版本 CLI 自身执行 `bifrost upgrade -y`，记录退出码、耗时、helper log、最终 CLI/Desktop/core 版本和升级残留清单。
+4. 释放文件锁后再次扫描进程、MSI 注册、安装目录与升级临时资产。
+
+预期结果：
+
+- 升级明确失败且不会假报成功；可验证的旧版本恢复并仍可启动。
+- helper 按锁定预算等待/重试，失败后恢复旧 `bifrost.exe`，不留下 pending、backup、PowerShell、args、ready 或临时 status 文件。
+- MSI 注册仍唯一，没有同时注册上一版本与目标版本；无版本探测风暴和可见 PowerShell/Terminal 窗口。
+
 ### TC-DAU-04H 普通 bifrost upgrade 自动联动已安装桌面 App
 
 操作步骤：
@@ -790,6 +823,7 @@ bifrost app uninstall
 
 | 日期 | 用例 | 执行命令 / 证据 | 结果 |
 | --- | --- | --- | --- |
+| 2026-08-15 | TC-DAU-04G2 alpha.8 干净安装基线 | Parallels Windows 11 ARM64 VM：SYSTEM/HKCU 双阶段清理返回 `system_msi_entries=0`、`all_uninstall_entries=0`、进程与残留目录均为 0；Release run `31815005722` 的 ARM64 CLI/MSI workflow artifacts 通过 SHA-256 校验后安装；CLI=`bifrost 0.0.181-alpha.8`，Desktop ProductVersion=`0.0.181-10008`，MSI DisplayVersion=`0.0.181.10008`，唯一 ProductCode=`{581E598F-99BD-4700-BA49-57EB820C7290}` | BASELINE PASS：已从彻底清理状态安装首个同时包含 channel discovery 与 staged-target handoff 的 alpha；等待发布 alpha.9 后执行默认 `bifrost upgrade -y` 完成相邻版本验证 |
 | 2026-07-05 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | 待复测：本轮新增 04C，验证已安装桌面端等于目标版本时跳过下载和重装 |
 | 2026-07-05 | TC-DAU-05 | `cargo test -p bifrost-admin handlers::system::tests --lib` | PASS：7/7 通过，覆盖 desktop alias、spawn args、CLI install 临时目录与 skip skills |
 | 2026-07-05 | TC-DAU-06 | `pnpm --dir web run test:unit -- src/stores/useVersionStore.test.ts` + 代码 review | PASS：Vitest 22 files / 93 tests 通过；新增 desktop shell 单测确认 `checkVersion/startUpgrade` 使用 `desktop` channel，代码确认桌面缓存窗口为 6 小时，非桌面仍使用 `cli` channel；桌面安装按钮位于 `desktopMode` 分支 |

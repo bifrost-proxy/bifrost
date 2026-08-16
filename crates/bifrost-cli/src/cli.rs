@@ -478,6 +478,12 @@ previous runtime settings."
     Upgrade {
         #[arg(short = 'y', long, hide = true)]
         yes: bool,
+        #[arg(
+            long,
+            value_hint = ValueHint::DirPath,
+            help = "Use release-formatted assets from a local directory instead of GitHub (explicit test mode)"
+        )]
+        local_assets: Option<PathBuf>,
     },
     #[command(about = "Install, uninstall, or upgrade the Bifrost desktop app")]
     App {
@@ -501,6 +507,31 @@ previous runtime settings."
         running_proxy_pid: Option<u32>,
         #[arg(long, hide = true, requires = "running_proxy_pid")]
         running_proxy_port: Option<u16>,
+    },
+    #[command(
+        hide = true,
+        about = "Schedule a deferred Windows CLI replacement from the staged target binary"
+    )]
+    WindowsUpgradeHandoff {
+        #[arg(long, hide = true)]
+        parent_pid: u32,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        pending_path: PathBuf,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        target_path: PathBuf,
+        #[arg(long, hide = true)]
+        target_version: String,
+        #[arg(
+            long,
+            hide = true,
+            action = ArgAction::Append,
+            allow_hyphen_values = true
+        )]
+        restart_arg: Vec<String>,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        deferred_status_path: Option<PathBuf>,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        handoff_ready_path: PathBuf,
     },
     #[command(visible_alias = "cfg", about = "Manage runtime configuration")]
     Config {

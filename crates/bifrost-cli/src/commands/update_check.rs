@@ -36,13 +36,18 @@ fn write_cache(cache: &VersionCache) {
 }
 
 fn is_cache_valid(cache: &VersionCache) -> bool {
+    is_cache_valid_for_current(cache, env!("CARGO_PKG_VERSION"))
+}
+
+fn is_cache_valid_for_current(cache: &VersionCache, current_version: &str) -> bool {
     let now = Utc::now();
     let cache_age = now.signed_duration_since(cache.checked_at);
     cache_age < Duration::hours(CACHE_DURATION_HOURS)
+        && version_check::same_release_channel(current_version, &cache.latest_version)
 }
 
 fn fetch_latest_release() -> Option<(String, Vec<String>)> {
-    match version_check::fetch_latest_release_sync() {
+    match version_check::fetch_latest_release_sync_for_current(env!("CARGO_PKG_VERSION")) {
         Ok(result) => Some(result),
         Err(e) => {
             debug!(error = %e, "fetch_latest_release failed");
@@ -80,7 +85,9 @@ pub fn get_latest_version() -> Option<VersionCache> {
         return Some(cache);
     }
 
-    if let Some(stale_cache) = read_cache() {
+    if let Some(stale_cache) = read_cache().filter(|cache| {
+        version_check::same_release_channel(env!("CARGO_PKG_VERSION"), &cache.latest_version)
+    }) {
         debug!(
             version = %stale_cache.latest_version,
             checked_at = %stale_cache.checked_at,
@@ -93,7 +100,7 @@ pub fn get_latest_version() -> Option<VersionCache> {
 }
 
 pub fn get_latest_version_fresh_with_diagnostics() -> Result<VersionCache, String> {
-    match version_check::fetch_latest_release_sync() {
+    match version_check::fetch_latest_release_sync_for_current(env!("CARGO_PKG_VERSION")) {
         Ok((latest, highlights)) => {
             let cache = VersionCache {
                 latest_version: latest,
@@ -238,6 +245,26 @@ mod tests {
         assert!(!is_newer_version("1.0.0", "0.0.1"));
         assert!(!is_newer_version("1.0.0", "1.0.0"));
         assert!(!is_newer_version("0.0.1", "0.0.1-alpha"));
+    }
+
+    #[test]
+    fn fresh_cache_must_match_the_running_release_channel() {
+        let stable = VersionCache {
+            latest_version: "0.0.181".to_string(),
+            release_highlights: vec![],
+            checked_at: Utc::now(),
+        };
+        let alpha = VersionCache {
+            latest_version: "0.0.181-alpha.9".to_string(),
+            release_highlights: vec![],
+            checked_at: Utc::now(),
+        };
+
+        assert!(is_cache_valid_for_current(&stable, "0.0.180"));
+        assert!(is_cache_valid_for_current(&alpha, "0.0.181-alpha.8"));
+        assert!(!is_cache_valid_for_current(&stable, "0.0.181-alpha.8"));
+        assert!(!is_cache_valid_for_current(&alpha, "0.0.180"));
+        assert!(is_cache_valid(&stable));
     }
 
     #[test]

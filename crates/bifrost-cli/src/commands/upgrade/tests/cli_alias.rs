@@ -17,8 +17,9 @@ fn accepts_hidden_yes_flag_for_both_spellings() {
     for command in ["upgrade", "update"] {
         let cli = Cli::parse_from(["bifrost", command, "-y"]);
         match cli.command {
-            Some(Commands::Upgrade { yes }) => {
+            Some(Commands::Upgrade { yes, local_assets }) => {
                 assert!(yes, "{command} should preserve the hidden yes flag");
+                assert!(local_assets.is_none());
             }
             _ => panic!("Expected {command} to parse as Upgrade command"),
         }
@@ -30,8 +31,26 @@ fn uses_same_default_flags_for_both_spellings() {
     for command in ["upgrade", "update"] {
         let cli = Cli::parse_from(["bifrost", command]);
         match cli.command {
-            Some(Commands::Upgrade { yes }) => {
+            Some(Commands::Upgrade { yes, local_assets }) => {
                 assert!(!yes, "{command} should use the same default flags");
+                assert!(local_assets.is_none());
+            }
+            _ => panic!("Expected {command} to parse as Upgrade command"),
+        }
+    }
+}
+
+#[test]
+fn accepts_local_assets_for_both_spellings() {
+    for command in ["upgrade", "update"] {
+        let cli = Cli::parse_from(["bifrost", command, "--local-assets", "C:/bifrost-assets"]);
+        match cli.command {
+            Some(Commands::Upgrade { yes, local_assets }) => {
+                assert!(!yes);
+                assert_eq!(
+                    local_assets.as_deref(),
+                    Some(std::path::Path::new("C:/bifrost-assets"))
+                );
             }
             _ => panic!("Expected {command} to parse as Upgrade command"),
         }

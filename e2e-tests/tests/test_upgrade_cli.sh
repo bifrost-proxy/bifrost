@@ -9,6 +9,12 @@ set -uo pipefail
 : "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
+# The E2E process must exercise a normal interactive CLI. Agent/IM gateway
+# parents intentionally mark their children as external workers, which would
+# redirect upgrade requests to the developer's already-running service instead
+# of the isolated fixture created below.
+unset BIFROST_EXTERNAL_CLI_WORKER
+unset BIFROST_DETACHED_DAEMON_CHILD
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -122,10 +128,11 @@ test_upgrade_help() {
        "$result" == *"upgrade bifrost to the latest version"* ]] || missing+=(description)
     [[ "$result" != *"--yes"* && "$result" != *"-y"* ]] || missing+=(removed-yes)
     [[ "$result" == *"--help"* || "$result" == *"-h"* ]] || missing+=(help-option)
+    [[ "$result" == *"--local-assets"* ]] || missing+=(local-assets)
     [[ "$result" != *"--restart"* ]] || missing+=(removed-restart)
 
     if [[ ${#missing[@]} -eq 0 ]]; then
-        pass "upgrade --help 显示正确的帮助信息且不包含 -y/--yes 或 --restart"
+        pass "upgrade --help 显示本地制品入口且不包含 -y/--yes 或 --restart"
     else
         fail "upgrade --help 断言失败 (missing: $(IFS=,; echo "${missing[*]}")): $result"
     fi
@@ -139,7 +146,7 @@ test_upgrade_check_output() {
     local result
     result=$("$BIFROST_BIN" upgrade 2>&1 || true)
 
-    if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|could not check"; then
+    if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|already up to date\|could not check"; then
         pass "upgrade 命令正确检查更新"
     else
         fail "upgrade 命令输出异常: $result"

@@ -96,7 +96,37 @@ fn should_run_update_notice(stdout_is_terminal: bool, command: Option<&Commands>
 
     !matches!(
         command,
-        Some(Commands::VersionCheck) | Some(Commands::Upgrade { .. }) | Some(Commands::App { .. })
+        Some(Commands::VersionCheck)
+            | Some(Commands::Upgrade { .. })
+            | Some(Commands::App { .. })
+            | Some(Commands::SelfUpdate { .. })
+            | Some(Commands::WindowsUpgradeHandoff { .. })
+    )
+}
+
+fn handle_windows_upgrade_handoff_command(command: Commands) -> Result<(), BifrostError> {
+    let Commands::WindowsUpgradeHandoff {
+        parent_pid,
+        pending_path,
+        target_path,
+        target_version,
+        restart_arg,
+        deferred_status_path,
+        handoff_ready_path,
+    } = command
+    else {
+        return Err(BifrostError::Config(
+            "expected Windows upgrade handoff command".to_string(),
+        ));
+    };
+    commands::handle_windows_upgrade_handoff(
+        parent_pid,
+        pending_path,
+        target_path,
+        target_version,
+        restart_arg,
+        deferred_status_path,
+        handoff_ready_path,
     )
 }
 
@@ -349,10 +379,13 @@ fn run_cli_main() {
             commands::agent::handle_agent_command("127.0.0.1", get_effective_port(cli.port), action)
         }
         Some(Commands::Script { action }) => handle_script_command(action),
-        Some(Commands::Upgrade { yes }) => handle_upgrade(yes),
+        Some(Commands::Upgrade { yes, local_assets }) => handle_upgrade(yes, local_assets),
         Some(Commands::App { action }) => handle_app_command(action),
         Some(command @ Commands::SelfUpdate { .. }) => {
             commands::handle_upgrade_background_command(command)
+        }
+        Some(command @ Commands::WindowsUpgradeHandoff { .. }) => {
+            handle_windows_upgrade_handoff_command(command)
         }
         Some(Commands::InstallSkill {
             tool,
@@ -944,7 +977,22 @@ mod tests {
         ));
         assert!(!should_run_update_notice(
             true,
-            Some(&Commands::Upgrade { yes: false })
+            Some(&Commands::Upgrade {
+                yes: false,
+                local_assets: None,
+            })
+        ));
+        assert!(!should_run_update_notice(
+            true,
+            Some(&Commands::WindowsUpgradeHandoff {
+                parent_pid: 123,
+                pending_path: "pending.exe".into(),
+                target_path: "bifrost.exe".into(),
+                target_version: "0.0.181-alpha.8".to_string(),
+                restart_arg: Vec::new(),
+                deferred_status_path: None,
+                handoff_ready_path: "handoff.ready".into(),
+            })
         ));
         assert!(should_run_update_notice(
             true,
@@ -1068,7 +1116,10 @@ mod tests {
         ));
         assert!(!should_run_update_notice(
             true,
-            Some(&Commands::Upgrade { yes: false }),
+            Some(&Commands::Upgrade {
+                yes: false,
+                local_assets: None,
+            }),
         ));
         assert!(should_run_update_notice(
             true,
@@ -1077,5 +1128,30 @@ mod tests {
                 format: cli::StatusFormat::Text
             })
         ));
+    }
+
+    #[test]
+    fn windows_upgrade_handoff_dispatch_rejects_other_commands_and_non_windows_hosts() {
+        let unexpected = super::handle_windows_upgrade_handoff_command(Commands::VersionCheck)
+            .expect_err("dispatch helper must reject unrelated commands");
+        assert!(unexpected
+            .to_string()
+            .contains("expected Windows upgrade handoff command"));
+
+        #[cfg(not(windows))]
+        {
+            let error =
+                super::handle_windows_upgrade_handoff_command(Commands::WindowsUpgradeHandoff {
+                    parent_pid: 123,
+                    pending_path: "pending.exe".into(),
+                    target_path: "bifrost.exe".into(),
+                    target_version: "0.0.181-alpha.8".to_string(),
+                    restart_arg: vec!["start".to_string()],
+                    deferred_status_path: None,
+                    handoff_ready_path: "handoff.ready".into(),
+                })
+                .expect_err("Windows-only command must fail closed on other hosts");
+            assert!(error.to_string().contains("only available on Windows"));
+        }
     }
 }
