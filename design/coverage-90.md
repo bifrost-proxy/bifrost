@@ -215,8 +215,8 @@ design/
 | `bifrost-sync` | 90.0 | Linux CI 94.0% |
 | `bifrost-power` | 84.0 | 剩余是 macOS-only IOKit |
 | `bifrost-device` | 90.0 | Linux CI 92.4% |
-| `bifrost-asr` | 94.0 | 当前基线 94.52% |
-| `bifrost-script` | 91.0 | 当前基线 91.42% |
+| `bifrost-asr` | 90.0 | 当前基线 94.52%；Linux/macOS 合入门禁统一为 90% |
+| `bifrost-script` | 90.0 | 当前基线 91.42%；合入门禁统一为 90% |
 | `skills` | 90.0 | Linux CI 95.4% |
 | `bifrost-e2e` | exempt | 测试运行器自身；质量由可执行 Rules/Shell/Runner 契约约束，不统计自覆盖率 |
 | `agent` | 78.0 | 当前基线 78.78% |

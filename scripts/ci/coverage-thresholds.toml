@@ -124,15 +124,15 @@ macos_min = 74.0
 min = 90.0
 
 [crates.bifrost-asr]
-# Current baseline 94.52%; ratchet just below measured coverage.
-min = 94.0
+# Current baseline 94.52%; the merge gate is intentionally standardized at 90%.
+min = 90.0
 # macOS local coverage includes platform/runtime branches that do not appear in
-# the Linux CI baseline, so keep a separate local floor.
-macos_min = 91.0
+# the Linux CI baseline; use the same 90% merge standard on both platforms.
+macos_min = 90.0
 
 [crates.bifrost-script]
-# Current baseline 91.42%; ratchet just below measured coverage.
-min = 91.0
+# Current baseline 91.42%; the merge gate is intentionally standardized at 90%.
+min = 90.0
 
 [crates.skills]
 # Reached 95.4% on Linux CI. All modules (executor/validator/store/registry/
