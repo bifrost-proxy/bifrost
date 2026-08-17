@@ -52,7 +52,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 port_file = pathlib.Path(sys.argv[1])
 request_log = pathlib.Path(sys.argv[2])
 lock = threading.Lock()
-state = {"updates": 0, "uploads": 0}
+state = {"uploads": 0}
 inline_png = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
     b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
@@ -97,13 +97,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         body = json.loads(raw.decode("utf-8") or "{}")
-        self.record({"path": self.path, "kind": "json", "body": body})
         if self.path.endswith("/ilink/bot/getupdates"):
-            with lock:
-                call = state["updates"]
-                state["updates"] += 1
-            if call == 0:
-                self.send_json({
+            cursor = body.get("get_updates_buf", "")
+            if cursor == "":
+                payload = {
                     "ret": 0,
                     "longpolling_timeout_ms": 5000,
                     "get_updates_buf": "cursor-weixin-e2e-1",
@@ -115,10 +112,10 @@ class Handler(BaseHTTPRequestHandler):
                         "context_token": "weixin-e2e-context",
                         "item_list": [{"type": 1, "text_item": {"text": "RUN_WEIXIN_NATIVE_E2E"}}],
                     }],
-                })
-            elif call == 1:
+                }
+            elif cursor == "cursor-weixin-e2e-1":
                 time.sleep(2.0)
-                self.send_json({
+                payload = {
                     "ret": 0,
                     "longpolling_timeout_ms": 5000,
                     "get_updates_buf": "cursor-weixin-e2e-2",
@@ -137,16 +134,25 @@ class Handler(BaseHTTPRequestHandler):
                             },
                         }],
                     }],
-                })
+                }
             else:
                 time.sleep(1.0)
-                self.send_json({
+                payload = {
                     "ret": 0,
                     "longpolling_timeout_ms": 5000,
                     "get_updates_buf": "cursor-weixin-e2e-2",
                     "msgs": [],
-                })
+                }
+            try:
+                self.send_json(payload)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            # A failed long-poll response must not advance the mock cursor or
+            # enter the request log. The real iLink cursor only advances after
+            # the client receives the response and presents the new cursor.
+            self.record({"path": self.path, "kind": "json", "body": body})
             return
+        self.record({"path": self.path, "kind": "json", "body": body})
         if self.path.endswith("/ilink/bot/getconfig"):
             self.send_json({"ret": 0, "typing_ticket": "typing-weixin-e2e"})
             return
