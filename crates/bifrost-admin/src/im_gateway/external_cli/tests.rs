@@ -396,19 +396,28 @@ async fn worker_client_override_and_process_spawn_use_configured_executable() {
     let _registry_guard = external_cli_env_guard_async().await;
     let temp_dir = tempfile::tempdir().unwrap();
     let _data_dir = EnvGuard::set("BIFROST_DATA_DIR", temp_dir.path());
-    let executable = Path::new("/usr/bin/true");
+    #[cfg(unix)]
+    let executable = PathBuf::from("/usr/bin/true");
+    #[cfg(windows)]
+    let executable = PathBuf::from(
+        std::env::var_os("SystemRoot").expect("Windows SystemRoot for test executable"),
+    )
+    .join("System32")
+    .join("where.exe");
     let _override_executable =
-        EnvGuard::set("BIFROST_TEST_EXTERNAL_CLI_WORKER_EXECUTABLE", executable);
+        EnvGuard::set("BIFROST_TEST_EXTERNAL_CLI_WORKER_EXECUTABLE", &executable);
 
     let client = ExternalCliWorkerClient::current_exe().expect("worker client override");
     assert_eq!(client.executable, executable);
     let mut child = spawn_external_cli_worker_process(&client.executable)
         .expect("spawn configured external worker executable");
-    assert!(child
-        .wait()
-        .await
-        .expect("wait configured worker")
-        .success());
+    let status = child.wait().await.expect("wait configured worker");
+    assert!(
+        status.code().is_some(),
+        "configured worker should exit normally"
+    );
+    #[cfg(unix)]
+    assert!(status.success());
 }
 
 #[cfg(unix)]
