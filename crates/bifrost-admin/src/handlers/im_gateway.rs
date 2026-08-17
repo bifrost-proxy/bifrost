@@ -145,35 +145,39 @@ pub async fn handle_im_gateway(
 
     let sub = path.strip_prefix("/api/im-gateway").unwrap_or(path);
 
+    // Keep the dispatcher future small on Windows, where the server runtime's
+    // worker-thread stack is comparatively limited. These handlers contain
+    // large request/stream state machines; boxing at this admin-only boundary
+    // also prevents one growing branch from inflating every other route.
     if let Some(rest) = sub.strip_prefix("/attachments") {
-        return utils::handle_attachment(req, rest).await;
+        return Box::pin(utils::handle_attachment(req, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/providers") {
-        return providers::handle_providers(req, &service, rest).await;
+        return Box::pin(providers::handle_providers(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/targets") {
-        return messages::handle_targets(req, &service, rest).await;
+        return Box::pin(messages::handle_targets(req, &service, rest)).await;
     }
     if sub == "/messages/send" || sub == "/messages/send/" {
-        return messages::handle_messages_send(req, &service).await;
+        return Box::pin(messages::handle_messages_send(req, &service)).await;
     }
     if sub == "/messages/upload" || sub == "/messages/upload/" {
-        return messages::handle_messages_upload(req, &service).await;
+        return Box::pin(messages::handle_messages_upload(req, &service)).await;
     }
     if let Some(rest) = sub.strip_prefix("/routes") {
-        return messages::handle_routes(req, &service, rest).await;
+        return Box::pin(messages::handle_routes(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/agent") {
-        return agent_api::handle_agent(req, &service, rest).await;
+        return Box::pin(agent_api::handle_agent(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/chat") {
-        return chat_gateway::handle_chat_gateway(req, &service, rest).await;
+        return Box::pin(chat_gateway::handle_chat_gateway(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/debug") {
-        return debug_inbound::handle_debug(req, &service, rest).await;
+        return Box::pin(debug_inbound::handle_debug(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/schedules") {
-        return schedules::handle_schedules(req, &service, rest).await;
+        return Box::pin(schedules::handle_schedules(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/history") {
         return utils::handle_history(&req, &service, rest);
