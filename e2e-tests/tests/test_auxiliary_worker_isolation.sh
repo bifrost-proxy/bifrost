@@ -651,6 +651,25 @@ while time.monotonic() < deadline:
         break
     time.sleep(0.1)
 assert cancel_job is not None, jobs
+_, active_runs = request_json(
+    "/im-gateway/agent/session-summaries?q=awi-cancel&limit=10"
+)
+active_run = next(
+    item for item in active_runs["items"]
+    if item["session_key"] == "awi-cancel"
+)
+assert active_run["status"] == "running", active_runs
+assert active_runs["summary"]["running_count"] == 1, active_runs
+assert set(active_run) == {
+    "session_key",
+    "status",
+    "title",
+    "runner_id",
+    "duration_secs",
+    "user_message_count",
+    "source",
+    "start_time",
+}, active_run
 status, accepted = request_json(
     f"/worker-jobs/{cancel_job['id']}/cancel",
     method="POST",
@@ -667,6 +686,15 @@ while time.monotonic() < deadline:
         break
     time.sleep(0.1)
 assert terminal["status"] == "cancelled", terminal
+_, finished_runs = request_json(
+    "/im-gateway/agent/session-summaries?q=awi-cancel&limit=10"
+)
+finished_run = next(
+    item for item in finished_runs["items"]
+    if item["session_key"] == "awi-cancel"
+)
+assert finished_run["status"] != "running", finished_runs
+assert finished_runs["summary"]["running_count"] == 0, finished_runs
 PY
 
 kill -0 "$BIFROST_PID" 2>/dev/null || fail "main process exited after External CLI cancellation"
