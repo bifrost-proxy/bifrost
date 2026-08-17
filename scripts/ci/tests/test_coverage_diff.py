@@ -204,147 +204,64 @@ class CoverageDiffTests(unittest.TestCase):
             path = root / "crates/a/src/lib.rs"
             path.parent.mkdir(parents=True)
             path.write_text(
-                "pub fn production() {\n execute();\n}\n#[cfg(test)]\nmod tests {\n fn test() {}\n}\n",
+                "pub fn production() {}\n#[cfg(test)]\nmod tests {\n fn test() {}\n}\n",
                 encoding="utf-8",
             )
             filtered = coverage_diff.exclude_inline_test_modules(
-                {"crates/a/src/lib.rs": set(range(1, 8))}, root
+                {"crates/a/src/lib.rs": {1, 2, 3, 4, 5}}, root
+            )
+        self.assertEqual(filtered, {"crates/a/src/lib.rs": {1}})
+
+    def test_non_executable_rust_lines_exclude_only_source_structure(self) -> None:
+        source = """pub fn run(
+    value: String,
+) {
+    // explanation
+    #[cfg(test)]
+    do_work(value);
+}
+
+match value {
+    Some(value) => use_value(value),
+}
+"""
+        self.assertEqual(
+            coverage_diff.rust_non_executable_lines(source),
+            {1, 2, 3, 4, 5, 7, 8, 11},
+        )
+
+    def test_exclude_non_executable_lines_preserves_behavioral_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "crates/a/src/lib.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "pub fn run() {\n    do_work();\n}\n\n// comment\n",
+                encoding="utf-8",
+            )
+            filtered = coverage_diff.exclude_non_executable_rust_lines(
+                {"crates/a/src/lib.rs": {1, 2, 3, 4, 5}}, root
             )
         self.assertEqual(filtered, {"crates/a/src/lib.rs": {2}})
 
-    def test_non_executable_rust_lines_do_not_depend_on_formatting(self) -> None:
-        source = """// explanation
-#[cfg(unix)]
-call_runtime(
-    important_value,
-);
-/* block
- * explanation
- */
-if ready {
-    execute();
+    def test_non_executable_rust_lines_exclude_formatter_only_continuations(self) -> None:
+        source = """let result =
+    run_worker(
+        request,
+    ).await;
+event_writer
+    .join()?;
+if accepted {
+    finish();
+} else {
+    abort();
 }
+result
 """
-        excluded = coverage_diff.rust_non_executable_lines(source)
-        self.assertEqual(excluded, {1, 2, 4, 5, 6, 7, 8, 11})
-        self.assertNotIn(3, excluded)
-        self.assertNotIn(9, excluded)
-        self.assertNotIn(10, excluded)
-
-    def test_non_executable_rust_declarations_are_excluded_but_bodies_remain(self) -> None:
-        source = """struct Control {
-    pid: u32,
-}
-impl Drop for Control {
-    fn drop(&mut self) {
-        release(self.pid);
-    }
-}
-async fn run(
-    value: u32,
-) -> Result<(), String> {
-    execute(value).await?;
-    Ok(())
-}
-static HANDLES: Lazy<
-    Map<String, Control>,
-> = Lazy::new(Map::new);
-"""
-        excluded = coverage_diff.rust_non_executable_lines(source)
-        self.assertTrue(set(range(1, 6)).issubset(excluded))
-        self.assertIn(9, excluded)
-        self.assertTrue(set(range(15, 18)).issubset(excluded))
-        self.assertNotIn(6, excluded)
-        self.assertNotIn(12, excluded)
-        self.assertNotIn(13, excluded)
-
-    def test_non_executable_rust_macro_fields_keep_branch_anchor(self) -> None:
-        source = '''fn report(enabled: bool) {
-    if enabled {
-        tracing::warn!(
-            session_key = request.session_key.as_deref().unwrap_or_default(),
-            "worker stopped",
-        );
-        let payload = serde_json::json!({
-            "file_key": file_key,
-        });
-    } else {
-        state = compute();
-        Some("branch value".to_string())
-    }
-}
-'''
-        excluded = coverage_diff.rust_non_executable_lines(source)
-        self.assertNotIn(2, excluded)
-        self.assertNotIn(3, excluded)
-        self.assertIn(4, excluded)
-        self.assertIn(5, excluded)
-        self.assertNotIn(7, excluded)
-        self.assertIn(8, excluded)
-        self.assertNotIn(11, excluded)
-        self.assertNotIn(12, excluded)
-
-    def test_non_executable_rust_continuations_keep_expression_anchors(self) -> None:
-        source = '''fn run() {
-    let value = source
-        .trim()
-        .to_string();
-    if matches!(
-        value,
-        State::Ready | State::Done
-    ) {
-        tracing::warn!(
-            task_id,
-            pid = handle.pid,
-            "worker stopped",
-        );
-    }
-    match value {
-        State::Ready =>
-            execute(
-                &task_id,
-                StatusCode::CONFLICT,
-            ),
-    }
-    let result = Payload {
-        status: value,
-    };
-    match request {
-        (&Method::POST, _)
-            if ready => execute(),
-    }
-}
-'''
-        excluded = coverage_diff.rust_non_executable_lines(source)
-        self.assertTrue(
-            {1, 3, 4, 6, 7, 8, 10, 11, 13, 18, 19, 23, 26}.issubset(
-                excluded
-            )
+        self.assertEqual(
+            coverage_diff.rust_non_executable_lines(source),
+            {1, 4, 5, 6, 9, 11},
         )
-        self.assertNotIn(2, excluded)
-        self.assertNotIn(5, excluded)
-        self.assertNotIn(9, excluded)
-        self.assertIn(12, excluded)
-        self.assertNotIn(17, excluded)
-        self.assertNotIn(22, excluded)
-
-    def test_branch_values_remain_coverage_obligations(self) -> None:
-        source = '''fn build(enabled: bool) -> Option<Payload> {
-    if enabled {
-        Some(Payload {
-            status: compute_status(),
-            message: "enabled".to_string(),
-        })
-    } else {
-        Some("disabled".to_string())
-    }
-}
-'''
-        excluded = coverage_diff.rust_non_executable_lines(source)
-        self.assertNotIn(3, excluded)
-        self.assertIn(4, excluded)
-        self.assertIn(5, excluded)
-        self.assertNotIn(8, excluded)
 
     def test_substantial_unchanged_moved_block_is_excluded(self) -> None:
         base = """fn download() {

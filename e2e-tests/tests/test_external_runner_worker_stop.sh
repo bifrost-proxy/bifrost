@@ -4,7 +4,13 @@ set -euo pipefail
 unset BIFROST_DETACHED_DAEMON_CHILD
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 : "${BIFROST_DISABLE_TRAY:=1}"
+# Keep the IM request dispatcher in the service process so this scenario
+# exercises the dedicated external-runner worker rather than the IM worker's
+# in-process broker fallback.
+: "${BIFROST_IM_GATEWAY_EXECUTION_MODE:=legacy}"
+: "${BIFROST_EXTERNAL_CLI_EXECUTION_MODE:=worker}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT BIFROST_DISABLE_TRAY
+export BIFROST_IM_GATEWAY_EXECUTION_MODE BIFROST_EXTERNAL_CLI_EXECUTION_MODE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -246,6 +252,34 @@ curl -fsS --noproxy '*' -X POST \
 wait "$REPLACED_PID"
 grep -q '"status":"stopped"' "$TEST_DIR/replaced-run.json"
 grep -q 'DONE_codex-stop' "$TEST_DIR/replacement-run.json"
+
+# Chat Gateway /clear must wait for the isolated worker stop before deleting
+# the service-owned queue/session state. The queued continuation must not run.
+CLEAR_SESSION="worker-stop-clear"
+"$BIFROST_BIN" -H 127.0.0.1 -p "$BIFROST_PORT" agent run \
+  --runner codex-stop --session "$CLEAR_SESSION" --json "hold-clear" \
+  >"$TEST_DIR/clear-active-run.ndjson" 2>&1 &
+CLEAR_RUN_PID=$!
+for _ in $(seq 1 160); do
+  grep -q 'hold-clear' "$MOCK_LOG" 2>/dev/null && break
+  sleep 0.05
+done
+"$BIFROST_BIN" -H 127.0.0.1 -p "$BIFROST_PORT" agent run \
+  --runner codex-stop --session "$CLEAR_SESSION" --json "/q queued-must-be-cleared" \
+  >"$TEST_DIR/clear-queued.ndjson" 2>&1
+grep -q '"queued":true' "$TEST_DIR/clear-queued.ndjson"
+"$BIFROST_BIN" -H 127.0.0.1 -p "$BIFROST_PORT" agent run \
+  --runner codex-stop --session "$CLEAR_SESSION" --json "/clear" \
+  >"$TEST_DIR/clear-command.ndjson" 2>&1
+wait "$CLEAR_RUN_PID"
+grep -q '"cleared":true' "$TEST_DIR/clear-command.ndjson"
+grep -q '"status":"stopped"' "$TEST_DIR/clear-active-run.ndjson"
+sleep 0.2
+if grep -q 'queued-must-be-cleared' "$MOCK_LOG"; then
+  echo "queued continuation ran after /clear" >&2
+  tail -100 "$MOCK_LOG" >&2
+  exit 1
+fi
 
 # Service shutdown must stop an active isolated worker through the same native
 # interrupt path before the parent runtime and worker control channels vanish.
