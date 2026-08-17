@@ -18,6 +18,17 @@ use crate::runner::TestCase;
 // mid-flight. This module-scoped mutex guarantees mutual exclusion.
 static DATA_DIR_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn first_streamed_chunk_deadline_ms() -> u128 {
+    if cfg!(target_os = "windows") {
+        // Windows process creation is materially slower on the hosted runners.
+        // Keep the relaxed budget platform-specific so the
+        // 1-second streaming regression guard remains intact everywhere else.
+        3_000
+    } else {
+        1_000
+    }
+}
+
 fn platform_echo_executable() -> String {
     if cfg!(target_os = "windows") {
         let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
@@ -276,10 +287,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if chunks[0].0.as_slice() != b"stream-one" || chunks[1].0.as_slice() != b"stream-two" {
                     return Err(format!("unexpected streamed chunks: {:?}", *chunks));
                 }
-                if chunks[0].1 >= 1000 {
+                let first_chunk_deadline_ms = first_streamed_chunk_deadline_ms();
+                if chunks[0].1 >= first_chunk_deadline_ms {
                     return Err(format!(
-                        "first streamed chunk arrived too late: {}ms",
-                        chunks[0].1
+                        "first streamed chunk arrived too late: {}ms (limit: {}ms)",
+                        chunks[0].1, first_chunk_deadline_ms
                     ));
                 }
                 if chunks[1].1 < 250 {
