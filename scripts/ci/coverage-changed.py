@@ -228,7 +228,18 @@ def coverage_command(
     jobs: int,
     test_filter: str | None,
 ) -> list[str]:
-    command = ["cargo", "llvm-cov", "--no-clean"]
+    # Some lifecycle tests intentionally terminate instrumented child processes.
+    # LLVM may leave a truncated raw profile for those children; keep merging the
+    # remaining valid profiles so the changed-lines gate still evaluates the
+    # coverage that was actually flushed. The gate remains fail-closed because
+    # missing coverage lowers the measured percentage.
+    command = [
+        "cargo",
+        "llvm-cov",
+        "--no-clean",
+        "--failure-mode",
+        "all",
+    ]
     for package in packages:
         command.extend(["--package", package])
     command.extend(

@@ -48,7 +48,19 @@ impl RunningTaskGuard {
         let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if source_compression_is_running(task_id) {
+        if source_compression_is_running(task_id)
+            || external_import_is_running(task_id)
+            || RUNNING_CHUNK_RETRY_TASKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(task_id)
+            || bulk_chunk_retry_state(task_id).is_some_and(|retry| {
+                matches!(
+                    retry.status,
+                    BulkChunkRetryStatus::Queued | BulkChunkRetryStatus::Running
+                )
+            })
+        {
             return Err(());
         }
         let mut running = RUNNING_TASKS.lock().unwrap();
@@ -85,7 +97,7 @@ impl RunningExternalImportGuard {
         let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if source_compression_is_running(task_id) {
+        if source_compression_is_running(task_id) || task_is_running(task_id) {
             return Err(());
         }
         let mut running = RUNNING_EXTERNAL_IMPORT_TASKS.lock().unwrap();
@@ -108,7 +120,7 @@ impl RunningChunkRetryGuard {
         let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if source_compression_is_running(task_id) {
+        if source_compression_is_running(task_id) || task_is_running(task_id) {
             return Err(());
         }
         let mut running = RUNNING_CHUNK_RETRY_TASKS
@@ -592,7 +604,8 @@ struct SourceAudioCompressionRecord {
     original_modified_ms: Option<u64>,
     compressed_size_bytes: u64,
     saved_bytes: u64,
-    pcm_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pcm_sha256: Option<String>,
     compressed_at_ms: u64,
 }
 

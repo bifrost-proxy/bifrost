@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write as StdWrite;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
@@ -42,7 +43,9 @@ const CONFIG_VERSION: u32 = 2;
 const WORKER_PROTOCOL_VERSION: u32 = 2;
 const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
-const WORKER_STOP_GRACE_MS: u64 = 1500;
+const WORKER_TRANSPORT_STOP_GRACE_MS: u64 = 1_500;
+const WORKER_STOP_GRACE_MS: u64 = 3_000;
+const WORKER_SESSION_LOCK_STRIPES: usize = 64;
 const CLI_VERSION_DETECTION_TIMEOUT_SECS: u64 = 10;
 const MAX_CAPTURED_STREAM_BYTES: usize = 4 * 1024;
 const MAX_CAPTURED_EVENTS: usize = 512;
@@ -82,11 +85,21 @@ static QUEUED_WORKER_SESSIONS: once_cell::sync::Lazy<
 > = once_cell::sync::Lazy::new(dashmap::DashMap::new);
 static EXTERNAL_CLI_RUN_SEMAPHORE: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(external_cli_max_concurrency()));
+static ACTIVE_WORKERS: once_cell::sync::Lazy<
+    dashmap::DashMap<u32, tokio::sync::mpsc::UnboundedSender<oneshot::Sender<()>>>,
+> = once_cell::sync::Lazy::new(dashmap::DashMap::new);
+static WORKER_SESSION_LOCKS: once_cell::sync::Lazy<Vec<tokio::sync::Mutex<()>>> =
+    once_cell::sync::Lazy::new(|| {
+        (0..WORKER_SESSION_LOCK_STRIPES)
+            .map(|_| tokio::sync::Mutex::new(()))
+            .collect()
+    });
 
 #[derive(Clone)]
 struct ExternalCliWorkerControlHandle {
     pid: u32,
-    control_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerControlRequest>,
+    stop_tx: tokio::sync::mpsc::UnboundedSender<oneshot::Sender<()>>,
+    guide_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerGuideRequest>,
 }
 
 #[derive(Clone)]
@@ -109,15 +122,24 @@ impl Drop for QueuedExternalCliWorkerGuard {
     }
 }
 
-enum ExternalCliWorkerControlRequest {
-    Stop {
-        ack_tx: oneshot::Sender<()>,
-    },
-    Guide {
-        guide_id: String,
-        message: String,
-        ack_tx: oneshot::Sender<ExternalCliGuideResult>,
-    },
+struct ActiveWorkerRegistration {
+    pid: u32,
+    session_key: Option<String>,
+}
+
+impl Drop for ActiveWorkerRegistration {
+    fn drop(&mut self) {
+        ACTIVE_WORKERS.remove(&self.pid);
+        if let Some(session_key) = self.session_key.as_deref() {
+            ACTIVE_WORKER_SESSIONS.remove_if(session_key, |_, handle| handle.pid == self.pid);
+        }
+    }
+}
+
+struct ExternalCliWorkerGuideRequest {
+    guide_id: String,
+    message: String,
+    ack_tx: oneshot::Sender<ExternalCliGuideResult>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,28 +173,13 @@ pub async fn request_worker_session_stop(session_key: &str) -> bool {
         return false;
     };
     let (ack_tx, mut ack_rx) = oneshot::channel();
-    match handle
-        .control_tx
-        .try_send(ExternalCliWorkerControlRequest::Stop { ack_tx })
-    {
-        Ok(()) => {}
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            tracing::warn!(
-                session_key,
-                pid = handle.pid,
-                "external_cli worker: control channel is saturated; terminating worker directly"
-            );
-            let _ = terminate_process(handle.pid);
-            return true;
-        }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            tracing::warn!(
-                session_key,
-                pid = handle.pid,
-                "external_cli worker: stop receiver is gone; skipping pid termination for stale worker entry"
-            );
-            return false;
-        }
+    if handle.stop_tx.send(ack_tx).is_err() {
+        tracing::warn!(
+            session_key,
+            pid = handle.pid,
+            "external_cli worker: stop receiver is gone; skipping pid termination for stale worker entry"
+        );
+        return false;
     }
     match tokio::time::timeout(Duration::from_millis(WORKER_STOP_GRACE_MS), &mut ack_rx).await {
         Ok(Ok(())) | Ok(Err(_)) => return true,
@@ -201,6 +208,41 @@ pub async fn stop_all_worker_sessions() -> usize {
     stopped
 }
 
+/// Gracefully stop every isolated external-runner worker before the service
+/// runtime is torn down. This registry includes sessionless direct API runs,
+/// which are intentionally absent from `ACTIVE_WORKER_SESSIONS`.
+pub async fn shutdown_all_active_runs() {
+    let workers = ACTIVE_WORKERS
+        .iter()
+        .map(|entry| (*entry.key(), entry.value().clone()))
+        .collect::<Vec<_>>();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(WORKER_STOP_GRACE_MS);
+    let mut pending = Vec::with_capacity(workers.len());
+
+    for (pid, stop_tx) in workers {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if stop_tx.send(ack_tx).is_ok() {
+            pending.push((pid, ack_rx));
+        } else {
+            let _ = terminate_process(pid);
+            ACTIVE_WORKERS.remove(&pid);
+        }
+    }
+
+    for (pid, ack_rx) in pending {
+        if !matches!(tokio::time::timeout_at(deadline, ack_rx).await, Ok(Ok(()))) {
+            tracing::warn!(
+                pid,
+                "external_cli worker did not stop before service shutdown; terminating"
+            );
+            let _ = terminate_process(pid);
+        }
+        ACTIVE_WORKERS.remove(&pid);
+    }
+    ACTIVE_WORKER_SESSIONS.clear();
+    kill_all_active_runs();
+}
+
 pub async fn request_worker_session_guide(
     session_key: &str,
     guide_id: String,
@@ -219,8 +261,8 @@ pub async fn request_worker_session_guide(
         .ok_or_else(|| format!("no active external runner for session '{session_key}'"))?;
     let (ack_tx, ack_rx) = oneshot::channel();
     handle
-        .control_tx
-        .try_send(ExternalCliWorkerControlRequest::Guide {
+        .guide_tx
+        .try_send(ExternalCliWorkerGuideRequest {
             guide_id,
             message,
             ack_tx,
@@ -316,7 +358,8 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     let session_key = run_request.session_key.clone().unwrap_or_default();
     let supports_live_guide = app_server::resolved_transport(&run_request)
         .is_ok_and(ExternalCliTransport::supports_live_guide);
-    let runtime = ExternalCliRuntime::new(PathBuf::from(runs_root));
+    let runs_root = PathBuf::from(runs_root);
+    let runtime = ExternalCliRuntime::new(runs_root.clone());
     let (progress_tx, mut progress_rx) = mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
     let run = tokio::spawn(async move {
         runtime
@@ -329,6 +372,8 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     ));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut progress_open = true;
+    let mut stop_deadline = None::<std::pin::Pin<Box<tokio::time::Sleep>>>;
+    let mut command_open = true;
     let final_event = loop {
         tokio::select! {
             progress = progress_rx.recv(), if progress_open => {
@@ -346,12 +391,22 @@ async fn run_worker_stdio_async() -> Result<(), String> {
                     timestamp_ms: now_ms(),
                 });
             }
-            command = command_rx.recv() => {
+            command = command_rx.recv(), if command_open => {
+                if command.is_none() {
+                    // The parent closes worker stdin after sending Stop. Disable
+                    // this branch after EOF so the grace-period timer is not
+                    // starved by an always-ready closed receiver.
+                    command_open = false;
+                }
                 match command {
                     Some(ExternalCliWorkerCommand::Stop) | None => {
-                        kill_all_active_runs();
-                        run.abort();
-                        break ExternalCliWorkerEvent::Stopped;
+                        if stop_deadline.is_some() {
+                            continue;
+                        }
+                        match begin_worker_stdio_stop(&runs_root, &session_key, &run).await {
+                            Some(deadline) => stop_deadline = Some(deadline),
+                            None => break ExternalCliWorkerEvent::Stopped,
+                        }
                     }
                     Some(ExternalCliWorkerCommand::Guide { guide_id, message }) => {
                         let result = if supports_live_guide {
@@ -413,6 +468,15 @@ async fn run_worker_stdio_async() -> Result<(), String> {
                     },
                 };
             }
+            _ = async {
+                match stop_deadline.as_mut() {
+                    Some(deadline) => deadline.await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                force_stop_worker_stdio_run(&run);
+                break ExternalCliWorkerEvent::Stopped;
+            }
         }
     };
     queue_external_cli_worker_event(&event_tx, final_event).await?;
@@ -421,6 +485,56 @@ async fn run_worker_stdio_async() -> Result<(), String> {
         .join()
         .map_err(|_| "external runner worker event writer panicked".to_string())?;
     Ok(())
+}
+
+async fn begin_worker_stdio_stop<T>(
+    runs_root: &Path,
+    session_key: &str,
+    run: &tokio::task::JoinHandle<T>,
+) -> Option<std::pin::Pin<Box<tokio::time::Sleep>>> {
+    if request_worker_stdio_run_stop(runs_root, session_key, run).await {
+        return Some(Box::pin(sleep(Duration::from_millis(
+            WORKER_TRANSPORT_STOP_GRACE_MS,
+        ))));
+    }
+    force_stop_worker_stdio_run(run);
+    None
+}
+
+fn force_stop_worker_stdio_run<T>(run: &tokio::task::JoinHandle<T>) {
+    kill_all_active_runs();
+    run.abort();
+}
+
+async fn request_worker_stdio_run_stop<T>(
+    runs_root: &Path,
+    session_key: &str,
+    run: &tokio::task::JoinHandle<T>,
+) -> bool {
+    let registration_deadline =
+        tokio::time::Instant::now() + Duration::from_millis(WORKER_TRANSPORT_STOP_GRACE_MS);
+    loop {
+        if !session_key.is_empty() && request_session_stop(runs_root, session_key).await.is_ok() {
+            return true;
+        }
+        // Sessionless direct API runs are intentionally not present in
+        // ACTIVE_SESSIONS. A worker owns one run, so its local registry is the
+        // authoritative fallback for shutdown/EOF.
+        let run_ids = ACTIVE_RUNS
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        if !run_ids.is_empty() {
+            for run_id in run_ids {
+                let _ = request_run_stop(runs_root, &run_id).await;
+            }
+            return true;
+        }
+        if run.is_finished() || tokio::time::Instant::now() >= registration_deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
 }
 
 mod app_server;
@@ -1217,6 +1331,12 @@ struct ExternalCliWorkerRun {
 
 impl ExternalCliWorkerClient {
     fn current_exe() -> Result<Self, String> {
+        #[cfg(test)]
+        if let Some(executable) = std::env::var_os("BIFROST_TEST_EXTERNAL_CLI_WORKER_EXECUTABLE") {
+            return Ok(Self {
+                executable: PathBuf::from(executable),
+            });
+        }
         let executable = std::env::current_exe()
             .map_err(|error| format!("resolve current executable failed: {error}"))?;
         let executable = labeled_process_executable(&executable, "bifrost-runner");
@@ -1541,6 +1661,14 @@ impl ExternalCliRuntime {
                     .to_string(),
             );
         }
+        let session_lock_index = request
+            .session_key
+            .as_deref()
+            .map(worker_session_lock_index);
+        let session_lock_guard = match session_lock_index {
+            Some(index) => Some(WORKER_SESSION_LOCKS[index].lock().await),
+            None => None,
+        };
         // Preserve the historical same-session replacement behavior: stop the
         // prior worker before waiting for the global concurrency slot, otherwise
         // a concurrency=1 replacement can queue behind the very run it must stop.
@@ -1595,35 +1723,75 @@ impl ExternalCliRuntime {
             .spawn(self.runs_root.clone(), request.clone())
             .await?;
         let worker_pid = worker.child_id();
-        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<
-            ExternalCliWorkerControlRequest,
-        >(MAX_PENDING_EXTERNAL_GUIDES);
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (guide_tx, mut guide_rx) = tokio::sync::mpsc::channel::<ExternalCliWorkerGuideRequest>(
+            MAX_PENDING_EXTERNAL_GUIDES,
+        );
+        if let Some(pid) = worker_pid {
+            ACTIVE_WORKERS.insert(pid, stop_tx.clone());
+        }
         if let (Some(session_key), Some(pid)) = (control_key.as_deref(), worker_pid) {
             ACTIVE_WORKER_SESSIONS.insert(
                 session_key.to_string(),
-                ExternalCliWorkerControlHandle { pid, control_tx },
+                ExternalCliWorkerControlHandle {
+                    pid,
+                    stop_tx,
+                    guide_tx,
+                },
             );
         }
-        let session_key = control_key;
+        let _worker_registration = worker_pid.map(|pid| ActiveWorkerRegistration {
+            pid,
+            session_key: control_key,
+        });
+        drop(session_lock_guard);
         let mut pending_guides = HashMap::<String, oneshot::Sender<ExternalCliGuideResult>>::new();
-        let mut control_open = true;
+        let mut pending_stop_ack = None::<oneshot::Sender<()>>;
+        let mut stop_deadline = None::<std::pin::Pin<Box<tokio::time::Sleep>>>;
         let result = loop {
             tokio::select! {
-                control = control_rx.recv(), if control_open => {
-                    match control {
-                        Some(ExternalCliWorkerControlRequest::Stop { ack_tx }) => {
-                            let _ = worker.terminate().await;
-                            let _ = ack_tx.send(());
-                            break Ok(ExternalCliRunResult::stopped(
-                                request.session_key.clone(),
-                                request.adapter.clone(),
-                            ));
+                stop = stop_rx.recv(), if pending_stop_ack.is_none() => {
+                    if let Some(ack_tx) = stop {
+                        match worker.request_stop().await {
+                            Ok(()) => {
+                                pending_stop_ack = Some(ack_tx);
+                                stop_deadline = Some(Box::pin(sleep(Duration::from_millis(
+                                    WORKER_STOP_GRACE_MS,
+                                ))));
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_key = request.session_key.as_deref().unwrap_or_default(),
+                                    error = %error,
+                                    "external_cli worker: graceful stop request failed; terminating worker"
+                                );
+                                let _ = worker.terminate().await;
+                                let _ = ack_tx.send(());
+                                break Ok(ExternalCliRunResult::stopped(
+                                    request.session_key.clone(),
+                                    request.adapter.clone(),
+                                ));
+                            }
                         }
-                        Some(ExternalCliWorkerControlRequest::Guide {
+                    }
+                }
+                guide = guide_rx.recv() => {
+                    if let Some(ExternalCliWorkerGuideRequest {
                             guide_id,
                             message,
                             ack_tx,
-                        }) => {
+                        }) = guide
+                    {
+                            if pending_stop_ack.is_some() {
+                                let _ = ack_tx.send(ExternalCliGuideResult {
+                                    guide_id,
+                                    accepted: false,
+                                    thread_id: None,
+                                    turn_id: None,
+                                    reason: Some("external runner is stopping".to_string()),
+                                });
+                                continue;
+                            }
                             if pending_guides.len() >= MAX_PENDING_EXTERNAL_GUIDES {
                                 let _ = ack_tx.send(ExternalCliGuideResult {
                                     guide_id,
@@ -1657,12 +1825,17 @@ impl ExternalCliRuntime {
                             } else {
                                 pending_guides.insert(guide_id, ack_tx);
                             }
-                        }
-                        None => control_open = false,
                     }
                 }
                 event = worker.next_event() => {
                     match event {
+                        Err(error) if pending_stop_ack.is_some() => {
+                            tracing::warn!(error = %error, "external runner worker exited during stop");
+                            break Ok(ExternalCliRunResult::stopped(
+                                request.session_key.clone(),
+                                request.adapter.clone(),
+                            ));
+                        }
                         Err(error) => break Err(error),
                         Ok(ExternalCliWorkerEvent::Started { .. }) => {}
                         Ok(ExternalCliWorkerEvent::Progress { event }) => {
@@ -1688,6 +1861,13 @@ impl ExternalCliRuntime {
                             let _ = std::fs::remove_file(result_path);
                             break value;
                         }
+                        Ok(ExternalCliWorkerEvent::Failed { error }) if pending_stop_ack.is_some() => {
+                            tracing::warn!(error = %error, "external runner worker failed during stop");
+                            break Ok(ExternalCliRunResult::stopped(
+                                request.session_key.clone(),
+                                request.adapter.clone(),
+                            ));
+                        }
                         Ok(ExternalCliWorkerEvent::Failed { error }) => break Err(error),
                         Ok(ExternalCliWorkerEvent::Stopped) => {
                             break Ok(ExternalCliRunResult::stopped(
@@ -1697,8 +1877,27 @@ impl ExternalCliRuntime {
                         }
                     }
                 }
+                _ = async {
+                    match stop_deadline.as_mut() {
+                        Some(deadline) => deadline.await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    tracing::warn!(
+                        session_key = request.session_key.as_deref().unwrap_or_default(),
+                        "external runner worker did not finish graceful stop in time; terminating"
+                    );
+                    let _ = worker.terminate().await;
+                    break Ok(ExternalCliRunResult::stopped(
+                        request.session_key.clone(),
+                        request.adapter.clone(),
+                    ));
+                }
             }
         };
+        if let Some(ack_tx) = pending_stop_ack {
+            let _ = ack_tx.send(());
+        }
         for (guide_id, ack_tx) in pending_guides {
             let _ = ack_tx.send(ExternalCliGuideResult {
                 guide_id,
@@ -1707,11 +1906,6 @@ impl ExternalCliRuntime {
                 turn_id: None,
                 reason: Some("external runner finished before guide acknowledgement".to_string()),
             });
-        }
-        if let Some(session_key) = session_key.as_deref() {
-            if let Some(pid) = worker_pid {
-                ACTIVE_WORKER_SESSIONS.remove_if(session_key, |_, handle| handle.pid == pid);
-            }
         }
         result
     }
@@ -2258,10 +2452,32 @@ pub async fn request_run_stop(runs_root: impl AsRef<Path>, run_id: &str) -> Resu
     tokio::fs::write(run_dir.join("stop_requested"), now_ms().to_string())
         .await
         .map_err(|error| format!("write stop marker failed: {error}"))?;
-    if let Some((_, pid)) = ACTIVE_RUNS.remove(run_id) {
-        terminate_process(pid)?;
+    if let Some(pid) = ACTIVE_RUNS.get(run_id).map(|entry| *entry.value()) {
+        // Protocol-aware transports observe the durable marker and send their
+        // native interrupt before exiting. Keep a bounded hard-kill fallback for
+        // startup/handshake hangs, but only while the same run still owns this pid.
+        let run_id = run_id.to_string();
+        tokio::spawn(async move {
+            // Transport handlers get their own shorter acknowledgement window;
+            // leave the outer fallback enough time to persist the stopped
+            // result and release ownership before sending a hard kill.
+            sleep(Duration::from_millis(WORKER_STOP_GRACE_MS)).await;
+            let still_owned = ACTIVE_RUNS
+                .get(&run_id)
+                .is_some_and(|entry| *entry.value() == pid);
+            if !still_owned {
+                return;
+            }
+            tracing::warn!(
+                run_id,
+                pid,
+                "external cli did not finish protocol stop in time; terminating process"
+            );
+            let _ = terminate_process(pid);
+            ACTIVE_RUNS.remove_if(&run_id, |_, owner| *owner == pid);
+            remove_active_sessions_for_run(&run_id);
+        });
     }
-    remove_active_sessions_for_run(run_id);
     Ok(())
 }
 
@@ -5449,6 +5665,12 @@ fn validate_external_cli_worker_runtime_path(path: &Path, root: &Path) -> Result
     Ok(path)
 }
 
+fn worker_session_lock_index(session_key: &str) -> usize {
+    let mut hasher = DefaultHasher::new();
+    session_key.hash(&mut hasher);
+    (hasher.finish() as usize) % WORKER_SESSION_LOCK_STRIPES
+}
+
 fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process::Child, String> {
     let mut command = external_cli_worker_process_command(executable);
     if let Ok(stderr) = external_cli_worker_stderr_file() {
@@ -5489,8 +5711,7 @@ fn external_cli_worker_process_command(executable: &Path) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .env(EXTERNAL_CLI_WORKER_ENV, "1")
-        .kill_on_drop(true);
+        .env(EXTERNAL_CLI_WORKER_ENV, "1");
     #[cfg(unix)]
     command.process_group(0);
     command

@@ -1170,6 +1170,120 @@ test("ASR task detail can queue bulk retry for all failed chunks", async ({ page
   );
 });
 
+test("ASR task detail retries one failed file or all failed files", async ({ page }) => {
+  await installAsrMicrophoneMocks(page);
+  const retryRequests: string[] = [];
+  const task = {
+    id: "task-failed-files",
+    name: "Failed files task",
+    audio_dir: "/tmp/asr-failed-files",
+    recursive: true,
+    enabled: true,
+    paused: false,
+    schedule: { kind: "daily", hour: 2, minute: 0 },
+    language: "chinese",
+    model: "Qwen3-ASR-1.7B",
+    runtime_strategy: "reuse_per_file",
+    created_at_ms: Date.now(),
+    updated_at_ms: Date.now(),
+    summary: {
+      discovered: 1,
+      processed: 0,
+      pending: 0,
+      failed: 1,
+      partial_success: 0,
+      failed_chunk_count: 0,
+      deleted_after_processing: 0,
+      running: false,
+    },
+  };
+  await page.route("**/_bifrost/api/asr/tasks", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ tasks: [task] }),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/task-failed-files", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...task,
+        daily_documents: [],
+        files: [
+          {
+            key: "failed-file-key",
+            task_id: task.id,
+            source_path: "/tmp/asr-failed-files/failed.wav",
+            status: "failed",
+            text_chars: 0,
+            error: "decoder failed",
+            failed_chunks: [],
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/asr/tasks/task-failed-files/files/failed-file-key/retry",
+    async (route) => {
+      retryRequests.push("single");
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          queued: 1,
+          skipped: 0,
+          file_key: "failed-file-key",
+          message: "Failed file queued for a full transcription retry.",
+        }),
+      });
+    },
+  );
+  await page.route(
+    "**/_bifrost/api/asr/tasks/task-failed-files/retry-failed-files",
+    async (route) => {
+      retryRequests.push("bulk");
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          queued: 1,
+          skipped: 0,
+          message: "Queued 1 failed file(s) for full transcription retry; 0 skipped.",
+        }),
+      });
+    },
+  );
+
+  await openPage(page, "ai?aiSection=tools-asr");
+  await page.getByRole("button", { name: "View details" }).click();
+  const taskPage = page.getByTestId("asr-task-detail-page");
+  await expect(taskPage.getByText("Directory Task: Failed files task")).toBeVisible();
+  await taskPage.getByRole("tab", { name: "Files (1)" }).click();
+  const retryTranscriptionButton = taskPage.getByRole("button", {
+    name: "Retry transcription",
+  });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(retryTranscriptionButton).toBeVisible();
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(retryTranscriptionButton).toBeVisible();
+
+  await retryTranscriptionButton.click();
+  await page.getByRole("button", { name: "OK" }).click();
+  await expect.poll(() => retryRequests).toEqual(["single"]);
+
+  await selectTaskAction(page, "Retry all failed files");
+  await page.getByRole("button", { name: "OK" }).click();
+  await expect.poll(() => retryRequests).toEqual(["single", "bulk"]);
+});
+
 test("ASR task files start sequential compression and show overall and per-file progress", async ({
   page,
 }) => {

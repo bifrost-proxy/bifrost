@@ -761,6 +761,34 @@
 - 用户明确进入 ASR 任务工作流后才激活 scheduler；既有任务恢复能力保持可用。
 - 测试仅使用临时目录、临时端口和定向 PID 清理，不影响默认 9900 服务、系统代理或真实 `~/.bifrost/asr` 模型。
 
+### TC-QASR-29 压缩统计历史修复与失败文件整文件重试
+
+操作步骤：
+
+1. 执行隔离的后端场景：
+   ```bash
+   bash e2e-tests/tests/test_asr_source_compression.sh
+   ```
+2. 确认脚本在压缩完成后主动从 `files.json` 删除 FLAC 的 `source_compression`，随后重新读取任务详情，并再次启动压缩。
+3. 执行聚焦单元与浏览器场景：
+   ```bash
+   cargo test -p bifrost-admin --lib stale_file_store_snapshot_cannot_erase_compression_metadata
+   cargo test -p bifrost-admin --lib completed_legacy_compression_ledger_repairs_matching_flac_only
+   cargo test -p bifrost-admin --lib whole_file_retry_reset_preserves_source_identity_and_limits_discovery
+   cargo test -p bifrost-admin --lib transcription_import_and_chunk_retry_guards_are_atomically_mutually_exclusive
+   pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "retries one failed file or all failed files"
+   ```
+4. 在 Files tab 检查 failed 行的 `Retry transcription`，确认亮色主题可见后切换到暗色主题并再次确认可见；再检查更多菜单的 `Retry all failed files`，分别确认请求和 loading 状态。
+
+预期结果：
+
+- 较旧的 file-store 快照不能清空同一路径已经写入的压缩元数据；任务详情仍显示正确的已压缩文件数和节省空间。
+- 只有 ledger 路径、FLAC 大小与当前 record 一致、FLAC 不是符号链接且原 WAV 不存在时才回填历史压缩数据；新一轮压缩启动前会把回填写回 `files.json`。
+- 单文件重试只提交目标 file key；批量重试只提交 `failed` 且源音频存在的记录，并返回 `queued/skipped`。
+- 整文件重试与 `Retry chunks` 文案和接口分离；暂停、运行、压缩、外部导入或 chunk retry 活跃时按钮禁用或后端返回冲突，生命周期 guard 在同一把锁内保持原子互斥。
+- `Retry transcription` 在亮色和暗色主题下都保持可见、可读，主题切换不影响单文件或批量重试入口。
+- 自动化只使用临时数据目录、临时端口和 mock 浏览器 API，不触碰真实任务或 9900 服务。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。
@@ -824,3 +852,4 @@
 | 2026-08-04 | TC-QASR-26 / 转录完成后无损压缩源 WAV | `bash e2e-tests/tests/test_asr_source_compression.sh`；`pnpm --dir web exec playwright test --grep "ASR task detail starts lossless source compression"` | PASS：隔离后端真实 API 场景中正常 success WAV 转为更小 FLAC，前后解码 PCM SHA-256 一致；坏 WAV 保留并记失败，partial_success 不入队，无 `.part`/backup 残留；记录主键迁移后仍 success 且 `pending=0`。聚焦 Playwright 验证 Compress WAVs 确认操作、完成状态和 Saved 2.44 KB 展示。 |
 | 2026-08-05 | TC-QASR-27 / 文件页逐个压缩进度与原文件清理二次确认 | `cargo test -p bifrost-admin source_compression_eligibility --lib`；`cargo test -p bifrost-admin cleanup_source_audio --lib`；`bash e2e-tests/tests/test_asr_source_compression.sh`；`bash e2e-tests/tests/test_asr_task_cli.sh`；聚焦 Playwright 两场景 | PASS：后端仅将成功且产物完整的普通 WAV 标记为可压缩；真实 FFmpeg 顺序压缩与 PCM 校验通过。Files tab 在亮/暗主题下展示已压缩、未压缩且符合资格、不可压缩逐文件状态及整体进度。Clean originals 先确认、再输入完整任务名称，缺失或错误 `confirm_name` 返回 400 且不删除，精确匹配后才执行清理。 |
 | 2026-08-07 | TC-QASR-28 / 安装后 ASR 惰性激活 | `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_ASR_TASK_RECOVERY_E2E_PORT=18983 bash e2e-tests/tests/test_asr_task_startup_recovery.sh` | PASS：普通 proxy/system API 与只读 ASR capabilities/Qwen status/MOSS status 探测后预置 processing 记录与 stale lock 保持不变，临时模型目录不存在且日志无 scheduler/task/model initializer；显式访问 ASR task 后才执行恢复并删除 stale lock。 |
+| 2026-08-18 | TC-QASR-29 / 压缩统计历史修复与失败文件整文件重试 | `bash e2e-tests/tests/test_asr_source_compression.sh`；4 个聚焦 Rust 单测；`SKIP_FRONTEND_BUILD=1 ./web/node_modules/.bin/playwright test web/tests/ui/asr-microphone-meter.spec.ts --grep "retries one failed file or all failed files" --workers=1` | PASS：临时目录真实 FFmpeg 压缩后主动清空 `source_compression`，任务 API 从匹配 ledger 恢复 1 个 FLAC 与节省空间，再次启动将修复持久化；缺失源文件单个重试返回 409、批量返回 queued=0/skipped=1。单测覆盖 stale snapshot 单调保护、严格 ledger/symlink 拒绝、精确 file key selection，以及转录/导入/chunk retry guard 原子互斥；浏览器从亮色切换到暗色后 failed 行单文件按钮仍可见，并验证单文件按钮与批量菜单分别调用新接口。初次浏览器用例因未切换 Files tab 超时，修正测试步骤后复跑通过。 |

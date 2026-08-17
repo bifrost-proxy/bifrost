@@ -192,6 +192,7 @@ fn discover_and_prepare_pending_batch(
     files: &mut FileStore,
     attempted_keys: &HashSet<String>,
     recording_date: Option<NaiveDate>,
+    only_file_keys: Option<&HashSet<String>>,
 ) -> Result<PendingBatchScan, String> {
     let discovered = discover_audio_files(&task.audio_dir, task.recursive)?;
     for path in &discovered {
@@ -218,7 +219,8 @@ fn discover_and_prepare_pending_batch(
         .iter()
         .filter(|path| {
             let key = source_key(path);
-            !attempted_keys.contains(&key)
+            only_file_keys.is_none_or(|keys| keys.contains(&key))
+                && !attempted_keys.contains(&key)
                 && files
                     .files
                     .get(&key)
@@ -279,6 +281,7 @@ fn pending_modified_time_ms(record: Option<&FileRecord>) -> u64 {
 async fn run_directory_task_for_date(
     task: AsrDirectoryTask,
     recording_date: Option<NaiveDate>,
+    only_file_keys: Option<HashSet<String>>,
 ) -> Result<(AsrDirectoryTask, usize, usize), String> {
     let _guard = ASR_JOB_RUN_LOCK.lock().await;
     let _task_lock = TaskRunFileLock::acquire(&task.id)?;
@@ -306,6 +309,7 @@ async fn run_directory_task_for_date(
         &mut files,
         &attempted_keys,
         recording_date,
+        only_file_keys.as_ref(),
     )?;
     update_run_progress(&task.id, |progress| {
         progress.current_file_total = pending_scan.pending.len();
@@ -466,6 +470,7 @@ async fn run_directory_task_for_date(
             &mut files,
             &attempted_keys,
             recording_date,
+            only_file_keys.as_ref(),
         ) {
             Ok(scan) => scan,
             Err(error) => break Err(error),
@@ -566,7 +571,7 @@ impl Drop for SpeechResourceLeaseGuard {
 }
 
 fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), String> {
-    spawn_directory_task_run_background_for_date(task, None)
+    spawn_directory_task_run_background_for_date(task, None, Vec::new())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -579,8 +584,10 @@ pub(crate) struct AsrWorkerRunOutcome {
 async fn execute_directory_task_run(
     task: AsrDirectoryTask,
     recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
 ) -> AsrWorkerRunOutcome {
-    let result = run_directory_task_for_date(task.clone(), recording_date).await;
+    let only_file_keys = (!file_keys.is_empty()).then(|| file_keys.into_iter().collect());
+    let result = run_directory_task_for_date(task.clone(), recording_date, only_file_keys).await;
     let outcome = match &result {
         Ok((_updated, processed, failed)) => {
             finish_run_progress(
@@ -641,6 +648,7 @@ async fn execute_directory_task_run(
 pub(crate) async fn run_directory_task_in_worker(
     task_id: &str,
     recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
 ) -> Result<AsrWorkerRunOutcome, String> {
     let task = find_task(task_id).ok_or_else(|| format!("ASR task '{task_id}' not found"))?;
     if source_compression_is_running(task_id) {
@@ -650,7 +658,7 @@ pub(crate) async fn run_directory_task_in_worker(
     FORCE_PAUSED_TASKS.lock().unwrap().remove(task_id);
     let running_guard = RunningTaskGuard::acquire(task_id)
         .map_err(|_| "ASR task is already running".to_string())?;
-    let outcome = execute_directory_task_run(task, recording_date).await;
+    let outcome = execute_directory_task_run(task, recording_date, file_keys).await;
     drop(running_guard);
     Ok(outcome)
 }
@@ -658,6 +666,7 @@ pub(crate) async fn run_directory_task_in_worker(
 fn spawn_directory_task_run_background_for_date(
     task: AsrDirectoryTask,
     recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
 ) -> Result<(), String> {
     if source_compression_is_running(&task.id) {
         return Err("ASR source-audio compression is running".to_string());
@@ -666,56 +675,77 @@ fn spawn_directory_task_run_background_for_date(
     FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
     let running_guard = RunningTaskGuard::acquire(&task.id)
         .map_err(|_| "ASR task is already running".to_string())?;
+    spawn_directory_task_run_background_with_guard(
+        task,
+        recording_date,
+        file_keys,
+        running_guard,
+    );
+    Ok(())
+}
 
+fn spawn_directory_task_run_background_with_guard(
+    task: AsrDirectoryTask,
+    recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
+    running_guard: RunningTaskGuard,
+) {
     let task_id = task.id.clone();
     if !cfg!(test)
         && crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
         && !crate::worker_runtime::asr::is_asr_worker_process()
     {
         tokio::spawn(async move {
-            if let Err(error) =
-                crate::worker_runtime::asr::run_directory_task(&task_id, recording_date).await
-            {
-                if find_task(&task_id).is_some_and(|task| task.paused) {
-                    finish_run_progress(
-                        &task_id,
-                        "paused",
-                        0,
-                        0,
-                        Some("ASR directory task paused and released compute.".to_string()),
-                    );
-                    tracing::info!(
-                        task_id = %task_id,
-                        "ASR directory worker cancellation preserved paused task state"
-                    );
-                } else {
-                    let _ = update_task_after_run(&task_id, Some(error.clone()));
-                    finish_run_progress(&task_id, "failed", 0, 0, Some(error.clone()));
-                    tracing::warn!(
-                        task_id = %task_id, error = %error,
-                        "ASR directory worker request failed"
-                    );
-                }
-            }
+            let result = crate::worker_runtime::asr::run_directory_task(
+                &task_id,
+                recording_date,
+                file_keys,
+            )
+            .await;
+            finish_parent_directory_worker_run(&task_id, result);
             drop(running_guard);
             tracing::debug!(
                 task_id = %task_id,
                 "released parent ASR directory task running marker"
             );
         });
-        return Ok(());
+        return;
     }
 
     tokio::spawn(async move {
-        let _ = execute_directory_task_run(task, recording_date).await;
+        let _ = execute_directory_task_run(task, recording_date, file_keys).await;
         drop(running_guard);
         tracing::debug!(
             task_id = %task_id,
             "released ASR directory task running marker"
         );
     });
+}
 
-    Ok(())
+fn finish_parent_directory_worker_run(
+    task_id: &str,
+    result: Result<crate::worker_runtime::asr::RunDirectoryTaskResult, String>,
+) {
+    let Err(error) = result else {
+        return;
+    };
+    if find_task(task_id).is_some_and(|task| task.paused) {
+        finish_run_progress(
+            task_id,
+            "paused",
+            0,
+            0,
+            Some("ASR directory task paused and released compute.".to_string()),
+        );
+        tracing::info!(
+            task_id,
+            "ASR directory worker cancellation preserved paused task state"
+        );
+        return;
+    }
+    let _ = update_task_after_run(task_id, Some(error.clone()));
+    finish_run_progress(task_id, "failed", 0, 0, Some(error.clone()));
+    tracing::warn!(task_id, error = %error, "ASR directory worker request failed");
 }
 
 fn refresh_task_daily_summaries(task: &AsrDirectoryTask) -> Result<Vec<PathBuf>, String> {

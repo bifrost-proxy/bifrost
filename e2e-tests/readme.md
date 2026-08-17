@@ -102,6 +102,10 @@ bash ../scripts/run_all_e2e.sh --ci
 ./tests/test_values_admin_api.sh     # 运行 Values API 测试
 ./tests/test_whitelist_admin_api.sh  # 运行 Whitelist API 测试
 
+# 隔离 external-runner Stop/Queue/替代 ownership 回归
+SKIP_BUILD=true BIFROST_BIN=../target/debug/bifrost \
+  bash ./tests/test_external_runner_worker_stop.sh
+
 # 运行 bifrost-e2e 自定义 runner
 cargo run -p bifrost-e2e -- --list
 

@@ -246,6 +246,31 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .trim_end_matches('/');
             retry_all_failed_chunks_response(id).await
         }
+        // POST /api/asr/tasks/{task_id}/retry-failed-files
+        (&Method::POST, _)
+            if path.starts_with("/api/asr/tasks/") && path.ends_with("/retry-failed-files") =>
+        {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/retry-failed-files")
+                .trim_end_matches('/');
+            retry_all_failed_files_response(id).await
+        }
+        // POST /api/asr/tasks/{task_id}/files/{file_key}/retry
+        (&Method::POST, _)
+            if path.starts_with("/api/asr/tasks/") && path.ends_with("/retry") =>
+        {
+            let parts = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/retry")
+                .trim_end_matches('/')
+                .split('/')
+                .collect::<Vec<_>>();
+            if parts.len() != 3 || parts[1] != "files" {
+                return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
+            }
+            retry_failed_file_response(parts[0], parts[2]).await
+        }
         // POST /api/asr/tasks/{task_id}/files/{file_key}/retry-chunks
         (&Method::POST, _)
             if path.starts_with("/api/asr/tasks/") && path.ends_with("/retry-chunks") =>

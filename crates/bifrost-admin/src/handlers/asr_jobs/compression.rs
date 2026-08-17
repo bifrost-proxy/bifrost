@@ -166,6 +166,87 @@ fn load_source_compression_state(task_id: &str) -> Option<SourceAudioCompression
         .and_then(|content| serde_json::from_str(&content).ok())
 }
 
+/// Reconstruct compression metadata written by older runs whose file-store
+/// entry was subsequently overwritten by a stale snapshot. The ledger is
+/// accepted only when its paths and byte counts still match the installed
+/// FLAC and the original WAV is gone.
+fn repair_legacy_source_compression_records(task_id: &str, store: &mut FileStore) -> usize {
+    if !store.files.values().any(|record| {
+        record.status == FileStatus::Success
+            && record.source_compression.is_none()
+            && record.source_path.extension().and_then(|value| value.to_str()) == Some("flac")
+    }) {
+        return 0;
+    }
+    let Some(task) = find_task(task_id) else {
+        return 0;
+    };
+    let Some(state) = load_source_compression_state(task_id) else {
+        return 0;
+    };
+    if state.task_id != task_id
+        || !matches!(
+            state.status,
+            SourceAudioCompressionStatus::Completed
+                | SourceAudioCompressionStatus::CompletedWithErrors
+        )
+        || state.finished_at_ms.is_none()
+    {
+        return 0;
+    }
+    let mut repaired = 0usize;
+    for result in state.results.iter().filter(|result| result.status == "compressed") {
+        let (Some(compressed_path), original_path) = (
+            result.compressed_path.as_deref().map(PathBuf::from),
+            PathBuf::from(&result.source_path),
+        ) else {
+            continue;
+        };
+        if original_path.is_file()
+            || !compressed_path.is_file()
+            || std::fs::symlink_metadata(&compressed_path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            || !source_path_is_within_task_audio_dir_for_recovery(
+                &task.audio_dir,
+                &compressed_path,
+            )
+            || !source_path_is_within_task_audio_dir_for_recovery(&task.audio_dir, &original_path)
+            || compressed_path.extension().and_then(|value| value.to_str()) != Some("flac")
+            || result.compressed_bytes == 0
+            || result.original_bytes <= result.compressed_bytes
+            || result.saved_bytes != result.original_bytes - result.compressed_bytes
+            || source_size(&compressed_path) != Some(result.compressed_bytes)
+        {
+            continue;
+        }
+        let key = source_key(&compressed_path);
+        let Some(record) = store.files.get_mut(&key) else {
+            continue;
+        };
+        if record.source_path != compressed_path
+            || record.status != FileStatus::Success
+            || record.source_compression.is_some()
+        {
+            continue;
+        }
+        record.source_size = Some(result.compressed_bytes);
+        record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: original_path,
+            original_size_bytes: result.original_bytes,
+            original_modified_ms: record.source_modified_ms,
+            compressed_size_bytes: result.compressed_bytes,
+            saved_bytes: result.saved_bytes,
+            // Legacy ledgers predate persisted PCM hashes. Recovery remains
+            // conservative when artifacts require hash verification.
+            pcm_sha256: None,
+            compressed_at_ms: state.finished_at_ms.unwrap_or(state.updated_at_ms),
+        });
+        repaired += 1;
+    }
+    repaired
+}
+
 fn save_source_compression_state(state: &SourceAudioCompressionState) -> Result<(), String> {
     atomic_json_write(&source_compression_state_path(&state.task_id), state)
 }
@@ -278,6 +359,9 @@ fn start_source_compression_background(
     }
     recover_source_compression_backups(&task)?;
     let store = load_file_store(&task.id);
+    // Persist any safe legacy-ledger repairs before replacing the ledger with
+    // the state for this new compression run.
+    save_file_store(&task.id, &store)?;
     let targets = store
         .files
         .iter()
@@ -511,7 +595,7 @@ fn compress_source_record(
             original_modified_ms: record.source_modified_ms,
             compressed_size_bytes: compressed_bytes,
             saved_bytes: original_bytes - compressed_bytes,
-            pcm_sha256: original_hash,
+            pcm_sha256: Some(original_hash),
             compressed_at_ms: now_ms(),
         });
         let new_key = source_key(&final_path);
@@ -793,11 +877,13 @@ fn recover_source_compression_backups(task: &AsrDirectoryTask) -> Result<(), Str
         }
 
         if source.is_file() {
-            if source_size(source) != Some(compression.compressed_size_bytes)
-                || decoded_pcm_sha256(source, record.media_duration_ms)? != compression.pcm_sha256
-            {
+            let hash_matches = match compression.pcm_sha256.as_deref() {
+                Some(expected) => decoded_pcm_sha256(source, record.media_duration_ms)? == expected,
+                None => false,
+            };
+            if source_size(source) != Some(compression.compressed_size_bytes) || !hash_matches {
                 return Err(format!(
-                    "compressed audio failed recovery verification; backup was preserved: {}",
+                    "compressed audio failed recovery verification (missing or mismatched PCM hash); backup was preserved: {}",
                     source.display()
                 ));
             }

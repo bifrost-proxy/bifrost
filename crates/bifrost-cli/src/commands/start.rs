@@ -2802,6 +2802,10 @@ pub fn run_foreground(
                 }
             }
 
+            // Ask isolated runners to perform their protocol-native interrupt
+            // while their parent tasks and control channels are still alive.
+            bifrost_admin::im_gateway::external_cli::shutdown_all_active_runs().await;
+
             listener_task.abort();
             rules_watcher_task.abort();
             rules_filesystem_watcher_task.abort();
@@ -2832,9 +2836,6 @@ pub fn run_foreground(
             bifrost_admin::shutdown_managed_asr_service().await;
             // Kill all managed browser processes to prevent orphans.
             bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
-            // Kill all active external CLI runs to prevent orphan process groups.
-            bifrost_admin::im_gateway::external_cli::kill_all_active_runs();
-
             Ok(())
         }
         .await;
@@ -3869,8 +3870,9 @@ pub fn run_daemon(
                 bifrost_admin::shutdown_managed_asr_service().await;
                 // Kill all managed browser processes to prevent orphans.
                 bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
-                // Kill all active external CLI runs to prevent orphan process groups.
-                bifrost_admin::im_gateway::external_cli::kill_all_active_runs();
+                // Stop isolated workers through their native transport before
+                // the service runtime is dropped; hard kill remains bounded.
+                bifrost_admin::im_gateway::external_cli::shutdown_all_active_runs().await;
 
                 if let Err(e) = result {
                     eprintln!("Runtime error: {}", e);
