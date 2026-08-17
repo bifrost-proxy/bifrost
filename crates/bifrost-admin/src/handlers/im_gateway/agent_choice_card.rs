@@ -11,24 +11,31 @@ pub(super) enum FeishuChoiceDelivery {
 pub(super) fn local_session_choice_markdown(text_reply: &str) -> String {
     text_reply
         .strip_suffix(RESUME_TEXT_INSTRUCTION)
-        .map(|summary| format!("{summary}点击下方按钮选择要恢复的 session。"))
+        .map(|summary| {
+            format!(
+                "{summary}从下方下拉列表选择要恢复的 session，或选择「🆕 新建会话」开启全新会话。"
+            )
+        })
         .unwrap_or_else(|| text_reply.to_string())
 }
 
 pub(super) fn local_session_choice_options(
     sessions: &[crate::im_gateway::external_cli::LocalExternalSession],
 ) -> Vec<crate::im_gateway::feishu::card_action::FeishuChoiceCardOption> {
-    sessions
-        .iter()
-        .enumerate()
-        .filter_map(|(index, session)| {
+    let new_session = crate::im_gateway::feishu::card_action::FeishuChoiceCardOption {
+        label: "🆕 新建会话".to_string(),
+        command: "/resume new".to_string(),
+    };
+    std::iter::once(new_session)
+        .chain(sessions.iter().enumerate().map(|(index, session)| {
             let title = truncate_str(session.title.trim(), 36);
-            let option = crate::im_gateway::feishu::card_action::FeishuChoiceCardOption {
+            crate::im_gateway::feishu::card_action::FeishuChoiceCardOption {
                 label: format!("{}. {} · {}", index + 1, title, session.datetime),
                 command: format!("/resume {}", session.id),
-            };
+            }
+        }))
+        .filter(|option| {
             crate::im_gateway::feishu::card_action::is_allowed_choice_command(&option.command)
-                .then_some(option)
         })
         .collect()
 }
@@ -371,7 +378,8 @@ mod tests {
         let card_markdown = local_session_choice_markdown(
             "最近 1 个 Codex 本地 session：\n\n1. id / title / datetime\n\n发送 `/resume <id>` 选择；也可以使用至少 8 位的唯一 id 前缀。",
         );
-        assert!(card_markdown.contains("点击下方按钮"));
+        assert!(card_markdown.contains("下拉列表"));
+        assert!(card_markdown.contains("🆕 新建会话"));
         assert!(!card_markdown.contains("发送 `/resume <id>`"));
 
         let sessions = vec![crate::im_gateway::external_cli::LocalExternalSession {
@@ -381,9 +389,11 @@ mod tests {
             updated_at_millis: 1,
         }];
         let resume = local_session_choice_options(&sessions);
-        assert_eq!(resume.len(), 1);
-        assert_eq!(resume[0].command, "/resume 01234567-89ab");
-        assert!(resume[0].label.contains("2026-08-17T10:00:00Z"));
+        assert_eq!(resume.len(), 2);
+        assert_eq!(resume[0].command, "/resume new");
+        assert_eq!(resume[0].label, "🆕 新建会话");
+        assert_eq!(resume[1].command, "/resume 01234567-89ab");
+        assert!(resume[1].label.contains("2026-08-17T10:00:00Z"));
 
         let models = (0..45)
             .map(
@@ -472,11 +482,14 @@ mod tests {
         assert_eq!(row["kind"], "card");
         assert_eq!(row["receiveId"], "oc_choice");
         assert_eq!(row["sourceMessageId"], "om_source");
-        assert_eq!(
-            row["card"]["body"]["elements"][1]["columns"][0]["elements"][0]["behaviors"][0]
-                ["value"]["chatType"],
-            "group"
-        );
+        let select = &row["card"]["body"]["elements"][1];
+        assert_eq!(select["tag"], "select_static");
+        let option_value = select["options"][0]["value"]
+            .as_str()
+            .expect("option value string");
+        let parsed: serde_json::Value = serde_json::from_str(option_value).unwrap();
+        assert_eq!(parsed["chatType"], "group");
+        assert_eq!(parsed["command"], "/model sonnet");
         let logs = message_log_store.list();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].status, MessageStatus::Success);

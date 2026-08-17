@@ -33,6 +33,7 @@ pub struct LocalExternalSession {
 pub enum ExternalCliResumeSlashCommand {
     List,
     Pick(String),
+    New,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,7 +72,10 @@ pub fn parse_external_cli_resume_slash_command(
         return Some(Ok(ExternalCliResumeSlashCommand::List));
     };
     if parts.next().is_some() {
-        return Some(Err("用法: /resume [session-id]".to_string()));
+        return Some(Err("用法: /resume [session-id | new]".to_string()));
+    }
+    if id.eq_ignore_ascii_case("new") {
+        return Some(Ok(ExternalCliResumeSlashCommand::New));
     }
     if id.len() > 128
         || !id
@@ -207,6 +211,27 @@ pub fn persist_local_session_selection(
     .map(|_| ())
 }
 
+/// Clears the resumed thread binding so the next message starts a brand-new
+/// external session. This is the inverse of [`persist_local_session_selection`]:
+/// with both thread/conversation ids cleared, `metadata_from_state` emits no
+/// `threadId`/`conversationId`, while model/effort overrides are preserved.
+pub fn persist_local_session_new_session(
+    session_key: &str,
+    adapter: &str,
+    runner_id: &str,
+) -> Result<(), String> {
+    crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        adapter,
+        Some(runner_id),
+        |state| {
+            state.external_thread_id = None;
+            state.external_conversation_id = None;
+        },
+    )
+    .map(|_| ())
+}
+
 pub async fn execute_local_session_resume_command(
     adapter: String,
     command: ExternalCliResumeSlashCommand,
@@ -235,6 +260,17 @@ pub async fn execute_local_session_resume_command(
                 "已选择本地 session：\n- id: `{}`\n- title: {}\n- datetime: {}\n\n下一条普通消息将恢复此会话。",
                 session.id, session.title, session.datetime
             ))
+        }
+        ExternalCliResumeSlashCommand::New => {
+            let selection = selection.ok_or_else(|| {
+                "sessionKey is required to start a new /resume session".to_string()
+            })?;
+            persist_local_session_new_session(
+                &selection.session_key,
+                &adapter,
+                &selection.runner_id,
+            )?;
+            Ok("已切换为新建会话：下一条普通消息将开启全新会话，不再恢复历史 thread。".to_string())
         }
     })
     .await
@@ -642,6 +678,18 @@ mod tests {
             parse_external_cli_resume_slash_command("/resume a b"),
             Some(Err(_))
         ));
+        assert_eq!(
+            parse_external_cli_resume_slash_command("/resume new"),
+            Some(Ok(ExternalCliResumeSlashCommand::New))
+        );
+        assert_eq!(
+            parse_external_cli_resume_slash_command("/RESUME NEW"),
+            Some(Ok(ExternalCliResumeSlashCommand::New))
+        );
+        assert!(matches!(
+            parse_external_cli_resume_slash_command("/resume new extra"),
+            Some(Err(_))
+        ));
         assert!(matches!(
             parse_external_cli_resume_slash_command("/resume ../../secret"),
             Some(Err(_))
@@ -707,6 +755,34 @@ mod tests {
         )
         .expect("persisted state");
         assert_eq!(state.external_thread_id.as_deref(), Some(id));
+
+        let new_missing_context = execute_local_session_resume_command(
+            "codex".to_string(),
+            ExternalCliResumeSlashCommand::New,
+            None,
+        )
+        .await
+        .expect_err("new session requires session context");
+        assert!(new_missing_context.contains("sessionKey"));
+
+        let new_session = execute_local_session_resume_command(
+            "codex".to_string(),
+            ExternalCliResumeSlashCommand::New,
+            Some(LocalSessionSelectionContext {
+                session_key: "web:async-resume".to_string(),
+                runner_id: "Codex".to_string(),
+            }),
+        )
+        .await
+        .expect("new session");
+        assert!(new_session.contains("新建会话"));
+        let cleared = crate::im_gateway::session_state::load_session_state(
+            "web:async-resume",
+            "codex",
+            Some("Codex"),
+        )
+        .expect("persisted state after new");
+        assert_eq!(cleared.external_thread_id, None);
 
         let unsupported = execute_local_session_resume_command(
             "mock".to_string(),
@@ -902,6 +978,37 @@ mod tests {
             Some("22222222-2222-2222-2222-222222222222")
         );
         assert!(state.external_conversation_id.is_none());
+        assert_eq!(state.model_override.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn new_session_clears_thread_binding_without_dropping_overrides() {
+        let _lock = local_session_test_env_lock().blocking_lock();
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let _data_guard = crate::test_env::BifrostDataDirGuard::set(data_dir.path());
+        crate::im_gateway::session_state::upsert_session_state(
+            "web:new-session-test",
+            "claude_code",
+            Some("Claude-Code"),
+            |state| {
+                state.external_thread_id = Some("old-thread".to_string());
+                state.external_conversation_id = Some("old-conversation".to_string());
+                state.model_override = Some("sonnet".to_string());
+            },
+        )
+        .expect("seed state");
+
+        persist_local_session_new_session("web:new-session-test", "claude_code", "Claude-Code")
+            .expect("persist new session");
+
+        let state = crate::im_gateway::session_state::load_session_state(
+            "web:new-session-test",
+            "claude_code",
+            Some("Claude-Code"),
+        )
+        .expect("state");
+        assert_eq!(state.external_thread_id, None);
+        assert_eq!(state.external_conversation_id, None);
         assert_eq!(state.model_override.as_deref(), Some("sonnet"));
     }
 

@@ -129,13 +129,15 @@
 预期结果：
 
 - 脚本输出 `[feishu-slash-choice] PASS`，退出码为 0。
-- 飞书单聊发送无参数 `/resume`、`/model`、`/effort` 后分别产生 Card 2.0 卡片。
-- `/resume` 卡片明确提示“点击下方按钮”，不再要求复制 `/resume <id>`。
-- 卡片按钮都有唯一 `element_id`，使用 `behaviors.callback`，且 `/model`、`/effort`
-  均提供清除 Runner 默认值按钮。
-- 点击三个候选按钮后，当前单聊 session 分别写入完整本地 session id、`gpt-unit`
+- 飞书单聊发送无参数 `/resume`、`/model`、`/effort` 后分别产生 Card 2.0 卡片，卡片正文
+  只含一个 `select_static` 下拉，不再平铺按钮。
+- `/resume` 卡片摘要明确提示“从下方下拉列表选择”，并包含“🆕 新建会话”入口，不再要求
+  复制 `/resume <id>`。
+- 下拉每个 option 的 `value` 是可反序列化的绑定 JSON 字符串；`/model`、`/effort` 下拉
+  均含“恢复 Runner 默认值”对应的 `clear` option。
+- 从下拉选择三个候选项后，当前单聊 session 分别写入完整本地 session id、`gpt-unit`
   model override 和 `high` reasoning effort override。
-- 点击 `/model clear`、`/effort clear` 后两个 override 被清除。
+- 选择 `/model clear`、`/effort clear` option 后两个 override 被清除。
 
 ### TC-LSR-06：飞书群聊绑定与越权回调安全回归
 
@@ -152,8 +154,8 @@
 
 预期结果：
 
-- 群聊 `/model` 卡片 callback 绑定 `chatType=group` 和原群 `chatId`。
-- 群聊点击 `/model gpt-unit` 后只更新
+- 群聊 `/model` 下拉 option 的绑定 `value` 含 `chatType=group` 和原群 `chatId`。
+- 群聊选择 `/model gpt-unit` option 后只更新
   `im:<provider-id>:group:<chat-id>` 对应 session，不串到单聊 session。
 - 其他用户、其他 chat、过期 callback 和伪造 `/stop now` 命令均返回 HTTP 400。
 - 所有被拒绝的 callback 都不修改单聊或群聊 session 状态。
@@ -175,12 +177,32 @@
 
 - 卡片 clear 后继续发送文本 `/model gpt-unit` 和 `/effort high`，原文本命令链路仍能
   恢复两个 override。
-- 飞书发送 `/models`、`/efforts` 仍返回原文本目录内容，不生成 callback 按钮。
+- 飞书发送 `/models`、`/efforts` 仍返回原文本目录内容，不生成 `select_static` 下拉。
 - 测试只启动一个当前构建的 Bifrost，使用动态端口、临时 `BIFROST_DATA_DIR`、
   `--no-system-proxy`、托盘禁用、Sync 登录弹窗禁用和 system proxy lifecycle helper
   禁用护栏。
 - 飞书发送走显式 dry-run 文件，不外呼正式飞书 API，不修改正式 9900 服务。
 - 退出后脚本只按本次记录的 PID 清理服务并删除临时目录。
+
+### TC-LSR-08：飞书 `/resume` 下拉「新建会话」清空 thread 回归
+
+操作步骤：
+
+1. 执行：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_feishu_slash_choice_cards.sh
+   ```
+
+2. 关注脚本中先选择本地 session 再选择「🆕 新建会话」的状态变化。
+
+预期结果：
+
+- `/resume` 下拉首个 option 固定为 `/resume new`（“🆕 新建会话”）。
+- 先选择本地 session option 后单聊 session 写入 `externalThreadId`；随后选择
+  「🆕 新建会话」option 后该字段被移除（`__ABSENT__`），下一条普通消息将开全新会话。
+- 越权点击（他人 / 错误 chat / 过期 / `/stop now`）在下拉回调路径下同样返回 HTTP 400。
 
 ## 清理步骤
 
@@ -202,15 +224,15 @@
 - 2026-08-07，TC-LSR-04：PASS。第一次执行暴露测试 fixture 同时配置 Codex 时产品默认
   选择 Codex、且 `/model` substring locator 同时匹配 `/models` 的测试缺陷；修正 fixture 为
   仅 Claude Code、locator 取精确目标后复跑，结果 1 passed（7.6s）。
-- 2026-08-17，TC-LSR-05：PASS。隔离 Bifrost 依次生成 `/resume`、`/model`、
-  `/effort` Card 2.0；三个候选按钮实点后状态正确，`/model clear` 与
-  `/effort clear` 实点后对应 override 被移除。
-- 2026-08-17，TC-LSR-06：PASS。群聊 `/model gpt-unit` 按钮实点只更新群级
+- 2026-08-17，TC-LSR-05：PASS。下拉改造后复跑，隔离 Bifrost 依次生成 `/resume`、
+  `/model`、`/effort` Card 2.0，正文均为单个 `select_static` 下拉；从下拉选择三个
+  候选 option 后状态正确，`/model clear`、`/effort clear` option 实选后对应 override 被移除。
+- 2026-08-17，TC-LSR-06：PASS。群聊 `/model gpt-unit` 下拉 option 实选只更新群级
   session；其他用户、错误 chat、过期 callback 和伪造 `/stop now` 均返回 HTTP 400，
   未篡改单聊或群聊状态。
 - 2026-08-17，TC-LSR-07：PASS。clear 后发送带参数文本 `/model gpt-unit` 与
-  `/effort high` 能恢复 override；`/models`、`/efforts` 仍返回不含 callback 按钮的
-  文本目录；测试使用动态端口、临时数据目录、双启动护栏和 `--no-system-proxy`；
-  发现 system proxy lifecycle helper 会在父进程退出后重建空 `.system_proxy.lock`，
-  增加 helper 禁用护栏后复跑输出 `[feishu-slash-choice] PASS`，并用 `find` 确认隔离
-  测试目录完全清理。
+  `/effort high` 能恢复 override；`/models`、`/efforts` 仍返回不含 `select_static`
+  下拉的文本目录；测试使用动态端口、临时数据目录、双启动护栏和 `--no-system-proxy`。
+- 2026-08-17，TC-LSR-08：PASS。`/resume` 下拉首项为 `/resume new`；先选本地 session
+  写入 `externalThreadId`，再选「🆕 新建会话」后该字段变为缺失；下拉回调路径下越权
+  点击仍返回 HTTP 400。脚本输出 `[feishu-slash-choice] PASS`。

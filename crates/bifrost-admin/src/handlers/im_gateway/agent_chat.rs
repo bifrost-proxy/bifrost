@@ -515,19 +515,22 @@ pub(super) fn build_im_channel_help_sections(
             }
             if crate::im_gateway::external_cli::supports_external_cli_model_slash(adapter) {
                 runner_lines
-                    .push("/models        查看当前 Codex/Traex/Claude Code Runner 可选模型");
+                    .push("/model         查看当前 Codex/Traex/Claude Code Runner 可选模型");
                 runner_lines.push(
                     "/model [模型]   查看或切换当前 Codex/Traex/Claude Code Runner 的 session 模型；/model clear 清除",
                 );
             }
             if crate::im_gateway::external_cli::supports_external_cli_resume_slash(adapter) {
                 runner_lines.push(
-                    "/resume [session-id]  查看最近 20 个本地会话，或选择一个会话在下一条消息恢复",
+                    "/resume        查看最近 20 个本地会话（含新建会话）",
+                );
+                runner_lines.push(
+                    "/resume [session-id]  选择一个会话在下一条消息恢复",
                 );
             }
             if !crate::im_gateway::external_cli::external_cli_effort_options(adapter).is_empty() {
                 runner_lines.push(
-                    "/efforts       查看当前 Codex/Traex/Claude Code Runner 可选 Reasoning Effort",
+                    "/effort        查看当前 Codex/Traex/Claude Code Runner 可选 Reasoning Effort",
                 );
                 runner_lines.push(
                     "/effort [级别]  查看或切换当前 Codex/Traex/Claude Code Runner 的 Reasoning Effort；/effort clear 清除",

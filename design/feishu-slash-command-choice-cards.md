@@ -47,7 +47,9 @@ IM external runner 已支持以下文本命令：
 
 ## 交互与卡片结构
 
-卡片继续使用无根级标题的 JSON 2.0 结构：
+卡片使用无根级标题的 JSON 2.0 结构。候选项渲染为单个 `select_static` 下拉，避免选项
+过多时平铺按钮刷屏。每个 option 的 `value` 是【字符串】，承载序列化后的完整绑定（飞书
+`select_static` 要求 option value 为唯一字符串，各 option 的 `command` 天然不同保证唯一）：
 
 ```json
 {
@@ -60,21 +62,35 @@ IM external runner 已支持以下文本命令：
     "elements": [
       {
         "tag": "markdown",
+        "element_id": "choice_summary",
         "content": "当前状态和候选项"
       },
       {
-        "tag": "column_set",
-        "flex_mode": "flow",
-        "columns": [
+        "tag": "select_static",
+        "element_id": "choice_select",
+        "width": "fill",
+        "placeholder": { "tag": "plain_text", "content": "请选择…" },
+        "behaviors": [
+          { "type": "callback", "value": { "bifrostAction": "slash_choice" } }
+        ],
+        "options": [
           {
-            "tag": "column",
-            "width": "weighted",
-            "weight": 1,
-            "elements": [
-              {
-                "tag": "button",
-                "element_id": "choice_0",
-                "text": {
+            "text": { "tag": "plain_text", "content": "候选项" },
+            "value": "{\"bifrostAction\":\"slash_choice\",\"providerId\":\"feishu-main\",\"chatId\":\"oc_xxx\",\"chatType\":\"p2p\",\"userId\":\"ou_xxx\",\"command\":\"/model example-model\",\"expiresAtMs\":0}"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`/resume` 下拉首个 option 固定为「🆕 新建会话」（`/resume new`），选择后清空 session 的
+`external_thread_id` / `external_conversation_id`，下一条普通消息开启全新会话；其后是最多
+20 个本地 session。`/model` 沿用最多 41 个 option（含 `/model clear`）；`/effort` 按当前
+模型目录或 Runner 兼容默认值生成，含 `/effort clear`。为兼容下拉迁移前已发出的旧卡片，
+回调解析同时接受 `select_static`（选中值在 `action.option` 字符串）与遗留 `button`
+（绑定对象在 `action.value`）两种结构。
                   "tag": "plain_text",
                   "content": "候选项"
                 },
@@ -102,18 +118,17 @@ IM external runner 已支持以下文本命令：
 }
 ```
 
-按钮每行最多两个；移动端由飞书 `column_set.flex_mode=flow` 自动换行。`/resume` 最多 20
-个按钮；模型列表沿用现有最多 40 个可见模型上限；推理强度按当前模型目录或 Runner
-兼容默认值生成。
+> 说明：上方 `column_set` + `button` 是【迁移前】的平铺结构，仅为向后兼容旧卡片保留；
+> 当前所有选择卡片都改用前述单个 `select_static` 下拉，回调绑定语义完全一致。
 
 ## 回调归一化与安全边界
 
-飞书新版回调使用以下字段：
+飞书回调使用以下字段（`select_static` 与遗留 `button` 通用）：
 
 - `header.event_type=card.action.trigger`
 - `event.operator.open_id`
-- `event.action.tag=button`
-- `event.action.value`
+- `event.action.tag`（`select_static` 或遗留 `button`）
+- `event.action.option`（`select_static` 选中项字符串）或 `event.action.value`（`button` 绑定对象）
 - `event.context.open_message_id`
 - `event.context.open_chat_id`
 

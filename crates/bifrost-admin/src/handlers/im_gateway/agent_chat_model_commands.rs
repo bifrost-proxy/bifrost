@@ -55,9 +55,10 @@ pub(super) async fn handle_im_resume_command(
         Some(configured_runner_id.as_str()),
     );
     let adapter = effective.settings.adapter.clone();
-    let picked = matches!(
+    let should_persist = matches!(
         &command,
         crate::im_gateway::external_cli::ExternalCliResumeSlashCommand::Pick(_)
+            | crate::im_gateway::external_cli::ExternalCliResumeSlashCommand::New
     );
     if matches!(
         &command,
@@ -81,7 +82,7 @@ pub(super) async fn handle_im_resume_command(
         Ok(reply) => reply,
         Err(error) => format!("❌ {error}"),
     };
-    if picked && !reply.starts_with('❌') {
+    if should_persist && !reply.starts_with('❌') {
         persist_im_model_system_message(session_key, &adapter, &effective.runner_id, &reply);
     }
     send_agent_reply(

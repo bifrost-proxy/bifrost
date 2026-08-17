@@ -307,7 +307,7 @@ def inject(message_id, text, chat_id="oc_direct", chat_type="p2p"):
 
 inject("om_resume", "/resume")
 PY
-wait_capture_count 2
+wait_capture_source "om_resume"
 
 python3 - "$BIFROST_PORT" "$FEISHU_DRY_RUN" "om_resume" "/resume 11111111-1111-1111-1111-111111111111" "evt_click_resume" <<'PY'
 import json
@@ -329,24 +329,25 @@ card = row["card"]
 assert card["schema"] == "2.0", card
 assert "header" not in card, card
 summary = card["body"]["elements"][0]["content"]
-assert "点击下方按钮" in summary, summary
+assert "下拉列表" in summary, summary
+assert "🆕 新建会话" in summary, summary
 assert "发送 `/resume <id>`" not in summary, summary
-buttons = []
-for element in card["body"]["elements"]:
-    for column in element.get("columns", []):
-        buttons.extend(
-            child for child in column.get("elements", [])
-            if child.get("tag") == "button"
-        )
-assert buttons, card
-element_ids = [button["element_id"] for button in buttons]
-assert len(element_ids) == len(set(element_ids)), element_ids
-button = next(
-    item for item in buttons
-    if item["behaviors"][0]["value"]["command"] == command
+selects = [
+    element for element in card["body"]["elements"]
+    if element.get("tag") == "select_static"
+]
+assert len(selects) == 1, card
+options = selects[0]["options"]
+option_values = [option["value"] for option in options]
+assert len(option_values) == len(set(option_values)), option_values
+# The dropdown always leads with the "new session" option.
+first = json.loads(options[0]["value"])
+assert first["command"] == "/resume new", first
+option = next(
+    item for item in options
+    if json.loads(item["value"])["command"] == command
 )
-value = button["behaviors"][0]["value"]
-assert button["behaviors"][0]["type"] == "callback", button
+value = option["value"]
 payload = {
     "providerId": "feishu-choice-e2e",
     "payload": {
@@ -356,10 +357,124 @@ payload = {
         },
         "event": {
             "operator": {"open_id": "ou_owner"},
-            "action": {"tag": "button", "value": value},
+            "action": {
+                "tag": "select_static",
+                "option": value,
+                "value": {"bifrostAction": "slash_choice"}
+            },
             "context": {
                 "open_message_id": row["messageId"],
-                "open_chat_id": value["chatId"]
+                "open_chat_id": json.loads(value)["chatId"]
+            }
+        }
+    }
+}
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-card-action",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"content-type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    assert response.status == 200, response.read().decode("utf-8")
+PY
+wait_state_value externalThreadId "11111111-1111-1111-1111-111111111111"
+
+# Click the "🆕 新建会话" option and confirm the resumed thread binding is cleared.
+python3 - "$BIFROST_PORT" "$FEISHU_DRY_RUN" "om_resume" "/resume new" "evt_click_resume_new" <<'PY'
+import json
+import pathlib
+import sys
+import urllib.request
+
+port, capture_path, source_message_id, command, event_id = sys.argv[1:6]
+rows = [
+    json.loads(line)
+    for line in pathlib.Path(capture_path).read_text(encoding="utf-8").splitlines()
+]
+row = next(
+    item for item in rows
+    if item.get("kind") == "card"
+    and item.get("sourceMessageId") == source_message_id
+)
+selects = [
+    element for element in row["card"]["body"]["elements"]
+    if element.get("tag") == "select_static"
+]
+option = next(
+    item for item in selects[0]["options"]
+    if json.loads(item["value"])["command"] == command
+)
+value = option["value"]
+payload = {
+    "providerId": "feishu-choice-e2e",
+    "payload": {
+        "header": {"event_id": event_id, "event_type": "card.action.trigger"},
+        "event": {
+            "operator": {"open_id": "ou_owner"},
+            "action": {
+                "tag": "select_static",
+                "option": value,
+                "value": {"bifrostAction": "slash_choice"}
+            },
+            "context": {
+                "open_message_id": row["messageId"],
+                "open_chat_id": json.loads(value)["chatId"]
+            }
+        }
+    }
+}
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-card-action",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"content-type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    assert response.status == 200, response.read().decode("utf-8")
+PY
+wait_session_field "feishu-choice-e2e:ou_owner" externalThreadId "__ABSENT__"
+
+# Re-resume the session so later structural assertions still see the thread binding.
+python3 - "$BIFROST_PORT" "$FEISHU_DRY_RUN" "om_resume" "/resume 11111111-1111-1111-1111-111111111111" "evt_click_resume_again" <<'PY'
+import json
+import pathlib
+import sys
+import urllib.request
+
+port, capture_path, source_message_id, command, event_id = sys.argv[1:6]
+rows = [
+    json.loads(line)
+    for line in pathlib.Path(capture_path).read_text(encoding="utf-8").splitlines()
+]
+row = next(
+    item for item in rows
+    if item.get("kind") == "card"
+    and item.get("sourceMessageId") == source_message_id
+)
+selects = [
+    element for element in row["card"]["body"]["elements"]
+    if element.get("tag") == "select_static"
+]
+option = next(
+    item for item in selects[0]["options"]
+    if json.loads(item["value"])["command"] == command
+)
+value = option["value"]
+payload = {
+    "providerId": "feishu-choice-e2e",
+    "payload": {
+        "header": {"event_id": event_id, "event_type": "card.action.trigger"},
+        "event": {
+            "operator": {"open_id": "ou_owner"},
+            "action": {
+                "tag": "select_static",
+                "option": value,
+                "value": {"bifrostAction": "slash_choice"}
+            },
+            "context": {
+                "open_message_id": row["messageId"],
+                "open_chat_id": json.loads(value)["chatId"]
             }
         }
     }
@@ -407,7 +522,9 @@ inject("om_model", "/model")
 inject("om_effort", "/effort")
 inject("om_group_model", "/model", "oc_group", "group")
 PY
-wait_capture_count 8
+wait_capture_source "om_model"
+wait_capture_source "om_effort"
+wait_capture_source "om_group_model"
 
 python3 - "$BIFROST_PORT" "$FEISHU_DRY_RUN" <<'PY'
 import json
@@ -431,21 +548,21 @@ def choice(source_message_id, command):
         and item.get("sourceMessageId") == source_message_id
     )
     card = row["card"]
-    buttons = [
-        child
+    options = [
+        option
         for element in card["body"]["elements"]
-        for column in element.get("columns", [])
-        for child in column.get("elements", [])
-        if child.get("tag") == "button"
+        if element.get("tag") == "select_static"
+        for option in element["options"]
     ]
-    button = next(
-        item for item in buttons
-        if item["behaviors"][0]["value"]["command"] == command
+    option = next(
+        item for item in options
+        if json.loads(item["value"])["command"] == command
     )
-    return row, button["behaviors"][0]["value"]
+    return row, option["value"]
 
 
-def callback(row, value, event_id, operator="ou_owner", chat_id=None, now_ms=None, expected=200):
+def callback(row, option_value, event_id, operator="ou_owner", chat_id=None, now_ms=None, expected=200):
+    binding = json.loads(option_value)
     payload = {
         "providerId": "feishu-choice-e2e",
         "payload": {
@@ -455,10 +572,14 @@ def callback(row, value, event_id, operator="ou_owner", chat_id=None, now_ms=Non
             },
             "event": {
                 "operator": {"open_id": operator},
-                "action": {"tag": "button", "value": value},
+                "action": {
+                    "tag": "select_static",
+                    "option": option_value,
+                    "value": {"bifrostAction": "slash_choice"}
+                },
                 "context": {
                     "open_message_id": row["messageId"],
-                    "open_chat_id": chat_id or value["chatId"]
+                    "open_chat_id": chat_id or binding["chatId"]
                 }
             }
         }
@@ -485,8 +606,8 @@ def callback(row, value, event_id, operator="ou_owner", chat_id=None, now_ms=Non
 model_row, model_value = choice("om_model", "/model gpt-unit")
 effort_row, effort_value = choice("om_effort", "/effort high")
 group_row, group_value = choice("om_group_model", "/model gpt-unit")
-assert group_value["chatType"] == "group", group_value
-assert group_value["chatId"] == "oc_group", group_value
+assert json.loads(group_value)["chatType"] == "group", group_value
+assert json.loads(group_value)["chatId"] == "oc_group", group_value
 
 callback(model_row, model_value, "evt_click_model")
 callback(effort_row, effort_value, "evt_click_effort")
@@ -495,7 +616,7 @@ callback(group_row, group_value, "evt_click_group_model")
 for index, (row, value, overrides) in enumerate([
     (model_row, model_value, {"operator": "ou_intruder"}),
     (model_row, model_value, {"chat_id": "oc_other"}),
-    (model_row, model_value, {"now_ms": model_value["expiresAtMs"]}),
+    (model_row, model_value, {"now_ms": json.loads(model_value)["expiresAtMs"]}),
 ]):
     callback(
         row,
@@ -507,9 +628,9 @@ for index, (row, value, overrides) in enumerate([
         expected=400,
     )
 
-forbidden = dict(model_value)
+forbidden = json.loads(model_value)
 forbidden["command"] = "/stop now"
-callback(model_row, forbidden, "evt_rejected_command", expected=400)
+callback(model_row, json.dumps(forbidden), "evt_rejected_command", expected=400)
 PY
 wait_session_field "feishu-choice-e2e:ou_owner" modelOverride "gpt-unit"
 wait_session_field "feishu-choice-e2e:ou_owner" reasoningEffortOverride "high"
@@ -535,18 +656,18 @@ def choice(source_message_id, command):
         if item.get("kind") == "card"
         and item.get("sourceMessageId") == source_message_id
     )
-    button = next(
-        child
+    option = next(
+        option
         for element in row["card"]["body"]["elements"]
-        for column in element.get("columns", [])
-        for child in column.get("elements", [])
-        if child.get("tag") == "button"
-        and child["behaviors"][0]["value"]["command"] == command
+        if element.get("tag") == "select_static"
+        for option in element["options"]
+        if json.loads(option["value"])["command"] == command
     )
-    return row, button["behaviors"][0]["value"]
+    return row, option["value"]
 
 
-def callback(row, value, event_id):
+def callback(row, option_value, event_id):
+    binding = json.loads(option_value)
     payload = {
         "providerId": "feishu-choice-e2e",
         "payload": {
@@ -556,10 +677,14 @@ def callback(row, value, event_id):
             },
             "event": {
                 "operator": {"open_id": "ou_owner"},
-                "action": {"tag": "button", "value": value},
+                "action": {
+                    "tag": "select_static",
+                    "option": option_value,
+                    "value": {"bifrostAction": "slash_choice"}
+                },
                 "context": {
                     "open_message_id": row["messageId"],
-                    "open_chat_id": value["chatId"]
+                    "open_chat_id": binding["chatId"]
                 }
             }
         }
@@ -657,22 +782,20 @@ choice_cards = [
     row for row in rows
     if row.get("kind") == "card"
     and any(
-        child.get("tag") == "button"
+        element.get("tag") == "select_static"
         for element in row.get("card", {}).get("body", {}).get("elements", [])
-        for column in element.get("columns", [])
-        for child in column.get("elements", [])
     )
 ]
 assert len(choice_cards) == 4, choice_cards
 commands = {
-    child["behaviors"][0]["value"]["command"]
+    json.loads(option["value"])["command"]
     for row in choice_cards
     for element in row["card"]["body"]["elements"]
-    for column in element.get("columns", [])
-    for child in column.get("elements", [])
-    if child.get("tag") == "button"
+    if element.get("tag") == "select_static"
+    for option in element["options"]
 }
 assert "/resume 11111111-1111-1111-1111-111111111111" in commands, commands
+assert "/resume new" in commands, commands
 assert "/model gpt-unit" in commands and "/model clear" in commands, commands
 assert "/effort high" in commands and "/effort clear" in commands, commands
 
@@ -687,15 +810,10 @@ for source_message_id, expected_text in [
     )
     serialized = json.dumps(row["card"], ensure_ascii=False)
     assert expected_text in serialized, row
+    # Text catalogs must NOT render an interactive dropdown.
     assert not any(
-        child.get("tag") == "button"
-        and any(
-            behavior.get("type") == "callback"
-            for behavior in child.get("behaviors", [])
-        )
+        element.get("tag") == "select_static"
         for element in row["card"]["body"]["elements"]
-        for column in element.get("columns", [])
-        for child in column.get("elements", [])
     ), row
 PY
 

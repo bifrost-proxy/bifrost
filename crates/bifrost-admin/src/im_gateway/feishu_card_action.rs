@@ -55,48 +55,49 @@ pub(crate) fn build_feishu_choice_card(
         "element_id": "choice_summary"
     })];
 
-    for (row_index, row) in options.chunks(2).enumerate() {
-        let columns = row
-            .iter()
-            .enumerate()
-            .map(|(column_index, option)| {
-                let option_index = row_index * 2 + column_index;
-                let label = normalize_button_label(&option.label);
-                serde_json::json!({
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "elements": [{
-                        "tag": "button",
-                        "element_id": format!("choice_{option_index}"),
-                        "type": "default",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": label
-                        },
-                        "behaviors": [{
-                            "type": "callback",
-                            "value": {
-                                "bifrostAction": SLASH_CHOICE_ACTION,
-                                "providerId": binding.provider_id,
-                                "chatId": binding.chat_id,
-                                "chatType": binding.chat_type,
-                                "userId": binding.user_id,
-                                "command": option.command,
-                                "expiresAtMs": expires_at_ms
-                            }
-                        }]
-                    }]
-                })
+    // Each option carries the full slash-choice binding serialized into its
+    // string `value`. Feishu `select_static` option values must be unique
+    // strings, and the distinct per-option `command` guarantees uniqueness.
+    let select_options = options
+        .iter()
+        .map(|option| {
+            let label = normalize_button_label(&option.label);
+            let value = serde_json::json!({
+                "bifrostAction": SLASH_CHOICE_ACTION,
+                "providerId": binding.provider_id,
+                "chatId": binding.chat_id,
+                "chatType": binding.chat_type,
+                "userId": binding.user_id,
+                "command": option.command,
+                "expiresAtMs": expires_at_ms
             })
-            .collect::<Vec<_>>();
-        elements.push(serde_json::json!({
-            "tag": "column_set",
-            "flex_mode": "flow",
-            "element_id": format!("choice_row_{row_index}"),
-            "columns": columns
-        }));
-    }
+            .to_string();
+            serde_json::json!({
+                "text": {
+                    "tag": "plain_text",
+                    "content": label
+                },
+                "value": value
+            })
+        })
+        .collect::<Vec<_>>();
+
+    elements.push(serde_json::json!({
+        "tag": "select_static",
+        "element_id": "choice_select",
+        "width": "fill",
+        "placeholder": {
+            "tag": "plain_text",
+            "content": "请选择…"
+        },
+        "behaviors": [{
+            "type": "callback",
+            "value": {
+                "bifrostAction": SLASH_CHOICE_ACTION
+            }
+        }],
+        "options": select_options
+    }));
 
     serde_json::json!({
         "schema": "2.0",
@@ -185,16 +186,38 @@ pub(crate) fn normalize_feishu_card_action(
         .get("action")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| "card action is missing event.action".to_string())?;
-    if action.get("tag").and_then(serde_json::Value::as_str) != Some("button") {
-        return Err("card action does not originate from a button".to_string());
-    }
-    let value: SlashChoiceValue = serde_json::from_value(
-        action
-            .get("value")
-            .cloned()
-            .ok_or_else(|| "card action is missing event.action.value".to_string())?,
-    )
-    .map_err(|error| format!("invalid card action value: {error}"))?;
+    // Choice cards render a single `select_static` dropdown; each option's
+    // string `value` carries the full serialized binding. Legacy `button`
+    // cards (already delivered before this change) stay clickable by reading
+    // the binding object from `action.value`.
+    let (value, raw_payload): (SlashChoiceValue, serde_json::Value) = match action
+        .get("tag")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("select_static") => {
+            let option = action
+                .get("option")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "card action is missing event.action.option".to_string())?;
+            let parsed: SlashChoiceValue = serde_json::from_str(option)
+                .map_err(|error| format!("invalid card action option: {error}"))?;
+            (parsed, serde_json::Value::String(option.to_string()))
+        }
+        Some("button") => {
+            let raw_value = action
+                .get("value")
+                .cloned()
+                .ok_or_else(|| "card action is missing event.action.value".to_string())?;
+            let parsed: SlashChoiceValue = serde_json::from_value(raw_value.clone())
+                .map_err(|error| format!("invalid card action value: {error}"))?;
+            (parsed, raw_value)
+        }
+        _ => {
+            return Err("card action does not originate from a select_static or button".to_string())
+        }
+    };
     let context = event
         .get("context")
         .and_then(serde_json::Value::as_object)
@@ -224,7 +247,7 @@ pub(crate) fn normalize_feishu_card_action(
         message: Some(ImEventMessage {
             text: command,
             raw_type: Some("interactive_callback".to_string()),
-            raw_content: action.get("value").cloned(),
+            raw_content: Some(raw_payload),
             ..ImEventMessage::default()
         }),
         received_at: now_ms,
@@ -278,7 +301,9 @@ pub(crate) fn is_allowed_choice_command(command: &str) -> bool {
     if name.eq_ignore_ascii_case("/resume") {
         return matches!(
             parse_external_cli_resume_slash_command(command),
-            Some(Ok(ExternalCliResumeSlashCommand::Pick(_)))
+            Some(Ok(
+                ExternalCliResumeSlashCommand::Pick(_) | ExternalCliResumeSlashCommand::New
+            ))
         );
     }
     if name.eq_ignore_ascii_case("/model") {
@@ -351,7 +376,11 @@ mod tests {
         }
     }
 
-    fn callback(value: serde_json::Value, operator_id: &str, chat_id: &str) -> serde_json::Value {
+    fn card_action(
+        action: serde_json::Value,
+        operator_id: &str,
+        chat_id: &str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "schema": "2.0",
             "header": {
@@ -363,10 +392,7 @@ mod tests {
                 "operator": {
                     "open_id": operator_id
                 },
-                "action": {
-                    "tag": "button",
-                    "value": value
-                },
+                "action": action,
                 "context": {
                     "open_message_id": "om_card",
                     "open_chat_id": chat_id
@@ -375,7 +401,7 @@ mod tests {
         })
     }
 
-    fn callback_value(command: &str, chat_type: &str, expires_at_ms: u64) -> serde_json::Value {
+    fn binding_value_string(command: &str, chat_type: &str, expires_at_ms: u64) -> String {
         serde_json::json!({
             "bifrostAction": "slash_choice",
             "providerId": "feishu-main",
@@ -385,10 +411,61 @@ mod tests {
             "command": command,
             "expiresAtMs": expires_at_ms
         })
+        .to_string()
+    }
+
+    /// Builds a `select_static` callback (the current card shape): the selected
+    /// binding travels as a JSON string inside `event.action.option`.
+    fn callback(command: &str, chat_type: &str, expires_at_ms: u64) -> serde_json::Value {
+        select_callback(
+            &binding_value_string(command, chat_type, expires_at_ms),
+            "ou_owner",
+            "oc_chat",
+        )
+    }
+
+    fn select_callback(option: &str, operator_id: &str, chat_id: &str) -> serde_json::Value {
+        card_action(
+            serde_json::json!({
+                "tag": "select_static",
+                "option": option,
+                "value": { "bifrostAction": "slash_choice" }
+            }),
+            operator_id,
+            chat_id,
+        )
+    }
+
+    /// Builds a legacy `button` callback, where the binding is an object in
+    /// `event.action.value`. Kept clickable for cards delivered before the
+    /// dropdown migration.
+    fn button_callback(
+        command: &str,
+        chat_type: &str,
+        expires_at_ms: u64,
+        operator_id: &str,
+        chat_id: &str,
+    ) -> serde_json::Value {
+        card_action(
+            serde_json::json!({
+                "tag": "button",
+                "value": {
+                    "bifrostAction": "slash_choice",
+                    "providerId": "feishu-main",
+                    "chatId": "oc_chat",
+                    "chatType": chat_type,
+                    "userId": "ou_owner",
+                    "command": command,
+                    "expiresAtMs": expires_at_ms
+                }
+            }),
+            operator_id,
+            chat_id,
+        )
     }
 
     #[test]
-    fn feishu_choice_card_builds_two_column_callback_buttons() {
+    fn feishu_choice_card_builds_select_static_dropdown() {
         let mut options = (0..5)
             .map(|index| FeishuChoiceCardOption {
                 label: format!("Option {index}"),
@@ -401,19 +478,20 @@ mod tests {
         assert_eq!(card["schema"], "2.0");
         assert!(card.get("header").is_none());
         let elements = card["body"]["elements"].as_array().unwrap();
-        assert_eq!(elements.len(), 4);
-        let rows = &elements[1..];
-        assert_eq!(rows[0]["columns"].as_array().unwrap().len(), 2);
-        assert_eq!(rows[1]["columns"].as_array().unwrap().len(), 2);
-        assert_eq!(rows[2]["columns"].as_array().unwrap().len(), 1);
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0]["tag"], "markdown");
+        let select = &elements[1];
+        assert_eq!(select["tag"], "select_static");
+        assert_eq!(select["element_id"], "choice_select");
+        assert!(select["placeholder"]["content"].as_str().is_some());
+        assert_eq!(select["behaviors"][0]["type"], "callback");
 
-        let mut element_ids = HashSet::new();
+        let select_options = select["options"].as_array().unwrap();
+        assert_eq!(select_options.len(), options.len());
+        let mut seen_values = HashSet::new();
         for (index, option) in options.iter().enumerate() {
-            let row = &rows[index / 2];
-            let button = &row["columns"][index % 2]["elements"][0];
-            assert_eq!(button["tag"], "button");
-            assert!(element_ids.insert(button["element_id"].as_str().unwrap()));
-            let label = button["text"]["content"].as_str().unwrap();
+            let entry = &select_options[index];
+            let label = entry["text"]["content"].as_str().unwrap();
             assert!(label.chars().count() <= MAX_BUTTON_LABEL_CHARS);
             assert!(!label.contains('\n'));
             if index < 4 {
@@ -421,10 +499,16 @@ mod tests {
             } else {
                 assert!(label.ends_with("..."));
             }
-            assert_eq!(button["behaviors"][0]["type"], "callback");
-            assert_eq!(button["behaviors"][0]["value"]["command"], option.command);
+            let value = entry["value"].as_str().expect("option value is a string");
+            assert!(
+                seen_values.insert(value.to_string()),
+                "option values unique"
+            );
+            let parsed: serde_json::Value = serde_json::from_str(value).unwrap();
+            assert_eq!(parsed["command"], option.command);
+            assert_eq!(parsed["bifrostAction"], "slash_choice");
             assert_eq!(
-                button["behaviors"][0]["value"]["expiresAtMs"],
+                parsed["expiresAtMs"],
                 1_000 + FEISHU_CHOICE_CARD_TTL.as_millis() as u64
             );
         }
@@ -434,16 +518,13 @@ mod tests {
     fn feishu_card_action_normalizes_authorized_group_and_p2p_clicks() {
         for (chat_type, command) in [
             ("p2p", "/resume 01234567-89ab"),
+            ("p2p", "/resume new"),
             ("group", "/model gpt-5.4"),
             ("p2p", "/model clear"),
             ("group", "/effort xhigh"),
             ("p2p", "/effort clear"),
         ] {
-            let raw = callback(
-                callback_value(command, chat_type, 20_000),
-                "ou_owner",
-                "oc_chat",
-            );
+            let raw = callback(command, chat_type, 20_000);
             let event = normalize_feishu_card_action(&raw, "feishu-main", 10_000)
                 .unwrap()
                 .unwrap();
@@ -458,38 +539,67 @@ mod tests {
     }
 
     #[test]
+    fn feishu_card_action_normalizes_legacy_button_clicks() {
+        let raw = button_callback("/effort high", "group", 20_000, "ou_owner", "oc_chat");
+        let event = normalize_feishu_card_action(&raw, "feishu-main", 10_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.message.unwrap().text, "/effort high");
+
+        let expired = button_callback("/effort high", "group", 5_000, "ou_owner", "oc_chat");
+        assert!(normalize_feishu_card_action(&expired, "feishu-main", 10_000).is_err());
+    }
+
+    #[test]
     fn feishu_card_action_rejects_unauthorized_expired_or_arbitrary_commands() {
-        let valid = callback_value("/model gpt-5.4", "p2p", 20_000);
+        let valid_option = binding_value_string("/model gpt-5.4", "p2p", 20_000);
         let cases = [
-            callback(valid.clone(), "ou_intruder", "oc_chat"),
-            callback(valid.clone(), "ou_owner", "oc_other"),
-            callback(
-                callback_value("/model gpt-5.4", "p2p", 10_000),
+            // wrong operator / wrong chat
+            select_callback(&valid_option, "ou_intruder", "oc_chat"),
+            select_callback(&valid_option, "ou_owner", "oc_other"),
+            // expired
+            select_callback(
+                &binding_value_string("/model gpt-5.4", "p2p", 10_000),
                 "ou_owner",
                 "oc_chat",
             ),
-            callback(
-                callback_value("/stop now", "p2p", 20_000),
+            // forbidden / malformed commands
+            select_callback(
+                &binding_value_string("/stop now", "p2p", 20_000),
                 "ou_owner",
                 "oc_chat",
             ),
-            callback(
-                callback_value("/model", "p2p", 20_000),
+            select_callback(
+                &binding_value_string("/model", "p2p", 20_000),
                 "ou_owner",
                 "oc_chat",
             ),
-            callback(
-                callback_value("/model reset", "p2p", 20_000),
+            select_callback(
+                &binding_value_string("/model reset", "p2p", 20_000),
                 "ou_owner",
                 "oc_chat",
             ),
-            callback(
-                callback_value("/effort auto", "p2p", 20_000),
+            select_callback(
+                &binding_value_string("/effort auto", "p2p", 20_000),
                 "ou_owner",
                 "oc_chat",
             ),
-            callback(
-                callback_value("/resume abc def", "p2p", 20_000),
+            select_callback(
+                &binding_value_string("/resume abc def", "p2p", 20_000),
+                "ou_owner",
+                "oc_chat",
+            ),
+            // option payload is not valid JSON
+            select_callback("not-json", "ou_owner", "oc_chat"),
+            // missing option field entirely
+            card_action(
+                serde_json::json!({ "tag": "select_static" }),
+                "ou_owner",
+                "oc_chat",
+            ),
+            // unsupported action tag
+            card_action(
+                serde_json::json!({ "tag": "date_picker", "value": {} }),
                 "ou_owner",
                 "oc_chat",
             ),
@@ -502,7 +612,7 @@ mod tests {
         }
 
         assert!(normalize_feishu_card_action(
-            &callback(valid, "ou_owner", "oc_chat"),
+            &select_callback(&valid_option, "ou_owner", "oc_chat"),
             "feishu-other",
             10_000
         )
@@ -522,19 +632,15 @@ mod tests {
     fn ws_message_dispatches_card_actions_and_rejects_invalid_clicks() {
         let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
         let sink = EventSink::from(sender);
-        let raw = callback(
-            callback_value("/effort high", "group", u64::MAX),
-            "ou_owner",
-            "oc_chat",
-        );
+        let raw = callback("/effort high", "group", u64::MAX);
         handle_ws_message(&raw.to_string(), "feishu-main", &sink);
         let event = events.try_recv().expect("card action event");
         assert_eq!(event.event_id, "evt_click_1");
         assert_eq!(event.source.message_id, None);
         assert_eq!(event.message.unwrap().text, "/effort high");
 
-        let invalid = callback(
-            callback_value("/effort high", "group", u64::MAX),
+        let invalid = select_callback(
+            &binding_value_string("/effort high", "group", u64::MAX),
             "ou_other",
             "oc_chat",
         );
