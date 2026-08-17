@@ -171,3 +171,23 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coverage_gap_schedule_store_delete_and_atomic_write_failures() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImScheduleStore::new(temp.path());
+        assert!(store.delete("missing-schedule").is_err());
+
+        let destination = temp.path().join("schedule-destination");
+        std::fs::create_dir(&destination).expect("blocking destination directory");
+
+        let error = atomic_write(&destination, b"schedule data")
+            .expect_err("atomic replacement must reject a directory destination");
+
+        assert!(error.to_string().contains("atomically replace"));
+    }
+}

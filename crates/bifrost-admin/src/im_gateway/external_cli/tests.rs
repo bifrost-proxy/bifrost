@@ -50,6 +50,27 @@ impl Drop for EnvGuard {
     }
 }
 
+fn worker_transport_test_request(session_key: &str) -> ExternalCliRunRequest {
+    ExternalCliRunRequest {
+        message: "worker transport test".to_string(),
+        images: Vec::new(),
+        files: Vec::new(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("worker-transport-test".to_string()),
+        runner_id: Some("worker-transport-test".to_string()),
+        session_key: Some(session_key.to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    }
+}
+
 fn delayed_final_command(content: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
@@ -418,6 +439,154 @@ async fn worker_client_override_and_process_spawn_use_configured_executable() {
     );
     #[cfg(unix)]
     assert!(status.success());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_client_spawn_and_event_reader_report_transport_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _data_dir = EnvGuard::set("BIFROST_DATA_DIR", temp_dir.path());
+
+    let missing_client = ExternalCliWorkerClient {
+        executable: temp_dir.path().join("missing-worker"),
+    };
+    let error = match missing_client
+        .spawn(
+            temp_dir.path().join("missing-runs"),
+            worker_transport_test_request("missing-worker"),
+        )
+        .await
+    {
+        Ok(_) => panic!("missing external worker unexpectedly spawned"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("spawn external runner worker failed"),
+        "{error}"
+    );
+
+    let executable = temp_dir.path().join("worker-output.sh");
+    std::fs::write(
+        &executable,
+        r#"#!/bin/sh
+IFS= read -r _command
+case "$BIFROST_TEST_WORKER_OUTPUT_MODE" in
+  started)
+    printf '%s\n' '{"type":"started","sessionKey":"transport-test","pid":123}'
+    sleep 30
+    ;;
+  malformed)
+    printf '%s\n' 'not-json'
+    ;;
+  invalid_utf8)
+    printf '\377\n'
+    ;;
+  eof)
+    exit 0
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    let client = ExternalCliWorkerClient { executable };
+
+    for mode in ["started", "malformed", "invalid_utf8", "eof"] {
+        let _mode = EnvGuard::set("BIFROST_TEST_WORKER_OUTPUT_MODE", Path::new(mode));
+        let mut run = client
+            .spawn(
+                temp_dir.path().join(format!("runs-{mode}")),
+                worker_transport_test_request(mode),
+            )
+            .await
+            .unwrap();
+        let request_path = run.request_path.clone().unwrap();
+        match mode {
+            "started" => {
+                let event = run.next_event().await.unwrap();
+                assert!(matches!(
+                    event,
+                    ExternalCliWorkerEvent::Started { pid: 123, .. }
+                ));
+                assert!(!request_path.exists());
+            }
+            "malformed" => {
+                let error = run.next_event().await.unwrap_err();
+                assert!(
+                    error.contains("parse external runner worker event failed"),
+                    "{error}"
+                );
+            }
+            "invalid_utf8" => {
+                let error = run.next_event().await.unwrap_err();
+                assert!(
+                    error.contains("read external runner worker event failed"),
+                    "{error}"
+                );
+                assert!(!request_path.exists());
+            }
+            "eof" => {
+                let error = run.next_event().await.unwrap_err();
+                assert!(error.contains("exited before final event"), "{error}");
+                assert!(!request_path.exists());
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_transport_enforces_frame_limits_and_rotates_stderr() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _data_dir = EnvGuard::set("BIFROST_DATA_DIR", temp_dir.path());
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let command_error = write_external_cli_worker_command(
+        &mut stdin,
+        &ExternalCliWorkerCommand::Guide {
+            guide_id: "oversized-guide".to_string(),
+            message: "x".repeat(EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(command_error.contains("command exceeds hard limit"));
+    let _ = child.kill().await;
+
+    let event_error = send_external_cli_worker_event(&ExternalCliWorkerEvent::Progress {
+        event: ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::Status,
+            content: "x".repeat(EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES),
+            title: None,
+            raw: serde_json::Value::Null,
+        },
+    })
+    .unwrap_err();
+    assert!(event_error.contains("event exceeds hard limit"));
+
+    let log_dir = external_cli_worker_runtime_root().join("logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let log_path = log_dir.join("external-cli-worker.log");
+    std::fs::File::create(&log_path)
+        .unwrap()
+        .set_len(EXTERNAL_CLI_WORKER_LOG_MAX_BYTES)
+        .unwrap();
+    drop(external_cli_worker_stderr_file().unwrap());
+    assert!(log_dir.join("external-cli-worker.log.1").is_file());
+    assert_eq!(std::fs::metadata(log_path).unwrap().len(), 0);
 }
 
 #[cfg(unix)]
@@ -5401,6 +5570,23 @@ fn external_cli_worker_json_spool_enforces_atomicity_limits_and_confinement() {
     assert!(open_private_temp_file(&duplicate_temp)
         .unwrap_err()
         .contains("create"));
+
+    let blocked_parent = root.join("blocked-parent");
+    std::fs::write(&blocked_parent, b"not-a-directory").unwrap();
+    assert!(
+        write_external_cli_worker_json(&blocked_parent.join("request.json"), &value, 1024,)
+            .unwrap_err()
+            .contains("create")
+    );
+
+    let directory_target = root.join("directory-target.json");
+    std::fs::create_dir(&directory_target).unwrap();
+    let rename_error = write_external_cli_worker_json(&directory_target, &value, 1024).unwrap_err();
+    assert!(rename_error.contains("rename"), "{rename_error}");
+    assert!(!root.read_dir().unwrap().flatten().any(|entry| entry
+        .file_name()
+        .to_string_lossy()
+        .contains("directory-target.tmp")));
 }
 
 #[tokio::test]

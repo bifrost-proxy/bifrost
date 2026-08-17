@@ -423,4 +423,25 @@ mod tests {
         assert_eq!(std::fs::read(&primary).unwrap(), unsupported);
         assert!(!backup_path(&primary).exists());
     }
+
+    #[test]
+    fn coverage_gap_provider_store_reports_lock_open_and_atomic_write_replace_failures() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let admin_dir = temp.path().join("admin");
+        std::fs::create_dir_all(&admin_dir).expect("admin dir");
+
+        let store = ImProviderStore::new(temp.path());
+        let lock_path = admin_dir.join(format!("{STORE_FILENAME}.lock"));
+        std::fs::create_dir(&lock_path).expect("blocking lock directory");
+        let lock_error = store
+            .add(provider("blocked-lock"))
+            .expect_err("a directory cannot be opened as the provider lock file");
+        assert!(lock_error.to_string().contains("open provider store lock"));
+
+        let destination = admin_dir.join("atomic-destination");
+        std::fs::create_dir(&destination).expect("blocking destination directory");
+        let write_error = atomic_write(&destination, b"provider data")
+            .expect_err("atomic replacement must reject a directory destination");
+        assert!(write_error.to_string().contains("atomically replace"));
+    }
 }

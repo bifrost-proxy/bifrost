@@ -1337,6 +1337,28 @@ mod tests {
             .unwrap();
         file.flush().await.unwrap();
         assert_eq!(tokio::fs::read(retained).await.unwrap(), b"3456");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let blocked_rotation = dir.path().join("blocked-rotation.log");
+            tokio::fs::create_dir(blocked_rotation.with_extension("log.1"))
+                .await
+                .unwrap();
+            assert!(rotate_log(&blocked_rotation).await.is_err());
+
+            let readonly_parent = dir.path().join("readonly-parent");
+            tokio::fs::create_dir(&readonly_parent).await.unwrap();
+            let readonly_log = readonly_parent.join("worker.log");
+            tokio::fs::write(&readonly_log, b"existing").await.unwrap();
+            std::fs::set_permissions(&readonly_parent, std::fs::Permissions::from_mode(0o500))
+                .unwrap();
+            let rename_error = rotate_log(&readonly_log).await.unwrap_err();
+            std::fs::set_permissions(&readonly_parent, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            assert!(!rename_error.is_empty());
+        }
     }
 
     #[cfg(unix)]
@@ -1720,6 +1742,143 @@ done
             .shutdown(Duration::from_secs(1))
             .await
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_channels_report_closed_queue_cancellation_and_response_paths() {
+        let _guard = jobs::test_guard_async().await;
+        jobs::clear_for_tests();
+        let tail = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec = shell_worker_spec("closed-request-channels", tail);
+        spec.max_concurrency = 1;
+        spec.max_queue_depth = 4;
+        spec.request_timeout = Duration::from_secs(2);
+        spec.heartbeat_timeout = Duration::from_secs(3);
+        let worker = ManagedWorker::spawn(spec).await.unwrap();
+
+        let held_controls = worker
+            .control_slots
+            .clone()
+            .acquire_many_owned(8)
+            .await
+            .unwrap();
+        let control_worker = worker.clone();
+        let control = tokio::spawn(async move {
+            control_worker
+                .request_with_id_inner(
+                    "closed-control-cancel".to_string(),
+                    Some("closed-control-job".to_string()),
+                    "operation.control".to_string(),
+                    serde_json::Value::Null,
+                    None,
+                    true,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !worker
+                .request_cancellations
+                .contains_key("closed-control-cancel")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(
+            worker
+                .request_cancellations
+                .remove("closed-control-cancel")
+                .unwrap(),
+        );
+        assert_eq!(
+            control.await.unwrap().unwrap_err(),
+            "worker control request cancellation channel closed"
+        );
+        drop(held_controls);
+
+        let held_request = worker.request_slots.clone().acquire_owned().await.unwrap();
+        let queued_worker = worker.clone();
+        let queued = tokio::spawn(async move {
+            queued_worker
+                .request_with_id(
+                    "closed-request-cancel".to_string(),
+                    Some("closed-request-job".to_string()),
+                    "operation.wait",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while worker.parent_queued_jobs.load(Ordering::Acquire) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(
+            worker
+                .request_cancellations
+                .remove("closed-request-cancel")
+                .unwrap(),
+        );
+        assert_eq!(
+            queued.await.unwrap().unwrap_err(),
+            "worker request cancellation channel closed"
+        );
+        drop(held_request);
+
+        let response_worker = worker.clone();
+        let response = tokio::spawn(async move {
+            response_worker
+                .request_with_id(
+                    "closed-response".to_string(),
+                    Some("closed-response-job".to_string()),
+                    "operation.wait",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !worker.dispatched_requests.contains_key("closed-response") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(worker.pending.remove("closed-response").unwrap());
+        assert_eq!(
+            response.await.unwrap().unwrap_err(),
+            "worker response channel closed"
+        );
+
+        worker.request_slots.close();
+        assert_eq!(
+            worker
+                .request_with_id(
+                    "closed-request-queue".to_string(),
+                    Some("closed-request-queue-job".to_string()),
+                    "operation.wait",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+                .unwrap_err(),
+            "worker request queue closed"
+        );
+        worker.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     #[cfg(unix)]

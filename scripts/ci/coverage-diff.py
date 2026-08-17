@@ -279,7 +279,10 @@ def rust_non_executable_lines(source: str) -> set[int]:
             # selectors; the guarded arm body remains a coverage obligation.
             excluded.add(line_no)
             continue
-        if re.fullmatch(r"[{}()\[\],;]+", stripped):
+        if re.fullmatch(r"[{}()\[\],;?<>]+", stripped):
+            # Rustfmt can place generic-call delimiters and `?` propagation on
+            # continuation-only lines such as `>(` or `)?;`. The invocation's
+            # opening line remains the executable coverage anchor.
             excluded.add(line_no)
     return excluded
 
