@@ -1446,14 +1446,19 @@ fn active_external_worker_jobs_from(
         ) {
             continue;
         }
-        if !matches!(
-            job.worker_kind,
-            crate::worker_runtime::WorkerKind::ExternalCli
-                | crate::worker_runtime::WorkerKind::Browser
-        ) {
-            continue;
-        }
-        let Some(adapter) = job.operation.strip_prefix("external_cli.run:") else {
+        let adapter = match job.worker_kind {
+            crate::worker_runtime::WorkerKind::ExternalCli => {
+                job.operation.strip_prefix("external_cli.run:")
+            }
+            crate::worker_runtime::WorkerKind::Browser if job.operation == "browser.run" => {
+                Some(crate::im_gateway::chatgpt_web::ADAPTER_ID)
+            }
+            crate::worker_runtime::WorkerKind::Browser => {
+                job.operation.strip_prefix("external_cli.run:")
+            }
+            _ => None,
+        };
+        let Some(adapter) = adapter else {
             continue;
         };
         let adapter = adapter.trim();
@@ -2377,6 +2382,7 @@ mod tests {
     #[test]
     fn active_external_worker_jobs_override_isolated_im_session_rows() {
         let session_key = "im:feishu-main:group:active-worker";
+        let browser_session_key = "im:feishu-main:group:active-browser-worker";
         let jobs = vec![
             test_worker_job(
                 "newer-active-traex",
@@ -2393,6 +2399,14 @@ mod tests {
                 crate::worker_runtime::WorkerJobStatus::Running,
                 crate::worker_runtime::WorkerKind::ExternalCli,
                 42_000,
+            ),
+            test_worker_job(
+                "active-browser",
+                Some(browser_session_key),
+                "browser.run",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::Browser,
+                41_000,
             ),
             test_worker_job(
                 "terminal-codex",
@@ -2420,25 +2434,47 @@ mod tests {
             ),
         ];
         let active = active_external_worker_jobs_from(jobs);
-        assert_eq!(active.len(), 1);
+        assert_eq!(active.len(), 2);
         assert_eq!(active[session_key].adapter, "traex");
+        assert_eq!(
+            active[browser_session_key].adapter,
+            crate::im_gateway::chatgpt_web::ADAPTER_ID
+        );
 
-        let mut unified = vec![serde_json::json!({
-            "session_key": session_key,
-            "status": "ended",
-            "running": false,
-            "state": "ended",
-            "run_state": "completed",
-            "source": "codex",
-            "agent_type": null,
-            "runner_id": "Codex",
-            "runner_type": null,
-            "title": "Active Feishu requirement",
-            "start_time": 10,
-            "last_active_time": 20,
-            "duration_secs": 10,
-            "user_message_count": 2,
-        })];
+        let mut unified = vec![
+            serde_json::json!({
+                "session_key": session_key,
+                "status": "ended",
+                "running": false,
+                "state": "ended",
+                "run_state": "completed",
+                "source": "codex",
+                "agent_type": null,
+                "runner_id": "Codex",
+                "runner_type": null,
+                "title": "Active Feishu requirement",
+                "start_time": 10,
+                "last_active_time": 20,
+                "duration_secs": 10,
+                "user_message_count": 2,
+            }),
+            serde_json::json!({
+                "session_key": browser_session_key,
+                "status": "ended",
+                "running": false,
+                "state": "ended",
+                "run_state": "completed",
+                "source": "feishu",
+                "agent_type": "external_cli",
+                "runner_id": null,
+                "runner_type": null,
+                "title": "Active browser requirement",
+                "start_time": 5,
+                "last_active_time": 15,
+                "duration_secs": 10,
+                "user_message_count": 1,
+            }),
+        ];
         overlay_active_external_worker_jobs(&mut unified, &active);
 
         assert_eq!(unified[0]["status"], "active");
@@ -2448,10 +2484,16 @@ mod tests {
         assert_eq!(unified[0]["agent_type"], "external_cli");
         assert_eq!(unified[0]["runner_type"], "traex");
         assert_eq!(unified[0]["runner_id"], "Codex");
+        assert_eq!(unified[1]["status"], "active");
+        assert_eq!(unified[1]["running"], true);
+        assert_eq!(unified[1]["runner_type"], "chatgpt_web");
+        assert_eq!(unified[1]["runner_id"], "chatgpt_web");
         let response = session_summaries_response(&unified, &std::collections::HashMap::new());
-        assert_eq!(response["summary"]["running_count"], 1);
+        assert_eq!(response["summary"]["running_count"], 2);
         assert_eq!(response["items"][0]["status"], "running");
         assert_eq!(response["items"][0]["session_key"], session_key);
+        assert_eq!(response["items"][1]["status"], "running");
+        assert_eq!(response["items"][1]["session_key"], browser_session_key);
     }
 
     #[test]
