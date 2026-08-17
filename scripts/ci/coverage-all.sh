@@ -250,11 +250,12 @@ restore_profiles() {
 
 sanitize_profiles() {
   local profile_dir="$1"
+  local report_name="${2:-profile-sanitizer.json}"
   local llvm_profdata
   llvm_profdata="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
   python3 scripts/ci/coverage-sanitize-profraw.py "$profile_dir" \
     --llvm-profdata "$llvm_profdata" \
-    --json-output "$OUTPUT_DIR/profile-sanitizer.json"
+    --json-output "$OUTPUT_DIR/$report_name"
 }
 
 prepare_isolated_e2e_environment() {
@@ -374,6 +375,11 @@ main() {
   # 2. Unit + integration tests, keep raw profiles (--no-report).
   step "Running unit + integration tests with instrumentation"
   cargo llvm-cov "${SCOPE_ARGS[@]}" --all-features --no-report --jobs "$JOBS"
+  # A lifecycle test may intentionally terminate an instrumented child before
+  # LLVM flushes its profile header. Quarantine only those corrupt child
+  # profiles before the first report; valid test profiles remain mandatory, so
+  # an all-corrupt run still fails closed in cargo llvm-cov report.
+  sanitize_profiles "$PROFILE_ROOT" "unit-integration-profile-sanitizer.json"
 
   if [[ "$WANT_JSON" -eq 1 ]]; then
     cargo llvm-cov report --json --output-path "$OUTPUT_DIR/unit-integration.json"
@@ -411,7 +417,7 @@ main() {
 
     local e2e_profiles="$OUTPUT_DIR/profiles/e2e"
     snapshot_profiles "$e2e_profiles"
-    sanitize_profiles "$e2e_profiles"
+    sanitize_profiles "$e2e_profiles" "e2e-profile-sanitizer.json"
     restore_profiles "$e2e_profiles"
     if [[ "$WANT_JSON" -eq 1 ]]; then
       cargo llvm-cov report --json --output-path "$OUTPUT_DIR/e2e.json"
