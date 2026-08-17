@@ -789,8 +789,47 @@ done
             StatusCode::GONE
         );
         std::fs::remove_dir(&path).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+
+            let outside = temp.path().join("outside.txt");
+            std::fs::write(&outside, b"0123456789").unwrap();
+            symlink(&outside, &path).unwrap();
+            assert_eq!(
+                read_worker_artifact("artifact-matrix", &artifact.artifact_id, None)
+                    .await
+                    .status(),
+                StatusCode::GONE
+            );
+            std::fs::remove_file(&path).unwrap();
+
+            std::fs::write(&path, b"0123456789").unwrap();
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o000);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            assert_eq!(
+                read_worker_artifact("artifact-matrix", &artifact.artifact_id, None)
+                    .await
+                    .status(),
+                StatusCode::GONE
+            );
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            std::fs::remove_file(&path).unwrap();
+        }
+
         std::fs::remove_dir(&root).unwrap();
         std::fs::write(&root, b"not-a-directory").unwrap();
+        assert_eq!(
+            read_worker_artifact("artifact-matrix", &artifact.artifact_id, None)
+                .await
+                .status(),
+            StatusCode::GONE
+        );
+        std::fs::remove_file(&root).unwrap();
         assert_eq!(
             read_worker_artifact("artifact-matrix", &artifact.artifact_id, None)
                 .await

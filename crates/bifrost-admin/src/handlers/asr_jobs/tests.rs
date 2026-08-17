@@ -5680,6 +5680,25 @@ mod tests {
         let chunk_retry = RunningChunkRetryGuard::acquire(task_id).unwrap();
         assert!(RunningTaskGuard::acquire(task_id).is_err());
         drop(chunk_retry);
+
+        set_bulk_chunk_retry_state(BulkChunkRetryState {
+            task_id: task_id.to_string(),
+            status: BulkChunkRetryStatus::Queued,
+            queued_files: 1,
+            processed_files: 0,
+            total_failed_chunks: 1,
+            recovered_chunks: 0,
+            still_failed_chunks: 0,
+            started_at_ms: None,
+            updated_at_ms: now_ms(),
+            finished_at_ms: None,
+            current_file_key: None,
+            current_source_path: None,
+            message: "queued".to_string(),
+            results: Vec::new(),
+        });
+        assert!(RunningTaskGuard::acquire(task_id).is_err());
+        BULK_CHUNK_RETRY_JOBS.lock().unwrap().remove(task_id);
     }
 
     #[tokio::test]
@@ -5773,6 +5792,62 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(!task_is_running(&batch_task.id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn coverage_gap_whole_file_retry_reports_file_store_save_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let single_task = test_directory_task("whole-file-retry-save-single", audio_dir.clone());
+        let batch_task = test_directory_task("whole-file-retry-save-batch", audio_dir.clone());
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![single_task.clone(), batch_task.clone()],
+        })
+        .unwrap();
+
+        let mut stores = Vec::new();
+        for (task, name) in [(&single_task, "single.wav"), (&batch_task, "batch.wav")] {
+            let source = audio_dir.join(name);
+            std::fs::write(&source, b"not-a-real-wave").unwrap();
+            let key = source_key(&source);
+            let mut record = pending_record(&task.id, &source);
+            record.status = FileStatus::Failed;
+            save_file_store(
+                &task.id,
+                &FileStore {
+                    version: TASK_STORE_VERSION,
+                    files: BTreeMap::from([(key.clone(), record)]),
+                },
+            )
+            .unwrap();
+            stores.push((task.id.clone(), key, file_store_path(&task.id)));
+        }
+
+        for (index, (task_id, key, store_path)) in stores.into_iter().enumerate() {
+            let task_dir = store_path.parent().unwrap();
+            let lock_path = store_path.with_extension("lock");
+            std::fs::remove_file(lock_path).unwrap();
+            std::fs::set_permissions(task_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+            let response = if index == 0 {
+                retry_failed_file_response(&task_id, &key).await
+            } else {
+                retry_all_failed_files_response(&task_id).await
+            };
+
+            std::fs::set_permissions(task_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(load_file_store(&task_id).files[&key].status, FileStatus::Failed);
+        }
     }
 
     #[tokio::test]
@@ -10973,6 +11048,74 @@ esac
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(task_id);
+        }
+    }
+
+    #[test]
+    fn source_compression_fresh_queue_legacy_prerequisites_and_marker_errors_are_safe() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let task_id = "compression-state-branches";
+        let audio_dir = temp.path().join("audio");
+        let output_dir = temp.path().join("output");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        save_source_compression_state(&SourceAudioCompressionState {
+            task_id: task_id.to_string(),
+            status: SourceAudioCompressionStatus::Queued,
+            queued_files: 1,
+            processed_files: 0,
+            compressed_files: 0,
+            skipped_files: 0,
+            failed_files: 0,
+            original_bytes: 0,
+            compressed_bytes: 0,
+            saved_bytes: 0,
+            started_at_ms: None,
+            updated_at_ms: now_ms(),
+            finished_at_ms: None,
+            current_source_path: None,
+            message: "queued".to_string(),
+            results: Vec::new(),
+        })
+        .unwrap();
+        assert!(source_compression_is_running(task_id));
+
+        let flac = audio_dir.join("legacy.flac");
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([(
+                source_key(&flac),
+                completed_test_record(task_id, &flac, &output_dir),
+            )]),
+        };
+        assert_eq!(repair_legacy_source_compression_records(task_id, &mut store), 0);
+
+        let task = test_directory_task(task_id, audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task],
+        })
+        .unwrap();
+        std::fs::remove_file(source_compression_state_path(task_id)).unwrap();
+        assert_eq!(repair_legacy_source_compression_records(task_id, &mut store), 0);
+
+        let cancel_parent = worker_source_compression_cancel_path(task_id)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(cancel_parent.parent().unwrap()).unwrap();
+        std::fs::write(&cancel_parent, b"blocks-directory").unwrap();
+        set_worker_source_compression_cancel(task_id, true);
+        assert!(!worker_source_compression_cancel_path(task_id).exists());
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&cancel_parent).unwrap();
+            std::fs::create_dir_all(&cancel_parent).unwrap();
+            std::fs::create_dir(worker_source_compression_cancel_path(task_id)).unwrap();
+            set_worker_source_compression_cancel(task_id, false);
+            assert!(worker_source_compression_cancel_path(task_id).is_dir());
         }
     }
 }

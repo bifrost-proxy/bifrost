@@ -313,11 +313,16 @@ static HANDLES: Lazy<
         (&Method::POST, _)
             if ready => execute(),
     }
+    build::<
+        Payload
+    >(
+        value,
+    )?;
 }
 '''
         excluded = coverage_diff.rust_non_executable_lines(source)
         self.assertTrue(
-            {1, 3, 4, 6, 7, 8, 10, 11, 13, 18, 19, 23, 26}.issubset(
+            {1, 3, 4, 6, 7, 8, 10, 11, 13, 18, 19, 23, 26, 31, 33}.issubset(
                 excluded
             )
         )
