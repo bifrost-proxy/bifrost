@@ -5,7 +5,7 @@
 验证 Agent Chat 与 IM external runner 的统一 `/resume` 指令：按当前 Runner 列出最近
 20 个本地 session（`id / title / datetime`），使用 `/resume <id>` 选择后，下一条普通
 消息通过 provider 原生 resume 参数继续本地会话；同时验证飞书中的 `/resume`、
-`/model`、`/effort` 返回 Card 2.0 按钮，用户点击后直接执行选择，不需要复制粘贴参数。
+`/model`、`/effort` 返回 Card 2.0 下拉选择卡，用户选中后直接执行选择，不需要复制粘贴参数。
 
 ## 前置条件
 
@@ -94,24 +94,25 @@
 - `cmp` 退出码为 0，证明扫描未改写 provider session 文件。
 - 输出和断言不打印 session 正文。
 
-### TC-LSR-04：Web Agent Chat Slash 菜单
+### TC-LSR-04：IM External Runner 帮助文案
 
 操作步骤：
 
 1. 执行：
 
    ```bash
-   pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts \
-     -g "shows model slash commands for Claude Code runner" --reporter=line
+   cargo test -p bifrost-admin \
+     im_help_for_external_cli_runner_only_lists_supported_commands \
+     --lib -- --nocapture
    ```
 
-2. 观察 slash 面板断言。
+2. 观察帮助文案断言。
 
 预期结果：
 
-- Claude Code Runner 下输入 `/` 时出现 `/resume`。
-- 说明文字包含“列出最近 20 个本地会话”。
-- 原有 `/models` 与 `/model` 仍存在。
+- Traex External Runner 帮助中出现 `/model`、`/resume` 和 `/effort`。
+- `/resume` 说明包含“查看最近 20 个本地会话（含新建会话）”和“选择一个会话在下一条消息恢复”。
+- 旧的帮助行 `/models` 与 `/efforts` 不再出现；带参数文本命令兼容由 TC-LSR-07 覆盖。
 
 ### TC-LSR-05：飞书三类 Slash 选择卡片与单聊点击闭环
 
@@ -236,3 +237,6 @@
 - 2026-08-17，TC-LSR-08：PASS。`/resume` 下拉首项为 `/resume new`；先选本地 session
   写入 `externalThreadId`，再选「🆕 新建会话」后该字段变为缺失；下拉回调路径下越权
   点击仍返回 HTTP 400。脚本输出 `[feishu-slash-choice] PASS`。
+- 2026-08-17，TC-LSR-04：PASS。将失效的 Web Playwright 路径替换为实际存在的 IM
+  External Runner 帮助回归；`im_help_for_external_cli_runner_only_lists_supported_commands`
+  断言 `/model`、`/resume`、`/effort` 与旧复数帮助行的边界。

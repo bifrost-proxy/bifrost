@@ -509,8 +509,9 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_effort()
     assert!(message.contains("- **Model**: `opus（claude settings）`"));
     assert!(message.contains("- **Reasoning Effort**: `low`"));
     assert!(message.contains("Claude Code Runner 命令:"));
-    assert!(message.contains("/models"));
-    assert!(message.contains("/efforts"));
+    assert!(message.contains("/model         查看当前 Codex/Traex/Claude Code Runner 可选模型"));
+    assert!(message
+        .contains("/effort        查看当前 Codex/Traex/Claude Code Runner 可选 Reasoning Effort"));
     assert!(!message.contains("/remember"));
 }
 

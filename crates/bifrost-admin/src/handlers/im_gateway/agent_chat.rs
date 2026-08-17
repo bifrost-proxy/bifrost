@@ -521,12 +521,8 @@ pub(super) fn build_im_channel_help_sections(
                 );
             }
             if crate::im_gateway::external_cli::supports_external_cli_resume_slash(adapter) {
-                runner_lines.push(
-                    "/resume        查看最近 20 个本地会话（含新建会话）",
-                );
-                runner_lines.push(
-                    "/resume [session-id]  选择一个会话在下一条消息恢复",
-                );
+                runner_lines.push("/resume        查看最近 20 个本地会话（含新建会话）");
+                runner_lines.push("/resume [session-id]  选择一个会话在下一条消息恢复");
             }
             if !crate::im_gateway::external_cli::external_cli_effort_options(adapter).is_empty() {
                 runner_lines.push(
