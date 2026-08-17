@@ -131,9 +131,31 @@ wait_for_http_ready "$READY_URL" 45 0.2 || fail "bifrost did not become ready"
 # Remote Invoke keeps one tokenless standby worker so its loopback Admin API is
 # available before sync login. It must remain idle and isolated from the proxy;
 # every other optional worker stays lazy.
-curl -fsS --noproxy '*' \
-  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/workers" \
-  >"$TEST_ROOT/workers.json"
+WORKERS_URL="http://127.0.0.1:$ADMIN_PORT/_bifrost/api/workers"
+# The proxy readiness endpoint can become available while the parent is still
+# finishing its one-time Remote Invoke endpoint discovery. That control request
+# is intentionally visible as an active worker job, so wait for the worker to
+# settle instead of racing the next heartbeat snapshot.
+for _ in $(seq 1 100); do
+  curl -fsS --noproxy '*' "$WORKERS_URL" >"$TEST_ROOT/workers.json"
+  if "$PYTHON_BIN" - "$TEST_ROOT/workers.json" "$BIFROST_PID" <<'PY'
+import json, sys
+workers = json.load(open(sys.argv[1], encoding="utf-8"))
+settled = (
+    len(workers) == 1
+    and workers[0]["workerKind"] == "remote_invoke"
+    and workers[0]["state"] == "ready"
+    and workers[0]["pid"] != int(sys.argv[2])
+    and workers[0]["activeJobs"] == 0
+    and workers[0]["queuedJobs"] == 0
+)
+raise SystemExit(0 if settled else 1)
+PY
+  then
+    break
+  fi
+  sleep 0.1
+done
 "$PYTHON_BIN" - "$TEST_ROOT/workers.json" "$BIFROST_PID" <<'PY'
 import json, sys
 workers = json.load(open(sys.argv[1], encoding="utf-8"))
