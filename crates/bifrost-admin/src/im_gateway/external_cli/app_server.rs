@@ -439,6 +439,8 @@ pub(super) async fn run_command(
     let mut terminal_error = None;
     let mut capacity_retries = 0u32;
     let mut turn_has_side_effects = false;
+    let mut stop_request_id = None::<u64>;
+    let mut stop_deadline = None::<std::pin::Pin<Box<tokio::time::Sleep>>>;
 
     while !terminal {
         tokio::select! {
@@ -451,6 +453,18 @@ pub(super) async fn run_command(
                 let frame: serde_json::Value = serde_json::from_str(&line)
                     .map_err(|error| format!("parse app-server frame failed: {error}; line={line}"))?;
                 if let Some(id) = frame.get("id").and_then(serde_json::Value::as_u64) {
+                    if stop_request_id == Some(id) {
+                        if let Some(error) = frame.get("error") {
+                            terminal_error = Some(format!(
+                                "app-server rejected turn/interrupt: {}",
+                                jsonrpc_error_message(error)
+                            ));
+                        }
+                        status = ExternalCliRunStatus::Stopped;
+                        exit_code = None;
+                        terminal = true;
+                        continue;
+                    }
                     if id == RATE_LIMIT_REQUEST_ID {
                         if let Some(response) = frame.get("result").cloned() {
                             let event = account_rate_limits_event(response);
@@ -602,6 +616,15 @@ pub(super) async fn run_command(
             }
             command = guide_rx.recv() => {
                 let Some(command) = command else { continue; };
+                if stop_request_id.is_some() {
+                    let _ = command.ack_tx.send(rejected_guide(
+                        command.guide_id,
+                        Some(thread_id.clone()),
+                        Some(turn_id.clone()),
+                        "app-server turn is stopping".to_string(),
+                    ));
+                    continue;
+                }
                 if session_key.is_some_and(|session_key| {
                     !active_session_is_owned_by(session_key, run_id)
                 }) {
@@ -635,24 +658,63 @@ pub(super) async fn run_command(
                     }
                 }
             }
-            _ = wait_for_stop_marker(stop_marker_path.clone()) => {
-                let _ = send_jsonrpc_request(
+            _ = wait_for_stop_marker(stop_marker_path.clone()), if stop_request_id.is_none() => {
+                const STOP_REQUEST_ID: u64 = 99;
+                match send_jsonrpc_request(
                     &mut stdin,
-                    99,
+                    STOP_REQUEST_ID,
                     "turn/interrupt",
                     serde_json::json!({"threadId": thread_id, "turnId": turn_id}),
-                ).await;
-                status = ExternalCliRunStatus::Stopped;
-                exit_code = None;
-                terminal = true;
+                ).await {
+                    Ok(()) => {
+                        stop_request_id = Some(STOP_REQUEST_ID);
+                        stop_deadline = Some(Box::pin(sleep(Duration::from_millis(
+                            WORKER_TRANSPORT_STOP_GRACE_MS,
+                        ))));
+                    }
+                    Err(error) => {
+                        terminal_error = Some(format!(
+                            "failed to send app-server turn/interrupt: {error}"
+                        ));
+                        status = ExternalCliRunStatus::Stopped;
+                        exit_code = None;
+                        terminal = true;
+                    }
+                }
             }
-            _ = &mut timeout_sleep => {
+            _ = &mut timeout_sleep, if stop_request_id.is_none() => {
+                if let Err(error) = send_jsonrpc_request(
+                    &mut stdin,
+                    98,
+                    "turn/interrupt",
+                    serde_json::json!({"threadId": thread_id, "turnId": turn_id}),
+                ).await {
+                    tracing::warn!(
+                        thread_id,
+                        turn_id,
+                        error = %error,
+                        "failed to interrupt timed-out app-server turn"
+                    );
+                }
                 status = ExternalCliRunStatus::TimedOut;
                 exit_code = None;
                 terminal_error = Some(format!(
                     "app-server turn timed out after {} seconds",
                     timeout_secs.unwrap_or_default(),
                 ));
+                terminal = true;
+            }
+            _ = async {
+                match stop_deadline.as_mut() {
+                    Some(deadline) => deadline.await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                terminal_error = Some(
+                    "app-server did not acknowledge turn/interrupt before termination".to_string()
+                );
+                status = ExternalCliRunStatus::Stopped;
+                exit_code = None;
                 terminal = true;
             }
         }
@@ -2556,6 +2618,238 @@ for line in sys.stdin:
         assert!(!ACTIVE_RUNS.contains_key("mock-app-server-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));
         assert!(live_guide::active_handle(session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mock_app_server_stop_protocol_covers_ack_rejection_deadline_and_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = temp_dir.path().join("mock-codex-stop-protocol");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+mode = os.environ["STOP_MODE"]
+marker = os.environ["STOP_SEEN"]
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    frame = json.loads(line)
+    method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/start":
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"stop-thread"}}})
+    elif method == "turn/start":
+        send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"stop-turn"}}})
+    elif method == "account/rateLimits/read":
+        send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"unsupported"}})
+    elif method == "turn/interrupt":
+        with open(marker, "w", encoding="utf-8") as handle:
+            handle.write(str(request_id))
+        if mode == "reject":
+            time.sleep(0.2)
+            send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32000,"message":"not active"}})
+        elif mode == "ack":
+            send({"jsonrpc":"2.0","id":request_id,"result":{}})
+        elif mode == "ignore":
+            pass
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        for mode in ["ack", "reject", "ignore"] {
+            let session_key = format!("app-server-stop-{mode}");
+            let stop_marker = temp_dir.path().join(format!("stop-{mode}"));
+            let stop_seen = temp_dir.path().join(format!("seen-{mode}"));
+            let mut request = request(DEFAULT_ADAPTER);
+            request.session_key = Some(session_key.clone());
+            request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+            request.adapter_config.executable = Some(executable.display().to_string());
+            request.adapter_config.env = BTreeMap::from([
+                ("STOP_MODE".to_string(), mode.to_string()),
+                ("STOP_SEEN".to_string(), stop_seen.display().to_string()),
+            ]);
+            request.adapter_config.timeout_secs = Some(10);
+            let stop_marker_for_run = stop_marker.clone();
+            let run = tokio::spawn(async move {
+                run_command(
+                    &format!("app-server-stop-{mode}-run"),
+                    Some(&session_key),
+                    &request,
+                    "wait".to_string(),
+                    stop_marker_for_run,
+                    None,
+                )
+                .await
+            });
+            timeout(Duration::from_secs(5), async {
+                while live_guide::active_handle(&format!("app-server-stop-{mode}")).is_none() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("app-server active guide registration");
+            tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+            timeout(Duration::from_secs(5), async {
+                while !stop_seen.is_file() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("turn/interrupt should be written");
+
+            if mode == "reject" {
+                let rejected = request_session_guide(
+                    &format!("app-server-stop-{mode}"),
+                    "late-guide".to_string(),
+                    "too late".to_string(),
+                )
+                .await;
+                assert_eq!(
+                    rejected.reason.as_deref(),
+                    Some("app-server turn is stopping")
+                );
+            }
+            let output = timeout(Duration::from_secs(8), run)
+                .await
+                .expect("stopped app-server should finish")
+                .unwrap()
+                .unwrap();
+            assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            match mode {
+                "ack" => assert!(!stderr.contains("turn/interrupt"), "{stderr}"),
+                "reject" => assert!(stderr.contains("rejected turn/interrupt"), "{stderr}"),
+                "ignore" => assert!(stderr.contains("did not acknowledge"), "{stderr}"),
+                _ => unreachable!(),
+            }
+        }
+
+        let timeout_seen = temp_dir.path().join("timeout-seen");
+        let mut request = request(DEFAULT_ADAPTER);
+        request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+        request.adapter_config.executable = Some(executable.display().to_string());
+        request.adapter_config.env = BTreeMap::from([
+            ("STOP_MODE".to_string(), "ignore".to_string()),
+            ("STOP_SEEN".to_string(), timeout_seen.display().to_string()),
+        ]);
+        request.adapter_config.timeout_secs = Some(1);
+        let output = run_command(
+            "app-server-timeout-interrupt-run",
+            None,
+            &request,
+            "wait".to_string(),
+            temp_dir.path().join("unused-timeout-stop"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.status, ExternalCliRunStatus::TimedOut);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("app-server turn timed out after 1 seconds"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_server_stop_and_timeout_report_closed_interrupt_stdin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = temp_dir.path().join("mock-codex-closed-interrupt");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+ready = os.environ["CLOSED_STDIN_READY"]
+for line in sys.stdin:
+    frame = json.loads(line)
+    method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":request_id,"result":{}}), flush=True)
+    elif method == "thread/start":
+        print(json.dumps({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"closed-thread"}}}), flush=True)
+    elif method == "turn/start":
+        print(json.dumps({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"closed-turn"}}}), flush=True)
+    elif method == "account/rateLimits/read":
+        print(json.dumps({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"unsupported"}}), flush=True)
+        with open(ready, "w", encoding="utf-8") as handle:
+            handle.write("ready")
+        os.close(0)
+        time.sleep(30)
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        for trigger in ["stop", "timeout"] {
+            let ready = temp_dir.path().join(format!("ready-{trigger}"));
+            let stop_marker = temp_dir.path().join(format!("stop-{trigger}"));
+            let mut request = request(DEFAULT_ADAPTER);
+            request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+            request.adapter_config.executable = Some(executable.display().to_string());
+            request.adapter_config.env = BTreeMap::from([(
+                "CLOSED_STDIN_READY".to_string(),
+                ready.display().to_string(),
+            )]);
+            request.adapter_config.timeout_secs = (trigger == "timeout").then_some(1);
+            let run_id = format!("app-server-closed-{trigger}-run");
+            let stop_marker_for_run = stop_marker.clone();
+            let run = tokio::spawn(async move {
+                run_command(
+                    &run_id,
+                    None,
+                    &request,
+                    "wait".to_string(),
+                    stop_marker_for_run,
+                    None,
+                )
+                .await
+            });
+            timeout(Duration::from_secs(5), async {
+                while !ready.is_file() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("mock should close stdin after handshake");
+            if trigger == "stop" {
+                tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+            }
+            let output = timeout(Duration::from_secs(8), run)
+                .await
+                .expect("closed-stdin app-server should finish")
+                .unwrap()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if trigger == "stop" {
+                assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+                assert!(
+                    stderr.contains("failed to send app-server turn/interrupt"),
+                    "{stderr}"
+                );
+            } else {
+                assert_eq!(output.status, ExternalCliRunStatus::TimedOut);
+                assert!(stderr.contains("app-server turn timed out"), "{stderr}");
+            }
+        }
     }
 
     #[cfg(unix)]

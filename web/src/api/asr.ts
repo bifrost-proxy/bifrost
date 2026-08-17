@@ -656,7 +656,7 @@ export interface AsrSourceAudioCompressionRecord {
   original_modified_ms?: number;
   compressed_size_bytes: number;
   saved_bytes: number;
-  pcm_sha256: string;
+  pcm_sha256?: string;
   compressed_at_ms: number;
 }
 
@@ -864,6 +864,13 @@ export interface RetryChunksResult {
 export interface RetryAllFailedChunksResult {
   message: string;
   retry: AsrBulkRetryState;
+}
+
+export interface RetryFailedFilesResult {
+  queued: number;
+  skipped: number;
+  file_key?: string;
+  message: string;
 }
 
 export interface CleanupAsrSourceAudioFailure {
@@ -1554,6 +1561,27 @@ export async function retryAllFailedChunks(
     },
   );
   return readJsonResponse<RetryAllFailedChunksResult>(response);
+}
+
+export async function retryFailedFile(
+  taskId: string,
+  fileKey: string,
+): Promise<RetryFailedFilesResult> {
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileKey)}/retry`,
+    { method: "POST", headers: buildStreamHeaders() },
+  );
+  return readJsonResponse<RetryFailedFilesResult>(response);
+}
+
+export async function retryAllFailedFiles(
+  taskId: string,
+): Promise<RetryFailedFilesResult> {
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(taskId)}/retry-failed-files`,
+    { method: "POST", headers: buildStreamHeaders() },
+  );
+  return readJsonResponse<RetryFailedFilesResult>(response);
 }
 
 export async function cleanupAsrSourceAudio(

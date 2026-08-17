@@ -47,7 +47,9 @@ import {
   cleanupAsrSourceAudio,
   cancelAsrSourceAudioCompression,
   retryAllFailedChunks,
+  retryAllFailedFiles,
   retryFailedChunks,
+  retryFailedFile,
   startAsrSourceAudioCompression,
   triggerDailyAgentRun,
 } from "../../../api/asr";
@@ -237,6 +239,8 @@ export default function DirectoryTaskDetailPage({
 }: DirectoryTaskDetailPageProps) {
   const [retryingFileKey, setRetryingFileKey] = useState<string | null>(null);
   const [startingBulkRetry, setStartingBulkRetry] = useState(false);
+  const [retryingFailedFileKey, setRetryingFailedFileKey] = useState<string | null>(null);
+  const [startingFailedFilesRetry, setStartingFailedFilesRetry] = useState(false);
   const [cleaningSourceAudio, setCleaningSourceAudio] = useState(false);
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
   const [cleanupConfirmName, setCleanupConfirmName] = useState("");
@@ -345,6 +349,38 @@ export default function DirectoryTaskDetailPage({
       );
     } finally {
       setStartingBulkRetry(false);
+    }
+  }, [taskDetail, onRefreshTask]);
+
+  const handleRetryFailedFile = useCallback(
+    async (fileKey: string) => {
+      if (!taskDetail) return;
+      setRetryingFailedFileKey(fileKey);
+      try {
+        const result = await retryFailedFile(taskDetail.id, fileKey);
+        message.success(result.message);
+        onRefreshTask(taskDetail.id);
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : "Failed to retry transcription");
+      } finally {
+        setRetryingFailedFileKey(null);
+      }
+    },
+    [taskDetail, onRefreshTask],
+  );
+
+  const handleRetryAllFailedFiles = useCallback(async () => {
+    if (!taskDetail) return;
+    setStartingFailedFilesRetry(true);
+    try {
+      const result = await retryAllFailedFiles(taskDetail.id);
+      if (result.queued > 0) message.success(result.message);
+      else message.info(result.message);
+      onRefreshTask(taskDetail.id);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to retry failed files");
+    } finally {
+      setStartingFailedFilesRetry(false);
     }
   }, [taskDetail, onRefreshTask]);
 
@@ -654,6 +690,8 @@ export default function DirectoryTaskDetailPage({
       ? Math.round((compressedSourceFileCount / compressionTrackedFileCount) * 100)
       : 0;
   const failedChunkCount = summary?.failed_chunk_count ?? 0;
+  const failedFileCount =
+    taskDetail?.files.filter((file) => file.status === "failed").length ?? 0;
   const cleanableSourceFileCount = summary?.cleanable_source_file_count ?? 0;
   const cleanableSourceBytes = summary?.cleanable_source_bytes ?? 0;
   const bulkRetryPercent =
@@ -1021,6 +1059,28 @@ export default function DirectoryTaskDetailPage({
           },
         },
         {
+          key: "retry-failed-files",
+          icon: startingFailedFilesRetry ? <LoadingOutlined /> : <ReloadOutlined />,
+          label: startingFailedFilesRetry
+            ? "Retrying failed files..."
+            : "Retry all failed files",
+          disabled:
+            failedFileCount === 0 ||
+            startingFailedFilesRetry ||
+            startingBulkRetry ||
+            taskDetail.summary.running ||
+            Boolean(taskDetail.paused) ||
+            bulkRetryActive ||
+            sourceCompressionActive,
+          onClick: () => {
+            Modal.confirm({
+              title: `Retry transcription for ${failedFileCount} failed file${failedFileCount === 1 ? "" : "s"}?`,
+              content: "Only failed files with available source audio will be queued.",
+              onOk: handleRetryAllFailedFiles,
+            });
+          },
+        },
+        {
           key: "retry-failed-chunks",
           icon: startingBulkRetry || bulkRetryActive ? <LoadingOutlined /> : <ReloadOutlined />,
           label: bulkRetryActive ? "Retrying failed chunks..." : "Retry all failed chunks",
@@ -1255,6 +1315,42 @@ export default function DirectoryTaskDetailPage({
                                 `${record.progress_current ?? 0}/${record.progress_total}`
                               }
                             />
+                          </Space>
+                        );
+                      }
+                      if (value === "failed") {
+                        const retryDisabled =
+                          retryingFailedFileKey !== null ||
+                          startingFailedFilesRetry ||
+                          startingBulkRetry ||
+                          taskDetail.summary.running ||
+                          Boolean(taskDetail.paused) ||
+                          bulkRetryActive ||
+                          sourceCompressionActive;
+                        return (
+                          <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                            {tag}
+                            <Popconfirm
+                              title="Retry transcription for this file?"
+                              description="The previous failed outputs will be cleared and this file will be transcribed again."
+                              onConfirm={() => handleRetryFailedFile(record.key)}
+                            >
+                              <Button
+                                type="link"
+                                size="small"
+                                icon={
+                                  retryingFailedFileKey === record.key ? (
+                                    <LoadingOutlined />
+                                  ) : (
+                                    <ReloadOutlined />
+                                  )
+                                }
+                                disabled={retryDisabled}
+                                style={{ padding: 0, height: "auto" }}
+                              >
+                                Retry transcription
+                              </Button>
+                            </Popconfirm>
                           </Space>
                         );
                       }

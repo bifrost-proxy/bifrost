@@ -130,6 +130,8 @@ class CoverageChangedTests(unittest.TestCase):
                 "cargo",
                 "llvm-cov",
                 "--no-clean",
+                "--failure-mode",
+                "all",
                 "--package",
                 "alpha",
                 "--package",

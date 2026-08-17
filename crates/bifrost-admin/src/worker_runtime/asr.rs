@@ -25,6 +25,8 @@ struct RunDirectoryTaskRequest {
     task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recording_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    file_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,6 +46,7 @@ pub(crate) fn is_asr_worker_process() -> bool {
 pub(crate) async fn run_directory_task(
     task_id: &str,
     recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
 ) -> Result<RunDirectoryTaskResult, String> {
     let worker = ensure_worker().await?;
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -55,6 +58,7 @@ pub(crate) async fn run_directory_task(
             serde_json::to_value(RunDirectoryTaskRequest {
                 task_id: task_id.to_string(),
                 recording_date: recording_date.map(|date| date.format("%Y-%m-%d").to_string()),
+                file_keys,
             })
             .map_err(|error| format!("serialize ASR worker task request: {error}"))?,
             Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
@@ -229,16 +233,19 @@ async fn handle_worker_frame(
                                 .map_err(|error| format!("parse ASR recording date: {error}"))
                         })
                         .transpose()?;
-                    crate::handlers::asr_jobs::run_directory_task_in_worker(&request.task_id, date)
-                        .await
-                        .and_then(|result| {
-                            serde_json::to_value(RunDirectoryTaskResult {
-                                processed: result.processed,
-                                failed: result.failed,
-                                status: result.status,
-                            })
-                            .map_err(|error| format!("serialize ASR worker result: {error}"))
+                    crate::handlers::asr_jobs::run_directory_task_in_worker(
+                        &request.task_id,
+                        date,
+                        request.file_keys,
+                    )
+                    .await
+                    .map(|result| {
+                        serde_json::json!(RunDirectoryTaskResult {
+                            processed: result.processed,
+                            failed: result.failed,
+                            status: result.status,
                         })
+                    })
                 }
                 "asr.compress_source_audio" => {
                     let task_id = request
@@ -504,6 +511,9 @@ while IFS= read -r line; do
         *'"taskId":"invalid-result"'*)
           payload='{"unexpected":true}'
           ;;
+        *'"fileKeys":["selected-key"]'*)
+          payload='{"processed":3,"failed":0,"status":"completed"}'
+          ;;
         *)
           payload='{"processed":2,"failed":0,"status":"completed"}'
           ;;
@@ -533,6 +543,7 @@ done
         let completed = run_directory_task(
             "completed",
             Some(NaiveDate::from_ymd_opt(2026, 8, 17).unwrap()),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -545,11 +556,19 @@ done
             }
         );
 
-        let failed = run_directory_task("failed", None).await.unwrap();
+        let failed = run_directory_task("failed", None, Vec::new())
+            .await
+            .unwrap();
         assert_eq!(failed.status, "failed");
-        let paused = run_directory_task("paused", None).await.unwrap();
+        let selected = run_directory_task("selected", None, vec!["selected-key".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(selected.processed, 3);
+        let paused = run_directory_task("paused", None, Vec::new())
+            .await
+            .unwrap();
         assert_eq!(paused.status, "paused");
-        assert!(run_directory_task("invalid-result", None)
+        assert!(run_directory_task("invalid-result", None, Vec::new())
             .await
             .unwrap_err()
             .contains("parse ASR worker result"));

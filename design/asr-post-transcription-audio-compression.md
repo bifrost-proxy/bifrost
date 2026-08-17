@@ -66,6 +66,18 @@ Task summary 增加：
 内存仅保存活跃任务和取消请求；daemon 重启后，落盘的活跃状态读取为 `interrupted`，由用户显式
 重新启动恢复，避免后台意外占用资源。
 
+### 并发写与历史修复
+
+`files.json` 的跨进程锁只保证写入不会同时发生，不能阻止较早读取的快照稍后覆盖新字段。
+因此同一 source key、同一 `source_path` 的合并必须把 `source_compression` 视为单调字段：磁盘
+记录已有压缩元数据时，incoming 的 `None` 不得清空它，同时保留压缩后大小和原始录音时间。
+显式回滚会迁回 WAV key 并删除 FLAC key，不受该规则阻挡。
+
+兼容已受影响的历史任务时，可从已完成 `source_compression.json` 回填，但必须同时满足：结果为
+`compressed`、ledger 的 compressed path 与当前非符号链接 FLAC record 完全一致、实际文件大小匹配、原 WAV
+已经不存在。历史 ledger 没有 PCM hash 时记录为缺省；若出现 part/backup 需要恢复校验，则保守
+停止并保留备份。新一轮压缩覆盖 ledger 前必须先持久化已验证的回填结果。
+
 ## 单文件事务
 
 1. 重新检查 record 状态、产物、路径边界、符号链接和扩展名。
@@ -96,6 +108,18 @@ Task summary 增加：
 同一时间全局只运行一个压缩 job，降低磁盘争用。普通 run、bulk retry、external import、
 cleanup originals 与 compression 双向互斥。
 
+失败文件的整文件转录重试与 failed-chunk retry 是不同操作：
+
+- `POST /api/asr/tasks/{id}/files/{file_key}/retry`：只重置并运行一个 `failed` 文件。
+- `POST /api/asr/tasks/{id}/retry-failed-files`：批量重置当前 `failed` 且源文件仍存在的记录，返回
+  `queued/skipped`。
+
+整文件重试会清理旧错误、输出引用、chunk/progress/timing 和 duplicate alias，但保留 source
+identity、压缩元数据与 memory hints。runner/worker 始终携带精确 file key 集合，后续追加文件扫描
+也不能扩大范围；显式用户重试允许重新尝试 unchanged deterministic MOSS failure。任务暂停、普通
+run、压缩、外部导入或 failed-chunk retry 活跃时拒绝启动；这些 lifecycle guard 在同一把锁内做
+双向检查，避免检查后启动前的竞态窗口。
+
 ## UI
 
 任务 Overview 沿用 Ant Design `Descriptions`、`Alert`、`Progress` 和紧凑 toolbar：
@@ -120,6 +144,8 @@ cleanup originals 与 compression 双向互斥。
 - file store key 迁移、duplicate 引用、compression summary。
 - external import 原 WAV 命中压缩后的完成记录，不重复导入。
 - 中断 artifact 恢复和辅助索引同步。
+- stale file-store 快照不能清除压缩元数据；匹配 ledger 可回填，路径/大小/原 WAV 不匹配时拒绝。
+- 整文件 reset 字段边界、精确 file-key discovery 和 worker IPC `fileKeys` roundtrip。
 
 ### E2E
 

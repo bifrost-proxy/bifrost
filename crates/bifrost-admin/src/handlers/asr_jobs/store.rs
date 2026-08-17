@@ -347,7 +347,7 @@ fn finish_run_progress(
 
 fn load_file_store(task_id: &str) -> FileStore {
     let path = file_store_path(task_id);
-    match std::fs::read_to_string(&path) {
+    let mut store = match std::fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str::<FileStore>(&content) {
             Ok(store) if store.version == TASK_STORE_VERSION => store,
             Ok(store) => {
@@ -376,7 +376,9 @@ fn load_file_store(task_id: &str) -> FileStore {
             version: TASK_STORE_VERSION,
             files: BTreeMap::new(),
         },
-    }
+    };
+    repair_legacy_source_compression_records(task_id, &mut store);
+    store
 }
 
 fn save_file_store(task_id: &str, store: &FileStore) -> Result<(), String> {
@@ -413,7 +415,20 @@ fn save_file_store_with_removals(
         merged.files.remove(key);
     }
     for (key, record) in store.files.iter() {
-        merged.files.insert(key.clone(), record.clone());
+        let mut record = record.clone();
+        if let Some(current) = merged.files.get(key) {
+            if current.source_path == record.source_path
+                && current.source_compression.is_some()
+                && record.source_compression.is_none()
+            {
+                record.source_compression = current.source_compression.clone();
+                record.source_size = current.source_size;
+                record.source_modified_ms = current.source_modified_ms;
+                record.source_created_at_ms = current.source_created_at_ms;
+                record.source_created_at_source = current.source_created_at_source.clone();
+            }
+        }
+        merged.files.insert(key.clone(), record);
     }
     normalize_completed_processing_records(task_id, &mut merged);
     atomic_json_write(&path, &merged)

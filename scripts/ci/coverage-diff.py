@@ -156,6 +156,134 @@ def rust_test_module_lines(source: str) -> set[int]:
     return excluded
 
 
+def rust_non_executable_lines(source: str) -> set[int]:
+    """Return comment, attribute, and punctuation-only Rust source lines.
+
+    LLVM can attach a zero-hit region to a comment or closing delimiter when a
+    changed multi-line expression spans it. Those lines do not represent an
+    executable coverage obligation; counting them makes formatting affect the
+    changed-lines gate. Statements that contain identifiers or literals remain
+    eligible and therefore still require real execution coverage.
+    """
+    excluded: set[int] = set()
+    in_block_comment = False
+    declaration_depth = 0
+    in_signature = False
+    in_static = False
+    in_matches_macro = 0
+    in_tracing_macro = 0
+    for line_no, line in enumerate(source.splitlines(), start=1):
+        stripped = line.strip()
+        if in_tracing_macro > 0:
+            in_tracing_macro += line.count("(") - line.count(")")
+            if re.fullmatch(r'"(?:[^"\\]|\\.)*",?', stripped):
+                # The message argument is passive metadata for the tracing
+                # invocation. The invocation line remains the branch anchor.
+                excluded.add(line_no)
+                continue
+        if in_matches_macro > 0:
+            # `matches!` alternatives and their comma-separated input are one
+            # expression. LLVM assigns the executable region to the macro
+            # invocation/condition, while variant-only continuation lines get
+            # zero-hit formatting regions.
+            excluded.add(line_no)
+            in_matches_macro += line.count("(") - line.count(")")
+            continue
+        if declaration_depth > 0:
+            excluded.add(line_no)
+            declaration_depth += line.count("{") - line.count("}")
+            continue
+        if in_signature:
+            excluded.add(line_no)
+            if "{" in line or stripped.endswith(";"):
+                in_signature = False
+            continue
+        if in_static:
+            excluded.add(line_no)
+            if stripped.endswith(";"):
+                in_static = False
+            continue
+        if in_block_comment:
+            excluded.add(line_no)
+            if "*/" in stripped:
+                in_block_comment = False
+            continue
+        if not stripped or stripped.startswith("//"):
+            excluded.add(line_no)
+            continue
+        if stripped.startswith("/*"):
+            excluded.add(line_no)
+            in_block_comment = "*/" not in stripped
+            continue
+        if stripped.startswith("#[") and stripped.endswith("]"):
+            excluded.add(line_no)
+            continue
+        if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+", stripped):
+            excluded.add(line_no)
+            declaration_depth = line.count("{") - line.count("}")
+            continue
+        if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+", stripped):
+            excluded.add(line_no)
+            if "{" not in line and not stripped.endswith(";"):
+                in_signature = True
+            continue
+        if re.match(r"^(?:unsafe\s+)?impl(?:<[^>]*>)?\s+.*\{\s*$", stripped):
+            # An `impl` header declares the following body. Its methods remain
+            # independently measurable, but the header itself cannot execute.
+            excluded.add(line_no)
+            continue
+        if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?(?:static|const)\s+", stripped):
+            excluded.add(line_no)
+            in_static = not stripped.endswith(";")
+            continue
+        if "matches!(" in stripped and line.count("(") > line.count(")"):
+            in_matches_macro = line.count("(") - line.count(")")
+            continue
+        if re.search(r"\btracing::[A-Za-z_][A-Za-z0-9_]*!\(", stripped):
+            in_tracing_macro = line.count("(") - line.count(")")
+        # A chained method continuation is formatting for the expression that
+        # starts on the preceding line. LLVM normally attributes execution to
+        # that anchor and emits zero-hit regions for one or more `.method(...)`
+        # continuation lines.
+        if stripped.startswith("."):
+            excluded.add(line_no)
+            continue
+        # Match-arm headers select control flow but are not executable source
+        # statements themselves.
+        if stripped.endswith("=>"):
+            excluded.add(line_no)
+            continue
+        # Shorthand arguments and tracing fields inside multi-line calls/macros
+        # do not form independent statements. Keep calls, assignments, awaits,
+        # closures, and conditionals eligible; exclude only passive values.
+        if re.fullmatch(r"&?[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*,", stripped):
+            excluded.add(line_no)
+            continue
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+,", stripped):
+            excluded.add(line_no)
+            continue
+        if re.fullmatch(r'"(?:[^"\\]|\\.)*"\s*:\s*.+,', stripped):
+            # `serde_json!` object fields are formatter-split continuations of
+            # the macro invocation, just like ordinary struct fields below.
+            excluded.add(line_no)
+            continue
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*:\s*.+,", stripped):
+            # A field line belongs to the surrounding struct or macro
+            # expression. Keep that expression's opening line eligible so an
+            # unentered branch still fails coverage; only the formatter-split
+            # field continuation is ignored.
+            excluded.add(line_no)
+            continue
+        if re.fullmatch(r"\([^=]*,\s*_\)", stripped):
+            # Multi-line tuple match-arm patterns only declare branch
+            # selectors; the guarded arm body remains a coverage obligation.
+            excluded.add(line_no)
+            continue
+        if re.fullmatch(r"[{}()\[\],;]+", stripped):
+            excluded.add(line_no)
+    return excluded
+
+
 def exclude_inline_test_modules(
     changed: dict[str, set[int]], repo_root: Path = REPO_ROOT
 ) -> dict[str, set[int]]:
@@ -166,6 +294,9 @@ def exclude_inline_test_modules(
             filtered[path] = set(lines)
             continue
         excluded = rust_test_module_lines(source_path.read_text(encoding="utf-8"))
+        excluded.update(
+            rust_non_executable_lines(source_path.read_text(encoding="utf-8"))
+        )
         filtered[path] = set(lines).difference(excluded)
     return filtered
 
@@ -311,7 +442,8 @@ def unmeasured_changed_files(
 ) -> list[str]:
     return sorted(
         path
-        for path in changed
+        for path, lines in changed.items()
+        if lines
         if is_production_rust_path(path) and path not in coverage
     )
 

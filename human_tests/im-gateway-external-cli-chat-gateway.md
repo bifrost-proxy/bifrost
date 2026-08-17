@@ -1630,7 +1630,35 @@
 5. Traex 收到合法 `/fast off` 或非法参数 `/fast invalid` 后都优先明确回复“当前 Runner 不支持 `/fast` 命令”，且 Traex Runner 不执行。
 6. 合法和非法 `/fast` 在群聊与忙碌链路均作为系统命令分类，不进入普通 prompt 或 live guide。
 
+### TC-IEC-71: 隔离 worker Stop、Queue 与替代 ownership
+
+前置条件：
+
+1. 当前源码已构建为 `target/debug/bifrost`。
+2. 测试只使用临时数据目录、动态端口和 mock Codex/Traex/Claude Code，不停止、重启或替换用户当前 Bifrost Service。
+
+操作步骤：
+
+1. 执行真实隔离 worker 链路：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_worker_stop.sh
+   ```
+2. 检查 mock 协议日志、Chat Gateway run result、IM queue 后续 turn 与同 session 替代运行顺序。
+3. 在无 session key 的直接 API run 仍活跃时停止临时 Service，确认 shutdown 先完成协议级中断，再退出父进程。
+4. 确认脚本退出后临时 Service、mock 进程和临时数据目录均已清理。
+
+预期结果：
+
+1. Codex 与 Traex app-server 收到 `turn/interrupt`；Claude Code stream-json 收到 `control_request` 的 `interrupt`，而不是只终止本地 worker。
+2. Stop 返回原始 run id 和非空 artifacts，最终状态为 `stopped`，不生成 `stopped-*` synthetic run。
+3. Guide channel 饱和不阻塞优先 Stop；当前 turn 停止后，主 Service 的 FIFO queue 保留并且排队消息只执行一次。
+4. 同 session 的直接替代运行先中断旧 worker，再启动新 worker；旧 worker cleanup 不能删除新 owner。
+5. Service shutdown 也覆盖无 session 的 worker，全局 worker 注册表不会遗漏直接 API run；测试输出 `[external-runner-worker-stop] PASS`，且不影响用户现有 Service。
+
 ## 最近执行记录
+
+- 2026-08-17：PASS — 新增并立即执行 TC-IEC-71。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_worker_stop.sh` 最终输出 `[external-runner-worker-stop] PASS`；隔离临时 Service 与 mock Codex/Traex/Claude Code 验证协议级 interrupt、真实 run id/artifacts 保留、Guide 饱和下优先 Stop、停止当前 turn 后 FIFO queue 只执行一次，以及同 session 替代 worker 的先停后启顺序。Review 扩展的无 session 直接 API run 首次复测暴露 daemon shutdown 先取消 Admin/IM 分支、worker EOF 又缺少 run-id fallback，导致只产生 synthetic stopped result；修复为父 future drop 关闭 stdin、worker 以本地 active run 写 marker 并原生 interrupt 后，完整脚本复跑通过。脚本完成临时 Service、mock 进程与数据目录清理，未停止或重启用户现有 Service。
 
 - 2026-08-14：PASS — 更新 TC-IEC-69 后立即执行真实隔离链路。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_prompt_passthrough.sh` 输出 `[im-prompt-passthrough] PASS`；临时 Bifrost、mock Feishu Provider 与捕获 stdin 的 mock Runner 验证 4 个 turn：空配置 P2P、带四层 Instructions 的 P2P 首条/后续、新群聊首条。四条 prompt 均只含一个可信动态外发上下文，精确绑定 `provider=prompt-e2e`、`app_id=cli_prompt_e2e` 和各自 chat ID，列全 Feishu content capabilities、CLI 内容/目的地形式、canonical send 命令及 help/capabilities 诊断流程；群消息既保留精确 routing block，也保留既有群名/群 ID/@发送者上下文增强。focused Rust 回归 `agent_outbound_context` 4/4、`compose_message_instructions` 3/3、`build_prompt_does_not_inject_legacy_bifrost_tool_context` 1/1 全部通过，临时服务与数据目录已清理。
 - 2026-08-09：PASS — 在最终收紧“完整数据只供实时 UI、外部执行器历史不保存 content/参数/结果/增量/计划”后，立即重新执行 TC-IEC-43/44/46/48：`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 输出 `[im-gateway-external-runner-image-input] PASS`。真实临时服务完成普通图片两轮、Traex-compatible、image-only runner-call 和纯文件 IM inbound；完整 prompt 仅进入 runner stdin，`prompt.md` 为计数摘要，`runtime_snapshot.json` 不含参数值，normalized events/result 仅含工具标识与状态，session 不含 assistant delta/plan/工具参数/工具结果，脚本已清理隔离数据与进程。
