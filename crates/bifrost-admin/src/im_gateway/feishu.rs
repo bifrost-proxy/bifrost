@@ -22,6 +22,9 @@ use crate::im_gateway::types::{
     SendOptions, SendResult, UploadedImage,
 };
 
+#[path = "feishu_card_action.rs"]
+pub(crate) mod card_action;
+
 mod message_read;
 pub use message_read::FeishuFetchedMessage;
 
@@ -2345,7 +2348,7 @@ async fn run_connection_loop(
                                         let success = if let Some(ref payload) = frame.payload {
                                             match std::str::from_utf8(payload) {
                                                 Ok(text) => {
-                                                    handle_ws_message(text, &config.id, sink);
+                                                    card_action::handle_ws_message(text, &config.id, sink);
                                                     true
                                                 }
                                                 Err(e) => {
@@ -2409,39 +2412,6 @@ async fn run_connection_loop(
                     }
                 }
             }
-        }
-    }
-}
-
-/// Handle a text message from the Feishu WebSocket.
-fn handle_ws_message(text: &str, provider_id: &str, sink: &EventSink) {
-    let parsed: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(provider_id = provider_id, error = %e, "failed to parse feishu ws message");
-            return;
-        }
-    };
-
-    // Check if this is a heartbeat/pong from Feishu's protocol layer
-    if let Some(msg_type) = parsed.get("type").and_then(|v| v.as_str()) {
-        if msg_type == "pong" || msg_type == "heartbeat" {
-            debug!(
-                provider_id = provider_id,
-                "received feishu protocol heartbeat"
-            );
-            return;
-        }
-    }
-
-    // Normalize and dispatch event
-    if let Some(event) = normalize_feishu_event(&parsed, provider_id) {
-        if let Err(e) = sink.send(event) {
-            error!(
-                provider_id = provider_id,
-                error = %e,
-                "failed to send event to sink, receiver may be dropped"
-            );
         }
     }
 }

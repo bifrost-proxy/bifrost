@@ -2974,6 +2974,14 @@ pub fn format_external_cli_effort_catalog_for_model(
     lines.join("\n")
 }
 
+pub(crate) fn external_cli_effort_options_for_model(
+    adapter: &str,
+    effective_model: Option<&str>,
+    models: &[ExternalCliModelInfo],
+) -> Vec<ExternalCliReasoningLevelInfo> {
+    external_cli_effort_levels_for_model(adapter, effective_model, models).0
+}
+
 pub fn validate_external_cli_effort_selection(
     adapter: &str,
     requested_effort: &str,

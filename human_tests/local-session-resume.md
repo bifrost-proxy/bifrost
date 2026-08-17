@@ -4,7 +4,8 @@
 
 验证 Agent Chat 与 IM external runner 的统一 `/resume` 指令：按当前 Runner 列出最近
 20 个本地 session（`id / title / datetime`），使用 `/resume <id>` 选择后，下一条普通
-消息通过 provider 原生 resume 参数继续本地会话。
+消息通过 provider 原生 resume 参数继续本地会话；同时验证飞书中的 `/resume`、
+`/model`、`/effort` 返回 Card 2.0 下拉选择卡，用户选中后直接执行选择，不需要复制粘贴参数。
 
 ## 前置条件
 
@@ -93,28 +94,122 @@
 - `cmp` 退出码为 0，证明扫描未改写 provider session 文件。
 - 输出和断言不打印 session 正文。
 
-### TC-LSR-04：Web Agent Chat Slash 菜单
+### TC-LSR-04：IM External Runner 帮助文案
 
 操作步骤：
 
 1. 执行：
 
    ```bash
-   pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts \
-     -g "shows model slash commands for Claude Code runner" --reporter=line
+   cargo test -p bifrost-admin \
+     im_help_for_external_cli_runner_only_lists_supported_commands \
+     --lib -- --nocapture
    ```
 
-2. 观察 slash 面板断言。
+2. 观察帮助文案断言。
 
 预期结果：
 
-- Claude Code Runner 下输入 `/` 时出现 `/resume`。
-- 说明文字包含“列出最近 20 个本地会话”。
-- 原有 `/models` 与 `/model` 仍存在。
+- Traex External Runner 帮助中出现 `/model`、`/resume` 和 `/effort`。
+- `/resume` 说明包含“查看最近 20 个本地会话（含新建会话）”和“选择一个会话在下一条消息恢复”。
+- 旧的帮助行 `/models` 与 `/efforts` 不再出现；带参数文本命令兼容由 TC-LSR-07 覆盖。
+
+### TC-LSR-05：飞书三类 Slash 选择卡片与单聊点击闭环
+
+操作步骤：
+
+1. 执行：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_feishu_slash_choice_cards.sh
+   ```
+
+2. 检查脚本退出码、最终输出和隔离服务断言。
+
+预期结果：
+
+- 脚本输出 `[feishu-slash-choice] PASS`，退出码为 0。
+- 飞书单聊发送无参数 `/resume`、`/model`、`/effort` 后分别产生 Card 2.0 卡片，卡片正文
+  只含一个 `select_static` 下拉，不再平铺按钮。
+- `/resume` 卡片摘要明确提示“从下方下拉列表选择”，并包含“🆕 新建会话”入口，不再要求
+  复制 `/resume <id>`。
+- 下拉每个 option 的 `value` 是可反序列化的绑定 JSON 字符串；`/model`、`/effort` 下拉
+  均含“恢复 Runner 默认值”对应的 `clear` option。
+- 从下拉选择三个候选项后，当前单聊 session 分别写入完整本地 session id、`gpt-unit`
+  model override 和 `high` reasoning effort override。
+- 选择 `/model clear`、`/effort clear` option 后两个 override 被清除。
+
+### TC-LSR-06：飞书群聊绑定与越权回调安全回归
+
+操作步骤：
+
+1. 执行：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_feishu_slash_choice_cards.sh
+   ```
+
+2. 检查群聊 session 与拒绝回调断言。
+
+预期结果：
+
+- 群聊 `/model` 下拉 option 的绑定 `value` 含 `chatType=group` 和原群 `chatId`。
+- 群聊选择 `/model gpt-unit` option 后只更新
+  `im:<provider-id>:group:<chat-id>` 对应 session，不串到单聊 session。
+- 其他用户、其他 chat、过期 callback 和伪造 `/stop now` 命令均返回 HTTP 400。
+- 所有被拒绝的 callback 都不修改单聊或群聊 session 状态。
+
+### TC-LSR-07：带参数文本命令兼容与测试环境隔离
+
+操作步骤：
+
+1. 执行：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_feishu_slash_choice_cards.sh
+   ```
+
+2. 检查最后的文本命令恢复状态、启动参数和清理结果。
+
+预期结果：
+
+- 卡片 clear 后继续发送文本 `/model gpt-unit` 和 `/effort high`，原文本命令链路仍能
+  恢复两个 override。
+- 飞书发送 `/models`、`/efforts` 仍返回原文本目录内容，不生成 `select_static` 下拉。
+- 测试只启动一个当前构建的 Bifrost，使用动态端口、临时 `BIFROST_DATA_DIR`、
+  `--no-system-proxy`、托盘禁用、Sync 登录弹窗禁用和 system proxy lifecycle helper
+  禁用护栏。
+- 飞书发送走显式 dry-run 文件，不外呼正式飞书 API，不修改正式 9900 服务。
+- 退出后脚本只按本次记录的 PID 清理服务并删除临时目录。
+
+### TC-LSR-08：飞书 `/resume` 下拉「新建会话」清空 thread 回归
+
+操作步骤：
+
+1. 执行：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_feishu_slash_choice_cards.sh
+   ```
+
+2. 关注脚本中先选择本地 session 再选择「🆕 新建会话」的状态变化。
+
+预期结果：
+
+- `/resume` 下拉首个 option 固定为 `/resume new`（“🆕 新建会话”）。
+- 先选择本地 session option 后单聊 session 写入 `externalThreadId`；随后选择
+  「🆕 新建会话」option 后该字段被移除（`__ABSENT__`），下一条普通消息将开全新会话。
+- 越权点击（他人 / 错误 chat / 过期 / `/stop now`）在下拉回调路径下同样返回 HTTP 400。
 
 ## 清理步骤
 
 - E2E trap 自动停止隔离 Bifrost 进程并删除 `.bifrost-e2e-local-resume.*`。
+- 飞书选择卡片 E2E trap 自动停止隔离 Bifrost 进程并删除
+  `.bifrost-e2e-feishu-choice.*`。
 - 删除 TC-LSR-03 的临时 snapshot 目录。
 - 确认没有测试端口监听和 mock runner 残留。
 
@@ -130,3 +225,18 @@
 - 2026-08-07，TC-LSR-04：PASS。第一次执行暴露测试 fixture 同时配置 Codex 时产品默认
   选择 Codex、且 `/model` substring locator 同时匹配 `/models` 的测试缺陷；修正 fixture 为
   仅 Claude Code、locator 取精确目标后复跑，结果 1 passed（7.6s）。
+- 2026-08-17，TC-LSR-05：PASS。下拉改造后复跑，隔离 Bifrost 依次生成 `/resume`、
+  `/model`、`/effort` Card 2.0，正文均为单个 `select_static` 下拉；从下拉选择三个
+  候选 option 后状态正确，`/model clear`、`/effort clear` option 实选后对应 override 被移除。
+- 2026-08-17，TC-LSR-06：PASS。群聊 `/model gpt-unit` 下拉 option 实选只更新群级
+  session；其他用户、错误 chat、过期 callback 和伪造 `/stop now` 均返回 HTTP 400，
+  未篡改单聊或群聊状态。
+- 2026-08-17，TC-LSR-07：PASS。clear 后发送带参数文本 `/model gpt-unit` 与
+  `/effort high` 能恢复 override；`/models`、`/efforts` 仍返回不含 `select_static`
+  下拉的文本目录；测试使用动态端口、临时数据目录、双启动护栏和 `--no-system-proxy`。
+- 2026-08-17，TC-LSR-08：PASS。`/resume` 下拉首项为 `/resume new`；先选本地 session
+  写入 `externalThreadId`，再选「🆕 新建会话」后该字段变为缺失；下拉回调路径下越权
+  点击仍返回 HTTP 400。脚本输出 `[feishu-slash-choice] PASS`。
+- 2026-08-17，TC-LSR-04：PASS。将失效的 Web Playwright 路径替换为实际存在的 IM
+  External Runner 帮助回归；`im_help_for_external_cli_runner_only_lists_supported_commands`
+  断言 `/model`、`/resume`、`/effort` 与旧复数帮助行的边界。

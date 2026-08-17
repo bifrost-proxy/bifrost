@@ -904,10 +904,14 @@ pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
     assert!(help.contains("/rq <序号>"));
     assert!(help.contains("/stop"));
     assert!(help.contains("Traex Runner 命令:"));
-    assert!(help.contains("/models"));
+    assert!(help.contains("/model         查看当前"));
     assert!(help.contains("/model [模型]"));
-    assert!(help.contains("/efforts"));
+    assert!(help.contains("/resume        查看最近 20 个本地会话（含新建会话）"));
+    assert!(help.contains("/resume [session-id]"));
+    assert!(help.contains("/effort        查看当前"));
     assert!(help.contains("/effort [级别]"));
+    assert!(!help.contains("/models"));
+    assert!(!help.contains("/efforts"));
     assert!(!help.contains("/g <引导内容>"));
     assert!(help.contains("普通后续消息默认按引导处理，使用 /q 才排队"));
     assert!(!help.contains("/remember"));
