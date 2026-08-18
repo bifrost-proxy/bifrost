@@ -1433,7 +1433,9 @@ time.sleep(30)
 "#,
         );
         let stdin_closed = temp_dir.path().join("stdin-closed");
-        let mut spec = mock_spec(&executable, Some(1));
+        // Leave enough time for the helper process to be scheduled under the
+        // fully instrumented test suite before exercising its timeout path.
+        let mut spec = mock_spec(&executable, Some(5));
         spec.env.insert(
             "STDIN_CLOSED".to_string(),
             stdin_closed.display().to_string(),
@@ -1446,14 +1448,14 @@ time.sleep(30)
             temp_dir.path().join("stop"),
             None,
         ));
-        timeout(Duration::from_secs(5), async {
+        timeout(Duration::from_secs(15), async {
             while !stdin_closed.is_file() {
                 sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("Claude timeout stdin closed");
-        let output = timeout(Duration::from_secs(8), run)
+        let output = timeout(Duration::from_secs(12), run)
             .await
             .expect("closed stdin timeout should terminate")
             .unwrap()
@@ -1461,7 +1463,7 @@ time.sleep(30)
 
         assert_eq!(output.status, ExternalCliRunStatus::TimedOut);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("stream-json runner timed out after 1 seconds"));
+        assert!(stderr.contains("stream-json runner timed out after 5 seconds"));
         assert!(stderr.contains("failed to interrupt timed-out Claude Code run"));
     }
 

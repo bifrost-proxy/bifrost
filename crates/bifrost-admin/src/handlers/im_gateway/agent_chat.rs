@@ -294,17 +294,16 @@ pub(super) async fn handle_im_new_group_command(
     }
 
     if trimmed == "/stop" {
-        let stopped = request_agent_stop(ctx.agent_session_manager, session_key).await;
-        let reply = if stopped {
-            "已请求停止当前 Agent loop。"
-        } else {
-            "当前没有正在执行的 Agent loop。"
+        let reply = match request_agent_stop(ctx.agent_session_manager, session_key).await {
+            Ok(true) => "已请求停止当前 Agent loop。".to_string(),
+            Ok(false) => "当前没有正在执行的 Agent loop。".to_string(),
+            Err(error) => format!("❌ 停止当前 Agent loop 失败：{error}"),
         };
         send_agent_reply(
             ctx.client,
             ctx.provider,
             ctx.event,
-            reply,
+            &reply,
             ctx.message_log_store,
         )
         .await;
@@ -1118,13 +1117,12 @@ pub(super) fn inbound_message_preview(
 
     // /stop — cooperative cancellation of the active turn loop
     if trimmed == "/stop" {
-        let stopped = request_agent_stop(agent_session_manager, session_key).await;
-        let reply = if stopped {
-            "🛑 已请求停止当前 Agent loop。"
-        } else {
-            "当前没有正在执行的 Agent loop。"
+        let reply = match request_agent_stop(agent_session_manager, session_key).await {
+            Ok(true) => "🛑 已请求停止当前 Agent loop。".to_string(),
+            Ok(false) => "当前没有正在执行的 Agent loop。".to_string(),
+            Err(error) => format!("❌ 停止当前 Agent loop 失败：{error}"),
         };
-        send_agent_reply(client, provider, event, reply, message_log_store).await;
+        send_agent_reply(client, provider, event, &reply, message_log_store).await;
         return;
     }
 

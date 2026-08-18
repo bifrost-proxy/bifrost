@@ -37,6 +37,14 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
+    fn set_str(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
     fn set(key: &'static str, value: &std::path::Path) -> Self {
         let previous = std::env::var(key).ok();
         unsafe {
@@ -52,6 +60,155 @@ impl EnvGuard {
         }
         Self { key, previous }
     }
+}
+
+#[tokio::test]
+async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let _worker = EnvGuard::set_str("BIFROST_IM_GATEWAY_WORKER", "1");
+    let endpoint = crate::worker_runtime::im_broker::ensure_main_broker()
+        .await
+        .expect("start main broker");
+    let _addr = EnvGuard::set_str(
+        crate::worker_runtime::im_broker::BROKER_ADDR_ENV,
+        &endpoint.addr,
+    );
+    let _token = EnvGuard::set_str(
+        crate::worker_runtime::im_broker::BROKER_TOKEN_ENV,
+        &endpoint.token,
+    );
+    let session_key = format!("broker-control-{}", uuid::Uuid::new_v4());
+    let (guide_tx, mut guide_rx) = tokio::sync::mpsc::channel(1);
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    ACTIVE_WORKER_SESSIONS.insert(
+        session_key.clone(),
+        ExternalCliWorkerControlHandle {
+            pid: 1,
+            stop_tx,
+            guide_tx,
+        },
+    );
+    let control = tokio::spawn(async move {
+        let guide = guide_rx.recv().await.expect("brokered guide request");
+        assert_eq!(guide.guide_id, "broker-guide");
+        assert_eq!(guide.message, "steer the active turn");
+        guide
+            .ack_tx
+            .send(ExternalCliGuideResult {
+                guide_id: guide.guide_id,
+                accepted: true,
+                thread_id: Some("thread-from-main".to_string()),
+                turn_id: Some("turn-from-main".to_string()),
+                reason: None,
+            })
+            .expect("ack brokered guide");
+        let stop = stop_rx.recv().await.expect("brokered stop request");
+        stop.send(()).expect("ack brokered stop");
+    });
+
+    let result = request_managed_session_guide(
+        &session_key,
+        "broker-guide".to_string(),
+        "steer the active turn".to_string(),
+    )
+    .await
+    .expect("guide through broker");
+    assert!(result.accepted);
+    assert_eq!(result.thread_id.as_deref(), Some("thread-from-main"));
+    assert!(
+        request_managed_session_stop(&default_runs_root(), &session_key,)
+            .await
+            .expect("stop through broker")
+    );
+    control.await.expect("join broker control receiver");
+
+    let missing = format!("missing-broker-control-{}", uuid::Uuid::new_v4());
+    let rejected = request_managed_session_guide(
+        &missing,
+        "missing-guide".to_string(),
+        "cannot be delivered".to_string(),
+    )
+    .await
+    .expect("missing main-process session is a runner rejection, not a broker failure");
+    assert!(!rejected.accepted);
+    assert!(
+        rejected
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no active external runner")),
+        "{rejected:?}"
+    );
+    assert!(
+        !request_managed_session_stop(&default_runs_root(), &missing,)
+            .await
+            .expect("missing stop should be a clean negative result")
+    );
+
+    drop(_addr);
+    drop(_token);
+    let _addr = EnvGuard::unset(crate::worker_runtime::im_broker::BROKER_ADDR_ENV);
+    let _token = EnvGuard::unset(crate::worker_runtime::im_broker::BROKER_TOKEN_ENV);
+    assert!(request_managed_session_guide(
+        &missing,
+        "unconfigured-guide".to_string(),
+        "cannot be delivered".to_string(),
+    )
+    .await
+    .unwrap_err()
+    .contains("broker is not configured"));
+    assert!(request_managed_session_stop(&default_runs_root(), &missing)
+        .await
+        .unwrap_err()
+        .contains("broker is not configured"));
+    assert_eq!(
+        request_managed_session_stop(&default_runs_root(), "")
+            .await
+            .unwrap_err(),
+        "session_key cannot be empty"
+    );
+}
+
+#[tokio::test]
+async fn managed_guide_uses_the_local_registry_in_the_main_process() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let _worker = EnvGuard::unset("BIFROST_IM_GATEWAY_WORKER");
+    let session_key = format!("local-managed-guide-{}", uuid::Uuid::new_v4());
+    let (guide_tx, mut guide_rx) = tokio::sync::mpsc::channel(1);
+    let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    ACTIVE_WORKER_SESSIONS.insert(
+        session_key.clone(),
+        ExternalCliWorkerControlHandle {
+            pid: 1,
+            stop_tx,
+            guide_tx,
+        },
+    );
+    let ack = tokio::spawn(async move {
+        let guide = guide_rx.recv().await.expect("local guide request");
+        guide
+            .ack_tx
+            .send(ExternalCliGuideResult {
+                guide_id: guide.guide_id,
+                accepted: true,
+                thread_id: Some("local-thread".to_string()),
+                turn_id: Some("local-turn".to_string()),
+                reason: None,
+            })
+            .expect("ack local guide");
+    });
+
+    let result = request_managed_session_guide(
+        &session_key,
+        "local-guide".to_string(),
+        "guide locally".to_string(),
+    )
+    .await
+    .expect("managed local guide");
+
+    assert!(result.accepted);
+    assert_eq!(result.thread_id.as_deref(), Some("local-thread"));
+    ack.await.expect("join local guide acknowledgement");
+    ACTIVE_WORKER_SESSIONS.remove(&session_key);
 }
 
 impl Drop for EnvGuard {

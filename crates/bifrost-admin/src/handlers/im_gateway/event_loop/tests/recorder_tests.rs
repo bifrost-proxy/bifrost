@@ -1295,6 +1295,9 @@ async fn external_runner_small_branches_keep_safe_defaults() {
 
     let other_session = group_test_event("provider", "stop", "/stop", false, 3);
     maybe_stop_external_cli_for_event(&other_session, "unrelated").await;
+
+    let matching_session = session_key_for_event(&other_session);
+    maybe_stop_external_cli_for_event(&other_session, &matching_session).await;
 }
 
 #[test]

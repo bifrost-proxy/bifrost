@@ -894,6 +894,7 @@ pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
     assert!(help.contains("IM 通道命令（所有 Runner）:"));
     assert!(help.contains("/help"));
     assert!(help.contains("/status"));
+    assert!(help.contains("/pwd"));
     assert!(help.contains("/cwd <绝对路径>"));
     assert!(help.contains("/runner [Runner]"));
     assert!(help.contains("/new <群名>"));
@@ -1126,7 +1127,10 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
     let handle = tokio::spawn(async move { runtime.run(request).await.unwrap() });
     let mut stop_requested = false;
     for _ in 0..250 {
-        if request_agent_stop_with_runs_root(&manager, session_key, &runs_root).await {
+        if request_agent_stop_with_runs_root(&manager, session_key, &runs_root)
+            .await
+            .expect("stop request")
+        {
             stop_requested = true;
             break;
         }
@@ -1139,6 +1143,27 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
     assert_eq!(
         result.status,
         crate::im_gateway::external_cli::ExternalCliRunStatus::Stopped
+    );
+}
+
+#[tokio::test]
+async fn request_agent_stop_propagates_control_plane_errors() {
+    let manager = bifrost_agent::AgentSessionManager::new(3600);
+    let runs_root = tempfile::tempdir().expect("temp runs root");
+
+    let error = request_agent_stop_with_runs_root(&manager, "", runs_root.path())
+        .await
+        .expect_err("invalid session key must not look like an inactive runner");
+
+    assert_eq!(error, "session_key cannot be empty");
+
+    let response = agent_stop_error_response("delete", &error);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"],
+        "failed to stop active session before delete: session_key cannot be empty"
     );
 }
 

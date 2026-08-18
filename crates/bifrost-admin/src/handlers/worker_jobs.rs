@@ -165,19 +165,27 @@ async fn cancel_worker_job(job_id: &str) -> Response<BoxBody> {
     }
 
     if job.worker_kind == WorkerKind::ExternalCli {
-        let worker_stopped =
-            crate::im_gateway::external_cli::request_worker_session_stop(&logical_job_id).await;
-        let legacy_stopped = if worker_stopped {
-            true
-        } else {
-            crate::im_gateway::external_cli::request_session_stop(
-                crate::im_gateway::external_cli::default_runs_root(),
-                &logical_job_id,
-            )
-            .await
-            .is_ok()
+        let stopped = match crate::im_gateway::external_cli::request_managed_session_stop(
+            crate::im_gateway::external_cli::default_runs_root(),
+            &logical_job_id,
+        )
+        .await
+        {
+            Ok(stopped) => stopped,
+            Err(error) => {
+                worker_job_cancel_rejected(job_id, error.clone());
+                return json_response_with_status(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &serde_json::json!({
+                        "accepted": false,
+                        "jobId": job_id,
+                        "workerKey": worker_key,
+                        "error": error,
+                    }),
+                );
+            }
         };
-        if legacy_stopped {
+        if stopped {
             return json_response_with_status(
                 StatusCode::ACCEPTED,
                 &serde_json::json!({
@@ -453,6 +461,34 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let job = worker_job(&job_id).unwrap();
+        assert_eq!(job.status, WorkerJobStatus::Running);
+        assert_eq!(job.events.last().unwrap().event, "cancel_rejected");
+    }
+
+    #[tokio::test]
+    async fn invalid_external_cli_cancel_reports_broker_error_and_restores_status() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let job_id = format!("invalid-external-cli-{}", uuid::Uuid::new_v4());
+        crate::worker_runtime::begin_worker_job(
+            &format!("external_cli:{job_id}"),
+            WorkerKind::ExternalCli,
+            &job_id,
+            Some(""),
+            "external_cli.run",
+        );
+        crate::worker_runtime::mark_worker_job_running(&job_id);
+
+        let path = format!("/api/worker-jobs/{job_id}/cancel");
+        let response = request(Method::POST, &path, &path).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["accepted"], false);
+        assert_eq!(payload["jobId"], job_id);
+        assert_eq!(payload["error"], "session_key cannot be empty");
+
         let job = worker_job(&job_id).unwrap();
         assert_eq!(job.status, WorkerJobStatus::Running);
         assert_eq!(job.events.last().unwrap().event, "cancel_rejected");

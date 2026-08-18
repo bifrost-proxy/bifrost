@@ -163,7 +163,7 @@ pub(super) async fn handle_busy_guide_command(
 ) {
     if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
         let guide_id = format!("guide-{}", uuid::Uuid::new_v4());
-        match crate::im_gateway::external_cli::request_worker_session_guide(
+        match crate::im_gateway::external_cli::request_managed_session_guide(
             session_key,
             guide_id,
             guide_text.to_string(),
@@ -215,8 +215,18 @@ pub(super) async fn handle_busy_guide_command(
                 warn!(
                     session_key = %session_key,
                     error = %error,
-                    "active external runner guide request failed; falling back to queue"
+                    "active external runner guide request failed"
                 );
+                release_busy_group_turn(ctx, "external runner guide control failed");
+                send_agent_reply(
+                    ctx.client,
+                    ctx.provider,
+                    ctx.event,
+                    &format!("❌ 发送实时引导失败：{error}"),
+                    ctx.message_log_store,
+                )
+                .await;
+                return;
             }
         }
     }

@@ -177,6 +177,10 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"message-1","type":"agentMessage","text":f"GUIDED_{runner}"}}})
         send({"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":thread_id,"turnId":turn_id,"tokenUsage":{"last":{"inputTokens":11,"cachedInputTokens":2,"outputTokens":7,"reasoningOutputTokens":3,"totalTokens":18},"total":{"inputTokens":11,"cachedInputTokens":2,"outputTokens":7,"reasoningOutputTokens":3,"totalTokens":18},"modelContextWindow":1000}}})
         send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}})
+    elif method == "turn/interrupt":
+        record({"event":"turn_interrupted","runner":runner,"params":frame["params"]})
+        send({"jsonrpc":"2.0","id":request_id,"result":{}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"interrupted"}}})
 PY
 chmod +x "$TEST_DIR/mock-runner"
 
@@ -259,6 +263,7 @@ for runner_name, adapter, mode, transport in (
     ("codex-im-effort", "codex", "accept", "app_server"),
     ("traex-im-effort", "traex", "accept", "app_server"),
     ("codex-im-quote", "codex", "accept", "app_server"),
+    ("codex-im-stop", "codex", "accept", "app_server"),
     ("codex-reject", "codex", "reject", "app_server"),
     ("claude-reject", "claude_code", "reject", None),
     ("codex-exec", "codex", "accept", "exec"),
@@ -545,6 +550,12 @@ send_im_inbound "im-queue-provider" "im-queue-owner" "/q queue-explicit"
 send_im_inbound "im-queue-provider" "im-queue-owner" "/g release-queue"
 wait_for_mock_record 'queue-explicit'
 
+create_im_provider "im-stop-provider" "im-stop-owner" "codex-im-stop"
+send_im_inbound "im-stop-provider" "im-stop-owner" "wait for isolated IM stop"
+wait_for_mock_record '"event":"turn_ready","runner":"codex-im-stop"'
+send_im_inbound "im-stop-provider" "im-stop-owner" "/stop"
+wait_for_mock_record '"event":"turn_interrupted","runner":"codex-im-stop"'
+
 run_im_effort_case() {
   local adapter="$1"
   local runner="$adapter-im-effort"
@@ -664,6 +675,20 @@ assert "【引用消息（仅作为上下文）】" in quote_prompt, quote_promp
 assert "QUOTE_SOURCE_REQUEST https://example.com/quoted-article" in quote_prompt, quote_prompt
 assert "【当前消息】" in quote_prompt, quote_prompt
 assert "QUOTE_CURRENT_QUESTION 这条引用里的链接是什么？" in quote_prompt, quote_prompt
+
+stop_interrupts = [
+    record for record in records
+    if record.get("event") == "turn_interrupted"
+    and record.get("runner") == "codex-im-stop"
+]
+assert len(stop_interrupts) == 1, stop_interrupts
+assert stop_interrupts[0]["params"]["threadId"] == "thread-codex-im-stop", stop_interrupts
+assert stop_interrupts[0]["params"]["turnId"] == "turn-codex-im-stop", stop_interrupts
+assert not any(
+    record.get("event") == "turn_steered"
+    and record.get("runner") == "codex-im-stop"
+    for record in records
+), records
 PY
 
 run_queue_fallback_case() {

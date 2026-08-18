@@ -30,6 +30,10 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
 # Remote Invoke 的本地 relay、SSH grant 和 Remote Execution 链路
 SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
   bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+
+# IM worker -> 主进程的 Guide/Stop 控制面与显式 Queue 语义
+SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+  bash e2e-tests/tests/test_external_runner_live_guide.sh
 ```
 
 以上命令构成合入门禁，均不依赖真实账号或云端 relay。真实浏览器账号、真实 ASR 模型、外部 IM 平台断网风暴和长时间资源压力属于发布前扩展 soak，不得在未执行时记为本用例通过。
@@ -140,6 +144,15 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
 3. 最后执行 External CLI 大结果与取消场景，再次探测代理并检查主进程 PID。
 
 预期：所有代理探测均返回 200；Bifrost 主进程不退出、不重启；worker 故障和 External CLI 取消不跨越到代理故障域。
+
+### TC-AWI-14：IM Worker 跨进程 Runner 控制
+
+1. 保持 IM Gateway 与 External CLI 的默认 worker 隔离模式，通过 debug inbound 启动 Codex/Traex 当前 turn。
+2. 从 IM worker 发送普通后续消息和 `/g`，确认主进程 Runner 收到实时 Guide；发送 `/q`，确认只在当前 turn 完成后执行。
+3. 向仍在运行的 session 发送 `/stop`，确认主进程 Runner 收到协议级 interrupt。
+4. 检查不存在 session、错误 capability token 与 broker 缺失配置的失败边界。
+
+预期：IM worker 不读取自己的空 Runner registry；Guide 与 Stop 通过 loopback capability broker 到达主进程，显式 Queue 语义不变，控制失败不会伪造成功。
 
 ## 清理步骤
 

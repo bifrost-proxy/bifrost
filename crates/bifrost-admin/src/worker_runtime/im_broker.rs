@@ -6,7 +6,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::im_gateway::external_cli::{
-    ExternalCliProgressEvent, ExternalCliRunRequest, ExternalCliRunResult, ExternalCliRuntime,
+    ExternalCliGuideResult, ExternalCliProgressEvent, ExternalCliRunRequest, ExternalCliRunResult,
+    ExternalCliRuntime,
 };
 
 pub(crate) const BROKER_ADDR_ENV: &str = "BIFROST_IM_AGENT_BROKER_ADDR";
@@ -35,6 +36,17 @@ enum BrokerRequest {
         runs_root: String,
         request: Box<ExternalCliRunRequest>,
     },
+    Guide {
+        token: String,
+        session_key: String,
+        guide_id: String,
+        message: String,
+    },
+    Stop {
+        token: String,
+        runs_root: String,
+        session_key: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,7 +54,17 @@ enum BrokerRequest {
 enum BrokerResponse {
     Progress { event: ExternalCliProgressEvent },
     Result { result: Box<ExternalCliRunResult> },
+    GuideResult { result: ExternalCliGuideResult },
+    StopResult { stopped: bool },
     Error { error: String },
+}
+
+impl BrokerRequest {
+    fn token(&self) -> &str {
+        match self {
+            Self::Run { token, .. } | Self::Guide { token, .. } | Self::Stop { token, .. } => token,
+        }
+    }
 }
 
 pub(crate) async fn ensure_main_broker() -> Result<BrokerEndpoint, String> {
@@ -154,9 +176,68 @@ pub(crate) async fn run_via_main_broker(
                 }
             }
             BrokerResponse::Result { result } => return Ok(*result),
+            BrokerResponse::GuideResult { .. } | BrokerResponse::StopResult { .. } => {
+                return Err("IM Agent broker returned an unexpected control response".to_string())
+            }
             BrokerResponse::Error { error } => return Err(error),
         }
     }
+}
+
+pub(crate) async fn guide_via_main_broker(
+    session_key: &str,
+    guide_id: String,
+    message: String,
+) -> Result<ExternalCliGuideResult, String> {
+    let response = request_control_via_main_broker(|token| BrokerRequest::Guide {
+        token,
+        session_key: session_key.to_string(),
+        guide_id,
+        message,
+    })
+    .await?;
+    match response {
+        BrokerResponse::GuideResult { result } => Ok(result),
+        BrokerResponse::Error { error } => Err(error),
+        _ => Err("IM Agent broker returned an unexpected guide response".to_string()),
+    }
+}
+
+pub(crate) async fn stop_via_main_broker(
+    runs_root: &std::path::Path,
+    session_key: &str,
+) -> Result<bool, String> {
+    let response = request_control_via_main_broker(|token| BrokerRequest::Stop {
+        token,
+        runs_root: runs_root.display().to_string(),
+        session_key: session_key.to_string(),
+    })
+    .await?;
+    match response {
+        BrokerResponse::StopResult { stopped } => Ok(stopped),
+        BrokerResponse::Error { error } => Err(error),
+        _ => Err("IM Agent broker returned an unexpected stop response".to_string()),
+    }
+}
+
+async fn request_control_via_main_broker(
+    build_request: impl FnOnce(String) -> BrokerRequest,
+) -> Result<BrokerResponse, String> {
+    let addr = std::env::var(BROKER_ADDR_ENV)
+        .map_err(|_| format!("{BROKER_ADDR_ENV} is required in IM Gateway worker"))?;
+    let token = std::env::var(BROKER_TOKEN_ENV)
+        .map_err(|_| format!("{BROKER_TOKEN_ENV} is required in IM Gateway worker"))?;
+    let mut stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|error| format!("connect IM Agent main broker {addr}: {error}"))?;
+    write_frame(&mut stream, &build_request(token)).await?;
+    let mut reader = BufReader::new(stream);
+    let line = super::read_limited_async_line(&mut reader, MAX_FRAME_BYTES)
+        .await
+        .map_err(|error| format!("read IM Agent broker control response: {error}"))?
+        .ok_or_else(|| "IM Agent broker closed before control response".to_string())?;
+    serde_json::from_str::<BrokerResponse>(&line)
+        .map_err(|error| format!("parse IM Agent broker control response: {error}"))
 }
 
 async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(), String> {
@@ -168,12 +249,7 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
         .ok_or_else(|| "IM Agent broker peer closed before request".to_string())?;
     let request: BrokerRequest = serde_json::from_str(&line)
         .map_err(|error| format!("parse IM Agent broker request: {error}"))?;
-    let BrokerRequest::Run {
-        token,
-        runs_root,
-        request,
-    } = request;
-    if token != expected_token {
+    if request.token() != expected_token {
         write_frame(
             &mut write_half,
             &BrokerResponse::Error {
@@ -183,13 +259,65 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
         .await?;
         return Ok(());
     }
+    match request {
+        BrokerRequest::Run {
+            runs_root, request, ..
+        } => serve_run_connection(reader, write_half, runs_root, *request).await,
+        BrokerRequest::Guide {
+            session_key,
+            guide_id,
+            message,
+            ..
+        } => {
+            let rejected_guide_id = guide_id.clone();
+            let response = match crate::im_gateway::external_cli::request_worker_session_guide(
+                &session_key,
+                guide_id,
+                message,
+            )
+            .await
+            {
+                Ok(result) => BrokerResponse::GuideResult { result },
+                Err(reason) => BrokerResponse::GuideResult {
+                    result: ExternalCliGuideResult {
+                        guide_id: rejected_guide_id,
+                        accepted: false,
+                        thread_id: None,
+                        turn_id: None,
+                        reason: Some(reason),
+                    },
+                },
+            };
+            write_frame(&mut write_half, &response).await
+        }
+        BrokerRequest::Stop {
+            runs_root,
+            session_key,
+            ..
+        } => {
+            let stopped = crate::im_gateway::external_cli::request_local_managed_session_stop(
+                std::path::Path::new(&runs_root),
+                &session_key,
+            )
+            .await;
+            write_frame(&mut write_half, &BrokerResponse::StopResult { stopped }).await
+        }
+    }
+}
+
+async fn serve_run_connection(
+    mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
+    mut write_half: tokio::net::tcp::OwnedWriteHalf,
+    runs_root: String,
+    request: ExternalCliRunRequest,
+) -> Result<(), String> {
     let runs_root = std::path::PathBuf::from(runs_root);
     let runtime = ExternalCliRuntime::new(runs_root);
     let session_key = request.session_key.clone();
     let adapter = request.adapter.clone();
     let (progress_tx, mut progress_rx) = mpsc::channel(256);
     let mut run = Box::pin(tokio::spawn(async move {
-        runtime.run_with_progress(*request, Some(progress_tx)).await
+        runtime.run_with_progress(request, Some(progress_tx)).await
     }));
     loop {
         tokio::select! {

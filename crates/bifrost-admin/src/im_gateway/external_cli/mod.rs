@@ -314,6 +314,77 @@ pub async fn request_worker_session_guide(
         .map_err(|_| format!("external runner guide response closed for session '{session_key}'"))
 }
 
+/// Route a live guide to the process that owns the active external-runner
+/// registry. In isolated IM Gateway mode the handler lives in the auxiliary
+/// worker while the runner lives in the main process, so a process-local
+/// registry lookup is insufficient.
+pub async fn request_managed_session_guide(
+    session_key: &str,
+    guide_id: String,
+    message: String,
+) -> Result<ExternalCliGuideResult, String> {
+    if session_key.trim().is_empty() {
+        return Err("session_key cannot be empty".to_string());
+    }
+    if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+        if !crate::worker_runtime::im_broker::client_configured() {
+            return Err("IM Gateway worker Agent broker is not configured".to_string());
+        }
+        return crate::worker_runtime::im_broker::guide_via_main_broker(
+            session_key,
+            guide_id,
+            message,
+        )
+        .await;
+    }
+    let rejected_guide_id = guide_id.clone();
+    match request_worker_session_guide(session_key, guide_id, message).await {
+        Ok(result) => Ok(result),
+        Err(reason) => Ok(ExternalCliGuideResult {
+            guide_id: rejected_guide_id,
+            accepted: false,
+            thread_id: None,
+            turn_id: None,
+            reason: Some(reason),
+        }),
+    }
+}
+
+pub(crate) async fn request_local_managed_session_stop(
+    runs_root: &Path,
+    session_key: &str,
+) -> bool {
+    let worker_stopped = request_worker_session_stop(session_key).await;
+    let legacy_stopped = request_session_stop(runs_root, session_key).await.is_ok();
+    let browser_stopped =
+        crate::im_gateway::chatgpt_web::worker::stop_session_run(session_key).await;
+    worker_stopped || legacy_stopped || browser_stopped
+}
+
+/// Stop every supported runner implementation for an IM session in the
+/// process that owns it. This covers isolated external CLI workers, the legacy
+/// in-process protocol registry, and the browser worker used by ChatGPT Web.
+pub async fn request_managed_session_stop(
+    runs_root: impl AsRef<Path>,
+    session_key: &str,
+) -> Result<bool, String> {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return Err("session_key cannot be empty".to_string());
+    }
+    if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+        if !crate::worker_runtime::im_broker::client_configured() {
+            return Err("IM Gateway worker Agent broker is not configured".to_string());
+        }
+        return crate::worker_runtime::im_broker::stop_via_main_broker(
+            runs_root.as_ref(),
+            session_key,
+        )
+        .await;
+    }
+    Ok(request_local_managed_session_stop(runs_root.as_ref(), session_key).await)
+}
+
 pub fn run_worker_stdio() -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

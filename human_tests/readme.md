@@ -262,7 +262,7 @@
 | [asr-scheduled-task-plan-b.md](./asr-scheduled-task-plan-b.md) | ASR 定时任务 Runtime 策略 | 44 | ASR runtime 策略、Daily Agent 外部 Runner、ChatGPT Web、IM delivery、任务详情更多菜单、恢复与性能回归 |
 | [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 70 | IM Provider、Target、Route、外部 Runner Schedule、消息投递、所有 IM Provider 共享完整 `/status`（含外部 Runner Session ID）与 WebUI 回归 |
 | [im-outbound-send.md](./im-outbound-send.md) | IM 主动外发 | 10 | provider 与飞书 bot ID/名称解析、owner/target/直达群聊、文本/Markdown/图片/文件/原生卡片有序发送、逐项 receipt/幂等 UUID、危险附件文件名拒绝、安装后 Skill 发现与真实外发授权边界 |
-| [im-gateway-external-cli-chat-gateway.md](./im-gateway-external-cli-chat-gateway.md) | Agent Custom Runner / Chat Gateway | 71 | Codex、Trae、Claude Code、ChatGPT Web 与自定义 Runner 的运行、历史、进度和控制链路，含隔离 worker 的协议级 Stop、优先控制通道、Queue 保留与同 session 替代 ownership，完整事件仅供实时 UI、历史只保留 final 与工具标识/状态、IM Codex `/fast` session 模式切换与非支持 Runner 提示、P2P/群动态 IM 外发上下文与精确 provider/target、Base 首条生命周期、Desktop Service 精简 PATH 下默认 Traex executable 发现、绑定 IM Session 的 WebUI 双向进展同步、Codex/Traex app-server 容量错误有限自动重试、Unix executable 瞬态占用重试、GPT Web 搜索来源 favicon 紧凑引用渲染，以及 IM 文件附件进入外部 Runner prompt |
+| [im-gateway-external-cli-chat-gateway.md](./im-gateway-external-cli-chat-gateway.md) | Agent Custom Runner / Chat Gateway | 72 | Codex、Trae、Claude Code、ChatGPT Web 与自定义 Runner 的运行、历史、进度和控制链路，含 IM worker 到主进程的 Guide/Stop capability broker、隔离 worker 的协议级 Stop、优先控制通道、Queue 保留与同 session 替代 ownership，完整事件仅供实时 UI、历史只保留 final 与工具标识/状态、IM Codex `/fast` session 模式切换与非支持 Runner 提示、P2P/群动态 IM 外发上下文与精确 provider/target、Base 首条生命周期、Desktop Service 精简 PATH 下默认 Traex executable 发现、绑定 IM Session 的 WebUI 双向进展同步、Codex/Traex app-server 容量错误有限自动重试、Unix executable 瞬态占用重试、GPT Web 搜索来源 favicon 紧凑引用渲染，以及 IM 文件附件进入外部 Runner prompt |
 | [local-session-resume.md](./local-session-resume.md) | External Runner 本地 Session Resume | 8 | Codex、Traex、Claude Code `/resume` 最近 20 条 id/title/datetime、唯一前缀选择、下一轮原生 resume、provider 隔离、真实本机会话只读 smoke、IM External Runner 帮助文案，以及飞书 `/resume`、`/model`、`/effort` Card 2.0 `select_static` 下拉单聊/群聊选择、clear、`/resume` 新建会话清空 thread、越权拒绝和文本命令兼容 |
 | [feishu-group-session.md](./feishu-group-session.md) | 飞书群聊 Agent Session | 29 | 普通群消息仅入账、@机器人与 Guide/Queue 触发、结构化增量多人上下文、slash 单聊一致性、群级 Session/Runner/工作目录隔离、消息/Turn 幂等与重启恢复、无标题卡片与原生回复引用、不依赖机器人自定义菜单、忙时排队与 live Guide 收尾时序、默认 Runner Guide 延后恢复、图片及富文本 mention、群名失败退避、旧 mention 历史升级兼容、群目录相对附件解析、引用消息作为主输入及纯引用触发、引用图片/文件自动落盘与绝对路径注入、附件失败事务边界及重启恢复、单文件上限、群聊/私聊跨 Session 独立进程并发、活跃 Session 重投去重/确认/审计、确定性并发时序、Runner 收尾 mailbox 回放、owner `/new` 私有群创建与幂等、多机器人广播/定向隔离、跨机器卡片读取权限，以及 `/q` `/pwd` `/runner` 线程查询 |
 | [feishu-thread-agent-derivation.md](./feishu-thread-agent-derivation.md) | 飞书群话题 Agent 派生 | 12 | 话题显式 @当前 Bot 门禁、多 Bot 独立处理、本地 checkpoint/普通双消息派生、跨设备缺锚点降级、卡片话题命令优先路由、话题 Runner/工作目录持久化、恢复租约接管、fork 响应校验、滚动卡片锚点、Codex/Traex fork 能力、Claude Code 扩展门禁与 `reply_in_thread` |
@@ -280,7 +280,7 @@
 |------|---------|-----------|------|
 | [mcp-oauth.md](./mcp-oauth.md) | MCP OAuth | 1 | OAuth token store Auto 模式 keyring 可用性 roundtrip 检测与文件 fallback 回归 |
 
-| [auxiliary-worker-isolation.md](./auxiliary-worker-isolation.md) | 附加能力 Worker 进程隔离 | 13 | Lazy 启动、回滚模式、IPC 边界、生命周期控制、Job/Artifact、Browser/ASR/IM/Remote 故障与代理联合 Chaos |
+| [auxiliary-worker-isolation.md](./auxiliary-worker-isolation.md) | 附加能力 Worker 进程隔离 | 14 | Lazy 启动、回滚模式、IPC 边界、生命周期控制、Job/Artifact、IM→主进程 Runner 控制、Browser/ASR/IM/Remote 故障与代理联合 Chaos |
 
 ---
 

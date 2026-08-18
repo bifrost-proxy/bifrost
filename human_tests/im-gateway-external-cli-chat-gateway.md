@@ -1656,7 +1656,33 @@
 4. 同 session 的直接替代运行先中断旧 worker，再启动新 worker；旧 worker cleanup 不能删除新 owner。
 5. Service shutdown 也覆盖无 session 的 worker，全局 worker 注册表不会遗漏直接 API run；测试输出 `[external-runner-worker-stop] PASS`，且不影响用户现有 Service。
 
+### TC-IEC-72: IM worker 到主进程的 Runner 控制面路由
+
+1. 以默认 `IM Gateway=worker`、`External CLI=worker` 模式启动隔离临时 Service，配置 mock Codex/Traex app-server Runner 和本地 debug inbound Provider。
+2. 从 IM 通道启动 Codex 当前 turn，随后发送普通后续消息与 `/g <消息>`；检查主进程 app-server 收到 `turn/steer`，且消息没有进入 FIFO Queue。
+3. 在另一会话发送 `/q <消息>` 后用 `/g` 结束当前 turn；检查 `/q` 内容只在当前 turn 完成后作为下一 turn 执行一次。
+4. 在持续运行的第三个会话发送 `/stop`；检查主进程 app-server 收到 `turn/interrupt`，而不是把 `/stop` 当作 steer 或排队消息。
+5. 逐项代码审计 `/help` 列出的 `/help`、`/status`、`/pwd`、`/cwd`、`/runner`、`/new`、`/clear`、`/reset`、`/q`、`/rq`、`/stop`、`/model`、`/resume`、`/effort`、`/fast`，并检查未在帮助中单列但仍兼容的 `/g`：确认纯查询/配置/队列命令只依赖 IM worker 本地或持久化状态；普通后续消息与 `/g` 的 Guide、以及 Stop 才需要主进程 broker，`/clear`、`/reset` 的停机前置动作复用同一 Stop 路由。
+6. 执行：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     main_broker_routes_guide_and_stop_to_the_main_process_registry --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     request_agent_stop_ --lib -- --nocapture
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+
+预期结果：
+
+1. broker 使用独立短连接验证 capability token 后，把 Guide/Stop 路由到主进程持有的 session registry；不存在的 session 返回明确拒绝/`stopped=false`。
+2. Codex/Traex 普通后续消息和 `/g` 均实时 steer；只有显式 `/q` 排队，消息不丢失也不重复执行。
+3. `/stop` 跨 IM worker 边界触发协议级 interrupt，并同时兼容 isolated External CLI、legacy run registry 与 ChatGPT Web browser worker。
+4. `/help` 其余命令不会因为进程拆分误进 Guide/Queue，也不会访问主进程内存注册表。
+
 ## 最近执行记录
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-72。`main_broker_routes_guide_and_stop_to_the_main_process_registry` 通过，验证 capability broker 的 Guide/Stop 成功路由、缺失 session 明确拒绝和 `stopped=false`；`request_agent_stop_` 2/2 通过，验证 Stop 控制错误会显式传播而不会伪报“当前没有任务”；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。默认 IM Gateway/External CLI worker 隔离链路中，Codex/Traex 普通 IM 后续消息与 `/g` 实时 steer，显式 `/q` 只在当前 turn 完成后执行一次；新增 Codex IM Stop 场景收到主进程 `turn/interrupt` 且没有 `turn/steer`。测试使用动态端口和临时数据目录，未停止或重启用户现有 9900 Service。
 
 - 2026-08-18：PASS — 新增并立即执行 TC-IEC-71。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_worker_stop.sh` 最终输出 `[external-runner-worker-stop] PASS`；隔离临时 Service 与 mock Codex/Traex/Claude Code 验证协议级 interrupt、真实 run id/artifacts 保留、Guide 饱和下优先 Stop、停止当前 turn 后 FIFO queue 只执行一次，以及同 session 替代 worker 的先停后启顺序。Review 扩展的无 session 直接 API run 首次复测暴露 daemon shutdown 先取消 Admin/IM 分支、worker EOF 又缺少 run-id fallback，导致只产生 synthetic stopped result；修复为父 future drop 关闭 stdin、worker 以本地 active run 写 marker 并原生 interrupt 后，完整脚本复跑通过。脚本完成临时 Service、mock 进程与数据目录清理，未停止或重启用户现有 Service。
 

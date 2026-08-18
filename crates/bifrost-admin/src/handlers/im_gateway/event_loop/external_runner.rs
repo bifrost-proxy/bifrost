@@ -1494,7 +1494,24 @@ pub(super) async fn run_external_cli_agent_chat(
     }
 
     if trimmed_msg == "/clear" || trimmed_msg == "/reset" {
-        let _ = request_agent_stop(ctx.agent_session_manager, &input.session_key).await;
+        if let Err(error) = request_agent_stop(ctx.agent_session_manager, &input.session_key).await
+        {
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("❌ 重置会话前停止当前 Runner 失败：{error}"),
+                ctx.message_log_store,
+            )
+            .await;
+            finalize_current_feishu_thread_binding(
+                ctx.group_context_store,
+                &ctx.provider.id,
+                ctx.event,
+                "failed",
+            );
+            return;
+        }
         if let Some(mut session) = ctx
             .agent_session_manager
             .try_take_session(&input.session_key)
@@ -3141,7 +3158,7 @@ pub(super) async fn maybe_stop_external_cli_for_event(event: &ImEvent, active_se
     if session_key != active_session_key {
         return;
     }
-    if let Err(error) = crate::im_gateway::external_cli::request_session_stop(
+    if let Err(error) = crate::im_gateway::external_cli::request_managed_session_stop(
         crate::im_gateway::external_cli::default_runs_root(),
         active_session_key,
     )

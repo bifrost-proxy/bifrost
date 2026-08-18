@@ -3020,7 +3020,10 @@ for line in sys.stdin:
                 )
                 .await
             });
-            timeout(Duration::from_secs(5), async {
+            // Coverage instrumentation can delay spawning this helper while
+            // the full admin test suite is running. This only widens fixture
+            // readiness; the stop protocol deadlines below stay unchanged.
+            timeout(Duration::from_secs(15), async {
                 while live_guide::active_handle(&format!("app-server-stop-{mode}")).is_none() {
                     sleep(Duration::from_millis(10)).await;
                 }

@@ -860,7 +860,11 @@ pub(super) async fn handle_agent(
         }
         if req.method() == Method::DELETE {
             service.queue_manager.clear_session(&session_key);
-            request_agent_stop(&service.agent_session_manager, &session_key).await;
+            if let Err(error) =
+                request_agent_stop(&service.agent_session_manager, &session_key).await
+            {
+                return agent_stop_error_response("delete", &error);
+            }
             service.agent_session_manager.clear_session(&session_key);
             service.queue_manager.clear_session(&session_key);
             clear_persisted_agent_session_state(&session_key, None, None);
