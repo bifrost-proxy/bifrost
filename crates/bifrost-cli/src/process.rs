@@ -418,6 +418,7 @@ pub fn inspect_process_identity(
 #[cfg(test)]
 fn classify_process_identity_from_probe(
     pid_exists: Result<(), i32>,
+    process_not_found_error: i32,
     start_time_match: bifrost_core::StartTimeMatch,
 ) -> ProcessIdentityStatus {
     match pid_exists {
@@ -427,7 +428,7 @@ fn classify_process_identity_from_probe(
                 ProcessIdentityStatus::Alive
             }
         },
-        Err(code) if code == libc::ESRCH => ProcessIdentityStatus::Exited,
+        Err(code) if code == process_not_found_error => ProcessIdentityStatus::Exited,
         Err(_) => ProcessIdentityStatus::Unknown,
     }
 }
@@ -664,14 +665,16 @@ mod tests {
     fn process_identity_classification_only_treats_esrch_as_definite_exit() {
         assert_eq!(
             classify_process_identity_from_probe(
-                Err(libc::ESRCH),
+                Err(404),
+                404,
                 bifrost_core::StartTimeMatch::Unknown
             ),
             ProcessIdentityStatus::Exited
         );
         assert_eq!(
             classify_process_identity_from_probe(
-                Err(libc::EPERM),
+                Err(403),
+                404,
                 bifrost_core::StartTimeMatch::Unknown
             ),
             ProcessIdentityStatus::Unknown
@@ -679,6 +682,7 @@ mod tests {
         assert_eq!(
             classify_process_identity_from_probe(
                 Ok(()),
+                404,
                 bifrost_core::StartTimeMatch::Mismatch {
                     recorded: 10,
                     observed: 20
@@ -687,7 +691,11 @@ mod tests {
             ProcessIdentityStatus::Reused
         );
         assert_eq!(
-            classify_process_identity_from_probe(Ok(()), bifrost_core::StartTimeMatch::Unknown),
+            classify_process_identity_from_probe(
+                Ok(()),
+                404,
+                bifrost_core::StartTimeMatch::Unknown
+            ),
             ProcessIdentityStatus::Alive
         );
     }
