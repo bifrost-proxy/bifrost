@@ -10,6 +10,8 @@ pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 30 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES: u64 = 250 * 1024 * 1024;
 const FEISHU_DRY_RUN_FILE_ENV: &str = "BIFROST_FEISHU_DRY_RUN_FILE";
+#[cfg(test)]
+const FEISHU_DRY_RUN_PROVIDER_ENV: &str = "BIFROST_FEISHU_DRY_RUN_PROVIDER_ID";
 
 pub(super) static AGENT_REPLY_IMAGE_UPLOAD_CACHE: OnceLock<
     Mutex<HashMap<AgentReplyImageCacheKey, String>>,
@@ -397,7 +399,7 @@ fn capture_feishu_card_dry_run(
     card: &serde_json::Value,
     uuid: Option<&str>,
 ) -> Option<bifrost_core::Result<crate::im_gateway::types::SendResult>> {
-    let path = std::env::var_os(FEISHU_DRY_RUN_FILE_ENV)?;
+    let path = feishu_dry_run_path(config)?;
     let message_id = format!("dry-run-{}", uuid_short());
     Some(
         append_feishu_dry_run(
@@ -427,7 +429,7 @@ fn capture_feishu_reaction_dry_run(
     message_id: &str,
     reaction: &str,
 ) -> Option<Result<(), String>> {
-    let path = std::env::var_os(FEISHU_DRY_RUN_FILE_ENV)?;
+    let path = feishu_dry_run_path(config)?;
     Some(append_feishu_dry_run(
         Path::new(&path),
         &serde_json::json!({
@@ -438,6 +440,17 @@ fn capture_feishu_reaction_dry_run(
             "reaction": reaction
         }),
     ))
+}
+
+fn feishu_dry_run_path(_config: &ImProviderConfig) -> Option<std::ffi::OsString> {
+    let path = std::env::var_os(FEISHU_DRY_RUN_FILE_ENV)?;
+    #[cfg(test)]
+    if std::env::var_os(FEISHU_DRY_RUN_PROVIDER_ENV)
+        .is_some_and(|provider_id| provider_id != std::ffi::OsStr::new(&_config.id))
+    {
+        return None;
+    }
+    Some(path)
 }
 
 fn append_feishu_dry_run(path: &Path, row: &serde_json::Value) -> Result<(), String> {
@@ -1149,7 +1162,12 @@ mod provider_event_connection_tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("capture/feishu.jsonl");
         let _guard = EnvVarGuard::set(FEISHU_DRY_RUN_FILE_ENV, &path);
-        let config = crate::handlers::im_gateway::tests::test_provider();
+        let _provider_guard = EnvVarGuard::set(
+            FEISHU_DRY_RUN_PROVIDER_ENV,
+            std::path::Path::new("feishu-dry-run-unit"),
+        );
+        let mut config = crate::handlers::im_gateway::tests::test_provider();
+        config.id = "feishu-dry-run-unit".to_string();
         let target = ImTarget {
             id: "target".to_string(),
             provider_id: config.id.clone(),
@@ -1161,6 +1179,16 @@ mod provider_event_connection_tests {
             created_at: 0,
             updated_at: 0,
         };
+        let mut unrelated_config = config.clone();
+        unrelated_config.id = "feishu-unrelated-unit".to_string();
+        assert!(capture_feishu_card_dry_run(
+            &unrelated_config,
+            &target,
+            None,
+            &serde_json::json!({"schema": "2.0"}),
+            Some("unrelated-card"),
+        )
+        .is_none());
         let client =
             ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
         let result = client
