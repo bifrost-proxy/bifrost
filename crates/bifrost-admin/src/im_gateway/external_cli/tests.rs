@@ -1,17 +1,12 @@
 use super::*;
 use std::ffi::OsStr;
-use std::sync::OnceLock;
-
-static EXTERNAL_CLI_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 struct ExternalCliEnvGuard {
     _env_guard: tokio::sync::MutexGuard<'static, ()>,
     _data_dir_guard: std::sync::MutexGuard<'static, ()>,
 }
 
 fn external_cli_env_guard() -> ExternalCliEnvGuard {
-    let env_guard = EXTERNAL_CLI_ENV_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .blocking_lock();
+    let env_guard = EXTERNAL_CLI_TEST_ENV_LOCK.blocking_lock();
     let data_dir_guard = crate::test_env::bifrost_data_dir_lock();
     ExternalCliEnvGuard {
         _env_guard: env_guard,
@@ -20,10 +15,7 @@ fn external_cli_env_guard() -> ExternalCliEnvGuard {
 }
 
 async fn external_cli_env_guard_async() -> ExternalCliEnvGuard {
-    let env_guard = EXTERNAL_CLI_ENV_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
+    let env_guard = external_cli_test_env_lock().await;
     let data_dir_guard = crate::test_env::bifrost_data_dir_lock();
     ExternalCliEnvGuard {
         _env_guard: env_guard,
@@ -3787,6 +3779,64 @@ async fn external_cli_run_writes_attachments_and_injects_prompt_paths() {
         "second run must not overwrite first run attachment"
     );
     assert_eq!(tokio::fs::read(&second_image_path).await.unwrap(), b"world");
+}
+
+#[tokio::test]
+async fn live_guide_prompt_persists_session_images_and_rejects_unsafe_ids() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(temp_dir.path());
+    let session_key = "im:feishu-main:live-guide-image";
+    let guide_id = "guide-image-test";
+    let prompt = prepare_live_guide_prompt(
+        session_key,
+        guide_id,
+        "inspect the screenshot and focus on the error",
+        &[bifrost_agent::ChatImageInput {
+            mime_type: "image/png".to_string(),
+            data: "aW1hZ2UtYnl0ZXM=".to_string(),
+        }],
+        &[ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "bG9nLWJ5dGVz".to_string(),
+            name: Some("runtime.log".to_string()),
+        }],
+    )
+    .await
+    .expect("prepare live guide prompt");
+
+    let history_path = bifrost_agent::persistence::canonical_conversation_path(
+        &bifrost_agent::config::agent_home_dir(),
+        session_key,
+    );
+    let attachment_dir = history_path
+        .parent()
+        .unwrap()
+        .join("attachments")
+        .join(history_path.file_stem().unwrap())
+        .join(guide_id);
+    let image_path = attachment_dir.join("images/image-1.png");
+    let file_path = attachment_dir.join("files/1-runtime.log");
+    assert_eq!(tokio::fs::read(&image_path).await.unwrap(), b"image-bytes");
+    assert_eq!(tokio::fs::read(&file_path).await.unwrap(), b"log-bytes");
+    assert!(prompt.contains("## Attached Images"), "{prompt}");
+    assert!(prompt.contains("## Attached Files"), "{prompt}");
+    assert!(
+        prompt.contains(&image_path.display().to_string()),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&file_path.display().to_string()),
+        "{prompt}"
+    );
+    assert!(
+        prompt.ends_with("inspect the screenshot and focus on the error\n"),
+        "{prompt}"
+    );
+
+    let error = prepare_live_guide_prompt(session_key, "../escape", "unsafe", &[], &[])
+        .await
+        .expect_err("unsafe guide id must be rejected");
+    assert!(error.contains("safe path component"), "{error}");
 }
 
 #[tokio::test]

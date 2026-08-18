@@ -258,6 +258,10 @@ for runner_name, adapter, mode, transport in (
     ("codex-web", "codex", "accept", "app_server"),
     ("traex-web", "traex", "accept", "app_server"),
     ("codex-im", "codex", "accept", "app_server"),
+    ("codex-im-image", "codex", "accept", "app_server"),
+    ("traex-im-image", "traex", "accept", "app_server"),
+    ("claude-im-image", "claude_code", "accept", None),
+    ("codex-im-image-reject", "codex", "reject", "app_server"),
     ("codex-cross-channel", "codex", "accept", "app_server"),
     ("codex-im-queue", "codex", "accept", "app_server"),
     ("codex-im-effort", "codex", "accept", "app_server"),
@@ -457,6 +461,40 @@ send_im_inbound() {
     >/dev/null
 }
 
+send_im_inbound_with_image() {
+  local provider_id="$1"
+  local owner_id="$2"
+  local text="$3"
+  local image_bytes="$4"
+  python3 - "$BIFROST_PORT" "$provider_id" "$owner_id" "$text" "$image_bytes" <<'PY'
+import base64
+import json
+import sys
+import urllib.request
+
+port, provider_id, owner_id, text, image_bytes = sys.argv[1:6]
+payload = {
+    "providerId": provider_id,
+    "userId": owner_id,
+    "chatId": f"chat-{provider_id}",
+    "text": text,
+    "images": [{
+        "fileKey": f"image-{provider_id}",
+        "mimeType": "image/png",
+        "data": base64.b64encode(image_bytes.encode()).decode(),
+    }],
+}
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-inbound",
+    data=json.dumps(payload).encode(),
+    headers={"content-type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    assert response.status == 200, response.read().decode()
+PY
+}
+
 send_im_inbound_with_reference() {
   local provider_id="$1"
   local owner_id="$2"
@@ -503,11 +541,66 @@ wait_for_mock_record() {
   return 1
 }
 
+wait_for_mock_record_count() {
+  local pattern="$1"
+  local expected_count="$2"
+  local count
+  for _ in $(seq 1 240); do
+    count="$(grep -c "$pattern" "$MOCK_LOG" 2>/dev/null || true)"
+    if (( count >= expected_count )); then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "[external-runner-live-guide] mock record count below $expected_count: $pattern" >&2
+  tail -120 "$BIFROST_LOG" >&2 || true
+  tail -80 "$MOCK_LOG" >&2 || true
+  return 1
+}
+
 create_im_provider "im-guide-provider" "im-guide-owner" "codex-im"
 send_im_inbound "im-guide-provider" "im-guide-owner" "wait for default IM guide"
 wait_for_mock_record '"event":"turn_ready","runner":"codex-im"'
 send_im_inbound "im-guide-provider" "im-guide-owner" "default-im-guide"
 wait_for_mock_record 'default-im-guide'
+
+for image_runner in codex-im-image traex-im-image claude-im-image; do
+  image_provider="provider-$image_runner"
+  image_owner="owner-$image_runner"
+  create_im_provider "$image_provider" "$image_owner" "$image_runner"
+  send_im_inbound "$image_provider" "$image_owner" "wait for image guidance from $image_runner"
+  if [[ "$image_runner" == claude* ]]; then
+    wait_for_mock_record "\"event\":\"stream_ready\",\"runner\":\"$image_runner\""
+  else
+    wait_for_mock_record "\"event\":\"turn_ready\",\"runner\":\"$image_runner\""
+  fi
+  image_guide_text="live-image-guide-$image_runner"
+  if [[ "$image_runner" == "traex-im-image" ]]; then
+    image_guide_text="/g $image_guide_text"
+  fi
+  send_im_inbound_with_image \
+    "$image_provider" \
+    "$image_owner" \
+    "$image_guide_text" \
+    "live-image-bytes-$image_runner"
+  wait_for_mock_record "live-image-guide-$image_runner"
+done
+
+create_im_provider \
+  "provider-codex-im-image-reject" \
+  "owner-codex-im-image-reject" \
+  "codex-im-image-reject"
+send_im_inbound \
+  "provider-codex-im-image-reject" \
+  "owner-codex-im-image-reject" \
+  "wait for rejected image guidance"
+wait_for_mock_record '"event":"turn_ready","runner":"codex-im-image-reject"'
+send_im_inbound_with_image \
+  "provider-codex-im-image-reject" \
+  "owner-codex-im-image-reject" \
+  "queue-after-reject-image" \
+  "rejected-live-image-bytes"
+wait_for_mock_record_count '"event":"turn_started","runner":"codex-im-image-reject"' 2
 
 create_im_provider "cross-channel-provider" "cross-channel-owner" "codex-cross-channel"
 curl -fsS --noproxy '*' -X PATCH \
@@ -612,8 +705,10 @@ send_im_inbound_with_reference \
   "quote-source-message"
 wait_for_mock_record 'QUOTE_CURRENT_QUESTION'
 
-python3 - "$MOCK_LOG" "$TEST_DIR/agent/im_gateway/session_state.json" <<'PY'
+python3 - "$MOCK_LOG" "$TEST_DIR/agent/im_gateway/session_state.json" "$TEST_DIR" <<'PY'
 import json
+import pathlib
+import re
 import sys
 
 records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
@@ -623,6 +718,53 @@ default_steers = [
 ]
 assert len(default_steers) == 1, default_steers
 assert default_steers[0]["params"]["input"][0]["text"] == "default-im-guide", default_steers
+
+test_dir = pathlib.Path(sys.argv[3]).resolve()
+for runner in ("codex-im-image", "traex-im-image", "claude-im-image"):
+    if runner.startswith("claude"):
+        image_records = [
+            record for record in records
+            if record.get("event") == "stream_guide_received"
+            and record.get("runner") == runner
+        ]
+        assert len(image_records) == 1, image_records
+        guide_prompt = image_records[0]["frame"]["message"]["content"][0]["text"]
+    else:
+        image_records = [
+            record for record in records
+            if record.get("event") == "turn_steered"
+            and record.get("runner") == runner
+        ]
+        assert len(image_records) == 1, image_records
+        guide_prompt = image_records[0]["params"]["input"][0]["text"]
+    assert "## Attached Images" in guide_prompt, guide_prompt
+    assert f"live-image-guide-{runner}" in guide_prompt, guide_prompt
+    paths = [pathlib.Path(value) for value in re.findall(r"`([^`]+)`", guide_prompt)]
+    image_paths = [path for path in paths if path.name == "image-1.png"]
+    assert len(image_paths) == 1, (runner, guide_prompt)
+    image_path = image_paths[0]
+    assert image_path.is_absolute(), image_path
+    assert image_path.read_bytes() == f"live-image-bytes-{runner}".encode(), image_path
+    relative = image_path.resolve().relative_to(test_dir)
+    assert relative.parts[:4] == ("agent", "sessions", "by-key", "attachments"), relative
+    assert relative.parts[-2:] == ("images", "image-1.png"), relative
+
+rejected_image_starts = [
+    record for record in records
+    if record.get("event") == "turn_started"
+    and record.get("runner") == "codex-im-image-reject"
+]
+assert len(rejected_image_starts) == 2, rejected_image_starts
+queued_image_prompt = rejected_image_starts[1]["params"]["input"][0]["text"]
+assert "queue-after-reject-image" in queued_image_prompt, queued_image_prompt
+assert "## Attached Images" in queued_image_prompt, queued_image_prompt
+queued_paths = [pathlib.Path(value) for value in re.findall(r"`([^`]+)`", queued_image_prompt)]
+queued_image_paths = [path for path in queued_paths if path.name == "image-1.png"]
+assert len(queued_image_paths) == 1, queued_image_prompt
+queued_image_path = queued_image_paths[0]
+assert queued_image_path.read_bytes() == b"rejected-live-image-bytes", queued_image_path
+queued_relative = queued_image_path.resolve().relative_to(test_dir)
+assert queued_relative.parts[:4] == ("agent", "sessions", "by-key", "attachments"), queued_relative
 
 queue_steers = [
     record for record in records

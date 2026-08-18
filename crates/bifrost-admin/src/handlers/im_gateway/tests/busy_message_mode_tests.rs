@@ -26,6 +26,26 @@ fn busy_group_event(message_id: &str, text: &str, received_at: u64) -> ImEvent {
     }
 }
 
+fn busy_group_image_event(
+    message_id: &str,
+    text: &str,
+    received_at: u64,
+    bytes_base64: &str,
+) -> ImEvent {
+    let mut event = busy_group_event(message_id, text, received_at);
+    let message = event.message.as_mut().expect("busy event message");
+    message.raw_type = Some("image".to_string());
+    message
+        .images
+        .push(crate::im_gateway::types::ImImageAttachment {
+            file_key: format!("image-{message_id}"),
+            mime_type: Some("image/png".to_string()),
+            data_base64: Some(bytes_base64.to_string()),
+            ..Default::default()
+        });
+    event
+}
+
 fn persisted_group_turn_status(store: &ImGroupContextStore, turn_id: &str) -> Option<String> {
     rusqlite::Connection::open(store.file_path())
         .unwrap()
@@ -319,6 +339,275 @@ async fn busy_group_turns_complete_or_release_with_their_queue_outcome() {
             None
         );
     }
+}
+
+#[tokio::test]
+async fn external_busy_image_is_persisted_and_guided_into_the_active_runner() {
+    let _external_cli_guard = crate::im_gateway::external_cli::external_cli_test_env_lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let _data_dir_guard = EnvGuard::set_data_dir(temp.path());
+    let _worker_env = EnvVarGuard::remove("BIFROST_IM_GATEWAY_WORKER");
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let provider = test_provider();
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let agent_config = service.agent_config_store.load();
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key(&provider.id, "image-guide");
+    let event = busy_group_image_event(
+        "image-guide-accepted",
+        "请结合截图继续定位",
+        10,
+        "cG5nLWd1aWRlLWJ5dGVz",
+    );
+    let mut active =
+        crate::im_gateway::external_cli::install_test_active_guide_session(&session_key);
+    let response = tokio::spawn(async move { active.respond_next(true).await });
+
+    handle_busy_default_message(
+        "请结合截图继续定位",
+        &session_key,
+        &BusyMessageContext {
+            queue_manager: &service.queue_manager,
+            client: &client,
+            provider: &provider,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_session_manager: &service.agent_session_manager,
+            progress_registry: &service.progress_registry,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_config: &agent_config,
+            group_context_store: &service.group_context_store,
+            group_turn_id: None,
+            default_mode: BusyMessageDefaultMode::ExternalGuide,
+            status_context: Default::default(),
+            default_work_dir: None,
+        },
+    )
+    .await;
+
+    let (guide_id, prompt) = response
+        .await
+        .expect("join test active runner")
+        .expect("respond to image guide");
+    assert!(guide_id.starts_with("guide-"), "{guide_id}");
+    assert!(prompt.contains("## Attached Images"), "{prompt}");
+    assert!(prompt.ends_with("请结合截图继续定位\n"), "{prompt}");
+    let image_path = prompt
+        .lines()
+        .find(|line| line.starts_with("1. `"))
+        .and_then(|line| line.split('`').nth(1))
+        .map(std::path::PathBuf::from)
+        .expect("absolute image path in guide prompt");
+    assert!(image_path.is_absolute(), "{}", image_path.display());
+    assert_eq!(
+        tokio::fs::read(&image_path).await.unwrap(),
+        b"png-guide-bytes"
+    );
+    assert!(service.queue_manager.queue_status(&session_key).is_empty());
+}
+
+#[tokio::test]
+async fn rejected_external_busy_image_keeps_original_text_and_bytes_in_fifo() {
+    let _external_cli_guard = crate::im_gateway::external_cli::external_cli_test_env_lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let _data_dir_guard = EnvGuard::set_data_dir(temp.path());
+    let _worker_env = EnvVarGuard::remove("BIFROST_IM_GATEWAY_WORKER");
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let provider = test_provider();
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let agent_config = service.agent_config_store.load();
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key(&provider.id, "image-reject");
+    let event = busy_group_image_event(
+        "image-guide-rejected",
+        "保留这张截图稍后处理",
+        11,
+        "cmVqZWN0ZWQtaW1hZ2UtYnl0ZXM=",
+    );
+    let mut active =
+        crate::im_gateway::external_cli::install_test_active_guide_session(&session_key);
+    let response = tokio::spawn(async move { active.respond_next(false).await });
+
+    handle_busy_default_message(
+        "保留这张截图稍后处理",
+        &session_key,
+        &BusyMessageContext {
+            queue_manager: &service.queue_manager,
+            client: &client,
+            provider: &provider,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_session_manager: &service.agent_session_manager,
+            progress_registry: &service.progress_registry,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_config: &agent_config,
+            group_context_store: &service.group_context_store,
+            group_turn_id: None,
+            default_mode: BusyMessageDefaultMode::ExternalGuide,
+            status_context: Default::default(),
+            default_work_dir: None,
+        },
+    )
+    .await;
+
+    let (_, prompt) = response
+        .await
+        .expect("join rejecting active runner")
+        .expect("reject image guide");
+    assert!(prompt.contains("保留这张截图稍后处理"), "{prompt}");
+    let queued = service
+        .queue_manager
+        .pop_queue_item(&session_key)
+        .expect("rejected image guide must be queued");
+    assert_eq!(queued.message, "保留这张截图稍后处理");
+    assert_eq!(queued.images.len(), 1);
+    assert_eq!(queued.images[0].mime_type, "image/png");
+    assert_eq!(queued.images[0].data, "cmVqZWN0ZWQtaW1hZ2UtYnl0ZXM=");
+
+    for index in 0..10 {
+        service
+            .queue_manager
+            .push_queue(&session_key, format!("already-full-{index}"))
+            .unwrap();
+    }
+    let mut active =
+        crate::im_gateway::external_cli::install_test_active_guide_session(&session_key);
+    let response = tokio::spawn(async move { active.respond_next(false).await });
+    handle_busy_default_message(
+        "保留这张截图稍后处理",
+        &session_key,
+        &BusyMessageContext {
+            queue_manager: &service.queue_manager,
+            client: &client,
+            provider: &provider,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_session_manager: &service.agent_session_manager,
+            progress_registry: &service.progress_registry,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_config: &agent_config,
+            group_context_store: &service.group_context_store,
+            group_turn_id: None,
+            default_mode: BusyMessageDefaultMode::ExternalGuide,
+            status_context: Default::default(),
+            default_work_dir: None,
+        },
+    )
+    .await;
+    response
+        .await
+        .expect("join rejecting full-queue runner")
+        .expect("reject image guide with full queue");
+    assert_eq!(service.queue_manager.queue_status(&session_key).len(), 10);
+}
+
+#[tokio::test]
+async fn external_busy_image_preparation_failure_keeps_original_attachment_in_fifo() {
+    let _external_cli_guard = crate::im_gateway::external_cli::external_cli_test_env_lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let _data_dir_guard = EnvGuard::set_data_dir(temp.path());
+    let _worker_env = EnvVarGuard::remove("BIFROST_IM_GATEWAY_WORKER");
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let provider = test_provider();
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let agent_config = service.agent_config_store.load();
+    let session_key = crate::im_gateway::group_context::build_group_session_key(
+        &provider.id,
+        "image-prepare-failure",
+    );
+    let event = busy_group_image_event(
+        "image-guide-prepare-failure",
+        "附件准备失败也不能丢",
+        12,
+        "cHJlcGFyZS1mYWlsdXJlLWJ5dGVz",
+    );
+    let blocked_data_dir = temp.path().join("not-a-directory");
+    std::fs::write(&blocked_data_dir, b"block directory creation").unwrap();
+    let _blocked_env = EnvVarGuard::set(
+        "BIFROST_DATA_DIR",
+        blocked_data_dir.to_str().expect("utf-8 blocked data dir"),
+    );
+
+    handle_busy_default_message(
+        "附件准备失败也不能丢",
+        &session_key,
+        &BusyMessageContext {
+            queue_manager: &service.queue_manager,
+            client: &client,
+            provider: &provider,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_session_manager: &service.agent_session_manager,
+            progress_registry: &service.progress_registry,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_config: &agent_config,
+            group_context_store: &service.group_context_store,
+            group_turn_id: None,
+            default_mode: BusyMessageDefaultMode::ExternalGuide,
+            status_context: Default::default(),
+            default_work_dir: None,
+        },
+    )
+    .await;
+
+    let queued = service
+        .queue_manager
+        .pop_queue_item(&session_key)
+        .expect("attachment preparation failure must queue the original input");
+    assert_eq!(queued.message, "附件准备失败也不能丢");
+    assert_eq!(queued.images.len(), 1);
+    assert_eq!(queued.images[0].data, "cHJlcGFyZS1mYWlsdXJlLWJ5dGVz");
+}
+
+#[tokio::test]
+async fn explicit_queue_mode_preserves_busy_images_and_reports_queue_overflow() {
+    let temp = tempfile::tempdir().unwrap();
+    let _data_dir_guard = EnvGuard::set_data_dir(temp.path());
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let provider = test_provider();
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let agent_config = service.agent_config_store.load();
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key(&provider.id, "image-queue");
+    let event = busy_group_image_event(
+        "image-explicit-queue",
+        "明确排队图片",
+        13,
+        "cXVldWVkLWltYWdlLWJ5dGVz",
+    );
+    let context = BusyMessageContext {
+        queue_manager: &service.queue_manager,
+        client: &client,
+        provider: &provider,
+        event: &event,
+        message_log_store: &service.message_log_store,
+        agent_session_manager: &service.agent_session_manager,
+        progress_registry: &service.progress_registry,
+        external_cli_config_store: &service.external_cli_config_store,
+        agent_config: &agent_config,
+        group_context_store: &service.group_context_store,
+        group_turn_id: None,
+        default_mode: BusyMessageDefaultMode::Queue,
+        status_context: Default::default(),
+        default_work_dir: None,
+    };
+
+    handle_busy_default_message("明确排队图片", &session_key, &context).await;
+    let queued = service
+        .queue_manager
+        .pop_queue_item(&session_key)
+        .expect("queue mode image");
+    assert_eq!(queued.message, "明确排队图片");
+    assert_eq!(queued.images[0].data, "cXVldWVkLWltYWdlLWJ5dGVz");
+
+    for index in 0..10 {
+        service
+            .queue_manager
+            .push_queue(&session_key, format!("full-{index}"))
+            .unwrap();
+    }
+    handle_busy_default_message("溢出图片", &session_key, &context).await;
+    assert_eq!(service.queue_manager.queue_status(&session_key).len(), 10);
 }
 
 #[test]

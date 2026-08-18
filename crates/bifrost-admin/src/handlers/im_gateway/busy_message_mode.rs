@@ -161,12 +161,60 @@ pub(super) async fn handle_busy_guide_command(
     session_key: &str,
     ctx: &BusyMessageContext<'_>,
 ) {
+    handle_busy_guide_command_with_attachments(
+        guide_text,
+        session_key,
+        ctx,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await;
+}
+
+async fn handle_busy_guide_command_with_attachments(
+    guide_text: &str,
+    session_key: &str,
+    ctx: &BusyMessageContext<'_>,
+    images: Vec<bifrost_agent::ChatImageInput>,
+    files: Vec<crate::im_gateway::external_cli::ExternalCliFileInput>,
+) {
     if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
         let guide_id = format!("guide-{}", uuid::Uuid::new_v4());
+        let guide_payload = if images.is_empty() && files.is_empty() {
+            guide_text.to_string()
+        } else {
+            match crate::im_gateway::external_cli::prepare_live_guide_prompt(
+                session_key,
+                &guide_id,
+                guide_text,
+                &images,
+                &files,
+            )
+            .await
+            {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    warn!(
+                        session_key = %session_key,
+                        error = %error,
+                        "failed to prepare live guide attachments; falling back to queue"
+                    );
+                    return queue_busy_guide_with_attachments(
+                        guide_text,
+                        session_key,
+                        ctx,
+                        images,
+                        files,
+                        Some(format!("实时引导附件准备失败：{error}")),
+                    )
+                    .await;
+                }
+            }
+        };
         match crate::im_gateway::external_cli::request_managed_session_guide(
             session_key,
             guide_id,
-            guide_text.to_string(),
+            guide_payload,
         )
         .await
         {
@@ -229,6 +277,17 @@ pub(super) async fn handle_busy_guide_command(
                 return;
             }
         }
+    }
+    if !images.is_empty() || !files.is_empty() {
+        return queue_busy_guide_with_attachments(
+            guide_text,
+            session_key,
+            ctx,
+            images,
+            files,
+            None,
+        )
+        .await;
     }
     match apply_busy_message_default_with_context(
         ctx.queue_manager,
@@ -323,6 +382,71 @@ pub(super) async fn handle_busy_guide_command(
     }
 }
 
+async fn queue_busy_guide_with_attachments(
+    guide_text: &str,
+    session_key: &str,
+    ctx: &BusyMessageContext<'_>,
+    images: Vec<bifrost_agent::ChatImageInput>,
+    files: Vec<crate::im_gateway::external_cli::ExternalCliFileInput>,
+    preparation_error: Option<String>,
+) {
+    match ctx.queue_manager.push_queue_with_attachments_and_context(
+        session_key,
+        guide_text.to_string(),
+        images,
+        files,
+        Some(queue_item_context(ctx)),
+    ) {
+        Ok(items) => {
+            let guide_pending = !ctx.queue_manager.guide_status(session_key).is_empty();
+            let (status, reply) = match preparation_error {
+                Some(error) => (
+                    format!(
+                        "{error}，已保留附件并排队：{}",
+                        truncate_str(guide_text, 48)
+                    ),
+                    format!("⚠️ {error}，已保留附件并排队（排队 {} 条）", items.len()),
+                ),
+                None => (
+                    format!(
+                        "Runner 未接受附件引导，已保留附件并排队：{}",
+                        truncate_str(guide_text, 48)
+                    ),
+                    format!(
+                        "⚠️ Runner 未接受运行中附件引导，已保留附件并排队（排队 {} 条）",
+                        items.len()
+                    ),
+                ),
+            };
+            let updated = ctx
+                .progress_registry
+                .update_queue_state(session_key, items.clone(), guide_pending, Some(status))
+                .await;
+            if !updated {
+                send_agent_reply(
+                    ctx.client,
+                    ctx.provider,
+                    ctx.event,
+                    &reply,
+                    ctx.message_log_store,
+                )
+                .await;
+            }
+        }
+        Err(error) => {
+            release_busy_group_turn(ctx, error);
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("排队失败: {error}"),
+                ctx.message_log_store,
+            )
+            .await;
+        }
+    }
+}
+
 pub(super) async fn handle_busy_default_message(
     message: &str,
     session_key: &str,
@@ -366,6 +490,26 @@ pub(super) async fn handle_busy_default_message(
             }
             _ => Vec::new(),
         };
+        if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
+            let source_has_attachments = ctx.event.message.as_ref().is_some_and(|event_message| {
+                !event_message.images.is_empty() || !event_message.files.is_empty()
+            });
+            if source_has_attachments && images.is_empty() && files.is_empty() {
+                release_busy_group_turn(ctx, "IM attachments could not be downloaded");
+                send_agent_reply(
+                    ctx.client,
+                    ctx.provider,
+                    ctx.event,
+                    "❌ 图片或附件下载失败，未发送运行中引导，请重新发送。",
+                    ctx.message_log_store,
+                )
+                .await;
+                return;
+            }
+            handle_busy_guide_command_with_attachments(message, session_key, ctx, images, files)
+                .await;
+            return;
+        }
         match ctx.queue_manager.push_queue_with_attachments_and_context(
             session_key,
             message.to_string(),
@@ -375,14 +519,7 @@ pub(super) async fn handle_busy_default_message(
         ) {
             Ok(items) => {
                 let guide_pending = !ctx.queue_manager.guide_status(session_key).is_empty();
-                let status_message = if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
-                    format!(
-                        "运行中引导暂不支持图片，已保留附件并排队：{}",
-                        truncate_str(message, 48)
-                    )
-                } else {
-                    format!("消息已排队：{}", truncate_str(message, 48))
-                };
+                let status_message = format!("消息已排队：{}", truncate_str(message, 48));
                 let updated = ctx
                     .progress_registry
                     .update_queue_state(
@@ -393,17 +530,10 @@ pub(super) async fn handle_busy_default_message(
                     )
                     .await;
                 if !updated {
-                    let reply = if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
-                        format!(
-                            "⚠️ 运行中引导暂不支持图片，已保留附件并排队（排队 {} 条）",
-                            items.len()
-                        )
-                    } else {
-                        format!(
-                            "✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）",
-                            items.len()
-                        )
-                    };
+                    let reply = format!(
+                        "✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）",
+                        items.len()
+                    );
                     send_agent_reply(
                         ctx.client,
                         ctx.provider,

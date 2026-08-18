@@ -1249,8 +1249,8 @@
 
 预期结果：
 
-1. 飞书/微信 IM 的 Codex、Traex、Claude Code 与其他 runner 在 session 忙碌时，普通消息默认加入下一轮 FIFO 队列；只有 `/g <消息>` 明确请求当前 turn 引导。
-2. 显式 `/g` 时 Codex/Traex app-server 收到 `turn/steer`，引导文本只进入当前 turn，不会因等待 steer ACK 阻塞 runner 控制循环，也不会在成功 steer 后再次作为下一轮执行。
+1. 飞书/微信 IM 的 Codex、Traex、Claude Code 与其他支持 Guide 的 runner 在 session 忙碌时，普通后续消息默认请求当前 turn 引导；`/g <消息>` 保留为显式 Guide 命令，只有 `/q <消息>` 明确加入下一轮 FIFO 队列。
+2. 普通后续消息或显式 `/g` 时，Codex/Traex app-server 收到 `turn/steer`，Claude Code stream-json 收到 interrupt 后的 user frame；引导文本只进入当前 turn，不会因等待 ACK 阻塞 runner 控制循环，也不会在成功 Guide 后再次作为下一轮执行。
 3. `/q queue-explicit` 不进入 `turn/steer`；当前 turn 结束后只执行一次排队消息，文本和顺序保持不变。
 4. runner 拒绝 Guide、控制通道失败或不支持 live guide 时，原消息明确降级排队，队列中仍保留完整文本。
 5. Agent Chat WebUI 在 Codex/Traex/Claude Code 与自定义 runner 运行中默认选中 Guide，发送 `/g <消息>`；切换 Queue 后发送 `/q <消息>`，控制回执不会错误结束主 turn 或被陈旧 thread summary 覆盖。
@@ -1680,7 +1680,41 @@
 3. `/stop` 跨 IM worker 边界触发协议级 interrupt，并同时兼容 isolated External CLI、legacy run registry 与 ChatGPT Web browser worker。
 4. `/help` 其余命令不会因为进程拆分误进 Guide/Queue，也不会访问主进程内存注册表。
 
+### TC-IEC-73: 运行中 IM 图片与文字进入实时 Guide
+
+前置条件：
+
+1. 当前 worktree 已编译 `target/debug/bifrost`。
+2. 使用默认 `IM Gateway=worker`、`External CLI=worker` 模式、动态端口、隔离临时数据目录和 mock Codex/Traex/Claude Code Runner；不得停止或重启本机 `9900` Service。
+
+操作步骤：
+
+1. 从 IM 通道分别启动 Codex、Traex 和 Claude Code 的持续运行 turn。
+2. 在 Codex 与 Claude Code 会话发送“图片 + 普通后续消息”，在 Traex 会话发送“图片 + `/g <消息>`”。
+3. 检查主进程 Runner 收到的 Guide payload、会话附件目录、原始图片字节和 FIFO Queue 状态。
+4. 执行 focused Rust 回归与真实隔离 E2E：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     live_guide_prompt_persists_session_images_and_rejects_unsafe_ids \
+     --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     mock_inbound_accepts_inline_image_payloads \
+     --lib -- --nocapture
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+
+预期结果：
+
+1. 三种 Runner 均在当前 turn 收到实时 Guide，不显示“运行中引导暂不支持图片”，也不把成功 Guide 的消息加入 FIFO Queue。
+2. 图片保存到 canonical session attachments 下以唯一 `guide-*` ID 隔离的 `images/image-1.png`；Guide payload 含 `## Attached Images`、绝对本地路径和原始文字。
+3. Traex 的 `/g` 前缀被控制层移除，图片路径与 `/g` 后的文字一起进入 Guide；Codex/Claude Code 普通后续消息行为一致。
+4. 图片下载全部失败时明确返回错误且不发送缺图 Guide；附件准备失败或 Runner 拒绝 Guide 时，原文字与附件完整保留到 FIFO Queue。
+5. `guide_id` 只能是安全单路径组件，`../escape` 等输入不能逃逸会话附件根目录。
+
 ## 最近执行记录
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-73。focused Rust 回归 `live_guide_prompt_persists_session_images_and_rejects_unsafe_ids` 与 `mock_inbound_accepts_inline_image_payloads` 均通过；重新构建当前二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 三次输出 `[external-runner-live-guide] PASS`。默认 IM Gateway/External CLI worker 隔离链路中，Codex 与 Claude Code 的普通“图片 + 文字”后续消息、Traex 的“图片 + /g”均实时进入当前 turn；图片保存于 canonical session attachments 的唯一 `guide-*` 目录，Guide payload 含绝对路径、原文字且落盘字节精确一致。扩展的 Codex 拒绝场景确认失败 Guide 降级 FIFO Queue 后，第二个 turn 仍收到原文字与完整图片。全部测试使用动态端口和临时数据目录，未停止或重启用户现有 9900 Service。
 
 - 2026-08-18：PASS — 新增并立即执行 TC-IEC-72。`main_broker_routes_guide_and_stop_to_the_main_process_registry` 通过，验证 capability broker 的 Guide/Stop 成功路由、缺失 session 明确拒绝和 `stopped=false`；`request_agent_stop_` 2/2 通过，验证 Stop 控制错误会显式传播而不会伪报“当前没有任务”；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。默认 IM Gateway/External CLI worker 隔离链路中，Codex/Traex 普通 IM 后续消息与 `/g` 实时 steer，显式 `/q` 只在当前 turn 完成后执行一次；新增 Codex IM Stop 场景收到主进程 `turn/interrupt` 且没有 `turn/steer`。测试使用动态端口和临时数据目录，未停止或重启用户现有 9900 Service。
 

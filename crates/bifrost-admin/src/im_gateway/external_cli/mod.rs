@@ -88,6 +88,9 @@ static ACTIVE_SESSIONS: once_cell::sync::Lazy<dashmap::DashMap<String, String>> 
 static ACTIVE_WORKER_SESSIONS: once_cell::sync::Lazy<
     dashmap::DashMap<String, ExternalCliWorkerControlHandle>,
 > = once_cell::sync::Lazy::new(dashmap::DashMap::new);
+#[cfg(test)]
+static EXTERNAL_CLI_TEST_ENV_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
 static QUEUED_WORKER_SESSIONS: once_cell::sync::Lazy<
     dashmap::DashMap<String, QueuedExternalCliWorkerControl>,
 > = once_cell::sync::Lazy::new(dashmap::DashMap::new);
@@ -166,6 +169,73 @@ struct ExternalCliWorkerGuideRequest {
     guide_id: String,
     message: String,
     ack_tx: oneshot::Sender<ExternalCliGuideResult>,
+}
+
+#[cfg(test)]
+pub(crate) async fn external_cli_test_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    EXTERNAL_CLI_TEST_ENV_LOCK.lock().await
+}
+
+#[cfg(test)]
+pub(crate) struct TestActiveGuideSession {
+    session_key: String,
+    guide_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerGuideRequest>,
+    guide_rx: tokio::sync::mpsc::Receiver<ExternalCliWorkerGuideRequest>,
+}
+
+#[cfg(test)]
+impl TestActiveGuideSession {
+    pub(crate) async fn respond_next(
+        &mut self,
+        accepted: bool,
+    ) -> Result<(String, String), String> {
+        let request = self
+            .guide_rx
+            .recv()
+            .await
+            .ok_or_else(|| "test guide request channel closed".to_string())?;
+        let guide_id = request.guide_id.clone();
+        let message = request.message.clone();
+        request
+            .ack_tx
+            .send(ExternalCliGuideResult {
+                guide_id: request.guide_id,
+                accepted,
+                thread_id: accepted.then(|| "test-thread".to_string()),
+                turn_id: accepted.then(|| "test-turn".to_string()),
+                reason: (!accepted).then(|| "test rejection".to_string()),
+            })
+            .map_err(|_| "test guide response receiver closed".to_string())?;
+        Ok((guide_id, message))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestActiveGuideSession {
+    fn drop(&mut self) {
+        ACTIVE_WORKER_SESSIONS.remove_if(&self.session_key, |_, handle| {
+            handle.guide_tx.same_channel(&self.guide_tx)
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_active_guide_session(session_key: &str) -> TestActiveGuideSession {
+    let (guide_tx, guide_rx) = tokio::sync::mpsc::channel(1);
+    let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    ACTIVE_WORKER_SESSIONS.insert(
+        session_key.to_string(),
+        ExternalCliWorkerControlHandle {
+            pid: 1,
+            stop_tx,
+            guide_tx: guide_tx.clone(),
+        },
+    );
+    TestActiveGuideSession {
+        session_key: session_key.to_string(),
+        guide_tx,
+        guide_rx,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,6 +418,77 @@ pub async fn request_managed_session_guide(
             reason: Some(reason),
         }),
     }
+}
+
+/// Persist IM attachments in the canonical session directory and render a
+/// text-only live-guide payload that every steerable external runner can
+/// consume. The runner receives absolute local paths instead of base64 image
+/// data because the live guide transports currently expose text input only.
+pub(crate) async fn prepare_live_guide_prompt(
+    session_key: &str,
+    guide_id: &str,
+    message: &str,
+    images: &[bifrost_agent::ChatImageInput],
+    files: &[ExternalCliFileInput],
+) -> Result<String, String> {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return Err("session_key cannot be empty".to_string());
+    }
+    let guide_id = guide_id.trim();
+    if !matches!(
+        Path::new(guide_id)
+            .components()
+            .collect::<Vec<_>>()
+            .as_slice(),
+        [std::path::Component::Normal(_)]
+    ) {
+        return Err("guide_id must be a safe path component".to_string());
+    }
+
+    let history_path = bifrost_agent::persistence::canonical_conversation_path(
+        &bifrost_agent::config::agent_home_dir(),
+        session_key,
+    );
+    let session_dir = history_path
+        .parent()
+        .ok_or_else(|| "canonical session history path has no parent".to_string())?;
+    let session_stem = history_path
+        .file_stem()
+        .ok_or_else(|| "canonical session history path has no file stem".to_string())?;
+    let attachment_base = session_dir.join("attachments").join(session_stem);
+    let request = ExternalCliRunRequest {
+        message: message.trim().to_string(),
+        images: images
+            .iter()
+            .filter(|image| !image.data.trim().is_empty())
+            .map(|image| ExternalCliImageInput {
+                mime_type: image.mime_type.clone(),
+                data: image.data.clone(),
+                name: None,
+            })
+            .collect(),
+        files: files.to_vec(),
+        operation: default_operation(),
+        params: serde_json::json!({
+            "attachmentBaseDir": attachment_base.display().to_string(),
+        }),
+        provider_id: None,
+        runner_id: None,
+        session_key: Some(session_key.to_string()),
+        runtime: default_runtime(),
+        adapter: default_adapter(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+    let guide_dir = Path::new(guide_id);
+    let saved_images = save_image_attachments(guide_dir, &request).await?;
+    let saved_files = save_file_attachments(guide_dir, &request).await?;
+    build_prompt(&request, &saved_images, &saved_files).await
 }
 
 pub(crate) async fn request_local_managed_session_stop(
