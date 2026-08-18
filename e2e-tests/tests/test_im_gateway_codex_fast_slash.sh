@@ -33,10 +33,26 @@ cleanup() {
   if [[ "${KEEP_TEST_DIR:-false}" == "true" ]]; then
     echo "[im-codex-fast] kept test directory: $TEST_DIR" >&2
   else
-    rm -rf "$TEST_DIR"
+    remove_test_dir "$TEST_DIR"
   fi
 }
 trap cleanup EXIT
+
+remove_test_dir() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 0
+
+  # macOS may briefly retain a file while a just-stopped CLI worker exits.
+  # Cleanup must not make an otherwise-passing test fail.
+  for _ in $(seq 1 5); do
+    rm -rf "$dir" 2>/dev/null && return 0
+    [[ -e "$dir" ]] || return 0
+    sleep 0.2
+  done
+
+  echo "WARN: failed to remove temporary test directory: $dir" >&2
+  return 0
+}
 
 wait_http() {
   for _ in $(seq 1 180); do
