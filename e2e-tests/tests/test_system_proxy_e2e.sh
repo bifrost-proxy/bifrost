@@ -1030,6 +1030,17 @@ test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash() {
             wait_pid "$old_pid"
             PROXY_PID=""
 
+            # A dead listener is deliberately not the trigger here. The helper
+            # must record the confirmed parent-instance disappearance first,
+            # before it restarts a managed daemon or restores proxy settings.
+            if wait_for_condition 5 1 grep -Eq 'detection_method[=:]\"?pid_missing\"?.*system proxy lifecycle helper observed confirmed parent-instance exit during fast identity check|system proxy lifecycle helper observed confirmed parent-instance exit during fast identity check.*detection_method[=:]\"?pid_missing\"?' "${TEST_DATA_DIR}"/logs/bifrost*.log; then
+                _log_pass "macOS: lifecycle helper 在确认 parent PID 消失后触发快速恢复，未依赖端口或 HTTP readiness"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: lifecycle helper 未记录 parent PID 缺失的快速恢复触发" "日志包含 detection_method=pid_missing 和 fast identity check" "$(tail -n 160 "${TEST_DATA_DIR}"/logs/bifrost*.log 2>/dev/null || true)"
+                failed=$((failed + 1))
+            fi
+
             local waited=0
             local new_pid=""
             while [[ $waited -lt 45 ]]; do
@@ -1037,10 +1048,12 @@ test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash() {
                 if [[ -n "$new_pid" && "$new_pid" != "$old_pid" ]] \
                     && curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/system" >/dev/null 2>&1 \
                     && macos_check_proxy_enabled_for_any_service "127.0.0.1" "$PROXY_PORT"; then
-                    PROXY_PID="$new_pid"
-                    _log_pass "macOS: restartable daemon 崩溃后 lifecycle helper 自动重启主进程并保留系统代理"
-                    passed=$((passed + 1))
-                    return
+                    if grep -Eq 'detection_method[=:]\"?pid_missing\"?.*recovery_action[=:]\"?restart_or_restore\"?.*system proxy lifecycle recovery completed|system proxy lifecycle recovery completed.*detection_method[=:]\"?pid_missing\"?.*recovery_action[=:]\"?restart_or_restore\"?' "${TEST_DATA_DIR}"/logs/bifrost*.log; then
+                        PROXY_PID="$new_pid"
+                        _log_pass "macOS: restartable daemon 崩溃后 lifecycle helper 自动重启主进程并保留系统代理，恢复日志可关联"
+                        passed=$((passed + 1))
+                        return
+                    fi
                 fi
                 sleep 1
                 waited=$((waited + 1))

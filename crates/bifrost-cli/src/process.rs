@@ -4,6 +4,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::get_bifrost_dir;
 
+/// A conservative observation of a recorded runtime process identity.
+///
+/// Lifecycle recovery must distinguish a process that is definitely gone from
+/// one that merely cannot be inspected. The latter must never trigger a proxy
+/// cleanup or replacement runtime on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessIdentityStatus {
+    /// The recorded PID is still present and does not appear to have been reused.
+    Alive,
+    /// The operating system definitively reported that the PID no longer exists.
+    Exited,
+    /// The PID exists but belongs to a different process instance.
+    Reused,
+    /// The process could not be inspected conclusively (for example, permissions).
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeStartMode {
@@ -305,6 +322,116 @@ pub fn is_process_running(pid: u32) -> bool {
     true
 }
 
+/// Inspect a process instance without treating an inconclusive OS lookup as an
+/// exit. This is intentionally separate from [`is_process_running`]: callers
+/// that modify system proxy state need a stronger signal than a boolean probe.
+#[cfg(unix)]
+pub fn inspect_process_identity(
+    pid: u32,
+    recorded_started_at_ms: Option<u64>,
+) -> ProcessIdentityStatus {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    if pid == 0 || pid > libc::pid_t::MAX as u32 {
+        return ProcessIdentityStatus::Unknown;
+    }
+
+    match kill(Pid::from_raw(pid as i32), None) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => return ProcessIdentityStatus::Exited,
+        Err(Errno::EPERM) => return ProcessIdentityStatus::Unknown,
+        Err(_) => return ProcessIdentityStatus::Unknown,
+    }
+
+    match bifrost_core::start_times_match(
+        recorded_started_at_ms,
+        bifrost_core::get_process_start_time_ms(pid),
+    ) {
+        bifrost_core::StartTimeMatch::Mismatch { .. } => ProcessIdentityStatus::Reused,
+        bifrost_core::StartTimeMatch::Match | bifrost_core::StartTimeMatch::Unknown => {
+            ProcessIdentityStatus::Alive
+        }
+    }
+}
+
+/// Windows' existing process-handle check is used as a conservative fallback.
+/// A failed handle lookup can be caused by access restrictions, so only the
+/// explicit "invalid PID" error is treated as an exit.
+#[cfg(windows)]
+pub fn inspect_process_identity(
+    pid: u32,
+    recorded_started_at_ms: Option<u64>,
+) -> ProcessIdentityStatus {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return ProcessIdentityStatus::Unknown;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
+            ProcessIdentityStatus::Exited
+        } else {
+            ProcessIdentityStatus::Unknown
+        };
+    }
+
+    let mut exit_code = 0_u32;
+    let query_succeeded = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0;
+    unsafe {
+        CloseHandle(handle);
+    }
+    if !query_succeeded {
+        return ProcessIdentityStatus::Unknown;
+    }
+    if exit_code != STILL_ACTIVE as u32 {
+        return ProcessIdentityStatus::Exited;
+    }
+
+    match bifrost_core::start_times_match(
+        recorded_started_at_ms,
+        bifrost_core::get_process_start_time_ms(pid),
+    ) {
+        bifrost_core::StartTimeMatch::Mismatch { .. } => ProcessIdentityStatus::Reused,
+        bifrost_core::StartTimeMatch::Match | bifrost_core::StartTimeMatch::Unknown => {
+            ProcessIdentityStatus::Alive
+        }
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub fn inspect_process_identity(
+    _pid: u32,
+    _recorded_started_at_ms: Option<u64>,
+) -> ProcessIdentityStatus {
+    ProcessIdentityStatus::Unknown
+}
+
+#[cfg(test)]
+fn classify_process_identity_from_probe(
+    pid_exists: Result<(), i32>,
+    start_time_match: bifrost_core::StartTimeMatch,
+) -> ProcessIdentityStatus {
+    match pid_exists {
+        Ok(()) => match start_time_match {
+            bifrost_core::StartTimeMatch::Mismatch { .. } => ProcessIdentityStatus::Reused,
+            bifrost_core::StartTimeMatch::Match | bifrost_core::StartTimeMatch::Unknown => {
+                ProcessIdentityStatus::Alive
+            }
+        },
+        Err(code) if code == libc::ESRCH => ProcessIdentityStatus::Exited,
+        Err(_) => ProcessIdentityStatus::Unknown,
+    }
+}
+
 #[cfg(windows)]
 pub fn is_process_running(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
@@ -532,6 +659,38 @@ pub fn kill_process_by_pid(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_identity_classification_only_treats_esrch_as_definite_exit() {
+        assert_eq!(
+            classify_process_identity_from_probe(
+                Err(libc::ESRCH),
+                bifrost_core::StartTimeMatch::Unknown
+            ),
+            ProcessIdentityStatus::Exited
+        );
+        assert_eq!(
+            classify_process_identity_from_probe(
+                Err(libc::EPERM),
+                bifrost_core::StartTimeMatch::Unknown
+            ),
+            ProcessIdentityStatus::Unknown
+        );
+        assert_eq!(
+            classify_process_identity_from_probe(
+                Ok(()),
+                bifrost_core::StartTimeMatch::Mismatch {
+                    recorded: 10,
+                    observed: 20
+                }
+            ),
+            ProcessIdentityStatus::Reused
+        );
+        assert_eq!(
+            classify_process_identity_from_probe(Ok(()), bifrost_core::StartTimeMatch::Unknown),
+            ProcessIdentityStatus::Alive
+        );
+    }
 
     #[test]
     fn runtime_system_proxy_host_maps_wildcard_listeners_to_loopback() {
