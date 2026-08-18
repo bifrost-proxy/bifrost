@@ -3814,8 +3814,8 @@ async fn live_guide_prompt_persists_session_images_and_rejects_unsafe_ids() {
         .join("attachments")
         .join(history_path.file_stem().unwrap())
         .join(guide_id);
-    let image_path = attachment_dir.join("images/image-1.png");
-    let file_path = attachment_dir.join("files/1-runtime.log");
+    let image_path = attachment_dir.join("images").join("image-1.png");
+    let file_path = attachment_dir.join("files").join("1-runtime.log");
     assert_eq!(tokio::fs::read(&image_path).await.unwrap(), b"image-bytes");
     assert_eq!(tokio::fs::read(&file_path).await.unwrap(), b"log-bytes");
     assert!(prompt.contains("## Attached Images"), "{prompt}");
