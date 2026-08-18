@@ -859,7 +859,8 @@ pub(super) async fn handle_agent(
             return error_response(StatusCode::NOT_FOUND, "session not found");
         }
         if req.method() == Method::DELETE {
-            service.agent_session_manager.request_stop(&session_key);
+            service.queue_manager.clear_session(&session_key);
+            request_agent_stop(&service.agent_session_manager, &session_key).await;
             service.agent_session_manager.clear_session(&session_key);
             service.queue_manager.clear_session(&session_key);
             clear_persisted_agent_session_state(&session_key, None, None);
@@ -4456,11 +4457,21 @@ mod coverage_boost_v2 {
     async fn agent_session_delete_returns_ok_even_when_missing() {
         let harness = TestAdminState::builder().build();
         let service = harness.im_gateway_service();
+        let generation = service.queue_manager.session_generation("missing");
 
-        let (status, body) =
-            agent_request_json(service, Method::DELETE, "/agent/sessions/missing", None).await;
+        let (status, body) = agent_request_json(
+            service.clone(),
+            Method::DELETE,
+            "/agent/sessions/missing",
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["ok"], true);
+        assert_eq!(
+            service.queue_manager.session_generation("missing"),
+            generation.wrapping_add(2)
+        );
     }
 
     // ---------------------------------------------------------------------

@@ -1102,6 +1102,371 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn rejected_stop_interrupt_is_stopped_with_diagnostic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-reject-stop",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"reject-stop-session"})
+send(first)
+interrupt = json.loads(sys.stdin.readline())
+send({"type":"control_response","response":{"subtype":"error","request_id":interrupt["request_id"],"error":"run already completed"}})
+"#,
+        );
+        let session_key = format!("mock-stream-json-reject-stop-{}", uuid::Uuid::new_v4());
+        let run_id = format!("mock-stream-json-reject-stop-run-{}", uuid::Uuid::new_v4());
+        let stop_marker = temp_dir.path().join("stop");
+        let run = tokio::spawn({
+            let run_id = run_id.clone();
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    &run_id,
+                    Some(&session_key),
+                    mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        let output = timeout(Duration::from_secs(8), run)
+            .await
+            .expect("rejected stop interrupt should terminate")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("run already completed"));
+        assert!(!ACTIVE_RUNS.contains_key(&run_id));
+        assert!(live_guide::active_handle(&session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_stop_interrupt_without_reason_uses_default_diagnostic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-reject-stop-default",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"reject-stop-default"})
+send(first)
+interrupt = json.loads(sys.stdin.readline())
+send({"type":"control_response","response":{"subtype":"error","request_id":interrupt["request_id"]}})
+"#,
+        );
+        let session_key = format!(
+            "mock-stream-json-reject-stop-default-{}",
+            uuid::Uuid::new_v4()
+        );
+        let stop_marker = temp_dir.path().join("stop");
+        let run = tokio::spawn({
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    "mock-stream-json-reject-stop-default-run",
+                    Some(&session_key),
+                    mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        let output = run.await.unwrap().unwrap();
+        assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Claude Code rejected the stop interrupt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_result_after_stop_marker_is_terminal_stop() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-interrupted-result",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"interrupted-result"})
+send(first)
+json.loads(sys.stdin.readline())
+send({"type":"result","subtype":"error_during_execution","is_error":True})
+"#,
+        );
+        let session_key = format!(
+            "mock-stream-json-interrupted-result-{}",
+            uuid::Uuid::new_v4()
+        );
+        let stop_marker = temp_dir.path().join("stop");
+        let run = tokio::spawn({
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    "mock-stream-json-interrupted-result-run",
+                    Some(&session_key),
+                    mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        assert_eq!(
+            run.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Stopped
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unacknowledged_stop_interrupt_hits_bounded_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-no-stop-ack",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"no-stop-ack-session"})
+send(first)
+json.loads(sys.stdin.readline())
+with open(os.environ["STOP_SEEN"], "w", encoding="utf-8") as handle:
+    handle.write("seen")
+time.sleep(30)
+"#,
+        );
+        let session_key = format!("mock-stream-json-no-stop-ack-{}", uuid::Uuid::new_v4());
+        let run_id = format!("mock-stream-json-no-stop-ack-run-{}", uuid::Uuid::new_v4());
+        let stop_marker = temp_dir.path().join("stop");
+        let stop_seen = temp_dir.path().join("stop-seen");
+        let mut spec = mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS));
+        spec.env
+            .insert("STOP_SEEN".to_string(), stop_seen.display().to_string());
+        let run = tokio::spawn({
+            let run_id = run_id.clone();
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    &run_id,
+                    Some(&session_key),
+                    spec,
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        timeout(Duration::from_secs(5), async {
+            while !stop_seen.is_file() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Claude stop interrupt observed");
+        let rejected = live_guide::request_session_guide(
+            &session_key,
+            "guide-during-stop".to_string(),
+            "must not be delivered".to_string(),
+        )
+        .await;
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("Claude Code session is stopping")
+        );
+        let output = timeout(Duration::from_secs(8), run)
+            .await
+            .expect("unacknowledged stop interrupt should hit fallback")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Claude Code did not acknowledge the stop interrupt before termination"));
+        assert!(!ACTIVE_RUNS.contains_key(&run_id));
+        assert!(live_guide::active_handle(&session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_stdin_stop_records_interrupt_write_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-closed-stop",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"closed-stop-session"})
+send(first)
+os.close(0)
+with open(os.environ["STDIN_CLOSED"], "w", encoding="utf-8") as handle:
+    handle.write("closed")
+time.sleep(30)
+"#,
+        );
+        let session_key = format!("mock-stream-json-closed-stop-{}", uuid::Uuid::new_v4());
+        let run_id = format!("mock-stream-json-closed-stop-run-{}", uuid::Uuid::new_v4());
+        let stop_marker = temp_dir.path().join("stop");
+        let stdin_closed = temp_dir.path().join("stdin-closed");
+        let mut spec = mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS));
+        spec.env.insert(
+            "STDIN_CLOSED".to_string(),
+            stdin_closed.display().to_string(),
+        );
+        let run = tokio::spawn({
+            let run_id = run_id.clone();
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    &run_id,
+                    Some(&session_key),
+                    spec,
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        timeout(Duration::from_secs(5), async {
+            while !stdin_closed.is_file() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Claude stdin closed");
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        let output = timeout(Duration::from_secs(8), run)
+            .await
+            .expect("closed stdin stop should terminate")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("failed to send Claude Code stop interrupt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_stdin_timeout_records_interrupt_write_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-closed-timeout",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"closed-timeout-session"})
+send(first)
+os.close(0)
+with open(os.environ["STDIN_CLOSED"], "w", encoding="utf-8") as handle:
+    handle.write("closed")
+time.sleep(30)
+"#,
+        );
+        let stdin_closed = temp_dir.path().join("stdin-closed");
+        let mut spec = mock_spec(&executable, Some(1));
+        spec.env.insert(
+            "STDIN_CLOSED".to_string(),
+            stdin_closed.display().to_string(),
+        );
+        let run = tokio::spawn(run_command(
+            "mock-stream-json-closed-timeout-run",
+            None,
+            spec,
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        timeout(Duration::from_secs(5), async {
+            while !stdin_closed.is_file() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Claude timeout stdin closed");
+        let output = timeout(Duration::from_secs(8), run)
+            .await
+            .expect("closed stdin timeout should terminate")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::TimedOut);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("stream-json runner timed out after 1 seconds"));
+        assert!(stderr.contains("failed to interrupt timed-out Claude Code run"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn pending_guide_rejects_parallel_redirect() {
         let temp_dir = tempfile::tempdir().unwrap();
         let executable = mock_executable(

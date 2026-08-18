@@ -3,17 +3,32 @@ use std::ffi::OsStr;
 use std::sync::OnceLock;
 
 static EXTERNAL_CLI_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-fn external_cli_env_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    EXTERNAL_CLI_ENV_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .blocking_lock()
+struct ExternalCliEnvGuard {
+    _env_guard: tokio::sync::MutexGuard<'static, ()>,
+    _data_dir_guard: std::sync::MutexGuard<'static, ()>,
 }
 
-async fn external_cli_env_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
-    EXTERNAL_CLI_ENV_LOCK
+fn external_cli_env_guard() -> ExternalCliEnvGuard {
+    let env_guard = EXTERNAL_CLI_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .blocking_lock();
+    let data_dir_guard = crate::test_env::bifrost_data_dir_lock();
+    ExternalCliEnvGuard {
+        _env_guard: env_guard,
+        _data_dir_guard: data_dir_guard,
+    }
+}
+
+async fn external_cli_env_guard_async() -> ExternalCliEnvGuard {
+    let env_guard = EXTERNAL_CLI_ENV_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .await
+        .await;
+    let data_dir_guard = crate::test_env::bifrost_data_dir_lock();
+    ExternalCliEnvGuard {
+        _env_guard: env_guard,
+        _data_dir_guard: data_dir_guard,
+    }
 }
 
 struct EnvGuard {
@@ -248,29 +263,60 @@ async fn acknowledged_external_worker_stop_does_not_kill_pid() {
 }
 
 #[tokio::test]
-async fn unacknowledged_external_worker_stop_uses_bounded_pid_fallback() {
+async fn worker_stop_rejects_empty_and_missing_session_keys() {
     let _registry_guard = external_cli_env_guard_async().await;
-    let session_key = format!("unacked-external-worker-{}", uuid::Uuid::new_v4());
+    assert!(!request_worker_session_stop("   ").await);
+    assert!(!request_worker_session_stop("missing-external-worker").await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unacknowledged_external_worker_stop_uses_owned_pid_fallback() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command as StdProcessCommand;
+
+    let mut child = StdProcessCommand::new("sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn unacknowledged external worker process");
+    let pid = child.id();
+    let session_key = format!("unacknowledged-worker-{}", uuid::Uuid::new_v4());
     let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
     let (guide_tx, _guide_rx) = tokio::sync::mpsc::channel(1);
+    ACTIVE_WORKERS.insert(pid, stop_tx.clone());
     ACTIVE_WORKER_SESSIONS.insert(
         session_key.clone(),
         ExternalCliWorkerControlHandle {
-            pid: 999_999_998,
-            stop_tx,
+            pid,
+            stop_tx: stop_tx.clone(),
             guide_tx,
         },
     );
-
-    let observe_stop = tokio::spawn(async move {
+    let consume_without_ack = tokio::spawn(async move {
         let _ack_tx = stop_rx.recv().await.expect("stop request");
         tokio::time::sleep(Duration::from_secs(10)).await;
     });
-    let started = tokio::time::Instant::now();
+
     assert!(request_worker_session_stop(&session_key).await);
-    assert!(started.elapsed() >= Duration::from_millis(WORKER_STOP_GRACE_MS));
-    observe_stop.abort();
-    assert!(!ACTIVE_WORKER_SESSIONS.contains_key(&session_key));
+    let status = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(status) = child.try_wait().expect("poll fallback-killed worker") {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("owned worker pid should be terminated after grace period");
+    assert!(!status.success());
+    consume_without_ack.abort();
+    ACTIVE_WORKERS.remove(&pid);
 }
 
 #[tokio::test]
@@ -293,7 +339,787 @@ async fn sessionless_registry_job_can_cancel_while_queued() {
 }
 
 #[tokio::test]
-async fn stop_all_worker_sessions_cancels_queued_and_acknowledged_active_entries() {
+async fn registered_worker_stop_resolves_named_and_sessionless_runs() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let runs_root = temp_dir.path();
+
+    let named_run = format!("named-run-{}", uuid::Uuid::new_v4());
+    let named_session = format!("named-session-{}", uuid::Uuid::new_v4());
+    tokio::fs::create_dir_all(runs_root.join(&named_run))
+        .await
+        .unwrap();
+    ACTIVE_RUNS.insert(named_run.clone(), 999_999_999);
+    ACTIVE_SESSIONS.insert(named_session.clone(), named_run.clone());
+    assert!(request_registered_worker_run_stop(runs_root, &named_session).await);
+    assert!(runs_root.join(&named_run).join("stop_requested").is_file());
+    ACTIVE_RUNS.remove(&named_run);
+    ACTIVE_SESSIONS.remove(&named_session);
+
+    let sessionless_run = format!("sessionless-run-{}", uuid::Uuid::new_v4());
+    tokio::fs::create_dir_all(runs_root.join(&sessionless_run))
+        .await
+        .unwrap();
+    ACTIVE_RUNS.insert(sessionless_run.clone(), 999_999_998);
+    assert!(request_registered_worker_run_stop(runs_root, "").await);
+    assert!(runs_root
+        .join(&sessionless_run)
+        .join("stop_requested")
+        .is_file());
+    ACTIVE_RUNS.remove(&sessionless_run);
+}
+
+fn worker_exec_request(session_key: Option<String>, script: &str) -> ExternalCliRunRequest {
+    ExternalCliRunRequest {
+        message: "worker request".to_string(),
+        images: Vec::new(),
+        files: Vec::new(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("worker-test-provider".to_string()),
+        runner_id: Some("worker-test-runner".to_string()),
+        session_key,
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: "mock".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("sh".to_string()),
+            args: vec!["-c".to_string(), script.to_string()],
+            transport: Some(ExternalCliTransport::Exec),
+            timeout_secs: Some(30),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    }
+}
+
+#[test]
+fn worker_stdio_subprocess_entrypoint() {
+    if std::env::var_os("BIFROST_TEST_REAL_WORKER_CHILD").is_some() {
+        let marker = std::env::var_os("BIFROST_TEST_REAL_WORKER_MARKER")
+            .expect("real worker child marker path");
+        std::fs::write(marker, b"entered").expect("write real worker child marker");
+        run_worker_stdio().expect("run real external worker stdio loop");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn real_worker_stdio_subprocess_interrupts_via_protocol() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let executable = temp_dir.path().join("real-worker-test.py");
+    std::fs::write(
+        &executable,
+        r#"#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+test_exe = os.environ["BIFROST_TEST_REAL_WORKER_EXE"]
+child = subprocess.Popen(
+    [test_exe, "--exact", "im_gateway::external_cli::tests::worker_stdio_subprocess_entrypoint", "--nocapture", "--quiet"],
+    stdin=sys.stdin,
+    stdout=subprocess.PIPE,
+    stderr=sys.stderr,
+    text=True,
+)
+for line in child.stdout:
+    if line.lstrip().startswith("{"):
+        sys.stdout.write(line)
+        sys.stdout.flush()
+sys.exit(child.wait())
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let current_exe = std::env::current_exe().unwrap();
+    let marker = temp_dir.path().join("worker-entered");
+    let _child_mode = EnvGuard::set("BIFROST_TEST_REAL_WORKER_CHILD", Path::new("1"));
+    let _child_exe = EnvGuard::set("BIFROST_TEST_REAL_WORKER_EXE", &current_exe);
+    let _child_marker = EnvGuard::set("BIFROST_TEST_REAL_WORKER_MARKER", &marker);
+    let _force = EnvGuard::set("BIFROST_FORCE_EXTERNAL_CLI_WORKER", Path::new("1"));
+    let _executable = EnvGuard::set(TEST_EXTERNAL_CLI_WORKER_EXECUTABLE_ENV, &executable);
+    let session_key = format!("real-worker-stdio-{}", uuid::Uuid::new_v4());
+    let runtime = ExternalCliRuntime::new(temp_dir.path().join("runs"));
+    let request = worker_exec_request(Some(session_key.clone()), "sleep 30");
+    let task = tokio::spawn(async move { runtime.run(request).await });
+    wait_for_parent_worker_handle(&session_key).await;
+
+    assert!(request_worker_session_stop(&session_key).await);
+    let result = timeout(Duration::from_secs(8), task)
+        .await
+        .expect("real worker stdio completion")
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read(&marker).unwrap(), b"entered");
+    assert_eq!(result.status, ExternalCliRunStatus::Stopped);
+}
+
+async fn collect_worker_events(
+    events: &mut mpsc::Receiver<ExternalCliWorkerEvent>,
+) -> Vec<ExternalCliWorkerEvent> {
+    let mut collected = Vec::new();
+    while let Some(event) = events.recv().await {
+        collected.push(event);
+    }
+    collected
+}
+
+#[cfg(unix)]
+fn fake_parent_worker(temp_dir: &tempfile::TempDir) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_dir.path().join("fake-external-worker.py");
+    std::fs::write(
+        &path,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+import time
+
+scenario = os.environ.get("BIFROST_TEST_EXTERNAL_CLI_WORKER_SCENARIO", "stopped")
+
+def emit(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+run = sys.stdin.readline()
+if not run:
+    sys.exit(2)
+emit({"type":"started","sessionKey":None,"pid":os.getpid()})
+
+if scenario == "close_stdin":
+    os.close(0)
+    time.sleep(10)
+elif scenario == "closed_stdin_with_stdout_holder":
+    subprocess.Popen(["sleep", "10"], stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)
+    os._exit(0)
+elif scenario == "delayed_stopped":
+    time.sleep(0.2)
+    emit({"type":"stopped"})
+elif scenario == "delayed_failed":
+    time.sleep(0.1)
+    emit({"type":"failed","error":"fake parent worker failure"})
+elif scenario == "delayed_eof":
+    time.sleep(0.1)
+elif scenario == "finished":
+    emit({"type":"heartbeat","timestamp_ms":1})
+    emit({"type":"progress","event":{
+        "eventType":"status","content":"fake progress","title":None,"raw":{}
+    }})
+    emit({"type":"finished","result":{"resultPath":os.environ["BIFROST_TEST_WORKER_RESULT_PATH"]}})
+else:
+    for raw in sys.stdin:
+        command = json.loads(raw)
+        kind = command.get("type")
+        if kind == "guide":
+            guide_id = command["guide_id"]
+            if guide_id == "accepted":
+                emit({"type":"guide_result","result":{
+                    "guideId":guide_id,
+                    "accepted":True,
+                    "threadId":"thread-test",
+                    "turnId":"turn-test"
+                }})
+        elif kind == "stop":
+            if scenario == "failed_on_stop":
+                time.sleep(0.2)
+                emit({"type":"failed","error":"fake failure while stopping"})
+            elif scenario == "invalid_finished_on_stop":
+                emit({"type":"finished","result":{"resultPath":"/outside-worker-results.json"}})
+            elif scenario == "eof_on_stop":
+                pass
+            elif scenario == "hang_on_stop":
+                time.sleep(10)
+            else:
+                emit({"type":"stopped"})
+            break
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    path
+}
+
+#[cfg(unix)]
+async fn wait_for_parent_worker_handle(session_key: &str) -> ExternalCliWorkerControlHandle {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(handle) = ACTIVE_WORKER_SESSIONS.get(session_key) {
+                break handle.value().clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("parent worker registration")
+}
+
+#[cfg(unix)]
+async fn spawn_fake_parent_worker(
+    temp_dir: &tempfile::TempDir,
+    scenario: &'static str,
+) -> (
+    String,
+    tokio::task::JoinHandle<Result<ExternalCliRunResult, String>>,
+    EnvGuard,
+    EnvGuard,
+    EnvGuard,
+) {
+    let executable = fake_parent_worker(temp_dir);
+    let force_worker = EnvGuard::set("BIFROST_FORCE_EXTERNAL_CLI_WORKER", Path::new("1"));
+    let executable_guard = EnvGuard::set(TEST_EXTERNAL_CLI_WORKER_EXECUTABLE_ENV, &executable);
+    let scenario_guard = EnvGuard::set(
+        "BIFROST_TEST_EXTERNAL_CLI_WORKER_SCENARIO",
+        Path::new(scenario),
+    );
+    let session_key = format!("fake-parent-worker-{}", uuid::Uuid::new_v4());
+    let runtime = ExternalCliRuntime::new(temp_dir.path().join("runs"));
+    let request = worker_exec_request(Some(session_key.clone()), "sleep 30");
+    let task = tokio::spawn(async move { runtime.run(request).await });
+    (
+        session_key,
+        task,
+        force_worker,
+        executable_guard,
+        scenario_guard,
+    )
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_stop_write_failure_terminates_and_acknowledges() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _stop_failure = EnvGuard::set(
+        TEST_EXTERNAL_CLI_PARENT_STOP_WRITE_FAILURE_ENV,
+        Path::new("1"),
+    );
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "close_stdin").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (ack_tx, ack_rx) = oneshot::channel();
+    handle.stop_tx.send(ack_tx).unwrap();
+
+    timeout(Duration::from_secs(8), ack_rx)
+        .await
+        .expect("bounded stop acknowledgement")
+        .unwrap();
+    let result = timeout(Duration::from_secs(8), task)
+        .await
+        .expect("bounded parent completion")
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.status, ExternalCliRunStatus::Stopped);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_acks_duplicate_stop_rejects_guide_and_accepts_failed_exit() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "failed_on_stop").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+    let (first_ack_tx, first_ack_rx) = oneshot::channel();
+    handle.stop_tx.send(first_ack_tx).unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let (second_ack_tx, second_ack_rx) = oneshot::channel();
+    handle.stop_tx.send(second_ack_tx).unwrap();
+    let (guide_ack_tx, guide_ack_rx) = oneshot::channel();
+    handle
+        .guide_tx
+        .send(ExternalCliWorkerGuideRequest {
+            guide_id: "during-stop".to_string(),
+            message: "ignored".to_string(),
+            ack_tx: guide_ack_tx,
+        })
+        .await
+        .unwrap();
+
+    let rejected = guide_ack_rx.await.unwrap();
+    assert_eq!(
+        rejected.reason.as_deref(),
+        Some("external runner is stopping")
+    );
+    first_ack_rx.await.unwrap();
+    second_ack_rx.await.unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap().status,
+        ExternalCliRunStatus::Stopped
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_treats_event_eof_during_stop_as_stopped() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "eof_on_stop").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+    let (ack_tx, ack_rx) = oneshot::channel();
+    handle.stop_tx.send(ack_tx).unwrap();
+
+    ack_rx.await.unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap().status,
+        ExternalCliRunStatus::Stopped
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_invalid_result_path_still_cleans_pending_control_requests() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "invalid_finished_on_stop").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+    let (guide_tx, guide_rx) = oneshot::channel();
+    handle
+        .guide_tx
+        .send(ExternalCliWorkerGuideRequest {
+            guide_id: "pending-at-invalid-finish".to_string(),
+            message: "pending".to_string(),
+            ack_tx: guide_tx,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (stop_tx, stop_rx) = oneshot::channel();
+    handle.stop_tx.send(stop_tx).unwrap();
+
+    stop_rx.await.unwrap();
+    assert_eq!(
+        guide_rx.await.unwrap().reason.as_deref(),
+        Some("external runner finished before guide acknowledgement")
+    );
+    let error = task.await.unwrap().unwrap_err();
+    assert!(error.contains("outside"), "unexpected error: {error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_timeout_terminates_unresponsive_worker() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "hang_on_stop").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+    let (ack_tx, ack_rx) = oneshot::channel();
+    handle.stop_tx.send(ack_tx).unwrap();
+
+    timeout(Duration::from_secs(8), ack_rx)
+        .await
+        .expect("hard-stop acknowledgement")
+        .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(8), task)
+            .await
+            .expect("hard-stop completion")
+            .unwrap()
+            .unwrap()
+            .status,
+        ExternalCliRunStatus::Stopped
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_routes_guides_bounds_pending_and_rejects_them_on_finish() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "stopped").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    handle
+        .guide_tx
+        .send(ExternalCliWorkerGuideRequest {
+            guide_id: "accepted".to_string(),
+            message: "accepted".to_string(),
+            ack_tx: accepted_tx,
+        })
+        .await
+        .unwrap();
+    let accepted = accepted_rx.await.unwrap();
+    assert!(accepted.accepted, "unexpected guide result: {accepted:?}");
+
+    let (first_tx, first_rx) = oneshot::channel();
+    handle
+        .guide_tx
+        .send(ExternalCliWorkerGuideRequest {
+            guide_id: "duplicate".to_string(),
+            message: "first".to_string(),
+            ack_tx: first_tx,
+        })
+        .await
+        .unwrap();
+    let (duplicate_tx, duplicate_rx) = oneshot::channel();
+    handle
+        .guide_tx
+        .send(ExternalCliWorkerGuideRequest {
+            guide_id: "duplicate".to_string(),
+            message: "second".to_string(),
+            ack_tx: duplicate_tx,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        duplicate_rx.await.unwrap().reason.as_deref(),
+        Some("duplicate guide id is already pending")
+    );
+
+    let mut pending = vec![first_rx];
+    for index in 1..MAX_PENDING_EXTERNAL_GUIDES {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        handle
+            .guide_tx
+            .send(ExternalCliWorkerGuideRequest {
+                guide_id: format!("pending-{index}"),
+                message: "pending".to_string(),
+                ack_tx,
+            })
+            .await
+            .unwrap();
+        pending.push(ack_rx);
+    }
+    let (overflow_tx, overflow_rx) = oneshot::channel();
+    handle
+        .guide_tx
+        .send(ExternalCliWorkerGuideRequest {
+            guide_id: "overflow".to_string(),
+            message: "overflow".to_string(),
+            ack_tx: overflow_tx,
+        })
+        .await
+        .unwrap();
+    assert!(overflow_rx
+        .await
+        .unwrap()
+        .reason
+        .unwrap()
+        .contains("too many pending guide requests"));
+
+    let (stop_tx, stop_rx) = oneshot::channel();
+    handle.stop_tx.send(stop_tx).unwrap();
+    stop_rx.await.unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap().status,
+        ExternalCliRunStatus::Stopped
+    );
+    for ack_rx in pending {
+        assert_eq!(
+            ack_rx.await.unwrap().reason.as_deref(),
+            Some("external runner finished before guide acknowledgement")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_guide_channel_closure_does_not_spin() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "delayed_stopped").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+    ACTIVE_WORKER_SESSIONS.remove(&session_key);
+    drop(handle);
+
+    assert_eq!(
+        timeout(Duration::from_secs(3), task)
+            .await
+            .expect("parent exits after guide channel closes")
+            .unwrap()
+            .unwrap()
+            .status,
+        ExternalCliRunStatus::Stopped
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_sessionless_finish_routes_progress_and_reads_result() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let executable = fake_parent_worker(&temp_dir);
+    let result_path =
+        external_cli_worker_result_dir().join(format!("result-{}.json", uuid::Uuid::new_v4()));
+    let expected = ExternalCliRunResult::stopped(None, "mock".to_string());
+    write_external_cli_worker_json(
+        &result_path,
+        &expected,
+        EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES,
+    )
+    .unwrap();
+    let _force = EnvGuard::set("BIFROST_FORCE_EXTERNAL_CLI_WORKER", Path::new("1"));
+    let _executable = EnvGuard::set(TEST_EXTERNAL_CLI_WORKER_EXECUTABLE_ENV, &executable);
+    let _scenario = EnvGuard::set(
+        "BIFROST_TEST_EXTERNAL_CLI_WORKER_SCENARIO",
+        Path::new("finished"),
+    );
+    let _result_path = EnvGuard::set("BIFROST_TEST_WORKER_RESULT_PATH", &result_path);
+    let runtime = ExternalCliRuntime::new(temp_dir.path().join("runs"));
+    let (progress_tx, mut progress_rx) = mpsc::channel(4);
+
+    let result = runtime
+        .run_with_progress(worker_exec_request(None, "sleep 30"), Some(progress_tx))
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, ExternalCliRunStatus::Stopped);
+    assert_eq!(progress_rx.recv().await.unwrap().content, "fake progress");
+    assert!(!result_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_reports_normal_failure_and_eof() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    for (scenario, expected) in [
+        ("delayed_failed", "fake parent worker failure"),
+        ("delayed_eof", "exited before final event"),
+    ] {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_session_key, task, _force, _executable, _scenario) =
+            spawn_fake_parent_worker(&temp_dir, scenario).await;
+        let error = task.await.unwrap().unwrap_err();
+        assert!(
+            error.contains(expected),
+            "unexpected {scenario} error: {error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_worker_rejects_oversized_guide_before_worker_write() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "stopped").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+    let (guide_tx, guide_rx) = oneshot::channel();
+    handle
+        .guide_tx
+        .send(ExternalCliWorkerGuideRequest {
+            guide_id: "closed-stdin".to_string(),
+            message: "x".repeat(EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES),
+            ack_tx: guide_tx,
+        })
+        .await
+        .unwrap();
+    let rejected = guide_rx.await.unwrap();
+    assert!(!rejected.accepted);
+    let reason = rejected.reason.unwrap();
+    assert!(
+        reason.contains("exceeds hard limit"),
+        "unexpected reason: {reason}"
+    );
+    let (stop_tx, stop_rx) = oneshot::channel();
+    handle.stop_tx.send(stop_tx).unwrap();
+    stop_rx.await.unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap().status,
+        ExternalCliRunStatus::Stopped
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_request_handles_guide_duplicate_stop_and_command_eof() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_key = format!("worker-loop-stop-{}", uuid::Uuid::new_v4());
+    let request = worker_exec_request(Some(session_key.clone()), "cat >/dev/null; sleep 30");
+    let (command_tx, command_rx) = mpsc::channel(MAX_PENDING_EXTERNAL_GUIDES + 2);
+    let (event_tx, mut event_rx) = mpsc::channel(128);
+    let worker = tokio::spawn(run_worker_request(
+        temp_dir.path().to_path_buf(),
+        request.clone(),
+        command_rx,
+        event_tx,
+    ));
+    timeout(Duration::from_secs(5), async {
+        while !ACTIVE_SESSIONS.contains_key(&session_key) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker run registration");
+
+    command_tx
+        .send(ExternalCliWorkerCommand::Guide {
+            guide_id: "exec-guide".to_string(),
+            message: "cannot steer exec".to_string(),
+        })
+        .await
+        .unwrap();
+    command_tx
+        .send(ExternalCliWorkerCommand::Run {
+            request: Box::new(ExternalCliWorkerRunRequest {
+                protocol_version: WORKER_PROTOCOL_VERSION,
+                runs_root: temp_dir.path().display().to_string(),
+                request_path: temp_dir.path().join("ignored.json"),
+            }),
+        })
+        .await
+        .unwrap();
+    command_tx
+        .send(ExternalCliWorkerCommand::Stop)
+        .await
+        .unwrap();
+    command_tx
+        .send(ExternalCliWorkerCommand::Stop)
+        .await
+        .unwrap();
+    drop(command_tx);
+
+    timeout(Duration::from_secs(8), worker)
+        .await
+        .expect("worker loop stop completion")
+        .unwrap()
+        .unwrap();
+    let events = collect_worker_events(&mut event_rx).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ExternalCliWorkerEvent::GuideResult { result }
+            if result.guide_id == "exec-guide" && !result.accepted
+    )));
+    for event in events {
+        if let ExternalCliWorkerEvent::Finished { result } = event {
+            let _ = std::fs::remove_file(result.result_path);
+        }
+    }
+}
+
+#[tokio::test]
+async fn worker_request_eof_before_run_registration_stops_cleanly() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let request = worker_exec_request(None, "sleep 1; exit 7");
+    let (command_tx, command_rx) = mpsc::channel(MAX_PENDING_EXTERNAL_GUIDES + 2);
+    let (event_tx, mut event_rx) = mpsc::channel(128);
+    drop(command_tx);
+
+    run_worker_request(temp_dir.path().to_path_buf(), request, command_rx, event_tx)
+        .await
+        .unwrap();
+
+    let events = collect_worker_events(&mut event_rx).await;
+    assert!(matches!(
+        events.last(),
+        Some(ExternalCliWorkerEvent::Stopped | ExternalCliWorkerEvent::Finished { .. })
+    ));
+    for event in events {
+        if let ExternalCliWorkerEvent::Finished { result } = event {
+            let _ = std::fs::remove_file(result.result_path);
+        }
+    }
+}
+
+#[tokio::test]
+async fn worker_request_aborts_when_native_stop_cannot_be_registered() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let _stop_outcome = EnvGuard::set(
+        TEST_EXTERNAL_CLI_WORKER_STOP_OUTCOME_ENV,
+        Path::new("rejected"),
+    );
+    let temp_dir = tempfile::tempdir().unwrap();
+    let request = worker_exec_request(None, "sleep 30");
+    let (command_tx, command_rx) = mpsc::channel(1);
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    command_tx
+        .send(ExternalCliWorkerCommand::Stop)
+        .await
+        .unwrap();
+    drop(command_tx);
+
+    timeout(
+        Duration::from_secs(3),
+        run_worker_request(temp_dir.path().to_path_buf(), request, command_rx, event_tx),
+    )
+    .await
+    .expect("rejected native stop must abort the worker task")
+    .unwrap();
+    assert!(collect_worker_events(&mut event_rx)
+        .await
+        .iter()
+        .any(|event| matches!(event, ExternalCliWorkerEvent::Stopped)));
+}
+
+#[tokio::test]
+async fn worker_request_hard_stops_after_native_stop_grace_period() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let _stop_outcome = EnvGuard::set(
+        TEST_EXTERNAL_CLI_WORKER_STOP_OUTCOME_ENV,
+        Path::new("accepted"),
+    );
+    let temp_dir = tempfile::tempdir().unwrap();
+    let request = worker_exec_request(None, "sleep 30");
+    let (command_tx, command_rx) = mpsc::channel(1);
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    command_tx
+        .send(ExternalCliWorkerCommand::Stop)
+        .await
+        .unwrap();
+    drop(command_tx);
+
+    timeout(
+        Duration::from_secs(4),
+        run_worker_request(temp_dir.path().to_path_buf(), request, command_rx, event_tx),
+    )
+    .await
+    .expect("accepted native stop must use the bounded hard-stop fallback")
+    .unwrap();
+    assert!(collect_worker_events(&mut event_rx)
+        .await
+        .iter()
+        .any(|event| matches!(event, ExternalCliWorkerEvent::Stopped)));
+}
+
+#[tokio::test]
+async fn worker_registration_wait_and_abort_helpers_cover_unregistered_runs() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let completed =
+        tokio::spawn(async { Ok(ExternalCliRunResult::stopped(None, "mock".to_string())) });
+    while !completed.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !wait_for_worker_run_stop_attempt(&completed, || async { false }).await,
+        "a completed unregistered run must not report a native stop"
+    );
+    completed.await.unwrap().unwrap();
+
+    let pending = tokio::spawn(std::future::pending::<Result<ExternalCliRunResult, String>>());
+    assert!(
+        !wait_for_worker_run_stop_attempt(&pending, || async { false }).await,
+        "an unregistered run must stop waiting at the bounded deadline"
+    );
+    assert!(matches!(
+        abort_worker_run(&pending),
+        ExternalCliWorkerEvent::Stopped
+    ));
+    assert!(pending.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn stop_worker_sessions_cancels_queued_and_acknowledged_active_entries() {
     let _registry_guard = external_cli_env_guard_async().await;
     let queued_key = format!("queued-stop-all-{}", uuid::Uuid::new_v4());
     let active_key = format!("active-stop-all-{}", uuid::Uuid::new_v4());
@@ -321,7 +1147,8 @@ async fn stop_all_worker_sessions_cancels_queued_and_acknowledged_active_entries
         }
     });
 
-    let stopped = stop_all_worker_sessions().await;
+    let stopped =
+        stop_worker_sessions(HashSet::from([queued_key.clone(), active_key.clone()])).await;
 
     assert!(stopped >= 2);
     assert!(*cancel_rx.borrow());
@@ -330,86 +1157,39 @@ async fn stop_all_worker_sessions_cancels_queued_and_acknowledged_active_entries
     ACTIVE_WORKER_SESSIONS.remove(&active_key);
 }
 
-#[test]
-fn active_worker_registration_drop_cleans_only_its_owned_entries() {
-    let pid = 4_000_000_001;
-    let session_key = format!("registration-drop-{}", uuid::Uuid::new_v4());
-    let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (guide_tx, _guide_rx) = tokio::sync::mpsc::channel(1);
-    ACTIVE_WORKERS.insert(pid, stop_tx.clone());
-    ACTIVE_WORKER_SESSIONS.insert(
-        session_key.clone(),
-        ExternalCliWorkerControlHandle {
-            pid,
-            stop_tx: stop_tx.clone(),
-            guide_tx: guide_tx.clone(),
+#[tokio::test]
+async fn stop_all_worker_sessions_collects_both_registries() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let queued_key = format!("queued-stop-public-{}", uuid::Uuid::new_v4());
+    let active_key = format!("active-stop-public-{}", uuid::Uuid::new_v4());
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    QUEUED_WORKER_SESSIONS.insert(
+        queued_key.clone(),
+        QueuedExternalCliWorkerControl {
+            queue_id: uuid::Uuid::new_v4().to_string(),
+            cancel_tx,
         },
     );
-    drop(ActiveWorkerRegistration {
-        pid,
-        session_key: Some(session_key.clone()),
-    });
-    assert!(!ACTIVE_WORKERS.contains_key(&pid));
-    assert!(!ACTIVE_WORKER_SESSIONS.contains_key(&session_key));
-
-    let replacement_pid = pid - 1;
-    ACTIVE_WORKERS.insert(pid, stop_tx.clone());
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (guide_tx, _guide_rx) = tokio::sync::mpsc::channel(1);
     ACTIVE_WORKER_SESSIONS.insert(
-        session_key.clone(),
+        active_key.clone(),
         ExternalCliWorkerControlHandle {
-            pid: replacement_pid,
+            pid: 999_999_989,
             stop_tx,
             guide_tx,
         },
     );
-    drop(ActiveWorkerRegistration {
-        pid,
-        session_key: Some(session_key.clone()),
+    let acknowledge = tokio::spawn(async move {
+        let ack_tx = stop_rx.recv().await.expect("public stop-all request");
+        let _ = ack_tx.send(());
     });
-    assert!(ACTIVE_WORKER_SESSIONS.contains_key(&session_key));
-    ACTIVE_WORKER_SESSIONS.remove(&session_key);
 
-    let sessionless_pid = pid - 2;
-    let (sessionless_tx, _sessionless_rx) = tokio::sync::mpsc::unbounded_channel();
-    ACTIVE_WORKERS.insert(sessionless_pid, sessionless_tx);
-    drop(ActiveWorkerRegistration {
-        pid: sessionless_pid,
-        session_key: None,
-    });
-    assert!(!ACTIVE_WORKERS.contains_key(&sessionless_pid));
-}
-
-#[test]
-fn queued_worker_guard_and_session_lock_registry_preserve_owned_entries_only() {
-    let session_key = format!("queued-guard-{}", uuid::Uuid::new_v4());
-    let queue_id = uuid::Uuid::new_v4().to_string();
-    let replacement_queue_id = uuid::Uuid::new_v4().to_string();
-    let (cancel_tx, _cancel_rx) = watch::channel(false);
-    QUEUED_WORKER_SESSIONS.insert(
-        session_key.clone(),
-        QueuedExternalCliWorkerControl {
-            queue_id: replacement_queue_id.clone(),
-            cancel_tx,
-        },
-    );
-
-    drop(QueuedExternalCliWorkerGuard {
-        session_key: Some(session_key.clone()),
-        queue_id,
-    });
-    assert_eq!(
-        QUEUED_WORKER_SESSIONS
-            .get(&session_key)
-            .map(|entry| entry.queue_id.clone()),
-        Some(replacement_queue_id)
-    );
-    drop(QueuedExternalCliWorkerGuard {
-        session_key: None,
-        queue_id: "unused".to_string(),
-    });
-    QUEUED_WORKER_SESSIONS.remove(&session_key);
-
-    assert_eq!(WORKER_SESSION_LOCKS.len(), WORKER_SESSION_LOCK_STRIPES);
+    assert_eq!(stop_all_worker_sessions().await, 2);
+    assert!(*cancel_rx.borrow());
+    acknowledge.await.unwrap();
+    QUEUED_WORKER_SESSIONS.remove(&queued_key);
+    ACTIVE_WORKER_SESSIONS.remove(&active_key);
 }
 
 #[tokio::test]
@@ -425,8 +1205,7 @@ async fn worker_client_override_and_process_spawn_use_configured_executable() {
     )
     .join("System32")
     .join("where.exe");
-    let _override_executable =
-        EnvGuard::set("BIFROST_TEST_EXTERNAL_CLI_WORKER_EXECUTABLE", &executable);
+    let _override_executable = EnvGuard::set(TEST_EXTERNAL_CLI_WORKER_EXECUTABLE_ENV, &executable);
 
     let client = ExternalCliWorkerClient::current_exe().expect("worker client override");
     assert_eq!(client.executable, executable);
@@ -589,82 +1368,45 @@ async fn worker_transport_enforces_frame_limits_and_rotates_stderr() {
     assert_eq!(std::fs::metadata(log_path).unwrap().len(), 0);
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn shutdown_all_active_runs_acks_closed_and_unresponsive_workers() {
-    use std::os::unix::process::CommandExt;
-    use std::process::Command as StdProcessCommand;
-
+async fn shutdown_all_active_runs_handles_acknowledged_and_closed_workers() {
     let _registry_guard = external_cli_env_guard_async().await;
-    let spawn_child = || {
-        StdProcessCommand::new("sh")
-            .arg("-c")
-            .arg("sleep 30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .expect("spawn shutdown test worker")
-    };
-    let mut closed_child = spawn_child();
-    let mut pending_child = spawn_child();
-    let mut acked_child = spawn_child();
-
+    let acknowledged_pid = 999_999_991;
+    let closed_pid = 999_999_992;
+    let (acknowledged_tx, mut acknowledged_rx) = tokio::sync::mpsc::unbounded_channel();
     let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
     drop(closed_rx);
-    ACTIVE_WORKERS.insert(closed_child.id(), closed_tx);
+    ACTIVE_WORKERS.insert(acknowledged_pid, acknowledged_tx);
+    ACTIVE_WORKERS.insert(closed_pid, closed_tx);
 
-    let (pending_tx, mut pending_rx) = tokio::sync::mpsc::unbounded_channel();
-    ACTIVE_WORKERS.insert(pending_child.id(), pending_tx);
-    let pending_observer = tokio::spawn(async move {
-        let _ack_tx = pending_rx.recv().await.expect("pending stop request");
-        tokio::time::sleep(Duration::from_secs(10)).await;
-    });
-
-    let (acked_tx, mut acked_rx) = tokio::sync::mpsc::unbounded_channel();
-    ACTIVE_WORKERS.insert(acked_child.id(), acked_tx);
-    let ack = tokio::spawn(async move {
-        let ack_tx = acked_rx.recv().await.expect("acknowledged stop request");
+    let acknowledge = tokio::spawn(async move {
+        let ack_tx = acknowledged_rx.recv().await.expect("shutdown stop request");
         let _ = ack_tx.send(());
     });
+    let acknowledged_stop_tx = ACTIVE_WORKERS
+        .get(&acknowledged_pid)
+        .map(|entry| entry.value().clone())
+        .unwrap();
+    let closed_stop_tx = ACTIVE_WORKERS
+        .get(&closed_pid)
+        .map(|entry| entry.value().clone())
+        .unwrap();
 
+    drop(acknowledged_stop_tx);
+    drop(closed_stop_tx);
     shutdown_all_active_runs().await;
 
-    ack.await.unwrap();
-    pending_observer.abort();
-    assert!(ACTIVE_WORKERS.is_empty());
-    assert!(ACTIVE_WORKER_SESSIONS.is_empty());
-    assert!(closed_child.wait().is_ok());
-    assert!(pending_child.wait().is_ok());
-    assert!(acked_child.try_wait().unwrap().is_none());
-    let _ = acked_child.kill();
-    let _ = acked_child.wait();
+    acknowledge.await.unwrap();
+    assert!(!ACTIVE_WORKERS.contains_key(&acknowledged_pid));
+    assert!(!ACTIVE_WORKERS.contains_key(&closed_pid));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn worker_stdio_stop_resolution_covers_session_run_registry_and_deadline() {
+async fn shutdown_all_active_runs_terminates_owned_unacknowledged_worker() {
+    let _registry_guard = external_cli_env_guard_async().await;
     use std::os::unix::process::CommandExt;
     use std::process::Command as StdProcessCommand;
-
-    let _registry_guard = external_cli_env_guard_async().await;
-    let temp_dir = tempfile::tempdir().unwrap();
-    let runs_root = temp_dir.path().join("runs");
-    std::fs::create_dir_all(&runs_root).unwrap();
-
-    let session_key = format!("stdio-stop-session-{}", uuid::Uuid::new_v4());
-    let session_run_id = format!("stdio-session-run-{}", uuid::Uuid::new_v4());
-    std::fs::create_dir_all(runs_root.join(&session_run_id)).unwrap();
-    ACTIVE_SESSIONS.insert(session_key.clone(), session_run_id.clone());
-    let pending = tokio::spawn(std::future::pending::<()>());
-    assert!(request_worker_stdio_run_stop(&runs_root, &session_key, &pending).await);
-    assert!(runs_root
-        .join(&session_run_id)
-        .join("stop_requested")
-        .is_file());
-    ACTIVE_SESSIONS.remove(&session_key);
-    pending.abort();
 
     let mut child = StdProcessCommand::new("sh")
         .arg("-c")
@@ -674,70 +1416,89 @@ async fn worker_stdio_stop_resolution_covers_session_run_registry_and_deadline()
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
-        .unwrap();
-    let registry_run_id = format!("stdio-registry-run-{}", uuid::Uuid::new_v4());
-    std::fs::create_dir_all(runs_root.join(&registry_run_id)).unwrap();
-    ACTIVE_RUNS.insert(registry_run_id.clone(), child.id());
-    let pending = tokio::spawn(std::future::pending::<()>());
-    assert!(request_worker_stdio_run_stop(&runs_root, "", &pending).await);
-    assert!(runs_root
-        .join(&registry_run_id)
-        .join("stop_requested")
-        .is_file());
-    ACTIVE_RUNS.remove(&registry_run_id);
-    pending.abort();
-    let _ = child.kill();
-    let _ = child.wait();
+        .expect("spawn shutdown fallback worker");
+    let pid = child.id();
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    ACTIVE_WORKERS.insert(pid, stop_tx.clone());
+    let consume_without_ack = tokio::spawn(async move {
+        let _ack_tx = stop_rx.recv().await.expect("shutdown stop request");
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    });
 
-    let finished = tokio::spawn(async {});
-    finished.await.unwrap();
-    let finished = tokio::spawn(async {});
-    tokio::task::yield_now().await;
-    assert!(!request_worker_stdio_run_stop(&runs_root, "", &finished).await);
+    drop(stop_tx);
+    shutdown_all_active_runs().await;
 
-    let pending = tokio::spawn(std::future::pending::<()>());
-    let started = tokio::time::Instant::now();
-    assert!(!request_worker_stdio_run_stop(&runs_root, "", &pending).await);
-    assert!(started.elapsed() >= Duration::from_millis(WORKER_TRANSPORT_STOP_GRACE_MS));
-    pending.abort();
+    let status = child.wait().expect("reap shutdown fallback worker");
+    assert!(!status.success());
+    assert!(!ACTIVE_WORKERS.contains_key(&pid));
+    consume_without_ack.abort();
 }
 
-#[tokio::test]
-async fn worker_stdio_stop_helpers_cover_graceful_and_forced_paths() {
-    let _registry_guard = external_cli_env_guard_async().await;
-    let temp_dir = tempfile::tempdir().unwrap();
-    let runs_root = temp_dir.path().join("runs");
-    std::fs::create_dir_all(&runs_root).unwrap();
+#[test]
+fn active_worker_registration_drop_removes_matching_session_owner() {
+    let _registry_guard = external_cli_env_guard();
+    let pid = 999_999_987;
+    let session_key = format!("matching-drop-owner-{}", uuid::Uuid::new_v4());
+    let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (guide_tx, _guide_rx) = tokio::sync::mpsc::channel(1);
+    ACTIVE_WORKERS.insert(pid, stop_tx.clone());
+    ACTIVE_WORKER_SESSIONS.insert(
+        session_key.clone(),
+        ExternalCliWorkerControlHandle {
+            pid,
+            stop_tx: stop_tx.clone(),
+            guide_tx,
+        },
+    );
 
-    let session_key = format!("stdio-helper-session-{}", uuid::Uuid::new_v4());
-    let run_id = format!("stdio-helper-run-{}", uuid::Uuid::new_v4());
-    std::fs::create_dir_all(runs_root.join(&run_id)).unwrap();
-    ACTIVE_SESSIONS.insert(session_key.clone(), run_id.clone());
-    let graceful = tokio::spawn(std::future::pending::<()>());
-    assert!(begin_worker_stdio_stop(&runs_root, &session_key, &graceful)
-        .await
-        .is_some());
-    assert!(runs_root.join(&run_id).join("stop_requested").is_file());
-    ACTIVE_SESSIONS.remove(&session_key);
-    graceful.abort();
+    drop(ActiveWorkerRegistration {
+        pid,
+        session_key: Some(session_key.clone()),
+        stop_tx,
+    });
 
-    let forced = tokio::spawn(std::future::pending::<()>());
-    assert!(begin_worker_stdio_stop(&runs_root, "", &forced)
-        .await
-        .is_none());
-    assert!(forced.await.unwrap_err().is_cancelled());
-
-    let direct = tokio::spawn(std::future::pending::<()>());
-    force_stop_worker_stdio_run(&direct);
-    assert!(direct.await.unwrap_err().is_cancelled());
+    assert!(!ACTIVE_WORKERS.contains_key(&pid));
+    assert!(!ACTIVE_WORKER_SESSIONS.contains_key(&session_key));
 }
 
 #[test]
 fn worker_session_lock_index_is_stable_and_bounded() {
-    let first = worker_session_lock_index("same-session");
-    assert_eq!(first, worker_session_lock_index("same-session"));
-    assert!(first < WORKER_SESSION_LOCK_STRIPES);
-    assert!(worker_session_lock_index("another-session") < WORKER_SESSION_LOCK_STRIPES);
+    let left = worker_session_lock_index("provider:session");
+    let right = worker_session_lock_index("provider:session");
+    assert_eq!(left, right);
+    assert!(left < WORKER_SESSION_LOCK_STRIPES);
+}
+
+#[test]
+fn stale_worker_registration_cannot_remove_reused_pid_owner() {
+    let _registry_guard = external_cli_env_guard();
+    let pid = 999_999_990;
+    let session_key = format!("pid-reuse-owner-{}", uuid::Uuid::new_v4());
+    let (old_stop_tx, _old_stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (new_stop_tx, _new_stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (guide_tx, _guide_rx) = tokio::sync::mpsc::channel(1);
+    ACTIVE_WORKERS.insert(pid, new_stop_tx.clone());
+    ACTIVE_WORKER_SESSIONS.insert(
+        session_key.clone(),
+        ExternalCliWorkerControlHandle {
+            pid,
+            stop_tx: new_stop_tx.clone(),
+            guide_tx,
+        },
+    );
+
+    drop(ActiveWorkerRegistration {
+        pid,
+        session_key: Some(session_key.clone()),
+        stop_tx: old_stop_tx,
+    });
+
+    assert!(active_worker_is_owned(pid, &new_stop_tx));
+    assert!(ACTIVE_WORKER_SESSIONS
+        .get(&session_key)
+        .is_some_and(|handle| handle.stop_tx.same_channel(&new_stop_tx)));
+    assert!(remove_active_worker_if_owned(pid, &new_stop_tx));
+    ACTIVE_WORKER_SESSIONS.remove(&session_key);
 }
 
 #[test]
@@ -3398,215 +4159,6 @@ async fn worker_stop_bypasses_saturated_guide_channel() {
     ack.await.expect("join priority stop acknowledgement");
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn isolated_worker_parent_stop_paths_cover_stopped_eof_failed_timeout_and_write_error() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let _registry_guard = external_cli_env_guard_async().await;
-    let temp_dir = tempfile::tempdir().unwrap();
-    let executable = temp_dir.path().join("mock-external-worker.py");
-    let stop_seen = temp_dir.path().join("stop-seen");
-    std::fs::write(
-        &executable,
-        r#"#!/usr/bin/env python3
-import json
-import os
-import sys
-import time
-
-mode = os.environ["BIFROST_TEST_WORKER_MODE"]
-stop_seen = os.environ["BIFROST_TEST_WORKER_STOP_SEEN"]
-run = json.loads(sys.stdin.readline())
-print(json.dumps({"type":"started","session_key":"mock","pid":os.getpid()}, separators=(",", ":")), flush=True)
-if mode == "closed":
-    os.close(0)
-    time.sleep(30)
-    raise SystemExit(0)
-for line in sys.stdin:
-    command = json.loads(line)
-    if command.get("type") != "stop":
-        continue
-    with open(stop_seen, "w", encoding="utf-8") as handle:
-        handle.write(mode)
-    if mode == "stopped":
-        time.sleep(0.2)
-        print(json.dumps({"type":"stopped"}), flush=True)
-    elif mode == "failed":
-        print(json.dumps({"type":"failed","error":"stopped with failure"}), flush=True)
-    elif mode == "eof":
-        raise SystemExit(0)
-    elif mode == "ignore":
-        time.sleep(30)
-    break
-"#,
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&executable, permissions).unwrap();
-
-    let _force_worker = EnvGuard::set("BIFROST_FORCE_EXTERNAL_CLI_WORKER", Path::new("1"));
-    let _worker_executable =
-        EnvGuard::set("BIFROST_TEST_EXTERNAL_CLI_WORKER_EXECUTABLE", &executable);
-    let _stop_seen = EnvGuard::set("BIFROST_TEST_WORKER_STOP_SEEN", &stop_seen);
-
-    for mode in ["stopped", "eof", "failed", "ignore", "closed"] {
-        let _ = std::fs::remove_file(&stop_seen);
-        let _mode = EnvGuard::set("BIFROST_TEST_WORKER_MODE", Path::new(mode));
-        let session_key = format!("isolated-parent-stop-{mode}");
-        let request = ExternalCliRunRequest {
-            message: "wait".to_string(),
-            images: Vec::new(),
-            files: Vec::new(),
-            operation: default_operation(),
-            params: serde_json::Value::Null,
-            provider_id: Some("provider-stop".to_string()),
-            runner_id: Some("mock-stop".to_string()),
-            session_key: Some(session_key.clone()),
-            runtime: DEFAULT_RUNTIME.to_string(),
-            adapter: DEFAULT_ADAPTER.to_string(),
-            work_dir: None,
-            instructions: None,
-            adapter_config: ExternalCliAdapterConfig::default(),
-            allow_work_dirs: Vec::new(),
-            inject_bifrost_tools: false,
-            skill_paths: Vec::new(),
-        };
-        let runtime = ExternalCliRuntime::new(temp_dir.path().join(format!("runs-{mode}")));
-        let run = tokio::spawn(async move { runtime.run(request).await });
-        let handle = timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(handle) = ACTIVE_WORKER_SESSIONS
-                    .get(&session_key)
-                    .map(|entry| entry.clone())
-                {
-                    break handle;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("isolated worker registration");
-
-        let mut pending_guide_receivers = Vec::new();
-        if mode == "stopped" {
-            let (first_ack_tx, first_ack_rx) = oneshot::channel();
-            handle
-                .guide_tx
-                .send(ExternalCliWorkerGuideRequest {
-                    guide_id: "duplicate-guide".to_string(),
-                    message: "first".to_string(),
-                    ack_tx: first_ack_tx,
-                })
-                .await
-                .unwrap();
-            pending_guide_receivers.push(first_ack_rx);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-
-            let (duplicate_ack_tx, duplicate_ack_rx) = oneshot::channel();
-            handle
-                .guide_tx
-                .send(ExternalCliWorkerGuideRequest {
-                    guide_id: "duplicate-guide".to_string(),
-                    message: "duplicate".to_string(),
-                    ack_tx: duplicate_ack_tx,
-                })
-                .await
-                .unwrap();
-            let duplicate = duplicate_ack_rx.await.unwrap();
-            assert_eq!(
-                duplicate.reason.as_deref(),
-                Some("duplicate guide id is already pending")
-            );
-
-            for index in 1..MAX_PENDING_EXTERNAL_GUIDES {
-                let (ack_tx, ack_rx) = oneshot::channel();
-                handle
-                    .guide_tx
-                    .send(ExternalCliWorkerGuideRequest {
-                        guide_id: format!("pending-guide-{index}"),
-                        message: "pending".to_string(),
-                        ack_tx,
-                    })
-                    .await
-                    .unwrap();
-                pending_guide_receivers.push(ack_rx);
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            let (overflow_ack_tx, overflow_ack_rx) = oneshot::channel();
-            handle
-                .guide_tx
-                .send(ExternalCliWorkerGuideRequest {
-                    guide_id: "overflow-guide".to_string(),
-                    message: "overflow".to_string(),
-                    ack_tx: overflow_ack_tx,
-                })
-                .await
-                .unwrap();
-            let overflow = overflow_ack_rx.await.unwrap();
-            assert_eq!(
-                overflow.reason.as_deref(),
-                Some("too many pending guide requests (limit 32)")
-            );
-        } else if mode == "closed" {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let (ack_tx, ack_rx) = oneshot::channel();
-            handle
-                .guide_tx
-                .send(ExternalCliWorkerGuideRequest {
-                    guide_id: "closed-guide".to_string(),
-                    message: "cannot write".to_string(),
-                    ack_tx,
-                })
-                .await
-                .unwrap();
-            let rejected = ack_rx.await.unwrap();
-            assert!(!rejected.accepted);
-            assert!(rejected
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("write external runner worker command")));
-        }
-
-        let session_key_for_stop = session_key.clone();
-        let stop =
-            tokio::spawn(async move { request_worker_session_stop(&session_key_for_stop).await });
-        if mode != "closed" {
-            wait_for_file_text(&stop_seen, mode).await;
-        }
-        if mode == "stopped" {
-            let (ack_tx, ack_rx) = oneshot::channel();
-            handle
-                .guide_tx
-                .send(ExternalCliWorkerGuideRequest {
-                    guide_id: "guide-while-stopping".to_string(),
-                    message: "too late".to_string(),
-                    ack_tx,
-                })
-                .await
-                .unwrap();
-            let rejected = ack_rx.await.unwrap();
-            assert!(!rejected.accepted);
-            assert_eq!(
-                rejected.reason.as_deref(),
-                Some("external runner is stopping")
-            );
-        }
-        assert!(timeout(Duration::from_secs(8), stop)
-            .await
-            .unwrap()
-            .unwrap());
-        let result = timeout(Duration::from_secs(8), run)
-            .await
-            .expect("isolated parent stop should finish")
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.status, ExternalCliRunStatus::Stopped, "{mode}");
-        assert!(!ACTIVE_WORKER_SESSIONS.contains_key(&session_key));
-    }
-}
-
 #[test]
 fn stale_run_session_cleanup_preserves_replacement_owner() {
     let session_key = format!("replacement-session-{}", uuid::Uuid::new_v4());
@@ -3650,7 +4202,7 @@ async fn request_run_stop_treats_missing_active_pid_as_stopped() {
             .await
             .unwrap()
     );
-    tokio::time::sleep(Duration::from_millis(WORKER_STOP_GRACE_MS + 100)).await;
+    tokio::time::sleep(Duration::from_millis(WORKER_TRANSPORT_STOP_GRACE_MS + 100)).await;
     assert!(
         ACTIVE_RUNS.get(run_id).is_none(),
         "missing active pid should be removed by the bounded stop fallback"
@@ -3658,25 +4210,24 @@ async fn request_run_stop_treats_missing_active_pid_as_stopped() {
 }
 
 #[tokio::test]
-async fn request_run_stop_does_not_remove_replacement_pid_owner() {
+async fn request_run_stop_does_not_touch_replaced_active_run_owner() {
     let _registry_guard = external_cli_env_guard_async().await;
     let temp_dir = tempfile::tempdir().unwrap();
-    let runs_root = temp_dir.path().to_path_buf();
-    let run_id = "replacement-active-pid-stop";
-    tokio::fs::create_dir_all(runs_root.join(run_id))
+    let run_id = format!("released-stop-owner-{}", uuid::Uuid::new_v4());
+    tokio::fs::create_dir_all(temp_dir.path().join(&run_id))
         .await
         .unwrap();
-    ACTIVE_RUNS.insert(run_id.to_string(), 999_999_997);
+    ACTIVE_RUNS.insert(run_id.clone(), 999_999_997);
 
-    request_run_stop(&runs_root, run_id).await.unwrap();
-    ACTIVE_RUNS.insert(run_id.to_string(), 999_999_996);
-    tokio::time::sleep(Duration::from_millis(WORKER_STOP_GRACE_MS + 100)).await;
+    request_run_stop(temp_dir.path(), &run_id).await.unwrap();
+    ACTIVE_RUNS.insert(run_id.clone(), 999_999_996);
+    tokio::time::sleep(Duration::from_millis(WORKER_TRANSPORT_STOP_GRACE_MS + 100)).await;
 
     assert_eq!(
-        ACTIVE_RUNS.get(run_id).map(|entry| *entry.value()),
+        ACTIVE_RUNS.get(&run_id).map(|entry| *entry.value()),
         Some(999_999_996)
     );
-    ACTIVE_RUNS.remove(run_id);
+    ACTIVE_RUNS.remove(&run_id);
 }
 
 #[test]

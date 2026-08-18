@@ -230,7 +230,7 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 `session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。FIFO queue 归主 Bifrost Service 的 `SessionQueueManager` 所有，不依赖隔离 worker 内存；运行中收到的普通后续消息默认入队，当前 turn 完成后作为独立下一轮执行，`/q` 继续提供显式排队与序号管理。只有显式 `/g` 才尝试运行中引导：Codex/Traex app-server 通过 `turn/steer` 接收 Guide，Claude Code 与自定义/exec transport 先请求 active worker capability，无法注入时完整降级 queue。ChatGPT Web 不提供 `/g`。
 
-隔离 external-runner 的 session ownership 由父进程维护：固定大小的 session lock stripe 串行化“停止旧 worker → 启动替代 worker”，避免两个独立进程分别持有 worker-local `ACTIVE_SESSIONS` 后并发覆盖。Stop 使用独立于有界 Guide channel 的优先通道，worker 收到后写 durable marker，再由 transport 发原生中断；父进程等待 worker 的真实 final event，因此保留真实 run id、artifacts 和终态。所有 worker PID/Stop sender 另有不依赖 session key 的全局注册表，Service shutdown 会在 listener/runtime 拆除前并发停止包括直接 API run 在内的 worker。若 worker/transport 在有界 grace period 内未确认，父进程才按已校验 PID 做 hard-kill fallback。worker stdin EOF 同样触发上述清理，但只消费一次，避免 closed channel 空转。
+隔离 external-runner 的 session ownership 由父进程维护：固定大小的 session lock stripe 串行化“停止旧 worker → 启动替代 worker”，避免两个独立进程分别持有 worker-local `ACTIVE_SESSIONS` 后并发覆盖。Stop 使用独立于有界 Guide channel 的优先通道；并发 `/stop` 与 Service shutdown 共享同一次停止过程并各自收到 ACK。worker 收到后写 durable marker，再由 transport 发原生中断；父进程等待 worker 的真实 final event，因此保留真实 run id、artifacts 和终态。所有 worker PID/Stop sender 另有不依赖 session key 的全局注册表，Service shutdown 会在 listener/runtime 拆除前并发停止包括直接 API run 在内的 worker。若 worker/transport 在有界 grace period 内未确认，父进程仅在 PID 仍由同一 Stop channel 所有时执行 hard-kill，避免 PID 复用误伤新进程。worker stdin EOF 同样触发上述清理，但只消费一次，避免 closed channel 空转。
 
 ## CLI + Web + Admin API
 
@@ -333,7 +333,7 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 - **流式协议 NDJSON vs. SSE**：当前 `/chat/stream` 采用 NDJSON，贴近 CLI JSONL 输出；WebUI 内部亦复用 NDJSON。
 - **外部 CLI session 复用**：Codex/Traex app-server 的 Guide 留在当前 turn；显式 `/q` 或 Guide 失败降级后的下一轮复用 `threadId`，Claude Code 通过 metadata `threadId` 关联。
 - **父/worker 状态边界**：队列、durable IM pending event、worker ownership 和进度投影留在主 Service；transport PID、active turn handle 与协议解析留在隔离 worker。Service 崩溃后的内存队列不保证单独恢复，恢复依据是 durable pending event；正在执行的外部进程也不跨 Service 崩溃接管，启动清理依赖 PID/run marker。此边界后续若升级为 durable queue，必须同时定义 event 去重与 lease 接管，不能只序列化内存队列。
-- **清理顺序**：`/clear`、`/reset` 先等待 Stop ACK，再删除 session/queue 状态；run directory pruning 仅删除已有 `result.json` 且不在 active 表中的目录。hard-kill 是超时兜底，不得替代协议中断或抢先删除 active ownership。
+- **清理顺序**：`/clear`、`/reset` 先提升 service-owned queue generation 形成消费 fence，再等待 Stop ACK，随后删除 session/queue 状态并再次提升 generation；旧 turn 只能消费启动时捕获的 generation，不能在 Stop 收尾竞态中取走 reset 后的新消息。run directory pruning 仅删除已有 `result.json` 且不在 active 表中的目录。hard-kill 是超时兜底，不得替代协议中断或抢先删除 active ownership。
 - **`/chat/stream` 实时性**：当前为 run 级 NDJSON，尚未做 stdout 行级实时转发；作为下一步增强。
 - **Bifrost 工具集合形态**：V1 通过 skill + CLI；V2 补 `bifrost mcp-server`。
 - **能力边界诚实**：Codex/Trae CLI 未稳定输出的 context window、剩余 context、自动压缩节省 token 等字段不得伪造，缺失显示 N/A；只展示 CLI 明确输出的 reasoning summary/status/tool/final。
