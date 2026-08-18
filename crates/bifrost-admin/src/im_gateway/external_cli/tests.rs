@@ -36,6 +36,42 @@ struct EnvGuard {
     previous: Option<String>,
 }
 
+/// Overrides both data-dir sources while `external_cli_env_guard_async` owns
+/// the shared data-dir lock. This keeps worker-runtime fixtures out of the
+/// developer's real Bifrost directory without trying to acquire the lock a
+/// second time.
+struct ExternalCliDataDirOverride {
+    previous_env: Option<String>,
+    previous_static: PathBuf,
+}
+
+impl ExternalCliDataDirOverride {
+    fn set(path: &Path) -> Self {
+        let previous_env = std::env::var("BIFROST_DATA_DIR").ok();
+        let previous_static = bifrost_storage::data_dir();
+        unsafe {
+            std::env::set_var("BIFROST_DATA_DIR", path);
+        }
+        bifrost_storage::set_data_dir(path.to_path_buf());
+        Self {
+            previous_env,
+            previous_static,
+        }
+    }
+}
+
+impl Drop for ExternalCliDataDirOverride {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous_env.take() {
+                Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
+                None => std::env::remove_var("BIFROST_DATA_DIR"),
+            }
+        }
+        bifrost_storage::set_data_dir(self.previous_static.clone());
+    }
+}
+
 impl EnvGuard {
     fn set_str(key: &'static str, value: &str) -> Self {
         let previous = std::env::var(key).ok();
@@ -691,7 +727,7 @@ else:
                 time.sleep(0.2)
                 emit({"type":"failed","error":"fake failure while stopping"})
             elif scenario == "invalid_finished_on_stop":
-                emit({"type":"finished","result":{"resultPath":"/outside-worker-results.json"}})
+                emit({"type":"finished","result":{"resultPath":os.environ["BIFROST_TEST_INVALID_WORKER_RESULT_PATH"]}})
             elif scenario == "eof_on_stop":
                 pass
             elif scenario == "hang_on_stop":
@@ -841,6 +877,12 @@ async fn parent_worker_treats_event_eof_during_stop_as_stopped() {
 async fn parent_worker_invalid_result_path_still_cleans_pending_control_requests() {
     let _registry_guard = external_cli_env_guard_async().await;
     let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let _data_dir = ExternalCliDataDirOverride::set(&data_dir);
+    std::fs::create_dir_all(external_cli_worker_result_dir()).unwrap();
+    let outside_result = temp_dir.path().join("outside-worker-results.json");
+    std::fs::write(&outside_result, b"{}").unwrap();
+    let _outside_result = EnvGuard::set("BIFROST_TEST_INVALID_WORKER_RESULT_PATH", &outside_result);
     let (session_key, task, _force, _executable, _scenario) =
         spawn_fake_parent_worker(&temp_dir, "invalid_finished_on_stop").await;
     let handle = wait_for_parent_worker_handle(&session_key).await;
