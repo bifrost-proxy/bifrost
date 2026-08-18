@@ -193,6 +193,7 @@ fn active_session_is_owned_by(session_key: &str, run_id: &str) -> bool {
 
 fn remove_active_app_server_session(session_key: &str, run_id: &str) {
     live_guide::remove_session(session_key, run_id);
+    live_model::remove_session(session_key, run_id);
 }
 
 fn rejected_guide(
@@ -400,6 +401,7 @@ pub(super) async fn run_command(
     events.push(turn_started_event);
 
     let (guide_tx, mut guide_rx) = mpsc::unbounded_channel::<live_guide::LiveGuideCommand>();
+    let (model_tx, mut model_rx) = mpsc::unbounded_channel::<live_model::LiveModelCommand>();
     if let Some(session_key) = session_key {
         register_active_app_server_session(
             session_key,
@@ -409,6 +411,15 @@ pub(super) async fn run_command(
                 thread_id: Some(thread_id.clone()),
                 turn_id: Some(turn_id.clone()),
                 guide_tx: guide_tx.clone(),
+            },
+        );
+        live_model::register_session(
+            session_key,
+            run_id,
+            live_model::ActiveModelHandle {
+                run_id: run_id.to_string(),
+                thread_id: Some(thread_id.clone()),
+                model_tx: model_tx.clone(),
             },
         );
     }
@@ -433,6 +444,7 @@ pub(super) async fn run_command(
     tokio::pin!(timeout_sleep);
     let mut next_request_id = 100u64;
     let mut pending_guides = HashMap::<u64, live_guide::LiveGuideCommand>::new();
+    let mut pending_model_updates = HashMap::<u64, live_model::LiveModelCommand>::new();
     let mut status = ExternalCliRunStatus::Failed;
     let mut exit_code = Some(1);
     let mut terminal = false;
@@ -485,6 +497,15 @@ pub(super) async fn run_command(
                             command.guide_id,
                             &thread_id,
                             &turn_id,
+                            &frame,
+                        );
+                        let _ = command.ack_tx.send(result);
+                    }
+                    if let Some(command) = pending_model_updates.remove(&id) {
+                        let result = model_update_result_from_response(
+                            command.update_id,
+                            command.model,
+                            &thread_id,
                             &frame,
                         );
                         let _ = command.ack_tx.send(result);
@@ -576,6 +597,15 @@ pub(super) async fn run_command(
                                     guide_tx: guide_tx.clone(),
                                 },
                             );
+                            live_model::register_session(
+                                session_key,
+                                run_id,
+                                live_model::ActiveModelHandle {
+                                    run_id: run_id.to_string(),
+                                    thread_id: Some(thread_id.clone()),
+                                    model_tx: model_tx.clone(),
+                                },
+                            );
                         }
                         turn_has_side_effects = false;
                         continue;
@@ -658,6 +688,55 @@ pub(super) async fn run_command(
                     }
                 }
             }
+            command = model_rx.recv() => {
+                let Some(command) = command else { continue; };
+                if stop_request_id.is_some() {
+                    let _ = command.ack_tx.send(live_model::rejected_model_update(
+                        command.update_id,
+                        command.model,
+                        Some(thread_id.clone()),
+                        "app-server turn is stopping".to_string(),
+                    ));
+                    continue;
+                }
+                if session_key.is_some_and(|session_key| {
+                    !active_session_is_owned_by(session_key, run_id)
+                }) {
+                    let _ = command.ack_tx.send(live_model::rejected_model_update(
+                        command.update_id,
+                        command.model,
+                        Some(thread_id.clone()),
+                        "active session was replaced before model update delivery".to_string(),
+                    ));
+                    continue;
+                }
+                next_request_id = next_request_id.saturating_add(1);
+                let request_id = next_request_id;
+                let params = serde_json::json!({
+                    "threadId": thread_id,
+                    "model": command.model,
+                });
+                match send_jsonrpc_request(
+                    &mut stdin,
+                    request_id,
+                    "thread/settings/update",
+                    params,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        pending_model_updates.insert(request_id, command);
+                    }
+                    Err(error) => {
+                        let _ = command.ack_tx.send(live_model::rejected_model_update(
+                            command.update_id,
+                            command.model,
+                            Some(thread_id.clone()),
+                            error,
+                        ));
+                    }
+                }
+            }
             _ = wait_for_stop_marker(stop_marker_path.clone()), if stop_request_id.is_none() => {
                 const STOP_REQUEST_ID: u64 = 99;
                 match send_jsonrpc_request(
@@ -731,11 +810,27 @@ pub(super) async fn run_command(
             "turn completed before guide acknowledgement".to_string(),
         ));
     }
+    for (_, command) in pending_model_updates {
+        let _ = command.ack_tx.send(live_model::rejected_model_update(
+            command.update_id,
+            command.model,
+            Some(thread_id.clone()),
+            "turn completed before model update acknowledgement".to_string(),
+        ));
+    }
     while let Ok(command) = guide_rx.try_recv() {
         let _ = command.ack_tx.send(rejected_guide(
             command.guide_id,
             Some(thread_id.clone()),
             Some(turn_id.clone()),
+            "turn is no longer active".to_string(),
+        ));
+    }
+    while let Ok(command) = model_rx.try_recv() {
+        let _ = command.ack_tx.send(live_model::rejected_model_update(
+            command.update_id,
+            command.model,
+            Some(thread_id.clone()),
             "turn is no longer active".to_string(),
         ));
     }
@@ -1250,6 +1345,23 @@ fn guide_result_from_response(
         turn_id: Some(accepted_turn_id),
         reason: None,
     }
+}
+
+fn model_update_result_from_response(
+    update_id: String,
+    model: Option<String>,
+    thread_id: &str,
+    frame: &serde_json::Value,
+) -> ExternalCliModelUpdateResult {
+    if let Some(error) = frame.get("error") {
+        return live_model::rejected_model_update(
+            update_id,
+            model,
+            Some(thread_id.to_string()),
+            jsonrpc_error_message(error),
+        );
+    }
+    live_model::accepted_model_update(update_id, model, Some(thread_id.to_string()))
 }
 
 fn jsonrpc_error_message(error: &serde_json::Value) -> String {
@@ -1875,6 +1987,16 @@ for line in sys.stdin:
         .await;
         assert_eq!(
             rejected.reason.as_deref(),
+            Some("app-server turn is stopping")
+        );
+        let model_rejected = live_model::request_session_model_update(
+            &session_key,
+            "model-during-stop".to_string(),
+            Some("gpt-test".to_string()),
+        )
+        .await;
+        assert_eq!(
+            model_rejected.reason.as_deref(),
             Some("app-server turn is stopping")
         );
         let output = timeout(Duration::from_secs(8), run)
@@ -2944,6 +3066,147 @@ for line in sys.stdin:
         assert!(!ACTIVE_RUNS.contains_key("mock-app-server-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));
         assert!(live_guide::active_handle(session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_and_traex_app_server_update_model_on_the_active_thread() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = temp_dir.path().join("mock-model-update-app-server");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+updates = 0
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    frame = json.loads(line)
+    method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/start":
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"model-thread"}}})
+    elif method == "turn/start":
+        send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"model-turn"}}})
+    elif method == "account/rateLimits/read":
+        send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"unsupported"}})
+    elif method == "thread/settings/update":
+        assert frame["params"]["threadId"] == "model-thread"
+        if updates == 0:
+            assert frame["params"]["model"] == "gpt-5.3-codex"
+            send({"jsonrpc":"2.0","id":request_id,"result":{}})
+        elif updates == 1:
+            assert frame["params"]["model"] == "reject-me"
+            send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32000,"message":"model rejected"}})
+        elif updates == 2:
+            assert frame["params"]["model"] is None
+            send({"jsonrpc":"2.0","id":request_id,"result":{}})
+        else:
+            assert frame["params"]["model"] == "pending-me"
+        updates += 1
+        if updates == 4:
+            send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"model-thread","turnId":"model-turn","item":{"id":"message-model","type":"agentMessage","text":"model updated"}}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"model-thread","turn":{"id":"model-turn","status":"completed"}}})
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        for adapter in [DEFAULT_ADAPTER, TRAEX_ADAPTER] {
+            let session_key = format!("model-update-{adapter}-{}", uuid::Uuid::new_v4());
+            let mut request = request(adapter);
+            request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+            request.adapter_config.executable = Some(executable.display().to_string());
+            let run_id = format!("model-update-run-{adapter}");
+            let run_task_id = run_id.clone();
+            let run_session_key = session_key.clone();
+            let stop_marker = temp_dir.path().join(format!("stop-model-{adapter}"));
+            let run = tokio::spawn(async move {
+                run_command(
+                    &run_task_id,
+                    Some(&run_session_key),
+                    &request,
+                    "keep running".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            });
+
+            timeout(Duration::from_secs(10), async {
+                while live_model::active_handle(&session_key).is_none() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("active model handle");
+            let selected = live_model::request_session_model_update(
+                &session_key,
+                "set-model".to_string(),
+                Some("gpt-5.3-codex".to_string()),
+            )
+            .await;
+            assert!(selected.accepted, "{adapter}: {selected:?}");
+            assert_eq!(selected.thread_id.as_deref(), Some("model-thread"));
+
+            let active_handle = live_model::active_handle(&session_key).expect("model handle");
+            ACTIVE_SESSIONS.insert(session_key.clone(), "replacement-run".to_string());
+            let (stale_ack_tx, stale_ack_rx) = oneshot::channel();
+            active_handle
+                .model_tx
+                .send(live_model::LiveModelCommand {
+                    update_id: "stale-model".to_string(),
+                    model: Some("must-not-send".to_string()),
+                    ack_tx: stale_ack_tx,
+                })
+                .unwrap();
+            assert_eq!(
+                stale_ack_rx.await.unwrap().reason.as_deref(),
+                Some("active session was replaced before model update delivery")
+            );
+            ACTIVE_SESSIONS.insert(session_key.clone(), run_id.clone());
+
+            let rejected = live_model::request_session_model_update(
+                &session_key,
+                "reject-model".to_string(),
+                Some("reject-me".to_string()),
+            )
+            .await;
+            assert!(!rejected.accepted, "{adapter}: {rejected:?}");
+            assert_eq!(rejected.reason.as_deref(), Some("model rejected"));
+
+            let cleared = live_model::request_session_model_update(
+                &session_key,
+                "clear-model".to_string(),
+                None,
+            )
+            .await;
+            assert!(cleared.accepted, "{adapter}: {cleared:?}");
+
+            let pending = live_model::request_session_model_update(
+                &session_key,
+                "pending-model".to_string(),
+                Some("pending-me".to_string()),
+            )
+            .await;
+            assert_eq!(
+                pending.reason.as_deref(),
+                Some("turn completed before model update acknowledgement")
+            );
+
+            let output = run.await.unwrap().unwrap();
+            assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
+            assert!(live_model::active_handle(&session_key).is_none());
+        }
     }
 
     #[cfg(unix)]

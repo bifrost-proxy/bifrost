@@ -1051,7 +1051,7 @@
 4. 下一条普通 Codex/Traex run 的启动参数包含 `--model Doubao-Unit`；下一条普通 Claude Code run 的启动参数包含 `--model sonnet` 或 `--model claude-opus-4-5-20251101`；session slash override 覆盖 runner 默认模型。
 5. Web UI 仅在当前 runner adapter 为 `codex`、`traex` 或 `claude_code` 时展示 model slash 命令；其它 adapter 不展示这两个入口。
 6. slash 命令和系统回执刷新后仍在消息列表中，发送下一条普通消息后不消失，但不会作为用户 prompt 注入 runner 上下文。
-7. 飞书 IM 空闲状态下 `/models`、`/model` 使用同一 session override；运行中发送 `/model` 明确提示等待当前任务结束，不把 `/model` 当普通 prompt 送进 Codex/Traex/Claude Code。
+7. 飞书 IM 空闲和运行中状态下 `/models`、`/model` 使用同一 session override；运行中的 `/model` 走 Runner 原生模型控制协议，不作为普通 prompt 或 Guide 文本发送。
 8. Agent Chat 输入框上方 token HUD 在刷新、发送下一条消息和 run 完成后持续展示当前模型、token 与 context，不因 history summary 或运行中空 status 快照退回 `Tokens -`、`Context 0%` 或隐藏模型名。
 9. Web UI 已有历史 assistant 回复后再次发送 `/model <name>`，页面立即追加独立居中的系统行 `切换模型为 <name>`，不替换、不隐藏、不合并最后一条 assistant 回复；刷新后历史显示与即时显示一致，且该系统行不作为 user/assistant 消息注入 runner prompt。
 
@@ -1749,7 +1749,38 @@
 3. Runner 已实时发送的 progress events 不会再次复制到 Broker 的终态帧；即使总事件量超过 16 MiB，最终 response、metadata 和 artifacts 仍正常返回。
 4. 脚本输出 `[im-gateway-delayed-final-state] PASS`，并清理临时 Service、进程和数据目录。
 
+### TC-IEC-75: IM 运行中动态切换 External Runner 模型
+
+前置条件：
+
+1. 使用隔离数据目录和 mock IM provider；不得连接真实飞书服务或重启用户现有 Service。
+2. Codex/Traex mock 实现 stdio app-server 握手、保持一个 turn 运行，并记录 `thread/settings/update`；Claude Code mock 实现 stream-json 初始化、保持 session 运行，并记录 `control_request`。
+
+操作步骤：
+
+1. 启动 Codex mock app-server 长任务，通过 IM concurrent/busy 入口依次发送 `/model <可用模型>` 与 `/model clear`。
+2. 检查 IM 回执、`session_state.json`、IM worker 到主进程 broker 帧、external worker 控制帧和 mock Codex 收到的 `thread/settings/update`。
+3. 使用 focused transport 回归分别验证 Codex、Traex 与 Claude Code 的 active thread/session 原生 model update、clear、拒绝、停止态和 session 替换边界。
+4. 使用 worker/control focused 回归验证 `transport=exec` 明确拒绝当前 run 热切换但保留持久化 override，下一轮使用新配置。
+5. 执行：
+   ```bash
+   cargo test -p bifrost-admin --lib model_update -- --nocapture
+   cargo test -p bifrost-admin --lib update_model_on_the_active_thread -- --nocapture
+   cargo test -p bifrost-admin --lib updates_model_in_the_active_session -- --nocapture
+   cargo test -p bifrost-admin --lib local_resume_and_model_commands_cover_idle_and_busy_control_paths -- --nocapture
+   ```
+
+预期结果：
+
+1. 忙碌态 `/model` 不再返回“等待任务结束”，也不进入普通 prompt、Guide 或 FIFO Queue；`/model` 与 `/models` 查询仍正常响应。
+2. Codex/Traex 收到 `thread/settings/update`，参数包含当前 `threadId` 和目标 model；Claude Code 收到 `control_request`，subtype 为 `set_model`。`clear` 分别发送 `model:null`，恢复 Runner 默认模型。
+3. 原生 ACK 后 IM 明确说明切换对后续响应/轮次生效，当前已发出的生成不会重启；session override 同步持久化，后续新 run 也使用新配置。
+4. IM Gateway 隔离 worker 通过 capability broker 把 ModelUpdate 精确路由到主进程持有的 active worker，缺失或已替代 session 不误投递。
+5. `exec` transport 明确提示运行中 Runner 未确认热切换，但已保存 override；下一轮使用新模型配置，且不会虚报运行中已切换成功。
+
 ## 最近执行记录
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-75。focused Rust 回归覆盖 live model channel、IM worker → 主进程 broker、Codex/Traex `thread/settings/update`、Claude Code `control_request/set_model` 与忙碌态 `/model clear`，全部通过；构建当前源码二进制后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_live_model_switch.sh` 输出 `[im-live-model] PASS`。隔离 Service + mock 飞书入站在 Codex turn 运行中依次发送 `/model gpt-live-unit` 与 `/model clear`，mock app-server 精确收到同一 `threadId` 的 model 字符串和 `null` 两个更新，IM 回执说明后续响应/轮次生效且没有旧的等待提示，session override 最终清除，原 turn 正常完成。测试未连接真实飞书、未重启用户现有 Service，并已清理临时进程和数据目录。
 
 - 2026-08-18：PASS — 新增并立即执行 TC-IEC-74。focused Worker stderr/启动协议、真实 subprocess 环境引导、Broker 终态大帧三项 Rust 回归均通过；使用动态端口和隔离数据目录执行 `test_im_gateway_external_runner_delayed_final_state.sh` 输出 `[im-gateway-delayed-final-state] PASS`。mock Runner 连续发送 450 条、每条 40 KiB 的 reasoning 事件（总量超过 Broker 16 MiB 单帧上限），实时 progress 保持可用，最终响应正常收敛。生产启动不再通过 stdin 发送 run 握手，而是使用 request 文件与私有环境变量；若 Worker 提前退出，调用方会收到有界 stderr 摘要。未连接真实飞书服务，也未重启用户现有 Service。工作区全量测试在链接阶段被本机磁盘耗尽中止（非测试断言失败），将由远端 CI 完成。
 

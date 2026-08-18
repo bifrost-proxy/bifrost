@@ -26,6 +26,7 @@ impl Drop for StreamJsonRunCleanup {
         }
         if let Some(session_key) = self.session_key.as_deref() {
             live_guide::remove_session(session_key, &self.run_id);
+            live_model::remove_session(session_key, &self.run_id);
         }
         if self.pid != 0 {
             let _ = terminate_process(self.pid);
@@ -96,7 +97,9 @@ pub(super) async fn run_command(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let stderr_task = tokio::spawn(read_stderr_lines(stderr));
     let (guide_tx, mut guide_rx) = mpsc::unbounded_channel::<live_guide::LiveGuideCommand>();
+    let (model_tx, mut model_rx) = mpsc::unbounded_channel::<live_model::LiveModelCommand>();
     let mut pending_guide = None::<PendingStreamJsonGuide>;
+    let mut pending_model_updates = HashMap::<String, live_model::LiveModelCommand>::new();
     let mut interrupted_results_to_ignore = 0usize;
     let mut thread_id = None::<String>;
     let mut initial_prompt_replayed = false;
@@ -141,6 +144,26 @@ pub(super) async fn run_command(
                                 }));
                             }
                             terminal_status = Some(ExternalCliRunStatus::Stopped);
+                            continue;
+                        }
+                        if let Some(command) = pending_model_updates.remove(&request_id) {
+                            let result = if succeeded {
+                                live_model::accepted_model_update(
+                                    command.update_id,
+                                    command.model,
+                                    thread_id.clone(),
+                                )
+                            } else {
+                                live_model::rejected_model_update(
+                                    command.update_id,
+                                    command.model,
+                                    thread_id.clone(),
+                                    reason.unwrap_or_else(|| {
+                                        "Claude Code rejected the model update request".to_string()
+                                    }),
+                                )
+                            };
+                            let _ = command.ack_tx.send(result);
                             continue;
                         }
                         if pending_guide
@@ -206,6 +229,17 @@ pub(super) async fn run_command(
                                 guide_tx: guide_tx.clone(),
                             },
                         );
+                        if guide_registered {
+                            live_model::register_session(
+                                session_key,
+                                run_id,
+                                live_model::ActiveModelHandle {
+                                    run_id: run_id.to_string(),
+                                    thread_id: Some(thread_id.clone()),
+                                    model_tx: model_tx.clone(),
+                                },
+                            );
+                        }
                     }
                 }
                 let interrupted_result = raw.as_ref().is_some_and(is_interrupted_result)
@@ -303,6 +337,43 @@ pub(super) async fn run_command(
                     }
                 }
             }
+            command = model_rx.recv() => {
+                let Some(command) = command else { continue; };
+                if stop_request_id.is_some() {
+                    let _ = command.ack_tx.send(live_model::rejected_model_update(
+                        command.update_id,
+                        command.model,
+                        thread_id.clone(),
+                        "Claude Code session is stopping".to_string(),
+                    ));
+                    continue;
+                }
+                if session_key.is_some_and(|session_key| {
+                    !live_guide::active_session_is_owned_by(session_key, run_id)
+                }) {
+                    let _ = command.ack_tx.send(live_model::rejected_model_update(
+                        command.update_id,
+                        command.model,
+                        thread_id.clone(),
+                        "active session was replaced before model update delivery".to_string(),
+                    ));
+                    continue;
+                }
+                let request_id = format!("bifrost-model-{}", uuid::Uuid::new_v4());
+                match write_model_frame(&mut stdin, &request_id, command.model.as_deref()).await {
+                    Ok(()) => {
+                        pending_model_updates.insert(request_id, command);
+                    }
+                    Err(error) => {
+                        let _ = command.ack_tx.send(live_model::rejected_model_update(
+                            command.update_id,
+                            command.model,
+                            thread_id.clone(),
+                            error,
+                        ));
+                    }
+                }
+            }
             _ = wait_for_stop_marker(stop_marker_path.clone()), if stop_request_id.is_none() => {
                 let request_id = format!("bifrost-stop-{}", uuid::Uuid::new_v4());
                 match write_interrupt_frame(&mut stdin, &request_id).await {
@@ -354,6 +425,7 @@ pub(super) async fn run_command(
 
     if let Some(session_key) = session_key {
         live_guide::remove_session(session_key, run_id);
+        live_model::remove_session(session_key, run_id);
     }
     if let Some(pending) = pending_guide {
         let _ = pending.command.ack_tx.send(live_guide::rejected_guide(
@@ -364,6 +436,15 @@ pub(super) async fn run_command(
         ));
     }
     reject_queued_guides(&mut guide_rx, thread_id.clone());
+    for (_, command) in pending_model_updates {
+        let _ = command.ack_tx.send(live_model::rejected_model_update(
+            command.update_id,
+            command.model,
+            thread_id.clone(),
+            "Claude Code session completed before model update acknowledgement".to_string(),
+        ));
+    }
+    reject_queued_model_updates(&mut model_rx, thread_id.clone());
 
     drop(stdin);
     let status = terminal_status.unwrap_or(ExternalCliRunStatus::Failed);
@@ -419,6 +500,20 @@ fn reject_queued_guides(
     }
 }
 
+fn reject_queued_model_updates(
+    model_rx: &mut mpsc::UnboundedReceiver<live_model::LiveModelCommand>,
+    thread_id: Option<String>,
+) {
+    while let Ok(command) = model_rx.try_recv() {
+        let _ = command.ack_tx.send(live_model::rejected_model_update(
+            command.update_id,
+            command.model,
+            thread_id.clone(),
+            "Claude Code session is no longer active".to_string(),
+        ));
+    }
+}
+
 async fn wait_for_stream_json_child(
     child: &mut tokio::process::Child,
     pid: u32,
@@ -462,6 +557,14 @@ async fn write_interrupt_frame(
     write_stream_json_frame(stdin, &build_interrupt_frame(request_id)).await
 }
 
+async fn write_model_frame(
+    stdin: &mut tokio::process::ChildStdin,
+    request_id: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    write_stream_json_frame(stdin, &build_model_frame(request_id, model)).await
+}
+
 async fn write_stream_json_frame(
     stdin: &mut tokio::process::ChildStdin,
     frame: &serde_json::Value,
@@ -484,6 +587,17 @@ fn build_interrupt_frame(request_id: &str) -> serde_json::Value {
         "type": "control_request",
         "request_id": request_id,
         "request": {"subtype": "interrupt"}
+    })
+}
+
+fn build_model_frame(request_id: &str, model: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "set_model",
+            "model": model,
+        }
     })
 }
 
@@ -611,6 +725,11 @@ mod tests {
         assert_eq!(interrupt["type"], "control_request");
         assert_eq!(interrupt["request_id"], "request-1");
         assert_eq!(interrupt["request"]["subtype"], "interrupt");
+        let model = build_model_frame("request-2", Some("sonnet"));
+        assert_eq!(model["type"], "control_request");
+        assert_eq!(model["request"]["subtype"], "set_model");
+        assert_eq!(model["request"]["model"], "sonnet");
+        assert!(build_model_frame("request-3", None)["request"]["model"].is_null());
     }
 
     #[test]
@@ -740,6 +859,99 @@ send({"type":"result","subtype":"success","is_error":False,"result":"guided resu
         assert!(!ACTIVE_RUNS.contains_key(run_id));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));
         assert!(live_guide::active_handle(session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mock_stream_json_runner_updates_model_in_the_active_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-model",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"claude-model-session"})
+send(first)
+
+selected = json.loads(sys.stdin.readline())
+assert selected["type"] == "control_request"
+assert selected["request"]["subtype"] == "set_model"
+assert selected["request"]["model"] == "sonnet"
+send({"type":"control_response","response":{"subtype":"success","request_id":selected["request_id"],"response":{}}})
+
+rejected = json.loads(sys.stdin.readline())
+assert rejected["request"]["subtype"] == "set_model"
+assert rejected["request"]["model"] == "reject-me"
+send({"type":"control_response","response":{"subtype":"error","request_id":rejected["request_id"]}})
+
+cleared = json.loads(sys.stdin.readline())
+assert cleared["request"]["subtype"] == "set_model"
+assert cleared["request"]["model"] is None
+send({"type":"control_response","response":{"subtype":"success","request_id":cleared["request_id"],"response":{}}})
+send({"type":"assistant","message":{"content":[{"type":"text","text":"model updated"}]},"session_id":"claude-model-session"})
+send({"type":"result","subtype":"success","is_error":False,"result":"model updated","session_id":"claude-model-session"})
+"#,
+        );
+        let session_key = format!("claude-model-{}", uuid::Uuid::new_v4());
+        let run_session_key = session_key.clone();
+        let run = tokio::spawn(async move {
+            run_command(
+                "claude-model-run",
+                Some(&run_session_key),
+                mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+                "initial prompt".to_string(),
+                temp_dir.path().join("stop"),
+                None,
+            )
+            .await
+        });
+
+        timeout(Duration::from_secs(10), async {
+            while live_model::active_handle(&session_key).is_none() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("active Claude model handle");
+
+        let selected = live_model::request_session_model_update(
+            &session_key,
+            "claude-model-set".to_string(),
+            Some("sonnet".to_string()),
+        )
+        .await;
+        assert!(selected.accepted, "{selected:?}");
+        assert_eq!(selected.thread_id.as_deref(), Some("claude-model-session"));
+
+        let rejected = live_model::request_session_model_update(
+            &session_key,
+            "claude-model-reject".to_string(),
+            Some("reject-me".to_string()),
+        )
+        .await;
+        assert!(!rejected.accepted, "{rejected:?}");
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("Claude Code rejected the model update request")
+        );
+
+        let cleared = live_model::request_session_model_update(
+            &session_key,
+            "claude-model-clear".to_string(),
+            None,
+        )
+        .await;
+        assert!(cleared.accepted, "{cleared:?}");
+
+        let output = run.await.unwrap().unwrap();
+        assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
+        assert!(live_model::active_handle(&session_key).is_none());
     }
 
     #[cfg(unix)]
@@ -1323,6 +1535,16 @@ time.sleep(30)
             rejected.reason.as_deref(),
             Some("Claude Code session is stopping")
         );
+        let model_rejected = live_model::request_session_model_update(
+            &session_key,
+            "model-during-stop".to_string(),
+            Some("sonnet".to_string()),
+        )
+        .await;
+        assert_eq!(
+            model_rejected.reason.as_deref(),
+            Some("Claude Code session is stopping")
+        );
         let output = timeout(Duration::from_secs(8), run)
             .await
             .expect("unacknowledged stop interrupt should hit fallback")
@@ -1578,6 +1800,16 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
             None,
         ));
         let handle = wait_for_active_handle(session_key).await;
+        let model_handle = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(handle) = live_model::active_handle(session_key) {
+                    break handle;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("active model handle");
         ACTIVE_SESSIONS.insert(session_key.to_string(), "replacement-run".to_string());
         let (ack_tx, ack_rx) = oneshot::channel();
         handle
@@ -1592,6 +1824,19 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
         assert_eq!(
             rejected.reason.as_deref(),
             Some("active session was replaced before guide delivery")
+        );
+        let (model_ack_tx, model_ack_rx) = oneshot::channel();
+        model_handle
+            .model_tx
+            .send(live_model::LiveModelCommand {
+                update_id: "model-replaced".to_string(),
+                model: Some("sonnet".to_string()),
+                ack_tx: model_ack_tx,
+            })
+            .unwrap();
+        assert_eq!(
+            model_ack_rx.await.unwrap().reason.as_deref(),
+            Some("active session was replaced before model update delivery")
         );
         assert_eq!(
             run_task.await.unwrap().unwrap().status,
@@ -1646,6 +1891,56 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
             run_task.await.unwrap().unwrap().status,
             ExternalCliRunStatus::Succeeded
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_completion_rejects_pending_model_update() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-pending-model",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"pending-model-session"})
+send(first)
+model = json.loads(sys.stdin.readline())
+assert model["request"]["subtype"] == "set_model"
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"pending-model-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-pending-model";
+        let run_id = "mock-stream-json-pending-model-run";
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        let rejected = live_model::request_session_model_update(
+            session_key,
+            "pending-model".to_string(),
+            Some("sonnet".to_string()),
+        )
+        .await;
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("Claude Code session completed before model update acknowledgement")
+        );
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+        ACTIVE_SESSIONS.remove(session_key);
     }
 
     #[cfg(unix)]
@@ -1876,5 +2171,29 @@ print(json.dumps({"type":"result","subtype":"error_max_turns","is_error":True,"r
             assert_eq!(result.reason.as_deref(), Some("turn is no longer active"));
         }
         assert!(guide_rx.try_recv().is_err());
+
+        let (model_tx, mut model_rx) = mpsc::unbounded_channel();
+        let mut model_acks = Vec::new();
+        for index in 0..3 {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            model_tx
+                .send(live_model::LiveModelCommand {
+                    update_id: format!("model-drain-{index}"),
+                    model: None,
+                    ack_tx,
+                })
+                .unwrap();
+            model_acks.push(ack_rx);
+        }
+        reject_queued_model_updates(&mut model_rx, Some("thread-drain".to_string()));
+        for ack_rx in model_acks {
+            let result = ack_rx.await.unwrap();
+            assert_eq!(result.thread_id.as_deref(), Some("thread-drain"));
+            assert_eq!(
+                result.reason.as_deref(),
+                Some("Claude Code session is no longer active")
+            );
+        }
+        assert!(model_rx.try_recv().is_err());
     }
 }

@@ -1,5 +1,9 @@
 use super::*;
 use std::ffi::OsStr;
+
+fn unused_model_tx() -> tokio::sync::mpsc::Sender<ExternalCliWorkerModelUpdateRequest> {
+    tokio::sync::mpsc::channel(1).0
+}
 struct ExternalCliEnvGuard {
     _env_guard: tokio::sync::MutexGuard<'static, ()>,
     _data_dir_guard: std::sync::MutexGuard<'static, ()>,
@@ -91,7 +95,7 @@ impl EnvGuard {
 }
 
 #[tokio::test]
-async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
+async fn main_broker_routes_guide_model_update_and_stop_to_the_main_process_registry() {
     let _registry_guard = external_cli_env_guard_async().await;
     let _worker = EnvGuard::set_str("BIFROST_IM_GATEWAY_WORKER", "1");
     let endpoint = crate::worker_runtime::im_broker::ensure_main_broker()
@@ -107,6 +111,7 @@ async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
     );
     let session_key = format!("broker-control-{}", uuid::Uuid::new_v4());
     let (guide_tx, mut guide_rx) = tokio::sync::mpsc::channel(1);
+    let (model_tx, mut model_rx) = tokio::sync::mpsc::channel(1);
     let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
     ACTIVE_WORKER_SESSIONS.insert(
         session_key.clone(),
@@ -114,6 +119,7 @@ async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
             pid: 1,
             stop_tx,
             guide_tx,
+            model_tx,
         },
     );
     let control = tokio::spawn(async move {
@@ -130,6 +136,18 @@ async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
                 reason: None,
             })
             .expect("ack brokered guide");
+        let model = model_rx.recv().await.expect("brokered model update");
+        assert_eq!(model.model.as_deref(), Some("gpt-5.3-codex"));
+        model
+            .ack_tx
+            .send(ExternalCliModelUpdateResult {
+                update_id: model.update_id,
+                model: model.model,
+                accepted: true,
+                thread_id: Some("thread-from-main".to_string()),
+                reason: None,
+            })
+            .expect("ack brokered model update");
         let stop = stop_rx.recv().await.expect("brokered stop request");
         stop.send(()).expect("ack brokered stop");
     });
@@ -143,6 +161,12 @@ async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
     .expect("guide through broker");
     assert!(result.accepted);
     assert_eq!(result.thread_id.as_deref(), Some("thread-from-main"));
+    let model =
+        request_managed_session_model_update(&session_key, Some("gpt-5.3-codex".to_string()))
+            .await
+            .expect("model update through broker");
+    assert!(model.accepted);
+    assert_eq!(model.model.as_deref(), Some("gpt-5.3-codex"));
     assert!(
         request_managed_session_stop(&default_runs_root(), &session_key,)
             .await
@@ -171,6 +195,10 @@ async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
             .await
             .expect("missing stop should be a clean negative result")
     );
+    assert!(request_managed_session_model_update(&missing, None)
+        .await
+        .unwrap_err()
+        .contains("no active external runner"));
 
     drop(_addr);
     drop(_token);
@@ -184,6 +212,16 @@ async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
     .await
     .unwrap_err()
     .contains("broker is not configured"));
+    assert!(request_managed_session_model_update(&missing, None)
+        .await
+        .unwrap_err()
+        .contains("broker is not configured"));
+    assert_eq!(
+        request_managed_session_model_update("", None)
+            .await
+            .unwrap_err(),
+        "session_key cannot be empty"
+    );
     assert!(request_managed_session_stop(&default_runs_root(), &missing)
         .await
         .unwrap_err()
@@ -197,11 +235,12 @@ async fn main_broker_routes_guide_and_stop_to_the_main_process_registry() {
 }
 
 #[tokio::test]
-async fn managed_guide_uses_the_local_registry_in_the_main_process() {
+async fn managed_guide_and_model_update_use_the_local_registry_in_the_main_process() {
     let _registry_guard = external_cli_env_guard_async().await;
     let _worker = EnvGuard::unset("BIFROST_IM_GATEWAY_WORKER");
     let session_key = format!("local-managed-guide-{}", uuid::Uuid::new_v4());
     let (guide_tx, mut guide_rx) = tokio::sync::mpsc::channel(1);
+    let (model_tx, mut model_rx) = tokio::sync::mpsc::channel(1);
     let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
     ACTIVE_WORKER_SESSIONS.insert(
         session_key.clone(),
@@ -209,6 +248,7 @@ async fn managed_guide_uses_the_local_registry_in_the_main_process() {
             pid: 1,
             stop_tx,
             guide_tx,
+            model_tx,
         },
     );
     let ack = tokio::spawn(async move {
@@ -223,6 +263,17 @@ async fn managed_guide_uses_the_local_registry_in_the_main_process() {
                 reason: None,
             })
             .expect("ack local guide");
+        let model = model_rx.recv().await.expect("local model update");
+        model
+            .ack_tx
+            .send(ExternalCliModelUpdateResult {
+                update_id: model.update_id,
+                model: model.model,
+                accepted: true,
+                thread_id: Some("local-thread".to_string()),
+                reason: None,
+            })
+            .expect("ack local model update");
     });
 
     let result = request_managed_session_guide(
@@ -235,8 +286,87 @@ async fn managed_guide_uses_the_local_registry_in_the_main_process() {
 
     assert!(result.accepted);
     assert_eq!(result.thread_id.as_deref(), Some("local-thread"));
+    let model = request_managed_session_model_update(&session_key, Some("gpt-local".to_string()))
+        .await
+        .expect("managed local model update");
+    assert!(model.accepted);
+    assert_eq!(model.model.as_deref(), Some("gpt-local"));
     ack.await.expect("join local guide acknowledgement");
     ACTIVE_WORKER_SESSIONS.remove(&session_key);
+}
+
+#[tokio::test]
+async fn worker_model_update_validates_missing_closed_full_and_response_channels() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    assert_eq!(
+        request_worker_session_model_update(" ", None)
+            .await
+            .unwrap_err(),
+        "session_key cannot be empty"
+    );
+    let missing = format!("missing-model-{}", uuid::Uuid::new_v4());
+    assert!(request_worker_session_model_update(&missing, None)
+        .await
+        .unwrap_err()
+        .contains("no active external runner"));
+
+    let closed = format!("closed-model-{}", uuid::Uuid::new_v4());
+    let (model_tx, model_rx) = tokio::sync::mpsc::channel(1);
+    drop(model_rx);
+    let (guide_tx, _guide_rx) = tokio::sync::mpsc::channel(1);
+    let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    ACTIVE_WORKER_SESSIONS.insert(
+        closed.clone(),
+        ExternalCliWorkerControlHandle {
+            pid: 1,
+            stop_tx,
+            guide_tx,
+            model_tx,
+        },
+    );
+    assert!(request_worker_session_model_update(&closed, None)
+        .await
+        .unwrap_err()
+        .contains("control channel closed"));
+    ACTIVE_WORKER_SESSIONS.remove(&closed);
+
+    let full = format!("full-model-{}", uuid::Uuid::new_v4());
+    let (model_tx, mut model_rx) = tokio::sync::mpsc::channel(1);
+    let (guide_tx, _guide_rx) = tokio::sync::mpsc::channel(1);
+    let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    ACTIVE_WORKER_SESSIONS.insert(
+        full.clone(),
+        ExternalCliWorkerControlHandle {
+            pid: 1,
+            stop_tx,
+            guide_tx,
+            model_tx,
+        },
+    );
+    let first_session = full.clone();
+    let first = tokio::spawn(async move {
+        request_worker_session_model_update(&first_session, Some("first".to_string())).await
+    });
+    timeout(Duration::from_secs(1), async {
+        while model_rx.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first model request queued");
+    assert!(
+        request_worker_session_model_update(&full, Some("second".to_string()))
+            .await
+            .unwrap_err()
+            .contains("too many pending model updates")
+    );
+    drop(model_rx.recv().await.expect("queued model request"));
+    assert!(first
+        .await
+        .unwrap()
+        .unwrap_err()
+        .contains("response closed"));
+    ACTIVE_WORKER_SESSIONS.remove(&full);
 }
 
 impl Drop for EnvGuard {
@@ -386,6 +516,7 @@ async fn stale_external_worker_entry_does_not_kill_pid_when_stop_receiver_is_gon
             pid,
             stop_tx,
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
 
@@ -426,6 +557,7 @@ async fn acknowledged_external_worker_stop_does_not_kill_pid() {
             pid,
             stop_tx,
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
     let ack_task = tokio::spawn(async move {
@@ -481,6 +613,7 @@ async fn unacknowledged_external_worker_stop_uses_owned_pid_fallback() {
             pid,
             stop_tx: stop_tx.clone(),
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
     let consume_without_ack = tokio::spawn(async move {
@@ -725,6 +858,15 @@ else:
                     "threadId":"thread-test",
                     "turnId":"turn-test"
                 }})
+        elif kind == "model_update":
+            update_id = command["update_id"]
+            if update_id == "accepted-model":
+                emit({"type":"model_update_result","result":{
+                    "updateId":update_id,
+                    "model":command.get("model"),
+                    "accepted":True,
+                    "threadId":"thread-test"
+                }})
         elif kind == "stop":
             if scenario == "failed_on_stop":
                 time.sleep(0.2)
@@ -843,10 +985,24 @@ async fn parent_worker_acks_duplicate_stop_rejects_guide_and_accepts_failed_exit
         })
         .await
         .unwrap();
+    let (model_ack_tx, model_ack_rx) = oneshot::channel();
+    handle
+        .model_tx
+        .send(ExternalCliWorkerModelUpdateRequest {
+            update_id: "during-stop-model".to_string(),
+            model: Some("gpt-test".to_string()),
+            ack_tx: model_ack_tx,
+        })
+        .await
+        .unwrap();
 
     let rejected = guide_ack_rx.await.unwrap();
     assert_eq!(
         rejected.reason.as_deref(),
+        Some("external runner is stopping")
+    );
+    assert_eq!(
+        model_ack_rx.await.unwrap().reason.as_deref(),
         Some("external runner is stopping")
     );
     first_ack_rx.await.unwrap();
@@ -1033,6 +1189,103 @@ async fn parent_worker_routes_guides_bounds_pending_and_rejects_them_on_finish()
 
 #[cfg(unix)]
 #[tokio::test]
+async fn parent_worker_routes_model_updates_bounds_pending_and_rejects_them_on_finish() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (session_key, task, _force, _executable, _scenario) =
+        spawn_fake_parent_worker(&temp_dir, "stopped").await;
+    let handle = wait_for_parent_worker_handle(&session_key).await;
+
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    handle
+        .model_tx
+        .send(ExternalCliWorkerModelUpdateRequest {
+            update_id: "accepted-model".to_string(),
+            model: Some("gpt-accepted".to_string()),
+            ack_tx: accepted_tx,
+        })
+        .await
+        .unwrap();
+    let accepted = accepted_rx.await.unwrap();
+    assert!(accepted.accepted, "unexpected model result: {accepted:?}");
+    assert_eq!(accepted.model.as_deref(), Some("gpt-accepted"));
+
+    let (first_tx, first_rx) = oneshot::channel();
+    handle
+        .model_tx
+        .send(ExternalCliWorkerModelUpdateRequest {
+            update_id: "pending-model".to_string(),
+            model: Some("gpt-pending".to_string()),
+            ack_tx: first_tx,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let (duplicate_tx, duplicate_rx) = oneshot::channel();
+    handle
+        .model_tx
+        .send(ExternalCliWorkerModelUpdateRequest {
+            update_id: "pending-model".to_string(),
+            model: Some("gpt-duplicate".to_string()),
+            ack_tx: duplicate_tx,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        duplicate_rx.await.unwrap().reason.as_deref(),
+        Some("duplicate model update id is already pending")
+    );
+
+    let mut pending = vec![first_rx];
+    for index in 1..MAX_PENDING_EXTERNAL_GUIDES {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        handle
+            .model_tx
+            .send(ExternalCliWorkerModelUpdateRequest {
+                update_id: format!("pending-model-{index}"),
+                model: None,
+                ack_tx,
+            })
+            .await
+            .unwrap();
+        pending.push(ack_rx);
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let (overflow_tx, overflow_rx) = oneshot::channel();
+    handle
+        .model_tx
+        .send(ExternalCliWorkerModelUpdateRequest {
+            update_id: "overflow-model".to_string(),
+            model: None,
+            ack_tx: overflow_tx,
+        })
+        .await
+        .unwrap();
+    assert!(overflow_rx
+        .await
+        .unwrap()
+        .reason
+        .unwrap()
+        .contains("too many pending model updates"));
+
+    let (stop_tx, stop_rx) = oneshot::channel();
+    handle.stop_tx.send(stop_tx).unwrap();
+    stop_rx.await.unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap().status,
+        ExternalCliRunStatus::Stopped
+    );
+    for ack_rx in pending {
+        let rejected = ack_rx.await.unwrap();
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("external runner finished before model update acknowledgement")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn parent_worker_guide_channel_closure_does_not_spin() {
     let _registry_guard = external_cli_env_guard_async().await;
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1143,7 +1396,7 @@ async fn parent_worker_rejects_oversized_guide_before_worker_write() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn worker_request_handles_guide_duplicate_stop_and_command_eof() {
+async fn worker_request_handles_guide_model_update_duplicate_stop_and_command_eof() {
     let _registry_guard = external_cli_env_guard_async().await;
     let temp_dir = tempfile::tempdir().unwrap();
     let session_key = format!("worker-loop-stop-{}", uuid::Uuid::new_v4());
@@ -1182,6 +1435,13 @@ async fn worker_request_handles_guide_duplicate_stop_and_command_eof() {
         .await
         .unwrap();
     command_tx
+        .send(ExternalCliWorkerCommand::ModelUpdate {
+            update_id: "exec-model".to_string(),
+            model: Some("unsupported-on-exec".to_string()),
+        })
+        .await
+        .unwrap();
+    command_tx
         .send(ExternalCliWorkerCommand::Stop)
         .await
         .unwrap();
@@ -1201,6 +1461,12 @@ async fn worker_request_handles_guide_duplicate_stop_and_command_eof() {
         event,
         ExternalCliWorkerEvent::GuideResult { result }
             if result.guide_id == "exec-guide" && !result.accepted
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ExternalCliWorkerEvent::ModelUpdateResult { result }
+            if result.update_id == "exec-model" && !result.accepted
+                && result.reason.as_deref().is_some_and(|reason| reason.contains("exec transport"))
     )));
     for event in events {
         if let ExternalCliWorkerEvent::Finished { result } = event {
@@ -1341,6 +1607,7 @@ async fn stop_worker_sessions_cancels_queued_and_acknowledged_active_entries() {
             pid: 1,
             stop_tx,
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
     let acknowledge = tokio::spawn(async move {
@@ -1380,6 +1647,7 @@ async fn stop_all_worker_sessions_collects_both_registries() {
             pid: 999_999_989,
             stop_tx,
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
     let acknowledge = tokio::spawn(async move {
@@ -1674,6 +1942,7 @@ fn active_worker_registration_drop_removes_matching_session_owner() {
             pid,
             stop_tx: stop_tx.clone(),
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
 
@@ -1710,6 +1979,7 @@ fn stale_worker_registration_cannot_remove_reused_pid_owner() {
             pid,
             stop_tx: new_stop_tx.clone(),
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
 
@@ -4400,6 +4670,7 @@ async fn worker_guide_rejects_saturated_control_channel_without_waiting() {
             pid: 1,
             stop_tx,
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
 
@@ -4434,6 +4705,7 @@ async fn worker_stop_bypasses_saturated_guide_channel() {
             pid: 1,
             stop_tx,
             guide_tx,
+            model_tx: unused_model_tx(),
         },
     );
     let ack = tokio::spawn(async move {

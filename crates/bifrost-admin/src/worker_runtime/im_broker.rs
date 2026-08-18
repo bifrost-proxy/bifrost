@@ -6,8 +6,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::im_gateway::external_cli::{
-    ExternalCliGuideResult, ExternalCliProgressEvent, ExternalCliRunRequest, ExternalCliRunResult,
-    ExternalCliRuntime,
+    ExternalCliGuideResult, ExternalCliModelUpdateResult, ExternalCliProgressEvent,
+    ExternalCliRunRequest, ExternalCliRunResult, ExternalCliRuntime,
 };
 
 pub(crate) const BROKER_ADDR_ENV: &str = "BIFROST_IM_AGENT_BROKER_ADDR";
@@ -42,6 +42,11 @@ enum BrokerRequest {
         guide_id: String,
         message: String,
     },
+    ModelUpdate {
+        token: String,
+        session_key: String,
+        model: Option<String>,
+    },
     Stop {
         token: String,
         runs_root: String,
@@ -52,11 +57,24 @@ enum BrokerRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BrokerResponse {
-    Progress { event: ExternalCliProgressEvent },
-    Result { result: Box<ExternalCliRunResult> },
-    GuideResult { result: ExternalCliGuideResult },
-    StopResult { stopped: bool },
-    Error { error: String },
+    Progress {
+        event: ExternalCliProgressEvent,
+    },
+    Result {
+        result: Box<ExternalCliRunResult>,
+    },
+    GuideResult {
+        result: ExternalCliGuideResult,
+    },
+    ModelUpdateResult {
+        result: ExternalCliModelUpdateResult,
+    },
+    StopResult {
+        stopped: bool,
+    },
+    Error {
+        error: String,
+    },
 }
 
 /// Returns the terminal result that is safe to send over the broker wire.
@@ -75,7 +93,10 @@ fn terminal_result_for_broker(mut result: ExternalCliRunResult) -> ExternalCliRu
 impl BrokerRequest {
     fn token(&self) -> &str {
         match self {
-            Self::Run { token, .. } | Self::Guide { token, .. } | Self::Stop { token, .. } => token,
+            Self::Run { token, .. }
+            | Self::Guide { token, .. }
+            | Self::ModelUpdate { token, .. }
+            | Self::Stop { token, .. } => token,
         }
     }
 }
@@ -189,7 +210,9 @@ pub(crate) async fn run_via_main_broker(
                 }
             }
             BrokerResponse::Result { result } => return Ok(*result),
-            BrokerResponse::GuideResult { .. } | BrokerResponse::StopResult { .. } => {
+            BrokerResponse::GuideResult { .. }
+            | BrokerResponse::ModelUpdateResult { .. }
+            | BrokerResponse::StopResult { .. } => {
                 return Err("IM Agent broker returned an unexpected control response".to_string())
             }
             BrokerResponse::Error { error } => return Err(error),
@@ -213,6 +236,23 @@ pub(crate) async fn guide_via_main_broker(
         BrokerResponse::GuideResult { result } => Ok(result),
         BrokerResponse::Error { error } => Err(error),
         _ => Err("IM Agent broker returned an unexpected guide response".to_string()),
+    }
+}
+
+pub(crate) async fn model_update_via_main_broker(
+    session_key: &str,
+    model: Option<String>,
+) -> Result<ExternalCliModelUpdateResult, String> {
+    let response = request_control_via_main_broker(|token| BrokerRequest::ModelUpdate {
+        token,
+        session_key: session_key.to_string(),
+        model,
+    })
+    .await?;
+    match response {
+        BrokerResponse::ModelUpdateResult { result } => Ok(result),
+        BrokerResponse::Error { error } => Err(error),
+        _ => Err("IM Agent broker returned an unexpected model update response".to_string()),
     }
 }
 
@@ -301,6 +341,21 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
                     },
                 },
             };
+            write_frame(&mut write_half, &response).await
+        }
+        BrokerRequest::ModelUpdate {
+            session_key, model, ..
+        } => {
+            let response =
+                match crate::im_gateway::external_cli::request_worker_session_model_update(
+                    &session_key,
+                    model,
+                )
+                .await
+                {
+                    Ok(result) => BrokerResponse::ModelUpdateResult { result },
+                    Err(error) => BrokerResponse::Error { error },
+                };
             write_frame(&mut write_half, &response).await
         }
         BrokerRequest::Stop {

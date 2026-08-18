@@ -40,7 +40,7 @@ const LEGACY_CLAUDE_CODE_RUNNER_ID: &str = "Claude Code";
 const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 2;
-const WORKER_PROTOCOL_VERSION: u32 = 2;
+const WORKER_PROTOCOL_VERSION: u32 = 3;
 const EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV: &str =
     "BIFROST_EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL";
 const EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV: &str =
@@ -123,6 +123,7 @@ struct ExternalCliWorkerControlHandle {
     pid: u32,
     stop_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
     guide_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerGuideRequest>,
+    model_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerModelUpdateRequest>,
 }
 
 #[derive(Clone)]
@@ -183,6 +184,12 @@ struct ExternalCliWorkerGuideRequest {
     ack_tx: oneshot::Sender<ExternalCliGuideResult>,
 }
 
+struct ExternalCliWorkerModelUpdateRequest {
+    update_id: String,
+    model: Option<String>,
+    ack_tx: oneshot::Sender<ExternalCliModelUpdateResult>,
+}
+
 #[cfg(test)]
 pub(crate) async fn external_cli_test_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
     EXTERNAL_CLI_TEST_ENV_LOCK.lock().await
@@ -193,6 +200,66 @@ pub(crate) struct TestActiveGuideSession {
     session_key: String,
     guide_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerGuideRequest>,
     guide_rx: tokio::sync::mpsc::Receiver<ExternalCliWorkerGuideRequest>,
+}
+
+#[cfg(test)]
+pub(crate) struct TestActiveModelSession {
+    session_key: String,
+    model_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerModelUpdateRequest>,
+    model_rx: tokio::sync::mpsc::Receiver<ExternalCliWorkerModelUpdateRequest>,
+}
+
+#[cfg(test)]
+impl TestActiveModelSession {
+    pub(crate) async fn respond_next(&mut self, accepted: bool) -> Result<Option<String>, String> {
+        let request = self
+            .model_rx
+            .recv()
+            .await
+            .ok_or_else(|| "test model request channel closed".to_string())?;
+        let model = request.model.clone();
+        request
+            .ack_tx
+            .send(ExternalCliModelUpdateResult {
+                update_id: request.update_id,
+                model: request.model,
+                accepted,
+                thread_id: accepted.then(|| "test-thread".to_string()),
+                reason: (!accepted).then(|| "test rejection".to_string()),
+            })
+            .map_err(|_| "test model response receiver closed".to_string())?;
+        Ok(model)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestActiveModelSession {
+    fn drop(&mut self) {
+        ACTIVE_WORKER_SESSIONS.remove_if(&self.session_key, |_, handle| {
+            handle.model_tx.same_channel(&self.model_tx)
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_active_model_session(session_key: &str) -> TestActiveModelSession {
+    let (guide_tx, _guide_rx) = tokio::sync::mpsc::channel(1);
+    let (model_tx, model_rx) = tokio::sync::mpsc::channel(1);
+    let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    ACTIVE_WORKER_SESSIONS.insert(
+        session_key.to_string(),
+        ExternalCliWorkerControlHandle {
+            pid: 1,
+            stop_tx,
+            guide_tx,
+            model_tx: model_tx.clone(),
+        },
+    );
+    TestActiveModelSession {
+        session_key: session_key.to_string(),
+        model_tx,
+        model_rx,
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +301,7 @@ impl Drop for TestActiveGuideSession {
 #[cfg(test)]
 pub(crate) fn install_test_active_guide_session(session_key: &str) -> TestActiveGuideSession {
     let (guide_tx, guide_rx) = tokio::sync::mpsc::channel(1);
+    let (model_tx, _model_rx) = tokio::sync::mpsc::channel(1);
     let (stop_tx, _stop_rx) = tokio::sync::mpsc::unbounded_channel();
     ACTIVE_WORKER_SESSIONS.insert(
         session_key.to_string(),
@@ -241,6 +309,7 @@ pub(crate) fn install_test_active_guide_session(session_key: &str) -> TestActive
             pid: 1,
             stop_tx,
             guide_tx: guide_tx.clone(),
+            model_tx,
         },
     );
     TestActiveGuideSession {
@@ -259,6 +328,19 @@ pub struct ExternalCliGuideResult {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliModelUpdateResult {
+    pub update_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -394,6 +476,63 @@ pub async fn request_worker_session_guide(
         .await
         .map_err(|_| format!("external runner guide timed out for session '{session_key}'"))?
         .map_err(|_| format!("external runner guide response closed for session '{session_key}'"))
+}
+
+pub async fn request_worker_session_model_update(
+    session_key: &str,
+    model: Option<String>,
+) -> Result<ExternalCliModelUpdateResult, String> {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return Err("session_key cannot be empty".to_string());
+    }
+    let handle = ACTIVE_WORKER_SESSIONS
+        .get(session_key)
+        .map(|entry| entry.clone())
+        .ok_or_else(|| format!("no active external runner for session '{session_key}'"))?;
+    let update_id = uuid::Uuid::new_v4().to_string();
+    let (ack_tx, ack_rx) = oneshot::channel();
+    handle
+        .model_tx
+        .try_send(ExternalCliWorkerModelUpdateRequest {
+            update_id,
+            model,
+            ack_tx,
+        })
+        .map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => format!(
+                "external runner has too many pending model updates for session '{session_key}'"
+            ),
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                format!("external runner model control channel closed for session '{session_key}'")
+            }
+        })?;
+    timeout(Duration::from_secs(20), ack_rx)
+        .await
+        .map_err(|_| format!("external runner model update timed out for session '{session_key}'"))?
+        .map_err(|_| {
+            format!("external runner model update response closed for session '{session_key}'")
+        })
+}
+
+/// Route a live model update to the process that owns the active
+/// external-runner registry. The model is persisted separately by the IM
+/// command handler; this request updates the already-running native session.
+pub async fn request_managed_session_model_update(
+    session_key: &str,
+    model: Option<String>,
+) -> Result<ExternalCliModelUpdateResult, String> {
+    if session_key.trim().is_empty() {
+        return Err("session_key cannot be empty".to_string());
+    }
+    if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
+        if !crate::worker_runtime::im_broker::client_configured() {
+            return Err("IM Gateway worker Agent broker is not configured".to_string());
+        }
+        return crate::worker_runtime::im_broker::model_update_via_main_broker(session_key, model)
+            .await;
+    }
+    request_worker_session_model_update(session_key, model).await
 }
 
 /// Route a live guide to the process that owns the active external-runner
@@ -666,6 +805,8 @@ async fn run_worker_request(
     let session_key = run_request.session_key.clone().unwrap_or_default();
     let supports_live_guide = app_server::resolved_transport(&run_request)
         .is_ok_and(ExternalCliTransport::supports_live_guide);
+    let supports_live_model = app_server::resolved_transport(&run_request)
+        .is_ok_and(ExternalCliTransport::supports_live_model);
     let runtime = ExternalCliRuntime::new(runs_root.clone());
     let (progress_tx, mut progress_rx) = mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
     let run = tokio::spawn(async move {
@@ -745,6 +886,29 @@ async fn run_worker_request(
                         queue_external_cli_worker_event(
                             &event_tx,
                             ExternalCliWorkerEvent::GuideResult { result },
+                        )
+                        .await?;
+                    }
+                    Some(ExternalCliWorkerCommand::ModelUpdate { update_id, model }) => {
+                        let result = if supports_live_model {
+                            live_model::request_session_model_update(
+                                &session_key,
+                                update_id,
+                                model,
+                            )
+                            .await
+                        } else {
+                            live_model::rejected_model_update(
+                                update_id,
+                                model,
+                                None,
+                                "active runner uses exec transport and cannot update its model"
+                                    .to_string(),
+                            )
+                        };
+                        queue_external_cli_worker_event(
+                            &event_tx,
+                            ExternalCliWorkerEvent::ModelUpdateResult { result },
                         )
                         .await?;
                     }
@@ -854,6 +1018,7 @@ async fn request_registered_worker_run_stop(runs_root: &Path, session_key: &str)
 mod app_server;
 mod command_spec;
 mod live_guide;
+mod live_model;
 mod stream_json;
 use command_spec::build_command_spec;
 
@@ -1027,6 +1192,10 @@ pub enum ExternalCliTransport {
 
 impl ExternalCliTransport {
     fn supports_live_guide(self) -> bool {
+        matches!(self, Self::AppServer | Self::StreamJson)
+    }
+
+    fn supports_live_model(self) -> bool {
         matches!(self, Self::AppServer | Self::StreamJson)
     }
 }
@@ -1604,6 +1773,10 @@ enum ExternalCliWorkerCommand {
         guide_id: String,
         message: String,
     },
+    ModelUpdate {
+        update_id: String,
+        model: Option<String>,
+    },
     Stop,
 }
 
@@ -1628,6 +1801,9 @@ enum ExternalCliWorkerEvent {
     },
     GuideResult {
         result: ExternalCliGuideResult,
+    },
+    ModelUpdateResult {
+        result: ExternalCliModelUpdateResult,
     },
     Stopped,
 }
@@ -1771,6 +1947,18 @@ impl ExternalCliWorkerRun {
         write_external_cli_worker_command(
             &mut self.stdin,
             &ExternalCliWorkerCommand::Guide { guide_id, message },
+        )
+        .await
+    }
+
+    async fn request_model_update(
+        &mut self,
+        update_id: String,
+        model: Option<String>,
+    ) -> Result<(), String> {
+        write_external_cli_worker_command(
+            &mut self.stdin,
+            &ExternalCliWorkerCommand::ModelUpdate { update_id, model },
         )
         .await
     }
@@ -2090,6 +2278,9 @@ impl ExternalCliRuntime {
         let (guide_tx, guide_rx) = tokio::sync::mpsc::channel::<ExternalCliWorkerGuideRequest>(
             MAX_PENDING_EXTERNAL_GUIDES,
         );
+        let (model_tx, model_rx) = tokio::sync::mpsc::channel::<ExternalCliWorkerModelUpdateRequest>(
+            MAX_PENDING_EXTERNAL_GUIDES,
+        );
         if let Some(pid) = worker_pid {
             ACTIVE_WORKERS.insert(pid, stop_tx.clone());
         }
@@ -2101,6 +2292,7 @@ impl ExternalCliRuntime {
                     pid,
                     stop_tx: worker_stop_tx,
                     guide_tx,
+                    model_tx,
                 },
             );
         }
@@ -2113,11 +2305,20 @@ impl ExternalCliRuntime {
         let mut worker = worker;
         let mut stop_rx = stop_rx;
         let mut guide_rx = guide_rx;
+        let mut model_rx = model_rx;
         let mut pending_guides = HashMap::<String, oneshot::Sender<ExternalCliGuideResult>>::new();
+        let mut pending_model_updates = HashMap::<
+            String,
+            (
+                Option<String>,
+                oneshot::Sender<ExternalCliModelUpdateResult>,
+            ),
+        >::new();
         let mut pending_stop_acks = Vec::<oneshot::Sender<()>>::new();
         let mut stop_requested = false;
         let mut stop_deadline = Box::pin(sleep(Duration::from_secs(365 * 24 * 60 * 60)));
         let mut guide_open = true;
+        let mut model_open = true;
         let stopped =
             || ExternalCliRunResult::stopped(request.session_key.clone(), request.adapter.clone());
         let result = loop {
@@ -2189,6 +2390,59 @@ impl ExternalCliRuntime {
                         None => guide_open = false,
                     }
                 }
+                update = model_rx.recv(), if model_open => {
+                    match update {
+                        Some(ExternalCliWorkerModelUpdateRequest {
+                            update_id,
+                            model,
+                            ack_tx,
+                        }) => {
+                            if stop_requested {
+                                let _ = ack_tx.send(live_model::rejected_model_update(
+                                    update_id,
+                                    model,
+                                    None,
+                                    "external runner is stopping".to_string(),
+                                ));
+                                continue;
+                            }
+                            if pending_model_updates.len() >= MAX_PENDING_EXTERNAL_GUIDES {
+                                let _ = ack_tx.send(live_model::rejected_model_update(
+                                    update_id,
+                                    model,
+                                    None,
+                                    format!(
+                                        "too many pending model updates (limit {MAX_PENDING_EXTERNAL_GUIDES})"
+                                    ),
+                                ));
+                                continue;
+                            }
+                            if pending_model_updates.contains_key(&update_id) {
+                                let _ = ack_tx.send(live_model::rejected_model_update(
+                                    update_id,
+                                    model,
+                                    None,
+                                    "duplicate model update id is already pending".to_string(),
+                                ));
+                                continue;
+                            }
+                            if let Err(error) = worker
+                                .request_model_update(update_id.clone(), model.clone())
+                                .await
+                            {
+                                let _ = ack_tx.send(live_model::rejected_model_update(
+                                    update_id,
+                                    model,
+                                    None,
+                                    error,
+                                ));
+                            } else {
+                                pending_model_updates.insert(update_id, (model, ack_tx));
+                            }
+                        }
+                        None => model_open = false,
+                    }
+                }
                 event = worker.next_event() => {
                     match event {
                         Err(_) if stop_requested => break Ok(stopped()),
@@ -2202,6 +2456,11 @@ impl ExternalCliRuntime {
                         Ok(ExternalCliWorkerEvent::Heartbeat { .. }) => {}
                         Ok(ExternalCliWorkerEvent::GuideResult { result }) => {
                             if let Some(ack_tx) = pending_guides.remove(&result.guide_id) {
+                                let _ = ack_tx.send(result);
+                            }
+                        }
+                        Ok(ExternalCliWorkerEvent::ModelUpdateResult { result }) => {
+                            if let Some((_, ack_tx)) = pending_model_updates.remove(&result.update_id) {
                                 let _ = ack_tx.send(result);
                             }
                         }
@@ -2248,6 +2507,14 @@ impl ExternalCliRuntime {
                 turn_id: None,
                 reason: Some("external runner finished before guide acknowledgement".to_string()),
             });
+        }
+        for (update_id, (model, ack_tx)) in pending_model_updates {
+            let _ = ack_tx.send(live_model::rejected_model_update(
+                update_id,
+                model,
+                None,
+                "external runner finished before model update acknowledgement".to_string(),
+            ));
         }
         result
     }
