@@ -263,6 +263,12 @@ result
             {1, 4, 5, 6, 9, 11},
         )
 
+    def test_non_executable_rust_lines_exclude_generic_punctuation_continuations(
+        self,
+    ) -> None:
+        source = ">(\n)?;\n"
+        self.assertEqual(coverage_diff.rust_non_executable_lines(source), {1, 2})
+
     def test_substantial_unchanged_moved_block_is_excluded(self) -> None:
         base = """fn download() {
     let client = client();

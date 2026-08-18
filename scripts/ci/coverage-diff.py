@@ -23,7 +23,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
-RUST_PUNCTUATION_ONLY_RE = re.compile(r"^[\[\]{}(),.;\s]+$")
+RUST_PUNCTUATION_ONLY_RE = re.compile(r"^[\[\]{}(),.;?<>\s]+$")
 EXTERNAL_TEST_MODULE_RE = re.compile(
     r"#\[cfg\(test\)\](?P<attrs>(?:\s*#\[[^\]]+\])*)\s*"
     r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
