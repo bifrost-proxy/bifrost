@@ -5595,7 +5595,10 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
     // spawned PowerShell mock under load. Keep this wait above the mock
     // runner's 10-second timeout, then also wait for the task marker to clear
     // so the temp data root cannot be dropped while bookkeeping is in flight.
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    // Full-suite contention has exceeded 30 seconds, so leave a bounded
+    // 60-second window for scheduling without weakening the report assertion.
+    let completion_wait = std::time::Duration::from_secs(60);
+    tokio::time::timeout(completion_wait, async {
         while !report.is_file() {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
@@ -5603,7 +5606,7 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
     .await
     .expect("after-ASR daily agent did not produce its report");
     assert!(!std::fs::read_to_string(report).unwrap().trim().is_empty());
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    tokio::time::timeout(completion_wait, async {
         while DAILY_AGENT_RUNNING_TASKS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
