@@ -1712,7 +1712,46 @@
 4. 图片下载全部失败时明确返回错误且不发送缺图 Guide；附件准备失败或 Runner 拒绝 Guide 时，原文字与附件完整保留到 FIFO Queue。
 5. `guide_id` 只能是安全单路径组件，`../escape` 等输入不能逃逸会话附件根目录。
 
+### TC-IEC-74: 隔离 Worker 启动与大终态稳定性
+
+前置条件：
+
+1. 当前源码已构建为 `target/debug/bifrost`。
+2. 测试只使用动态端口、临时数据目录和 mock runner；不得连接真实飞书服务或重启用户现有 Service。
+
+操作步骤：
+
+1. 执行 Worker 启动与 stderr 诊断回归：
+   ```bash
+   cargo test -p bifrost-admin \
+     im_gateway::external_cli::tests::worker_client_spawn_and_event_reader_report_transport_failures \
+     --lib -- --exact --nocapture
+   cargo test -p bifrost-admin \
+     im_gateway::external_cli::tests::real_worker_stdio_subprocess_interrupts_via_protocol \
+     --lib -- --exact --nocapture
+   ```
+2. 执行 Broker 终态边界回归：
+   ```bash
+   cargo test -p bifrost-admin \
+     worker_runtime::im_broker::tests::broker_terminal_result_discards_duplicate_live_events_and_preserves_delivery_fields \
+     --lib -- --exact --nocapture
+   ```
+3. 执行隔离 Service 端到端用例：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_external_runner_delayed_final_state.sh
+   ```
+
+预期结果：
+
+1. 生产 Worker 的启动请求仅通过受限 request 文件和私有环境变量传递；stdin 保持给运行中的 Guide/Stop 控制命令使用。
+2. Worker 在启动失败且 stdout 提前结束时，父端错误包含有界 stderr 摘要，避免只返回无上下文的 exit status。
+3. Runner 已实时发送的 progress events 不会再次复制到 Broker 的终态帧；即使总事件量超过 16 MiB，最终 response、metadata 和 artifacts 仍正常返回。
+4. 脚本输出 `[im-gateway-delayed-final-state] PASS`，并清理临时 Service、进程和数据目录。
+
 ## 最近执行记录
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-74。focused Worker stderr/启动协议、真实 subprocess 环境引导、Broker 终态大帧三项 Rust 回归均通过；使用动态端口和隔离数据目录执行 `test_im_gateway_external_runner_delayed_final_state.sh` 输出 `[im-gateway-delayed-final-state] PASS`。mock Runner 连续发送 450 条、每条 40 KiB 的 reasoning 事件（总量超过 Broker 16 MiB 单帧上限），实时 progress 保持可用，最终响应正常收敛。生产启动不再通过 stdin 发送 run 握手，而是使用 request 文件与私有环境变量；若 Worker 提前退出，调用方会收到有界 stderr 摘要。未连接真实飞书服务，也未重启用户现有 Service。工作区全量测试在链接阶段被本机磁盘耗尽中止（非测试断言失败），将由远端 CI 完成。
 
 - 2026-08-18：PASS — 新增并立即执行 TC-IEC-73。focused Rust 回归 `live_guide_prompt_persists_session_images_and_rejects_unsafe_ids` 与 `mock_inbound_accepts_inline_image_payloads` 均通过；重新构建当前二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 三次输出 `[external-runner-live-guide] PASS`。默认 IM Gateway/External CLI worker 隔离链路中，Codex 与 Claude Code 的普通“图片 + 文字”后续消息、Traex 的“图片 + /g”均实时进入当前 turn；图片保存于 canonical session attachments 的唯一 `guide-*` 目录，Guide payload 含绝对路径、原文字且落盘字节精确一致。扩展的 Codex 拒绝场景确认失败 Guide 降级 FIFO Queue 后，第二个 turn 仍收到原文字与完整图片。全部测试使用动态端口和临时数据目录，未停止或重启用户现有 9900 Service。
 

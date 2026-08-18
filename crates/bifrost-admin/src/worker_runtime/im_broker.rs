@@ -59,6 +59,19 @@ enum BrokerResponse {
     Error { error: String },
 }
 
+/// Returns the terminal result that is safe to send over the broker wire.
+///
+/// Progress events are already delivered one frame at a time while the run is
+/// active. Keeping the same in-memory event stream on the terminal result
+/// duplicates potentially unbounded raw runner output and can make the final
+/// frame exceed `MAX_FRAME_BYTES`. The full event history remains available to
+/// the main process while the durable run artifact keeps its compact event
+/// summaries.
+fn terminal_result_for_broker(mut result: ExternalCliRunResult) -> ExternalCliRunResult {
+    result.events.clear();
+    result
+}
+
 impl BrokerRequest {
     fn token(&self) -> &str {
         match self {
@@ -361,7 +374,7 @@ async fn serve_run_connection(
                     Ok(result) => write_frame(
                         &mut write_half,
                         &BrokerResponse::Result {
-                            result: Box::new(result),
+                            result: Box::new(terminal_result_for_broker(result)),
                         },
                     )
                     .await?,
@@ -436,6 +449,49 @@ mod tests {
             "events": []
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn broker_terminal_result_discards_duplicate_live_events_and_preserves_delivery_fields() {
+        let mut full_result = result();
+        full_result.response = "final response".to_string();
+        full_result.responses = vec!["thinking".to_string(), "final response".to_string()];
+        full_result
+            .metadata
+            .insert("threadId".to_string(), "thread-1".to_string());
+        full_result.events = (0..512)
+            .map(|index| ExternalCliProgressEvent {
+                event_type:
+                    crate::im_gateway::external_cli::ExternalCliProgressEventType::AssistantDelta,
+                content: "x".repeat(40 * 1024),
+                title: Some(format!("event-{index}")),
+                raw: serde_json::json!({ "payload": "x".repeat(1024) }),
+            })
+            .collect();
+
+        let oversized = BrokerResponse::Result {
+            result: Box::new(full_result.clone()),
+        };
+        assert!(serde_json::to_vec(&oversized).unwrap().len() > MAX_FRAME_BYTES);
+
+        let terminal_result = terminal_result_for_broker(full_result);
+        assert!(terminal_result.events.is_empty());
+        assert_eq!(terminal_result.response, "final response");
+        assert_eq!(terminal_result.responses, ["thinking", "final response"]);
+        assert_eq!(
+            terminal_result.metadata.get("threadId"),
+            Some(&"thread-1".to_string())
+        );
+        assert_eq!(terminal_result.artifacts.run_dir, "");
+
+        write_frame(
+            &mut tokio::io::sink(),
+            &BrokerResponse::Result {
+                result: Box::new(terminal_result),
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

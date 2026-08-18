@@ -94,6 +94,12 @@ script = (
     "printf '%s\n' "
     "'{\"type\":\"thread.started\",\"thread_id\":\"thread-delayed-final\"}' "
     "'{\"type\":\"turn.started\"}' "
+    # Reproduce a long-running runner that emits more than the 16 MiB broker
+    # frame cap in aggregate. Every individual progress frame stays small;
+    # only the obsolete duplicate event list in the terminal result would be
+    # oversized.
+    "python3 -c 'import json; [print(json.dumps({\"type\": \"item.completed\", \"item\": {\"id\": str(i), \"type\": \"reasoning\", \"text\": \"x\" * 40960}}), flush=True) for i in range(450)]'; "
+    "printf '%s\n' "
     "'{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'; "
     "sleep 5; "
     "printf '%s\n' "

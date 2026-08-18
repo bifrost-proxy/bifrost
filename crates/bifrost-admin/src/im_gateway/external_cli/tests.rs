@@ -628,6 +628,10 @@ sys.exit(child.wait())
     let _child_mode = EnvGuard::set("BIFROST_TEST_REAL_WORKER_CHILD", Path::new("1"));
     let _child_exe = EnvGuard::set("BIFROST_TEST_REAL_WORKER_EXE", &current_exe);
     let _child_marker = EnvGuard::set("BIFROST_TEST_REAL_WORKER_MARKER", &marker);
+    let _env_bootstrap = EnvGuard::set(
+        TEST_EXTERNAL_CLI_WORKER_FORCE_ENV_BOOTSTRAP_ENV,
+        Path::new("1"),
+    );
     let _force = EnvGuard::set("BIFROST_FORCE_EXTERNAL_CLI_WORKER", Path::new("1"));
     let _executable = EnvGuard::set(TEST_EXTERNAL_CLI_WORKER_EXECUTABLE_ENV, &executable);
     let session_key = format!("real-worker-stdio-{}", uuid::Uuid::new_v4());
@@ -635,6 +639,13 @@ sys.exit(child.wait())
     let request = worker_exec_request(Some(session_key.clone()), "sleep 30");
     let task = tokio::spawn(async move { runtime.run(request).await });
     wait_for_parent_worker_handle(&session_key).await;
+    timeout(Duration::from_secs(5), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("real worker subprocess entrypoint");
 
     assert!(request_worker_session_stop(&session_key).await);
     let result = timeout(Duration::from_secs(8), task)
@@ -1400,8 +1411,12 @@ async fn worker_client_override_and_process_spawn_use_configured_executable() {
 
     let client = ExternalCliWorkerClient::current_exe().expect("worker client override");
     assert_eq!(client.executable, executable);
-    let mut child = spawn_external_cli_worker_process(&client.executable)
-        .expect("spawn configured external worker executable");
+    let mut child = spawn_external_cli_worker_process(
+        &client.executable,
+        temp_dir.path(),
+        &temp_dir.path().join("request.json"),
+    )
+    .expect("spawn configured external worker executable");
     let status = child.wait().await.expect("wait configured worker");
     assert!(
         status.code().is_some(),
@@ -1457,6 +1472,10 @@ case "$BIFROST_TEST_WORKER_OUTPUT_MODE" in
   eof)
     exit 0
     ;;
+  eof_with_stderr)
+    printf '%s\n' 'worker bootstrap rejected command: missing field request' >&2
+    exit 1
+    ;;
 esac
 "#,
     )
@@ -1464,9 +1483,16 @@ esac
     let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&executable, permissions).unwrap();
+    let _executable_override = EnvGuard::set(TEST_EXTERNAL_CLI_WORKER_EXECUTABLE_ENV, &executable);
     let client = ExternalCliWorkerClient { executable };
 
-    for mode in ["started", "malformed", "invalid_utf8", "eof"] {
+    for mode in [
+        "started",
+        "malformed",
+        "invalid_utf8",
+        "eof",
+        "eof_with_stderr",
+    ] {
         let _mode = EnvGuard::set("BIFROST_TEST_WORKER_OUTPUT_MODE", Path::new(mode));
         let mut run = client
             .spawn(
@@ -1503,6 +1529,15 @@ esac
             "eof" => {
                 let error = run.next_event().await.unwrap_err();
                 assert!(error.contains("exited before final event"), "{error}");
+                assert!(!request_path.exists());
+            }
+            "eof_with_stderr" => {
+                let error = run.next_event().await.unwrap_err();
+                assert!(error.contains("exited before final event"), "{error}");
+                assert!(
+                    error.contains("worker bootstrap rejected command: missing field request"),
+                    "{error}"
+                );
                 assert!(!request_path.exists());
             }
             _ => unreachable!(),
@@ -4162,6 +4197,7 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
 #[cfg(unix)]
 #[tokio::test]
 async fn app_server_session_stop_sends_interrupt_and_preserves_real_run_result() {
+    let _registry_guard = external_cli_env_guard_async().await;
     use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -4258,6 +4294,7 @@ for line in sys.stdin:
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_stream_json_session_stop_sends_interrupt_control_frame() {
+    let _registry_guard = external_cli_env_guard_async().await;
     use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = tempfile::tempdir().unwrap();

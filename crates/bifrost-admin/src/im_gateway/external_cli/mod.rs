@@ -41,8 +41,17 @@ const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 2;
 const WORKER_PROTOCOL_VERSION: u32 = 2;
+const EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV: &str =
+    "BIFROST_EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL";
+const EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV: &str =
+    "BIFROST_EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT";
+const EXTERNAL_CLI_WORKER_BOOTSTRAP_REQUEST_PATH_ENV: &str =
+    "BIFROST_EXTERNAL_CLI_WORKER_BOOTSTRAP_REQUEST_PATH";
 #[cfg(test)]
 const TEST_EXTERNAL_CLI_WORKER_EXECUTABLE_ENV: &str = "BIFROST_TEST_EXTERNAL_CLI_WORKER_EXECUTABLE";
+#[cfg(test)]
+const TEST_EXTERNAL_CLI_WORKER_FORCE_ENV_BOOTSTRAP_ENV: &str =
+    "BIFROST_TEST_EXTERNAL_CLI_WORKER_FORCE_ENV_BOOTSTRAP";
 #[cfg(test)]
 const TEST_EXTERNAL_CLI_WORKER_STOP_OUTCOME_ENV: &str =
     "BIFROST_TEST_EXTERNAL_CLI_WORKER_STOP_OUTCOME";
@@ -56,6 +65,9 @@ const WORKER_STOP_GRACE_MS: u64 = 3_000;
 const WORKER_SESSION_LOCK_STRIPES: usize = 64;
 const CLI_VERSION_DETECTION_TIMEOUT_SECS: u64 = 10;
 const MAX_CAPTURED_STREAM_BYTES: usize = 4 * 1024;
+// Worker stderr is useful for diagnosing startup and protocol failures, but it
+// can include tool output. Keep the user-facing diagnostic short and bounded.
+const MAX_CAPTURED_WORKER_STDERR_BYTES: usize = 4 * 1024;
 const MAX_CAPTURED_EVENTS: usize = 512;
 const MAX_PERSISTED_PROGRESS_TITLE_BYTES: usize = 128;
 const MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES: usize = 256;
@@ -537,18 +549,9 @@ pub fn run_worker_stdio() -> Result<(), String> {
 
 async fn run_worker_stdio_async() -> Result<(), String> {
     let mut stdin = std::io::BufReader::new(std::io::stdin());
-    let Some(first_line) = crate::worker_runtime::read_limited_sync_line(
-        &mut stdin,
-        EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES,
-    )
-    .map_err(|error| format!("read external runner worker command failed: {error}"))?
-    else {
-        return Err("external runner worker expected a run command".to_string());
-    };
-    let ExternalCliWorkerCommand::Run { request } = serde_json::from_str(&first_line)
-        .map_err(|error| format!("parse external runner worker command failed: {error}"))?
-    else {
-        return Err("external runner worker first command must be run".to_string());
+    let request = match external_cli_worker_bootstrap_from_environment()? {
+        Some(request) => request,
+        None => read_external_cli_worker_stdin_bootstrap(&mut stdin)?,
     };
     if request.protocol_version != WORKER_PROTOCOL_VERSION {
         return Err(format!(
@@ -598,6 +601,52 @@ async fn run_worker_stdio_async() -> Result<(), String> {
         .join()
         .map_err(|_| "external runner worker event writer panicked".to_string())?;
     result
+}
+
+fn read_external_cli_worker_stdin_bootstrap(
+    stdin: &mut impl std::io::BufRead,
+) -> Result<Box<ExternalCliWorkerRunRequest>, String> {
+    let Some(first_line) =
+        crate::worker_runtime::read_limited_sync_line(stdin, EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES)
+            .map_err(|error| format!("read external runner worker command failed: {error}"))?
+    else {
+        return Err("external runner worker expected a run command".to_string());
+    };
+    let ExternalCliWorkerCommand::Run { request } = serde_json::from_str(&first_line)
+        .map_err(|error| format!("parse external runner worker command failed: {error}"))?
+    else {
+        return Err("external runner worker first command must be run".to_string());
+    };
+    Ok(request)
+}
+
+fn external_cli_worker_bootstrap_from_environment(
+) -> Result<Option<Box<ExternalCliWorkerRunRequest>>, String> {
+    let protocol = std::env::var_os(EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV);
+    let runs_root = std::env::var_os(EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV);
+    let request_path = std::env::var_os(EXTERNAL_CLI_WORKER_BOOTSTRAP_REQUEST_PATH_ENV);
+    if protocol.is_none() && runs_root.is_none() && request_path.is_none() {
+        return Ok(None);
+    }
+    let protocol = protocol.ok_or_else(|| {
+        format!("{EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV} is required for external runner worker bootstrap")
+    })?;
+    let protocol = protocol
+        .to_str()
+        .ok_or_else(|| "external runner worker bootstrap protocol is not valid UTF-8".to_string())?
+        .parse::<u32>()
+        .map_err(|error| format!("parse external runner worker bootstrap protocol: {error}"))?;
+    let runs_root = runs_root.ok_or_else(|| {
+        format!("{EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV} is required for external runner worker bootstrap")
+    })?;
+    let request_path = request_path.ok_or_else(|| {
+        format!("{EXTERNAL_CLI_WORKER_BOOTSTRAP_REQUEST_PATH_ENV} is required for external runner worker bootstrap")
+    })?;
+    Ok(Some(Box::new(ExternalCliWorkerRunRequest {
+        protocol_version: protocol,
+        runs_root: PathBuf::from(runs_root).display().to_string(),
+        request_path: PathBuf::from(request_path),
+    })))
 }
 
 async fn run_worker_request(
@@ -1591,6 +1640,7 @@ struct ExternalCliWorkerRun {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
     events: tokio::io::BufReader<tokio::process::ChildStdout>,
+    stderr_capture: Option<tokio::task::JoinHandle<String>>,
     request_path: Option<PathBuf>,
 }
 
@@ -1619,13 +1669,14 @@ impl ExternalCliWorkerClient {
             &ExternalCliWorkerRequestFile { request },
             EXTERNAL_CLI_WORKER_REQUEST_MAX_BYTES,
         )?;
-        let mut child = match spawn_external_cli_worker_process(&self.executable) {
-            Ok(child) => child,
-            Err(error) => {
-                let _ = std::fs::remove_file(&request_path);
-                return Err(error);
-            }
-        };
+        let mut child =
+            match spawn_external_cli_worker_process(&self.executable, &runs_root, &request_path) {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&request_path);
+                    return Err(error);
+                }
+            };
         let Some(mut stdin) = child.stdin.take() else {
             let _ = std::fs::remove_file(&request_path);
             let _ = child.start_kill();
@@ -1638,29 +1689,52 @@ impl ExternalCliWorkerClient {
             let _ = child.wait().await;
             return Err("external runner worker stdout unavailable".to_string());
         };
-        if let Err(error) = write_external_cli_worker_command(
-            &mut stdin,
-            &ExternalCliWorkerCommand::Run {
-                request: Box::new(ExternalCliWorkerRunRequest {
-                    protocol_version: WORKER_PROTOCOL_VERSION,
-                    runs_root: runs_root.display().to_string(),
-                    request_path: request_path.clone(),
-                }),
-            },
-        )
-        .await
-        {
+        let Some(stderr) = child.stderr.take() else {
             let _ = std::fs::remove_file(&request_path);
             let _ = child.start_kill();
             let _ = child.wait().await;
-            return Err(error);
+            return Err("external runner worker stderr unavailable".to_string());
+        };
+        let stderr_log = external_cli_worker_stderr_file().ok();
+        let stderr_capture = tokio::spawn(capture_external_cli_worker_stderr(stderr, stderr_log));
+        if use_external_cli_worker_stdin_bootstrap() {
+            if let Err(error) = write_external_cli_worker_command(
+                &mut stdin,
+                &ExternalCliWorkerCommand::Run {
+                    request: Box::new(ExternalCliWorkerRunRequest {
+                        protocol_version: WORKER_PROTOCOL_VERSION,
+                        runs_root: runs_root.display().to_string(),
+                        request_path: request_path.clone(),
+                    }),
+                },
+            )
+            .await
+            {
+                let _ = std::fs::remove_file(&request_path);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(error);
+            }
         }
         Ok(ExternalCliWorkerRun {
             child,
             stdin,
             events: tokio::io::BufReader::new(stdout),
+            stderr_capture: Some(stderr_capture),
             request_path: Some(request_path),
         })
+    }
+}
+
+fn use_external_cli_worker_stdin_bootstrap() -> bool {
+    #[cfg(test)]
+    {
+        std::env::var_os(TEST_EXTERNAL_CLI_WORKER_EXECUTABLE_ENV).is_some()
+            && std::env::var_os(TEST_EXTERNAL_CLI_WORKER_FORCE_ENV_BOOTSTRAP_ENV).is_none()
+    }
+    #[cfg(not(test))]
+    {
+        false
     }
 }
 
@@ -1748,9 +1822,14 @@ impl ExternalCliWorkerRun {
                 .wait()
                 .await
                 .map_err(|error| format!("wait external runner worker failed: {error}"))?;
-            return Err(format!(
-                "external runner worker exited before final event: {status}"
-            ));
+            let stderr = self.take_captured_stderr().await;
+            let diagnostic = format_external_cli_worker_stderr(&stderr);
+            return Err(match diagnostic {
+                Some(diagnostic) => format!(
+                    "external runner worker exited before final event: {status}; worker stderr: {diagnostic}"
+                ),
+                None => format!("external runner worker exited before final event: {status}"),
+            });
         };
         let event = serde_json::from_str::<ExternalCliWorkerEvent>(&line).map_err(|error| {
             format!("parse external runner worker event failed: {error}; line={line}")
@@ -1766,6 +1845,19 @@ impl ExternalCliWorkerRun {
             let _ = std::fs::remove_file(path);
         }
     }
+
+    async fn take_captured_stderr(&mut self) -> String {
+        let Some(capture) = self.stderr_capture.take() else {
+            return String::new();
+        };
+        match capture.await {
+            Ok(stderr) => stderr,
+            Err(error) => {
+                tracing::warn!(error = %error, "external runner worker stderr capture task failed");
+                String::new()
+            }
+        }
+    }
 }
 
 impl Drop for ExternalCliWorkerRun {
@@ -1775,6 +1867,9 @@ impl Drop for ExternalCliWorkerRun {
             let _ = terminate_process(pid);
         }
         let _ = self.child.start_kill();
+        if let Some(capture) = self.stderr_capture.take() {
+            capture.abort();
+        }
     }
 }
 
@@ -5907,11 +6002,19 @@ fn worker_session_lock_index(session_key: &str) -> usize {
     session_key.hash(&mut hasher);
     (hasher.finish() as usize) % WORKER_SESSION_LOCK_STRIPES
 }
-fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process::Child, String> {
+fn spawn_external_cli_worker_process(
+    executable: &Path,
+    runs_root: &Path,
+    request_path: &Path,
+) -> Result<tokio::process::Child, String> {
     let mut command = external_cli_worker_process_command(executable);
-    if let Ok(stderr) = external_cli_worker_stderr_file() {
-        command.stderr(Stdio::from(stderr));
-    }
+    command
+        .env(
+            EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV,
+            WORKER_PROTOCOL_VERSION.to_string(),
+        )
+        .env(EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV, runs_root)
+        .env(EXTERNAL_CLI_WORKER_BOOTSTRAP_REQUEST_PATH_ENV, request_path);
     command
         .spawn()
         .map_err(|error| format!("spawn external runner worker failed: {error}"))
@@ -5946,11 +6049,74 @@ fn external_cli_worker_process_command(executable: &Path) -> Command {
         .arg("external-runner-worker")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .env(EXTERNAL_CLI_WORKER_ENV, "1");
     #[cfg(unix)]
     command.process_group(0);
     command
+}
+
+async fn capture_external_cli_worker_stderr(
+    mut stderr: tokio::process::ChildStderr,
+    stderr_log: Option<std::fs::File>,
+) -> String {
+    let mut log = stderr_log.map(tokio::fs::File::from_std);
+    let mut captured = Vec::new();
+    let mut buffer = [0_u8; 4096];
+
+    loop {
+        let read = match stderr.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => {
+                tracing::warn!(error = %error, "read external runner worker stderr failed");
+                break;
+            }
+        };
+        if let Some(file) = log.as_mut() {
+            if let Err(error) = file.write_all(&buffer[..read]).await {
+                tracing::warn!(error = %error, "write external runner worker stderr log failed");
+                log = None;
+            }
+        }
+        append_capped_tail(
+            &mut captured,
+            &buffer[..read],
+            MAX_CAPTURED_WORKER_STDERR_BYTES,
+        );
+    }
+    if let Some(mut file) = log {
+        if let Err(error) = file.flush().await {
+            tracing::warn!(error = %error, "flush external runner worker stderr log failed");
+        }
+    }
+    String::from_utf8_lossy(&captured).into_owned()
+}
+
+fn append_capped_tail(output: &mut Vec<u8>, chunk: &[u8], cap: usize) {
+    if chunk.len() >= cap {
+        output.clear();
+        output.extend_from_slice(&chunk[chunk.len() - cap..]);
+        return;
+    }
+    let overflow = output.len().saturating_add(chunk.len()).saturating_sub(cap);
+    if overflow > 0 {
+        output.drain(..overflow);
+    }
+    output.extend_from_slice(chunk);
+}
+
+fn format_external_cli_worker_stderr(stderr: &str) -> Option<String> {
+    let compact = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    let mut end = compact.len().min(MAX_CAPTURED_WORKER_STDERR_BYTES);
+    while end > 0 && !compact.is_char_boundary(end) {
+        end -= 1;
+    }
+    let suffix = if end < compact.len() { "…" } else { "" };
+    Some(format!("{}{}", &compact[..end], suffix))
 }
 
 async fn write_external_cli_worker_command(
