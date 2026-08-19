@@ -2040,6 +2040,288 @@ mod tests {
         assert!(minimum_interval_error.contains("MOSS adaptive rescue minimum interval"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_auto_rescue_retries_token_limit_then_segments_with_scoped_speakers() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("audio.wav");
+        std::fs::write(&wav, b"wav").unwrap();
+        let binary = temp.path().join("moss-transcribe");
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+
+        let token_retry_state = temp.path().join("token-retry-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nmax_new=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--max-new' ]; then shift; max_new=\"$1\"; fi\n  shift\ndone\nif [ \"$count\" -eq 1 ]; then\n  [ \"$max_new\" = '12000' ] || exit 21\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  [ \"$max_new\" = '18000' ] || exit 22\n  printf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"token rescued\"}}]'\nfi\n",
+                token_retry_state.display()
+            ),
+        );
+        let token_rescued = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 600_000, "", None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(token_rescued.transcription.text, "token rescued");
+        assert_eq!(
+            token_rescued.fallback_reason.as_deref(),
+            Some("moss_auto_rescue:max_token->whole_tps30")
+        );
+        assert_eq!(std::fs::read_to_string(&token_retry_state).unwrap(), "2");
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        write_executable(
+            &fake_bin.join("ffmpeg"),
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then shift; input=\"$1\"; fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let _path_guard = EnvVarGuard::set(
+            "PATH",
+            &std::env::join_paths(path_entries).unwrap(),
+        );
+        let segmented_state = temp.path().join("segmented-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -le 2 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  printf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"clip\"}}]'\nfi\n",
+                segmented_state.display()
+            ),
+        );
+        let segmented = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(segmented.transcription.text, "clip\nclip");
+        assert_eq!(
+            segmented.fallback_reason.as_deref(),
+            Some("moss_auto_rescue:max_token->whole_tps30->segment_600_adaptive_60_30_10;segment_scoped_speakers")
+        );
+        let speakers = segmented
+            .transcription
+            .structured
+            .segments
+            .iter()
+            .map(|segment| segment.speaker.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(speakers, vec!["clip_0000000000_S01", "clip_0000600000_S01"]);
+        assert_eq!(std::fs::read_to_string(&segmented_state).unwrap(), "4");
+
+        write_executable(
+            &binary,
+            "#!/bin/sh\nprintf '{\"segments\":[],\"finish_reason\":\"length\"}'\n",
+        );
+        let failed = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap_err();
+        assert!(failed.starts_with(&format!(
+            "moss_non_retryable_v{}_rtf1.5_tps30_seg600adaptive60to30to10:",
+            env!("CARGO_PKG_VERSION")
+        )));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_auto_rescue_does_not_retry_non_token_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("audio.wav");
+        std::fs::write(&wav, b"wav").unwrap();
+        let binary = temp.path().join("moss-transcribe");
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+        let state = temp.path().join("attempt-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\nprintf '%s' $((count + 1)) > \"$state\"\necho 'runtime transport failed' >&2\nexit 7\n",
+                state.display()
+            ),
+        );
+        let error = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 600_000, "", None, None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("runtime transport failed"));
+        assert_eq!(std::fs::read_to_string(state).unwrap(), "1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_auto_rescue_covers_preexpanded_and_nondeterministic_rescue_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("audio.wav");
+        std::fs::write(&wav, b"wav").unwrap();
+        let binary = temp.path().join("moss-transcribe");
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        write_executable(
+            &fake_bin.join("ffmpeg"),
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then shift; input=\"$1\"; fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let _path_guard =
+            EnvVarGuard::set("PATH", &std::env::join_paths(path_entries).unwrap());
+
+        let preexpanded_state = temp.path().join("preexpanded-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -eq 1 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  printf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"clip\"}}]'\nfi\n",
+                preexpanded_state.display()
+            ),
+        );
+        let _tps_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_OUTPUT_TOKENS_PER_SECOND",
+            std::ffi::OsStr::new("30"),
+        );
+        let preexpanded = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(preexpanded.transcription.text, "clip\nclip");
+        assert_eq!(std::fs::read_to_string(preexpanded_state).unwrap(), "3");
+        drop(_tps_guard);
+
+        let token_transport_state = temp.path().join("token-transport-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -eq 1 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  echo 'runtime transport failed' >&2\n  exit 7\nfi\n",
+                token_transport_state.display()
+            ),
+        );
+        let token_transport_error = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap_err();
+        assert!(token_transport_error.contains("runtime transport failed"));
+        assert_eq!(
+            std::fs::read_to_string(token_transport_state).unwrap(),
+            "2"
+        );
+
+        let segmented_transport_state = temp.path().join("segmented-transport-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -le 2 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  echo 'runtime transport failed' >&2\n  exit 7\nfi\n",
+                segmented_transport_state.display()
+            ),
+        );
+        let segmented_transport_error = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap_err();
+        assert!(segmented_transport_error.contains("MOSS segmented rescue chunk"));
+        assert!(segmented_transport_error.contains("runtime transport failed"));
+        assert_eq!(
+            std::fs::read_to_string(segmented_transport_state).unwrap(),
+            "3"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_auto_rescue_persists_segmented_fallback_metadata_and_metric() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _data_guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("meeting.wav");
+        let source_wav = make_wav(&[500_i16; 100]);
+        std::fs::write(&source, &source_wav).unwrap();
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        write_executable(
+            &fake_bin.join("ffmpeg"),
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then shift; input=\"$1\"; fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let _path_guard = EnvVarGuard::set(
+            "PATH",
+            &std::env::join_paths(path_entries).unwrap(),
+        );
+
+        let binary = temp.path().join("moss-transcribe");
+        let state = temp.path().join("attempt-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -le 2 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  printf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"clip\"}}]'\nfi\n",
+                state.display()
+            ),
+        );
+        let runtime = moss_process_test_paths(temp.path(), binary);
+        let mut task = test_directory_task("moss-auto-rescue-artifacts", audio_dir);
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        let source_info = SourceAudioInfo {
+            source_size: Some(source_wav.len() as u64),
+            source_modified_ms: Some(9_000),
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(610_000),
+        };
+        let output = transcribe_file_for_task_with_wav(
+            &task,
+            Path::new("/unused/asr"),
+            Path::new("/unused/model"),
+            &source,
+            &source,
+            &source_info,
+            TaskTranscribeHooks {
+                on_chunk_progress: None,
+                on_chunk_metric: None,
+                pause_check: None,
+                force_pause_task_id: None,
+                memory_limit_hints: &[],
+                server_url: None,
+                startup_fallback_reason: None,
+                server_state: None,
+                managed_server_restart: None,
+                partial_artifacts: None,
+                moss_runtime: Some(&runtime),
+            },
+        )
+        .await
+        .unwrap();
+        let expected = "moss_auto_rescue:max_token->whole_tps30->segment_600_adaptive_60_30_10;segment_scoped_speakers";
+        assert_eq!(output.fallback_reason.as_deref(), Some(expected));
+        assert_eq!(
+            output.chunk_metrics[0].fallback_reason.as_deref(),
+            Some(expected)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&output.metadata_path).unwrap()).unwrap();
+        assert_eq!(metadata["fallback_reason"], expected);
+        assert_eq!(metadata["chunk_metrics"][0]["fallback_reason"], expected);
+    }
+
     #[test]
     fn moss_input_guard_rejects_unknown_short_silent_and_invalid_audio() {
         let temp = TempDir::new().unwrap();
@@ -4134,6 +4416,40 @@ mod tests {
                 "moss_non_retryable_v{}_rtf3.0_tps30_seg300adaptive60to30to10_gaps60:",
                 env!("CARGO_PKG_VERSION")
             )
+        );
+
+        let default_profile = MossExecutionProfile {
+            max_runtime_rtf: MOSS_MAX_RUNTIME_RTF,
+            output_tokens_per_second: MOSS_OUTPUT_TOKENS_PER_SECOND,
+            segment_seconds: None,
+            allow_gap_markers: false,
+        };
+        let token_rescue = default_profile.automatic_token_rescue();
+        assert_eq!(
+            token_rescue.max_runtime_rtf,
+            MOSS_AUTO_TOKEN_RESCUE_MAX_RUNTIME_RTF
+        );
+        assert_eq!(
+            token_rescue.output_tokens_per_second,
+            MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND
+        );
+        let segmented_rescue = default_profile.automatic_segmented_rescue();
+        assert_eq!(
+            segmented_rescue.max_runtime_rtf,
+            MOSS_AUTO_SEGMENTED_RESCUE_MAX_RUNTIME_RTF
+        );
+        assert_eq!(
+            segmented_rescue.segment_seconds,
+            Some(MOSS_AUTO_RESCUE_SEGMENT_SECONDS)
+        );
+        assert_eq!(
+            MossExecutionProfile {
+                max_runtime_rtf: 3.0,
+                ..default_profile
+            }
+            .automatic_segmented_rescue()
+            .max_runtime_rtf,
+            3.0
         );
     }
 

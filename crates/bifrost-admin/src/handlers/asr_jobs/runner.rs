@@ -1659,10 +1659,10 @@ async fn transcribe_file_for_task_with_wav(
             .as_ref()
             .map(|context| context.started_at_ms);
         let moss_started = Instant::now();
-        let result = if let Some(segment_seconds) = moss_segment_seconds_from_env()
+        let (result, moss_fallback_reason) = if let Some(segment_seconds) = moss_segment_seconds_from_env()
             .filter(|seconds| duration_secs > *seconds)
         {
-            run_segmented_moss_joint_transcription(
+            let result = run_segmented_moss_joint_transcription(
                 runtime,
                 wav,
                 duration_ms,
@@ -1670,9 +1670,15 @@ async fn transcribe_file_for_task_with_wav(
                 hooks.pause_check,
                 segment_seconds,
             )
-            .await
+            .await;
+            (
+                result,
+                Some(format!(
+                    "moss_manual_segmented_rescue:segment_{segment_seconds}_adaptive_60_30_10;segment_scoped_speakers"
+                )),
+            )
         } else {
-            run_moss_joint_transcription(
+            match run_moss_joint_transcription_with_auto_rescue(
                 runtime,
                 wav,
                 duration_ms,
@@ -1681,6 +1687,10 @@ async fn transcribe_file_for_task_with_wav(
                 file_started_at_ms,
             )
             .await
+            {
+                Ok(rescued) => (Ok(rescued.transcription), rescued.fallback_reason),
+                Err(error) => (Err(error), None),
+            }
         };
         let elapsed_ms = moss_started
             .elapsed()
@@ -1694,13 +1704,19 @@ async fn transcribe_file_for_task_with_wav(
             &result,
             elapsed_ms,
             None,
-            None,
+            moss_fallback_reason.clone(),
         );
         let result = result?;
         if let Some(callback) = hooks.on_chunk_metric {
             callback(metric.clone());
         }
-        (result, Vec::new(), Vec::new(), vec![metric], None)
+        (
+            result,
+            Vec::new(),
+            Vec::new(),
+            vec![metric],
+            moss_fallback_reason,
+        )
     } else if task.diarization.enabled {
         let diarized = transcribe_diarized_segments_for_task(
             task,
