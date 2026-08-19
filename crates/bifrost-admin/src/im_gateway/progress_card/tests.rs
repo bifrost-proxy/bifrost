@@ -2090,6 +2090,157 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
 }
 
 #[test]
+fn live_session_model_survives_static_runner_summary_refresh() {
+    let mut snapshot = ImAgentProgressSnapshot::new("session-live-model", "run task");
+    snapshot.update_runner_summary(ProgressRunnerSummary {
+        runner_id: "codex-custom".to_string(),
+        adapter: "codex".to_string(),
+        model: Some("gpt-runner-default".to_string()),
+        model_source: Some("runner 配置".to_string()),
+        external_thread_id: Some("thread-live-model".to_string()),
+        ..ProgressRunnerSummary::default()
+    });
+
+    snapshot.update_runner_model(
+        Some("gpt-session-selected".to_string()),
+        Some("session slash command".to_string()),
+    );
+    snapshot.update_runner_summary(ProgressRunnerSummary {
+        runner_id: "codex-custom".to_string(),
+        adapter: "codex".to_string(),
+        model: Some("gpt-runner-default".to_string()),
+        model_source: Some("runner 配置".to_string()),
+        external_thread_id: Some("thread-live-model".to_string()),
+        token_usage: Some(ProgressRunnerTokenUsage {
+            total_tokens: Some(42),
+            ..ProgressRunnerTokenUsage::default()
+        }),
+        ..ProgressRunnerSummary::default()
+    });
+
+    let runner = snapshot.runner.expect("runner summary");
+    assert_eq!(runner.model.as_deref(), Some("gpt-session-selected"));
+    assert_eq!(
+        runner.model_source.as_deref(),
+        Some("session slash command")
+    );
+    assert_eq!(
+        runner
+            .token_usage
+            .as_ref()
+            .and_then(|usage| usage.total_tokens),
+        Some(42)
+    );
+}
+
+#[test]
+fn clearing_live_session_model_survives_static_runner_summary_refresh() {
+    let mut snapshot = ImAgentProgressSnapshot::new("session-clear-model", "run task");
+    snapshot.update_runner_summary(ProgressRunnerSummary {
+        runner_id: "codex-custom".to_string(),
+        adapter: "codex".to_string(),
+        model: Some("gpt-session-selected".to_string()),
+        model_source: Some("session slash command".to_string()),
+        external_thread_id: Some("thread-clear-model".to_string()),
+        ..ProgressRunnerSummary::default()
+    });
+
+    snapshot.update_runner_model(None, Some("session slash command".to_string()));
+    snapshot.update_runner_summary(ProgressRunnerSummary {
+        runner_id: "codex-custom".to_string(),
+        adapter: "codex".to_string(),
+        model: Some("gpt-session-selected".to_string()),
+        model_source: Some("runner 配置".to_string()),
+        external_thread_id: Some("thread-clear-model".to_string()),
+        ..ProgressRunnerSummary::default()
+    });
+
+    let runner = snapshot.runner.expect("runner summary");
+    assert_eq!(runner.model, None);
+    assert_eq!(
+        runner.model_source.as_deref(),
+        Some("session slash command")
+    );
+}
+
+#[test]
+fn live_session_model_wins_over_stale_external_status_refresh() {
+    let mut snapshot = ImAgentProgressSnapshot::new("session-live-status", "run task");
+    snapshot.update_runner_summary(ProgressRunnerSummary {
+        runner_id: "codex-custom".to_string(),
+        adapter: "codex".to_string(),
+        model: Some("gpt-runner-default".to_string()),
+        model_source: Some("runner 配置".to_string()),
+        external_thread_id: Some("thread-live-status".to_string()),
+        ..ProgressRunnerSummary::default()
+    });
+
+    let mut stale_status = active_status(0);
+    stale_status.runner_id = Some("codex-custom".to_string());
+    stale_status.runner_type = Some("codex".to_string());
+    stale_status.model = Some("gpt-runner-default".to_string());
+    stale_status.model_provider = Some("runner config".to_string());
+    stale_status.external_thread_id = Some("thread-live-status".to_string());
+
+    snapshot.update_runner_model(
+        Some("gpt-session-selected".to_string()),
+        Some("session slash command".to_string()),
+    );
+    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(
+        stale_status.clone(),
+    )));
+    assert!(format_status_panel_title(&snapshot)
+        .contains("模型：gpt-session-selected（session slash command）"));
+    assert!(!format_footer_markdown(&snapshot).contains("gpt-runner-default"));
+
+    snapshot.update_runner_model(None, Some("session slash command".to_string()));
+    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(stale_status)));
+    assert!(format_status_panel_title(&snapshot).contains("模型：Codex 默认模型"));
+    assert!(!format_footer_markdown(&snapshot).contains("gpt-runner-default"));
+
+    snapshot.update_runner_model(
+        Some("gpt-session-selected".to_string()),
+        Some("session slash command".to_string()),
+    );
+    let mut new_thread_status = active_status(0);
+    new_thread_status.runner_id = Some("codex-custom".to_string());
+    new_thread_status.runner_type = Some("codex".to_string());
+    new_thread_status.model = Some("gpt-new-thread".to_string());
+    new_thread_status.model_provider = Some("runner config".to_string());
+    new_thread_status.external_thread_id = Some("thread-new-status".to_string());
+    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(new_thread_status)));
+    assert!(format_status_panel_title(&snapshot).contains("模型：gpt-new-thread（runner config）"));
+    assert!(!format_footer_markdown(&snapshot).contains("gpt-session-selected"));
+}
+
+#[test]
+fn different_thread_replaces_preserved_live_session_model() {
+    let mut snapshot = ImAgentProgressSnapshot::new("session-new-thread", "run task");
+    snapshot.update_runner_summary(ProgressRunnerSummary {
+        runner_id: "codex-custom".to_string(),
+        adapter: "codex".to_string(),
+        model: Some("gpt-session-selected".to_string()),
+        model_source: Some("session slash command".to_string()),
+        external_thread_id: Some("thread-old".to_string()),
+        ..ProgressRunnerSummary::default()
+    });
+
+    snapshot.update_runner_summary(ProgressRunnerSummary {
+        runner_id: "codex-custom".to_string(),
+        adapter: "codex".to_string(),
+        model: Some("gpt-runner-default".to_string()),
+        model_source: Some("runner 配置".to_string()),
+        external_thread_id: Some("thread-new".to_string()),
+        ..ProgressRunnerSummary::default()
+    });
+
+    let runner = snapshot.runner.expect("runner summary");
+    assert_eq!(runner.model.as_deref(), Some("gpt-runner-default"));
+    assert_eq!(runner.model_source.as_deref(), Some("runner 配置"));
+    assert_eq!(runner.external_thread_id.as_deref(), Some("thread-new"));
+}
+
+#[test]
 fn external_runner_footer_hides_machine_status_line() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "codex task");
     snapshot.runner = Some(ProgressRunnerSummary {

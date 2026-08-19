@@ -1311,6 +1311,120 @@ fn generate_paths() -> serde_json::Value {
                 }
             }
         },
+        "/api/diagnostics/workers": {
+            "get": {
+                "tags": ["Diagnostics"],
+                "summary": "Auxiliary worker diagnostics snapshot",
+                "description": "Returns lifecycle, heartbeat, concurrency and failure state for managed auxiliary workers without starting idle workers.",
+                "operationId": "getAuxiliaryWorkerDiagnostics",
+                "responses": {
+                    "200": {"description": "Auxiliary worker diagnostics"}
+                }
+            }
+        },
+        "/api/workers": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "List auxiliary workers",
+                "operationId": "listAuxiliaryWorkers",
+                "responses": {"200": {"description": "Worker snapshots"}}
+            }
+        },
+        "/api/workers/modes": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "List auxiliary capability execution modes",
+                "description": "Reports worker or legacy mode and the environment variable used for emergency rollback for each auxiliary capability.",
+                "operationId": "listAuxiliaryWorkerModes",
+                "responses": {"200": {"description": "Execution modes"}}
+            }
+        },
+        "/api/worker-jobs": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "List bounded auxiliary worker job history",
+                "operationId": "listAuxiliaryWorkerJobs",
+                "parameters": [
+                    {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 256}},
+                    {"name": "status", "in": "query", "schema": {"type": "string"}},
+                    {"name": "kind", "in": "query", "schema": {"type": "string"}}
+                ],
+                "responses": {"200": {"description": "Worker jobs"}, "400": {"description": "Invalid filter"}}
+            }
+        },
+        "/api/worker-jobs/{jobId}": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "Get an auxiliary worker job",
+                "operationId": "getAuxiliaryWorkerJob",
+                "parameters": [{"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Worker job"}, "404": {"description": "Job not found"}}
+            }
+        },
+        "/api/worker-jobs/{jobId}/cancel": {
+            "post": {
+                "tags": ["Workers"],
+                "summary": "Cancel an auxiliary worker job",
+                "operationId": "cancelAuxiliaryWorkerJob",
+                "parameters": [{"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "responses": {"202": {"description": "Cancellation accepted"}, "404": {"description": "Job not found"}, "409": {"description": "Job already terminal"}, "503": {"description": "Worker unavailable"}}
+            }
+        },
+        "/api/worker-jobs/{jobId}/events": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "Get bounded worker job events",
+                "operationId": "getAuxiliaryWorkerJobEvents",
+                "parameters": [{"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Worker job events"}, "404": {"description": "Job not found"}}
+            }
+        },
+        "/api/worker-jobs/{jobId}/artifacts": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "List registered worker job artifacts",
+                "operationId": "listAuxiliaryWorkerJobArtifacts",
+                "parameters": [{"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Worker artifacts"}, "404": {"description": "Job not found"}}
+            }
+        },
+        "/api/worker-jobs/{jobId}/artifacts/{artifactId}": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "Read a bounded worker artifact range or tail",
+                "operationId": "readAuxiliaryWorkerJobArtifact",
+                "parameters": [
+                    {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}},
+                    {"name": "artifactId", "in": "path", "required": true, "schema": {"type": "string"}},
+                    {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}},
+                    {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 1048576}},
+                    {"name": "tail", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 1048576}}
+                ],
+                "responses": {"200": {"description": "Artifact bytes"}, "400": {"description": "Invalid range"}, "404": {"description": "Artifact not found"}, "410": {"description": "Artifact expired"}}
+            }
+        },
+        "/api/workers/{kind}": {
+            "get": {
+                "tags": ["Workers"],
+                "summary": "List one auxiliary worker kind",
+                "operationId": "getAuxiliaryWorkerKind",
+                "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Worker snapshots"}, "404": {"description": "Unknown worker kind"}}
+            }
+        },
+        "/api/workers/{kind}/{action}": {
+            "post": {
+                "tags": ["Workers"],
+                "summary": "Control auxiliary worker lifecycle",
+                "description": "Action is start, stop, restart, or reset-circuit. Start and restart only operate on worker instances already registered by their owning capability.",
+                "operationId": "controlAuxiliaryWorkerKind",
+                "parameters": [
+                    {"name": "kind", "in": "path", "required": true, "schema": {"type": "string"}},
+                    {"name": "action", "in": "path", "required": true, "schema": {"type": "string", "enum": ["start", "stop", "restart", "reset-circuit"]}}
+                ],
+                "responses": {"200": {"description": "Lifecycle action result"}, "404": {"description": "Unknown worker kind"}, "503": {"description": "All requested worker actions failed"}}
+            }
+        },
 
         // ═══════════════════════════════════════════════════════
         // Ports

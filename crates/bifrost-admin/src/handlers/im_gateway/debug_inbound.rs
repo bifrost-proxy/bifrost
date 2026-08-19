@@ -7,6 +7,8 @@ struct MockInboundRequest {
     #[serde(default)]
     text: String,
     #[serde(default)]
+    images: Vec<MockInboundImage>,
+    #[serde(default)]
     files: Vec<MockInboundFile>,
     #[serde(default)]
     user_id: Option<String>,
@@ -36,6 +38,17 @@ struct MockInboundRequest {
     parent_id: Option<String>,
     #[serde(default)]
     thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MockInboundImage {
+    #[serde(default)]
+    file_key: Option<String>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +186,10 @@ async fn inject_mock_inbound(
     }
     if body.text.trim().is_empty()
         && body
+            .images
+            .iter()
+            .all(|image| image.data.as_deref().unwrap_or_default().trim().is_empty())
+        && body
             .files
             .iter()
             .all(|file| file.data.as_deref().unwrap_or_default().trim().is_empty())
@@ -215,11 +232,17 @@ async fn inject_mock_inbound(
         .unwrap_or_else(|| format!("mock-msg-{}", uuid_short()));
 
     let tx = ensure_mock_event_sink(service, &provider);
+    let has_image = body
+        .images
+        .iter()
+        .any(|image| !image.data.as_deref().unwrap_or_default().trim().is_empty());
     let has_file = body
         .files
         .iter()
         .any(|file| !file.data.as_deref().unwrap_or_default().trim().is_empty());
-    let raw_type = if body.text.trim().is_empty() && has_file {
+    let raw_type = if body.text.trim().is_empty() && has_image {
+        "image"
+    } else if body.text.trim().is_empty() && has_file {
         "file"
     } else {
         "text"
@@ -265,7 +288,24 @@ async fn inject_mock_inbound(
             } else {
                 Vec::new()
             },
-            images: Vec::new(),
+            images: body
+                .images
+                .into_iter()
+                .filter_map(|image| {
+                    let data = image.data?.trim().to_string();
+                    if data.is_empty() {
+                        return None;
+                    }
+                    Some(crate::im_gateway::types::ImImageAttachment {
+                        file_key: image
+                            .file_key
+                            .unwrap_or_else(|| format!("mock-image-{}", uuid_short())),
+                        mime_type: Some(image.mime_type.unwrap_or_else(|| "image/png".to_string())),
+                        data_base64: Some(data),
+                        ..Default::default()
+                    })
+                })
+                .collect(),
             files: body
                 .files
                 .into_iter()
@@ -421,6 +461,7 @@ mod tests {
             parent_id: Some("om_parent".to_string()),
             thread_id: Some("omt_thread".to_string()),
             reply_to: None,
+            images: Vec::new(),
             files: Vec::new(),
         }
     }
@@ -614,6 +655,49 @@ mod tests {
             Some("IyBSZXBvcnQ=")
         );
         assert!(message.files[0].download_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn mock_inbound_accepts_inline_image_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        service
+            .provider_store
+            .add(provider("debug-image-provider"))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-image-provider".to_string(), tx);
+        let mut body = request("debug-image-provider", "  ");
+        body.images = vec![
+            MockInboundImage {
+                file_key: None,
+                mime_type: Some("image/png".to_string()),
+                data: Some("  aW1hZ2U=  ".to_string()),
+            },
+            MockInboundImage {
+                file_key: Some("ignored-empty".to_string()),
+                mime_type: None,
+                data: Some(" ".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            inject_mock_inbound(body, &service).await.status(),
+            StatusCode::OK
+        );
+        let event = rx.try_recv().expect("mock image event");
+        let message = event.message.expect("mock message");
+
+        assert_eq!(message.raw_type.as_deref(), Some("image"));
+        assert_eq!(message.images.len(), 1);
+        assert!(message.images[0].file_key.starts_with("mock-image-"));
+        assert_eq!(message.images[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(message.images[0].data_base64.as_deref(), Some("aW1hZ2U="));
+        assert!(message.images[0].download_url.is_none());
     }
 
     #[tokio::test]

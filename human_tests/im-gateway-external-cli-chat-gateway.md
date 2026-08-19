@@ -1051,7 +1051,7 @@
 4. 下一条普通 Codex/Traex run 的启动参数包含 `--model Doubao-Unit`；下一条普通 Claude Code run 的启动参数包含 `--model sonnet` 或 `--model claude-opus-4-5-20251101`；session slash override 覆盖 runner 默认模型。
 5. Web UI 仅在当前 runner adapter 为 `codex`、`traex` 或 `claude_code` 时展示 model slash 命令；其它 adapter 不展示这两个入口。
 6. slash 命令和系统回执刷新后仍在消息列表中，发送下一条普通消息后不消失，但不会作为用户 prompt 注入 runner 上下文。
-7. 飞书 IM 空闲状态下 `/models`、`/model` 使用同一 session override；运行中发送 `/model` 明确提示等待当前任务结束，不把 `/model` 当普通 prompt 送进 Codex/Traex/Claude Code。
+7. 飞书 IM 空闲和运行中状态下 `/models`、`/model` 使用同一 session override；运行中的 `/model` 走 Runner 原生模型控制协议，不作为普通 prompt 或 Guide 文本发送。
 8. Agent Chat 输入框上方 token HUD 在刷新、发送下一条消息和 run 完成后持续展示当前模型、token 与 context，不因 history summary 或运行中空 status 快照退回 `Tokens -`、`Context 0%` 或隐藏模型名。
 9. Web UI 已有历史 assistant 回复后再次发送 `/model <name>`，页面立即追加独立居中的系统行 `切换模型为 <name>`，不替换、不隐藏、不合并最后一条 assistant 回复；刷新后历史显示与即时显示一致，且该系统行不作为 user/assistant 消息注入 runner prompt。
 
@@ -1249,8 +1249,8 @@
 
 预期结果：
 
-1. 飞书/微信 IM 的 Codex、Traex、Claude Code 与其他 runner 在 session 忙碌时，普通消息默认加入下一轮 FIFO 队列；只有 `/g <消息>` 明确请求当前 turn 引导。
-2. 显式 `/g` 时 Codex/Traex app-server 收到 `turn/steer`，引导文本只进入当前 turn，不会因等待 steer ACK 阻塞 runner 控制循环，也不会在成功 steer 后再次作为下一轮执行。
+1. 飞书/微信 IM 的 Codex、Traex、Claude Code 与其他支持 Guide 的 runner 在 session 忙碌时，普通后续消息默认请求当前 turn 引导；`/g <消息>` 保留为显式 Guide 命令，只有 `/q <消息>` 明确加入下一轮 FIFO 队列。
+2. 普通后续消息或显式 `/g` 时，Codex/Traex app-server 收到 `turn/steer`，Claude Code stream-json 收到 interrupt 后的 user frame；引导文本只进入当前 turn，不会因等待 ACK 阻塞 runner 控制循环，也不会在成功 Guide 后再次作为下一轮执行。
 3. `/q queue-explicit` 不进入 `turn/steer`；当前 turn 结束后只执行一次排队消息，文本和顺序保持不变。
 4. runner 拒绝 Guide、控制通道失败或不支持 live guide 时，原消息明确降级排队，队列中仍保留完整文本。
 5. Agent Chat WebUI 在 Codex/Traex/Claude Code 与自定义 runner 运行中默认选中 Guide，发送 `/g <消息>`；切换 Queue 后发送 `/q <消息>`，控制回执不会错误结束主 turn 或被陈旧 thread summary 覆盖。
@@ -1630,7 +1630,195 @@
 5. Traex 收到合法 `/fast off` 或非法参数 `/fast invalid` 后都优先明确回复“当前 Runner 不支持 `/fast` 命令”，且 Traex Runner 不执行。
 6. 合法和非法 `/fast` 在群聊与忙碌链路均作为系统命令分类，不进入普通 prompt 或 live guide。
 
+### TC-IEC-71: 隔离 worker Stop、Queue 与替代 ownership
+
+前置条件：
+
+1. 当前源码已构建为 `target/debug/bifrost`。
+2. 测试只使用临时数据目录、动态端口和 mock Codex/Traex/Claude Code，不停止、重启或替换用户当前 Bifrost Service。
+
+操作步骤：
+
+1. 执行真实隔离 worker 链路：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_worker_stop.sh
+   ```
+2. 检查 mock 协议日志、Chat Gateway run result、IM queue 后续 turn 与同 session 替代运行顺序。
+3. 在无 session key 的直接 API run 仍活跃时停止临时 Service，确认 shutdown 先完成协议级中断，再退出父进程。
+4. 确认脚本退出后临时 Service、mock 进程和临时数据目录均已清理。
+
+预期结果：
+
+1. Codex 与 Traex app-server 收到 `turn/interrupt`；Claude Code stream-json 收到 `control_request` 的 `interrupt`，而不是只终止本地 worker。
+2. Stop 返回原始 run id 和非空 artifacts，最终状态为 `stopped`，不生成 `stopped-*` synthetic run。
+3. Guide channel 饱和不阻塞优先 Stop；当前 turn 停止后，主 Service 的 FIFO queue 保留并且排队消息只执行一次；`/clear` 等待 Stop 后清空 queue/session，已排队消息不得再运行。
+4. 同 session 的直接替代运行先中断旧 worker，再启动新 worker；旧 worker cleanup 不能删除新 owner。
+5. Service shutdown 也覆盖无 session 的 worker，全局 worker 注册表不会遗漏直接 API run；测试输出 `[external-runner-worker-stop] PASS`，且不影响用户现有 Service。
+
+### TC-IEC-72: IM worker 到主进程的 Runner 控制面路由
+
+1. 以默认 `IM Gateway=worker`、`External CLI=worker` 模式启动隔离临时 Service，配置 mock Codex/Traex app-server Runner 和本地 debug inbound Provider。
+2. 从 IM 通道启动 Codex 当前 turn，随后发送普通后续消息与 `/g <消息>`；检查主进程 app-server 收到 `turn/steer`，且消息没有进入 FIFO Queue。
+3. 在另一会话发送 `/q <消息>` 后用 `/g` 结束当前 turn；检查 `/q` 内容只在当前 turn 完成后作为下一 turn 执行一次。
+4. 在持续运行的第三个会话发送 `/stop`；检查主进程 app-server 收到 `turn/interrupt`，而不是把 `/stop` 当作 steer 或排队消息。
+5. 逐项代码审计 `/help` 列出的 `/help`、`/status`、`/pwd`、`/cwd`、`/runner`、`/new`、`/clear`、`/reset`、`/q`、`/rq`、`/stop`、`/model`、`/resume`、`/effort`、`/fast`，并检查未在帮助中单列但仍兼容的 `/g`：确认纯查询/配置/队列命令只依赖 IM worker 本地或持久化状态；普通后续消息与 `/g` 的 Guide、以及 Stop 才需要主进程 broker，`/clear`、`/reset` 的停机前置动作复用同一 Stop 路由。
+6. 执行：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     main_broker_routes_guide_and_stop_to_the_main_process_registry --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     request_agent_stop_ --lib -- --nocapture
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+
+预期结果：
+
+1. broker 使用独立短连接验证 capability token 后，把 Guide/Stop 路由到主进程持有的 session registry；不存在的 session 返回明确拒绝/`stopped=false`。
+2. Codex/Traex 普通后续消息和 `/g` 均实时 steer；只有显式 `/q` 排队，消息不丢失也不重复执行。
+3. `/stop` 跨 IM worker 边界触发协议级 interrupt，并同时兼容 isolated External CLI、legacy run registry 与 ChatGPT Web browser worker。
+4. `/help` 其余命令不会因为进程拆分误进 Guide/Queue，也不会访问主进程内存注册表。
+
+### TC-IEC-73: 运行中 IM 图片与文字进入实时 Guide
+
+前置条件：
+
+1. 当前 worktree 已编译 `target/debug/bifrost`。
+2. 使用默认 `IM Gateway=worker`、`External CLI=worker` 模式、动态端口、隔离临时数据目录和 mock Codex/Traex/Claude Code Runner；不得停止或重启本机 `9900` Service。
+
+操作步骤：
+
+1. 从 IM 通道分别启动 Codex、Traex 和 Claude Code 的持续运行 turn。
+2. 在 Codex 与 Claude Code 会话发送“图片 + 普通后续消息”，在 Traex 会话发送“图片 + `/g <消息>`”。
+3. 检查主进程 Runner 收到的 Guide payload、会话附件目录、原始图片字节和 FIFO Queue 状态。
+4. 执行 focused Rust 回归与真实隔离 E2E：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     live_guide_prompt_persists_session_images_and_rejects_unsafe_ids \
+     --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     mock_inbound_accepts_inline_image_payloads \
+     --lib -- --nocapture
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+
+预期结果：
+
+1. 三种 Runner 均在当前 turn 收到实时 Guide，不显示“运行中引导暂不支持图片”，也不把成功 Guide 的消息加入 FIFO Queue。
+2. 图片保存到 canonical session attachments 下以唯一 `guide-*` ID 隔离的 `images/image-1.png`；Guide payload 含 `## Attached Images`、绝对本地路径和原始文字。
+3. Traex 的 `/g` 前缀被控制层移除，图片路径与 `/g` 后的文字一起进入 Guide；Codex/Claude Code 普通后续消息行为一致。
+4. 图片下载全部失败时明确返回错误且不发送缺图 Guide；附件准备失败或 Runner 拒绝 Guide 时，原文字与附件完整保留到 FIFO Queue。
+5. `guide_id` 只能是安全单路径组件，`../escape` 等输入不能逃逸会话附件根目录。
+
+### TC-IEC-74: 隔离 Worker 启动与大终态稳定性
+
+前置条件：
+
+1. 当前源码已构建为 `target/debug/bifrost`。
+2. 测试只使用动态端口、临时数据目录和 mock runner；不得连接真实飞书服务或重启用户现有 Service。
+
+操作步骤：
+
+1. 执行 Worker 启动与 stderr 诊断回归：
+   ```bash
+   cargo test -p bifrost-admin \
+     im_gateway::external_cli::tests::worker_client_spawn_and_event_reader_report_transport_failures \
+     --lib -- --exact --nocapture
+   cargo test -p bifrost-admin \
+     im_gateway::external_cli::tests::real_worker_stdio_subprocess_interrupts_via_protocol \
+     --lib -- --exact --nocapture
+   ```
+2. 执行 Broker 终态边界回归：
+   ```bash
+   cargo test -p bifrost-admin \
+     worker_runtime::im_broker::tests::broker_terminal_result_discards_duplicate_live_events_and_preserves_delivery_fields \
+     --lib -- --exact --nocapture
+   ```
+3. 执行隔离 Service 端到端用例：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_external_runner_delayed_final_state.sh
+   ```
+
+预期结果：
+
+1. 生产 Worker 的启动请求仅通过受限 request 文件和私有环境变量传递；stdin 保持给运行中的 Guide/Stop 控制命令使用。
+2. Worker 在启动失败且 stdout 提前结束时，父端错误包含有界 stderr 摘要，避免只返回无上下文的 exit status。
+3. Runner 已实时发送的 progress events 不会再次复制到 Broker 的终态帧；即使总事件量超过 16 MiB，最终 response、metadata 和 artifacts 仍正常返回。
+4. 脚本输出 `[im-gateway-delayed-final-state] PASS`，并清理临时 Service、进程和数据目录。
+
+### TC-IEC-75: IM 运行中动态切换 External Runner 模型
+
+前置条件：
+
+1. 使用隔离数据目录和 mock IM provider；不得连接真实飞书服务或重启用户现有 Service。
+2. Codex/Traex mock 实现 stdio app-server 握手、保持一个 turn 运行，并记录 `thread/settings/update`；Claude Code mock 实现 stream-json 初始化、保持 session 运行，并记录 `control_request`。
+
+操作步骤：
+
+1. 启动 Codex mock app-server 长任务，通过 IM concurrent/busy 入口依次发送 `/model <可用模型>` 与 `/model clear`。
+2. 检查 IM 回执、`session_state.json`、IM worker 到主进程 broker 帧、external worker 控制帧和 mock Codex 收到的 `thread/settings/update`。
+3. 使用 focused transport 回归分别验证 Codex、Traex 与 Claude Code 的 active thread/session 原生 model update、clear、拒绝、停止态和 session 替换边界。
+4. 使用 worker/control focused 回归验证 `transport=exec` 明确拒绝当前 run 热切换但保留持久化 override，下一轮使用新配置。
+5. 执行：
+   ```bash
+   cargo test -p bifrost-admin --lib model_update -- --nocapture
+   cargo test -p bifrost-admin --lib update_model_on_the_active_thread -- --nocapture
+   cargo test -p bifrost-admin --lib updates_model_in_the_active_session -- --nocapture
+   cargo test -p bifrost-admin --lib local_resume_and_model_commands_cover_idle_and_busy_control_paths -- --nocapture
+   ```
+
+预期结果：
+
+1. 忙碌态 `/model` 不再返回“等待任务结束”，也不进入普通 prompt、Guide 或 FIFO Queue；`/model` 与 `/models` 查询仍正常响应。
+2. Codex/Traex 收到 `thread/settings/update`，参数包含当前 `threadId` 和目标 model；Claude Code 收到 `control_request`，subtype 为 `set_model`。`clear` 分别发送 `model:null`，恢复 Runner 默认模型。
+3. 原生 ACK 后 IM 明确说明切换对后续响应/轮次生效，当前已发出的生成不会重启；session override 同步持久化，后续新 run 也使用新配置。
+4. IM Gateway 隔离 worker 通过 capability broker 把 ModelUpdate 精确路由到主进程持有的 active worker，缺失或已替代 session 不误投递。
+5. `exec` transport 明确提示运行中 Runner 未确认热切换，但已保存 override；下一轮使用新模型配置，且不会虚报运行中已切换成功。
+
+### TC-IEC-76: IM progress card 展示 thread 有效模型
+
+前置条件：
+
+1. 使用隔离数据目录、mock 飞书 OpenAPI 和 mock Codex app-server；Runner 默认模型设置为 `gpt-runner-default`。
+2. mock app-server 保持同一个 thread/turn 运行，并接受 `/model gpt-live-unit` 与 `/model clear` 的 `thread/settings/update`。
+
+操作步骤：
+
+1. 以 `deliveryMode=progress_card` 触发一条普通 IM 消息，确认 progress card 初始模型来自本次 run 的有效配置。
+2. 在同一个运行中 session 发送 `/model gpt-live-unit`，等待原生 ACK，并检查 CardKit 更新 payload。
+3. 在 Runner 继续发送状态、usage 或终态事件后再次检查卡片，确认模型没有回退到 `gpt-runner-default`。
+4. 发送 `/model clear`，等待原生 ACK，并检查卡片恢复为 Codex 默认模型。
+5. 执行：
+   ```bash
+   cargo test -p bifrost-admin --lib live_session_model -- --nocapture
+   cargo test -p bifrost-admin --lib external_cli_progress_runner_summary_uses_session_effort_override -- --nocapture
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_live_model_switch.sh
+   ```
+
+预期结果：
+
+1. session model override 的卡片来源不再显示为 `runner 配置`，而是保留 session 级来源。
+2. 只有 Runner 原生 ACK 成功后，当前 progress card 才切换模型；ACK 拒绝不会把下轮 override 冒充为当前 thread 模型。
+3. 后续 token、额度、状态和终态刷新继续更新其他 Runner 字段，但不会覆盖当前 thread 的动态模型。
+4. `/model clear` ACK 成功后，当前卡片展示 Codex 默认模型，而不是启动时或 Runner 配置中的旧模型。
+
 ## 最近执行记录
+
+- 2026-08-19：PASS — 复跑 TC-IEC-75。先以 `RUST_TEST_THREADS=1 make coverage-changed` 完成包含 live model channel、IM broker、Codex/Traex app-server 与 Claude Code stream-json 的完整 Rust 回归，再使用当前源码构建的二进制执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_live_model_switch.sh`，输出 `[im-live-model] PASS`。隔离 Service + mock 飞书入站在同一个运行中 Codex turn 依次发送 `/model gpt-live-unit` 与 `/model clear`，mock app-server 收到同一 `threadId` 的 model 字符串和 `null` 更新；当前 turn 正常结束、session override 最终清除。脚本使用动态端口和临时数据目录，未连接真实飞书、未触碰正式 `9900` 服务，并通过 trap 清理测试进程。
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-75。focused Rust 回归覆盖 live model channel、IM worker → 主进程 broker、Codex/Traex `thread/settings/update`、Claude Code `control_request/set_model` 与忙碌态 `/model clear`，全部通过；构建当前源码二进制后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_live_model_switch.sh` 输出 `[im-live-model] PASS`。隔离 Service + mock 飞书入站在 Codex turn 运行中依次发送 `/model gpt-live-unit` 与 `/model clear`，mock app-server 精确收到同一 `threadId` 的 model 字符串和 `null` 两个更新，IM 回执说明后续响应/轮次生效且没有旧的等待提示，session override 最终清除，原 turn 正常完成。测试未连接真实飞书、未重启用户现有 Service，并已清理临时进程和数据目录。
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-74。focused Worker stderr/启动协议、真实 subprocess 环境引导、Broker 终态大帧三项 Rust 回归均通过；使用动态端口和隔离数据目录执行 `test_im_gateway_external_runner_delayed_final_state.sh` 输出 `[im-gateway-delayed-final-state] PASS`。mock Runner 连续发送 450 条、每条 40 KiB 的 reasoning 事件（总量超过 Broker 16 MiB 单帧上限），实时 progress 保持可用，最终响应正常收敛。生产启动不再通过 stdin 发送 run 握手，而是使用 request 文件与私有环境变量；若 Worker 提前退出，调用方会收到有界 stderr 摘要。未连接真实飞书服务，也未重启用户现有 Service。工作区全量测试在链接阶段被本机磁盘耗尽中止（非测试断言失败），将由远端 CI 完成。
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-73。focused Rust 回归 `live_guide_prompt_persists_session_images_and_rejects_unsafe_ids` 与 `mock_inbound_accepts_inline_image_payloads` 均通过；重新构建当前二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 三次输出 `[external-runner-live-guide] PASS`。默认 IM Gateway/External CLI worker 隔离链路中，Codex 与 Claude Code 的普通“图片 + 文字”后续消息、Traex 的“图片 + /g”均实时进入当前 turn；图片保存于 canonical session attachments 的唯一 `guide-*` 目录，Guide payload 含绝对路径、原文字且落盘字节精确一致。扩展的 Codex 拒绝场景确认失败 Guide 降级 FIFO Queue 后，第二个 turn 仍收到原文字与完整图片。全部测试使用动态端口和临时数据目录，未停止或重启用户现有 9900 Service。
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-72。`main_broker_routes_guide_and_stop_to_the_main_process_registry` 通过，验证 capability broker 的 Guide/Stop 成功路由、缺失 session 明确拒绝和 `stopped=false`；`request_agent_stop_` 2/2 通过，验证 Stop 控制错误会显式传播而不会伪报“当前没有任务”；`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。默认 IM Gateway/External CLI worker 隔离链路中，Codex/Traex 普通 IM 后续消息与 `/g` 实时 steer，显式 `/q` 只在当前 turn 完成后执行一次；新增 Codex IM Stop 场景收到主进程 `turn/interrupt` 且没有 `turn/steer`。测试使用动态端口和临时数据目录，未停止或重启用户现有 9900 Service。
+
+- 2026-08-18：PASS — 新增并立即执行 TC-IEC-71。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_worker_stop.sh` 最终输出 `[external-runner-worker-stop] PASS`；隔离临时 Service 与 mock Codex/Traex/Claude Code 验证协议级 interrupt、真实 run id/artifacts 保留、Guide 饱和下优先 Stop、停止当前 turn 后 FIFO queue 只执行一次，以及同 session 替代 worker 的先停后启顺序。Review 扩展的无 session 直接 API run 首次复测暴露 daemon shutdown 先取消 Admin/IM 分支、worker EOF 又缺少 run-id fallback，导致只产生 synthetic stopped result；修复为父 future drop 关闭 stdin、worker 以本地 active run 写 marker 并原生 interrupt 后，完整脚本复跑通过。脚本完成临时 Service、mock 进程与数据目录清理，未停止或重启用户现有 Service。
 
 - 2026-08-14：PASS — 更新 TC-IEC-69 后立即执行真实隔离链路。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_prompt_passthrough.sh` 输出 `[im-prompt-passthrough] PASS`；临时 Bifrost、mock Feishu Provider 与捕获 stdin 的 mock Runner 验证 4 个 turn：空配置 P2P、带四层 Instructions 的 P2P 首条/后续、新群聊首条。四条 prompt 均只含一个可信动态外发上下文，精确绑定 `provider=prompt-e2e`、`app_id=cli_prompt_e2e` 和各自 chat ID，列全 Feishu content capabilities、CLI 内容/目的地形式、canonical send 命令及 help/capabilities 诊断流程；群消息既保留精确 routing block，也保留既有群名/群 ID/@发送者上下文增强。focused Rust 回归 `agent_outbound_context` 4/4、`compose_message_instructions` 3/3、`build_prompt_does_not_inject_legacy_bifrost_tool_context` 1/1 全部通过，临时服务与数据目录已清理。
 - 2026-08-09：PASS — 在最终收紧“完整数据只供实时 UI、外部执行器历史不保存 content/参数/结果/增量/计划”后，立即重新执行 TC-IEC-43/44/46/48：`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 输出 `[im-gateway-external-runner-image-input] PASS`。真实临时服务完成普通图片两轮、Traex-compatible、image-only runner-call 和纯文件 IM inbound；完整 prompt 仅进入 runner stdin，`prompt.md` 为计数摘要，`runtime_snapshot.json` 不含参数值，normalized events/result 仅含工具标识与状态，session 不含 assistant delta/plan/工具参数/工具结果，脚本已清理隔离数据与进程。

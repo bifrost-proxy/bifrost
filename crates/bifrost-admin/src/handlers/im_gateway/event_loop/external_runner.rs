@@ -1494,7 +1494,24 @@ pub(super) async fn run_external_cli_agent_chat(
     }
 
     if trimmed_msg == "/clear" || trimmed_msg == "/reset" {
-        let _ = request_agent_stop(ctx.agent_session_manager, &input.session_key).await;
+        if let Err(error) = request_agent_stop(ctx.agent_session_manager, &input.session_key).await
+        {
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("❌ 重置会话前停止当前 Runner 失败：{error}"),
+                ctx.message_log_store,
+            )
+            .await;
+            finalize_current_feishu_thread_binding(
+                ctx.group_context_store,
+                &ctx.provider.id,
+                ctx.event,
+                "failed",
+            );
+            return;
+        }
         if let Some(mut session) = ctx
             .agent_session_manager
             .try_take_session(&input.session_key)
@@ -2008,8 +2025,9 @@ pub(super) async fn run_external_cli_agent_chat(
         let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
             crate::im_gateway::external_cli::default_runs_root(),
         );
-        let (external_progress_tx, mut external_progress_rx) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (external_progress_tx, mut external_progress_rx) = tokio::sync::mpsc::channel(
+            crate::im_gateway::external_cli::EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY,
+        );
         let request_for_progress = request.clone();
         // Keep the runner control loop independently polled while this task
         // handles a default Guide message (or a legacy inbound /g). Awaiting the
@@ -3009,10 +3027,37 @@ pub(in crate::handlers::im_gateway) fn external_cli_progress_runner_summary(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     metadata: Option<&std::collections::BTreeMap<String, String>>,
 ) -> crate::im_gateway::progress_card::ProgressRunnerSummary {
-    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
-        &request.adapter,
-        &request.adapter_config,
-    );
+    let mut resolved_model_config =
+        crate::im_gateway::external_cli::resolve_external_cli_model_config(
+            &request.adapter,
+            &request.adapter_config,
+        );
+    if let Some(state) = request.session_key.as_deref().and_then(|session_key| {
+        crate::im_gateway::session_state::load_session_state(
+            session_key,
+            &request.adapter,
+            Some(runner_id),
+        )
+    }) {
+        let request_model = resolved_model_config.model.as_deref().map(str::trim);
+        let session_model = state.model_override.as_deref().map(str::trim);
+        if session_model.is_some() && session_model == request_model {
+            resolved_model_config.model_provider = None;
+            resolved_model_config.model_source = state
+                .model_override_source
+                .or_else(|| Some("session slash command".to_string()));
+        }
+        let request_effort = resolved_model_config
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim);
+        let session_effort = state.reasoning_effort_override.as_deref().map(str::trim);
+        if session_effort.is_some() && session_effort == request_effort {
+            resolved_model_config.reasoning_source = state
+                .reasoning_effort_override_source
+                .or_else(|| Some("session slash command".to_string()));
+        }
+    }
     let configured_model = resolved_model_config
         .model
         .as_deref()
@@ -3140,7 +3185,7 @@ pub(super) async fn maybe_stop_external_cli_for_event(event: &ImEvent, active_se
     if session_key != active_session_key {
         return;
     }
-    if let Err(error) = crate::im_gateway::external_cli::request_session_stop(
+    if let Err(error) = crate::im_gateway::external_cli::request_managed_session_stop(
         crate::im_gateway::external_cli::default_runs_root(),
         active_session_key,
     )

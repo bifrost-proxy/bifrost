@@ -5,13 +5,33 @@ use crate::cli::SystemProxyLaunchdCommands;
 use crate::cli::{Cli, SystemProxyCommands};
 use crate::config::get_bifrost_dir;
 use crate::process::{
-    capture_runtime_system_proxy_snapshot, is_process_running, read_runtime_info,
-    runtime_system_proxy_host, RuntimeInfo, RuntimeSystemProxySnapshot,
+    capture_runtime_system_proxy_snapshot, inspect_process_identity, is_process_running,
+    read_runtime_info, runtime_system_proxy_host, ProcessIdentityStatus, RuntimeInfo,
+    RuntimeSystemProxySnapshot,
 };
 #[cfg(unix)]
 use bifrost_power::PowerEvent;
 #[cfg(target_os = "macos")]
 use bifrost_power::PowerNotificationWatcher;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LifecycleRecoveryTrigger {
+    PidMissing,
+    PidReused,
+    PollConfirmedExit,
+    Signal(&'static str),
+}
+
+impl LifecycleRecoveryTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PidMissing => "pid_missing",
+            Self::PidReused => "pid_reused",
+            Self::PollConfirmedExit => "poll_confirmed_exit",
+            Self::Signal(signal) => signal,
+        }
+    }
+}
 
 pub fn handle_system_proxy_command(
     cli: &Cli,
@@ -752,35 +772,82 @@ fn cleanup_or_restart_managed_runtime(data_dir: &std::path::Path) -> bifrost_cor
     cleanup_system_proxy_state(data_dir)
 }
 
-fn cleanup_after_parent_exit(data_dir: &std::path::Path) -> bifrost_core::Result<()> {
-    match bifrost_core::read_system_proxy_shutdown_mode(data_dir) {
+fn cleanup_after_parent_exit(
+    data_dir: &std::path::Path,
+    parent_pid: Option<u32>,
+    parent_started_at_ms: Option<u64>,
+    trigger: LifecycleRecoveryTrigger,
+) -> bifrost_core::Result<()> {
+    let recovery_started_at = std::time::Instant::now();
+    let helper_pid = std::process::id();
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        helper_pid,
+        parent_pid = parent_pid.unwrap_or_default(),
+        parent_started_at_ms = parent_started_at_ms.unwrap_or_default(),
+        detection_method = trigger.as_str(),
+        data_dir = %data_dir.display(),
+        "system proxy lifecycle recovery started"
+    );
+    let (action, result) = match bifrost_core::read_system_proxy_shutdown_mode(data_dir) {
         Some(bifrost_core::SystemProxyShutdownMode::BackgroundCleanup) => {
             let _ = bifrost_core::consume_system_proxy_shutdown_mode(data_dir);
             tracing::info!(
                 target: "bifrost_cli::shutdown",
                 data_dir = %data_dir.display(),
+                detection_method = trigger.as_str(),
                 "system proxy lifecycle helper running stop-requested background cleanup"
             );
-            cleanup_system_proxy_state(data_dir)
+            ("background_cleanup", cleanup_system_proxy_state(data_dir))
         }
         Some(bifrost_core::SystemProxyShutdownMode::ForegroundCleanup) => {
             tracing::info!(
                 target: "bifrost_cli::shutdown",
                 data_dir = %data_dir.display(),
+                detection_method = trigger.as_str(),
                 "system proxy lifecycle helper exiting because stop cleaned proxy before parent exit"
             );
-            Ok(())
+            ("already_cleaned", Ok(()))
         }
         Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart) => {
             tracing::info!(
                 target: "bifrost_cli::shutdown",
                 data_dir = %data_dir.display(),
+                detection_method = trigger.as_str(),
                 "system proxy lifecycle helper skipping cleanup for restart"
             );
-            Ok(())
+            ("preserve_for_restart", Ok(()))
         }
-        None => cleanup_or_restart_managed_runtime(data_dir),
+        None => (
+            "restart_or_restore",
+            cleanup_or_restart_managed_runtime(data_dir),
+        ),
+    };
+
+    match &result {
+        Ok(()) => tracing::info!(
+            target: "bifrost_cli::shutdown",
+            helper_pid,
+            parent_pid = parent_pid.unwrap_or_default(),
+            parent_started_at_ms = parent_started_at_ms.unwrap_or_default(),
+            detection_method = trigger.as_str(),
+            recovery_action = action,
+            elapsed_ms = recovery_started_at.elapsed().as_millis() as u64,
+            "system proxy lifecycle recovery completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: "bifrost_cli::shutdown",
+            helper_pid,
+            parent_pid = parent_pid.unwrap_or_default(),
+            parent_started_at_ms = parent_started_at_ms.unwrap_or_default(),
+            detection_method = trigger.as_str(),
+            recovery_action = action,
+            elapsed_ms = recovery_started_at.elapsed().as_millis() as u64,
+            error = %error,
+            "system proxy lifecycle recovery failed; managed proxy state may require manual repair"
+        ),
     }
+    result
 }
 
 #[cfg(unix)]
@@ -855,7 +922,10 @@ fn reconcile_system_proxy_after_power_wake(
         "system proxy wake reconcile starting"
     );
 
-    if pid_reuse_detected(parent_pid, parent_started_at_ms) {
+    if matches!(
+        parent_identity_status(parent_pid, parent_started_at_ms),
+        ProcessIdentityStatus::Reused
+    ) {
         tracing::warn!(
             target: "bifrost_cli::shutdown",
             trigger = TRIGGER,
@@ -910,15 +980,24 @@ fn reconcile_system_proxy_after_power_wake(
     cleanup_or_restart_managed_runtime(data_dir)
 }
 
-fn pid_reuse_detected(parent_pid: Option<u32>, recorded_started_at_ms: Option<u64>) -> bool {
-    let Some(pid) = parent_pid else {
-        return false;
-    };
-    let observed = bifrost_core::get_process_start_time_ms(pid);
-    matches!(
-        bifrost_core::start_times_match(recorded_started_at_ms, observed),
-        bifrost_core::StartTimeMatch::Mismatch { .. }
-    )
+fn parent_identity_status(
+    parent_pid: Option<u32>,
+    recorded_started_at_ms: Option<u64>,
+) -> ProcessIdentityStatus {
+    parent_pid.map_or(ProcessIdentityStatus::Unknown, |pid| {
+        inspect_process_identity(pid, recorded_started_at_ms)
+    })
+}
+
+fn immediate_parent_exit_trigger(
+    parent_pid: Option<u32>,
+    parent_started_at_ms: Option<u64>,
+) -> Option<LifecycleRecoveryTrigger> {
+    match parent_identity_status(parent_pid, parent_started_at_ms) {
+        ProcessIdentityStatus::Exited => Some(LifecycleRecoveryTrigger::PidMissing),
+        ProcessIdentityStatus::Reused => Some(LifecycleRecoveryTrigger::PidReused),
+        ProcessIdentityStatus::Alive | ProcessIdentityStatus::Unknown => None,
+    }
 }
 
 fn run_system_proxy_lifecycle_helper(
@@ -936,17 +1015,41 @@ fn run_system_proxy_lifecycle_helper(
         parent_pid = parent_pid.unwrap_or_default(),
         parent_started_at_ms = parent_started_at_ms.unwrap_or_default(),
         poll_secs = poll_interval.as_secs(),
+        fast_identity_poll_ms = 250_u64,
         required_parent_misses,
-        "system proxy lifecycle helper started"
+        "system proxy lifecycle helper started; fast process-identity checks do not use listener or HTTP readiness"
     );
 
-    if pid_reuse_detected(parent_pid, parent_started_at_ms) {
-        tracing::warn!(
-            target: "bifrost_cli::shutdown",
-            parent_pid = parent_pid.unwrap_or_default(),
-            "system proxy lifecycle helper detected pid_reuse_check=mismatch at startup; running guarded cleanup"
-        );
-        return cleanup_after_parent_exit(&data_dir);
+    match parent_identity_status(parent_pid, parent_started_at_ms) {
+        ProcessIdentityStatus::Reused => {
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                parent_pid = parent_pid.unwrap_or_default(),
+                detection_method = LifecycleRecoveryTrigger::PidReused.as_str(),
+                "system proxy lifecycle helper detected parent PID reuse at startup; running guarded recovery"
+            );
+            return cleanup_after_parent_exit(
+                &data_dir,
+                parent_pid,
+                parent_started_at_ms,
+                LifecycleRecoveryTrigger::PidReused,
+            );
+        }
+        ProcessIdentityStatus::Exited => {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                parent_pid = parent_pid.unwrap_or_default(),
+                detection_method = LifecycleRecoveryTrigger::PidMissing.as_str(),
+                "system proxy lifecycle helper observed parent PID missing at startup; running immediate guarded recovery"
+            );
+            return cleanup_after_parent_exit(
+                &data_dir,
+                parent_pid,
+                parent_started_at_ms,
+                LifecycleRecoveryTrigger::PidMissing,
+            );
+        }
+        ProcessIdentityStatus::Alive | ProcessIdentityStatus::Unknown => {}
     }
 
     #[cfg(unix)]
@@ -1008,21 +1111,47 @@ fn run_system_proxy_lifecycle_helper(
             let mut consecutive_parent_misses = 0_u32;
             let mut parent_poll = tokio::time::interval(poll_interval);
             parent_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // A direct process-instance disappearance is a strong liveness
+            // signal. Check it much more frequently than the conservative
+            // zombie/legacy fallback, without involving the proxy port or
+            // Admin readiness endpoint.
+            let mut parent_identity_poll =
+                tokio::time::interval(std::time::Duration::from_millis(250));
+            parent_identity_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut power_poll = tokio::time::interval(std::time::Duration::from_millis(250));
             power_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     _ = sigterm.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGTERM");
-                        return cleanup_after_parent_exit(&data_dir);
+                        return cleanup_after_parent_exit(&data_dir, parent_pid, parent_started_at_ms, LifecycleRecoveryTrigger::Signal("sigterm"));
                     },
                     _ = sigint.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGINT");
-                        return cleanup_after_parent_exit(&data_dir);
+                        return cleanup_after_parent_exit(&data_dir, parent_pid, parent_started_at_ms, LifecycleRecoveryTrigger::Signal("sigint"));
                     },
                     _ = sighup.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGHUP");
-                        return cleanup_after_parent_exit(&data_dir);
+                        return cleanup_after_parent_exit(&data_dir, parent_pid, parent_started_at_ms, LifecycleRecoveryTrigger::Signal("sighup"));
+                    },
+                    _ = parent_identity_poll.tick() => {
+                        if let Some(trigger) = immediate_parent_exit_trigger(
+                            parent_pid,
+                            parent_started_at_ms,
+                        ) {
+                            tracing::info!(
+                                target: "bifrost_cli::shutdown",
+                                parent_pid = parent_pid.unwrap_or_default(),
+                                detection_method = trigger.as_str(),
+                                "system proxy lifecycle helper observed confirmed parent-instance exit during fast identity check"
+                            );
+                            return cleanup_after_parent_exit(
+                                &data_dir,
+                                parent_pid,
+                                parent_started_at_ms,
+                                trigger,
+                            );
+                        }
                     },
                     _ = power_poll.tick() => {
                         while let Ok(event) = power_rx.try_recv() {
@@ -1047,14 +1176,6 @@ fn run_system_proxy_lifecycle_helper(
                         }
                     },
                     _ = parent_poll.tick() => {
-                        if pid_reuse_detected(parent_pid, parent_started_at_ms) {
-                            tracing::warn!(
-                                target: "bifrost_cli::shutdown",
-                                parent_pid = parent_pid.unwrap_or_default(),
-                                "system proxy lifecycle helper detected pid_reuse_check=mismatch during poll; running guarded cleanup"
-                            );
-                            return cleanup_after_parent_exit(&data_dir);
-                        }
                         if let Some(pid) = parent_pid {
                             if !is_process_running(pid) {
                                 consecutive_parent_misses += 1;
@@ -1071,7 +1192,12 @@ fn run_system_proxy_lifecycle_helper(
                                         parent_pid = pid,
                                         "system proxy lifecycle helper confirmed parent exit"
                                     );
-                                    return cleanup_after_parent_exit(&data_dir);
+                                    return cleanup_after_parent_exit(
+                                        &data_dir,
+                                        parent_pid,
+                                        parent_started_at_ms,
+                                        LifecycleRecoveryTrigger::PollConfirmedExit,
+                                    );
                                 }
                             } else {
                                 consecutive_parent_misses = 0;
@@ -1086,16 +1212,49 @@ fn run_system_proxy_lifecycle_helper(
     #[cfg(not(unix))]
     {
         let mut consecutive_parent_misses = 0_u32;
+        let fast_identity_interval = std::time::Duration::from_millis(250);
+        let mut next_parent_poll = std::time::Instant::now() + poll_interval;
         loop {
-            std::thread::sleep(poll_interval);
-            if pid_reuse_detected(parent_pid, parent_started_at_ms) {
-                tracing::warn!(
-                    target: "bifrost_cli::shutdown",
-                    parent_pid = parent_pid.unwrap_or_default(),
-                    "system proxy lifecycle helper detected pid_reuse_check=mismatch during poll; running guarded cleanup"
-                );
-                return cleanup_after_parent_exit(&data_dir);
+            std::thread::sleep(fast_identity_interval);
+            match parent_identity_status(parent_pid, parent_started_at_ms) {
+                ProcessIdentityStatus::Reused => {
+                    tracing::warn!(
+                        target: "bifrost_cli::shutdown",
+                        parent_pid = parent_pid.unwrap_or_default(),
+                        detection_method = LifecycleRecoveryTrigger::PidReused.as_str(),
+                        "system proxy lifecycle helper detected parent PID reuse; running guarded recovery"
+                    );
+                    return cleanup_after_parent_exit(
+                        &data_dir,
+                        parent_pid,
+                        parent_started_at_ms,
+                        LifecycleRecoveryTrigger::PidReused,
+                    );
+                }
+                ProcessIdentityStatus::Exited => {
+                    tracing::info!(
+                        target: "bifrost_cli::shutdown",
+                        parent_pid = parent_pid.unwrap_or_default(),
+                        detection_method = LifecycleRecoveryTrigger::PidMissing.as_str(),
+                        "system proxy lifecycle helper observed parent PID missing; running immediate guarded recovery"
+                    );
+                    return cleanup_after_parent_exit(
+                        &data_dir,
+                        parent_pid,
+                        parent_started_at_ms,
+                        LifecycleRecoveryTrigger::PidMissing,
+                    );
+                }
+                ProcessIdentityStatus::Alive | ProcessIdentityStatus::Unknown => {}
             }
+
+            // Keep the historical boolean probe at its conservative cadence.
+            // It still handles zombie and platform-specific fallback cases, but
+            // it must not delay an explicit PID-instance disappearance.
+            if std::time::Instant::now() < next_parent_poll {
+                continue;
+            }
+            next_parent_poll = std::time::Instant::now() + poll_interval;
             if let Some(pid) = parent_pid {
                 if !is_process_running(pid) {
                     consecutive_parent_misses += 1;
@@ -1112,7 +1271,12 @@ fn run_system_proxy_lifecycle_helper(
                             parent_pid = pid,
                             "system proxy lifecycle helper confirmed parent exit"
                         );
-                        return cleanup_after_parent_exit(&data_dir);
+                        return cleanup_after_parent_exit(
+                            &data_dir,
+                            parent_pid,
+                            parent_started_at_ms,
+                            LifecycleRecoveryTrigger::PollConfirmedExit,
+                        );
                     }
                 } else {
                     consecutive_parent_misses = 0;
@@ -1213,11 +1377,18 @@ mod tests {
     }
 
     #[test]
-    fn pid_reuse_detected_when_start_time_mismatches_current_process() {
+    fn parent_identity_status_detects_pid_reuse_from_start_time_mismatch() {
         let recorded = bifrost_core::current_process_start_time_ms()
             .map(|started_at_ms| started_at_ms.saturating_add(10_000));
 
-        assert!(pid_reuse_detected(Some(std::process::id()), recorded));
+        assert_eq!(
+            parent_identity_status(Some(std::process::id()), recorded),
+            ProcessIdentityStatus::Reused
+        );
+        assert_eq!(
+            immediate_parent_exit_trigger(Some(std::process::id()), recorded),
+            Some(LifecycleRecoveryTrigger::PidReused)
+        );
     }
 
     #[test]
@@ -1375,9 +1546,30 @@ mod tests {
     }
 
     #[test]
-    fn pid_reuse_detected_returns_false_when_parent_pid_missing() {
-        assert!(!pid_reuse_detected(None, Some(123)));
-        assert!(!pid_reuse_detected(None, None));
+    fn parent_identity_status_is_unknown_without_parent_pid() {
+        assert_eq!(
+            parent_identity_status(None, Some(123)),
+            ProcessIdentityStatus::Unknown
+        );
+        assert_eq!(
+            parent_identity_status(None, None),
+            ProcessIdentityStatus::Unknown
+        );
+        assert_eq!(immediate_parent_exit_trigger(None, None), None);
+    }
+
+    #[test]
+    fn lifecycle_recovery_trigger_names_are_diagnostic_stable() {
+        assert_eq!(LifecycleRecoveryTrigger::PidMissing.as_str(), "pid_missing");
+        assert_eq!(LifecycleRecoveryTrigger::PidReused.as_str(), "pid_reused");
+        assert_eq!(
+            LifecycleRecoveryTrigger::PollConfirmedExit.as_str(),
+            "poll_confirmed_exit"
+        );
+        assert_eq!(
+            LifecycleRecoveryTrigger::Signal("sigterm").as_str(),
+            "sigterm"
+        );
     }
 
     #[test]

@@ -2040,6 +2040,288 @@ mod tests {
         assert!(minimum_interval_error.contains("MOSS adaptive rescue minimum interval"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_auto_rescue_retries_token_limit_then_segments_with_scoped_speakers() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("audio.wav");
+        std::fs::write(&wav, b"wav").unwrap();
+        let binary = temp.path().join("moss-transcribe");
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+
+        let token_retry_state = temp.path().join("token-retry-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nmax_new=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--max-new' ]; then shift; max_new=\"$1\"; fi\n  shift\ndone\nif [ \"$count\" -eq 1 ]; then\n  [ \"$max_new\" = '12000' ] || exit 21\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  [ \"$max_new\" = '18000' ] || exit 22\n  printf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"token rescued\"}}]'\nfi\n",
+                token_retry_state.display()
+            ),
+        );
+        let token_rescued = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 600_000, "", None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(token_rescued.transcription.text, "token rescued");
+        assert_eq!(
+            token_rescued.fallback_reason.as_deref(),
+            Some("moss_auto_rescue:max_token->whole_tps30")
+        );
+        assert_eq!(std::fs::read_to_string(&token_retry_state).unwrap(), "2");
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        write_executable(
+            &fake_bin.join("ffmpeg"),
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then shift; input=\"$1\"; fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let _path_guard = EnvVarGuard::set(
+            "PATH",
+            &std::env::join_paths(path_entries).unwrap(),
+        );
+        let segmented_state = temp.path().join("segmented-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -le 2 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  printf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"clip\"}}]'\nfi\n",
+                segmented_state.display()
+            ),
+        );
+        let segmented = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(segmented.transcription.text, "clip\nclip");
+        assert_eq!(
+            segmented.fallback_reason.as_deref(),
+            Some("moss_auto_rescue:max_token->whole_tps30->segment_600_adaptive_60_30_10;segment_scoped_speakers")
+        );
+        let speakers = segmented
+            .transcription
+            .structured
+            .segments
+            .iter()
+            .map(|segment| segment.speaker.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(speakers, vec!["clip_0000000000_S01", "clip_0000600000_S01"]);
+        assert_eq!(std::fs::read_to_string(&segmented_state).unwrap(), "4");
+
+        write_executable(
+            &binary,
+            "#!/bin/sh\nprintf '{\"segments\":[],\"finish_reason\":\"length\"}'\n",
+        );
+        let failed = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap_err();
+        assert!(failed.starts_with(&format!(
+            "moss_non_retryable_v{}_rtf1.5_tps30_seg600adaptive60to30to10:",
+            env!("CARGO_PKG_VERSION")
+        )));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_auto_rescue_does_not_retry_non_token_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("audio.wav");
+        std::fs::write(&wav, b"wav").unwrap();
+        let binary = temp.path().join("moss-transcribe");
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+        let state = temp.path().join("attempt-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\nprintf '%s' $((count + 1)) > \"$state\"\necho 'runtime transport failed' >&2\nexit 7\n",
+                state.display()
+            ),
+        );
+        let error = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 600_000, "", None, None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("runtime transport failed"));
+        assert_eq!(std::fs::read_to_string(state).unwrap(), "1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_auto_rescue_covers_preexpanded_and_nondeterministic_rescue_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("audio.wav");
+        std::fs::write(&wav, b"wav").unwrap();
+        let binary = temp.path().join("moss-transcribe");
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        write_executable(
+            &fake_bin.join("ffmpeg"),
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then shift; input=\"$1\"; fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let _path_guard =
+            EnvVarGuard::set("PATH", &std::env::join_paths(path_entries).unwrap());
+
+        let preexpanded_state = temp.path().join("preexpanded-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -eq 1 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  printf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"clip\"}}]'\nfi\n",
+                preexpanded_state.display()
+            ),
+        );
+        let _tps_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_OUTPUT_TOKENS_PER_SECOND",
+            std::ffi::OsStr::new("30"),
+        );
+        let preexpanded = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(preexpanded.transcription.text, "clip\nclip");
+        assert_eq!(std::fs::read_to_string(preexpanded_state).unwrap(), "3");
+        drop(_tps_guard);
+
+        let token_transport_state = temp.path().join("token-transport-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -eq 1 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  echo 'runtime transport failed' >&2\n  exit 7\nfi\n",
+                token_transport_state.display()
+            ),
+        );
+        let token_transport_error = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap_err();
+        assert!(token_transport_error.contains("runtime transport failed"));
+        assert_eq!(
+            std::fs::read_to_string(token_transport_state).unwrap(),
+            "2"
+        );
+
+        let segmented_transport_state = temp.path().join("segmented-transport-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -le 2 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  echo 'runtime transport failed' >&2\n  exit 7\nfi\n",
+                segmented_transport_state.display()
+            ),
+        );
+        let segmented_transport_error = run_moss_joint_transcription_with_auto_rescue(
+            &runtime, &wav, 610_000, "", None, None,
+        )
+        .await
+        .unwrap_err();
+        assert!(segmented_transport_error.contains("MOSS segmented rescue chunk"));
+        assert!(segmented_transport_error.contains("runtime transport failed"));
+        assert_eq!(
+            std::fs::read_to_string(segmented_transport_state).unwrap(),
+            "3"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_auto_rescue_persists_segmented_fallback_metadata_and_metric() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _data_guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("meeting.wav");
+        let source_wav = make_wav(&[500_i16; 100]);
+        std::fs::write(&source, &source_wav).unwrap();
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        write_executable(
+            &fake_bin.join("ffmpeg"),
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then shift; input=\"$1\"; fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let _path_guard = EnvVarGuard::set(
+            "PATH",
+            &std::env::join_paths(path_entries).unwrap(),
+        );
+
+        let binary = temp.path().join("moss-transcribe");
+        let state = temp.path().join("attempt-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -le 2 ]; then\n  printf '{{\"segments\":[],\"finish_reason\":\"length\"}}'\nelse\n  printf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"clip\"}}]'\nfi\n",
+                state.display()
+            ),
+        );
+        let runtime = moss_process_test_paths(temp.path(), binary);
+        let mut task = test_directory_task("moss-auto-rescue-artifacts", audio_dir);
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        let source_info = SourceAudioInfo {
+            source_size: Some(source_wav.len() as u64),
+            source_modified_ms: Some(9_000),
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(610_000),
+        };
+        let output = transcribe_file_for_task_with_wav(
+            &task,
+            Path::new("/unused/asr"),
+            Path::new("/unused/model"),
+            &source,
+            &source,
+            &source_info,
+            TaskTranscribeHooks {
+                on_chunk_progress: None,
+                on_chunk_metric: None,
+                pause_check: None,
+                force_pause_task_id: None,
+                memory_limit_hints: &[],
+                server_url: None,
+                startup_fallback_reason: None,
+                server_state: None,
+                managed_server_restart: None,
+                partial_artifacts: None,
+                moss_runtime: Some(&runtime),
+            },
+        )
+        .await
+        .unwrap();
+        let expected = "moss_auto_rescue:max_token->whole_tps30->segment_600_adaptive_60_30_10;segment_scoped_speakers";
+        assert_eq!(output.fallback_reason.as_deref(), Some(expected));
+        assert_eq!(
+            output.chunk_metrics[0].fallback_reason.as_deref(),
+            Some(expected)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&output.metadata_path).unwrap()).unwrap();
+        assert_eq!(metadata["fallback_reason"], expected);
+        assert_eq!(metadata["chunk_metrics"][0]["fallback_reason"], expected);
+    }
+
     #[test]
     fn moss_input_guard_rejects_unknown_short_silent_and_invalid_audio() {
         let temp = TempDir::new().unwrap();
@@ -3886,7 +4168,7 @@ mod tests {
         let mut attempted = HashSet::new();
 
         let initial =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert_eq!(initial.pending, vec![first.clone()]);
 
         let first_key = source_key(&first);
@@ -3897,12 +4179,12 @@ mod tests {
         std::fs::write(&appended, b"audio").unwrap();
 
         let after_append =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert_eq!(after_append.pending, vec![appended.clone()]);
 
         attempted.insert(source_key(&appended));
         let final_scan =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert!(final_scan.pending.is_empty());
     }
 
@@ -3937,7 +4219,7 @@ mod tests {
         save_file_store(&task.id, &files).unwrap();
 
         let scan =
-            discover_and_prepare_pending_batch(&task, &mut files, &HashSet::new(), None).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &HashSet::new(), None, None).unwrap();
         assert!(scan.pending.is_empty());
         let preserved = files.files.get(&preserved_key).unwrap();
         assert_eq!(preserved.status, FileStatus::PartialSuccess);
@@ -3966,7 +4248,7 @@ mod tests {
             version: TASK_STORE_VERSION,
             files: BTreeMap::new(),
         };
-        let initial = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        let initial = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert_eq!(initial.pending, vec![source.clone()]);
 
         let key = source_key(&source);
@@ -3982,15 +4264,15 @@ mod tests {
             "moss_non_retryable_v{}: MOSS output has no complete speaker-aware segment before 256 generated tokens",
             env!("CARGO_PKG_VERSION")
         ));
-        let unchanged = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        let unchanged = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert!(unchanged.pending.is_empty());
 
         std::fs::write(&source, b"audio changed").unwrap();
-        let changed = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        let changed = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert_eq!(changed.pending, vec![source.clone()]);
 
         task.transcription_mode = AsrTranscriptionMode::Standard;
-        let standard = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        let standard = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert_eq!(standard.pending, vec![source]);
     }
 
@@ -4011,7 +4293,7 @@ mod tests {
             version: TASK_STORE_VERSION,
             files: BTreeMap::new(),
         };
-        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
 
         let record = files.files.get_mut(&source_key(&source)).unwrap();
         record.status = FileStatus::Failed;
@@ -4021,7 +4303,7 @@ mod tests {
         ));
 
         let default_scan =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert!(default_scan.pending.is_empty());
     }
 
@@ -4046,7 +4328,7 @@ mod tests {
             version: TASK_STORE_VERSION,
             files: BTreeMap::new(),
         };
-        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
 
         let dynamic_record = files.files.get_mut(&source_key(&dynamic_source)).unwrap();
         dynamic_record.status = FileStatus::Failed;
@@ -4062,7 +4344,7 @@ mod tests {
         ));
 
         let rescue_scan =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert_eq!(rescue_scan.pending, vec![dynamic_source]);
         assert_eq!(
             files.files.get(&source_key(&fixed_source)).unwrap().status,
@@ -4135,6 +4417,40 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )
         );
+
+        let default_profile = MossExecutionProfile {
+            max_runtime_rtf: MOSS_MAX_RUNTIME_RTF,
+            output_tokens_per_second: MOSS_OUTPUT_TOKENS_PER_SECOND,
+            segment_seconds: None,
+            allow_gap_markers: false,
+        };
+        let token_rescue = default_profile.automatic_token_rescue();
+        assert_eq!(
+            token_rescue.max_runtime_rtf,
+            MOSS_AUTO_TOKEN_RESCUE_MAX_RUNTIME_RTF
+        );
+        assert_eq!(
+            token_rescue.output_tokens_per_second,
+            MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND
+        );
+        let segmented_rescue = default_profile.automatic_segmented_rescue();
+        assert_eq!(
+            segmented_rescue.max_runtime_rtf,
+            MOSS_AUTO_SEGMENTED_RESCUE_MAX_RUNTIME_RTF
+        );
+        assert_eq!(
+            segmented_rescue.segment_seconds,
+            Some(MOSS_AUTO_RESCUE_SEGMENT_SECONDS)
+        );
+        assert_eq!(
+            MossExecutionProfile {
+                max_runtime_rtf: 3.0,
+                ..default_profile
+            }
+            .automatic_segmented_rescue()
+            .max_runtime_rtf,
+            3.0
+        );
     }
 
     #[test]
@@ -4204,7 +4520,7 @@ mod tests {
         };
         let attempted = HashSet::new();
 
-        let scan = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        let scan = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         assert_eq!(scan.pending, vec![earlier, later]);
     }
 
@@ -4228,7 +4544,7 @@ mod tests {
         let attempted = HashSet::new();
         let date = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
 
-        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None, None).unwrap();
         for record in files.files.values_mut() {
             record.status = FileStatus::Failed;
             record.error = Some(format!(
@@ -4238,7 +4554,7 @@ mod tests {
         }
 
         let scan =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted, Some(date)).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, Some(date), None).unwrap();
 
         assert_eq!(scan.pending, vec![friday]);
         assert!(files.files.contains_key(&source_key(&thursday)));
@@ -4777,6 +5093,11 @@ mod tests {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let runtime_guard = runtime.enter();
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let task = AsrDirectoryTask {
@@ -4816,13 +5137,45 @@ mod tests {
             .insert("force-pause-task".to_string());
         assert!(!task_force_pause_requested("force-pause-task"));
 
-        update_task_paused("force-pause-task", true).unwrap();
+        let response = pause_task_response(
+            "force-pause-task",
+            true,
+            AsrTaskPauseMode::LongTerm,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(runtime_guard);
+        runtime.block_on(tokio::task::yield_now());
         assert!(task_force_pause_requested("force-pause-task"));
 
         FORCE_PAUSED_TASKS
             .lock()
             .unwrap()
             .remove("force-pause-task");
+        set_worker_force_pause("force-pause-task", false);
+
+        assert_eq!(
+            pause_task_response(
+                "force-pause-task",
+                false,
+                AsrTaskPauseMode::LongTerm,
+            )
+            .status(),
+            StatusCode::OK
+        );
+        pause_task_for_worker_job_cancel("force-pause-task").unwrap();
+        let persisted = load_tasks()
+            .tasks
+            .into_iter()
+            .find(|task| task.id == "force-pause-task")
+            .unwrap();
+        assert!(persisted.paused);
+        assert!(persisted.next_run_at_ms.is_none());
+        assert!(task_force_pause_requested("force-pause-task"));
+        FORCE_PAUSED_TASKS
+            .lock()
+            .unwrap()
+            .remove("force-pause-task");
+        set_worker_force_pause("force-pause-task", false);
     }
 
     #[test]
@@ -5448,6 +5801,546 @@ mod tests {
         assert_eq!(targets[1].failed_chunks, 1);
     }
 
+    #[test]
+    fn whole_file_retry_reset_preserves_source_identity_and_limits_discovery() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let selected = audio_dir.join("selected.wav");
+        let other = audio_dir.join("other.wav");
+        std::fs::write(&selected, b"selected").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        let task = test_directory_task("whole-file-retry", audio_dir);
+        let selected_key = source_key(&selected);
+        let other_key = source_key(&other);
+        let mut selected_record = pending_record(&task.id, &selected);
+        selected_record.status = FileStatus::Failed;
+        selected_record.error = Some("deterministic failure".to_string());
+        selected_record.text_chars = 12;
+        selected_record.output_text_path = Some(temp.path().join("old.txt"));
+        selected_record.memory_limit_hints.push(AsrChunkMemoryHint {
+            model: task.model.clone(),
+            offset_secs: 0,
+            duration_secs: 30,
+            preferred_chunk_secs: 10,
+            trigger_count: 1,
+            last_triggered_at_ms: 1,
+            last_error: Some("memory".to_string()),
+        });
+        let mut other_record = pending_record(&task.id, &other);
+        other_record.status = FileStatus::Failed;
+        reset_failed_file_for_transcription(&mut selected_record);
+        assert_eq!(selected_record.status, FileStatus::Pending);
+        assert!(selected_record.error.is_none());
+        assert!(selected_record.output_text_path.is_none());
+        assert_eq!(selected_record.memory_limit_hints.len(), 1);
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([
+                (selected_key.clone(), selected_record),
+                (other_key, other_record),
+            ]),
+        };
+        let selected_keys = HashSet::from([selected_key]);
+        let scan = discover_and_prepare_pending_batch(
+            &task,
+            &mut store,
+            &HashSet::new(),
+            None,
+            Some(&selected_keys),
+        )
+        .unwrap();
+        assert_eq!(scan.pending, vec![selected]);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn whole_file_retry_handlers_cover_conflicts_and_invalid_sources() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let normal = test_directory_task("whole-file-retry-errors", audio_dir.clone());
+        let mut paused = test_directory_task("whole-file-retry-paused", audio_dir.clone());
+        paused.paused = true;
+        let running = test_directory_task("whole-file-retry-running", audio_dir.clone());
+        let compressing = test_directory_task("whole-file-retry-compressing", audio_dir.clone());
+        let importing = test_directory_task("whole-file-retry-importing", audio_dir.clone());
+        let chunking = test_directory_task("whole-file-retry-chunking", audio_dir.clone());
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![
+                normal.clone(),
+                paused.clone(),
+                running.clone(),
+                compressing.clone(),
+                importing.clone(),
+                chunking.clone(),
+            ],
+        })
+        .unwrap();
+
+        assert_eq!(
+            retry_failed_file_response("missing", "file").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            retry_all_failed_files_response("missing").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            retry_failed_file_response(&paused.id, "file").await.status(),
+            StatusCode::CONFLICT
+        );
+
+        let running_guard = RunningTaskGuard::acquire(&running.id).unwrap();
+        assert_eq!(
+            retry_all_failed_files_response(&running.id).await.status(),
+            StatusCode::CONFLICT
+        );
+        drop(running_guard);
+
+        let compression_guard = RunningSourceCompressionGuard::acquire(&compressing.id).unwrap();
+        assert_eq!(
+            retry_all_failed_files_response(&compressing.id).await.status(),
+            StatusCode::CONFLICT
+        );
+        drop(compression_guard);
+
+        let import_guard = RunningExternalImportGuard::acquire(&importing.id).unwrap();
+        assert_eq!(
+            retry_all_failed_files_response(&importing.id).await.status(),
+            StatusCode::CONFLICT
+        );
+        drop(import_guard);
+
+        let chunk_guard = RunningChunkRetryGuard::acquire(&chunking.id).unwrap();
+        assert_eq!(
+            retry_all_failed_files_response(&chunking.id).await.status(),
+            StatusCode::CONFLICT
+        );
+        drop(chunk_guard);
+        set_bulk_chunk_retry_state(BulkChunkRetryState {
+            task_id: chunking.id.clone(),
+            status: BulkChunkRetryStatus::Queued,
+            queued_files: 1,
+            processed_files: 0,
+            total_failed_chunks: 1,
+            recovered_chunks: 0,
+            still_failed_chunks: 0,
+            started_at_ms: None,
+            updated_at_ms: now_ms(),
+            finished_at_ms: None,
+            current_file_key: None,
+            current_source_path: None,
+            message: "queued".to_string(),
+            results: Vec::new(),
+        });
+        assert_eq!(
+            retry_all_failed_files_response(&chunking.id).await.status(),
+            StatusCode::CONFLICT
+        );
+        BULK_CHUNK_RETRY_JOBS.lock().unwrap().remove(&chunking.id);
+
+        assert_eq!(
+            retry_failed_file_response(&normal.id, "missing").await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let available = audio_dir.join("available.wav");
+        std::fs::write(&available, b"audio").unwrap();
+        let available_key = source_key(&available);
+        let missing = audio_dir.join("missing.wav");
+        let missing_key = source_key(&missing);
+        let changed = audio_dir.join("changed.wav");
+        std::fs::write(&changed, b"audio").unwrap();
+        let mut successful = pending_record(&normal.id, &available);
+        successful.status = FileStatus::Success;
+        let mut missing_record = pending_record(&normal.id, &missing);
+        missing_record.status = FileStatus::Failed;
+        let mut changed_record = pending_record(&normal.id, &changed);
+        changed_record.status = FileStatus::Failed;
+        save_file_store(
+            &normal.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([
+                    (available_key.clone(), successful),
+                    (missing_key.clone(), missing_record),
+                    ("stale-key".to_string(), changed_record),
+                ]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            retry_failed_file_response(&normal.id, &available_key)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            retry_failed_file_response(&normal.id, &missing_key)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            retry_failed_file_response(&normal.id, "stale-key")
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            retry_all_failed_files_response(&normal.id).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    #[test]
+    fn transcription_import_and_chunk_retry_guards_are_atomically_mutually_exclusive() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let task_id = "asr-lifecycle-guard-matrix";
+
+        let transcription = RunningTaskGuard::acquire(task_id).unwrap();
+        assert!(RunningExternalImportGuard::acquire(task_id).is_err());
+        assert!(RunningChunkRetryGuard::acquire(task_id).is_err());
+        drop(transcription);
+
+        let import = RunningExternalImportGuard::acquire(task_id).unwrap();
+        assert!(RunningTaskGuard::acquire(task_id).is_err());
+        drop(import);
+
+        let chunk_retry = RunningChunkRetryGuard::acquire(task_id).unwrap();
+        assert!(RunningTaskGuard::acquire(task_id).is_err());
+        drop(chunk_retry);
+
+        set_bulk_chunk_retry_state(BulkChunkRetryState {
+            task_id: task_id.to_string(),
+            status: BulkChunkRetryStatus::Queued,
+            queued_files: 1,
+            processed_files: 0,
+            total_failed_chunks: 1,
+            recovered_chunks: 0,
+            still_failed_chunks: 0,
+            started_at_ms: None,
+            updated_at_ms: now_ms(),
+            finished_at_ms: None,
+            current_file_key: None,
+            current_source_path: None,
+            message: "queued".to_string(),
+            results: Vec::new(),
+        });
+        assert!(RunningTaskGuard::acquire(task_id).is_err());
+        BULK_CHUNK_RETRY_JOBS.lock().unwrap().remove(task_id);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn whole_file_retry_handlers_queue_valid_single_and_batch_sources() {
+        use http_body_util::BodyExt;
+
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let single_task = test_directory_task("whole-file-retry-single", audio_dir.clone());
+        let batch_task = test_directory_task("whole-file-retry-batch", audio_dir.clone());
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![single_task.clone(), batch_task.clone()],
+        })
+        .unwrap();
+
+        let single_source = audio_dir.join("single.wav");
+        std::fs::write(&single_source, b"not-a-real-wave").unwrap();
+        let single_key = source_key(&single_source);
+        let mut single_record = pending_record(&single_task.id, &single_source);
+        single_record.status = FileStatus::Failed;
+        single_record.error = Some("previous failure".to_string());
+        single_record.failed_chunks.push(FailedChunkRecord {
+            chunk_index: 0,
+            offset_secs: 0,
+            duration_secs: 1,
+            error: "previous chunk failure".to_string(),
+            attempts: 1,
+            energy_rms: None,
+            is_silent: false,
+        });
+        save_file_store(
+            &single_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(single_key.clone(), single_record)]),
+            },
+        )
+        .unwrap();
+
+        let response = retry_failed_file_response(&single_task.id, &single_key).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["queued"], 1);
+        assert_eq!(payload["file_key"], single_key);
+        for _ in 0..200 {
+            if !task_is_running(&single_task.id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!task_is_running(&single_task.id));
+
+        let batch_source_a = audio_dir.join("batch-a.wav");
+        let batch_source_b = audio_dir.join("batch-b.wav");
+        let missing_source = audio_dir.join("batch-missing.wav");
+        std::fs::write(&batch_source_a, b"not-a-real-wave-a").unwrap();
+        std::fs::write(&batch_source_b, b"not-a-real-wave-b").unwrap();
+        let mut batch_records = BTreeMap::new();
+        for source in [&batch_source_a, &batch_source_b, &missing_source] {
+            let mut record = pending_record(&batch_task.id, source);
+            record.status = FileStatus::Failed;
+            record.error = Some("previous failure".to_string());
+            batch_records.insert(source_key(source), record);
+        }
+        save_file_store(
+            &batch_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: batch_records,
+            },
+        )
+        .unwrap();
+
+        let response = retry_all_failed_files_response(&batch_task.id).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["queued"], 2);
+        assert_eq!(payload["skipped"], 1);
+        for _ in 0..200 {
+            if !task_is_running(&batch_task.id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!task_is_running(&batch_task.id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn coverage_gap_whole_file_retry_reports_file_store_save_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let single_task = test_directory_task("whole-file-retry-save-single", audio_dir.clone());
+        let batch_task = test_directory_task("whole-file-retry-save-batch", audio_dir.clone());
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![single_task.clone(), batch_task.clone()],
+        })
+        .unwrap();
+
+        let mut stores = Vec::new();
+        for (task, name) in [(&single_task, "single.wav"), (&batch_task, "batch.wav")] {
+            let source = audio_dir.join(name);
+            std::fs::write(&source, b"not-a-real-wave").unwrap();
+            let key = source_key(&source);
+            let mut record = pending_record(&task.id, &source);
+            record.status = FileStatus::Failed;
+            save_file_store(
+                &task.id,
+                &FileStore {
+                    version: TASK_STORE_VERSION,
+                    files: BTreeMap::from([(key.clone(), record)]),
+                },
+            )
+            .unwrap();
+            stores.push((task.id.clone(), key, file_store_path(&task.id)));
+        }
+
+        for (index, (task_id, key, store_path)) in stores.into_iter().enumerate() {
+            let task_dir = store_path.parent().unwrap();
+            let lock_path = store_path.with_extension("lock");
+            std::fs::remove_file(lock_path).unwrap();
+            std::fs::set_permissions(task_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+            let response = if index == 0 {
+                retry_failed_file_response(&task_id, &key).await
+            } else {
+                retry_all_failed_files_response(&task_id).await
+            };
+
+            std::fs::set_permissions(task_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(load_file_store(&task_id).files[&key].status, FileStatus::Failed);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn whole_file_retry_http_routes_reach_batch_single_and_malformed_paths() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let service = service_fn(|request: Request<Incoming>| async move {
+                    let path = request.uri().path().to_string();
+                    Ok::<_, hyper::Error>(handle_asr_tasks(request, &path).await)
+                });
+                http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for path in [
+            "/api/asr/tasks/missing/retry-failed-files",
+            "/api/asr/tasks/missing/files/file-key/retry",
+            "/api/asr/tasks/missing/not-files/file-key/retry",
+        ] {
+            assert_eq!(
+                client
+                    .post(format!("http://{address}{path}"))
+                    .header(reqwest::header::CONNECTION, "close")
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                reqwest::StatusCode::NOT_FOUND
+            );
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn parent_directory_worker_result_preserves_paused_state_and_records_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let mut paused = test_directory_task("parent-worker-paused", audio_dir.clone());
+        paused.paused = true;
+        let failed = test_directory_task("parent-worker-failed", audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![paused.clone(), failed.clone()],
+        })
+        .unwrap();
+
+        finish_parent_directory_worker_run(
+            &paused.id,
+            Err("worker cancellation acknowledged".to_string()),
+        )
+        .await;
+        let (paused_progress, _) = load_run_progress(&paused.id);
+        assert_eq!(
+            paused_progress.map(|progress| progress.status),
+            Some("paused".to_string())
+        );
+
+        finish_parent_directory_worker_run(
+            &failed.id,
+            Err("worker transport failed".to_string()),
+        )
+        .await;
+        let (failed_progress, _) = load_run_progress(&failed.id);
+        assert_eq!(
+            failed_progress.map(|progress| progress.status),
+            Some("failed".to_string())
+        );
+        assert!(find_task(&failed.id)
+            .and_then(|task| task.last_error)
+            .is_some_and(|error| error.contains("worker transport failed")));
+
+        finish_parent_directory_worker_run(
+            &failed.id,
+            Ok(crate::worker_runtime::asr::RunDirectoryTaskResult {
+                processed: 1,
+                failed: 0,
+                status: "completed".to_string(),
+                daily_agent_dates: Vec::new(),
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn parent_directory_worker_result_queues_daily_agent_dates_in_main_process() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let mut task = test_directory_task("parent-worker-daily-agent", audio_dir);
+        task.daily_agent.enabled = true;
+        let mut agent = AsrDailyAgentItem::daily_report();
+        agent.runner = "mock-parent-handoff".to_string();
+        agent.trigger_policy = AsrDailyAgentTriggerPolicy::AfterAsrRun;
+        task.daily_agent.agents = vec![agent.clone()];
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+        let daily_dir = daily_dir_for_task(&task.id);
+        std::fs::create_dir_all(&daily_dir).unwrap();
+        std::fs::write(daily_dir.join("2026-08-18.md"), "worker transcript").unwrap();
+
+        // Keep the test from starting an external runner. Pending state must be
+        // persisted before the already-running check.
+        DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(task.id.clone());
+        finish_parent_directory_worker_run(
+            &task.id,
+            Ok(crate::worker_runtime::asr::RunDirectoryTaskResult {
+                processed: 1,
+                failed: 0,
+                status: "completed".to_string(),
+                daily_agent_dates: vec!["2026-08-18".to_string()],
+            }),
+        )
+        .await;
+        DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&task.id);
+
+        let processed = load_daily_agent_processed_state(&task.id);
+        assert_eq!(
+            daily_agent_pending_dates(&processed, &agent.id),
+            ["2026-08-18"]
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn run_without_pending_files_refreshes_daily_summaries() {
@@ -5543,11 +6436,12 @@ mod tests {
         store.files.insert(key, record);
         save_file_store(&task.id, &store).unwrap();
 
-        let (_updated, processed_now, failed_now) =
-            run_directory_task_for_date(task, None).await.unwrap();
+        let (_updated, processed_now, failed_now, daily_agent_dates) =
+            run_directory_task_for_date(task, None, None).await.unwrap();
 
         assert_eq!(processed_now, 0);
         assert_eq!(failed_now, 0);
+        assert_eq!(daily_agent_dates, ["2026-05-14"]);
         let daily_path = temp
             .path()
             .join("asr/data/text/task-daily-refresh/.daily/2026-05-14.md");
@@ -8736,6 +9630,348 @@ esac
     }
 
     #[test]
+    fn stale_file_store_snapshot_cannot_erase_compression_metadata() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let source = temp.path().join("recording.flac");
+        std::fs::write(&source, b"compressed-audio").unwrap();
+        let key = source_key(&source);
+        let mut current = pending_record("stale-compression", &source);
+        current.status = FileStatus::Success;
+        current.source_size = Some(16);
+        current.source_modified_ms = Some(123);
+        current.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: temp.path().join("recording.wav"),
+            original_size_bytes: 64,
+            original_modified_ms: Some(123),
+            compressed_size_bytes: 16,
+            saved_bytes: 48,
+            pcm_sha256: Some("verified".to_string()),
+            compressed_at_ms: 456,
+        });
+        save_file_store(
+            "stale-compression",
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), current.clone())]),
+            },
+        )
+        .unwrap();
+
+        let mut stale = current;
+        stale.source_size = None;
+        stale.source_modified_ms = None;
+        stale.source_compression = None;
+        save_file_store(
+            "stale-compression",
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), stale)]),
+            },
+        )
+        .unwrap();
+
+        let restored = load_file_store("stale-compression");
+        let record = &restored.files[&key];
+        assert!(record.source_compression.is_some());
+        assert_eq!(record.source_size, Some(16));
+        assert_eq!(record.source_modified_ms, Some(123));
+    }
+
+    #[test]
+    fn completed_legacy_compression_ledger_repairs_matching_flac_only() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let original = temp.path().join("legacy.wav");
+        let compressed = temp.path().join("legacy.flac");
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![test_directory_task(
+                "legacy-compression",
+                temp.path().to_path_buf(),
+            )],
+        })
+        .unwrap();
+        std::fs::write(&compressed, b"flac-bytes").unwrap();
+        let key = source_key(&compressed);
+        let mut record = pending_record("legacy-compression", &compressed);
+        record.status = FileStatus::Success;
+        record.source_modified_ms = Some(42);
+        save_file_store(
+            "legacy-compression",
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record)]),
+            },
+        )
+        .unwrap();
+        save_source_compression_state(&SourceAudioCompressionState {
+            task_id: "legacy-compression".to_string(),
+            status: SourceAudioCompressionStatus::Completed,
+            queued_files: 1,
+            processed_files: 1,
+            compressed_files: 1,
+            skipped_files: 0,
+            failed_files: 0,
+            original_bytes: 100,
+            compressed_bytes: 10,
+            saved_bytes: 90,
+            started_at_ms: Some(1),
+            updated_at_ms: 2,
+            finished_at_ms: Some(2),
+            current_source_path: None,
+            message: "completed".to_string(),
+            results: vec![SourceAudioCompressionFileResult {
+                source_path: original.display().to_string(),
+                compressed_path: Some(compressed.display().to_string()),
+                status: "compressed".to_string(),
+                original_bytes: 100,
+                compressed_bytes: 10,
+                saved_bytes: 90,
+                message: "ok".to_string(),
+            }],
+        })
+        .unwrap();
+
+        let repaired = load_file_store("legacy-compression");
+        let compression = repaired.files[&key].source_compression.as_ref().unwrap();
+        assert_eq!(compression.original_source_path, original);
+        assert_eq!(compression.saved_bytes, 90);
+        assert!(compression.pcm_sha256.is_none());
+
+        std::fs::write(&original, b"restored-original").unwrap();
+        let mut unrepaired = repaired.files[&key].clone();
+        unrepaired.source_compression = None;
+        assert_eq!(
+            repair_legacy_source_compression_records(
+                "legacy-compression",
+                &mut FileStore {
+                    version: TASK_STORE_VERSION,
+                    files: BTreeMap::from([(key, unrepaired)]),
+                },
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn legacy_compression_repair_rejects_each_untrusted_ledger_shape() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let mut empty_store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        assert_eq!(
+            repair_legacy_source_compression_records("missing-task", &mut empty_store),
+            0
+        );
+
+        let task_id = "legacy-compression-rejection-matrix";
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![test_directory_task(task_id, audio_dir.clone())],
+        })
+        .unwrap();
+        assert_eq!(
+            repair_legacy_source_compression_records(task_id, &mut empty_store),
+            0
+        );
+
+        let make_result = |name: &str,
+                           compressed_path: Option<&Path>,
+                           original_bytes: u64,
+                           compressed_bytes: u64,
+                           saved_bytes: u64| SourceAudioCompressionFileResult {
+            source_path: audio_dir.join(format!("{name}.wav")).display().to_string(),
+            compressed_path: compressed_path.map(|path| path.display().to_string()),
+            status: "compressed".to_string(),
+            original_bytes,
+            compressed_bytes,
+            saved_bytes,
+            message: "legacy".to_string(),
+        };
+        let write_ten = |path: &Path| std::fs::write(path, b"0123456789").unwrap();
+        let original_present = audio_dir.join("original-present.wav");
+        let original_present_flac = audio_dir.join("original-present.flac");
+        write_ten(&original_present);
+        write_ten(&original_present_flac);
+        let outside_flac = temp.path().join("outside.flac");
+        write_ten(&outside_flac);
+        let wrong_extension = audio_dir.join("wrong-extension.wav");
+        write_ten(&wrong_extension);
+        let zero_bytes = audio_dir.join("zero-bytes.flac");
+        let non_saving = audio_dir.join("non-saving.flac");
+        let saved_mismatch = audio_dir.join("saved-mismatch.flac");
+        let size_mismatch = audio_dir.join("size-mismatch.flac");
+        let missing_record = audio_dir.join("missing-record.flac");
+        for path in [
+            &zero_bytes,
+            &non_saving,
+            &saved_mismatch,
+            &size_mismatch,
+            &missing_record,
+        ] {
+            write_ten(path);
+        }
+
+        #[cfg(unix)]
+        let symlink_flac = {
+            use std::os::unix::fs::symlink;
+
+            let path = audio_dir.join("symlink.flac");
+            symlink(&outside_flac, &path).unwrap();
+            path
+        };
+
+        let wrong_source = audio_dir.join("wrong-source.flac");
+        let failed_record = audio_dir.join("failed-record.flac");
+        let already_repaired = audio_dir.join("already-repaired.flac");
+        let valid = audio_dir.join("valid.flac");
+        for path in [&wrong_source, &failed_record, &already_repaired, &valid] {
+            write_ten(path);
+        }
+        let mut records = BTreeMap::new();
+        let mut wrong_source_record = pending_record(task_id, &wrong_source);
+        wrong_source_record.source_path = audio_dir.join("different.flac");
+        wrong_source_record.status = FileStatus::Success;
+        records.insert(source_key(&wrong_source), wrong_source_record);
+        let mut failed = pending_record(task_id, &failed_record);
+        failed.status = FileStatus::Failed;
+        records.insert(source_key(&failed_record), failed);
+        let mut repaired = pending_record(task_id, &already_repaired);
+        repaired.status = FileStatus::Success;
+        repaired.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: audio_dir.join("already-repaired.wav"),
+            original_size_bytes: 100,
+            original_modified_ms: None,
+            compressed_size_bytes: 10,
+            saved_bytes: 90,
+            pcm_sha256: None,
+            compressed_at_ms: 1,
+        });
+        records.insert(source_key(&already_repaired), repaired);
+        let mut valid_record = pending_record(task_id, &valid);
+        valid_record.status = FileStatus::Success;
+        records.insert(source_key(&valid), valid_record);
+        #[cfg(unix)]
+        {
+            let mut symlink_record = pending_record(task_id, &symlink_flac);
+            symlink_record.status = FileStatus::Success;
+            records.insert(source_key(&symlink_flac), symlink_record);
+        }
+
+        save_source_compression_state(&SourceAudioCompressionState {
+            task_id: task_id.to_string(),
+            status: SourceAudioCompressionStatus::Completed,
+            queued_files: 15,
+            processed_files: 15,
+            compressed_files: 15,
+            skipped_files: 0,
+            failed_files: 0,
+            original_bytes: 1_500,
+            compressed_bytes: 150,
+            saved_bytes: 1_350,
+            started_at_ms: Some(1),
+            updated_at_ms: 2,
+            finished_at_ms: Some(3),
+            current_source_path: None,
+            message: "completed".to_string(),
+            results: vec![
+                make_result("missing-path", None, 100, 10, 90),
+                make_result("original-present", Some(&original_present_flac), 100, 10, 90),
+                make_result("missing-compressed", Some(&audio_dir.join("missing.flac")), 100, 10, 90),
+                make_result("outside", Some(&outside_flac), 100, 10, 90),
+                #[cfg(unix)]
+                make_result("symlink", Some(&symlink_flac), 100, 10, 90),
+                make_result("wrong-extension", Some(&wrong_extension), 100, 10, 90),
+                make_result("zero-bytes", Some(&zero_bytes), 100, 0, 100),
+                make_result("non-saving", Some(&non_saving), 10, 10, 0),
+                make_result("saved-mismatch", Some(&saved_mismatch), 100, 10, 89),
+                make_result("size-mismatch", Some(&size_mismatch), 100, 9, 91),
+                make_result("missing-record", Some(&missing_record), 100, 10, 90),
+                make_result("wrong-source", Some(&wrong_source), 100, 10, 90),
+                make_result("failed-record", Some(&failed_record), 100, 10, 90),
+                make_result("already-repaired", Some(&already_repaired), 100, 10, 90),
+                make_result("valid", Some(&valid), 100, 10, 90),
+            ],
+        })
+        .unwrap();
+
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: records,
+        };
+        assert_eq!(repair_legacy_source_compression_records(task_id, &mut store), 1);
+        let compression = store.files[&source_key(&valid)]
+            .source_compression
+            .as_ref()
+            .unwrap();
+        assert_eq!(compression.saved_bytes, 90);
+        assert_eq!(compression.compressed_at_ms, 3);
+
+        let mut active_state = load_source_compression_state(task_id).unwrap();
+        active_state.status = SourceAudioCompressionStatus::Running;
+        active_state.finished_at_ms = None;
+        save_source_compression_state(&active_state).unwrap();
+        store
+            .files
+            .get_mut(&source_key(&valid))
+            .unwrap()
+            .source_compression = None;
+        assert_eq!(repair_legacy_source_compression_records(task_id, &mut store), 0);
+    }
+
+    #[test]
+    fn compression_recovery_without_legacy_pcm_hash_fails_closed() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task("compression-missing-pcm-hash", audio_dir.clone());
+        let original = audio_dir.join("legacy.wav");
+        let compressed = audio_dir.join("legacy.flac");
+        std::fs::write(&compressed, b"compressed").unwrap();
+        std::fs::write(
+            audio_dir.join(".legacy.wav.bifrost-compress-backup"),
+            b"original",
+        )
+        .unwrap();
+        let key = source_key(&compressed);
+        let mut record = pending_record(&task.id, &compressed);
+        record.status = FileStatus::Success;
+        record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: original,
+            original_size_bytes: 100,
+            original_modified_ms: None,
+            compressed_size_bytes: 10,
+            saved_bytes: 90,
+            pcm_sha256: None,
+            compressed_at_ms: 1,
+        });
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key, record)]),
+            },
+        )
+        .unwrap();
+
+        let error = recover_source_compression_backups(&task).unwrap_err();
+        assert!(error.contains("missing or mismatched PCM hash"), "{error}");
+    }
+
+    #[test]
     fn source_compression_recovery_restores_pre_migration_backup() {
         let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
@@ -8838,7 +10074,7 @@ esac
             original_modified_ms,
             compressed_size_bytes: 123,
             saved_bytes: original_size - 123,
-            pcm_sha256: original_hash,
+            pcm_sha256: Some(original_hash),
             compressed_at_ms: now_ms(),
         });
         let mut duplicate = migrated.clone();
@@ -8959,7 +10195,7 @@ esac
         .unwrap();
 
         let guard = RunningSourceCompressionGuard::acquire(&task.id).unwrap();
-        run_source_compression_job(task.clone(), targets, guard);
+        run_source_compression_job(task.clone(), targets, guard, None);
 
         let state = load_source_compression_state(&task.id).unwrap();
         assert_eq!(state.status, SourceAudioCompressionStatus::CompletedWithErrors);
@@ -9006,6 +10242,7 @@ esac
             cancelled_task.clone(),
             vec![(source_key(&cancelled_source), cancelled_record)],
             guard,
+            None,
         );
         let cancelled = load_source_compression_state(&cancelled_task.id).unwrap();
         assert_eq!(cancelled.status, SourceAudioCompressionStatus::Cancelled);
@@ -9045,7 +10282,11 @@ esac
         let response = start_source_compression_response(&task.id);
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let mut terminal = None;
-        for _ in 0..100 {
+        // Coverage instrumentation and loaded CI hosts can make the spawned
+        // ffmpeg fixture exceed the former one-second polling budget. Keep
+        // the assertion bounded while allowing the real background job time
+        // to reach its terminal state.
+        for _ in 0..500 {
             let state = normalized_source_compression_state(&task.id).unwrap();
             if matches!(
                 state.status,
@@ -9278,7 +10519,7 @@ esac
             original_modified_ms,
             compressed_size_bytes: 4,
             saved_bytes: original_size - 4,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         let finalized_backup = audio_dir.join(".finalized.wav.bifrost-compress-backup");
@@ -9328,7 +10569,7 @@ esac
             original_modified_ms,
             compressed_size_bytes: 4,
             saved_bytes: original_size - 4,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         std::fs::write(
@@ -9367,7 +10608,7 @@ esac
             original_modified_ms: restored_modified_ms,
             compressed_size_bytes: 4,
             saved_bytes: restored_size - 4,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         std::fs::write(
@@ -9457,7 +10698,7 @@ esac
             original_modified_ms: None,
             compressed_size_bytes: 1,
             saved_bytes: 0,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         save_file_store(
@@ -9485,7 +10726,7 @@ esac
             original_modified_ms: None,
             compressed_size_bytes: 4,
             saved_bytes: 6,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         save_file_store(
@@ -9521,7 +10762,7 @@ esac
             original_modified_ms: old_modified,
             compressed_size_bytes: 4,
             saved_bytes: old_size - 4,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         std::fs::copy(
@@ -9558,7 +10799,7 @@ esac
             original_modified_ms: None,
             compressed_size_bytes: 4,
             saved_bytes: 96,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         std::fs::write(
@@ -9619,7 +10860,7 @@ esac
             original_modified_ms: None,
             compressed_size_bytes: 4,
             saved_bytes: 96,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         std::fs::write(
@@ -9657,7 +10898,7 @@ esac
             original_modified_ms: None,
             compressed_size_bytes: 4,
             saved_bytes: 96,
-            pcm_sha256: "stable-pcm".to_string(),
+            pcm_sha256: Some("stable-pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         std::fs::write(
@@ -9888,6 +11129,85 @@ esac
     }
 
     #[test]
+    fn parent_compression_guard_does_not_clear_worker_cancel_marker() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let task_id = "compression-worker-cancel-marker";
+
+        set_worker_source_compression_cancel(task_id, true);
+        let mut guard = RunningSourceCompressionGuard::acquire(task_id).unwrap();
+        guard.relinquish_cancel_marker();
+        drop(guard);
+
+        assert!(worker_source_compression_cancel_path(task_id).is_file());
+        set_worker_source_compression_cancel(task_id, false);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn worker_directory_run_preserves_exclusion_pause_and_completion_states() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        assert!(run_directory_task_in_worker("missing", None, Vec::new())
+            .await
+            .unwrap_err()
+            .contains("not found"));
+
+        let task_id = "worker-directory-run";
+        let task = test_directory_task(task_id, audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let compression = RunningSourceCompressionGuard::acquire(task_id).unwrap();
+        assert!(run_directory_task_in_worker(task_id, None, Vec::new())
+            .await
+            .unwrap_err()
+            .contains("compression"));
+        drop(compression);
+
+        let running = RunningTaskGuard::acquire(task_id).unwrap();
+        assert!(run_directory_task_in_worker(task_id, None, Vec::new())
+            .await
+            .unwrap_err()
+            .contains("already running"));
+        drop(running);
+
+        let mut paused = task.clone();
+        paused.paused = true;
+        paused.paused_at_ms = Some(now_ms());
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![paused],
+        })
+        .unwrap();
+        let paused_outcome = run_directory_task_in_worker(task_id, None, Vec::new()).await.unwrap();
+        assert_eq!(paused_outcome.status, "paused");
+        assert_eq!(paused_outcome.processed, 0);
+        assert_eq!(paused_outcome.failed, 0);
+        assert!(find_task(task_id).unwrap().paused);
+
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task],
+        })
+        .unwrap();
+        let completed = run_directory_task_in_worker(task_id, None, Vec::new()).await.unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.processed, 0);
+        assert_eq!(completed.failed, 0);
+        assert!(!task_is_running(task_id));
+        assert!(serde_json::to_value(completed).unwrap().is_object());
+    }
+
+    #[test]
     fn compressed_source_matches_original_import_target_identity() {
         let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
@@ -9910,7 +11230,7 @@ esac
             original_modified_ms: None,
             compressed_size_bytes: 4_000,
             saved_bytes: size - 4_000,
-            pcm_sha256: "pcm".to_string(),
+            pcm_sha256: Some("pcm".to_string()),
             compressed_at_ms: now_ms(),
         });
         save_file_store(
@@ -10021,5 +11341,178 @@ esac
         let by_speaker = collect_diarization_speaker_waveforms(&waveform, 16_000, &segments);
 
         assert_eq!(by_speaker["speaker_00"].len(), 8_000);
+    }
+
+    #[test]
+    fn task_running_state_observes_process_lock_without_local_marker() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+
+        let guard = TaskRunFileLock::acquire("cross-process-running").unwrap();
+        assert!(task_is_running("cross-process-running"));
+
+        drop(guard);
+        assert!(!task_is_running("cross-process-running"));
+    }
+
+    #[test]
+    fn source_compression_running_state_observes_worker_process_lock() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        RUNNING_SOURCE_COMPRESSION_TASKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+
+        let guard = SourceCompressionFileLock::acquire("compression-worker-lock").unwrap();
+        assert!(source_compression_is_running("compression-worker-lock"));
+
+        drop(guard);
+        assert!(!source_compression_is_running("compression-worker-lock"));
+    }
+
+    #[test]
+    fn stale_file_store_snapshots_merge_under_cross_process_lock() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let task_id = "file-store-cross-process-merge";
+        let audio_dir = temp.path().join("audio");
+        let output_dir = temp.path().join("output");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source_a = audio_dir.join("a.wav");
+        let source_b = audio_dir.join("b.wav");
+        std::fs::write(&source_a, b"a").unwrap();
+        std::fs::write(&source_b, b"b").unwrap();
+
+        let mut first = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        first.files.insert(
+            source_key(&source_a),
+            completed_test_record(task_id, &source_a, &output_dir.join("a")),
+        );
+        let mut stale_second = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        stale_second.files.insert(
+            source_key(&source_b),
+            completed_test_record(task_id, &source_b, &output_dir.join("b")),
+        );
+
+        save_file_store(task_id, &first).unwrap();
+        save_file_store(task_id, &stale_second).unwrap();
+
+        let merged = load_file_store(task_id);
+        assert!(merged.files.contains_key(&source_key(&source_a)));
+        assert!(merged.files.contains_key(&source_key(&source_b)));
+    }
+
+    #[test]
+    fn source_compression_lock_and_bulk_cancel_markers_are_process_safe() {
+        let _lock = test_data_dir_lock();
+        let dir = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(dir.path());
+        let first = SourceCompressionFileLock::acquire("compression-lock").unwrap();
+        let duplicate = match SourceCompressionFileLock::acquire("compression-lock") {
+            Ok(_) => panic!("duplicate compression lock unexpectedly acquired"),
+            Err(error) => error,
+        };
+        assert!(duplicate.contains("already running"), "{duplicate}");
+        drop(first);
+        drop(SourceCompressionFileLock::acquire("compression-lock").unwrap());
+
+        let task_ids = ["bulk-cancel-a", "bulk-cancel-b"];
+        {
+            let mut running = RUNNING_SOURCE_COMPRESSION_TASKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            running.extend(task_ids.iter().map(|task_id| task_id.to_string()));
+        }
+        cancel_all_worker_source_compressions();
+        for task_id in task_ids {
+            assert!(worker_source_compression_cancel_path(task_id).is_file());
+            set_worker_source_compression_cancel(task_id, false);
+            RUNNING_SOURCE_COMPRESSION_TASKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(task_id);
+        }
+    }
+
+    #[test]
+    fn source_compression_fresh_queue_legacy_prerequisites_and_marker_errors_are_safe() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let task_id = "compression-state-branches";
+        let audio_dir = temp.path().join("audio");
+        let output_dir = temp.path().join("output");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        save_source_compression_state(&SourceAudioCompressionState {
+            task_id: task_id.to_string(),
+            status: SourceAudioCompressionStatus::Queued,
+            queued_files: 1,
+            processed_files: 0,
+            compressed_files: 0,
+            skipped_files: 0,
+            failed_files: 0,
+            original_bytes: 0,
+            compressed_bytes: 0,
+            saved_bytes: 0,
+            started_at_ms: None,
+            updated_at_ms: now_ms(),
+            finished_at_ms: None,
+            current_source_path: None,
+            message: "queued".to_string(),
+            results: Vec::new(),
+        })
+        .unwrap();
+        assert!(source_compression_is_running(task_id));
+
+        let flac = audio_dir.join("legacy.flac");
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([(
+                source_key(&flac),
+                completed_test_record(task_id, &flac, &output_dir),
+            )]),
+        };
+        assert_eq!(repair_legacy_source_compression_records(task_id, &mut store), 0);
+
+        let task = test_directory_task(task_id, audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task],
+        })
+        .unwrap();
+        std::fs::remove_file(source_compression_state_path(task_id)).unwrap();
+        assert_eq!(repair_legacy_source_compression_records(task_id, &mut store), 0);
+
+        let cancel_parent = worker_source_compression_cancel_path(task_id)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(cancel_parent.parent().unwrap()).unwrap();
+        std::fs::write(&cancel_parent, b"blocks-directory").unwrap();
+        set_worker_source_compression_cancel(task_id, true);
+        assert!(!worker_source_compression_cancel_path(task_id).exists());
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&cancel_parent).unwrap();
+            std::fs::create_dir_all(&cancel_parent).unwrap();
+            std::fs::create_dir(worker_source_compression_cancel_path(task_id)).unwrap();
+            set_worker_source_compression_cancel(task_id, false);
+            assert!(worker_source_compression_cancel_path(task_id).is_dir());
+        }
     }
 }

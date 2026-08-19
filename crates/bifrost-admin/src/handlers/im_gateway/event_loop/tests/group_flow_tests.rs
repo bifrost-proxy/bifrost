@@ -2312,3 +2312,55 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
     assert_eq!(service.queue_manager.queue_status(&session_key).len(), 1);
     service.agent_session_manager.return_session(held_session);
 }
+
+#[tokio::test]
+async fn external_runner_reset_reports_stop_control_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-reset-stop-error".to_string();
+    service.provider_store.add(provider.clone()).unwrap();
+    let event = group_test_event(&provider.id, "reset-stop-error", "/clear", true, 1);
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let (_tx, mut rx) = mpsc::unbounded_channel();
+
+    run_external_cli_agent_chat(
+        ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+        },
+        ExternalCliChatInput {
+            message_text: "/clear".to_string(),
+            images: Vec::new(),
+            files: Vec::new(),
+            session_key: String::new(),
+            adapter_override: None,
+            instructions_override: None,
+            delivery_override: None,
+            runner_id_override: None,
+            runner_selected: false,
+            group_turn_id: None,
+            reset_group_context: false,
+            thread_anchor_message_id: None,
+            thread_fallback_message: None,
+        },
+    )
+    .await;
+
+    assert!(service.message_log_store.list().iter().any(|entry| entry
+        .content
+        .as_deref()
+        .is_some_and(|content| content.contains("重置会话前停止当前 Runner 失败"))));
+}

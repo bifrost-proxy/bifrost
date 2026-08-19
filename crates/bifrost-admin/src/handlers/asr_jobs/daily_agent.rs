@@ -409,14 +409,6 @@ async fn maybe_enqueue_daily_agent_after_asr_run(
         .collect::<Vec<_>>();
     requested_dates.sort();
     requested_dates.dedup();
-    if requested_dates.is_empty() {
-        tracing::info!(
-            task_id = %task.id,
-            trigger_source = "asr_completion",
-            "skipped daily agent: ASR run produced no dated transcript changes"
-        );
-        return;
-    }
     let agents = normalized_daily_agents(&task.daily_agent);
     let runnable_agents: Vec<_> = agents
         .into_iter()
@@ -433,16 +425,17 @@ async fn maybe_enqueue_daily_agent_after_asr_run(
         return;
     }
 
-    match requested_dates.iter().try_fold(false, |changed, date| {
-        daily_agent_has_changed_daily_markdown(task, &runnable_agents, Some(date))
-            .map(|date_changed| changed || date_changed)
-    }) {
-        Ok(true) => {}
-        Ok(false) => {
+    let queued_dates = match prepare_daily_agent_pending_dates(
+        task,
+        &runnable_agents,
+        &requested_dates,
+    ) {
+        Ok(dates) if !dates.is_empty() => dates,
+        Ok(_) => {
             tracing::info!(
                 task_id = %task.id,
                 trigger_source = "asr_completion",
-                "skipped daily agent: no daily markdown changes after ASR run"
+                "skipped daily agent: no pending or changed daily markdown"
             );
             return;
         }
@@ -451,34 +444,38 @@ async fn maybe_enqueue_daily_agent_after_asr_run(
                 task_id = %task.id,
                 trigger_source = "asr_completion",
                 error = %error,
-                "skipped daily agent: failed to inspect daily markdown changes"
+                "skipped daily agent: failed to prepare pending dates"
             );
             return;
         }
-    }
+    };
 
-    // Check if already running
-    {
-        let running = DAILY_AGENT_RUNNING_TASKS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if running.contains(&task.id) {
-            tracing::debug!(
-                task_id = %task.id,
-                "skipped daily agent: already running"
-            );
-            return;
-        }
-    }
+    // Reserve the task before spawning so adjacent ASR completions cannot
+    // start overlapping automatic queues. The reservation spans all dates.
+    let Some(running_reservation) = DailyAgentRunningReservation::try_acquire(&task.id) else {
+        tracing::debug!(
+            task_id = %task.id,
+            "skipped daily agent: already running"
+        );
+        return;
+    };
 
     let task_id = task.id.clone();
     let task_clone = task.clone();
-    let queued_dates = requested_dates.clone();
-
     // Spawn the daily agent run in background
     tokio::spawn(async move {
-        for date in queued_dates {
-            run_daily_agents(&task_clone, "asr_completion", Some(&date), false).await;
+        let _running_reservation = running_reservation;
+        let mut attempted_dates = HashSet::new();
+        while let Some(date) = next_daily_agent_pending_date(&task_clone, &attempted_dates) {
+            attempted_dates.insert(date.clone());
+            run_daily_agents_with_running_marker(
+                &task_clone,
+                "asr_completion",
+                Some(&date),
+                false,
+                false,
+            )
+            .await;
         }
     });
 
@@ -487,10 +484,66 @@ async fn maybe_enqueue_daily_agent_after_asr_run(
         trigger_source = "asr_completion",
         agents = runnable_agents.len(),
         requested_dates = ?requested_dates,
+        queued_dates = ?queued_dates,
         "queued ASR daily agent run"
     );
 }
 
+fn prepare_daily_agent_pending_dates(
+    task: &AsrDirectoryTask,
+    agents: &[AsrDailyAgentItem],
+    requested_dates: &[String],
+) -> Result<Vec<String>, String> {
+    let _state_guard = DAILY_AGENT_PROCESSED_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut processed = load_daily_agent_processed_state(&task.id);
+    let mut queued_dates = Vec::new();
+
+    for agent in agents {
+        let agent_task = task_for_daily_agent(task, agent);
+        let mut agent_dates = daily_agent_pending_dates(&processed, &agent.id);
+        let automatic_plan = build_daily_agent_change_plan(
+            &agent_task,
+            "asr_completion",
+            None,
+            false,
+        )?;
+        agent_dates.extend(
+            automatic_plan
+                .entries
+                .into_iter()
+                .filter(|entry| entry.change_kind != DailyAgentChangeKind::Unchanged)
+                .map(|entry| entry.date),
+        );
+        for date in requested_dates {
+            let plan = build_daily_agent_change_plan(
+                &agent_task,
+                "asr_completion",
+                Some(date),
+                false,
+            )?;
+            agent_dates.extend(
+                plan.entries
+                    .into_iter()
+                    .filter(|entry| entry.change_kind != DailyAgentChangeKind::Unchanged)
+                    .map(|entry| entry.date),
+            );
+        }
+        agent_dates.sort();
+        agent_dates.dedup();
+        queued_dates.extend(agent_dates.iter().cloned());
+        add_daily_agent_pending_dates(&mut processed, &agent.id, agent_dates);
+    }
+
+    queued_dates.sort();
+    queued_dates.dedup();
+    processed.version = PROCESSED_STATE_VERSION;
+    save_daily_agent_processed_state(&task.id, &processed)?;
+    Ok(queued_dates)
+}
+
+#[cfg(test)]
 fn daily_agent_has_changed_daily_markdown(
     task: &AsrDirectoryTask,
     agents: &[AsrDailyAgentItem],
@@ -515,11 +568,58 @@ fn daily_agent_has_changed_daily_markdown(
     Ok(false)
 }
 
+fn next_daily_agent_pending_date(
+    task: &AsrDirectoryTask,
+    attempted_dates: &HashSet<String>,
+) -> Option<String> {
+    let processed = load_daily_agent_processed_state(&task.id);
+    normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .filter(|agent| {
+            agent.enabled
+                && agent.trigger_policy == AsrDailyAgentTriggerPolicy::AfterAsrRun
+                && daily_agent_runner_ready_for_agent(agent)
+        })
+        .flat_map(|agent| daily_agent_pending_dates(&processed, &agent.id))
+        .filter(|date| !attempted_dates.contains(date))
+        .min()
+}
+
+fn remove_daily_agent_pending_date_if_entry_current(
+    state: &mut AsrDailyAgentProcessedState,
+    task: &AsrDirectoryTask,
+    entry: &DailyAgentChangePlanEntry,
+) -> bool {
+    let source_path = Path::new(&entry.source_path);
+    let entry_is_current = compute_sha256(source_path)
+        .ok()
+        .zip(std::fs::metadata(source_path).ok().map(|metadata| metadata.len()))
+        .is_some_and(|(source_sha256, source_len_bytes)| {
+            source_sha256 == entry.source_sha256 && source_len_bytes == entry.source_len_bytes
+        })
+        && daily_agent_config_sha256(task) == entry.agent_config_sha256
+        && daily_agent_upstream_sha256(task, &entry.date) == entry.upstream_sha256;
+    if entry_is_current {
+        remove_daily_agent_pending_date(state, &task.daily_agent.agent_id, &entry.date);
+    }
+    entry_is_current
+}
+
 async fn run_daily_agents(
     task: &AsrDirectoryTask,
     trigger_source: &str,
     requested_date: Option<&str>,
     force: bool,
+) -> Vec<DailyAgentRunResult> {
+    run_daily_agents_with_running_marker(task, trigger_source, requested_date, force, true).await
+}
+
+async fn run_daily_agents_with_running_marker(
+    task: &AsrDirectoryTask,
+    trigger_source: &str,
+    requested_date: Option<&str>,
+    force: bool,
+    manage_running_marker: bool,
 ) -> Vec<DailyAgentRunResult> {
     let agents = match ordered_daily_agents(&task.daily_agent) {
         Ok(agents) => agents,
@@ -549,7 +649,7 @@ async fn run_daily_agents(
         .collect::<HashSet<_>>();
 
     let task_id = task.id.clone();
-    {
+    if manage_running_marker {
         let mut running = DAILY_AGENT_RUNNING_TASKS
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -680,7 +780,7 @@ async fn run_daily_agents(
         results.push(result);
     }
 
-    {
+    if manage_running_marker {
         let mut running = DAILY_AGENT_RUNNING_TASKS
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2135,6 +2235,9 @@ async fn run_daily_agent_inner(
     }
 
     // 7. Update processed state
+    let _state_guard = DAILY_AGENT_PROCESSED_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut processed = load_daily_agent_processed_state(&task.id);
     let generated_report_targets = reports_generated.iter().cloned().collect::<HashSet<_>>();
 
@@ -2186,10 +2289,19 @@ async fn run_daily_agent_inner(
                 }
             })
             .or_insert_with(|| entry.date.clone());
+        if !remove_daily_agent_pending_date_if_entry_current(&mut processed, task, entry) {
+            tracing::info!(
+                task_id = %task.id,
+                agent_id = %task.daily_agent.agent_id,
+                date = %entry.date,
+                "kept daily agent date pending because its inputs changed during generation"
+            );
+        }
     }
 
     processed.version = PROCESSED_STATE_VERSION;
     save_daily_agent_processed_state(&task.id, &processed)?;
+    drop(_state_guard);
 
     sync_daily_agent_reports_after_generation(task, &reports_generated).await?;
 
@@ -2291,6 +2403,7 @@ fn update_daily_agent_status(
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _task_store_guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
@@ -2302,7 +2415,7 @@ fn update_daily_agent_status(
         agent.last_run_id = Some(run_id.to_string());
     });
     mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
-    save_tasks(&store)
+    save_tasks_unlocked(&store)
 }
 
 fn update_daily_agent_im_error(source_task: &AsrDirectoryTask, error: &str) -> Result<(), String> {
@@ -2311,6 +2424,7 @@ fn update_daily_agent_im_error(source_task: &AsrDirectoryTask, error: &str) -> R
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _task_store_guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
@@ -2319,7 +2433,7 @@ fn update_daily_agent_im_error(source_task: &AsrDirectoryTask, error: &str) -> R
         agent.im_delivery.last_send_error = Some(error.to_string());
     });
     mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
-    save_tasks(&store)
+    save_tasks_unlocked(&store)
 }
 
 fn update_daily_agent_im_sent(source_task: &AsrDirectoryTask) -> Result<(), String> {
@@ -2328,6 +2442,7 @@ fn update_daily_agent_im_sent(source_task: &AsrDirectoryTask) -> Result<(), Stri
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _task_store_guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
@@ -2337,5 +2452,5 @@ fn update_daily_agent_im_sent(source_task: &AsrDirectoryTask) -> Result<(), Stri
         agent.im_delivery.last_send_error = None;
     });
     mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
-    save_tasks(&store)
+    save_tasks_unlocked(&store)
 }

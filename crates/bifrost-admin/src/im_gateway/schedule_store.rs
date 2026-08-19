@@ -1,5 +1,8 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +54,7 @@ impl ImScheduleStore {
     }
 
     pub fn add(&self, schedule: ImSchedule) -> Result<()> {
+        let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
         self.refresh_locked(&mut data);
         if data.schedules.iter().any(|s| s.id == schedule.id) {
@@ -64,6 +68,7 @@ impl ImScheduleStore {
     }
 
     pub fn update(&self, schedule: ImSchedule) -> Result<()> {
+        let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
         self.refresh_locked(&mut data);
         if let Some(existing) = data.schedules.iter_mut().find(|s| s.id == schedule.id) {
@@ -78,6 +83,7 @@ impl ImScheduleStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
+        let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
         self.refresh_locked(&mut data);
         let before = data.schedules.len();
@@ -99,13 +105,24 @@ impl ImScheduleStore {
         }
         let content = serde_json::to_string_pretty(data)
             .map_err(|e| BifrostError::Config(format!("serialize schedule store: {e}")))?;
-        std::fs::write(&self.file_path, content).map_err(|e| {
-            BifrostError::Io(std::io::Error::other(format!(
-                "write {}: {e}",
-                self.file_path.display()
-            )))
-        })?;
+        atomic_write(&self.file_path, content.as_bytes())?;
+        crate::worker_runtime::im_gateway::notify_runtime_config_changed();
         Ok(())
+    }
+
+    fn acquire_write_lock(&self) -> Result<File> {
+        let lock_path = self.file_path.with_extension("json.lock");
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        file.lock_exclusive()?;
+        Ok(file)
     }
 
     fn refresh_from_disk(&self) {
@@ -136,5 +153,41 @@ impl ImScheduleStore {
                 None
             }
         }
+    }
+}
+
+fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(content)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "atomically replace {}: {}",
+            path.display(),
+            error.error
+        )))
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coverage_gap_schedule_store_delete_and_atomic_write_failures() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImScheduleStore::new(temp.path());
+        assert!(store.delete("missing-schedule").is_err());
+
+        let destination = temp.path().join("schedule-destination");
+        std::fs::create_dir(&destination).expect("blocking destination directory");
+
+        let error = atomic_write(&destination, b"schedule data")
+            .expect_err("atomic replacement must reject a directory destination");
+
+        assert!(error.to_string().contains("atomically replace"));
     }
 }

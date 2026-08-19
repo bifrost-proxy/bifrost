@@ -380,9 +380,16 @@ impl RemoteInvokeWorker {
             &identity.device_name,
             &identity.platform,
         ));
-        let executor = Arc::new(RemoteInvokeExecutor::new_with_state(
-            admin_host, admin_port, state,
-        ));
+        let executor = if std::env::var("BIFROST_REMOTE_INVOKE_WORKER")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        {
+            Arc::new(RemoteInvokeExecutor::new(admin_host, admin_port))
+        } else {
+            Arc::new(RemoteInvokeExecutor::new_with_state(
+                admin_host, admin_port, state,
+            ))
+        };
         let data_dir = bifrost_storage::data_dir();
         let ssh_key_store = Arc::new(SshKeyStore::new(&data_dir));
         let grant_crypto_store = Arc::new(GrantCryptoStore::new(&data_dir));
@@ -1285,9 +1292,10 @@ impl RemoteInvokeWorker {
 
     fn registration_session_token(&self) -> Option<String> {
         normalize_registration_session_token(
-            self.sync_manager.as_ref().and_then(|manager| {
-                manager.session_token_for_remote(&self.relay_client.base_url())
-            }),
+            self.sync_manager
+                .as_ref()
+                .and_then(|manager| manager.session_token_for_remote(&self.relay_client.base_url()))
+                .or_else(|| std::env::var("BIFROST_REMOTE_SESSION_TOKEN").ok()),
         )
     }
 
@@ -2006,6 +2014,11 @@ impl RemoteInvokeWorker {
         self.local_grants
             .write()
             .insert(grant_id.to_string(), updated_info.clone());
+        // The isolated Remote Execution broker runs in the main process and
+        // reloads GrantInfo from the shared store for every authorization.
+        // Keep that authoritative view in sync with the worker's live grant;
+        // persisting only StoredGrantPolicy leaves file_access/scope stale.
+        self.persist_grant_info(grant_id, &updated_info);
         self.persist_grant_policy(
             grant_id,
             &StoredGrantPolicy {
@@ -2784,7 +2797,12 @@ impl RemoteInvokeWorker {
             let now = now_millis();
             let mut grants = self.local_grants.write();
             let result = validate_grant_for_call(&mut grants, &grant_id, now);
-            if result.is_none() {
+            // In isolated mode the main-process broker performs and persists
+            // the authoritative consume transaction. Keep the local mutation
+            // so this worker rejects a second one-shot call, but do not publish
+            // Consumed before the in-flight call reaches the broker.
+            if result.is_none() && !crate::worker_runtime::remote_broker::broker_client_configured()
+            {
                 if let Some(grant) = grants.get(&grant_id) {
                     self.persist_grant_info(&grant_id, grant);
                 }

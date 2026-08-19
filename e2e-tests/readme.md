@@ -102,6 +102,10 @@ bash ../scripts/run_all_e2e.sh --ci
 ./tests/test_values_admin_api.sh     # 运行 Values API 测试
 ./tests/test_whitelist_admin_api.sh  # 运行 Whitelist API 测试
 
+# 隔离 external-runner Stop/Queue/替代 ownership 回归
+SKIP_BUILD=true BIFROST_BIN=../target/debug/bifrost \
+  bash ./tests/test_external_runner_worker_stop.sh
+
 # 运行 bifrost-e2e 自定义 runner
 cargo run -p bifrost-e2e -- --list
 
@@ -195,12 +199,15 @@ Admin API 测试脚本位于 `tests/` 目录，用于测试 Bifrost 的管理 AP
 | `test_system_admin_api.sh`    | 10     | 系统信息、概览、指标历史             |
 | `test_im_gateway_prompt_passthrough.sh` | 4 | IM 动态外发上下文、飞书 P2P/群精确路由、Base 首轮生命周期、消息级指令组合与 CLI help 完整性 |
 | `test_im_gateway_local_session_resume.sh` | 10 | Codex、Traex、Claude Code 本地 session 列表、选择、provider 隔离与下一轮原生 resume 参数 |
+| `test_im_gateway_live_model_switch.sh` | 1 | 运行中的 IM `/model` 经隔离 worker、主进程 broker 与 external worker 下发 Codex app-server `thread/settings/update`，并验证 set/clear、持久化、进度卡 thread 有效模型实时刷新且不被 Runner 配置回退，以及后续轮次语义 |
 | `test_feishu_slash_choice_cards.sh` | 7 | 飞书 `/resume`、`/model`、`/effort` Card 2.0 按钮、单聊/群聊点击、默认值清除、越权拒绝与带参数文本命令兼容 |
 | `test_feishu_group_session_context.sh` | 1 | 飞书群/私聊隔离、多机器人路由、引用消息图片与文件自动落盘，并向 Runner 注入会话附件绝对路径 |
 | `test_feishu_progress_terminal_notification.sh` | 1 | 飞书任务过程卡成功/失败终态折叠、独立终态卡引用链、本地文件自动上传发送，以及出站 30 MiB 上限/上传失败的非阻塞提示 |
 | `test_im_outbound_send_e2e.sh` | 1 | IM provider 能力发现、provider/飞书 bot ID/名称选择、owner/target/直达群聊、Markdown/图片/文件/原生卡片有序发送、raw binary upload、危险附件文件名拒绝与严格 CLI 参数校验 |
 | `test_im_gateway_subagent_event_boundary.sh` | 3 | Codex/Traex 根 thread/turn 隔离与 Claude Code 普通工具事件；子协作完成不提前结束根任务 |
 | `test_process_resolution_performance.sh` | 8 | 管理请求跳过进程识别、外部 Admin-like path 防误伤、诊断计数、主指标隔离、普通代理回归、并发连接共享 snapshot generation、有界缓存诊断与可选 18k 高基数真实连接压力 |
+| `test_auxiliary_worker_isolation.sh` | 13 | 六类附加能力 lazy worker、NDJSON/大帧边界、Job/Artifact、External CLI 取消，以及逐 worker kill 后代理存活 |
+| `test_remote_invoke_ssh_e2e.sh` | 1 | 本地 relay、SSH grant 权限升降级、File/Shell/Query stdout、Remote Execution、双 caller、traffic/search/replay 与 revoke |
 | `test_scripts_admin_api.sh`   | 12     | 脚本 CRUD、列表、内置脚本            |
 | `test_replay_rules.sh`        | 28     | Replay custom rules、请求/响应修改矩阵 |
 | `test_host_rule_path_rewrite.sh` | 4 | Host path 前缀、精确 path、正则精确资源与正则 origin-only 转发回归 |

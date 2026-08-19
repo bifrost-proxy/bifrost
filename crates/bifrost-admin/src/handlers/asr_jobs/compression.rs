@@ -1,5 +1,38 @@
 struct RunningSourceCompressionGuard {
     task_id: String,
+    owns_cancel_marker: bool,
+}
+
+struct SourceCompressionFileLock {
+    path: PathBuf,
+}
+
+impl SourceCompressionFileLock {
+    fn acquire(task_id: &str) -> Result<Self, String> {
+        let path = source_compression_run_lock_path(task_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create source compression lock dir: {error}"))?;
+        }
+        match create_task_run_lock(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                replace_stale_task_run_lock(
+                    &path,
+                    "ASR source-audio compression is already running",
+                    "source compression lock",
+                )?;
+            }
+            Err(error) => return Err(format!("create source compression lock: {error}")),
+        }
+        Ok(Self { path })
+    }
+}
+
+impl Drop for SourceCompressionFileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 struct RemoveFileOnDrop(PathBuf);
@@ -70,7 +103,12 @@ impl RunningSourceCompressionGuard {
         running.insert(task_id.to_string());
         Ok(Self {
             task_id: task_id.to_string(),
+            owns_cancel_marker: true,
         })
+    }
+
+    fn relinquish_cancel_marker(&mut self) {
+        self.owns_cancel_marker = false;
     }
 }
 
@@ -84,14 +122,35 @@ impl Drop for RunningSourceCompressionGuard {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.task_id);
+        if self.owns_cancel_marker {
+            set_worker_source_compression_cancel(&self.task_id, false);
+        }
     }
 }
 
 fn source_compression_is_running(task_id: &str) -> bool {
-    RUNNING_SOURCE_COMPRESSION_TASKS
+    if RUNNING_SOURCE_COMPRESSION_TASKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .contains(task_id)
+    {
+        return true;
+    }
+    let lock_path = source_compression_run_lock_path(task_id);
+    if lock_path.is_file() && !is_task_run_lock_stale(&lock_path) {
+        return true;
+    }
+    load_source_compression_state(task_id).is_some_and(|state| {
+        state.status == SourceAudioCompressionStatus::Queued
+            && now_ms().saturating_sub(state.updated_at_ms) < 2 * 60 * 1000
+    })
+}
+
+fn source_compression_run_lock_path(task_id: &str) -> PathBuf {
+    bifrost_storage::data_dir()
+        .join("asr/tasks")
+        .join(task_id)
+        .join("source_compression.lock")
 }
 
 fn source_compression_state_path(task_id: &str) -> PathBuf {
@@ -105,6 +164,87 @@ fn load_source_compression_state(task_id: &str) -> Option<SourceAudioCompression
     std::fs::read_to_string(source_compression_state_path(task_id))
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
+}
+
+/// Reconstruct compression metadata written by older runs whose file-store
+/// entry was subsequently overwritten by a stale snapshot. The ledger is
+/// accepted only when its paths and byte counts still match the installed
+/// FLAC and the original WAV is gone.
+fn repair_legacy_source_compression_records(task_id: &str, store: &mut FileStore) -> usize {
+    if !store.files.values().any(|record| {
+        record.status == FileStatus::Success
+            && record.source_compression.is_none()
+            && record.source_path.extension().and_then(|value| value.to_str()) == Some("flac")
+    }) {
+        return 0;
+    }
+    let Some(task) = find_task(task_id) else {
+        return 0;
+    };
+    let Some(state) = load_source_compression_state(task_id) else {
+        return 0;
+    };
+    if state.task_id != task_id
+        || !matches!(
+            state.status,
+            SourceAudioCompressionStatus::Completed
+                | SourceAudioCompressionStatus::CompletedWithErrors
+        )
+        || state.finished_at_ms.is_none()
+    {
+        return 0;
+    }
+    let mut repaired = 0usize;
+    for result in state.results.iter().filter(|result| result.status == "compressed") {
+        let (Some(compressed_path), original_path) = (
+            result.compressed_path.as_deref().map(PathBuf::from),
+            PathBuf::from(&result.source_path),
+        ) else {
+            continue;
+        };
+        if original_path.is_file()
+            || !compressed_path.is_file()
+            || std::fs::symlink_metadata(&compressed_path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            || !source_path_is_within_task_audio_dir_for_recovery(
+                &task.audio_dir,
+                &compressed_path,
+            )
+            || !source_path_is_within_task_audio_dir_for_recovery(&task.audio_dir, &original_path)
+            || compressed_path.extension().and_then(|value| value.to_str()) != Some("flac")
+            || result.compressed_bytes == 0
+            || result.original_bytes <= result.compressed_bytes
+            || result.saved_bytes != result.original_bytes - result.compressed_bytes
+            || source_size(&compressed_path) != Some(result.compressed_bytes)
+        {
+            continue;
+        }
+        let key = source_key(&compressed_path);
+        let Some(record) = store.files.get_mut(&key) else {
+            continue;
+        };
+        if record.source_path != compressed_path
+            || record.status != FileStatus::Success
+            || record.source_compression.is_some()
+        {
+            continue;
+        }
+        record.source_size = Some(result.compressed_bytes);
+        record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: original_path,
+            original_size_bytes: result.original_bytes,
+            original_modified_ms: record.source_modified_ms,
+            compressed_size_bytes: result.compressed_bytes,
+            saved_bytes: result.saved_bytes,
+            // Legacy ledgers predate persisted PCM hashes. Recovery remains
+            // conservative when artifacts require hash verification.
+            pcm_sha256: None,
+            compressed_at_ms: state.finished_at_ms.unwrap_or(state.updated_at_ms),
+        });
+        repaired += 1;
+    }
+    repaired
 }
 
 fn save_source_compression_state(state: &SourceAudioCompressionState) -> Result<(), String> {
@@ -151,6 +291,41 @@ fn source_compression_cancel_requested(task_id: &str) -> bool {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .contains(task_id)
+        || worker_source_compression_cancel_path(task_id).is_file()
+}
+
+fn worker_source_compression_cancel_path(task_id: &str) -> PathBuf {
+    bifrost_storage::data_dir()
+        .join("runtime/asr-worker/cancel")
+        .join(format!("compression-{task_id}.cancel"))
+}
+
+pub(crate) fn set_worker_source_compression_cancel(task_id: &str, requested: bool) {
+    let path = worker_source_compression_cancel_path(task_id);
+    if requested {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(error) = std::fs::write(&path, now_ms().to_string()) {
+            warn!(task_id, error = %error, "failed to persist ASR compression cancel marker");
+        }
+    } else if let Err(error) = std::fs::remove_file(&path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            warn!(task_id, error = %error, "failed to clear ASR compression cancel marker");
+        }
+    }
+}
+
+pub(crate) fn cancel_all_worker_source_compressions() {
+    let task_ids = RUNNING_SOURCE_COMPRESSION_TASKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for task_id in task_ids {
+        set_worker_source_compression_cancel(&task_id, true);
+    }
 }
 
 fn start_source_compression_background(
@@ -171,9 +346,22 @@ fn start_source_compression_background(
         return Err("ASR failed-chunk retry is running; wait for it to finish".to_string());
     }
 
-    let guard = RunningSourceCompressionGuard::acquire(&task.id)?;
+    let use_worker = !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
+        && !crate::worker_runtime::asr::is_asr_worker_process();
+    set_worker_source_compression_cancel(&task.id, false);
+    let mut guard = RunningSourceCompressionGuard::acquire(&task.id)?;
+    if use_worker {
+        // The detached worker-side blocking task owns this shared marker. The
+        // parent request future can finish as soon as cancellation is
+        // acknowledged and must not clear the marker while compression exits.
+        guard.relinquish_cancel_marker();
+    }
     recover_source_compression_backups(&task)?;
     let store = load_file_store(&task.id);
+    // Persist any safe legacy-ledger repairs before replacing the ledger with
+    // the state for this new compression run.
+    save_file_store(&task.id, &store)?;
     let targets = store
         .files
         .iter()
@@ -218,14 +406,57 @@ fn start_source_compression_background(
     }
 
     let response = state.clone();
-    tokio::task::spawn_blocking(move || run_source_compression_job(task, targets, guard));
+    if use_worker {
+        let task_id = task.id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = crate::worker_runtime::asr::run_source_compression(&task_id).await {
+                update_source_compression_state(&task_id, |state| {
+                    state.status = SourceAudioCompressionStatus::Interrupted;
+                    state.finished_at_ms = Some(now_ms());
+                    state.current_source_path = None;
+                    state.message = format!("ASR compression worker failed: {error}");
+                });
+                tracing::warn!(task_id = %task_id, error = %error, "ASR compression worker request failed");
+            }
+            drop(guard);
+        });
+        return Ok(response);
+    }
+
+    tokio::task::spawn_blocking(move || run_source_compression_job(task, targets, guard, None));
     Ok(response)
+}
+
+pub(crate) async fn run_source_compression_in_worker(
+    task_id: &str,
+) -> Result<serde_json::Value, String> {
+    let task = find_task(task_id).ok_or_else(|| format!("ASR task '{task_id}' not found"))?;
+    let guard = RunningSourceCompressionGuard::acquire(task_id)?;
+    let process_lock = SourceCompressionFileLock::acquire(task_id)?;
+    recover_source_compression_backups(&task)?;
+    let store = load_file_store(task_id);
+    let targets = store
+        .files
+        .iter()
+        .filter(|(_, record)| is_compressible_source_audio_record(&task, record))
+        .map(|(key, record)| (key.clone(), record.clone()))
+        .collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        run_source_compression_job(task, targets, guard, Some(process_lock))
+    })
+        .await
+        .map_err(|error| format!("ASR compression worker task failed: {error}"))?;
+    let state = load_source_compression_state(task_id)
+        .ok_or_else(|| "ASR compression worker did not persist a final state".to_string())?;
+    serde_json::to_value(state)
+        .map_err(|error| format!("serialize ASR compression worker state: {error}"))
 }
 
 fn run_source_compression_job(
     task: AsrDirectoryTask,
     targets: Vec<(String, FileRecord)>,
     _guard: RunningSourceCompressionGuard,
+    _process_lock: Option<SourceCompressionFileLock>,
 ) {
     update_source_compression_state(&task.id, |state| {
         state.status = SourceAudioCompressionStatus::Running;
@@ -364,7 +595,7 @@ fn compress_source_record(
             original_modified_ms: record.source_modified_ms,
             compressed_size_bytes: compressed_bytes,
             saved_bytes: original_bytes - compressed_bytes,
-            pcm_sha256: original_hash,
+            pcm_sha256: Some(original_hash),
             compressed_at_ms: now_ms(),
         });
         let new_key = source_key(&final_path);
@@ -646,11 +877,13 @@ fn recover_source_compression_backups(task: &AsrDirectoryTask) -> Result<(), Str
         }
 
         if source.is_file() {
-            if source_size(source) != Some(compression.compressed_size_bytes)
-                || decoded_pcm_sha256(source, record.media_duration_ms)? != compression.pcm_sha256
-            {
+            let hash_matches = match compression.pcm_sha256.as_deref() {
+                Some(expected) => decoded_pcm_sha256(source, record.media_duration_ms)? == expected,
+                None => false,
+            };
+            if source_size(source) != Some(compression.compressed_size_bytes) || !hash_matches {
                 return Err(format!(
-                    "compressed audio failed recovery verification; backup was preserved: {}",
+                    "compressed audio failed recovery verification (missing or mismatched PCM hash); backup was preserved: {}",
                     source.display()
                 ));
             }
@@ -773,6 +1006,17 @@ fn cancel_source_compression(task_id: &str) -> Option<SourceAudioCompressionStat
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(task_id.to_string());
+    set_worker_source_compression_cancel(task_id, true);
+    if crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
+        && !crate::worker_runtime::asr::is_asr_worker_process()
+    {
+        let task_id = task_id.to_string();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                crate::worker_runtime::asr::stop_source_compression(&task_id).await;
+            });
+        }
+    }
     update_source_compression_state(task_id, |state| {
         state.status = SourceAudioCompressionStatus::Cancelling;
         state.message = "Cancellation requested; the current file will finish safely.".to_string();

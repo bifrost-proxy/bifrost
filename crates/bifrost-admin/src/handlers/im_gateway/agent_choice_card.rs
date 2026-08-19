@@ -447,6 +447,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dry_run_file = temp.path().join("feishu/card.jsonl");
         let _dry_run_guard = EnvVarGuard::set("BIFROST_FEISHU_DRY_RUN_FILE", &dry_run_file);
+        let _dry_run_provider_guard = EnvVarGuard::set(
+            "BIFROST_FEISHU_DRY_RUN_PROVIDER_ID",
+            std::path::Path::new("feishu-choice-unit"),
+        );
         let mut provider = crate::handlers::im_gateway::tests::test_provider();
         provider.id = "feishu-choice-unit".to_string();
         let client =
@@ -579,6 +583,10 @@ mod tests {
             crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let _home_guard = EnvVarGuard::set("CODEX_HOME", codex_home.path());
         let _dry_run_guard = EnvVarGuard::set("BIFROST_FEISHU_DRY_RUN_FILE", &dry_run_file);
+        let _dry_run_provider_guard = EnvVarGuard::set(
+            "BIFROST_FEISHU_DRY_RUN_PROVIDER_ID",
+            std::path::Path::new("feishu-choice-unit"),
+        );
         let id = "eeeeeeee-0000-0000-0000-000000000007";
         let session_path = codex_home.path().join("sessions/choice.jsonl");
         std::fs::create_dir_all(session_path.parent().expect("parent")).expect("create sessions");

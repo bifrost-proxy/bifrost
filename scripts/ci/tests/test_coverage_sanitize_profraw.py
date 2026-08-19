@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / "coverage-sanitize-profraw.py"
+COVERAGE_ALL = SCRIPT.with_name("coverage-all.sh")
 SPEC = importlib.util.spec_from_file_location("coverage_sanitize_profraw", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -13,6 +14,20 @@ SPEC.loader.exec_module(MODULE)
 
 
 class CoverageProfileSanitizerTests(unittest.TestCase):
+    def test_unified_coverage_sanitizes_unit_profiles_before_first_report(self):
+        source = COVERAGE_ALL.read_text(encoding="utf-8")
+        unit_sanitize = source.index(
+            'sanitize_profiles "$PROFILE_ROOT" "unit-integration-profile-sanitizer.json"'
+        )
+        first_report = source.index(
+            'cargo llvm-cov report --json --output-path "$OUTPUT_DIR/unit-integration.json"'
+        )
+        self.assertLess(unit_sanitize, first_report)
+        self.assertIn(
+            'sanitize_profiles "$e2e_profiles" "e2e-profile-sanitizer.json"',
+            source,
+        )
+
     def test_invalid_profiles_are_quarantined_without_touching_valid_profiles(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

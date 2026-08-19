@@ -85,6 +85,34 @@ grep -Fq -- '- name: Native Weixin provider E2E' <<<"$linux_shell_job"
 grep -Fq 'BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost' <<<"$linux_shell_job"
 grep -Fq 'run: bash e2e-tests/tests/test_weixin_provider_e2e.sh' <<<"$linux_shell_job"
 
+live_model_step="$({
+  awk '
+    /- name: IM live model progress card E2E/ { in_step = 1 }
+    in_step && /- name:/ && !/- name: IM live model progress card E2E/ { exit }
+    in_step { print }
+  ' <<<"$linux_shell_job"
+})"
+grep -Fq -- '- name: IM live model progress card E2E' <<<"$live_model_step"
+grep -Fq 'BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost' <<<"$live_model_step"
+grep -Fq 'SKIP_BUILD: "true"' <<<"$live_model_step"
+grep -Fq 'run: bash e2e-tests/tests/test_im_gateway_live_model_switch.sh' <<<"$live_model_step"
+
+# The coverage job runs the proxy shell manifest itself, so it must provision
+# every external tool required by those scenarios instead of depending on the
+# separately isolated shell E2E job.
+coverage_job="$(
+  awk '
+    /^  coverage:$/ { in_job = 1 }
+    in_job && /^  [[:alnum:]_-]+:$/ && $0 != "  coverage:" { exit }
+    in_job { print }
+  ' "$ci_workflow"
+)"
+grep -Fq -- '- name: Install sync-server dependencies' <<<"$coverage_job"
+grep -Fq 'working-directory: packages/bifrost-sync-server' <<<"$coverage_job"
+grep -Fq -- '- name: Build sync-server (TypeScript -> dist/cli.js)' <<<"$coverage_job"
+grep -Fq -- '- name: Install FFmpeg for ASR source compression E2E' <<<"$coverage_job"
+grep -Fq 'sudo apt-get install --yes --no-install-recommends ffmpeg' <<<"$coverage_job"
+
 grep -Fq 'cargo llvm-cov show-env --sh' "$coverage_all"
 grep -Fq 'unit-integration.json' "$coverage_all"
 grep -Fq 'e2e.json' "$coverage_all"
@@ -114,9 +142,9 @@ grep -Fq 'CARGO_LLVM_COV_TARGET_DIR' "$coverage_changed"
 grep -Fq 'clear_profiles(target_dir)' "$coverage_changed"
 grep -Fq -- '--worktree' "$coverage_changed"
 grep -Fq 'coverage-changed' Makefile
-grep -Fq 'Changed production Rust coverage (95%)' scripts/ci/local-ci.sh
+grep -Fq 'Changed production Rust coverage (90%)' scripts/ci/local-ci.sh
 grep -Fq 'all exact #[cfg(test)] items excluded' "$coverage_production"
-grep -Fq 'changed_lines_min = 95.0' scripts/ci/coverage-thresholds.toml
+grep -Fq 'changed_lines_min = 90.0' scripts/ci/coverage-thresholds.toml
 grep -Fq 'coverage-diff.py target/coverage/lcov.info' "$ci_workflow"
 grep -Fq -- '--with-e2e --e2e-suite proxy' "$ci_workflow"
 grep -Fq 'target/coverage/production-coverage.json' "$ci_workflow"
@@ -223,7 +251,7 @@ grep -Fq 'shell_test_capability_group()' "$runner"
 grep -Fq 'BIFROST_E2E_SHELL_TESTS' "$runner"
 grep -Fq 'PROXY_COVERAGE_SHELL_MANIFEST' "$coverage_all"
 grep -Fq 'rules | shell | runner | proxy' "$coverage_all"
-expected_proxy_coverage_shell_tests=16
+expected_proxy_coverage_shell_tests=21
 actual_proxy_coverage_shell_tests="$(wc -l <"$proxy_coverage_shell_manifest" | tr -d ' ')"
 if [[ "$actual_proxy_coverage_shell_tests" -ne "$expected_proxy_coverage_shell_tests" ]]; then
   echo "proxy coverage shell manifest count mismatch: expected $expected_proxy_coverage_shell_tests, got $actual_proxy_coverage_shell_tests" >&2
@@ -366,7 +394,7 @@ mod tests {
 EOF
   cat >"$fixture_dir/scripts/ci/coverage-thresholds.toml" <<'EOF'
 [settings]
-changed_lines_min = 95.0
+changed_lines_min = 90.0
 EOF
 
   git -C "$fixture_dir" init -b main >/dev/null

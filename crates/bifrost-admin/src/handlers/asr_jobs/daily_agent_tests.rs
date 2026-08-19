@@ -1859,6 +1859,11 @@ async fn daily_agent_chatgpt_web_entry_failure_continues_and_keeps_failed_date_r
     processed
         .date_watermarks
         .insert(task.daily_agent.agent_id.clone(), "2026-06-23".to_string());
+    add_daily_agent_pending_dates(
+        &mut processed,
+        &task.daily_agent.agent_id,
+        ["2026-06-24".to_string(), "2026-06-25".to_string()],
+    );
     save_daily_agent_processed_state(&task.id, &processed).unwrap();
 
     let result = run_daily_agent_inner(&task, "manual", None, false, "run-partial")
@@ -1880,6 +1885,10 @@ async fn daily_agent_chatgpt_web_entry_failure_continues_and_keeps_failed_date_r
     assert!(processed
         .documents
         .contains_key(&daily_agent_processed_key(&task, "2026-06-25")));
+    assert_eq!(
+        daily_agent_pending_dates(&processed, &task.daily_agent.agent_id),
+        ["2026-06-24"]
+    );
 }
 
 #[tokio::test]
@@ -4251,6 +4260,142 @@ fn daily_agent_unscoped_first_run_uses_latest_date_and_explicit_backfill_bypasse
     assert_eq!(backfill.entries[0].date, "2026-07-26");
 }
 
+#[test]
+fn daily_agent_pending_dates_persist_dedupe_and_survive_watermark_advances() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut task = test_directory_task("daily-agent-pending-task", temp.path().join("audio"));
+    task.daily_agent.enabled = true;
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.runner = "mock-pending".to_string();
+    agent.trigger_policy = AsrDailyAgentTriggerPolicy::AfterAsrRun;
+    task.daily_agent.agents = vec![agent.clone()];
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::create_dir_all(&daily_dir).unwrap();
+    std::fs::write(daily_dir.join("2026-08-10.md"), "already processed").unwrap();
+    std::fs::write(daily_dir.join("2026-08-11.md"), "failed previously").unwrap();
+    std::fs::write(daily_dir.join("2026-08-12.md"), "new today").unwrap();
+
+    let agent_task = task_for_daily_agent(&task, &agent);
+    let source = daily_dir.join("2026-08-10.md");
+    let report = daily_agent_output_dir(&agent_task).join("2026-08-10-report.md");
+    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+    std::fs::write(&report, "existing report").unwrap();
+    let source_sha256 = compute_sha256(&source).unwrap();
+    let report_sha256 = compute_sha256(&report).unwrap();
+    let processed_key = daily_agent_processed_key(&agent_task, "2026-08-10");
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed.documents.insert(
+        processed_key.clone(),
+        AsrDailyAgentProcessedDocument {
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            output_dir: agent.output_dir.clone(),
+            date: "2026-08-10".to_string(),
+            source_sha256,
+            source_len_bytes: std::fs::metadata(source).unwrap().len(),
+            processed_at_ms: 1,
+            runner: agent.runner.clone(),
+            report_path: Some(report.to_string_lossy().to_string()),
+            last_run_id: "old-run".to_string(),
+        },
+    );
+    processed.artifacts.insert(
+        processed_key,
+        AsrDailyAgentArtifactState {
+            report_sha256: Some(report_sha256),
+            report_len_bytes: Some(std::fs::metadata(&report).unwrap().len()),
+            generator_contract_version: Some(DAILY_AGENT_GENERATOR_CONTRACT_VERSION),
+            agent_config_sha256: Some(daily_agent_config_sha256(&agent_task)),
+            upstream_sha256: DailyAgentBTreeMap::new(),
+        },
+    );
+    processed
+        .date_watermarks
+        .insert(agent.id.clone(), "2026-08-11".to_string());
+    add_daily_agent_pending_dates(
+        &mut processed,
+        &agent.id,
+        ["2026-08-11".to_string(), "2026-08-11".to_string()],
+    );
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
+
+    let queued = prepare_daily_agent_pending_dates(
+        &task,
+        &[agent],
+        &["2026-08-12".to_string()],
+    )
+    .unwrap();
+    assert_eq!(queued, ["2026-08-11", "2026-08-12"]);
+    let persisted = load_daily_agent_processed_state(&task.id);
+    assert_eq!(
+        daily_agent_pending_dates(&persisted, DEFAULT_DAILY_AGENT_ID),
+        ["2026-08-11", "2026-08-12"]
+    );
+    assert_eq!(
+        next_daily_agent_pending_date(&task, &HashSet::new()).as_deref(),
+        Some("2026-08-11")
+    );
+    assert_eq!(
+        next_daily_agent_pending_date(
+            &task,
+            &HashSet::from(["2026-08-11".to_string()]),
+        )
+        .as_deref(),
+        Some("2026-08-12")
+    );
+}
+
+#[test]
+fn daily_agent_pending_date_is_only_removed_when_generated_inputs_are_current() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task = test_directory_task(
+        "daily-agent-pending-current-input-task",
+        temp.path().join("audio"),
+    );
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::create_dir_all(&daily_dir).unwrap();
+    let source = daily_dir.join("2026-08-18.md");
+    std::fs::write(&source, "initial transcript").unwrap();
+    let entry = build_daily_agent_change_plan(
+        &task,
+        "asr_completion",
+        Some("2026-08-18"),
+        false,
+    )
+    .unwrap()
+    .entries
+    .remove(0);
+    let mut state = AsrDailyAgentProcessedState::default();
+    add_daily_agent_pending_dates(
+        &mut state,
+        &task.daily_agent.agent_id,
+        ["2026-08-18".to_string()],
+    );
+
+    std::fs::write(&source, "initial transcript with late ASR append").unwrap();
+    assert!(!remove_daily_agent_pending_date_if_entry_current(
+        &mut state,
+        &task,
+        &entry,
+    ));
+    assert_eq!(
+        daily_agent_pending_dates(&state, &task.daily_agent.agent_id),
+        ["2026-08-18"]
+    );
+
+    std::fs::write(&source, "initial transcript").unwrap();
+    assert!(remove_daily_agent_pending_date_if_entry_current(
+        &mut state,
+        &task,
+        &entry,
+    ));
+    assert!(daily_agent_pending_dates(&state, &task.daily_agent.agent_id).is_empty());
+}
+
 fn daily_agent_mock_runner_settings(
     content: &str,
 ) -> crate::im_gateway::external_cli::ExternalCliAgentSettings {
@@ -5595,7 +5740,10 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
     // spawned PowerShell mock under load. Keep this wait above the mock
     // runner's 10-second timeout, then also wait for the task marker to clear
     // so the temp data root cannot be dropped while bookkeeping is in flight.
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    // Full-suite contention has exceeded 30 seconds, so leave a bounded
+    // 60-second window for scheduling without weakening the report assertion.
+    let completion_wait = std::time::Duration::from_secs(60);
+    tokio::time::timeout(completion_wait, async {
         while !report.is_file() {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
@@ -5603,7 +5751,7 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
     .await
     .expect("after-ASR daily agent did not produce its report");
     assert!(!std::fs::read_to_string(report).unwrap().trim().is_empty());
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    tokio::time::timeout(completion_wait, async {
         while DAILY_AGENT_RUNNING_TASKS
             .lock()
             .unwrap_or_else(|error| error.into_inner())

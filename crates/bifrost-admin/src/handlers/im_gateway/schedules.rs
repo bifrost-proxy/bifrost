@@ -163,25 +163,45 @@ pub(super) async fn handle_schedule_run(
     if req.method() != Method::POST {
         return method_not_allowed();
     }
-    let Some(schedule) = service.schedule_store.get(id) else {
-        return error_response(StatusCode::NOT_FOUND, "Schedule not found");
-    };
+    if !crate::worker_runtime::worker_execution_enabled(
+        crate::worker_runtime::WorkerKind::ImGateway,
+    ) {
+        return match execute_manual_schedule(service, id).await {
+            Ok(task_run) => json_response(&task_run),
+            Err(error) if error.contains("not found") => {
+                error_response(StatusCode::NOT_FOUND, &error)
+            }
+            Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+        };
+    }
+    match crate::worker_runtime::im_gateway::run_schedule(id).await {
+        Ok(task_run) => json_response(&task_run),
+        Err(error) if error.contains("not found") => error_response(StatusCode::NOT_FOUND, &error),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
 
-    let run_id = uuid_short();
+pub(crate) async fn execute_manual_schedule(
+    service: &ImGatewayService,
+    id: &str,
+) -> Result<crate::im_gateway::types::ImTaskRun, String> {
+    let schedule = service
+        .schedule_store
+        .get(id)
+        .ok_or_else(|| format!("Schedule '{id}' not found"))?;
     let task_run = execute_schedule_once(
         service,
         &schedule,
-        run_id.clone(),
+        uuid_short(),
         crate::im_gateway::types::TriggerSource::ManualRun,
     )
     .await;
-
-    // Persist the run record
-    let _ = service.run_store.add(task_run.clone());
-
+    service
+        .run_store
+        .add(task_run.clone())
+        .map_err(|error| format!("persist manual schedule run: {error}"))?;
     send_schedule_run_notification(service, &schedule, &task_run).await;
-
-    json_response(&task_run)
+    Ok(task_run)
 }
 
 pub(super) async fn execute_schedule_once(

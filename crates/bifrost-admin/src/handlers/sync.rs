@@ -471,29 +471,77 @@ async fn reconcile_remote_invoke_workers(state: &SharedAdminState) {
     let targets = bifrost_sync::SyncManagerHandle::new(sync_manager.clone())
         .remote_invoke_registration_targets()
         .await;
-    let desired_urls: Vec<String> = targets
+
+    if crate::worker_runtime::worker_execution_enabled(
+        crate::worker_runtime::WorkerKind::RemoteInvoke,
+    ) {
+        let mut isolated_targets = targets
+            .into_iter()
+            .map(
+                |target| crate::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                    provider_id: target.provider_id,
+                    relay_url: target.remote_base_url,
+                    session_token: target.session_token,
+                    allow_missing_session_token: false,
+                },
+            )
+            .collect::<Vec<_>>();
+        if isolated_targets.is_empty() {
+            let relay_url = state
+                .config_manager
+                .as_ref()
+                .and_then(|manager| manager.try_config())
+                .map(|config| config.sync.remote_base_url.clone())
+                .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
+            isolated_targets.push(crate::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                provider_id: "standby".to_string(),
+                relay_url,
+                session_token: String::new(),
+                allow_missing_session_token: true,
+            });
+        }
+        let Some((admin_host, admin_port)) = state.remote_invoke_admin_endpoint() else {
+            warn!("remote invoke admin endpoint missing; skip isolated worker reconcile");
+            return;
+        };
+        let count = isolated_targets.len();
+        crate::worker_runtime::remote_invoke::configure_runtime_targets(
+            isolated_targets,
+            admin_host,
+            admin_port,
+            state.clone(),
+        );
+        state.stop_remote_invoke_workers_except(&[]);
+        info!(
+            workers = count,
+            "remote invoke isolated worker targets reconciled"
+        );
+        return;
+    }
+
+    crate::worker_runtime::remote_invoke::stop_runtime_controller();
+    let desired_urls = targets
         .iter()
         .map(|target| target.remote_base_url.trim_end_matches('/').to_string())
-        .collect();
-
+        .collect::<Vec<_>>();
     state.stop_remote_invoke_workers_except(&desired_urls);
     if desired_urls.is_empty() {
-        info!("remote invoke workers stopped because no provider session supports registration");
+        info!("legacy remote invoke runtimes stopped because no provider supports registration");
         return;
     }
 
     let Some((admin_host, admin_port)) = state.remote_invoke_admin_endpoint() else {
-        warn!("remote invoke admin endpoint missing; skip provider worker reconcile");
+        warn!("remote invoke admin endpoint missing; skip legacy runtime reconcile");
         return;
     };
     let Some(config_manager) = state.config_manager.clone() else {
-        warn!("config manager missing; skip provider worker reconcile");
+        warn!("config manager missing; skip legacy remote invoke reconcile");
         return;
     };
     let identity = match Identity::load_or_create(config_manager.data_dir()) {
         Ok(identity) => identity,
         Err(error) => {
-            warn!(error = %error, "remote invoke identity init failed during provider reconcile");
+            warn!(error = %error, "remote invoke identity init failed during legacy reconcile");
             return;
         }
     };
@@ -522,7 +570,7 @@ async fn reconcile_remote_invoke_workers(state: &SharedAdminState) {
         info!(
             provider_id = %target.provider_id,
             relay_url = %relay_url,
-            "remote invoke provider worker started"
+            "legacy remote invoke provider runtime started"
         );
     }
 }
@@ -631,7 +679,31 @@ fn render_sync_login_result_html(success: bool, message: &str, user_id: Option<&
 
 #[cfg(test)]
 mod tests {
-    use super::render_sync_login_result_html;
+    use super::{reconcile_remote_invoke_workers, render_sync_login_result_html};
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn sync_login_success_page_redirects_to_home() {
@@ -648,5 +720,39 @@ mod tests {
 
         assert!(!html.contains("window.location.replace(\"/\")"));
         assert!(html.contains("Login failed."));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_invoke_reconcile_handles_empty_isolated_and_legacy_targets() {
+        let _runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
+        let temp = tempfile::tempdir().unwrap();
+        let config_manager = std::sync::Arc::new(
+            bifrost_storage::ConfigManager::new(temp.path().join("config")).unwrap(),
+        );
+        let sync_manager =
+            std::sync::Arc::new(bifrost_sync::SyncManager::new(config_manager, 0).unwrap());
+        let state = std::sync::Arc::new(
+            crate::state::AdminState::new(0).with_sync_manager_shared(sync_manager),
+        );
+        let mode_env = crate::worker_runtime::execution_mode_env(
+            crate::worker_runtime::WorkerKind::RemoteInvoke,
+        );
+        let _mode_guard = EnvGuard::set(mode_env, "isolated");
+
+        reconcile_remote_invoke_workers(&state).await;
+        state.set_remote_invoke_admin_endpoint("127.0.0.1".to_string(), 0);
+        reconcile_remote_invoke_workers(&state).await;
+        crate::worker_runtime::remote_invoke::stop_runtime_controller();
+        crate::worker_runtime::global_worker_supervisor()
+            .stop_kind(
+                crate::worker_runtime::WorkerKind::RemoteInvoke,
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+
+        unsafe { std::env::set_var(mode_env, "legacy") };
+        reconcile_remote_invoke_workers(&state).await;
+
+        crate::worker_runtime::remote_invoke::stop_runtime_controller();
     }
 }

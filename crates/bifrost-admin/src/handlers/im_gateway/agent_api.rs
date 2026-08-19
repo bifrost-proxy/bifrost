@@ -243,6 +243,7 @@ pub(super) async fn handle_agent(
             .map(|s| s.session_key.clone())
             .chain(running_turns.iter().map(|s| s.session_key.clone()))
             .collect();
+        let active_external_worker_jobs = active_external_worker_jobs_by_session();
 
         // Determine retention cutoff based on persistence mode
         let agent_config = service.agent_config_store.load();
@@ -583,6 +584,15 @@ pub(super) async fn handle_agent(
             }));
         }
 
+        // External CLI work started by the isolated IM Gateway worker is
+        // executed and tracked in the main process. Its AgentSession remains
+        // inside the IM worker, so the main-process SessionManager cannot see
+        // the active turn. Reconcile the unified rows with the authoritative
+        // worker-job registry before sorting and deduplication. The job is an
+        // activity overlay only; canonical session persistence remains the
+        // authority for which top-level runs exist.
+        overlay_active_external_worker_jobs(&mut unified, &active_external_worker_jobs);
+
         // Sort by last_active_time descending (newest first)
         unified.sort_by(|a, b| {
             let t_a = a
@@ -849,7 +859,12 @@ pub(super) async fn handle_agent(
             return error_response(StatusCode::NOT_FOUND, "session not found");
         }
         if req.method() == Method::DELETE {
-            service.agent_session_manager.request_stop(&session_key);
+            service.queue_manager.clear_session(&session_key);
+            if let Err(error) =
+                request_agent_stop(&service.agent_session_manager, &session_key).await
+            {
+                return agent_stop_error_response("delete", &error);
+            }
             service.agent_session_manager.clear_session(&session_key);
             service.queue_manager.clear_session(&session_key);
             clear_persisted_agent_session_state(&session_key, None, None);
@@ -1408,6 +1423,132 @@ fn active_session_list_run_state(running: bool, session_run_state: &str) -> Stri
         "completed".to_string()
     } else {
         session_run_state.to_string()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveExternalWorkerJob {
+    started_at: u64,
+    ordering_time_ms: u64,
+    adapter: String,
+}
+
+fn active_external_worker_jobs_by_session(
+) -> std::collections::HashMap<String, ActiveExternalWorkerJob> {
+    active_external_worker_jobs_from(crate::worker_runtime::worker_jobs())
+}
+
+fn active_external_worker_jobs_from(
+    jobs: impl IntoIterator<Item = crate::worker_runtime::WorkerJobRecord>,
+) -> std::collections::HashMap<String, ActiveExternalWorkerJob> {
+    let mut active = std::collections::HashMap::new();
+    for job in jobs {
+        if !matches!(
+            job.status,
+            crate::worker_runtime::WorkerJobStatus::Queued
+                | crate::worker_runtime::WorkerJobStatus::Running
+                | crate::worker_runtime::WorkerJobStatus::Cancelling
+        ) {
+            continue;
+        }
+        let adapter = match job.worker_kind {
+            crate::worker_runtime::WorkerKind::ExternalCli => {
+                job.operation.strip_prefix("external_cli.run:")
+            }
+            crate::worker_runtime::WorkerKind::Browser if job.operation == "browser.run" => {
+                Some(crate::im_gateway::chatgpt_web::ADAPTER_ID)
+            }
+            crate::worker_runtime::WorkerKind::Browser => {
+                job.operation.strip_prefix("external_cli.run:")
+            }
+            _ => None,
+        };
+        let Some(adapter) = adapter else {
+            continue;
+        };
+        let adapter = adapter.trim();
+        if adapter.is_empty() {
+            continue;
+        }
+        let Some(session_key) = job
+            .logical_job_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        // Sessionless calls use the registry request id as their logical job
+        // id. They have no stable Agent session to show in AI Runs.
+        if session_key == job.request_id {
+            continue;
+        }
+        let ordering_time_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
+        let projection = ActiveExternalWorkerJob {
+            started_at: ordering_time_ms / 1000,
+            ordering_time_ms,
+            adapter: adapter.to_string(),
+        };
+        active
+            .entry(session_key.to_string())
+            .and_modify(|existing: &mut ActiveExternalWorkerJob| {
+                if projection.ordering_time_ms > existing.ordering_time_ms {
+                    *existing = projection.clone();
+                }
+            })
+            .or_insert(projection);
+    }
+    active
+}
+
+fn overlay_active_external_worker_jobs(
+    unified: &mut [serde_json::Value],
+    active_jobs: &std::collections::HashMap<String, ActiveExternalWorkerJob>,
+) {
+    if active_jobs.is_empty() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for item in unified.iter_mut() {
+        let Some(session_key) = item
+            .get("session_key")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+        else {
+            continue;
+        };
+        let Some(job) = active_jobs.get(&session_key) else {
+            continue;
+        };
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        object.insert("status".to_string(), serde_json::json!("active"));
+        object.insert("running".to_string(), serde_json::json!(true));
+        object.insert("state".to_string(), serde_json::json!("running"));
+        object.insert("run_state".to_string(), serde_json::json!("running"));
+        object.insert("start_time".to_string(), serde_json::json!(job.started_at));
+        object.insert("last_active_time".to_string(), serde_json::json!(now));
+        object.insert(
+            "duration_secs".to_string(),
+            serde_json::json!(now.saturating_sub(job.started_at)),
+        );
+        insert_json_if_missing_or_null(object, "agent_type", serde_json::json!("external_cli"));
+        insert_json_if_missing_or_null(object, "runner_type", serde_json::json!(job.adapter));
+        insert_json_if_missing_or_null(object, "runner_id", serde_json::json!(job.adapter));
+    }
+}
+
+fn insert_json_if_missing_or_null(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: serde_json::Value,
+) {
+    if object.get(key).is_none_or(serde_json::Value::is_null) {
+        object.insert(key.to_string(), value);
     }
 }
 
@@ -2216,6 +2357,174 @@ mod tests {
             history_session_list_run_state(&completed_summary),
             "completed"
         );
+    }
+
+    fn test_worker_job(
+        id: &str,
+        session_key: Option<&str>,
+        operation: &str,
+        status: crate::worker_runtime::WorkerJobStatus,
+        worker_kind: crate::worker_runtime::WorkerKind,
+        created_at_ms: u64,
+    ) -> crate::worker_runtime::WorkerJobRecord {
+        crate::worker_runtime::WorkerJobRecord {
+            id: id.to_string(),
+            request_id: id.to_string(),
+            logical_job_id: session_key.map(ToString::to_string),
+            worker_key: format!("worker:{id}"),
+            worker_kind,
+            operation: operation.to_string(),
+            status,
+            created_at_ms,
+            started_at_ms: Some(created_at_ms),
+            finished_at_ms: None,
+            error: None,
+            events: Vec::new(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn active_external_worker_jobs_override_isolated_im_session_rows() {
+        let session_key = "im:feishu-main:group:active-worker";
+        let browser_session_key = "im:feishu-main:group:active-browser-worker";
+        let jobs = vec![
+            test_worker_job(
+                "newer-active-traex",
+                Some(session_key),
+                "external_cli.run:traex",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::ExternalCli,
+                42_900,
+            ),
+            test_worker_job(
+                "older-active-codex",
+                Some(session_key),
+                "external_cli.run:codex",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::ExternalCli,
+                42_000,
+            ),
+            test_worker_job(
+                "active-browser",
+                Some(browser_session_key),
+                "browser.run",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::Browser,
+                41_000,
+            ),
+            test_worker_job(
+                "terminal-codex",
+                Some("terminal-session"),
+                "external_cli.run:codex",
+                crate::worker_runtime::WorkerJobStatus::Succeeded,
+                crate::worker_runtime::WorkerKind::ExternalCli,
+                43_000,
+            ),
+            test_worker_job(
+                "unrelated-asr",
+                Some("asr-session"),
+                "asr.transcribe",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::Asr,
+                44_000,
+            ),
+            test_worker_job(
+                "sessionless-registry-id",
+                Some("sessionless-registry-id"),
+                "external_cli.run:codex",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::ExternalCli,
+                45_000,
+            ),
+            test_worker_job(
+                "unrelated-browser",
+                Some("unrelated-browser-session"),
+                "browser.inspect",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::Browser,
+                46_000,
+            ),
+            test_worker_job(
+                "empty-adapter",
+                Some("empty-adapter-session"),
+                "external_cli.run:   ",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::ExternalCli,
+                47_000,
+            ),
+            test_worker_job(
+                "empty-session",
+                Some("   "),
+                "external_cli.run:codex",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::ExternalCli,
+                48_000,
+            ),
+        ];
+        let active = active_external_worker_jobs_from(jobs);
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[session_key].adapter, "traex");
+        assert_eq!(
+            active[browser_session_key].adapter,
+            crate::im_gateway::chatgpt_web::ADAPTER_ID
+        );
+
+        let mut unified = vec![
+            serde_json::json!({
+                "session_key": session_key,
+                "status": "ended",
+                "running": false,
+                "state": "ended",
+                "run_state": "completed",
+                "source": "codex",
+                "agent_type": null,
+                "runner_id": "Codex",
+                "runner_type": null,
+                "title": "Active Feishu requirement",
+                "start_time": 10,
+                "last_active_time": 20,
+                "duration_secs": 10,
+                "user_message_count": 2,
+            }),
+            serde_json::json!({
+                "session_key": browser_session_key,
+                "status": "ended",
+                "running": false,
+                "state": "ended",
+                "run_state": "completed",
+                "source": "feishu",
+                "agent_type": "external_cli",
+                "runner_id": null,
+                "runner_type": null,
+                "title": "Active browser requirement",
+                "start_time": 5,
+                "last_active_time": 15,
+                "duration_secs": 10,
+                "user_message_count": 1,
+            }),
+            serde_json::json!({"status": "ended"}),
+            serde_json::Value::Null,
+        ];
+        overlay_active_external_worker_jobs(&mut unified, &active);
+
+        assert_eq!(unified[0]["status"], "active");
+        assert_eq!(unified[0]["running"], true);
+        assert_eq!(unified[0]["run_state"], "running");
+        assert_eq!(unified[0]["start_time"], 42);
+        assert_eq!(unified[0]["agent_type"], "external_cli");
+        assert_eq!(unified[0]["runner_type"], "traex");
+        assert_eq!(unified[0]["runner_id"], "Codex");
+        assert_eq!(unified[1]["status"], "active");
+        assert_eq!(unified[1]["running"], true);
+        assert_eq!(unified[1]["runner_type"], "chatgpt_web");
+        assert_eq!(unified[1]["runner_id"], "chatgpt_web");
+        let response = session_summaries_response(&unified, &std::collections::HashMap::new());
+        assert_eq!(response["summary"]["running_count"], 2);
+        assert_eq!(response["items"][0]["status"], "running");
+        assert_eq!(response["items"][0]["session_key"], session_key);
+        assert_eq!(response["items"][1]["status"], "running");
+        assert_eq!(response["items"][1]["session_key"], browser_session_key);
     }
 
     #[test]
@@ -4178,11 +4487,21 @@ mod coverage_boost_v2 {
     async fn agent_session_delete_returns_ok_even_when_missing() {
         let harness = TestAdminState::builder().build();
         let service = harness.im_gateway_service();
+        let generation = service.queue_manager.session_generation("missing");
 
-        let (status, body) =
-            agent_request_json(service, Method::DELETE, "/agent/sessions/missing", None).await;
+        let (status, body) = agent_request_json(
+            service.clone(),
+            Method::DELETE,
+            "/agent/sessions/missing",
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["ok"], true);
+        assert_eq!(
+            service.queue_manager.session_generation("missing"),
+            generation.wrapping_add(2)
+        );
     }
 
     // ---------------------------------------------------------------------

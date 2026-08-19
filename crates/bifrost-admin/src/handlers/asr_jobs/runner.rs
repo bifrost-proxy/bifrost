@@ -103,7 +103,7 @@ fn task_allows_external_device_event_import(task: &AsrDirectoryTask) -> bool {
 
 #[cfg(target_os = "macos")]
 async fn sync_external_device_task(task: AsrDirectoryTask, trigger: &'static str) {
-    if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
+    if task_is_running(&task.id) {
         return;
     }
     match start_external_import_background(task.clone(), trigger) {
@@ -192,6 +192,7 @@ fn discover_and_prepare_pending_batch(
     files: &mut FileStore,
     attempted_keys: &HashSet<String>,
     recording_date: Option<NaiveDate>,
+    only_file_keys: Option<&HashSet<String>>,
 ) -> Result<PendingBatchScan, String> {
     let discovered = discover_audio_files(&task.audio_dir, task.recursive)?;
     for path in &discovered {
@@ -218,7 +219,8 @@ fn discover_and_prepare_pending_batch(
         .iter()
         .filter(|path| {
             let key = source_key(path);
-            !attempted_keys.contains(&key)
+            only_file_keys.is_none_or(|keys| keys.contains(&key))
+                && !attempted_keys.contains(&key)
                 && files
                     .files
                     .get(&key)
@@ -279,7 +281,8 @@ fn pending_modified_time_ms(record: Option<&FileRecord>) -> u64 {
 async fn run_directory_task_for_date(
     task: AsrDirectoryTask,
     recording_date: Option<NaiveDate>,
-) -> Result<(AsrDirectoryTask, usize, usize), String> {
+    only_file_keys: Option<HashSet<String>>,
+) -> Result<(AsrDirectoryTask, usize, usize, Vec<String>), String> {
     let _guard = ASR_JOB_RUN_LOCK.lock().await;
     let _task_lock = TaskRunFileLock::acquire(&task.id)?;
     start_run_progress(&task.id, "background");
@@ -306,6 +309,7 @@ async fn run_directory_task_for_date(
         &mut files,
         &attempted_keys,
         recording_date,
+        only_file_keys.as_ref(),
     )?;
     update_run_progress(&task.id, |progress| {
         progress.current_file_total = pending_scan.pending.len();
@@ -319,7 +323,7 @@ async fn run_directory_task_for_date(
     });
 
     if pending_scan.pending.is_empty() {
-        refresh_task_daily_summaries(&task)?;
+        let daily_agent_dates = daily_summary_dates(&refresh_task_daily_summaries(&task)?);
         let updated = match update_task_after_run(&task.id, None) {
             Ok(task) => task,
             Err(error) => {
@@ -331,7 +335,7 @@ async fn run_directory_task_for_date(
             }
         };
         spawn_daily_agent_original_files_after_refresh(&updated);
-        return Ok((updated, 0, 0));
+        return Ok((updated, 0, 0, daily_agent_dates));
     }
 
     let resource_decision = crate::handlers::speech::acquire_speech_resource(
@@ -466,6 +470,7 @@ async fn run_directory_task_for_date(
             &mut files,
             &attempted_keys,
             recording_date,
+            only_file_keys.as_ref(),
         ) {
             Ok(scan) => scan,
             Err(error) => break Err(error),
@@ -531,9 +536,7 @@ async fn run_directory_task_for_date(
     };
     spawn_daily_agent_original_files_after_refresh(&updated);
     // Hook: trigger Daily Agent if configured
-    maybe_enqueue_daily_agent_after_asr_run(&updated, &daily_agent_dates).await;
-
-    Ok((updated, processed_now, failed_now))
+    Ok((updated, processed_now, failed_now, daily_agent_dates))
 }
 
 fn completed_recording_dates_for_attempted_files(
@@ -555,6 +558,18 @@ fn completed_recording_dates_for_attempted_files(
     dates
 }
 
+fn daily_summary_dates(paths: &[PathBuf]) -> Vec<String> {
+    let mut dates = paths
+        .iter()
+        .filter_map(|path| path.file_stem().and_then(|name| name.to_str()))
+        .filter(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    dates.sort();
+    dates.dedup();
+    dates
+}
+
 struct SpeechResourceLeaseGuard {
     lease: Option<bifrost_asr::resources::ResourceLease>,
 }
@@ -566,77 +581,197 @@ impl Drop for SpeechResourceLeaseGuard {
 }
 
 fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), String> {
-    spawn_directory_task_run_background_for_date(task, None)
+    spawn_directory_task_run_background_for_date(task, None, Vec::new())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrWorkerRunOutcome {
+    pub processed: usize,
+    pub failed: usize,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub daily_agent_dates: Vec<String>,
+}
+
+async fn execute_directory_task_run(
+    task: AsrDirectoryTask,
+    recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
+) -> AsrWorkerRunOutcome {
+    let only_file_keys = (!file_keys.is_empty()).then(|| file_keys.into_iter().collect());
+    let result = run_directory_task_for_date(task.clone(), recording_date, only_file_keys).await;
+    let outcome = match &result {
+        Ok((updated, processed, failed, daily_agent_dates)) => {
+            if !crate::worker_runtime::asr::is_asr_worker_process() {
+                maybe_enqueue_daily_agent_after_asr_run(updated, daily_agent_dates).await;
+            }
+            finish_run_progress(
+                &task.id,
+                "completed",
+                *processed,
+                *failed,
+                Some(format!(
+                    "ASR directory task completed; processed {processed}, failed {failed}."
+                )),
+            );
+            tracing::info!(
+                task_id = %task.id, processed = processed, failed = failed,
+                "ASR directory task completed"
+            );
+            AsrWorkerRunOutcome {
+                processed: *processed,
+                failed: *failed,
+                status: "completed".to_string(),
+                daily_agent_dates: daily_agent_dates.clone(),
+            }
+        }
+        Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
+            finish_run_progress(
+                &task.id,
+                "paused",
+                0,
+                0,
+                Some("ASR directory task paused and released compute.".to_string()),
+            );
+            tracing::info!(
+                task_id = %task.id,
+                "ASR directory task paused and released compute"
+            );
+            AsrWorkerRunOutcome {
+                processed: 0,
+                failed: 0,
+                status: "paused".to_string(),
+                daily_agent_dates: Vec::new(),
+            }
+        }
+        Err(error) => {
+            let _ = update_task_after_run(&task.id, Some(error.clone()));
+            finish_run_progress(&task.id, "failed", 0, 0, Some(error.clone()));
+            tracing::warn!(
+                task_id = %task.id, error = %error,
+                "ASR directory task failed"
+            );
+            AsrWorkerRunOutcome {
+                processed: 0,
+                failed: 0,
+                status: "failed".to_string(),
+                daily_agent_dates: Vec::new(),
+            }
+        }
+    };
+    set_worker_force_pause(&task.id, false);
+    outcome
+}
+
+pub(crate) async fn run_directory_task_in_worker(
+    task_id: &str,
+    recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
+) -> Result<AsrWorkerRunOutcome, String> {
+    let task = find_task(task_id).ok_or_else(|| format!("ASR task '{task_id}' not found"))?;
+    if source_compression_is_running(task_id) {
+        return Err("ASR source-audio compression is running".to_string());
+    }
+    set_worker_force_pause(task_id, false);
+    FORCE_PAUSED_TASKS.lock().unwrap().remove(task_id);
+    let running_guard = RunningTaskGuard::acquire(task_id)
+        .map_err(|_| "ASR task is already running".to_string())?;
+    let outcome = execute_directory_task_run(task, recording_date, file_keys).await;
+    drop(running_guard);
+    Ok(outcome)
 }
 
 fn spawn_directory_task_run_background_for_date(
     task: AsrDirectoryTask,
     recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
 ) -> Result<(), String> {
     if source_compression_is_running(&task.id) {
         return Err("ASR source-audio compression is running".to_string());
     }
+    set_worker_force_pause(&task.id, false);
     FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
     let running_guard = RunningTaskGuard::acquire(&task.id)
         .map_err(|_| "ASR task is already running".to_string())?;
+    spawn_directory_task_run_background_with_guard(
+        task,
+        recording_date,
+        file_keys,
+        running_guard,
+    );
+    Ok(())
+}
 
+fn spawn_directory_task_run_background_with_guard(
+    task: AsrDirectoryTask,
+    recording_date: Option<NaiveDate>,
+    file_keys: Vec<String>,
+    running_guard: RunningTaskGuard,
+) {
     let task_id = task.id.clone();
-    let task_clone = task.clone();
+    if !cfg!(test)
+        && crate::worker_runtime::worker_execution_enabled(crate::worker_runtime::WorkerKind::Asr)
+        && !crate::worker_runtime::asr::is_asr_worker_process()
+    {
+        tokio::spawn(async move {
+            let result = crate::worker_runtime::asr::run_directory_task(
+                &task_id,
+                recording_date,
+                file_keys,
+            )
+            .await;
+            finish_parent_directory_worker_run(&task_id, result).await;
+            drop(running_guard);
+            tracing::debug!(
+                task_id = %task_id,
+                "released parent ASR directory task running marker"
+            );
+        });
+        return;
+    }
+
     tokio::spawn(async move {
-        let running_guard = running_guard;
-        let result = run_directory_task_for_date(task_clone.clone(), recording_date).await;
-        match &result {
-            Ok((_updated, processed, failed)) => {
-                finish_run_progress(
-                    &task_clone.id,
-                    "completed",
-                    *processed,
-                    *failed,
-                    Some(format!(
-                        "ASR directory task completed; processed {processed}, failed {failed}."
-                    )),
-                );
-                tracing::info!(
-                    task_id = %task_clone.id, processed = processed, failed = failed,
-                    "ASR directory task completed"
-                );
-            }
-            Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
-                finish_run_progress(
-                    &task_clone.id,
-                    "paused",
-                    0,
-                    0,
-                    Some("ASR directory task paused and released compute.".to_string()),
-                );
-                tracing::info!(
-                    task_id = %task_clone.id,
-                    "ASR directory task paused and released compute"
-                );
-            }
-            Err(error) => {
-                let _ = update_task_after_run(&task_clone.id, Some(error.clone()));
-                finish_run_progress(
-                    &task_clone.id,
-                    "failed",
-                    0,
-                    0,
-                    Some(error.clone()),
-                );
-                tracing::warn!(
-                    task_id = %task_clone.id, error = %error,
-                    "ASR directory task failed"
-                );
-            }
-        }
+        let _ = execute_directory_task_run(task, recording_date, file_keys).await;
         drop(running_guard);
         tracing::debug!(
             task_id = %task_id,
             "released ASR directory task running marker"
         );
     });
+}
 
-    Ok(())
+async fn finish_parent_directory_worker_run(
+    task_id: &str,
+    result: Result<crate::worker_runtime::asr::RunDirectoryTaskResult, String>,
+) {
+    let error = match result {
+        Ok(result) => {
+            if let Some(task) = find_task(task_id) {
+                // An empty ASR result must still wake durable Daily Agent
+                // backlog left by an earlier failed or interrupted run.
+                maybe_enqueue_daily_agent_after_asr_run(&task, &result.daily_agent_dates).await;
+            }
+            return;
+        }
+        Err(error) => error,
+    };
+    if find_task(task_id).is_some_and(|task| task.paused) {
+        finish_run_progress(
+            task_id,
+            "paused",
+            0,
+            0,
+            Some("ASR directory task paused and released compute.".to_string()),
+        );
+        tracing::info!(
+            task_id,
+            "ASR directory worker cancellation preserved paused task state"
+        );
+        return;
+    }
+    let _ = update_task_after_run(task_id, Some(error.clone()));
+    finish_run_progress(task_id, "failed", 0, 0, Some(error.clone()));
+    tracing::warn!(task_id, error = %error, "ASR directory worker request failed");
 }
 
 fn refresh_task_daily_summaries(task: &AsrDirectoryTask) -> Result<Vec<PathBuf>, String> {
@@ -1550,10 +1685,10 @@ async fn transcribe_file_for_task_with_wav(
             .as_ref()
             .map(|context| context.started_at_ms);
         let moss_started = Instant::now();
-        let result = if let Some(segment_seconds) = moss_segment_seconds_from_env()
+        let (result, moss_fallback_reason) = if let Some(segment_seconds) = moss_segment_seconds_from_env()
             .filter(|seconds| duration_secs > *seconds)
         {
-            run_segmented_moss_joint_transcription(
+            let result = run_segmented_moss_joint_transcription(
                 runtime,
                 wav,
                 duration_ms,
@@ -1561,9 +1696,15 @@ async fn transcribe_file_for_task_with_wav(
                 hooks.pause_check,
                 segment_seconds,
             )
-            .await
+            .await;
+            (
+                result,
+                Some(format!(
+                    "moss_manual_segmented_rescue:segment_{segment_seconds}_adaptive_60_30_10;segment_scoped_speakers"
+                )),
+            )
         } else {
-            run_moss_joint_transcription(
+            match run_moss_joint_transcription_with_auto_rescue(
                 runtime,
                 wav,
                 duration_ms,
@@ -1572,6 +1713,10 @@ async fn transcribe_file_for_task_with_wav(
                 file_started_at_ms,
             )
             .await
+            {
+                Ok(rescued) => (Ok(rescued.transcription), rescued.fallback_reason),
+                Err(error) => (Err(error), None),
+            }
         };
         let elapsed_ms = moss_started
             .elapsed()
@@ -1585,13 +1730,19 @@ async fn transcribe_file_for_task_with_wav(
             &result,
             elapsed_ms,
             None,
-            None,
+            moss_fallback_reason.clone(),
         );
         let result = result?;
         if let Some(callback) = hooks.on_chunk_metric {
             callback(metric.clone());
         }
-        (result, Vec::new(), Vec::new(), vec![metric], None)
+        (
+            result,
+            Vec::new(),
+            Vec::new(),
+            vec![metric],
+            moss_fallback_reason,
+        )
     } else if task.diarization.enabled {
         let diarized = transcribe_diarized_segments_for_task(
             task,

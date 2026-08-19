@@ -42,6 +42,19 @@ class CoverageDiffTests(unittest.TestCase):
             (source / "feature/tests/nested.rs").write_text(
                 "fn helper() {}\n", encoding="utf-8"
             )
+            (source / "included").mkdir()
+            (source / "included.rs").write_text(
+                '#[cfg(test)]\nmod tests {\n    include!("included/cases.rs");\n}\n',
+                encoding="utf-8",
+            )
+            (source / "included/cases.rs").write_text(
+                "fn included_helper() {}\n", encoding="utf-8"
+            )
+            e2e_source = root / "crates/bifrost-e2e/src"
+            e2e_source.mkdir(parents=True)
+            (e2e_source / "runner.rs").write_text(
+                "pub fn run() {}\n", encoding="utf-8"
+            )
 
             self.assertTrue(
                 coverage_diff.is_production_rust_path(
@@ -64,6 +77,16 @@ class CoverageDiffTests(unittest.TestCase):
             self.assertFalse(
                 coverage_diff.is_production_rust_path(
                     "crates/a/src/feature/tests/nested.rs", root
+                )
+            )
+            self.assertFalse(
+                coverage_diff.is_production_rust_path(
+                    "crates/a/src/included/cases.rs", root
+                )
+            )
+            self.assertFalse(
+                coverage_diff.is_production_rust_path(
+                    "crates/bifrost-e2e/src/runner.rs", root
                 )
             )
 
@@ -130,6 +153,15 @@ class CoverageDiffTests(unittest.TestCase):
                 {},
             ),
             ["crates/a/src/platform.rs"],
+        )
+
+    def test_unmeasured_changed_files_ignore_fully_excluded_test_modules(self) -> None:
+        self.assertEqual(
+            coverage_diff.unmeasured_changed_files(
+                {"crates/a/src/tests.rs": set()},
+                {},
+            ),
+            [],
         )
 
     def test_worktree_diff_includes_tracked_and_untracked_rust_files(self) -> None:
@@ -202,6 +234,69 @@ class CoverageDiffTests(unittest.TestCase):
                 {"crates/a/src/lib.rs": {1, 2, 3, 4, 5}}, root
             )
         self.assertEqual(filtered, {"crates/a/src/lib.rs": {1}})
+
+    def test_non_executable_rust_lines_exclude_only_source_structure(self) -> None:
+        source = """pub fn run(
+    value: String,
+) {
+    // explanation
+    #[cfg(test)]
+    do_work(value);
+}
+
+match value {
+    Some(value) => use_value(value),
+}
+"""
+        self.assertEqual(
+            coverage_diff.rust_non_executable_lines(source),
+            {1, 2, 3, 4, 5, 7, 8, 11},
+        )
+
+    def test_exclude_non_executable_lines_preserves_behavioral_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "crates/a/src/lib.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "pub fn run() {\n    do_work();\n}\n\n// comment\n",
+                encoding="utf-8",
+            )
+            filtered = coverage_diff.exclude_non_executable_rust_lines(
+                {"crates/a/src/lib.rs": {1, 2, 3, 4, 5}}, root
+            )
+        self.assertEqual(filtered, {"crates/a/src/lib.rs": {2}})
+
+    def test_non_executable_rust_lines_exclude_formatter_only_continuations(self) -> None:
+        source = """let result =
+    run_worker(
+        request,
+    ).await;
+event_writer
+    .join()?;
+if accepted {
+    finish();
+} else {
+    abort();
+}
+result
+"""
+        self.assertEqual(
+            coverage_diff.rust_non_executable_lines(source),
+            {1, 4, 5, 6, 9, 11},
+        )
+
+    def test_non_executable_rust_lines_exclude_generic_punctuation_continuations(
+        self,
+    ) -> None:
+        source = ">(\n)?;\n"
+        self.assertEqual(coverage_diff.rust_non_executable_lines(source), {1, 2})
+
+    def test_non_executable_rust_lines_exclude_module_and_import_declarations(
+        self,
+    ) -> None:
+        source = "pub mod worker_runtime;\nuse fs2::FileExt;\npub use crate::worker::Worker;\n"
+        self.assertEqual(coverage_diff.rust_non_executable_lines(source), {1, 2, 3})
 
     def test_substantial_unchanged_moved_block_is_excluded(self) -> None:
         base = """fn download() {

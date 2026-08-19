@@ -1,7 +1,7 @@
 use bifrost_core::{
     init_logging_with_config, install_panic_hook, BifrostError, LogConfig, LogOutput,
 };
-use bifrost_storage::{data_dir, ConfigManager, DEFAULT_REMOTE_BASE_URL};
+use bifrost_storage::{data_dir, set_data_dir, ConfigManager, DEFAULT_REMOTE_BASE_URL};
 use bifrost_tls::init_crypto_provider;
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
@@ -140,6 +140,7 @@ fn command_uses_stdout_protocol(command: Option<&Commands>) -> bool {
         }) | Some(Commands::Agent {
             action: cli::AgentCommands::ExternalRunnerWorker,
         }) | Some(Commands::AsrDiarizationWorker { .. })
+            | Some(Commands::AuxiliaryWorker { .. })
     )
 }
 
@@ -204,6 +205,18 @@ fn run_cli_main() {
 
     let cli = Cli::parse();
 
+    // Auxiliary workers must bind their isolated data directory before the
+    // logger derives its file path. Applying it later would leak worker logs
+    // into the user's default data directory and make isolated test/runtime
+    // profiles rotate unrelated logs.
+    if let Some(Commands::AuxiliaryWorker {
+        data_dir: worker_data_dir,
+        ..
+    }) = cli.command.as_ref()
+    {
+        set_data_dir(worker_data_dir.clone());
+    }
+
     let is_detached_daemon_child = commands::is_detached_daemon_child_process();
     let is_daemon_mode = matches!(&cli.command, Some(Commands::Start { daemon: true, .. }))
         && !is_detached_daemon_child;
@@ -248,6 +261,13 @@ fn run_cli_main() {
     }
 
     let result = match cli.command {
+        Some(Commands::AuxiliaryWorker {
+            kind,
+            data_dir: _,
+            admin_host,
+            admin_port,
+        }) => bifrost_admin::worker_runtime::run_auxiliary_worker(&kind, &admin_host, admin_port)
+            .map_err(BifrostError::Config),
         Some(Commands::AsrDiarizationWorker { request }) => {
             bifrost_admin::run_asr_diarization_worker_stdio(&request).map_err(BifrostError::Config)
         }

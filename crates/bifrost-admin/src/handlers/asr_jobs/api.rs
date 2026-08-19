@@ -246,6 +246,31 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .trim_end_matches('/');
             retry_all_failed_chunks_response(id).await
         }
+        // POST /api/asr/tasks/{task_id}/retry-failed-files
+        (&Method::POST, _)
+            if path.starts_with("/api/asr/tasks/") && path.ends_with("/retry-failed-files") =>
+        {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/retry-failed-files")
+                .trim_end_matches('/');
+            retry_all_failed_files_response(id).await
+        }
+        // POST /api/asr/tasks/{task_id}/files/{file_key}/retry
+        (&Method::POST, _)
+            if path.starts_with("/api/asr/tasks/") && path.ends_with("/retry") =>
+        {
+            let parts = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/retry")
+                .trim_end_matches('/')
+                .split('/')
+                .collect::<Vec<_>>();
+            if parts.len() != 3 || parts[1] != "files" {
+                return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
+            }
+            retry_failed_file_response(parts[0], parts[2]).await
+        }
         // POST /api/asr/tasks/{task_id}/files/{file_key}/retry-chunks
         (&Method::POST, _)
             if path.starts_with("/api/asr/tasks/") && path.ends_with("/retry-chunks") =>
@@ -464,8 +489,10 @@ fn update_task_config(
     let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _task_store_guard = acquire_task_store_write_lock()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     let requeue_existing_files = update.requeue_existing_files.unwrap_or(true);
-    let running = RUNNING_TASKS.lock().unwrap().contains(id);
+    let running = task_is_running(id);
     let high_risk = update.audio_dir.is_some()
         || update.recursive.is_some()
         || update.language.is_some()
@@ -561,7 +588,7 @@ fn update_task_config(
         .filter(|_| !task.paused)
         .and_then(|_| task.schedule.next_run_at_ms(now.saturating_add(60_000), false));
     let updated = task.clone();
-    save_tasks(&store).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    save_tasks_unlocked(&store).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     let transcription_output_changed = transcription_mode_changed
         || transcription_prompt_changed
             && updated.transcription_mode == AsrTranscriptionMode::MossJoint;
@@ -574,7 +601,7 @@ fn update_task_config(
             Ok(0)
         };
         if let Err(error) = file_update {
-            let rollback = save_tasks(&original_store);
+            let rollback = save_tasks_unlocked(&original_store);
             let message = match rollback {
                 Ok(()) => format!(
                     "update ASR task file records after transcription configuration change: {error}"
@@ -931,11 +958,15 @@ fn delete_task_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
     let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _task_store_guard = match acquire_task_store_write_lock() {
+        Ok(guard) => guard,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
     let mut store = load_tasks();
     let Some(index) = store.tasks.iter().position(|task| task.id == id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
-    if RUNNING_TASKS.lock().unwrap().contains(id) {
+    if task_is_running(id) {
         return error_response(StatusCode::CONFLICT, "task_running");
     }
     if source_compression_is_running(id) {
@@ -951,7 +982,7 @@ fn delete_task_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
         return error_response(StatusCode::BAD_REQUEST, "task_delete_confirmation_required");
     }
     store.tasks.remove(index);
-    match save_tasks(&store) {
+    match save_tasks_unlocked(&store) {
         Ok(()) => {
             BULK_CHUNK_RETRY_JOBS.lock().unwrap().remove(id);
             json_response(&serde_json::json!({ "ok": true }))
@@ -979,7 +1010,7 @@ fn cleanup_task_source_audio_response(id: &str, query: Option<&str>) -> Response
             "source_audio_cleanup_confirmation_required",
         );
     }
-    if RUNNING_TASKS.lock().unwrap().contains(id) {
+    if task_is_running(id) {
         return json_response_with_status(
             StatusCode::CONFLICT,
             &serde_json::json!({
@@ -1090,9 +1121,18 @@ async fn run_task_response(id: &str) -> Response<BoxBody> {
 fn pause_task_response(id: &str, force: bool, mode: AsrTaskPauseMode) -> Response<BoxBody> {
     match update_task_paused_with_mode(id, true, mode) {
         Ok(task) => {
-            let running = RUNNING_TASKS.lock().unwrap().contains(id);
+            let running = task_is_running(id);
             if force {
                 FORCE_PAUSED_TASKS.lock().unwrap().insert(id.to_string());
+                set_worker_force_pause(id, true);
+                if crate::worker_runtime::worker_execution_enabled(
+                    crate::worker_runtime::WorkerKind::Asr,
+                ) {
+                    let task_id = id.to_string();
+                    tokio::spawn(async move {
+                        crate::worker_runtime::asr::stop_task(&task_id).await;
+                    });
+                }
             }
             json_response(&serde_json::json!({
                 "task": task_with_control_summary(task),
@@ -1129,8 +1169,9 @@ async fn resume_task_response(id: &str) -> Response<BoxBody> {
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     };
     FORCE_PAUSED_TASKS.lock().unwrap().remove(id);
+    set_worker_force_pause(id, false);
 
-    if RUNNING_TASKS.lock().unwrap().contains(id) {
+    if task_is_running(id) {
         return json_response(&serde_json::json!({
             "task": task_with_control_summary(task),
             "paused": false,

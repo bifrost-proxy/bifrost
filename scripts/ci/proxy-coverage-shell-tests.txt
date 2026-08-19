@@ -14,3 +14,8 @@ test_response_stream_script.sh
 test_websocket_frames.sh
 test_trustworthy_traffic_metrics.sh
 test_asr_assisted_voiceprint_api.sh
+test_auxiliary_worker_isolation.sh
+test_asr_source_compression.sh
+test_chatgpt_web_startup_auth_preflight.sh
+test_weixin_provider_e2e.sh
+test_remote_invoke_ssh_e2e.sh

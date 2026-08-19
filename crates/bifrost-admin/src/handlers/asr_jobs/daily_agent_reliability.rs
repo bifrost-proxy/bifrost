@@ -8,8 +8,51 @@ struct AsrDailyAgentProcessedState {
     pub documents: DailyAgentBTreeMap<String, AsrDailyAgentProcessedDocument>,
     #[serde(default)]
     pub date_watermarks: DailyAgentBTreeMap<String, String>,
+    /// Dates selected by the automatic trigger but not yet completed by the
+    /// corresponding agent. Keeping this durable prevents worker exits,
+    /// service restarts, and later watermark advances from losing backlog.
+    #[serde(default)]
+    pub pending_dates: DailyAgentBTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub artifacts: DailyAgentBTreeMap<String, AsrDailyAgentArtifactState>,
+}
+
+fn daily_agent_pending_dates(
+    state: &AsrDailyAgentProcessedState,
+    agent_id: &str,
+) -> Vec<String> {
+    state
+        .pending_dates
+        .get(agent_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn add_daily_agent_pending_dates(
+    state: &mut AsrDailyAgentProcessedState,
+    agent_id: &str,
+    dates: impl IntoIterator<Item = String>,
+) {
+    let pending = state.pending_dates.entry(agent_id.to_string()).or_default();
+    pending.extend(dates);
+    pending.sort();
+    pending.dedup();
+}
+
+fn remove_daily_agent_pending_date(
+    state: &mut AsrDailyAgentProcessedState,
+    agent_id: &str,
+    date: &str,
+) {
+    let remove_agent = if let Some(pending) = state.pending_dates.get_mut(agent_id) {
+        pending.retain(|pending_date| pending_date != date);
+        pending.is_empty()
+    } else {
+        false
+    };
+    if remove_agent {
+        state.pending_dates.remove(agent_id);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

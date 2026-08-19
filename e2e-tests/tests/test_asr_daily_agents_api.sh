@@ -200,6 +200,21 @@ def request(method, path, payload=None, expected=200):
             return json.loads(body or "{}")
         raise AssertionError((error.code, body)) from error
 
+def queue_daily_agent_run(date):
+    response = None
+    for _ in range(120):
+        response = request(
+            "POST",
+            f"/asr/tasks/{task_id}/daily-agent/run?date={date}&force=1",
+            expected=(200, 202),
+        )
+        status = response.get("status")
+        if status == "queued":
+            return response
+        assert status == "already_running", response
+        time.sleep(0.25)
+    raise AssertionError(response)
+
 request("PATCH", "/im-gateway/chat/config", {
     "version": 1,
     "defaultRunnerId": "daily-codex",
@@ -307,12 +322,8 @@ daily_dir.mkdir(parents=True, exist_ok=True)
     "帮我记录一下修复线上超时并查询 Trace。\n",
     encoding="utf-8",
 )
-queued = request(
-    "POST",
-    f"/asr/tasks/{task_id}/daily-agent/run?date={date}&force=1",
-    expected=(200, 202),
-)
-assert queued["status"] in ("queued", "already_running"), queued
+queued = queue_daily_agent_run(date)
+assert queued["status"] == "queued", queued
 
 runs = None
 expected_agents = {
@@ -387,12 +398,8 @@ empty_date = "2026-07-14"
     "# 2026-07-14\n\n帮我记录一下修复线上超时。\n",
     encoding="utf-8",
 )
-queued = request(
-    "POST",
-    f"/asr/tasks/{task_id}/daily-agent/run?date={empty_date}&force=1",
-    expected=(200, 202),
-)
-assert queued["status"] in ("queued", "already_running"), queued
+queued = queue_daily_agent_run(empty_date)
+assert queued["status"] == "queued", queued
 
 empty_runs = None
 for _ in range(180):

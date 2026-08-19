@@ -8,6 +8,8 @@ pub(super) struct ImModelCommandContext<'a> {
     pub(super) group_context_store: &'a Arc<ImGroupContextStore>,
     pub(super) event: &'a ImEvent,
     pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
+    pub(super) progress_registry: Option<&'a ImAgentProgressRegistry>,
+    pub(super) active_session: bool,
 }
 
 pub(super) async fn handle_im_resume_command(
@@ -222,10 +224,31 @@ pub(super) async fn handle_im_model_command(
                 &effective.runner_id,
                 "清除模型切换",
             );
-            format!(
+            let mut reply = format!(
                 "已清除 {adapter_label} Runner `{}` 的 session 模型 override。下一条消息将使用 Runner 配置或 {adapter_label} 默认模型。",
                 effective.runner_id
-            )
+            );
+            if ctx.active_session {
+                let update_result =
+                    crate::im_gateway::external_cli::request_managed_session_model_update(
+                        session_key,
+                        None,
+                    )
+                    .await;
+                update_progress_card_model_after_ack(
+                    ctx.progress_registry,
+                    session_key,
+                    None,
+                    &update_result,
+                )
+                .await;
+                reply.push_str(&format_active_model_update(
+                    session_key,
+                    None,
+                    update_result,
+                ));
+            }
+            reply
         }
         crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Set(model) => {
             match crate::im_gateway::external_cli::load_external_cli_model_catalog(
@@ -248,7 +271,7 @@ pub(super) async fn handle_im_model_command(
                                 &effective.runner_id,
                                 Some(model.clone()),
                             );
-                            let reply = format!(
+                            let mut reply = format!(
                                 "已将 {adapter_label} Runner `{}` 的 session 模型设置为 `{}`。\n下一条消息会通过 `--model {}` 启动。",
                                 effective.runner_id, model, model
                             );
@@ -258,6 +281,25 @@ pub(super) async fn handle_im_model_command(
                                 &effective.runner_id,
                                 &format!("切换模型为 {model}"),
                             );
+                            if ctx.active_session {
+                                let update_result = crate::im_gateway::external_cli::request_managed_session_model_update(
+                                    session_key,
+                                    Some(model.clone()),
+                                )
+                                .await;
+                                update_progress_card_model_after_ack(
+                                    ctx.progress_registry,
+                                    session_key,
+                                    Some(model.clone()),
+                                    &update_result,
+                                )
+                                .await;
+                                reply.push_str(&format_active_model_update(
+                                    session_key,
+                                    Some(model.clone()),
+                                    update_result,
+                                ));
+                            }
                             reply
                         }
                         Err(response) => response,
@@ -278,6 +320,47 @@ pub(super) async fn handle_im_model_command(
     )
     .await;
     true
+}
+
+async fn update_progress_card_model_after_ack(
+    progress_registry: Option<&ImAgentProgressRegistry>,
+    session_key: &str,
+    model: Option<String>,
+    result: &Result<crate::im_gateway::external_cli::ExternalCliModelUpdateResult, String>,
+) {
+    if !result.as_ref().is_ok_and(|result| result.accepted) {
+        return;
+    }
+    let Some(progress_registry) = progress_registry else {
+        return;
+    };
+    let source = Some("session slash command".to_string());
+    let _ = progress_registry
+        .update_runner_model(session_key, model, source)
+        .await;
+}
+
+fn format_active_model_update(
+    session_key: &str,
+    model: Option<String>,
+    result: Result<crate::im_gateway::external_cli::ExternalCliModelUpdateResult, String>,
+) -> String {
+    let target = model
+        .as_deref()
+        .map(|model| format!("`{model}`"))
+        .unwrap_or_else(|| "Runner 默认模型".to_string());
+    match result {
+        Ok(result) if result.accepted => format!(
+            "\n✅ 运行中的 session `{session_key}` 已确认切换到 {target}；该设置对后续响应/轮次生效，当前已经发出的生成不会重启。"
+        ),
+        Ok(result) => format!(
+            "\n⚠️ session 配置已保存，但运行中的 Runner 未确认热切换（{}）。下一次启动仍会使用新配置。",
+            result.reason.as_deref().unwrap_or("未返回原因")
+        ),
+        Err(error) => format!(
+            "\n⚠️ session 配置已保存，但运行中的 Runner 热切换失败（{error}）。下一次启动仍会使用新配置。"
+        ),
+    }
 }
 
 pub(super) async fn handle_im_effort_command(
@@ -745,4 +828,51 @@ fn persist_im_service_tier_override(
         },
     )
     .map(|_| ())
+}
+
+#[cfg(test)]
+mod live_model_reply_tests {
+    use super::*;
+
+    fn result(
+        accepted: bool,
+        reason: Option<&str>,
+    ) -> crate::im_gateway::external_cli::ExternalCliModelUpdateResult {
+        crate::im_gateway::external_cli::ExternalCliModelUpdateResult {
+            update_id: "update-test".to_string(),
+            model: Some("gpt-test".to_string()),
+            accepted,
+            thread_id: accepted.then(|| "thread-test".to_string()),
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn active_model_update_reply_covers_success_rejection_and_transport_error() {
+        let accepted = format_active_model_update(
+            "session-test",
+            Some("gpt-test".to_string()),
+            Ok(result(true, None)),
+        );
+        assert!(accepted.contains("`gpt-test`"));
+        assert!(accepted.contains("后续响应/轮次生效"));
+
+        let rejected = format_active_model_update(
+            "session-test",
+            None,
+            Ok(result(false, Some("runner rejected"))),
+        );
+        assert!(rejected.contains("runner rejected"));
+
+        let rejected_without_reason =
+            format_active_model_update("session-test", None, Ok(result(false, None)));
+        assert!(rejected_without_reason.contains("未返回原因"));
+
+        let failed = format_active_model_update(
+            "session-test",
+            Some("gpt-test".to_string()),
+            Err("broker unavailable".to_string()),
+        );
+        assert!(failed.contains("broker unavailable"));
+    }
 }

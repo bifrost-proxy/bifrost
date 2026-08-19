@@ -165,7 +165,7 @@ adapter 声明能力，WebUI/API 按能力显隐配置项：
 - `POST /api/im-gateway/chat/stream`：NDJSON 流式返回 canonical progress events。
 - `GET /api/im-gateway/chat/runs/:run_id`：读取 runtime snapshot、stdout/stderr、normalized events、final response。
 - `GET /api/im-gateway/chat/runs/:run_id/events`（planned，截至 2026-06-16 未落地）。
-- `POST /api/im-gateway/chat/runs/:run_id/stop`：写 stop marker，向 active CLI process 发终止信号。Unix 下只在确认子进程拥有独立 process group 时才终止同组；run 收敛阶段优先识别 stop marker，即使 shell 迟到输出也固定返回 `status:"stopped"`。Windows `taskkill` 把明确的 `process not found` / `no running instance of the task` 视为幂等成功。
+- `POST /api/im-gateway/chat/runs/:run_id/stop`：写入 durable stop marker。协议型 transport 优先发送原生中断（Codex/Traex `turn/interrupt`，Claude Code stream-json `control_request: interrupt`）并等待 ACK/终态；只有启动、握手或中断超时才终止独立进程组。run 收敛阶段优先识别 stop marker，即使 shell 迟到输出也固定返回 `status:"stopped"`。Windows `taskkill` 把明确的 `process not found` / `no running instance of the task` 视为幂等成功。
 - `GET/PATCH /api/im-gateway/chat/config`：完整 runner registry。
 - `GET/PATCH /api/im-gateway/chat/config/channels/:provider_id`：`ExternalCliChannelSettings`（`runnerId/enabled/deliveryMode`）。
 - `POST /api/im-gateway/agent/resolve-config`（planned）：输入 provider/route/work_dir/request overrides 返回脱敏 `AgentRuntimeSnapshot`。
@@ -228,7 +228,15 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 ### 会话状态持久化与默认续接
 
-`session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。运行中收到的普通后续消息默认进入 FIFO queue，当前 turn 完成后作为独立下一轮执行；`/q` 继续提供显式排队与序号管理。只有显式 `/g` 才尝试运行中引导：Codex/Traex app-server 通过 `turn/steer` 接收 Guide，Claude Code 与自定义/exec transport 先请求 active worker capability，无法注入时完整降级 queue。ChatGPT Web 不提供 `/g`；`/stop` 映射到 active runner 进程并终止其独立进程组。
+`session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。FIFO queue 归主 Bifrost Service 的 `SessionQueueManager` 所有，不依赖隔离 worker 内存；运行中收到的普通后续消息默认入队，当前 turn 完成后作为独立下一轮执行，`/q` 继续提供显式排队与序号管理。只有显式 `/g` 才尝试运行中引导：Codex/Traex app-server 通过 `turn/steer` 接收 Guide，Claude Code 与自定义/exec transport 先请求 active worker capability，无法注入时完整降级 queue。ChatGPT Web 不提供 `/g`。
+
+运行中的 `/model <name>` 与 `/model clear` 先更新同一份 session override，再经 IM worker → 主进程 capability broker → external worker 控制通道更新原生会话。Codex 与 Traex app-server 使用 `thread/settings/update {threadId, model}`；Claude Code stream-json 使用 `control_request {subtype:"set_model", model}`。原生 ACK 只表示新模型对后续响应/轮次生效，不中断或重启已经发出的生成。`/model`、`/models` 查询在运行中同样可用。自定义 `exec` transport 没有原生热切换协议时，override 仍持久化供下一次 run 使用，并向用户明确报告当前 Runner 未确认热切换。
+
+IM progress card 的模型展示以本次 session/thread 的有效模型为准，不把 session override 重新标记为 Runner 配置。运行中模型更新只有在原生 ACK 成功后才刷新当前卡片；后续 token、额度、状态或终态摘要刷新必须保留该 thread 的动态模型，不能再用启动时的 Runner 配置覆盖。原生更新被拒绝时，当前卡片继续展示实际运行模型，已持久化的 override 只在下一次 run 生效。
+
+隔离 external-runner 的 session ownership 由父进程维护：固定大小的 session lock stripe 串行化“停止旧 worker → 启动替代 worker”，避免两个独立进程分别持有 worker-local `ACTIVE_SESSIONS` 后并发覆盖。Stop 使用独立于有界 Guide channel 的优先通道；并发 `/stop` 与 Service shutdown 共享同一次停止过程并各自收到 ACK。worker 收到后写 durable marker，再由 transport 发原生中断；父进程等待 worker 的真实 final event，因此保留真实 run id、artifacts 和终态。所有 worker PID/Stop sender 另有不依赖 session key 的全局注册表，Service shutdown 会在 listener/runtime 拆除前并发停止包括直接 API run 在内的 worker。若 worker/transport 在有界 grace period 内未确认，父进程仅在 PID 仍由同一 Stop channel 所有时执行 hard-kill，避免 PID 复用误伤新进程。worker stdin EOF 同样触发上述清理，但只消费一次，避免 closed channel 空转。
+
+Worker 启动和运行中控制必须分离：生产父进程将受限 request 文件路径、run 根目录和协议版本写入子进程专有环境变量，Worker 启动后从该环境读取请求；stdin 只承载后续 Guide、ModelUpdate、Stop 控制帧。保留 stdin `run` 首帧解析仅用于兼容测试替身，不能作为生产启动依赖。Worker stderr 必须同时写入本地诊断日志并由父端捕获最多 4 KiB 尾部；若 stdout 在 final event 前 EOF，错误包含压缩后的有界 stderr 摘要。Broker 进度事件按帧实时转发，而终态 result 必须清空已实时发送的完整 event 列表，只保留 response、responses、metadata 和 artifacts，避免大任务重复序列化后超过 Broker 16 MiB 单帧限制。
 
 ## CLI + Web + Admin API
 
@@ -255,7 +263,7 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 ### Phase 2：流式 + stop + IM route
 
 - `POST /chat/stream` NDJSON。
-- `POST /runs/:id/stop` + stop marker + 进程组终止 + Windows `taskkill` 幂等处理。
+- `POST /runs/:id/stop` + stop marker + transport 原生 interrupt + 有界进程组终止 fallback + Windows `taskkill` 幂等处理。
 - `ExternalCliAgentChat` route action：IM 真实入站命中后走 external CLI runtime。
 - 新增 `ProgressCard` delivery 覆盖外部 runner 状态字段。
 
@@ -330,6 +338,8 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 - **admin token vs. provider owner 身份**：Chat Gateway 默认只允许 admin token；`reply_mode=real_im` 需显式 provider/target + send permission。
 - **流式协议 NDJSON vs. SSE**：当前 `/chat/stream` 采用 NDJSON，贴近 CLI JSONL 输出；WebUI 内部亦复用 NDJSON。
 - **外部 CLI session 复用**：Codex/Traex app-server 的 Guide 留在当前 turn；显式 `/q` 或 Guide 失败降级后的下一轮复用 `threadId`，Claude Code 通过 metadata `threadId` 关联。
+- **父/worker 状态边界**：队列、durable IM pending event、worker ownership 和进度投影留在主 Service；transport PID、active turn handle 与协议解析留在隔离 worker。Service 崩溃后的内存队列不保证单独恢复，恢复依据是 durable pending event；正在执行的外部进程也不跨 Service 崩溃接管，启动清理依赖 PID/run marker。此边界后续若升级为 durable queue，必须同时定义 event 去重与 lease 接管，不能只序列化内存队列。
+- **清理顺序**：`/clear`、`/reset` 先提升 service-owned queue generation 形成消费 fence，再等待 Stop ACK，随后删除 session/queue 状态并再次提升 generation；旧 turn 只能消费启动时捕获的 generation，不能在 Stop 收尾竞态中取走 reset 后的新消息。run directory pruning 仅删除已有 `result.json` 且不在 active 表中的目录。hard-kill 是超时兜底，不得替代协议中断或抢先删除 active ownership。
 - **`/chat/stream` 实时性**：当前为 run 级 NDJSON，尚未做 stdout 行级实时转发；作为下一步增强。
 - **Bifrost 工具集合形态**：V1 通过 skill + CLI；V2 补 `bifrost mcp-server`。
 - **能力边界诚实**：Codex/Trae CLI 未稳定输出的 context window、剩余 context、自动压缩节省 token 等字段不得伪造，缺失显示 N/A；只展示 CLI 明确输出的 reasoning summary/status/tool/final。

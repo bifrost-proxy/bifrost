@@ -311,6 +311,24 @@
 - 分段结果明确说明 speaker 只在片段内有效；超过 60 秒的未解析区间仍失败，不静默漏字。
 - 最终正式服务无救援变量，日报流水线和纯文本投递均可继续运行。
 
+### TC-MOSS-19：max-token 自动扩容与分段恢复回归
+
+操作步骤：
+
+1. 执行 `cargo test -p bifrost-admin moss_auto_rescue --lib -- --nocapture`，使用受控 MOSS runner 让默认整文件第一次返回 `finish_reason=length`，检查第二次调用的 `--max-new` 从 12000 提升为 18000 并成功。
+2. 使用同一用例让 20 token/s 与 30 token/s 两次整文件调用均返回 `finish_reason=length`，之后让两个 600 秒片段成功；检查总调用次数、拼接文本、绝对时间偏移和两个独立片段的 speaker ID。
+3. 使用普通 transport failure fixture 再执行一次，检查只调用 runner 一次且原错误直接返回，不启动 token 扩容或分段。
+4. 执行 `cargo test -p bifrost-admin segmented_moss_rescue_covers_success_adaptive_split_gap_and_failures --lib -- --nocapture`，确认分段内确定性失败继续按 60、30、10 秒递归缩短，非确定性失败不递归。
+5. 只读检查正式服务 9900 的 PID 与任务状态；本用例不得重启、暂停、恢复或改写正式任务。
+
+预期结果：
+
+- 正常整文件成功路径不增加额外推理；只有明确 max-token 错误进入自动恢复。
+- 第一层自动恢复使用 30 token/s 整文件；仍确定性失败时才使用 600 秒分段和既有自适应细分。
+- 分段 speaker 分别呈现为 `clip_0000000000_S01`、`clip_0000600000_S01`，不会把两个独立解码中的 `S01` 伪装成同一全局说话人。
+- 成功产物的 `fallback_reason` 明确区分 token 扩容与分段恢复路径；transport failure 不被掩盖。
+- 正式 9900 服务和真实任务状态在验证前后保持不变。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。
@@ -346,3 +364,4 @@
 | 2026-07-22 | TC-MOSS-17 | PASS：定向 Rust 回归确认 `.DS_Store` 不再撤销有效 runtime，后台初始化状态可共享真实字节进度且结束后不泄露 URL、目标路径或陈旧进度；目录任务节流、晚加入 SSE 的 runtime/model 两阶段进度、下载 relay 三条边界回归均通过，本地变更行覆盖率为 99.52%（206/207），超过 95% 门禁。Playwright 验证管理页在未点击 Initialize 时自动从 69% 轮询至 74%，显示字节、速率、ETA 和续传标记。真实 9900 服务无需重启即完成 runtime/model 初始化，`.part` 清零且 marker 存在；原任务继续处理，最新检查为 `processed=641`、`pending=5`、`failed=11`、`running=true`。 |
 | 2026-07-22 | TC-MOSS-12 | PASS（合并 #413 后复测）：当前合并树的 MOSS Rust 回归 26/26、release/runtime contract 与 18995 隔离 task-mode API E2E 均通过；真实 9900 任务只读核验为 646 success、0 pending、11 failed，pending/processing 缺失源文件为 0，success 缺失转录为 0，Files 与 summary 一致。 |
 | 2026-07-24 | TC-MOSS-18 | PASS（正式任务补救与日报闭环）：任务 `71190c695b3040b38bee465579cd4d10` 的 2026-07-18、2026-07-22 缺失录音按日期定向补救，成功文件未重跑；暂存的 11 个 7 月 20–21 日文件在主队列结束后按原相对路径恢复。2026-07-23 外接盘 28/28 文件导入，本地 MOSS 得到 23 条有效录音 success；5 条短碎片、近静音和空壳按固定输入门禁保留为明确失败且未重试。三日合并转录和 Daily Agent 均完成，正式服务最后恢复为无 `BIFROST_MOSS_*` 环境变量的默认模式。定向缓存单测证明救援配置可以重试默认的长度触顶失败，而短音频等固定输入失败仍跳过；MOSS release contract E2E 通过。 |
+| 2026-08-19 | TC-MOSS-19 | PASS：受控 runner 回归 2/2，通过 `--max-new` 断言确认 600 秒整文件从 12000 token 自动扩容到 18000 token；两次整文件 `finish_reason=length` 后自动执行两个分段并拼接为两段文本，speaker 分别作用域化为 `clip_0000000000_S01` 与 `clip_0000600000_S01`，恢复路径写入 `fallback_reason`。普通 transport failure 仅调用一次且原错误直接返回。既有分段自适应回归 1/1 通过，确认确定性失败继续递归缩短、非确定性失败直接返回。只读核验正式服务仍为 PID 68174、版本 0.0.182，任务仍为 1208 processed、98 failed、0 pending、未暂停；验证未调用正式任务写接口。 |

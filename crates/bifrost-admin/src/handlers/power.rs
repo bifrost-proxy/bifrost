@@ -16,8 +16,18 @@ pub async fn handle_power(
         ("/api/power/on", Method::POST) => post_on(state).await,
         ("/api/power/off", Method::POST) => post_off(state).await,
         ("/api/power/mode", Method::POST) => post_mode(req, state).await,
+        ("/api/power/remote-call", Method::POST) => post_remote_call(state).await,
         _ => error_response(StatusCode::NOT_FOUND, "Not Found"),
     }
+}
+
+async fn post_remote_call(state: SharedAdminState) -> Response<BoxBody> {
+    let mgr = match require_manager(&state) {
+        Some(m) => m,
+        None => return manager_unavailable_response(),
+    };
+    mgr.on_remote_call();
+    json_ok(&mgr.status())
 }
 
 fn require_manager(state: &SharedAdminState) -> Option<bifrost_power::SharedKeepAwakeManager> {
@@ -106,5 +116,42 @@ fn json_ok<T: serde::Serialize>(v: &T) -> Response<BoxBody> {
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("serialize error: {e}"),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use http_body_util::BodyExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn remote_call_endpoint_returns_keepawake_status() {
+        let manager = bifrost_power::KeepAwakeManager::new(
+            bifrost_power::Mode::Auto,
+            Arc::new(bifrost_power::NoopPersister),
+        );
+        let state = Arc::new(crate::state::AdminState::new(0).with_keepawake_manager(manager));
+
+        let response = post_remote_call(state).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value.get("mode").and_then(|mode| mode.as_str()),
+            Some("auto")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_call_endpoint_requires_manager() {
+        let state = Arc::new(crate::state::AdminState::new(0));
+
+        let response = post_remote_call(state).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

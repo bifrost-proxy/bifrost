@@ -1320,6 +1320,43 @@
 
 ---
 
+### TC-CSP-38：确认进程实例消失后快速保护，端口/readiness 降级不得误触发
+
+**前置条件**：
+- macOS 环境；使用临时数据目录、非正式端口，并在测试前保存当前系统代理快照。
+- 日常开发机默认**不执行**本用例的真实系统代理写入步骤；应在远端 CI 隔离环境或专用测试设备中执行，避免影响开发者正在使用的代理配置。
+- 通过当前源码构建 Bifrost，启动时设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 和 `BIFROST_DISABLE_TRAY=1`。
+- 已启动带 `--daemon --system-proxy` 的 Bifrost 托管运行时；`runtime.json` 记录其 PID 和 `started_at_ms`。
+
+**操作步骤**：
+1. 确认系统代理指向测试 Bifrost 端口，记录运行时 PID 和 helper 启动日志：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost -p 18889 start --daemon --yes --skip-cert-check --unsafe-ssl --system-proxy
+   jq '.pid, .started_at_ms, .runtime_start_mode' "$TEST_DATA_DIR/runtime.json"
+   ```
+2. 对记录的主进程执行强制退出；不要以关闭端口、阻塞 CPU、或使 Admin HTTP 请求超时来模拟退出：
+   ```bash
+   kill -9 "$RUNTIME_PID"
+   ```
+3. 立即检查日志，随后等待 replacement daemon 的新 PID、Admin API 和系统代理目标恢复：
+   ```bash
+   rg 'detection_method.*pid_missing|system proxy lifecycle recovery (started|completed)' "$TEST_DATA_DIR/logs"
+   curl -fsS "http://127.0.0.1:18889/_bifrost/api/system"
+   ```
+4. 单独执行正常更新/重启交接，确认旧 PID 消失且新 PID 不同，但系统代理没有被恢复或关闭：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost restart
+   rg 'preserve_for_restart|system proxy lifecycle helper skipping cleanup for restart' "$TEST_DATA_DIR/logs"
+   ```
+
+**预期结果**：
+- 主进程确实不存在时，helper 在快速身份检查中写出 `detection_method=pid_missing`；仅 `ESRCH` 或 PID 启动时间不匹配可授权快速恢复。权限不足、PID 查询异常或没有 PID 时必须保持 `Unknown`，不能主动回滚系统代理。
+- 崩溃恢复日志包含相同的 `helper_pid`、`parent_pid`、`parent_started_at_ms`、`detection_method`、`recovery_action` 和 `elapsed_ms`；托管 daemon 成功换代时完成记录为 `recovery_action=restart_or_restore`，新 listener 和系统代理目标均可用。
+- 端口连接失败、Admin HTTP 超时或高 CPU 调度延迟本身不产生 `pid_missing`/`pid_reused`，不触发这条快速恢复路径。它们仍按原有保守检查与恢复策略处理。
+- 正常 restart 使用 `preserve_for_restart` 交接；新 PID 与旧 PID 不同不等于崩溃，helper 不得回滚或关闭系统代理。
+
+---
+
 ## 执行记录
 
 - 2026-08-06：针对 CLI proxy 退出清理扩展，执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，验证 stop 输出 `Cleaning managed proxy settings before stopping Bifrost proxy...`，清理提示发生在 `Stopping Bifrost proxy` 之前，且不使用后台 cleanup 降级提示。

@@ -87,6 +87,20 @@ fn ensure_external_cli_recorder_handles_metadata_write_failures() {
 
 #[test]
 fn external_cli_progress_runner_summary_uses_session_effort_override() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+    crate::im_gateway::session_state::upsert_session_state(
+        "feishu-main:owner-open-id",
+        crate::im_gateway::external_cli::TRAEX_ADAPTER,
+        Some("Traex"),
+        |state| {
+            state.model_override = Some("GPT-5.5".to_string());
+            state.model_override_source = Some("session slash command".to_string());
+            state.reasoning_effort_override = Some("high".to_string());
+            state.reasoning_effort_override_source = Some("session slash command".to_string());
+        },
+    )
+    .expect("persist session model override");
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         message: "hello".to_string(),
         images: Vec::new(),
@@ -124,8 +138,15 @@ fn external_cli_progress_runner_summary_uses_session_effort_override() {
     );
 
     assert_eq!(summary.model.as_deref(), Some("GPT-5.5"));
+    assert_eq!(
+        summary.model_source.as_deref(),
+        Some("session slash command")
+    );
     assert_eq!(summary.reasoning_effort.as_deref(), Some("high"));
-    assert_eq!(summary.reasoning_source.as_deref(), Some("runner 配置"));
+    assert_eq!(
+        summary.reasoning_source.as_deref(),
+        Some("session slash command")
+    );
 }
 
 #[test]
@@ -1295,6 +1316,9 @@ async fn external_runner_small_branches_keep_safe_defaults() {
 
     let other_session = group_test_event("provider", "stop", "/stop", false, 3);
     maybe_stop_external_cli_for_event(&other_session, "unrelated").await;
+
+    let matching_session = session_key_for_event(&other_session);
+    maybe_stop_external_cli_for_event(&other_session, &matching_session).await;
 }
 
 #[test]

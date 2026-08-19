@@ -115,9 +115,16 @@ async fn spawn_im_gateway_http(
             let service = service.clone();
             async move {
                 let path = request.uri().path().to_string();
-                Ok::<_, std::convert::Infallible>(
-                    handle_im_gateway(request, Some(service), &path).await,
-                )
+                let response = match path.as_str() {
+                    "/api/im-gateway/messages/send" => {
+                        messages::handle_messages_send_in_process(request, &service).await
+                    }
+                    "/api/im-gateway/messages/upload" => {
+                        messages::handle_messages_upload_in_process(request, &service).await
+                    }
+                    _ => handle_im_gateway(request, Some(service), &path).await,
+                };
+                Ok::<_, std::convert::Infallible>(response)
             }
         });
         let _ = http1::Builder::new()
@@ -2705,6 +2712,128 @@ pub(super) fn test_provider() -> ImProviderConfig {
         agent_config: None,
         created_at: 0,
         updated_at: 0,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn upload_body_validation_covers_provider_capability_and_size_failures() {
+    let _test_guard = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let mut disabled = test_provider();
+    disabled.id = "disabled-upload".to_string();
+    disabled.enabled = false;
+    service.provider_store.add(disabled).unwrap();
+
+    let mut webhook = test_provider();
+    webhook.id = "webhook-upload".to_string();
+    webhook.provider_type = ImProviderType::Webhook;
+    service.provider_store.add(webhook).unwrap();
+
+    let mut weixin = test_provider();
+    weixin.id = "weixin-upload".to_string();
+    weixin.provider_type = ImProviderType::Weixin;
+    service.provider_store.add(weixin).unwrap();
+
+    let upload = |provider_id: &str, kind: &str, body: Vec<u8>| messages::UploadMessageRequest {
+        metadata: messages::UploadMessageMetadata {
+            provider_id: provider_id.to_string(),
+            kind: kind.to_string(),
+            file_name: "upload.bin".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
+            image_type: "message".to_string(),
+        },
+        body,
+    };
+
+    assert_eq!(
+        messages::handle_messages_upload_body(
+            &service,
+            upload("disabled-upload", "image", vec![1]),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        messages::handle_messages_upload_body(
+            &service,
+            upload("webhook-upload", "image", vec![1]),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        messages::handle_messages_upload_body(
+            &service,
+            upload("weixin-upload", "native_card", vec![1]),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        messages::handle_messages_upload_body(
+            &service,
+            upload("weixin-upload", "image", Vec::new()),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        messages::handle_messages_upload_body(
+            &service,
+            upload("weixin-upload", "image", vec![0; 10 * 1024 * 1024 + 1]),
+        )
+        .await
+        .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn im_gateway_dispatcher_reaches_attachment_message_and_schedule_routes() {
+    let _test_guard = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = std::sync::Arc::new(ImGatewayService::new(temp_dir.path()));
+    let http = reqwest::Client::new();
+
+    for (path, expected) in [
+        (
+            "/api/im-gateway/attachments/missing",
+            reqwest::StatusCode::NOT_FOUND,
+        ),
+        (
+            "/api/im-gateway/messages/send/",
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "/api/im-gateway/messages/upload/",
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        ("/api/im-gateway/routes", reqwest::StatusCode::OK),
+        ("/api/im-gateway/schedules", reqwest::StatusCode::OK),
+    ] {
+        let (address, server) = spawn_im_gateway_http(std::sync::Arc::clone(&service)).await;
+        let response = http
+            .get(format!("http://{address}{path}"))
+            .header("connection", "close")
+            .send()
+            .await
+            .expect("dispatch IM Gateway route");
+        assert_eq!(response.status(), expected, "{path}");
+        server.await.expect("gateway server");
     }
 }
 

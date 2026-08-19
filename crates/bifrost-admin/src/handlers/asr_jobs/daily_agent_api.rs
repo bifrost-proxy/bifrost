@@ -80,6 +80,11 @@ async fn put_daily_agent_config_response(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
+    let _task_store_guard = match acquire_task_store_write_lock() {
+        Ok(guard) => guard,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
+
     let mut store = load_tasks();
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
@@ -138,7 +143,7 @@ async fn put_daily_agent_config_response(
     task.updated_at_ms = now_ms();
     let updated_config = task.daily_agent.clone();
 
-    if let Err(e) = save_tasks(&store) {
+    if let Err(e) = save_tasks_unlocked(&store) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
     }
 
@@ -246,6 +251,11 @@ async fn put_daily_agent_instructions_response(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
+    let _task_store_guard = match acquire_task_store_write_lock() {
+        Ok(guard) => guard,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
+
     let mut store = load_tasks();
     if let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) {
         let agent_id = agent.id.clone();
@@ -256,7 +266,7 @@ async fn put_daily_agent_instructions_response(
         mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
         task.updated_at_ms = now_ms();
     }
-    if let Err(e) = save_tasks(&store) {
+    if let Err(e) = save_tasks_unlocked(&store) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
     }
 

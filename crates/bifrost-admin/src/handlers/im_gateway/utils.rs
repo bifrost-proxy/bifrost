@@ -99,7 +99,7 @@ pub(super) async fn read_body_json<T: serde::de::DeserializeOwned>(
 pub(super) async fn request_agent_stop(
     manager: &bifrost_agent::AgentSessionManager,
     session_key: &str,
-) -> bool {
+) -> Result<bool, String> {
     request_agent_stop_with_runs_root(
         manager,
         session_key,
@@ -112,15 +112,19 @@ pub(super) async fn request_agent_stop_with_runs_root(
     manager: &bifrost_agent::AgentSessionManager,
     session_key: &str,
     runs_root: impl AsRef<Path>,
-) -> bool {
+) -> Result<bool, String> {
     let internal_stopped = manager.request_stop(session_key);
-    let external_worker_stopped =
-        crate::im_gateway::external_cli::request_worker_session_stop(session_key).await;
     let external_stopped =
-        crate::im_gateway::external_cli::request_session_stop(runs_root, session_key)
-            .await
-            .is_ok();
-    internal_stopped || external_worker_stopped || external_stopped
+        crate::im_gateway::external_cli::request_managed_session_stop(runs_root, session_key)
+            .await?;
+    Ok(internal_stopped || external_stopped)
+}
+
+pub(super) fn agent_stop_error_response(action: &str, error: &str) -> Response<BoxBody> {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &format!("failed to stop active session before {action}: {error}"),
+    )
 }
 
 /// Extract a path segment that appears before a known suffix.

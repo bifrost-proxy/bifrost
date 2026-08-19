@@ -80,6 +80,7 @@ ring = "0.17"
 async-trait.workspace = true
 prost = "0.13"
 portable-pty = "0.9"
+fs2 = "0.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 icns = "0.3"

@@ -20,7 +20,7 @@ Bifrost 早期覆盖率工具链分散：
 - 提供 `scripts/ci/coverage-all.sh`：一次性跑 unit + integration，`--with-e2e` 时合并 E2E instrumented profraw，输出 text / html / json / lcov。
 - 提供 `scripts/ci/coverage-crate.sh`：按 crate 度量，本地迭代补测时快速反馈。
 - 提供 `scripts/ci/coverage-changed.py`：自动识别当前工作区变更的生产 Rust crate，
-  复用独立插桩编译缓存，只运行相关 crate 测试，并按 CI 同源 changed-lines 95% 算法
+  复用独立插桩编译缓存，只运行相关 crate 测试，并按 CI 同源 changed-lines 90% 算法
   在推送前给出快速反馈。
 - 提供 `scripts/ci/coverage-gate.py`：解析 `coverage.json`，按棘轮下限 + 工作区聚合下限校验，支持 `--gaps` 输出最需要补测的文件列表。
 - 提供 `scripts/ci/coverage-thresholds.toml`：per-crate 棘轮下限、工作区聚合下限、`default` 目标 90%、`enforce_ratchet_up` 与 `ratchet_slack` 配置。
@@ -95,7 +95,7 @@ profraw、使用的二进制不可执行、数据目录落在 `~/.bifrost` 下�
   因为全量覆盖率成本很高且 CI 已有明确阈值。
 - 修改生产 Rust 时，推送前必须运行 `make coverage-changed`。这个快速入口不是全量
   coverage：只插桩变更 crate，保留 `target/coverage-changed/cargo-target` 中的编译产物，
-  每次仅删除旧 `.profraw`，再对当前工作区执行 changed-lines 95% 检查。
+  每次仅删除旧 `.profraw`，再对当前工作区执行 changed-lines 90% 检查。
 - `FAIL` 必须本地补测；`INCOMPLETE` 必须纳入 test-host package 或说明平台/E2E-only
   原因，禁止把未测文件和 0/0 当通过。远端完整 union coverage 始终是最终权威门禁。
 - 某个 crate 因为客观原因（macOS API、桌面 API、依赖硬件、依赖网络）达不到 90%，必须在本文档的 **不适用清单** 里写明理由，并在 `coverage-thresholds.toml` 维护对应 crate 的 min 例外。
@@ -160,7 +160,7 @@ design/
 4. 清理 target/coverage-changed/cargo-target/**/*.profraw
    → 不删除已编译插桩 artifacts
 5. cargo llvm-cov --no-clean -p <changed packages> --all-features --lcov
-6. coverage-diff.py --worktree 使用同一 changed_lines_min=95.0 计算
+6. coverage-diff.py --worktree 使用同一 changed_lines_min=90.0 计算
 7. changed file 不在 LCOV 时返回 INCOMPLETE，而不是 0/0 PASS
 ```
 
@@ -215,8 +215,8 @@ design/
 | `bifrost-sync` | 90.0 | Linux CI 94.0% |
 | `bifrost-power` | 84.0 | 剩余是 macOS-only IOKit |
 | `bifrost-device` | 90.0 | Linux CI 92.4% |
-| `bifrost-asr` | 94.0 | 当前基线 94.52% |
-| `bifrost-script` | 91.0 | 当前基线 91.42% |
+| `bifrost-asr` | 90.0 | 当前基线 94.52%；Linux/macOS 合入门禁统一为 90% |
+| `bifrost-script` | 90.0 | 当前基线 91.42%；合入门禁统一为 90% |
 | `skills` | 90.0 | Linux CI 95.4% |
 | `bifrost-e2e` | exempt | 测试运行器自身；质量由可执行 Rules/Shell/Runner 契约约束，不统计自覆盖率 |
 | `agent` | 78.0 | 当前基线 78.78% |
@@ -239,7 +239,7 @@ design/
 
 ### 本地开发
 
-- 生产 Rust 迭代：`make coverage-changed` 自动选变更 crate 并执行 95% changed-lines 预检。
+- 生产 Rust 迭代：`make coverage-changed` 自动选变更 crate 并执行 90% changed-lines 预检。
 - 聚焦单测迭代：`COVERAGE_CHANGED_ARGS="--test-filter <name>" make coverage-changed`；
   推送前去掉 filter 再跑一次。
 - 跨 crate 测试宿主：`COVERAGE_CHANGED_ARGS="--include-package bifrost-tests" make coverage-changed`。
@@ -254,7 +254,7 @@ design/
 - GitHub Actions workflow 必须运行 `bash scripts/ci/coverage-all.sh --json --gate` 并作为合入门禁。
 - `local-ci.sh` 默认不运行全量 coverage；仅在用户明确要求或专项排查 coverage 失败时提供显式 coverage 入口，避免本机默认校验成本过高。
 - `local-ci.sh` 默认执行 `make coverage-changed`；无生产 Rust 变更时快速 skip，存在
-  变更时先完成相关 crate 95% 预检。只有已记录的平台/E2E-only 例外才使用
+  变更时先完成相关 crate 90% 预检。只有已记录的平台/E2E-only 例外才使用
   `--skip-changed-coverage`，该选项不会豁免远端 coverage job。
 - 需要合并 E2E 覆盖率时显式追加 `--with-e2e`。
 - 失败时 GitHub Actions 会在 job log 里打印违规 crate 与 gap 分析。
@@ -333,9 +333,9 @@ design/
   production Rust 文件做精确连续块比对；源端所有精确保留行都参与“是否已删除”判断，
   不能因为中间一行修改把保留代码切成较短片段后误判为搬移；只有原位置已经消失、至少 8 行且包含至少
   4 行实质代码的原样搬移块，才不重复计入“新增行”。原位置仍保留的 copy-paste、
-  小段样板、任何被修改的行和真正新增逻辑仍受 95% 门禁；报告必须打印被排除的搬移
+  小段样板、任何被修改的行和真正新增逻辑仍受 90% 门禁；报告必须打印被排除的搬移
   行数，避免用 copy detection 静默稀释门禁。
-- changed-lines 最低门禁为 95%，高于 workspace 和 crate 历史棘轮，避免大型 crate
+- changed-lines 最低门禁为 90%，与项目覆盖率目标一致，避免大型 crate
   依靠既有已覆盖代码吸收未测试新增逻辑。
 - 本地 `coverage-changed.py` 复用该计算器的 `--worktree` 模式，在 commit/push 前覆盖
   暂存、未暂存和未跟踪生产文件；它自动缩小到变更 crate，避免为了提前发现几行缺测

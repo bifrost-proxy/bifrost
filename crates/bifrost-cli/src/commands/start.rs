@@ -149,48 +149,99 @@ fn spawn_remote_invoke_worker_startup_task(
         target: "bifrost_cli::startup",
         admin_host = %admin_host,
         admin_port = admin_port,
-        "remote invoke worker initialization scheduled"
+        mode = bifrost_admin::worker_runtime::execution_mode(
+            bifrost_admin::worker_runtime::WorkerKind::RemoteInvoke,
+        ).as_str(),
+        "remote invoke runtime initialization scheduled"
     );
     tokio::spawn(async move {
         let started_at = Instant::now();
+        if bifrost_admin::worker_runtime::worker_execution_enabled(
+            bifrost_admin::worker_runtime::WorkerKind::RemoteInvoke,
+        ) {
+            let default_relay_url = shared_config_manager
+                .try_config()
+                .map(|config| config.sync.remote_base_url.clone())
+                .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
+            let registration_targets = bifrost_sync::SyncManagerHandle::new(sync_manager)
+                .remote_invoke_registration_targets()
+                .await;
+            let mut targets = registration_targets
+                .into_iter()
+                .map(
+                    |target| bifrost_admin::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                        provider_id: target.provider_id,
+                        relay_url: target.remote_base_url,
+                        session_token: target.session_token,
+                        allow_missing_session_token: false,
+                    },
+                )
+                .collect::<Vec<_>>();
+            if targets.is_empty() {
+                targets.push(
+                    bifrost_admin::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                        provider_id: "standby".to_string(),
+                        relay_url: default_relay_url,
+                        session_token: String::new(),
+                        allow_missing_session_token: true,
+                    },
+                );
+            }
+            let count = targets.len();
+            bifrost_admin::worker_runtime::remote_invoke::configure_runtime_targets(
+                targets,
+                admin_host,
+                admin_port,
+                admin_state.clone(),
+            );
+            tracing::info!(
+                target: "bifrost_cli::startup",
+                workers = count,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "remote invoke isolated worker targets configured"
+            );
+            return;
+        }
+
         let default_relay_url = shared_config_manager
             .try_config()
-            .map(|c| c.sync.remote_base_url.clone())
+            .map(|config| config.sync.remote_base_url.clone())
             .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
         let registration_targets = bifrost_sync::SyncManagerHandle::new(sync_manager.clone())
             .remote_invoke_registration_targets()
             .await;
-        let relay_urls: Vec<String> = if registration_targets.is_empty() {
+        let relay_urls = if registration_targets.is_empty() {
             vec![default_relay_url]
         } else {
             registration_targets
                 .into_iter()
                 .map(|target| target.remote_base_url)
-                .collect()
+                .collect::<Vec<_>>()
         };
-        let data_dir_path = shared_config_manager.data_dir().to_path_buf();
+        let data_dir = shared_config_manager.data_dir().to_path_buf();
         let admin_state_for_worker = admin_state.clone();
         let sync_manager_for_worker = sync_manager.clone();
         let worker_result = tokio::task::spawn_blocking(move || {
-            let identity = bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path)
-                .map_err(|e| e.to_string())?;
-            let mut workers = Vec::new();
-            for relay_url in relay_urls {
-                let ri_config = bifrost_admin::RemoteInvokeConfig {
-                    relay_url,
-                    ..Default::default()
-                };
-                workers.push(bifrost_admin::RemoteInvokeWorker::new(
-                    ri_config,
-                    identity.clone(),
-                    Some(bifrost_sync::SyncManagerHandle::new(
-                        sync_manager_for_worker.clone(),
-                    )),
-                    admin_state_for_worker.clone(),
-                    &admin_host,
-                    admin_port,
-                ));
-            }
+            let identity = bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir)
+                .map_err(|error| error.to_string())?;
+            let workers = relay_urls
+                .into_iter()
+                .map(|relay_url| {
+                    bifrost_admin::RemoteInvokeWorker::new(
+                        bifrost_admin::RemoteInvokeConfig {
+                            relay_url,
+                            ..Default::default()
+                        },
+                        identity.clone(),
+                        Some(bifrost_sync::SyncManagerHandle::new(
+                            sync_manager_for_worker.clone(),
+                        )),
+                        admin_state_for_worker.clone(),
+                        &admin_host,
+                        admin_port,
+                    )
+                })
+                .collect::<Vec<_>>();
             Ok::<_, String>(workers)
         })
         .await;
@@ -205,27 +256,52 @@ fn spawn_remote_invoke_worker_startup_task(
                     target: "bifrost_cli::startup",
                     workers = workers.len(),
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    "remote invoke worker initialized asynchronously"
+                    "legacy in-process remote invoke runtimes initialized"
                 );
             }
-            Ok(Err(error)) => {
-                tracing::info!(
-                    target: "bifrost_cli::startup",
-                    error = %error,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    "remote invoke identity init failed, feature disabled"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "bifrost_cli::startup",
-                    error = %error,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    "remote invoke worker initialization task failed"
-                );
-            }
+            Ok(Err(error)) => tracing::info!(
+                target: "bifrost_cli::startup",
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "remote invoke identity init failed; feature disabled"
+            ),
+            Err(error) => tracing::warn!(
+                target: "bifrost_cli::startup",
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "remote invoke initialization task failed"
+            ),
         }
     });
+}
+
+fn start_im_gateway_runtime(admin_state: &AdminState, admin_host: String, admin_port: u16) {
+    if bifrost_admin::worker_runtime::worker_execution_enabled(
+        bifrost_admin::worker_runtime::WorkerKind::ImGateway,
+    ) {
+        bifrost_admin::worker_runtime::im_gateway::start_runtime_controller(admin_host, admin_port);
+        if let Some(im_service) = admin_state.im_gateway_service() {
+            // Browser authentication is a main-process control-plane action;
+            // the heavy browser work is delegated to the Browser worker.
+            im_service.spawn_chatgpt_web_startup_auth_check();
+            im_service.spawn_feishu_setup_supervisor();
+        }
+        return;
+    }
+
+    bifrost_admin::worker_runtime::im_gateway::stop_runtime_controller();
+    if let Some(im_service) = admin_state.im_gateway_service() {
+        im_service.start_scheduler();
+        // The check itself is cheap when no ChatGPT Web runner exists. When a
+        // runner is configured it delegates to the isolated Browser worker,
+        // preserving lazy startup without silently skipping login readiness.
+        im_service.spawn_chatgpt_web_startup_auth_check();
+        im_service.spawn_feishu_setup_supervisor();
+        let im_service_clone = im_service.clone();
+        tokio::spawn(async move {
+            im_service_clone.auto_connect_providers().await;
+        });
+    }
 }
 
 fn parse_yes_no_answer(input: &str) -> Option<bool> {
@@ -2410,7 +2486,7 @@ pub fn run_foreground(
                 shared_config_manager.clone(),
                 sync_manager.clone(),
                 admin_state.clone(),
-                remote_invoke_admin_host,
+                remote_invoke_admin_host.clone(),
                 config.port,
             );
 
@@ -2418,16 +2494,11 @@ pub fn run_foreground(
             let connection_cleanup_task =
                 bifrost_admin::start_connection_cleanup_task(admin_state.connection_monitor.clone());
 
-            // Auto-connect IM Gateway providers that have owner_open_id configured
-            if let Some(im_service) = admin_state.im_gateway_service() {
-                im_service.start_scheduler();
-                im_service.spawn_chatgpt_web_startup_auth_check();
-                im_service.spawn_feishu_setup_supervisor();
-                let im_service_clone = im_service.clone();
-                tokio::spawn(async move {
-                    im_service_clone.auto_connect_providers().await;
-                });
-            }
+            start_im_gateway_runtime(
+                &admin_state,
+                remote_invoke_admin_host.clone(),
+                config.port,
+            );
 
             let metrics_collector = admin_state.metrics_collector.clone();
             let rules_storage_for_resolver = admin_state.rules_storage.clone();
@@ -2731,6 +2802,10 @@ pub fn run_foreground(
                 }
             }
 
+            // Ask isolated runners to perform their protocol-native interrupt
+            // while their parent tasks and control channels are still alive.
+            bifrost_admin::im_gateway::external_cli::shutdown_all_active_runs().await;
+
             listener_task.abort();
             rules_watcher_task.abort();
             rules_filesystem_watcher_task.abort();
@@ -2750,13 +2825,17 @@ pub fn run_foreground(
                 task.abort();
             }
 
+            // Stop controllers first so their reconcile loops cannot restart a
+            // worker while the process is draining auxiliary runtimes.
+            bifrost_admin::worker_runtime::im_gateway::stop_runtime_controller();
+            bifrost_admin::worker_runtime::remote_invoke::stop_runtime_controller();
+            // Stop auxiliary workers before legacy cleanup so each worker can
+            // release its own process tree and runtime resources gracefully.
+            bifrost_admin::worker_runtime::shutdown_all_workers().await;
             // Kill managed ASR service to prevent orphan processes.
             bifrost_admin::shutdown_managed_asr_service().await;
             // Kill all managed browser processes to prevent orphans.
             bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
-            // Kill all active external CLI runs to prevent orphan process groups.
-            bifrost_admin::im_gateway::external_cli::kill_all_active_runs();
-
             Ok(())
         }
         .await;
@@ -3602,16 +3681,18 @@ pub fn run_daemon(
                         admin_state.connection_monitor.clone(),
                     ));
 
-                    // Auto-connect IM Gateway providers (daemon mode)
-                    if let Some(im_service) = admin_state.im_gateway_service() {
-                        im_service.start_scheduler();
-                        im_service.spawn_chatgpt_web_startup_auth_check();
-                        im_service.spawn_feishu_setup_supervisor();
-                        let im_service_clone = im_service.clone();
-                        tokio::spawn(async move {
-                            im_service_clone.auto_connect_providers().await;
-                        });
-                    }
+                    let system_proxy_host = if config.host == "0.0.0.0" {
+                        "127.0.0.1".to_string()
+                    } else {
+                        config.host.clone()
+                    };
+                    let system_proxy_port = config.port;
+
+                    start_im_gateway_runtime(
+                        &admin_state,
+                        system_proxy_host.clone(),
+                        system_proxy_port,
+                    );
 
                     let metrics_collector = admin_state.metrics_collector.clone();
                     let rules_storage_for_resolver = admin_state.rules_storage.clone();
@@ -3642,12 +3723,6 @@ pub fn run_daemon(
                     log_resolver_rules(&resolver);
 
                     let unsafe_ssl = config.unsafe_ssl;
-                    let system_proxy_host = if config.host == "0.0.0.0" {
-                        "127.0.0.1".to_string()
-                    } else {
-                        config.host.clone()
-                    };
-                    let system_proxy_port = config.port;
                     let server = ProxyServer::new(config.clone())
                         .with_access_control(access_control.clone())
                         .with_tls_config(tls_config.clone())
@@ -3658,6 +3733,10 @@ pub fn run_daemon(
                         .admin_state()
                         .cloned()
                         .expect("admin_state should be set");
+                    admin_state_arc.set_remote_invoke_admin_endpoint(
+                        system_proxy_host.clone(),
+                        system_proxy_port,
+                    );
 
                     spawn_remote_invoke_worker_startup_task(
                         shared_config_manager.clone(),
@@ -3780,12 +3859,20 @@ pub fn run_daemon(
                 => result,
                 };
 
+                // Stop controllers first so their reconcile loops cannot restart a
+                // worker while the process is draining auxiliary runtimes.
+                bifrost_admin::worker_runtime::im_gateway::stop_runtime_controller();
+                bifrost_admin::worker_runtime::remote_invoke::stop_runtime_controller();
+                // Stop auxiliary workers before legacy cleanup so each worker can
+                // release its own process tree and runtime resources gracefully.
+                bifrost_admin::worker_runtime::shutdown_all_workers().await;
                 // Kill managed ASR service to prevent orphan processes.
                 bifrost_admin::shutdown_managed_asr_service().await;
                 // Kill all managed browser processes to prevent orphans.
                 bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
-                // Kill all active external CLI runs to prevent orphan process groups.
-                bifrost_admin::im_gateway::external_cli::kill_all_active_runs();
+                // Stop isolated workers through their native transport before
+                // the service runtime is dropped; hard kill remains bounded.
+                bifrost_admin::im_gateway::external_cli::shutdown_all_active_runs().await;
 
                 if let Err(e) = result {
                     eprintln!("Runtime error: {}", e);
@@ -4890,7 +4977,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn forked_daemon_child_clears_inherited_external_worker_marker() {
-        let _guard = data_dir_test_lock();
+        let _guard = crate::commands::UPGRADE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _worker_marker = ScopedEnvVar::set(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
 
         clear_external_cli_worker_marker_for_forked_daemon();

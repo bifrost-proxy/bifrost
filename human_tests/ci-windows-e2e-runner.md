@@ -113,7 +113,7 @@
 2. 确认 synthetic 用例首轮返回失败、第二次返回成功，并且 attempt counter 最终为 2。
 3. 确认 `run_all()` 返回的最终结果为成功，而不是保留首轮失败结果。
 4. 推送后检查 changed production Rust line coverage，确认 `runner.rs` 新增 retry 生产代码达到
-   95% 变更行门禁。
+   90% 变更行门禁。
 
 **预期结果**：
 - 完整 retry loop 实际执行 `TestCase` clone、retry port 等待和 worker task helper。

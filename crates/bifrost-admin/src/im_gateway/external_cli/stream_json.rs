@@ -26,6 +26,7 @@ impl Drop for StreamJsonRunCleanup {
         }
         if let Some(session_key) = self.session_key.as_deref() {
             live_guide::remove_session(session_key, &self.run_id);
+            live_model::remove_session(session_key, &self.run_id);
         }
         if self.pid != 0 {
             let _ = terminate_process(self.pid);
@@ -41,8 +42,9 @@ pub(super) async fn run_command(
     spec: CommandSpec,
     prompt: String,
     stop_marker_path: PathBuf,
-    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
+    let (stdout_path, stderr_path) = external_cli_log_paths(&stop_marker_path);
     let mut command = Command::new(&spec.executable);
     command
         .args(&spec.args)
@@ -86,12 +88,18 @@ pub(super) async fn run_command(
         .stderr
         .take()
         .ok_or_else(|| "stream-json stderr unavailable".to_string())?;
+    let (stdout, stdout_tee_task) =
+        tee_external_cli_output(stdout, stdout_path, "stream-json stdout").await?;
+    let (stderr, stderr_tee_task) =
+        tee_external_cli_output(stderr, stderr_path, "stream-json stderr").await?;
     write_user_frame(&mut stdin, &prompt).await?;
 
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let stderr_task = tokio::spawn(read_stderr_lines(stderr));
     let (guide_tx, mut guide_rx) = mpsc::unbounded_channel::<live_guide::LiveGuideCommand>();
+    let (model_tx, mut model_rx) = mpsc::unbounded_channel::<live_model::LiveModelCommand>();
     let mut pending_guide = None::<PendingStreamJsonGuide>;
+    let mut pending_model_updates = HashMap::<String, live_model::LiveModelCommand>::new();
     let mut interrupted_results_to_ignore = 0usize;
     let mut thread_id = None::<String>;
     let mut initial_prompt_replayed = false;
@@ -110,6 +118,8 @@ pub(super) async fn run_command(
     tokio::pin!(timeout_sleep);
     let mut terminal_status = None::<ExternalCliRunStatus>;
     let mut terminal_error = None::<String>;
+    let mut stop_request_id = None::<String>;
+    let mut stop_deadline = None::<std::pin::Pin<Box<tokio::time::Sleep>>>;
 
     while terminal_status.is_none() {
         tokio::select! {
@@ -127,6 +137,35 @@ pub(super) async fn run_command(
                 }
                 if let Some(raw) = raw.as_ref() {
                     if let Some((request_id, succeeded, reason)) = control_response(raw) {
+                        if stop_request_id.as_deref() == Some(request_id.as_str()) {
+                            if !succeeded {
+                                terminal_error = Some(reason.unwrap_or_else(|| {
+                                    "Claude Code rejected the stop interrupt".to_string()
+                                }));
+                            }
+                            terminal_status = Some(ExternalCliRunStatus::Stopped);
+                            continue;
+                        }
+                        if let Some(command) = pending_model_updates.remove(&request_id) {
+                            let result = if succeeded {
+                                live_model::accepted_model_update(
+                                    command.update_id,
+                                    command.model,
+                                    thread_id.clone(),
+                                )
+                            } else {
+                                live_model::rejected_model_update(
+                                    command.update_id,
+                                    command.model,
+                                    thread_id.clone(),
+                                    reason.unwrap_or_else(|| {
+                                        "Claude Code rejected the model update request".to_string()
+                                    }),
+                                )
+                            };
+                            let _ = command.ack_tx.send(result);
+                            continue;
+                        }
                         if pending_guide
                             .as_ref()
                             .is_some_and(|pending| pending.request_id == request_id)
@@ -190,6 +229,17 @@ pub(super) async fn run_command(
                                 guide_tx: guide_tx.clone(),
                             },
                         );
+                        if guide_registered {
+                            live_model::register_session(
+                                session_key,
+                                run_id,
+                                live_model::ActiveModelHandle {
+                                    run_id: run_id.to_string(),
+                                    thread_id: Some(thread_id.clone()),
+                                    model_tx: model_tx.clone(),
+                                },
+                            );
+                        }
                     }
                 }
                 let interrupted_result = raw.as_ref().is_some_and(is_interrupted_result)
@@ -209,7 +259,7 @@ pub(super) async fn run_command(
                                 &mut tool_started_at,
                             );
                             if let Some(progress_tx) = progress_tx.as_ref() {
-                                let _ = progress_tx.send(event.clone());
+                                let _ = progress_tx.try_send(event.clone());
                             }
                             events.push(event);
                         }
@@ -219,6 +269,10 @@ pub(super) async fn run_command(
                     if let Some(raw) = raw.as_ref().filter(|raw| {
                         raw.get("type").and_then(serde_json::Value::as_str) == Some("result")
                     }) {
+                        if stop_request_id.is_some() && is_interrupted_result(raw) {
+                            terminal_status = Some(ExternalCliRunStatus::Stopped);
+                            continue;
+                        }
                         let succeeded = !raw
                             .get("is_error")
                             .and_then(serde_json::Value::as_bool)
@@ -237,6 +291,15 @@ pub(super) async fn run_command(
             }
             guide = guide_rx.recv() => {
                 let Some(guide) = guide else { continue; };
+                if stop_request_id.is_some() {
+                    let _ = guide.ack_tx.send(live_guide::rejected_guide(
+                        guide.guide_id,
+                        thread_id.clone(),
+                        None,
+                        "Claude Code session is stopping".to_string(),
+                    ));
+                    continue;
+                }
                 if session_key.is_some_and(|session_key| !live_guide::active_session_is_owned_by(session_key, run_id)) {
                     let _ = guide.ack_tx.send(live_guide::rejected_guide(
                         guide.guide_id,
@@ -274,21 +337,95 @@ pub(super) async fn run_command(
                     }
                 }
             }
-            _ = wait_for_stop_marker(stop_marker_path.clone()) => {
-                terminal_status = Some(ExternalCliRunStatus::Stopped);
+            command = model_rx.recv() => {
+                let Some(command) = command else { continue; };
+                if stop_request_id.is_some() {
+                    let _ = command.ack_tx.send(live_model::rejected_model_update(
+                        command.update_id,
+                        command.model,
+                        thread_id.clone(),
+                        "Claude Code session is stopping".to_string(),
+                    ));
+                    continue;
+                }
+                if session_key.is_some_and(|session_key| {
+                    !live_guide::active_session_is_owned_by(session_key, run_id)
+                }) {
+                    let _ = command.ack_tx.send(live_model::rejected_model_update(
+                        command.update_id,
+                        command.model,
+                        thread_id.clone(),
+                        "active session was replaced before model update delivery".to_string(),
+                    ));
+                    continue;
+                }
+                let request_id = format!("bifrost-model-{}", uuid::Uuid::new_v4());
+                match write_model_frame(&mut stdin, &request_id, command.model.as_deref()).await {
+                    Ok(()) => {
+                        pending_model_updates.insert(request_id, command);
+                    }
+                    Err(error) => {
+                        let _ = command.ack_tx.send(live_model::rejected_model_update(
+                            command.update_id,
+                            command.model,
+                            thread_id.clone(),
+                            error,
+                        ));
+                    }
+                }
             }
-            _ = &mut timeout_sleep => {
-                terminal_error = Some(format!(
+            _ = wait_for_stop_marker(stop_marker_path.clone()), if stop_request_id.is_none() => {
+                let request_id = format!("bifrost-stop-{}", uuid::Uuid::new_v4());
+                match write_interrupt_frame(&mut stdin, &request_id).await {
+                    Ok(()) => {
+                        stop_request_id = Some(request_id);
+                        stop_deadline = Some(Box::pin(sleep(Duration::from_millis(
+                            WORKER_TRANSPORT_STOP_GRACE_MS,
+                        ))));
+                    }
+                    Err(error) => {
+                        terminal_error = Some(format!(
+                            "failed to send Claude Code stop interrupt: {error}"
+                        ));
+                        terminal_status = Some(ExternalCliRunStatus::Stopped);
+                    }
+                }
+            }
+            _ = &mut timeout_sleep, if stop_request_id.is_none() => {
+                let request_id = format!("bifrost-timeout-{}", uuid::Uuid::new_v4());
+                if let Err(error) = write_interrupt_frame(&mut stdin, &request_id).await {
+                    terminal_error = Some(format!(
+                        "failed to interrupt timed-out Claude Code run: {error}"
+                    ));
+                }
+                let timeout_error = format!(
                     "stream-json runner timed out after {} seconds",
                     timeout_secs.unwrap_or_default(),
-                ));
+                );
+                terminal_error = Some(match terminal_error.take() {
+                    Some(interrupt_error) => format!("{timeout_error}; {interrupt_error}"),
+                    None => timeout_error,
+                });
                 terminal_status = Some(ExternalCliRunStatus::TimedOut);
+            }
+            _ = async {
+                match stop_deadline.as_mut() {
+                    Some(deadline) => deadline.await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                terminal_error = Some(
+                    "Claude Code did not acknowledge the stop interrupt before termination"
+                        .to_string(),
+                );
+                terminal_status = Some(ExternalCliRunStatus::Stopped);
             }
         }
     }
 
     if let Some(session_key) = session_key {
         live_guide::remove_session(session_key, run_id);
+        live_model::remove_session(session_key, run_id);
     }
     if let Some(pending) = pending_guide {
         let _ = pending.command.ack_tx.send(live_guide::rejected_guide(
@@ -299,6 +436,15 @@ pub(super) async fn run_command(
         ));
     }
     reject_queued_guides(&mut guide_rx, thread_id.clone());
+    for (_, command) in pending_model_updates {
+        let _ = command.ack_tx.send(live_model::rejected_model_update(
+            command.update_id,
+            command.model,
+            thread_id.clone(),
+            "Claude Code session completed before model update acknowledgement".to_string(),
+        ));
+    }
+    reject_queued_model_updates(&mut model_rx, thread_id.clone());
 
     drop(stdin);
     let status = terminal_status.unwrap_or(ExternalCliRunStatus::Failed);
@@ -322,6 +468,8 @@ pub(super) async fn run_command(
         let _ = stderr_task.await;
         b"stream-json runner did not exit after termination\n".to_vec()
     };
+    join_external_cli_tee(stdout_tee_task, "stream-json stdout").await?;
+    join_external_cli_tee(stderr_tee_task, "stream-json stderr").await?;
     if let Some(error) = terminal_error {
         if !stderr.is_empty() && !stderr.ends_with(b"\n") {
             stderr.push(b'\n');
@@ -348,6 +496,20 @@ fn reject_queued_guides(
             thread_id.clone(),
             None,
             "turn is no longer active".to_string(),
+        ));
+    }
+}
+
+fn reject_queued_model_updates(
+    model_rx: &mut mpsc::UnboundedReceiver<live_model::LiveModelCommand>,
+    thread_id: Option<String>,
+) {
+    while let Ok(command) = model_rx.try_recv() {
+        let _ = command.ack_tx.send(live_model::rejected_model_update(
+            command.update_id,
+            command.model,
+            thread_id.clone(),
+            "Claude Code session is no longer active".to_string(),
         ));
     }
 }
@@ -395,6 +557,14 @@ async fn write_interrupt_frame(
     write_stream_json_frame(stdin, &build_interrupt_frame(request_id)).await
 }
 
+async fn write_model_frame(
+    stdin: &mut tokio::process::ChildStdin,
+    request_id: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    write_stream_json_frame(stdin, &build_model_frame(request_id, model)).await
+}
+
 async fn write_stream_json_frame(
     stdin: &mut tokio::process::ChildStdin,
     frame: &serde_json::Value,
@@ -417,6 +587,17 @@ fn build_interrupt_frame(request_id: &str) -> serde_json::Value {
         "type": "control_request",
         "request_id": request_id,
         "request": {"subtype": "interrupt"}
+    })
+}
+
+fn build_model_frame(request_id: &str, model: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "set_model",
+            "model": model,
+        }
     })
 }
 
@@ -544,6 +725,11 @@ mod tests {
         assert_eq!(interrupt["type"], "control_request");
         assert_eq!(interrupt["request_id"], "request-1");
         assert_eq!(interrupt["request"]["subtype"], "interrupt");
+        let model = build_model_frame("request-2", Some("sonnet"));
+        assert_eq!(model["type"], "control_request");
+        assert_eq!(model["request"]["subtype"], "set_model");
+        assert_eq!(model["request"]["model"], "sonnet");
+        assert!(build_model_frame("request-3", None)["request"]["model"].is_null());
     }
 
     #[test]
@@ -677,6 +863,99 @@ send({"type":"result","subtype":"success","is_error":False,"result":"guided resu
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn mock_stream_json_runner_updates_model_in_the_active_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-model",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"claude-model-session"})
+send(first)
+
+selected = json.loads(sys.stdin.readline())
+assert selected["type"] == "control_request"
+assert selected["request"]["subtype"] == "set_model"
+assert selected["request"]["model"] == "sonnet"
+send({"type":"control_response","response":{"subtype":"success","request_id":selected["request_id"],"response":{}}})
+
+rejected = json.loads(sys.stdin.readline())
+assert rejected["request"]["subtype"] == "set_model"
+assert rejected["request"]["model"] == "reject-me"
+send({"type":"control_response","response":{"subtype":"error","request_id":rejected["request_id"]}})
+
+cleared = json.loads(sys.stdin.readline())
+assert cleared["request"]["subtype"] == "set_model"
+assert cleared["request"]["model"] is None
+send({"type":"control_response","response":{"subtype":"success","request_id":cleared["request_id"],"response":{}}})
+send({"type":"assistant","message":{"content":[{"type":"text","text":"model updated"}]},"session_id":"claude-model-session"})
+send({"type":"result","subtype":"success","is_error":False,"result":"model updated","session_id":"claude-model-session"})
+"#,
+        );
+        let session_key = format!("claude-model-{}", uuid::Uuid::new_v4());
+        let run_session_key = session_key.clone();
+        let run = tokio::spawn(async move {
+            run_command(
+                "claude-model-run",
+                Some(&run_session_key),
+                mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+                "initial prompt".to_string(),
+                temp_dir.path().join("stop"),
+                None,
+            )
+            .await
+        });
+
+        timeout(Duration::from_secs(10), async {
+            while live_model::active_handle(&session_key).is_none() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("active Claude model handle");
+
+        let selected = live_model::request_session_model_update(
+            &session_key,
+            "claude-model-set".to_string(),
+            Some("sonnet".to_string()),
+        )
+        .await;
+        assert!(selected.accepted, "{selected:?}");
+        assert_eq!(selected.thread_id.as_deref(), Some("claude-model-session"));
+
+        let rejected = live_model::request_session_model_update(
+            &session_key,
+            "claude-model-reject".to_string(),
+            Some("reject-me".to_string()),
+        )
+        .await;
+        assert!(!rejected.accepted, "{rejected:?}");
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("Claude Code rejected the model update request")
+        );
+
+        let cleared = live_model::request_session_model_update(
+            &session_key,
+            "claude-model-clear".to_string(),
+            None,
+        )
+        .await;
+        assert!(cleared.accepted, "{cleared:?}");
+
+        let output = run.await.unwrap().unwrap();
+        assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
+        assert!(live_model::active_handle(&session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn result_frame_force_kills_runner_that_does_not_exit() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -749,7 +1028,7 @@ sys.stdin.readline()
 sys.stderr.write("mock stderr without newline")
 "#,
         );
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let (progress_tx, mut progress_rx) = mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
         let output = run_command(
             "mock-stream-json-eof-run",
             None,
@@ -818,6 +1097,173 @@ time.sleep(30)
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn stop_protocol_covers_ack_rejection_interrupted_result_and_deadline() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-stop-protocol",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+mode = os.environ["STOP_MODE"]
+marker = os.environ["STOP_SEEN"]
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+first["session_id"] = "stop-protocol-session"
+send(first)
+for line in sys.stdin:
+    frame = json.loads(line)
+    if frame.get("type") != "control_request":
+        continue
+    with open(marker, "w", encoding="utf-8") as handle:
+        handle.write(frame["request_id"])
+    if mode == "ack":
+        send({"type":"control_response","response":{"subtype":"success","request_id":frame["request_id"],"response":{}}})
+    elif mode == "reject":
+        time.sleep(0.2)
+        send({"type":"control_response","response":{"subtype":"error","request_id":frame["request_id"],"error":"not active"}})
+    elif mode == "result":
+        send({"type":"result","subtype":"error_during_execution","is_error":True,"result":"interrupted","session_id":"stop-protocol-session"})
+    elif mode == "ignore":
+        pass
+"#,
+        );
+
+        for mode in ["ack", "reject", "result", "ignore"] {
+            let run_id = format!("stream-json-stop-{mode}-run");
+            let session_key = format!("stream-json-stop-{mode}-session");
+            let stop_marker = temp_dir.path().join(format!("stop-{mode}"));
+            let stop_seen = temp_dir.path().join(format!("seen-{mode}"));
+            let mut spec = mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS));
+            spec.env = BTreeMap::from([
+                ("STOP_MODE".to_string(), mode.to_string()),
+                ("STOP_SEEN".to_string(), stop_seen.display().to_string()),
+            ]);
+            ACTIVE_SESSIONS.insert(session_key.clone(), run_id.clone());
+            let stop_marker_for_run = stop_marker.clone();
+            let run_id_for_run = run_id.clone();
+            let session_key_for_run = session_key.clone();
+            let run = tokio::spawn(async move {
+                run_command(
+                    &run_id_for_run,
+                    Some(&session_key_for_run),
+                    spec,
+                    "wait".to_string(),
+                    stop_marker_for_run,
+                    None,
+                )
+                .await
+            });
+            wait_for_active_handle(&session_key).await;
+            tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+            wait_for_path(&stop_seen).await;
+            if mode == "reject" {
+                let rejected = live_guide::request_session_guide(
+                    &session_key,
+                    "late-guide".to_string(),
+                    "too late".to_string(),
+                )
+                .await;
+                assert_eq!(
+                    rejected.reason.as_deref(),
+                    Some("Claude Code session is stopping")
+                );
+            }
+            let output = timeout(Duration::from_secs(8), run)
+                .await
+                .expect("stream-json stop should finish")
+                .unwrap()
+                .unwrap();
+            assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            match mode {
+                "reject" => assert!(stderr.contains("not active"), "{stderr}"),
+                "ignore" => assert!(stderr.contains("did not acknowledge"), "{stderr}"),
+                _ => {}
+            }
+            assert!(!ACTIVE_RUNS.contains_key(&run_id));
+            assert!(!ACTIVE_SESSIONS.contains_key(&session_key));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_and_timeout_report_closed_interrupt_stdin() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-closed-stop-stdin",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+first = json.loads(sys.stdin.readline())
+first["session_id"] = "closed-stop-session"
+print(json.dumps(first, separators=(",", ":")), flush=True)
+with open(os.environ["CLOSED_STDIN_READY"], "w", encoding="utf-8") as handle:
+    handle.write("ready")
+os.close(0)
+time.sleep(30)
+"#,
+        );
+
+        for trigger in ["stop", "timeout"] {
+            let ready = temp_dir.path().join(format!("ready-{trigger}"));
+            let stop_marker = temp_dir.path().join(format!("stop-{trigger}"));
+            let mut spec = mock_spec(&executable, (trigger == "timeout").then_some(1));
+            spec.env = BTreeMap::from([(
+                "CLOSED_STDIN_READY".to_string(),
+                ready.display().to_string(),
+            )]);
+            let run_id = format!("stream-json-closed-{trigger}-run");
+            let stop_marker_for_run = stop_marker.clone();
+            let run = tokio::spawn(async move {
+                run_command(
+                    &run_id,
+                    None,
+                    spec,
+                    "wait".to_string(),
+                    stop_marker_for_run,
+                    None,
+                )
+                .await
+            });
+            wait_for_path(&ready).await;
+            if trigger == "stop" {
+                tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+            }
+            let output = timeout(Duration::from_secs(8), run)
+                .await
+                .expect("closed-stdin stream-json should finish")
+                .unwrap()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if trigger == "stop" {
+                assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+                assert!(
+                    stderr.contains("failed to send Claude Code stop interrupt"),
+                    "{stderr}"
+                );
+            } else {
+                assert_eq!(output.status, ExternalCliRunStatus::TimedOut);
+                assert!(
+                    stderr.contains("failed to interrupt timed-out Claude Code run"),
+                    "{stderr}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn interrupt_rejection_uses_default_reason_and_run_can_finish() {
         let temp_dir = tempfile::tempdir().unwrap();
         let executable = mock_executable(
@@ -864,6 +1310,383 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
             run_task.await.unwrap().unwrap().status,
             ExternalCliRunStatus::Succeeded
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_stop_interrupt_is_stopped_with_diagnostic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-reject-stop",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"reject-stop-session"})
+send(first)
+interrupt = json.loads(sys.stdin.readline())
+send({"type":"control_response","response":{"subtype":"error","request_id":interrupt["request_id"],"error":"run already completed"}})
+"#,
+        );
+        let session_key = format!("mock-stream-json-reject-stop-{}", uuid::Uuid::new_v4());
+        let run_id = format!("mock-stream-json-reject-stop-run-{}", uuid::Uuid::new_v4());
+        let stop_marker = temp_dir.path().join("stop");
+        let run = tokio::spawn({
+            let run_id = run_id.clone();
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    &run_id,
+                    Some(&session_key),
+                    mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        let output = timeout(Duration::from_secs(8), run)
+            .await
+            .expect("rejected stop interrupt should terminate")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("run already completed"));
+        assert!(!ACTIVE_RUNS.contains_key(&run_id));
+        assert!(live_guide::active_handle(&session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_stop_interrupt_without_reason_uses_default_diagnostic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-reject-stop-default",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"reject-stop-default"})
+send(first)
+interrupt = json.loads(sys.stdin.readline())
+send({"type":"control_response","response":{"subtype":"error","request_id":interrupt["request_id"]}})
+"#,
+        );
+        let session_key = format!(
+            "mock-stream-json-reject-stop-default-{}",
+            uuid::Uuid::new_v4()
+        );
+        let stop_marker = temp_dir.path().join("stop");
+        let run = tokio::spawn({
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    "mock-stream-json-reject-stop-default-run",
+                    Some(&session_key),
+                    mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        let output = run.await.unwrap().unwrap();
+        assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Claude Code rejected the stop interrupt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_result_after_stop_marker_is_terminal_stop() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-interrupted-result",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"interrupted-result"})
+send(first)
+json.loads(sys.stdin.readline())
+send({"type":"result","subtype":"error_during_execution","is_error":True})
+"#,
+        );
+        let session_key = format!(
+            "mock-stream-json-interrupted-result-{}",
+            uuid::Uuid::new_v4()
+        );
+        let stop_marker = temp_dir.path().join("stop");
+        let run = tokio::spawn({
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    "mock-stream-json-interrupted-result-run",
+                    Some(&session_key),
+                    mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        assert_eq!(
+            run.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Stopped
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unacknowledged_stop_interrupt_hits_bounded_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-no-stop-ack",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"no-stop-ack-session"})
+send(first)
+json.loads(sys.stdin.readline())
+with open(os.environ["STOP_SEEN"], "w", encoding="utf-8") as handle:
+    handle.write("seen")
+time.sleep(30)
+"#,
+        );
+        let session_key = format!("mock-stream-json-no-stop-ack-{}", uuid::Uuid::new_v4());
+        let run_id = format!("mock-stream-json-no-stop-ack-run-{}", uuid::Uuid::new_v4());
+        let stop_marker = temp_dir.path().join("stop");
+        let stop_seen = temp_dir.path().join("stop-seen");
+        let mut spec = mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS));
+        spec.env
+            .insert("STOP_SEEN".to_string(), stop_seen.display().to_string());
+        let run = tokio::spawn({
+            let run_id = run_id.clone();
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    &run_id,
+                    Some(&session_key),
+                    spec,
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        timeout(Duration::from_secs(5), async {
+            while !stop_seen.is_file() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Claude stop interrupt observed");
+        let rejected = live_guide::request_session_guide(
+            &session_key,
+            "guide-during-stop".to_string(),
+            "must not be delivered".to_string(),
+        )
+        .await;
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("Claude Code session is stopping")
+        );
+        let model_rejected = live_model::request_session_model_update(
+            &session_key,
+            "model-during-stop".to_string(),
+            Some("sonnet".to_string()),
+        )
+        .await;
+        assert_eq!(
+            model_rejected.reason.as_deref(),
+            Some("Claude Code session is stopping")
+        );
+        let output = timeout(Duration::from_secs(8), run)
+            .await
+            .expect("unacknowledged stop interrupt should hit fallback")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Claude Code did not acknowledge the stop interrupt before termination"));
+        assert!(!ACTIVE_RUNS.contains_key(&run_id));
+        assert!(live_guide::active_handle(&session_key).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_stdin_stop_records_interrupt_write_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-closed-stop",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"closed-stop-session"})
+send(first)
+os.close(0)
+with open(os.environ["STDIN_CLOSED"], "w", encoding="utf-8") as handle:
+    handle.write("closed")
+time.sleep(30)
+"#,
+        );
+        let session_key = format!("mock-stream-json-closed-stop-{}", uuid::Uuid::new_v4());
+        let run_id = format!("mock-stream-json-closed-stop-run-{}", uuid::Uuid::new_v4());
+        let stop_marker = temp_dir.path().join("stop");
+        let stdin_closed = temp_dir.path().join("stdin-closed");
+        let mut spec = mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS));
+        spec.env.insert(
+            "STDIN_CLOSED".to_string(),
+            stdin_closed.display().to_string(),
+        );
+        let run = tokio::spawn({
+            let run_id = run_id.clone();
+            let session_key = session_key.clone();
+            let stop_marker = stop_marker.clone();
+            async move {
+                run_command(
+                    &run_id,
+                    Some(&session_key),
+                    spec,
+                    "initial task".to_string(),
+                    stop_marker,
+                    None,
+                )
+                .await
+            }
+        });
+
+        wait_for_active_handle(&session_key).await;
+        timeout(Duration::from_secs(5), async {
+            while !stdin_closed.is_file() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Claude stdin closed");
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        let output = timeout(Duration::from_secs(8), run)
+            .await
+            .expect("closed stdin stop should terminate")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Stopped);
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("failed to send Claude Code stop interrupt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_stdin_timeout_records_interrupt_write_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-closed-timeout",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"closed-timeout-session"})
+send(first)
+os.close(0)
+with open(os.environ["STDIN_CLOSED"], "w", encoding="utf-8") as handle:
+    handle.write("closed")
+time.sleep(30)
+"#,
+        );
+        let stdin_closed = temp_dir.path().join("stdin-closed");
+        // Leave enough time for the helper process to be scheduled under the
+        // fully instrumented test suite before exercising its timeout path.
+        let mut spec = mock_spec(&executable, Some(5));
+        spec.env.insert(
+            "STDIN_CLOSED".to_string(),
+            stdin_closed.display().to_string(),
+        );
+        let run = tokio::spawn(run_command(
+            "mock-stream-json-closed-timeout-run",
+            None,
+            spec,
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        timeout(Duration::from_secs(15), async {
+            while !stdin_closed.is_file() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Claude timeout stdin closed");
+        let output = timeout(Duration::from_secs(12), run)
+            .await
+            .expect("closed stdin timeout should terminate")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::TimedOut);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("stream-json runner timed out after 5 seconds"));
+        assert!(stderr.contains("failed to interrupt timed-out Claude Code run"));
     }
 
     #[cfg(unix)]
@@ -977,6 +1800,16 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
             None,
         ));
         let handle = wait_for_active_handle(session_key).await;
+        let model_handle = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(handle) = live_model::active_handle(session_key) {
+                    break handle;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("active model handle");
         ACTIVE_SESSIONS.insert(session_key.to_string(), "replacement-run".to_string());
         let (ack_tx, ack_rx) = oneshot::channel();
         handle
@@ -991,6 +1824,19 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
         assert_eq!(
             rejected.reason.as_deref(),
             Some("active session was replaced before guide delivery")
+        );
+        let (model_ack_tx, model_ack_rx) = oneshot::channel();
+        model_handle
+            .model_tx
+            .send(live_model::LiveModelCommand {
+                update_id: "model-replaced".to_string(),
+                model: Some("sonnet".to_string()),
+                ack_tx: model_ack_tx,
+            })
+            .unwrap();
+        assert_eq!(
+            model_ack_rx.await.unwrap().reason.as_deref(),
+            Some("active session was replaced before model update delivery")
         );
         assert_eq!(
             run_task.await.unwrap().unwrap().status,
@@ -1045,6 +1891,56 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
             run_task.await.unwrap().unwrap().status,
             ExternalCliRunStatus::Succeeded
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_completion_rejects_pending_model_update() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-pending-model",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"pending-model-session"})
+send(first)
+model = json.loads(sys.stdin.readline())
+assert model["request"]["subtype"] == "set_model"
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"pending-model-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-pending-model";
+        let run_id = "mock-stream-json-pending-model-run";
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        let rejected = live_model::request_session_model_update(
+            session_key,
+            "pending-model".to_string(),
+            Some("sonnet".to_string()),
+        )
+        .await;
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("Claude Code session completed before model update acknowledgement")
+        );
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+        ACTIVE_SESSIONS.remove(session_key);
     }
 
     #[cfg(unix)]
@@ -1237,7 +2133,7 @@ print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text"
 print(json.dumps({"type":"result","subtype":"error_max_turns","is_error":True,"result":"failed"}), flush=True)
 "#,
         );
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let (progress_tx, mut progress_rx) = mpsc::channel(EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY);
         let output = run_command(
             "mock-stream-json-failed-result-run",
             None,
@@ -1275,5 +2171,29 @@ print(json.dumps({"type":"result","subtype":"error_max_turns","is_error":True,"r
             assert_eq!(result.reason.as_deref(), Some("turn is no longer active"));
         }
         assert!(guide_rx.try_recv().is_err());
+
+        let (model_tx, mut model_rx) = mpsc::unbounded_channel();
+        let mut model_acks = Vec::new();
+        for index in 0..3 {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            model_tx
+                .send(live_model::LiveModelCommand {
+                    update_id: format!("model-drain-{index}"),
+                    model: None,
+                    ack_tx,
+                })
+                .unwrap();
+            model_acks.push(ack_rx);
+        }
+        reject_queued_model_updates(&mut model_rx, Some("thread-drain".to_string()));
+        for ack_rx in model_acks {
+            let result = ack_rx.await.unwrap();
+            assert_eq!(result.thread_id.as_deref(), Some("thread-drain"));
+            assert_eq!(
+                result.reason.as_deref(),
+                Some("Claude Code session is no longer active")
+            );
+        }
+        assert!(model_rx.try_recv().is_err());
     }
 }

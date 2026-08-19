@@ -59,6 +59,9 @@ impl QueueItem {
 
 /// Per-session queue state.
 struct SessionQueue {
+    /// Generation captured by the active turn that owns this queue. Session
+    /// reset increments it so a finishing old turn cannot dequeue new work.
+    generation: u64,
     /// Auto-incrementing sequence counter.
     next_seq: u64,
     /// FIFO queue of pending messages.
@@ -71,6 +74,7 @@ struct SessionQueue {
 impl Default for SessionQueue {
     fn default() -> Self {
         Self {
+            generation: 0,
             next_seq: 1,
             items: VecDeque::new(),
             attachment_bytes: 0,
@@ -356,13 +360,38 @@ impl SessionQueueManager {
 
     /// Pop the next queued message (FIFO).
     pub fn pop_queue(&self, session_key: &str) -> Option<String> {
-        self.pop_queue_item(session_key).map(|item| item.message)
+        let generation = self.session_generation(session_key);
+        self.pop_queue_at_generation(session_key, generation)
+    }
+    /// Return the generation retained while draining a continuation queue.
+    pub fn session_generation(&self, session_key: &str) -> u64 {
+        self.queues
+            .entry(session_key.to_string())
+            .or_default()
+            .generation
+    }
+
+    /// Pop only when the queue still belongs to the captured turn generation.
+    pub fn pop_queue_at_generation(&self, session_key: &str, generation: u64) -> Option<String> {
+        self.pop_queue_item_at_generation(session_key, generation)
+            .map(|item| item.message)
     }
 
     /// Pop the next queued message with attachments (FIFO).
     pub fn pop_queue_item(&self, session_key: &str) -> Option<QueueItem> {
+        let generation = self.session_generation(session_key);
+        self.pop_queue_item_at_generation(session_key, generation)
+    }
+    fn pop_queue_item_at_generation(
+        &self,
+        session_key: &str,
+        generation: u64,
+    ) -> Option<QueueItem> {
         if let Some(mut entry) = self.queues.get_mut(session_key) {
             let queue = entry.value_mut();
+            if queue.generation != generation {
+                return None;
+            }
             let item = queue.items.pop_front()?;
             let attachment_bytes = queue_item_attachment_bytes(&item);
             queue.attachment_bytes = queue.attachment_bytes.saturating_sub(attachment_bytes);
@@ -426,9 +455,13 @@ impl SessionQueueManager {
     pub fn clear_session(&self, session_key: &str) {
         self.guide_slots.remove(session_key);
         self.handed_off_guides.remove(session_key);
-        if let Some((_, queue)) = self.queues.remove(session_key) {
-            self.release_global_attachment_bytes(queue.attachment_bytes);
-        }
+        let mut entry = self.queues.entry(session_key.to_string()).or_default();
+        let queue = entry.value_mut();
+        self.release_global_attachment_bytes(queue.attachment_bytes);
+        queue.items.clear();
+        queue.attachment_bytes = 0;
+        queue.generation = queue.generation.wrapping_add(1);
+        queue.next_seq = 1;
     }
 
     /// Drop every in-memory delivery artifact owned by a provider that is
@@ -454,9 +487,7 @@ impl SessionQueueManager {
             .map(|entry| entry.key().clone())
             .collect();
         for session_key in queue_keys {
-            if let Some((_, queue)) = self.queues.remove(&session_key) {
-                self.release_global_attachment_bytes(queue.attachment_bytes);
-            }
+            self.clear_session(&session_key);
         }
         self.pending_turn_events
             .retain(|session_key, _| !belongs_to_provider(session_key));
@@ -618,6 +649,29 @@ mod tests {
         assert_eq!(mgr.pop_queue("s1").as_deref(), Some("a"));
         assert_eq!(mgr.pop_queue("s1").as_deref(), Some("b"));
         assert!(mgr.pop_queue("s1").is_none());
+    }
+
+    #[test]
+    fn clear_generation_fences_old_turn_from_new_queue() {
+        let mgr = SessionQueueManager::new();
+        let old_generation = mgr.session_generation("reset-race");
+        mgr.push_queue("reset-race", "old queued message".into())
+            .unwrap();
+
+        mgr.clear_session("reset-race");
+        let new_generation = mgr.session_generation("reset-race");
+        assert_ne!(old_generation, new_generation);
+        mgr.push_queue("reset-race", "new queued message".into())
+            .unwrap();
+
+        assert!(mgr
+            .pop_queue_at_generation("reset-race", old_generation)
+            .is_none());
+        assert_eq!(
+            mgr.pop_queue_at_generation("reset-race", new_generation)
+                .as_deref(),
+            Some("new queued message")
+        );
     }
 
     #[test]
@@ -813,6 +867,32 @@ mod tests {
         let ch = mgr.get_or_create_guide_channel("s1");
         assert!(ch.lock().unwrap().is_empty());
         assert!(mgr.queue_status("s1").is_empty());
+    }
+
+    #[test]
+    fn queue_generation_fences_old_turn_and_wrappers_pop_current_items() {
+        let mgr = SessionQueueManager::new();
+        let initial_generation = mgr.session_generation("s1");
+        mgr.push_queue("s1", "old".into()).unwrap();
+        assert_eq!(
+            mgr.pop_queue_at_generation("s1", initial_generation)
+                .as_deref(),
+            Some("old")
+        );
+
+        mgr.push_queue("s1", "must-be-cleared".into()).unwrap();
+        mgr.clear_session("s1");
+        let reset_generation = mgr.session_generation("s1");
+        assert_ne!(reset_generation, initial_generation);
+        mgr.push_queue("s1", "new".into()).unwrap();
+        assert!(mgr
+            .pop_queue_at_generation("s1", initial_generation)
+            .is_none());
+        assert_eq!(mgr.pop_queue("s1").as_deref(), Some("new"));
+
+        mgr.push_queue("s1", "item".into()).unwrap();
+        assert_eq!(mgr.pop_queue_item("s1").unwrap().message, "item");
+        assert!(mgr.pop_queue_item("missing").is_none());
     }
 
     #[test]

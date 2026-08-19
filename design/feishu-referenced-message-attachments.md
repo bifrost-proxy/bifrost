@@ -87,7 +87,7 @@
 - Shell E2E：扩展群会话黑盒脚本，引用 mock 图片和文件，断言 Runner Prompt 包含
   `Attached Images/Files`、绝对路径、原文件名，且路径内容与 mock 响应一致。
 - Human test：在 `human_tests/feishu-group-session.md` 增加引用附件用例并逐条执行。
-- 覆盖率：生产 Rust 变更执行 `make coverage-changed`，changed-lines 门禁为 95%；远端 CI
+- 覆盖率：生产 Rust 变更执行 `make coverage-changed`，changed-lines 门禁为 90%；远端 CI
   继续执行 workspace 及各 crate 的 90% 棘轮门禁。
 
 ## 飞书官方接口契约

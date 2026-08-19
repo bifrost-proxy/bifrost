@@ -39,8 +39,12 @@ export ADMIN_PATH_PREFIX="/_bifrost"
 export ADMIN_BASE_URL="http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-$SCRIPT_DIR/../../.bifrost-e2e-remote-invoke-ssh-$RANDOM}"
 export BIFROST_DATA_DIR
+mark_e2e_data_root "$BIFROST_DATA_DIR"
 
 cleanup() {
+    # Sweep any detached helpers while the ownership marker still exists;
+    # `admin_cleanup_bifrost` may remove the data directory afterwards.
+    kill_bifrost_in_data_root "$BIFROST_DATA_DIR" || true
     admin_cleanup_bifrost || true
     if [[ -n "${RELAY_PID:-}" ]] && kill -0 "$RELAY_PID" 2>/dev/null; then
         kill "$RELAY_PID" 2>/dev/null || true
@@ -50,7 +54,6 @@ cleanup() {
         kill "$MOCK_PID" 2>/dev/null || true
         wait "$MOCK_PID" 2>/dev/null || true
     fi
-    pkill -f "bifrost __tray --data-dir ${BIFROST_DATA_DIR}" >/dev/null 2>&1 || true
     rm -rf "$RELAY_DATA_DIR" "$TMPDIR" "$BIFROST_DATA_DIR" "${CALLER_DATA_DIR:-}" "${CALLER_DATA_DIR_2:-}" "$MOCK_DIR" >/dev/null 2>&1 || true
     rm -f "$TARGET_HOME_FILE" "$RELAY_LOG" "$MOCK_LOG" >/dev/null 2>&1 || true
 }
@@ -682,7 +685,11 @@ log "Switch SSH grant to Read-only watch and verify command/file denial plus sta
 update_grant_level_and_assert "query" "remote_query" "none"
 CLI_QUERY_STATUS_OUTPUT="$TMPDIR/cli_query_status.out"
 BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status --relay-url "$RELAY_URL" \
-    >"$CLI_QUERY_STATUS_OUTPUT" 2>&1
+    >"$CLI_QUERY_STATUS_OUTPUT" 2>&1 || {
+        cat "$CLI_QUERY_STATUS_OUTPUT" >&2
+        dump_grant_diagnostics
+        exit 1
+    }
 python3 - "$CLI_QUERY_STATUS_OUTPUT" <<'PY'
 import json
 import sys

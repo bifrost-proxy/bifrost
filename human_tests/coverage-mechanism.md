@@ -33,7 +33,7 @@
 | TC-COV-08 | 设计文档 `design/coverage-90.md` 列出 mechanism + 不适用清单 | doc |
 | TC-COV-09 | 覆盖 E2E 与生产数据目录、HOME/XDG、9900 端口硬隔离 | safety |
 | TC-COV-10 | 覆盖管线与全仓 Shell 语法契约通过 | regression |
-| TC-COV-11 | PR changed-lines 95% 门禁 | gate |
+| TC-COV-11 | PR changed-lines 90% 门禁 | gate |
 | TC-COV-12 | Shell 静态质量门禁 | regression |
 | TC-COV-13 | 代理核心能力矩阵 | contract |
 | TC-COV-14 | E2E 机器可读结果 | observability |
@@ -209,17 +209,17 @@ BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 \
 macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job 拆分；167 个
 测试无重复、无遗漏，按历史耗时估算的最大 job 偏差不超过平均值 15%。
 
-### TC-COV-11 PR changed-lines 95% 门禁
+### TC-COV-11 PR changed-lines 90% 门禁
 
 **步骤**：
 
 ```bash
 python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
-grep -n 'changed_lines_min = 95.0' scripts/ci/coverage-thresholds.toml
+grep -n 'changed_lines_min = 90.0' scripts/ci/coverage-thresholds.toml
 grep -n 'coverage-diff.py' .github/workflows/ci.yml
 ```
 
-**预期**：工具单测全部通过；PR coverage job 在 LCOV 生成后执行 changed-lines 95%
+**预期**：工具单测全部通过；PR coverage job 在 LCOV 生成后执行 changed-lines 90%
 门禁；`#[cfg(test)] mod tests` 中的测试代码不计入生产增量覆盖率；源文件仍保留的
 copy-paste 不得排除，尤其 16 行源块仅修改中间一行形成 8+7 精确匹配时，目的端完整
 副本仍全部留在 changed-lines 门禁中。
@@ -456,7 +456,7 @@ bash e2e-tests/tests/test_coverage_pipeline_contract.sh
 契约测试会在 `mktemp -d` 创建只含一个 `coverage-demo` crate 的真实 Git workspace：
 
 1. 基线提交后修改生产函数，并为所有新分支补测试。
-2. 运行 `coverage-changed.py --base-ref main`，断言自动选择 `coverage-demo` 且 95% 门禁通过。
+2. 运行 `coverage-changed.py --base-ref main`，断言自动选择 `coverage-demo` 且 90% 门禁通过。
 3. 在未提交 worktree 追加没有测试的生产函数。
 4. 原命令再次运行，断言本地直接失败并打印 `crates/demo/src/lib.rs` 缺口。
 5. trap 删除临时 workspace，不触碰正式 `~/.bifrost`、9900 服务或当前仓库生产代码。
@@ -508,7 +508,7 @@ make coverage-changed
 `crates/a/src/tests.rs` 与 `crates/a/src/feature/tests/nested.rs` 识别为仅测试模块并排除；
 由普通 `mod runtime_tests;` 引入的同名运行时模块仍识别为生产 Rust；带
 `#[path = "support/suite.rs"]` 的测试模块按显式相对路径排除该文件及其子模块树。静态与 Python
-契约通过；当前真实业务生产改动的 changed-lines 覆盖率不少于 95%，且拆分 test
+契约通过；当前真实业务生产改动的 changed-lines 覆盖率不少于 90%，且拆分 test
 module 不出现在 `unmeasured_files`，最终结果不是 `INCOMPLETE`。所有测试只使用本机临时
 Git workspace、Cargo 缓存与 `127.0.0.1` fixture，不连接飞书或任何公网业务域名。
 

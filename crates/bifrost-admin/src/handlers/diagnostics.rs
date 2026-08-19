@@ -19,6 +19,13 @@ pub async fn handle_diagnostics<B>(
             },
             _ => method_not_allowed(),
         },
+        "/api/diagnostics/workers" => match *req.method() {
+            Method::GET => {
+                let workers = crate::worker_runtime::worker_snapshots().await;
+                json_response(&workers)
+            }
+            _ => method_not_allowed(),
+        },
         _ => error_response(StatusCode::NOT_FOUND, "Not Found"),
     }
 }
@@ -68,6 +75,35 @@ mod tests {
         assert_eq!(snapshot.lookup_requests_total, 1);
         assert_eq!(snapshot.snapshot_refreshes_total, 1);
         assert_eq!(snapshot.scanned_pids_total, 4);
+    }
+
+    #[tokio::test]
+    async fn worker_diagnostics_returns_snapshot_list_and_rejects_writes() {
+        let (_temp_dir, state) = isolated_state();
+        let get = Request::builder()
+            .method(Method::GET)
+            .uri("/_bifrost/api/diagnostics/workers")
+            .body(())
+            .unwrap();
+        let response =
+            handle_diagnostics(get, Arc::clone(&state), "/api/diagnostics/workers").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let snapshots: Vec<crate::worker_runtime::ManagedWorkerSnapshot> =
+            serde_json::from_slice(&body).unwrap();
+        assert!(snapshots.is_empty());
+
+        let post = Request::builder()
+            .method(Method::POST)
+            .uri("/_bifrost/api/diagnostics/workers")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            handle_diagnostics(post, state, "/api/diagnostics/workers")
+                .await
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
     }
 
     #[tokio::test]

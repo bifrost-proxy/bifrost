@@ -1,6 +1,8 @@
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +45,7 @@ impl ImProviderStore {
     }
 
     pub fn list(&self) -> Vec<ImProviderConfig> {
+        self.refresh_from_disk();
         self.data
             .read()
             .providers
@@ -53,6 +56,7 @@ impl ImProviderStore {
     }
 
     pub fn get(&self, id: &str) -> Option<ImProviderConfig> {
+        self.refresh_from_disk();
         self.data
             .read()
             .providers
@@ -64,8 +68,10 @@ impl ImProviderStore {
 
     pub fn add(&self, provider: ImProviderConfig) -> Result<()> {
         self.ensure_writable()?;
+        let _file_lock = self.acquire_write_lock()?;
         let provider = normalized_provider(provider);
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         if data.providers.iter().any(|p| p.id == provider.id) {
             return Err(BifrostError::Config(format!(
                 "provider with id '{}' already exists",
@@ -78,8 +84,10 @@ impl ImProviderStore {
 
     pub fn update(&self, provider: ImProviderConfig) -> Result<()> {
         self.ensure_writable()?;
+        let _file_lock = self.acquire_write_lock()?;
         let provider = normalized_provider(provider);
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         if let Some(existing) = data.providers.iter_mut().find(|p| p.id == provider.id) {
             *existing = provider;
             self.save_locked(&data)
@@ -93,7 +101,9 @@ impl ImProviderStore {
 
     pub fn delete(&self, id: &str) -> Result<()> {
         self.ensure_writable()?;
+        let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         let before = data.providers.len();
         data.providers.retain(|p| p.id != id);
         if data.providers.len() == before {
@@ -143,7 +153,45 @@ impl ImProviderStore {
         }
 
         atomic_write(&self.file_path, content.as_bytes())?;
+        crate::worker_runtime::im_gateway::notify_runtime_config_changed();
         Ok(())
+    }
+
+    fn refresh_from_disk(&self) {
+        if let Some(data) = Self::load_with_backup(&self.file_path) {
+            *self.data.write() = data;
+        }
+    }
+
+    fn refresh_locked(&self, data: &mut StoreData) {
+        if let Some(latest) = Self::load_with_backup(&self.file_path) {
+            *data = latest;
+        }
+    }
+
+    fn acquire_write_lock(&self) -> Result<File> {
+        let parent = self.file_path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let lock_path = parent.join(format!("{STORE_FILENAME}.lock"));
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                BifrostError::Io(std::io::Error::other(format!(
+                    "open provider store lock {}: {error}",
+                    lock_path.display()
+                )))
+            })?;
+        file.lock_exclusive().map_err(|error| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "lock provider store {}: {error}",
+                lock_path.display()
+            )))
+        })?;
+        Ok(file)
     }
 
     fn ensure_writable(&self) -> Result<()> {
@@ -374,5 +422,26 @@ mod tests {
         assert!(store.list().is_empty());
         assert_eq!(std::fs::read(&primary).unwrap(), unsupported);
         assert!(!backup_path(&primary).exists());
+    }
+
+    #[test]
+    fn coverage_gap_provider_store_reports_lock_open_and_atomic_write_replace_failures() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let admin_dir = temp.path().join("admin");
+        std::fs::create_dir_all(&admin_dir).expect("admin dir");
+
+        let store = ImProviderStore::new(temp.path());
+        let lock_path = admin_dir.join(format!("{STORE_FILENAME}.lock"));
+        std::fs::create_dir(&lock_path).expect("blocking lock directory");
+        let lock_error = store
+            .add(provider("blocked-lock"))
+            .expect_err("a directory cannot be opened as the provider lock file");
+        assert!(lock_error.to_string().contains("open provider store lock"));
+
+        let destination = admin_dir.join("atomic-destination");
+        std::fs::create_dir(&destination).expect("blocking destination directory");
+        let write_error = atomic_write(&destination, b"provider data")
+            .expect_err("atomic replacement must reject a directory destination");
+        assert!(write_error.to_string().contains("atomically replace"));
     }
 }

@@ -49,7 +49,7 @@ mod debug_inbound;
 mod event_loop;
 mod messages;
 mod providers;
-mod schedules;
+pub(crate) mod schedules;
 mod service;
 mod utils;
 
@@ -73,6 +73,10 @@ use busy_message_mode::*;
 use event_loop::*;
 #[allow(unused_imports)]
 use messages::*;
+pub(crate) use messages::{
+    handle_messages_send_body, handle_messages_upload_body, SendMessageRequest,
+    UploadMessageMetadata, UploadMessageRequest,
+};
 use providers::*;
 use schedules::*;
 use service::{
@@ -85,6 +89,51 @@ use service::{
 pub use service::{ImGatewayService, SharedImGatewayService};
 use utils::*;
 
+pub(crate) async fn start_provider_event_connection_runtime(
+    service: &ImGatewayService,
+    provider_id: &str,
+) -> Result<(), String> {
+    providers::start_provider_event_connection(service, provider_id).await
+}
+
+pub(crate) fn provider_runtime_status_value(
+    service: &ImGatewayService,
+    provider_id: &str,
+) -> Result<serde_json::Value, String> {
+    let provider = service.provider_store.get(provider_id);
+    let status = service.connection_manager.get_status(provider_id);
+    if provider.is_none() && status.is_none() {
+        return Err("Provider not found".to_string());
+    }
+    let mut value = serde_json::to_value(status.unwrap_or_default())
+        .map_err(|error| format!("serialize provider runtime status: {error}"))?;
+    if let Some(provider) = provider.filter(|provider| {
+        provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin
+    }) {
+        let owner_id = provider.owner_open_id.as_deref().unwrap_or_default();
+        let send_ready = !owner_id.is_empty()
+            && service
+                .connection_manager
+                .weixin_provider()
+                .send_ready_for_user(&provider, owner_id);
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "send_ready".to_string(),
+                serde_json::Value::Bool(send_ready),
+            );
+            if !send_ready {
+                object.insert(
+                    "send_ready_reason".to_string(),
+                    serde_json::Value::String(
+                        "awaiting an inbound message context token".to_string(),
+                    ),
+                );
+            }
+        }
+    }
+    Ok(value)
+}
+
 pub async fn handle_im_gateway(
     req: Request<Incoming>,
     service: Option<SharedImGatewayService>,
@@ -96,35 +145,39 @@ pub async fn handle_im_gateway(
 
     let sub = path.strip_prefix("/api/im-gateway").unwrap_or(path);
 
+    // Keep the dispatcher future small on Windows, where the server runtime's
+    // worker-thread stack is comparatively limited. These handlers contain
+    // large request/stream state machines; boxing at this admin-only boundary
+    // also prevents one growing branch from inflating every other route.
     if let Some(rest) = sub.strip_prefix("/attachments") {
-        return utils::handle_attachment(req, rest).await;
+        return Box::pin(utils::handle_attachment(req, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/providers") {
-        return providers::handle_providers(req, &service, rest).await;
+        return Box::pin(providers::handle_providers(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/targets") {
-        return messages::handle_targets(req, &service, rest).await;
+        return Box::pin(messages::handle_targets(req, &service, rest)).await;
     }
     if sub == "/messages/send" || sub == "/messages/send/" {
-        return messages::handle_messages_send(req, &service).await;
+        return Box::pin(messages::handle_messages_send(req, &service)).await;
     }
     if sub == "/messages/upload" || sub == "/messages/upload/" {
-        return messages::handle_messages_upload(req, &service).await;
+        return Box::pin(messages::handle_messages_upload(req, &service)).await;
     }
     if let Some(rest) = sub.strip_prefix("/routes") {
-        return messages::handle_routes(req, &service, rest).await;
+        return Box::pin(messages::handle_routes(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/agent") {
-        return agent_api::handle_agent(req, &service, rest).await;
+        return Box::pin(agent_api::handle_agent(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/chat") {
-        return chat_gateway::handle_chat_gateway(req, &service, rest).await;
+        return Box::pin(chat_gateway::handle_chat_gateway(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/debug") {
-        return debug_inbound::handle_debug(req, &service, rest).await;
+        return Box::pin(debug_inbound::handle_debug(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/schedules") {
-        return schedules::handle_schedules(req, &service, rest).await;
+        return Box::pin(schedules::handle_schedules(req, &service, rest)).await;
     }
     if let Some(rest) = sub.strip_prefix("/history") {
         return utils::handle_history(&req, &service, rest);

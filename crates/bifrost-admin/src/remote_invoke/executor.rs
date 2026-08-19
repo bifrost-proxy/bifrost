@@ -308,11 +308,27 @@ impl RemoteInvokeExecutor {
         F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        if crate::worker_runtime::remote_broker::broker_client_configured() {
+            return crate::worker_runtime::remote_broker::execute_via_main_broker(
+                command,
+                stdin_rx,
+                &mut on_stdout,
+            )
+            .await
+            .map_err(BifrostError::Config);
+        }
+        if crate::worker_runtime::remote_execution::should_isolate_remote_execution() {
+            return Err(BifrostError::Config(
+                "Remote Invoke worker execution broker is not configured".to_string(),
+            ));
+        }
         // Auto-trigger keep-awake on every remote call (all kinds, including
         // read-only). Manager internally decides whether to acquire based
         // on mode; on non-macOS this is a cheap no-op.
         if let Some(mgr) = &self.keepawake_manager {
             mgr.on_remote_call();
+        } else if let Err(error) = self.notify_remote_call_via_admin().await {
+            debug!(error = %error, "remote invoke keep-awake notification failed");
         }
         let start = Instant::now();
         let transport_validation = match command.query.as_ref() {
@@ -415,9 +431,7 @@ impl RemoteInvokeExecutor {
     /// - `set_mode` (args: {"mode":".."}) — change mode
     async fn execute_power_op(&self, command: &RemoteCommand) -> Result<String> {
         let Some(mgr) = self.keepawake_manager.clone() else {
-            return Err(BifrostError::Config(
-                "keepawake manager not initialized on this host".to_string(),
-            ));
+            return self.execute_power_op_via_admin(command).await;
         };
         let cmd = command.command.as_str();
         match cmd {
@@ -467,6 +481,71 @@ impl RemoteInvokeExecutor {
             other => Err(BifrostError::Config(format!(
                 "unknown power command: {other}"
             ))),
+        }
+    }
+
+    async fn notify_remote_call_via_admin(&self) -> Result<()> {
+        self.admin_power_request(reqwest::Method::POST, "remote-call", None)
+            .await
+            .map(|_| ())
+    }
+
+    async fn execute_power_op_via_admin(&self, command: &RemoteCommand) -> Result<String> {
+        match command.command.as_str() {
+            "status" => {
+                self.admin_power_request(reqwest::Method::GET, "status", None)
+                    .await
+            }
+            "on" => {
+                self.admin_power_request(reqwest::Method::POST, "on", None)
+                    .await
+            }
+            "off" => {
+                self.admin_power_request(reqwest::Method::POST, "off", None)
+                    .await
+            }
+            "set_mode" => {
+                let body = command.args_json.clone().ok_or_else(|| {
+                    BifrostError::Config("missing args for power set_mode".to_string())
+                })?;
+                self.admin_power_request(reqwest::Method::POST, "mode", Some(body))
+                    .await
+            }
+            other => Err(BifrostError::Config(format!(
+                "unknown power command: {other}"
+            ))),
+        }
+    }
+
+    async fn admin_power_request(
+        &self,
+        method: reqwest::Method,
+        operation: &str,
+        body: Option<String>,
+    ) -> Result<String> {
+        let url = format!(
+            "http://{}:{}/_bifrost/api/power/{operation}",
+            self.admin_host, self.admin_port
+        );
+        let mut request = self.http.request(method, &url);
+        if let Some(body) = body {
+            request = request
+                .header("content-type", "application/json")
+                .body(body);
+        }
+        let response = request.send().await.map_err(|error| {
+            BifrostError::Network(format!("power.{operation} request failed: {error}"))
+        })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            BifrostError::Network(format!("read power.{operation} response failed: {error}"))
+        })?;
+        if status.is_success() {
+            Ok(body)
+        } else {
+            Err(BifrostError::Network(format!(
+                "power.{operation} returned HTTP {status}: {body}"
+            )))
         }
     }
 
@@ -3896,6 +3975,18 @@ mod tests {
         }
     }
 
+    fn shell_timeout_test_completion_budget() -> Duration {
+        // Windows process-tree teardown on a loaded CI host can take a couple
+        // of seconds after the Tokio timeout has fired. Keep the behavioral
+        // assertion strict on Unix while allowing for that platform cleanup
+        // cost; the error assertion below still proves the timeout fired.
+        if cfg!(target_os = "windows") {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(2)
+        }
+    }
+
     fn current_dir_argv() -> Vec<String> {
         if cfg!(target_os = "windows") {
             vec![
@@ -5049,16 +5140,16 @@ mod tests {
         let err = runtime
             .block_on(executor.execute(&cmd))
             .expect_err("idle timeout must produce an error");
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(2_000),
-            "idle timeout should have killed within a second or two, elapsed={:?}",
-            elapsed
-        );
         let msg = format!("{err}");
         assert!(
             msg.contains("idle timeout"),
             "expected idle timeout error, got: {msg}"
+        );
+        let elapsed = started.elapsed();
+        let budget = shell_timeout_test_completion_budget();
+        assert!(
+            elapsed < budget,
+            "idle timeout should have killed within {budget:?}, elapsed={elapsed:?}"
         );
     }
 
@@ -5111,16 +5202,16 @@ mod tests {
         let err = runtime
             .block_on(executor.execute(&cmd))
             .expect_err("wall-clock timeout must produce an error");
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(2_000),
-            "wall-clock should have killed within 2s, elapsed={:?}",
-            elapsed
-        );
         let msg = format!("{err}");
         assert!(
             msg.contains("wall-clock timeout"),
             "expected wall-clock timeout error, got: {msg}"
+        );
+        let elapsed = started.elapsed();
+        let budget = shell_timeout_test_completion_budget();
+        assert!(
+            elapsed < budget,
+            "wall-clock should have killed within {budget:?}, elapsed={elapsed:?}"
         );
     }
 
@@ -5682,6 +5773,8 @@ mod coverage_boost {
     use bifrost_command::{
         FilterCondition, SearchArgs, TrafficGetArgs, TrafficListArgs, TrafficListDirection,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn new_executor() -> RemoteInvokeExecutor {
         RemoteInvokeExecutor::new("127.0.0.1", 8800)
@@ -6133,7 +6226,7 @@ mod coverage_boost {
     // --- execute_power_op & file op wrappers ---------------------------------
 
     #[tokio::test]
-    async fn execute_power_op_without_manager_returns_config_error() {
+    async fn execute_power_op_without_manager_uses_admin_fallback() {
         let executor = new_executor();
         let cmd = RemoteCommand {
             command: "status".to_string(),
@@ -6141,10 +6234,172 @@ mod coverage_boost {
         };
         let err = executor.execute_power_op(&cmd).await.unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("keepawake manager not initialized"),
-            "msg={msg}"
+        assert!(msg.contains("power.status request failed"), "msg={msg}");
+    }
+
+    async fn serve_single_http_response(
+        expected_request_line: &'static str,
+        response_body: &'static str,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        serve_single_http_response_with_status(expected_request_line, "200 OK", response_body).await
+    }
+
+    async fn serve_single_http_response_with_status(
+        expected_request_line: &'static str,
+        response_status: &'static str,
+        response_body: &'static str,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake admin server");
+        let port = listener.local_addr().expect("fake admin address").port();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept fake admin request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("read fake admin request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "request headers unexpectedly large"
+                );
+            }
+            let request = String::from_utf8_lossy(&request);
+            let request_line = request.lines().next().unwrap_or_default();
+            assert_eq!(request_line, expected_request_line);
+            let response = format!(
+                "HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write fake admin response");
+        });
+        (port, handle)
+    }
+
+    #[tokio::test]
+    async fn execute_power_op_status_uses_admin_fallback_when_isolated() {
+        let (port, server) = serve_single_http_response(
+            "GET /_bifrost/api/power/status HTTP/1.1",
+            r#"{"mode":"auto","active":true}"#,
+        )
+        .await;
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", port);
+        let command = RemoteCommand {
+            command: "status".to_string(),
+            ..Default::default()
+        };
+
+        let body = executor
+            .execute_power_op(&command)
+            .await
+            .expect("power status through admin fallback");
+
+        let value: serde_json::Value = serde_json::from_str(&body).expect("power JSON");
+        assert_eq!(
+            value.get("mode").and_then(|mode| mode.as_str()),
+            Some("auto")
         );
+        assert_eq!(
+            value.get("active").and_then(|active| active.as_bool()),
+            Some(true)
+        );
+        server.await.expect("fake admin server completes");
+    }
+
+    #[tokio::test]
+    async fn execute_power_admin_fallback_covers_mutations_validation_and_http_errors() {
+        for (command_name, endpoint) in [("on", "on"), ("off", "off")] {
+            let request_line =
+                Box::leak(format!("POST /_bifrost/api/power/{endpoint} HTTP/1.1").into_boxed_str());
+            let (port, server) = serve_single_http_response(request_line, r#"{"ok":true}"#).await;
+            let executor = RemoteInvokeExecutor::new("127.0.0.1", port);
+            let command = RemoteCommand {
+                command: command_name.to_string(),
+                ..Default::default()
+            };
+            assert!(executor.execute_power_op_via_admin(&command).await.is_ok());
+            server.await.unwrap();
+        }
+
+        let (port, server) = serve_single_http_response(
+            "POST /_bifrost/api/power/mode HTTP/1.1",
+            r#"{"mode":"always"}"#,
+        )
+        .await;
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", port);
+        let set_mode = RemoteCommand {
+            command: "set_mode".to_string(),
+            args_json: Some(r#"{"mode":"always"}"#.to_string()),
+            ..Default::default()
+        };
+        assert!(executor
+            .execute_power_op_via_admin(&set_mode)
+            .await
+            .unwrap()
+            .contains("always"));
+        server.await.unwrap();
+
+        for command in [
+            RemoteCommand {
+                command: "set_mode".to_string(),
+                ..Default::default()
+            },
+            RemoteCommand {
+                command: "unknown".to_string(),
+                ..Default::default()
+            },
+        ] {
+            assert!(executor.execute_power_op_via_admin(&command).await.is_err());
+        }
+
+        let (port, server) = serve_single_http_response_with_status(
+            "POST /_bifrost/api/power/off HTTP/1.1",
+            "503 Service Unavailable",
+            "temporarily unavailable",
+        )
+        .await;
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", port);
+        let error = executor
+            .execute_power_op_via_admin(&RemoteCommand {
+                command: "off".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("503 Service Unavailable"), "{error}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn notify_remote_call_uses_admin_fallback_when_isolated() {
+        let (port, server) = serve_single_http_response(
+            "POST /_bifrost/api/power/remote-call HTTP/1.1",
+            r#"{"mode":"auto","active":true}"#,
+        )
+        .await;
+        let executor = RemoteInvokeExecutor::new("127.0.0.1", port);
+
+        executor
+            .notify_remote_call_via_admin()
+            .await
+            .expect("remote call keepawake notification through admin fallback");
+
+        server.await.expect("fake admin server completes");
     }
 
     #[tokio::test]

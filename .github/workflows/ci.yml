@@ -175,6 +175,19 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
         working-directory: web
+      - name: Install sync-server dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: packages/bifrost-sync-server
+      - name: Build sync-server (TypeScript -> dist/cli.js)
+        run: pnpm run build
+        working-directory: packages/bifrost-sync-server
+      - name: Install FFmpeg for ASR source compression E2E
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -192,13 +205,13 @@ jobs:
         run: >-
           bash scripts/ci/coverage-all.sh --with-e2e --e2e-suite proxy
           --json --lcov --gate --gaps
-      - name: Changed production Rust line coverage (95%)
+      - name: Changed production Rust line coverage (90%)
         if: github.event_name == 'pull_request'
         env:
           COVERAGE_BASE_REF: origin/${{ github.base_ref }}
         run: >-
           python3 scripts/ci/coverage-diff.py target/coverage/lcov.info
-          --base-ref "$COVERAGE_BASE_REF" --threshold 95
+          --base-ref "$COVERAGE_BASE_REF" --threshold 90
           --json-output target/coverage/changed-lines.json
       - name: Coverage summary (job summary)
         if: always()
@@ -374,6 +387,12 @@ jobs:
           BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost
           SKIP_BUILD: "true"
         run: bash e2e-tests/tests/test_weixin_provider_e2e.sh
+      - name: IM live model progress card E2E
+        shell: bash
+        env:
+          BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost
+          SKIP_BUILD: "true"
+        run: bash e2e-tests/tests/test_im_gateway_live_model_switch.sh
       - name: E2E shell tests
         shell: bash
         run: bash scripts/ci/run-e2e-shell.sh

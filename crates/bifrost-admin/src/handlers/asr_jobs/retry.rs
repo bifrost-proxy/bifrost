@@ -1,3 +1,156 @@
+fn whole_file_retry_conflict(task: &AsrDirectoryTask) -> Option<String> {
+    if task.paused {
+        return Some("ASR task is paused; resume it before retrying transcription".to_string());
+    }
+    if task_is_running(&task.id) {
+        return Some("ASR task is already running".to_string());
+    }
+    if source_compression_is_running(&task.id) {
+        return Some("Source-audio compression is running; wait for it to finish".to_string());
+    }
+    if external_import_is_running(&task.id) {
+        return Some("ASR external import is running; wait for it to finish".to_string());
+    }
+    if RUNNING_CHUNK_RETRY_TASKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&task.id)
+        || bulk_chunk_retry_state(&task.id).is_some_and(|retry| {
+            matches!(retry.status, BulkChunkRetryStatus::Queued | BulkChunkRetryStatus::Running)
+        })
+    {
+        return Some("ASR failed-chunk retry is running; wait for it to finish".to_string());
+    }
+    None
+}
+
+fn reset_failed_file_for_transcription(record: &mut FileRecord) {
+    record.status = FileStatus::Pending;
+    record.output_text_path = None;
+    record.output_metadata_path = None;
+    record.output_timeline_path = None;
+    record.text_chars = 0;
+    record.error = None;
+    record.duplicate_of_source_key = None;
+    record.transcript_alias = None;
+    record.chunk_metrics.clear();
+    record.fallback_reason = None;
+    record.started_at_ms = None;
+    record.finished_at_ms = None;
+    record.progress_current = None;
+    record.progress_total = None;
+    record.failed_chunks.clear();
+}
+
+async fn retry_failed_file_response(task_id: &str, file_key: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(task_id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+    if let Some(message) = whole_file_retry_conflict(&task) {
+        return error_response(StatusCode::CONFLICT, &message);
+    }
+    let running_guard = match RunningTaskGuard::acquire(task_id) {
+        Ok(guard) => guard,
+        Err(()) => return error_response(StatusCode::CONFLICT, "ASR task is already running"),
+    };
+    let mut store = load_file_store(task_id);
+    let Some(record) = store.files.get_mut(file_key) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task file not found");
+    };
+    if record.status != FileStatus::Failed {
+        return error_response(StatusCode::CONFLICT, "Only failed files can be retried");
+    }
+    if !record.source_path.is_file() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "Source audio is missing; restore it before retrying transcription",
+        );
+    }
+    if source_key(&record.source_path) != file_key {
+        return error_response(
+            StatusCode::CONFLICT,
+            "Source audio changed since this failure was recorded; refresh the task before retrying",
+        );
+    }
+    reset_failed_file_for_transcription(record);
+    if let Err(error) = save_file_store(task_id, &store) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
+    set_worker_force_pause(task_id, false);
+    FORCE_PAUSED_TASKS.lock().unwrap().remove(task_id);
+    spawn_directory_task_run_background_with_guard(
+        task,
+        None,
+        vec![file_key.to_string()],
+        running_guard,
+    );
+    json_response_with_status(
+        StatusCode::ACCEPTED,
+        &serde_json::json!({
+            "queued": 1,
+            "skipped": 0,
+            "file_key": file_key,
+            "message": "Failed file queued for a full transcription retry.",
+        }),
+    )
+}
+
+async fn retry_all_failed_files_response(task_id: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(task_id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+    if let Some(message) = whole_file_retry_conflict(&task) {
+        return error_response(StatusCode::CONFLICT, &message);
+    }
+    let running_guard = match RunningTaskGuard::acquire(task_id) {
+        Ok(guard) => guard,
+        Err(()) => return error_response(StatusCode::CONFLICT, "ASR task is already running"),
+    };
+    let mut store = load_file_store(task_id);
+    let mut file_keys = Vec::new();
+    let mut skipped = 0usize;
+    for (key, record) in &mut store.files {
+        if record.status != FileStatus::Failed {
+            continue;
+        }
+        if !record.source_path.is_file() || source_key(&record.source_path) != *key {
+            skipped += 1;
+            continue;
+        }
+        reset_failed_file_for_transcription(record);
+        file_keys.push(key.clone());
+    }
+    if file_keys.is_empty() {
+        return json_response(&serde_json::json!({
+            "queued": 0,
+            "skipped": skipped,
+            "message": "No failed files with available source audio can be retried.",
+        }));
+    }
+    if let Err(error) = save_file_store(task_id, &store) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
+    set_worker_force_pause(task_id, false);
+    FORCE_PAUSED_TASKS.lock().unwrap().remove(task_id);
+    spawn_directory_task_run_background_with_guard(
+        task,
+        None,
+        file_keys.clone(),
+        running_guard,
+    );
+    json_response_with_status(
+        StatusCode::ACCEPTED,
+        &serde_json::json!({
+            "queued": file_keys.len(),
+            "skipped": skipped,
+            "message": format!(
+                "Queued {} failed file(s) for full transcription retry; {} skipped.",
+                file_keys.len(), skipped
+            ),
+        }),
+    )
+}
+
 /// POST /api/asr/tasks/{task_id}/files/{file_key}/retry-chunks
 ///
 /// Retry all failed chunks for a file that is in `partial_success` status.

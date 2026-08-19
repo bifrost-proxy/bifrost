@@ -294,17 +294,16 @@ pub(super) async fn handle_im_new_group_command(
     }
 
     if trimmed == "/stop" {
-        let stopped = request_agent_stop(ctx.agent_session_manager, session_key).await;
-        let reply = if stopped {
-            "已请求停止当前 Agent loop。"
-        } else {
-            "当前没有正在执行的 Agent loop。"
+        let reply = match request_agent_stop(ctx.agent_session_manager, session_key).await {
+            Ok(true) => "已请求停止当前 Agent loop。".to_string(),
+            Ok(false) => "当前没有正在执行的 Agent loop。".to_string(),
+            Err(error) => format!("❌ 停止当前 Agent loop 失败：{error}"),
         };
         send_agent_reply(
             ctx.client,
             ctx.provider,
             ctx.event,
-            reply,
+            &reply,
             ctx.message_log_store,
         )
         .await;
@@ -360,6 +359,8 @@ pub(super) async fn handle_im_new_group_command(
             group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
+            progress_registry: None,
+            active_session: false,
         },
     )
     .await
@@ -378,6 +379,8 @@ pub(super) async fn handle_im_new_group_command(
             group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
+            progress_registry: None,
+            active_session: false,
         },
     )
     .await
@@ -396,6 +399,8 @@ pub(super) async fn handle_im_new_group_command(
             group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
+            progress_registry: None,
+            active_session: false,
         },
     )
     .await
@@ -414,6 +419,8 @@ pub(super) async fn handle_im_new_group_command(
             group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
+            progress_registry: None,
+            active_session: false,
         },
     )
     .await
@@ -1118,13 +1125,12 @@ pub(super) fn inbound_message_preview(
 
     // /stop — cooperative cancellation of the active turn loop
     if trimmed == "/stop" {
-        let stopped = request_agent_stop(agent_session_manager, session_key).await;
-        let reply = if stopped {
-            "🛑 已请求停止当前 Agent loop。"
-        } else {
-            "当前没有正在执行的 Agent loop。"
+        let reply = match request_agent_stop(agent_session_manager, session_key).await {
+            Ok(true) => "🛑 已请求停止当前 Agent loop。".to_string(),
+            Ok(false) => "当前没有正在执行的 Agent loop。".to_string(),
+            Err(error) => format!("❌ 停止当前 Agent loop 失败：{error}"),
         };
-        send_agent_reply(client, provider, event, reply, message_log_store).await;
+        send_agent_reply(client, provider, event, &reply, message_log_store).await;
         return;
     }
 
@@ -1149,15 +1155,23 @@ pub(super) fn inbound_message_preview(
         return;
     }
 
-    if crate::im_gateway::external_cli::parse_external_cli_model_slash_command(trimmed).is_some() {
-        send_agent_reply(
+    if handle_im_model_command(
+        trimmed,
+        session_key,
+        ctx.agent_config,
+        ImModelCommandContext {
             client,
             provider,
+            external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
             event,
-            "当前任务正在处理中，请等待任务结束后再切换 Runner 模型。",
             message_log_store,
-        )
-        .await;
+            progress_registry: Some(ctx.progress_registry.as_ref()),
+            active_session: true,
+        },
+    )
+    .await
+    {
         return;
     }
 
@@ -1184,6 +1198,8 @@ pub(super) fn inbound_message_preview(
             group_context_store: ctx.group_context_store,
             event,
             message_log_store,
+            progress_registry: Some(ctx.progress_registry.as_ref()),
+            active_session: true,
         },
     )
     .await
@@ -1202,6 +1218,8 @@ pub(super) fn inbound_message_preview(
             group_context_store: ctx.group_context_store,
             event,
             message_log_store,
+            progress_registry: Some(ctx.progress_registry.as_ref()),
+            active_session: true,
         },
     )
     .await
@@ -1521,7 +1539,7 @@ mod local_resume_tests {
     }
 
     #[tokio::test]
-    async fn local_resume_commands_cover_idle_selection_errors_and_busy_rejection() {
+    async fn local_resume_and_model_commands_cover_idle_and_busy_control_paths() {
         let _local_session_lock = crate::im_gateway::external_cli::local_session_test_env_lock()
             .lock()
             .await;
@@ -1598,6 +1616,8 @@ mod local_resume_tests {
                     group_context_store: &service.group_context_store,
                     event: &event,
                     message_log_store: &service.message_log_store,
+                    progress_registry: None,
+                    active_session: false,
                 },
             )
             .await
@@ -1626,6 +1646,82 @@ mod local_resume_tests {
         )
         .await;
 
+        let mut active_model =
+            crate::im_gateway::external_cli::install_test_active_model_session(&session_key);
+        let model_ack = tokio::spawn(async move {
+            assert_eq!(active_model.respond_next(true).await.unwrap(), None);
+        });
+        let busy_model_event = resume_event(&provider, "/model clear");
+        handle_busy_message(
+            "/model clear",
+            &session_key,
+            BusyMessageContext {
+                queue_manager: &service.queue_manager,
+                client: &client,
+                provider: &provider,
+                event: &busy_model_event,
+                message_log_store: &service.message_log_store,
+                agent_session_manager: &service.agent_session_manager,
+                progress_registry: &service.progress_registry,
+                external_cli_config_store: &service.external_cli_config_store,
+                agent_config: &agent_config,
+                group_context_store: &service.group_context_store,
+                group_turn_id: None,
+                default_mode: BusyMessageDefaultMode::Queue,
+                status_context: Default::default(),
+                default_work_dir: None,
+            },
+        )
+        .await;
+        model_ack.await.expect("join busy model acknowledgement");
+
+        let mut runner_config = service.external_cli_config_store.load();
+        let runner_id = agent_config
+            .runner
+            .as_ref()
+            .and_then(|runner| runner.custom_runner_id())
+            .expect("default runner id");
+        let runner = runner_config
+            .runners
+            .get_mut(runner_id)
+            .expect("default runner config");
+        runner.adapter = "claude_code".to_string();
+        service
+            .external_cli_config_store
+            .save(runner_config)
+            .expect("save Claude runner config");
+        let mut active_model =
+            crate::im_gateway::external_cli::install_test_active_model_session(&session_key);
+        let model_ack = tokio::spawn(async move {
+            assert_eq!(
+                active_model.respond_next(true).await.unwrap().as_deref(),
+                Some("sonnet")
+            );
+        });
+        let busy_model_event = resume_event(&provider, "/model sonnet");
+        handle_busy_message(
+            "/model sonnet",
+            &session_key,
+            BusyMessageContext {
+                queue_manager: &service.queue_manager,
+                client: &client,
+                provider: &provider,
+                event: &busy_model_event,
+                message_log_store: &service.message_log_store,
+                agent_session_manager: &service.agent_session_manager,
+                progress_registry: &service.progress_registry,
+                external_cli_config_store: &service.external_cli_config_store,
+                agent_config: &agent_config,
+                group_context_store: &service.group_context_store,
+                group_turn_id: None,
+                default_mode: BusyMessageDefaultMode::Queue,
+                status_context: Default::default(),
+                default_work_dir: None,
+            },
+        )
+        .await;
+        model_ack.await.expect("join busy model acknowledgement");
+
         let replies = service.message_log_store.list();
         for expected in [
             id,
@@ -1633,6 +1729,9 @@ mod local_resume_tests {
             "用法: /resume",
             "请先用 `/runner`",
             "任务正在处理中",
+            "运行中的 session",
+            "后续响应/轮次生效",
+            "sonnet",
         ] {
             assert!(
                 replies.iter().any(|log| {

@@ -235,6 +235,33 @@ grep -qiE '^content-type: audio/flac' "$TEST_DATA_DIR/source-range.headers" || \
 [[ "$(wc -c <"$TEST_DATA_DIR/source-range.bin" | tr -d ' ')" == "32" ]] || \
   fail "compressed source range did not contain 32 bytes"
 
+# Simulate the historical stale-snapshot bug: a later writer kept the FLAC
+# path but erased its compression metadata. The completed ledger must restore
+# API statistics, and the next compression start must persist that repair
+# before replacing the ledger.
+python3 - "$TEST_DATA_DIR/asr/tasks/$TASK_ID/files.json" "$COMPRESSED_KEY" <<'PY'
+import json
+import sys
+path, key = sys.argv[1:]
+store = json.load(open(path))
+record = store["files"][key]
+record.pop("source_compression", None)
+record["source_size"] = None
+open(path, "w").write(json.dumps(store, indent=2))
+PY
+curl -fsS "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}" \
+  >"$TEST_DATA_DIR/detail-repaired.json"
+python3 - "$TEST_DATA_DIR/detail-repaired.json" "$COMPRESSED_KEY" <<'PY'
+import json
+import sys
+detail = json.load(open(sys.argv[1]))
+record = next(item for item in detail["files"] if item["key"] == sys.argv[2])
+assert detail["summary"]["compressed_source_file_count"] == 1, detail["summary"]
+assert detail["summary"]["compression_saved_bytes"] > 0, detail["summary"]
+assert record["source_compression"]["codec"] == "flac", record
+assert "pcm_sha256" not in record["source_compression"], record
+PY
+
 # A repeated run may retry the still-invalid WAV, but must never enqueue the
 # already-compressed success record or the partial-success record.
 curl -fsS -X POST \
@@ -263,6 +290,48 @@ assert state["failed_files"] == 1, state
 assert len(list(audio.glob("completed.flac"))) == 1, list(audio.iterdir())
 assert not list(audio.glob(".*bifrost-compress.part")), list(audio.iterdir())
 assert not list(audio.glob(".*bifrost-compress-backup")), list(audio.iterdir())
+PY
+python3 - "$TEST_DATA_DIR/asr/tasks/$TASK_ID/files.json" "$COMPRESSED_KEY" <<'PY'
+import json
+import sys
+record = json.load(open(sys.argv[1]))["files"][sys.argv[2]]
+assert record["source_compression"]["codec"] == "flac", record
+PY
+
+# Whole-file retry endpoints distinguish transcription failures from failed
+# chunks and safely skip failed records whose source audio is unavailable.
+python3 - "$TEST_DATA_DIR/asr/tasks/$TASK_ID/files.json" "$TEST_AUDIO_DIR" <<'PY'
+import copy
+import json
+import pathlib
+import sys
+path, audio_dir = sys.argv[1:]
+store = json.load(open(path))
+template = next(iter(store["files"].values()))
+missing = copy.deepcopy(template)
+missing["source_path"] = str(pathlib.Path(audio_dir) / "missing-failed.wav")
+missing["source_size"] = 123
+missing["status"] = "failed"
+missing["error"] = "decoder failed"
+missing["output_text_path"] = None
+missing["output_metadata_path"] = None
+missing["output_timeline_path"] = None
+missing["source_compression"] = None
+store["files"]["missing-failed-key"] = missing
+open(path, "w").write(json.dumps(store, indent=2))
+PY
+SINGLE_RETRY_STATUS="$(curl -sS -o "$TEST_DATA_DIR/retry-missing.json" -w '%{http_code}' -X POST \
+  "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/files/missing-failed-key/retry")"
+[[ "$SINGLE_RETRY_STATUS" == "409" ]] || fail "missing-source retry returned $SINGLE_RETRY_STATUS"
+curl -fsS -X POST \
+  "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/retry-failed-files" \
+  >"$TEST_DATA_DIR/retry-failed-files.json"
+python3 - "$TEST_DATA_DIR/retry-failed-files.json" <<'PY'
+import json
+import sys
+result = json.load(open(sys.argv[1]))
+assert result["queued"] == 0, result
+assert result["skipped"] == 1, result
 PY
 
 echo "[asr-source-compression-e2e] PASS"

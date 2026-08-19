@@ -549,6 +549,7 @@ pub(super) async fn handle_chat_gateway(
                 );
                 if is_clear_session_command(&request.message) {
                     return clear_chat_gateway_session_response(
+                        _service,
                         &request,
                         &effective.runner_id,
                         true,
@@ -634,6 +635,9 @@ pub(super) async fn handle_chat_gateway(
                 let agent_session_manager = _service.agent_session_manager.clone();
                 let queue_manager = _service.queue_manager.clone();
                 let session_key_for_preview = request.session_key.clone();
+                let queue_generation = session_key_for_preview
+                    .as_deref()
+                    .map(|session_key| queue_manager.session_generation(session_key));
                 let web_im_progress_context = bound_im_target
                     .filter(|_| {
                         effective.settings.delivery_mode
@@ -671,9 +675,11 @@ pub(super) async fn handle_chat_gateway(
                         let request_snapshot = current_request.clone();
                         let streams_progress =
                             current_request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
-                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<
                             crate::im_gateway::external_cli::ExternalCliProgressEvent,
-                        >();
+                        >(
+                            crate::im_gateway::external_cli::EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY,
+                        );
                         let http_progress_tx = tx.clone();
                         let progress_request = request_snapshot.clone();
                         let progress_runner_id = runner_id_for_state.clone();
@@ -802,7 +808,10 @@ pub(super) async fn handle_chat_gateway(
                         let Some(session_key) = session_key_for_preview.as_deref() else {
                             break;
                         };
-                        let Some(next_message) = queue_manager.pop_queue(session_key) else {
+                        let Some(next_message) = queue_manager.pop_queue_at_generation(
+                            session_key,
+                            queue_generation.unwrap_or_default(),
+                        ) else {
                             break;
                         };
                         current_request = request_for_state.clone();
@@ -895,6 +904,7 @@ pub(super) async fn handle_chat_gateway(
                 );
                 if is_clear_session_command(&request.message) {
                     return clear_chat_gateway_session_response(
+                        _service,
                         &request,
                         &effective.runner_id,
                         false,
@@ -1058,7 +1068,7 @@ async fn guide_external_cli_session(
     guide_id: String,
     message: String,
 ) -> Response<BoxBody> {
-    match crate::im_gateway::external_cli::request_worker_session_guide(
+    match crate::im_gateway::external_cli::request_managed_session_guide(
         session_key,
         guide_id.clone(),
         message.clone(),
@@ -1266,9 +1276,11 @@ async fn runner_call_stream_response(
             "web_runner_call_started",
         );
         let streams_progress = request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<
             crate::im_gateway::external_cli::ExternalCliProgressEvent,
-        >();
+        >(
+            crate::im_gateway::external_cli::EXTERNAL_CLI_PROGRESS_CHANNEL_CAPACITY,
+        );
         let call_progress_tx = tx.clone();
         let progress_request = request_snapshot.clone();
         let progress_runner_id = effective.runner_id.clone();
@@ -1884,7 +1896,7 @@ async fn guide_external_cli_stream_response(
     message: &str,
 ) -> Response<BoxBody> {
     let guide_id = format!("guide-{}", uuid::Uuid::new_v4());
-    let outcome = crate::im_gateway::external_cli::request_worker_session_guide(
+    let outcome = crate::im_gateway::external_cli::request_managed_session_guide(
         session_key,
         guide_id.clone(),
         message.to_string(),
@@ -1947,25 +1959,29 @@ async fn guide_external_cli_stream_response(
 }
 
 async fn stop_external_cli_stream_response(session_key: &str) -> Response<BoxBody> {
-    let worker_stopped =
-        crate::im_gateway::external_cli::request_worker_session_stop(session_key).await;
-    let stopped = crate::im_gateway::external_cli::request_session_stop(
+    let outcome = crate::im_gateway::external_cli::request_managed_session_stop(
         crate::im_gateway::external_cli::default_runs_root(),
         session_key,
     )
-    .await
-    .is_ok()
-        || worker_stopped;
-    let payload = serde_json::json!({
-        "eventType": "run_finished",
-        "sessionKey": session_key,
-        "response": if stopped {
-            "已请求停止当前 Runner。"
-        } else {
-            "当前没有正在执行的 Runner。"
-        },
-        "stopped": stopped,
-    });
+    .await;
+    let payload = match outcome {
+        Ok(stopped) => serde_json::json!({
+            "eventType": "run_finished",
+            "sessionKey": session_key,
+            "response": if stopped {
+                "已请求停止当前 Runner。"
+            } else {
+                "当前没有正在执行的 Runner。"
+            },
+            "stopped": stopped,
+        }),
+        Err(error) => serde_json::json!({
+            "eventType": "run_failed",
+            "sessionKey": session_key,
+            "error": format!("停止 Runner 失败: {error}"),
+            "stopped": false,
+        }),
+    };
     let stream = tokio_stream::once(Ok::<_, hyper::Error>(hyper::body::Frame::data(
         bytes::Bytes::from(format!("{payload}\n")),
     )));
@@ -1996,6 +2012,7 @@ fn first_message_title_preview(message: &str) -> Option<String> {
 }
 
 async fn clear_chat_gateway_session_response(
+    service: &ImGatewayService,
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     runner_id: &str,
     stream: bool,
@@ -2011,6 +2028,14 @@ async fn clear_chat_gateway_session_response(
             "sessionKey is required to reset Chat Gateway session",
         );
     };
+    // Fence the active turn before waiting for Stop.
+    service.queue_manager.clear_session(session_key);
+    if let Err(error) = request_agent_stop(&service.agent_session_manager, session_key).await {
+        return agent_stop_error_response("reset", &error);
+    }
+    service.agent_session_manager.clear_session(session_key);
+    // Drop messages that arrived while Stop was in flight.
+    service.queue_manager.clear_session(session_key);
     if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
         crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
     }
@@ -3239,8 +3264,9 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
 
-    async fn spawn_chat_gateway_test_server(
+    pub(super) async fn spawn_chat_gateway_test_server(
         service: crate::SharedImGatewayService,
+        rest: &'static str,
     ) -> (String, tokio::task::JoinHandle<()>) {
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
@@ -3261,7 +3287,7 @@ mod tests {
                         let service = Arc::clone(&service);
                         async move {
                             Ok::<_, hyper::Error>(
-                                handle_chat_gateway(request, &service, "/stream").await,
+                                handle_chat_gateway(request, &service, rest).await,
                             )
                         }
                     });
@@ -3483,7 +3509,8 @@ mod tests {
             )
             .await
             .expect("seed bound progress card");
-        let (base_url, gateway) = spawn_chat_gateway_test_server(Arc::clone(&service)).await;
+        let (base_url, gateway) =
+            spawn_chat_gateway_test_server(Arc::clone(&service), "/stream").await;
 
         let response = reqwest::Client::builder()
             .no_proxy()
@@ -3544,7 +3571,8 @@ mod tests {
             )
             .await
             .expect("seed bound progress card");
-        let (base_url, gateway) = spawn_chat_gateway_test_server(Arc::clone(&service)).await;
+        let (base_url, gateway) =
+            spawn_chat_gateway_test_server(Arc::clone(&service), "/stream").await;
 
         let response = reqwest::Client::builder()
             .no_proxy()
@@ -5440,6 +5468,91 @@ mod coverage_boost {
         assert!(!is_clear_session_command("/clear now"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn clear_chat_gateway_session_fences_queue_before_and_after_stop() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let mut request = sample_run_request();
+        request.session_key = Some("clear-generation".to_string());
+        request.message = "/clear".to_string();
+        service
+            .queue_manager
+            .push_queue("clear-generation", "must be cleared".to_string())
+            .unwrap();
+        let generation = service.queue_manager.session_generation("clear-generation");
+
+        let response =
+            clear_chat_gateway_session_response(&service, &request, "mock-runner", false).await;
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect clear response")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["success"], true);
+        assert!(service
+            .queue_manager
+            .queue_status("clear-generation")
+            .is_empty());
+        assert_eq!(
+            service.queue_manager.session_generation("clear-generation"),
+            generation.wrapping_add(2)
+        );
+
+        request.session_key = Some("clear-generation-stream".to_string());
+        let response =
+            clear_chat_gateway_session_response(&service, &request, "mock-runner", true).await;
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect streaming clear response")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["eventType"], "run_finished");
+        assert_eq!(payload["status"], "cleared");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clear_chat_gateway_http_routes_wait_for_stop_before_replying() {
+        for (rest, expected) in [
+            ("/stream", "\"status\":\"cleared\""),
+            ("", "\"success\":true"),
+        ] {
+            let harness = TestAdminState::builder().build();
+            let service = harness.im_gateway_service();
+            let session_key = format!("http-clear-{}", uuid::Uuid::new_v4());
+            service
+                .queue_manager
+                .push_queue(&session_key, "must be fenced".to_string())
+                .unwrap();
+            let (base_url, gateway) =
+                super::tests::spawn_chat_gateway_test_server(Arc::clone(&service), rest).await;
+
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build local test client")
+                .post(base_url)
+                .json(&serde_json::json!({
+                    "message": "/clear",
+                    "runnerId": crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID,
+                    "sessionKey": session_key,
+                    "runtime": "external_cli"
+                }))
+                .send()
+                .await
+                .expect("send clear request");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.text().await.expect("clear response body");
+            assert!(body.contains(expected), "unexpected clear response: {body}");
+            assert!(service.queue_manager.queue_status(&session_key).is_empty());
+            gateway.abort();
+        }
+    }
+
     #[test]
     fn first_message_title_preview_trims_and_truncates() {
         assert!(first_message_title_preview("   ").is_none());
@@ -5957,6 +6070,89 @@ mod coverage_boost {
         assert!(payload["reason"]
             .as_str()
             .is_some_and(|reason| reason.contains("no active external runner")));
+    }
+
+    async fn stop_stream_payload(session_key: &str) -> serde_json::Value {
+        let response = stop_external_cli_stream_response(session_key).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect stop response")
+            .to_bytes();
+        serde_json::from_slice(&body).expect("stop response json")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_stream_reports_active_inactive_and_invalid_sessions() {
+        let missing = format!("missing-web-stop-{}", uuid::Uuid::new_v4());
+        let payload = stop_stream_payload(&missing).await;
+        assert_eq!(payload["eventType"], "run_finished");
+        assert_eq!(payload["stopped"], false);
+        assert_eq!(payload["response"], "当前没有正在执行的 Runner。");
+
+        let temp_dir = tempfile::tempdir().expect("temp runs root");
+        let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp_dir.path());
+        let runs_root = crate::im_gateway::external_cli::default_runs_root();
+        let session_key = format!("active-web-stop-{}", uuid::Uuid::new_v4());
+        let (executable, args) =
+            crate::handlers::im_gateway::tests::fake_external_runner_sleep_command();
+        let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            images: Vec::new(),
+            files: Vec::new(),
+            message: "wait until stopped".to_string(),
+            operation: "ask".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: Some("web-stop-test".to_string()),
+            runner_id: Some("web".to_string()),
+            session_key: Some(session_key.clone()),
+            runtime: "external_cli".to_string(),
+            adapter: "mock".to_string(),
+            work_dir: None,
+            instructions: None,
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                executable: Some(executable),
+                args,
+                timeout_secs: Some(20),
+                ..Default::default()
+            },
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+        let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(&runs_root);
+        let mut run =
+            tokio::spawn(async move { runtime.run(request).await.expect("runner result") });
+
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if run.is_finished() {
+                    panic!("runner finished before stop: {:?}", (&mut run).await);
+                }
+                let payload = stop_stream_payload(&session_key).await;
+                if payload["stopped"] == true {
+                    break payload;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("active runner should accept stop");
+        assert_eq!(payload["eventType"], "run_finished");
+        assert_eq!(payload["response"], "已请求停止当前 Runner。");
+        assert_eq!(
+            run.await.expect("join runner").status,
+            crate::im_gateway::external_cli::ExternalCliRunStatus::Stopped
+        );
+
+        let payload = stop_stream_payload("").await;
+        assert_eq!(payload["eventType"], "run_failed");
+        assert_eq!(payload["stopped"], false);
+        assert!(payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("session_key cannot be empty")));
     }
 
     #[test]

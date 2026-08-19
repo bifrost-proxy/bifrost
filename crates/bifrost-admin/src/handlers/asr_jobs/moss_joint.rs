@@ -32,12 +32,15 @@ const MOSS_CONTEXT_MARGIN_TOKENS: u64 = 2_048;
 const MOSS_AUDIO_TOKENS_PER_SECOND: u64 = 13;
 const MOSS_OUTPUT_TOKENS_PER_SECOND: u64 = 20;
 const MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND: u64 = 30;
+const MOSS_AUTO_RESCUE_SEGMENT_SECONDS: u64 = 600;
 const MOSS_RESCUE_SEGMENT_SECONDS: [u64; 3] = [60, 300, 600];
 const MOSS_RESCUE_FALLBACK_SEGMENT_SECONDS: [u64; 3] = [60, 30, 10];
 const MOSS_RESCUE_MAX_GAP_MS: u64 = 60_000;
 const MOSS_MIN_OUTPUT_TOKENS: u64 = 5_120;
 const MOSS_MAX_WHOLE_FILE_SECONDS: u64 = 3_300;
 const MOSS_MAX_RUNTIME_RTF: f64 = 0.5;
+const MOSS_AUTO_TOKEN_RESCUE_MAX_RUNTIME_RTF: f64 = 1.0;
+const MOSS_AUTO_SEGMENTED_RESCUE_MAX_RUNTIME_RTF: f64 = 1.5;
 const MOSS_RESCUE_RUNTIME_RTFS: [f64; 3] = [1.0, 2.0, 3.0];
 const MOSS_MIN_AUDIO_DURATION_MS: u64 = 10_000;
 const MOSS_RUNTIME_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,6 +50,53 @@ const MOSS_RESOURCE_DOWNLOAD_RETRY_DELAY_MS: u64 = 500;
 static MOSS_INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static MOSS_INIT_STATE: Lazy<StdMutex<MossInitializationState>> =
     Lazy::new(|| StdMutex::new(MossInitializationState::default()));
+
+#[derive(Debug, Clone, Copy)]
+struct MossExecutionProfile {
+    max_runtime_rtf: f64,
+    output_tokens_per_second: u64,
+    segment_seconds: Option<u64>,
+    allow_gap_markers: bool,
+}
+
+impl MossExecutionProfile {
+    fn from_env() -> Self {
+        Self {
+            max_runtime_rtf: moss_max_runtime_rtf_from_env(),
+            output_tokens_per_second: moss_output_tokens_per_second_from_env(),
+            segment_seconds: moss_segment_seconds_from_env(),
+            allow_gap_markers: moss_allow_gap_markers_from_env(),
+        }
+    }
+
+    fn automatic_token_rescue(self) -> Self {
+        Self {
+            max_runtime_rtf: self
+                .max_runtime_rtf
+                .max(MOSS_AUTO_TOKEN_RESCUE_MAX_RUNTIME_RTF),
+            output_tokens_per_second: MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND,
+            segment_seconds: None,
+            ..self
+        }
+    }
+
+    fn automatic_segmented_rescue(self) -> Self {
+        Self {
+            max_runtime_rtf: self
+                .max_runtime_rtf
+                .max(MOSS_AUTO_SEGMENTED_RESCUE_MAX_RUNTIME_RTF),
+            output_tokens_per_second: MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND,
+            segment_seconds: Some(MOSS_AUTO_RESCUE_SEGMENT_SECONDS),
+            ..self
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MossAutomaticRescueResult {
+    transcription: crate::handlers::asr_streaming::WholeFileTranscription,
+    fallback_reason: Option<String>,
+}
 
 #[derive(Debug, Clone, Default)]
 struct MossInitializationState {
@@ -556,7 +606,15 @@ fn moss_model_spec() -> MossModelSpec {
     }
 }
 
+#[cfg(test)]
 fn moss_output_token_budget(duration_ms: u64) -> Result<u32, String> {
+    moss_output_token_budget_for(duration_ms, moss_output_tokens_per_second_from_env())
+}
+
+fn moss_output_token_budget_for(
+    duration_ms: u64,
+    output_tokens_per_second: u64,
+) -> Result<u32, String> {
     let duration_seconds = duration_ms.div_ceil(1_000).max(1);
     if duration_seconds > MOSS_MAX_WHOLE_FILE_SECONDS {
         return Err(moss_fixed_non_retryable_runtime_error(&format!(
@@ -565,7 +623,6 @@ fn moss_output_token_budget(duration_ms: u64) -> Result<u32, String> {
             duration_seconds.div_ceil(60)
         )));
     }
-    let output_tokens_per_second = moss_output_tokens_per_second_from_env();
     let wanted = duration_seconds
         .saturating_mul(output_tokens_per_second)
         .max(MOSS_MIN_OUTPUT_TOKENS);
@@ -599,11 +656,11 @@ fn validate_moss_audio_input(wav: &Path, duration_ms: u64) -> Result<(), String>
     }
 }
 
-fn moss_remaining_runtime_budget(
+fn moss_remaining_runtime_budget_for(
     duration_ms: u64,
     file_started_at_ms: Option<u64>,
+    max_runtime_rtf: f64,
 ) -> Result<Duration, String> {
-    let max_runtime_rtf = moss_max_runtime_rtf_from_env();
     let limit_ms = ((duration_ms as f64) * max_runtime_rtf).floor() as u64;
     let elapsed_ms = file_started_at_ms
         .map(|started_at_ms| now_ms().saturating_sub(started_at_ms))
@@ -732,6 +789,10 @@ fn moss_runtime_error_is_deterministic(error: &str) -> bool {
         || error.contains("degenerate repetitive transcription")
         || error.contains("no positive-duration speaker-aware segments")
         || error.contains("max-new token limit before completion")
+}
+
+fn moss_runtime_error_is_token_limit(error: &str) -> bool {
+    error.contains("max-new token limit before completion")
 }
 
 fn moss_failure_is_non_retryable_for_unchanged_source(
@@ -1800,6 +1861,7 @@ fn parse_moss_json(
     })
 }
 
+#[cfg(test)]
 async fn run_moss_joint_transcription(
     runtime: &MossRuntimePaths,
     wav: &Path,
@@ -1808,12 +1870,38 @@ async fn run_moss_joint_transcription(
     pause_check: Option<&PauseCheckCallback<'_>>,
     file_started_at_ms: Option<u64>,
 ) -> Result<crate::handlers::asr_streaming::WholeFileTranscription, String> {
+    run_moss_joint_transcription_with_profile(
+        runtime,
+        wav,
+        duration_ms,
+        prompt,
+        pause_check,
+        file_started_at_ms,
+        MossExecutionProfile::from_env(),
+    )
+    .await
+}
+
+async fn run_moss_joint_transcription_with_profile(
+    runtime: &MossRuntimePaths,
+    wav: &Path,
+    duration_ms: u64,
+    prompt: &str,
+    pause_check: Option<&PauseCheckCallback<'_>>,
+    file_started_at_ms: Option<u64>,
+    profile: MossExecutionProfile,
+) -> Result<crate::handlers::asr_streaming::WholeFileTranscription, String> {
     if prompt.chars().count() > MOSS_MAX_PROMPT_CHARS {
         return Err(format!("MOSS prompt exceeds {MOSS_MAX_PROMPT_CHARS} characters"));
     }
-    let max_new = moss_output_token_budget(duration_ms)?;
+    let max_new =
+        moss_output_token_budget_for(duration_ms, profile.output_tokens_per_second)?;
     let budget_started = Instant::now();
-    let max_runtime = moss_remaining_runtime_budget(duration_ms, file_started_at_ms)?;
+    let max_runtime = moss_remaining_runtime_budget_for(
+        duration_ms,
+        file_started_at_ms,
+        profile.max_runtime_rtf,
+    )?;
     let prompt_file = if prompt.is_empty() {
         None
     } else {
@@ -1869,24 +1957,39 @@ async fn run_moss_joint_transcription(
                         String::from_utf8_lossy(&output.stderr).trim()
                     );
                     return Err(if moss_runtime_error_is_deterministic(&error) {
-                        moss_non_retryable_runtime_error(&error)
+                        format!(
+                            "{} {error}",
+                            moss_non_retryable_marker_prefix_for(
+                                profile.max_runtime_rtf,
+                                profile.output_tokens_per_second,
+                                profile.segment_seconds,
+                                profile.allow_gap_markers,
+                            )
+                        )
                     } else {
                         error
                     });
                 }
                 return parse_moss_json(&output.stdout, duration_ms).map_err(|error| {
                     if moss_runtime_error_is_deterministic(&error) {
-                        moss_non_retryable_runtime_error(&error)
+                        format!(
+                            "{} {error}",
+                            moss_non_retryable_marker_prefix_for(
+                                profile.max_runtime_rtf,
+                                profile.output_tokens_per_second,
+                                profile.segment_seconds,
+                                profile.allow_gap_markers,
+                            )
+                        )
                     } else {
                         error
                     }
                 });
             }
             _ = &mut deadline => {
-                let max_runtime_rtf = moss_max_runtime_rtf_from_env();
                 return Err(format!(
                     "moss_rtf_exceeded: end-to-end processing exceeded {:.1}x audio duration (remaining_limit_ms={}, audio_ms={duration_ms})",
-                    max_runtime_rtf,
+                    profile.max_runtime_rtf,
                     max_runtime.as_millis()
                 ));
             }
@@ -1903,22 +2006,30 @@ async fn run_moss_rescue_interval(
     runtime: &MossRuntimePaths,
     source_wav: &Path,
     interval_wav: &Path,
-    start_ms: u64,
-    end_ms: u64,
+    interval_ms: std::ops::Range<u64>,
     prompt: &str,
     pause_check: Option<&PauseCheckCallback<'_>>,
+    profile: MossExecutionProfile,
 ) -> Result<Option<crate::handlers::asr_streaming::WholeFileTranscription>, String> {
-    ffmpeg_cut_wav_ms(source_wav, interval_wav, start_ms, end_ms, pause_check).await?;
+    ffmpeg_cut_wav_ms(
+        source_wav,
+        interval_wav,
+        interval_ms.start,
+        interval_ms.end,
+        pause_check,
+    )
+    .await?;
     if compute_wav_rms_energy(interval_wav).is_some_and(|rms| rms < SILENCE_RMS_THRESHOLD) {
         return Ok(None);
     }
-    run_moss_joint_transcription(
+    run_moss_joint_transcription_with_profile(
         runtime,
         interval_wav,
-        end_ms.saturating_sub(start_ms),
+        interval_ms.end.saturating_sub(interval_ms.start),
         prompt,
         pause_check,
         None,
+        profile,
     )
     .await
     .map(Some)
@@ -1930,6 +2041,9 @@ fn append_offset_moss_segments(
     offset_ms: u64,
 ) {
     output.extend(result.structured.segments.into_iter().map(|mut segment| {
+        if let Some(speaker) = segment.speaker.as_mut() {
+            *speaker = format!("clip_{offset_ms:010}_{speaker}");
+        }
         segment.start_ms = segment.start_ms.saturating_add(offset_ms);
         segment.end_ms = segment.end_ms.saturating_add(offset_ms);
         segment
@@ -1944,15 +2058,37 @@ async fn run_segmented_moss_joint_transcription(
     pause_check: Option<&PauseCheckCallback<'_>>,
     segment_seconds: u64,
 ) -> Result<crate::handlers::asr_streaming::WholeFileTranscription, String> {
+    run_segmented_moss_joint_transcription_with_profile(
+        runtime,
+        wav,
+        duration_ms,
+        prompt,
+        pause_check,
+        segment_seconds,
+        MossExecutionProfile::from_env(),
+    )
+    .await
+}
+
+async fn run_segmented_moss_joint_transcription_with_profile(
+    runtime: &MossRuntimePaths,
+    wav: &Path,
+    duration_ms: u64,
+    prompt: &str,
+    pause_check: Option<&PauseCheckCallback<'_>>,
+    segment_seconds: u64,
+    profile: MossExecutionProfile,
+) -> Result<crate::handlers::asr_streaming::WholeFileTranscription, String> {
     let segment_ms = segment_seconds.saturating_mul(1_000);
     if segment_ms == 0 || duration_ms <= segment_ms {
-        return run_moss_joint_transcription(
+        return run_moss_joint_transcription_with_profile(
             runtime,
             wav,
             duration_ms,
             prompt,
             pause_check,
             None,
+            profile,
         )
         .await;
     }
@@ -1982,10 +2118,10 @@ async fn run_segmented_moss_joint_transcription(
             runtime,
             wav,
             &segment_wav,
-            segment_start_ms,
-            segment_end_ms,
+            segment_start_ms..segment_end_ms,
             prompt,
             pause_check,
+            profile,
         )
         .await;
 
@@ -2006,7 +2142,7 @@ async fn run_segmented_moss_joint_transcription(
                                 .saturating_add(MOSS_MIN_AUDIO_DURATION_MS)
                     });
                 let Some(next_seconds) = next_seconds else {
-                    if moss_allow_gap_markers_from_env()
+                    if profile.allow_gap_markers
                         && unresolved_gap_ms.saturating_add(interval_duration_ms)
                             <= MOSS_RESCUE_MAX_GAP_MS
                     {
@@ -2086,4 +2222,120 @@ async fn run_segmented_moss_joint_transcription(
             usage: None,
         },
     })
+}
+
+async fn run_moss_joint_transcription_with_auto_rescue(
+    runtime: &MossRuntimePaths,
+    wav: &Path,
+    duration_ms: u64,
+    prompt: &str,
+    pause_check: Option<&PauseCheckCallback<'_>>,
+    file_started_at_ms: Option<u64>,
+) -> Result<MossAutomaticRescueResult, String> {
+    let initial_profile = MossExecutionProfile::from_env();
+    let file_started_at_ms = file_started_at_ms.or_else(|| Some(now_ms()));
+    match run_moss_joint_transcription_with_profile(
+        runtime,
+        wav,
+        duration_ms,
+        prompt,
+        pause_check,
+        file_started_at_ms,
+        initial_profile,
+    )
+    .await
+    {
+        Ok(transcription) => Ok(MossAutomaticRescueResult {
+            transcription,
+            fallback_reason: None,
+        }),
+        Err(error) if moss_runtime_error_is_token_limit(&error) => {
+            tracing::warn!(
+                duration_ms,
+                output_tokens_per_second = initial_profile.output_tokens_per_second,
+                "MOSS whole-file transcription reached the output token limit; starting automatic rescue"
+            );
+            let rescue_profile = initial_profile.automatic_token_rescue();
+            let token_rescue = if initial_profile.output_tokens_per_second
+                == MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND
+            {
+                Err(error)
+            } else {
+                run_moss_joint_transcription_with_profile(
+                    runtime,
+                    wav,
+                    duration_ms,
+                    prompt,
+                    pause_check,
+                    file_started_at_ms,
+                    rescue_profile,
+                )
+                .await
+            };
+            match token_rescue {
+                Ok(transcription) => Ok(MossAutomaticRescueResult {
+                    transcription,
+                    fallback_reason: Some(
+                        "moss_auto_rescue:max_token->whole_tps30".to_string(),
+                    ),
+                }),
+                Err(rescue_error) if moss_runtime_error_is_deterministic(&rescue_error) => {
+                    tracing::warn!(
+                        duration_ms,
+                        error = %rescue_error,
+                        segment_seconds = MOSS_AUTO_RESCUE_SEGMENT_SECONDS,
+                        "MOSS expanded-token whole-file rescue failed deterministically; starting segmented rescue"
+                    );
+                    let segmented_profile = initial_profile.automatic_segmented_rescue();
+                    let segmented_budget = moss_remaining_runtime_budget_for(
+                        duration_ms,
+                        file_started_at_ms,
+                        segmented_profile.max_runtime_rtf,
+                    )?;
+                    let segmented = run_segmented_moss_joint_transcription_with_profile(
+                            runtime,
+                            wav,
+                            duration_ms,
+                            prompt,
+                            pause_check,
+                            MOSS_AUTO_RESCUE_SEGMENT_SECONDS,
+                            segmented_profile,
+                        );
+                    let transcription = tokio::time::timeout(segmented_budget, segmented)
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "moss_rtf_exceeded: automatic rescue exceeded {:.1}x audio duration (remaining_limit_ms={}, audio_ms={duration_ms})",
+                            segmented_profile.max_runtime_rtf,
+                            segmented_budget.as_millis(),
+                        )
+                    })?
+                    .map_err(|error| {
+                        if moss_runtime_error_is_deterministic(&error) {
+                            format!(
+                                "{} {error}",
+                                moss_non_retryable_marker_prefix_for(
+                                    segmented_profile.max_runtime_rtf,
+                                    segmented_profile.output_tokens_per_second,
+                                    segmented_profile.segment_seconds,
+                                    segmented_profile.allow_gap_markers,
+                                )
+                            )
+                        } else {
+                            error
+                        }
+                    })?;
+                    Ok(MossAutomaticRescueResult {
+                        transcription,
+                        fallback_reason: Some(
+                            "moss_auto_rescue:max_token->whole_tps30->segment_600_adaptive_60_30_10;segment_scoped_speakers"
+                                .to_string(),
+                        ),
+                    })
+                }
+                Err(rescue_error) => Err(rescue_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }

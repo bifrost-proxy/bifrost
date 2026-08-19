@@ -65,8 +65,19 @@
 
 预期：重定向到 `/ai/runs`，只用 session key 作为摘要搜索词；不再渲染消息详情，旧聊天和会话详情前端代码不再构建。
 
+### TC-AIH-07 隔离 IM Worker 运行态
+
+1. 使用隔离 `BIFROST_DATA_DIR` 启动 Bifrost，并让外部 Codex mock 保持一个长时间运行的任务。
+2. 确认主进程 `/worker-jobs` 中对应 `external_cli.run:codex` Job 为 `queued` 或 `running`。
+3. 在任务仍运行时请求 `/im-gateway/agent/session-summaries`，确认同一 `session_key` 的摘要状态为 `running`，总览 `running_count` 包含该任务。
+4. 确认摘要仍只有 allowlist 字段，不包含消息、工作目录、历史路径或 Worker 诊断信息。
+5. 取消任务并等待 Worker Job 进入终态，再次请求摘要。
+
+预期：即使 Agent Session 位于隔离 IM Worker，AI Runs 仍使用主进程权威 Worker Job 运行态显示任务；任务结束后不再误报 Running，且数据最小化边界不变。
+
 ## 执行记录
 
+- 2026-08-17：新增 TC-AIH-07 后立即执行 `bash e2e-tests/tests/test_auxiliary_worker_isolation.sh`，输出 `[auxiliary-worker-isolation] CORE PASS`。隔离服务中的长运行 Codex Job 在 `/worker-jobs` 为 active 时，同一 `session_key` 的 `/im-gateway/agent/session-summaries` 摘要为 `running`、`running_count=1`，且响应只含 8 个 allowlist 字段；取消并等待 Job 进入 `cancelled` 后，摘要不再为 Running、`running_count=0`。测试使用动态端口和临时 `BIFROST_DATA_DIR`，未触碰本机 9900 服务。
 - 2026-08-14：使用隔离 Vite 前端与 Playwright Chromium 执行 `node_modules/.bin/playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，TC-AIH-01 至 TC-AIH-06 全部通过（`6 passed`）。首次执行为 `5 passed / 1 failed`，失败原因是测试点击 Ant Select 占位文字时被 combobox 输入层拦截；改用可交互 Select 容器和可见下拉层后，专项复测 `1 passed`，完整复测 `6 passed (25.0s)`。网络断言确认页面未请求 `/sessions/all`、`/sessions/history` 或单线程详情。
 - 2026-08-14：根据体验反馈补充默认英文 UI 与详情宽度对齐；自动用例新增英文文案、1120px 同宽和水平居中断言，最终完整复测 `6 passed (53.2s)`。
 - 2026-08-14：删除旧聊天工作台、线程/消息渲染、会话列表与会话详情前端代码后，复查源码无残余引用；Agent Configuration 自动断言仅保留 General、Skills、Runners。再次执行完整 AI Hub Playwright，结果 `6 passed (20.9s)`。

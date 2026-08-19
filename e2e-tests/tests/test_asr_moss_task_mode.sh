@@ -30,9 +30,25 @@ stop_admin() {
 
 cleanup() {
   stop_admin
-  rm -rf "$DATA_DIR"
+  remove_test_dir "$DATA_DIR"
 }
 trap cleanup EXIT
+
+remove_test_dir() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 0
+
+  # macOS may briefly recreate task state while the stopped admin's workers exit.
+  # Cleanup must not turn otherwise-passing API assertions into a test failure.
+  for _ in $(seq 1 5); do
+    rm -rf "$dir" 2>/dev/null && return 0
+    [[ -e "$dir" ]] || return 0
+    sleep 0.2
+  done
+
+  echo "WARN: failed to remove temporary test directory: $dir" >&2
+  return 0
+}
 
 if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
   BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/debug/bifrost}"
