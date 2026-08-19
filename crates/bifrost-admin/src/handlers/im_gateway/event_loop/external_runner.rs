@@ -3042,6 +3042,7 @@ pub(in crate::handlers::im_gateway) fn external_cli_progress_runner_summary(
         let request_model = resolved_model_config.model.as_deref().map(str::trim);
         let session_model = state.model_override.as_deref().map(str::trim);
         if session_model.is_some() && session_model == request_model {
+            resolved_model_config.model_provider = None;
             resolved_model_config.model_source = state
                 .model_override_source
                 .or_else(|| Some("session slash command".to_string()));
