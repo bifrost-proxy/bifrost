@@ -1778,6 +1778,34 @@
 4. IM Gateway 隔离 worker 通过 capability broker 把 ModelUpdate 精确路由到主进程持有的 active worker，缺失或已替代 session 不误投递。
 5. `exec` transport 明确提示运行中 Runner 未确认热切换，但已保存 override；下一轮使用新模型配置，且不会虚报运行中已切换成功。
 
+### TC-IEC-76: IM progress card 展示 thread 有效模型
+
+前置条件：
+
+1. 使用隔离数据目录、mock 飞书 OpenAPI 和 mock Codex app-server；Runner 默认模型设置为 `gpt-runner-default`。
+2. mock app-server 保持同一个 thread/turn 运行，并接受 `/model gpt-live-unit` 与 `/model clear` 的 `thread/settings/update`。
+
+操作步骤：
+
+1. 以 `deliveryMode=progress_card` 触发一条普通 IM 消息，确认 progress card 初始模型来自本次 run 的有效配置。
+2. 在同一个运行中 session 发送 `/model gpt-live-unit`，等待原生 ACK，并检查 CardKit 更新 payload。
+3. 在 Runner 继续发送状态、usage 或终态事件后再次检查卡片，确认模型没有回退到 `gpt-runner-default`。
+4. 发送 `/model clear`，等待原生 ACK，并检查卡片恢复为 Codex 默认模型。
+5. 执行：
+   ```bash
+   cargo test -p bifrost-admin --lib live_session_model -- --nocapture
+   cargo test -p bifrost-admin --lib external_cli_progress_runner_summary_uses_session_effort_override -- --nocapture
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_live_model_switch.sh
+   ```
+
+预期结果：
+
+1. session model override 的卡片来源不再显示为 `runner 配置`，而是保留 session 级来源。
+2. 只有 Runner 原生 ACK 成功后，当前 progress card 才切换模型；ACK 拒绝不会把下轮 override 冒充为当前 thread 模型。
+3. 后续 token、额度、状态和终态刷新继续更新其他 Runner 字段，但不会覆盖当前 thread 的动态模型。
+4. `/model clear` ACK 成功后，当前卡片展示 Codex 默认模型，而不是启动时或 Runner 配置中的旧模型。
+
 ## 最近执行记录
 
 - 2026-08-19：PASS — 复跑 TC-IEC-75。先以 `RUST_TEST_THREADS=1 make coverage-changed` 完成包含 live model channel、IM broker、Codex/Traex app-server 与 Claude Code stream-json 的完整 Rust 回归，再使用当前源码构建的二进制执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_live_model_switch.sh`，输出 `[im-live-model] PASS`。隔离 Service + mock 飞书入站在同一个运行中 Codex turn 依次发送 `/model gpt-live-unit` 与 `/model clear`，mock app-server 收到同一 `threadId` 的 model 字符串和 `null` 更新；当前 turn 正常结束、session override 最终清除。脚本使用动态端口和临时数据目录，未连接真实飞书、未触碰正式 `9900` 服务，并通过 trap 清理测试进程。

@@ -3027,10 +3027,36 @@ pub(in crate::handlers::im_gateway) fn external_cli_progress_runner_summary(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     metadata: Option<&std::collections::BTreeMap<String, String>>,
 ) -> crate::im_gateway::progress_card::ProgressRunnerSummary {
-    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
-        &request.adapter,
-        &request.adapter_config,
-    );
+    let mut resolved_model_config =
+        crate::im_gateway::external_cli::resolve_external_cli_model_config(
+            &request.adapter,
+            &request.adapter_config,
+        );
+    if let Some(state) = request.session_key.as_deref().and_then(|session_key| {
+        crate::im_gateway::session_state::load_session_state(
+            session_key,
+            &request.adapter,
+            Some(runner_id),
+        )
+    }) {
+        let request_model = resolved_model_config.model.as_deref().map(str::trim);
+        let session_model = state.model_override.as_deref().map(str::trim);
+        if session_model.is_some() && session_model == request_model {
+            resolved_model_config.model_source = state
+                .model_override_source
+                .or_else(|| Some("session slash command".to_string()));
+        }
+        let request_effort = resolved_model_config
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim);
+        let session_effort = state.reasoning_effort_override.as_deref().map(str::trim);
+        if session_effort.is_some() && session_effort == request_effort {
+            resolved_model_config.reasoning_source = state
+                .reasoning_effort_override_source
+                .or_else(|| Some("session slash command".to_string()));
+        }
+    }
     let configured_model = resolved_model_config
         .model
         .as_deref()

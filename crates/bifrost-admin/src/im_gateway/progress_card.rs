@@ -149,6 +149,33 @@ impl ImAgentProgressSnapshot {
         self.card_updated_at_ms = now_ms.max(self.card_started_at_ms);
     }
 
+    fn update_runner_summary(&mut self, mut runner: ProgressRunnerSummary) {
+        if let Some(current) = self.runner.as_ref() {
+            let same_runner =
+                current.runner_id == runner.runner_id && current.adapter == runner.adapter;
+            let same_thread = current.external_thread_id == runner.external_thread_id
+                || current.external_thread_id.is_none()
+                || runner.external_thread_id.is_none();
+            let has_live_session_model =
+                current.model_source.as_deref() == Some("session slash command");
+            let incoming_is_static =
+                runner.model_source.as_deref() != Some("session slash command");
+            if same_runner && same_thread && has_live_session_model && incoming_is_static {
+                runner.model = current.model.clone();
+                runner.model_source = current.model_source.clone();
+            }
+        }
+        self.runner = Some(runner);
+    }
+
+    fn update_runner_model(&mut self, model: Option<String>, source: Option<String>) {
+        let Some(runner) = self.runner.as_mut() else {
+            return;
+        };
+        runner.model = model;
+        runner.model_source = source;
+    }
+
     pub fn apply_event(&mut self, event: AgentTurnProgressEvent) {
         match event {
             AgentTurnProgressEvent::Status(status) => {
@@ -895,7 +922,19 @@ impl FeishuProgressCardSession {
         &mut self,
         runner: ProgressRunnerSummary,
     ) -> Result<()> {
-        self.snapshot.runner = Some(runner);
+        self.snapshot.update_runner_summary(runner);
+        self.flush_snapshot_with_limit_rollover(
+            "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
+        )
+        .await
+    }
+
+    pub async fn update_runner_model_and_flush(
+        &mut self,
+        model: Option<String>,
+        source: Option<String>,
+    ) -> Result<()> {
+        self.snapshot.update_runner_model(model, source);
         self.flush_snapshot_with_limit_rollover(
             "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
         )
@@ -1925,6 +1964,37 @@ impl ImAgentProgressRegistry {
                     session_key = session_key,
                     error = %error,
                     "failed to update IM progress card runner summary"
+                );
+                false
+            }
+        }
+    }
+
+    pub async fn update_runner_model(
+        &self,
+        session_key: &str,
+        model: Option<String>,
+        source: Option<String>,
+    ) -> bool {
+        if self.weixin_sessions.contains_key(session_key) {
+            return true;
+        }
+        let Some(session) = self.sessions.get(session_key) else {
+            return false;
+        };
+        let session = Arc::clone(session.value());
+        let result = session
+            .lock()
+            .await
+            .update_runner_model_and_flush(model, source)
+            .await;
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(
+                    session_key = session_key,
+                    error = %error,
+                    "failed to update IM progress card runner model"
                 );
                 false
             }

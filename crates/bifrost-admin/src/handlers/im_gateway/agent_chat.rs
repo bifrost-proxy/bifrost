@@ -359,6 +359,7 @@ pub(super) async fn handle_im_new_group_command(
             group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
+            progress_registry: None,
             active_session: false,
         },
     )
@@ -378,6 +379,7 @@ pub(super) async fn handle_im_new_group_command(
             group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
+            progress_registry: None,
             active_session: false,
         },
     )
@@ -397,6 +399,7 @@ pub(super) async fn handle_im_new_group_command(
             group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
+            progress_registry: None,
             active_session: false,
         },
     )
@@ -416,6 +419,7 @@ pub(super) async fn handle_im_new_group_command(
             group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
+            progress_registry: None,
             active_session: false,
         },
     )
@@ -1162,6 +1166,7 @@ pub(super) fn inbound_message_preview(
             group_context_store: ctx.group_context_store,
             event,
             message_log_store,
+            progress_registry: Some(ctx.progress_registry.as_ref()),
             active_session: true,
         },
     )
@@ -1193,6 +1198,7 @@ pub(super) fn inbound_message_preview(
             group_context_store: ctx.group_context_store,
             event,
             message_log_store,
+            progress_registry: Some(ctx.progress_registry.as_ref()),
             active_session: true,
         },
     )
@@ -1212,6 +1218,7 @@ pub(super) fn inbound_message_preview(
             group_context_store: ctx.group_context_store,
             event,
             message_log_store,
+            progress_registry: Some(ctx.progress_registry.as_ref()),
             active_session: true,
         },
     )
@@ -1609,6 +1616,7 @@ mod local_resume_tests {
                     group_context_store: &service.group_context_store,
                     event: &event,
                     message_log_store: &service.message_log_store,
+                    progress_registry: None,
                     active_session: false,
                 },
             )

@@ -8,6 +8,7 @@ pub(super) struct ImModelCommandContext<'a> {
     pub(super) group_context_store: &'a Arc<ImGroupContextStore>,
     pub(super) event: &'a ImEvent,
     pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
+    pub(super) progress_registry: Option<&'a ImAgentProgressRegistry>,
     pub(super) active_session: bool,
 }
 
@@ -228,14 +229,23 @@ pub(super) async fn handle_im_model_command(
                 effective.runner_id
             );
             if ctx.active_session {
-                reply.push_str(&format_active_model_update(
-                    session_key,
-                    None,
+                let update_result =
                     crate::im_gateway::external_cli::request_managed_session_model_update(
                         session_key,
                         None,
                     )
-                    .await,
+                    .await;
+                update_progress_card_model_after_ack(
+                    ctx.progress_registry,
+                    session_key,
+                    None,
+                    &update_result,
+                )
+                .await;
+                reply.push_str(&format_active_model_update(
+                    session_key,
+                    None,
+                    update_result,
                 ));
             }
             reply
@@ -272,17 +282,23 @@ pub(super) async fn handle_im_model_command(
                                 &format!("切换模型为 {model}"),
                             );
                             if ctx.active_session {
-                                reply.push_str(
-                                    &format_active_model_update(
-                                        session_key,
-                                        Some(model.clone()),
-                                        crate::im_gateway::external_cli::request_managed_session_model_update(
-                                            session_key,
-                                            Some(model.clone()),
-                                        )
-                                        .await,
-                                    ),
-                                );
+                                let update_result = crate::im_gateway::external_cli::request_managed_session_model_update(
+                                    session_key,
+                                    Some(model.clone()),
+                                )
+                                .await;
+                                update_progress_card_model_after_ack(
+                                    ctx.progress_registry,
+                                    session_key,
+                                    Some(model.clone()),
+                                    &update_result,
+                                )
+                                .await;
+                                reply.push_str(&format_active_model_update(
+                                    session_key,
+                                    Some(model.clone()),
+                                    update_result,
+                                ));
                             }
                             reply
                         }
@@ -304,6 +320,24 @@ pub(super) async fn handle_im_model_command(
     )
     .await;
     true
+}
+
+async fn update_progress_card_model_after_ack(
+    progress_registry: Option<&ImAgentProgressRegistry>,
+    session_key: &str,
+    model: Option<String>,
+    result: &Result<crate::im_gateway::external_cli::ExternalCliModelUpdateResult, String>,
+) {
+    if !result.as_ref().is_ok_and(|result| result.accepted) {
+        return;
+    }
+    let Some(progress_registry) = progress_registry else {
+        return;
+    };
+    let source = Some("session slash command".to_string());
+    let _ = progress_registry
+        .update_runner_model(session_key, model, source)
+        .await;
 }
 
 fn format_active_model_update(

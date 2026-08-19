@@ -232,6 +232,8 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 运行中的 `/model <name>` 与 `/model clear` 先更新同一份 session override，再经 IM worker → 主进程 capability broker → external worker 控制通道更新原生会话。Codex 与 Traex app-server 使用 `thread/settings/update {threadId, model}`；Claude Code stream-json 使用 `control_request {subtype:"set_model", model}`。原生 ACK 只表示新模型对后续响应/轮次生效，不中断或重启已经发出的生成。`/model`、`/models` 查询在运行中同样可用。自定义 `exec` transport 没有原生热切换协议时，override 仍持久化供下一次 run 使用，并向用户明确报告当前 Runner 未确认热切换。
 
+IM progress card 的模型展示以本次 session/thread 的有效模型为准，不把 session override 重新标记为 Runner 配置。运行中模型更新只有在原生 ACK 成功后才刷新当前卡片；后续 token、额度、状态或终态摘要刷新必须保留该 thread 的动态模型，不能再用启动时的 Runner 配置覆盖。原生更新被拒绝时，当前卡片继续展示实际运行模型，已持久化的 override 只在下一次 run 生效。
+
 隔离 external-runner 的 session ownership 由父进程维护：固定大小的 session lock stripe 串行化“停止旧 worker → 启动替代 worker”，避免两个独立进程分别持有 worker-local `ACTIVE_SESSIONS` 后并发覆盖。Stop 使用独立于有界 Guide channel 的优先通道；并发 `/stop` 与 Service shutdown 共享同一次停止过程并各自收到 ACK。worker 收到后写 durable marker，再由 transport 发原生中断；父进程等待 worker 的真实 final event，因此保留真实 run id、artifacts 和终态。所有 worker PID/Stop sender 另有不依赖 session key 的全局注册表，Service shutdown 会在 listener/runtime 拆除前并发停止包括直接 API run 在内的 worker。若 worker/transport 在有界 grace period 内未确认，父进程仅在 PID 仍由同一 Stop channel 所有时执行 hard-kill，避免 PID 复用误伤新进程。worker stdin EOF 同样触发上述清理，但只消费一次，避免 closed channel 空转。
 
 Worker 启动和运行中控制必须分离：生产父进程将受限 request 文件路径、run 根目录和协议版本写入子进程专有环境变量，Worker 启动后从该环境读取请求；stdin 只承载后续 Guide、ModelUpdate、Stop 控制帧。保留 stdin `run` 首帧解析仅用于兼容测试替身，不能作为生产启动依赖。Worker stderr 必须同时写入本地诊断日志并由父端捕获最多 4 KiB 尾部；若 stdout 在 final event 前 EOF，错误包含压缩后的有界 stderr 摘要。Broker 进度事件按帧实时转发，而终态 result 必须清空已实时发送的完整 event 列表，只保留 response、responses、metadata 和 artifacts，避免大任务重复序列化后超过 Broker 16 MiB 单帧限制。
