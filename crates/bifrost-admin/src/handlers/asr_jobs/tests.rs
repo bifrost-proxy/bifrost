@@ -6212,8 +6212,9 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[test]
-    fn parent_directory_worker_result_preserves_paused_state_and_records_failures() {
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn parent_directory_worker_result_preserves_paused_state_and_records_failures() {
         let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
         let _env = EnvGuard::set_data_dir(temp.path());
@@ -6231,7 +6232,8 @@ mod tests {
         finish_parent_directory_worker_run(
             &paused.id,
             Err("worker cancellation acknowledged".to_string()),
-        );
+        )
+        .await;
         let (paused_progress, _) = load_run_progress(&paused.id);
         assert_eq!(
             paused_progress.map(|progress| progress.status),
@@ -6241,7 +6243,8 @@ mod tests {
         finish_parent_directory_worker_run(
             &failed.id,
             Err("worker transport failed".to_string()),
-        );
+        )
+        .await;
         let (failed_progress, _) = load_run_progress(&failed.id);
         assert_eq!(
             failed_progress.map(|progress| progress.status),
@@ -6257,7 +6260,60 @@ mod tests {
                 processed: 1,
                 failed: 0,
                 status: "completed".to_string(),
+                daily_agent_dates: Vec::new(),
             }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn parent_directory_worker_result_queues_daily_agent_dates_in_main_process() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let mut task = test_directory_task("parent-worker-daily-agent", audio_dir);
+        task.daily_agent.enabled = true;
+        let mut agent = AsrDailyAgentItem::daily_report();
+        agent.runner = "mock-parent-handoff".to_string();
+        agent.trigger_policy = AsrDailyAgentTriggerPolicy::AfterAsrRun;
+        task.daily_agent.agents = vec![agent.clone()];
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+        let daily_dir = daily_dir_for_task(&task.id);
+        std::fs::create_dir_all(&daily_dir).unwrap();
+        std::fs::write(daily_dir.join("2026-08-18.md"), "worker transcript").unwrap();
+
+        // Keep the test from starting an external runner. Pending state must be
+        // persisted before the already-running check.
+        DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(task.id.clone());
+        finish_parent_directory_worker_run(
+            &task.id,
+            Ok(crate::worker_runtime::asr::RunDirectoryTaskResult {
+                processed: 1,
+                failed: 0,
+                status: "completed".to_string(),
+                daily_agent_dates: vec!["2026-08-18".to_string()],
+            }),
+        )
+        .await;
+        DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&task.id);
+
+        let processed = load_daily_agent_processed_state(&task.id);
+        assert_eq!(
+            daily_agent_pending_dates(&processed, &agent.id),
+            ["2026-08-18"]
         );
     }
 
@@ -6356,11 +6412,12 @@ mod tests {
         store.files.insert(key, record);
         save_file_store(&task.id, &store).unwrap();
 
-        let (_updated, processed_now, failed_now) =
+        let (_updated, processed_now, failed_now, daily_agent_dates) =
             run_directory_task_for_date(task, None, None).await.unwrap();
 
         assert_eq!(processed_now, 0);
         assert_eq!(failed_now, 0);
+        assert_eq!(daily_agent_dates, ["2026-05-14"]);
         let daily_path = temp
             .path()
             .join("asr/data/text/task-daily-refresh/.daily/2026-05-14.md");

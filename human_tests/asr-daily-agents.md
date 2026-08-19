@@ -348,8 +348,26 @@
 - 当前 task 没有 Daily Agent 运行时，后端接受请求并创建新 run；task 已有 Agent 运行时仍保持 task-level 串行，不启动第二个队列。
 - 后端返回 `already_running` 时，WebUI 显示 warning `Daily Agent run is already in progress`，不得显示已入队或成功提示。
 
+### TC-ADA-22 回归：ASR worker 回收不再中断 Daily Agent，失败日期可持续补偿
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin parent_api_round_trips_results_and_controls_through_isolated_worker --lib -- --nocapture`，确认隔离 worker result 能携带多个 `dailyAgentDates`。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin parent_directory_worker_result_ --lib -- --nocapture`，确认主进程收到 worker result 后先持久化待处理日期，并保持 paused/failed 状态语义。
+3. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_pending_dates_persist_dedupe_and_survive_watermark_advances --lib -- --nocapture`，确认 pending 日期去重且不会被后续 watermark 推进隐藏。
+4. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_entry_failure_continues_and_keeps_failed_date_retryable --lib -- --nocapture`，模拟同批两个日期中一个失败、一个成功。
+5. 使用非正式端口执行 `BIFROST_E2E_PORT=19197 BIFROST_DAILY_AGENT_MOCK_PORT=19198 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh`，验证真实 Admin API、两个默认 Agent、mock Runner、processed records 与 report sync 链路。
+
+预期结果：
+- ASR auxiliary worker 只返回完成日期，不在 worker 进程中启动长时间 Daily Agent 浏览器任务；主进程负责排队，因此 worker 空闲回收不会关闭正在生成报告的浏览器。
+- `daily_agent_processed.json` 按 Agent 保存持久 pending 日期；相同日期不会重复，watermark 前进后仍可见。
+- 成功 Agent/日期在报告校验并持久化后从 pending 移除；失败 Agent/日期仍在 pending 中，供后续 ASR completion 串行补偿。
+- 一轮自动队列对每个日期最多尝试一次，不在 ChatGPT Web 失败时形成无限重试。
+- 首次无作用域自动运行仍遵循 watermark guard，不会补扫全部历史文件。
+- E2E 使用临时数据目录、禁用托盘与自动登录弹窗、禁用系统代理，且不占用正式 `9900` 端口。
+
 ## 执行记录
 
+- 2026-08-19：执行 TC-ADA-22 通过。隔离 worker 协议测试确认 `dailyAgentDates` 可从 ASR worker 返回主进程；父进程 handoff 测试确认完成日期在主进程持久化为 pending，worker 不再启动长时间浏览器任务；pending 测试确认日期去重、watermark 推进不隐藏 backlog、生成期间再次追加转写不会被旧报告误清 pending；ChatGPT Web mock 测试确认失败日期保留而成功日期移除。随后在临时端口 `19197/19198` 两次执行 `e2e-tests/tests/test_asr_daily_agents_api.sh` 均通过，修复后复跑的临时 task 为 `45084575493744b48974442f6661786a`，验证真实 Admin API、两个默认 Agent、mock Runner、processed records 与 report sync。测试未使用正式 `9900` 端口，脚本已清理临时服务和数据目录。
 - 2026-08-05：执行 TC-ADA-21 通过。运行 `pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts --grep "force reruns all or one Agent" --workers=1`，结果 `1 passed`。隔离浏览器依次验证：`Run All Agents` 请求包含 `date=2026-05-14&force=1` 且无 `agent_id`；下拉 `Run daily_report` 请求包含 `date=2026-05-14&agent_id=daily_report&force=1`；mock 后端返回 `already_running` 时页面显示 warning `Daily Agent run is already in progress`。测试 mock 了 mobile device API，并在迟到的连接设备证书弹窗出现时定向关闭，未向正式 9900 服务提交 Daily Agent run。
 - 2026-07-21：执行 TC-ADA-20 回归验证并通过。已新增 `design/asr-daily-agent-failure-isolation.md` 明确 ChatGPT Web per-date 失败隔离边界；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_gate_excludes_known_failed_entries_from_missing_reports --lib -- --nocapture` 通过，确认已知失败日期的 report target 不再触发 missing report gate；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_entry_failure_summary_lists_failed_dates_and_targets --lib -- --nocapture` 通过，确认失败摘要包含日期、目标文件和错误；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout --lib -- --nocapture` 通过，确认默认 timeout 从 2 小时缩短到 1 小时且 ChatGPT Web 内部 timeout 为 3570 秒；执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过，脚本源码哨兵确认 `ASR daily agent entry failed; continuing with remaining entries` 和 `partial_success` 已覆盖，并复跑 ChatGPT Web 共享 profile、DOM final wait、same-conversation wait、失败隔离和 tomorrow_todo 回归单测。
 - 2026-07-01：执行 TC-ADA-18 / TC-ADA-19 回归验证。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract --lib -- --nocapture` 通过，确认 `tomorrow_todo` 接受 `# 明日 To Do List - 2026-06-15`、`## 明天必须完成`、`## 可选推进`、`## 需要确认`，拒绝 `# 2026-06-15 日报`，且 retry prompt 不包含 `今日概览`、`证据与不确定性` 或 `日报正文`。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin recovered_browser_mode_must_match_requested_execution_mode --lib -- --nocapture` 通过，确认 recovered browser 只有实际 headless/headed 与请求模式一致时才可复用，未知模式一律拒绝恢复。随后执行 `BIFROST_E2E_PORT=19197 BIFROST_DAILY_AGENT_MOCK_PORT=19198 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 通过，临时 task 为 `2e9972e09c1f45909a0b73835ea02715`，验证真实 Admin API + Runner 链路仍能生成 `daily_report` 与 `tomorrow_todo` 两个默认 Agent 的 report、processed records 和按 Agent 分目录 report sync；脚本源码哨兵确认 `daily_agent.rs` 包含 `validate_chatgpt_web_tomorrow_todo_response` 与 `上一条回复不是最终明日待办`，`browser.rs` 包含 `orphaned browser mode mismatch`。
