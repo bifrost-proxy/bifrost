@@ -3621,13 +3621,6 @@ fn external_runner_adapter(snapshot: &ImAgentProgressSnapshot) -> String {
 }
 
 fn external_runner_model_label(snapshot: &ImAgentProgressSnapshot) -> String {
-    if let Some(status_model) = snapshot
-        .status
-        .as_ref()
-        .and_then(internal_runner_model_label)
-    {
-        return status_model;
-    }
     let runner = snapshot.runner.as_ref();
     let runner_model = runner
         .and_then(|runner| runner.model.as_deref())
@@ -3637,6 +3630,39 @@ fn external_runner_model_label(snapshot: &ImAgentProgressSnapshot) -> String {
         .and_then(|runner| runner.model_source.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let status = snapshot.status.as_ref();
+    let live_model_matches_status = runner.is_some_and(|runner| {
+        let same_runner = status
+            .and_then(|status| status.runner_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none_or(|value| value == runner.runner_id.trim());
+        let same_adapter = status
+            .and_then(|status| status.runner_type.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none_or(|value| value == runner.adapter.trim());
+        let same_thread = match (
+            status.and_then(|status| status.external_thread_id.as_deref()),
+            runner.external_thread_id.as_deref(),
+        ) {
+            (Some(status_thread), Some(runner_thread)) => {
+                status_thread.trim() == runner_thread.trim()
+            }
+            _ => true,
+        };
+        same_runner && same_adapter && same_thread
+    });
+    let has_live_session_model =
+        runner_source == Some("session slash command") && live_model_matches_status;
+    if let Some(status_model) = snapshot
+        .status
+        .as_ref()
+        .and_then(internal_runner_model_label)
+        .filter(|_| !has_live_session_model)
+    {
+        return status_model;
+    }
     match runner_model {
         Some(model) => match runner_source {
             Some(source) => format!("{}（{}）", truncate_one_line(model, 48), source),
