@@ -177,6 +177,24 @@ completion advances the watermark monotonically. This keeps intended backfill
 possible while preventing a new downstream agent from sweeping the entire
 archive accidentally.
 
+### 6.1 Durable automatic-run compensation
+
+The same processed-state document stores `pending_dates` per agent. An ASR
+completion first persists every automatically selected date before it starts a
+runner. The queue merges these durable dates with watermark-eligible changes,
+sorts them, and attempts each date once per queue invocation.
+
+A date is removed only for the agent whose validated report was persisted. A
+runner failure, process exit, service restart, or a later watermark advance
+therefore cannot hide unfinished work. The next ASR completion reloads and
+serially retries the backlog. Initial unscoped runs still go through the normal
+watermark guard, so compensation does not fan out over untracked history.
+
+ASR runs execute in an auxiliary worker, but Daily Agent browser work belongs
+to the long-lived Admin process. The worker returns completed recording dates
+in its result and never spawns the browser task itself. This keeps the worker's
+five-minute idle reaper from terminating an in-progress report generation.
+
 ### 7. Import completion barrier
 
 External import progress records a `completion_token` computed from the import
@@ -220,6 +238,8 @@ Unit tests cover:
 - question fingerprint reuse and single-child invalidation;
 - report and upstream hash invalidation plus v1 migration;
 - automatic watermark filtering and explicit backfill;
+- durable pending-date deduplication, failure retention, success removal, and
+  parent-process handoff from the isolated ASR worker;
 - import barrier read-back, duplicate consumption, and scheduling failure.
 
 E2E tests run with an isolated data directory, disabled tray, disabled sync

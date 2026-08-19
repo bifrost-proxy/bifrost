@@ -63,6 +63,35 @@ static DAILY_AGENT_RUNNING_TASKS: Lazy<StdMutex<HashSet<String>>> =
 /// read-modify-write races on the task store.
 static DAILY_AGENT_TASK_CONFIG_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 
+/// Serializes read-modify-write updates to daily_agent_processed.json. The
+/// automatic pending queue and successful report persistence share this file.
+static DAILY_AGENT_PROCESSED_STATE_LOCK: Lazy<StdMutex<()>> =
+    Lazy::new(|| StdMutex::new(()));
+
+struct DailyAgentRunningReservation {
+    task_id: String,
+}
+
+impl DailyAgentRunningReservation {
+    fn try_acquire(task_id: &str) -> Option<Self> {
+        let mut running = DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        running.insert(task_id.to_string()).then(|| Self {
+            task_id: task_id.to_string(),
+        })
+    }
+}
+
+impl Drop for DailyAgentRunningReservation {
+    fn drop(&mut self) {
+        DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.task_id);
+    }
+}
+
 fn get_daily_agent_task_lock(task_id: &str) -> Arc<Mutex<()>> {
     let mut locks = DAILY_AGENT_TASK_LOCKS
         .lock()

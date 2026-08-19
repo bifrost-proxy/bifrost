@@ -35,6 +35,8 @@ pub(crate) struct RunDirectoryTaskResult {
     pub processed: usize,
     pub failed: usize,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub daily_agent_dates: Vec<String>,
 }
 
 pub(crate) fn is_asr_worker_process() -> bool {
@@ -244,6 +246,7 @@ async fn handle_worker_frame(
                             processed: result.processed,
                             failed: result.failed,
                             status: result.status,
+                            daily_agent_dates: result.daily_agent_dates,
                         })
                     })
                 }
@@ -339,11 +342,13 @@ mod tests {
             processed: 3,
             failed: 1,
             status: "completed".to_string(),
+            daily_agent_dates: vec!["2026-08-17".to_string()],
         })
         .unwrap();
         let parsed: RunDirectoryTaskResult = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.processed, 3);
         assert_eq!(parsed.failed, 1);
+        assert_eq!(parsed.daily_agent_dates, ["2026-08-17"]);
     }
 
     #[test]
@@ -508,6 +513,9 @@ while IFS= read -r line; do
         *'"taskId":"paused"'*)
           payload='{"processed":1,"failed":0,"status":"paused"}'
           ;;
+        *'"taskId":"daily-dates"'*)
+          payload='{"processed":2,"failed":0,"status":"completed","dailyAgentDates":["2026-08-17","2026-08-18"]}'
+          ;;
         *'"taskId":"invalid-result"'*)
           payload='{"unexpected":true}'
           ;;
@@ -553,6 +561,7 @@ done
                 processed: 2,
                 failed: 0,
                 status: "completed".to_string(),
+                daily_agent_dates: Vec::new(),
             }
         );
 
@@ -560,6 +569,10 @@ done
             .await
             .unwrap();
         assert_eq!(failed.status, "failed");
+        let daily_dates = run_directory_task("daily-dates", None, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(daily_dates.daily_agent_dates, ["2026-08-17", "2026-08-18"]);
         let selected = run_directory_task("selected", None, vec!["selected-key".to_string()])
             .await
             .unwrap();

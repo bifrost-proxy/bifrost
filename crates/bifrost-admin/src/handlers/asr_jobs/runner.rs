@@ -282,7 +282,7 @@ async fn run_directory_task_for_date(
     task: AsrDirectoryTask,
     recording_date: Option<NaiveDate>,
     only_file_keys: Option<HashSet<String>>,
-) -> Result<(AsrDirectoryTask, usize, usize), String> {
+) -> Result<(AsrDirectoryTask, usize, usize, Vec<String>), String> {
     let _guard = ASR_JOB_RUN_LOCK.lock().await;
     let _task_lock = TaskRunFileLock::acquire(&task.id)?;
     start_run_progress(&task.id, "background");
@@ -323,7 +323,7 @@ async fn run_directory_task_for_date(
     });
 
     if pending_scan.pending.is_empty() {
-        refresh_task_daily_summaries(&task)?;
+        let daily_agent_dates = daily_summary_dates(&refresh_task_daily_summaries(&task)?);
         let updated = match update_task_after_run(&task.id, None) {
             Ok(task) => task,
             Err(error) => {
@@ -335,7 +335,7 @@ async fn run_directory_task_for_date(
             }
         };
         spawn_daily_agent_original_files_after_refresh(&updated);
-        return Ok((updated, 0, 0));
+        return Ok((updated, 0, 0, daily_agent_dates));
     }
 
     let resource_decision = crate::handlers::speech::acquire_speech_resource(
@@ -536,9 +536,7 @@ async fn run_directory_task_for_date(
     };
     spawn_daily_agent_original_files_after_refresh(&updated);
     // Hook: trigger Daily Agent if configured
-    maybe_enqueue_daily_agent_after_asr_run(&updated, &daily_agent_dates).await;
-
-    Ok((updated, processed_now, failed_now))
+    Ok((updated, processed_now, failed_now, daily_agent_dates))
 }
 
 fn completed_recording_dates_for_attempted_files(
@@ -554,6 +552,18 @@ fn completed_recording_dates_for_attempted_files(
         })
         .filter_map(file_record_local_date)
         .map(|date| date.format("%Y-%m-%d").to_string())
+        .collect::<Vec<_>>();
+    dates.sort();
+    dates.dedup();
+    dates
+}
+
+fn daily_summary_dates(paths: &[PathBuf]) -> Vec<String> {
+    let mut dates = paths
+        .iter()
+        .filter_map(|path| path.file_stem().and_then(|name| name.to_str()))
+        .filter(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok())
+        .map(str::to_string)
         .collect::<Vec<_>>();
     dates.sort();
     dates.dedup();
@@ -579,6 +589,8 @@ pub(crate) struct AsrWorkerRunOutcome {
     pub processed: usize,
     pub failed: usize,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub daily_agent_dates: Vec<String>,
 }
 
 async fn execute_directory_task_run(
@@ -589,7 +601,10 @@ async fn execute_directory_task_run(
     let only_file_keys = (!file_keys.is_empty()).then(|| file_keys.into_iter().collect());
     let result = run_directory_task_for_date(task.clone(), recording_date, only_file_keys).await;
     let outcome = match &result {
-        Ok((_updated, processed, failed)) => {
+        Ok((updated, processed, failed, daily_agent_dates)) => {
+            if !crate::worker_runtime::asr::is_asr_worker_process() {
+                maybe_enqueue_daily_agent_after_asr_run(updated, daily_agent_dates).await;
+            }
             finish_run_progress(
                 &task.id,
                 "completed",
@@ -607,6 +622,7 @@ async fn execute_directory_task_run(
                 processed: *processed,
                 failed: *failed,
                 status: "completed".to_string(),
+                daily_agent_dates: daily_agent_dates.clone(),
             }
         }
         Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
@@ -625,6 +641,7 @@ async fn execute_directory_task_run(
                 processed: 0,
                 failed: 0,
                 status: "paused".to_string(),
+                daily_agent_dates: Vec::new(),
             }
         }
         Err(error) => {
@@ -638,6 +655,7 @@ async fn execute_directory_task_run(
                 processed: 0,
                 failed: 0,
                 status: "failed".to_string(),
+                daily_agent_dates: Vec::new(),
             }
         }
     };
@@ -702,7 +720,7 @@ fn spawn_directory_task_run_background_with_guard(
                 file_keys,
             )
             .await;
-            finish_parent_directory_worker_run(&task_id, result);
+            finish_parent_directory_worker_run(&task_id, result).await;
             drop(running_guard);
             tracing::debug!(
                 task_id = %task_id,
@@ -722,12 +740,20 @@ fn spawn_directory_task_run_background_with_guard(
     });
 }
 
-fn finish_parent_directory_worker_run(
+async fn finish_parent_directory_worker_run(
     task_id: &str,
     result: Result<crate::worker_runtime::asr::RunDirectoryTaskResult, String>,
 ) {
-    let Err(error) = result else {
-        return;
+    let error = match result {
+        Ok(result) => {
+            if let Some(task) = find_task(task_id) {
+                // An empty ASR result must still wake durable Daily Agent
+                // backlog left by an earlier failed or interrupted run.
+                maybe_enqueue_daily_agent_after_asr_run(&task, &result.daily_agent_dates).await;
+            }
+            return;
+        }
+        Err(error) => error,
     };
     if find_task(task_id).is_some_and(|task| task.paused) {
         finish_run_progress(

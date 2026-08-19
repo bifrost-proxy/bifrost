@@ -15,7 +15,8 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - `AsrDirectoryTask` 携带 `daily_agent: AsrDailyAgentConfig` 字段;`agents: Vec<AsrDailyAgentItem>` 承载多个 Agent 定义;默认双 Agent `daily_report`(输出到 `report/`) 与 `tomorrow_todo`(输出到 `tomorrow_todo/`,绑定 `owner:feishu-main` 发送 full_report)。
 - Workspace 严格布局:`.daily/{.gitignore,.git/,YYYY-MM-DD.md,agents/<agent_id>/{AGENTS.md,input/YYYY-MM-DD.md,output/<output_dir>/YYYY-MM-DD-report.md}}`。Runner cwd 必须是 `.daily/agents/<agent_id>`;`allow_work_dirs` 仅允许 `daily_dir`。
 - Agent 标识约束:`id`/`name`/`output_dir` 仅允许 `[A-Za-z0-9_-]`;不同 Agent 有独立 processed key `<agent_id>:<date>`,避免跨 Agent 覆盖。
-- ASR run terminal 后调用 `maybe_enqueue_daily_agent_after_asr_run(&updated)`;仅当 daily markdown 有增量(new_file/appended/rewritten)时排队;`unchanged` 跳过。
+- ASR worker 在 run terminal 时只返回本轮完成的 `daily_agent_dates`;长生命周期 Admin 主进程收到 worker result 后调用 `maybe_enqueue_daily_agent_after_asr_run`,避免五分钟空闲回收 ASR worker 时连带关闭仍在生成报告的浏览器。仅当 daily markdown 有增量(new_file/appended/rewritten)或存在持久 pending 日期时排队;`unchanged` 跳过。
+- 自动触发选中的日期按 Agent 写入 `daily_agent_processed.json.pending_dates`;只有对应 Agent 的 report 成功落盘后才移除。失败、进程退出或服务重启后的日期继续保留,并在下次 ASR 完成时按日期串行补偿。
 - 并发控制:全局 `DAILY_AGENT_TASK_LOCKS`(per-task) + `DAILY_AGENT_RUNNING_TASKS`(去重) + `DAILY_AGENT_TASK_CONFIG_LOCK`(配置写);同 task 内多 Agent 串行,不并发抢 ChatGPT Web runner。
 - Agent 依赖:`dependencies[{agent_id,include_output}]` 建立稳定 DAG;未知/自/重复/循环依赖保存失败;`dependency_failure_policy=skip|continue` 控制上游失败传播。`include_output=true` 时同日产物挂载到 `input/upstream/<agent_id>/<date>-report.md`,ChatGPT Web 每次消息直接注入正文。
 - ChatGPT Web 大输入必须走剪贴板 + `Meta+V/Ctrl+V` 原生粘贴路径,不再按字符数分片;composer 大文本后 ChatGPT 可能上传为文件,输入框无正文属于正常状态;adapter 只轮询发送按钮可用状态。
@@ -32,6 +33,7 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - ASR 音频转写主链路(转写成功率、chunk retry、daily markdown 生成)不受影响。
 - ASR run terminal 判定、`update_task_after_run` 语义、`repair_interrupted_processing_records_on_startup` 恢复流程不变。
 - 全局 `ASR_JOB_RUN_LOCK`(GPU 单例) 不被 Daily Agent 占用;Daily Agent 只用自身 per-task 锁。
+- 首次启用或新 Agent 的无作用域自动运行仍只处理最新日期,不得因持久 pending 补偿绕过 watermark 并扫过全部历史。
 - 已有 AGENTS.md 与 conversation state 不被覆盖;git 不可用时不阻塞任务创建与 report 生成。
 - Codex / ChatGPT Web / 其他外部 runner 的现有配置(session_key、adapter_config、allow_work_dirs)保留原语义。
 - 旧单 Agent 配置(`agent_id`/`name`/`runner`/`output_dir`/`instructions`)保留为兼容镜像;加载时补齐默认 `tomorrow_todo`。
@@ -140,13 +142,14 @@ ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 da
 
 ### Runner 触发
 
-`maybe_enqueue_daily_agent_after_asr_run(&updated_task)`:
+ASR worker 与 Admin 主进程的触发链路:
 
-1. 若 daily_agent.enabled = false → skip。
-2. 若 `agents` 为空 → 用 legacy 单 Agent 迁移。
-3. 加 `DAILY_AGENT_RUNNING_TASKS`(已存在则 skip)。
-4. 遍历 enabled Agent,对每个 Agent 计算 change plan,若非 unchanged 则加入队列。
-5. spawn task-level queue runner,持 `DAILY_AGENT_TASK_LOCKS[task_id]`,串行执行。
+1. ASR worker 刷新 daily markdown 后,从本轮成功或部分成功的文件提取去重日期,通过 `RunDirectoryTaskResult.daily_agent_dates` 返回主进程;worker 本身不启动 Daily Agent。
+2. 主进程收到 result 后调用 `maybe_enqueue_daily_agent_after_asr_run`;若 daily_agent.enabled = false 或没有 ready 的 after-ASR Agent 则 skip。
+3. 对每个 ready Agent 合并已有 `pending_dates`、watermark 允许的 change plan 与本轮显式完成日期,在短临界区内原子保存。
+4. 若 `DAILY_AGENT_RUNNING_TASKS` 已存在则不再启动第二个队列;已持久化的新增日期由当前 loop 动态读取。
+5. task-level loop 每次读取最早的未尝试 pending 日期,持 `DAILY_AGENT_TASK_LOCKS[task_id]`,串行执行所有相关 Agent。一次 loop 内失败日期不无限重试。
+6. 每个 Agent report 校验并成功落盘后,在同一个 processed-state 临界区写入文档/制品/watermark 并移除该 Agent 的 pending 日期;失败日期保留给后续 ASR completion 补偿。
 
 ### Runner 消息组织
 
