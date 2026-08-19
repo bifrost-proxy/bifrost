@@ -205,6 +205,18 @@ fn run_cli_main() {
 
     let cli = Cli::parse();
 
+    // Auxiliary workers must bind their isolated data directory before the
+    // logger derives its file path. Applying it later would leak worker logs
+    // into the user's default data directory and make isolated test/runtime
+    // profiles rotate unrelated logs.
+    if let Some(Commands::AuxiliaryWorker {
+        data_dir: worker_data_dir,
+        ..
+    }) = cli.command.as_ref()
+    {
+        set_data_dir(worker_data_dir.clone());
+    }
+
     let is_detached_daemon_child = commands::is_detached_daemon_child_process();
     let is_daemon_mode = matches!(&cli.command, Some(Commands::Start { daemon: true, .. }))
         && !is_detached_daemon_child;
@@ -251,14 +263,11 @@ fn run_cli_main() {
     let result = match cli.command {
         Some(Commands::AuxiliaryWorker {
             kind,
-            data_dir: worker_data_dir,
+            data_dir: _,
             admin_host,
             admin_port,
-        }) => {
-            set_data_dir(worker_data_dir);
-            bifrost_admin::worker_runtime::run_auxiliary_worker(&kind, &admin_host, admin_port)
-                .map_err(BifrostError::Config)
-        }
+        }) => bifrost_admin::worker_runtime::run_auxiliary_worker(&kind, &admin_host, admin_port)
+            .map_err(BifrostError::Config),
         Some(Commands::AsrDiarizationWorker { request }) => {
             bifrost_admin::run_asr_diarization_worker_stdio(&request).map_err(BifrostError::Config)
         }
