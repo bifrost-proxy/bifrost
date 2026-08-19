@@ -924,6 +924,11 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     task.daily_agent.terminology = Some("Jennie = 内部项目代号\nBeta 客户 = 测试客户".to_string());
     ensure_asr_daily_workspace(&task).unwrap();
     std::fs::write(
+        daily_agent_instructions_path(&task),
+        "# 日报指南\n\n第一行必须严格为 `# 2026-05-01 日报`。",
+    )
+    .unwrap();
+    std::fs::write(
         daily_dir_for_task(&task.id).join("2026-05-19.md"),
         "今日新增转写内容",
     )
@@ -951,6 +956,17 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     assert!(chatgpt_next.contains("AGENTS.md 内容"));
     assert!(chatgpt_next.contains("本条消息已附带 AGENTS.md 指令"));
     assert!(chatgpt_next.contains("今日新增转写内容"));
+    assert!(chatgpt_next.contains("本次运行输出契约（系统动态生成，优先级高于 AGENTS.md 和已有输出）"));
+    assert!(chatgpt_next.contains("最终输出第一行必须严格为 `# 2026-05-19 日报`"));
+    assert!(chatgpt_next.contains("第一行必须严格为 `# 2026-05-01 日报`"));
+    assert!(
+        chatgpt_next
+            .find("第一行必须严格为 `# 2026-05-01 日报`")
+            .unwrap()
+            < chatgpt_next
+                .find("最终输出第一行必须严格为 `# 2026-05-19 日报`")
+                .unwrap()
+    );
 }
 
 #[test]
@@ -1203,11 +1219,20 @@ fn daily_agent_chatgpt_web_tomorrow_todo_prompt_overrides_existing_source_date_h
     let plan = build_daily_agent_change_plan(&task, "test", None, true).unwrap();
     let prompt = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
 
-    assert!(prompt.contains("Tomorrow ToDo 日期规则"));
+    assert!(prompt.contains("本次运行输出契约（系统动态生成，优先级高于 AGENTS.md 和已有输出）"));
     assert!(prompt.contains("源转录日期 `2026-06-15` 的明日待办目标日期是 `2026-06-16`"));
     assert!(prompt.contains("最终标题必须是 `# 明日 To Do List - 2026-06-16`"));
-    assert!(prompt.contains("如果已有输出标题仍是 `# 明日 To Do List - 2026-06-15`"));
+    assert!(prompt.contains(
+        "如果 AGENTS.md 或已有输出标题仍是 `# 明日 To Do List - 2026-06-15`"
+    ));
     assert!(prompt.contains("# 明日 To Do List - 2026-06-15"));
+    let existing_output_position = prompt.find("## 已有输出完整内容").unwrap();
+    let runtime_contract_position = prompt.find("## 本次运行输出契约").unwrap();
+    assert!(existing_output_position < runtime_contract_position);
+    assert!(prompt[..runtime_contract_position].contains("# 明日 To Do List - 2026-06-15"));
+    assert!(prompt
+        .trim_end()
+        .ends_with("不得沿用旧标题。"));
 }
 
 #[test]

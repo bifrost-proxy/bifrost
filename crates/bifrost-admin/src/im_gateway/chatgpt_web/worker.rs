@@ -22,6 +22,7 @@ const BROWSER_REQUEST_MAX_BYTES: u64 = 384 * 1024 * 1024;
 const BROWSER_RESULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_IDLE_SECS: u64 = 10 * 60;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
+const REQUEST_TIMEOUT_HEADROOM_SECS: u64 = 5;
 const MAX_PROGRESS_CONTENT_BYTES: usize = 16 * 1024;
 const MAX_PROGRESS_TITLE_BYTES: usize = 1024;
 const MAX_PROGRESS_RAW_BYTES: usize = 32 * 1024;
@@ -102,6 +103,7 @@ pub(crate) async fn run_via_browser_worker(
     request: ExternalCliRunRequest,
     progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
 ) -> Result<ExternalCliRunResult, String> {
+    let request_timeout = browser_worker_request_timeout(&request);
     let request_id = uuid::Uuid::new_v4().to_string();
     let logical_job_id = request
         .session_key
@@ -128,7 +130,7 @@ pub(crate) async fn run_via_browser_worker(
             request_path: request_path.clone(),
         })
         .map_err(|error| format!("serialize browser worker request reference: {error}"))?,
-        Some(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)),
+        Some(request_timeout),
     );
     tokio::pin!(request_future);
 
@@ -180,6 +182,16 @@ pub(crate) async fn run_via_browser_worker(
         crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded => {}
     }
     Ok(result)
+}
+
+fn browser_worker_request_timeout(request: &ExternalCliRunRequest) -> Duration {
+    let timeout_secs = request
+        .adapter_config
+        .timeout_secs
+        .map(|seconds| seconds.saturating_add(REQUEST_TIMEOUT_HEADROOM_SECS))
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
+        .max(DEFAULT_REQUEST_TIMEOUT_SECS);
+    Duration::from_secs(timeout_secs)
 }
 
 pub(crate) async fn stop_session_run(session_key: &str) -> bool {
@@ -742,6 +754,36 @@ mod tests {
         std::fs::write(&path, b"request").unwrap();
         drop(RemoveFileOnDrop(path.clone()));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn browser_worker_request_timeout_tracks_long_adapter_timeouts() {
+        let mut request: ExternalCliRunRequest = serde_json::from_value(serde_json::json!({
+            "message": "daily report",
+            "operation": "send",
+            "params": null,
+            "runtime": "external_cli",
+            "adapter": "chatgpt_web",
+            "adapterConfig": {}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            browser_worker_request_timeout(&request),
+            Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+        );
+
+        request.adapter_config.timeout_secs = Some(60);
+        assert_eq!(
+            browser_worker_request_timeout(&request),
+            Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+        );
+
+        request.adapter_config.timeout_secs = Some(7_170);
+        assert_eq!(
+            browser_worker_request_timeout(&request),
+            Duration::from_secs(7_170 + REQUEST_TIMEOUT_HEADROOM_SECS)
+        );
     }
 
     #[tokio::test]

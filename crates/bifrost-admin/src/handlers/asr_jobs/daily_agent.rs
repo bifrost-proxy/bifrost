@@ -1540,16 +1540,47 @@ fn chatgpt_web_daily_agent_retry_prompt(
 ) -> String {
     match contract {
         ChatGptWebDailyAgentContract::DailyReport => format!(
-            "上一条回复不是最终日报。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 日报正文。必须包含 `# {date} 日报`、`## 今日概览` 和 `## 证据与不确定性`，不要使用代码块包装."
+            "上一条回复不是最终日报。系统动态确定的本次日期是 {date}，此规则优先级高于 AGENTS.md 中的历史固定日期或示例。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 日报正文。第一行必须严格为 `# {date} 日报`，必须包含 `## 今日概览` 和 `## 证据与不确定性`；不要保留日期冲突说明，不要使用代码块包装."
         ),
         ChatGptWebDailyAgentContract::TomorrowTodo => format!(
-            "上一条回复不是最终明日待办。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {} 明日 To Do List。必须包含 `# 明日 To Do List - {}`、`## 明天必须完成`、`## 可选推进` 和 `## 需要确认`，不要使用代码块包装.",
+            "上一条回复不是最终明日待办。系统动态确定的目标日期优先级高于 AGENTS.md 中的历史固定日期或示例。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {} 明日 To Do List。第一行必须严格为 `# 明日 To Do List - {}`，必须包含 `## 明天必须完成`、`## 可选推进` 和 `## 需要确认`；不要保留日期冲突说明，不要使用代码块包装.",
             tomorrow_todo_target_date(date),
             tomorrow_todo_target_date(date),
         ),
         ChatGptWebDailyAgentContract::GenericMarkdown => format!(
             "上一条回复不是最终 Markdown 输出。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出 {date} 对应的最终正文。输出必须是 Markdown 正文，不要使用代码块包装."
         ),
+    }
+}
+
+fn chatgpt_web_daily_agent_retry_prompt_with_context(
+    original_prompt: &str,
+    date: &str,
+    contract: ChatGptWebDailyAgentContract,
+) -> String {
+    format!(
+        "{original_prompt}\n\n---\n\n{}",
+        chatgpt_web_daily_agent_retry_prompt(date, contract)
+    )
+}
+
+#[cfg(test)]
+mod retry_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn retry_prompt_keeps_original_daily_agent_context() {
+        let original = "# Daily Agent Input\n\nsource-marker-2026-08-18";
+        let prompt = chatgpt_web_daily_agent_retry_prompt_with_context(
+            original,
+            "2026-08-18",
+            ChatGptWebDailyAgentContract::DailyReport,
+        );
+
+        assert!(prompt.starts_with(original));
+        assert!(prompt.contains("source-marker-2026-08-18"));
+        assert!(prompt.contains("# 2026-08-18 日报"));
+        assert!(prompt.contains("## 证据与不确定性"));
     }
 }
 
@@ -1975,6 +2006,7 @@ async fn run_daily_agent_inner(
                         Ok(prompt) => prompt,
                         Err(error) => fail_entry!(error),
                     };
+                    let retry_context_prompt = prompt.clone();
                     let run_result = match run_external_daily_agent_prompt(
                         task,
                         &runner_id,
@@ -2069,7 +2101,8 @@ async fn run_daily_agent_inner(
                                 error = %first_error,
                                 "chatgpt_web daily agent response failed validation; retrying with explicit final-output instruction"
                             );
-                            let retry_prompt = chatgpt_web_daily_agent_retry_prompt(
+                            let retry_prompt = chatgpt_web_daily_agent_retry_prompt_with_context(
+                                &retry_context_prompt,
                                 &entry.date,
                                 response_contract,
                             );

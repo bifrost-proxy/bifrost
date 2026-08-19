@@ -365,8 +365,35 @@
 - 首次无作用域自动运行仍遵循 watermark guard，不会补扫全部历史文件。
 - E2E 使用临时数据目录、禁用托盘与自动登录弹窗、禁用系统代理，且不占用正式 `9900` 端口。
 
+### TC-ADA-23 回归：长时间 ChatGPT Web 请求不被 browser worker 的 30 分钟默认上限截断
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin browser_worker_request_timeout_tracks_long_adapter_timeouts --lib -- --nocapture`。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin wait_final_backend_transient_error_preserves_finished_candidate --lib -- --nocapture`。
+3. 执行 ChatGPT Web send 定向测试，覆盖后端 final 后清理 stale Stop、Stop 点击失败或持续残留时仍按 busy 上限退出、未捕获 POST 时等待 provisional `WEB:*` conversation 提交，以及非提交类错误不进入该恢复分支。
+4. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin retry_prompt_keeps_original_daily_agent_context --lib --all-features -- --nocapture`。
+5. 确认单测覆盖未配置 timeout、显式短 timeout、Daily Agent `timeoutSecs=7170`、`final candidate -> HTTP 429 -> 同一 final candidate`，以及纠偏 prompt 同时包含原始 Daily Agent 输入和最终输出契约。
+6. 安装已验证二进制并通过正式 `9900` 服务精确触发此前失败的日期和 Agent；不得触发全局 Force Run，同一时间只运行一个 Daily Agent。
+7. 如果旧 run 已进入缺失上下文的 provisional 对话，先通过 `/worker-jobs/{job_id}/cancel` 精确停止对应 browser job，确认 Daily Agent run 变为 `failed`，不得停止整个 worker kind 或无关 external CLI 会话。
+8. 轮询新 `run_id`；如果触发 conversation 丢失后的纠偏重放，检查日志确认新对话获得完整原始上下文，且 provisional handoff 不会重复发送。
+9. 等待 `success`，确认目标报告非空、标题与日期/Agent 契约一致，并检查 `daily_agent_processed.json` 写入同一新 `run_id`；再串行触发同日期下一个 Agent。
+10. 如果 AGENTS.md 或已有输出含历史固定日期，确认动态运行契约位于整个 prompt 末尾；最终报告必须使用本次运行日期，不得保留旧日期或日期冲突说明。
+
+预期结果：
+- 未配置或显式短 timeout 的普通 ChatGPT Web 请求仍使用 1800 秒父进程默认等待上限。
+- `timeoutSecs=7170` 时父进程等待上限为 7175 秒，不会在 1800 秒提前发送 cancel。
+- 已发现的 finished candidate 不会被后续瞬时 429/5xx 清空;后端明确返回未完成或内容变化时仍会正确重置。
+- 后端确认 finished 时能清理页面残留 Stop；没有 finished 证据时不会误停正在生成的回复；Stop 点击失败或持续残留时按 busy 上限返回 `conversation_busy`，不会无限循环。
+- 未捕获 POST 但已进入 provisional `WEB:*` 对话时等待真实 conversation id，不误报 busy、不重复发送。
+- conversation 丢失后的新对话会收到完整原始 prompt 和纠偏契约，不会只收到脱离源 Markdown 的纠偏语。
+- AGENTS.md 或已有输出中的历史固定日期不会覆盖本次运行日期；日报标题使用源日期，明日待办标题使用源日期的下一天。
+- 真实补跑最终生成有效报告；失败重试前不得推进 processed watermark。
+- 正式恢复保持单任务串行，避免并发加重 ChatGPT Web 限流。
+
 ## 执行记录
 
+- 2026-08-20：扩展执行 TC-ADA-23 的 stale Stop 回归。运行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib --all-features busy_gate_ -- --nocapture`，3 个用例通过：后端 finished 后成功清理 stale Stop、没有 finished 证据时不点击 Stop，以及 Stop 点击失败/持续残留时按 busy 上限返回 `conversation_busy` 而不无限循环。
+- 2026-08-19：执行 TC-ADA-23 通过。单测验证 browser worker 父超时跟随 adapter timeout、瞬时 429/5xx 保留 finished candidate、后端 final 后清理 stale Stop、provisional `WEB:*` handoff 不重复发送、conversation 丢失后纠偏携带完整原始上下文，并验证 AGENTS.md 含历史固定日期时动态运行契约在其后覆盖旧日期。安装验证后的正式二进制后，仅在正式 `9900` 服务上精确串行触发 task `735775510b384fff8903d9c6fc54f1a3` 的 `2026-08-18 / daily_report` 与 `tomorrow_todo`。日报 run `1787136020872-54c9f081-26d4-4e76-8648-227726787804` 持续 435557ms 后成功，产物 34317 字节，首行为 `# 2026-08-18 日报`，包含 `今日概览` 与 `证据与不确定性`；processed state 写入同一 run id。确认 browser job 清空后才触发 TODO；TODO run `1787136511344-3c0a82dc-d609-4e0c-ba6c-972d865e03ea` 经同会话纠偏后持续 296509ms 成功，产物 2169 字节，首行为 `# 明日 To Do List - 2026-08-19`，三个必需章节齐全，processed state 写入同一 run id。两次运行均未被五分钟 worker idle 回收中断，最终 browser 活跃 job 为空；没有触发全局 Force Run，也没有并发运行两个 Daily Agent。
 - 2026-08-19：执行 TC-ADA-22 通过。隔离 worker 协议测试确认 `dailyAgentDates` 可从 ASR worker 返回主进程；父进程 handoff 测试确认完成日期在主进程持久化为 pending，worker 不再启动长时间浏览器任务；pending 测试确认日期去重、watermark 推进不隐藏 backlog、生成期间再次追加转写不会被旧报告误清 pending；ChatGPT Web mock 测试确认失败日期保留而成功日期移除。随后在临时端口 `19197/19198` 两次执行 `e2e-tests/tests/test_asr_daily_agents_api.sh` 均通过，修复后复跑的临时 task 为 `45084575493744b48974442f6661786a`，验证真实 Admin API、两个默认 Agent、mock Runner、processed records 与 report sync。测试未使用正式 `9900` 端口，脚本已清理临时服务和数据目录。
 - 2026-08-05：执行 TC-ADA-21 通过。运行 `pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts --grep "force reruns all or one Agent" --workers=1`，结果 `1 passed`。隔离浏览器依次验证：`Run All Agents` 请求包含 `date=2026-05-14&force=1` 且无 `agent_id`；下拉 `Run daily_report` 请求包含 `date=2026-05-14&agent_id=daily_report&force=1`；mock 后端返回 `already_running` 时页面显示 warning `Daily Agent run is already in progress`。测试 mock 了 mobile device API，并在迟到的连接设备证书弹窗出现时定向关闭，未向正式 9900 服务提交 Daily Agent run。
 - 2026-07-21：执行 TC-ADA-20 回归验证并通过。已新增 `design/asr-daily-agent-failure-isolation.md` 明确 ChatGPT Web per-date 失败隔离边界；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_gate_excludes_known_failed_entries_from_missing_reports --lib -- --nocapture` 通过，确认已知失败日期的 report target 不再触发 missing report gate；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_entry_failure_summary_lists_failed_dates_and_targets --lib -- --nocapture` 通过，确认失败摘要包含日期、目标文件和错误；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout --lib -- --nocapture` 通过，确认默认 timeout 从 2 小时缩短到 1 小时且 ChatGPT Web 内部 timeout 为 3570 秒；执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过，脚本源码哨兵确认 `ASR daily agent entry failed; continuing with remaining entries` 和 `partial_success` 已覆盖，并复跑 ChatGPT Web 共享 profile、DOM final wait、same-conversation wait、失败隔离和 tomorrow_todo 回归单测。

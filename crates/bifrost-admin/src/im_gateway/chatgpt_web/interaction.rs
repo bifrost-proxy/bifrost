@@ -616,13 +616,11 @@ pub(super) async fn wait_final(
                     }
                 }
                 Err(error) if is_transient_conversation_read_error(&error) => {
-                    backend_ready_candidate = None;
+                    if let Some(candidate) = backend_ready_candidate.as_mut() {
+                        candidate.waited.had_429_or_fallback = true;
+                    }
                     last_backend_error = Some(error.clone());
-                    tracing::warn!(
-                        conversation_id,
-                        error = %error,
-                        "chatgpt_web wait_final: transient backend read failure; retrying without accepting DOM as final"
-                    );
+                    tracing::warn!(conversation_id, error = %error, has_final_candidate = backend_ready_candidate.is_some(), "chatgpt_web wait_final: transient backend read failure; preserving any finished candidate and retrying without accepting DOM as final");
                 }
                 Err(error) => return Err(error),
             }
@@ -1492,7 +1490,7 @@ fn test_backend_details() -> &'static TestBackendDetails {
 }
 
 #[cfg(test)]
-fn set_test_backend_details(conversation_id: &str, details: Vec<Result<Value, String>>) {
+pub(super) fn set_test_backend_details(conversation_id: &str, details: Vec<Result<Value, String>>) {
     test_backend_details()
         .lock()
         .expect("test backend details lock")
@@ -3659,6 +3657,54 @@ mod tests {
 
         assert!(error.contains("backend did not confirm"), "{error}");
         assert!(error.contains("HTTP 503"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn wait_final_backend_transient_error_preserves_finished_candidate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config, auth) = backend_wait_runtime(&temp);
+        let conversation_id = "test-backend-transient-after-final";
+        let final_text = format!("final {}", "x".repeat(600));
+        set_test_backend_details(
+            conversation_id,
+            vec![
+                Ok(backend_text_detail(
+                    &final_text,
+                    "finished_successfully",
+                    true,
+                )),
+                Err("ChatGPT browser-context HTTP 429".to_string()),
+                Ok(backend_text_detail(
+                    &final_text,
+                    "finished_successfully",
+                    true,
+                )),
+            ],
+        );
+        set_test_dom_outcomes(
+            conversation_id,
+            (0..9).map(|_| DomExtractOutcome::NotFound).collect(),
+        );
+
+        let waited = wait_final(
+            &config,
+            &auth,
+            conversation_id,
+            Some(10.0),
+            WaitFinalOptions {
+                duration: std::time::Duration::from_secs(8),
+                stop_marker_path: &temp.path().join("stop"),
+                profile_dir: Some(&config.profile_dir),
+                terminal_idle_stable_for: std::time::Duration::ZERO,
+                require_backend_finality: true,
+            },
+        )
+        .await
+        .expect("transient read must not discard a finished candidate");
+
+        assert_eq!(waited.final_message["text"], final_text);
+        assert!(waited.had_429_or_fallback);
+        assert!(take_test_backend_detail(conversation_id).is_none());
     }
 
     #[tokio::test]

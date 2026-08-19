@@ -160,6 +160,26 @@ ASR worker 与 Admin 主进程的触发链路:
 - `allow_work_dirs`:`[daily_dir]`。
 - `input`:按 ChatGPT Web / 文件型外部 runner 组织;ChatGPT Web 走剪贴板大输入路径。
 - `adapter_config`:透传 conversation ref、execution_mode。
+- ChatGPT Web browser auxiliary worker 的父进程等待上限取
+  `max(30 分钟, adapter_config.timeoutSecs + 5 秒)`。未显式配置时保持 30 分钟默认值;
+  Daily Agent 传入 7170 秒等长超时时,worker 不得在 1800 秒提前取消仍在生成或因 429
+  等待恢复的浏览器请求。
+- 后端已经返回 finished assistant candidate 后若间歇出现 429/5xx,保留 candidate 和
+  settle timer;只有后端明确返回未完成状态或 current branch/内容签名变化时才重置。后续
+  成功读取同一 candidate 即可完成确认,避免持续限流要求两次无间断成功读取。
+- 页面仍显示 Stop 但后端明确确认当前分支已经 finished 时,允许点击一次 stale Stop 清理
+  前端残留状态;没有后端 finished 证据时不得停止仍在生成的回复。如果点击失败或 Stop
+  持续残留,busy gate 仍必须受原等待上限约束并返回 `conversation_busy`,不得无限循环。
+- 大输入已提交、页面进入 `/c/WEB:<uuid>` 且出现生成状态,但 CDP 没有捕获
+  `f/conversation` POST 时,把 `WEB:*` 视为 provisional conversation 并等待它提交为真实
+  conversation id,不得按 `conversation_busy` 立即失败或重复发送 prompt。
+- Daily Agent 首轮输出不满足标题/章节契约时,纠偏 prompt 必须包含本轮完整原始 prompt。
+  即使原 conversation 丢失并在新对话中重放,新对话仍拥有源 Markdown、Agent 指令和输出
+  契约,而不是只收到一段脱离上下文的纠偏语。
+- ChatGPT Web prompt 必须在用户可编辑的 AGENTS.md、已有输出和源文件正文之后，把本次运行的动态输出契约追加到整个 prompt 末尾。
+  运行日期是权威值；如果 AGENTS.md 或已有输出仍包含历史固定日期，模型必须替换旧日期，
+  不得因遵循旧标题而反复触发纠偏。`daily_report` 使用源转录日期，`tomorrow_todo` 使用
+  源转录日期的下一天。
 
 ### IM 发送
 
