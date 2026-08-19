@@ -560,6 +560,54 @@ async fn external_busy_image_preparation_failure_keeps_original_attachment_in_fi
 }
 
 #[tokio::test]
+async fn external_busy_missing_remote_attachment_is_rejected_without_empty_guide() {
+    let temp = tempfile::tempdir().unwrap();
+    let _data_dir_guard = EnvGuard::set_data_dir(temp.path());
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let provider = test_provider();
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let agent_config = service.agent_config_store.load();
+    let session_key = crate::im_gateway::group_context::build_group_session_key(
+        &provider.id,
+        "missing-remote-attachment",
+    );
+    let mut event = busy_group_event("missing-remote-attachment", "请看附件", 13);
+    let message = event.message.as_mut().unwrap();
+    message
+        .images
+        .push(crate::im_gateway::types::ImImageAttachment {
+            file_key: "missing-image-key".to_string(),
+            mime_type: Some("image/png".to_string()),
+            ..Default::default()
+        });
+
+    handle_busy_default_message(
+        "请看附件",
+        &session_key,
+        &BusyMessageContext {
+            queue_manager: &service.queue_manager,
+            client: &client,
+            provider: &provider,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_session_manager: &service.agent_session_manager,
+            progress_registry: &service.progress_registry,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_config: &agent_config,
+            group_context_store: &service.group_context_store,
+            group_turn_id: None,
+            default_mode: BusyMessageDefaultMode::ExternalGuide,
+            status_context: Default::default(),
+            default_work_dir: None,
+        },
+    )
+    .await;
+
+    assert!(service.queue_manager.queue_status(&session_key).is_empty());
+    assert!(service.queue_manager.guide_status(&session_key).is_empty());
+}
+
+#[tokio::test]
 async fn explicit_queue_mode_preserves_busy_images_and_reports_queue_overflow() {
     let temp = tempfile::tempdir().unwrap();
     let _data_dir_guard = EnvGuard::set_data_dir(temp.path());

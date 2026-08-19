@@ -42,6 +42,19 @@ class CoverageDiffTests(unittest.TestCase):
             (source / "feature/tests/nested.rs").write_text(
                 "fn helper() {}\n", encoding="utf-8"
             )
+            (source / "included").mkdir()
+            (source / "included.rs").write_text(
+                '#[cfg(test)]\nmod tests {\n    include!("included/cases.rs");\n}\n',
+                encoding="utf-8",
+            )
+            (source / "included/cases.rs").write_text(
+                "fn included_helper() {}\n", encoding="utf-8"
+            )
+            e2e_source = root / "crates/bifrost-e2e/src"
+            e2e_source.mkdir(parents=True)
+            (e2e_source / "runner.rs").write_text(
+                "pub fn run() {}\n", encoding="utf-8"
+            )
 
             self.assertTrue(
                 coverage_diff.is_production_rust_path(
@@ -64,6 +77,16 @@ class CoverageDiffTests(unittest.TestCase):
             self.assertFalse(
                 coverage_diff.is_production_rust_path(
                     "crates/a/src/feature/tests/nested.rs", root
+                )
+            )
+            self.assertFalse(
+                coverage_diff.is_production_rust_path(
+                    "crates/a/src/included/cases.rs", root
+                )
+            )
+            self.assertFalse(
+                coverage_diff.is_production_rust_path(
+                    "crates/bifrost-e2e/src/runner.rs", root
                 )
             )
 
@@ -268,6 +291,12 @@ result
     ) -> None:
         source = ">(\n)?;\n"
         self.assertEqual(coverage_diff.rust_non_executable_lines(source), {1, 2})
+
+    def test_non_executable_rust_lines_exclude_module_and_import_declarations(
+        self,
+    ) -> None:
+        source = "pub mod worker_runtime;\nuse fs2::FileExt;\npub use crate::worker::Worker;\n"
+        self.assertEqual(coverage_diff.rust_non_executable_lines(source), {1, 2, 3})
 
     def test_substantial_unchanged_moved_block_is_excluded(self) -> None:
         base = """fn download() {

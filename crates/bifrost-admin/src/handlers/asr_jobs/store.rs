@@ -1,3 +1,5 @@
+use fs2::FileExt;
+
 fn add_task(task: AsrDirectoryTask) -> Result<(), String> {
     let _guard = acquire_task_store_write_lock()?;
     let mut store = load_tasks();
@@ -166,6 +168,16 @@ pub(crate) fn set_worker_force_pause(id: &str, requested: bool) {
             warn!(task_id = %id, error = %error, "failed to clear ASR worker cancel marker");
         }
     }
+}
+
+pub(crate) fn pause_task_for_worker_job_cancel(id: &str) -> Result<(), String> {
+    update_task_paused_with_mode(id, true, AsrTaskPauseMode::LongTerm)?;
+    FORCE_PAUSED_TASKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(id.to_string());
+    set_worker_force_pause(id, true);
+    Ok(())
 }
 
 pub(crate) fn cancel_all_worker_tasks() {

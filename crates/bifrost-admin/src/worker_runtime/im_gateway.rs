@@ -26,6 +26,21 @@ use super::{
 
 const IM_GATEWAY_WORKER_ENV: &str = "BIFROST_IM_GATEWAY_WORKER";
 const IM_GATEWAY_WORKER_KEY: &str = "im_gateway:runtime";
+const IM_GATEWAY_INHERITED_ENV_ALLOWLIST: &[&str] = &[
+    // Explicit deterministic test/dry-run controls. These are non-secret
+    // capability switches or output paths, not ambient credentials.
+    "BIFROST_E2E",
+    "BIFROST_COVERAGE_E2E",
+    "BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL",
+    "BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL",
+    "BIFROST_FEISHU_DRY_RUN_FILE",
+    "BIFROST_FEISHU_DRY_RUN_PROVIDER_ID",
+    "BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN",
+    "BIFROST_CHATGPT_WEB_E2E_MOCK",
+    "BIFROST_CHATGPT_WEB_LIVE_E2E",
+    "BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST",
+    "BIFROST_CHATGPT_WEB_E2E_FAIL_DATES",
+];
 const CONTROLLER_RECONCILE_SECS: u64 = 15;
 const WORKER_REQUEST_TIMEOUT_SECS: u64 = 120;
 const SEND_REQUEST_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -445,6 +460,30 @@ async fn request_provider(
         .await
 }
 
+pub(crate) async fn run_schedule(
+    schedule_id: &str,
+) -> Result<crate::im_gateway::types::ImTaskRun, String> {
+    let schedule_id = schedule_id.trim();
+    if schedule_id.is_empty() {
+        return Err("schedule id cannot be empty".to_string());
+    }
+    let worker = ensure_worker_from_controller().await?;
+    let value = worker
+        .request_with_id(
+            uuid::Uuid::new_v4().to_string(),
+            Some(format!(
+                "schedule:{}",
+                &blake3::hash(schedule_id.as_bytes()).to_hex()[..24]
+            )),
+            "im.run_schedule",
+            serde_json::json!({"scheduleId": schedule_id}),
+            Some(Duration::from_secs(WORKER_REQUEST_TIMEOUT_SECS)),
+        )
+        .await?;
+    serde_json::from_value(value)
+        .map_err(|error| format!("parse IM schedule worker result: {error}"))
+}
+
 async fn reconcile_runtime(last_signature: &mut Option<String>) -> Result<(), String> {
     let signature = runtime_signature()?;
     let desired = signature.is_some() || !MANUAL_PROVIDER_LEASES.is_empty();
@@ -462,6 +501,10 @@ async fn reconcile_runtime(last_signature: &mut Option<String>) -> Result<(), St
         .ok_or_else(|| "IM Gateway worker controller endpoint is not configured".to_string())?;
     let changed = *last_signature != signature;
     let broker = super::im_broker::ensure_main_broker().await?;
+    let worker_was_running = global_worker_supervisor()
+        .get(IM_GATEWAY_WORKER_KEY)
+        .await
+        .is_some();
     let worker = if changed {
         global_worker_supervisor()
             .restart(spawn_spec(&endpoint, &broker)?)
@@ -473,17 +516,20 @@ async fn reconcile_runtime(last_signature: &mut Option<String>) -> Result<(), St
     };
     *last_signature = signature;
 
-    let leases = MANUAL_PROVIDER_LEASES
-        .iter()
-        .map(|entry| entry.key().clone())
-        .collect::<Vec<_>>();
-    for provider_id in leases {
-        if let Err(error) = request_provider(&worker, "im.connect_provider", &provider_id).await {
-            tracing::warn!(
-                provider_id,
-                error = %error,
-                "failed to restore manually connected IM provider after worker start"
-            );
+    if changed || !worker_was_running {
+        let leases = MANUAL_PROVIDER_LEASES
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for provider_id in leases {
+            if let Err(error) = request_provider(&worker, "im.connect_provider", &provider_id).await
+            {
+                tracing::warn!(
+                    provider_id,
+                    error = %error,
+                    "failed to restore manually connected IM provider after worker start"
+                );
+            }
         }
     }
     Ok(())
@@ -524,6 +570,13 @@ fn runtime_signature() -> Result<Option<String>, String> {
         schedule.last_run_at = None;
         schedule.created_at = 0;
         schedule.updated_at = 0;
+        if let Some(conversation_ref) = schedule
+            .agent
+            .as_mut()
+            .and_then(|agent| agent.conversation_ref.as_mut())
+        {
+            conversation_ref.updated_at = 0;
+        }
     }
 
     let mut routes = crate::im_gateway::ImRouteStore::new(&data_dir).list();
@@ -573,6 +626,12 @@ fn spawn_spec(
     );
     spec.env
         .insert(IM_GATEWAY_WORKER_ENV.to_string(), "1".to_string());
+    for key in IM_GATEWAY_INHERITED_ENV_ALLOWLIST {
+        if let Some(value) = std::env::var_os(key) {
+            spec.env
+                .insert((*key).to_string(), value.to_string_lossy().into_owned());
+        }
+    }
     super::im_broker::configure_worker_env(&mut spec, broker);
     spec.max_concurrency = 8;
     spec.startup_timeout = Duration::from_secs(20);
@@ -611,6 +670,7 @@ pub fn run_im_gateway_worker_stdio(_admin_host: &str, admin_port: u16) -> Result
                 "im.send_message".to_string(),
                 "im.upload_message".to_string(),
                 "im.runtime_status".to_string(),
+                "im.run_schedule".to_string(),
             ],
             move |frame, context| {
                 let service = service.clone();
@@ -647,8 +707,31 @@ async fn handle_worker_frame(
                     } else {
                         service
                             .connection_manager
-                            .stop_connection(&request.provider_id);
+                            .stop_connection_and_wait(&request.provider_id)
+                            .await;
                         Ok(serde_json::json!({"disconnected": true}))
+                    }
+                }
+                "im.run_schedule" => {
+                    let schedule_id = request
+                        .payload
+                        .get("scheduleId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    match schedule_id {
+                        Some(schedule_id) => {
+                            crate::handlers::im_gateway::schedules::execute_manual_schedule(
+                                &service,
+                                schedule_id,
+                            )
+                            .await
+                            .and_then(|run| {
+                                serde_json::to_value(run)
+                                    .map_err(|error| format!("serialize IM schedule run: {error}"))
+                            })
+                        }
+                        None => Err("IM schedule worker request is missing scheduleId".to_string()),
                     }
                 }
                 "im.provider_status" => {
@@ -709,7 +792,10 @@ async fn handle_worker_frame(
         }
         ParentFrame::Cancel { request_id, .. } => {
             if let Some((_, provider_id)) = ACTIVE_PROVIDER_REQUESTS.remove(&request_id) {
-                service.connection_manager.stop_connection(&provider_id);
+                service
+                    .connection_manager
+                    .stop_connection_and_wait(&provider_id)
+                    .await;
             }
         }
         ParentFrame::ConfigApply {
@@ -963,6 +1049,31 @@ mod tests {
     use crate::worker_runtime::{WorkerFrame, WorkerRequest};
 
     static LEASE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static MODE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct TestEnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn provider_request_round_trip() {
@@ -1035,6 +1146,15 @@ mod tests {
             .status(),
             StatusCode::BAD_GATEWAY
         );
+
+        let oversized = Response::builder()
+            .status(StatusCode::OK)
+            .body(full_body(vec![b'x'; SEND_RESPONSE_MAX_BYTES + 1]))
+            .unwrap();
+        assert!(capture_worker_http_response(oversized)
+            .await
+            .unwrap_err()
+            .contains("exceeds"));
         assert_eq!(
             worker_http_response(WorkerHttpResponse {
                 status: 200,
@@ -1069,6 +1189,9 @@ mod tests {
             read_json_file::<serde_json::Value>(&json_path, 128).unwrap(),
             serde_json::json!({"ok": true})
         );
+        assert!(read_json_file::<serde_json::Value>(&json_path, 2)
+            .unwrap_err()
+            .contains("exceeds limit"));
         assert_eq!(
             validate_runtime_path(&json_path, &root).unwrap(),
             std::fs::canonicalize(&json_path).unwrap()
@@ -1077,6 +1200,7 @@ mod tests {
         let raw_path = root.join("upload.bin");
         write_private_file(&raw_path, b"private-upload").unwrap();
         assert_eq!(read_bytes_file(&raw_path, 128).unwrap(), b"private-upload");
+        assert!(open_private_file(&raw_path).is_err());
         assert!(read_bytes_file(&raw_path, 4)
             .unwrap_err()
             .contains("exceeds"));
@@ -1085,6 +1209,16 @@ mod tests {
                 .unwrap_err()
                 .contains("exceeds")
         );
+
+        let directory_target = root.join("directory-target.json");
+        std::fs::create_dir(&directory_target).unwrap();
+        assert!(write_json_file(
+            &directory_target,
+            &serde_json::json!({"cannot": "replace-directory"}),
+            128,
+        )
+        .unwrap_err()
+        .contains("rename"));
 
         let outside = temp.path().join("outside.json");
         std::fs::write(&outside, b"{}").unwrap();
@@ -1212,6 +1346,7 @@ mod tests {
     #[test]
     fn worker_mode_spawn_and_controller_helpers_preserve_process_boundary() {
         std::env::remove_var(IM_GATEWAY_WORKER_ENV);
+        std::env::set_var("BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL", "1");
         assert!(!is_im_gateway_worker_process());
         std::env::set_var(IM_GATEWAY_WORKER_ENV, "true");
         assert!(is_im_gateway_worker_process());
@@ -1238,6 +1373,12 @@ mod tests {
                 .map(String::as_str),
             Some("token")
         );
+        assert_eq!(
+            spec.env
+                .get("BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL")
+                .map(String::as_str),
+            Some("1")
+        );
         assert!(spec
             .args
             .windows(2)
@@ -1245,6 +1386,7 @@ mod tests {
         assert!(runtime_root().ends_with("runtime/im-gateway-worker"));
         assert!(Arc::ptr_eq(&controller_notify(), &controller_notify()));
         std::env::remove_var(IM_GATEWAY_WORKER_ENV);
+        std::env::remove_var("BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL");
     }
 
     #[tokio::test]
@@ -1259,6 +1401,16 @@ mod tests {
                 "missing-provider",
                 "im.disconnect_provider",
                 serde_json::json!({"providerId": "missing"}),
+            ),
+            (
+                "missing-schedule",
+                "im.run_schedule",
+                serde_json::json!({"scheduleId": "missing"}),
+            ),
+            (
+                "empty-schedule",
+                "im.run_schedule",
+                serde_json::json!({"scheduleId": "  "}),
             ),
             ("unsupported", "im.unknown", serde_json::json!({})),
         ] {
@@ -1359,6 +1511,108 @@ mod tests {
         stop_runtime_controller();
         notify_runtime_config_changed();
         notify_config_changed();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_mode_rejects_isolated_controls_without_starting_worker() {
+        let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        let _mode_guard = MODE_TEST_LOCK.lock().await;
+        let env_name = crate::worker_runtime::execution_mode_env(WorkerKind::ImGateway);
+        let _env_guard = TestEnvGuard::set(env_name, "legacy");
+        *controller_endpoint().write() = None;
+
+        start_runtime_controller("127.0.0.1".to_string(), 9876);
+        tokio::task::yield_now().await;
+        assert!(controller_endpoint().read().is_none());
+        assert!(connect_provider("provider")
+            .await
+            .unwrap_err()
+            .contains("disabled"));
+        assert!(disconnect_provider("provider")
+            .await
+            .unwrap_err()
+            .contains("disabled"));
+        assert!(provider_status("provider").await.unwrap().is_none());
+        assert!(run_schedule("  ").await.unwrap_err().contains("empty"));
+        notify_runtime_config_changed();
+        notify_config_changed();
+        stop_runtime_controller();
+    }
+
+    #[test]
+    fn runtime_signature_ignores_persisted_runtime_timestamps() {
+        let temp = tempfile::tempdir().unwrap();
+        let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(temp.path());
+        let provider_store = crate::im_gateway::ImProviderStore::new(temp.path());
+        let mut provider = crate::im_gateway::types::ImProviderConfig {
+            id: "signature-provider".to_string(),
+            provider_type: crate::im_gateway::types::ImProviderType::Feishu,
+            display_name: "Signature Provider".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: Some("app-id".to_string()),
+            secret_ref: Some("secret-ref".to_string()),
+            owner_open_id: None,
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 10,
+            updated_at: 20,
+        };
+        provider_store.add(provider.clone()).unwrap();
+
+        let schedule_store = crate::im_gateway::ImScheduleStore::new(temp.path());
+        let mut schedule = crate::im_gateway::types::ImSchedule {
+            id: "signature-schedule".to_string(),
+            name: "Signature Schedule".to_string(),
+            enabled: true,
+            message_channel: None,
+            trigger: crate::im_gateway::types::ScheduleTrigger::Interval { every_ms: 60_000 },
+            task_type: crate::im_gateway::types::ScheduleTaskType::Agent,
+            script: Default::default(),
+            agent: Some(crate::im_gateway::types::ScheduleAgentTask {
+                prompt: "summarize".to_string(),
+                conversation_ref: Some(crate::im_gateway::types::ScheduleConversationRef {
+                    adapter: "codex".to_string(),
+                    thread_id: Some("thread-signature".to_string()),
+                    updated_at: 50,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            timeout_ms: 10_000,
+            max_output_bytes: 1024,
+            concurrency_policy: Default::default(),
+            retry: Default::default(),
+            next_run_at: Some(30),
+            last_run_at: Some(40),
+            created_at: 10,
+            updated_at: 20,
+        };
+        schedule_store.add(schedule.clone()).unwrap();
+        let first = runtime_signature().unwrap().unwrap();
+
+        provider.created_at = 100;
+        provider.updated_at = 200;
+        provider_store.update(provider).unwrap();
+        schedule.next_run_at = Some(300);
+        schedule.last_run_at = Some(400);
+        schedule.created_at = 100;
+        schedule.updated_at = 200;
+        schedule
+            .agent
+            .as_mut()
+            .unwrap()
+            .conversation_ref
+            .as_mut()
+            .unwrap()
+            .updated_at = 500;
+        schedule_store.update(schedule).unwrap();
+
+        assert_eq!(
+            runtime_signature().unwrap().as_deref(),
+            Some(first.as_str())
+        );
     }
 
     #[cfg(unix)]
@@ -1584,6 +1838,10 @@ done
             .status(),
             StatusCode::BAD_GATEWAY
         );
+        assert!(run_schedule("schedule-invalid-result")
+            .await
+            .unwrap_err()
+            .contains("parse IM schedule worker result"));
         assert!(
             supervisor
                 .unregister(IM_GATEWAY_WORKER_KEY, Duration::from_secs(1))

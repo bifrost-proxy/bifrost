@@ -154,6 +154,33 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
 
 预期：IM worker 不读取自己的空 Runner registry；Guide 与 Stop 通过 loopback capability broker 到达主进程，显式 Queue 语义不变，控制失败不会伪造成功。
 
+### TC-AWI-15：Worker 生命周期与最小环境能力
+
+1. 运行 `test_auxiliary_worker_isolation.sh`，确认真实 worker 的握手、超大帧拒绝、进程回收和代理存活。
+2. 运行 `goodbye_reaps_process_and_blocked_stdin_write_fails_worker`，分别模拟 worker 发送 Goodbye 后继续存活，以及持续心跳但不读取 stdin。
+3. 运行 `inherited_worker_environment_excludes_unlisted_secrets`、External CLI transport failure 与 run retention 跨进程锁回归。
+4. 运行 Weixin provider 与 Browser mock 链路，确认 `env_clear` 后仅显式的 kind 专属非敏感控制变量仍可用。
+
+预期：Goodbye 只有在 OS 进程树完成回收后才进入 Stopped；stdin 写满在生产超时内失败并回收 worker；worker 不继承 token/secret/password 等环境；External CLI wrapper 异常退出时实际 CLI 进程组被回收；保留仍持锁的运行中 run，同时可清理已释放锁且没有 `result.json` 的失败 run；Browser/IM E2E 开关通过 kind 白名单工作，不恢复环境全量继承。
+
+### TC-AWI-16：Remote Broker relay 绑定与 grant 事务
+
+1. 运行 `test_remote_invoke_ssh_e2e.sh`，建立本地 relay 与 SSH grant，依次验证 Full Trust、Shell、Files、Read-only、恢复 Full Trust、撤销。
+2. 运行 `worker_runtime::remote_broker::tests` 与 `remote_invoke::grant_info_store::tests`。
+3. 检查 shell 请求携带的旧 `policy_id` 被主进程丢弃，并按持久 grant `policy_binding` 重新选择；策略版本变化时拒绝执行。
+4. 并发消费/撤销 grant，确认跨进程事务不会丢更新，失败授权不扣额度。
+
+预期：broker token 只映射到单一 relay，caller 不能提交 relay；合法 shell 命令在主进程重选策略后成功，越权策略不能生效；grant validate/consume/revoke 使用同一跨进程事务与原子持久化；Remote Execution worker 不持有真实 Admin listener 坐标。
+
+### TC-AWI-17：IM 跨进程配置、日志与手动 Schedule
+
+1. 运行 `test_auxiliary_worker_isolation.sh`，创建 provider、target 和 script schedule 后立即手动 Run，不等待 15 秒 reconcile。
+2. 断言 run 成功、stdout 包含 `awi-schedule-ok`、worker job operation 为 `im.run_schedule`，并从主进程 API 立即读到 `manual_run` history。
+3. 运行 `test_weixin_provider_e2e.sh` 与 `test_external_runner_live_guide.sh`。
+4. 运行 message/session/run store 并发回归，确认多实例写入不丢数据，损坏文件不在读取路径静默删除。
+
+预期：Target/Route/Provider/Schedule 的新配置对 worker 立即可见；manual schedule 不回落主进程；run history、message log、session state 使用跨进程锁和原子替换；provider disconnect/cancel 等待 transport drain；Weixin 上下文与 Runner Guide/Stop 控制链路保持可用。
+
 ## 清理步骤
 
 1. 通过生命周期 API 或协议 Shutdown 停止 worker。
@@ -161,3 +188,19 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
 3. 停止 echo/mock relay/provider。
 4. 确认没有测试 PID 存活后删除临时数据目录。
 5. 保留需要审计的日志时，复制到测试 artifact 目录后再清理。
+
+## 执行记录
+
+### 2026-08-19
+
+使用当前分支构建的 `target/debug/bifrost`，以独立临时数据目录和动态端口连续执行自动化基线中的五项真实场景测试：
+
+- `test_auxiliary_worker_isolation.sh`：PASS；覆盖 worker 隔离主链路及新增的手动 Schedule worker job、stdout 与主进程 run history 可见性。
+- `test_asr_source_compression.sh`：PASS；真实 ffmpeg 压缩、产物校验和失败持久化均符合预期。
+- `test_weixin_provider_e2e.sh`：PASS；`env_clear` 后显式 IM worker 环境白名单和 provider 链路可用。
+- `test_remote_invoke_ssh_e2e.sh`：PASS；relay、grant、Shell policy 重选、Remote Execution 与 revoke 链路均符合预期。
+- `test_external_runner_live_guide.sh`：PASS；IM worker 到主进程的 Guide/Stop 控制面与显式 Queue 语义未回归。
+
+同时执行 Worker 生命周期、External CLI transport、Remote Broker、GrantInfoStore、MessageLogStore、SessionState 和 RunStore 的对应 Rust 专项回归，均为 PASS；这些专项测试与上述五项真实链路共同覆盖 TC-AWI-01～17。
+
+所有脚本均通过各自的 trap 按已记录 PID 清理测试进程和临时目录；未使用 `pkill` 或 `killall`，未触碰正式 `9900` 服务。

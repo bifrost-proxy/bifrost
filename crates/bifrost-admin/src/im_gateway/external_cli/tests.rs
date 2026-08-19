@@ -235,6 +235,22 @@ async fn main_broker_routes_guide_model_update_and_stop_to_the_main_process_regi
 }
 
 #[tokio::test]
+async fn im_gateway_worker_run_requires_a_configured_main_broker() {
+    let _registry_guard = external_cli_env_guard_async().await;
+    let _worker = EnvGuard::set_str("BIFROST_IM_GATEWAY_WORKER", "1");
+    let _addr = EnvGuard::unset(crate::worker_runtime::im_broker::BROKER_ADDR_ENV);
+    let _token = EnvGuard::unset(crate::worker_runtime::im_broker::BROKER_TOKEN_ENV);
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = ExternalCliRuntime::new(temp.path());
+
+    let error = runtime
+        .run_with_progress(worker_transport_test_request("missing-broker"), None)
+        .await
+        .unwrap_err();
+    assert!(error.contains("broker is not configured"), "{error}");
+}
+
+#[tokio::test]
 async fn managed_guide_and_model_update_use_the_local_registry_in_the_main_process() {
     let _registry_guard = external_cli_env_guard_async().await;
     let _worker = EnvGuard::unset("BIFROST_IM_GATEWAY_WORKER");
@@ -1728,8 +1744,10 @@ async fn worker_client_spawn_and_event_reader_report_transport_failures() {
 IFS= read -r _command
 case "$BIFROST_TEST_WORKER_OUTPUT_MODE" in
   started)
-    printf '%s\n' '{"type":"started","sessionKey":"transport-test","pid":123}'
-    sleep 30
+    sleep 30 &
+    nested_pid=$!
+    printf '%s\n' "{\"type\":\"started\",\"sessionKey\":\"transport-test\",\"pid\":$$}"
+    wait "$nested_pid"
     ;;
   malformed)
     printf '%s\n' 'not-json'
@@ -1773,11 +1791,19 @@ esac
         match mode {
             "started" => {
                 let event = run.next_event().await.unwrap();
-                assert!(matches!(
-                    event,
-                    ExternalCliWorkerEvent::Started { pid: 123, .. }
-                ));
+                let ExternalCliWorkerEvent::Started { pid, .. } = event else {
+                    panic!("expected started event");
+                };
+                assert!(unix_process_exists(pid), "worker command should be running");
                 assert!(!request_path.exists());
+                drop(run);
+                timeout(Duration::from_secs(3), async {
+                    while unix_process_exists(pid) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("dropping a failed worker transport must reap its nested command");
             }
             "malformed" => {
                 let error = run.next_event().await.unwrap_err();
@@ -1811,6 +1837,18 @@ esac
             _ => unreachable!(),
         }
     }
+}
+
+#[cfg(unix)]
+fn unix_process_exists(pid: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    matches!(
+        kill(Pid::from_raw(pid as i32), None),
+        Ok(()) | Err(Errno::EPERM)
+    )
 }
 
 #[cfg(unix)]
@@ -4142,6 +4180,72 @@ async fn live_guide_prompt_persists_session_images_and_rejects_unsafe_ids() {
         .await
         .expect_err("unsafe guide id must be rejected");
     assert!(error.contains("safe path component"), "{error}");
+    assert!(prepare_live_guide_prompt("  ", "guide", "unsafe", &[], &[])
+        .await
+        .unwrap_err()
+        .contains("session_key cannot be empty"));
+}
+
+#[test]
+fn worker_bootstrap_parsers_cover_missing_invalid_and_valid_inputs() {
+    let _guard = external_cli_env_guard();
+    let _protocol = EnvGuard::unset(EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV);
+    let _runs = EnvGuard::unset(EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV);
+    let _request = EnvGuard::unset(EXTERNAL_CLI_WORKER_BOOTSTRAP_REQUEST_PATH_ENV);
+    assert!(external_cli_worker_bootstrap_from_environment()
+        .unwrap()
+        .is_none());
+
+    {
+        let _runs = EnvGuard::set_str(EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV, "/runs");
+        assert!(external_cli_worker_bootstrap_from_environment()
+            .unwrap_err()
+            .contains(EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV));
+    }
+    {
+        let _protocol = EnvGuard::set_str(EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV, "bad");
+        assert!(external_cli_worker_bootstrap_from_environment()
+            .unwrap_err()
+            .contains("parse external runner worker bootstrap protocol"));
+    }
+    {
+        let _protocol = EnvGuard::set_str(EXTERNAL_CLI_WORKER_BOOTSTRAP_PROTOCOL_ENV, "1");
+        assert!(external_cli_worker_bootstrap_from_environment()
+            .unwrap_err()
+            .contains(EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV));
+        let _runs = EnvGuard::set_str(EXTERNAL_CLI_WORKER_BOOTSTRAP_RUNS_ROOT_ENV, "/runs");
+        assert!(external_cli_worker_bootstrap_from_environment()
+            .unwrap_err()
+            .contains(EXTERNAL_CLI_WORKER_BOOTSTRAP_REQUEST_PATH_ENV));
+        let _request = EnvGuard::set_str(
+            EXTERNAL_CLI_WORKER_BOOTSTRAP_REQUEST_PATH_ENV,
+            "/request.json",
+        );
+        let parsed = external_cli_worker_bootstrap_from_environment()
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.protocol_version, 1);
+        assert_eq!(parsed.runs_root, "/runs");
+        assert_eq!(parsed.request_path, PathBuf::from("/request.json"));
+    }
+
+    let mut empty = std::io::Cursor::new(Vec::<u8>::new());
+    assert!(read_external_cli_worker_stdin_bootstrap(&mut empty)
+        .unwrap_err()
+        .contains("expected a run command"));
+    let mut wrong = std::io::Cursor::new(b"{\"type\":\"stop\"}\n".to_vec());
+    assert!(read_external_cli_worker_stdin_bootstrap(&mut wrong)
+        .unwrap_err()
+        .contains("first command must be run"));
+    let mut valid = std::io::Cursor::new(
+        b"{\"type\":\"run\",\"request\":{\"protocolVersion\":1,\"runsRoot\":\"/runs\",\"requestPath\":\"/request.json\"}}\n".to_vec(),
+    );
+    assert_eq!(
+        read_external_cli_worker_stdin_bootstrap(&mut valid)
+            .unwrap()
+            .runs_root,
+        "/runs"
+    );
 }
 
 #[tokio::test]
@@ -6447,6 +6551,26 @@ fn append_tail_keeps_only_the_bounded_suffix() {
 }
 
 #[test]
+fn worker_stderr_tail_and_inactive_lock_cover_boundary_paths() {
+    let mut tail = b"old".to_vec();
+    append_capped_tail(&mut tail, b"012345", 4);
+    assert_eq!(tail, b"2345");
+    append_capped_tail(&mut tail, b"67", 4);
+    assert_eq!(tail, b"4567");
+    assert_eq!(format_external_cli_worker_stderr("  "), None);
+    let long = format!("{}é", "x".repeat(MAX_CAPTURED_WORKER_STDERR_BYTES));
+    assert!(format_external_cli_worker_stderr(&long)
+        .unwrap()
+        .ends_with('…'));
+
+    let root = tempfile::tempdir().unwrap();
+    let run = root.path().join("run");
+    std::fs::create_dir_all(run.join(EXTERNAL_CLI_RUN_LOCK_FILE)).unwrap();
+    assert!(lock_inactive_external_cli_run(&run).is_none());
+    assert!(lock_inactive_external_cli_run(&root.path().join("missing")).is_none());
+}
+
+#[test]
 fn app_server_stdout_capture_keeps_only_the_bounded_suffix() {
     let mut bytes = Vec::new();
     super::app_server::record_stdout_line(&mut bytes, &"x".repeat(MAX_CAPTURED_STREAM_BYTES * 2));
@@ -6510,6 +6634,7 @@ fn executor_run_retention_prunes_oldest_completed_directories() {
     for index in 0..=(MAX_RETAINED_RUNS + 1) {
         let run = root.path().join(format!("run-{index:03}"));
         std::fs::create_dir_all(&run).unwrap();
+        drop(acquire_external_cli_lock(&run.join(EXTERNAL_CLI_RUN_LOCK_FILE)).unwrap());
         std::fs::write(run.join("result.json"), b"{}").unwrap();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -6519,19 +6644,57 @@ fn executor_run_retention_prunes_oldest_completed_directories() {
 }
 
 #[test]
-fn executor_run_retention_never_prunes_incomplete_directory() {
+fn executor_run_retention_prunes_failed_directories_without_result() {
     let root = tempfile::tempdir().unwrap();
     let incomplete = root.path().join("incomplete-active");
     std::fs::create_dir_all(&incomplete).unwrap();
+    drop(acquire_external_cli_lock(&incomplete.join(EXTERNAL_CLI_RUN_LOCK_FILE)).unwrap());
     std::fs::write(incomplete.join("cli.stdout.log"), vec![0_u8; 1024]).unwrap();
     for index in 0..=(MAX_RETAINED_RUNS + 1) {
         let run = root.path().join(format!("completed-{index:03}"));
         std::fs::create_dir_all(&run).unwrap();
+        drop(acquire_external_cli_lock(&run.join(EXTERNAL_CLI_RUN_LOCK_FILE)).unwrap());
         std::fs::write(run.join("result.json"), b"{}").unwrap();
         std::thread::sleep(Duration::from_millis(2));
     }
     prune_completed_run_directories(root.path(), None).unwrap();
-    assert!(incomplete.exists());
+    assert!(!incomplete.exists());
+}
+
+#[test]
+fn executor_run_retention_preserves_cross_process_locked_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let active = root.path().join("active-without-result");
+    std::fs::create_dir_all(&active).unwrap();
+    let _active_lock = acquire_external_cli_lock(&active.join(EXTERNAL_CLI_RUN_LOCK_FILE)).unwrap();
+    std::fs::write(active.join("cli.stdout.log"), vec![0_u8; 1024]).unwrap();
+    for index in 0..=(MAX_RETAINED_RUNS + 1) {
+        let run = root.path().join(format!("completed-{index:03}"));
+        std::fs::create_dir_all(&run).unwrap();
+        drop(acquire_external_cli_lock(&run.join(EXTERNAL_CLI_RUN_LOCK_FILE)).unwrap());
+        std::fs::write(run.join("result.json"), b"{}").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    prune_completed_run_directories(root.path(), None).unwrap();
+
+    assert!(active.exists());
+}
+
+#[test]
+fn inactive_run_lock_remains_held_until_pruning_finishes() {
+    let root = tempfile::tempdir().unwrap();
+    let run = root.path().join("completed");
+    std::fs::create_dir_all(&run).unwrap();
+    let lock_path = run.join(EXTERNAL_CLI_RUN_LOCK_FILE);
+    let initial_lock = acquire_external_cli_lock(&lock_path).unwrap();
+    assert!(lock_inactive_external_cli_run(&run).is_none());
+
+    drop(initial_lock);
+    let inactive_lock = lock_inactive_external_cli_run(&run).unwrap();
+    assert!(lock_inactive_external_cli_run(&run).is_none());
+    drop(inactive_lock);
+    assert!(lock_inactive_external_cli_run(&run).is_some());
 }
 
 #[test]

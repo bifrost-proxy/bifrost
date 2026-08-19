@@ -81,6 +81,22 @@ pub(crate) fn is_browser_worker_process() -> bool {
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
+fn forward_browser_progress(
+    event: WorkerEvent,
+    request_id: &str,
+    progress_tx: Option<&mpsc::Sender<ExternalCliProgressEvent>>,
+) {
+    if event.request_id.as_deref() != Some(request_id) || event.event != "progress" {
+        return;
+    }
+    let Some(progress_tx) = progress_tx else {
+        return;
+    };
+    if let Ok(progress) = serde_json::from_value::<ExternalCliProgressEvent>(event.payload) {
+        let _ = progress_tx.try_send(progress);
+    }
+}
+
 pub(crate) async fn run_via_browser_worker(
     runs_root: PathBuf,
     request: ExternalCliRunRequest,
@@ -121,14 +137,7 @@ pub(crate) async fn run_via_browser_worker(
             result = &mut request_future => break result,
             event = events.recv() => {
                 match event {
-                    Ok(event) if event.request_id.as_deref() == Some(request_id.as_str()) && event.event == "progress" => {
-                        if let Some(progress_tx) = progress_tx.as_ref() {
-                            if let Ok(progress) = serde_json::from_value::<ExternalCliProgressEvent>(event.payload) {
-                                let _ = progress_tx.try_send(progress);
-                            }
-                        }
-                    }
-                    Ok(_) => {}
+                    Ok(event) => forward_browser_progress(event, &request_id, progress_tx.as_ref()),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         tracing::warn!(skipped, "browser worker progress receiver lagged");
                     }
@@ -137,6 +146,18 @@ pub(crate) async fn run_via_browser_worker(
             }
         }
     };
+    loop {
+        match events.try_recv() {
+            Ok(event) => forward_browser_progress(event, &request_id, progress_tx.as_ref()),
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "browser worker progress receiver lagged");
+            }
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+        }
+    }
     touch();
     let value = response?;
     let reference: BrowserResultReference = serde_json::from_value(value)
@@ -305,6 +326,21 @@ fn spawn_spec() -> Result<WorkerSpawnSpec, String> {
     );
     spec.env
         .insert(BROWSER_WORKER_ENV.to_string(), "1".to_string());
+    for key in [
+        "BIFROST_E2E",
+        "BIFROST_COVERAGE_E2E",
+        "BIFROST_BROWSER_WORKER_IDLE_SECS",
+        "BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN",
+        "BIFROST_CHATGPT_WEB_E2E_MOCK",
+        "BIFROST_CHATGPT_WEB_LIVE_E2E",
+        "BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST",
+        "BIFROST_CHATGPT_WEB_E2E_FAIL_DATES",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            spec.env
+                .insert(key.to_string(), value.to_string_lossy().into_owned());
+        }
+    }
     // Browser cancellation currently tears down the managed browser process tree.
     // Serialize requests so cancelling one run cannot terminate another live run.
     spec.max_concurrency = 1;
@@ -662,6 +698,43 @@ mod tests {
         assert_eq!(compact.raw, serde_json::json!({"truncated": true}));
     }
 
+    #[tokio::test]
+    async fn progress_forwarding_ignores_unrelated_missing_and_malformed_events() {
+        let event =
+            |request_id: Option<&str>, event: &str, payload: serde_json::Value| WorkerEvent {
+                request_id: request_id.map(str::to_string),
+                job_id: None,
+                event: event.to_string(),
+                payload,
+            };
+        let (progress_tx, mut progress_rx) = mpsc::channel(1);
+        forward_browser_progress(
+            event(Some("other"), "progress", serde_json::Value::Null),
+            "request",
+            Some(&progress_tx),
+        );
+        forward_browser_progress(
+            event(Some("request"), "other", serde_json::Value::Null),
+            "request",
+            Some(&progress_tx),
+        );
+        forward_browser_progress(
+            event(
+                Some("request"),
+                "progress",
+                serde_json::json!({"bad": true}),
+            ),
+            "request",
+            Some(&progress_tx),
+        );
+        forward_browser_progress(
+            event(Some("request"), "progress", serde_json::Value::Null),
+            "request",
+            None,
+        );
+        assert!(progress_rx.try_recv().is_err());
+    }
+
     #[test]
     fn request_cleanup_guard_removes_abandoned_spool() {
         let temp = tempfile::tempdir().unwrap();
@@ -786,6 +859,60 @@ mod tests {
         assert!(!response.ok);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn browser_run_request_executes_and_spools_mock_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp.path());
+        let request: ExternalCliRunRequest = serde_json::from_value(serde_json::json!({
+            "message": "run inside browser worker",
+            "adapter": "mock",
+            "sessionKey": "browser-worker-session",
+            "adapterConfig": {
+                "executable": "sh",
+                "args": [
+                    "-c",
+                    "cat >/dev/null; printf '%s\\n' '{\"type\":\"assistant_final\",\"content\":\"browser worker done\"}'"
+                ],
+                "timeoutSecs": 10
+            }
+        }))
+        .unwrap();
+        let request_path = request_dir().join("request-direct.json");
+        write_json_file(
+            &request_path,
+            &BrowserRunFileRequest {
+                runs_root: temp.path().join("runs"),
+                request,
+            },
+            BROWSER_REQUEST_MAX_BYTES,
+        )
+        .unwrap();
+        let (context, mut output_rx) = WorkerStdioContext::test_context(WorkerKind::Browser);
+
+        let value = handle_worker_request(
+            "direct-run",
+            "browser.run",
+            serde_json::to_value(BrowserRunReference {
+                request_path: request_path.clone(),
+            })
+            .unwrap(),
+            context,
+        )
+        .await
+        .unwrap();
+
+        let reference: BrowserResultReference = serde_json::from_value(value).unwrap();
+        let result: ExternalCliRunResult =
+            read_json_file(&reference.result_path, BROWSER_RESULT_MAX_BYTES).unwrap();
+        assert_eq!(result.response, "browser worker done");
+        assert!(!request_path.exists());
+        assert!(matches!(
+            output_rx.try_recv(),
+            Ok(WorkerFrame::Event { .. }) | Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
     #[test]
     fn browser_spool_helpers_cover_success_limits_and_path_validation() {
         let temp = tempfile::tempdir().unwrap();
@@ -894,21 +1021,188 @@ done
         supervisor.get_or_start(spec).await.unwrap();
 
         let settings = ExternalCliAgentSettings::default();
-        assert!(auth_status(&settings).await.unwrap().logged_in);
-        assert!(open_login(&settings).await.unwrap().logged_in);
-        assert!(stop_login(&settings).await.unwrap().logged_in);
-        let startup = ensure_startup_auth_ready("chatgpt", &settings)
-            .await
-            .unwrap();
+        let auth = auth_status(&settings).await;
+        let login = open_login(&settings).await;
+        let stop = stop_login(&settings).await;
+        let startup = ensure_startup_auth_ready("chatgpt", &settings).await;
+        let exists = session_conversation_exists("session-1").await;
+        let cleared = clear_session_conversation("session-1").await;
+        let unregistered = supervisor
+            .unregister(BROWSER_WORKER_KEY, Duration::from_secs(1))
+            .await;
+
+        assert!(unregistered);
+        assert!(auth.unwrap().logged_in);
+        assert!(login.unwrap().logged_in);
+        assert!(stop.unwrap().logged_in);
+        let startup = startup.unwrap();
         assert_eq!(startup.runner_id, "chatgpt");
         assert!(startup.logged_in);
-        assert!(session_conversation_exists("session-1").await.unwrap());
-        clear_session_conversation("session-1").await.unwrap();
+        assert!(exists.unwrap());
+        cleared.unwrap();
+    }
 
-        assert!(
-            supervisor
-                .unregister(BROWSER_WORKER_KEY, Duration::from_secs(1))
-                .await
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_browser_run_reads_result_and_forwards_progress() {
+        let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let temp = tempfile::tempdir().unwrap();
+        let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp.path());
+        let result_path = result_dir().join("result-parent.json");
+        let result: ExternalCliRunResult = serde_json::from_value(serde_json::json!({
+            "runId": "browser-run",
+            "sessionKey": "browser-parent-session",
+            "runtime": "chatgpt_web",
+            "adapter": "chatgpt-web",
+            "status": "failed",
+            "exitCode": 1,
+            "response": "browser failed safely",
+            "startedAt": 1,
+            "finishedAt": 2,
+            "durationMs": 1,
+            "artifacts": {
+                "runDir": "", "prompt": "", "commandSnapshot": "",
+                "stdout": "", "stderr": "", "normalizedEvents": "", "lastMessage": ""
+            },
+            "events": []
+        }))
+        .unwrap();
+        write_json_file(&result_path, &result, BROWSER_RESULT_MAX_BYTES).unwrap();
+        let script = r#"
+printf '{"type":"hello","hello":{"protocolVersion":1,"workerKind":"browser","workerInstanceId":"browser-run-test","pid":%s,"buildVersion":"test","startupToken":"%s","capabilities":[]}}\n' "$$" "$BIFROST_WORKER_STARTUP_TOKEN"
+printf '{"type":"ready","worker_instance_id":"browser-run-test"}\n'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*'browser.run'*)
+      request_id=$(printf '%s' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
+      printf '{"type":"event","event":{"requestId":"%s","jobId":"%s","event":"progress","payload":{"eventType":"status","content":"browser working","title":null,"raw":null}}}\n' "$request_id" "$request_id"
+      printf '{"type":"response","response":{"requestId":"%s","ok":true,"cancelled":false,"payload":{"resultPath":"%s"},"error":null}}\n' "$request_id" "$BIFROST_TEST_BROWSER_RESULT_PATH"
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"browser-run-test","reason":"test complete"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec = WorkerSpawnSpec::new(
+            BROWSER_WORKER_KEY,
+            WorkerKind::Browser,
+            "/bin/sh",
+            vec!["-c".to_string(), script.to_string()],
         );
+        spec.env.insert(
+            "BIFROST_TEST_BROWSER_RESULT_PATH".to_string(),
+            result_path.display().to_string(),
+        );
+        spec.startup_timeout = Duration::from_secs(2);
+        spec.request_timeout = Duration::from_secs(2);
+        spec.heartbeat_timeout = Duration::from_secs(10);
+        let supervisor = global_worker_supervisor();
+        supervisor.get_or_start(spec).await.unwrap();
+        let request: ExternalCliRunRequest = serde_json::from_value(
+            serde_json::json!({"message": "hello", "sessionKey": "browser-parent-session"}),
+        )
+        .unwrap();
+        let (progress_tx, mut progress_rx) = mpsc::channel(2);
+
+        let returned =
+            run_via_browser_worker(temp.path().join("runs"), request, Some(progress_tx)).await;
+        let progress = progress_rx.recv().await;
+        let unregistered = supervisor
+            .unregister(BROWSER_WORKER_KEY, Duration::from_secs(1))
+            .await;
+
+        assert!(unregistered);
+        let returned = returned.unwrap();
+        assert_eq!(returned.response, "browser failed safely");
+        assert_eq!(progress.unwrap().content, "browser working");
+        assert!(!result_path.exists());
+        assert!(crate::worker_runtime::worker_jobs().iter().any(|job| {
+            job.logical_job_id.as_deref() == Some("browser-parent-session")
+                && job.status == crate::worker_runtime::WorkerJobStatus::Failed
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_browser_run_marks_stopped_result_cancelled() {
+        let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let temp = tempfile::tempdir().unwrap();
+        let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp.path());
+        let result_path = result_dir().join("result-stopped.json");
+        let result: ExternalCliRunResult = serde_json::from_value(serde_json::json!({
+            "runId": "browser-stopped-run",
+            "sessionKey": "browser-stopped-session",
+            "runtime": "chatgpt_web",
+            "adapter": "chatgpt-web",
+            "status": "stopped",
+            "exitCode": null,
+            "response": "browser stopped",
+            "startedAt": 1,
+            "finishedAt": 2,
+            "durationMs": 1,
+            "artifacts": {
+                "runDir": "", "prompt": "", "commandSnapshot": "",
+                "stdout": "", "stderr": "", "normalizedEvents": "", "lastMessage": ""
+            },
+            "events": []
+        }))
+        .unwrap();
+        write_json_file(&result_path, &result, BROWSER_RESULT_MAX_BYTES).unwrap();
+        let script = r#"
+printf '{"type":"hello","hello":{"protocolVersion":1,"workerKind":"browser","workerInstanceId":"browser-stopped-test","pid":%s,"buildVersion":"test","startupToken":"%s","capabilities":[]}}\n' "$$" "$BIFROST_WORKER_STARTUP_TOKEN"
+printf '{"type":"ready","worker_instance_id":"browser-stopped-test"}\n'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*'browser.run'*)
+      request_id=$(printf '%s' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
+      printf '{"type":"response","response":{"requestId":"%s","ok":true,"cancelled":false,"payload":{"resultPath":"%s"},"error":null}}\n' "$request_id" "$BIFROST_TEST_BROWSER_RESULT_PATH"
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"browser-stopped-test","reason":"test complete"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec = WorkerSpawnSpec::new(
+            BROWSER_WORKER_KEY,
+            WorkerKind::Browser,
+            "/bin/sh",
+            vec!["-c".to_string(), script.to_string()],
+        );
+        spec.env.insert(
+            "BIFROST_TEST_BROWSER_RESULT_PATH".to_string(),
+            result_path.display().to_string(),
+        );
+        spec.startup_timeout = Duration::from_secs(2);
+        spec.request_timeout = Duration::from_secs(2);
+        spec.heartbeat_timeout = Duration::from_secs(10);
+        let supervisor = global_worker_supervisor();
+        supervisor.get_or_start(spec).await.unwrap();
+        let request: ExternalCliRunRequest = serde_json::from_value(serde_json::json!({
+            "message": "hello",
+            "sessionKey": "browser-stopped-session"
+        }))
+        .unwrap();
+
+        let returned = run_via_browser_worker(temp.path().join("runs"), request, None).await;
+        let unregistered = supervisor
+            .unregister(BROWSER_WORKER_KEY, Duration::from_secs(1))
+            .await;
+
+        assert!(unregistered);
+        assert_eq!(
+            returned.unwrap().status,
+            crate::im_gateway::external_cli::ExternalCliRunStatus::Stopped
+        );
+        assert!(!result_path.exists());
+        assert!(crate::worker_runtime::worker_jobs().iter().any(|job| {
+            job.logical_job_id.as_deref() == Some("browser-stopped-session")
+                && job.status == crate::worker_runtime::WorkerJobStatus::Cancelled
+        }));
     }
 }

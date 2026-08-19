@@ -2437,6 +2437,30 @@ mod tests {
                 crate::worker_runtime::WorkerKind::ExternalCli,
                 45_000,
             ),
+            test_worker_job(
+                "unrelated-browser",
+                Some("unrelated-browser-session"),
+                "browser.inspect",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::Browser,
+                46_000,
+            ),
+            test_worker_job(
+                "empty-adapter",
+                Some("empty-adapter-session"),
+                "external_cli.run:   ",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::ExternalCli,
+                47_000,
+            ),
+            test_worker_job(
+                "empty-session",
+                Some("   "),
+                "external_cli.run:codex",
+                crate::worker_runtime::WorkerJobStatus::Running,
+                crate::worker_runtime::WorkerKind::ExternalCli,
+                48_000,
+            ),
         ];
         let active = active_external_worker_jobs_from(jobs);
         assert_eq!(active.len(), 2);
@@ -2479,6 +2503,8 @@ mod tests {
                 "duration_secs": 10,
                 "user_message_count": 1,
             }),
+            serde_json::json!({"status": "ended"}),
+            serde_json::Value::Null,
         ];
         overlay_active_external_worker_jobs(&mut unified, &active);
 

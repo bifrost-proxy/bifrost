@@ -15,8 +15,8 @@ use crate::remote_invoke::types::{FileAccessScope, RemoteCommand};
 use crate::remote_invoke::{RemoteInvokeExecutor, RemoteInvokeResponse};
 
 use super::{
-    run_worker_stdio, ManagedWorker, ParentFrame, WorkerEvent, WorkerKind, WorkerSpawnSpec,
-    WorkerStdioContext,
+    global_worker_supervisor, run_worker_stdio, ManagedWorker, ParentFrame, WorkerEvent,
+    WorkerKind, WorkerSpawnSpec, WorkerStdioContext,
 };
 
 const REMOTE_EXECUTION_PARENT_ENV: &str = "BIFROST_REMOTE_INVOKE_WORKER";
@@ -27,6 +27,10 @@ const REMOTE_EXECUTION_EVENT: &str = "remote_execution.stdout";
 
 static ACTIVE_EXECUTION_WORKERS: Lazy<DashMap<String, Arc<ManagedWorker>>> =
     Lazy::new(DashMap::new);
+static EXECUTION_LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+#[cfg(test)]
+static TEST_REMOTE_EXECUTION_SPAWN_SPEC: Lazy<parking_lot::Mutex<Option<WorkerSpawnSpec>>> =
+    Lazy::new(|| parking_lot::Mutex::new(None));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +164,28 @@ pub(crate) async fn cancel_registered_execution(
     worker.cancel_request(request_id, logical_job_id).await
 }
 
+#[cfg(test)]
+pub(crate) fn register_execution_worker_for_test(worker: Arc<ManagedWorker>) {
+    ACTIVE_EXECUTION_WORKERS.insert(worker.key().to_string(), worker);
+}
+
+pub(crate) async fn stop_all_registered_executions(grace: Duration) -> usize {
+    let workers = {
+        let _lifecycle = EXECUTION_LIFECYCLE_LOCK.lock().await;
+        let workers = ACTIVE_EXECUTION_WORKERS
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect::<Vec<_>>();
+        ACTIVE_EXECUTION_WORKERS.clear();
+        workers
+    };
+    let count = workers.len();
+    for worker in workers {
+        let _ = worker.shutdown(grace).await;
+    }
+    count
+}
+
 pub(crate) fn should_isolate_remote_execution() -> bool {
     super::remote_invoke::is_remote_invoke_worker_process()
         && super::worker_execution_enabled(WorkerKind::RemoteExecution)
@@ -176,6 +202,10 @@ where
     F: FnMut(Vec<u8>) -> Fut,
     Fut: Future<Output = BifrostResult<()>>,
 {
+    let _lifecycle = EXECUTION_LIFECYCLE_LOCK.lock().await;
+    if global_worker_supervisor().is_kind_suspended(WorkerKind::RemoteExecution) {
+        return Err("Remote Execution workers are suspended".to_string());
+    }
     let execution_id = uuid::Uuid::new_v4().to_string();
     let spec = spawn_spec(&execution_id, admin_host, admin_port, command.timeout_ms)?;
     let stderr_path = spec.stderr_path.clone().unwrap_or_else(|| {
@@ -183,6 +213,7 @@ where
     });
     let worker = ManagedWorker::spawn(spec).await?;
     let mut shutdown_guard = WorkerShutdownGuard::new(worker.clone(), stderr_path.clone());
+    drop(_lifecycle);
 
     worker
         .request(
@@ -317,10 +348,14 @@ async fn forward_stdin(
 
 fn spawn_spec(
     execution_id: &str,
-    admin_host: &str,
-    admin_port: u16,
+    _admin_host: &str,
+    _admin_port: u16,
     timeout_ms: Option<u64>,
 ) -> Result<WorkerSpawnSpec, String> {
+    #[cfg(test)]
+    if let Some(spec) = TEST_REMOTE_EXECUTION_SPAWN_SPEC.lock().take() {
+        return Ok(spec);
+    }
     let executable = std::env::current_exe()
         .map_err(|error| format!("resolve Remote Execution worker executable: {error}"))?;
     let data_dir = bifrost_storage::data_dir();
@@ -335,9 +370,9 @@ fn spawn_spec(
             "--data-dir".to_string(),
             data_dir.display().to_string(),
             "--admin-host".to_string(),
-            admin_host.to_string(),
+            "127.0.0.1".to_string(),
             "--admin-port".to_string(),
-            admin_port.to_string(),
+            "0".to_string(),
         ],
     );
     spec.env
@@ -347,7 +382,6 @@ fn spawn_spec(
         "BIFROST_REMOTE_WORKER_HTTP_TOKEN".to_string(),
         super::remote_broker::BROKER_ADDR_ENV.to_string(),
         super::remote_broker::BROKER_TOKEN_ENV.to_string(),
-        super::remote_broker::BROKER_RELAY_ENV.to_string(),
     ]);
     spec.max_concurrency = 8;
     spec.max_queue_depth = 64;
@@ -372,8 +406,14 @@ fn remote_execution_runtime_root() -> PathBuf {
         .join("remote-execution")
 }
 
-pub fn run_remote_execution_worker_stdio(admin_host: &str, admin_port: u16) -> Result<(), String> {
-    let admin_host = admin_host.to_string();
+pub fn run_remote_execution_worker_stdio(
+    _admin_host: &str,
+    _admin_port: u16,
+) -> Result<(), String> {
+    // Shell execution workers never receive the Admin listener coordinates.
+    // Non-shell commands are executed by the authorized main-process broker.
+    let admin_host = "127.0.0.1".to_string();
+    let admin_port = 0;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("bifrost-remote-execution-worker")
@@ -700,6 +740,22 @@ mod tests {
         .await
         .unwrap_err()
         .contains("decode remote execution stdout"));
+        assert!(handle_stdout_event(
+            Some(event(
+                Some("execution"),
+                REMOTE_EXECUTION_EVENT,
+                serde_json::json!({
+                    "dataBase64": base64::engine::general_purpose::STANDARD.encode(b"stdout")
+                })
+            )),
+            "execution",
+            &mut |_| std::future::ready(Err(bifrost_core::BifrostError::Config(
+                "consumer failed".to_string(),
+            ))),
+        )
+        .await
+        .unwrap_err()
+        .contains("consumer failed"));
     }
 
     #[tokio::test]
@@ -779,6 +835,31 @@ mod tests {
         };
         assert_eq!(response.payload["closed"], true);
 
+        dispatch_worker_frame(
+            request(
+                "run",
+                "remote_execution.run",
+                serde_json::to_value(RemoteExecutionEnvelope::from_command(&RemoteCommand {
+                    command: "unsupported.query".to_string(),
+                    ..Default::default()
+                }))
+                .unwrap(),
+                Some("exec-1"),
+            ),
+            context.clone(),
+            state.clone(),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output.recv().await.unwrap() else {
+            panic!("expected run response")
+        };
+        assert!(response.ok);
+        assert!(response.payload.is_object());
+        assert!(!state.inputs.lock().await.contains_key("exec-1"));
+
         for (frame, expected) in [
             (
                 request(
@@ -788,6 +869,20 @@ mod tests {
                     None,
                 ),
                 "decode execution stdin",
+            ),
+            (
+                request(
+                    "oversized-stdin",
+                    "remote_execution.stdin",
+                    serde_json::json!({
+                        "executionId": "exec-1",
+                        "dataBase64": base64::engine::general_purpose::STANDARD.encode(
+                            vec![b'x'; REMOTE_EXECUTION_INPUT_CHUNK_BYTES + 1]
+                        )
+                    }),
+                    None,
+                ),
+                "exceeds hard limit",
             ),
             (
                 request(
@@ -879,6 +974,10 @@ mod tests {
         assert!(!cancel_registered_execution("missing", "request", "job")
             .await
             .unwrap());
+        assert_eq!(
+            stop_all_registered_executions(Duration::from_millis(1)).await,
+            0
+        );
     }
 
     #[cfg(unix)]
@@ -967,6 +1066,10 @@ done
         .unwrap());
         assert_eq!(pending.await.unwrap().unwrap_err(), "cancel acknowledged");
 
+        assert_eq!(
+            stop_all_registered_executions(Duration::from_secs(1)).await,
+            1
+        );
         drop(shutdown_guard);
         tokio::time::timeout(Duration::from_secs(3), async {
             while stderr_path.exists() || worker.state() != WorkerLifecycleState::Stopped {
@@ -976,5 +1079,175 @@ done
         .await
         .unwrap();
         assert!(!ACTIVE_EXECUTION_WORKERS.contains_key(&key));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_execute_remote_command_streams_output_and_reaps_the_worker() {
+        let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let key = format!("remote_execution:execute-{}", uuid::Uuid::new_v4());
+        let tail = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*)
+      request_id=$(printf '%s' "$line" | sed -n -e 's/.*"requestId":"\([^"]*\)".*/\1/p' -e 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'remote_execution.run'*)
+          job_id=$(printf '%s' "$line" | sed -n -e 's/.*"jobId":"\([^"]*\)".*/\1/p' -e 's/.*"job_id":"\([^"]*\)".*/\1/p')
+          printf '{"type":"event","event":{"requestId":"%s","jobId":"%s","event":"remote_execution.stdout","payload":{"dataBase64":"c3RyZWFtZWQ="}}}\n' "$request_id" "$job_id"
+          ;;
+      esac
+      printf '{"type":"response","response":{"requestId":"%s","ok":true,"cancelled":false,"payload":{},"error":null}}\n' "$request_id"
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec =
+            crate::worker_runtime::test_shell_worker_spec(&key, WorkerKind::RemoteExecution, tail);
+        spec.request_timeout = Duration::from_secs(2);
+        spec.heartbeat_timeout = Duration::from_secs(3);
+        *TEST_REMOTE_EXECUTION_SPAWN_SPEC.lock() = Some(spec);
+
+        let mut streamed = Vec::new();
+        let response = execute_remote_command(
+            &RemoteCommand {
+                command: "query.status".to_string(),
+                timeout_ms: Some(1_000),
+                ..Default::default()
+            },
+            "127.0.0.1",
+            0,
+            None,
+            &mut |chunk| {
+                streamed.extend(chunk);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(streamed, b"streamed");
+        assert!(!ACTIVE_EXECUTION_WORKERS.contains_key(&key));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parent_execute_remote_command_rejects_suspension_bad_results_and_stdin_failures() {
+        let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let supervisor = global_worker_supervisor();
+
+        supervisor
+            .suspend_kind(WorkerKind::RemoteExecution, Duration::ZERO)
+            .await;
+        let error =
+            execute_remote_command(&RemoteCommand::default(), "127.0.0.1", 0, None, &mut |_| {
+                std::future::ready(Ok(()))
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("suspended"), "{error}");
+        supervisor.resume_kind(WorkerKind::RemoteExecution);
+
+        let malformed_key = format!("remote_execution:malformed-{}", uuid::Uuid::new_v4());
+        let malformed_tail = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*)
+      request_id=$(printf '%s' "$line" | sed -n -e 's/.*"requestId":"\([^"]*\)".*/\1/p' -e 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'remote_execution.run'*) payload='null' ;;
+        *) payload='{"accepted":true}' ;;
+      esac
+      printf '{"type":"response","response":{"requestId":"%s","ok":true,"cancelled":false,"payload":%s,"error":null}}\n' "$request_id" "$payload"
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut malformed_spec = crate::worker_runtime::test_shell_worker_spec(
+            &malformed_key,
+            WorkerKind::RemoteExecution,
+            malformed_tail,
+        );
+        malformed_spec.request_timeout = Duration::from_secs(2);
+        malformed_spec.heartbeat_timeout = Duration::from_secs(3);
+        *TEST_REMOTE_EXECUTION_SPAWN_SPEC.lock() = Some(malformed_spec);
+        let error =
+            execute_remote_command(&RemoteCommand::default(), "127.0.0.1", 0, None, &mut |_| {
+                std::future::ready(Ok(()))
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("parse remote execution response"), "{error}");
+
+        let stdin_key = format!("remote_execution:stdin-error-{}", uuid::Uuid::new_v4());
+        let stdin_tail = r#"
+run_id=''
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*)
+      request_id=$(printf '%s' "$line" | sed -n -e 's/.*"requestId":"\([^"]*\)".*/\1/p' -e 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'remote_execution.run'*) run_id="$request_id" ;;
+        *'remote_execution.stdin'*)
+          printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":false,"payload":null,"error":"stdin rejected"}}\n' "$request_id"
+          ;;
+        *)
+          printf '{"type":"response","response":{"requestId":"%s","ok":true,"cancelled":false,"payload":{"accepted":true},"error":null}}\n' "$request_id"
+          ;;
+      esac
+      ;;
+    *'"type":"cancel"'*)
+      printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":true,"payload":null,"error":"cancel acknowledged"}}\n' "$run_id"
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut stdin_spec = crate::worker_runtime::test_shell_worker_spec(
+            &stdin_key,
+            WorkerKind::RemoteExecution,
+            stdin_tail,
+        );
+        stdin_spec.request_timeout = Duration::from_secs(2);
+        stdin_spec.heartbeat_timeout = Duration::from_secs(3);
+        stdin_spec.max_concurrency = 8;
+        *TEST_REMOTE_EXECUTION_SPAWN_SPEC.lock() = Some(stdin_spec);
+        let (stdin_tx, stdin_rx) = mpsc::channel(1);
+        stdin_tx.send(b"stdin".to_vec()).await.unwrap();
+        drop(stdin_tx);
+        let error = execute_remote_command(
+            &RemoteCommand::default(),
+            "127.0.0.1",
+            0,
+            Some(stdin_rx),
+            &mut |_| std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("stdin rejected"), "{error}");
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while ACTIVE_EXECUTION_WORKERS.contains_key(&malformed_key)
+                || ACTIVE_EXECUTION_WORKERS.contains_key(&stdin_key)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

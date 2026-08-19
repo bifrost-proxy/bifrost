@@ -7,6 +7,7 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 use parking_lot::RwLock;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -73,12 +74,15 @@ const MAX_PERSISTED_PROGRESS_TITLE_BYTES: usize = 128;
 const MAX_PERSISTED_PROGRESS_RAW_STRING_BYTES: usize = 256;
 const MAX_RETAINED_RUNS: usize = 64;
 const MAX_RETAINED_RUN_BYTES: u64 = 256 * 1024 * 1024;
+const EXTERNAL_CLI_RUN_LOCK_FILE: &str = ".active.lock";
 const EXTERNAL_CLI_WORKER_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const EXTERNAL_CLI_TEE_BUFFER_BYTES: usize = 64 * 1024;
 const EXTERNAL_CLI_WORKER_REQUEST_MAX_BYTES: u64 = 384 * 1024 * 1024;
 const EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const EXTERNAL_CLI_WORKER_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
-const EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+// Four External CLI jobs may run concurrently. Keep the two command streams
+// below the shared 256 MiB retained-run budget even before pruning runs.
+const EXTERNAL_CLI_COMMAND_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const EXTERNAL_CLI_WORKER_PROGRESS_CONTENT_BYTES: usize = 16 * 1024;
 const EXTERNAL_CLI_WORKER_PROGRESS_TITLE_BYTES: usize = 1024;
 const EXTERNAL_CLI_WORKER_HEARTBEAT_INTERVAL_SECS: u64 = 10;
@@ -1818,6 +1822,7 @@ struct ExternalCliWorkerRun {
     events: tokio::io::BufReader<tokio::process::ChildStdout>,
     stderr_capture: Option<tokio::task::JoinHandle<String>>,
     request_path: Option<PathBuf>,
+    active_command_pid: Option<u32>,
 }
 
 impl ExternalCliWorkerClient {
@@ -1898,6 +1903,7 @@ impl ExternalCliWorkerClient {
             events: tokio::io::BufReader::new(stdout),
             stderr_capture: Some(stderr_capture),
             request_path: Some(request_path),
+            active_command_pid: None,
         })
     }
 }
@@ -1975,6 +1981,7 @@ impl ExternalCliWorkerRun {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(error)) => Err(format!("wait external runner worker failed: {error}")),
             Err(_) => {
+                self.terminate_active_command();
                 if let Some(pid) = self.child.id() {
                     let _ = terminate_process(pid);
                 }
@@ -2022,10 +2029,25 @@ impl ExternalCliWorkerRun {
         let event = serde_json::from_str::<ExternalCliWorkerEvent>(&line).map_err(|error| {
             format!("parse external runner worker event failed: {error}; line={line}")
         })?;
-        if matches!(event, ExternalCliWorkerEvent::Started { .. }) {
-            self.cleanup_request_file();
+        match &event {
+            ExternalCliWorkerEvent::Started { pid, .. } => {
+                self.active_command_pid = Some(*pid);
+                self.cleanup_request_file();
+            }
+            ExternalCliWorkerEvent::Finished { .. }
+            | ExternalCliWorkerEvent::Failed { .. }
+            | ExternalCliWorkerEvent::Stopped => {
+                self.active_command_pid = None;
+            }
+            _ => {}
         }
         Ok(event)
+    }
+
+    fn terminate_active_command(&mut self) {
+        if let Some(pid) = self.active_command_pid.take() {
+            let _ = terminate_process(pid);
+        }
     }
 
     fn cleanup_request_file(&mut self) {
@@ -2051,6 +2073,9 @@ impl ExternalCliWorkerRun {
 impl Drop for ExternalCliWorkerRun {
     fn drop(&mut self) {
         self.cleanup_request_file();
+        // The actual Codex/Claude/Traex command owns a process group distinct
+        // from the wrapper worker. Reap it first when the protocol fails.
+        self.terminate_active_command();
         if let Some(pid) = self.child.id() {
             let _ = terminate_process(pid);
         }
@@ -2528,11 +2553,18 @@ impl ExternalCliRuntime {
         validate_work_dir(&request)?;
         let started_at = now_ms();
         let run_id = format!("{}-{}", started_at, uuid::Uuid::new_v4());
+        // Keep the cross-process prune lock adjacent to the runs directory.
+        // Consumers enumerate every entry inside runs_root as a run id.
+        let prune_lock = acquire_external_cli_lock(&self.runs_root.with_extension("prune.lock"))?;
         prune_completed_run_directories(&self.runs_root, Some(&run_id))?;
         let run_dir = self.runs_root.join(&run_id);
-        tokio::fs::create_dir_all(&run_dir)
-            .await
+        // Do not hold the blocking cross-process prune lock across an await:
+        // another runtime task may synchronously wait for the same lock and
+        // prevent this task from resuming to release it.
+        std::fs::create_dir_all(&run_dir)
             .map_err(|error| format!("create run dir failed: {error}"))?;
+        let _run_lock = acquire_external_cli_lock(&run_dir.join(EXTERNAL_CLI_RUN_LOCK_FILE))?;
+        drop(prune_lock);
 
         let prompt_path = run_dir.join("prompt.md");
         let last_message_path = run_dir.join("last_message.md");
@@ -6056,25 +6088,57 @@ fn prune_completed_run_directories(
         .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
         .filter(|entry| active_run != entry.file_name().to_str())
         .filter(|entry| !ACTIVE_RUNS.contains_key(entry.file_name().to_string_lossy().as_ref()))
-        .filter(|entry| entry.path().join("result.json").is_file())
-        .map(|entry| {
+        .filter_map(|entry| {
+            let inactive_lock = lock_inactive_external_cli_run(&entry.path())?;
             let modified = entry
                 .metadata()
                 .and_then(|metadata| metadata.modified())
                 .unwrap_or(UNIX_EPOCH);
             let bytes = directory_size(&entry.path());
-            (entry.path(), modified, bytes)
+            Some((entry.path(), modified, bytes, inactive_lock))
         })
         .collect::<Vec<_>>();
-    runs.sort_by_key(|(_, modified, _)| *modified);
-    let mut total = runs.iter().map(|(_, _, bytes)| *bytes).sum::<u64>();
+    runs.sort_by_key(|(_, modified, _, _)| *modified);
+    let mut total = runs.iter().map(|(_, _, bytes, _)| *bytes).sum::<u64>();
     while runs.len() > MAX_RETAINED_RUNS || total > MAX_RETAINED_RUN_BYTES {
-        let (path, _, bytes) = runs.remove(0);
+        let (path, _, bytes, _inactive_lock) = runs.remove(0);
         std::fs::remove_dir_all(&path)
             .map_err(|error| format!("prune external run {} failed: {error}", path.display()))?;
         total = total.saturating_sub(bytes);
     }
     Ok(())
+}
+
+fn acquire_external_cli_lock(path: &Path) -> Result<std::fs::File, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create external CLI lock directory failed: {error}"))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("open external CLI lock {} failed: {error}", path.display()))?;
+    FileExt::lock_exclusive(&file)
+        .map_err(|error| format!("lock external CLI run {} failed: {error}", path.display()))?;
+    Ok(file)
+}
+
+fn lock_inactive_external_cli_run(run_dir: &Path) -> Option<std::fs::File> {
+    let lock_path = run_dir.join(EXTERNAL_CLI_RUN_LOCK_FILE);
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return None,
+    };
+    FileExt::try_lock_exclusive(&file).ok()?;
+    Some(file)
 }
 
 fn directory_size(path: &Path) -> u64 {

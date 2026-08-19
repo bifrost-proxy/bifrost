@@ -7,7 +7,6 @@ use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, Local, LocalResult, NaiveDate, TimeZone,
     Timelike,
 };
-use fs2::FileExt;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use once_cell::sync::Lazy;

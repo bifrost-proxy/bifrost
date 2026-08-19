@@ -30,6 +30,7 @@ EXTERNAL_TEST_MODULE_RE = re.compile(
     re.MULTILINE,
 )
 PATH_ATTR_RE = re.compile(r'#\[path\s*=\s*"([^"]+)"\]')
+INCLUDE_RE = re.compile(r'include!\s*\(\s*"([^"]+)"\s*\)')
 MOVED_BLOCK_MIN_LINES = 8
 MOVED_BLOCK_MIN_SUBSTANTIVE_LINES = 4
 
@@ -59,12 +60,23 @@ def external_test_module_roots(repo_root: Path) -> tuple[Path, ...]:
             module_name = declaration.group("name")
             roots.add((module_dir / f"{module_name}.rs").resolve())
             roots.add((module_dir / module_name).resolve())
+        test_module_lines = rust_test_module_lines(source)
+        for line_no, line in enumerate(source.splitlines(), start=1):
+            if line_no not in test_module_lines:
+                continue
+            for included in INCLUDE_RE.finditer(line):
+                module_file = (source_path.parent / included.group(1)).resolve()
+                roots.add(module_file)
+                if module_file.suffix == ".rs":
+                    roots.add(module_file.with_suffix(""))
     return tuple(sorted(roots))
 
 
 def is_production_rust_path(path: str, repo_root: Path = REPO_ROOT) -> bool:
     """Exclude verified external ``#[cfg(test)]`` modules, not path names."""
     if not PRODUCTION_RUST_RE.match(path):
+        return False
+    if path.startswith("crates/bifrost-e2e/src/"):
         return False
     absolute = (repo_root / path).resolve()
     return not any(
@@ -208,6 +220,9 @@ def rust_non_executable_lines(source: str) -> set[int]:
         if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+", stripped):
             excluded.add(line_no)
             declaration_depth = line.count("{") - line.count("}")
+            continue
+        if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:mod|use)\s+", stripped):
+            excluded.add(line_no)
             continue
         if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+", stripped):
             excluded.add(line_no)

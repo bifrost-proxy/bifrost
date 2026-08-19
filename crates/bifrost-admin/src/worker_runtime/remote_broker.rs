@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
+use bifrost_core::BifrostError;
+use bifrost_storage::RemoteShellStore;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -16,14 +19,12 @@ use super::remote_execution::RemoteExecutionEnvelope;
 
 pub(crate) const BROKER_ADDR_ENV: &str = "BIFROST_REMOTE_EXECUTION_BROKER_ADDR";
 pub(crate) const BROKER_TOKEN_ENV: &str = "BIFROST_REMOTE_EXECUTION_BROKER_TOKEN";
-pub(crate) const BROKER_RELAY_ENV: &str = "BIFROST_REMOTE_EXECUTION_BROKER_RELAY";
 const BROKER_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const BROKER_STDIN_CHUNK_BYTES: usize = 64 * 1024;
 const BROKER_MAX_CONNECTIONS: usize = 32;
 
 static SERVER: OnceLock<tokio::sync::Mutex<Option<BrokerServer>>> = OnceLock::new();
 static RUNTIME_STATE: OnceLock<parking_lot::RwLock<Option<BrokerRuntimeState>>> = OnceLock::new();
-static GRANT_AUTH_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
 
 #[derive(Clone)]
 struct BrokerRuntimeState {
@@ -35,7 +36,45 @@ struct BrokerRuntimeState {
 #[derive(Debug, Clone)]
 pub(crate) struct BrokerEndpoint {
     pub addr: String,
-    pub token: String,
+    capabilities: Arc<parking_lot::RwLock<RelayCapabilities>>,
+}
+
+#[derive(Debug, Default)]
+struct RelayCapabilities {
+    relay_by_token: HashMap<String, String>,
+    token_by_relay: HashMap<String, String>,
+}
+
+impl BrokerEndpoint {
+    fn issue_relay_token(&self, relay_url: &str) -> String {
+        let token = uuid::Uuid::new_v4().to_string();
+        let mut capabilities = self.capabilities.write();
+        if let Some(previous) = capabilities
+            .token_by_relay
+            .insert(relay_url.to_string(), token.clone())
+        {
+            capabilities.relay_by_token.remove(&previous);
+        }
+        capabilities
+            .relay_by_token
+            .insert(token.clone(), relay_url.to_string());
+        token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(addr: &str, relay_url: &str, token: &str) -> Self {
+        let mut capabilities = RelayCapabilities::default();
+        capabilities
+            .relay_by_token
+            .insert(token.to_string(), relay_url.to_string());
+        capabilities
+            .token_by_relay
+            .insert(relay_url.to_string(), token.to_string());
+        Self {
+            addr: addr.to_string(),
+            capabilities: Arc::new(parking_lot::RwLock::new(capabilities)),
+        }
+    }
 }
 
 struct BrokerServer {
@@ -48,7 +87,6 @@ struct BrokerServer {
 enum BrokerRequest {
     Start {
         token: String,
-        relay_url: String,
         envelope: Box<RemoteExecutionEnvelope>,
     },
     Stdin {
@@ -105,7 +143,7 @@ pub(crate) async fn ensure_main_broker(
         .to_string();
     let endpoint = BrokerEndpoint {
         addr,
-        token: uuid::Uuid::new_v4().to_string(),
+        capabilities: Arc::new(parking_lot::RwLock::new(RelayCapabilities::default())),
     };
     let endpoint_for_task = endpoint.clone();
     let connections = Arc::new(Semaphore::new(BROKER_MAX_CONNECTIONS));
@@ -129,10 +167,10 @@ pub(crate) async fn ensure_main_broker(
                     continue;
                 }
             };
-            let token = endpoint_for_task.token.clone();
+            let capabilities = endpoint_for_task.capabilities.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(error) = serve_connection(stream, &token).await {
+                if let Err(error) = serve_connection(stream, &capabilities).await {
                     tracing::debug!(error = %error, "Remote Execution broker connection closed");
                 }
             });
@@ -154,18 +192,14 @@ pub(crate) fn configure_worker_env(
     endpoint: &BrokerEndpoint,
     relay_url: &str,
 ) {
+    let token = endpoint.issue_relay_token(relay_url);
     spec.env
         .insert(BROKER_ADDR_ENV.to_string(), endpoint.addr.clone());
-    spec.env
-        .insert(BROKER_TOKEN_ENV.to_string(), endpoint.token.clone());
-    spec.env
-        .insert(BROKER_RELAY_ENV.to_string(), relay_url.to_string());
+    spec.env.insert(BROKER_TOKEN_ENV.to_string(), token);
 }
 
 pub(crate) fn broker_client_configured() -> bool {
-    std::env::var(BROKER_ADDR_ENV).is_ok()
-        && std::env::var(BROKER_TOKEN_ENV).is_ok()
-        && std::env::var(BROKER_RELAY_ENV).is_ok()
+    std::env::var(BROKER_ADDR_ENV).is_ok() && std::env::var(BROKER_TOKEN_ENV).is_ok()
 }
 
 pub(crate) async fn execute_via_main_broker<F, Fut>(
@@ -181,8 +215,6 @@ where
         .map_err(|_| format!("{BROKER_ADDR_ENV} is required in Remote Invoke worker"))?;
     let token = std::env::var(BROKER_TOKEN_ENV)
         .map_err(|_| format!("{BROKER_TOKEN_ENV} is required in Remote Invoke worker"))?;
-    let relay_url = std::env::var(BROKER_RELAY_ENV)
-        .map_err(|_| format!("{BROKER_RELAY_ENV} is required in Remote Invoke worker"))?;
     let mut stream = TcpStream::connect(&addr)
         .await
         .map_err(|error| format!("connect Remote Execution main broker {addr}: {error}"))?;
@@ -190,7 +222,6 @@ where
         &mut stream,
         &BrokerRequest::Start {
             token,
-            relay_url,
             envelope: Box::new(RemoteExecutionEnvelope::from_command(command)),
         },
     )
@@ -242,7 +273,10 @@ where
     }
 }
 
-async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(), String> {
+async fn serve_connection(
+    stream: TcpStream,
+    capabilities: &parking_lot::RwLock<RelayCapabilities>,
+) -> Result<(), String> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let start_line = super::read_limited_async_line(&mut reader, BROKER_MAX_FRAME_BYTES)
@@ -251,15 +285,11 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
         .ok_or_else(|| "Remote Execution broker peer closed before start".to_string())?;
     let start: BrokerRequest = serde_json::from_str(&start_line)
         .map_err(|error| format!("parse Remote Execution broker start: {error}"))?;
-    let BrokerRequest::Start {
-        token,
-        relay_url,
-        envelope,
-    } = start
-    else {
+    let BrokerRequest::Start { token, envelope } = start else {
         return Err("Remote Execution broker requires start as first frame".to_string());
     };
-    if token != expected_token {
+    let relay_url = capabilities.read().relay_by_token.get(&token).cloned();
+    let Some(relay_url) = relay_url else {
         write_response(
             &mut write_half,
             &BrokerResponse::Error {
@@ -268,13 +298,13 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
         )
         .await?;
         return Ok(());
-    }
+    };
 
     let runtime = runtime_state()
         .read()
         .clone()
         .ok_or_else(|| "Remote Execution broker runtime is not configured".to_string())?;
-    let command = match reauthorize_intent(&relay_url, *envelope) {
+    let command = match reauthorize_intent(&relay_url, *envelope, &runtime) {
         Ok(command) => command,
         Err(error) => {
             write_response(&mut write_half, &BrokerResponse::Error { error }).await?;
@@ -406,28 +436,31 @@ async fn serve_connection(stream: TcpStream, expected_token: &str) -> Result<(),
 fn reauthorize_intent(
     relay_url: &str,
     envelope: RemoteExecutionEnvelope,
+    runtime: &BrokerRuntimeState,
 ) -> Result<RemoteCommand, String> {
-    let _authorization = grant_auth_lock().lock();
     let grant_id = envelope
         .grant_id()
-        .ok_or_else(|| "Remote Execution intent is missing grant_id".to_string())?;
+        .ok_or_else(|| "Remote Execution intent is missing grant_id".to_string())?
+        .to_string();
     let store = GrantInfoStore::new(&bifrost_storage::data_dir());
-    let mut grants = store
-        .load_for_relay(relay_url)
-        .map_err(|error| format!("reload Remote Invoke grant for broker authorization: {error}"))?;
-    let grant = grants.get_mut(grant_id).ok_or_else(|| {
-        format!("Remote Invoke grant '{grant_id}' is not authorized in main process")
-    })?;
     let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    validate_and_consume_grant(grant_id, grant, &envelope, now)?;
-    let updated = grant.clone();
     store
-        .upsert(relay_url, grant_id, &updated)
-        .map_err(|error| format!("persist Remote Invoke broker authorization: {error}"))?;
-    Ok(envelope.into_command())
+        .update_for_relay(relay_url, |grants| {
+            let grant = grants.get_mut(&grant_id).ok_or_else(|| {
+                BifrostError::Config(format!(
+                    "Remote Invoke grant '{grant_id}' is not authorized in main process"
+                ))
+            })?;
+            validate_grant(&grant_id, grant, &envelope, now).map_err(BifrostError::Config)?;
+            let mut command = envelope.into_command();
+            enforce_shell_policy(&mut command, grant, runtime).map_err(BifrostError::Config)?;
+            consume_grant(grant, now);
+            Ok(command)
+        })
+        .map_err(|error| format!("authorize Remote Invoke broker intent: {error}"))
 }
 
-fn validate_and_consume_grant(
+fn validate_grant(
     grant_id: &str,
     grant: &mut GrantInfo,
     envelope: &RemoteExecutionEnvelope,
@@ -467,6 +500,10 @@ fn validate_and_consume_grant(
             envelope.command_kind().as_str()
         ));
     }
+    Ok(())
+}
+
+fn consume_grant(grant: &mut GrantInfo, now: u64) {
     if let Some(remaining) = grant.remaining_calls {
         grant.remaining_calls = Some(remaining - 1);
         if remaining == 1 {
@@ -476,11 +513,48 @@ fn validate_and_consume_grant(
     grant.use_count = grant.use_count.saturating_add(1);
     grant.last_command_at = Some(now);
     grant.last_used_at = Some(now);
+}
+
+#[cfg(test)]
+fn validate_and_consume_grant(
+    grant_id: &str,
+    grant: &mut GrantInfo,
+    envelope: &RemoteExecutionEnvelope,
+    now: u64,
+) -> Result<(), String> {
+    validate_grant(grant_id, grant, envelope, now)?;
+    consume_grant(grant, now);
     Ok(())
 }
 
-fn grant_auth_lock() -> &'static parking_lot::Mutex<()> {
-    GRANT_AUTH_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
+fn enforce_shell_policy(
+    command: &mut RemoteCommand,
+    grant: &GrantInfo,
+    runtime: &BrokerRuntimeState,
+) -> Result<(), String> {
+    if command.kind != crate::remote_invoke::types::CommandKind::ShellExec {
+        return Ok(());
+    }
+    // The transport worker may carry the policy selected during its initial
+    // grant check, but that value crosses an untrusted process boundary. Drop
+    // it and reconstruct the effective policy from the persisted grant below.
+    command.policy_id = None;
+    if let Some(snapshot) = grant.shell_policy_set_version_snapshot {
+        let current = RemoteShellStore::new()
+            .and_then(|store| store.current_version())
+            .map_err(|error| format!("load shell policy set version failed: {error}"))?;
+        if current != snapshot {
+            return Err(format!(
+                "shell policy set version changed (grant={snapshot}, current={current}), reconnect is required"
+            ));
+        }
+    }
+    let executor = RemoteInvokeExecutor::new(&runtime.admin_host, runtime.admin_port);
+    let policy_id = executor
+        .select_policy_id_for_command(command, grant.policy_binding.as_ref())
+        .map_err(|error| error.to_string())?;
+    command.policy_id = Some(policy_id);
+    Ok(())
 }
 
 async fn write_request<W>(writer: &mut W, frame: &BrokerRequest) -> Result<(), String>
@@ -587,12 +661,22 @@ mod tests {
         RemoteExecutionEnvelope::from_command(&command)
     }
 
+    fn capabilities_for(token: &str, relay_url: &str) -> parking_lot::RwLock<RelayCapabilities> {
+        let mut capabilities = RelayCapabilities::default();
+        capabilities
+            .relay_by_token
+            .insert(token.to_string(), relay_url.to_string());
+        capabilities
+            .token_by_relay
+            .insert(relay_url.to_string(), token.to_string());
+        parking_lot::RwLock::new(capabilities)
+    }
+
     #[test]
     fn broker_client_requires_all_capability_environment() {
         let _lock = BROKER_TEST_ENV_LOCK.blocking_lock();
         std::env::remove_var(BROKER_ADDR_ENV);
         std::env::remove_var(BROKER_TOKEN_ENV);
-        std::env::remove_var(BROKER_RELAY_ENV);
         assert!(!broker_client_configured());
     }
 
@@ -605,7 +689,6 @@ mod tests {
             let addr = listener.local_addr().unwrap().to_string();
             std::env::set_var(BROKER_ADDR_ENV, &addr);
             std::env::set_var(BROKER_TOKEN_ENV, "token");
-            std::env::set_var(BROKER_RELAY_ENV, "https://relay.example");
             (listener, addr)
         }
 
@@ -620,8 +703,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 serde_json::from_str::<BrokerRequest>(&start).unwrap(),
-                BrokerRequest::Start { token, relay_url, .. }
-                    if token == "token" && relay_url == "https://relay.example"
+                BrokerRequest::Start { token, .. } if token == "token"
             ));
             let mut stdin = Vec::new();
             loop {
@@ -716,15 +798,15 @@ mod tests {
             .contains(BROKER_ADDR_ENV)
         );
         std::env::remove_var(BROKER_TOKEN_ENV);
-        std::env::remove_var(BROKER_RELAY_ENV);
     }
 
     #[test]
     fn worker_environment_contains_only_the_broker_capabilities() {
-        let endpoint = BrokerEndpoint {
-            addr: "127.0.0.1:12345".to_string(),
-            token: "capability".to_string(),
-        };
+        let endpoint = BrokerEndpoint::for_test(
+            "127.0.0.1:12345",
+            "https://relay.example",
+            "previous-capability",
+        );
         let mut spec = super::super::WorkerSpawnSpec::new(
             "remote",
             super::super::WorkerKind::RemoteInvoke,
@@ -733,11 +815,28 @@ mod tests {
         );
         configure_worker_env(&mut spec, &endpoint, "https://relay.example");
         assert_eq!(spec.env.get(BROKER_ADDR_ENV), Some(&endpoint.addr));
-        assert_eq!(spec.env.get(BROKER_TOKEN_ENV), Some(&endpoint.token));
+        let token = spec.env.get(BROKER_TOKEN_ENV).unwrap();
+        assert_ne!(token, "previous-capability");
         assert_eq!(
-            spec.env.get(BROKER_RELAY_ENV).map(String::as_str),
-            Some("https://relay.example")
+            endpoint.capabilities.read().relay_by_token.get(token),
+            Some(&"https://relay.example".to_string())
         );
+        assert!(!endpoint
+            .capabilities
+            .read()
+            .relay_by_token
+            .contains_key("previous-capability"));
+
+        let other_token = endpoint.issue_relay_token("https://other-relay.example");
+        let capabilities = endpoint.capabilities.read();
+        assert_eq!(
+            capabilities
+                .relay_by_token
+                .get(&other_token)
+                .map(String::as_str),
+            Some("https://other-relay.example")
+        );
+        assert_ne!(other_token, *token);
     }
 
     #[tokio::test]
@@ -751,7 +850,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.addr, second.addr);
-        assert_eq!(first.token, second.token);
+        assert!(Arc::ptr_eq(&first.capabilities, &second.capabilities));
         assert!(first.addr.starts_with("127.0.0.1:"));
         let runtime = runtime_state().read().clone().unwrap();
         assert_eq!(runtime.admin_host, "localhost");
@@ -767,7 +866,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_ne!(recovered.token, first.token);
+        assert!(!Arc::ptr_eq(&recovered.capabilities, &first.capabilities));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -827,11 +926,11 @@ mod tests {
             ..Default::default()
         };
         let mut stream = TcpStream::connect(&endpoint.addr).await.unwrap();
+        let token = endpoint.issue_relay_token(relay_url);
         write_request(
             &mut stream,
             &BrokerRequest::Start {
-                token: endpoint.token,
-                relay_url: relay_url.to_string(),
+                token,
                 envelope: Box::new(envelope(command)),
             },
         )
@@ -974,14 +1073,15 @@ mod tests {
 
         let (client, server) = pair().await;
         drop(client);
-        assert!(serve_connection(server, "token")
+        let capabilities = capabilities_for("token", "https://missing-grant.example.test");
+        assert!(serve_connection(server, &capabilities)
             .await
             .unwrap_err()
             .contains("closed before start"));
 
         let (mut client, server) = pair().await;
         client.write_all(b"not-json\n").await.unwrap();
-        assert!(serve_connection(server, "token")
+        assert!(serve_connection(server, &capabilities)
             .await
             .unwrap_err()
             .contains("parse Remote Execution broker start"));
@@ -990,7 +1090,7 @@ mod tests {
         write_request(&mut client, &BrokerRequest::StdinClose)
             .await
             .unwrap();
-        assert!(serve_connection(server, "token")
+        assert!(serve_connection(server, &capabilities)
             .await
             .unwrap_err()
             .contains("requires start"));
@@ -1000,13 +1100,12 @@ mod tests {
             &mut client,
             &BrokerRequest::Start {
                 token: "wrong".to_string(),
-                relay_url: "https://relay.example".to_string(),
                 envelope: Box::new(envelope(RemoteCommand::default())),
             },
         )
         .await
         .unwrap();
-        serve_connection(server, "token").await.unwrap();
+        serve_connection(server, &capabilities).await.unwrap();
         let mut reader = BufReader::new(client);
         let line = super::super::read_limited_async_line(&mut reader, BROKER_MAX_FRAME_BYTES)
             .await
@@ -1027,7 +1126,6 @@ mod tests {
             &mut client,
             &BrokerRequest::Start {
                 token: "token".to_string(),
-                relay_url: "https://missing-grant.example.test".to_string(),
                 envelope: Box::new(envelope(RemoteCommand {
                     grant_id: Some("missing-grant".to_string()),
                     ..Default::default()
@@ -1036,7 +1134,7 @@ mod tests {
         )
         .await
         .unwrap();
-        serve_connection(server, "token").await.unwrap();
+        serve_connection(server, &capabilities).await.unwrap();
         let mut reader = BufReader::new(client);
         let line = super::super::read_limited_async_line(&mut reader, BROKER_MAX_FRAME_BYTES)
             .await
@@ -1082,7 +1180,6 @@ mod tests {
 
         let start = || BrokerRequest::Start {
             token: "token".to_string(),
-            relay_url: relay_url.to_string(),
             envelope: Box::new(envelope(RemoteCommand {
                 command: "status".to_string(),
                 grant_id: Some(grant.grant_id.clone()),
@@ -1091,11 +1188,12 @@ mod tests {
                 ..Default::default()
             })),
         };
+        let capabilities = capabilities_for("token", relay_url);
 
         let (mut client, server) = pair().await;
         write_request(&mut client, &start()).await.unwrap();
         drop(client);
-        assert!(serve_connection(server, "token")
+        assert!(serve_connection(server, &capabilities)
             .await
             .unwrap_err()
             .contains("client disconnected"));
@@ -1103,7 +1201,7 @@ mod tests {
         let (mut client, server) = pair().await;
         write_request(&mut client, &start()).await.unwrap();
         client.write_all(b"not-json\n").await.unwrap();
-        assert!(serve_connection(server, "token")
+        assert!(serve_connection(server, &capabilities)
             .await
             .unwrap_err()
             .contains("parse Remote Execution broker stdin"));
@@ -1118,7 +1216,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(serve_connection(server, "token")
+        assert!(serve_connection(server, &capabilities)
             .await
             .unwrap_err()
             .contains("decode Remote Execution broker stdin"));
@@ -1137,7 +1235,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(serve_connection(server, "token")
+        assert!(serve_connection(server, &capabilities)
             .await
             .unwrap_err()
             .contains("stdin chunk exceeds hard limit"));
@@ -1145,7 +1243,7 @@ mod tests {
         let (mut client, server) = pair().await;
         write_request(&mut client, &start()).await.unwrap();
         write_request(&mut client, &start()).await.unwrap();
-        assert!(serve_connection(server, "token")
+        assert!(serve_connection(server, &capabilities)
             .await
             .unwrap_err()
             .contains("duplicate Remote Execution broker start"));
@@ -1259,5 +1357,51 @@ mod tests {
         assert_eq!(grant.status, GrantStatus::Consumed);
         assert_eq!(grant.use_count, 1);
         assert!(validate_and_consume_grant("grant-once", &mut grant, &envelope, 43).is_err());
+    }
+
+    #[test]
+    fn main_broker_reselects_worker_supplied_shell_policy_from_persisted_grant() {
+        use crate::remote_invoke::types::{FileAccessScope, GrantScope};
+
+        let temp = tempfile::tempdir().unwrap();
+        let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp.path());
+        let relay_url = "https://relay.shell-policy.test";
+        let mut grant = active_grant();
+        grant.grant_scope = GrantScope::RemoteShellExec;
+        bifrost_storage::ensure_default_ssh_key_shell_policy().unwrap();
+        grant.policy_binding = Some(serde_json::json!({
+            "mode": "selected",
+            "policy_ids": [bifrost_storage::DEFAULT_SSH_KEY_SHELL_POLICY_ID]
+        }));
+        grant.shell_policy_set_version_snapshot =
+            Some(RemoteShellStore::new().unwrap().current_version().unwrap());
+        GrantInfoStore::new(temp.path())
+            .upsert(relay_url, &grant.grant_id, &grant)
+            .unwrap();
+        let command = RemoteCommand {
+            kind: crate::remote_invoke::types::CommandKind::ShellExec,
+            command: "echo should-not-run".to_string(),
+            command_text: Some("echo should-not-run".to_string()),
+            exec_mode: Some(crate::remote_invoke::types::ShellExecMode::ShellText),
+            policy_id: Some("worker-selected-policy".to_string()),
+            grant_id: Some(grant.grant_id.clone()),
+            caller_fingerprint: Some(grant.caller_fingerprint.clone()),
+            file_access: FileAccessScope::None,
+            ..Default::default()
+        };
+        let runtime = BrokerRuntimeState {
+            state: Arc::new(crate::state::AdminState::new(0)),
+            admin_host: "127.0.0.1".to_string(),
+            admin_port: 0,
+        };
+        let authorized = reauthorize_intent(relay_url, envelope(command), &runtime).unwrap();
+        assert_eq!(
+            authorized.policy_id.as_deref(),
+            Some(bifrost_storage::DEFAULT_SSH_KEY_SHELL_POLICY_ID)
+        );
+        let persisted = GrantInfoStore::new(temp.path())
+            .load_for_relay(relay_url)
+            .unwrap();
+        assert_eq!(persisted[&grant.grant_id].use_count, 1);
     }
 }

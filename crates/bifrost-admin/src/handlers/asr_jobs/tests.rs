@@ -5152,6 +5152,30 @@ mod tests {
             .unwrap()
             .remove("force-pause-task");
         set_worker_force_pause("force-pause-task", false);
+
+        assert_eq!(
+            pause_task_response(
+                "force-pause-task",
+                false,
+                AsrTaskPauseMode::LongTerm,
+            )
+            .status(),
+            StatusCode::OK
+        );
+        pause_task_for_worker_job_cancel("force-pause-task").unwrap();
+        let persisted = load_tasks()
+            .tasks
+            .into_iter()
+            .find(|task| task.id == "force-pause-task")
+            .unwrap();
+        assert!(persisted.paused);
+        assert!(persisted.next_run_at_ms.is_none());
+        assert!(task_force_pause_requested("force-pause-task"));
+        FORCE_PAUSED_TASKS
+            .lock()
+            .unwrap()
+            .remove("force-pause-task");
+        set_worker_force_pause("force-pause-task", false);
     }
 
     #[test]

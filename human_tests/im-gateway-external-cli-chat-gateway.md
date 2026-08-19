@@ -1780,6 +1780,8 @@
 
 ## 最近执行记录
 
+- 2026-08-19：PASS — 复跑 TC-IEC-75。先以 `RUST_TEST_THREADS=1 make coverage-changed` 完成包含 live model channel、IM broker、Codex/Traex app-server 与 Claude Code stream-json 的完整 Rust 回归，再使用当前源码构建的二进制执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_live_model_switch.sh`，输出 `[im-live-model] PASS`。隔离 Service + mock 飞书入站在同一个运行中 Codex turn 依次发送 `/model gpt-live-unit` 与 `/model clear`，mock app-server 收到同一 `threadId` 的 model 字符串和 `null` 更新；当前 turn 正常结束、session override 最终清除。脚本使用动态端口和临时数据目录，未连接真实飞书、未触碰正式 `9900` 服务，并通过 trap 清理测试进程。
+
 - 2026-08-18：PASS — 新增并立即执行 TC-IEC-75。focused Rust 回归覆盖 live model channel、IM worker → 主进程 broker、Codex/Traex `thread/settings/update`、Claude Code `control_request/set_model` 与忙碌态 `/model clear`，全部通过；构建当前源码二进制后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_live_model_switch.sh` 输出 `[im-live-model] PASS`。隔离 Service + mock 飞书入站在 Codex turn 运行中依次发送 `/model gpt-live-unit` 与 `/model clear`，mock app-server 精确收到同一 `threadId` 的 model 字符串和 `null` 两个更新，IM 回执说明后续响应/轮次生效且没有旧的等待提示，session override 最终清除，原 turn 正常完成。测试未连接真实飞书、未重启用户现有 Service，并已清理临时进程和数据目录。
 
 - 2026-08-18：PASS — 新增并立即执行 TC-IEC-74。focused Worker stderr/启动协议、真实 subprocess 环境引导、Broker 终态大帧三项 Rust 回归均通过；使用动态端口和隔离数据目录执行 `test_im_gateway_external_runner_delayed_final_state.sh` 输出 `[im-gateway-delayed-final-state] PASS`。mock Runner 连续发送 450 条、每条 40 KiB 的 reasoning 事件（总量超过 Broker 16 MiB 单帧上限），实时 progress 保持可用，最终响应正常收敛。生产启动不再通过 stdin 发送 run 握手，而是使用 request 文件与私有环境变量；若 Worker 提前退出，调用方会收到有界 stderr 摘要。未连接真实飞书服务，也未重启用户现有 Service。工作区全量测试在链接阶段被本机磁盘耗尽中止（非测试断言失败），将由远端 CI 完成。

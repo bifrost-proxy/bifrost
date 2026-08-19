@@ -1,5 +1,8 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +55,7 @@ impl ImMessageLogStore {
                 MAX_CONTENT_CHARS,
             ));
         }
+        let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
         self.refresh_locked(&mut data);
         data.messages.push(log);
@@ -162,6 +166,7 @@ impl ImMessageLogStore {
 
     /// Clear all message logs for a specific provider.
     pub fn clear_by_provider(&self, provider_id: &str) -> Result<()> {
+        let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
         self.refresh_locked(&mut data);
         data.messages.retain(|m| m.provider_id != provider_id);
@@ -170,6 +175,7 @@ impl ImMessageLogStore {
 
     /// Clear all message logs.
     pub fn clear_all(&self) -> Result<()> {
+        let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
         self.refresh_locked(&mut data);
         data.messages.clear();
@@ -184,7 +190,9 @@ impl ImMessageLogStore {
             .as_millis() as u64;
         let cutoff = now_ms.saturating_sub(TTL_MS);
 
+        let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         let before = data.messages.len();
         data.messages.retain(|m| m.timestamp >= cutoff);
         if data.messages.len() != before {
@@ -216,15 +224,40 @@ impl ImMessageLogStore {
                 )))
             })?;
         }
-        let content = serde_json::to_string_pretty(data)
+        let content = serde_json::to_vec_pretty(data)
             .map_err(|e| BifrostError::Config(format!("serialize message log store: {e}")))?;
-        std::fs::write(&self.file_path, content).map_err(|e| {
+        let parent = self.file_path.parent().unwrap_or_else(|| Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
             BifrostError::Io(std::io::Error::other(format!(
-                "write {}: {e}",
+                "create temporary message log store for {}: {e}",
                 self.file_path.display()
             )))
         })?;
+        temporary.write_all(&content)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&self.file_path).map_err(|error| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "atomically replace {}: {}",
+                self.file_path.display(),
+                error.error
+            )))
+        })?;
         Ok(())
+    }
+
+    fn acquire_write_lock(&self) -> Result<File> {
+        let lock_path = self.file_path.with_extension("json.lock");
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        file.lock_exclusive()?;
+        Ok(file)
     }
 
     fn refresh_from_disk(&self) {
@@ -251,7 +284,10 @@ impl ImMessageLogStore {
         match serde_json::from_str::<StoreData>(&content) {
             Ok(data) if data.version == STORE_VERSION => Some(data),
             _ => {
-                let _ = std::fs::remove_file(file_path);
+                tracing::warn!(
+                    path = %file_path.display(),
+                    "preserving unreadable IM Gateway message log store"
+                );
                 None
             }
         }
@@ -502,5 +538,95 @@ mod tests {
             data.messages.last().unwrap().content.as_deref(),
             Some("full content")
         );
+    }
+
+    #[test]
+    fn concurrent_store_instances_preserve_both_updates_and_invalid_evidence() {
+        let temp = tempfile::tempdir().expect("temp message store");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let mut threads = Vec::new();
+        for index in 0..2 {
+            let root = temp.path().to_path_buf();
+            let barrier = barrier.clone();
+            let timestamp = timestamp + index;
+            threads.push(std::thread::spawn(move || {
+                let store = ImMessageLogStore::new(&root);
+                barrier.wait();
+                store
+                    .add(message(
+                        &format!("concurrent-{index}"),
+                        "provider",
+                        MessageDirection::Inbound,
+                        "peer",
+                        Some(&format!("message-{index}")),
+                        timestamp,
+                        "content",
+                    ))
+                    .unwrap();
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let ids = ImMessageLogStore::new(temp.path())
+            .list()
+            .into_iter()
+            .map(|message| message.id)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(ids.contains("concurrent-0"));
+        assert!(ids.contains("concurrent-1"));
+
+        let first = ImMessageLogStore::new(temp.path());
+        let second = ImMessageLogStore::new(temp.path());
+        assert_eq!(first.list_by_provider("provider").len(), 2);
+        second.clear_by_provider("provider").unwrap();
+        assert!(first.list().is_empty());
+        second
+            .add(message(
+                "remaining",
+                "other-provider",
+                MessageDirection::Outbound,
+                "peer",
+                None,
+                timestamp,
+                "content",
+            ))
+            .unwrap();
+        second.clear_all().unwrap();
+        assert!(first.list().is_empty());
+        second.purge_expired().unwrap();
+
+        let store_path = temp.path().join("admin").join(STORE_FILENAME);
+        std::fs::write(&store_path, b"not-json").unwrap();
+        let _ = ImMessageLogStore::new(temp.path());
+        assert_eq!(std::fs::read(&store_path).unwrap(), b"not-json");
+    }
+
+    #[test]
+    fn atomic_persist_and_oversized_load_fail_closed() {
+        let temp = tempfile::tempdir().expect("temp message store");
+        let store = ImMessageLogStore::new(temp.path());
+        std::fs::create_dir(&store.file_path).unwrap();
+        let error = store
+            .save_locked(&StoreData {
+                version: STORE_VERSION,
+                messages: Vec::new(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("atomically replace"), "{error}");
+
+        std::fs::remove_dir(&store.file_path).unwrap();
+        let oversized = std::fs::File::create(&store.file_path).unwrap();
+        oversized.set_len(256 * 1024 * 1024 + 1).unwrap();
+        assert!(ImMessageLogStore::load_from_disk(&store.file_path).is_none());
+        drop(oversized);
+        std::fs::write(&store.file_path, b"{invalid-json").unwrap();
+        assert!(ImMessageLogStore::load_from_disk(&store.file_path).is_none());
     }
 }

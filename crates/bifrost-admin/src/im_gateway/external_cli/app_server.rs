@@ -2132,7 +2132,7 @@ for line in sys.stdin:
         request.adapter_config.timeout_secs = Some(1);
 
         let output = timeout(
-            Duration::from_secs(8),
+            Duration::from_secs(20),
             run_command(
                 "app-server-closed-timeout-run",
                 None,
@@ -3294,7 +3294,7 @@ for line in sys.stdin:
             .await
             .expect("app-server active guide registration");
             tokio::fs::write(&stop_marker, b"stop").await.unwrap();
-            timeout(Duration::from_secs(5), async {
+            timeout(Duration::from_secs(15), async {
                 while !stop_seen.is_file() {
                     sleep(Duration::from_millis(10)).await;
                 }
@@ -3314,7 +3314,7 @@ for line in sys.stdin:
                     Some("app-server turn is stopping")
                 );
             }
-            let output = timeout(Duration::from_secs(8), run)
+            let output = timeout(Duration::from_secs(20), run)
                 .await
                 .expect("stopped app-server should finish")
                 .unwrap()

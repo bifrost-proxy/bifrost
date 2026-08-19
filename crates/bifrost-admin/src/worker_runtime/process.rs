@@ -24,6 +24,35 @@ pub const WORKER_STARTUP_TOKEN_ENV: &str = "BIFROST_WORKER_STARTUP_TOKEN";
 pub const WORKER_KIND_ENV: &str = "BIFROST_WORKER_KIND";
 const WORKER_STDERR_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const WORKER_STDERR_READ_BYTES: usize = 16 * 1024;
+#[cfg(not(test))]
+const WORKER_STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const WORKER_STDIN_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+
+const WORKER_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "TZ",
+    "RUST_LOG",
+    "RUST_BACKTRACE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+];
 
 static WORKER_PROCESS_SYSTEM: Lazy<parking_lot::Mutex<System>> =
     Lazy::new(|| parking_lot::Mutex::new(System::new_all()));
@@ -180,6 +209,10 @@ impl ManagedWorker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
+        command.env_clear();
+        for (key, value) in worker_inherited_environment() {
+            command.env(key, value);
+        }
         for key in &spec.env_remove {
             command.env_remove(key);
         }
@@ -294,6 +327,7 @@ impl ManagedWorker {
         let worker = Arc::downgrade(worker);
         tokio::spawn(async move {
             let mut unexpected = false;
+            let mut goodbye_reason = None;
             loop {
                 let line = match read_limited_async_line(&mut stdout, WORKER_MAX_FRAME_BYTES).await
                 {
@@ -360,7 +394,14 @@ impl ManagedWorker {
                         let _ = worker.events.send(event);
                     }
                     Ok(WorkerFrame::Goodbye { reason, .. }) => {
-                        worker.mark_stopped(reason);
+                        // Goodbye is only a protocol message; it is not proof
+                        // that the OS process exited. Keep the worker in a
+                        // stopping state until its process tree is reaped.
+                        worker.state.store(
+                            state_to_u8(WorkerLifecycleState::Stopping),
+                            Ordering::Release,
+                        );
+                        goodbye_reason = Some(reason);
                         break;
                     }
                     Ok(WorkerFrame::Ready { .. } | WorkerFrame::ConfigApplied { .. }) => {}
@@ -377,6 +418,13 @@ impl ManagedWorker {
                 }
             }
             if let Some(worker) = worker.upgrade() {
+                if let Some(reason) = goodbye_reason {
+                    let mut child = worker.child.lock().await;
+                    terminate_child_tree(&mut child).await;
+                    drop(child);
+                    worker.mark_stopped(reason);
+                    return;
+                }
                 if !matches!(
                     worker.state(),
                     WorkerLifecycleState::Stopping | WorkerLifecycleState::Stopped
@@ -855,13 +903,28 @@ impl ManagedWorker {
 
     async fn write_parent_frame(&self, frame: &ParentFrame) -> Result<(), String> {
         let line = serialize_frame(frame)?;
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-        stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
-        stdin.flush().await.map_err(|e| e.to_string())
+        let write = async {
+            let mut stdin = self.stdin.lock().await;
+            stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
+            stdin.flush().await.map_err(|e| e.to_string())
+        };
+        match tokio::time::timeout(WORKER_STDIN_WRITE_TIMEOUT, write).await {
+            Ok(result) => result,
+            Err(_) => {
+                let error = format!(
+                    "worker '{}' stdin write timed out after {:?}",
+                    self.key, WORKER_STDIN_WRITE_TIMEOUT
+                );
+                self.mark_failed(error.clone());
+                let mut child = self.child.lock().await;
+                terminate_child_tree(&mut child).await;
+                Err(error)
+            }
+        }
     }
     fn mark_failed(&self, error: String) {
         jobs::fail_worker_jobs(&self.key, &error);
@@ -902,6 +965,31 @@ impl ManagedWorker {
                 });
             }
         }
+    }
+}
+
+fn worker_inherited_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    std::env::vars_os()
+        .filter(|(key, _)| {
+            let key = key.to_string_lossy();
+            worker_environment_key_allowed(&key)
+        })
+        .collect()
+}
+
+fn worker_environment_key_allowed(key: &str) -> bool {
+    #[cfg(windows)]
+    {
+        WORKER_ENV_ALLOWLIST
+            .iter()
+            .any(|allowed| key.eq_ignore_ascii_case(allowed))
+            || key
+                .get(..3)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("LC_"))
+    }
+    #[cfg(not(windows))]
+    {
+        WORKER_ENV_ALLOWLIST.contains(&key) || key.starts_with("LC_")
     }
 }
 
@@ -1146,6 +1234,18 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    fn unix_process_exists(pid: u32) -> bool {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        matches!(
+            kill(Pid::from_raw(pid as i32), None),
+            Ok(()) | Err(Errno::EPERM)
+        )
+    }
+
+    #[cfg(unix)]
     fn shell_worker_spec(key: &str, tail: &str) -> WorkerSpawnSpec {
         test_shell_worker_spec(key, WorkerKind::Asr, tail)
     }
@@ -1321,6 +1421,12 @@ mod tests {
             tokio::fs::read(path.with_extension("log.1")).await.unwrap(),
             b"existing-more"
         );
+        tokio::fs::write(&path, b"replacement").await.unwrap();
+        rotate_log(&path).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(path.with_extension("log.1")).await.unwrap(),
+            b"replacement"
+        );
 
         let zero = dir.path().join("zero.log");
         let (mut file, mut bytes) = open_bounded_log(&zero, 0).await.unwrap();
@@ -1445,6 +1551,44 @@ mod tests {
         assert!(malformed.snapshot(0, None, None).last_error.is_some());
         let _ = malformed.shutdown(Duration::ZERO).await;
 
+        let unexpected_exit = ManagedWorker::spawn(shell_worker_spec("unexpected-exit", "exit 0"))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while unexpected_exit.state() != WorkerLifecycleState::Degraded {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(unexpected_exit
+            .snapshot(0, None, None)
+            .last_error
+            .unwrap()
+            .contains("exited unexpectedly"));
+
+        let oversized_tail = format!(
+            "head -c {} /dev/zero | tr '\\0' x; printf '\\n'; sleep 1",
+            WORKER_MAX_FRAME_BYTES + 1
+        );
+        let oversized =
+            ManagedWorker::spawn(shell_worker_spec("oversized-output", &oversized_tail))
+                .await
+                .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while oversized.state() != WorkerLifecycleState::Degraded {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(oversized
+            .snapshot(0, None, None)
+            .last_error
+            .unwrap()
+            .contains("read worker stdout failed"));
+        let _ = oversized.shutdown(Duration::ZERO).await;
+
         let duplicate = ManagedWorker::spawn(shell_worker_spec(
             "duplicate",
             r#"printf '{"type":"hello","hello":{"protocolVersion":1,"workerKind":"asr","workerInstanceId":"duplicate","pid":1,"buildVersion":"test","startupToken":"duplicate","capabilities":[]}}\n'; sleep 1"#,
@@ -1471,6 +1615,68 @@ mod tests {
             .unwrap()
             .contains("heartbeat timed out"));
         let _ = heartbeat.shutdown(Duration::ZERO).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn goodbye_reaps_process_and_blocked_stdin_write_fails_worker() {
+        let goodbye = ManagedWorker::spawn(shell_worker_spec(
+            "goodbye-without-exit",
+            r#"printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"claimed exit"}\n'; sleep 30"#,
+        ))
+        .await
+        .unwrap();
+        let goodbye_pid = goodbye.pid().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if goodbye.state() == WorkerLifecycleState::Stopped {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("goodbye process tree should be reaped");
+        assert!(!unix_process_exists(goodbye_pid));
+
+        let blocked = ManagedWorker::spawn(shell_worker_spec("blocked-stdin", "sleep 30"))
+            .await
+            .unwrap();
+        let blocked_pid = blocked.pid().unwrap();
+        let error = blocked
+            .write_parent_frame(&ParentFrame::ConfigApply {
+                request_id: "fill-pipe".to_string(),
+                generation: 1,
+                payload: serde_json::json!({"payload": "x".repeat(900 * 1024)}),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("stdin write timed out"), "{error}");
+        assert_eq!(blocked.state(), WorkerLifecycleState::Degraded);
+        assert!(!unix_process_exists(blocked_pid));
+    }
+
+    #[test]
+    fn inherited_worker_environment_excludes_unlisted_secrets() {
+        let inherited = worker_inherited_environment()
+            .into_iter()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(inherited
+            .iter()
+            .all(|key| worker_environment_key_allowed(key)));
+        assert!(!inherited.iter().any(|key| {
+            key.contains("TOKEN") || key.contains("SECRET") || key.contains("PASSWORD")
+        }));
+        assert!(worker_environment_key_allowed("PATH"));
+        assert!(worker_environment_key_allowed("LC_ALL"));
+        assert!(!worker_environment_key_allowed("BIFROST_API_TOKEN"));
+        #[cfg(windows)]
+        {
+            assert!(worker_environment_key_allowed("Path"));
+            assert!(worker_environment_key_allowed("SystemRoot"));
+            assert!(worker_environment_key_allowed("lc_all"));
+        }
     }
 
     #[cfg(unix)]

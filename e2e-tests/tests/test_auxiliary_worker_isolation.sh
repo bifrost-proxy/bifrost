@@ -115,6 +115,8 @@ BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 BIFROST_DISABLE_TRAY=1 \
 BIFROST_E2E=1 \
 BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
+BIFROST_FEISHU_DRY_RUN_FILE="$TEST_ROOT/feishu-dry-run.ndjson" \
+BIFROST_FEISHU_DRY_RUN_PROVIDER_ID="awi-provider" \
 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
 "$BIFROST_BIN" start \
   --host 127.0.0.1 \
@@ -201,6 +203,52 @@ workers = json.load(open(sys.argv[1], encoding="utf-8"))
 assert len(workers) == 1, workers
 assert workers[0]["workerKind"] == "im_gateway", workers
 assert workers[0]["pid"] != int(sys.argv[2]), workers
+PY
+
+# Manual schedule execution must use the isolated IM worker instead of falling
+# back to the Admin process. Feishu delivery is redirected to a deterministic
+# dry-run file while script execution and run persistence cross the worker RPC.
+curl -fsS --noproxy '*' -X POST -H 'content-type: application/json' \
+  --data '{"id":"awi-provider","provider_type":"feishu","display_name":"AWI provider","enabled":false,"app_id":"awi-app","app_secret":"awi-secret"}' \
+  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/im-gateway/providers" \
+  >"$TEST_ROOT/im-schedule-provider.json"
+curl -fsS --noproxy '*' -X POST -H 'content-type: application/json' \
+  --data '{"id":"awi-target","provider_id":"awi-provider","display_name":"AWI target","receive_id_type":"chat_id","receive_id":"awi-target-chat","enabled":true}' \
+  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/im-gateway/targets" \
+  >"$TEST_ROOT/im-schedule-target.json"
+curl -fsS --noproxy '*' -X POST -H 'content-type: application/json' \
+  --data '{"id":"awi-manual-schedule","name":"AWI manual schedule","enabled":true,"message_channel":{"provider_id":"awi-provider","target_id":"awi-target","target_mode":"configured_target"},"trigger":{"type":"interval","every_ms":3600000},"task_type":"script","script":{"script_text":"printf awi-schedule-ok"},"timeout_ms":5000,"max_output_bytes":4096}' \
+  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/im-gateway/schedules" \
+  >"$TEST_ROOT/im-schedule.json"
+curl -fsS --noproxy '*' \
+  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/im-gateway/providers" \
+  >"$TEST_ROOT/im-schedule-providers.json"
+curl -fsS --noproxy '*' \
+  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/im-gateway/targets" \
+  >"$TEST_ROOT/im-schedule-targets.json"
+curl -fsS --noproxy '*' -X POST \
+  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/im-gateway/schedules/awi-manual-schedule/run" \
+  >"$TEST_ROOT/im-schedule-run.json"
+curl -fsS --noproxy '*' \
+  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/im-gateway/schedules/awi-manual-schedule/runs" \
+  >"$TEST_ROOT/im-schedule-runs.json"
+curl -fsS --noproxy '*' \
+  "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/worker-jobs?worker_kind=im_gateway" \
+  >"$TEST_ROOT/im-worker-jobs.json"
+"$PYTHON_BIN" - "$TEST_ROOT/im-schedule-run.json" "$TEST_ROOT/im-schedule-runs.json" "$TEST_ROOT/im-worker-jobs.json" "$TEST_ROOT/im-schedule.json" "$TEST_ROOT/im-schedule-providers.json" "$TEST_ROOT/im-schedule-targets.json" <<'PY'
+import json, sys
+run = json.load(open(sys.argv[1], encoding="utf-8"))
+runs = json.load(open(sys.argv[2], encoding="utf-8"))
+jobs = json.load(open(sys.argv[3], encoding="utf-8"))
+schedule = json.load(open(sys.argv[4], encoding="utf-8"))
+providers = json.load(open(sys.argv[5], encoding="utf-8"))
+targets = json.load(open(sys.argv[6], encoding="utf-8"))
+assert str(run["status"]).lower() == "success", {"run": run, "schedule": schedule, "providers": providers, "targets": targets}
+assert run["exit_code"] == 0, run
+assert "awi-schedule-ok" in run["stdout_preview"], run
+assert any(item["run_id"] == run["run_id"] and item["trigger_source"] == "manual_run" for item in runs), runs
+items = jobs.get("items", jobs) if isinstance(jobs, dict) else jobs
+assert any(item.get("operation") == "im.run_schedule" and item.get("status") == "succeeded" for item in items), items
 PY
 
 # The proxy data path must work before and after auxiliary worker failures.

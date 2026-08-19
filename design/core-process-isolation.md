@@ -1170,6 +1170,7 @@ Remote Worker 完成 transport 层解密和初步 scope 校验后，发送：
 主进程 TaskBroker 必须再次校验：
 
 - grant 是否仍有效；
+- broker capability token 必须绑定单一 relay，relay 只能由主进程根据 token 推导，不能由 Remote Worker 在请求中指定；
 - capability 是否在 scope 中；
 - command schema；
 - cwd/path/env allowlist；
@@ -1177,6 +1178,10 @@ Remote Worker 完成 transport 层解密和初步 scope 校验后，发送：
 - active call 数；
 - wall-clock/idle/output quota；
 - 目标 worker readiness。
+
+Grant 的读取、有效性校验、scope/file-access/caller/SSH fingerprint 校验、单次额度消费、撤销和持久化必须使用同一个跨进程事务锁与原子替换协议。授权失败不得扣减额度；同一 grant 的并发请求不得重复消费同一次额度，也不得覆盖并发撤销结果。
+
+对于 `shell.exec`，Remote Worker 提交的 `policy_id` 不可信。主进程必须从持久化 grant 的 `policy_binding` 重新选择策略，并校验 `shell_policy_set_version_snapshot`；策略集版本变化时要求重新连接授权。Remote Execution Worker 只接收经过该流程重建的命令，不得持有真实 Admin listener 的 host/port 或通过 loopback 绕过 broker。
 
 ### 14.4 执行路由
 

@@ -49,7 +49,7 @@ mod debug_inbound;
 mod event_loop;
 mod messages;
 mod providers;
-mod schedules;
+pub(crate) mod schedules;
 mod service;
 mod utils;
 

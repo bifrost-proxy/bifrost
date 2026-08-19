@@ -118,6 +118,13 @@ async fn handle_workers_with_supervisor<B>(
                 affected = affected.saturating_add(
                     crate::im_gateway::external_cli::stop_all_worker_sessions().await,
                 );
+            } else if kind == WorkerKind::RemoteExecution {
+                affected = affected.saturating_add(
+                    crate::worker_runtime::remote_execution::stop_all_registered_executions(
+                        Duration::from_secs(5),
+                    )
+                    .await,
+                );
             }
             json_response(&WorkerActionResponse {
                 worker_kind: kind,

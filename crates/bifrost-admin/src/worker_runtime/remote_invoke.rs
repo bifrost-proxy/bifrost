@@ -753,10 +753,11 @@ mod tests {
             target_fingerprint(&target, "127.0.0.1", 8081).unwrap()
         );
 
-        let broker = super::super::remote_broker::BrokerEndpoint {
-            addr: "127.0.0.1:1234".to_string(),
-            token: "broker-token".to_string(),
-        };
+        let broker = super::super::remote_broker::BrokerEndpoint::for_test(
+            "127.0.0.1:1234",
+            &target.relay_url,
+            "broker-token",
+        );
         let spec = spawn_spec(&target, "127.0.0.1", 8080, "http-token", &broker).unwrap();
         assert_eq!(spec.kind, WorkerKind::RemoteInvoke);
         assert_eq!(spec.max_concurrency, 16);

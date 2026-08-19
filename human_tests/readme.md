@@ -280,7 +280,7 @@
 |------|---------|-----------|------|
 | [mcp-oauth.md](./mcp-oauth.md) | MCP OAuth | 1 | OAuth token store Auto 模式 keyring 可用性 roundtrip 检测与文件 fallback 回归 |
 
-| [auxiliary-worker-isolation.md](./auxiliary-worker-isolation.md) | 附加能力 Worker 进程隔离 | 14 | Lazy 启动、回滚模式、IPC 边界、生命周期控制、Job/Artifact、IM→主进程 Runner 控制、Browser/ASR/IM/Remote 故障与代理联合 Chaos |
+| [auxiliary-worker-isolation.md](./auxiliary-worker-isolation.md) | 附加能力 Worker 进程隔离 | 17 | Lazy 启动、回滚模式、IPC 边界、生命周期与最小环境、Job/Artifact、relay/grant 事务、IM 跨进程 store/manual schedule、IM→主进程 Runner 控制、Browser/ASR/IM/Remote 故障与代理联合 Chaos |
 
 ---
 

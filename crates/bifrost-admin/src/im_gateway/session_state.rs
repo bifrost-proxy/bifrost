@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 const STORE_VERSION: u32 = 1;
@@ -371,6 +374,7 @@ fn update_store(update: impl FnOnce(&mut StoreData)) -> Result<(), String> {
     let lock = STORE_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().map_err(|_| "session state lock poisoned")?;
     let path = default_store_path();
+    let _file_guard = acquire_store_lock(&path)?;
     let mut store = match load_store_result(&path) {
         Ok(Some(store)) => store,
         Ok(None) => StoreData::default(),
@@ -381,6 +385,24 @@ fn update_store(update: impl FnOnce(&mut StoreData)) -> Result<(), String> {
     };
     update(&mut store);
     save_store(&path, &store)
+}
+
+fn acquire_store_lock(path: &Path) -> Result<File, String> {
+    let lock_path = path.with_extension("json.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create session state lock dir failed: {error}"))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("open session state lock failed: {error}"))?;
+    file.lock_exclusive()
+        .map_err(|error| format!("lock session state store failed: {error}"))?;
+    Ok(file)
 }
 
 fn load_store(path: &Path) -> Option<StoreData> {
@@ -453,21 +475,22 @@ fn save_store(path: &Path, store: &StoreData) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create session state dir failed: {error}"))?;
     }
-    let content = serde_json::to_string_pretty(store)
+    let content = serde_json::to_vec_pretty(store)
         .map_err(|error| format!("serialize session state failed: {error}"))?;
-    let tmp_path = path.with_file_name(format!(
-        "{}.{}.tmp",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or(STORE_FILENAME),
-        std::process::id()
-    ));
-    std::fs::write(&tmp_path, content)
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| format!("create session state temp file failed: {error}"))?;
+    temporary
+        .write_all(&content)
         .map_err(|error| format!("write session state temp file failed: {error}"))?;
-    std::fs::rename(&tmp_path, path).map_err(|error| {
-        let _ = std::fs::remove_file(&tmp_path);
-        format!("replace session state file failed: {error}")
-    })
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("sync session state temp file failed: {error}"))?;
+    temporary
+        .persist(path)
+        .map_err(|error| format!("replace session state file failed: {}", error.error))?;
+    Ok(())
 }
 
 fn normalize_state(state: &mut ImAgentSessionState) -> Result<(), String> {

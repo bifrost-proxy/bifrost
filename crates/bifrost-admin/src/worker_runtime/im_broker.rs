@@ -718,6 +718,75 @@ mod tests {
         assert!(!client_configured());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn clients_reject_unexpected_broker_response_types() {
+        let _lock = ENV_LOCK.lock().await;
+
+        async fn serve_once(response: BrokerResponse) -> tokio::task::JoinHandle<()> {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            std::env::set_var(BROKER_ADDR_ENV, listener.local_addr().unwrap().to_string());
+            std::env::set_var(BROKER_TOKEN_ENV, "token");
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                super::super::read_limited_async_line(&mut reader, MAX_FRAME_BYTES)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                write_frame(&mut write_half, &response).await.unwrap();
+            })
+        }
+
+        let server = serve_once(BrokerResponse::StopResult { stopped: false }).await;
+        assert_eq!(
+            run_via_main_broker(std::path::PathBuf::new(), request(), None)
+                .await
+                .unwrap_err(),
+            "IM Agent broker returned an unexpected control response"
+        );
+        server.await.unwrap();
+
+        let server = serve_once(BrokerResponse::StopResult { stopped: false }).await;
+        assert_eq!(
+            guide_via_main_broker("session", "guide".to_string(), "continue".to_string())
+                .await
+                .unwrap_err(),
+            "IM Agent broker returned an unexpected guide response"
+        );
+        server.await.unwrap();
+
+        let server = serve_once(BrokerResponse::StopResult { stopped: false }).await;
+        assert_eq!(
+            model_update_via_main_broker("session", Some("gpt-5.6".to_string()))
+                .await
+                .unwrap_err(),
+            "IM Agent broker returned an unexpected model update response"
+        );
+        server.await.unwrap();
+
+        let server = serve_once(BrokerResponse::GuideResult {
+            result: ExternalCliGuideResult {
+                guide_id: "guide".to_string(),
+                accepted: false,
+                thread_id: None,
+                turn_id: None,
+                reason: Some("not running".to_string()),
+            },
+        })
+        .await;
+        assert_eq!(
+            stop_via_main_broker(std::path::Path::new("runs"), "session")
+                .await
+                .unwrap_err(),
+            "IM Agent broker returned an unexpected stop response"
+        );
+        server.await.unwrap();
+
+        std::env::remove_var(BROKER_ADDR_ENV);
+        std::env::remove_var(BROKER_TOKEN_ENV);
+    }
+
     #[tokio::test]
     async fn server_rejects_closed_malformed_and_bad_token_clients() {
         async fn pair() -> (TcpStream, TcpStream) {
@@ -771,6 +840,65 @@ mod tests {
             .await
             .unwrap_err()
             .contains("exceeds"));
+    }
+
+    #[tokio::test]
+    async fn server_routes_control_requests_and_returns_bounded_results() {
+        async fn exchange(request: BrokerRequest) -> BrokerResponse {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+            let mut client = client.unwrap();
+            write_frame(&mut client, &request).await.unwrap();
+            let server = tokio::spawn(async move {
+                serve_connection(accepted.unwrap().0, "token")
+                    .await
+                    .unwrap();
+            });
+            let mut reader = BufReader::new(client);
+            let line = super::super::read_limited_async_line(&mut reader, MAX_FRAME_BYTES)
+                .await
+                .unwrap()
+                .unwrap();
+            server.await.unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        let guide = exchange(BrokerRequest::Guide {
+            token: "token".to_string(),
+            session_key: "missing-session".to_string(),
+            guide_id: "guide-1".to_string(),
+            message: "continue".to_string(),
+        })
+        .await;
+        assert!(matches!(
+            guide,
+            BrokerResponse::GuideResult { result }
+                if result.guide_id == "guide-1" && !result.accepted
+        ));
+
+        let model = exchange(BrokerRequest::ModelUpdate {
+            token: "token".to_string(),
+            session_key: "missing-session".to_string(),
+            model: Some("gpt-5.6".to_string()),
+        })
+        .await;
+        assert!(matches!(
+            model,
+            BrokerResponse::Error { error } if error.contains("no active external runner")
+        ));
+
+        let temp = tempfile::tempdir().unwrap();
+        let stopped = exchange(BrokerRequest::Stop {
+            token: "token".to_string(),
+            runs_root: temp.path().display().to_string(),
+            session_key: "missing-session".to_string(),
+        })
+        .await;
+        assert!(matches!(
+            stopped,
+            BrokerResponse::StopResult { stopped: false }
+        ));
     }
 
     #[cfg(unix)]

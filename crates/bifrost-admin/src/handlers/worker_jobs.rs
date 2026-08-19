@@ -1,4 +1,5 @@
 use std::io::SeekFrom;
+use std::path::{Component, Path};
 
 use hyper::{Method, Request, Response, StatusCode};
 use serde::Deserialize;
@@ -117,6 +118,16 @@ async fn cancel_worker_job(job_id: &str) -> Response<BoxBody> {
             }),
         );
     };
+
+    if job.worker_kind == WorkerKind::Asr {
+        if let Some(task_id) = logical_job_id.strip_prefix("task:") {
+            if let Err(error) = crate::handlers::asr_jobs::pause_task_for_worker_job_cancel(task_id)
+            {
+                worker_job_cancel_rejected(job_id, error.clone());
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+            }
+        }
+    }
 
     if job.worker_kind == WorkerKind::RemoteExecution {
         match crate::worker_runtime::remote_execution::cancel_registered_execution(
@@ -323,7 +334,16 @@ async fn read_worker_artifact(
             )
         }
     };
-    let metadata = match tokio::fs::metadata(&canonical_path).await {
+    let mut file = match open_artifact_beneath(&canonical_root, &canonical_path) {
+        Ok(file) => tokio::fs::File::from_std(file),
+        Err(error) => {
+            return error_response(
+                StatusCode::GONE,
+                &format!("worker artifact is no longer safely available: {error}"),
+            )
+        }
+    };
+    let metadata = match file.metadata().await {
         Ok(metadata) if metadata.is_file() => metadata,
         Ok(_) => {
             return error_response(
@@ -344,15 +364,6 @@ async fn read_worker_artifact(
             "worker artifact changed after it was registered",
         );
     }
-    let mut file = match tokio::fs::File::open(&canonical_path).await {
-        Ok(file) => file,
-        Err(error) => {
-            return error_response(
-                StatusCode::GONE,
-                &format!("worker artifact is no longer available: {error}"),
-            )
-        }
-    };
     if let Err(error) = file.seek(SeekFrom::Start(offset)).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -384,6 +395,108 @@ async fn read_worker_artifact(
         .expect("worker artifact response")
 }
 
+#[cfg(unix)]
+fn open_artifact_beneath(root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let relative = path.strip_prefix(root).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "artifact escaped spool root",
+        )
+    })?;
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid artifact relative path",
+        ));
+    }
+
+    let root_c = CString::new(root.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artifact root contains NUL",
+        )
+    })?;
+    let root_fd = unsafe {
+        nix::libc::open(
+            root_c.as_ptr(),
+            nix::libc::O_RDONLY
+                | nix::libc::O_DIRECTORY
+                | nix::libc::O_NOFOLLOW
+                | nix::libc::O_CLOEXEC,
+        )
+    };
+    if root_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut directory = unsafe { std::fs::File::from_raw_fd(root_fd) };
+    for component in &components[..components.len() - 1] {
+        let Component::Normal(name) = component else {
+            unreachable!()
+        };
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "artifact path contains NUL",
+            )
+        })?;
+        let fd = unsafe {
+            nix::libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                nix::libc::O_RDONLY
+                    | nix::libc::O_DIRECTORY
+                    | nix::libc::O_NOFOLLOW
+                    | nix::libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    let Component::Normal(name) = components.last().expect("artifact component") else {
+        unreachable!()
+    };
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artifact path contains NUL",
+        )
+    })?;
+    let fd = unsafe {
+        nix::libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            nix::libc::O_RDONLY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(not(unix))]
+fn open_artifact_beneath(root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
+    let canonical = path.canonicalize()?;
+    if !canonical.starts_with(root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "artifact escaped spool root",
+        ));
+    }
+    std::fs::File::open(canonical)
+}
+
 fn parse_status(value: &str) -> Result<WorkerJobStatus, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "queued" => Ok(WorkerJobStatus::Queued),
@@ -407,6 +520,33 @@ mod tests {
         assert_eq!(parse_status("success"), Ok(WorkerJobStatus::Succeeded));
         assert_eq!(parse_status("canceled"), Ok(WorkerJobStatus::Cancelled));
         assert!(parse_status("unknown").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_open_rejects_symlink_leaf_and_intermediate_directory() {
+        use std::io::Read;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, b"outside").unwrap();
+
+        let valid_path = root.path().join("valid.txt");
+        std::fs::write(&valid_path, b"inside").unwrap();
+        let mut valid = open_artifact_beneath(root.path(), &valid_path).unwrap();
+        let mut content = String::new();
+        valid.read_to_string(&mut content).unwrap();
+        assert_eq!(content, "inside");
+
+        let leaf_link = root.path().join("leaf-link.txt");
+        symlink(&outside_file, &leaf_link).unwrap();
+        assert!(open_artifact_beneath(root.path(), &leaf_link).is_err());
+
+        let directory_link = root.path().join("directory-link");
+        symlink(outside.path(), &directory_link).unwrap();
+        assert!(open_artifact_beneath(root.path(), &directory_link.join("secret.txt")).is_err());
     }
 
     #[tokio::test]
@@ -742,6 +882,80 @@ done
         supervisor
             .unregister(&key, std::time::Duration::from_secs(1))
             .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_remote_execution_cancellation_is_acknowledged() {
+        let _guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
+        crate::worker_runtime::clear_worker_jobs_for_tests();
+        let key = format!("remote_execution:cancel-handler-{}", uuid::Uuid::new_v4());
+        let tail = r#"
+wait_id=''
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"request"'*)
+      wait_id=$(printf '%s' "$line" | sed -n -e 's/.*"requestId":"\([^"]*\)".*/\1/p' -e 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      ;;
+    *'"type":"cancel"'*)
+      printf '{"type":"response","response":{"requestId":"%s","ok":false,"cancelled":true,"payload":null,"error":"remote cancel acknowledged"}}\n' "$wait_id"
+      wait_id=''
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"goodbye","worker_instance_id":"fake-instance","reason":"shutdown acknowledged"}\n'
+      exit 0
+      ;;
+  esac
+done
+"#;
+        let mut spec =
+            crate::worker_runtime::test_shell_worker_spec(&key, WorkerKind::RemoteExecution, tail);
+        spec.request_timeout = std::time::Duration::from_secs(2);
+        spec.heartbeat_timeout = std::time::Duration::from_secs(3);
+        let worker = crate::worker_runtime::ManagedWorker::spawn(spec)
+            .await
+            .unwrap();
+        crate::worker_runtime::remote_execution::register_execution_worker_for_test(worker.clone());
+        let request_id = format!("remote-cancel-request-{}", uuid::Uuid::new_v4());
+        let logical_job_id = "remote-logical-job".to_string();
+        let pending_worker = worker.clone();
+        let pending_request_id = request_id.clone();
+        let pending_logical_job_id = logical_job_id.clone();
+        let pending = tokio::spawn(async move {
+            pending_worker
+                .request_with_id(
+                    pending_request_id,
+                    Some(pending_logical_job_id),
+                    "remote_execution.run",
+                    serde_json::Value::Null,
+                    None,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while worker_job(&request_id).is_none_or(|job| job.status != WorkerJobStatus::Running) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let path = format!("/api/worker-jobs/{request_id}/cancel");
+        assert_eq!(
+            request(Method::POST, &path, &path).await.status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            pending.await.unwrap().unwrap_err(),
+            "remote cancel acknowledged"
+        );
+        assert_eq!(
+            crate::worker_runtime::remote_execution::stop_all_registered_executions(
+                std::time::Duration::from_secs(1),
+            )
+            .await,
+            1
+        );
     }
 
     #[tokio::test]
