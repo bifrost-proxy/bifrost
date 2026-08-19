@@ -10,6 +10,10 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, info, warn};
 
 use super::browser::{BrowserSession, CdpClient, CdpEvent, CdpPage};
+use super::interaction::{
+    get_conversation_detail, is_transient_conversation_read_error,
+    try_waited_final_from_conversation_detail,
+};
 use super::{
     evaluate_value, seed_chatgpt_cookies, stop_requested, stopped_error, AuthState, RuntimeConfig,
     F_CONVERSATION_URL,
@@ -1132,6 +1136,7 @@ async fn send_with_browser_once(
             assert_target_page(cdp, expected_conversation_id, true).await?;
             wait_until_conversation_not_busy(
                 cdp,
+                (config, auth, expected_conversation_id),
                 "before composer injection",
                 conversation_busy_wait_duration(config),
                 stop_marker_path,
@@ -1181,6 +1186,7 @@ async fn send_with_browser_once(
                             {
                                 wait_until_conversation_not_busy(
                                     cdp,
+                                    (config, auth, expected_conversation_id),
                                     "send button not actionable after composer injection",
                                     conversation_busy_wait_duration(config),
                                     stop_marker_path,
@@ -1244,7 +1250,15 @@ async fn send_with_browser_once(
                     .await
                 {
                     Ok(result) => Ok(result),
-                    Err(_quick_err) => {
+                    Err(quick_err) => {
+                        let no_request = request_ids.is_empty();
+                        let total_timeout = Duration::from_secs(config.chatgpt.timeout_secs);
+                        let recovery = (no_request, quick_err.as_str(), total_timeout, quick_timeout);
+                        if let Some(recovery_result) =
+                            recover_uncaptured_submit(cdp, recovery, stop_marker_path).await
+                        {
+                            recovery_result
+                        } else {
                         // Only try secondary send if POST was NOT captured.
                         // If POST was captured (request_ids non-empty), the message was already
                         // sent—just wait longer for the SSE stream to complete.
@@ -1400,6 +1414,7 @@ async fn send_with_browser_once(
                                 )
                                 .await
                             }
+                        }
                         }
                     }
                 };
@@ -2256,6 +2271,99 @@ async fn wait_send_handoff(
     ))
 }
 
+fn handoff_error_indicates_submitted_without_captured_post(error: &str) -> bool {
+    error.starts_with("conversation_busy:")
+        && error.contains("composer=EMPTY")
+        && error.contains("stopButton=VISIBLE")
+}
+
+fn uncaptured_submit_recovery_timeout(
+    request_ids_empty: bool,
+    error: &str,
+    total_timeout: Duration,
+    quick_timeout: Duration,
+) -> Option<Duration> {
+    (request_ids_empty && handoff_error_indicates_submitted_without_captured_post(error))
+        .then(|| total_timeout.saturating_sub(quick_timeout))
+}
+
+async fn recover_uncaptured_submit(
+    cdp: &CdpClient,
+    recovery: (bool, &str, Duration, Duration),
+    stop_marker_path: &Path,
+) -> Option<Result<SendResult, String>> {
+    let (request_ids_empty, error, total_timeout, quick_timeout) = recovery;
+    let recovery_timeout =
+        uncaptured_submit_recovery_timeout(request_ids_empty, error, total_timeout, quick_timeout)?;
+    warn!(error, "chatgpt_web send: page entered generation without a captured POST; waiting for provisional WEB conversation id to commit");
+    if recovery_timeout.is_zero() {
+        Some(Err(error.to_string()))
+    } else {
+        Some(
+            wait_for_committed_conversation_after_uncaptured_submit(
+                cdp,
+                recovery_timeout,
+                stop_marker_path,
+            )
+            .await,
+        )
+    }
+}
+
+fn is_provisional_web_conversation_id(conversation_id: &str) -> bool {
+    conversation_id
+        .trim()
+        .to_ascii_uppercase()
+        .starts_with("WEB:")
+}
+
+async fn wait_for_committed_conversation_after_uncaptured_submit(
+    cdp: &CdpClient,
+    duration: Duration,
+    stop_marker_path: &Path,
+) -> Result<SendResult, String> {
+    let started = Instant::now();
+    let deadline = tokio::time::Instant::now() + duration;
+    let mut provisional_id: Option<String> = None;
+    while tokio::time::Instant::now() < deadline {
+        if stop_requested(stop_marker_path).await {
+            return Err(stopped_error());
+        }
+        if cdp.is_closed() {
+            return Err("browser_unavailable: ChatGPT Web CDP connection closed while waiting for provisional conversation to commit".to_string());
+        }
+
+        match current_conversation_id(cdp).await {
+            Ok(Some(conversation_id)) if !is_provisional_web_conversation_id(&conversation_id) => {
+                info!(conversation_id, provisional_id = ?provisional_id, elapsed_ms = started.elapsed().as_millis() as u64, "chatgpt_web send: provisional WEB conversation committed after uncaptured submit");
+                return Ok(SendResult {
+                    conversation_id: Some(conversation_id),
+                    turn_exchange_id: None,
+                    event_types: vec!["handoff_recovered_after_uncaptured_submit".to_string()],
+                    sse_detail: None,
+                });
+            }
+            Ok(Some(conversation_id)) => {
+                if provisional_id.as_deref() != Some(conversation_id.as_str()) {
+                    info!(conversation_id, "chatgpt_web send: observed provisional WEB conversation id after uncaptured submit");
+                    provisional_id = Some(conversation_id);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                debug!(error = %error, "chatgpt_web send: failed to inspect provisional conversation id; retrying")
+            }
+        }
+        sleep(Duration::from_millis(STOP_BUTTON_BUSY_POLL_MS)).await;
+    }
+
+    let diagnostic = inspect_page_detailed(cdp)
+        .await
+        .unwrap_or_else(|_| json!({}));
+    let diagnostic_summary = format_send_diagnostic(&diagnostic);
+    Err(format!("conversation_busy: submitted without captured POST but provisional conversation did not commit within {}s: {diagnostic_summary}", duration.as_secs()))
+}
+
 async fn probe_handoff_page(cdp: &CdpClient) -> Result<(), String> {
     let result = cdp
         .send_with_timeout(
@@ -2798,10 +2906,12 @@ fn conversation_busy_wait_duration(config: &RuntimeConfig) -> Duration {
 
 async fn wait_until_conversation_not_busy(
     cdp: &CdpClient,
+    backend: (&RuntimeConfig, &AuthState, Option<&str>),
     context: &str,
     max_wait: Duration,
     stop_marker_path: &Path,
 ) -> Result<(), String> {
+    let (config, auth, conversation_id) = backend;
     let started = Instant::now();
     let mut logged_busy = false;
     loop {
@@ -2821,6 +2931,23 @@ async fn wait_until_conversation_not_busy(
                 );
             }
             return Ok(());
+        }
+        if let Some(conversation_id) = conversation_id {
+            match get_conversation_detail(config, auth, conversation_id).await {
+                Ok(detail) if backend_confirms_finished_assistant(&detail) => {
+                    let clicked = click_visible_stop_button(cdp).await?;
+                    warn!(context, conversation_id, clicked, "chatgpt_web send: backend is finished while the UI still shows Stop; clearing stale busy state");
+                    sleep(Duration::from_millis(STOP_BUTTON_BUSY_POLL_MS)).await;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) if is_transient_conversation_read_error(&error) => {
+                    debug!(context, conversation_id, error = %error, "chatgpt_web send: transient backend read failure while checking visible Stop button");
+                }
+                Err(error) => {
+                    warn!(context, conversation_id, error = %error, "chatgpt_web send: backend check failed while checking visible Stop button");
+                }
+            }
         }
 
         let diag_summary = format_send_diagnostic(&diagnostic);
@@ -2856,6 +2983,25 @@ async fn wait_until_conversation_not_busy(
             .unwrap_or_else(|| Duration::from_millis(STOP_BUTTON_BUSY_POLL_MS));
         sleep(remaining.min(Duration::from_millis(STOP_BUTTON_BUSY_POLL_MS))).await;
     }
+}
+
+fn backend_confirms_finished_assistant(detail: &Value) -> bool {
+    try_waited_final_from_conversation_detail(detail, None).is_some()
+}
+
+async fn click_visible_stop_button(cdp: &CdpClient) -> Result<bool, String> {
+    evaluate_value(
+        cdp,
+        r#"(() => {
+          const button = document.querySelector('[data-testid="stop-button"]');
+          const visible = !!(button && (button.offsetWidth || button.offsetHeight || button.getClientRects().length));
+          if (!visible) return false;
+          button.click();
+          return true;
+        })()"#,
+    )
+    .await
+    .map(|value| value.as_bool().unwrap_or(false))
 }
 
 async fn conversation_busy_if_stop_button_visible(
@@ -4096,6 +4242,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::interaction::set_test_backend_details;
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{json, Value};
@@ -4120,19 +4267,18 @@ mod tests {
                     .get("method")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let result = if method == "Runtime.evaluate" {
-                    json!({
-                        "result": {
-                            "value": values.pop_front().unwrap_or(Value::Null)
-                        }
-                    })
+                let response = if method == "Runtime.evaluate" {
+                    let value = values.pop_front().unwrap_or(Value::Null);
+                    if let Some(message) = value.get("__cdp_error").and_then(Value::as_str) {
+                        json!({"id": id, "error": {"message": message}})
+                    } else {
+                        json!({"id": id, "result": {"result": {"value": value}}})
+                    }
                 } else {
-                    json!({})
+                    json!({"id": id, "result": {}})
                 };
                 socket
-                    .send(Message::Text(
-                        json!({"id": id, "result": result}).to_string().into(),
-                    ))
+                    .send(Message::Text(response.to_string().into()))
                     .await
                     .unwrap();
             }
@@ -4184,6 +4330,360 @@ mod tests {
         assert!(!is_retryable_send_error(
             "conversation_busy: send button not actionable after composer injection: page=https://chatgpt.com/c/abc, stopButton=VISIBLE(response in progress?)"
         ));
+    }
+
+    #[test]
+    fn uncaptured_submit_recovery_requires_empty_composer_and_visible_stop() {
+        let submitted_without_post = "conversation_busy: page=https://chatgpt.com/c/WEB:abc, composer=EMPTY(text not injected), sendButton=NOT_FOUND, stopButton=VISIBLE(response in progress?), busyElements=1";
+        assert!(handoff_error_indicates_submitted_without_captured_post(
+            submitted_without_post
+        ));
+        assert!(!handoff_error_indicates_submitted_without_captured_post(
+            "conversation_busy: page=https://chatgpt.com/, composer=HAS_TEXT, stopButton=VISIBLE(response in progress?)"
+        ));
+        assert!(!handoff_error_indicates_submitted_without_captured_post(
+            "browser_send_not_submitted: composer=EMPTY(text not injected), sendButton=NOT_FOUND"
+        ));
+
+        assert_eq!(
+            uncaptured_submit_recovery_timeout(
+                true,
+                submitted_without_post,
+                Duration::from_secs(30),
+                Duration::from_secs(8),
+            ),
+            Some(Duration::from_secs(22))
+        );
+        assert_eq!(
+            uncaptured_submit_recovery_timeout(
+                true,
+                submitted_without_post,
+                Duration::from_secs(5),
+                Duration::from_secs(8),
+            ),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            uncaptured_submit_recovery_timeout(
+                false,
+                submitted_without_post,
+                Duration::from_secs(30),
+                Duration::from_secs(8),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provisional_web_conversation_id_is_not_committed() {
+        assert!(is_provisional_web_conversation_id("WEB:e764df8b-b349"));
+        assert!(is_provisional_web_conversation_id(" web:e764df8b-b349 "));
+        assert!(!is_provisional_web_conversation_id(
+            "6a854408-18dc-83ec-868a-64a5f134cb60"
+        ));
+    }
+
+    #[tokio::test]
+    async fn uncaptured_submit_recovery_returns_committed_conversation() {
+        let submitted_without_post = "conversation_busy: page=https://chatgpt.com/c/WEB:abc, composer=EMPTY(text not injected), sendButton=NOT_FOUND, stopButton=VISIBLE(response in progress?), busyElements=1";
+        let cdp = mock_cdp(vec![Value::String(
+            json!({
+                "urlCid": "6a854408-18dc-83ec-868a-64a5f134cb60",
+                "turnCount": 2,
+                "href": "https://chatgpt.com/c/6a854408-18dc-83ec-868a-64a5f134cb60"
+            })
+            .to_string(),
+        )])
+        .await;
+        let temp = tempfile::tempdir().unwrap();
+
+        let recovered = recover_uncaptured_submit(
+            &cdp,
+            (
+                true,
+                submitted_without_post,
+                Duration::from_secs(9),
+                Duration::from_secs(8),
+            ),
+            &temp.path().join("stop"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            recovered.conversation_id.as_deref(),
+            Some("6a854408-18dc-83ec-868a-64a5f134cb60")
+        );
+        assert_eq!(
+            recovered.event_types,
+            vec!["handoff_recovered_after_uncaptured_submit"]
+        );
+        cdp.close();
+
+        let unused_cdp = mock_cdp(Vec::new()).await;
+        assert!(recover_uncaptured_submit(
+            &unused_cdp,
+            (
+                false,
+                submitted_without_post,
+                Duration::from_secs(9),
+                Duration::from_secs(8),
+            ),
+            &temp.path().join("stop"),
+        )
+        .await
+        .is_none());
+        let exhausted = recover_uncaptured_submit(
+            &unused_cdp,
+            (
+                true,
+                submitted_without_post,
+                Duration::from_secs(5),
+                Duration::from_secs(8),
+            ),
+            &temp.path().join("stop"),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(exhausted, submitted_without_post);
+        unused_cdp.close();
+    }
+
+    #[tokio::test]
+    async fn uncaptured_submit_recovery_tracks_provisional_before_commit() {
+        let provisional = json!({
+            "urlCid": "WEB:e764df8b-b349",
+            "turnCount": 1,
+            "href": "https://chatgpt.com/c/WEB:e764df8b-b349"
+        });
+        let committed = json!({
+            "urlCid": "6a854408-18dc-83ec-868a-64a5f134cb60",
+            "turnCount": 2,
+            "href": "https://chatgpt.com/c/6a854408-18dc-83ec-868a-64a5f134cb60"
+        });
+        let cdp = mock_cdp(vec![
+            Value::String(
+                json!({
+                    "urlCid": null,
+                    "turnCount": 0,
+                    "href": "https://chatgpt.com/"
+                })
+                .to_string(),
+            ),
+            Value::String(provisional.to_string()),
+            Value::String(committed.to_string()),
+        ])
+        .await;
+        let temp = tempfile::tempdir().unwrap();
+
+        let recovered = wait_for_committed_conversation_after_uncaptured_submit(
+            &cdp,
+            Duration::from_secs(7),
+            &temp.path().join("stop"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            recovered.conversation_id.as_deref(),
+            Some("6a854408-18dc-83ec-868a-64a5f134cb60")
+        );
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn uncaptured_submit_recovery_retries_page_inspection_errors() {
+        let committed = json!({
+            "urlCid": "6a854408-18dc-83ec-868a-64a5f134cb60",
+            "turnCount": 2,
+            "href": "https://chatgpt.com/c/6a854408-18dc-83ec-868a-64a5f134cb60"
+        });
+        let cdp = mock_cdp(vec![
+            json!({"__cdp_error": "temporary evaluation failure"}),
+            Value::String(committed.to_string()),
+        ])
+        .await;
+        let temp = tempfile::tempdir().unwrap();
+
+        let recovered = wait_for_committed_conversation_after_uncaptured_submit(
+            &cdp,
+            Duration::from_secs(4),
+            &temp.path().join("stop"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            recovered.conversation_id.as_deref(),
+            Some("6a854408-18dc-83ec-868a-64a5f134cb60")
+        );
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn uncaptured_submit_recovery_honors_stop_and_closed_browser() {
+        let temp = tempfile::tempdir().unwrap();
+        let stop = temp.path().join("stop");
+        tokio::fs::write(&stop, b"stop").await.unwrap();
+        let cdp = mock_cdp(Vec::new()).await;
+        assert!(wait_for_committed_conversation_after_uncaptured_submit(
+            &cdp,
+            Duration::from_secs(1),
+            &stop,
+        )
+        .await
+        .unwrap_err()
+        .starts_with("stopped:"));
+        cdp.close();
+
+        let open_stop = temp.path().join("not-stopped");
+        assert!(wait_for_committed_conversation_after_uncaptured_submit(
+            &cdp,
+            Duration::from_secs(1),
+            &open_stop,
+        )
+        .await
+        .unwrap_err()
+        .starts_with("browser_unavailable:"));
+    }
+
+    #[tokio::test]
+    async fn uncaptured_submit_recovery_timeout_includes_page_diagnostic() {
+        let cdp = mock_cdp(vec![json!({
+            "url": "https://chatgpt.com/c/WEB:still-provisional",
+            "stopButtonVisible": true
+        })])
+        .await;
+        let temp = tempfile::tempdir().unwrap();
+
+        let error = wait_for_committed_conversation_after_uncaptured_submit(
+            &cdp,
+            Duration::ZERO,
+            &temp.path().join("stop"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("provisional conversation did not commit within 0s"));
+        assert!(error.contains("WEB:still-provisional"));
+        assert!(error.contains("stopButton=VISIBLE"));
+        cdp.close();
+    }
+
+    fn busy_gate_runtime(temp: &tempfile::TempDir) -> (RuntimeConfig, AuthState) {
+        (
+            RuntimeConfig {
+                browser: super::super::BrowserConfig::default(),
+                chatgpt: super::super::ChatGptConfig::default(),
+                profile_dir: temp.path().join("profile"),
+                state_path: temp.path().join("auth-state.json"),
+                sessions_path: temp.path().join("sessions.json"),
+                attachments_dir: temp.path().join("attachments"),
+            },
+            AuthState {
+                captured_at: String::new(),
+                base_url: String::new(),
+                user_agent: String::new(),
+                captured_auth_headers: std::collections::BTreeMap::new(),
+                captured_auth_identity: super::super::AuthorizationIdentity::default(),
+                captured_account_check: None,
+                cookies: Vec::new(),
+            },
+        )
+    }
+
+    fn busy_diagnostic(visible: bool) -> Value {
+        json!({
+            "url": "https://chatgpt.com/c/stale-stop",
+            "composerFound": true,
+            "composerVisible": true,
+            "composerDisabled": false,
+            "composerHasText": false,
+            "stopButtonVisible": visible,
+            "busyCount": usize::from(visible)
+        })
+    }
+
+    fn backend_answer(status: &str, end_turn: bool) -> Value {
+        json!({
+            "current_node": "answer",
+            "mapping": {
+                "answer": {
+                    "parent": null,
+                    "message": {
+                        "id": "answer",
+                        "author": {"role": "assistant"},
+                        "create_time": 20.0,
+                        "status": status,
+                        "end_turn": end_turn,
+                        "content": {"parts": ["final answer"]}
+                    }
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn busy_gate_clears_stale_stop_only_after_backend_finished() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, auth) = busy_gate_runtime(&temp);
+        let conversation_id = "stale-stop-finished";
+        set_test_backend_details(
+            conversation_id,
+            vec![Ok(backend_answer("finished_successfully", true))],
+        );
+        let cdp = mock_cdp(vec![
+            busy_diagnostic(true),
+            Value::Bool(true),
+            busy_diagnostic(false),
+        ])
+        .await;
+
+        wait_until_conversation_not_busy(
+            &cdp,
+            (&config, &auth, Some(conversation_id)),
+            "test stale stop",
+            Duration::from_secs(2),
+            &temp.path().join("stop"),
+        )
+        .await
+        .unwrap();
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn busy_gate_does_not_click_stop_without_backend_finished_evidence() {
+        for (suffix, detail) in [
+            ("in-progress", Ok(backend_answer("in_progress", false))),
+            (
+                "transient",
+                Err("ChatGPT browser-context HTTP 429".to_string()),
+            ),
+            (
+                "permanent",
+                Err("ChatGPT browser-context HTTP 401".to_string()),
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (config, auth) = busy_gate_runtime(&temp);
+            let conversation_id = format!("stale-stop-{suffix}");
+            set_test_backend_details(&conversation_id, vec![detail]);
+            let cdp = mock_cdp(vec![busy_diagnostic(true), json!({"ok": true})]).await;
+
+            let error = wait_until_conversation_not_busy(
+                &cdp,
+                (&config, &auth, Some(&conversation_id)),
+                "test active generation",
+                Duration::ZERO,
+                &temp.path().join("stop"),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.starts_with("conversation_busy:"), "{suffix}: {error}");
+            cdp.close();
+        }
     }
 
     #[test]
@@ -4805,6 +5305,33 @@ mod coverage_boost {
         assert!(!diagnostic_has_visible_stop_button(&json!({
             "sendButtonFound": false,
         })));
+    }
+
+    #[test]
+    fn stale_stop_button_is_only_clearable_after_backend_finished_current_branch() {
+        let finished = json!({
+            "current_node": "answer",
+            "mapping": {
+                "answer": {
+                    "parent": null,
+                    "message": {
+                        "id": "answer",
+                        "author": {"role": "assistant"},
+                        "create_time": 20.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["final answer"]}
+                    }
+                }
+            }
+        });
+        let mut in_progress = finished.clone();
+        in_progress["mapping"]["answer"]["message"]["status"] = json!("in_progress");
+        in_progress["mapping"]["answer"]["message"]["end_turn"] = json!(false);
+
+        assert!(backend_confirms_finished_assistant(&finished));
+        assert!(!backend_confirms_finished_assistant(&in_progress));
+        assert!(!backend_confirms_finished_assistant(&json!({})));
     }
 
     // --- target_page_matches / terminal_mismatch / error ---

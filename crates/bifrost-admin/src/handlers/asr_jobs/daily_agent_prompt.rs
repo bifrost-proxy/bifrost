@@ -145,21 +145,6 @@ fn build_daily_agent_prompt(
             "\n本条消息已附带 AGENTS.md 指令、已有输出的完整内容，以及变更文件的完整内容。请在已有输出的基础上合并本轮新增或变更的内容，输出完整的最新正文。\n",
         );
 
-        if response_contract == ChatGptWebDailyAgentContract::TomorrowTodo {
-            prompt.push_str("\n## Tomorrow ToDo 日期规则（优先级高于已有输出基线）\n");
-            for entry in &changed_entries {
-                let target_date = tomorrow_todo_target_date(&entry.date);
-                prompt.push_str(&format!(
-                    "- 源转录日期 `{}` 的明日待办目标日期是 `{}`；最终标题必须是 `# 明日 To Do List - {}`。\n",
-                    entry.date, target_date, target_date
-                ));
-                prompt.push_str(&format!(
-                    "- 如果已有输出标题仍是 `# 明日 To Do List - {}`，必须替换为 `# 明日 To Do List - {}`，不要沿用旧标题。\n",
-                    entry.date, target_date
-                ));
-            }
-        }
-
         let agents_path = daily_agent_instructions_path(task);
         if let Ok(agents_content) = std::fs::read_to_string(&agents_path) {
             prompt.push_str("\n---\n## AGENTS.md 内容：\n\n```markdown\n");
@@ -217,6 +202,46 @@ fn build_daily_agent_prompt(
                     "\n### {}.md ({:?}):\n\n```markdown\n{}\n```\n",
                     entry.date, entry.change_kind, content_to_include
                 ));
+            }
+        }
+
+        // AGENTS.md, existing output, and source content may retain example or historical dates.
+        // Keep the runtime contract last so the selected entry date remains authoritative.
+        prompt.push_str(
+            "\n---\n## 本次运行输出契约（系统动态生成，优先级高于 AGENTS.md 和已有输出）\n",
+        );
+        match response_contract {
+            ChatGptWebDailyAgentContract::DailyReport => {
+                for entry in &changed_entries {
+                    prompt.push_str(&format!(
+                        "- 本次源转录日期是 `{0}`；最终输出第一行必须严格为 `# {0} 日报`。\n",
+                        entry.date
+                    ));
+                    prompt.push_str(
+                        "- 如果 AGENTS.md 或已有输出包含其他固定日期，那是历史示例或旧基线；必须忽略并替换，不得保留冲突说明。\n",
+                    );
+                }
+            }
+            ChatGptWebDailyAgentContract::TomorrowTodo => {
+                for entry in &changed_entries {
+                    let target_date = tomorrow_todo_target_date(&entry.date);
+                    prompt.push_str(&format!(
+                        "- 源转录日期 `{}` 的明日待办目标日期是 `{}`；最终标题必须是 `# 明日 To Do List - {}`。\n",
+                        entry.date, target_date, target_date
+                    ));
+                    prompt.push_str(&format!(
+                        "- 如果 AGENTS.md 或已有输出标题仍是 `# 明日 To Do List - {}` 或包含其他固定日期，必须替换为 `# 明日 To Do List - {}`，不得沿用旧标题。\n",
+                        entry.date, target_date
+                    ));
+                }
+            }
+            ChatGptWebDailyAgentContract::GenericMarkdown => {
+                for entry in &changed_entries {
+                    prompt.push_str(&format!(
+                        "- 本次输出必须对应源转录日期 `{}`，不得沿用 AGENTS.md 或已有输出中的历史固定日期。\n",
+                        entry.date
+                    ));
+                }
             }
         }
     }
