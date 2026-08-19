@@ -85,6 +85,18 @@ grep -Fq -- '- name: Native Weixin provider E2E' <<<"$linux_shell_job"
 grep -Fq 'BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost' <<<"$linux_shell_job"
 grep -Fq 'run: bash e2e-tests/tests/test_weixin_provider_e2e.sh' <<<"$linux_shell_job"
 
+live_model_step="$({
+  awk '
+    /- name: IM live model progress card E2E/ { in_step = 1 }
+    in_step && /- name:/ && !/- name: IM live model progress card E2E/ { exit }
+    in_step { print }
+  ' <<<"$linux_shell_job"
+})"
+grep -Fq -- '- name: IM live model progress card E2E' <<<"$live_model_step"
+grep -Fq 'BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost' <<<"$live_model_step"
+grep -Fq 'SKIP_BUILD: "true"' <<<"$live_model_step"
+grep -Fq 'run: bash e2e-tests/tests/test_im_gateway_live_model_switch.sh' <<<"$live_model_step"
+
 # The coverage job runs the proxy shell manifest itself, so it must provision
 # every external tool required by those scenarios instead of depending on the
 # separately isolated shell E2E job.

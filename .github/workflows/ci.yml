@@ -387,6 +387,12 @@ jobs:
           BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost
           SKIP_BUILD: "true"
         run: bash e2e-tests/tests/test_weixin_provider_e2e.sh
+      - name: IM live model progress card E2E
+        shell: bash
+        env:
+          BIFROST_BIN: ${{ github.workspace }}/target/debug/bifrost
+          SKIP_BUILD: "true"
+        run: bash e2e-tests/tests/test_im_gateway_live_model_switch.sh
       - name: E2E shell tests
         shell: bash
         run: bash scripts/ci/run-e2e-shell.sh

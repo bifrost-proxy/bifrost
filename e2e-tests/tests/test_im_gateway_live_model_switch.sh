@@ -7,16 +7,34 @@ unset BIFROST_IM_GATEWAY_WORKER
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
 export BIFROST_DISABLE_TRAY=1
 export BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1
+export CARGO_NET_OFFLINE=true
+
+export HTTP_PROXY=http://127.0.0.1:9
+export HTTPS_PROXY=http://127.0.0.1:9
+export ALL_PROXY=http://127.0.0.1:9
+export NO_PROXY=127.0.0.1,localhost
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export all_proxy="$ALL_PROXY"
+export no_proxy="$NO_PROXY"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
+
+case "${BIFROST_BIN//\\//}" in
+  target/release/bifrost|*/target/release/bifrost|target/release/bifrost.exe|*/target/release/bifrost.exe)
+    echo "[im-live-model] SKIP fake OpenAPI: release build rejects Feishu loopback by design"
+    exit 0
+    ;;
+esac
+
 TEST_DIR="$(mktemp -d "$REPO_DIR/.bifrost-e2e-live-model.XXXXXX")"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 PROTOCOL_LOG="$TEST_DIR/app-server-protocol.jsonl"
 TURN_READY="$TEST_DIR/turn.ready"
 FEISHU_REQUEST_LOG="$TEST_DIR/feishu-requests.jsonl"
 FEISHU_PORT_FILE="$TEST_DIR/feishu.port"
-BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -268,7 +286,9 @@ PY
 chmod +x "$MOCK_CODEX"
 
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
-  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+  env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    -u http_proxy -u https_proxy -u all_proxy \
+    SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
