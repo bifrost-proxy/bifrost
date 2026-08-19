@@ -168,7 +168,8 @@ ASR worker 与 Admin 主进程的触发链路:
   settle timer;只有后端明确返回未完成状态或 current branch/内容签名变化时才重置。后续
   成功读取同一 candidate 即可完成确认,避免持续限流要求两次无间断成功读取。
 - 页面仍显示 Stop 但后端明确确认当前分支已经 finished 时,允许点击一次 stale Stop 清理
-  前端残留状态;没有后端 finished 证据时不得停止仍在生成的回复。
+  前端残留状态;没有后端 finished 证据时不得停止仍在生成的回复。如果点击失败或 Stop
+  持续残留,busy gate 仍必须受原等待上限约束并返回 `conversation_busy`,不得无限循环。
 - 大输入已提交、页面进入 `/c/WEB:<uuid>` 且出现生成状态,但 CDP 没有捕获
   `f/conversation` POST 时,把 `WEB:*` 视为 provisional conversation 并等待它提交为真实
   conversation id,不得按 `conversation_busy` 立即失败或重复发送 prompt。

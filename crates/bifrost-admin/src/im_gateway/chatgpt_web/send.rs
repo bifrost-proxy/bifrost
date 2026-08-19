@@ -2932,12 +2932,17 @@ async fn wait_until_conversation_not_busy(
             }
             return Ok(());
         }
+        if started.elapsed() >= max_wait {
+            let diag_summary = format_send_diagnostic(&diagnostic);
+            return Err(format!("conversation_busy: {context}: {diag_summary}"));
+        }
         if let Some(conversation_id) = conversation_id {
             match get_conversation_detail(config, auth, conversation_id).await {
                 Ok(detail) if backend_confirms_finished_assistant(&detail) => {
                     let clicked = click_visible_stop_button(cdp).await?;
                     warn!(context, conversation_id, clicked, "chatgpt_web send: backend is finished while the UI still shows Stop; clearing stale busy state");
-                    sleep(Duration::from_millis(STOP_BUTTON_BUSY_POLL_MS)).await;
+                    let remaining = max_wait.saturating_sub(started.elapsed());
+                    sleep(remaining.min(Duration::from_millis(STOP_BUTTON_BUSY_POLL_MS))).await;
                     continue;
                 }
                 Ok(_) => {}
@@ -4654,6 +4659,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn busy_gate_finished_stale_stop_respects_max_wait_when_click_does_not_clear() {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, auth) = busy_gate_runtime(&temp);
+        let conversation_id = "stale-stop-finished-not-cleared";
+        set_test_backend_details(
+            conversation_id,
+            vec![Ok(backend_answer("finished_successfully", true))],
+        );
+        let cdp = mock_cdp(vec![
+            busy_diagnostic(true),
+            Value::Bool(false),
+            busy_diagnostic(true),
+        ])
+        .await;
+
+        let error = wait_until_conversation_not_busy(
+            &cdp,
+            (&config, &auth, Some(conversation_id)),
+            "test stale stop cannot be cleared",
+            Duration::from_millis(50),
+            &temp.path().join("stop"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.starts_with("conversation_busy: test stale stop cannot be cleared:"),
+            "{error}"
+        );
+        cdp.close();
+    }
+
+    #[tokio::test]
     async fn busy_gate_does_not_click_stop_without_backend_finished_evidence() {
         for (suffix, detail) in [
             ("in-progress", Ok(backend_answer("in_progress", false))),
@@ -4670,13 +4708,18 @@ mod tests {
             let (config, auth) = busy_gate_runtime(&temp);
             let conversation_id = format!("stale-stop-{suffix}");
             set_test_backend_details(&conversation_id, vec![detail]);
-            let cdp = mock_cdp(vec![busy_diagnostic(true), json!({"ok": true})]).await;
+            let cdp = mock_cdp(vec![
+                busy_diagnostic(true),
+                json!({"ok": true}),
+                busy_diagnostic(true),
+            ])
+            .await;
 
             let error = wait_until_conversation_not_busy(
                 &cdp,
                 (&config, &auth, Some(&conversation_id)),
                 "test active generation",
-                Duration::ZERO,
+                Duration::from_millis(20),
                 &temp.path().join("stop"),
             )
             .await
