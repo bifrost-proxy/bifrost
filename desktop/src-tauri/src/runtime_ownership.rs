@@ -205,9 +205,9 @@ pub(super) fn probe_runtime_health_lane_with_timeout(
     };
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
-    if let Err(error) = stream.write_all(
-        b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-    ) {
+    if let Err(error) =
+        stream.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    {
         return RuntimeHealthLaneProbeResult {
             healthy: false,
             elapsed: started.elapsed(),
@@ -233,7 +233,11 @@ pub(super) fn probe_runtime_health_lane_with_timeout(
             snapshot: None,
         };
     };
-    if !head.lines().next().is_some_and(|line| line.contains(" 200 ")) {
+    if !head
+        .lines()
+        .next()
+        .is_some_and(|line| line.contains(" 200 "))
+    {
         return RuntimeHealthLaneProbeResult {
             healthy: false,
             elapsed: started.elapsed(),

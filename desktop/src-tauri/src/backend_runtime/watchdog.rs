@@ -211,8 +211,7 @@ fn append_watchdog_signal_event(
     decision: &str,
     observation: &BackendSignalObservation,
 ) {
-    let mut event =
-        bifrost_core::SystemProxyLifecycleEvent::new(event_name, "desktop_watchdog");
+    let mut event = bifrost_core::SystemProxyLifecycleEvent::new(event_name, "desktop_watchdog");
     event.decision = Some(decision.into());
     event.admin_probe_ms = Some(observation.admin.elapsed.as_millis() as u64);
     event.data_plane_probe_ms = Some(observation.data_plane.elapsed.as_millis() as u64);
