@@ -2485,7 +2485,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn managed_restart_launches_replacement_and_waits_for_data_canary() {
         use std::os::unix::fs::PermissionsExt;
@@ -2637,6 +2637,7 @@ while True:
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn managed_restart_spawn_failure_applies_fail_open_diagnostics() {
         let dir = tempfile::tempdir().unwrap();
@@ -2656,6 +2657,7 @@ while True:
         assert!(owner.last_error.is_some());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn managed_restart_grace_applies_both_recovery_policies() {
         for (mode, applied, expected) in [
@@ -2708,6 +2710,26 @@ while True:
                     }
             }));
         }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn managed_restart_is_not_attempted_when_system_proxy_is_unsupported() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = unused_loopback_port();
+        write_restart_fixture(
+            dir.path(),
+            port,
+            std::env::current_exe().unwrap(),
+            true,
+            port,
+            true,
+        );
+
+        assert_eq!(
+            restart_managed_runtime_before_cleanup(dir.path()),
+            ManagedRuntimeRestartOutcome::NotAttempted
+        );
     }
 
     #[test]
