@@ -111,6 +111,9 @@ impl ScriptManager {
         request: &mut bifrost_script::RequestData,
         ctx: &bifrost_script::ScriptContext,
     ) -> Vec<bifrost_script::ScriptExecutionResult> {
+        if !bifrost_core::scripts_allowed() {
+            return Vec::new();
+        }
         let mut results = Vec::new();
         for script_name in script_names {
             let mut result = if let Some((content, name)) = Self::inline_script(script_name, ctx) {
@@ -139,6 +142,9 @@ impl ScriptManager {
         ctx: &bifrost_script::ScriptContext,
         cfg: &UnifiedConfig,
     ) -> Vec<bifrost_script::ScriptExecutionResult> {
+        if !bifrost_core::scripts_allowed() {
+            return Vec::new();
+        }
         let mut results = Vec::new();
         for script_name in script_names {
             let mut result = if let Some((content, name)) = Self::inline_script(script_name, ctx) {
@@ -173,6 +179,9 @@ impl ScriptManager {
         response: &mut bifrost_script::ResponseData,
         ctx: &bifrost_script::ScriptContext,
     ) -> Vec<bifrost_script::ScriptExecutionResult> {
+        if !bifrost_core::scripts_allowed() {
+            return Vec::new();
+        }
         let mut results = Vec::new();
         for script_name in script_names {
             let mut result = if let Some((content, name)) = Self::inline_script(script_name, ctx) {
@@ -201,6 +210,9 @@ impl ScriptManager {
         ctx: &bifrost_script::ScriptContext,
         cfg: &UnifiedConfig,
     ) -> Vec<bifrost_script::ScriptExecutionResult> {
+        if !bifrost_core::scripts_allowed() {
+            return Vec::new();
+        }
         let mut results = Vec::new();
         for script_name in script_names {
             let mut result = if let Some((content, name)) = Self::inline_script(script_name, ctx) {
@@ -248,6 +260,9 @@ impl ScriptManager {
             bifrost_script::ScriptError,
         >,
     > {
+        if !bifrost_core::scripts_allowed() {
+            return Vec::new();
+        }
         let mut results = Vec::new();
         for script_name in script_names {
             let result = self
@@ -287,6 +302,9 @@ impl ScriptManager {
             bifrost_script::ScriptError,
         >,
     > {
+        if !bifrost_core::scripts_allowed() {
+            return Vec::new();
+        }
         let mut results = Vec::new();
         for script_name in script_names {
             let result = self
@@ -325,6 +343,16 @@ impl ScriptManager {
         ),
         bifrost_script::ScriptError,
     > {
+        if !bifrost_core::scripts_allowed() {
+            return Ok((
+                bifrost_script::DecodeOutput {
+                    data: String::new(),
+                    code: "resource_pressure".into(),
+                    msg: "parser script paused by resource pressure".into(),
+                },
+                Vec::new(),
+            ));
+        }
         self.engine
             .execute_parser_script_with_config(
                 script_ref,
@@ -925,6 +953,82 @@ mod tests {
             Some("yes")
         );
         assert_eq!(request.body.as_deref(), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn critical_pressure_pauses_every_script_execution_surface() {
+        const CHILD: &str = "BIFROST_SCRIPT_PRESSURE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "handlers::scripts::tests::critical_pressure_pauses_every_script_execution_surface",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ScriptManager::new(dir.path().to_path_buf());
+        let mut request = RequestData::default();
+        let mut response = ResponseData::default();
+        let ctx = ScriptContext {
+            request_id: "pressure".into(),
+            script_name: "pressure".into(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: Vec::new(),
+        };
+        let config = UnifiedConfig::default();
+        let names = vec!["must-not-run".to_string()];
+
+        assert!(manager
+            .execute_request_scripts(&names, &mut request, &ctx)
+            .await
+            .is_empty());
+        assert!(manager
+            .execute_request_scripts_with_config(&names, &mut request, &ctx, &config)
+            .await
+            .is_empty());
+        assert!(manager
+            .execute_response_scripts(&names, &mut response, &ctx)
+            .await
+            .is_empty());
+        assert!(manager
+            .execute_response_scripts_with_config(&names, &mut response, &ctx, &config)
+            .await
+            .is_empty());
+        assert!(manager
+            .execute_decode_scripts(&names, "response", &request, b"", &response, b"", &ctx)
+            .await
+            .is_empty());
+        assert!(manager
+            .execute_decode_scripts_with_config(
+                &names, "response", &request, b"", &response, b"", &ctx, &config,
+            )
+            .await
+            .is_empty());
+        let (output, logs) = manager
+            .execute_parser_script_with_config(
+                "must-not-run",
+                "response",
+                &request,
+                b"",
+                &response,
+                b"",
+                &ctx,
+                &config,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.code, "resource_pressure");
+        assert!(logs.is_empty());
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Normal);
     }
 
     #[tokio::test]

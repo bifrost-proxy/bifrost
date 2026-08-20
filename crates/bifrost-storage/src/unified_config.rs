@@ -341,12 +341,25 @@ pub struct TraySystemStatsItemsUpdate {
     pub download: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemProxyRecoveryMode {
+    #[default]
+    FailOpen,
+    FailClosed,
+}
+
+pub const MIN_SYSTEM_PROXY_RECOVERY_GRACE_SECS: u64 = 3;
+pub const MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS: u64 = 5;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SystemProxyConfig {
     pub enabled: bool,
     pub bypass: String,
     pub auto_enable: bool,
+    pub recovery_mode: SystemProxyRecoveryMode,
+    pub recovery_grace_secs: u64,
 }
 
 impl Default for SystemProxyConfig {
@@ -355,6 +368,8 @@ impl Default for SystemProxyConfig {
             enabled: true,
             bypass: DEFAULT_SYSTEM_PROXY_BYPASS.to_string(),
             auto_enable: false,
+            recovery_mode: SystemProxyRecoveryMode::FailOpen,
+            recovery_grace_secs: MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS,
         }
     }
 }
@@ -521,6 +536,8 @@ pub struct SystemProxyConfigUpdate {
     pub enabled: Option<bool>,
     pub bypass: Option<String>,
     pub auto_enable: Option<bool>,
+    pub recovery_mode: Option<SystemProxyRecoveryMode>,
+    pub recovery_grace_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]

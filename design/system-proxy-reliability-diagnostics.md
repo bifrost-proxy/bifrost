@@ -15,7 +15,7 @@
 - `bifrost-core::system_proxy_recovery` 提供 `is_retryable_recovery_error` / `is_network_services_not_ready_error` / `retry_with_policy`（`system_proxy_recovery.rs` line 21/31/58），对应 network services 未 ready 的 retry 安全网。
 - LaunchDaemon one-shot cleanup（`system_proxy_launchd`）保留并继续走 startup recovery（`system_proxy_launchd.rs` line 357/371 使用两次 live listener 检查）。
 
-尚未落地（planned, not yet shipped as of 2026-06-17）：
+尚未落地（本轮按 `design/runtime-stability-hardening.md` 实施）：
 
 - `bifrost-core::system_proxy_owner_state` 模块与 `system_proxy_owner_state.json` 文件（含 `runtime_start_mode` / `restartable_runtime` / `helper_pid` / `helper_last_heartbeat_at` / `wake_watcher_status` / `last_*` 字段）。
 - `bifrost-core::system_proxy_events` 模块、`logs/system_proxy_events.jsonl` 结构化事件、`.system_proxy_diagnostics.lock` 独立诊断锁、10 MiB rotation。

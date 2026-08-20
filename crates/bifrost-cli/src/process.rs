@@ -57,6 +57,8 @@ pub struct RuntimeInfo {
     pub system_proxy_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub system_proxy_bypass: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub health_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +98,7 @@ impl RuntimeInfo {
             binary_path: std::env::current_exe().ok(),
             system_proxy_enabled: None,
             system_proxy_bypass: None,
+            health_port: None,
         }
     }
 
@@ -106,6 +109,11 @@ impl RuntimeInfo {
     pub fn with_system_proxy(mut self, enabled: bool, bypass: impl Into<String>) -> Self {
         self.system_proxy_enabled = Some(enabled);
         self.system_proxy_bypass = Some(bypass.into());
+        self
+    }
+
+    pub fn with_health_port(mut self, health_port: u16) -> Self {
+        self.health_port = Some(health_port);
         self
     }
 }
@@ -223,6 +231,7 @@ fn runtime_info_from_admin_overview(
         binary_path: None,
         system_proxy_enabled: None,
         system_proxy_bypass: None,
+        health_port: None,
     })
 }
 
@@ -266,7 +275,45 @@ pub fn write_runtime_info(info: &RuntimeInfo) -> bifrost_core::Result<()> {
     let json = serde_json::to_string_pretty(info).map_err(std::io::Error::other)?;
     std::fs::write(&runtime_file, json)?;
     write_pid(info.pid)?;
+    persist_runtime_lifecycle_diagnostics(info);
     Ok(())
+}
+
+fn persist_runtime_lifecycle_diagnostics(info: &RuntimeInfo) {
+    let Ok(data_dir) = get_bifrost_dir() else {
+        return;
+    };
+    let ownership_generation = bifrost_core::SystemProxyManager::new(data_dir.clone())
+        .ensure_managed_ownership()
+        .ok()
+        .flatten()
+        .map(|ownership| ownership.generation);
+    if let Err(error) = bifrost_core::update_system_proxy_owner_state(&data_dir, |state| {
+        state.ownership_generation = ownership_generation.clone();
+        state.pid = Some(info.pid);
+        state.started_at_ms = info.started_at_ms;
+        state.runtime_start_mode = Some(format!("{:?}", info.start_mode).to_ascii_lowercase());
+        state.restartable_runtime = info.restartable_runtime;
+        state.listener_addr = Some(format!(
+            "{}:{}",
+            runtime_system_proxy_host(info.host.as_deref()),
+            info.port
+        ));
+        state.health_port = info.health_port;
+        state.phase = Some("running".into());
+        state.last_action = Some("runtime_marker_written".into());
+        state.last_error = None;
+    }) {
+        tracing::warn!(error = %error, "failed to persist runtime owner diagnostics");
+    }
+
+    let mut event =
+        bifrost_core::SystemProxyLifecycleEvent::new("runtime_marker_written", "runtime");
+    event.new_pid = Some(info.pid);
+    event.ownership_generation = ownership_generation;
+    if let Err(error) = bifrost_core::append_system_proxy_event(&data_dir, &event) {
+        tracing::warn!(error = %error, "failed to persist runtime lifecycle event");
+    }
 }
 
 pub fn remove_pid() -> bifrost_core::Result<()> {
@@ -660,6 +707,37 @@ pub fn kill_process_by_pid(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_diagnostics_tolerate_unwritable_data_path() {
+        const MARKER: &str = "BIFROST_PROCESS_DIAGNOSTICS_FAILURE_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .arg("--exact")
+            .arg("process::tests::lifecycle_diagnostics_tolerate_unwritable_data_path")
+            .arg("--nocapture")
+            .env(MARKER, "1")
+            .status()
+            .expect("run isolated diagnostics failure test");
+            assert!(status.success());
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("not-a-directory");
+        std::fs::write(&blocked, b"file").unwrap();
+        std::env::set_var("BIFROST_DATA_DIR", &blocked);
+        let info = RuntimeInfo::new(
+            std::process::id(),
+            9900,
+            None,
+            Some("127.0.0.1".into()),
+            RuntimeStartMode::Daemon,
+        );
+        persist_runtime_lifecycle_diagnostics(&info);
+    }
 
     #[test]
     fn process_identity_classification_only_treats_esrch_as_definite_exit() {

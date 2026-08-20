@@ -991,6 +991,7 @@ fn test_build_restart_args_with_runtime_info() {
         binary_path: None,
         system_proxy_enabled: Some(false),
         system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
+        health_port: None,
     };
 
     let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
@@ -1025,6 +1026,7 @@ fn test_build_restart_args_default_host_skipped() {
         binary_path: None,
         system_proxy_enabled: Some(false),
         system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
+        health_port: None,
     };
 
     let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
@@ -1108,6 +1110,7 @@ fn upgrade_restart_ports_from_runtime_uses_runtime_ports() {
         binary_path: None,
         system_proxy_enabled: None,
         system_proxy_bypass: None,
+        health_port: None,
     };
 
     assert_eq!(restart_ports_from_runtime(Some(&info)), vec![18891, 18892]);
@@ -1146,6 +1149,7 @@ fn test_build_restart_args_no_host() {
         binary_path: None,
         system_proxy_enabled: Some(false),
         system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
+        health_port: None,
     };
 
     let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
@@ -1176,6 +1180,7 @@ fn test_build_restart_args_preserves_system_proxy_snapshot() {
         binary_path: None,
         system_proxy_enabled: Some(false),
         system_proxy_bypass: Some("runtime-bypass-ignored-by-snapshot".to_string()),
+        health_port: None,
     };
     let snapshot = RuntimeSystemProxySnapshot {
         bypass: "localhost,127.0.0.1,*.local".to_string(),
@@ -1212,6 +1217,7 @@ fn test_build_restart_args_preserves_runtime_system_proxy_request() {
         binary_path: None,
         system_proxy_enabled: Some(true),
         system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
+        health_port: None,
     };
 
     let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
@@ -1245,6 +1251,7 @@ fn test_build_restart_args_defaults_to_no_system_proxy_for_legacy_runtime() {
         binary_path: None,
         system_proxy_enabled: None,
         system_proxy_bypass: None,
+        health_port: None,
     };
 
     let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);

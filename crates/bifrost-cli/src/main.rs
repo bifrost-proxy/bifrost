@@ -14,6 +14,7 @@ mod config;
 mod help;
 mod parsing;
 mod process;
+mod runtime_health;
 
 use cli::{
     AiCommands, AiVoiceCommands, CaptureCommands, Cli, Commands, ImportArgs, SyncCommands,

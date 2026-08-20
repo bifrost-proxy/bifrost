@@ -86,6 +86,11 @@ impl BodyStreamWriter {
         if data.is_empty() {
             return Ok(());
         }
+        if !bifrost_core::payload_persistence_allowed() {
+            self.size = self.size.saturating_sub(self.buffer.len());
+            self.buffer.clear();
+            return Ok(());
+        }
         self.buffer.extend_from_slice(data);
         self.size += data.len();
         if self.buffer.len() >= self.flush_bytes || self.last_flush.elapsed() >= self.flush_interval
@@ -105,6 +110,11 @@ impl BodyStreamWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         if self.buffer.is_empty() {
+            return Ok(());
+        }
+        if !bifrost_core::payload_persistence_allowed() {
+            self.size = self.size.saturating_sub(self.buffer.len());
+            self.buffer.clear();
             return Ok(());
         }
         self.file.write_all(&self.buffer)?;
@@ -235,7 +245,7 @@ impl BodyStore {
     }
 
     pub fn store(&self, id: &str, kind: &str, data: &[u8]) -> Option<BodyRef> {
-        if data.is_empty() {
+        if data.is_empty() || !bifrost_core::payload_persistence_allowed() {
             return None;
         }
 
@@ -267,7 +277,7 @@ impl BodyStore {
     }
 
     pub fn store_force_file(&self, id: &str, kind: &str, data: &[u8]) -> Option<BodyRef> {
-        if data.is_empty() {
+        if data.is_empty() || !bifrost_core::payload_persistence_allowed() {
             return None;
         }
 
@@ -297,6 +307,12 @@ impl BodyStore {
     }
 
     pub fn start_stream(&self, id: &str, kind: &str) -> std::io::Result<BodyStreamWriter> {
+        if !bifrost_core::payload_persistence_allowed() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "body persistence paused by resource pressure",
+            ));
+        }
         self.acquire_stream_slot()?;
         let filename = format!("{}_{}", id, kind);
         let path = self.temp_dir.join(&filename);
@@ -737,6 +753,50 @@ mod tests {
         let body_ref = store.store("test3", "req", b"");
         assert!(body_ref.is_none());
 
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn critical_pressure_disables_all_body_persistence_paths() {
+        const CHILD: &str = "BIFROST_BODY_PRESSURE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "body_store::tests::critical_pressure_disables_all_body_persistence_paths",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let dir = create_test_dir();
+        let store = BodyStore::new(dir.clone(), 8, 7, 64 * 1024, Duration::from_secs(60));
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
+        assert!(store.store("critical", "req", b"body").is_none());
+        assert!(store.store_force_file("critical", "res", b"body").is_none());
+        match store.start_stream("critical", "stream") {
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+            Ok(_) => panic!("critical pressure unexpectedly opened a body stream"),
+        }
+
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Normal);
+        let mut writer = store.start_stream("active", "stream").unwrap();
+        writer.write_chunk(b"buffered").unwrap();
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
+        writer.write_chunk(b"discarded").unwrap();
+        assert_eq!(writer.body_ref().size(), 0);
+
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Normal);
+        writer.write_chunk(b"buffered").unwrap();
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
+        writer.flush_buffered().unwrap();
+        assert_eq!(writer.body_ref().size(), 0);
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Normal);
+        drop(writer);
         cleanup_test_dir(&dir);
     }
 

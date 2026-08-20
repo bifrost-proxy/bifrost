@@ -94,6 +94,52 @@ fn desktop_watchdog_sustained_readiness_failure_recovers_managed_child() {
 }
 
 #[test]
+fn desktop_watchdog_requires_admin_data_plane_and_scheduler_signals() {
+    let base = BackendSignalSnapshot {
+        admin_healthy: false,
+        data_plane_healthy: false,
+        health_lane_present: true,
+        health_lane_healthy: true,
+        scheduler_heartbeat_age_ms: Some(6_000),
+    };
+    assert!(confirms_managed_runtime_unresponsive(base));
+
+    assert!(!confirms_managed_runtime_unresponsive(
+        BackendSignalSnapshot {
+            admin_healthy: true,
+            ..base
+        }
+    ));
+    assert!(!confirms_managed_runtime_unresponsive(
+        BackendSignalSnapshot {
+            data_plane_healthy: true,
+            ..base
+        }
+    ));
+    assert!(!confirms_managed_runtime_unresponsive(
+        BackendSignalSnapshot {
+            scheduler_heartbeat_age_ms: Some(500),
+            ..base
+        }
+    ));
+    assert!(!confirms_managed_runtime_unresponsive(
+        BackendSignalSnapshot {
+            health_lane_present: false,
+            health_lane_healthy: false,
+            scheduler_heartbeat_age_ms: None,
+            ..base
+        }
+    ));
+    assert!(confirms_managed_runtime_unresponsive(
+        BackendSignalSnapshot {
+            health_lane_healthy: false,
+            scheduler_heartbeat_age_ms: None,
+            ..base
+        }
+    ));
+}
+
+#[test]
 fn desktop_watchdog_requested_recovery_closes_with_recovery_log_state() {
     let started = Instant::now();
     let mut health = BackendWatchdogHealth::default();

@@ -2380,6 +2380,28 @@ pub enum AccountCommands {
 pub enum SystemProxyCommands {
     #[command(about = "Show system proxy status")]
     Status,
+    #[command(about = "Diagnose runtime, watchdog, and system proxy ownership state")]
+    Doctor {
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = StatusFormat::Text,
+            help = "Output format"
+        )]
+        format: StatusFormat,
+    },
+    #[command(about = "Configure daemon-loss fail-open or fail-closed recovery")]
+    RecoveryPolicy {
+        #[arg(value_parser = ["fail-open", "fail-closed"], help = "Recovery behavior after the readiness grace period")]
+        mode: String,
+        #[arg(
+            long,
+            default_value_t = 5,
+            value_parser = clap::value_parser!(u64).range(3..=5),
+            help = "Readiness grace period in seconds (3-5)"
+        )]
+        grace_secs: u64,
+    },
     #[command(about = "Enable system proxy")]
     Enable {
         #[arg(long, help = "Bypass list (comma-separated)")]

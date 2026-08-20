@@ -709,6 +709,7 @@ shell_test_weight() {
     test_group_sync_e2e.sh) echo 46 ;;
     test_upgrade_admin_api_restart_e2e.sh) echo 43 ;;
     test_replay_websocket_frames.sh) echo 41 ;;
+    test_runtime_pressure_degradation.sh) echo 35 ;;
     test_traffic_persistence_e2e.sh) echo 40 ;;
     test_group_sync_no_logstorm_e2e.sh) echo 38 ;;
     test_sse_frames.sh) echo 38 ;;
@@ -740,6 +741,7 @@ shell_test_weight() {
 shell_test_runs_serial_in_parallel_shell_job() {
   case "$1" in
     test_memory_pressure_e2e.sh|\
+    test_runtime_pressure_degradation.sh|\
     test_large_body_protection.sh|\
     test_cli_start_interactive_restart_e2e.sh|\
     test_body_cache_sync_cleanup_admin_api.sh|\
@@ -830,6 +832,7 @@ shell_test_capability_group() {
     test_res_body_*|\
     test_rule_*|\
     test_rules_*|\
+    test_runtime_*|\
     test_script_*|\
     test_scripts_*|\
     test_search_traffic_*|\
