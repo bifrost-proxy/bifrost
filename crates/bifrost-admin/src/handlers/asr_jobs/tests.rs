@@ -10281,24 +10281,27 @@ esac
 
         let response = start_source_compression_response(&task.id);
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let mut terminal = None;
-        // Coverage instrumentation and loaded CI hosts can make the spawned
-        // ffmpeg fixture exceed the former one-second polling budget. Keep
-        // the assertion bounded while allowing the real background job time
-        // to reach its terminal state.
-        for _ in 0..500 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let terminal = loop {
             let state = normalized_source_compression_state(&task.id).unwrap();
             if matches!(
                 state.status,
                 SourceAudioCompressionStatus::Completed
                     | SourceAudioCompressionStatus::CompletedWithErrors
             ) {
-                terminal = Some(state);
-                break;
+                break state;
+            }
+            // spawn_blocking can be delayed while the full workspace suite is
+            // saturating a loaded CI host. Keep a bounded wall-clock deadline
+            // without treating scheduler latency as a product failure.
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "background compression should finish within 30s; last status={:?}, message={}",
+                    state.status, state.message
+                );
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let terminal = terminal.expect("background compression should finish");
+        };
         assert_eq!(terminal.status, SourceAudioCompressionStatus::Completed);
         assert_eq!(terminal.compressed_files, 1);
         assert!(task.audio_dir.join("background.flac").is_file());
