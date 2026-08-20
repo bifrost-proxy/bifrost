@@ -2,21 +2,13 @@ use super::*;
 
 mod watchdog;
 
-pub(super) use watchdog::monitor_desktop_backend;
 #[cfg(test)]
 pub(super) use watchdog::{
     confirms_managed_runtime_unresponsive, open_backend_recovery_circuit,
     sustained_readiness_failure_action, BackendRecoveryBudget, BackendSignalSnapshot,
     BackendWatchdogHealth, SustainedReadinessAction, WatchdogProbeDisposition,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ManagedBackendExit {
-    pub(super) pid: u32,
-    pub(super) exit_code: Option<i32>,
-    pub(super) exit_signal: Option<i32>,
-    pub(super) detail: String,
-}
+pub(super) use watchdog::{monitor_desktop_backend, ManagedBackendExit};
 
 pub(super) fn ensure_backend_running(
     binary_path: &Path,

@@ -1,6 +1,14 @@
 use super::*;
 use std::collections::VecDeque;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedBackendExit {
+    pub(crate) pid: u32,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) exit_signal: Option<i32>,
+    pub(crate) detail: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatchdogProbeDisposition {
     Healthy,
