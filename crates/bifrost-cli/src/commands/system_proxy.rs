@@ -2032,6 +2032,7 @@ mod tests {
 
     struct TestManagedProxyRecovery {
         ownership: Option<bifrost_core::ManagedSystemProxyOwnership>,
+        fail_ensure: bool,
         suspend_calls: Vec<String>,
         resume_calls: Vec<String>,
     }
@@ -2056,6 +2057,7 @@ mod tests {
                     },
                     applied,
                 }),
+                fail_ensure: false,
                 suspend_calls: Vec::new(),
                 resume_calls: Vec::new(),
             }
@@ -2066,6 +2068,11 @@ mod tests {
         fn ensure_managed_ownership(
             &mut self,
         ) -> bifrost_core::Result<Option<bifrost_core::ManagedSystemProxyOwnership>> {
+            if self.fail_ensure {
+                return Err(bifrost_core::BifrostError::Config(
+                    "test ownership read failure".into(),
+                ));
+            }
             Ok(self.ownership.clone())
         }
 
@@ -2398,7 +2405,6 @@ mod tests {
         assert!(!dir.path().join("system_proxy_events.jsonl").exists());
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn doctor_report_covers_healthy_stale_invalid_and_ownership_findings() {
         fn health_server(body: Vec<u8>) -> (u16, std::thread::JoinHandle<()>) {
@@ -2484,6 +2490,7 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding == "scheduler heartbeat is stale"));
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert!(report.findings.iter().any(|finding| {
             finding == "managed state says applied but OS proxy ownership changed"
         }));
@@ -2525,6 +2532,7 @@ mod tests {
             .health_error
             .as_deref()
             .is_some_and(|error| error.contains("health lane unavailable")));
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert!(unavailable.findings.iter().any(|finding| {
             finding == "fail-open state no longer matches the recorded original proxy"
         }));
@@ -2616,6 +2624,15 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_helper_heartbeat_tolerates_an_unwritable_data_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_path = dir.path().join("not-a-directory");
+        std::fs::write(&blocked_path, b"blocked").unwrap();
+
+        record_lifecycle_helper_heartbeat(&blocked_path, Some(424_242), "test_unwritable_path");
+    }
+
+    #[test]
     fn restart_helpers_cover_invalid_host_ready_runtime_and_real_adapter_empty_state() {
         let invalid_runtime = RuntimeInfo {
             pid: 424_242,
@@ -2654,17 +2671,29 @@ mod tests {
             port,
             true,
         );
+        cleanup_or_restart_managed_runtime(dir.path()).unwrap();
+        server.join().unwrap();
+
         let mut proxy = TestManagedProxyRecovery::new(port, true);
-        proxy.ownership = None;
+        proxy.fail_ensure = true;
         assert_eq!(
             restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
                 dir.path(),
-                std::time::Duration::from_secs(1),
+                std::time::Duration::from_millis(10),
                 &mut proxy,
             ),
-            ManagedRuntimeRestartOutcome::Ready
+            ManagedRuntimeRestartOutcome::NotAttempted
         );
-        server.join().unwrap();
+        proxy.fail_ensure = false;
+        proxy.ownership = TestManagedProxyRecovery::new(port + 1, true).ownership;
+        assert_eq!(
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                std::time::Duration::from_millis(10),
+                &mut proxy,
+            ),
+            ManagedRuntimeRestartOutcome::NotAttempted
+        );
 
         assert_eq!(
             reconcile_proxy_after_runtime_ready(
