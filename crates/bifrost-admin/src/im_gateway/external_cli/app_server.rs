@@ -1065,6 +1065,11 @@ fn build_thread_request(
     let mut params = serde_json::Map::new();
     if let Some(thread_id) = existing_thread_id {
         params.insert("threadId".to_string(), serde_json::json!(thread_id));
+        // Some legacy Traex rollouts cannot materialize the response history; the
+        // thread remains fully available to the following turn/start request.
+        if request.adapter == TRAEX_ADAPTER {
+            params.insert("excludeTurns".to_string(), serde_json::json!(true));
+        }
     }
     if let Some(work_dir) = request.work_dir.as_ref() {
         params.insert(
@@ -2176,6 +2181,25 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn only_traex_thread_resume_excludes_history_turns() {
+        let traex = request(TRAEX_ADAPTER);
+        let (start_method, start_params) = build_thread_request(&traex, None);
+        let (resume_method, resume_params) =
+            build_thread_request(&traex, Some("traex-legacy-thread"));
+
+        assert_eq!(start_method, "thread/start");
+        assert!(start_params.get("excludeTurns").is_none(), "{start_params}");
+        assert_eq!(resume_method, "thread/resume");
+        assert_eq!(resume_params["threadId"], "traex-legacy-thread");
+        assert_eq!(resume_params["excludeTurns"], true);
+
+        let codex = request(DEFAULT_ADAPTER);
+        let (method, params) = build_thread_request(&codex, Some("codex-thread"));
+        assert_eq!(method, "thread/resume");
+        assert!(params.get("excludeTurns").is_none(), "{params}");
+    }
+
+    #[test]
     fn codex_app_server_omits_service_tier_without_explicit_configuration() {
         let request = request(DEFAULT_ADAPTER);
         let command = build_command_spec(&request);
@@ -2232,12 +2256,14 @@ for line in sys.stdin:
         assert_eq!(method, "thread/fork");
         assert_eq!(params["threadId"], "thread-source");
         assert_eq!(params["lastTurnId"], "turn-source");
+        assert!(params.get("excludeTurns").is_none());
 
         let mut traex = codex;
         traex.adapter = TRAEX_ADAPTER.to_string();
         let (method, params) = build_thread_request(&traex, Some("thread-source"));
         assert_eq!(method, "thread/fork");
         assert!(params.get("lastTurnId").is_none());
+        assert!(params.get("excludeTurns").is_none());
     }
 
     #[test]
@@ -3498,6 +3524,57 @@ for line in sys.stdin:
             .events
             .iter()
             .any(|event| event.content == "derived result"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mock_traex_resume_excludes_history_then_starts_turn() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_app_server(
+            &temp_dir,
+            "mock-traex-legacy-resume",
+            r#"#!/usr/bin/env python3
+import json, sys
+def send(value): print(json.dumps(value, separators=(",", ":")), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line); method, request_id = frame.get("method"), frame.get("id")
+    if method == "initialize":
+        assert frame["params"]["capabilities"]["experimentalApi"] is True
+        send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/resume":
+        assert frame["params"]["threadId"] == "traex-legacy-thread"
+        assert frame["params"]["excludeTurns"] is True
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"traex-legacy-thread"}}})
+    elif method == "turn/start":
+        assert frame["params"]["threadId"] == "traex-legacy-thread"
+        send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"traex-next-turn"}}})
+        send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"traex-legacy-thread","turnId":"traex-next-turn","item":{"id":"message","type":"agentMessage","text":"legacy resume continued"}}})
+        send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"traex-legacy-thread","turn":{"id":"traex-next-turn","status":"completed"}}})
+    elif method == "account/rateLimits/read":
+        send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"unsupported"}})
+"#,
+        );
+        let mut request = request(TRAEX_ADAPTER);
+        request.params = serde_json::json!({ "threadId": "traex-legacy-thread" });
+        request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+        request.adapter_config.executable = Some(executable.display().to_string());
+
+        let output = run_command(
+            "mock-traex-legacy-resume-run",
+            None,
+            &request,
+            "continue".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
+        assert!(output
+            .events
+            .iter()
+            .any(|event| event.content == "legacy resume continued"));
     }
 
     #[cfg(unix)]
