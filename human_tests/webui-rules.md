@@ -1006,6 +1006,31 @@
 **执行结果（2026-08-16，本地纯前端 Playwright）**：
 - ✅ PASS：执行 `pnpm --dir web exec playwright test tests/ui/rules-dynamic-island-global.spec.ts --config=playwright.frontend.config.ts`，2/2 通过。空摘要场景在主题切换前后均无胶囊，`Add Filter` / `Fuzzy Search` 可见；活跃规则场景仍通过拖拽、展开、Merged Rules 和深链跳转断言。
 
+---
+
+### TC-WRU-51-回归：清空末行后光标保持在末行
+
+**前置条件**：
+1. 打开 Rules 页面并选中一条首行非空的规则。
+2. 规则的已保存内容不以空行结尾。
+
+**操作步骤**：
+1. 在编辑器末尾新建一行，输入 `probe`。
+2. 确认 Save 按钮已启用。
+3. 在 `probe` 末尾按 `Cmd+Backspace`（macOS）或对应的行首删除快捷键。
+4. 切换亮色/暗色主题后重复上述步骤。
+
+**预期结果**：
+- `probe` 被清空，末尾空行仍保留在 Monaco model 中。
+- 光标停留在末尾空行的第 1 列，不跳到首行第 1 列。
+- Save 按钮恢复禁用，因为忽略末尾空行后的内容与已保存版本等价。
+- 在亮色和暗色主题下行为一致。
+
+**回归目的**：覆盖编辑内容恢复到已保存语义后，Zustand 清理草稿导致 React effect 再次调用 Monaco `setValue`，进而将 selection 重置到 `(1,1)` 的回归。
+
+**执行结果（2026-08-20，本地真实 Chromium + 隔离后端）**：
+- ✅ PASS：执行 `pnpm --dir web exec playwright test tests/ui/admin-rules-values.spec.ts --grep '清空末行后保持光标位置' --workers=1`，1/1 通过。用例创建首行非空、末尾无换行的隔离规则，在亮色和暗色主题下分别输入第二行 `probe` 并执行 `Cmd+Backspace`；两次均断言 Save 恢复禁用、Monaco 仍保留第二空行，且输入上下文的 `top` 大于 0，证明光标未跳回首行。
+
 ## 清理
 
 测试完成后清理临时数据：
