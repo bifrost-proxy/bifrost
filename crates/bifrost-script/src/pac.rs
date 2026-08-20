@@ -69,18 +69,26 @@ impl PacEngine {
 
         let runtime = Runtime::new().map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
         runtime.set_memory_limit(self.config.max_memory);
+        let context =
+            Context::full(&runtime).map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+        context.with(|js_ctx| {
+            install_pac_helpers(&js_ctx)?;
+            remove_dangerous_globals(&js_ctx);
+            Ok::<(), ScriptError>(())
+        })?;
+
+        // Only charge the untrusted PAC program against its execution budget.
+        // QuickJS context creation and installation of Bifrost's trusted PAC
+        // helpers can be delayed by scheduler pressure or coverage
+        // instrumentation; counting that setup time caused harmless PAC files
+        // to fail closed before their script started running.
         let deadline = Arc::new(Instant::now() + Duration::from_millis(self.config.timeout_ms));
         let interrupt_deadline = deadline.clone();
         runtime.set_interrupt_handler(Some(Box::new(move || {
             Instant::now() >= *interrupt_deadline
         })));
 
-        let context =
-            Context::full(&runtime).map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
-
         let raw = context.with(|js_ctx| {
-            install_pac_helpers(&js_ctx)?;
-            remove_dangerous_globals(&js_ctx);
             js_ctx.eval::<(), _>(script).map_err(|e| {
                 if Instant::now() >= *deadline {
                     ScriptError::Timeout(self.config.timeout_ms)
