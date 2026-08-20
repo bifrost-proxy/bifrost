@@ -24,6 +24,13 @@ Bifrost 对已有 Traex thread 的 `thread/resume` 请求发送实验参数
 改写 Traex session 数据，也不影响 Traex 在后续 `turn/start` 中加载原上下文。Bifrost
 initialize 已声明 `experimentalApi: true`，因此不需要增加新的握手能力。
 
+Traex 恢复或合并生成的 rollout 还可能保留来源会话的 `session_meta`。包含完整 instructions
+的 metadata 单行可能超过 1 MiB；rollout 的首个有效 `session_meta` 表示当前文件所属的主
+session，后续记录只是嵌套历史。Bifrost 发现本地 session 时必须在总扫描预算内解析该
+大行并保留首个有效 id，不能跳过主 metadata 或被后续来源会话 id 覆盖；否则
+`traex resume <id>` 可以按 Traex thread 索引恢复，但 Bifrost `/resume <id>` 会在启动 Runner
+前误报未找到。
+
 兼容处理严格限定为 Traex resume：Traex `thread/start`、Codex start/resume 以及
 `thread/fork` 均保持原参数和响应语义。
 
@@ -47,6 +54,7 @@ initialize 已声明 `experimentalApi: true`，因此不需要增加新的握手
 - 不直接启动 CLI；选择后仍由下一条普通消息进入既有 runtime。
 - 不清除当前 Bifrost 可见聊天历史、模型/effort/fast override 或工作目录。
 - 不修改、清理或重建 Traex thread-store、rollout 与 session 文件。
+- 不把恢复 rollout 中后续嵌套 `session_meta` 误识别为该文件的主 session。
 - Codex resume 仍返回完整 turns；Traex start、fork 与 checkpoint fork 不添加
   `excludeTurns`。
 
@@ -79,7 +87,7 @@ initialize 已声明 `experimentalApi: true`，因此不需要增加新的握手
 | Provider | Session 文件 | 标题/时间辅助索引 | 环境变量 |
 | --- | --- | --- | --- |
 | Codex | `<CODEX_HOME>/sessions/**/*.jsonl` | `<CODEX_HOME>/session_index.jsonl` | `CODEX_HOME` |
-| Traex | `<TRAE_HOME>/cli/sessions/**/*.jsonl` | `<TRAE_HOME>/cli/history.jsonl` | `TRAE_HOME`, `TRAEX_HOME` |
+| Traex | `<TRAE_HOME>/cli/sessions/**/*.jsonl`（首个有效 `session_meta` 为主 session） | `<TRAE_HOME>/cli/history.jsonl` | `TRAE_HOME`, `TRAEX_HOME` |
 | Claude Code | `<CLAUDE_CONFIG_DIR>/projects/**/*.jsonl` | `<CLAUDE_CONFIG_DIR>/history.jsonl` + session `ai-title` | `CLAUDE_CONFIG_DIR`, `CLAUDE_HOME` |
 
 未设置 provider home 时，从当前 OS 用户 home 下的 `.codex`、`.trae`、`.claude`
@@ -95,6 +103,9 @@ adapter id 始终独立。
 - datetime 统一输出 UTC RFC3339 秒精度；优先 session 事件/索引时间，最后回退文件
   mtime。
 - 同 id 只保留更新时间最新且信息最完整的一条。
+- session rollout 的单行解析上限为 2 MiB、总扫描上限仍为 4 MiB；history/index 继续使用
+  1 MiB 单行限制。单个 Traex rollout 出现多条 `session_meta` 时只采用首个有效 id；后续
+  来源会话 metadata 仍可参与时间扫描，但不能改变该文件归属。
 
 ## 状态与运行链路
 
@@ -114,8 +125,8 @@ flowchart LR
 
 ## 测试计划
 
-- 单元测试：parser、三 provider fixture、20 条截断、排序、标题清洗、完整/前缀/歧义 id、
-  session state 写入与 command spec resume 参数。
+- 单元测试：parser、三 provider fixture、Traex 多 `session_meta` 主 id、20 条截断、排序、
+  标题清洗、完整/前缀/歧义 id、session state 写入与 command spec resume 参数。
 - E2E：`e2e-tests/tests/test_im_gateway_local_session_resume.sh` 用隔离目录、mock runner 和
   Chat Gateway 验证 list → pick → next turn resume；app-server mock 验证 Traex resume 的
   `excludeTurns` 参数及后续 `turn/start`。

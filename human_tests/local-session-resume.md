@@ -230,6 +230,38 @@
 - 正式 Traex rollout SHA-256、目标 thread 的 turns/items 数量与 projection state 前后
   相同。运行中的其他 Traex session 可以正常更新共享 SQLite 文件。
 
+### TC-LSR-10：Traex 恢复 Rollout 的主 Session 发现回归
+
+操作步骤：
+
+1. 执行本地 session 单元测试：
+
+   ```bash
+   cargo test -p bifrost-admin local_sessions --lib -- --nocapture
+   ```
+
+2. 执行包含多 `session_meta` Traex fixture 的 Chat Gateway E2E：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_local_session_resume.sh
+   ```
+
+3. 此步骤会短暂中断正式本地 Bifrost 服务。先备份 `~/.bifrost/config.toml` 和已安装
+   二进制，再安装当前构建、重启服务，并确认 provider 恢复连接。
+4. 从飞书向当前 Traex Runner 发送
+   `/resume 01a01f8a-db54-73c3-ae1a-54d8f4447fc0`。
+
+预期结果：
+
+- 单元 fixture 的 rollout 首条 `session_meta` 超过 1 MiB 且属于当前主 session，后续
+  `session_meta` 属于被恢复的来源 session；发现结果仍保留首个主 id 和其 history 标题。
+- E2E 经真实 Chat Gateway 完成 `/resume` 列表、唯一前缀选择和下一轮 app-server resume，
+  输出 `[im-local-session-resume] PASS`。
+- 飞书不再回复“本地没有找到 session”，而是确认已选择完整目标 id，并提示下一条普通
+  消息将恢复此会话。
+- 不修改正式 Traex rollout；Codex 与 Claude Code 的本地 session 发现仍通过同一回归套件。
+
 ## 清理步骤
 
 - E2E trap 自动停止隔离 Bifrost 进程并删除 `.bifrost-e2e-local-resume.*`。
