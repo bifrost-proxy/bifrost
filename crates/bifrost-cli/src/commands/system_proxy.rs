@@ -883,14 +883,13 @@ fn runtime_data_plane_is_ready(runtime: &RuntimeInfo) -> bool {
         let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
         if stream
             .write_all(b"GET http://bifrost-runtime-canary.invalid/__bifrost_runtime_canary HTTP/1.1\r\nHost: bifrost-runtime-canary.invalid\r\nConnection: close\r\n\r\n")
-            .is_err()
+            .is_ok()
         {
-            continue;
-        }
-        let mut response = [0_u8; 128];
-        if let Ok(read) = stream.read(&mut response) {
-            if response[..read].starts_with(b"HTTP/1.1 204") {
-                return true;
+            let mut response = [0_u8; 128];
+            if let Ok(read) = stream.read(&mut response) {
+                if response[..read].starts_with(b"HTTP/1.1 204") {
+                    return true;
+                }
             }
         }
     }
@@ -903,6 +902,57 @@ enum ManagedRuntimeRestartOutcome {
     Ready,
     FailOpenSuspended,
     FailClosedPreserved,
+}
+
+trait ManagedSystemProxyRecovery {
+    fn ensure_managed_ownership(
+        &mut self,
+    ) -> bifrost_core::Result<Option<bifrost_core::ManagedSystemProxyOwnership>>;
+
+    fn suspend_managed_if_generation(
+        &mut self,
+        expected_generation: &str,
+    ) -> bifrost_core::Result<bifrost_core::GuardedSystemProxyTransition>;
+
+    fn resume_managed_if_generation(
+        &mut self,
+        expected_generation: &str,
+    ) -> bifrost_core::Result<bifrost_core::GuardedSystemProxyTransition>;
+}
+
+impl ManagedSystemProxyRecovery for bifrost_core::SystemProxyManager {
+    fn ensure_managed_ownership(
+        &mut self,
+    ) -> bifrost_core::Result<Option<bifrost_core::ManagedSystemProxyOwnership>> {
+        bifrost_core::SystemProxyManager::ensure_managed_ownership(self)
+    }
+
+    fn suspend_managed_if_generation(
+        &mut self,
+        expected_generation: &str,
+    ) -> bifrost_core::Result<bifrost_core::GuardedSystemProxyTransition> {
+        bifrost_core::SystemProxyManager::suspend_managed_if_generation(self, expected_generation)
+    }
+
+    fn resume_managed_if_generation(
+        &mut self,
+        expected_generation: &str,
+    ) -> bifrost_core::Result<bifrost_core::GuardedSystemProxyTransition> {
+        bifrost_core::SystemProxyManager::resume_managed_if_generation(self, expected_generation)
+    }
+}
+
+fn reconcile_proxy_after_runtime_ready(
+    manager: &mut impl ManagedSystemProxyRecovery,
+    generation: &str,
+    recovery_mode: SystemProxyRecoveryMode,
+    grace_action_applied: bool,
+) -> bifrost_core::Result<bifrost_core::GuardedSystemProxyTransition> {
+    if grace_action_applied && recovery_mode == SystemProxyRecoveryMode::FailOpen {
+        manager.resume_managed_if_generation(generation)
+    } else {
+        Ok(bifrost_core::GuardedSystemProxyTransition::AlreadyInState)
+    }
 }
 
 fn system_proxy_recovery_policy(
@@ -951,6 +1001,19 @@ fn restart_managed_runtime_before_cleanup_with_timeout(
     data_dir: &std::path::Path,
     ready_timeout: std::time::Duration,
 ) -> ManagedRuntimeRestartOutcome {
+    let mut manager = bifrost_core::SystemProxyManager::new(data_dir.to_path_buf());
+    restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+        data_dir,
+        ready_timeout,
+        &mut manager,
+    )
+}
+
+fn restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+    data_dir: &std::path::Path,
+    ready_timeout: std::time::Duration,
+    manager: &mut impl ManagedSystemProxyRecovery,
+) -> ManagedRuntimeRestartOutcome {
     let Some(runtime) = read_runtime_info_from(data_dir) else {
         tracing::info!(
             target: "bifrost_cli::shutdown",
@@ -987,24 +1050,27 @@ fn restart_managed_runtime_before_cleanup_with_timeout(
         return ManagedRuntimeRestartOutcome::NotAttempted;
     }
 
-    let Some(binary_path) = runtime.binary_path.clone() else {
-        tracing::info!(
-            target: "bifrost_cli::shutdown",
-            port = runtime.port,
-            "runtime_restart_skipped: runtime binary path missing"
-        );
-        return ManagedRuntimeRestartOutcome::NotAttempted;
-    };
+    let binary_path = runtime
+        .binary_path
+        .clone()
+        .expect("managed restart preflight requires a runtime binary path");
     if !binary_path.exists() {
+        let error = format!(
+            "runtime binary path does not exist: {}",
+            binary_path.display()
+        );
+        let _ = bifrost_core::update_system_proxy_owner_state(data_dir, |state| {
+            state.phase = Some("restart_preflight_failed".into());
+            state.last_action = Some("validate_runtime_binary".into());
+            state.last_error = Some(error.clone());
+        });
         tracing::warn!(
             target: "bifrost_cli::shutdown",
-            binary_path = %binary_path.display(),
             "runtime_restart_failed: runtime binary path does not exist"
         );
         return ManagedRuntimeRestartOutcome::NotAttempted;
     }
 
-    let mut manager = bifrost_core::SystemProxyManager::new(data_dir.to_path_buf());
     let ownership = match manager.ensure_managed_ownership() {
         Ok(Some(ownership)) => ownership,
         Ok(None) => return ManagedRuntimeRestartOutcome::NotAttempted,
@@ -1103,10 +1169,11 @@ fn restart_managed_runtime_before_cleanup_with_timeout(
             let _ = bifrost_core::consume_system_proxy_shutdown_mode(data_dir);
             return apply_recovery_policy_after_failed_restart(
                 data_dir,
-                &mut manager,
+                manager,
                 &generation,
                 recovery_mode,
                 recovery_started_at,
+                false,
                 Some(error.to_string()),
             );
         }
@@ -1117,12 +1184,12 @@ fn restart_managed_runtime_before_cleanup_with_timeout(
     let mut grace_action_applied = false;
     while std::time::Instant::now() < deadline {
         if runtime_data_plane_is_ready(&runtime) {
-            let transition =
-                if grace_action_applied && recovery_mode == SystemProxyRecoveryMode::FailOpen {
-                    manager.resume_managed_if_generation(&generation)
-                } else {
-                    Ok(bifrost_core::GuardedSystemProxyTransition::AlreadyInState)
-                };
+            let transition = reconcile_proxy_after_runtime_ready(
+                manager,
+                &generation,
+                recovery_mode,
+                grace_action_applied,
+            );
             tracing::info!(
                 target: "bifrost_cli::shutdown",
                 port = runtime.port,
@@ -1212,26 +1279,32 @@ fn restart_managed_runtime_before_cleanup_with_timeout(
     let _ = bifrost_core::consume_system_proxy_shutdown_mode(data_dir);
     apply_recovery_policy_after_failed_restart(
         data_dir,
-        &mut manager,
+        manager,
         &generation,
         recovery_mode,
         recovery_started_at,
+        grace_action_applied,
         None,
     )
 }
 
 fn apply_recovery_policy_after_failed_restart(
     data_dir: &std::path::Path,
-    manager: &mut bifrost_core::SystemProxyManager,
+    manager: &mut impl ManagedSystemProxyRecovery,
     generation: &str,
     recovery_mode: SystemProxyRecoveryMode,
     recovery_started_at: std::time::Instant,
+    action_already_applied: bool,
     error: Option<String>,
 ) -> ManagedRuntimeRestartOutcome {
     let (outcome, action) = match recovery_mode {
         SystemProxyRecoveryMode::FailOpen => (
             ManagedRuntimeRestartOutcome::FailOpenSuspended,
-            manager.suspend_managed_if_generation(generation),
+            if action_already_applied {
+                Ok(bifrost_core::GuardedSystemProxyTransition::AlreadyInState)
+            } else {
+                manager.suspend_managed_if_generation(generation)
+            },
         ),
         SystemProxyRecoveryMode::FailClosed => (
             ManagedRuntimeRestartOutcome::FailClosedPreserved,
@@ -1957,6 +2030,62 @@ mod tests {
         .unwrap();
     }
 
+    struct TestManagedProxyRecovery {
+        ownership: Option<bifrost_core::ManagedSystemProxyOwnership>,
+        suspend_calls: Vec<String>,
+        resume_calls: Vec<String>,
+    }
+
+    impl TestManagedProxyRecovery {
+        fn new(target_port: u16, applied: bool) -> Self {
+            Self {
+                ownership: Some(bifrost_core::ManagedSystemProxyOwnership {
+                    schema_version: 2,
+                    generation: "generation-fixture".into(),
+                    original: bifrost_core::ProxyBackup {
+                        enable: false,
+                        host: String::new(),
+                        port: 0,
+                        bypass: String::new(),
+                    },
+                    target: bifrost_core::ProxyBackup {
+                        enable: true,
+                        host: "127.0.0.1".into(),
+                        port: target_port,
+                        bypass: "localhost,127.0.0.1".into(),
+                    },
+                    applied,
+                }),
+                suspend_calls: Vec::new(),
+                resume_calls: Vec::new(),
+            }
+        }
+    }
+
+    impl ManagedSystemProxyRecovery for TestManagedProxyRecovery {
+        fn ensure_managed_ownership(
+            &mut self,
+        ) -> bifrost_core::Result<Option<bifrost_core::ManagedSystemProxyOwnership>> {
+            Ok(self.ownership.clone())
+        }
+
+        fn suspend_managed_if_generation(
+            &mut self,
+            expected_generation: &str,
+        ) -> bifrost_core::Result<bifrost_core::GuardedSystemProxyTransition> {
+            self.suspend_calls.push(expected_generation.into());
+            Ok(bifrost_core::GuardedSystemProxyTransition::Applied)
+        }
+
+        fn resume_managed_if_generation(
+            &mut self,
+            expected_generation: &str,
+        ) -> bifrost_core::Result<bifrost_core::GuardedSystemProxyTransition> {
+            self.resume_calls.push(expected_generation.into());
+            Ok(bifrost_core::GuardedSystemProxyTransition::Applied)
+        }
+    }
+
     #[test]
     fn combined_proxy_cleanup_reports_success_and_each_failure_shape() {
         assert_eq!(
@@ -2412,6 +2541,7 @@ mod tests {
             "generation-closed",
             SystemProxyRecoveryMode::FailClosed,
             std::time::Instant::now(),
+            false,
             Some("spawn failed".into()),
         );
 
@@ -2485,7 +2615,215 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[test]
+    fn restart_helpers_cover_invalid_host_ready_runtime_and_real_adapter_empty_state() {
+        let invalid_runtime = RuntimeInfo {
+            pid: 424_242,
+            port: unused_loopback_port(),
+            socks5_port: None,
+            host: Some("invalid host name".into()),
+            started_at_ms: Some(1),
+            start_mode: RuntimeStartMode::Daemon,
+            restartable_runtime: true,
+            binary_path: Some(std::env::current_exe().unwrap()),
+            system_proxy_enabled: Some(true),
+            system_proxy_bypass: Some("localhost".into()),
+            health_port: None,
+        };
+        assert!(!runtime_data_plane_is_ready(&invalid_runtime));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        write_restart_fixture(
+            dir.path(),
+            port,
+            std::env::current_exe().unwrap(),
+            true,
+            port,
+            true,
+        );
+        let mut proxy = TestManagedProxyRecovery::new(port, true);
+        proxy.ownership = None;
+        assert_eq!(
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                std::time::Duration::from_secs(1),
+                &mut proxy,
+            ),
+            ManagedRuntimeRestartOutcome::Ready
+        );
+        server.join().unwrap();
+
+        assert_eq!(
+            reconcile_proxy_after_runtime_ready(
+                &mut proxy,
+                "generation-fixture",
+                SystemProxyRecoveryMode::FailOpen,
+                false,
+            )
+            .unwrap(),
+            bifrost_core::GuardedSystemProxyTransition::AlreadyInState
+        );
+        assert_eq!(
+            reconcile_proxy_after_runtime_ready(
+                &mut proxy,
+                "generation-fixture",
+                SystemProxyRecoveryMode::FailOpen,
+                true,
+            )
+            .unwrap(),
+            bifrost_core::GuardedSystemProxyTransition::Applied
+        );
+        assert_eq!(proxy.resume_calls, ["generation-fixture"]);
+        assert_eq!(
+            reconcile_proxy_after_runtime_ready(
+                &mut proxy,
+                "generation-fixture",
+                SystemProxyRecoveryMode::FailClosed,
+                true,
+            )
+            .unwrap(),
+            bifrost_core::GuardedSystemProxyTransition::AlreadyInState
+        );
+
+        let empty_dir = tempfile::tempdir().unwrap();
+        let mut manager = bifrost_core::SystemProxyManager::new(empty_dir.path().to_path_buf());
+        assert_eq!(
+            ManagedSystemProxyRecovery::suspend_managed_if_generation(&mut manager, "missing")
+                .unwrap(),
+            bifrost_core::GuardedSystemProxyTransition::NotManaged
+        );
+        assert_eq!(
+            ManagedSystemProxyRecovery::resume_managed_if_generation(&mut manager, "missing")
+                .unwrap(),
+            bifrost_core::GuardedSystemProxyTransition::NotManaged
+        );
+    }
+
+    #[test]
+    fn managed_restart_rejects_missing_binary_and_unwritable_handoff_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = unused_loopback_port();
+        let mut runtime = RuntimeInfo {
+            pid: 424_242,
+            port,
+            socks5_port: None,
+            host: Some("127.0.0.1".into()),
+            started_at_ms: Some(1),
+            start_mode: RuntimeStartMode::Daemon,
+            restartable_runtime: true,
+            binary_path: None,
+            system_proxy_enabled: Some(true),
+            system_proxy_bypass: Some("localhost".into()),
+            health_port: None,
+        };
+        std::fs::write(
+            dir.path().join("runtime.json"),
+            serde_json::to_vec_pretty(&runtime).unwrap(),
+        )
+        .unwrap();
+        let mut proxy = TestManagedProxyRecovery::new(port, true);
+        assert_eq!(
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                std::time::Duration::from_millis(10),
+                &mut proxy,
+            ),
+            ManagedRuntimeRestartOutcome::NotAttempted
+        );
+
+        runtime.binary_path = Some(dir.path().join("missing-bifrost"));
+        std::fs::write(
+            dir.path().join("runtime.json"),
+            serde_json::to_vec_pretty(&runtime).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                std::time::Duration::from_millis(10),
+                &mut proxy,
+            ),
+            ManagedRuntimeRestartOutcome::NotAttempted
+        );
+        let owner_state = bifrost_core::read_system_proxy_owner_state(dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            owner_state.phase.as_deref(),
+            Some("restart_preflight_failed")
+        );
+        assert_eq!(
+            owner_state.last_action.as_deref(),
+            Some("validate_runtime_binary")
+        );
+        assert!(owner_state
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("missing-bifrost"));
+
+        write_restart_fixture(
+            dir.path(),
+            port,
+            std::env::current_exe().unwrap(),
+            true,
+            port,
+            true,
+        );
+        std::fs::create_dir(dir.path().join(".system_proxy_shutdown_mode")).unwrap();
+        assert_eq!(
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                std::time::Duration::from_millis(10),
+                &mut proxy,
+            ),
+            ManagedRuntimeRestartOutcome::NotAttempted
+        );
+    }
+
+    #[test]
+    fn doctor_reports_a_dead_runtime_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = RuntimeInfo {
+            pid: 424_242,
+            port: unused_loopback_port(),
+            socks5_port: None,
+            host: Some("127.0.0.1".into()),
+            started_at_ms: Some(1),
+            start_mode: RuntimeStartMode::Daemon,
+            restartable_runtime: true,
+            binary_path: Some(std::env::current_exe().unwrap()),
+            system_proxy_enabled: Some(true),
+            system_proxy_bypass: Some("localhost".into()),
+            health_port: None,
+        };
+        std::fs::write(
+            dir.path().join("runtime.json"),
+            serde_json::to_vec_pretty(&runtime).unwrap(),
+        )
+        .unwrap();
+        let manager = bifrost_core::SystemProxyManager::new(dir.path().to_path_buf());
+        let report = build_system_proxy_doctor_report(dir.path(), &manager);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.contains("runtime process identity is Exited")));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn managed_restart_launches_replacement_and_waits_for_data_canary() {
         use std::os::unix::fs::PermissionsExt;
@@ -2499,11 +2837,12 @@ mod tests {
         std::fs::write(
             &fake_binary,
             r#"#!/usr/bin/env python3
-import os, socket, sys
+import os, socket, sys, time
 port = int(sys.argv[sys.argv.index('--port') + 1])
 data_dir = os.environ['BIFROST_DATA_DIR']
 with open(os.path.join(data_dir, 'replacement.pid'), 'w') as output:
     output.write(str(os.getpid()))
+time.sleep(3.2)
 server = socket.socket()
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(('127.0.0.1', port))
@@ -2556,10 +2895,29 @@ while True:
         )
         .unwrap();
 
+        let config_manager = ConfigManager::new(dir.path().to_path_buf()).unwrap();
+        futures::executor::block_on(config_manager.update_system_proxy_config(
+            SystemProxyConfigUpdate {
+                enabled: None,
+                bypass: None,
+                auto_enable: None,
+                recovery_mode: Some(SystemProxyRecoveryMode::FailOpen),
+                recovery_grace_secs: Some(MIN_SYSTEM_PROXY_RECOVERY_GRACE_SECS),
+            },
+        ))
+        .unwrap();
+
+        let mut proxy = TestManagedProxyRecovery::new(port, true);
         assert_eq!(
-            restart_managed_runtime_before_cleanup(dir.path()),
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                std::time::Duration::from_secs(5),
+                &mut proxy,
+            ),
             ManagedRuntimeRestartOutcome::Ready
         );
+        assert_eq!(proxy.suspend_calls, ["generation-fixture"]);
+        assert_eq!(proxy.resume_calls, ["generation-fixture"]);
         let child_pid = std::fs::read_to_string(dir.path().join("replacement.pid"))
             .unwrap()
             .parse::<u32>()
@@ -2637,7 +2995,7 @@ while True:
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn managed_restart_spawn_failure_applies_fail_open_diagnostics() {
         let dir = tempfile::tempdir().unwrap();
@@ -2646,10 +3004,16 @@ while True:
         std::fs::create_dir(&not_executable).unwrap();
         write_restart_fixture(dir.path(), port, not_executable, true, port, false);
 
+        let mut proxy = TestManagedProxyRecovery::new(port, true);
         assert_eq!(
-            restart_managed_runtime_before_cleanup(dir.path()),
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                std::time::Duration::from_secs(30),
+                &mut proxy,
+            ),
             ManagedRuntimeRestartOutcome::FailOpenSuspended
         );
+        assert_eq!(proxy.suspend_calls, ["generation-fixture"]);
         let owner = bifrost_core::read_system_proxy_owner_state(dir.path())
             .unwrap()
             .unwrap();
@@ -2657,7 +3021,7 @@ while True:
         assert!(owner.last_error.is_some());
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn managed_restart_grace_applies_both_recovery_policies() {
         for (mode, applied, expected) in [
@@ -2694,12 +3058,18 @@ while True:
             ))
             .unwrap();
 
+            let mut proxy = TestManagedProxyRecovery::new(port, applied);
             assert_eq!(
-                restart_managed_runtime_before_cleanup_with_timeout(
+                restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
                     dir.path(),
                     std::time::Duration::from_millis(3_250),
+                    &mut proxy,
                 ),
                 expected
+            );
+            assert_eq!(
+                proxy.suspend_calls.len(),
+                usize::from(mode == SystemProxyRecoveryMode::FailOpen)
             );
             let events = bifrost_core::read_recent_system_proxy_events(dir.path(), 20).unwrap();
             assert!(events.iter().any(|event| {
