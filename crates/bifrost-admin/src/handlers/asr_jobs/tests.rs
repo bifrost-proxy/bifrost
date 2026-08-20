@@ -10405,6 +10405,22 @@ esac
         assert!(normalized.finished_at_ms.is_some());
         assert!(normalized.current_source_path.is_none());
 
+        // Reproduce the status-poll TOCTOU: the poll captured Running, while
+        // the background job persisted Completed and dropped its guard before
+        // normalization checked liveness. The stale snapshot must not replace
+        // the terminal state with Interrupted.
+        let stale_running = interrupted.clone();
+        save_source_compression_state(&completed).unwrap();
+        let normalized =
+            normalize_loaded_source_compression_state(&empty_task.id, stale_running);
+        assert_eq!(normalized.status, SourceAudioCompressionStatus::Completed);
+        assert_eq!(
+            load_source_compression_state(&empty_task.id)
+                .unwrap()
+                .status,
+            SourceAudioCompressionStatus::Completed
+        );
+
         assert!(cancel_source_compression("missing-compression-state").is_none());
         update_source_compression_state("missing-compression-state", |_| {
             panic!("missing state must not invoke updater")
