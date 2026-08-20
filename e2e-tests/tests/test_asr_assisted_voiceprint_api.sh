@@ -26,6 +26,7 @@ expect_status() {
 ADMIN_PORT="${BIFROST_ASR_ASSISTED_VOICEPRINT_E2E_PORT:-${ADMIN_PORT:-18996}}"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-assisted-voiceprint.XXXXXX")"
 ADMIN_PID=""
+DAEMON_PID=""
 BASE_URL="http://127.0.0.1:${ADMIN_PORT}/_bifrost/api"
 
 if [[ "${BIFROST_ASR_ASSISTED_VOICEPRINT_FORCE_FAKE_FFMPEG:-false}" == "true" ]] || \
@@ -35,12 +36,51 @@ if [[ "${BIFROST_ASR_ASSISTED_VOICEPRINT_FORCE_FAKE_FFMPEG:-false}" == "true" ]]
   export PATH="$TEST_ROOT/bin:$PATH"
 fi
 
+wait_for_pid_exit() {
+  local pid="${1:-}"
+  local attempts="${2:-50}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  for _ in $(seq 1 "$attempts"); do
+    kill -0 "$pid" >/dev/null 2>&1 || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 cleanup() {
+  set +e
+  local helper_pid=""
+  if [[ -f "${DATA_DIR:-}/system_proxy_owner_state.json" ]]; then
+    helper_pid="$(python3 - "${DATA_DIR}/system_proxy_owner_state.json" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        print(json.load(source).get("helper_pid") or "")
+except Exception:
+    print("")
+PY
+)"
+  fi
+  if [[ -n "${BIFROST_BIN:-}" && -x "${BIFROST_BIN:-}" && -n "${DATA_DIR:-}" ]]; then
+    BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
+  fi
+  wait_for_pid_exit "${DAEMON_PID:-}" 50 || kill "${DAEMON_PID}" >/dev/null 2>&1 || true
   if [[ -n "$ADMIN_PID" ]]; then
     kill "$ADMIN_PID" >/dev/null 2>&1 || true
     wait "$ADMIN_PID" >/dev/null 2>&1 || true
   fi
-  rm -rf "$TEST_ROOT"
+  if ! wait_for_pid_exit "$helper_pid" 100; then
+    kill "$helper_pid" >/dev/null 2>&1 || true
+    wait_for_pid_exit "$helper_pid" 20 || kill -KILL "$helper_pid" >/dev/null 2>&1 || true
+  fi
+  for _ in $(seq 1 20); do
+    rm -rf "$TEST_ROOT" 2>/dev/null || true
+    [[ ! -e "$TEST_ROOT" ]] && return 0
+    sleep 0.1
+  done
+  echo "[asr-assisted-voiceprint-api-e2e] warning: temporary test root remained after cleanup retries: $TEST_ROOT" >&2
+  return 0
 }
 trap cleanup EXIT
 
@@ -95,6 +135,9 @@ curl -fsS "$BASE_URL/system/overview" >/dev/null || {
   tail -100 "$TEST_ROOT/bifrost.log" >&2 || true
   fail "Bifrost admin did not start"
 }
+if [[ -f "$DATA_DIR/bifrost.pid" ]]; then
+  DAEMON_PID="$(tr -cd '0-9' < "$DATA_DIR/bifrost.pid")"
+fi
 
 curl -fsS -X POST "$BASE_URL/asr/tasks" -H 'Content-Type: application/json' \
   --data "{\"name\":\"Assisted E2E\",\"audio_dir\":\"$AUDIO_DIR\",\"enabled\":false}" \
