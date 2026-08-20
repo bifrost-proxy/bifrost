@@ -11,6 +11,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEST_DIR="$(mktemp -d "$REPO_DIR/.bifrost-e2e-local-resume.XXXXXX")"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 ARGV_LOG="$TEST_DIR/runner-argv.jsonl"
+RPC_LOG="$TEST_DIR/runner-rpc.jsonl"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
@@ -113,7 +114,29 @@ if "--version" in args or args[:2] == ["debug", "models"]:
     print(f"{adapter} mock 1.0")
     raise SystemExit(0)
 
-if adapter == "claude_code":
+if adapter == "traex" and args[:1] == ["app-server"]:
+    def send(value):
+        print(json.dumps(value, separators=(",", ":")), flush=True)
+
+    for line in sys.stdin:
+        frame = json.loads(line)
+        with open(os.environ["BIFROST_MOCK_RPC_LOG"], "a", encoding="utf-8") as file:
+            file.write(json.dumps(frame) + "\n")
+        method = frame.get("method")
+        request_id = frame.get("id")
+        if method == "initialize":
+            send({"jsonrpc": "2.0", "id": request_id, "result": {}})
+        elif method in ("thread/start", "thread/resume"):
+            selected = frame.get("params", {}).get("threadId", "new-traex-thread")
+            send({"jsonrpc": "2.0", "id": request_id, "result": {"thread": {"id": selected}}})
+        elif method == "turn/start":
+            selected = frame["params"]["threadId"]
+            send({"jsonrpc": "2.0", "id": request_id, "result": {"turn": {"id": "traex-e2e-turn"}}})
+            send({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": selected, "turnId": "traex-e2e-turn", "item": {"id": "message", "type": "agentMessage", "text": "TRAEX_RESUME_OK"}}})
+            send({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": selected, "turn": {"id": "traex-e2e-turn", "status": "completed"}}})
+        elif method == "account/rateLimits/read":
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "unsupported"}})
+elif adapter == "claude_code":
     sys.stdin.readline()
     selected = args[args.index("--resume") + 1] if "--resume" in args else "new-claude"
     print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "CLAUDE_RESUME_OK"}]}}))
@@ -151,14 +174,14 @@ BIFROST_DATA_DIR="$TEST_DIR/data" \
 BIFROST_PID=$!
 wait_http
 
-python3 - "$BIFROST_PORT" "$MOCK_RUNNER" "$ARGV_LOG" <<'PY'
+python3 - "$BIFROST_PORT" "$MOCK_RUNNER" "$ARGV_LOG" "$RPC_LOG" <<'PY'
 import json
 import pathlib
 import sys
 import urllib.error
 import urllib.request
 
-port, mock_runner, argv_log = sys.argv[1:4]
+port, mock_runner, argv_log, rpc_log = sys.argv[1:5]
 api = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/chat"
 
 providers = [
@@ -182,9 +205,10 @@ for runner_id, adapter, *_ in providers:
             "env": {
                 "BIFROST_MOCK_ADAPTER": adapter,
                 "BIFROST_MOCK_ARGV_LOG": argv_log,
+                "BIFROST_MOCK_RPC_LOG": rpc_log,
             },
             "timeoutSecs": 30,
-            "transport": "exec",
+            "transport": "app_server" if adapter == "traex" else "exec",
         },
         "injectBifrostTools": False,
         "skillPaths": [],
@@ -256,6 +280,14 @@ for runner_id, adapter, session_id, title, expected in providers:
     args = invocation["args"]
     if adapter == "claude_code":
         assert "--resume" in args and session_id in args, args
+    elif adapter == "traex":
+        frames = [json.loads(line) for line in pathlib.Path(rpc_log).read_text().splitlines()]
+        resumes = [frame for frame in frames if frame.get("method") == "thread/resume"]
+        assert len(resumes) == 1, frames
+        assert resumes[0]["params"]["threadId"] == session_id, resumes[0]
+        assert resumes[0]["params"]["excludeTurns"] is True, resumes[0]
+        turns = [frame for frame in frames if frame.get("method") == "turn/start"]
+        assert len(turns) == 1 and turns[0]["params"]["threadId"] == session_id, frames
     else:
         assert "resume" in args and session_id in args, args
 
