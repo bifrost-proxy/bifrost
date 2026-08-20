@@ -582,8 +582,10 @@ mod platform {
             return Err("stateful ASR PCM frame must contain whole i16 samples".to_string());
         }
         Ok(pcm
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / i16::MAX as f32)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| i16::from_le_bytes(*chunk) as f32 / i16::MAX as f32)
             .collect())
     }
 }

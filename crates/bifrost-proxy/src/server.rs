@@ -1832,6 +1832,9 @@ enum ProxyAuthResult {
     Unauthorized,
 }
 
+// Authentication failures are returned as complete HTTP responses so this
+// boundary preserves challenge headers and response bodies verbatim.
+#[allow(clippy::result_large_err)]
 async fn authorize_proxy_request(
     req: &Request<Incoming>,
     peer_addr: SocketAddr,

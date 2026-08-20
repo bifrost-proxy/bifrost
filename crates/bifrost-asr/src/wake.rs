@@ -96,8 +96,10 @@ impl StreamingWakeKwsDetector {
             return None;
         }
         let samples = pcm16le
-            .chunks_exact(2)
-            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / i16::MAX as f32)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| i16::from_le_bytes(*bytes) as f32 / i16::MAX as f32)
             .collect::<Vec<_>>();
         self.stream.accept_waveform(sample_rate, &samples);
         while self.kws.is_ready(&self.stream) {

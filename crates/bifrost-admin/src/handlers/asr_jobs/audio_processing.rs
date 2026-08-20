@@ -261,8 +261,8 @@ fn compute_wav_rms_energy(wav_path: &Path) -> Option<f64> {
             while remaining >= 2 {
                 let wanted = (remaining.min(buffer.len() as u64) as usize) & !1;
                 file.read_exact(&mut buffer[..wanted]).ok()?;
-                for sample in buffer[..wanted].chunks_exact(2) {
-                    let value = i16::from_le_bytes([sample[0], sample[1]]) as f64;
+                for sample in buffer[..wanted].as_chunks::<2>().0 {
+                    let value = i16::from_le_bytes(*sample) as f64;
                     sum_sq += value * value;
                 }
                 sample_count += (wanted / 2) as u64;
