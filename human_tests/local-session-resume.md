@@ -35,7 +35,9 @@
 - 脚本输出 `[im-local-session-resume] PASS`，退出码为 0。
 - Codex、Traex、Claude Code 的 `/resume` 都返回对应 fixture 的 id/title/datetime。
 - `/resume <唯一前缀>` 不执行 mock runner；下一条消息才执行。
-- Codex/Traex argv 包含 `resume` 和完整 id；Claude argv 包含 `--resume` 和完整 id。
+- Codex argv 包含 `resume` 和完整 id；Traex app-server 收到包含完整 `threadId` 与
+  `excludeTurns: true` 的 `thread/resume`，随后收到同 thread 的 `turn/start`；Claude argv
+  包含 `--resume` 和完整 id。
 - Traex 使用 Codex session id 时返回 400，证明 provider 目录隔离。
 
 ### TC-LSR-02：Parser、排序、20 条上限和状态持久化
@@ -205,6 +207,29 @@
   「🆕 新建会话」option 后该字段被移除（`__ABSENT__`），下一条普通消息将开全新会话。
 - 越权点击（他人 / 错误 chat / 过期 / `/stop now`）在下拉回调路径下同样返回 HTTP 400。
 
+### TC-LSR-09：Traex Legacy Thread History 恢复兼容
+
+操作步骤：
+
+1. 选择一个可由 `traex resume <session-id>` 正常恢复、但 app-server 默认
+   `thread/resume` 会触发 `thread_turns` 唯一键冲突的旧 session。
+2. 将 Traex provider home 和相关 thread-store 完整复制到临时目录；记录正式 rollout 的
+   SHA-256，以及目标 thread 的 turns/items 数量和 projection state。所有后续命令仅对临时
+   副本设置 `TRAE_HOME`。
+3. 对临时副本发送不含 `excludeTurns` 的 app-server `thread/resume`，确认复现
+   `failed to materialize legacy thread history`。
+4. 使用当前构建的 Bifrost 和 Traex Runner 绑定同一临时 session，发送下一条普通消息。
+5. 对比正式 rollout 的 SHA-256 和目标 thread 数据快照，并清理临时目录和测试进程。
+
+预期结果：
+
+- 默认 app-server resume 在隔离副本稳定复现唯一键错误，证明 fixture 命中原故障。
+- Bifrost 发出的 Traex resume 含 `excludeTurns: true`，响应后继续进入 `turn/start`，任务
+  不再在历史列表阶段失败。
+- 仍使用原 `threadId`，Traex 能读取旧上下文并续写；不创建替代 session。
+- 正式 Traex rollout SHA-256、目标 thread 的 turns/items 数量与 projection state 前后
+  相同。运行中的其他 Traex session 可以正常更新共享 SQLite 文件。
+
 ## 清理步骤
 
 - E2E trap 自动停止隔离 Bifrost 进程并删除 `.bifrost-e2e-local-resume.*`。
@@ -240,3 +265,11 @@
 - 2026-08-17，TC-LSR-04：PASS。将失效的 Web Playwright 路径替换为实际存在的 IM
   External Runner 帮助回归；`im_help_for_external_cli_runner_only_lists_supported_commands`
   断言 `/model`、`/resume`、`/effort` 与旧复数帮助行的边界。
+- 2026-08-20，TC-LSR-01：PASS。Traex 场景切换为 app-server mock；从 Chat Gateway
+  完成 list → pick → next turn，捕获的 `thread/resume` 含原 `threadId` 和
+  `excludeTurns: true`，随后同 thread 的 `turn/start` 完成并返回 `TRAEX_RESUME_OK`。
+- 2026-08-20，TC-LSR-09：PASS。Traex 0.201.4 对目标 session 的隔离副本执行默认
+  `thread/resume`，稳定返回 legacy materializer 的 `(thread_id, turn_id)` 唯一键错误；
+  对同一副本添加 `excludeTurns: true` 后 `resume=ok`、`same_thread=true`、
+  `turn_start=ok`、`turn_completed=true`。正式 rollout SHA-256 未变，目标 thread 的
+  2 turns、29 items 与 projection state 前后相同；临时副本已删除。

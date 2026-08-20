@@ -885,6 +885,57 @@ test("Rules 页面真实变更后可保存且保存后禁用按钮", async ({
   await expect(saveButton).toBeDisabled();
 });
 
+test("Rules 编辑器清空末行后保持光标位置", async ({ page, request }) => {
+  const ruleName = uniqueName("delete-last-line-rule");
+  const originalContent = "first.example statusCode://204";
+
+  const createRuleRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: ruleName,
+      content: originalContent,
+    },
+  });
+  if (!createRuleRes.ok()) {
+    throw new Error(await createRuleRes.text());
+  }
+
+  await openPage(page, "rules");
+  const ruleItem = page
+    .getByTestId("rule-item")
+    .filter({ hasText: ruleName })
+    .first();
+  await ruleItem.click();
+  await expect(page.getByTestId("rule-editor-title")).toHaveText(ruleName);
+
+  const editorContainer = page.getByTestId("rule-editor-container");
+  const saveButton = page.getByTestId("rule-save-button");
+  const verifyDeleteLastLine = async () => {
+    await setMonacoEditor(page, editorContainer, `${originalContent}\nprobe`);
+    await expect(saveButton).toBeEnabled();
+
+    await page.keyboard.press(
+      process.platform === "darwin" ? "Meta+Backspace" : "Control+Backspace",
+    );
+
+    await expect(saveButton).toBeDisabled();
+    await expect(editorContainer.locator(".view-line")).toHaveCount(2);
+    await expect
+      .poll(async () =>
+        editorContainer
+          .locator('[role="textbox"][aria-label="Editor content"]')
+          .evaluate((element) =>
+            Number.parseFloat((element as HTMLElement).style.top || "0"),
+          ),
+      )
+      .toBeGreaterThan(0);
+  };
+
+  await verifyDeleteLastLine();
+  await page.getByRole("img", { name: "moon" }).click();
+  await expect(page.getByRole("img", { name: "sun" })).toBeVisible();
+  await verifyDeleteLastLine();
+});
+
 test("Rules Dynamic Island 展开的 Merged Rules 支持一键复制", async ({
   page,
   context,
