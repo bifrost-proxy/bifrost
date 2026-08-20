@@ -32,6 +32,10 @@ import {
   findRuleReferenceAtColumn,
   parseRuleReferenceLine,
 } from "../../../components/BifrostEditor/snippet/ruleReference";
+import {
+  normalizeRuleEditorContent,
+  shouldReplaceRuleEditorModel,
+} from "./modelSync";
 import styles from "./index.module.css";
 
 function formatRuleTime(value?: string | null): string {
@@ -49,10 +53,6 @@ function formatSyncStatus(sync?: RuleSyncInfo | null): string {
     default:
       return "Local only";
   }
-}
-
-function normalizeRuleEditorContent(content: string | undefined | null): string {
-  return (content ?? "").replace(/\r\n/g, "\n").replace(/\n+$/g, "");
 }
 
 interface RuleReferenceMatch {
@@ -141,6 +141,7 @@ export default function RuleEditor() {
 
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const modelRef = useRef<MonacoEditor.ITextModel | null>(null);
+  const modelRuleNameRef = useRef<string | null>(null);
   const saveRef = useRef<typeof saveCurrentRule | null>(null);
   const validatorRef = useRef<DebouncedValidator | null>(null);
   const isSettingValueRef = useRef(false);
@@ -562,6 +563,7 @@ export default function RuleEditor() {
     registerDesktopMonacoCommands(ed, isDesktopShell());
 
     ed.setModel(model);
+    modelRuleNameRef.current = rule?.name ?? null;
     ed.addCommand(KeyMod.CtrlCmd | KeyCode.KeyS, () => {
       handleSave();
     });
@@ -622,6 +624,7 @@ export default function RuleEditor() {
       ed.dispose();
       editorRef.current = null;
       modelRef.current = null;
+      modelRuleNameRef.current = null;
     };
   }, [
     canEdit,
@@ -657,6 +660,7 @@ export default function RuleEditor() {
 
     if (!currentRule) {
       collapseRuleReference();
+      modelRuleNameRef.current = null;
       isSettingValueRef.current = true;
       modelRef.current.setValue("");
       isSettingValueRef.current = false;
@@ -671,7 +675,15 @@ export default function RuleEditor() {
     const currentContent = modelRef.current.getValue();
     ruleDetailCacheRef.current.set(currentRule.name, content);
 
-    if (currentContent !== content) {
+    const shouldReplaceModel = shouldReplaceRuleEditorModel({
+      currentContent,
+      nextContent: content,
+      currentRuleName: modelRuleNameRef.current,
+      nextRuleName: currentRule.name,
+    });
+    modelRuleNameRef.current = currentRule.name;
+
+    if (shouldReplaceModel) {
       collapseRuleReference();
       isSettingValueRef.current = true;
       modelRef.current.setValue(content);
