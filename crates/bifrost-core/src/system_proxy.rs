@@ -428,6 +428,17 @@ impl SystemProxyManager {
         }
     }
 
+    fn management_available(&self) -> bool {
+        #[cfg(test)]
+        {
+            Self::is_supported() || self.skip_os_proxy_io
+        }
+        #[cfg(not(test))]
+        {
+            Self::is_supported()
+        }
+    }
+
     fn record_system_proxy_action(&self, event_name: &str, action: &str) {
         let ownership = self.load_managed_state().ok();
         let generation = ownership.as_ref().map(|state| state.generation.clone());
@@ -866,7 +877,7 @@ impl SystemProxyManager {
     }
 
     pub fn ensure_managed_ownership(&self) -> Result<Option<ManagedSystemProxyOwnership>> {
-        if !Self::is_supported() {
+        if !self.management_available() {
             return Ok(None);
         }
         #[cfg(target_os = "macos")]
@@ -891,7 +902,7 @@ impl SystemProxyManager {
     /// Read the persisted ownership snapshot without migrating or writing it.
     /// Diagnostics use this path so `doctor` remains observational.
     pub fn read_managed_ownership(&self) -> Result<Option<ManagedSystemProxyOwnership>> {
-        if !Self::is_supported() {
+        if !self.management_available() {
             return Ok(None);
         }
         match self.load_managed_state() {
@@ -907,7 +918,7 @@ impl SystemProxyManager {
         &mut self,
         expected_generation: &str,
     ) -> Result<GuardedSystemProxyTransition> {
-        if !Self::is_supported() {
+        if !self.management_available() {
             return Ok(GuardedSystemProxyTransition::NotManaged);
         }
         #[cfg(target_os = "macos")]
@@ -975,7 +986,7 @@ impl SystemProxyManager {
         &mut self,
         expected_generation: &str,
     ) -> Result<GuardedSystemProxyTransition> {
-        if !Self::is_supported() {
+        if !self.management_available() {
             return Ok(GuardedSystemProxyTransition::NotManaged);
         }
         #[cfg(target_os = "macos")]
@@ -3152,11 +3163,11 @@ mod tests {
         ));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn managed_ownership_migrates_legacy_state_and_read_is_observational() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = SystemProxyManager::new(dir.path().to_path_buf());
+        let mut manager = SystemProxyManager::new(dir.path().to_path_buf());
+        manager.skip_os_proxy_io = true;
         std::fs::write(
             manager.state_file_path(),
             r#"{
@@ -3182,11 +3193,11 @@ mod tests {
         assert!(manager.read_managed_ownership().is_err());
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn generation_transitions_reject_stale_or_already_applied_state_before_os_access() {
         let dir = tempfile::tempdir().unwrap();
         let mut manager = SystemProxyManager::new(dir.path().to_path_buf());
+        manager.skip_os_proxy_io = true;
         assert_eq!(
             manager.suspend_managed_if_generation("missing").unwrap(),
             GuardedSystemProxyTransition::NotManaged
@@ -3269,7 +3280,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn generation_transitions_persist_suspend_and_resume_with_test_backend() {
         let dir = tempfile::tempdir().unwrap();
