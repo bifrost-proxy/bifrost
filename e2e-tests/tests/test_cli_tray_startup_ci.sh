@@ -80,23 +80,52 @@ read_tray_pid_file() {
   printf '%s' "$content" | tr -d '[:space:]'
 }
 
+remove_created_data_dir() {
+  local dir="$1"
+  [[ -n "$dir" && -d "$dir" ]] || return 0
+
+  # On macOS, the daemon and tray logger can finish their last rotation after
+  # the processes have received their exit signals. Retry so that a harmless
+  # late log write cannot turn an otherwise successful smoke test red.
+  # Keep sweeping for the full grace period even after a successful removal:
+  # a detached helper can otherwise recreate diagnostics immediately after
+  # `rm` returns and leave the workspace dirty without an error.
+  for _ in $(seq 1 10); do
+    rm -rf "$dir" 2>/dev/null || true
+    sleep 0.2
+  done
+
+  rm -rf "$dir" 2>/dev/null || true
+  if [[ -e "$dir" ]]; then
+    echo "WARN: could not fully remove tray startup data directory: $dir" >&2
+  fi
+}
+
 
 cleanup() {
+  local tray_pid=""
+  set +e
+  if [[ -n "$DATA_DIR" ]]; then
+    # Capture this before `bifrost stop`, which normally removes tray.pid.
+    tray_pid="$(read_tray_pid_file)"
+  fi
   if [[ -n "$DATA_DIR" && -x "$BIN" ]]; then
     BIFROST_DATA_DIR="$DATA_DIR" "$BIN" stop >/dev/null 2>&1 || true
   fi
   if [[ -n "$START_PID" ]]; then
     kill_process_tree "$START_PID"
+    wait "$START_PID" 2>/dev/null || true
   fi
-  if [[ -n "$DATA_DIR" ]]; then
-    kill_pid_force "$(read_tray_pid_file)"
+  if [[ -n "$tray_pid" ]]; then
+    kill_pid_force "$tray_pid"
   fi
   if [[ -n "$PORT" ]]; then
     kill_bifrost_on_port "$PORT"
   fi
   if [[ -n "$DATA_DIR" && "$DATA_DIR_CREATED" == "1" && "${BIFROST_TRAY_STARTUP_KEEP_DATA_DIR:-0}" != "1" ]]; then
-    rm -rf "$DATA_DIR"
+    remove_created_data_dir "$DATA_DIR"
   fi
+  return 0
 }
 trap cleanup EXIT
 
