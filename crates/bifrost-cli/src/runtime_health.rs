@@ -269,10 +269,20 @@ fn current_fd_limit() -> u64 {
         rlim_max: 0,
     };
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
-        limit.rlim_cur
+        rlim_to_u64(limit.rlim_cur)
     } else {
         0
     }
+}
+
+#[cfg(all(unix, target_pointer_width = "32"))]
+fn rlim_to_u64(value: libc::rlim_t) -> u64 {
+    u64::from(value)
+}
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+fn rlim_to_u64(value: libc::rlim_t) -> u64 {
+    value
 }
 
 #[cfg(not(unix))]
@@ -302,6 +312,12 @@ fn current_fd_count() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_limit_is_reported_as_u64_on_the_current_unix_width() {
+        assert!(current_fd_limit() > 0);
+    }
 
     #[test]
     fn health_lane_is_loopback_and_reports_scheduler_age() {
