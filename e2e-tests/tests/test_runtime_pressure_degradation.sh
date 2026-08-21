@@ -10,7 +10,7 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
 source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-$(allocate_free_port)}"
-UPSTREAM_PORT="${UPSTREAM_PORT:-$(allocate_free_port)}"
+UPSTREAM_PORT="${UPSTREAM_PORT:-0}"
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -x "${PROJECT_DIR}/target/debug/bifrost" ]]; then
     BIFROST_BIN="${PROJECT_DIR}/target/debug/bifrost"
@@ -48,7 +48,9 @@ wait_for_admin() {
 }
 
 PYTHON_BIN="$(python3_cmd)"
-"$PYTHON_BIN" - "$UPSTREAM_PORT" >"${TEST_DATA_DIR}/upstream.log" 2>&1 <<'PY' &
+UPSTREAM_PORT_FILE="${TEST_DATA_DIR}/upstream.port"
+"$PYTHON_BIN" - "$UPSTREAM_PORT" "$UPSTREAM_PORT_FILE" \
+    >"${TEST_DATA_DIR}/upstream.log" 2>&1 <<'PY' &
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -63,11 +65,33 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         return
 
-ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler)
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    handle.write(str(server.server_address[1]))
+    handle.flush()
+server.serve_forever()
 PY
 UPSTREAM_PID=$!
-wait_for_http_ready "http://127.0.0.1:${UPSTREAM_PORT}/pressure" 30 0.1 \
-    || fail "pressure-test upstream did not become ready: $(cat "${TEST_DATA_DIR}/upstream.log")"
+for _ in {1..100}; do
+    [[ -s "$UPSTREAM_PORT_FILE" ]] && break
+    if ! kill -0 "$UPSTREAM_PID" 2>/dev/null; then
+        echo "[FAIL] pressure-test upstream exited before publishing its port" >&2
+        cat "${TEST_DATA_DIR}/upstream.log" >&2 || true
+        exit 1
+    fi
+    sleep 0.1
+done
+if [[ ! -s "$UPSTREAM_PORT_FILE" ]]; then
+    echo "[FAIL] pressure-test upstream did not publish its port" >&2
+    cat "${TEST_DATA_DIR}/upstream.log" >&2 || true
+    exit 1
+fi
+UPSTREAM_PORT="$(<"$UPSTREAM_PORT_FILE")"
+if ! wait_for_http_ready "http://127.0.0.1:${UPSTREAM_PORT}/pressure" 30 0.1; then
+    echo "[FAIL] pressure-test upstream did not become ready" >&2
+    cat "${TEST_DATA_DIR}/upstream.log" >&2 || true
+    exit 1
+fi
 
 export BIFROST_DATA_DIR="$TEST_DATA_DIR"
 export BIFROST_RESOURCE_PRESSURE_OVERRIDE=critical
