@@ -68,6 +68,13 @@ struct ProviderRequest {
     provider_id: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeConfigReloadRequest {
+    #[serde(default)]
+    manual_provider_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SendMessageReference {
@@ -116,9 +123,10 @@ pub(crate) fn is_im_gateway_worker_process() -> bool {
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
-/// Starts the lightweight main-process controller. It only watches the
-/// persisted IM configuration and starts/stops the isolated runtime worker;
-/// provider sockets, event loops and scheduler tasks live in the worker.
+/// Starts the lightweight main-process controller. It watches persisted IM
+/// configuration, starts an absent/unhealthy isolated runtime worker when
+/// needed, and hot-reloads a healthy worker in place. Provider sockets, event
+/// loops and scheduler tasks live in the worker.
 pub fn start_runtime_controller(admin_host: String, admin_port: u16) {
     if !super::worker_execution_enabled(WorkerKind::ImGateway) {
         stop_runtime_controller();
@@ -487,40 +495,70 @@ pub(crate) async fn run_schedule(
 async fn reconcile_runtime(last_signature: &mut Option<String>) -> Result<(), String> {
     let signature = runtime_signature()?;
     let desired = signature.is_some() || !MANUAL_PROVIDER_LEASES.is_empty();
-    if !desired {
-        global_worker_supervisor()
-            .stop(IM_GATEWAY_WORKER_KEY, Duration::from_secs(10))
-            .await;
-        *last_signature = None;
+    let changed = *last_signature != signature;
+    let existing_worker = global_worker_supervisor().get(IM_GATEWAY_WORKER_KEY).await;
+    if existing_worker.is_none() && !desired {
+        *last_signature = signature;
         return Ok(());
     }
 
-    let endpoint = controller_endpoint()
-        .read()
-        .clone()
-        .ok_or_else(|| "IM Gateway worker controller endpoint is not configured".to_string())?;
-    let changed = *last_signature != signature;
-    let broker = super::im_broker::ensure_main_broker().await?;
-    let worker_was_running = global_worker_supervisor()
-        .get(IM_GATEWAY_WORKER_KEY)
-        .await
-        .is_some();
-    let worker = if changed {
-        global_worker_supervisor()
-            .restart(spawn_spec(&endpoint, &broker)?)
-            .await?
-    } else {
-        global_worker_supervisor()
-            .get_or_start(spawn_spec(&endpoint, &broker)?)
-            .await?
+    let worker_was_running = existing_worker.is_some();
+    let worker = match existing_worker {
+        Some(worker) => worker,
+        None => {
+            // Starting an absent/unhealthy worker is fault recovery. A mere
+            // configuration change never enters this path while the existing
+            // worker remains healthy.
+            let endpoint = controller_endpoint().read().clone().ok_or_else(|| {
+                "IM Gateway worker controller endpoint is not configured".to_string()
+            })?;
+            let broker = super::im_broker::ensure_main_broker().await?;
+            global_worker_supervisor()
+                .get_or_start(spawn_spec(&endpoint, &broker)?)
+                .await?
+        }
     };
+
+    let leases = MANUAL_PROVIDER_LEASES
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    if changed && worker_was_running {
+        let old_signature = last_signature
+            .as_deref()
+            .map(short_signature)
+            .unwrap_or("none");
+        let new_signature = signature.as_deref().map(short_signature).unwrap_or("none");
+        let report = worker
+            .request_control(
+                "im.reload_config",
+                serde_json::to_value(RuntimeConfigReloadRequest {
+                    manual_provider_ids: leases.clone(),
+                })
+                .map_err(|error| format!("serialize IM runtime reload request: {error}"))?,
+                Some(Duration::from_secs(30)),
+            )
+            .await?;
+        let failed_count = report
+            .get("failedProviders")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len)
+            .unwrap_or_default();
+        if failed_count > 0 {
+            return Err(format!(
+                "IM runtime hot reload retained the worker but {failed_count} provider transport(s) failed: {report}"
+            ));
+        }
+        tracing::info!(
+            worker_pid = ?worker.pid(),
+            old_signature,
+            new_signature,
+            "IM Gateway runtime configuration hot-reloaded without worker restart"
+        );
+    }
     *last_signature = signature;
 
-    if changed || !worker_was_running {
-        let leases = MANUAL_PROVIDER_LEASES
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>();
+    if !worker_was_running {
         for provider_id in leases {
             if let Err(error) = request_provider(&worker, "im.connect_provider", &provider_id).await
             {
@@ -533,6 +571,10 @@ async fn reconcile_runtime(last_signature: &mut Option<String>) -> Result<(), St
         }
     }
     Ok(())
+}
+
+fn short_signature(signature: &str) -> &str {
+    signature.get(..12).unwrap_or(signature)
 }
 
 async fn ensure_worker_from_controller() -> Result<Arc<ManagedWorker>, String> {
@@ -671,6 +713,7 @@ pub fn run_im_gateway_worker_stdio(_admin_host: &str, admin_port: u16) -> Result
                 "im.upload_message".to_string(),
                 "im.runtime_status".to_string(),
                 "im.run_schedule".to_string(),
+                "im.reload_config".to_string(),
             ],
             move |frame, context| {
                 let service = service.clone();
@@ -733,6 +776,19 @@ async fn handle_worker_frame(
                         }
                         None => Err("IM schedule worker request is missing scheduleId".to_string()),
                     }
+                }
+                "im.reload_config" => {
+                    let request: RuntimeConfigReloadRequest =
+                        serde_json::from_value(request.payload)
+                            .map_err(|error| format!("parse IM runtime reload request: {error}"))?;
+                    serde_json::to_value(
+                        crate::handlers::im_gateway::reload_runtime_config(
+                            &service,
+                            &request.manual_provider_ids,
+                        )
+                        .await,
+                    )
+                    .map_err(|error| format!("serialize IM runtime reload report: {error}"))
                 }
                 "im.provider_status" => {
                     let request = parse_provider_request(request.payload)?;
@@ -801,14 +857,29 @@ async fn handle_worker_frame(
         ParentFrame::ConfigApply {
             request_id,
             generation,
-            ..
+            payload,
         } => {
+            let request =
+                serde_json::from_value::<RuntimeConfigReloadRequest>(payload).unwrap_or_default();
+            // A generic config frame may not know the main process' manual
+            // provider leases. Fail safe by retaining current transports;
+            // the dedicated controller request always supplies exact leases.
+            let manual_provider_ids = if request.manual_provider_ids.is_empty() {
+                service.connection_manager.provider_ids()
+            } else {
+                request.manual_provider_ids
+            };
+            let report =
+                crate::handlers::im_gateway::reload_runtime_config(&service, &manual_provider_ids)
+                    .await;
             context
                 .response(
                     request_id,
                     Ok(serde_json::json!({
                         "generation": generation,
-                        "restartRequired": true
+                        "applied": !report.has_failures(),
+                        "restartRequired": false,
+                        "report": report
                     })),
                 )
                 .await;
@@ -1385,6 +1456,8 @@ mod tests {
             .any(|pair| pair == ["--admin-port", "9876"]));
         assert!(runtime_root().ends_with("runtime/im-gateway-worker"));
         assert!(Arc::ptr_eq(&controller_notify(), &controller_notify()));
+        assert_eq!(short_signature("short"), "short");
+        assert_eq!(short_signature("1234567890123456"), "123456789012");
         std::env::remove_var(IM_GATEWAY_WORKER_ENV);
         std::env::remove_var("BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL");
     }
@@ -1412,6 +1485,11 @@ mod tests {
                 "im.run_schedule",
                 serde_json::json!({"scheduleId": "  "}),
             ),
+            (
+                "reload-config",
+                "im.reload_config",
+                serde_json::json!({"manualProviderIds": []}),
+            ),
             ("unsupported", "im.unknown", serde_json::json!({})),
         ] {
             handle_worker_frame(
@@ -1433,9 +1511,13 @@ mod tests {
                 panic!("expected worker response")
             };
             assert_eq!(response.request_id, request_id);
-            if request_id == "status" {
+            if matches!(request_id, "status" | "reload-config") {
                 assert!(response.ok);
-                assert!(response.payload["providers"].is_array());
+                if request_id == "status" {
+                    assert!(response.payload["providers"].is_array());
+                } else {
+                    assert_eq!(response.payload["failedProviders"], serde_json::json!([]));
+                }
             } else {
                 assert!(!response.ok);
             }
@@ -1471,6 +1553,25 @@ mod tests {
         .unwrap();
         assert!(!ACTIVE_PROVIDER_REQUESTS.contains_key("cancel"));
 
+        let manual_provider = crate::im_gateway::types::ImProviderConfig {
+            id: "manual-provider".to_string(),
+            provider_type: crate::im_gateway::types::ImProviderType::Webhook,
+            display_name: "Manual Provider".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: None,
+            secret_ref: Some("secret".to_string()),
+            owner_open_id: None,
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        service.provider_store.add(manual_provider.clone()).unwrap();
+        service
+            .connection_manager
+            .set_transport_config_for_test(&manual_provider);
         handle_worker_frame(
             ParentFrame::ConfigApply {
                 request_id: "config".to_string(),
@@ -1486,7 +1587,12 @@ mod tests {
             panic!("expected config response")
         };
         assert_eq!(response.payload["generation"], 9);
-        assert_eq!(response.payload["restartRequired"], true);
+        assert_eq!(response.payload["applied"], true);
+        assert_eq!(response.payload["restartRequired"], false);
+        assert_eq!(
+            service.connection_manager.provider_ids(),
+            vec![manual_provider.id]
+        );
 
         handle_worker_frame(
             ParentFrame::Ping {
@@ -1502,9 +1608,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn idle_controller_paths_do_not_launch_workers() {
         let _runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
+        let data_dir = tempfile::tempdir().unwrap();
+        let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(data_dir.path());
         let _lock = LEASE_TEST_LOCK.lock().await;
         MANUAL_PROVIDER_LEASES.clear();
         let _ = runtime_signature().unwrap();
+        let mut last_signature = Some("stale".to_string());
+        reconcile_runtime(&mut last_signature).await.unwrap();
+        assert!(last_signature.is_none());
         assert!(provider_status("missing").await.unwrap().is_none());
         assert!(connect_provider("  ").await.unwrap_err().contains("empty"));
         assert!(disconnect_provider("").await.unwrap_err().contains("empty"));
@@ -1672,6 +1783,9 @@ done
 
         connect_provider(" provider-test ").await.unwrap();
         assert!(MANUAL_PROVIDER_LEASES.contains("provider-test"));
+        let mut last_signature = Some("outdated-signature".to_string());
+        reconcile_runtime(&mut last_signature).await.unwrap();
+        assert!(last_signature.is_none());
         let status = provider_status("provider-test").await.unwrap().unwrap();
         assert_eq!(status["status"], "connected");
 

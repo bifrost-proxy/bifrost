@@ -1,6 +1,28 @@
 use super::*;
 use std::ffi::OsStr;
 
+#[test]
+fn config_store_load_refreshes_disk_and_preserves_last_known_good() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ExternalCliConfigStore::new(temp.path());
+    let original = store.load();
+
+    let mut updated = original.clone();
+    updated.default_runner_id = DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string();
+    save_config_to_disk(&store.file_path, &updated).unwrap();
+    assert_eq!(
+        store.load().default_runner_id,
+        DEFAULT_CLAUDE_CODE_RUNNER_ID
+    );
+
+    std::fs::write(&store.file_path, b"{partial").unwrap();
+    assert_eq!(
+        store.load().default_runner_id,
+        DEFAULT_CLAUDE_CODE_RUNNER_ID,
+        "an invalid concurrent write must not discard the worker's last known-good config"
+    );
+}
+
 fn unused_model_tx() -> tokio::sync::mpsc::Sender<ExternalCliWorkerModelUpdateRequest> {
     tokio::sync::mpsc::channel(1).0
 }

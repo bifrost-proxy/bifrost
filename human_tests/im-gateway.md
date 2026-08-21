@@ -1201,3 +1201,24 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 测试使用临时目录，测试结束自动删除；不创建、连接或删除真实 Provider。
 - **执行记录（2026-08-08）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib im_status_ -- --nocapture`，共享状态用例通过，覆盖已有 Feishu 会话完整诊断、新 Weixin 会话完整概览、运行中 live Runner/Model/External Session ID 优先级、Markdown inline 值转义以及持久化 runner model/effort/external thread ID；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib idle_weixin_status_reply_uses_shared_complete_overview -- --nocapture`，1 个真实 idle command handler 回执用例通过；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib busy_status_reply_covers_detail_live_and_processing_fallbacks -- --nocapture`，真实 busy handler 的 idle-detail、active-turn 与 external-preview fallback 三条 `/status` 分支均通过。outbound message log 包含 Weixin Provider、Codex Runner、模型、Reasoning Effort、Bound Session、External Session ID、Completed User Turns、Queue 与 Ready/Running 状态。测试使用临时数据目录和 mock Weixin client，未读取或修改真实 Provider。
+
+### TC-IMG-76: Schedule 配置热加载不得重启 Worker 或中断外部 Runner
+
+- **前置条件**:
+  - 工作目录为项目根目录，使用当前分支编译出的 `target/debug/bifrost`。
+  - 只使用动态端口和临时 `BIFROST_DATA_DIR`，必须携带 `--no-system-proxy`，不得启动、停止或修改正式 9900 服务。
+  - 使用 mock external Runner 子进程，不连接真实飞书/微信账号。
+- **操作步骤**:
+  1. 执行隔离 Worker 配置热加载回归：
+     ```bash
+     SKIP_BUILD=true e2e-tests/tests/test_im_gateway_config_hot_reload.sh
+     ```
+  2. 用例先启动一个 12 秒 Schedule script run，在 `activeJobs >= 1` 时 PATCH Schedule 名称。
+  3. 用例再配置一个 mock external Runner，将同一 Schedule 切换为 Agent 类型；Runner 子进程处于活跃状态时再次 PATCH Schedule 名称。
+  4. 两阶段分别读取 `/api/workers/im_gateway` 的 PID、`restartCount` 和 `activeJobs`，并检查最终任务结果。
+- **预期结果**:
+  - 两次配置修改均通过 worker control lane 原地热加载，不调用 supervisor restart。
+  - script run 返回 `status=success` 和 `hot-reload-task-ok`；external Runner 返回 `status=success` 和 `hot-reload-runner-ok`。
+  - 修改前后 Worker PID、`restartCount` 完全一致；运行中的任务不返回 500、不丢失输出。
+  - 测试退出时临时数据目录、Runner 子进程和临时 Bifrost 进程全部清理，不影响系统代理与正式服务。
+- **执行记录（2026-08-21）**: PASS — 执行 `SKIP_BUILD=true e2e-tests/tests/test_im_gateway_config_hot_reload.sh`，Schedule script 与 external Runner 两阶段均在 `activeJobs=1` 时完成配置 PATCH；两条任务均成功返回预期结果，Worker PID 与 `restartCount` 在修改前后保持不变，临时服务和数据已自动清理。
