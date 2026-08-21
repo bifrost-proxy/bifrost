@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef, type CSSProperties } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -86,6 +86,8 @@ import { showTlsWhitelistChangeSuccess } from "../../utils/tlsInterceptionNotice
 const TAB_PARAM = "tab";
 const HIGHLIGHT_PARAM = "highlight";
 const DEFAULT_TAB = "proxy";
+const MAX_BODY_PROBE_NEAR_LEFT_LABEL_GAP_PX = 16;
+const MAX_BODY_PROBE_SECOND_NEAR_LEFT_LABEL_GAP_PX = 28;
 const VALID_TABS = [
   "proxy",
   "certificate",
@@ -97,6 +99,21 @@ const VALID_TABS = [
   "remote",
   "remote-invoke",
 ];
+
+const maxBodyProbeLeftMarkStyle: CSSProperties = {
+  transform: "translateX(0)",
+  whiteSpace: "nowrap",
+};
+
+const maxBodyProbeNearLeftMarkStyle: CSSProperties = {
+  ...maxBodyProbeLeftMarkStyle,
+  marginLeft: MAX_BODY_PROBE_NEAR_LEFT_LABEL_GAP_PX,
+};
+
+const maxBodyProbeSecondNearLeftMarkStyle: CSSProperties = {
+  ...maxBodyProbeLeftMarkStyle,
+  marginLeft: MAX_BODY_PROBE_SECOND_NEAR_LEFT_LABEL_GAP_PX,
+};
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message) {
@@ -1236,10 +1253,19 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     1 * 1024 * 1024,
     formatBytes,
   );
-  const maxBodyProbeMarks: Record<number, string> = {
-    0: "Off",
-    [16 * 1024]: "16KB",
-    [64 * 1024]: "64KB",
+  const maxBodyProbeMarks = {
+    0: {
+      label: "Off",
+      style: maxBodyProbeLeftMarkStyle,
+    },
+    [16 * 1024]: {
+      label: "16KB",
+      style: maxBodyProbeNearLeftMarkStyle,
+    },
+    [64 * 1024]: {
+      label: "64KB",
+      style: maxBodyProbeSecondNearLeftMarkStyle,
+    },
     [256 * 1024]: "256KB",
     [1 * 1024 * 1024]: "1MB",
   };

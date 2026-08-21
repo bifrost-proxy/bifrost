@@ -10,6 +10,11 @@ import {
   waitForToast,
   uniqueName,
 } from "./helpers/admin-helpers";
+import {
+  expectNoHorizontalOverlap,
+  MAX_BODY_PROBE_MARK_LABELS,
+  routeSliderLayoutApis,
+} from "./helpers/settings-performance-layout";
 
 const DEFAULT_REMOTE_BASE_URL = getDefaultRemoteBaseUrl();
 
@@ -457,6 +462,40 @@ test("Settings 性能配置在第二个页面主动刷新后可见", async ({
       data: { max_records: original },
     });
   }
+});
+
+test("Settings Performance 的 Max Body Probe Size 相邻刻度文本不重叠", async ({
+  page,
+}) => {
+  await routeSliderLayoutApis(page);
+  await openPage(page, "settings");
+  await page.getByRole("tab", { name: /Performance/ }).click();
+
+  const performanceTab = page.getByTestId("settings-performance-tab");
+  await expect(performanceTab).toContainText("Max Body Probe Size");
+  const probeSection = performanceTab.getByTestId("settings-performance-max-body-probe-slider");
+  const markLocators = MAX_BODY_PROBE_MARK_LABELS.map((label) =>
+    probeSection.locator(".ant-slider-mark-text", { hasText: new RegExp(`^${label}$`) }).first(),
+  );
+
+  for (const markLocator of markLocators) {
+    await expect(markLocator).toBeVisible();
+  }
+  const expectAdjacentMarksNotToOverlap = async () => {
+    for (let index = 1; index < markLocators.length; index += 1) {
+      await expectNoHorizontalOverlap(markLocators[index - 1], markLocators[index]);
+    }
+  };
+
+  await page.setViewportSize({ width: 900, height: 720 });
+  await expectAdjacentMarksNotToOverlap();
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expectAdjacentMarksNotToOverlap();
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expectAdjacentMarksNotToOverlap();
 });
 
 test("Network 超级性能模式覆盖整个工作区并可跳转高亮 Performance 开关", async ({

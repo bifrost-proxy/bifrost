@@ -59,7 +59,7 @@ Performance 面板当前渲染的字段（对应 `PerformanceTab.tsx`）：
 | Max DB Size | 上限 10 GiB | `max_db_size` | 按字节校验 |
 | Max Body Inline Size (DB) | 上限 10 MiB | `max_body_inline_size` | 按字节校验 |
 | Max Body Buffer Size | 上限 64 MiB | `max_body_buffer_size` | 按字节校验 |
-| Max Body Probe Size | 上限 1 MiB | `max_body_probe_size` | 按字节校验 |
+| Max Body Probe Size | 上限 1 MiB | `max_body_probe_size` | 按字节校验；低端相邻刻度文本需保持可读间距，不改变实际刻度值 |
 | File Retention Days | 上限 7 天 | `file_retention_days` | `<= 7` |
 | Breakpoint Timeout | min/max 区间 | `breakpoint_timeout_ms` | `MIN_BREAKPOINT_TIMEOUT_MS..=MAX_BREAKPOINT_TIMEOUT_MS` |
 | Enable Binary Traffic Capture | 开关 | `binary_traffic_performance_mode` | bool |
@@ -83,6 +83,7 @@ Performance 面板当前渲染的字段（对应 `PerformanceTab.tsx`）：
 - 文件：`web/src/pages/Settings/index.tsx`
   - `useEffect` 首屏 `GET /api/config/performance` 得到 `performanceConfig`，落入 `perfDraft` / `breakpointPerfDraft`。
   - 每次成功刷新 `PerformanceConfig` 后同步 `fetchHistory(3600)` 更新趋势图。
+  - `Max Body Probe Size` 的 `0`、`16KB` 与 `64KB` mark 使用 Ant Design `marks` 对象的 label style 做局部排布修正，避免线性 0..1MiB 刻度下低端标签互相覆盖。
 
 ### Admin API
 
@@ -167,6 +168,8 @@ Performance 面板当前渲染的字段（对应 `PerformanceTab.tsx`）：
   - 连续滑动 5 次 → 只发 1 次 `PUT /api/config/performance`（拦截网络请求断言）。
   - 服务端注入 400 → 前端草稿回滚到 `performanceConfig.traffic`。
   - `Clear Cache` 点击后 body_store 统计归零或明显下降。
+- `web/tests/ui/admin-settings.spec.ts`
+  - `Settings Performance 的 Max Body Probe Size 相邻刻度文本不重叠`：用真实 Chromium 在 900px 和 1280px 宽度下量测 `Off`、`16KB`、`64KB`、`256KB`、`1MB` 全部相邻 mark 边界，覆盖亮色和暗色主题。
 
 ### 真实场景 human_tests
 
