@@ -258,9 +258,19 @@
 
 预期结果：引用文件保留 `quoted-requirements.md` 和 `text/markdown`，引用图片保留 `image/png`，两者都写入当前 Session 的 `attachments/<run>/files|images`，Runner 只看到可消费的绝对路径且磁盘字节与假 OpenAPI 响应一致。资源下载使用被引用消息 ID，不使用当前触发消息 ID。下载失败、单文件超过飞书 100 MiB 平台上限或累计超过 250 MiB 时，飞书用户和模型上下文都会收到非阻塞提示，失败附件被跳过，但 Runner、Turn、其他附件和服务继续正常执行；引用附件排在当前消息附件之前；重启恢复复用 SQLite 中的消息正文和资源 key，仅重新下载二进制。
 
+### TC-FGS-30：机器人入群后自动检查完整群消息权限
+
+1. 使用临时数据目录启动真实 debug Bifrost 和 `127.0.0.1` 假飞书 OpenAPI。
+2. 假 OpenAPI 的 `GET /application/v6/scopes` 返回 `im:message.group_msg` 的 `grant_status=2`。
+3. 通过 debug 生命周期入口向同一个 Provider 和群连续注入两次相同的 `im.chat.member.bot.added_v1` 语义事件。
+4. 查询 Provider 消息日志并检查群内通知内容与数量。
+5. 单元链路把同一权限改为 `grant_status=1`，确认不发送提示；同时验证状态存储重启、重新入群事件和稳定发送 UUID。
+
+预期结果：缺权限时群内恰好出现一条提示，包含 `im:message.group_msg`、应用管理员/企业管理员说明，以及可点击的 `https://open.larkoffice.com/app/cli_group_e2e/auth` 直达申请链接；同一入群事件重放不重复提示。已授权时保持静默。权限 API 错误或响应不完整时不误报缺权限，生命周期事件保持待重试。不同入群事件允许重新检查。功能上线前已存在的群只在第一条可见群消息时懒检查。
+
 ## 执行方式
 
-TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
+TC-FGS-01 至 TC-FGS-05 与 TC-FGS-30 由以下真实服务脚本逐条执行：
 
 ```bash
 bash e2e-tests/tests/test_feishu_group_session_context.sh

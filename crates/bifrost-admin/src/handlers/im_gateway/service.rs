@@ -495,6 +495,7 @@ pub struct ImGatewayService {
     pub message_log_store: Arc<ImMessageLogStore>,
     pub outbox_store: Arc<crate::im_gateway::ImOutboxStore>,
     pub group_context_store: Arc<ImGroupContextStore>,
+    pub feishu_group_permission_store: Arc<crate::im_gateway::FeishuGroupPermissionStore>,
     pub connection_manager: Arc<ImConnectionManager>,
     pub agent_config_store: Arc<ImAgentConfigStore>,
     pub agent_session_manager: Arc<ImAgentSessionManager>,
@@ -550,6 +551,9 @@ impl ImGatewayService {
             message_log_store: Arc::new(ImMessageLogStore::new(data_dir)),
             outbox_store: Arc::new(crate::im_gateway::ImOutboxStore::new(data_dir)),
             group_context_store: Arc::new(ImGroupContextStore::new(data_dir)),
+            feishu_group_permission_store: Arc::new(
+                crate::im_gateway::FeishuGroupPermissionStore::new(data_dir),
+            ),
             connection_manager: Arc::new(ImConnectionManager::new_with_data_dir(data_dir)),
             agent_config_store,
             agent_session_manager: Arc::new(ImAgentSessionManager::new(
@@ -613,6 +617,7 @@ impl ImGatewayService {
         let event_store = Arc::clone(&self.event_store);
         let message_log_store = Arc::clone(&self.message_log_store);
         let group_context_store = Arc::clone(&self.group_context_store);
+        let feishu_group_permission_store = Arc::clone(&self.feishu_group_permission_store);
         let route_store = Arc::clone(&self.route_store);
         let provider_store = Arc::clone(&self.provider_store);
         let agent_config_store = Arc::clone(&self.agent_config_store);
@@ -632,6 +637,7 @@ impl ImGatewayService {
                 event_store,
                 message_log_store,
                 group_context_store,
+                feishu_group_permission_store,
                 route_store,
                 provider_store,
                 agent_config_store,

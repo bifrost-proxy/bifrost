@@ -1682,6 +1682,22 @@ function ConnectionsPanel({
           )}
           {(editingProvider || createStep === 2) && (
             <>
+              {selectedProviderType === "feishu" && (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 14 }}
+                  message="Enable the Feishu group permission check"
+                  description={
+                    <span>
+                      In Feishu Open Platform, subscribe to <Text code>im.chat.member.bot.added_v1</Text>{" "}
+                      and grant <Text code>im:chat.members:bot_access</Text>. Bifrost then checks{" "}
+                      <Text code>im:message.group_msg</Text> when the bot joins a group and posts a
+                      direct permission-application link only when it is missing.
+                    </span>
+                  }
+                />
+              )}
           <Form.Item name="display_name" label="Display Name">
             <Input placeholder="Optional display name" />
           </Form.Item>

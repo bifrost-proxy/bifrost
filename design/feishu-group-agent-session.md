@@ -64,6 +64,8 @@ SQLite Turn 仍保存完整的消息 ID、序号、时间、mentions、游标和
 - 如果从上次执行到本次触发之间存在有效聊天，按原顺序逐行提供 `<at id=发送者 open_id>显示名</at>：消息内容`，并用一句固定边界说明这些内容只作背景；
 - 已经由 Bifrost 处理过的 `/status`、`/help`、`/cwd`、`/runner` 等管理命令不进入模型背景；
 - 如果没有收到有效的累积消息，完全省略背景区域；这既可能代表群内没有新聊天，也可能代表应用没有 `im:message.group_msg` 权限、飞书未投递普通群消息；
+- 订阅 `im.chat.member.bot.added_v1` 并授予 `im:chat.members:bot_access` 后，机器人入群会查询 `GET /application/v6/scopes`。若 `im:message.group_msg` 已授权则保持静默；若未授权则在群内只发送一次提示，并附带 `https://open.larkoffice.com/app/<app_id>/auth` 直达申请页。接口失败属于未知状态，只记录并重试，不得误报缺权限。
+- 入群检查按 Provider、群、入群事件、目标权限和提示版本持久化幂等；同一事件重放不会重复提示，移除后重新入群会重新检查。功能上线前已存在的群，在第一条可见群消息到来时执行一次懒检查，不在启动时遍历并打扰所有群。
 - 最后一条触发消息只出现一次，格式同样是 `<at id=发送者 open_id>显示名</at>：消息内容`。
 - 回复消息带有 `parent_id` 且当前 Provider 确认该消息应由自己消费时，通过飞书 `GET /im/v1/messages/{parent_id}` 读取权威消息内容，再以当前 Provider 的本地账本作为 Prompt 组装缓存；不同机器人可以部署在不同机器上，不依赖共享进程内存、本地 JSON 或共享 SQLite。返回的 `chat_id` 必须与当前群一致，跨群引用直接拒绝。若它同时位于当前增量区间，则从普通背景中排除，避免重复注入。
 - `回复某条消息 + 只 @机器人` 是有效 Agent 输入。此时被引用消息本身作为主消息，并明确告诉模型用户未附加文字、应直接理解和回应主消息；不能因去除 mention 后文本为空而发送帮助信息。
@@ -102,6 +104,7 @@ Runner 回复中的相对图片和文件链接同样以当前群 binding 的工�
 
 - 订阅事件：`im.message.receive_v1`，事件体提供 `chat_type`、`chat_id`、`message_id`、发送者、消息内容、mentions 和回复/话题关系，可区分单聊与群聊。
 - 只接收 @ 消息可使用 `im:message.group_at_msg:readonly`；要让未 @ 的普通群聊也进入账本，必须申请敏感权限 `im:message.group_msg`，并在权限变更后重新发布应用版本。
+- 自动入群检查还要求在飞书开放平台订阅 `im.chat.member.bot.added_v1` 并申请 `im:chat.members:bot_access`；本地 Provider 的 `event_types` 字段不会替代开放平台事件订阅。提示中的申请链接面向应用管理员，敏感权限仍需企业管理员审批。
 - 回复群消息需要 `im:message:send_as_bot`（或包含发送能力的 `im:message`）；读取消息资源需要 `im:resource`。
 - `GET /open-apis/bot/v3/info` 用于解析当前机器人 `open_id`，从而区分“@机器人”和“@其他成员”。
 - @ 判定优先严格比较 mention `open_id` 与当前 Provider 的 bot `open_id`；即使两个机器人重名，也不能用名称覆盖不匹配的 `open_id`，避免同群多机器人串触发。
