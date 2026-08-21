@@ -5761,32 +5761,35 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
         ],
     )
     .await;
-    // The Windows full-suite job can take several seconds to schedule the
-    // spawned PowerShell mock under load. Keep this wait above the mock
-    // runner's 10-second timeout, then also wait for the task marker to clear
-    // so the temp data root cannot be dropped while bookkeeping is in flight.
-    // Full-suite contention has exceeded 30 seconds, so leave a bounded
-    // 60-second window for scheduling without weakening the report assertion.
-    let completion_wait = std::time::Duration::from_secs(60);
-    tokio::time::timeout(completion_wait, async {
-        while !report.is_file() {
+    // The Windows full-suite job can take well over a minute to schedule the
+    // spawned PowerShell mock under load. Bound the complete report + cleanup
+    // lifecycle with one wall-clock deadline so scheduler delay is tolerated
+    // without allowing a genuinely stuck background task to pass.
+    let completion_wait = std::time::Duration::from_secs(180);
+    let completion = tokio::time::timeout(completion_wait, async {
+        loop {
+            let running = DAILY_AGENT_RUNNING_TASKS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(&task.id);
+            if report.is_file() && !running {
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("after-ASR daily agent did not produce its report");
+    .await;
+    let running = DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains(&task.id);
+    assert!(
+        completion.is_ok(),
+        "after-ASR daily agent did not finish within {completion_wait:?}: report_exists={}, running_marker={running}, report={}",
+        report.is_file(),
+        report.display()
+    );
     assert!(!std::fs::read_to_string(report).unwrap().trim().is_empty());
-    tokio::time::timeout(completion_wait, async {
-        while DAILY_AGENT_RUNNING_TASKS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .contains(&task.id)
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("after-ASR daily agent did not release its running marker");
 }
 
 #[tokio::test(flavor = "current_thread")]

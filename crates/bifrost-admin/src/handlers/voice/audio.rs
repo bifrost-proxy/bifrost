@@ -259,8 +259,8 @@ pub(super) fn voice_pcm16_rms(bytes: &[u8]) -> Result<f32, String> {
     }
     let mut sum = 0.0f64;
     let mut count = 0usize;
-    for chunk in bytes.chunks_exact(2) {
-        let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as f64 / i16::MAX as f64;
+    for chunk in bytes.as_chunks::<2>().0 {
+        let sample = i16::from_le_bytes(*chunk) as f64 / i16::MAX as f64;
         sum += sample * sample;
         count += 1;
     }

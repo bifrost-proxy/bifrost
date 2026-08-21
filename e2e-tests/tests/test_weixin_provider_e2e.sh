@@ -586,8 +586,16 @@ assert cancel_index < terminal_index, (cancel_index, terminal_index)
 
 polls = [record["body"] for record in records if record["path"].endswith("/ilink/bot/getupdates")]
 assert len(polls) >= 2, polls
-assert polls[0].get("get_updates_buf") == "", polls[0]
-assert polls[1].get("get_updates_buf") == "cursor-weixin-e2e-1", polls[1]
+cursors = [poll.get("get_updates_buf", "") for poll in polls]
+assert cursors[0] == "", cursors
+# A connection replacement can replay the empty cursor after the mock has
+# delivered its response but before the consumer durably commits cursor-1.
+# That is valid at-least-once polling (the single agent run asserted above
+# proves message-id deduplication). What must hold is eventual advancement and
+# no regression to the empty cursor after the durable cursor is observed.
+assert "cursor-weixin-e2e-1" in cursors[1:], cursors
+advanced_index = cursors.index("cursor-weixin-e2e-1")
+assert "" not in cursors[advanced_index:], cursors
 
 upload_requests = [
     record["body"] for record in records

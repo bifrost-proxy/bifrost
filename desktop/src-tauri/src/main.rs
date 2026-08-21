@@ -156,6 +156,8 @@ struct DesktopServerConfigResponse {
 struct DesktopRuntimeMarker {
     pid: u32,
     port: u16,
+    #[serde(default)]
+    health_port: Option<u16>,
     #[serde(default, rename = "runtime_start_mode", alias = "start_mode")]
     start_mode: Option<String>,
 }

@@ -10,7 +10,9 @@ use super::{
 use crate::state::{SharedAdminState, SharedSystemProxyManager};
 use bifrost_core::ShellProxyManager;
 use bifrost_core::SystemProxyManager;
-use bifrost_storage::{NewSystemProxyConfig as SystemProxyConfig, SystemProxyConfigUpdate};
+use bifrost_storage::{
+    NewSystemProxyConfig as SystemProxyConfig, SystemProxyConfigUpdate, SystemProxyRecoveryMode,
+};
 
 #[derive(Serialize)]
 struct SystemProxyStatus {
@@ -24,6 +26,8 @@ struct SystemProxyStatus {
     /// User's persisted Bifrost preference. Cleanup recovery must not mutate it.
     configured_enabled: bool,
     configured_bypass: String,
+    recovery_mode: SystemProxyRecoveryMode,
+    recovery_grace_secs: u64,
 }
 
 impl SystemProxyStatus {
@@ -37,6 +41,8 @@ impl SystemProxyStatus {
             managed_by_bifrost,
             configured_enabled: false,
             configured_bypass: String::new(),
+            recovery_mode: SystemProxyRecoveryMode::default(),
+            recovery_grace_secs: bifrost_storage::MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS,
         }
     }
 
@@ -50,12 +56,16 @@ impl SystemProxyStatus {
             managed_by_bifrost: false,
             configured_enabled: config.enabled,
             configured_bypass: config.bypass.clone(),
+            recovery_mode: config.recovery_mode,
+            recovery_grace_secs: config.recovery_grace_secs,
         }
     }
 
     fn apply_config(&mut self, config: &SystemProxyConfig) {
         self.configured_enabled = config.enabled;
         self.configured_bypass = config.bypass.clone();
+        self.recovery_mode = config.recovery_mode;
+        self.recovery_grace_secs = config.recovery_grace_secs;
     }
 }
 
@@ -114,6 +124,8 @@ struct CliProxyStatus {
 struct SetSystemProxyRequest {
     enabled: bool,
     bypass: Option<String>,
+    recovery_mode: Option<SystemProxyRecoveryMode>,
+    recovery_grace_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -398,6 +410,21 @@ fn matches_expected_system_proxy(
     !status.enabled || !status.managed_by_bifrost
 }
 
+fn persisted_system_proxy_update(
+    status: &SystemProxyStatus,
+    recovery_mode: Option<bifrost_storage::SystemProxyRecoveryMode>,
+    recovery_grace_secs: Option<u64>,
+) -> SystemProxyConfigUpdate {
+    let enabled_by_bifrost = status.enabled && status.managed_by_bifrost;
+    SystemProxyConfigUpdate {
+        enabled: Some(enabled_by_bifrost),
+        bypass: enabled_by_bifrost.then(|| status.bypass.clone()),
+        auto_enable: None,
+        recovery_mode,
+        recovery_grace_secs,
+    }
+}
+
 async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
     use http_body_util::BodyExt;
 
@@ -423,6 +450,8 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
 
+    let recovery_mode = request.recovery_mode;
+    let recovery_grace_secs = request.recovery_grace_secs;
     let bypass = request
         .bypass
         .unwrap_or_else(|| "localhost,127.0.0.1,::1,*.local".to_string());
@@ -451,15 +480,8 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
 
                 if let Some(ref config_manager) = state.config_manager {
                     let enabled_by_bifrost = status.enabled && status.managed_by_bifrost;
-                    let update = SystemProxyConfigUpdate {
-                        enabled: Some(enabled_by_bifrost),
-                        bypass: if enabled_by_bifrost {
-                            Some(status.bypass.clone())
-                        } else {
-                            None
-                        },
-                        auto_enable: None,
-                    };
+                    let update =
+                        persisted_system_proxy_update(&status, recovery_mode, recovery_grace_secs);
                     if let Err(e) = config_manager.update_system_proxy_config(update).await {
                         tracing::error!("Failed to persist system proxy config: {}", e);
                     } else {
@@ -897,6 +919,8 @@ mod tests {
             managed_by_bifrost: false,
             configured_enabled: false,
             configured_bypass: String::new(),
+            recovery_mode: SystemProxyRecoveryMode::default(),
+            recovery_grace_secs: bifrost_storage::MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS,
         };
 
         assert!(matches_expected_system_proxy(
@@ -905,6 +929,39 @@ mod tests {
             "127.0.0.1",
             8800
         ));
+    }
+
+    #[test]
+    fn persisted_update_keeps_recovery_policy_and_only_saves_owned_bypass() {
+        let mut status = SystemProxyStatus {
+            supported: true,
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 9900,
+            bypass: "localhost,127.0.0.1".into(),
+            managed_by_bifrost: true,
+            configured_enabled: true,
+            configured_bypass: String::new(),
+            recovery_mode: SystemProxyRecoveryMode::FailOpen,
+            recovery_grace_secs: 5,
+        };
+        let update = persisted_system_proxy_update(
+            &status,
+            Some(SystemProxyRecoveryMode::FailClosed),
+            Some(3),
+        );
+        assert_eq!(update.enabled, Some(true));
+        assert_eq!(update.bypass.as_deref(), Some("localhost,127.0.0.1"));
+        assert_eq!(
+            update.recovery_mode,
+            Some(SystemProxyRecoveryMode::FailClosed)
+        );
+        assert_eq!(update.recovery_grace_secs, Some(3));
+
+        status.managed_by_bifrost = false;
+        let update = persisted_system_proxy_update(&status, None, None);
+        assert_eq!(update.enabled, Some(false));
+        assert!(update.bypass.is_none());
     }
 
     #[test]
@@ -918,6 +975,8 @@ mod tests {
             managed_by_bifrost: true,
             configured_enabled: true,
             configured_bypass: String::new(),
+            recovery_mode: SystemProxyRecoveryMode::default(),
+            recovery_grace_secs: bifrost_storage::MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS,
         };
 
         assert!(!matches_expected_system_proxy(
@@ -946,6 +1005,7 @@ mod tests {
             enabled: true,
             bypass: "example.com".to_string(),
             auto_enable: true,
+            ..SystemProxyConfig::default()
         };
         let status = SystemProxyStatus::unsupported(&cfg);
 
@@ -984,6 +1044,7 @@ mod tests {
             enabled: true,
             bypass: "configured.example".to_string(),
             auto_enable: false,
+            ..SystemProxyConfig::default()
         };
         let success = system_proxy_status_response(
             Ok((

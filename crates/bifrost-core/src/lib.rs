@@ -16,9 +16,11 @@ pub mod process_start_time;
 pub mod protocol;
 pub mod rule;
 pub mod rule_share;
+pub mod runtime_stability;
 pub mod shell_proxy;
 pub mod syntax;
 pub mod system_proxy;
+pub mod system_proxy_diagnostics;
 pub mod system_proxy_launchd;
 pub mod system_proxy_recovery;
 pub mod text;
@@ -82,6 +84,11 @@ pub use rule::{
     RuleSyntaxGuidance, RuleSyntaxReport, RulesResolver, ScriptReference, SharedValueStore,
     TemplateEngine, ValidationResult, ValueStore, VariableInfo,
 };
+pub use runtime_stability::{
+    current_resource_pressure, heavy_tasks_allowed, payload_persistence_allowed,
+    publish_resource_pressure, scripts_allowed, PressureInputs, PressureThresholds,
+    ResourcePressureController, ResourcePressureLevel, RuntimeHealthSnapshot,
+};
 pub use shell_proxy::{ShellProxyManager, ShellProxyStatus, ShellType};
 pub use syntax::{
     get_all_protocols, get_filter_value_specs, get_pattern_types, get_syntax_info,
@@ -89,8 +96,12 @@ pub use syntax::{
     ProtocolInfo, ProtocolValueSpec, SyntaxInfo, TemplateVariableInfo, ValueHint,
 };
 pub use system_proxy::{
-    repair_system_proxy_lock_permissions, ProxyBackup, SystemProxyDisableOutcome,
-    SystemProxyManager,
+    repair_system_proxy_lock_permissions, GuardedSystemProxyTransition,
+    ManagedSystemProxyOwnership, ProxyBackup, SystemProxyDisableOutcome, SystemProxyManager,
+};
+pub use system_proxy_diagnostics::{
+    append_system_proxy_event, read_recent_system_proxy_events, read_system_proxy_owner_state,
+    update_system_proxy_owner_state, SystemProxyLifecycleEvent, SystemProxyOwnerState,
 };
 pub use system_proxy_launchd::{
     consume_stop_restore_suppression, consume_system_proxy_shutdown_mode, install_launchd_cleanup,

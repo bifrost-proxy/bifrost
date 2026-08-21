@@ -1,9 +1,10 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
     configure_backend_stop_command, configure_desktop_backend_environment,
-    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
-    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
-    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    confirms_managed_runtime_unresponsive, deferred_desktop_install_version_error,
+    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
+    desktop_shutdown_backend_action, desktop_sidecar_rust_log, desktop_startup_deadline,
+    desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
     ensure_backend_running, ensure_backend_running_with_cli_wait,
     existing_backend_candidate_matches_runtime, external_cli_backend_matches_handoff,
@@ -23,13 +24,14 @@ use super::{
     uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_backend_stop_helper,
     wait_for_child_exit, wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
     write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendRecoveryBudget,
-    BackendState, BackendSystemIdentity, BackendWaitFailureKind, BackendWatchdogHealth,
-    DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
-    DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
-    PendingDesktopInstall, StartupDeadlineDisposition, SustainedReadinessAction,
-    WatchdogProbeDisposition, BACKEND_WATCHDOG_MAX_RECOVERIES, BACKEND_WATCHDOG_RECOVERY_WINDOW,
-    DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
-    DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    BackendSignalSnapshot, BackendState, BackendSystemIdentity, BackendWaitFailureKind,
+    BackendWatchdogHealth, DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker,
+    DesktopShutdownBackendAction, DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff,
+    HostWindowCloseBehavior, PendingDesktopInstall, StartupDeadlineDisposition,
+    SustainedReadinessAction, WatchdogProbeDisposition, BACKEND_WATCHDOG_MAX_RECOVERIES,
+    BACKEND_WATCHDOG_RECOVERY_WINDOW, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
+    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV,
+    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 #[cfg(target_os = "macos")]
 use super::{macos_menu_action, MacosMenuAction, MACOS_APP_QUIT_MENU_ID};
@@ -1061,6 +1063,7 @@ fn desktop_shutdown_stops_only_a_backend_owned_by_the_desktop() {
     let runtime = DesktopRuntimeMarker {
         pid: 456,
         port: 19900,
+        health_port: None,
         start_mode: Some("desktop".to_string()),
     };
     let identity = BackendSystemIdentity {
@@ -1081,6 +1084,7 @@ fn normal_startup_reuses_only_the_current_data_directory_runtime() {
     let runtime = DesktopRuntimeMarker {
         pid: 456,
         port: 19900,
+        health_port: None,
         start_mode: Some("daemon".to_string()),
     };
     let matching_identity = BackendSystemIdentity {

@@ -28,7 +28,20 @@ API_PORT=""
 API_PID=""
 RUNNING_APP_PID=""
 RELAUNCHED_APP_PID=""
+
+remove_test_root() {
+    local attempt
+    for attempt in $(seq 1 20); do
+        rm -rf "$TEST_ROOT" 2>/dev/null || true
+        [[ ! -e "$TEST_ROOT" ]] && return 0
+        sleep 0.1
+    done
+    echo "[WARN] temporary desktop app test root remained after cleanup retries: $TEST_ROOT" >&2
+    return 0
+}
+
 cleanup() {
+    set +e
     if [[ -n "$API_DATA_DIR" && -n "$API_PORT" ]]; then
         BIFROST_DATA_DIR="$API_DATA_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
     fi
@@ -44,7 +57,8 @@ cleanup() {
         kill "$RELAUNCHED_APP_PID" >/dev/null 2>&1 || true
         wait "$RELAUNCHED_APP_PID" 2>/dev/null || true
     fi
-    rm -rf "$TEST_ROOT"
+    remove_test_root
+    return 0
 }
 trap cleanup EXIT
 
@@ -234,8 +248,8 @@ if [[ -n "$API_PID" ]]; then
     wait "$API_PID" 2>/dev/null || true
     API_PID=""
 fi
-API_DATA_DIR=""
-API_PORT=""
+# Keep the API runtime identity until EXIT so cleanup can issue one final,
+# idempotent stop before removing files that daemon log writers may still hold.
 
 HOST_OS="$(uname -s)"
 read_progress_field() {

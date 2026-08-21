@@ -30,12 +30,13 @@ pub use unified_config::{
     SandboxFileConfig, SandboxFileConfigUpdate, SandboxLimitsConfig, SandboxLimitsConfigUpdate,
     SandboxNetConfig, SandboxNetConfigUpdate, ServerConfig, ServerConfigUpdate, SocksAuthConfig,
     SyncConfig, SyncConfigUpdate, SystemProxyConfig as NewSystemProxyConfig,
-    SystemProxyConfigUpdate, TlsConfig, TlsConfigUpdate, TrafficConfig as NewTrafficConfig,
-    TrafficConfigUpdate, TrayConfig, TrayConfigUpdate, TraySystemStatsItems,
-    TraySystemStatsItemsUpdate, UiConfig, UiConfigUpdate, UnifiedConfig,
+    SystemProxyConfigUpdate, SystemProxyRecoveryMode, TlsConfig, TlsConfigUpdate,
+    TrafficConfig as NewTrafficConfig, TrafficConfigUpdate, TrayConfig, TrayConfigUpdate,
+    TraySystemStatsItems, TraySystemStatsItemsUpdate, UiConfig, UiConfigUpdate, UnifiedConfig,
     DEFAULT_BREAKPOINT_TIMEOUT_MS, DEFAULT_REMOTE_BASE_URL, DEFAULT_SYSTEM_PROXY_BYPASS,
     DEFAULT_TRAFFIC_MAX_RECORDS, LEGACY_DEFAULT_SYSTEM_PROXY_BYPASS, MAX_BREAKPOINT_TIMEOUT_MS,
-    MAX_TRAFFIC_MAX_DB_SIZE_BYTES, MAX_TRAFFIC_MAX_RECORDS, MIN_BREAKPOINT_TIMEOUT_MS,
-    MIN_TRAFFIC_MAX_DB_SIZE_BYTES, MIN_TRAFFIC_MAX_RECORDS,
+    MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS, MAX_TRAFFIC_MAX_DB_SIZE_BYTES, MAX_TRAFFIC_MAX_RECORDS,
+    MIN_BREAKPOINT_TIMEOUT_MS, MIN_SYSTEM_PROXY_RECOVERY_GRACE_SECS, MIN_TRAFFIC_MAX_DB_SIZE_BYTES,
+    MIN_TRAFFIC_MAX_RECORDS,
 };
 pub use values::{ValueEntry, ValuesStorage};

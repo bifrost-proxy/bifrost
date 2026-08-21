@@ -1636,9 +1636,11 @@ fn pcm16le_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
         return Err("pcm16le audio byte length must be even".to_string());
     }
     Ok(bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+            let sample = i16::from_le_bytes(*chunk);
             sample as f32 / i16::MAX as f32
         })
         .collect())

@@ -1021,6 +1021,7 @@ mod tests {
             binary_path: None,
             system_proxy_enabled: None,
             system_proxy_bypass: None,
+            health_port: None,
         };
         let healthy =
             runtime_status_lines_with_process_state(&running, true, true, true).join("\n");
@@ -1094,6 +1095,7 @@ mod tests {
             binary_path: None,
             system_proxy_enabled: None,
             system_proxy_bypass: None,
+            health_port: None,
         };
         let system_proxy = SystemProxyStatus {
             supported: true,
@@ -1190,6 +1192,7 @@ mod tests {
             binary_path: None,
             system_proxy_enabled: None,
             system_proxy_bypass: None,
+            health_port: None,
         };
         let addresses = ProxyAddressInfo {
             addresses: vec![
@@ -1289,6 +1292,7 @@ mod tests {
             binary_path: None,
             system_proxy_enabled: None,
             system_proxy_bypass: None,
+            health_port: None,
         }
     }
 

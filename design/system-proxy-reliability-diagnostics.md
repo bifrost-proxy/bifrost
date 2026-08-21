@@ -15,7 +15,7 @@
 - `bifrost-core::system_proxy_recovery` 提供 `is_retryable_recovery_error` / `is_network_services_not_ready_error` / `retry_with_policy`（`system_proxy_recovery.rs` line 21/31/58），对应 network services 未 ready 的 retry 安全网。
 - LaunchDaemon one-shot cleanup（`system_proxy_launchd`）保留并继续走 startup recovery（`system_proxy_launchd.rs` line 357/371 使用两次 live listener 检查）。
 
-尚未落地（planned, not yet shipped as of 2026-06-17）：
+尚未落地（本轮按 `design/runtime-stability-hardening.md` 实施）：
 
 - `bifrost-core::system_proxy_owner_state` 模块与 `system_proxy_owner_state.json` 文件（含 `runtime_start_mode` / `restartable_runtime` / `helper_pid` / `helper_last_heartbeat_at` / `wake_watcher_status` / `last_*` 字段）。
 - `bifrost-core::system_proxy_events` 模块、`logs/system_proxy_events.jsonl` 结构化事件、`.system_proxy_diagnostics.lock` 独立诊断锁、10 MiB rotation。
@@ -79,7 +79,7 @@ Bifrost 启用系统代理后，如果主进程异常退出、macOS 合盖或休
 | wake 后 listener alive 但网络未 ready | 记录 `network_stack_unready_summary`，不恢复系统代理 |
 | watcher 失败 | 不停止 helper，降级到主进程 wake-gap、LaunchDaemon 与 startup recovery |
 | 诊断数据 | 写入 `system_proxy_owner_state.json` 与 `logs/system_proxy_events.jsonl` |
-| 诊断状态并发 | owner state 与 event log 使用独立 `.system_proxy_diagnostics.lock` 与原子写，不复用 system proxy 写锁 |
+| 诊断状态并发 | owner state 与 event log 使用独立 `.system_proxy_diagnostics.lock` 与原子写，不复用 system proxy 写锁；等待上限 2 秒，超时不得阻塞启动、restart 或恢复 |
 | 心跳落点 | helper heartbeat 只更新 owner state，不按 5 秒频率写 JSONL |
 | 主进程已死但代理残留 | 对 daemon/desktop 等可托管运行时优先尝试自动重启；重启失败或不可托管时才 guarded restore/disable |
 | Windows 边界 | Windows 落地跨平台诊断、helper parent-death cleanup、可托管 runtime restart-before-restore、status/doctor；不实现 IOKit watcher、LaunchDaemon、networksetup readiness |
@@ -122,7 +122,7 @@ Layer 4  startup recovery
 - 所有 restore/disable 必须先确认当前系统代理 target 属于 Bifrost。
 - 所有 cleanup/reconcile 决策必须写 lifecycle event。
 - helper 与主进程共用同一套 wake reconcile 决策函数，只是 trigger 不同。
-- 诊断状态写入不能长时间持有 `.system_proxy.lock`，避免 heartbeat/event 写入阻塞恢复。
+- 诊断状态写入不得获取 `.system_proxy.lock`，只能只读现有 ownership；独立 diagnostics lock 也必须有界等待，避免 heartbeat/event 写入阻塞恢复。
 
 ## 平台能力矩阵
 

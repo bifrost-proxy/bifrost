@@ -690,8 +690,6 @@ fn labeled_worker_executable(executable: &Path, alias_name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
     use crate::worker_runtime::WorkerFrame;
 
     use super::*;

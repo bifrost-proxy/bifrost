@@ -396,11 +396,18 @@
 
         assert_eq!(bitmap.height, 36);
         assert!(bitmap.width <= 1400);
-        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+        assert!(bitmap
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[3] == 255));
 
         let icon_region_max_alpha = bitmap
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .filter_map(|(idx, pixel)| {
                 let x = idx as u32 % bitmap.width;
@@ -619,7 +626,12 @@
 
         assert_eq!(bitmap.height, 48);
         assert!(bitmap.width > 200);
-        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+        assert!(bitmap
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[3] == 255));
 
         let separator_x = (0..bitmap.width)
             .find(|x| {

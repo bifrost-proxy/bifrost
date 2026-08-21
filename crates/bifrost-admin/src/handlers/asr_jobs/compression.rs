@@ -252,7 +252,14 @@ fn save_source_compression_state(state: &SourceAudioCompressionState) -> Result<
 }
 
 fn normalized_source_compression_state(task_id: &str) -> Option<SourceAudioCompressionState> {
-    let mut state = load_source_compression_state(task_id)?;
+    let state = load_source_compression_state(task_id)?;
+    Some(normalize_loaded_source_compression_state(task_id, state))
+}
+
+fn normalize_loaded_source_compression_state(
+    task_id: &str,
+    mut state: SourceAudioCompressionState,
+) -> SourceAudioCompressionState {
     if matches!(
         state.status,
         SourceAudioCompressionStatus::Queued
@@ -260,6 +267,29 @@ fn normalized_source_compression_state(task_id: &str) -> Option<SourceAudioCompr
             | SourceAudioCompressionStatus::Cancelling
     ) && !source_compression_is_running(task_id)
     {
+        // Serialize the final liveness decision with a possible replacement
+        // run. Otherwise a new guard could be acquired between the reload and
+        // the Interrupted write below.
+        let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The background job persists its terminal state immediately before
+        // dropping the running guard. A status poll can read `Running`, then
+        // observe the guard disappear after that final write. Reload after
+        // observing the stopped guard so a stale snapshot cannot overwrite a
+        // successfully completed run as `Interrupted`.
+        if let Some(latest) = load_source_compression_state(task_id) {
+            state = latest;
+        }
+        if !matches!(
+            state.status,
+            SourceAudioCompressionStatus::Queued
+                | SourceAudioCompressionStatus::Running
+                | SourceAudioCompressionStatus::Cancelling
+        ) || source_compression_is_running(task_id)
+        {
+            return state;
+        }
         state.status = SourceAudioCompressionStatus::Interrupted;
         state.updated_at_ms = now_ms();
         state.finished_at_ms = Some(state.updated_at_ms);
@@ -269,7 +299,7 @@ fn normalized_source_compression_state(task_id: &str) -> Option<SourceAudioCompr
                 .to_string();
         let _ = save_source_compression_state(&state);
     }
-    Some(state)
+    state
 }
 
 fn update_source_compression_state<F>(task_id: &str, update: F)

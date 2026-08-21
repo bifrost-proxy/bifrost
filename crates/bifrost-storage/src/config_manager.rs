@@ -223,6 +223,15 @@ impl ConfigManager {
         if let Some(auto_enable) = update.auto_enable {
             config.system_proxy.auto_enable = auto_enable;
         }
+        if let Some(recovery_mode) = update.recovery_mode {
+            config.system_proxy.recovery_mode = recovery_mode;
+        }
+        if let Some(recovery_grace_secs) = update.recovery_grace_secs {
+            config.system_proxy.recovery_grace_secs = recovery_grace_secs.clamp(
+                crate::MIN_SYSTEM_PROXY_RECOVERY_GRACE_SECS,
+                crate::MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS,
+            );
+        }
 
         self.save_config(&config)?;
         let _ = self
@@ -772,6 +781,8 @@ impl ConfigManager {
                     enabled: legacy.system_proxy.enabled,
                     bypass: legacy.system_proxy.bypass.clone(),
                     auto_enable: false,
+                    recovery_mode: crate::SystemProxyRecoveryMode::default(),
+                    recovery_grace_secs: crate::MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS,
                 };
                 system_proxy.normalize_legacy_default_bypass();
                 system_proxy
@@ -1254,6 +1265,8 @@ mod tests {
                 enabled: Some(true),
                 bypass: Some("localhost".to_string()),
                 auto_enable: Some(true),
+                recovery_mode: Some(crate::SystemProxyRecoveryMode::FailClosed),
+                recovery_grace_secs: Some(4),
             })
             .await
             .unwrap();
@@ -1261,6 +1274,11 @@ mod tests {
         assert!(config.system_proxy.enabled);
         assert_eq!(config.system_proxy.bypass, "localhost");
         assert!(config.system_proxy.auto_enable);
+        assert_eq!(
+            config.system_proxy.recovery_mode,
+            crate::SystemProxyRecoveryMode::FailClosed
+        );
+        assert_eq!(config.system_proxy.recovery_grace_secs, 4);
         let event = receiver.try_recv().unwrap();
         assert!(matches!(event, ConfigChangeEvent::SystemProxyConfigChanged));
     }

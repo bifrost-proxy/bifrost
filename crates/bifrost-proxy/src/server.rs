@@ -57,6 +57,8 @@ use bifrost_core::{
 
 const NOISY_CONN_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const TRUST_PROBE_ROUTE_PREFIX: &str = "/_bifrost/trust-probe/";
+const RUNTIME_CANARY_HOST: &str = "bifrost-runtime-canary.invalid";
+const RUNTIME_CANARY_PATH: &str = "/__bifrost_runtime_canary";
 
 #[derive(Default)]
 struct NoisyConnErrorLogState {
@@ -1277,6 +1279,18 @@ async fn handle_request(
     let is_local_client = peer_addr.ip().is_loopback();
     let admin_routing = admin_routing_decision(&req, proxy_config.port, &proxy_config.host);
 
+    if is_runtime_data_plane_canary(&req) {
+        return Ok(if is_local_client {
+            Response::builder()
+                .status(hyper::StatusCode::NO_CONTENT)
+                .header("cache-control", "no-store")
+                .body(empty_body())
+                .expect("static runtime canary response must be valid")
+        } else {
+            error_response(403, "Runtime canary is loopback-only")
+        });
+    }
+
     let connect_tls_intercept_config = if method == Method::CONNECT {
         Some(if let Some(ref state) = admin_state {
             let runtime_config = state.runtime_config.read().await;
@@ -1818,6 +1832,9 @@ enum ProxyAuthResult {
     Unauthorized,
 }
 
+// Authentication failures are returned as complete HTTP responses so this
+// boundary preserves challenge headers and response bodies verbatim.
+#[allow(clippy::result_large_err)]
 async fn authorize_proxy_request(
     req: &Request<Incoming>,
     peer_addr: SocketAddr,
@@ -2088,6 +2105,18 @@ fn is_trust_probe_proxy_configured_request<B>(req: &Request<B>) -> bool {
     uri.scheme_str().is_none()
         && uri.path() == TRUST_PROBE_PROXY_CONFIG_PATH
         && request_host_matches(req, TRUST_PROBE_PROXY_CONFIG_HOST)
+}
+
+fn is_runtime_data_plane_canary<B>(req: &Request<B>) -> bool {
+    if req.method() != Method::GET || req.uri().path() != RUNTIME_CANARY_PATH {
+        return false;
+    }
+    let uri = req.uri();
+    (uri.scheme_str() == Some("http")
+        && uri
+            .host()
+            .is_some_and(|host| host.eq_ignore_ascii_case(RUNTIME_CANARY_HOST)))
+        || (uri.scheme_str().is_none() && request_host_matches(req, RUNTIME_CANARY_HOST))
 }
 
 fn request_host_matches<B>(req: &Request<B>, expected_host: &str) -> bool {
@@ -2516,6 +2545,39 @@ mod tests {
             client_process_resolution_mode(false, &Method::GET, Some(&config)),
             ClientProcessResolutionMode::Normal
         );
+    }
+
+    #[test]
+    fn runtime_data_plane_canary_accepts_only_exact_get_target() {
+        let absolute = Request::builder()
+            .method(Method::GET)
+            .uri(format!("http://{RUNTIME_CANARY_HOST}{RUNTIME_CANARY_PATH}"))
+            .body(())
+            .unwrap();
+        assert!(is_runtime_data_plane_canary(&absolute));
+
+        let origin = Request::builder()
+            .method(Method::GET)
+            .uri(RUNTIME_CANARY_PATH)
+            .header(HOST, format!("{RUNTIME_CANARY_HOST}:80"))
+            .body(())
+            .unwrap();
+        assert!(is_runtime_data_plane_canary(&origin));
+
+        let wrong_method = Request::builder()
+            .method(Method::POST)
+            .uri(format!("http://{RUNTIME_CANARY_HOST}{RUNTIME_CANARY_PATH}"))
+            .body(())
+            .unwrap();
+        assert!(!is_runtime_data_plane_canary(&wrong_method));
+
+        let wrong_host = Request::builder()
+            .method(Method::GET)
+            .uri(RUNTIME_CANARY_PATH)
+            .header(HOST, "example.com")
+            .body(())
+            .unwrap();
+        assert!(!is_runtime_data_plane_canary(&wrong_host));
     }
 
     #[test]

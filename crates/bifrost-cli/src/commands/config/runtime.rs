@@ -108,6 +108,7 @@ mod tests {
             binary_path: None,
             system_proxy_enabled: None,
             system_proxy_bypass: None,
+            health_port: None,
         }
     }
 

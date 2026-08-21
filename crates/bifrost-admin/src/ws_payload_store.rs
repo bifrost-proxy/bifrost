@@ -159,7 +159,7 @@ impl WsPayloadStore {
     }
 
     pub fn append_bytes(&self, connection_id: &str, bytes: &[u8]) -> Option<BodyRef> {
-        if bytes.is_empty() {
+        if bytes.is_empty() || !bifrost_core::payload_persistence_allowed() {
             return None;
         }
         let safe_id = Self::safe_connection_id(connection_id);

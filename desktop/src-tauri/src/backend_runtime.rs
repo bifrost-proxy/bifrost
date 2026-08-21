@@ -2,18 +2,13 @@ use super::*;
 
 mod watchdog;
 
-pub(super) use watchdog::monitor_desktop_backend;
 #[cfg(test)]
 pub(super) use watchdog::{
-    open_backend_recovery_circuit, sustained_readiness_failure_action, BackendRecoveryBudget,
+    confirms_managed_runtime_unresponsive, open_backend_recovery_circuit,
+    sustained_readiness_failure_action, BackendRecoveryBudget, BackendSignalSnapshot,
     BackendWatchdogHealth, SustainedReadinessAction, WatchdogProbeDisposition,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ManagedBackendExit {
-    pub(super) pid: u32,
-    pub(super) detail: String,
-}
+pub(super) use watchdog::{monitor_desktop_backend, ManagedBackendExit};
 
 pub(super) fn ensure_backend_running(
     binary_path: &Path,
@@ -364,8 +359,17 @@ pub(super) fn poll_managed_backend_exit(
         Ok(Some(status)) => {
             let pid = child.id();
             let _ = child_guard.take();
+            #[cfg(unix)]
+            let exit_signal = {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal()
+            };
+            #[cfg(not(unix))]
+            let exit_signal = None;
             Ok(Some(ManagedBackendExit {
                 pid,
+                exit_code: status.code(),
+                exit_signal,
                 detail: format!("managed backend child pid={pid} exited with status {status}"),
             }))
         }
@@ -391,6 +395,22 @@ pub(super) fn attempt_backend_recovery(app: &AppHandle, exited: &ManagedBackendE
     let Some(_recovery_guard) = begin_backend_recovery(&state) else {
         return;
     };
+
+    let recovery_started_at = Instant::now();
+    let mut exit_event = bifrost_core::SystemProxyLifecycleEvent::new(
+        "managed_child_exit_confirmed",
+        "desktop_watchdog",
+    );
+    exit_event.old_pid = Some(exited.pid);
+    exit_event.exit_code = exited.exit_code;
+    exit_event.exit_signal = exited.exit_signal;
+    exit_event.trigger = Some(exited.detail.clone());
+    if let Err(error) = bifrost_core::append_system_proxy_event(&state.data_dir, &exit_event) {
+        append_desktop_bootstrap_log(
+            &state.data_dir,
+            format!("failed to persist managed child exit event: {error}"),
+        );
+    }
 
     append_desktop_bootstrap_log(
         &state.data_dir,
@@ -435,6 +455,7 @@ pub(super) fn attempt_backend_recovery(app: &AppHandle, exited: &ManagedBackendE
         None,
     ) {
         Ok((child, port)) => {
+            let new_pid = child.as_ref().map(Child::id);
             if let Ok(mut child_guard) = state.child.lock() {
                 *child_guard = child;
             }
@@ -448,6 +469,16 @@ pub(super) fn attempt_backend_recovery(app: &AppHandle, exited: &ManagedBackendE
                 &state.data_dir,
                 format!("desktop backend watchdog recovery succeeded; active_port={port}"),
             );
+            let mut event = bifrost_core::SystemProxyLifecycleEvent::new(
+                "managed_child_recovery_succeeded",
+                "desktop_watchdog",
+            );
+            event.old_pid = Some(exited.pid);
+            event.new_pid = new_pid;
+            event.exit_code = exited.exit_code;
+            event.exit_signal = exited.exit_signal;
+            event.recovery_elapsed_ms = Some(recovery_started_at.elapsed().as_millis() as u64);
+            let _ = bifrost_core::append_system_proxy_event(&state.data_dir, &event);
             try_start_native_handoff(app, "backend watchdog recovery");
         }
         Err(error) => {
@@ -459,6 +490,16 @@ pub(super) fn attempt_backend_recovery(app: &AppHandle, exited: &ManagedBackendE
                     BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY
                 ),
             );
+            let mut event = bifrost_core::SystemProxyLifecycleEvent::new(
+                "managed_child_recovery_failed",
+                "desktop_watchdog",
+            );
+            event.old_pid = Some(exited.pid);
+            event.exit_code = exited.exit_code;
+            event.exit_signal = exited.exit_signal;
+            event.error = Some(error.to_string());
+            event.recovery_elapsed_ms = Some(recovery_started_at.elapsed().as_millis() as u64);
+            let _ = bifrost_core::append_system_proxy_event(&state.data_dir, &event);
             std::thread::sleep(BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY);
         }
     }

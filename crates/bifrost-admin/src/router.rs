@@ -237,6 +237,13 @@ impl AdminRouter {
             return resp;
         }
 
+        if !bifrost_core::heavy_tasks_allowed() && is_heavy_admin_request(path) {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "This operation is paused while Bifrost is under resource pressure",
+            );
+        }
+
         // ASR is deliberately lazy: ordinary admin polling after a fresh
         // install must not recover tasks, start watchers, or prepare model
         // assets. Activation also belongs after auth/write checks so rejected
@@ -547,6 +554,22 @@ impl AdminRouter {
     }
 }
 
+fn is_heavy_admin_request(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/traffic" | "/api/traffic/query" | "/api/traffic/statistics" | "/api/traffic/batch"
+    ) || path.starts_with("/api/search")
+        || path.starts_with("/api/app-icon/")
+        || path.starts_with("/api/scripts")
+        || path.starts_with("/api/replay")
+        || path.starts_with("/api/asr")
+        || path.starts_with("/api/speech")
+        || path.starts_with("/api/voice")
+        || path.starts_with("/api/worker-jobs")
+        || path.starts_with("/api/im-gateway")
+        || path.starts_with("/api/remote-invoke")
+}
+
 #[derive(Serialize)]
 struct CsrfResponse<'a> {
     csrf_token: &'a str,
@@ -567,6 +590,89 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_pressure_guard_targets_heavy_admin_surfaces_only() {
+        for path in [
+            "/api/traffic",
+            "/api/traffic/query",
+            "/api/search",
+            "/api/app-icon/Safari",
+            "/api/scripts",
+            "/api/replay/execute",
+            "/api/asr/jobs",
+            "/api/worker-jobs",
+            "/api/im-gateway/config",
+            "/api/remote-invoke/connections",
+        ] {
+            assert!(is_heavy_admin_request(path), "{path}");
+        }
+        for path in [
+            "/api/proxy/system/support",
+            "/api/system/overview",
+            "/api/traffic/record-id",
+            "/api/metrics",
+        ] {
+            assert!(!is_heavy_admin_request(path), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn critical_pressure_rejects_heavy_admin_route() {
+        const MARKER: &str = "BIFROST_ROUTER_PRESSURE_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .arg("--exact")
+            .arg("router::tests::critical_pressure_rejects_heavy_admin_route")
+            .arg("--nocapture")
+            .env(MARKER, "1")
+            .status()
+            .expect("run isolated pressure test");
+            assert!(status.success());
+            return;
+        }
+
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind router test listener");
+        let addr = listener.local_addr().expect("router test listener addr");
+        let server = tokio::spawn(async move {
+            let (stream, peer_addr) = listener.accept().await.expect("accept router request");
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req: Request<Incoming>| {
+                let state = state.clone();
+                async move {
+                    Ok::<_, hyper::Error>(
+                        AdminRouter::handle(req, state, None, Some(peer_addr)).await,
+                    )
+                }
+            });
+            http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+                .expect("serve router request");
+        });
+
+        let response = reqwest::get(format!(
+            "http://{addr}{ADMIN_PATH_PREFIX}/api/traffic/query"
+        ))
+        .await
+        .expect("request heavy admin route");
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        drop(response);
+        server.abort();
+        let _ = server.await;
+    }
     use crate::admin_auth_db::AuthDb;
     use crate::state::AdminState;
     use crate::test_support::TestAdminState;

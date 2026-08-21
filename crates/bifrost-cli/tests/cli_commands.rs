@@ -31,6 +31,22 @@ fn generate_completions(shell: Shell) -> String {
     String::from_utf8(buf).expect("completion output should be utf-8")
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn system_proxy_status_reports_recovery_policy_without_mutating_proxy() {
+    let data_dir = tempfile::tempdir().expect("temporary Bifrost data dir");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_bifrost"))
+        .args(["system-proxy", "status"])
+        .env("BIFROST_DATA_DIR", data_dir.path())
+        .output()
+        .expect("run system proxy status");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Supported: true"), "stdout: {stdout}");
+    assert!(stdout.contains("Recovery policy:"), "stdout: {stdout}");
+}
+
 #[test]
 fn metrics_subcommands_parse() {
     let help = run_help(&["metrics"]);

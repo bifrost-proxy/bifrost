@@ -1,10 +1,20 @@
 use super::*;
+use std::io::Read;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BackendHealthProbeResult {
     pub(super) healthy: bool,
     pub(super) elapsed: Duration,
     pub(super) failure: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RuntimeHealthLaneProbeResult {
+    pub(super) healthy: bool,
+    pub(super) elapsed: Duration,
+    pub(super) failure: Option<String>,
+    pub(super) snapshot: Option<bifrost_core::RuntimeHealthSnapshot>,
 }
 
 pub(super) fn is_backend_ready(port: u16) -> bool {
@@ -153,6 +163,155 @@ pub(super) fn probe_backend_health_with_timeout(
         healthy: status.is_success(),
         elapsed: started.elapsed(),
         failure: (!status.is_success()).then(|| format!("HTTP status {}", status.as_u16())),
+    }
+}
+
+pub(super) fn probe_data_plane_canary_with_timeout(
+    port: u16,
+    timeout: Duration,
+) -> BackendHealthProbeResult {
+    probe_raw_loopback_http(
+        port,
+        "GET http://bifrost-runtime-canary.invalid/__bifrost_runtime_canary HTTP/1.1\r\nHost: bifrost-runtime-canary.invalid\r\nConnection: close\r\n\r\n",
+        timeout,
+        "204",
+    )
+}
+
+pub(super) fn probe_runtime_health_lane_with_timeout(
+    health_port: Option<u16>,
+    timeout: Duration,
+) -> RuntimeHealthLaneProbeResult {
+    let started = Instant::now();
+    let Some(port) = health_port else {
+        return RuntimeHealthLaneProbeResult {
+            healthy: false,
+            elapsed: started.elapsed(),
+            failure: Some("runtime marker has no dedicated health port".into()),
+            snapshot: None,
+        };
+    };
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut stream = match TcpStream::connect_timeout(&address, timeout) {
+        Ok(stream) => stream,
+        Err(error) => {
+            return RuntimeHealthLaneProbeResult {
+                healthy: false,
+                elapsed: started.elapsed(),
+                failure: Some(format!("health lane connect failed: {error}")),
+                snapshot: None,
+            };
+        }
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    if let Err(error) =
+        stream.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    {
+        return RuntimeHealthLaneProbeResult {
+            healthy: false,
+            elapsed: started.elapsed(),
+            failure: Some(format!("health lane write failed: {error}")),
+            snapshot: None,
+        };
+    }
+    let mut response = Vec::new();
+    if let Err(error) = stream.read_to_end(&mut response) {
+        return RuntimeHealthLaneProbeResult {
+            healthy: false,
+            elapsed: started.elapsed(),
+            failure: Some(format!("health lane read failed: {error}")),
+            snapshot: None,
+        };
+    }
+    let response = String::from_utf8_lossy(&response);
+    let Some((head, body)) = response.split_once("\r\n\r\n") else {
+        return RuntimeHealthLaneProbeResult {
+            healthy: false,
+            elapsed: started.elapsed(),
+            failure: Some("health lane returned an invalid HTTP response".into()),
+            snapshot: None,
+        };
+    };
+    if !head
+        .lines()
+        .next()
+        .is_some_and(|line| line.contains(" 200 "))
+    {
+        return RuntimeHealthLaneProbeResult {
+            healthy: false,
+            elapsed: started.elapsed(),
+            failure: Some(format!(
+                "health lane returned {}",
+                head.lines().next().unwrap_or("unknown status")
+            )),
+            snapshot: None,
+        };
+    }
+    match serde_json::from_str::<bifrost_core::RuntimeHealthSnapshot>(body) {
+        Ok(snapshot) => RuntimeHealthLaneProbeResult {
+            healthy: true,
+            elapsed: started.elapsed(),
+            failure: None,
+            snapshot: Some(snapshot),
+        },
+        Err(error) => RuntimeHealthLaneProbeResult {
+            healthy: false,
+            elapsed: started.elapsed(),
+            failure: Some(format!("health lane JSON was invalid: {error}")),
+            snapshot: None,
+        },
+    }
+}
+
+fn probe_raw_loopback_http(
+    port: u16,
+    request: &str,
+    timeout: Duration,
+    expected_status: &str,
+) -> BackendHealthProbeResult {
+    let started = Instant::now();
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut stream = match TcpStream::connect_timeout(&address, timeout) {
+        Ok(stream) => stream,
+        Err(error) => {
+            return BackendHealthProbeResult {
+                healthy: false,
+                elapsed: started.elapsed(),
+                failure: Some(format!("connect failed: {error}")),
+            };
+        }
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    if let Err(error) = stream.write_all(request.as_bytes()) {
+        return BackendHealthProbeResult {
+            healthy: false,
+            elapsed: started.elapsed(),
+            failure: Some(format!("write failed: {error}")),
+        };
+    }
+    let mut response = [0_u8; 256];
+    let read = match stream.read(&mut response) {
+        Ok(read) => read,
+        Err(error) => {
+            return BackendHealthProbeResult {
+                healthy: false,
+                elapsed: started.elapsed(),
+                failure: Some(format!("read failed: {error}")),
+            };
+        }
+    };
+    let status_line = String::from_utf8_lossy(&response[..read])
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let healthy = status_line.contains(&format!(" {expected_status} "));
+    BackendHealthProbeResult {
+        healthy,
+        elapsed: started.elapsed(),
+        failure: (!healthy).then(|| format!("unexpected response: {status_line}")),
     }
 }
 

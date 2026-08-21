@@ -1,4 +1,9 @@
 #![recursion_limit = "512"]
+// Admin handlers intentionally return complete HTTP/WebSocket errors so callers
+// can forward status, headers, and bodies without a second error conversion.
+// Boxing these cold-path values would complicate every handler boundary for no
+// measured data-plane benefit.
+#![allow(clippy::result_large_err)]
 
 pub mod admin_audit;
 mod admin_auth;

@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 : "${BIFROST_DISABLE_TRAY:=1}"
+: "${BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER:=1}"
+: "${BIFROST_RESOURCE_PRESSURE_OVERRIDE:=normal}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
+export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+export BIFROST_RESOURCE_PRESSURE_OVERRIDE
+
+# Parallel feature suites terminate their sandbox daemon before deleting its data
+# directory. Keep the independent system-proxy helper out of those sandboxes so it
+# cannot recreate lifecycle diagnostics during cleanup. The dedicated
+# test_system_proxy_e2e.sh and test_cli_proxy_environment_e2e.sh explicitly unset
+# this variable when exercising the helper's crash recovery contract.
+# Keep feature suites independent of transient CI host pressure. The dedicated
+# test_runtime_pressure_degradation.sh overrides this with `critical` and verifies
+# the full degradation contract.
 
 
 set -uo pipefail
@@ -709,6 +722,7 @@ shell_test_weight() {
     test_group_sync_e2e.sh) echo 46 ;;
     test_upgrade_admin_api_restart_e2e.sh) echo 43 ;;
     test_replay_websocket_frames.sh) echo 41 ;;
+    test_runtime_pressure_degradation.sh) echo 35 ;;
     test_traffic_persistence_e2e.sh) echo 40 ;;
     test_group_sync_no_logstorm_e2e.sh) echo 38 ;;
     test_sse_frames.sh) echo 38 ;;
@@ -740,6 +754,7 @@ shell_test_weight() {
 shell_test_runs_serial_in_parallel_shell_job() {
   case "$1" in
     test_memory_pressure_e2e.sh|\
+    test_runtime_pressure_degradation.sh|\
     test_large_body_protection.sh|\
     test_cli_start_interactive_restart_e2e.sh|\
     test_body_cache_sync_cleanup_admin_api.sh|\
@@ -830,6 +845,7 @@ shell_test_capability_group() {
     test_res_body_*|\
     test_rule_*|\
     test_rules_*|\
+    test_runtime_*|\
     test_script_*|\
     test_scripts_*|\
     test_search_traffic_*|\

@@ -1,6 +1,14 @@
 use super::*;
 use std::collections::VecDeque;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedBackendExit {
+    pub(crate) pid: u32,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) exit_signal: Option<i32>,
+    pub(crate) detail: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatchdogProbeDisposition {
     Healthy,
@@ -23,6 +31,26 @@ pub(crate) enum WatchdogProbeDisposition {
 pub(crate) enum SustainedReadinessAction {
     RecoverManagedChild,
     MarkExternalUnavailable,
+}
+
+const SCHEDULER_HEARTBEAT_STALE_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BackendSignalSnapshot {
+    pub(crate) admin_healthy: bool,
+    pub(crate) data_plane_healthy: bool,
+    pub(crate) health_lane_present: bool,
+    pub(crate) health_lane_healthy: bool,
+    pub(crate) scheduler_heartbeat_age_ms: Option<u64>,
+}
+
+pub(crate) fn confirms_managed_runtime_unresponsive(signals: BackendSignalSnapshot) -> bool {
+    let scheduler_or_lane_failed = signals.health_lane_present
+        && (!signals.health_lane_healthy
+            || signals
+                .scheduler_heartbeat_age_ms
+                .is_some_and(|age| age >= SCHEDULER_HEARTBEAT_STALE_MS));
+    !signals.admin_healthy && !signals.data_plane_healthy && scheduler_or_lane_failed
 }
 
 pub(crate) fn sustained_readiness_failure_action(
@@ -124,6 +152,97 @@ impl BackendWatchdogHealth {
     }
 }
 
+struct BackendSignalObservation {
+    admin: BackendHealthProbeResult,
+    data_plane: BackendHealthProbeResult,
+    health_lane: RuntimeHealthLaneProbeResult,
+    signals: BackendSignalSnapshot,
+}
+
+impl BackendSignalObservation {
+    fn confirmed_unresponsive(&self) -> bool {
+        confirms_managed_runtime_unresponsive(self.signals)
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "admin_ok={} admin_ms={} admin_error={} data_ok={} data_ms={} data_error={} health_port_present={} health_ok={} health_ms={} health_error={} heartbeat_age_ms={}",
+            self.admin.healthy,
+            self.admin.elapsed.as_millis(),
+            self.admin.failure.as_deref().unwrap_or("none"),
+            self.data_plane.healthy,
+            self.data_plane.elapsed.as_millis(),
+            self.data_plane.failure.as_deref().unwrap_or("none"),
+            self.signals.health_lane_present,
+            self.health_lane.healthy,
+            self.health_lane.elapsed.as_millis(),
+            self.health_lane.failure.as_deref().unwrap_or("none"),
+            self.signals
+                .scheduler_heartbeat_age_ms
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        )
+    }
+}
+
+fn probe_backend_signals(
+    data_dir: &std::path::Path,
+    port: u16,
+    timeout: Duration,
+) -> BackendSignalObservation {
+    let marker = read_desktop_runtime_marker(data_dir).filter(|marker| marker.port == port);
+    let health_port = marker.as_ref().and_then(|marker| marker.health_port);
+    let admin = probe_backend_health_with_timeout(port, timeout);
+    let data_plane = probe_data_plane_canary_with_timeout(port, timeout);
+    let health_lane = probe_runtime_health_lane_with_timeout(health_port, timeout);
+    let signals = BackendSignalSnapshot {
+        admin_healthy: admin.healthy,
+        data_plane_healthy: data_plane.healthy,
+        health_lane_present: health_port.is_some(),
+        health_lane_healthy: health_lane.healthy,
+        scheduler_heartbeat_age_ms: health_lane
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.scheduler_heartbeat_age_ms),
+    };
+    BackendSignalObservation {
+        admin,
+        data_plane,
+        health_lane,
+        signals,
+    }
+}
+
+fn append_watchdog_signal_event(
+    data_dir: &std::path::Path,
+    event_name: &str,
+    decision: &str,
+    observation: &BackendSignalObservation,
+) {
+    let mut event = bifrost_core::SystemProxyLifecycleEvent::new(event_name, "desktop_watchdog");
+    event.decision = Some(decision.into());
+    event.admin_probe_ms = Some(observation.admin.elapsed.as_millis() as u64);
+    event.data_plane_probe_ms = Some(observation.data_plane.elapsed.as_millis() as u64);
+    event.health_lane_probe_ms = Some(observation.health_lane.elapsed.as_millis() as u64);
+    if let Some(snapshot) = observation.health_lane.snapshot.as_ref() {
+        event.new_pid = Some(snapshot.pid);
+        event.scheduler_heartbeat_age_ms = Some(snapshot.scheduler_heartbeat_age_ms);
+        event.rss_bytes = Some(snapshot.rss_bytes);
+        event.cpu_percent = Some(snapshot.cpu_percent);
+        event.fd_count = Some(snapshot.fd_count);
+        event.fd_limit = Some(snapshot.fd_limit);
+        event.active_connections = Some(snapshot.active_connections);
+        event.queue_depth = Some(snapshot.queue_depth);
+        event.queue_capacity = Some(snapshot.queue_capacity);
+    }
+    if let Err(error) = bifrost_core::append_system_proxy_event(data_dir, &event) {
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!("failed to persist watchdog lifecycle event: {error}"),
+        );
+    }
+}
+
 pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
     let Some(state) = app.try_state::<BackendState>() else {
         return;
@@ -134,6 +253,7 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
     let mut watchdog_health = BackendWatchdogHealth::default();
     let mut recovery_budget = BackendRecoveryBudget::default();
     let mut shutdown_paused = false;
+    let mut isolated_admin_failure_active = false;
     loop {
         std::thread::sleep(BACKEND_WATCHDOG_POLL_INTERVAL);
 
@@ -211,37 +331,61 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
             continue;
         }
 
-        let probe = probe_backend_health_with_timeout(current_port, BACKEND_HEALTH_PROBE_TIMEOUT);
+        let probe =
+            probe_backend_signals(&state.data_dir, current_port, BACKEND_HEALTH_PROBE_TIMEOUT);
+        let isolated_admin_failure = !probe.admin.healthy && !probe.confirmed_unresponsive();
+        if !isolated_admin_failure {
+            isolated_admin_failure_active = false;
+        }
         let observed_at = Instant::now();
-        let disposition = if probe.healthy {
-            watchdog_health.observe_success(observed_at)
-        } else {
+        let disposition = if probe.confirmed_unresponsive() {
             watchdog_health.observe_failure(observed_at)
+        } else {
+            watchdog_health.observe_success(observed_at)
         };
 
         match disposition {
             WatchdogProbeDisposition::Healthy => {
-                clear_backend_unavailable_after_healthy_probe(
-                    &state,
-                    current_port,
-                    "desktop backend watchdog observed healthy backend",
-                );
+                if probe.admin.healthy {
+                    clear_backend_unavailable_after_healthy_probe(
+                        &state,
+                        current_port,
+                        "desktop backend watchdog observed healthy backend",
+                    );
+                } else if !isolated_admin_failure_active {
+                    append_desktop_bootstrap_log(
+                        &state.data_dir,
+                        format!(
+                            "desktop backend Admin probe failed in isolation; managed process preserved; port={current_port} {}",
+                            probe.summary()
+                        ),
+                    );
+                    append_watchdog_signal_event(
+                        &state.data_dir,
+                        "watchdog_admin_probe_isolated_failure",
+                        "preserve_process",
+                        &probe,
+                    );
+                    isolated_admin_failure_active = true;
+                }
             }
             WatchdogProbeDisposition::Recovered {
                 failures,
                 degraded_for,
             } => {
-                clear_backend_unavailable_after_healthy_probe(
-                    &state,
-                    current_port,
-                    "desktop backend watchdog observed recovered backend",
-                );
+                if probe.admin.healthy {
+                    clear_backend_unavailable_after_healthy_probe(
+                        &state,
+                        current_port,
+                        "desktop backend watchdog observed recovered backend",
+                    );
+                }
                 append_desktop_bootstrap_log(
                     &state.data_dir,
                     format!(
-                        "desktop backend health recovered without restart; port={current_port} consecutive_failures={failures} degraded_ms={} probe_elapsed_ms={}",
+                        "desktop backend multi-signal health recovered without restart; port={current_port} consecutive_failures={failures} degraded_ms={} {}",
                         degraded_for.as_millis(),
-                        probe.elapsed.as_millis()
+                        probe.summary()
                     ),
                 );
             }
@@ -252,11 +396,16 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                 append_desktop_bootstrap_log(
                     &state.data_dir,
                     format!(
-                        "desktop backend health degraded; port={current_port} consecutive_failures={failures} degraded_ms={} probe_elapsed_ms={} error={}",
+                        "desktop backend multi-signal health degraded; port={current_port} consecutive_failures={failures} degraded_ms={} {}",
                         degraded_for.as_millis(),
-                        probe.elapsed.as_millis(),
-                        probe.failure.as_deref().unwrap_or("unknown probe failure")
+                        probe.summary()
                     ),
+                );
+                append_watchdog_signal_event(
+                    &state.data_dir,
+                    "watchdog_multi_signal_degraded",
+                    "observe_grace_window",
+                    &probe,
                 );
             }
             WatchdogProbeDisposition::Preserved => {}
@@ -264,36 +413,42 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                 failures,
                 degraded_for,
             } => {
-                let confirmation = probe_backend_health_with_timeout(
+                let confirmation = probe_backend_signals(
+                    &state.data_dir,
                     current_port,
                     BACKEND_HEALTH_CONFIRMATION_TIMEOUT,
                 );
-                if confirmation.healthy {
+                if !confirmation.confirmed_unresponsive() {
                     watchdog_health.reset();
-                    clear_backend_unavailable_after_healthy_probe(
-                        &state,
-                        current_port,
-                        "desktop backend watchdog confirmation observed recovered backend",
-                    );
+                    if confirmation.admin.healthy {
+                        clear_backend_unavailable_after_healthy_probe(
+                            &state,
+                            current_port,
+                            "desktop backend watchdog confirmation observed recovered backend",
+                        );
+                    }
                     append_desktop_bootstrap_log(
                         &state.data_dir,
                         format!(
-                            "desktop backend health recovered during final confirmation; port={current_port} consecutive_failures={failures} degraded_ms={} confirmation_elapsed_ms={}",
+                            "desktop backend recovery cancelled because final multi-signal confirmation was not unanimous; port={current_port} consecutive_failures={failures} degraded_ms={} {}",
                             degraded_for.as_millis(),
-                            confirmation.elapsed.as_millis()
+                            confirmation.summary()
                         ),
                     );
                     continue;
                 }
 
                 let reason = format!(
-                    "backend health remained unavailable after grace window on port {current_port}; consecutive_failures={failures} degraded_ms={} last_error={} confirmation_error={}",
+                    "backend Admin, data-plane canary, and scheduler/health lane all remained unavailable after grace window on port {current_port}; consecutive_failures={failures} degraded_ms={} last={} confirmation={}",
                     degraded_for.as_millis(),
-                    probe.failure.as_deref().unwrap_or("unknown probe failure"),
-                    confirmation
-                        .failure
-                        .as_deref()
-                        .unwrap_or("unknown confirmation failure")
+                    probe.summary(),
+                    confirmation.summary()
+                );
+                append_watchdog_signal_event(
+                    &state.data_dir,
+                    "watchdog_multi_signal_recovery_confirmed",
+                    "recover_managed_child",
+                    &confirmation,
                 );
                 let managed_backend = state
                     .child
@@ -342,6 +497,8 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                             app,
                             &ManagedBackendExit {
                                 pid,
+                                exit_code: None,
+                                exit_signal: None,
                                 detail: format!(
                                     "managed backend child pid={pid} was terminated after sustained readiness failure"
                                 ),

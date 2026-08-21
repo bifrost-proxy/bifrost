@@ -89,6 +89,25 @@
 - `FindProxyForURL` 中的无限循环触发 PAC timeout 后返回 `ScriptError::Timeout`，不依赖 QuickJS 在不同平台上的底层错误文案。
 - `bifrost-script` lib 全量测试通过，PAC 正常执行、JavaScript 错误上报、sandbox timeout 和网络/file sandbox 用例不受影响。
 
+### TC-PAC-06：资源压力下 PAC 可信初始化不触发错误超时
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   cargo test -p bifrost-script pac::tests -- --nocapture
+   cargo test -p bifrost-cli parsing::rules::tests::test_pac_local_file_script_maps_to_proxy -- --exact
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_pac_proxy_auto_config.sh
+   ```
+2. 重复执行本地 PAC 文件用例，或在 coverage/整仓并行测试负载下执行，确认常量返回 PAC 不会在脚本开始前超时。
+
+预期结果：
+
+- QuickJS context 与 Bifrost 可信 PAC helper 初始化不计入 50ms 不受信任脚本执行预算。
+- 本地 PAC 文件能稳定返回 `PROXY file-proxy.example:8080`，不会因宿主调度延迟错误 fail-closed 为 502。
+- 无限循环 PAC 仍触发 `ScriptError::Timeout`，4MiB 内存上限和 sandbox 行为不变。
+- 真实 Values/远程 PAC 与双 Bifrost 上游代理链路继续 13/13 通过。
+
 ## 清理步骤
 
 - E2E 脚本退出时会停止入口 Bifrost、上游 Bifrost、Mock Server，并删除 `.bifrost-e2e-pac.*` 临时目录。
@@ -106,3 +125,4 @@
 | 2026-07-02 | TC-PAC-02..03 | 通过 | 执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_pac_proxy_auto_config.sh`。脚本构建当前 release binary，启动 Mock HTTP Server、上游 Bifrost 和入口 Bifrost；Values PAC 与远程 PAC 均经入口 Bifrost -> 上游 Bifrost -> Mock Server 返回 200；PAC + `proxy://127.0.0.1:1` + `host://127.0.0.1:<echo_port>` 场景返回 200 并确认 `/forward` 与 query 保留。专项脚本 13/13 通过；`python3 check_rules.py rules/forwarding/pac.txt` 语法 fixture 1/1 通过。 |
 | 2026-07-02 | TC-PAC-04 | 通过 | 执行系统代理不变量扫描命中 `outbound_blocking_reqwest_client_builder`、`.no_proxy()`、E2E 的 `--no-system-proxy`、`BIFROST_DISABLE_TRAY` 与 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT`；执行旧提示残留扫描，确认 `not yet implemented`、`尚未实现`、`未实现`、远程 PAC 不拉取和不执行 PAC JS 等旧描述均无残留。 |
 | 2026-07-06 | TC-PAC-05 | 通过 | 执行 `cargo test -p bifrost-script pac::tests::times_out_cpu_intensive_scripts --lib -- --nocapture`，1 passed；执行 `cargo clippy -p bifrost-script --lib --tests -- -D warnings` 通过；执行 `cargo test -p bifrost-script --lib -- --nocapture`，136 passed。 |
+| 2026-08-21 | TC-PAC-06 | 通过 | `bifrost-script` PAC 单测 15/15 通过（含无限循环超时）；本地文件 PAC 用例连续执行 20 次全部通过；当前 release 二进制执行 `test_pac_proxy_auto_config.sh`，Values PAC、远程 PAC、上游代理链与 DIRECT 清除既有 proxy 共 13/13 通过。 |

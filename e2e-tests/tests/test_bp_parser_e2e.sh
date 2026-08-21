@@ -280,7 +280,12 @@ bp-http-rpc.test bp://build_in_bp?protocol=http-rpc&psm=flow.devops.next_agent&v
 bp-http-rpc.test decode://bp
 RULES
 
+    # This suite verifies parser behavior, not pressure degradation. Keep the
+    # proxy at normal pressure so a busy shared CI host cannot intentionally
+    # disable scripts underneath these assertions. The critical-pressure path
+    # is covered by test_runtime_pressure_degradation.sh.
     SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+        BIFROST_RESOURCE_PRESSURE_OVERRIDE=normal \
         "$BIFROST_BIN" -p "$PROXY_PORT" start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy \
         --rules-file "$rules_file" >"$BIFROST_LOG_FILE" 2>&1 &
     BIFROST_PID=$!

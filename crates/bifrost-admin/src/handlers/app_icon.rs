@@ -13,6 +13,12 @@ pub async fn handle_app_icon<B>(
     if req.method() != Method::GET {
         return error_response(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
     }
+    if !bifrost_core::heavy_tasks_allowed() {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "App icon resolution is paused by resource pressure",
+        );
+    }
 
     let app_icon_cache = match &state.app_icon_cache {
         Some(cache) => cache,
@@ -188,6 +194,7 @@ fn get_app_search_dirs() -> Vec<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::Arc;
 
     use hyper::{header, Method, Request, StatusCode};
@@ -219,5 +226,32 @@ mod tests {
             .headers()
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .is_none(),);
+    }
+
+    #[tokio::test]
+    async fn critical_pressure_rejects_icon_resolution() {
+        const MARKER: &str = "BIFROST_APP_ICON_PRESSURE_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let status = Command::new(std::env::current_exe().expect("current test executable"))
+                .arg("--exact")
+                .arg("handlers::app_icon::tests::critical_pressure_rejects_icon_resolution")
+                .arg("--nocapture")
+                .env(MARKER, "1")
+                .status()
+                .expect("run isolated pressure test");
+            assert!(status.success());
+            return;
+        }
+
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
+        let state = Arc::new(AdminState::new(0));
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/app-icon/Test")
+            .body(())
+            .expect("request");
+
+        let response = handle_app_icon(request, state, "/api/app-icon/Test").await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

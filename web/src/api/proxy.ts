@@ -12,6 +12,8 @@ export interface SystemProxyStatus {
   /** Persisted Bifrost preference, independent from crash cleanup recovery. */
   configured_enabled?: boolean;
   configured_bypass?: string;
+  recovery_mode?: "fail_open" | "fail_closed";
+  recovery_grace_secs?: number;
 }
 
 export interface SystemProxySupportStatus {
@@ -45,6 +47,8 @@ export interface CliProxyStatus {
 export interface SetSystemProxyRequest {
   enabled: boolean;
   bypass?: string;
+  recovery_mode?: "fail_open" | "fail_closed";
+  recovery_grace_secs?: number;
 }
 
 export interface SetSystemProxyLaunchdRequest {

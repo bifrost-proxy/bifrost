@@ -25,6 +25,8 @@ PY
 )}"
 
 cleanup() {
+  set +e
+  BIFROST_DATA_DIR="$TEST_DIR/data" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
   if [[ -n "${BIFROST_PID:-}" ]]; then
     kill "$BIFROST_PID" >/dev/null 2>&1 || true
     wait "$BIFROST_PID" >/dev/null 2>&1 || true
@@ -32,8 +34,18 @@ cleanup() {
   if [[ "${KEEP_TEST_DIR:-false}" == "true" ]]; then
     echo "[subagent-event-boundary] keeping test dir: $TEST_DIR" >&2
   else
-    rm -rf "$TEST_DIR"
+    # Detached worker/lifecycle writers may finish one last atomic state update
+    # after the foreground process exits. Sweep for a bounded grace period so
+    # a late write cannot recreate data/ after a successful removal.
+    for _ in $(seq 1 10); do
+      rm -rf "$TEST_DIR" 2>/dev/null || true
+      sleep 0.2
+    done
+    rm -rf "$TEST_DIR" 2>/dev/null || true
+    [[ ! -e "$TEST_DIR" ]] \
+      || echo "WARN: could not fully remove subagent E2E directory: $TEST_DIR" >&2
   fi
+  return 0
 }
 trap cleanup EXIT
 

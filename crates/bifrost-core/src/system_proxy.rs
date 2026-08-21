@@ -23,7 +23,7 @@ const LOCK_WAIT_LOG_INTERVAL_MS: u64 = 5_000;
 #[cfg(target_os = "macos")]
 const LOCK_WAIT_POLL_MS: u64 = 100;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyBackup {
     pub enable: bool,
     pub host: String,
@@ -71,6 +71,23 @@ pub enum SystemProxyDisableOutcome {
     OwnedByOther,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ManagedSystemProxyOwnership {
+    pub schema_version: u32,
+    pub generation: String,
+    pub original: ProxyBackup,
+    pub target: ProxyBackup,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedSystemProxyTransition {
+    Applied,
+    AlreadyInState,
+    OwnershipChanged,
+    NotManaged,
+}
+
 fn backup_restores_managed_target(
     backup: &ProxyBackup,
     managed_target: Option<&ProxyBackup>,
@@ -112,10 +129,18 @@ fn restart_handoff_preserved_original(
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ManagedProxyState {
+    #[serde(default = "managed_proxy_state_schema_version_default")]
+    schema_version: u32,
+    #[serde(default)]
+    generation: String,
     original: ProxyBackup,
     target: ProxyBackup,
     #[serde(default = "managed_proxy_state_applied_default")]
     applied: bool,
+}
+
+fn managed_proxy_state_schema_version_default() -> u32 {
+    1
 }
 
 fn managed_proxy_state_applied_default() -> bool {
@@ -376,6 +401,8 @@ pub struct SystemProxyManager {
     original_proxy: Option<Sysproxy>,
     is_set: bool,
     data_dir: PathBuf,
+    #[cfg(test)]
+    skip_os_proxy_io: bool,
 }
 
 impl SystemProxyManager {
@@ -384,6 +411,8 @@ impl SystemProxyManager {
             original_proxy: None,
             is_set: false,
             data_dir,
+            #[cfg(test)]
+            skip_os_proxy_io: false,
         }
     }
 
@@ -397,6 +426,33 @@ impl SystemProxyManager {
         {
             false
         }
+    }
+
+    fn management_available(&self) -> bool {
+        #[cfg(test)]
+        {
+            Self::is_supported() || self.skip_os_proxy_io
+        }
+        #[cfg(not(test))]
+        {
+            Self::is_supported()
+        }
+    }
+
+    fn record_system_proxy_action(&self, event_name: &str, action: &str) {
+        let ownership = self.load_managed_state().ok();
+        let generation = ownership.as_ref().map(|state| state.generation.clone());
+        let expected_proxy = ownership.as_ref().map(|state| state.target.clone());
+        let _ = crate::update_system_proxy_owner_state(&self.data_dir, |owner| {
+            owner.ownership_generation = generation.clone();
+            owner.expected_proxy = expected_proxy.clone();
+            owner.last_action = Some(action.into());
+            owner.last_error = None;
+        });
+        let mut event = crate::SystemProxyLifecycleEvent::new(event_name, "system_proxy_manager");
+        event.ownership_generation = generation;
+        event.system_proxy_action = Some(action.into());
+        let _ = crate::append_system_proxy_event(&self.data_dir, &event);
     }
 
     pub fn enable(&mut self, host: &str, port: u16, bypass: Option<&str>) -> Result<()> {
@@ -598,6 +654,7 @@ impl SystemProxyManager {
             port,
             bypass_str
         );
+        self.record_system_proxy_action("system_proxy_enabled", "enable");
 
         Ok(())
     }
@@ -649,6 +706,7 @@ impl SystemProxyManager {
             })?;
         }
 
+        self.record_system_proxy_action("system_proxy_force_disabled", "force_disable");
         self.is_set = false;
         self.original_proxy = None;
         self.remove_state_files();
@@ -816,6 +874,182 @@ impl SystemProxyManager {
         };
 
         managed_target_listener_is_alive(&state.target)
+    }
+
+    pub fn ensure_managed_ownership(&self) -> Result<Option<ManagedSystemProxyOwnership>> {
+        if !self.management_available() {
+            return Ok(None);
+        }
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "ensure_managed_ownership")?;
+
+        let mut state = match self.load_managed_state() {
+            Ok(state) => state,
+            Err(BifrostError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        if state.generation.is_empty() {
+            state.schema_version = 2;
+            state.generation = uuid::Uuid::now_v7().to_string();
+            self.write_managed_state(&state)?;
+        }
+        Ok(Some(state.into()))
+    }
+
+    /// Read the persisted ownership snapshot without migrating or writing it.
+    /// Diagnostics use this path so `doctor` remains observational.
+    pub fn read_managed_ownership(&self) -> Result<Option<ManagedSystemProxyOwnership>> {
+        if !self.management_available() {
+            return Ok(None);
+        }
+        match self.load_managed_state() {
+            Ok(state) => Ok(Some(state.into())),
+            Err(BifrostError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn suspend_managed_if_generation(
+        &mut self,
+        expected_generation: &str,
+    ) -> Result<GuardedSystemProxyTransition> {
+        if !self.management_available() {
+            return Ok(GuardedSystemProxyTransition::NotManaged);
+        }
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "suspend_managed_if_generation")?;
+
+        let mut state = match self.load_managed_state() {
+            Ok(state) => state,
+            Err(BifrostError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(GuardedSystemProxyTransition::NotManaged)
+            }
+            Err(error) => return Err(error),
+        };
+        if state.generation != expected_generation {
+            return Ok(GuardedSystemProxyTransition::OwnershipChanged);
+        }
+        if !state.applied {
+            return Ok(GuardedSystemProxyTransition::AlreadyInState);
+        }
+        #[cfg(test)]
+        let current_matches = if self.skip_os_proxy_io {
+            true
+        } else {
+            #[cfg(target_os = "macos")]
+            {
+                macos_any_service_proxy_matches(&state.target.host, state.target.port)?
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let current = Self::get_current()?;
+                current.target_matches(&state.target.host, state.target.port)
+            }
+        };
+        #[cfg(not(test))]
+        let current_matches = {
+            #[cfg(target_os = "macos")]
+            {
+                macos_any_service_proxy_matches(&state.target.host, state.target.port)?
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let current = Self::get_current()?;
+                current.target_matches(&state.target.host, state.target.port)
+            }
+        };
+        if !guarded_suspend_allowed(&state, expected_generation, current_matches) {
+            return Ok(GuardedSystemProxyTransition::OwnershipChanged);
+        }
+        #[cfg(test)]
+        if !self.skip_os_proxy_io {
+            self.apply_proxy_backup_for_target(&state.original, Some(&state.target))?;
+        }
+        #[cfg(not(test))]
+        self.apply_proxy_backup_for_target(&state.original, Some(&state.target))?;
+        state.applied = false;
+        state.schema_version = 2;
+        self.write_managed_state(&state)?;
+        self.is_set = false;
+        self.original_proxy = None;
+        self.record_system_proxy_action("system_proxy_fail_open_suspended", "suspend");
+        Ok(GuardedSystemProxyTransition::Applied)
+    }
+
+    pub fn resume_managed_if_generation(
+        &mut self,
+        expected_generation: &str,
+    ) -> Result<GuardedSystemProxyTransition> {
+        if !self.management_available() {
+            return Ok(GuardedSystemProxyTransition::NotManaged);
+        }
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "resume_managed_if_generation")?;
+
+        let mut state = match self.load_managed_state() {
+            Ok(state) => state,
+            Err(BifrostError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(GuardedSystemProxyTransition::NotManaged)
+            }
+            Err(error) => return Err(error),
+        };
+        if state.generation != expected_generation {
+            return Ok(GuardedSystemProxyTransition::OwnershipChanged);
+        }
+        if state.applied {
+            return Ok(GuardedSystemProxyTransition::AlreadyInState);
+        }
+        #[cfg(test)]
+        let current_matches_original = if self.skip_os_proxy_io {
+            true
+        } else {
+            self.current_matches_backup(&state.original)?
+        };
+        #[cfg(not(test))]
+        let current_matches_original = self.current_matches_backup(&state.original)?;
+        if !guarded_resume_allowed(&state, expected_generation, current_matches_original) {
+            return Ok(GuardedSystemProxyTransition::OwnershipChanged);
+        }
+        #[cfg(test)]
+        if !self.skip_os_proxy_io {
+            self.apply_proxy_backup(&state.target)?;
+        }
+        #[cfg(not(test))]
+        self.apply_proxy_backup(&state.target)?;
+        state.applied = true;
+        state.schema_version = 2;
+        self.write_managed_state(&state)?;
+        self.original_proxy = Some(state.original.clone().into());
+        self.is_set = true;
+        self.record_system_proxy_action("system_proxy_generation_resumed", "resume");
+        Ok(GuardedSystemProxyTransition::Applied)
+    }
+
+    fn current_matches_backup(&self, expected: &ProxyBackup) -> Result<bool> {
+        #[cfg(target_os = "macos")]
+        {
+            if expected.enable {
+                return macos_all_services_proxy_match(&expected.host, expected.port);
+            }
+            Ok(!macos_any_service_proxy_enabled()?)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let current = Self::get_current()?;
+            Ok(if expected.enable {
+                current.target_matches(&expected.host, expected.port)
+                    && proxy_bypass_lists_match(&current.bypass, &expected.bypass)
+            } else {
+                !current.enable
+            })
+        }
     }
 
     pub fn last_runtime_target_has_live_listener(data_dir: &std::path::Path) -> bool {
@@ -1210,7 +1444,16 @@ impl SystemProxyManager {
         target: &Sysproxy,
         applied: bool,
     ) -> Result<()> {
+        let existing_generation = self.load_managed_state().ok().and_then(|state| {
+            state
+                .target
+                .target_matches(&target.host, target.port)
+                .then_some(state.generation)
+                .filter(|generation| !generation.is_empty())
+        });
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: existing_generation.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
             original: ProxyBackup::from(original),
             target: ProxyBackup::from(target),
             applied,
@@ -1275,6 +1518,7 @@ impl SystemProxyManager {
             return Ok(());
         }
 
+        self.record_system_proxy_action("system_proxy_restored", "restore_original");
         self.remove_state_files();
         self.is_set = false;
         Ok(())
@@ -1544,6 +1788,40 @@ impl SystemProxyManager {
     }
 }
 
+impl From<ManagedProxyState> for ManagedSystemProxyOwnership {
+    fn from(state: ManagedProxyState) -> Self {
+        Self {
+            schema_version: state.schema_version,
+            generation: state.generation,
+            original: state.original,
+            target: state.target,
+            applied: state.applied,
+        }
+    }
+}
+
+fn guarded_suspend_allowed(
+    state: &ManagedProxyState,
+    expected_generation: &str,
+    current_matches_target: bool,
+) -> bool {
+    state.applied
+        && !expected_generation.is_empty()
+        && state.generation == expected_generation
+        && current_matches_target
+}
+
+fn guarded_resume_allowed(
+    state: &ManagedProxyState,
+    expected_generation: &str,
+    current_matches_original: bool,
+) -> bool {
+    !state.applied
+        && !expected_generation.is_empty()
+        && state.generation == expected_generation
+        && current_matches_original
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CrashRecoveryDecision {
     RestoreOriginal,
@@ -1796,6 +2074,36 @@ fn macos_stored_proxy_endpoint() -> Option<(String, u16)> {
 #[cfg(target_os = "macos")]
 fn macos_any_service_proxy_matches(host: &str, port: u16) -> Result<bool> {
     Ok(!macos_services_proxy_matches(host, port)?.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_any_service_proxy_enabled() -> Result<bool> {
+    use std::process::Command;
+
+    for service in list_macos_services()? {
+        for getter in ["-getwebproxy", "-getsecurewebproxy"] {
+            let output = Command::new("networksetup")
+                .args([getter, &service])
+                .output()
+                .map_err(|error| {
+                    BifrostError::Config(format!(
+                        "Failed to inspect {service} system proxy state: {error}"
+                    ))
+                })?;
+            if !output.status.success() {
+                return Err(BifrostError::Config(format!(
+                    "networksetup {getter} failed for {service}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            let (enabled, _, _) =
+                parse_macos_networksetup_proxy(&String::from_utf8_lossy(&output.stdout));
+            if enabled {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -2816,6 +3124,8 @@ mod tests {
 
     fn make_state(applied: bool, target_port: u16) -> ManagedProxyState {
         ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: false,
                 host: String::new(),
@@ -2830,6 +3140,264 @@ mod tests {
             },
             applied,
         }
+    }
+
+    #[test]
+    fn guarded_transitions_require_matching_generation_and_observed_owner() {
+        let applied = make_state(true, 9900);
+        assert!(guarded_suspend_allowed(&applied, "test-generation", true));
+        assert!(!guarded_suspend_allowed(&applied, "stale-generation", true));
+        assert!(!guarded_suspend_allowed(&applied, "test-generation", false));
+
+        let suspended = make_state(false, 9900);
+        assert!(guarded_resume_allowed(&suspended, "test-generation", true));
+        assert!(!guarded_resume_allowed(
+            &suspended,
+            "stale-generation",
+            true
+        ));
+        assert!(!guarded_resume_allowed(
+            &suspended,
+            "test-generation",
+            false
+        ));
+    }
+
+    #[test]
+    fn managed_ownership_migrates_legacy_state_and_read_is_observational() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SystemProxyManager::new(dir.path().to_path_buf());
+        manager.skip_os_proxy_io = true;
+        std::fs::write(
+            manager.state_file_path(),
+            r#"{
+                "original": {"enable": false, "host": "", "port": 0, "bypass": ""},
+                "target": {"enable": true, "host": "127.0.0.1", "port": 9900, "bypass": "localhost"}
+            }"#,
+        )
+        .unwrap();
+
+        let migrated = manager.ensure_managed_ownership().unwrap().unwrap();
+        assert_eq!(migrated.schema_version, 2);
+        assert!(!migrated.generation.is_empty());
+        assert!(migrated.applied);
+        let before = std::fs::read(manager.state_file_path()).unwrap();
+        assert_eq!(manager.read_managed_ownership().unwrap(), Some(migrated));
+        assert_eq!(std::fs::read(manager.state_file_path()).unwrap(), before);
+
+        std::fs::remove_file(manager.state_file_path()).unwrap();
+        assert!(manager.ensure_managed_ownership().unwrap().is_none());
+        assert!(manager.read_managed_ownership().unwrap().is_none());
+        std::fs::write(manager.state_file_path(), "not-json").unwrap();
+        assert!(manager.ensure_managed_ownership().is_err());
+        assert!(manager.read_managed_ownership().is_err());
+    }
+
+    #[test]
+    fn generation_transitions_reject_stale_or_already_applied_state_before_os_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SystemProxyManager::new(dir.path().to_path_buf());
+        manager.skip_os_proxy_io = true;
+        assert_eq!(
+            manager.suspend_managed_if_generation("missing").unwrap(),
+            GuardedSystemProxyTransition::NotManaged
+        );
+        assert_eq!(
+            manager.resume_managed_if_generation("missing").unwrap(),
+            GuardedSystemProxyTransition::NotManaged
+        );
+
+        manager
+            .write_managed_state(&make_state(true, 9900))
+            .unwrap();
+        assert_eq!(
+            manager
+                .suspend_managed_if_generation("stale-generation")
+                .unwrap(),
+            GuardedSystemProxyTransition::OwnershipChanged
+        );
+        assert_eq!(
+            manager
+                .resume_managed_if_generation("test-generation")
+                .unwrap(),
+            GuardedSystemProxyTransition::AlreadyInState
+        );
+
+        manager
+            .write_managed_state(&make_state(false, 9900))
+            .unwrap();
+        assert_eq!(
+            manager
+                .suspend_managed_if_generation("test-generation")
+                .unwrap(),
+            GuardedSystemProxyTransition::AlreadyInState
+        );
+        assert_eq!(
+            manager
+                .resume_managed_if_generation("stale-generation")
+                .unwrap(),
+            GuardedSystemProxyTransition::OwnershipChanged
+        );
+
+        std::fs::write(manager.state_file_path(), "not-json").unwrap();
+        assert!(manager
+            .suspend_managed_if_generation("test-generation")
+            .is_err());
+        assert!(manager
+            .resume_managed_if_generation("test-generation")
+            .is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generation_transitions_reject_observed_proxy_mismatch_without_writing_os_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SystemProxyManager::new(dir.path().to_path_buf());
+        let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+
+        manager
+            .write_managed_state(&make_state(true, unused_port))
+            .unwrap();
+        assert_eq!(
+            manager
+                .suspend_managed_if_generation("test-generation")
+                .unwrap(),
+            GuardedSystemProxyTransition::OwnershipChanged
+        );
+
+        manager
+            .write_managed_state(&make_state(false, unused_port))
+            .unwrap();
+        assert_eq!(
+            manager
+                .resume_managed_if_generation("test-generation")
+                .unwrap(),
+            GuardedSystemProxyTransition::OwnershipChanged
+        );
+    }
+
+    #[test]
+    fn generation_transitions_persist_suspend_and_resume_with_test_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SystemProxyManager::new(dir.path().to_path_buf());
+        manager.skip_os_proxy_io = true;
+        manager
+            .write_managed_state(&make_state(true, 9900))
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .suspend_managed_if_generation("test-generation")
+                .unwrap(),
+            GuardedSystemProxyTransition::Applied
+        );
+        let suspended = manager.load_managed_state().unwrap();
+        assert!(!suspended.applied);
+        assert!(!manager.is_set);
+        assert!(manager.original_proxy.is_none());
+
+        assert_eq!(
+            manager
+                .resume_managed_if_generation("test-generation")
+                .unwrap(),
+            GuardedSystemProxyTransition::Applied
+        );
+        let resumed = manager.load_managed_state().unwrap();
+        assert!(resumed.applied);
+        assert!(manager.is_set);
+        assert!(manager.original_proxy.is_some());
+        manager.detach_in_place();
+
+        let events = crate::read_recent_system_proxy_events(dir.path(), 10).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event == "system_proxy_fail_open_suspended"));
+        assert!(events
+            .iter()
+            .any(|event| event.event == "system_proxy_generation_resumed"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_enabled_proxy_audit_is_read_only() {
+        assert!(macos_any_service_proxy_enabled().is_ok());
+    }
+
+    #[test]
+    fn managed_state_generation_and_action_diagnostics_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = SystemProxyManager::new(dir.path().to_path_buf());
+        let original = Sysproxy {
+            enable: false,
+            host: String::new(),
+            port: 0,
+            bypass: String::new(),
+        };
+        let target = Sysproxy {
+            enable: true,
+            host: "127.0.0.1".into(),
+            port: 9900,
+            bypass: "localhost".into(),
+        };
+
+        manager
+            .save_managed_state(&original, &target, false)
+            .unwrap();
+        let first = manager.load_managed_state().unwrap();
+        assert!(!first.generation.is_empty());
+        manager
+            .save_managed_state(&original, &target, true)
+            .unwrap();
+        let second = manager.load_managed_state().unwrap();
+        assert_eq!(second.generation, first.generation);
+        assert!(second.applied);
+
+        manager.record_system_proxy_action("coverage_action", "diagnose");
+        let owner = crate::read_system_proxy_owner_state(dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.ownership_generation, Some(first.generation.clone()));
+        assert_eq!(owner.expected_proxy, Some(second.target));
+        assert_eq!(owner.last_action.as_deref(), Some("diagnose"));
+        let events = crate::read_recent_system_proxy_events(dir.path(), 5).unwrap();
+        assert_eq!(events[0].event, "coverage_action");
+        assert_eq!(events[0].ownership_generation, Some(first.generation));
+    }
+
+    #[test]
+    fn managed_target_listener_uses_persisted_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let manager = SystemProxyManager::new(dir.path().to_path_buf());
+        manager
+            .write_managed_state(&make_state(true, port))
+            .unwrap();
+
+        assert!(SystemProxyManager::managed_target_has_live_listener(
+            dir.path()
+        ));
+        drop(listener);
+        std::fs::remove_file(manager.state_file_path()).unwrap();
+        assert!(!SystemProxyManager::managed_target_has_live_listener(
+            dir.path()
+        ));
+    }
+
+    #[test]
+    fn legacy_managed_state_defaults_to_applied_without_generation() {
+        let state: ManagedProxyState = serde_json::from_value(serde_json::json!({
+            "original": { "enable": false, "host": "", "port": 0, "bypass": "" },
+            "target": { "enable": true, "host": "127.0.0.1", "port": 9900, "bypass": "" }
+        }))
+        .unwrap();
+        assert_eq!(state.schema_version, 1);
+        assert!(state.generation.is_empty());
+        assert!(state.applied);
     }
 
     #[test]
@@ -3181,6 +3749,8 @@ mod tests {
     #[test]
     fn restart_handoff_preserves_recorded_original_when_all_conditions_met() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: true,
                 host: "10.0.0.1".to_string(),
@@ -3209,6 +3779,8 @@ mod tests {
     #[test]
     fn restart_handoff_does_not_preserve_when_manager_already_set() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: true,
                 host: "10.0.0.1".to_string(),
@@ -3240,6 +3812,8 @@ mod tests {
     #[test]
     fn restart_handoff_does_not_preserve_when_target_mismatches() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: true,
                 host: "10.0.0.1".to_string(),
@@ -3266,6 +3840,8 @@ mod tests {
     #[test]
     fn restart_handoff_does_not_preserve_when_current_not_pointing_at_target() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: true,
                 host: "10.0.0.1".to_string(),
@@ -3307,6 +3883,8 @@ mod tests {
     #[test]
     fn crash_recovery_restores_when_current_points_to_managed_target() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: false,
                 host: String::new(),
@@ -3337,6 +3915,8 @@ mod tests {
     #[test]
     fn crash_recovery_preserves_external_proxy_on_different_port() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: false,
                 host: String::new(),
@@ -3367,6 +3947,8 @@ mod tests {
     #[test]
     fn crash_recovery_discards_pending_apply_when_target_was_never_set() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: true,
                 host: "127.0.0.1".to_string(),
@@ -3397,6 +3979,8 @@ mod tests {
     #[test]
     fn crash_recovery_restores_pending_apply_when_target_is_visible() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: true,
                 host: "127.0.0.1".to_string(),
@@ -3427,6 +4011,8 @@ mod tests {
     #[test]
     fn macos_recovery_keeps_managed_state_when_services_are_not_ready() {
         let state = ManagedProxyState {
+            schema_version: 2,
+            generation: "test-generation".into(),
             original: ProxyBackup {
                 enable: false,
                 host: String::new(),

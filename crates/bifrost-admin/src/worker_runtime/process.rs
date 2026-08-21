@@ -202,6 +202,12 @@ impl Drop for RequestTrackingGuard<'_> {
 
 impl ManagedWorker {
     pub async fn spawn(spec: WorkerSpawnSpec) -> Result<Arc<Self>, String> {
+        if !bifrost_core::heavy_tasks_allowed() {
+            return Err(format!(
+                "{} worker start rejected by resource pressure governor",
+                spec.kind.as_str()
+            ));
+        }
         let startup_token = uuid::Uuid::new_v4().to_string();
         let mut command = Command::new(&spec.executable);
         command
@@ -1521,6 +1527,39 @@ mod tests {
             error.contains("second worker frame must be ready"),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn critical_pressure_rejects_worker_spawn_before_process_creation() {
+        const MARKER: &str = "BIFROST_WORKER_PRESSURE_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .arg("--exact")
+            .arg(
+                "worker_runtime::process::tests::critical_pressure_rejects_worker_spawn_before_process_creation",
+            )
+            .arg("--nocapture")
+            .env(MARKER, "1")
+            .status()
+            .expect("run isolated pressure test");
+            assert!(status.success());
+            return;
+        }
+
+        bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
+        let spec = WorkerSpawnSpec::new(
+            "pressure-rejected",
+            WorkerKind::Asr,
+            "/definitely/missing/bifrost-worker",
+            Vec::new(),
+        );
+        let error = ManagedWorker::spawn(spec)
+            .await
+            .err()
+            .expect("spawn rejected");
+        assert!(error.contains("resource pressure governor"));
     }
 
     #[cfg(unix)]

@@ -81,6 +81,14 @@ impl AsyncTrafficWriter {
         };
         self.send_lossless(cmd, "update");
     }
+
+    pub fn queue_depth(&self) -> usize {
+        self.tx.max_capacity().saturating_sub(self.tx.capacity())
+    }
+
+    pub fn queue_capacity(&self) -> usize {
+        self.tx.max_capacity()
+    }
 }
 
 impl Clone for AsyncTrafficWriter {
