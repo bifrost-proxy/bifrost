@@ -2,15 +2,20 @@
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 : "${BIFROST_DISABLE_TRAY:=1}"
 : "${BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER:=1}"
+: "${BIFROST_RESOURCE_PRESSURE_OVERRIDE:=normal}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
 export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+export BIFROST_RESOURCE_PRESSURE_OVERRIDE
 
 # Parallel feature suites terminate their sandbox daemon before deleting its data
 # directory. Keep the independent system-proxy helper out of those sandboxes so it
 # cannot recreate lifecycle diagnostics during cleanup. The dedicated
-# test_system_proxy_e2e.sh cases explicitly unset this variable when exercising the
-# helper's crash recovery contract.
+# test_system_proxy_e2e.sh and test_cli_proxy_environment_e2e.sh explicitly unset
+# this variable when exercising the helper's crash recovery contract.
+# Keep feature suites independent of transient CI host pressure. The dedicated
+# test_runtime_pressure_degradation.sh overrides this with `critical` and verifies
+# the full degradation contract.
 
 
 set -uo pipefail
