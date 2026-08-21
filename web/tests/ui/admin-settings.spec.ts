@@ -467,7 +467,6 @@ test("Settings 性能配置在第二个页面主动刷新后可见", async ({
 test("Settings Performance 的 Max Body Probe Size 相邻刻度文本不重叠", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 1280, height: 720 });
   await routeSliderLayoutApis(page);
   await openPage(page, "settings");
   await page.getByRole("tab", { name: /Performance/ }).click();
@@ -482,15 +481,21 @@ test("Settings Performance 的 Max Body Probe Size 相邻刻度文本不重叠",
   for (const markLocator of markLocators) {
     await expect(markLocator).toBeVisible();
   }
-  for (let index = 1; index < markLocators.length; index += 1) {
-    await expectNoHorizontalOverlap(markLocators[index - 1], markLocators[index]);
-  }
+  const expectAdjacentMarksNotToOverlap = async () => {
+    for (let index = 1; index < markLocators.length; index += 1) {
+      await expectNoHorizontalOverlap(markLocators[index - 1], markLocators[index]);
+    }
+  };
+
+  await page.setViewportSize({ width: 900, height: 720 });
+  await expectAdjacentMarksNotToOverlap();
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expectAdjacentMarksNotToOverlap();
 
   await page.getByTestId("theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  for (let index = 1; index < markLocators.length; index += 1) {
-    await expectNoHorizontalOverlap(markLocators[index - 1], markLocators[index]);
-  }
+  await expectAdjacentMarksNotToOverlap();
 });
 
 test("Network 超级性能模式覆盖整个工作区并可跳转高亮 Performance 开关", async ({

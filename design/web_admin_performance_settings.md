@@ -169,7 +169,7 @@ Performance 面板当前渲染的字段（对应 `PerformanceTab.tsx`）：
   - 服务端注入 400 → 前端草稿回滚到 `performanceConfig.traffic`。
   - `Clear Cache` 点击后 body_store 统计归零或明显下降。
 - `web/tests/ui/admin-settings.spec.ts`
-  - `Settings Performance 的 Max Body Probe Size 相邻刻度文本不重叠`：用真实 Chromium 量测 `Off`、`16KB`、`64KB`、`256KB`、`1MB` 全部相邻 mark 边界，覆盖亮色和暗色主题。
+  - `Settings Performance 的 Max Body Probe Size 相邻刻度文本不重叠`：用真实 Chromium 在 900px 和 1280px 宽度下量测 `Off`、`16KB`、`64KB`、`256KB`、`1MB` 全部相邻 mark 边界，覆盖亮色和暗色主题。
 
 ### 真实场景 human_tests
 

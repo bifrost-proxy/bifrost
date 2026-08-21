@@ -87,6 +87,7 @@ const TAB_PARAM = "tab";
 const HIGHLIGHT_PARAM = "highlight";
 const DEFAULT_TAB = "proxy";
 const MAX_BODY_PROBE_NEAR_LEFT_LABEL_GAP_PX = 16;
+const MAX_BODY_PROBE_SECOND_NEAR_LEFT_LABEL_GAP_PX = 28;
 const VALID_TABS = [
   "proxy",
   "certificate",
@@ -107,6 +108,11 @@ const maxBodyProbeLeftMarkStyle: CSSProperties = {
 const maxBodyProbeNearLeftMarkStyle: CSSProperties = {
   ...maxBodyProbeLeftMarkStyle,
   marginLeft: MAX_BODY_PROBE_NEAR_LEFT_LABEL_GAP_PX,
+};
+
+const maxBodyProbeSecondNearLeftMarkStyle: CSSProperties = {
+  ...maxBodyProbeLeftMarkStyle,
+  marginLeft: MAX_BODY_PROBE_SECOND_NEAR_LEFT_LABEL_GAP_PX,
 };
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -1244,7 +1250,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     },
     [64 * 1024]: {
       label: "64KB",
-      style: maxBodyProbeNearLeftMarkStyle,
+      style: maxBodyProbeSecondNearLeftMarkStyle,
     },
     [256 * 1024]: "256KB",
     [1 * 1024 * 1024]: "1MB",
