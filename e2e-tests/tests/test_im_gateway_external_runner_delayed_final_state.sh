@@ -5,6 +5,7 @@ set -euo pipefail
 : "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
+export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"

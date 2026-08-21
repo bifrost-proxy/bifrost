@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 : "${BIFROST_DISABLE_TRAY:=1}"
+: "${BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
+export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+
+# Parallel feature suites terminate their sandbox daemon before deleting its data
+# directory. Keep the independent system-proxy helper out of those sandboxes so it
+# cannot recreate lifecycle diagnostics during cleanup. The dedicated
+# test_system_proxy_e2e.sh cases explicitly unset this variable when exercising the
+# helper's crash recovery contract.
 
 
 set -uo pipefail
