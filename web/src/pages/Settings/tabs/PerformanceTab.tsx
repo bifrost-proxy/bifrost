@@ -1,4 +1,5 @@
 import { Alert, Badge, Button, Card, Col, Divider, InputNumber, Popconfirm, Row, Slider, Space, Switch, Typography, theme } from "antd";
+import type { ComponentProps } from "react";
 import {
   ThunderboltOutlined,
   FolderOutlined,
@@ -15,6 +16,7 @@ import type {
 } from "../../../api/config";
 
 const { Text } = Typography;
+type SliderMarks = NonNullable<ComponentProps<typeof Slider>["marks"]>;
 
 const resourceAlertBadgeStatus: Record<ResourceAlertLevel, "success" | "warning" | "error"> = {
   ok: "success",
@@ -73,7 +75,7 @@ export interface PerformanceTabProps {
   maxDbSizeMarks: Record<number, string>;
   maxBodyInlineMarks: Record<number, string>;
   maxBodyBufferMarks: Record<number, string>;
-  maxBodyProbeMarks: Record<number, string>;
+  maxBodyProbeMarks: SliderMarks;
   fileRetentionMarks: Record<number, string>;
   breakpointTimeoutMarks: Record<number, string>;
   highlightSuperPerformanceMode?: boolean;
@@ -433,7 +435,12 @@ export default function PerformanceTab({
 
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>
-                  <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                  <Space
+                    data-testid="settings-performance-max-body-probe-slider"
+                    direction="vertical"
+                    size={0}
+                    style={{ width: "100%" }}
+                  >
                     <Text>Max Body Probe Size</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       Default 64 KB. For non-text or suspected large bodies,

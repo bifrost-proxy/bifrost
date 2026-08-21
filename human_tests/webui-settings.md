@@ -309,6 +309,24 @@ Settings 页面是 Bifrost 管理端的系统设置中心，包含多个功能 T
 
 ---
 
+#### TC-WST-43：Max Body Probe Size 相邻刻度文本不重叠
+
+**操作步骤**：
+1. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/settings?tab=performance`
+2. 在 Performance Tab 中找到 `Max Body Probe Size` 配置项
+3. 查看滑块刻度 `Off`、`16KB`、`64KB`、`256KB`、`1MB`
+4. 切换为深色主题后再次查看同一滑块刻度
+
+**预期结果**：
+- `Off` 和 `16KB` 两个左侧相邻刻度文本保持至少可读间距，不出现重叠或贴压
+- 其余刻度文本仍位于对应滑块位置附近，滑块最小值、最大值和步进不变
+- 亮色和暗色主题下刻度均清晰可读
+
+**执行记录**：
+- 2026-08-21：PASS。执行 `WEB_PORT=19112 BACKEND_PORT=19111 BIFROST_UI_TEST_PORT=19111 ADMIN_API_BASE=http://127.0.0.1:19111/_bifrost/api PROXY_URL=http://127.0.0.1:19111 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="..." pnpm --dir web exec playwright test --config=playwright.frontend.config.ts admin-settings.spec.ts -g "Max Body Probe Size 相邻刻度文本不重叠"`，使用前端-only Playwright 配置和临时 Admin API mock，真实 Chromium 打开 Settings Performance 页面，分别在亮色和暗色主题下量测 `Off`、`16KB`、`64KB`、`256KB`、`1MB` 全部相邻刻度文本边界，1/1 PASS。
+
+---
+
 ### Access Control Tab
 
 #### TC-WST-23：查看访问控制模式
