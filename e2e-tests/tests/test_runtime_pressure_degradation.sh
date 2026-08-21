@@ -72,7 +72,9 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
 server.serve_forever()
 PY
 UPSTREAM_PID=$!
-for _ in {1..100}; do
+UPSTREAM_START_TIMEOUT_SECS="${UPSTREAM_START_TIMEOUT_SECS:-60}"
+UPSTREAM_START_DEADLINE=$((SECONDS + UPSTREAM_START_TIMEOUT_SECS))
+while (( SECONDS < UPSTREAM_START_DEADLINE )); do
     [[ -s "$UPSTREAM_PORT_FILE" ]] && break
     if ! kill -0 "$UPSTREAM_PID" 2>/dev/null; then
         echo "[FAIL] pressure-test upstream exited before publishing its port" >&2
