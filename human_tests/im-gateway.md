@@ -115,6 +115,26 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 rm -rf ./.bifrost-test
 ```
 
+### TC-IMG-76: Schedule preview-confirm-create 与 External Agent 公共控制面
+
+- **前置条件**:
+  - 使用独立临时 `BIFROST_DATA_DIR` 启动当前源码版 Bifrost，设置 `BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 并携带 `--no-system-proxy`。
+  - 已创建测试 Provider、Configured Target，并至少启用 Codex、Traex、Claude Code 或 ChatGPT Web 中一个 External Runner。
+- **操作步骤**:
+  1. 执行 `bifrost im schedule preview agent-daily --provider test-feishu --target oncall --target-mode configured_target --cron '0 9 * * 1-5' --timezone Asia/Shanghai --agent-prompt 'Summarize traffic' --agent-runner-id traex --idempotency-key im:test-76 --format json-pretty`。
+  2. 检查返回的规范化 schedule 与 `upcoming_run_times`，不执行创建，确认 GET `/schedules` 仍为空。
+  3. 用户确认后，将完全相同的参数中的 `preview` 攠为 `add`；再次执行同一 add。
+  4. 修改 prompt 但复用 `im:test-76` 再次 add。
+  5. 在 WebUI Schedules 页面打开 Add Schedule，在亮色和暗色主题分别检查 Owner/Configured Target、并发策略、重试、幂等键字段；提交后检查确认弹窗包含任务、Runner、目标与未来三次运行时间。
+- **预期结果**:
+  - preview 返回未来三次严格递增的运行时间，Asia/Shanghai 工作日 09:00 的 UTC 换算正确，且 preview 不落库。
+  - 首次 add 创建一条 schedule；相同幂等键和相同请求返回原 schedule，不重复创建；相同幂等键但不同请求返回 HTTP 409。
+  - Provider 不存在、Target 不存在或 Target 属于其他 Provider 时，preview/add 均拒绝。
+  - IM External Runner 的可信上下文包含公共 `preview -> explicit confirmation -> add` 流程和当前会话锁定的 provider/destination；Codex、Traex、Claude Code、ChatGPT Web 不使用各自私有 scheduler。
+  - WebUI 在亮色和暗色主题下布局、边框、文字与弹窗均可读，确认前不创建 schedule。
+- **清理步骤**:
+  - 删除 `im:test-76` 对应 schedule、测试 Target 与 Provider；停止测试进程并删除临时数据目录。
+
 ---
 
 ## V2 阶段：实时消息收发与 Schedule 执行测试

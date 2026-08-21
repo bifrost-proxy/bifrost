@@ -98,6 +98,7 @@ bifrost install-skill -y
 - `config`、`traffic`、`search`、`group`、多数 `status` 相关能力依赖"已有运行中的代理"
 - `rule`、`value`、`script`、`ca` 主要操作本地数据目录，不一定要求代理正在运行
 - `im` 通过当前运行中的 Bifrost Admin API 管理 IM Gateway provider、target、route、schedule 和消息；配置飞书/微信通道时优先走 CLI 交互式授权/扫码流程，不要直接改 provider 配置文件
+- 在 IM 对话中创建 schedule 时，必须使用 runtime 注入的可信 provider/destination：先执行 `bifrost im schedule preview ... --format json-pretty`，向用户展示规范化任务、时区、Runner、目标和未来三次运行时间，等待明确确认后再以完全相同参数执行 `schedule add`；必须携带稳定 `--idempotency-key`，不得猜测或扩大目标。Codex、Traex、Claude Code、ChatGPT Web 均走这一公共控制面。
 - `system-proxy` 会修改操作系统代理设置；除非用户明确要求，不要主动启用
 - `cli-proxy enable/disable` 会写入或移除当前 shell profile 中的代理和 CA 环境块；执行前先确认用户希望影响的 shell，不要代替用户无授权修改 profile
 

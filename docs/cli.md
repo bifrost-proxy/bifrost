@@ -823,6 +823,7 @@ bifrost im send --card-title "Deploy report" --card-text "**Done**" --card-image
 bifrost im route add deploy --event message.receive --regex '^/deploy' --script-file ./deploy.sh
 bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh
 bifrost im schedule add agent-daily --target oncall --cron '0 9 * * *' --agent-prompt 'Summarize traffic' --agent-runner-id codex --agent-model gpt-5 --agent-reasoning-effort high --agent-enable web_search
+bifrost im schedule preview agent-daily --provider feishu-main --target oncall --target-mode configured_target --cron '0 9 * * 1-5' --timezone Asia/Shanghai --agent-prompt 'Summarize traffic' --agent-runner-id traex --idempotency-key im:event-digest --format json-pretty
 bifrost im messages list --direction inbound
 ```
 
@@ -842,6 +843,8 @@ IM 通道建立后，Bifrost 会先推送上线通知和可用命令帮助。所
 回复引用消息时，Bifrost 通过飞书消息读取 API 获取文本或交互卡片可见内容，并校验消息仍属于当前群；不同机器上的机器人无需共享内存、JSON 或 SQLite。应用需具备 `im:message:readonly` 与 `im:message.group_msg`，权限变更后创建并发布新版本；缺权限时机器人会直接给出这组申请指引。Bifrost 生成的飞书卡片不再显示占空间的顶部标题栏。由群消息或单聊消息触发的回复使用飞书原生消息回复关系，因此客户端会在卡片上方显示简洁引用；任务计划、工具记录等卡片内部折叠区标题仍保留。上线通知、定时任务和管理端主动发送没有可引用的来源消息，仍直接发送到目标会话，但卡片同样保持无顶部标题。
 
 `bifrost im schedule add/update` 创建 Agent schedule 时可用 `--agent-runner-id` 选择 Runner，并通过 `--agent-model`、`--agent-profile`、`--agent-profile-v2`、`--agent-sandbox`、`--agent-reasoning-effort`、`--agent-reasoning-summary`、`--agent-approval-policy`、`--agent-danger-full-access`、`--agent-bypass-hook-trust`、`--agent-skip-git-repo-check`、`--agent-ignore-user-config`、`--agent-ignore-rules`、`--agent-add-dir`、`--agent-config`、`--agent-enable`、`--agent-disable` 等参数写入 `agent.adapter_config`。这些 schedule 级参数会在运行时覆盖 Runner 默认 Codex adapter 配置；历史 `--agent-search` 仅作为兼容入口映射为 `--enable web_search`，不再生成当前 Codex CLI 不支持的 `--search`。
+
+自然语言或自动化创建 schedule 时，先用 `schedule preview` 严格校验 cron、IANA timezone、Provider/Target 绑定并查看未来三次执行时间，取得用户确认后再用完全相同的参数执行 `schedule add`。`--idempotency-key` 防止消息重投造成重复创建；同 key 不同请求会返回冲突。创建默认启用，可用 `--disabled` 暂存。重叠运行通过 `--concurrency-policy forbid|skip_if_running|queue_one` 控制，失败重试通过 `--retry-max` 和 `--retry-delay-ms` 控制。Codex、Traex、Claude Code 与 ChatGPT Web 都复用同一控制面和 External Runner 运行时。
 
 ### 本地语音输入（ai voice）
 

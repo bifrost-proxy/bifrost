@@ -2962,6 +2962,191 @@ pub(super) async fn im_gateway_dispatcher_reaches_attachment_message_and_schedul
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn schedule_control_plane_previews_creates_replays_and_rejects_unsafe_changes() {
+    let _test_guard = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("ou_owner".to_string());
+    service.provider_store.add(provider).expect("save provider");
+    service
+        .target_store
+        .add(ImTarget {
+            id: "disabled-target".to_string(),
+            provider_id: "feishu-main".to_string(),
+            display_name: "Disabled".to_string(),
+            receive_id_type: "chat_id".to_string(),
+            receive_id: "oc_disabled".to_string(),
+            default_msg_type: "text".to_string(),
+            enabled: false,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .expect("save target");
+    let http = reqwest::Client::new();
+    let body = serde_json::json!({
+        "name": "Daily summary",
+        "idempotency_key": "im-preview-1",
+        "message_channel": {
+            "provider_id": "feishu-main",
+            "target_id": "owner",
+            "target_mode": "owner"
+        },
+        "trigger": {"type": "interval", "every_ms": 60000},
+        "task_type": "agent",
+        "agent": {"prompt": "Summarize", "runner_id": "codex"},
+        "retry": {"max_retries": 2, "delay_ms": 1},
+        "concurrency_policy": "queue_one"
+    });
+
+    let request = |method: reqwest::Method, path: &str, value: serde_json::Value| {
+        let service = Arc::clone(&service);
+        let http = http.clone();
+        let path = path.to_string();
+        async move {
+            let (address, server) = spawn_im_gateway_http(service).await;
+            let response = http
+                .request(method, format!("http://{address}{path}"))
+                .header("connection", "close")
+                .json(&value)
+                .send()
+                .await
+                .expect("schedule request");
+            server.await.expect("schedule server");
+            response
+        }
+    };
+
+    let preview = request(
+        reqwest::Method::POST,
+        "/api/im-gateway/schedules/preview",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(preview.status(), reqwest::StatusCode::OK);
+    let preview: serde_json::Value = preview.json().await.expect("preview JSON");
+    assert_eq!(preview["schedule"]["idempotency_key"], "im-preview-1");
+    assert_eq!(preview["upcoming_run_times"].as_array().unwrap().len(), 3);
+    assert!(service.schedule_store.list().is_empty());
+
+    assert_eq!(
+        request(
+            reqwest::Method::GET,
+            "/api/im-gateway/schedules/preview",
+            serde_json::json!({}),
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::METHOD_NOT_ALLOWED
+    );
+
+    let mut invalid_trigger = body.clone();
+    invalid_trigger["trigger"] = serde_json::json!({"type": "interval", "every_ms": 0});
+    assert_eq!(
+        request(
+            reqwest::Method::POST,
+            "/api/im-gateway/schedules/preview",
+            invalid_trigger,
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    let created = request(
+        reqwest::Method::POST,
+        "/api/im-gateway/schedules",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(created.status(), reqwest::StatusCode::OK);
+    let created: serde_json::Value = created.json().await.expect("created JSON");
+    let schedule_id = created["id"].as_str().unwrap().to_string();
+
+    let replay = request(
+        reqwest::Method::POST,
+        "/api/im-gateway/schedules",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(replay.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        replay.json::<serde_json::Value>().await.unwrap()["id"],
+        schedule_id
+    );
+
+    let mut conflict = body.clone();
+    conflict["agent"]["prompt"] = serde_json::json!("Different");
+    assert_eq!(
+        request(reqwest::Method::POST, "/api/im-gateway/schedules", conflict,)
+            .await
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+
+    let mut missing_provider = body.clone();
+    missing_provider["idempotency_key"] = serde_json::json!("missing-provider");
+    missing_provider["message_channel"]["provider_id"] = serde_json::json!("missing");
+    assert_eq!(
+        request(
+            reqwest::Method::POST,
+            "/api/im-gateway/schedules",
+            missing_provider,
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    assert_eq!(
+        request(
+            reqwest::Method::PATCH,
+            &format!("/api/im-gateway/schedules/{schedule_id}"),
+            serde_json::json!({
+                "message_channel": {
+                    "provider_id": "missing",
+                    "target_id": "owner",
+                    "target_mode": "owner"
+                }
+            }),
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    assert_eq!(
+        request(
+            reqwest::Method::PATCH,
+            &format!("/api/im-gateway/schedules/{schedule_id}"),
+            serde_json::json!({"idempotency_key": "replacement"}),
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+
+    let mut disabled_target = body;
+    disabled_target["idempotency_key"] = serde_json::json!("im-disabled-target");
+    disabled_target["message_channel"]["target_id"] = serde_json::json!("disabled-target");
+    disabled_target["message_channel"]["target_mode"] = serde_json::json!("configured_target");
+    assert_eq!(
+        request(
+            reqwest::Method::POST,
+            "/api/im-gateway/schedules/preview",
+            disabled_target,
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+}
+
 #[test]
 pub(super) fn provider_resolve_by_feishu_bot_id_and_name_is_exact_and_unambiguous() {
     let primary = test_provider();

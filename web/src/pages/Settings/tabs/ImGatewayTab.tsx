@@ -2184,12 +2184,14 @@ function RoutesPanel({
 function SchedulesPanel({
   schedules,
   providers,
+  targets,
   externalCliConfig,
   loading,
   onRefresh,
 }: {
   schedules: ImSchedule[];
   providers: ImProviderConfig[];
+  targets: ImTarget[];
   externalCliConfig: ExternalCliGatewayConfig | null;
   loading: boolean;
   onRefresh: () => void;
@@ -2218,19 +2220,40 @@ function SchedulesPanel({
     [providers],
   );
   const channelOptions = useMemo(
-    () =>
-      providers
+    () => [
+      ...providers
         .filter((provider) => provider.owner_open_id?.trim())
         .map((provider) => ({
-          value: provider.id,
-          label: `${provider.display_name || provider.id} (${provider.id})`,
+          value: `owner:${provider.id}`,
+          label: `${provider.display_name || provider.id} · Owner`,
         })),
-    [providers],
+      ...targets
+        .filter((target) => target.enabled)
+        .map((target) => ({
+          value: `target:${target.id}`,
+          label: `${target.display_name || target.id} · ${providerById.get(target.provider_id)?.display_name || target.provider_id}`,
+        })),
+    ],
+    [providerById, providers, targets],
   );
 
   const resolveChannelPayload = (value?: string) => {
     if (!value) return null;
-    const provider = providerById.get(value);
+    if (value.startsWith("target:")) {
+      const id = value.slice("target:".length);
+      const target = targets.find((item) => item.id === id && item.enabled);
+      if (!target) return null;
+      return {
+        messageChannel: {
+          provider_id: target.provider_id,
+          target_id: target.id,
+          target_mode: "configured_target" as const,
+        },
+      };
+    }
+    if (!value.startsWith("owner:")) return null;
+    const id = value.slice("owner:".length);
+    const provider = providerById.get(id);
     if (!provider?.owner_open_id?.trim()) return null;
     return {
       messageChannel: {
@@ -2258,6 +2281,7 @@ function SchedulesPanel({
         id: values.id?.trim() || undefined,
         name: values.name,
         enabled: values.enabled ?? true,
+        idempotency_key: values.idempotency_key?.trim() || undefined,
         message_channel: channel?.messageChannel,
         task_type: values.task_type,
         trigger:
@@ -2273,6 +2297,11 @@ function SchedulesPanel({
               },
         timeout_ms: Number(values.timeout_ms || 30000),
         max_output_bytes: Number(values.max_output_bytes || 1048576),
+        concurrency_policy: values.concurrency_policy || "skip_if_running",
+        retry: {
+          max_retries: Number(values.retry_max || 0),
+          delay_ms: Number(values.retry_delay_ms || 0),
+        },
       };
       if (values.task_type === "agent") {
         payload.agent = {
@@ -2292,11 +2321,41 @@ function SchedulesPanel({
           cwd: values.cwd || undefined,
         };
       }
-      await imGatewayApi.createSchedule(payload);
-      message.success("Schedule created");
-      setAddModalOpen(false);
-      form.resetFields();
-      onRefresh();
+      const preview = await imGatewayApi.previewSchedule(payload);
+      Modal.confirm({
+        title: "Confirm schedule",
+        width: 620,
+        content: (
+          <div>
+            <p>Review the normalized schedule before creating it.</p>
+            <Descriptions size="small" bordered column={1}>
+              <Descriptions.Item label="Task">{preview.schedule.name}</Descriptions.Item>
+              <Descriptions.Item label="Runner">
+                {preview.schedule.agent?.runner_id || externalCliConfig?.defaultRunnerId || "Default"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Destination">
+                {renderScheduleChannel(preview.schedule)} · {preview.schedule.message_channel?.target_mode}
+              </Descriptions.Item>
+              <Descriptions.Item label="Next runs">
+                {preview.upcoming_run_times.map((timestamp) => new Date(timestamp).toLocaleString()).join("; ")}
+              </Descriptions.Item>
+            </Descriptions>
+          </div>
+        ),
+        okText: "Confirm and create",
+        onOk: async () => {
+          try {
+            await imGatewayApi.createSchedule(preview.schedule);
+            message.success("Schedule created");
+            setAddModalOpen(false);
+            form.resetFields();
+            onRefresh();
+          } catch (err) {
+            message.error(normalizeApiErrorMessage(err, "Failed to create schedule"));
+            throw err;
+          }
+        },
+      });
     } catch (err) {
       if ((err as { errorFields?: unknown }).errorFields) return;
       message.error(err instanceof Error ? err.message : "Failed to create schedule");
@@ -2478,6 +2537,9 @@ function SchedulesPanel({
               timezone: "UTC",
               timeout_ms: 30000,
               max_output_bytes: 1048576,
+              concurrency_policy: "skip_if_running",
+              retry_max: 0,
+              retry_delay_ms: 0,
             });
             setAddModalOpen(true);
           }}
@@ -2593,6 +2655,24 @@ function SchedulesPanel({
             </Form.Item>
             <Form.Item name="enabled" label="Enabled" valuePropName="checked">
               <Switch />
+            </Form.Item>
+            <Form.Item name="idempotency_key" label="Idempotency Key">
+              <Input placeholder="Optional stable create key" />
+            </Form.Item>
+            <Form.Item name="concurrency_policy" label="Concurrency">
+              <Select
+                options={[
+                  { value: "skip_if_running", label: "Skip if running" },
+                  { value: "forbid", label: "Reject overlap" },
+                  { value: "queue_one", label: "Queue one" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="retry_max" label="Max Retries">
+              <Input type="number" min={0} max={10} />
+            </Form.Item>
+            <Form.Item name="retry_delay_ms" label="Retry Delay (ms)">
+              <Input type="number" min={0} max={86400000} />
             </Form.Item>
           </div>
 
@@ -2768,6 +2848,12 @@ function ScheduleDetailModal({
         </Descriptions.Item>
         <Descriptions.Item label="Next Run">{renderTime(schedule.next_run_at)}</Descriptions.Item>
         <Descriptions.Item label="Last Run">{renderTime(schedule.last_run_at)}</Descriptions.Item>
+        <Descriptions.Item label="Last Status">
+          {schedule.last_run_status || "-"}
+        </Descriptions.Item>
+        <Descriptions.Item label="Consecutive Failures">
+          {schedule.consecutive_failures || 0}
+        </Descriptions.Item>
         <Descriptions.Item label="Timeout">{schedule.timeout_ms}ms</Descriptions.Item>
       </Descriptions>
 
@@ -3209,9 +3295,11 @@ export default function ImGatewayTab({
         tasks.push(
           Promise.all([
             imGatewayApi.listSchedules(),
+            imGatewayApi.listTargets(),
             imGatewayApi.getExternalCliConfig().catch(() => null),
-          ]).then(([schedulesData, externalConfig]) => {
+          ]).then(([schedulesData, targetsData, externalConfig]) => {
             setSchedules(schedulesData);
+            setTargets(targetsData);
             setExternalCliConfig(externalConfig);
           }),
         );
@@ -3256,13 +3344,15 @@ export default function ImGatewayTab({
           setRoutes(await imGatewayApi.listRoutes());
           break;
         case "schedules": {
-          const [s, p, externalConfig] = await Promise.all([
+          const [s, p, t, externalConfig] = await Promise.all([
             imGatewayApi.listSchedules(),
             imGatewayApi.listProviders(),
+            imGatewayApi.listTargets(),
             imGatewayApi.getExternalCliConfig().catch(() => null),
           ]);
           setSchedules(s);
           setProviders(p);
+          setTargets(t);
           setExternalCliConfig(externalConfig);
           break;
         }
@@ -3396,6 +3486,7 @@ export default function ImGatewayTab({
         <SchedulesPanel
           schedules={schedules}
           providers={providers}
+          targets={targets}
           externalCliConfig={externalCliConfig}
           loading={loading}
           onRefresh={fetchData}

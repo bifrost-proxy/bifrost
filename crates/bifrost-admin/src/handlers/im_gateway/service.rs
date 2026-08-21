@@ -869,49 +869,7 @@ impl ImGatewayService {
                 let now = now_ms();
                 let schedules = service.schedule_store.list();
                 for schedule in service.scheduler.get_due_schedules(&schedules, now) {
-                    service.scheduler.remove_completed(&schedule.id);
-                    if service.scheduler.is_running(&schedule.id) {
-                        debug!(
-                            schedule_id = %schedule.id,
-                            "schedule already running, skipping due tick"
-                        );
-                        continue;
-                    }
-
-                    let mut scheduled = schedule.clone();
-                    scheduled.last_run_at = Some(now);
-                    scheduled.next_run_at =
-                        ImScheduler::compute_next_run_for_schedule(&scheduled, now);
-                    scheduled.updated_at = now;
-                    if let Err(error) = service.schedule_store.update(scheduled.clone()) {
-                        warn!(
-                            schedule_id = %scheduled.id,
-                            error = %error,
-                            "failed to update schedule next_run_at before execution"
-                        );
-                    }
-
-                    let task_service = service.clone();
-                    let schedule_id = scheduled.id.clone();
-                    let handle = tokio::spawn(async move {
-                        let run_id = uuid_short();
-                        let task_run = execute_schedule_once(
-                            &task_service,
-                            &scheduled,
-                            run_id,
-                            crate::im_gateway::types::TriggerSource::Schedule,
-                        )
-                        .await;
-                        if let Err(error) = task_service.run_store.add(task_run.clone()) {
-                            warn!(
-                                schedule_id = %scheduled.id,
-                                error = %error,
-                                "failed to persist scheduled task run"
-                            );
-                        }
-                        send_schedule_run_notification(&task_service, &scheduled, &task_run).await;
-                    });
-                    service.scheduler.register_running(&schedule_id, handle);
+                    service.process_due_schedule(schedule, now);
                 }
 
                 let next_run_at = service
@@ -931,6 +889,79 @@ impl ImGatewayService {
                 }
             }
         });
+    }
+
+    fn process_due_schedule(self: &Arc<Self>, schedule: ImSchedule, now: u64) {
+        self.scheduler.remove_completed(&schedule.id);
+        let mut scheduled = schedule.clone();
+        scheduled.last_run_at = Some(now);
+        scheduled.next_run_at = ImScheduler::compute_next_run_for_schedule(&scheduled, now);
+        scheduled.updated_at = now;
+        if let Err(error) = self.schedule_store.update(scheduled.clone()) {
+            warn!(
+                schedule_id = %scheduled.id,
+                error = %error,
+                "failed to update schedule next_run_at before execution"
+            );
+        }
+        if self.scheduler.is_running(&schedule.id) {
+            match schedule.concurrency_policy {
+                crate::im_gateway::types::ConcurrencyPolicy::Forbid => {
+                    let mut run = failed_schedule_run(
+                        uuid_short(),
+                        crate::im_gateway::types::TriggerSource::Schedule,
+                        &schedule.id,
+                        schedule
+                            .message_channel
+                            .as_ref()
+                            .map(|v| v.provider_id.clone()),
+                        schedule
+                            .message_channel
+                            .as_ref()
+                            .map(|v| v.target_id.clone()),
+                        "schedule execution rejected because a previous run is still active"
+                            .to_string(),
+                    );
+                    run.status = crate::im_gateway::types::TaskRunStatus::Rejected;
+                    if let Err(error) = self.run_store.add(run.clone()) {
+                        warn!(schedule_id = %schedule.id, error = %error, "failed to persist rejected schedule run");
+                    }
+                    update_schedule_run_state(self, &schedule, &run);
+                }
+                crate::im_gateway::types::ConcurrencyPolicy::SkipIfRunning => {
+                    debug!(schedule_id = %schedule.id, "schedule already running, skipping due tick");
+                }
+                crate::im_gateway::types::ConcurrencyPolicy::QueueOne => {
+                    let queued = self.scheduler.queue_one(&schedule.id);
+                    debug!(schedule_id = %schedule.id, queued, "schedule already running, queue-one policy evaluated");
+                }
+            }
+            return;
+        }
+
+        let task_service = self.clone();
+        let schedule_id = scheduled.id.clone();
+        let handle = tokio::spawn(async move {
+            let mut next_schedule = Some(scheduled);
+            while let Some(current) = next_schedule.take() {
+                match execute_schedule_with_retry(
+                    &task_service,
+                    &current,
+                    crate::im_gateway::types::TriggerSource::Schedule,
+                )
+                .await
+                {
+                    Ok(task_run) => {
+                        send_schedule_run_notification(&task_service, &current, &task_run).await;
+                    }
+                    Err(error) => {
+                        warn!(schedule_id = %current.id, error = %error, "scheduled execution could not be persisted")
+                    }
+                }
+                next_schedule = queued_enabled_schedule(&task_service, &current.id);
+            }
+        });
+        self.scheduler.register_running(&schedule_id, handle);
     }
 
     /// Spawn a background task that periodically re-scans all providers and
@@ -1001,6 +1032,15 @@ impl ImGatewayService {
             }
         });
     }
+}
+
+fn queued_enabled_schedule(service: &ImGatewayService, schedule_id: &str) -> Option<ImSchedule> {
+    service
+        .scheduler
+        .take_queued(schedule_id)
+        .then(|| service.schedule_store.get(schedule_id))
+        .flatten()
+        .filter(|schedule| schedule.enabled)
 }
 
 pub type SharedImGatewayService = Arc<ImGatewayService>;
@@ -1074,6 +1114,9 @@ pub(super) fn should_run_provider_event_connection(provider: &ImProviderConfig) 
             .as_deref()
             .is_some_and(|secret| !secret.is_empty())
 }
+
+#[cfg(test)]
+mod schedule_execution_tests;
 
 #[cfg(test)]
 mod provider_event_connection_tests {

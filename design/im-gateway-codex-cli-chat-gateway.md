@@ -200,6 +200,8 @@ adapter 声明能力，WebUI/API 按能力显隐配置项：
 
 Schedule Agent 覆盖：以 schedule 覆盖值覆盖 Runner 默认值；`dangerFullAccess=true` 时移除模板已有 `--sandbox`；`bifrost im schedule add/update` 必须同时提供 `--target` 或 `--provider/--target-mode`。
 
+所有 External Runner 通过同一个 Bifrost schedule control plane 工作，不为 Codex、Traex、Claude Code 或 ChatGPT Web 分别实现定时器。IM 入站时注入的可信 channel context 给出锁定的 provider/destination 和稳定幂等键。自然语言建 schedule 必须执行 `bifrost im schedule preview ... --format json-pretty`，展示时区、任务、Runner、目标及未来三次运行时间，等待用户明确确认后原样执行 `schedule add`。禁止 Agent 猜测或扩大目标，也禁止绕过 Bifrost 直接调用平台 API 或 Runner 私有 scheduler。
+
 ### Claude-Code adapter
 
 默认执行 `claude -p --verbose --output-format stream-json --input-format text`。未显式 `permissionMode` 时追加 `--dangerously-skip-permissions`；`permissionMode` 映射到 Claude Code camelCase 值；`model`→`--model`；`reasoningEffort`→`--effort`；`addDirs`→`--add-dir`。`/models` 列出 `sonnet`/`opus`/`fable`；`/model <slug>` 持久化到 `sessionKey + adapter + runnerId` 的 `modelOverride`，下一条普通消息通过 `claude --model <slug>` 启动。`session_id`/`thread_id`/`threadId` 事件写入 metadata `threadId`，用于排队/schedule/session state 续接。
@@ -208,7 +210,7 @@ Schedule Agent 覆盖：以 schedule 覆盖值覆盖 Runner 默认值；`dangerF
 
 Skill resolver：`<work_dir>/.agents/skills`、`~/.agents/skills`、`~/.codex/skills`、`$BIFROST_DATA_DIR/agent/skills` 与 `.system`。prompt 中只放 name、description、绝对路径；不 eager 注入完整 SKILL.md。Codex adapter 用 `--add-dir` 让 CLI 读取 skill root；Bifrost 内置能力优先通过 `bifrost install-skill -t universal -y` 安装到标准 Agent Skills 目录。
 
-V1 通过 skill 调用 `bifrost` CLI（`traffic list/search/get`、`im send`、`im provider status`、`remote ...`、`rules ...`）。Chat Gateway 测试默认不允许 `bifrost im send` 发到真实 IM。V2 新增 `bifrost mcp-server` 结构化工具：`im_send`、`im_update_progress`、`traffic_search/get`、`rule_list`、`remote_status/invoke`、`schedule_*`。
+V1 通过 skill 调用 `bifrost` CLI（`traffic list/search/get`、`im send`、`im provider status`、`im schedule preview/add`、`remote ...`、`rules ...`）。Chat Gateway 测试默认不允许 `bifrost im send` 发到真实 IM。后续版本可在 `bifrost mcp-server` 提供等价结构化工具；CLI/API 仍是唯一业务控制面。
 
 ### 进程与 run dir
 

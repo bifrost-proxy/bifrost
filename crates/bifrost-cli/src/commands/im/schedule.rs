@@ -15,14 +15,29 @@ pub(super) fn handle_im_schedule(host: &str, port: u16, args: &[String]) -> Resu
             let name = args.get(1).ok_or_else(|| {
                 bifrost_core::BifrostError::Config("schedule name required".to_string())
             })?;
+            let format = schedule_output_format(&args[2..])?;
             let body = parse_schedule_add_args(name, &args[2..])?;
             let url = api_url(host, port, "/schedules");
             let resp = http_post(&url, &body)?;
-            println!(
-                "{} Schedule '{}' created.",
-                "✓".bright_green(),
-                resp["id"].as_str().unwrap_or(name)
-            );
+            print_schedule_result(
+                &resp,
+                format,
+                &format!(
+                    "Schedule '{}' created.",
+                    resp["id"].as_str().unwrap_or(name)
+                ),
+            )?;
+            Ok(())
+        }
+        Some("preview") => {
+            let name = args.get(1).ok_or_else(|| {
+                bifrost_core::BifrostError::Config("schedule name required".to_string())
+            })?;
+            let format = schedule_output_format(&args[2..])?;
+            let body = parse_schedule_add_args(name, &args[2..])?;
+            let url = api_url(host, port, "/schedules/preview");
+            let resp = http_post(&url, &body)?;
+            print_schedule_result(&resp, format, "Schedule preview generated.")?;
             Ok(())
         }
         Some("update") => {
@@ -91,7 +106,9 @@ pub(super) fn handle_im_schedule(host: &str, port: u16, args: &[String]) -> Resu
             Ok(())
         }
         _ => {
-            eprintln!("Usage: bifrost im schedule <list|add|update|pause|resume|run|logs|delete>");
+            eprintln!(
+                "Usage: bifrost im schedule <list|preview|add|update|pause|resume|run|logs|delete>"
+            );
             Ok(())
         }
     }
@@ -100,6 +117,7 @@ pub(super) fn handle_im_schedule(host: &str, port: u16, args: &[String]) -> Resu
 pub(super) fn parse_schedule_add_args(name: &str, args: &[String]) -> Result<Value> {
     let mut body = json!({
         "name": name,
+        "enabled": true,
     });
     let mut trigger = json!({});
     let mut script = json!({});
@@ -128,6 +146,33 @@ pub(super) fn parse_schedule_add_args(name: &str, args: &[String]) -> Result<Val
                 i += 1;
                 if let Some(v) = args.get(i) {
                     target_mode = Some(v.to_string());
+                }
+            }
+            "--disabled" => {
+                body["enabled"] = json!(false);
+            }
+            "--idempotency-key" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["idempotency_key"] = json!(v);
+                }
+            }
+            "--concurrency-policy" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    body["concurrency_policy"] = json!(v);
+                }
+            }
+            "--retry-max" => {
+                i += 1;
+                if let Some(v) = args.get(i).and_then(|v| v.parse::<u32>().ok()) {
+                    body["retry"]["max_retries"] = json!(v);
+                }
+            }
+            "--retry-delay-ms" => {
+                i += 1;
+                if let Some(v) = args.get(i).and_then(|v| v.parse::<u64>().ok()) {
+                    body["retry"]["delay_ms"] = json!(v);
                 }
             }
             "--cron" => {
@@ -661,6 +706,39 @@ fn push_json_array_string(value: &mut Value, item: &str) {
     if let Some(values) = value.as_array_mut() {
         values.push(json!(item));
     }
+}
+
+pub(super) fn schedule_output_format(args: &[String]) -> Result<&str> {
+    if args.last().is_some_and(|arg| arg == "--format") {
+        return Err(bifrost_core::BifrostError::Config(
+            "--format requires a value".to_string(),
+        ));
+    }
+    let format = args
+        .windows(2)
+        .find(|pair| pair[0] == "--format")
+        .map(|pair| pair[1].as_str())
+        .unwrap_or("human");
+    if matches!(format, "human" | "json" | "json-pretty") {
+        Ok(format)
+    } else {
+        Err(bifrost_core::BifrostError::Config(
+            "--format must be one of: human, json, json-pretty".to_string(),
+        ))
+    }
+}
+
+pub(super) fn print_schedule_result(resp: &Value, format: &str, success: &str) -> Result<()> {
+    match format {
+        "json" => println!("{resp}"),
+        "json-pretty" => println!(
+            "{}",
+            serde_json::to_string_pretty(resp)
+                .expect("serializing a serde_json::Value is infallible")
+        ),
+        _ => println!("{} {}", "✓".bright_green(), success),
+    }
+    Ok(())
 }
 
 fn print_schedule_list(resp: &Value) {

@@ -53,6 +53,16 @@ impl ImScheduleStore {
             .cloned()
     }
 
+    pub fn get_by_idempotency_key(&self, key: &str) -> Option<ImSchedule> {
+        self.refresh_from_disk();
+        self.data
+            .read()
+            .schedules
+            .iter()
+            .find(|schedule| schedule.idempotency_key.as_deref() == Some(key))
+            .cloned()
+    }
+
     pub fn add(&self, schedule: ImSchedule) -> Result<()> {
         let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
@@ -63,6 +73,17 @@ impl ImScheduleStore {
                 schedule.id
             )));
         }
+        if let Some(key) = schedule.idempotency_key.as_deref() {
+            if data
+                .schedules
+                .iter()
+                .any(|existing| existing.idempotency_key.as_deref() == Some(key))
+            {
+                return Err(BifrostError::Config(format!(
+                    "schedule with idempotency key '{key}' already exists"
+                )));
+            }
+        }
         data.schedules.push(schedule);
         self.save_locked(&data)
     }
@@ -71,6 +92,15 @@ impl ImScheduleStore {
         let _file_lock = self.acquire_write_lock()?;
         let mut data = self.data.write();
         self.refresh_locked(&mut data);
+        if let Some(key) = schedule.idempotency_key.as_deref() {
+            if data.schedules.iter().any(|existing| {
+                existing.id != schedule.id && existing.idempotency_key.as_deref() == Some(key)
+            }) {
+                return Err(BifrostError::Config(format!(
+                    "schedule with idempotency key '{key}' already exists"
+                )));
+            }
+        }
         if let Some(existing) = data.schedules.iter_mut().find(|s| s.id == schedule.id) {
             *existing = schedule;
             self.save_locked(&data)
@@ -175,6 +205,37 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn schedule(id: &str, key: Option<&str>) -> ImSchedule {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id,
+            "idempotency_key": key,
+            "message_channel": {
+                "provider_id": "provider",
+                "target_id": "owner",
+                "target_mode": "owner"
+            },
+            "trigger": {"type": "interval", "every_ms": 1000},
+            "task_type": "script",
+            "script": {"script_text": "echo ok"}
+        }))
+        .expect("schedule")
+    }
+
+    #[test]
+    fn idempotency_key_lookup_and_uniqueness_are_persisted() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImScheduleStore::new(temp.path());
+        store.add(schedule("one", Some("key-1"))).unwrap();
+        assert_eq!(store.get_by_idempotency_key("key-1").unwrap().id, "one");
+        assert!(store.add(schedule("two", Some("key-1"))).is_err());
+
+        let mut second = schedule("two", Some("key-2"));
+        store.add(second.clone()).unwrap();
+        second.idempotency_key = Some("key-1".to_string());
+        assert!(store.update(second).is_err());
+    }
 
     #[test]
     fn coverage_gap_schedule_store_delete_and_atomic_write_failures() {

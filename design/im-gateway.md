@@ -183,16 +183,21 @@ Task Executor 应用 cwd/env/timeout/output policy：
 
 `ImSchedule` 字段：
 
-- `id / name / task_type ∈ {script, agent} / trigger ∈ {cron, interval} / message_channel`
+- `id / name / task_type ∈ {script, agent} / trigger ∈ {cron, interval} / message_channel / idempotency_key`
 - `script { script_text | script_file, cwd, env, timeout }`
 - `agent { prompt / session_key / work_dir / system_prompt / runner_id / initial_prompt / conversation_ref }`
-- `enabled / next_run_at / last_run_at / last_run_status`
+- `enabled / next_run_at / last_run_at / last_run_status / consecutive_failures`
+- `concurrency_policy ∈ {forbid, skip_if_running, queue_one}` 与 `retry { max_retries, delay_ms }`
 
-Scheduler：`ImGatewayService::start_scheduler()` 在启动时开常驻 loop；`compute_next_run_at()` 支持 cron / interval / catch-up 关闭。手动 `POST /schedules/:id/run` 与自动触发共用同一执行函数。
+Scheduler：`ImGatewayService::start_scheduler()` 在启动时开常驻 loop；interval 使用毫秒间隔，cron 兼容 Unix 5 段表达式并接受原生 6/7 段表达式，按 IANA timezone 计算；非法表达式或时区在保存前直接拒绝，不再退化为固定 60 秒。catch-up 默认关闭。手动 `POST /schedules/:id/run` 与自动触发共用同一执行与重试函数；最终状态和连续失败次数回写 schedule。
+
+重叠触发时，`forbid` 记录 `rejected` run，`skip_if_running` 跳过当前 tick，`queue_one` 最多保留一个待运行 tick。失败或超时按 retry 策略重试，每次尝试都进入 run history，只有最终尝试发送通知。
 
 Schedule 通道绑定必须显式；`message_channel.target_mode` 覆盖 `SourceThread` / `SourceUser` / `Owner` / `ConfiguredTarget`。执行完成后使用绑定通道的默认接收者发送通知，Agent 任务优先使用 `agent_final_response`。
 
 ChatGPT Web Runner 与 Codex Runner 在 schedule 首次执行成功后把 `conversation_id` / `thread_id` 回写到 `agent.conversation_ref`，后续 run 复用同一会话，除非显式重置 schedule。
+
+IM 内的 Codex、Traex、Claude Code、ChatGPT Web 共用 Bifrost schedule 控制面，不接入各自私有 scheduler。Gateway 在可信 runtime context 中固定当前 provider 与 destination，Agent 必须先调用 `schedule preview`，向用户展示规范化参数和未来三次运行时间，获得当前会话的明确确认后才可调用 `schedule add`。create 使用稳定 `idempotency_key` 去重；同 key 同请求返回既有 schedule，同 key 不同请求返回冲突。`agent.system_prompt` 会合并进实际 External Runner instructions。
 
 ### Remote Invoke 协议扩展
 
@@ -278,7 +283,7 @@ pub enum RemoteImGatewayAction {
 - `bifrost im provider add|list|status|edit|remove [--provider <id>]`
 - `bifrost im target add|list|remove|check --provider <id> --receive-id <...> --receive-id-type <chat_id|open_id|...>`
 - `bifrost im route add|list|pause|resume|remove --provider <id> --trigger <chat_id|user|keyword|regex> --script-file <...>`
-- `bifrost im schedule add|list|pause|resume|run|remove --provider <id> [--cron <expr>|--interval <secs>] [--script-file <...>|--agent-prompt <...>|--agent-prompt-file <...>|--agent-session-key <...>|--agent-work-dir <...>|--agent-system-prompt <...>] [--target <...>|--provider-owner]`
+- `bifrost im schedule preview|add|list|pause|resume|run|delete --provider <id> [--cron <expr> --timezone <IANA>|--every <milliseconds>] [--script-file <...>|--agent-prompt <...>|--agent-prompt-file <...>|--agent-session-key <...>|--agent-work-dir <...>|--agent-system-prompt <...>] --target <...> [--target-mode <owner|configured_target|source_thread|source_user>] [--idempotency-key <key>] [--disabled] [--concurrency-policy <...>] [--retry-max <n>] [--retry-delay-ms <ms>] [--format human|json|json-pretty]`
 - `bifrost im send [<provider>|--provider <id>|--bot-id <app_id>|--bot-name <name>] [--target <...>|--chat-id <oc_xxx>] --text <...>|--markdown-file <...>|--image <...>|--file <...>|--card-file <...>`
 - `bifrost im history events|runs|messages --provider <id>`
 - `bifrost im channel check --provider <id> --target <...>`
@@ -299,6 +304,7 @@ Provider 选择：provider 位置参数与 `--provider` 是直接选择；`--bot
 - `POST /targets/:id/check`
 - `POST/GET/PATCH/DELETE /routes[/:id]`
 - `POST/GET/PATCH/DELETE /schedules[/:id]`
+- `POST /schedules/preview`（严格校验并返回规范化 schedule 与未来三次运行时间，不落库）
 - `POST /schedules/:id/run`
 - `POST /messages/send`
 - `GET /events`, `GET /runs`, `GET /messages`
