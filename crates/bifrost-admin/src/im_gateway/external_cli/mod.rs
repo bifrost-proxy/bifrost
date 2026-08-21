@@ -1463,6 +1463,17 @@ impl ExternalCliConfigStore {
     }
 
     pub fn load(&self) -> ExternalCliGatewayConfig {
+        // The isolated IM worker is intentionally long-lived. Refresh from
+        // the shared persisted config so Runner changes become visible to the
+        // next task without restarting (and aborting) the worker. Invalid or
+        // partially-written input keeps the last known-good in-memory value.
+        if let Some(config) = load_config_from_disk(&self.file_path) {
+            let config = normalized_gateway_config(config);
+            let mut data = self.data.write();
+            if *data != config {
+                *data = config;
+            }
+        }
         self.data.read().clone()
     }
 

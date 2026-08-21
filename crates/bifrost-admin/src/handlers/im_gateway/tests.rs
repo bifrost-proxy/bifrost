@@ -7,6 +7,131 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::sync::OnceLock;
 
+#[tokio::test]
+async fn runtime_config_reload_keeps_matching_transport_and_contains_invalid_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ImGatewayService::new(temp.path());
+    let mut provider = ImProviderConfig {
+        id: "hot-reload-provider".to_string(),
+        provider_type: ImProviderType::Webhook,
+        display_name: "Hot Reload".to_string(),
+        enabled: true,
+        base_url: None,
+        app_id: Some("app-a".to_string()),
+        secret_ref: Some("secret".to_string()),
+        owner_open_id: None,
+        event_connection_enabled: true,
+        event_types: vec!["message".to_string()],
+        agent_config: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    service.provider_store.add(provider.clone()).unwrap();
+    service
+        .connection_manager
+        .set_transport_config_for_test(&provider);
+
+    let kept = reload_runtime_config(&service, &[]).await;
+    assert_eq!(kept.kept_provider_ids, vec![provider.id.clone()]);
+    assert!(!kept.has_failures());
+
+    provider.app_id = Some("app-b".to_string());
+    service.provider_store.update(provider.clone()).unwrap();
+    let preserved = reload_runtime_config(&service, &[]).await;
+    assert_eq!(preserved.failed_providers.len(), 1);
+    assert!(service
+        .connection_manager
+        .get_status(&provider.id)
+        .is_some());
+
+    service
+        .connection_manager
+        .stop_connection_and_wait(&provider.id)
+        .await;
+    let failed_fresh = reload_runtime_config(&service, &[]).await;
+    assert_eq!(failed_fresh.failed_providers.len(), 1);
+    assert_eq!(
+        service
+            .connection_manager
+            .get_status(&provider.id)
+            .unwrap()
+            .state,
+        crate::im_gateway::types::ConnectionState::Failed
+    );
+
+    provider.enabled = false;
+    service.provider_store.update(provider.clone()).unwrap();
+    let stopped = reload_runtime_config(&service, &[]).await;
+    assert_eq!(stopped.stopped_provider_ids, vec![provider.id]);
+    assert!(service.connection_manager.provider_ids().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_config_reload_starts_and_reconnects_only_changed_transport() {
+    let _test_guard = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let _loopback_guard = EnvVarGuard::set("BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL", "1");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let response = service_fn(|_request| async {
+                    Ok::<_, hyper::Error>(
+                        hyper::Response::builder()
+                            .status(hyper::StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Full::new(Bytes::from_static(
+                                br#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                            )))
+                            .unwrap(),
+                    )
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), response)
+                    .await;
+            });
+        }
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let service = ImGatewayService::new(temp.path());
+    let mut provider = ImProviderConfig {
+        id: "reload-feishu".to_string(),
+        provider_type: ImProviderType::Feishu,
+        display_name: "Reload Feishu".to_string(),
+        enabled: true,
+        base_url: Some(format!("http://{address}/open-apis")),
+        app_id: Some("app-a".to_string()),
+        secret_ref: Some("secret".to_string()),
+        owner_open_id: Some("ou-owner".to_string()),
+        event_connection_enabled: true,
+        event_types: vec!["message".to_string()],
+        agent_config: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    service.provider_store.add(provider.clone()).unwrap();
+
+    let started = reload_runtime_config(&service, &[]).await;
+    assert_eq!(started.started_provider_ids, vec![provider.id.clone()]);
+    assert!(!started.has_failures());
+
+    provider.app_id = Some("app-b".to_string());
+    service.provider_store.update(provider.clone()).unwrap();
+    let reconnected = reload_runtime_config(&service, &[]).await;
+    assert_eq!(
+        reconnected.reconnected_provider_ids,
+        vec![provider.id.clone()]
+    );
+    assert!(!reconnected.has_failures());
+
+    service.connection_manager.stop_all();
+    server.abort();
+}
+
 struct DefaultMethodProvider;
 
 #[async_trait::async_trait]

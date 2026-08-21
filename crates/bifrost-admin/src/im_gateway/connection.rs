@@ -26,6 +26,54 @@ struct ManagedConnection {
     handle: ConnectionHandle,
     status: ConnectionStatus,
     generation: u64,
+    transport_fingerprint: Option<ProviderTransportFingerprint>,
+}
+
+/// Only fields consumed by the provider transport belong here. Display names,
+/// owner/Agent settings and timestamps are deliberately excluded: changing
+/// those values must not churn an otherwise healthy socket.
+#[derive(Clone, PartialEq, Eq)]
+struct ProviderTransportFingerprint {
+    provider_type: ImProviderType,
+    base_url: Option<String>,
+    app_id: Option<String>,
+    secret_ref: Option<String>,
+    event_connection_enabled: bool,
+    event_types: Vec<String>,
+}
+
+impl ProviderTransportFingerprint {
+    fn from_config(config: &ImProviderConfig) -> Self {
+        let mut event_types = config
+            .event_types
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        event_types.sort();
+        event_types.dedup();
+        Self {
+            provider_type: config.provider_type,
+            base_url: normalized_optional_transport_value(config.base_url.as_deref(), true),
+            app_id: normalized_optional_transport_value(config.app_id.as_deref(), false),
+            secret_ref: normalized_optional_transport_value(config.secret_ref.as_deref(), false),
+            event_connection_enabled: config.event_connection_enabled,
+            event_types,
+        }
+    }
+}
+
+fn normalized_optional_transport_value(value: Option<&str>, trim_slash: bool) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            if trim_slash {
+                value.trim_end_matches('/').to_string()
+            } else {
+                value.to_string()
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +178,7 @@ impl ImConnectionManager {
                     handle,
                     status,
                     generation,
+                    transport_fingerprint: Some(ProviderTransportFingerprint::from_config(config)),
                 },
             );
         }
@@ -204,6 +253,7 @@ impl ImConnectionManager {
                     handle,
                     status,
                     generation,
+                    transport_fingerprint: Some(ProviderTransportFingerprint::from_config(config)),
                 },
             );
         }
@@ -295,6 +345,25 @@ impl ImConnectionManager {
         conns.get(provider_id).map(|c| c.status.clone())
     }
 
+    /// IDs with transport state, including failed/disconnected entries that
+    /// should be reconsidered during a configuration hot reload.
+    pub fn provider_ids(&self) -> Vec<String> {
+        self.connections.read().keys().cloned().collect()
+    }
+
+    /// Returns true when the running transport was created from the same
+    /// transport-relevant configuration. Non-transport edits intentionally
+    /// return true so they can be picked up in-process without reconnecting.
+    pub fn transport_matches(&self, config: &ImProviderConfig) -> bool {
+        self.connections
+            .read()
+            .get(&config.id)
+            .and_then(|connection| connection.transport_fingerprint.as_ref())
+            .is_some_and(|fingerprint| {
+                fingerprint == &ProviderTransportFingerprint::from_config(config)
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn set_status_for_test(&self, provider_id: &str, status: ConnectionStatus) {
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
@@ -308,6 +377,25 @@ impl ImConnectionManager {
                 },
                 status,
                 generation: self.reserve_generation(),
+                transport_fingerprint: None,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_transport_config_for_test(&self, config: &ImProviderConfig) {
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        self.connections.write().insert(
+            config.id.clone(),
+            ManagedConnection {
+                provider_id: config.id.clone(),
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: None,
+                },
+                status: ConnectionStatus::default(),
+                generation: self.reserve_generation(),
+                transport_fingerprint: Some(ProviderTransportFingerprint::from_config(config)),
             },
         );
     }
@@ -369,6 +457,7 @@ impl ImConnectionManager {
                 },
                 status,
                 generation: self.reserve_generation(),
+                transport_fingerprint: None,
             },
         );
     }
@@ -430,6 +519,56 @@ mod tests {
     }
 
     #[test]
+    fn transport_fingerprint_ignores_runtime_metadata_but_detects_socket_inputs() {
+        let manager = ImConnectionManager::new();
+        let config = ImProviderConfig {
+            id: "feishu-hot-reload".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Original".to_string(),
+            enabled: true,
+            base_url: Some("https://open.feishu.cn/open-apis/".to_string()),
+            app_id: Some("app-id".to_string()),
+            secret_ref: Some("secret".to_string()),
+            owner_open_id: Some("owner-a".to_string()),
+            event_connection_enabled: true,
+            event_types: vec!["event-b".to_string(), "event-a".to_string()],
+            agent_config: None,
+            created_at: 1,
+            updated_at: 2,
+        };
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        manager.connections.write().insert(
+            config.id.clone(),
+            ManagedConnection {
+                provider_id: config.id.clone(),
+                handle: ConnectionHandle {
+                    shutdown_tx,
+                    stopped_rx: None,
+                },
+                status: ConnectionStatus::default(),
+                generation: 1,
+                transport_fingerprint: Some(ProviderTransportFingerprint::from_config(&config)),
+            },
+        );
+
+        let mut metadata_edit = config.clone();
+        metadata_edit.display_name = "Renamed".to_string();
+        metadata_edit.owner_open_id = Some("owner-b".to_string());
+        metadata_edit.updated_at = 99;
+        metadata_edit.event_types.reverse();
+        assert!(manager.transport_matches(&metadata_edit));
+        assert_eq!(manager.provider_ids(), vec![config.id.clone()]);
+
+        let mut credential_edit = metadata_edit.clone();
+        credential_edit.app_id = Some("replacement-app".to_string());
+        assert!(!manager.transport_matches(&credential_edit));
+
+        let mut subscription_edit = metadata_edit;
+        subscription_edit.event_types.push("event-c".to_string());
+        assert!(!manager.transport_matches(&subscription_edit));
+    }
+
+    #[test]
     fn test_get_status_nonexistent_returns_none() {
         let mgr = ImConnectionManager::new();
         assert!(mgr.get_status("nonexistent").is_none());
@@ -463,6 +602,7 @@ mod tests {
                 },
                 status: ConnectionStatus::default(),
                 generation: 1,
+                transport_fingerprint: None,
             },
         );
 
@@ -500,6 +640,7 @@ mod tests {
                 },
                 status: ConnectionStatus::default(),
                 generation: 1,
+                transport_fingerprint: None,
             },
         );
 
@@ -545,6 +686,7 @@ mod tests {
                 },
                 status: ConnectionStatus::default(),
                 generation: 7,
+                transport_fingerprint: None,
             },
         );
         update_connection_state_if_generation(

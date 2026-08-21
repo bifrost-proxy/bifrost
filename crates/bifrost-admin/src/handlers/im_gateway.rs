@@ -136,6 +136,91 @@ pub(crate) fn provider_runtime_status_value(
     Ok(value)
 }
 
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RuntimeConfigReloadReport {
+    kept_provider_ids: Vec<String>,
+    started_provider_ids: Vec<String>,
+    reconnected_provider_ids: Vec<String>,
+    stopped_provider_ids: Vec<String>,
+    failed_providers: Vec<(String, String)>,
+}
+
+impl RuntimeConfigReloadReport {
+    pub(crate) fn has_failures(&self) -> bool {
+        !self.failed_providers.is_empty()
+    }
+}
+
+/// Reconcile persisted IM configuration inside the existing worker process.
+///
+/// The scheduler and stores already read persisted state dynamically. This
+/// method wakes the scheduler immediately and only replaces provider
+/// transports whose transport-specific inputs changed. Provider event
+/// pipelines are intentionally retained so an active Agent/Runner turn is not
+/// aborted by an unrelated configuration edit.
+pub(crate) async fn reload_runtime_config(
+    service: &ImGatewayService,
+    manual_provider_ids: &[String],
+) -> RuntimeConfigReloadReport {
+    use std::collections::{HashMap, HashSet};
+
+    service.scheduler.notify_reschedule();
+
+    let provider_configs = service
+        .provider_store
+        .list()
+        .into_iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect::<HashMap<_, _>>();
+    let manual_provider_ids = manual_provider_ids
+        .iter()
+        .map(|provider_id| provider_id.trim())
+        .filter(|provider_id| !provider_id.is_empty())
+        .collect::<HashSet<_>>();
+    let desired_provider_ids = provider_configs
+        .values()
+        .filter(|provider| {
+            service::should_run_provider_event_connection(provider)
+                || manual_provider_ids.contains(provider.id.as_str())
+        })
+        .map(|provider| provider.id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut report = RuntimeConfigReloadReport::default();
+    for provider_id in service.connection_manager.provider_ids() {
+        if !desired_provider_ids.contains(&provider_id) {
+            service
+                .connection_manager
+                .stop_connection_and_wait(&provider_id)
+                .await;
+            report.stopped_provider_ids.push(provider_id);
+        }
+    }
+
+    let mut desired_provider_ids = desired_provider_ids.into_iter().collect::<Vec<_>>();
+    desired_provider_ids.sort();
+    for provider_id in desired_provider_ids {
+        let Some(provider) = provider_configs.get(&provider_id) else {
+            continue;
+        };
+        if service.connection_manager.transport_matches(provider) {
+            report.kept_provider_ids.push(provider_id);
+            continue;
+        }
+        let was_present = service
+            .connection_manager
+            .get_status(&provider_id)
+            .is_some();
+        match providers::start_provider_event_connection(service, &provider_id).await {
+            Ok(()) if was_present => report.reconnected_provider_ids.push(provider_id),
+            Ok(()) => report.started_provider_ids.push(provider_id),
+            Err(error) => report.failed_providers.push((provider_id, error)),
+        }
+    }
+    report
+}
+
 pub async fn handle_im_gateway(
     req: Request<Incoming>,
     service: Option<SharedImGatewayService>,

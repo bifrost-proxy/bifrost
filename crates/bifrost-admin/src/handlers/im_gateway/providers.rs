@@ -1133,7 +1133,12 @@ pub(super) async fn start_provider_event_connection(
             Ok(())
         }
         Err(e) => {
-            service.connection_manager.mark_failed(id, e.to_string());
+            // start_connection validates replacement prerequisites before it
+            // removes an existing transport. Preserve that healthy old
+            // transport when a hot-reload candidate is invalid.
+            if service.connection_manager.get_status(id).is_none() {
+                service.connection_manager.mark_failed(id, e.to_string());
+            }
             Err(e.to_string())
         }
     }
