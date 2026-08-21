@@ -1591,8 +1591,26 @@ mod tests {
         assert_eq!(response.payload["restartRequired"], false);
         assert_eq!(
             service.connection_manager.provider_ids(),
-            vec![manual_provider.id]
+            vec![manual_provider.id.clone()]
         );
+
+        handle_worker_frame(
+            ParentFrame::ConfigApply {
+                request_id: "config-with-leases".to_string(),
+                generation: 10,
+                payload: serde_json::json!({"manualProviderIds": [manual_provider.id]}),
+            },
+            context.clone(),
+            service.clone(),
+        )
+        .await
+        .unwrap();
+        let WorkerFrame::Response { response } = output.recv().await.unwrap() else {
+            panic!("expected config response")
+        };
+        assert!(response.ok);
+        assert_eq!(response.payload["generation"], 10);
+        assert_eq!(response.payload["restartRequired"], false);
 
         handle_worker_frame(
             ParentFrame::Ping {
