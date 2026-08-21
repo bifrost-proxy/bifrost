@@ -2463,6 +2463,172 @@ test("AI 一级页整合 IM Gateway 子导航并按 URL 切换独立面板", asy
   await expect(page.getByTestId("im-gateway-section-history")).toHaveCount(0);
 });
 
+test("IM Schedule 先预览确认再创建，并在亮暗主题下展示可靠性配置", async ({ page }) => {
+  const provider = {
+    id: "schedule-provider",
+    provider_type: "feishu",
+    display_name: "Schedule Provider",
+    enabled: true,
+    app_id: "cli_schedule",
+    secret_configured: true,
+    owner_open_id: "ou_schedule_owner",
+    event_connection_enabled: true,
+    event_types: [],
+    created_at: 1,
+    updated_at: 1,
+  };
+  const previewedSchedule = {
+    id: "schedule-preview-id",
+    name: "Weekday agent summary",
+    enabled: true,
+    idempotency_key: "im:test:schedule-preview",
+    message_channel: {
+      provider_id: provider.id,
+      target_id: "target:with:colon",
+      target_mode: "configured_target",
+    },
+    trigger: { type: "cron", expr: "0 9 * * 1-5", timezone: "Asia/Shanghai" },
+    task_type: "agent",
+    script: {},
+    agent: { prompt: "Summarize the project", runner_id: "Traex" },
+    timeout_ms: 30000,
+    max_output_bytes: 1048576,
+    concurrency_policy: "queue_one",
+    retry: { max_retries: 2, delay_ms: 1000 },
+    consecutive_failures: 0,
+    created_at: 1,
+    updated_at: 1,
+  };
+  let previewPayload: Record<string, unknown> | null = null;
+  let createPayload: Record<string, unknown> | null = null;
+  let createAttempts = 0;
+
+  await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
+    await route.fulfill({ json: [provider] });
+  });
+  await page.route("**/_bifrost/api/im-gateway/targets", async (route) => {
+    await route.fulfill({
+      json: [
+        {
+          id: "target:with:colon",
+          provider_id: provider.id,
+          display_name: "Colon Target",
+          target_type: "chat",
+          target_id: "oc_schedule_target",
+          enabled: true,
+          created_at: 1,
+          updated_at: 1,
+        },
+      ],
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      json: {
+        version: 1,
+        defaultRunnerId: "Traex",
+        runners: {
+          Traex: {
+            enabled: true,
+            adapter: "traex",
+            adapterConfig: {},
+            injectBifrostTools: false,
+            skillPaths: [],
+            deliveryMode: "final_reply",
+          },
+        },
+        channels: {},
+      },
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/schedules/preview", async (route) => {
+    previewPayload = route.request().postDataJSON();
+    await route.fulfill({
+      json: {
+        schedule: previewedSchedule,
+        upcoming_run_times: [1787293200000, 1787379600000, 1787466000000],
+      },
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/schedules", async (route) => {
+    if (route.request().method() === "POST") {
+      createAttempts += 1;
+      createPayload = route.request().postDataJSON();
+      if (createAttempts === 1) {
+        await route.fulfill({ status: 409, json: { error: "schedule conflict" } });
+        return;
+      }
+      await route.fulfill({ json: previewedSchedule });
+      return;
+    }
+    await route.fulfill({ json: [] });
+  });
+
+  await page.addInitScript(() => {
+    localStorage.setItem("bifrost-theme", JSON.stringify({ state: { mode: "light" }, version: 0 }));
+  });
+  await openPage(page, "ai/channels?imGatewaySection=schedules");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  const section = page.getByTestId("im-gateway-section-schedules");
+  await section.getByRole("button", { name: "Add" }).click();
+
+  const addDialog = page.getByRole("dialog", { name: "Add Schedule" });
+  await expect(addDialog.getByLabel("Idempotency Key")).toBeVisible();
+  await expect(addDialog.getByLabel("Concurrency")).toBeVisible();
+  await expect(addDialog.getByLabel("Max Retries")).toBeVisible();
+  await addDialog.getByLabel("Name").fill("Weekday agent summary");
+  await setSelectValue(page, addDialog.getByLabel("Task Type"), "Agent");
+  await setSelectValue(
+    page,
+    addDialog.getByLabel("IM Channel"),
+    "Colon Target · Schedule Provider",
+  );
+  await setSelectValue(page, addDialog.getByLabel("Trigger"), "Cron");
+  await addDialog.getByLabel("Cron").fill("0 9 * * 1-5");
+  await addDialog.getByLabel("Timezone").fill("Asia/Shanghai");
+  await addDialog.getByLabel("Idempotency Key").fill("im:test:schedule-preview");
+  await setSelectValue(page, addDialog.getByLabel("Concurrency"), "Queue one");
+  await addDialog.getByLabel("Max Retries").fill("2");
+  await addDialog.getByLabel("Retry Delay (ms)").fill("1000");
+  await addDialog.getByLabel("Preset Prompt").fill("Summarize the project");
+  await addDialog.getByRole("button", { name: "Create" }).click();
+
+  const confirmation = page.getByRole("dialog", { name: "Confirm schedule" });
+  await expect(confirmation).toContainText("Weekday agent summary");
+  await expect(confirmation).toContainText("Traex");
+  await expect(confirmation).toContainText("Schedule Provider · configured_target");
+  expect(createPayload).toBeNull();
+  expect(previewPayload).toMatchObject({
+    name: "Weekday agent summary",
+    enabled: true,
+    idempotency_key: "im:test:schedule-preview",
+    concurrency_policy: "queue_one",
+    retry: { max_retries: 2, delay_ms: 1000 },
+    message_channel: {
+      provider_id: provider.id,
+      target_id: "target:with:colon",
+      target_mode: "configured_target",
+    },
+    trigger: { type: "cron", expr: "0 9 * * 1-5", timezone: "Asia/Shanghai" },
+    agent: { prompt: "Summarize the project", runner_id: "Traex" },
+  });
+
+  await confirmation.getByRole("button", { name: "Confirm and create" }).click();
+  await waitForToast(page, "schedule conflict");
+  await expect(confirmation).toBeVisible();
+  expect(createAttempts).toBe(1);
+
+  await confirmation.getByRole("button", { name: "Confirm and create" }).click();
+  await expect.poll(() => createPayload).toEqual(previewedSchedule);
+  expect(createAttempts).toBe(2);
+  await waitForToast(page, "Schedule created");
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await section.getByRole("button", { name: "Add" }).click();
+  await expect(page.getByRole("dialog", { name: "Add Schedule" }).getByLabel("Concurrency")).toBeVisible();
+});
+
 test("Settings Remote Invoke 将 Connection Status 与 Discovery Mode 合并到同一张状态卡片", async ({
   page,
 }) => {

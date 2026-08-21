@@ -221,6 +221,7 @@ export interface ImSchedule {
   id: string;
   name: string;
   enabled: boolean;
+  idempotency_key?: string;
   message_channel?: ImMessageChannelBinding;
   trigger: {
     type: "cron" | "interval";
@@ -252,8 +253,15 @@ export interface ImSchedule {
   };
   timeout_ms: number;
   max_output_bytes: number;
+  concurrency_policy?: "forbid" | "skip_if_running" | "queue_one";
+  retry?: {
+    max_retries: number;
+    delay_ms: number;
+  };
   next_run_at?: number;
   last_run_at?: number;
+  last_run_status?: string;
+  consecutive_failures?: number;
   created_at: number;
   updated_at: number;
 }
@@ -571,6 +579,17 @@ export async function createSchedule(
   data: Partial<ImSchedule>,
 ): Promise<ImSchedule> {
   return post(`${BASE}/schedules`, data);
+}
+
+export interface ImSchedulePreview {
+  schedule: ImSchedule;
+  upcoming_run_times: number[];
+}
+
+export async function previewSchedule(
+  data: Partial<ImSchedule>,
+): Promise<ImSchedulePreview> {
+  return post(`${BASE}/schedules/preview`, data);
 }
 
 export async function updateSchedule(

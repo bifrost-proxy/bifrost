@@ -1020,6 +1020,10 @@ mod tests {
                 "--nocapture",
             ])
             .env(CHILD_ENV, "1")
+            .env_remove("BIFROST_DATA_DIR")
+            .env_remove("BIFROST_APP_INSTALL_DIR")
+            .env_remove("BIFROST_INSTALL_DIR")
+            .env_remove(super::DESKTOP_CORE_ENV)
             .status()
             .expect("spawn isolated desktop version owner test");
             assert!(
@@ -1040,7 +1044,7 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&cli_path, permissions).expect("make stale CLI executable");
-        std::env::set_var("BIFROST_DATA_DIR", dir.path());
+        let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(dir.path());
         std::env::set_var("BIFROST_APP_INSTALL_DIR", dir.path().join("missing-app"));
         std::env::set_var("PATH", &cli_dir);
         std::fs::write(

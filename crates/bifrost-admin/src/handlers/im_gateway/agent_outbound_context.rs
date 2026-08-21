@@ -147,6 +147,26 @@ fn render_im_agent_outbound_context(
             receive_id_type.expect("safe receive id type"),
             receive_id.expect("safe receive id"),
         ));
+        let target_mode = if receive_id_type == Some("open_id") {
+            "source_user"
+        } else {
+            "source_thread"
+        };
+        let idempotency_key = format!("im:{}", blake3::hash(event.event_id.as_bytes()).to_hex());
+        lines.extend([
+            "Scheduled Agent tasks use the same configured External Runner layer as normal IM turns (for example Codex, Traex, Claude Code, or ChatGPT Web). Never invoke a runner-specific scheduler directly.".to_string(),
+            "When the user asks to create a schedule: collect the task, trigger, IANA timezone, runner, and destination; run preview first; show the normalized values and all upcoming_run_times; wait for explicit confirmation; only then run add with exactly the same values.".to_string(),
+            format!(
+                "Trusted schedule route arguments for this conversation: --provider '{}' --target '{}' --target-mode '{}'",
+                provider_id.expect("safe provider id"),
+                receive_id.expect("safe receive id"),
+                target_mode,
+            ),
+            format!("Stable idempotency argument for this request: --idempotency-key '{idempotency_key}'"),
+            "If this turn confirms a preview from an earlier turn, ignore the newly suggested per-turn key above and reuse the exact idempotency_key returned by that preview. The preview response is the source of truth across confirmation turns.".to_string(),
+            "Preview form: bifrost im schedule preview <NAME> <TRUSTED_ROUTE_ARGS> (--cron <EXPR> --timezone <IANA_TZ> | --every <MILLISECONDS>) --agent-prompt <PROMPT> [--agent-runner-id <RUNNER>] --idempotency-key <KEY> --format json-pretty".to_string(),
+            "Confirmed create form: replace `preview` with `add` and preserve every argument, especially route, timezone, runner, prompt, and idempotency key. Do not create, update, pause, resume, run, or delete a schedule without explicit user confirmation in the current conversation.".to_string(),
+        ]);
     } else {
         lines.push("Do not attempt a proactive send in the current state; no executable send command is available. Keep the exact provider/target unchanged and report the readiness problem.".to_string());
     }
@@ -161,6 +181,7 @@ fn render_im_agent_outbound_context(
         "Troubleshooting (CLI help and live capabilities are authoritative; do not guess):".to_string(),
         "1. bifrost im --help".to_string(),
         "2. bifrost im send --help".to_string(),
+        "2a. bifrost im schedule --help".to_string(),
     ]);
     if let Some(provider_id) = provider_id {
         lines.push(format!(
@@ -313,6 +334,11 @@ mod tests {
         assert!(context.contains("--card-title"));
         assert!(context.contains("There is no --video flag"));
         assert!(context.contains("bifrost im send --provider 'feishu-main' --receive-id-type 'chat_id' --receive-id 'oc_exact_chat'"));
+        assert!(context.contains("bifrost im schedule preview"));
+        assert!(context.contains("--target 'oc_exact_chat' --target-mode 'source_thread'"));
+        assert!(context.contains("wait for explicit confirmation"));
+        assert!(context.contains("reuse the exact idempotency_key returned by that preview"));
+        assert!(context.contains("Codex, Traex, Claude Code, or ChatGPT Web"));
         assert!(!context.contains("NEVER_RENDER_THIS_SECRET"));
     }
 

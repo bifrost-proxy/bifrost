@@ -1,4 +1,7 @@
-use super::schedule::{parse_schedule_add_args, parse_schedule_update_args};
+use super::schedule::{
+    handle_im_schedule, parse_schedule_add_args, parse_schedule_update_args, print_schedule_result,
+    schedule_output_format,
+};
 use super::*;
 use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -549,6 +552,129 @@ fn parse_schedule_add_args_supports_agent_prompt() {
     assert_eq!(body["agent"]["prompt"], "Summarize traffic");
     assert_eq!(body["agent"]["session_key"], "daily");
     assert_eq!(body["agent"]["work_dir"], "/tmp/project");
+    assert_eq!(body["enabled"], true);
+}
+
+#[test]
+fn parse_schedule_add_args_supports_safe_schedule_controls() {
+    let body = parse_schedule_add_args(
+        "daily-agent",
+        &[
+            "--disabled".into(),
+            "--idempotency-key".into(),
+            "im:event-123".into(),
+            "--concurrency-policy".into(),
+            "queue_one".into(),
+            "--retry-max".into(),
+            "2".into(),
+            "--retry-delay-ms".into(),
+            "1500".into(),
+        ],
+    )
+    .expect("parse schedule controls");
+
+    assert_eq!(body["enabled"], false);
+    assert_eq!(body["idempotency_key"], "im:event-123");
+    assert_eq!(body["concurrency_policy"], "queue_one");
+    assert_eq!(body["retry"]["max_retries"], 2);
+    assert_eq!(body["retry"]["delay_ms"], 1500);
+}
+
+#[test]
+fn schedule_output_format_rejects_missing_or_invalid_values_before_request() {
+    assert!(schedule_output_format(&["--format".into()])
+        .unwrap_err()
+        .to_string()
+        .contains("requires a value"));
+    assert!(schedule_output_format(&["--format".into(), "yaml".into()])
+        .unwrap_err()
+        .to_string()
+        .contains("must be one of"));
+    assert_eq!(
+        schedule_output_format(&["--format".into(), "json".into()]).unwrap(),
+        "json"
+    );
+}
+
+#[tokio::test]
+async fn schedule_cli_preview_and_add_use_expected_control_plane_routes() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+    let schedule = json!({
+        "id": "schedule-1",
+        "name": "daily-agent",
+        "idempotency_key": "stable-key"
+    });
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/schedules/preview"))
+        .and(body_partial_json(json!({
+            "name": "daily-agent",
+            "idempotency_key": "stable-key"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "schedule": schedule,
+            "upcoming_run_times": [1, 2, 3]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/schedules"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(schedule))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let common = vec![
+        "daily-agent".into(),
+        "--every".into(),
+        "60000".into(),
+        "--agent-prompt".into(),
+        "Summarize".into(),
+        "--target".into(),
+        "owner".into(),
+        "--idempotency-key".into(),
+        "stable-key".into(),
+        "--format".into(),
+        "json".into(),
+    ];
+    let mut preview = vec!["preview".into()];
+    preview.extend(common.clone());
+    handle_im_schedule(&host, port, &preview).expect("preview schedule");
+    let mut add = vec!["add".into()];
+    add.extend(common);
+    handle_im_schedule(&host, port, &add).expect("add schedule");
+}
+
+#[test]
+fn schedule_cli_rejects_format_before_connecting() {
+    for subcommand in ["preview", "add"] {
+        let error = handle_im_schedule(
+            "127.0.0.1",
+            1,
+            &[
+                subcommand.into(),
+                "daily".into(),
+                "--format".into(),
+                "yaml".into(),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--format must be one of"));
+    }
+}
+
+#[test]
+fn schedule_cli_handles_preview_usage_and_all_output_formats_without_network() {
+    let missing_name = handle_im_schedule("127.0.0.1", 1, &["preview".into()])
+        .expect_err("preview requires a schedule name");
+    assert!(missing_name.to_string().contains("schedule name required"));
+
+    handle_im_schedule("127.0.0.1", 1, &[]).expect("usage is informational");
+    let value = json!({"id": "schedule-1"});
+    print_schedule_result(&value, "json", "created").unwrap();
+    print_schedule_result(&value, "json-pretty", "created").unwrap();
+    print_schedule_result(&value, "human", "created").unwrap();
 }
 
 #[test]

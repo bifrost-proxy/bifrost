@@ -9,6 +9,34 @@ pub(super) async fn handle_schedules(
 ) -> Response<BoxBody> {
     let rest = rest.trim_end_matches('/');
 
+    if rest == "/preview" {
+        if req.method() != Method::POST {
+            return method_not_allowed();
+        }
+        let mut schedule: ImSchedule = match read_body_json(req).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        if let Err(error) = crate::im_gateway::schedule_tools::normalize_schedule(&mut schedule) {
+            return error_response(StatusCode::BAD_REQUEST, &error);
+        }
+        if let Err(error) = validate_schedule_destination(service, &schedule) {
+            return error_response(StatusCode::BAD_REQUEST, &error);
+        }
+        let upcoming_run_times = match crate::im_gateway::scheduler::ImScheduler::preview_next_runs(
+            &schedule.trigger,
+            now_ms(),
+            3,
+        ) {
+            Ok(times) => times,
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+        };
+        return json_response(&serde_json::json!({
+            "schedule": schedule,
+            "upcoming_run_times": upcoming_run_times,
+        }));
+    }
+
     // GET /schedules  |  POST /schedules
     if rest.is_empty() {
         return match *req.method() {
@@ -30,12 +58,41 @@ pub(super) async fn handle_schedules(
                 {
                     return error_response(StatusCode::BAD_REQUEST, &e);
                 }
+                if let Err(error) = validate_schedule_destination(service, &schedule) {
+                    return error_response(StatusCode::BAD_REQUEST, &error);
+                }
+                if let Some(key) = schedule.idempotency_key.as_deref() {
+                    if let Some(existing) = service.schedule_store.get_by_idempotency_key(key) {
+                        if schedule_create_equivalent(&existing, &schedule) {
+                            return json_response(&existing);
+                        }
+                        return error_response(
+                            StatusCode::CONFLICT,
+                            &format!("schedule idempotency key '{key}' was already used for a different request"),
+                        );
+                    }
+                }
                 match service.schedule_store.add(schedule.clone()) {
                     Ok(()) => {
                         service.scheduler.notify_reschedule();
                         json_response(&schedule)
                     }
-                    Err(e) => error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+                    Err(e) => {
+                        if let Some(key) = schedule.idempotency_key.as_deref() {
+                            if let Some(existing) =
+                                service.schedule_store.get_by_idempotency_key(key)
+                            {
+                                if schedule_create_equivalent(&existing, &schedule) {
+                                    return json_response(&existing);
+                                }
+                                return error_response(
+                                    StatusCode::CONFLICT,
+                                    &format!("schedule idempotency key '{key}' was already used for a different request"),
+                                );
+                            }
+                        }
+                        error_response(StatusCode::BAD_REQUEST, &e.to_string())
+                    }
                 }
             }
             _ => method_not_allowed(),
@@ -81,12 +138,21 @@ pub(super) async fn handle_schedule_by_id(
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
+            if patch.get("idempotency_key").is_some() {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "schedule idempotency_key is immutable",
+                );
+            }
             let Some(mut existing) = service.schedule_store.get(id) else {
                 return error_response(StatusCode::NOT_FOUND, "Schedule not found");
             };
             apply_schedule_patch(&mut existing, &patch);
             if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule(&mut existing) {
                 return error_response(StatusCode::BAD_REQUEST, &e);
+            }
+            if let Err(error) = validate_schedule_destination(service, &existing) {
+                return error_response(StatusCode::BAD_REQUEST, &error);
             }
             match service.schedule_store.update(existing.clone()) {
                 Ok(()) => {
@@ -105,6 +171,47 @@ pub(super) async fn handle_schedule_by_id(
         },
         _ => method_not_allowed(),
     }
+}
+
+fn validate_schedule_destination(
+    service: &ImGatewayService,
+    schedule: &ImSchedule,
+) -> Result<(), String> {
+    crate::im_gateway::schedule_tools::validate_schedule_destination(
+        schedule,
+        |provider_id| {
+            service.provider_store.get(provider_id).map(|provider| {
+                provider
+                    .owner_open_id
+                    .as_deref()
+                    .is_some_and(|owner| !owner.trim().is_empty())
+            })
+        },
+        |target_id| {
+            service
+                .target_store
+                .get(target_id)
+                .map(|target| (target.provider_id, target.enabled))
+        },
+    )
+}
+
+fn schedule_create_equivalent(existing: &ImSchedule, requested: &ImSchedule) -> bool {
+    let mut existing = existing.clone();
+    let mut requested = requested.clone();
+    for schedule in [&mut existing, &mut requested] {
+        schedule.id.clear();
+        schedule.next_run_at = None;
+        schedule.last_run_at = None;
+        schedule.last_run_status = None;
+        schedule.consecutive_failures = 0;
+        schedule.created_at = 0;
+        schedule.updated_at = 0;
+        if let Some(agent) = schedule.agent.as_mut() {
+            agent.conversation_ref = None;
+        }
+    }
+    serde_json::to_value(existing).ok() == serde_json::to_value(requested).ok()
 }
 
 pub(super) async fn handle_schedule_pause(
@@ -189,19 +296,80 @@ pub(crate) async fn execute_manual_schedule(
         .schedule_store
         .get(id)
         .ok_or_else(|| format!("Schedule '{id}' not found"))?;
-    let task_run = execute_schedule_once(
+    let task_run = execute_schedule_with_retry(
         service,
         &schedule,
-        uuid_short(),
         crate::im_gateway::types::TriggerSource::ManualRun,
     )
-    .await;
-    service
-        .run_store
-        .add(task_run.clone())
-        .map_err(|error| format!("persist manual schedule run: {error}"))?;
+    .await?;
     send_schedule_run_notification(service, &schedule, &task_run).await;
     Ok(task_run)
+}
+
+pub(super) async fn execute_schedule_with_retry(
+    service: &ImGatewayService,
+    schedule: &ImSchedule,
+    trigger_source: crate::im_gateway::types::TriggerSource,
+) -> Result<crate::im_gateway::types::ImTaskRun, String> {
+    let mut attempt = 0_u32;
+    loop {
+        let task_run = execute_schedule_once(service, schedule, uuid_short(), trigger_source).await;
+        service
+            .run_store
+            .add(task_run.clone())
+            .map_err(|error| format!("persist schedule run: {error}"))?;
+
+        let should_retry = matches!(
+            task_run.status,
+            crate::im_gateway::types::TaskRunStatus::Failed
+                | crate::im_gateway::types::TaskRunStatus::Timeout
+        ) && attempt < schedule.retry.max_retries;
+        if !should_retry {
+            update_schedule_run_state(service, schedule, &task_run);
+            return Ok(task_run);
+        }
+
+        attempt += 1;
+        warn!(
+            schedule_id = %schedule.id,
+            attempt,
+            max_retries = schedule.retry.max_retries,
+            delay_ms = schedule.retry.delay_ms,
+            status = ?task_run.status,
+            "retrying failed schedule execution"
+        );
+        if schedule.retry.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(schedule.retry.delay_ms)).await;
+        }
+    }
+}
+
+pub(super) fn update_schedule_run_state(
+    service: &ImGatewayService,
+    schedule: &ImSchedule,
+    task_run: &crate::im_gateway::types::ImTaskRun,
+) {
+    let Some(mut current) = service.schedule_store.get(&schedule.id) else {
+        return;
+    };
+    current.last_run_at = Some(task_run.started_at);
+    current.last_run_status = Some(task_run.status);
+    current.consecutive_failures = match task_run.status {
+        crate::im_gateway::types::TaskRunStatus::Success => 0,
+        crate::im_gateway::types::TaskRunStatus::Failed
+        | crate::im_gateway::types::TaskRunStatus::Timeout => {
+            current.consecutive_failures.saturating_add(1)
+        }
+        _ => current.consecutive_failures,
+    };
+    current.updated_at = now_ms();
+    if let Err(error) = service.schedule_store.update(current) {
+        warn!(
+            schedule_id = %schedule.id,
+            error = %error,
+            "failed to persist schedule run state"
+        );
+    }
 }
 
 pub(super) async fn execute_schedule_once(
@@ -469,6 +637,19 @@ async fn execute_external_runner_schedule_once(
                 _ => Some(initial_prompt.to_string()),
             };
         }
+    }
+    if let Some(system_prompt) = agent_task
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        settings.instructions = match settings.instructions.take() {
+            Some(existing) if !existing.trim().is_empty() => {
+                Some(format!("{}\n\n{}", existing.trim(), system_prompt))
+            }
+            _ => Some(system_prompt.to_string()),
+        };
     }
     let session_key = agent_task
         .session_key

@@ -9,6 +9,7 @@ pub(super) fn normalize_schedule_trims_channel_and_rejects_missing_agent_channel
         id: String::new(),
         name: "Trim channel".to_string(),
         enabled: true,
+        idempotency_key: None,
         message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
             provider_id: "  feishu-main  ".to_string(),
             target_id: "  owner-open-id  ".to_string(),
@@ -28,6 +29,8 @@ pub(super) fn normalize_schedule_trims_channel_and_rejects_missing_agent_channel
         retry: Default::default(),
         next_run_at: None,
         last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
         created_at: 0,
         updated_at: 0,
     };
@@ -42,6 +45,106 @@ pub(super) fn normalize_schedule_trims_channel_and_rejects_missing_agent_channel
     assert_eq!(
         crate::im_gateway::schedule_tools::normalize_schedule(&mut schedule),
         Err("schedule requires message_channel".to_string())
+    );
+}
+
+#[test]
+pub(super) fn schedule_run_state_counts_only_execution_failures() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut schedule = ImSchedule {
+        id: "schedule-state".to_string(),
+        name: "Schedule state".to_string(),
+        enabled: true,
+        idempotency_key: None,
+        message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
+            provider_id: "feishu-main".to_string(),
+            target_id: "owner".to_string(),
+            target_mode: crate::im_gateway::types::MessageTargetMode::Owner,
+        }),
+        trigger: crate::im_gateway::types::ScheduleTrigger::Interval { every_ms: 60_000 },
+        task_type: crate::im_gateway::types::ScheduleTaskType::Script,
+        script: crate::im_gateway::types::TaskScript {
+            script_text: Some("echo ok".to_string()),
+            ..Default::default()
+        },
+        agent: None,
+        timeout_ms: 10_000,
+        max_output_bytes: 1024,
+        concurrency_policy: Default::default(),
+        retry: Default::default(),
+        next_run_at: None,
+        last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 2,
+        created_at: 1,
+        updated_at: 1,
+    };
+    service
+        .schedule_store
+        .add(schedule.clone())
+        .expect("store schedule");
+
+    let schedule_id = schedule.id.clone();
+    let run = |status| crate::im_gateway::types::ImTaskRun {
+        run_id: uuid::Uuid::new_v4().to_string(),
+        trigger_source: crate::im_gateway::types::TriggerSource::Schedule,
+        route_id: None,
+        schedule_id: Some(schedule_id.clone()),
+        provider_id: None,
+        target_id: None,
+        status,
+        started_at: 10,
+        ended_at: Some(11),
+        duration_ms: Some(1),
+        exit_code: None,
+        input_preview: None,
+        stdout_preview: None,
+        stderr_preview: None,
+        stdout_digest: None,
+        stderr_digest: None,
+        error: None,
+        task_type: Some(crate::im_gateway::types::ScheduleTaskType::Script),
+        runner_id: None,
+        agent_final_response: None,
+        agent_tool_calls: Vec::new(),
+        agent_plan_steps: None,
+    };
+
+    update_schedule_run_state(
+        &service,
+        &schedule,
+        &run(crate::im_gateway::types::TaskRunStatus::Rejected),
+    );
+    assert_eq!(
+        service
+            .schedule_store
+            .get(&schedule.id)
+            .unwrap()
+            .consecutive_failures,
+        2
+    );
+
+    update_schedule_run_state(
+        &service,
+        &schedule,
+        &run(crate::im_gateway::types::TaskRunStatus::Failed),
+    );
+    schedule = service.schedule_store.get(&schedule.id).unwrap();
+    assert_eq!(schedule.consecutive_failures, 3);
+
+    update_schedule_run_state(
+        &service,
+        &schedule,
+        &run(crate::im_gateway::types::TaskRunStatus::Success),
+    );
+    assert_eq!(
+        service
+            .schedule_store
+            .get(&schedule.id)
+            .unwrap()
+            .consecutive_failures,
+        0
     );
 }
 
@@ -77,6 +180,7 @@ pub(super) fn schedule_patch_merges_agent_adapter_config_without_dropping_prompt
         id: "schedule-patch".to_string(),
         name: "Schedule Patch".to_string(),
         enabled: true,
+        idempotency_key: None,
         message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
             provider_id: "feishu-main".to_string(),
             target_id: "target-main".to_string(),
@@ -106,6 +210,8 @@ pub(super) fn schedule_patch_merges_agent_adapter_config_without_dropping_prompt
         retry: Default::default(),
         next_run_at: None,
         last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
         created_at: 0,
         updated_at: 0,
     };
@@ -230,6 +336,7 @@ pub(super) async fn schedule_agent_can_run_selected_external_runner_with_initial
         id: "schedule-runner".to_string(),
         name: "Schedule Runner".to_string(),
         enabled: true,
+        idempotency_key: None,
         message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
             provider_id: provider.id.clone(),
             target_id: "target-main".to_string(),
@@ -254,6 +361,8 @@ pub(super) async fn schedule_agent_can_run_selected_external_runner_with_initial
         retry: Default::default(),
         next_run_at: None,
         last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
         created_at: 0,
         updated_at: 0,
     };
@@ -351,6 +460,7 @@ pub(super) async fn schedule_agent_adapter_config_overrides_runner_without_dropp
         id: "schedule-adapter-override".to_string(),
         name: "Schedule Adapter Override".to_string(),
         enabled: true,
+        idempotency_key: None,
         message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
             provider_id: provider.id.clone(),
             target_id: "target-main".to_string(),
@@ -382,6 +492,8 @@ pub(super) async fn schedule_agent_adapter_config_overrides_runner_without_dropp
         retry: Default::default(),
         next_run_at: None,
         last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
         created_at: 0,
         updated_at: 0,
     };
@@ -463,6 +575,7 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
         id: "schedule-workdir".to_string(),
         name: "Schedule Workdir".to_string(),
         enabled: true,
+        idempotency_key: None,
         message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
             provider_id: provider.id.clone(),
             target_id: "target-main".to_string(),
@@ -487,6 +600,8 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
         retry: Default::default(),
         next_run_at: None,
         last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
         created_at: 0,
         updated_at: 0,
     };
@@ -570,6 +685,7 @@ pub(super) async fn schedule_agent_persists_codex_thread_id_for_next_run() {
         id: "schedule-codex-thread".to_string(),
         name: "Schedule Codex Thread".to_string(),
         enabled: true,
+        idempotency_key: None,
         message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
             provider_id: provider.id.clone(),
             target_id: "target-main".to_string(),
@@ -594,6 +710,8 @@ pub(super) async fn schedule_agent_persists_codex_thread_id_for_next_run() {
         retry: Default::default(),
         next_run_at: None,
         last_run_at: None,
+        last_run_status: None,
+        consecutive_failures: 0,
         created_at: 0,
         updated_at: 0,
     };

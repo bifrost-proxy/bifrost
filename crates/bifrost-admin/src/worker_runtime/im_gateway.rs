@@ -610,6 +610,8 @@ fn runtime_signature() -> Result<Option<String>, String> {
     for schedule in &mut schedules {
         schedule.next_run_at = None;
         schedule.last_run_at = None;
+        schedule.last_run_status = None;
+        schedule.consecutive_failures = 0;
         schedule.created_at = 0;
         schedule.updated_at = 0;
         if let Some(conversation_ref) = schedule
@@ -1695,6 +1697,7 @@ mod tests {
             id: "signature-schedule".to_string(),
             name: "Signature Schedule".to_string(),
             enabled: true,
+            idempotency_key: None,
             message_channel: None,
             trigger: crate::im_gateway::types::ScheduleTrigger::Interval { every_ms: 60_000 },
             task_type: crate::im_gateway::types::ScheduleTaskType::Agent,
@@ -1715,6 +1718,8 @@ mod tests {
             retry: Default::default(),
             next_run_at: Some(30),
             last_run_at: Some(40),
+            last_run_status: None,
+            consecutive_failures: 0,
             created_at: 10,
             updated_at: 20,
         };

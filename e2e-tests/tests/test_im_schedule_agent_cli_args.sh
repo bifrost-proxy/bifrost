@@ -72,6 +72,19 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
 BIFROST_PID=$!
 wait_http "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" "bifrost"
 
+"$BIFROST_BIN" -p "$BIFROST_PORT" im provider add feishu-main \
+  --type feishu \
+  --app-id cli_app \
+  --secret cli_secret \
+  --owner-open-id owner-open-id \
+  --enabled true \
+  --runner codex
+
+"$BIFROST_BIN" -p "$BIFROST_PORT" im target add oc_human_test \
+  --provider feishu-main \
+  --receive-id-type chat_id \
+  --receive-id oc_human_test
+
 "$BIFROST_BIN" -p "$BIFROST_PORT" im schedule add codex-args-human \
   --target oc_human_test \
   --cron '0 0 1 1 *' \

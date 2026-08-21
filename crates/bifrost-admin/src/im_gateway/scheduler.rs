@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
+use chrono::{TimeZone, Utc};
+use chrono_tz::Tz;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
@@ -16,6 +19,7 @@ struct RunningTask {
     #[allow(dead_code)]
     schedule_id: String,
     task_handle: tokio::task::JoinHandle<()>,
+    queued: bool,
 }
 
 impl Default for ImScheduler {
@@ -37,75 +41,80 @@ impl ImScheduler {
     /// For `Interval` triggers: `next_run = last_run_at + every_ms`.
     /// If `last_run_at` is None, returns `now_ms + every_ms`.
     ///
-    /// For `Cron` triggers: simplified implementation that returns
-    /// `now_ms + 60_000` as a placeholder. A full cron parser should be
-    /// integrated in a future iteration.
     pub fn compute_next_run(trigger: &ScheduleTrigger, now_ms: u64) -> Option<u64> {
+        Self::compute_next_run_result(trigger, now_ms)
+            .ok()
+            .flatten()
+    }
+
+    pub fn compute_next_run_result(
+        trigger: &ScheduleTrigger,
+        now_ms: u64,
+    ) -> Result<Option<u64>, String> {
         match trigger {
             ScheduleTrigger::Interval { every_ms } => {
                 if *every_ms == 0 {
-                    return None;
+                    return Err("interval every_ms must be greater than 0".to_string());
                 }
-                Some(now_ms + every_ms)
+                Ok(now_ms.checked_add(*every_ms))
             }
-            ScheduleTrigger::Cron { expr, .. } => {
-                if expr.is_empty() {
-                    return None;
-                }
-                // Simplified cron: parse basic interval-like patterns.
-                // Full cron parsing requires a dedicated crate; for now, we attempt
-                // to handle `*/N * * * *` (every N minutes) as a common pattern.
-                if let Some(next) = Self::parse_simple_cron(expr, now_ms) {
-                    Some(next)
-                } else {
-                    // Fallback: schedule 60s from now for unrecognized cron expressions
-                    debug!(
-                        cron_expr = %expr,
-                        "unrecognized cron expression, defaulting to 60s interval"
-                    );
-                    Some(now_ms + 60_000)
-                }
+            ScheduleTrigger::Cron { expr, timezone } => {
+                let expression = normalize_cron_expression(expr)?;
+                let schedule = cron::Schedule::from_str(&expression)
+                    .map_err(|error| format!("invalid cron expression '{expr}': {error}"))?;
+                let timezone = Tz::from_str(timezone.trim())
+                    .map_err(|_| format!("invalid IANA timezone '{timezone}'"))?;
+                let now_ms = i64::try_from(now_ms)
+                    .map_err(|_| format!("timestamp out of range: {now_ms}"))?;
+                let now = Utc
+                    .timestamp_millis_opt(now_ms)
+                    .single()
+                    .ok_or_else(|| format!("timestamp out of range: {now_ms}"))?
+                    .with_timezone(&timezone);
+                Ok(schedule
+                    .after(&now)
+                    .next()
+                    .and_then(|next| u64::try_from(next.timestamp_millis()).ok()))
             }
         }
     }
 
-    /// Attempt to parse simple cron patterns like `*/N * * * *` (every N minutes).
-    fn parse_simple_cron(expr: &str, now_ms: u64) -> Option<u64> {
-        let parts: Vec<&str> = expr.split_whitespace().collect();
-        if parts.len() < 5 {
-            return None;
-        }
-
-        let minute_part = parts[0];
-
-        // Handle `*/N` pattern (every N minutes)
-        if let Some(interval_str) = minute_part.strip_prefix("*/") {
-            if let Ok(minutes) = interval_str.parse::<u64>() {
-                if minutes > 0 && minutes <= 60 {
-                    let interval_ms = minutes * 60 * 1000;
-                    // Align to next interval boundary
-                    let current_minute_ms = now_ms % interval_ms;
-                    let next = now_ms + (interval_ms - current_minute_ms);
-                    return Some(next);
+    pub fn preview_next_runs(
+        trigger: &ScheduleTrigger,
+        now_ms: u64,
+        count: usize,
+    ) -> Result<Vec<u64>, String> {
+        match trigger {
+            ScheduleTrigger::Interval { every_ms } => {
+                if *every_ms == 0 {
+                    return Err("interval every_ms must be greater than 0".to_string());
                 }
+                Ok((1..=count)
+                    .filter_map(|step| {
+                        every_ms
+                            .checked_mul(step as u64)
+                            .and_then(|offset| now_ms.checked_add(offset))
+                    })
+                    .collect())
+            }
+            ScheduleTrigger::Cron { expr, timezone } => {
+                let expression = normalize_cron_expression(expr)?;
+                let schedule = cron::Schedule::from_str(&expression)
+                    .map_err(|error| format!("invalid cron expression '{expr}': {error}"))?;
+                let timezone = Tz::from_str(timezone.trim())
+                    .map_err(|_| format!("invalid IANA timezone '{timezone}'"))?;
+                let now = Utc
+                    .timestamp_millis_opt(now_ms as i64)
+                    .single()
+                    .ok_or_else(|| format!("timestamp out of range: {now_ms}"))?
+                    .with_timezone(&timezone);
+                Ok(schedule
+                    .after(&now)
+                    .take(count)
+                    .filter_map(|next| u64::try_from(next.timestamp_millis()).ok())
+                    .collect())
             }
         }
-
-        // Handle specific minute `N * * * *` (run at minute N of each hour)
-        if let Ok(minute) = minute_part.parse::<u64>() {
-            if minute < 60 {
-                let hour_ms: u64 = 60 * 60 * 1000;
-                let minute_ms = minute * 60 * 1000;
-                let current_hour_offset = now_ms % hour_ms;
-                if current_hour_offset < minute_ms {
-                    return Some(now_ms + (minute_ms - current_hour_offset));
-                } else {
-                    return Some(now_ms + (hour_ms - current_hour_offset) + minute_ms);
-                }
-            }
-        }
-
-        None
     }
 
     /// Check which schedules are due for execution at the given time.
@@ -133,6 +142,7 @@ impl ImScheduler {
             RunningTask {
                 schedule_id: schedule_id.to_string(),
                 task_handle: handle,
+                queued: false,
             },
         );
         info!(schedule_id = %schedule_id, "registered running task");
@@ -146,6 +156,30 @@ impl ImScheduler {
         } else {
             false
         }
+    }
+
+    /// Keep at most one pending tick while a schedule is already running.
+    pub fn queue_one(&self, schedule_id: &str) -> bool {
+        let mut tasks = self.running_tasks.write();
+        let Some(task) = tasks.get_mut(schedule_id) else {
+            return false;
+        };
+        if task.task_handle.is_finished() || task.queued {
+            return false;
+        }
+        task.queued = true;
+        true
+    }
+
+    /// Consume the single pending tick after the active execution finishes.
+    pub fn take_queued(&self, schedule_id: &str) -> bool {
+        let mut tasks = self.running_tasks.write();
+        let Some(task) = tasks.get_mut(schedule_id) else {
+            return false;
+        };
+        let queued = task.queued;
+        task.queued = false;
+        queued
     }
 
     /// Remove a completed task from the running registry.
@@ -210,6 +244,71 @@ impl ImScheduler {
     }
 }
 
+fn normalize_cron_expression(expr: &str) -> Result<String, String> {
+    let fields = expr.split_whitespace().collect::<Vec<_>>();
+    match fields.len() {
+        // Five-field input follows conventional Unix cron numbering where
+        // Sunday is 0 or 7. The `cron` crate uses Quartz numbering where
+        // Sunday is 1, so translate numeric day-of-week fields while keeping
+        // names and wildcard expressions unchanged.
+        5 => {
+            let day_of_week = normalize_unix_day_of_week(fields[4])?;
+            Ok(format!(
+                "0 {} {} {} {} {}",
+                fields[0], fields[1], fields[2], fields[3], day_of_week
+            ))
+        }
+        6 | 7 => Ok(fields.join(" ")),
+        _ => Err(format!(
+            "invalid cron expression '{expr}': expected 5, 6, or 7 fields"
+        )),
+    }
+}
+
+fn normalize_unix_day_of_week(value: &str) -> Result<String, String> {
+    if value == "*" || value.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return Ok(value.to_string());
+    }
+    value
+        .split(',')
+        .map(|part| {
+            let (base, step) = part
+                .split_once('/')
+                .map(|(base, step)| (base, Some(step)))
+                .unwrap_or((part, None));
+            let normalized = if base == "*" {
+                "*".to_string()
+            } else if let Some((start, end)) = base.split_once('-') {
+                let start = parse_unix_day_of_week(start)?;
+                let end = parse_unix_day_of_week(end)?;
+                if start <= end {
+                    format!("{start}-{end}")
+                } else {
+                    format!("{start}-7,1-{end}")
+                }
+            } else {
+                parse_unix_day_of_week(base)?.to_string()
+            };
+            Ok(match step {
+                Some(step) => format!("{normalized}/{step}"),
+                None => normalized,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|parts| parts.join(","))
+}
+
+fn parse_unix_day_of_week(value: &str) -> Result<u8, String> {
+    let value = value
+        .parse::<u8>()
+        .map_err(|_| format!("invalid Unix day-of-week value '{value}'"))?;
+    match value {
+        0 | 7 => Ok(1),
+        1..=6 => Ok(value + 1),
+        _ => Err(format!("invalid Unix day-of-week value '{value}'")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +343,101 @@ mod tests {
     }
 
     #[test]
+    fn cron_uses_iana_timezone_for_five_field_expression() {
+        let trigger = ScheduleTrigger::Cron {
+            expr: "0 9 * * 1-5".to_string(),
+            timezone: "Asia/Shanghai".to_string(),
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-21T00:30:00Z")
+            .unwrap()
+            .timestamp_millis() as u64;
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-08-21T01:00:00Z")
+            .unwrap()
+            .timestamp_millis() as u64;
+
+        assert_eq!(ImScheduler::compute_next_run(&trigger, now), Some(expected));
+    }
+
+    #[test]
+    fn cron_rejects_invalid_expression_and_timezone() {
+        let invalid_expression = ScheduleTrigger::Cron {
+            expr: "not a cron".to_string(),
+            timezone: "UTC".to_string(),
+        };
+        assert!(ImScheduler::compute_next_run_result(&invalid_expression, 100_000).is_err());
+
+        let invalid_timezone = ScheduleTrigger::Cron {
+            expr: "0 9 * * *".to_string(),
+            timezone: "Mars/Olympus".to_string(),
+        };
+        assert!(ImScheduler::compute_next_run_result(&invalid_timezone, 100_000).is_err());
+    }
+
+    #[test]
+    fn cron_rejects_timestamp_larger_than_i64() {
+        let trigger = ScheduleTrigger::Cron {
+            expr: "0 * * * *".to_string(),
+            timezone: "UTC".to_string(),
+        };
+        assert_eq!(
+            ImScheduler::compute_next_run_result(&trigger, u64::MAX),
+            Err(format!("timestamp out of range: {}", u64::MAX))
+        );
+    }
+
+    #[test]
+    fn cron_preview_returns_three_ordered_runs() {
+        let trigger = ScheduleTrigger::Cron {
+            expr: "*/15 * * * *".to_string(),
+            timezone: "UTC".to_string(),
+        };
+        let runs = ImScheduler::preview_next_runs(&trigger, 1_710_000_000_000, 3).unwrap();
+        assert_eq!(runs.len(), 3);
+        assert!(runs.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn schedule_preview_and_cron_normalization_cover_boundary_forms() {
+        assert!(ImScheduler::preview_next_runs(
+            &ScheduleTrigger::Interval { every_ms: 0 },
+            100_000,
+            3,
+        )
+        .is_err());
+
+        assert_eq!(
+            normalize_cron_expression("0 0 9 * * 1").unwrap(),
+            "0 0 9 * * 1"
+        );
+        assert_eq!(
+            normalize_cron_expression("0 0 9 * * 1 2026").unwrap(),
+            "0 0 9 * * 1 2026"
+        );
+        assert_eq!(normalize_unix_day_of_week("*/2").unwrap(), "*/2");
+        assert_eq!(normalize_unix_day_of_week("6-1").unwrap(), "7-7,1-2");
+        assert_eq!(normalize_unix_day_of_week("1").unwrap(), "2");
+        assert_eq!(normalize_unix_day_of_week("0").unwrap(), "1");
+        assert!(normalize_unix_day_of_week("8").is_err());
+    }
+
+    #[tokio::test]
+    async fn queue_one_only_keeps_one_pending_tick() {
+        let scheduler = ImScheduler::new();
+        assert!(!scheduler.queue_one("missing"));
+        assert!(!scheduler.take_queued("missing"));
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        scheduler.register_running("scheduled", handle);
+
+        assert!(scheduler.queue_one("scheduled"));
+        assert!(!scheduler.queue_one("scheduled"));
+        assert!(scheduler.take_queued("scheduled"));
+        assert!(!scheduler.take_queued("scheduled"));
+        scheduler.stop_all();
+    }
+
+    #[test]
     fn test_cron_empty_returns_none() {
         let trigger = ScheduleTrigger::Cron {
             expr: "".to_string(),
@@ -263,6 +457,7 @@ mod tests {
                 id: "s1".to_string(),
                 name: "due".to_string(),
                 enabled: true,
+                idempotency_key: None,
                 message_channel: Some(ImMessageChannelBinding {
                     provider_id: "p1".to_string(),
                     target_id: "owner".to_string(),
@@ -283,6 +478,8 @@ mod tests {
                 retry: RetryPolicy::default(),
                 next_run_at: Some(now - 1000), // past due
                 last_run_at: None,
+                last_run_status: None,
+                consecutive_failures: 0,
                 created_at: 0,
                 updated_at: 0,
             },
@@ -290,6 +487,7 @@ mod tests {
                 id: "s2".to_string(),
                 name: "not due".to_string(),
                 enabled: true,
+                idempotency_key: None,
                 message_channel: Some(ImMessageChannelBinding {
                     provider_id: "p1".to_string(),
                     target_id: "owner".to_string(),
@@ -310,6 +508,8 @@ mod tests {
                 retry: RetryPolicy::default(),
                 next_run_at: Some(now + 5000), // future
                 last_run_at: None,
+                last_run_status: None,
+                consecutive_failures: 0,
                 created_at: 0,
                 updated_at: 0,
             },
@@ -317,6 +517,7 @@ mod tests {
                 id: "s3".to_string(),
                 name: "disabled".to_string(),
                 enabled: false,
+                idempotency_key: None,
                 message_channel: Some(ImMessageChannelBinding {
                     provider_id: "p1".to_string(),
                     target_id: "owner".to_string(),
@@ -337,6 +538,8 @@ mod tests {
                 retry: RetryPolicy::default(),
                 next_run_at: Some(now - 1000), // past due but disabled
                 last_run_at: None,
+                last_run_status: None,
+                consecutive_failures: 0,
                 created_at: 0,
                 updated_at: 0,
             },

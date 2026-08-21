@@ -36,6 +36,8 @@ tracing = "0.1"
 ipnet.workspace = true
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz.workspace = true
+cron.workspace = true
 parking_lot = "0.12"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess = "2"

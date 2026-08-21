@@ -598,13 +598,20 @@ pub struct RetryPolicy {
     pub delay_ms: u64,
 }
 
+fn default_schedule_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImSchedule {
     #[serde(default)]
     pub id: String,
     pub name: String,
-    #[serde(default)]
+    #[serde(default = "default_schedule_enabled")]
     pub enabled: bool,
+    /// Stable caller-provided key used to make create requests idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     /// Channel used for schedule notifications and injected send_msg defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_channel: Option<ImMessageChannelBinding>,
@@ -627,6 +634,10 @@ pub struct ImSchedule {
     pub next_run_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_status: Option<TaskRunStatus>,
+    #[serde(default)]
+    pub consecutive_failures: u32,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -649,6 +660,19 @@ impl ImSchedule {
     pub fn validate_for_save(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("schedule name cannot be empty".to_string());
+        }
+        if self
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|key| key.trim().is_empty() || key.len() > 256)
+        {
+            return Err("schedule idempotency_key must be 1..=256 bytes".to_string());
+        }
+        if self.retry.max_retries > 10 {
+            return Err("schedule retry.max_retries cannot exceed 10".to_string());
+        }
+        if self.retry.delay_ms > 86_400_000 {
+            return Err("schedule retry.delay_ms cannot exceed 86400000".to_string());
         }
         match &self.trigger {
             ScheduleTrigger::Cron { expr, .. } if expr.trim().is_empty() => {
@@ -688,6 +712,50 @@ impl ImSchedule {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schedule_validation_tests {
+    use super::*;
+
+    fn schedule() -> ImSchedule {
+        serde_json::from_value(serde_json::json!({
+            "name": "valid",
+            "message_channel": {
+                "provider_id": "provider",
+                "target_id": "owner",
+                "target_mode": "owner"
+            },
+            "trigger": {"type": "interval", "every_ms": 1000},
+            "task_type": "script",
+            "script": {"script_text": "echo ok"}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn schedule_reliability_limits_are_validated() {
+        let mut value = schedule();
+        value.idempotency_key = Some(String::new());
+        assert!(value
+            .validate_for_save()
+            .unwrap_err()
+            .contains("idempotency_key"));
+        value.idempotency_key = Some("x".repeat(257));
+        assert!(value
+            .validate_for_save()
+            .unwrap_err()
+            .contains("idempotency_key"));
+        value.idempotency_key = Some("stable".to_string());
+        value.retry.max_retries = 11;
+        assert!(value
+            .validate_for_save()
+            .unwrap_err()
+            .contains("max_retries"));
+        value.retry.max_retries = 10;
+        value.retry.delay_ms = 86_400_001;
+        assert!(value.validate_for_save().unwrap_err().contains("delay_ms"));
     }
 }
 
