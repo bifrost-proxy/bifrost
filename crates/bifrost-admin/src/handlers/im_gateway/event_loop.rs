@@ -82,6 +82,7 @@ pub(super) async fn run_event_loop(
     event_store: Arc<ImEventStore>,
     message_log_store: Arc<ImMessageLogStore>,
     group_context_store: Arc<ImGroupContextStore>,
+    feishu_group_permission_store: Arc<crate::im_gateway::FeishuGroupPermissionStore>,
     route_store: Arc<ImRouteStore>,
     provider_store: Arc<ImProviderStore>,
     agent_config_store: Arc<ImAgentConfigStore>,
@@ -101,6 +102,7 @@ pub(super) async fn run_event_loop(
         event_store,
         message_log_store,
         group_context_store,
+        feishu_group_permission_store,
         route_store,
         provider_store,
         agent_config_store,
@@ -125,6 +127,7 @@ pub(super) async fn run_event_loop_with_options(
     event_store: Arc<ImEventStore>,
     message_log_store: Arc<ImMessageLogStore>,
     group_context_store: Arc<ImGroupContextStore>,
+    feishu_group_permission_store: Arc<crate::im_gateway::FeishuGroupPermissionStore>,
     route_store: Arc<ImRouteStore>,
     provider_store: Arc<ImProviderStore>,
     agent_config_store: Arc<ImAgentConfigStore>,
@@ -297,6 +300,22 @@ pub(super) async fn run_event_loop_with_options(
             continue;
         }
 
+        if event.event_type == crate::im_gateway::feishu_group_permission::BOT_JOINED_EVENT_TYPE {
+            let completed = handle_feishu_group_permission_check(
+                &client,
+                &provider,
+                &event,
+                &feishu_group_permission_store,
+                &message_log_store,
+                false,
+            )
+            .await;
+            if completed {
+                pending_completion.complete();
+            }
+            continue;
+        }
+
         // Deduplication: per Feishu docs, use message_id for idempotency
         // ("如有幂等需求请使用 message_id 去重，不要依赖 event_id").
         // Falls back to event_id for non-message events.
@@ -354,6 +373,17 @@ pub(super) async fn run_event_loop_with_options(
         // an inbound IM channel, so owner_open_id only records the login user
         // and must not filter inbound messages.
         let is_group_event = crate::im_gateway::group_context::is_feishu_group_event(&event);
+        if is_group_event {
+            handle_feishu_group_permission_check(
+                &client,
+                &provider,
+                &event,
+                &feishu_group_permission_store,
+                &message_log_store,
+                true,
+            )
+            .await;
+        }
         if provider.provider_type == crate::im_gateway::types::ImProviderType::Feishu
             && !is_group_event
         {

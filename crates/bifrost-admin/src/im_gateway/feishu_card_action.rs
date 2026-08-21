@@ -139,7 +139,15 @@ pub(super) fn handle_ws_message(text: &str, provider_id: &str, sink: &EventSink)
             }
         };
     if let Some(event) = normalized {
-        if let Err(error) = sink.send(event) {
+        let lifecycle =
+            event.event_type == crate::im_gateway::feishu_group_permission::BOT_JOINED_EVENT_TYPE;
+        let result = if lifecycle {
+            sink.persist_and_send(event)
+                .map_err(|error| error.to_string())
+        } else {
+            sink.send(event).map_err(|error| error.to_string())
+        };
+        if let Err(error) = result {
             error!(
                 provider_id,
                 error = %error,
@@ -650,5 +658,28 @@ mod tests {
         handle_ws_message("not-json", "feishu-main", &sink);
         handle_ws_message(r#"{"type":"pong"}"#, "feishu-main", &sink);
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn permission_ws_message_persists_bot_added_lifecycle_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(crate::im_gateway::ImEventStore::new(temp.path()));
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let sink =
+            EventSink::with_durable_store(sender, std::sync::Arc::clone(&store), "feishu-main");
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt-bot-added-ws",
+                "event_type": "im.chat.member.bot.added_v1"
+            },
+            "event": {"chat_id": "oc_group"}
+        });
+
+        handle_ws_message(&raw.to_string(), "feishu-main", &sink);
+        assert_eq!(
+            events.try_recv().unwrap().event_type,
+            crate::im_gateway::feishu_group_permission::BOT_JOINED_EVENT_TYPE
+        );
+        assert_eq!(store.pending_by_provider("feishu-main").len(), 1);
     }
 }

@@ -164,6 +164,64 @@ pub struct FeishuCreatedChat {
     pub name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeishuScopeGrantStatus {
+    Granted,
+    Missing,
+}
+
+#[derive(Debug)]
+struct ScopeGrantPage {
+    granted: bool,
+    has_more: bool,
+    page_token: Option<String>,
+}
+
+fn parse_scope_grant_page(
+    value: &serde_json::Value,
+    required_scope: &str,
+) -> std::result::Result<ScopeGrantPage, String> {
+    let code = value
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    if code != 0 {
+        let message = value
+            .get("msg")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return Err(format!(
+            "query Feishu application scopes failed: code={code}, msg={message}"
+        ));
+    }
+    let data = value
+        .get("data")
+        .ok_or_else(|| "Feishu application scopes response missing data".to_string())?;
+    let scopes = data
+        .get("scopes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Feishu application scopes response missing data.scopes".to_string())?;
+    Ok(ScopeGrantPage {
+        granted: scopes.iter().any(|scope| {
+            scope.get("scope_name").and_then(serde_json::Value::as_str) == Some(required_scope)
+                && scope
+                    .get("grant_status")
+                    .and_then(serde_json::Value::as_i64)
+                    == Some(1)
+        }),
+        has_more: data
+            .get("has_more")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        page_token: data
+            .get("page_token")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    })
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct TokenCacheKey {
     base_url: String,
@@ -331,6 +389,58 @@ impl FeishuProvider {
         cache.insert(cache_key, TokenCache { token, expires_at });
 
         Ok(result)
+    }
+
+    /// Query the application's tenant-level grant status for one permission.
+    /// The application scopes endpoint itself does not require an extra scope.
+    pub async fn scope_grant_status(
+        &self,
+        config: &ImProviderConfig,
+        required_scope: &str,
+    ) -> Result<FeishuScopeGrantStatus> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut request = self
+                .http
+                .get(format!("{base_url}/application/v6/scopes"))
+                .header("Authorization", format!("Bearer {token}"))
+                .query(&[("page_size", "100")]);
+            if let Some(token) = page_token.as_deref() {
+                request = request.query(&[("page_token", token)]);
+            }
+            let response = request.send().await.map_err(|error| {
+                bifrost_core::BifrostError::Network(format!(
+                    "query Feishu application scopes failed: {error}"
+                ))
+            })?;
+            let status = response.status();
+            let value: serde_json::Value = response.json().await.map_err(|error| {
+                bifrost_core::BifrostError::Network(format!(
+                    "parse Feishu application scopes response failed: {error}"
+                ))
+            })?;
+            if !status.is_success() {
+                return Err(bifrost_core::BifrostError::Network(format!(
+                    "query Feishu application scopes failed: status={status}"
+                )));
+            }
+            let page = parse_scope_grant_page(&value, required_scope)
+                .map_err(bifrost_core::BifrostError::Network)?;
+            if page.granted {
+                return Ok(FeishuScopeGrantStatus::Granted);
+            }
+            if !page.has_more {
+                return Ok(FeishuScopeGrantStatus::Missing);
+            }
+            page_token = Some(page.page_token.ok_or_else(|| {
+                bifrost_core::BifrostError::Network(
+                    "Feishu application scopes response has_more without page_token".to_string(),
+                )
+            })?);
+        }
     }
 
     /// Refresh token from Feishu API.
@@ -2422,15 +2532,40 @@ async fn run_connection_loop(
 
 /// Normalize a raw Feishu event into the unified ImEvent model.
 ///
-/// Handles `im.message.receive_v1` events.
+/// Handles message receive and bot-added lifecycle events.
 pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Option<ImEvent> {
     let header = raw.get("header")?;
     let event_id = header.get("event_id").and_then(|v| v.as_str())?.to_string();
     let event_type_raw = header.get("event_type").and_then(|v| v.as_str())?;
 
-    // Only handle im.message.receive_v1 for V1
     let normalized_event_type = match event_type_raw {
         "im.message.receive_v1" => "message.receive",
+        "im.chat.member.bot.added_v1" => {
+            let event = raw.get("event")?;
+            let chat_id = event
+                .get("chat_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?
+                .to_string();
+            let raw_bytes = raw.to_string();
+            let digest_value = digest(&SHA256, raw_bytes.as_bytes());
+            return Some(ImEvent {
+                event_id,
+                provider_id: provider_id.to_string(),
+                provider_type: ImProviderType::Feishu,
+                event_type: crate::im_gateway::feishu_group_permission::BOT_JOINED_EVENT_TYPE
+                    .to_string(),
+                source: ImEventSource {
+                    chat_id: Some(chat_id),
+                    chat_type: Some("group".to_string()),
+                    ..ImEventSource::default()
+                },
+                message: None,
+                received_at: current_timestamp_ms(),
+                raw_digest: Some(format!("sha256:{}", hex_encode(digest_value.as_ref()))),
+            });
+        }
         _ => {
             debug!(
                 provider_id = provider_id,
@@ -3448,6 +3583,196 @@ mod tests {
         assert_eq!(msg.text, "/check bifrost");
         assert_eq!(msg.raw_type.as_deref(), Some("text"));
         assert!(event.raw_digest.unwrap().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn test_normalize_feishu_bot_added_event() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt-bot-added",
+                "event_type": "im.chat.member.bot.added_v1"
+            },
+            "event": {
+                "chat_id": "oc_permission_group",
+                "operator_id": {"open_id": "ou_admin"}
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").expect("normalized event");
+        assert_eq!(
+            event.event_type,
+            crate::im_gateway::feishu_group_permission::BOT_JOINED_EVENT_TYPE
+        );
+        assert_eq!(event.event_id, "evt-bot-added");
+        assert_eq!(event.source.chat_id.as_deref(), Some("oc_permission_group"));
+        assert_eq!(event.source.chat_type.as_deref(), Some("group"));
+        assert!(event.message.is_none());
+        assert!(event.raw_digest.is_some());
+    }
+
+    #[test]
+    fn test_normalize_feishu_bot_added_event_requires_chat_id() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt-bot-added",
+                "event_type": "im.chat.member.bot.added_v1"
+            },
+            "event": {}
+        });
+
+        assert!(normalize_feishu_event(&raw, "feishu-main").is_none());
+    }
+
+    #[test]
+    fn test_parse_scope_grant_page_distinguishes_granted_and_missing() {
+        let granted = serde_json::json!({
+            "code": 0,
+            "data": {
+                "scopes": [
+                    {"scope_name": "im:message.group_msg", "grant_status": 1}
+                ],
+                "has_more": false
+            }
+        });
+        assert!(
+            parse_scope_grant_page(&granted, "im:message.group_msg")
+                .unwrap()
+                .granted
+        );
+
+        let missing = serde_json::json!({
+            "code": 0,
+            "data": {
+                "scopes": [
+                    {"scope_name": "im:message.group_msg", "grant_status": 2}
+                ],
+                "has_more": true,
+                "page_token": "next-page"
+            }
+        });
+        let page = parse_scope_grant_page(&missing, "im:message.group_msg").unwrap();
+        assert!(!page.granted);
+        assert!(page.has_more);
+        assert_eq!(page.page_token.as_deref(), Some("next-page"));
+    }
+
+    #[test]
+    fn test_parse_scope_grant_page_rejects_api_error_and_missing_scopes() {
+        assert!(parse_scope_grant_page(
+            &serde_json::json!({"code": 999, "msg": "denied"}),
+            "im:message.group_msg"
+        )
+        .unwrap_err()
+        .contains("code=999"));
+        assert!(parse_scope_grant_page(
+            &serde_json::json!({"code": 0, "data": {}}),
+            "im:message.group_msg"
+        )
+        .unwrap_err()
+        .contains("data.scopes"));
+    }
+
+    #[tokio::test]
+    async fn scope_grant_status_follows_pagination_and_rejects_invalid_responses() {
+        async fn fixture(
+            responses: Vec<(StatusCode, &'static str)>,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let responses = Arc::new(parking_lot::Mutex::new(responses.into_iter()));
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let responses = Arc::clone(&responses);
+                    tokio::spawn(async move {
+                        let service = service_fn(move |request: Request<Incoming>| {
+                            let responses = Arc::clone(&responses);
+                            async move {
+                                let (status, body) = if request
+                                    .uri()
+                                    .path()
+                                    .ends_with("/auth/v3/tenant_access_token/internal")
+                                {
+                                    (
+                                        StatusCode::OK,
+                                        r#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                                    )
+                                } else {
+                                    responses
+                                        .lock()
+                                        .next()
+                                        .unwrap_or((StatusCode::NOT_FOUND, r#"{"code":404}"#))
+                                };
+                                Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(status)
+                                        .header("Content-Type", "application/json")
+                                        .body(Full::new(Bytes::from_static(body.as_bytes())))
+                                        .unwrap(),
+                                )
+                            }
+                        });
+                        let _ = http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    });
+                }
+            });
+            (format!("http://{address}/open-apis"), task)
+        }
+
+        let (base_url, server) = fixture(vec![
+            (
+                StatusCode::OK,
+                r#"{"code":0,"data":{"scopes":[],"has_more":true,"page_token":"next"}}"#,
+            ),
+            (
+                StatusCode::OK,
+                r#"{"code":0,"data":{"scopes":[{"scope_name":"im:message.group_msg","grant_status":1}],"has_more":false}}"#,
+            ),
+        ])
+        .await;
+        let mut config = provider_with_base_url(Some(&base_url));
+        config.secret_ref = Some("secret".to_string());
+        assert_eq!(
+            FeishuProvider::new()
+                .scope_grant_status(&config, "im:message.group_msg")
+                .await
+                .unwrap(),
+            FeishuScopeGrantStatus::Granted
+        );
+        server.abort();
+
+        for (status, body, expected) in [
+            (
+                StatusCode::OK,
+                r#"{"code":0,"data":{"scopes":[],"has_more":true}}"#,
+                "has_more without page_token",
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"code":0}"#,
+                "status=500",
+            ),
+            (
+                StatusCode::OK,
+                "not-json",
+                "parse Feishu application scopes response",
+            ),
+        ] {
+            let (base_url, server) = fixture(vec![(status, body)]).await;
+            let mut config = provider_with_base_url(Some(&base_url));
+            config.secret_ref = Some("secret".to_string());
+            let error = FeishuProvider::new()
+                .scope_grant_status(&config, "im:message.group_msg")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "unexpected error: {error}");
+            server.abort();
+        }
     }
 
     #[test]

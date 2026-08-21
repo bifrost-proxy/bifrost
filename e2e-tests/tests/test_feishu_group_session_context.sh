@@ -4,6 +4,7 @@ set -euo pipefail
 unset BIFROST_DETACHED_DAEMON_CHILD
 unset BIFROST_EXTERNAL_CLI_WORKER
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+export BIFROST_DISABLE_TRAY=1
 export CARGO_NET_OFFLINE="${CARGO_NET_OFFLINE:-true}"
 
 # Hard fail closed for network access: this scenario must only reach the two
@@ -123,7 +124,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if path.endswith("/bot/v3/info"):
+        if path.endswith("/application/v6/scopes"):
+            self.send_json({"code": 0, "data": {"scopes": [{
+                "scope_name": "im:message.group_msg", "grant_status": 2
+            }], "has_more": False}})
+        elif path.endswith("/bot/v3/info"):
             self.send_json({"code": 0, "bot": {"open_id": "ou_bot", "app_name": "Bifrost"}})
         elif path.endswith("/im/v1/messages/a1"):
             content = json.dumps({"text": "先讨论发布窗口"}, ensure_ascii=False)
@@ -216,7 +221,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"code": 0})
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if path.endswith("/bot/v3/info"):
+        if path.endswith("/application/v6/scopes"):
+            self.send_json({"code": 0, "data": {"scopes": [{
+                "scope_name": "im:message.group_msg", "grant_status": 1
+            }], "has_more": False}})
+        elif path.endswith("/bot/v3/info"):
             self.send_json({"code": 0, "bot": {"open_id": "ou_bot_b", "app_name": "Bifrost B"}})
         elif "/im/v1/chats/" in path:
             self.send_json({"code": 0, "data": {"name": "共享多机器人群"}})
@@ -494,7 +503,48 @@ request("/providers", {
     "owner_open_id": "owner-b",
     "event_connection_enabled": False,
 })
+request("/debug/mock-bot-joined", {
+    "providerId": "feishu-group-e2e",
+    "chatId": "chat-permission",
+    "eventId": "evt-permission-joined",
+})
+request("/debug/mock-bot-joined", {
+    "providerId": "feishu-group-e2e",
+    "chatId": "chat-permission",
+    "eventId": "evt-permission-joined",
+})
 PY
+
+for _ in $(seq 1 160); do
+  if curl -fsS --noproxy '*' \
+    "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/providers/feishu-group-e2e/messages" \
+    | python3 -c '
+import json, sys
+messages = json.load(sys.stdin)
+notices = [
+    (entry.get("content") or "") + (entry.get("content_preview") or "")
+    for entry in messages
+    if entry.get("trigger") == "feishu_group_permission"
+]
+expected = "https://open.larkoffice.com/app/cli_group_e2e/auth"
+raise SystemExit(0 if len(notices) == 1 and expected in notices[0] and "im:message.group_msg" in notices[0] else 1)
+'
+  then
+    break
+  fi
+  sleep 0.25
+done
+curl -fsS --noproxy '*' \
+  "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/providers/feishu-group-e2e/messages" \
+  | python3 -c '
+import json, sys
+messages = json.load(sys.stdin)
+notices = [entry for entry in messages if entry.get("trigger") == "feishu_group_permission"]
+assert len(notices) == 1, notices
+content = (notices[0].get("content") or "") + (notices[0].get("content_preview") or "")
+assert "https://open.larkoffice.com/app/cli_group_e2e/auth" in content, content
+assert "im:message.group_msg" in content, content
+'
 
 inject() {
   local chat_id="$1"

@@ -84,6 +84,15 @@ struct MockCardActionRequest {
     now_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MockBotJoinedRequest {
+    provider_id: String,
+    chat_id: String,
+    #[serde(default)]
+    event_id: Option<String>,
+}
+
 pub(super) async fn handle_debug(
     req: Request<Incoming>,
     service: &SharedImGatewayService,
@@ -93,8 +102,81 @@ pub(super) async fn handle_debug(
     match rest {
         "/mock-inbound" => handle_mock_inbound(req, service).await,
         "/mock-card-action" => handle_mock_card_action(req, service).await,
+        "/mock-bot-joined" => handle_mock_bot_joined(req, service).await,
         _ => error_response(StatusCode::NOT_FOUND, "IM Gateway debug endpoint not found"),
     }
+}
+
+async fn handle_mock_bot_joined(
+    req: Request<Incoming>,
+    service: &SharedImGatewayService,
+) -> Response<BoxBody> {
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+    let body: MockBotJoinedRequest = match read_body_json(req).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    inject_mock_bot_joined(body, service).await
+}
+
+async fn inject_mock_bot_joined(
+    body: MockBotJoinedRequest,
+    service: &SharedImGatewayService,
+) -> Response<BoxBody> {
+    let provider_id = body.provider_id.trim();
+    let chat_id = body.chat_id.trim();
+    if provider_id.is_empty() || chat_id.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "providerId and chatId are required",
+        );
+    }
+    let Some(provider) = service.provider_store.get(provider_id) else {
+        return error_response(StatusCode::NOT_FOUND, "provider not found");
+    };
+    if provider.provider_type != ImProviderType::Feishu {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "mock bot joined requires a Feishu provider",
+        );
+    }
+    let event_id = body
+        .event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("mock-bot-joined-{}", uuid_short()));
+    let event = ImEvent {
+        event_id: event_id.clone(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Feishu,
+        event_type: crate::im_gateway::feishu_group_permission::BOT_JOINED_EVENT_TYPE.to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some(chat_id.to_string()),
+            chat_type: Some("group".to_string()),
+            ..Default::default()
+        },
+        message: None,
+        received_at: now_ms(),
+        raw_digest: None,
+    };
+    let tx = ensure_mock_event_sink(service, &provider);
+    if tx.send(event).is_err() {
+        service.mock_event_sinks.write().remove(&provider.id);
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mock inbound sink is closed",
+        );
+    }
+    json_response(&serde_json::json!({
+        "success": true,
+        "providerId": provider.id,
+        "eventId": event_id,
+        "chatId": chat_id
+    }))
 }
 
 async fn handle_mock_inbound(
@@ -397,6 +479,7 @@ fn ensure_mock_event_sink(
     let event_store = service.event_store.clone();
     let message_log_store = service.message_log_store.clone();
     let group_context_store = service.group_context_store.clone();
+    let feishu_group_permission_store = service.feishu_group_permission_store.clone();
     let route_store = service.route_store.clone();
     let provider_store = service.provider_store.clone();
     let agent_config_store = service.agent_config_store.clone();
@@ -416,6 +499,7 @@ fn ensure_mock_event_sink(
             event_store,
             message_log_store,
             group_context_store,
+            feishu_group_permission_store,
             route_store,
             provider_store,
             agent_config_store,
@@ -514,6 +598,79 @@ mod tests {
                 }
             }),
         }
+    }
+
+    fn bot_joined_request(provider_id: &str, chat_id: &str) -> MockBotJoinedRequest {
+        MockBotJoinedRequest {
+            provider_id: provider_id.to_string(),
+            chat_id: chat_id.to_string(),
+            event_id: Some(" evt-bot-joined-debug ".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_bot_joined_validates_and_injects_lifecycle_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        service
+            .provider_store
+            .add(provider("debug-bot-joined"))
+            .unwrap();
+        let mut weixin = provider("debug-bot-joined-weixin");
+        weixin.provider_type = ImProviderType::Weixin;
+        service.provider_store.add(weixin).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-bot-joined".to_string(), tx);
+
+        for (body, expected) in [
+            (bot_joined_request(" ", "oc_group"), StatusCode::BAD_REQUEST),
+            (
+                bot_joined_request("missing", "oc_group"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                bot_joined_request("debug-bot-joined-weixin", "oc_group"),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            assert_eq!(
+                inject_mock_bot_joined(body, &service).await.status(),
+                expected
+            );
+        }
+
+        assert_eq!(
+            inject_mock_bot_joined(
+                bot_joined_request("debug-bot-joined", " oc_group "),
+                &service
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let event = rx.try_recv().expect("bot joined lifecycle event");
+        assert_eq!(event.event_id, "evt-bot-joined-debug");
+        assert_eq!(event.source.chat_id.as_deref(), Some("oc_group"));
+        assert_eq!(
+            event.event_type,
+            crate::im_gateway::feishu_group_permission::BOT_JOINED_EVENT_TYPE
+        );
+
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-bot-joined".to_string(), closed_tx);
+        let mut generated = bot_joined_request("debug-bot-joined", "oc_group");
+        generated.event_id = None;
+        assert_eq!(
+            inject_mock_bot_joined(generated, &service).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
@@ -902,6 +1059,95 @@ mod tests {
         assert_eq!(body["eventId"], "evt_http_choice");
         assert_eq!(body["senderId"], "ou_owner");
         assert_eq!(body["chatId"], "oc_choice");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn permission_mock_bot_joined_http_route_validates_and_injects_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        service
+            .provider_store
+            .add(provider("debug-bot-joined-http"))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-bot-joined-http".to_string(), tx);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let io = TokioIo::new(stream);
+                let service = service.clone();
+                let handler = service_fn(move |request| {
+                    let service = service.clone();
+                    async move {
+                        let path = request.uri().path().to_string();
+                        Ok::<_, std::convert::Infallible>(
+                            crate::handlers::im_gateway::handle_im_gateway(
+                                request,
+                                Some(service),
+                                &path,
+                            )
+                            .await,
+                        )
+                    }
+                });
+                http1::Builder::new()
+                    .keep_alive(false)
+                    .serve_connection(io, handler)
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let endpoint = format!("http://{address}/api/im-gateway/debug/mock-bot-joined");
+        assert_eq!(
+            client
+                .get(&endpoint)
+                .header("connection", "close")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .header("connection", "close")
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body("{")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+        let response = client
+            .post(&endpoint)
+            .header("connection", "close")
+            .json(&serde_json::json!({
+                "providerId": "debug-bot-joined-http",
+                "chatId": "oc_http",
+                "eventId": "evt-http-bot-added"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["eventId"],
+            "evt-http-bot-added"
+        );
+        let event = rx.try_recv().expect("HTTP bot joined event");
+        assert_eq!(event.source.chat_id.as_deref(), Some("oc_http"));
         server.await.unwrap();
     }
 }

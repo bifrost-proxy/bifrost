@@ -1,5 +1,368 @@
 use super::*;
 
+async fn spawn_permission_check_server(
+    grant_status: i64,
+) -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let sends = Arc::new(AtomicUsize::new(0));
+    let sends_for_task = Arc::clone(&sends);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let sends = Arc::clone(&sends_for_task);
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 32 * 1024];
+                let Ok(length) = stream.read(&mut request).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.contains("/auth/v3/tenant_access_token/internal") {
+                    r#"{"code":0,"tenant_access_token":"token","expire":7200}"#.to_string()
+                } else if request.contains("/application/v6/scopes") {
+                    serde_json::json!({
+                        "code": 0,
+                        "data": {
+                            "scopes": [{
+                                "scope_name": "im:message.group_msg",
+                                "grant_status": grant_status
+                            }],
+                            "has_more": false
+                        }
+                    })
+                    .to_string()
+                } else if request.starts_with("POST /open-apis/im/v1/messages?") {
+                    sends.fetch_add(1, Ordering::SeqCst);
+                    if grant_status == 3 {
+                        r#"{"code":999,"msg":"send denied"}"#.to_string()
+                    } else {
+                        r#"{"code":0,"data":{"message_id":"om_permission"}}"#.to_string()
+                    }
+                } else {
+                    r#"{"code":404,"msg":"not found"}"#.to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{address}/open-apis"), sends, task)
+}
+
+fn bot_joined_event(provider_id: &str) -> ImEvent {
+    ImEvent {
+        event_id: "evt-bot-added".to_string(),
+        provider_id: provider_id.to_string(),
+        provider_type: ImProviderType::Feishu,
+        event_type: crate::im_gateway::feishu_group_permission::BOT_JOINED_EVENT_TYPE.to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("oc_permission".to_string()),
+            chat_type: Some("group".to_string()),
+            ..Default::default()
+        },
+        message: None,
+        received_at: 1,
+        raw_digest: None,
+    }
+}
+
+#[tokio::test]
+async fn bot_joined_missing_scope_sends_one_direct_application_link() {
+    use std::sync::atomic::Ordering;
+
+    let (base_url, sends, server) = spawn_permission_check_server(2).await;
+    let temp = tempfile::tempdir().unwrap();
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-permission-missing".to_string();
+    provider.base_url = Some(base_url);
+    provider.app_id = Some("cli_permission".to_string());
+    provider.secret_ref = Some("secret".to_string());
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let event = bot_joined_event(&provider.id);
+
+    assert!(
+        handle_feishu_group_permission_check(
+            &client,
+            &provider,
+            &event,
+            &service.feishu_group_permission_store,
+            &service.message_log_store,
+            false,
+        )
+        .await
+    );
+    assert!(
+        handle_feishu_group_permission_check(
+            &client,
+            &provider,
+            &event,
+            &service.feishu_group_permission_store,
+            &service.message_log_store,
+            false,
+        )
+        .await
+    );
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    let logs = service.message_log_store.list();
+    let notice = logs
+        .iter()
+        .find(|entry| entry.trigger.as_deref() == Some("feishu_group_permission"))
+        .and_then(|entry| entry.content.as_deref())
+        .expect("permission notice log");
+    assert!(notice.contains("https://open.larkoffice.com/app/cli_permission/auth"));
+    assert!(notice.contains("im:message.group_msg"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn bot_joined_granted_scope_is_silent_and_persisted() {
+    use std::sync::atomic::Ordering;
+
+    let (base_url, sends, server) = spawn_permission_check_server(1).await;
+    let temp = tempfile::tempdir().unwrap();
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-permission-granted".to_string();
+    provider.base_url = Some(base_url);
+    provider.app_id = Some("cli_permission".to_string());
+    provider.secret_ref = Some("secret".to_string());
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let event = bot_joined_event(&provider.id);
+
+    assert!(
+        handle_feishu_group_permission_check(
+            &client,
+            &provider,
+            &event,
+            &service.feishu_group_permission_store,
+            &service.message_log_store,
+            false,
+        )
+        .await
+    );
+    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    assert!(service.message_log_store.list().is_empty());
+    let key = service.feishu_group_permission_store.join_check_key(
+        &provider.id,
+        "oc_permission",
+        &event.event_id,
+    );
+    assert!(service
+        .feishu_group_permission_store
+        .is_complete(&key)
+        .unwrap());
+    server.abort();
+}
+
+#[tokio::test]
+async fn permission_check_unknown_and_non_feishu_inputs_do_not_emit_notices() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider = recorder_test_provider();
+    provider.id = "permission-edge".to_string();
+    provider.base_url = Some("http://127.0.0.1:9/open-apis".to_string());
+    provider.secret_ref = Some("secret".to_string());
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let mut event = bot_joined_event(&provider.id);
+
+    assert!(
+        !handle_feishu_group_permission_check(
+            &client,
+            &provider,
+            &event,
+            &service.feishu_group_permission_store,
+            &service.message_log_store,
+            false,
+        )
+        .await
+    );
+    assert!(
+        handle_feishu_group_permission_check(
+            &client,
+            &provider,
+            &event,
+            &service.feishu_group_permission_store,
+            &service.message_log_store,
+            true,
+        )
+        .await
+    );
+
+    event.source.chat_id = None;
+    assert!(
+        handle_feishu_group_permission_check(
+            &client,
+            &provider,
+            &event,
+            &service.feishu_group_permission_store,
+            &service.message_log_store,
+            false,
+        )
+        .await
+    );
+
+    provider.provider_type = ImProviderType::Weixin;
+    assert!(
+        handle_feishu_group_permission_check(
+            &client,
+            &provider,
+            &event,
+            &service.feishu_group_permission_store,
+            &service.message_log_store,
+            false,
+        )
+        .await
+    );
+    assert!(service.message_log_store.list().is_empty());
+}
+
+#[tokio::test]
+async fn permission_check_handles_corrupt_state_missing_app_and_send_failure() {
+    let corrupt_dir = tempfile::tempdir().unwrap();
+    let corrupt_admin = corrupt_dir.path().join("admin");
+    std::fs::create_dir_all(&corrupt_admin).unwrap();
+    std::fs::write(
+        corrupt_admin.join("im_gateway_feishu_group_permissions.json"),
+        b"not-json",
+    )
+    .unwrap();
+    let corrupt_service = crate::handlers::im_gateway::ImGatewayService::new(corrupt_dir.path());
+    let provider = recorder_test_provider();
+    let client = ImProviderClient::Feishu(Arc::clone(
+        corrupt_service.connection_manager.feishu_provider(),
+    ));
+    let event = bot_joined_event(&provider.id);
+    assert!(
+        !handle_feishu_group_permission_check(
+            &client,
+            &provider,
+            &event,
+            &corrupt_service.feishu_group_permission_store,
+            &corrupt_service.message_log_store,
+            false,
+        )
+        .await
+    );
+
+    let (base_url, _, server) = spawn_permission_check_server(2).await;
+    let missing_app_dir = tempfile::tempdir().unwrap();
+    let missing_app_service =
+        crate::handlers::im_gateway::ImGatewayService::new(missing_app_dir.path());
+    let mut missing_app = recorder_test_provider();
+    missing_app.base_url = Some(base_url);
+    missing_app.app_id = Some(" ".to_string());
+    missing_app.secret_ref = Some("secret".to_string());
+    let client = ImProviderClient::Feishu(Arc::clone(
+        missing_app_service.connection_manager.feishu_provider(),
+    ));
+    assert!(
+        !handle_feishu_group_permission_check(
+            &client,
+            &missing_app,
+            &bot_joined_event(&missing_app.id),
+            &missing_app_service.feishu_group_permission_store,
+            &missing_app_service.message_log_store,
+            false,
+        )
+        .await
+    );
+    server.abort();
+
+    let (base_url, _, server) = spawn_permission_check_server(3).await;
+    let failed_send_dir = tempfile::tempdir().unwrap();
+    let failed_send_service =
+        crate::handlers::im_gateway::ImGatewayService::new(failed_send_dir.path());
+    let mut failed_send = recorder_test_provider();
+    failed_send.base_url = Some(base_url);
+    failed_send.app_id = Some("cli_permission".to_string());
+    failed_send.secret_ref = Some("secret".to_string());
+    let client = ImProviderClient::Feishu(Arc::clone(
+        failed_send_service.connection_manager.feishu_provider(),
+    ));
+    assert!(
+        !handle_feishu_group_permission_check(
+            &client,
+            &failed_send,
+            &bot_joined_event(&failed_send.id),
+            &failed_send_service.feishu_group_permission_store,
+            &failed_send_service.message_log_store,
+            false,
+        )
+        .await
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn lifecycle_event_loop_completes_granted_permission_check() {
+    let (base_url, sends, server) = spawn_permission_check_server(1).await;
+    let temp = tempfile::tempdir().unwrap();
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-permission-event-loop".to_string();
+    provider.base_url = Some(base_url);
+    provider.app_id = Some("cli_permission".to_string());
+    provider.secret_ref = Some("secret".to_string());
+    let event = bot_joined_event(&provider.id);
+    let key = service.feishu_group_permission_store.join_check_key(
+        &provider.id,
+        "oc_permission",
+        &event.event_id,
+    );
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(run_event_loop_with_options(
+        rx,
+        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+        provider,
+        Arc::clone(&service.event_store),
+        Arc::clone(&service.message_log_store),
+        Arc::clone(&service.group_context_store),
+        Arc::clone(&service.feishu_group_permission_store),
+        Arc::clone(&service.route_store),
+        Arc::clone(&service.provider_store),
+        Arc::clone(&service.agent_config_store),
+        Arc::clone(&service.schedule_store),
+        Arc::clone(&service.scheduler),
+        Arc::clone(&service.target_store),
+        Arc::clone(&service.connection_manager),
+        Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
+        Arc::clone(&service.queue_manager),
+        Arc::clone(&service.progress_registry),
+        EventLoopOptions {
+            send_online_notification: false,
+        },
+    ));
+    tx.send(event).unwrap();
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("permission event loop timed out")
+        .expect("permission event loop panicked");
+
+    assert!(service
+        .feishu_group_permission_store
+        .is_complete(&key)
+        .unwrap());
+    assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 0);
+    server.abort();
+}
+
 #[tokio::test]
 async fn initial_external_attachments_are_deferred_for_weixin_and_empty_without_message() {
     let temp = tempfile::tempdir().expect("initial attachment data dir");
