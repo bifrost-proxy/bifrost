@@ -12,6 +12,8 @@ const DEFAULT_LIST_LIMIT: usize = 20;
 const MAX_DISCOVERED_FILES: usize = 50_000;
 const MAX_SESSION_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_INDEX_SCAN_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_JSON_LINE_BYTES: usize = 1024 * 1024;
+const MAX_TRAEX_SESSION_LINE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TITLE_CHARS: usize = 96;
 const MIN_ID_PREFIX_CHARS: usize = 8;
 
@@ -105,6 +107,7 @@ pub fn discover_local_sessions(
         ProviderKind::Codex => discover_codex_like_sessions(
             &root.join("sessions"),
             load_codex_index(&root.join("session_index.jsonl")),
+            false,
         ),
         ProviderKind::Traex => discover_codex_like_sessions(
             &root.join("cli").join("sessions"),
@@ -114,6 +117,7 @@ pub fn discover_local_sessions(
                 "text",
                 "ts",
             ),
+            true,
         ),
         ProviderKind::ClaudeCode => discover_claude_sessions(
             &root.join("projects"),
@@ -305,11 +309,14 @@ fn provider_home(provider: ProviderKind) -> PathBuf {
 fn discover_codex_like_sessions(
     sessions_root: &Path,
     hints: HashMap<String, SessionHints>,
+    keep_first_session_id: bool,
 ) -> Vec<LocalExternalSession> {
     let mut sessions = HashMap::<String, LocalExternalSession>::new();
     for path in collect_jsonl_files(sessions_root) {
         let fallback_millis = file_modified_millis(&path);
-        let Some((id, event_millis, fallback_title)) = read_codex_like_session_meta(&path) else {
+        let Some((id, event_millis, fallback_title)) =
+            read_codex_like_session_meta(&path, keep_first_session_id)
+        else {
             continue;
         };
         let hint = hints.get(&id);
@@ -369,11 +376,19 @@ fn discover_claude_sessions(
     sessions.into_values().collect()
 }
 
-fn read_codex_like_session_meta(path: &Path) -> Option<(String, u64, Option<String>)> {
+fn read_codex_like_session_meta(
+    path: &Path,
+    keep_first_session_id: bool,
+) -> Option<(String, u64, Option<String>)> {
     let mut id = None;
     let mut updated_at_millis = 0;
     let mut title = None;
-    visit_json_lines(path, MAX_SESSION_SCAN_BYTES, |value| {
+    let max_line_bytes = if keep_first_session_id {
+        MAX_TRAEX_SESSION_LINE_BYTES
+    } else {
+        MAX_JSON_LINE_BYTES
+    };
+    visit_json_lines_with_limit(path, MAX_SESSION_SCAN_BYTES, max_line_bytes, |value| {
         updated_at_millis = updated_at_millis.max(timestamp_from_value(
             value.get("timestamp").unwrap_or(&serde_json::Value::Null),
         ));
@@ -381,7 +396,11 @@ fn read_codex_like_session_meta(path: &Path) -> Option<(String, u64, Option<Stri
             return;
         };
         if value.get("type").and_then(serde_json::Value::as_str) == Some("session_meta") {
-            id = json_string(payload, "session_id").or_else(|| json_string(payload, "id"));
+            let candidate_id =
+                json_string(payload, "session_id").or_else(|| json_string(payload, "id"));
+            if !keep_first_session_id || id.is_none() {
+                id = candidate_id;
+            }
             updated_at_millis = updated_at_millis.max(timestamp_from_value(
                 payload.get("timestamp").unwrap_or(&serde_json::Value::Null),
             ));
@@ -518,13 +537,22 @@ fn collect_jsonl_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn visit_json_lines(path: &Path, max_bytes: u64, mut visit: impl FnMut(&serde_json::Value)) {
+fn visit_json_lines(path: &Path, max_bytes: u64, visit: impl FnMut(&serde_json::Value)) {
+    visit_json_lines_with_limit(path, max_bytes, MAX_JSON_LINE_BYTES, visit);
+}
+
+fn visit_json_lines_with_limit(
+    path: &Path,
+    max_bytes: u64,
+    max_line_bytes: usize,
+    mut visit: impl FnMut(&serde_json::Value),
+) {
     let Ok(file) = File::open(path) else {
         return;
     };
     let reader = BufReader::new(file).take(max_bytes);
     for line in reader.lines().map_while(Result::ok) {
-        if line.len() > 1024 * 1024 {
+        if line.len() > max_line_bytes {
             continue;
         }
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
@@ -844,11 +872,24 @@ mod tests {
         let trae_id = "11111111-1111-1111-1111-111111111111";
         write_lines(
             &trae_home.path().join("cli/sessions/rollout-trae.jsonl"),
-            &[serde_json::json!({
-                "timestamp": "2026-08-06T01:00:00Z",
-                "type": "session_meta",
-                "payload": {"id": trae_id, "timestamp": "2026-08-06T01:00:00Z"}
-            })],
+            &[
+                serde_json::json!({
+                    "timestamp": "2026-08-06T01:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": trae_id,
+                        "timestamp": "2026-08-06T01:00:00Z",
+                        "instructions": "x".repeat(1024 * 1024 + 1),
+                    }
+                }),
+                // Traex may preserve metadata from the resumed source session in
+                // the new rollout. The first session_meta owns the rollout.
+                serde_json::json!({
+                    "timestamp": "2026-08-05T01:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "timestamp": "2026-08-05T01:00:00Z"}
+                }),
+            ],
         );
         write_lines(
             &trae_home.path().join("cli/history.jsonl"),
@@ -868,11 +909,34 @@ mod tests {
 
         let trae = discover_local_sessions("traex", None).expect("trae sessions");
         assert_eq!(trae.len(), 1);
+        assert_eq!(trae[0].id, trae_id);
         assert_eq!(trae[0].title, "Trae title");
         let claude = discover_local_sessions("claude_code", None).expect("claude sessions");
         assert_eq!(claude.len(), 1);
         assert_eq!(claude[0].id, claude_id);
         assert_eq!(claude[0].title, "AI title");
+    }
+
+    #[test]
+    fn resume_keeps_existing_codex_last_session_meta_behavior() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = home.path().join("rollout.jsonl");
+        write_lines(
+            &path,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"id": "first-session"}
+                }),
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"id": "last-session"}
+                }),
+            ],
+        );
+
+        let (id, _, _) = read_codex_like_session_meta(&path, false).expect("metadata");
+        assert_eq!(id, "last-session");
     }
 
     #[test]

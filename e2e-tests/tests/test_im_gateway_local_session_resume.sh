@@ -75,11 +75,22 @@ write_jsonl(root / "codex/session_index.jsonl", [{
     "thread_name": "Codex local title",
     "updated_at": "2099-08-07T03:02:00Z",
 }])
-write_jsonl(root / "trae/cli/sessions/2099/08/07/traex.jsonl", [{
-    "timestamp": "2099-08-07T04:01:00Z",
-    "type": "session_meta",
-    "payload": {"id": traex_id, "timestamp": "2099-08-07T04:01:00Z"},
-}])
+write_jsonl(root / "trae/cli/sessions/2099/08/07/traex.jsonl", [
+    {
+        "timestamp": "2099-08-07T04:01:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": traex_id,
+            "timestamp": "2099-08-07T04:01:00Z",
+            "instructions": "x" * (1024 * 1024 + 1),
+        },
+    },
+    {
+        "timestamp": "2099-08-06T04:01:00Z",
+        "type": "session_meta",
+        "payload": {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "timestamp": "2099-08-06T04:01:00Z"},
+    },
+])
 write_jsonl(root / "trae/cli/history.jsonl", [{
     "session_id": traex_id,
     "ts": 4089758580,
