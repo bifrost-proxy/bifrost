@@ -103,7 +103,7 @@
 - `resume_if_generation(g)`：确认 generation 未变化、state 仍 suspended、实际代理仍等于 original；满足后才恢复 target。
 - generation 或实际状态不匹配返回 `OwnershipChanged`，不写系统代理。
 
-`system_proxy_owner_state.json` 是可诊断投影，不替代 `proxy_state.json` 的写入依据。它通过独立 diagnostics lock 原子更新，包含 runtime/helper、policy、phase、last action/error。
+`system_proxy_owner_state.json` 是可诊断投影，不替代 `proxy_state.json` 的写入依据。它通过独立 diagnostics lock 原子更新，包含 runtime/helper、policy、phase、last action/error。诊断路径只读取现有 ownership，不迁移 state、不申请 system proxy mutation lock；diagnostics lock 最多等待 2 秒，超时记录 warning 并让核心启动/重启/转发链路继续。
 
 ## Helper recovery 状态机
 
@@ -128,7 +128,7 @@ Desktop-owned runtime 不由 helper 拉起，仍由 Desktop child watchdog 管�
 
 ## 生命周期事件与 doctor
 
-事件文件：`logs/system_proxy_events.jsonl`，单行 JSON、10 MiB rotation、最多 3 份。独立 `.system_proxy_diagnostics.lock` 串行化跨进程 append 与 owner state 原子更新。
+事件文件：`logs/system_proxy_events.jsonl`，单行 JSON、10 MiB rotation、最多 3 份。独立 `.system_proxy_diagnostics.lock` 串行化跨进程 append 与 owner state 原子更新；锁等待有界，诊断竞争不得阻塞 daemon 恢复。
 
 公共字段包括：
 

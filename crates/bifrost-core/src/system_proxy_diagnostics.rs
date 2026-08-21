@@ -1,8 +1,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use fs2::FileExt;
+use fs2::{lock_contended_error, FileExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{BifrostError, ProxyBackup, ResourcePressureLevel, Result};
@@ -12,6 +13,8 @@ const DIAGNOSTICS_LOCK_FILE: &str = ".system_proxy_diagnostics.lock";
 const EVENT_FILE: &str = "system_proxy_events.jsonl";
 const EVENT_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const EVENT_ROTATIONS: usize = 3;
+const DIAGNOSTICS_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const DIAGNOSTICS_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -79,6 +82,7 @@ impl SystemProxyLifecycleEvent {
     }
 }
 
+#[derive(Debug)]
 struct DiagnosticsLock {
     file: File,
 }
@@ -90,6 +94,10 @@ impl Drop for DiagnosticsLock {
 }
 
 fn acquire_lock(data_dir: &Path) -> Result<DiagnosticsLock> {
+    acquire_lock_with_timeout(data_dir, DIAGNOSTICS_LOCK_TIMEOUT)
+}
+
+fn acquire_lock_with_timeout(data_dir: &Path, timeout: Duration) -> Result<DiagnosticsLock> {
     fs::create_dir_all(data_dir)?;
     let file = OpenOptions::new()
         .create(true)
@@ -97,8 +105,25 @@ fn acquire_lock(data_dir: &Path) -> Result<DiagnosticsLock> {
         .read(true)
         .write(true)
         .open(data_dir.join(DIAGNOSTICS_LOCK_FILE))?;
-    file.lock_exclusive().map_err(BifrostError::Io)?;
-    Ok(DiagnosticsLock { file })
+    let started = Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(DiagnosticsLock { file }),
+            Err(error) if error.raw_os_error() == lock_contended_error().raw_os_error() => {
+                if started.elapsed() >= timeout {
+                    return Err(BifrostError::Config(format!(
+                        "timed out after {} ms waiting for lifecycle diagnostics lock",
+                        timeout.as_millis()
+                    )));
+                }
+                std::thread::sleep(std::cmp::min(
+                    DIAGNOSTICS_LOCK_POLL_INTERVAL,
+                    timeout.saturating_sub(started.elapsed()),
+                ));
+            }
+            Err(error) => return Err(BifrostError::Io(error)),
+        }
+    }
 }
 
 fn owner_state_path(data_dir: &Path) -> PathBuf {
@@ -237,6 +262,17 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].event, "event_1");
         assert_eq!(recent[1].event, "event_2");
+    }
+
+    #[test]
+    fn diagnostics_lock_wait_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let _held = acquire_lock(temp.path()).unwrap();
+        let started = Instant::now();
+        let error = acquire_lock_with_timeout(temp.path(), Duration::from_millis(40))
+            .expect_err("a contended diagnostics lock must time out");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.to_string().contains("timed out after 40 ms"));
     }
 
     #[test]

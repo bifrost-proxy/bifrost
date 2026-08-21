@@ -283,8 +283,12 @@ fn persist_runtime_lifecycle_diagnostics(info: &RuntimeInfo) {
     let Ok(data_dir) = get_bifrost_dir() else {
         return;
     };
+    // Runtime diagnostics must stay observational. In particular, this path is
+    // also reached by the detached restart handoff after the old listener has
+    // stopped. Migrating ownership here would take the system-proxy mutation
+    // lock and can delay (or deadlock behind) the replacement daemon exec.
     let ownership_generation = bifrost_core::SystemProxyManager::new(data_dir.clone())
-        .ensure_managed_ownership()
+        .read_managed_ownership()
         .ok()
         .flatten()
         .map(|ownership| ownership.generation);

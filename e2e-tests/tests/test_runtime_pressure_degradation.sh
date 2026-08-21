@@ -66,6 +66,8 @@ class Handler(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 PY
 UPSTREAM_PID=$!
+wait_for_http_ready "http://127.0.0.1:${UPSTREAM_PORT}/pressure" 30 0.1 \
+    || fail "pressure-test upstream did not become ready: $(cat "${TEST_DATA_DIR}/upstream.log")"
 
 export BIFROST_DATA_DIR="$TEST_DATA_DIR"
 export BIFROST_RESOURCE_PRESSURE_OVERRIDE=critical
