@@ -134,6 +134,19 @@ FORWARDED="$(env NO_PROXY="" no_proxy="" curl -fsS \
 assert_equals "basic-forwarding-survived-pressure" "$FORWARDED" \
     "basic forwarding remains available under pressure"
 
+REPLAY_RESPONSE="$(env NO_PROXY="*" no_proxy="*" curl -fsS \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg url "http://127.0.0.1:${UPSTREAM_PORT}/replay-pressure" \
+        '{url:$url,method:"GET",headers:[],rule_config:{mode:"none"},timeout_ms:5000}')" \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/replay/execute/unified")"
+assert_json_field ".success" "true" "$REPLAY_RESPONSE" \
+    "interactive Replay send remains available under pressure"
+assert_json_field ".data.status" "200" "$REPLAY_RESPONSE" \
+    "Replay receives the upstream response under pressure"
+assert_json_field ".data.body" "basic-forwarding-survived-pressure" "$REPLAY_RESPONSE" \
+    "Replay preserves the upstream response body under pressure"
+
 BODY_FILE_COUNT="$(find "${TEST_DATA_DIR}/body_cache" -type f 2>/dev/null | wc -l | tr -d ' ')"
 assert_equals "0" "$BODY_FILE_COUNT" "Body payload persistence is paused"
 
