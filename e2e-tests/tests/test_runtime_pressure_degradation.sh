@@ -248,12 +248,19 @@ for route in \
     "/api/asr/tasks/${ASR_TASK_ID}" \
     "/api/asr/tasks/${ASR_TASK_ID}/watch" \
     "/api/asr/tasks/-/watch" \
+    "/api/asr/tasks/${ASR_TASK_ID}/files/missing/timeline" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily/2026-08-22" \
     "/api/asr/external-volumes" \
     "/api/asr/tasks/${ASR_TASK_ID}/external-import" \
     "/api/asr/tasks/${ASR_TASK_ID}/daily-agent" \
     "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/agents" \
     "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/runs" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/reports/2026-08-22" \
+    "/api/asr/offline-jobs/missing" \
+    "/api/asr/offline-jobs/missing/artifacts/txt" \
     "/api/asr/speaker-profiles" \
+    "/api/asr/speaker-profiles/missing" \
+    "/api/asr/transcribe-ws" \
     "/api/speech/pipelines" \
     "/api/speech/pipelines/status" \
     "/api/speech/resources" \
@@ -271,10 +278,21 @@ done
 
 assert_pressure_allowed PATCH "/api/asr/tasks/${ASR_TASK_ID}" '{"enabled":false}'
 assert_pressure_allowed PUT "/api/asr/tasks/${ASR_TASK_ID}/daily-agent" '{}'
+assert_pressure_allowed PUT "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/agents" '{"content":""}'
 assert_pressure_allowed POST "/api/asr/tasks/${ASR_TASK_ID}/pause?mode=long_term"
+assert_pressure_allowed POST "/api/asr/tasks/${ASR_TASK_ID}/cleanup-source-audio?confirm_name=wrong" '{}'
 assert_pressure_allowed POST "/api/asr/service/stop" '{}'
+assert_pressure_allowed POST "/api/asr/speaker-profiles" '{}'
+assert_pressure_allowed POST "/api/asr/speaker-profiles/assisted-sessions" '{}'
+assert_pressure_allowed POST "/api/asr/speaker-profiles/assisted-sessions/missing/labels" '{}'
+assert_pressure_allowed POST "/api/asr/speaker-profiles/enrollment-sessions" '{}'
 assert_pressure_allowed POST "/api/voice/wake/listener/progress" '{}'
 assert_pressure_allowed POST "/api/voice/wake/listener/stop" '{}'
+assert_pressure_allowed PUT "/api/voice/vocabulary" '{}'
+assert_pressure_allowed DELETE "/api/asr/speaker-profiles/missing"
+assert_pressure_allowed DELETE "/api/asr/speaker-profiles/assisted-sessions/missing"
+assert_pressure_allowed DELETE "/api/asr/speaker-profiles/missing/samples/missing"
+assert_pressure_allowed DELETE "/api/asr/tasks/${ASR_TASK_ID}/compress-source-audio"
 
 for route in \
     "/api/asr/init-stream" \
@@ -292,6 +310,8 @@ for route in \
     "/api/asr/tasks/${ASR_TASK_ID}/run" \
     "/api/asr/tasks/${ASR_TASK_ID}/resume" \
     "/api/asr/tasks/${ASR_TASK_ID}/external-import/run" \
+    "/api/asr/tasks/${ASR_TASK_ID}/files/missing/retry-chunks" \
+    "/api/asr/tasks/${ASR_TASK_ID}/files/missing/retry" \
     "/api/asr/tasks/${ASR_TASK_ID}/retry-failed-chunks" \
     "/api/asr/tasks/${ASR_TASK_ID}/retry-failed-files" \
     "/api/asr/tasks/${ASR_TASK_ID}/compress-source-audio" \
@@ -299,6 +319,10 @@ for route in \
     "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/send" \
     "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/sync" \
     "/api/asr/speaker-profiles/identify" \
+    "/api/asr/speaker-profiles/assisted-sessions/missing/finish" \
+    "/api/asr/speaker-profiles/enrollment-sessions/missing/audio" \
+    "/api/asr/speaker-profiles/enrollment-sessions/missing/verify" \
+    "/api/asr/speaker-profiles/enrollment-sessions/missing/finish" \
     "/api/voice/sessions" \
     "/api/voice/wake/kws/init" \
     "/api/voice/wake/trigger" \
