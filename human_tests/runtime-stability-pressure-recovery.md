@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证高资源负载下 Bifrost 不因单一 Admin API 超时误杀托管进程，独立健康通道与数据面 canary 仍可判定真实存活；进入资源压力状态后停止 payload 持久化和重任务，同时保留基础转发与用户主动发起的单次 Replay；并验证系统代理恢复策略、ownership generation 和结构化诊断产物。
+验证高资源负载下 Bifrost 不因单一 Admin API 超时误杀托管进程，独立健康通道与数据面 canary 仍可判定真实存活；进入资源压力状态后停止 payload 持久化和新重任务，同时保留基础转发、用户主动发起的单次 Replay，以及 AI/IM、Remote Invoke、Scripts 的配置与状态控制面；并验证系统代理恢复策略、ownership generation 和结构化诊断产物。
 
 ## 前置条件
 
@@ -40,6 +40,8 @@ BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressu
 - Traffic 大查询返回 503，轻量 Admin 请求仍可用。
 - 通过代理访问本地 upstream 成功，基础转发未中断。
 - Replay Send 通过同一本地 upstream 成功返回 200 和预期响应体，不被通用重任务 guard 误拦截。
+- AI/IM provider、Agent config、channel config 与 Remote Invoke status 均返回 200，不因整个 API 前缀被误判而 503。
+- Scripts 列表与新建/保存返回 200；Scripts test 和新 AI runner turn 仍返回 503，确认只暂停执行面。
 - Body payload 不写入缓存；doctor 能读到压力状态。
 
 ### TC-RSPR-03：恢复策略只允许 fail-open/fail-closed 和 3～5 秒窗口

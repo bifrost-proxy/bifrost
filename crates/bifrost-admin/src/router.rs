@@ -237,7 +237,7 @@ impl AdminRouter {
             return resp;
         }
 
-        if !bifrost_core::heavy_tasks_allowed() && is_heavy_admin_request(path) {
+        if !bifrost_core::heavy_tasks_allowed() && is_heavy_admin_request(req.method(), path) {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "This operation is paused while Bifrost is under resource pressure",
@@ -554,7 +554,7 @@ impl AdminRouter {
     }
 }
 
-fn is_heavy_admin_request(path: &str) -> bool {
+fn is_heavy_admin_request(method: &Method, path: &str) -> bool {
     // Replay is intentionally absent here. A single Replay send is an
     // interactive data-plane request, and its executor already has a bounded
     // concurrency semaphore. Blanket-blocking `/api/replay*` also makes the
@@ -564,13 +564,42 @@ fn is_heavy_admin_request(path: &str) -> bool {
         "/api/traffic" | "/api/traffic/query" | "/api/traffic/statistics" | "/api/traffic/batch"
     ) || path.starts_with("/api/search")
         || path.starts_with("/api/app-icon/")
-        || path.starts_with("/api/scripts")
+        || is_heavy_script_request(method, path)
         || path.starts_with("/api/asr")
         || path.starts_with("/api/speech")
         || path.starts_with("/api/voice")
         || path.starts_with("/api/worker-jobs")
-        || path.starts_with("/api/im-gateway")
-        || path.starts_with("/api/remote-invoke")
+        || is_heavy_im_gateway_request(method, path)
+}
+
+fn is_heavy_script_request(method: &Method, path: &str) -> bool {
+    method == Method::POST && matches!(path, "/api/scripts/test" | "/api/scripts/test/")
+}
+
+fn is_heavy_im_gateway_request(method: &Method, path: &str) -> bool {
+    if method != Method::POST {
+        return false;
+    }
+
+    matches!(
+        path,
+        "/api/im-gateway/messages/send"
+            | "/api/im-gateway/messages/send/"
+            | "/api/im-gateway/messages/upload"
+            | "/api/im-gateway/messages/upload/"
+            | "/api/im-gateway/chat"
+            | "/api/im-gateway/chat/"
+            | "/api/im-gateway/chat/stream"
+            | "/api/im-gateway/chat/stream/"
+            | "/api/im-gateway/chat/runner-calls/stream"
+            | "/api/im-gateway/chat/runner-calls/stream/"
+            | "/api/im-gateway/chat/adapters/chatgpt-web/auth/open"
+            | "/api/im-gateway/chat/adapters/chatgpt-web/auth/open/"
+    ) || path.starts_with("/api/im-gateway/debug/")
+        || (path.starts_with("/api/im-gateway/chat/sessions/")
+            && path.trim_end_matches('/').ends_with("/guide"))
+        || (path.starts_with("/api/im-gateway/schedules/")
+            && path.trim_end_matches('/').ends_with("/run"))
 }
 
 #[derive(Serialize)]
@@ -596,28 +625,48 @@ mod tests {
 
     #[test]
     fn resource_pressure_guard_targets_heavy_admin_surfaces_only() {
-        for path in [
-            "/api/traffic",
-            "/api/traffic/query",
-            "/api/search",
-            "/api/app-icon/Safari",
-            "/api/scripts",
-            "/api/asr/jobs",
-            "/api/worker-jobs",
-            "/api/im-gateway/config",
-            "/api/remote-invoke/connections",
+        for (method, path) in [
+            (Method::GET, "/api/traffic"),
+            (Method::GET, "/api/traffic/query"),
+            (Method::GET, "/api/search"),
+            (Method::GET, "/api/app-icon/Safari"),
+            (Method::POST, "/api/scripts/test"),
+            (Method::GET, "/api/asr/jobs"),
+            (Method::GET, "/api/worker-jobs"),
+            (Method::POST, "/api/im-gateway/messages/send"),
+            (Method::POST, "/api/im-gateway/messages/upload"),
+            (Method::POST, "/api/im-gateway/chat/stream"),
+            (
+                Method::POST,
+                "/api/im-gateway/chat/adapters/chatgpt-web/auth/open",
+            ),
+            (Method::POST, "/api/im-gateway/chat/sessions/session/guide"),
+            (Method::POST, "/api/im-gateway/schedules/schedule/run"),
         ] {
-            assert!(is_heavy_admin_request(path), "{path}");
+            assert!(is_heavy_admin_request(&method, path), "{method} {path}");
         }
-        for path in [
-            "/api/proxy/system/support",
-            "/api/system/overview",
-            "/api/traffic/record-id",
-            "/api/metrics",
-            "/api/replay/execute",
-            "/api/replay/groups",
+        for (method, path) in [
+            (Method::GET, "/api/proxy/system/support"),
+            (Method::GET, "/api/system/overview"),
+            (Method::GET, "/api/traffic/record-id"),
+            (Method::GET, "/api/metrics"),
+            (Method::POST, "/api/replay/execute"),
+            (Method::GET, "/api/replay/groups"),
+            (Method::GET, "/api/scripts"),
+            (Method::PUT, "/api/scripts/request/example"),
+            (Method::DELETE, "/api/scripts/request/example"),
+            (Method::POST, "/api/scripts/rename/request/example"),
+            (Method::GET, "/api/im-gateway/providers"),
+            (Method::PATCH, "/api/im-gateway/chat/config"),
+            (
+                Method::GET,
+                "/api/im-gateway/chat/config/channels/feishu-main",
+            ),
+            (Method::POST, "/api/im-gateway/schedules"),
+            (Method::GET, "/api/remote-invoke/status"),
+            (Method::POST, "/api/remote-invoke/discovery/enter"),
         ] {
-            assert!(!is_heavy_admin_request(path), "{path}");
+            assert!(!is_heavy_admin_request(&method, path), "{method} {path}");
         }
     }
 

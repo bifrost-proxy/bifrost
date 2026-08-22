@@ -17,7 +17,7 @@
 - watchdog 不得只因 Admin API 超时终止 managed child。
 - watchdog 使用四类信号：managed child exit、独立 scheduler heartbeat、数据面 loopback canary、Admin health。
 - 独立 health lane 绑定随机 loopback 端口，由独立 OS 线程服务；主 Tokio scheduler 只更新时间戳。
-- 资源压力进入 degraded/critical 后停止 Body/WS payload 持久化，暂停图标、Traffic 大查询、脚本和附加任务，拒绝新重任务；CONNECT、基础转发与用户主动发起的单次 Replay 不进入拒绝路径。
+- 资源压力进入 degraded/critical 后停止 Body/WS payload 持久化，暂停图标、Traffic 大查询、脚本测试和附加任务执行，拒绝新重任务；CONNECT、基础转发、用户主动发起的单次 Replay，以及 AI/IM、Remote Invoke、Scripts 的配置与状态控制面不进入拒绝路径。
 - 结构化 lifecycle event 落盘，覆盖 PID、退出码/信号、各探针耗时、RSS、CPU、FD、活动连接、队列、恢复耗时和 system proxy action。
 - system proxy owner state 包含 generation、target、原始代理、runtime/helper、策略和最近动作；提供 `bifrost system-proxy doctor`。
 - lifecycle helper 发现 daemon 明确消失后立即启动 replacement。
@@ -78,7 +78,11 @@
 | BodyStore / WsPayloadStore 新 payload | 停止持久化，已有 reader 保留 |
 | app icon miss / bundle 扫描 | 503，不启动新提取 |
 | Traffic list/query/batch/search | 503；轻量单条读取与健康接口保留 |
-| req/res/decode scripts | 跳过新执行并记录 pressure reason |
+| Scripts 列表、读取、保存、重命名、删除 | 保留，允许修正配置；不触发脚本执行 |
+| Scripts test、req/res/decode 新执行 | 503 或跳过，并记录 pressure reason |
+| AI/IM providers、channels、runner config、routes、schedules CRUD | 保留，避免整个 AI/IM 管理面失效 |
+| AI/IM 新消息发送、附件上传、Agent/runner turn、schedule 手动 run | 503，不启动新重任务 |
+| Remote Invoke 状态、授权、连接与访问控制管理 | 保留；这些 Admin API 不直接执行远端命令 |
 | worker jobs、ASR 等附加重任务 | 503，不启动新任务 |
 | 单次 Replay、Replay 收藏与历史 | 保留；继续使用并发上限，payload 持久化仍服从 pressure governor |
 
@@ -145,5 +149,6 @@ Desktop-owned runtime 不由 helper 拉起，仍由 Desktop child watchdog 管�
 
 - 单元测试：watchdog 真值表、pressure 回滞、payload/重任务降级、generation suspend/resume 决策、helper fail-open/fail-closed 时间线、旧 schema 兼容。
 - E2E：独立 data-dir + 动态端口验证 Admin 单独失败不重启、health lane/数据 canary、pressure forced mode、helper policy 与 generation conflict。
+- E2E：Critical 压力下验证 AI/IM providers、Agent config、channel config、Remote Invoke 状态和 Scripts CRUD 可用，同时 Scripts test 与新 AI turn 仍返回 503。
 - human tests：macOS Desktop pause/kill、真实 system proxy 快照恢复、fail-open 黑洞窗口、外部代理接管、doctor 证据完整性。
 - Rust 门禁：受影响 crate 测试、fmt/clippy、`make coverage-changed`，再由 GitHub Actions 执行 workspace/coverage/E2E。
