@@ -37,6 +37,17 @@ cleanup() {
     kill "$WEIXIN_PID" >/dev/null 2>&1 || true
     wait "$WEIXIN_PID" >/dev/null 2>&1 || true
   fi
+  # The native runner and threaded mock server may finish their final file
+  # writes a few milliseconds after their parent processes have been reaped.
+  # Retry removal so that this harmless shutdown race cannot turn a passing
+  # provider flow into a failed E2E job.
+  local cleanup_attempt
+  for cleanup_attempt in $(seq 1 20); do
+    if rm -rf "$TEST_DIR" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
   rm -rf "$TEST_DIR"
 }
 

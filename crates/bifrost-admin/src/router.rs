@@ -237,7 +237,8 @@ impl AdminRouter {
             return resp;
         }
 
-        if !bifrost_core::heavy_tasks_allowed() && is_heavy_admin_request(req.method(), path) {
+        let heavy_tasks_allowed = bifrost_core::heavy_tasks_allowed();
+        if !heavy_tasks_allowed && is_heavy_admin_request(req.method(), path) {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "This operation is paused while Bifrost is under resource pressure",
@@ -248,7 +249,7 @@ impl AdminRouter {
         // install must not recover tasks, start watchers, or prepare model
         // assets. Activation also belongs after auth/write checks so rejected
         // requests cannot initialize the subsystem.
-        if should_activate_asr_scheduler(path) {
+        if heavy_tasks_allowed && should_activate_asr_scheduler(path) {
             crate::handlers::asr_jobs::ensure_scheduler_started().await;
         }
 
@@ -565,11 +566,32 @@ fn is_heavy_admin_request(method: &Method, path: &str) -> bool {
     ) || path.starts_with("/api/search")
         || path.starts_with("/api/app-icon/")
         || is_heavy_script_request(method, path)
-        || path.starts_with("/api/asr")
-        || path.starts_with("/api/speech")
+        || is_heavy_asr_request(method, path)
+        || is_heavy_speech_request(method, path)
         || path.starts_with("/api/voice")
         || path.starts_with("/api/worker-jobs")
         || is_heavy_im_gateway_request(method, path)
+}
+
+fn is_heavy_asr_request(method: &Method, path: &str) -> bool {
+    if method == Method::GET
+        && matches!(
+            path,
+            "/api/asr/capabilities" | "/api/asr/status" | "/api/asr/tasks"
+        )
+    {
+        return false;
+    }
+
+    path.starts_with("/api/asr")
+}
+
+fn is_heavy_speech_request(method: &Method, path: &str) -> bool {
+    if method == Method::GET && path == "/api/speech/pipelines/status" {
+        return false;
+    }
+
+    path.starts_with("/api/speech")
 }
 
 fn is_heavy_script_request(method: &Method, path: &str) -> bool {
@@ -632,6 +654,10 @@ mod tests {
             (Method::GET, "/api/app-icon/Safari"),
             (Method::POST, "/api/scripts/test"),
             (Method::GET, "/api/asr/jobs"),
+            (Method::GET, "/api/asr/init-stream"),
+            (Method::POST, "/api/asr/service/start"),
+            (Method::GET, "/api/asr/tasks/task/files/file/source"),
+            (Method::GET, "/api/speech/decision"),
             (Method::GET, "/api/worker-jobs"),
             (Method::POST, "/api/im-gateway/messages/send"),
             (Method::POST, "/api/im-gateway/messages/upload"),
@@ -653,6 +679,10 @@ mod tests {
             (Method::POST, "/api/replay/execute"),
             (Method::GET, "/api/replay/groups"),
             (Method::GET, "/api/scripts"),
+            (Method::GET, "/api/asr/capabilities"),
+            (Method::GET, "/api/asr/status"),
+            (Method::GET, "/api/asr/tasks"),
+            (Method::GET, "/api/speech/pipelines/status"),
             (Method::PUT, "/api/scripts/request/example"),
             (Method::DELETE, "/api/scripts/request/example"),
             (Method::POST, "/api/scripts/rename/request/example"),
@@ -733,6 +763,28 @@ mod tests {
         .expect("request interactive replay route");
         assert_eq!(replay_response.status(), reqwest::StatusCode::OK);
         drop(replay_response);
+
+        let previous_scheduler_state =
+            crate::handlers::asr_jobs::set_scheduler_started_for_test(false).await;
+        for path in [
+            "/api/asr/capabilities",
+            "/api/asr/status",
+            "/api/asr/tasks",
+            "/api/speech/pipelines/status",
+        ] {
+            let response = reqwest::get(format!("http://{addr}{ADMIN_PATH_PREFIX}{path}"))
+                .await
+                .expect("request lightweight AI control-plane route");
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+        }
+        let scheduler_started =
+            crate::handlers::asr_jobs::set_scheduler_started_for_test(true).await;
+        assert!(
+            !scheduler_started,
+            "Critical-pressure task summary must not lazily start the ASR scheduler"
+        );
+        crate::handlers::asr_jobs::set_scheduler_started_for_test(previous_scheduler_state).await;
+
         server.abort();
         let _ = server.await;
     }
