@@ -42,6 +42,8 @@ static ACTIVE_CLIENTS: Lazy<parking_lot::RwLock<HashMap<String, Arc<RemoteWorker
     Lazy::new(|| parking_lot::RwLock::new(HashMap::new()));
 static PRIMARY_RELAY: Lazy<parking_lot::RwLock<Option<String>>> =
     Lazy::new(|| parking_lot::RwLock::new(None));
+static CONTROL_PLANE_WORKER: Lazy<parking_lot::RwLock<Option<Arc<RemoteInvokeWorker>>>> =
+    Lazy::new(|| parking_lot::RwLock::new(None));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +107,8 @@ pub fn configure_runtime_targets(
         .filter_map(normalize_target)
         .filter(|target| seen_relays.insert(target.relay_url.clone()))
         .collect::<Vec<_>>();
+    *CONTROL_PLANE_WORKER.write() =
+        build_control_plane_worker(normalized.first(), &admin_host, admin_port, state.clone());
     *desired_state().write() = DesiredRemoteState {
         targets: normalized,
         admin_host,
@@ -140,6 +144,7 @@ pub fn stop_runtime_controller() {
     controller_notify().notify_waiters();
     ACTIVE_CLIENTS.write().clear();
     *PRIMARY_RELAY.write() = None;
+    *CONTROL_PLANE_WORKER.write() = None;
 }
 
 pub fn has_active_client() -> bool {
@@ -149,6 +154,61 @@ pub fn has_active_client() -> bool {
 pub fn runtime_configured() -> bool {
     super::worker_execution_enabled(WorkerKind::RemoteInvoke)
         && !desired_state().read().targets.is_empty()
+}
+
+pub async fn admin_proxy_ready() -> bool {
+    if !runtime_configured() {
+        return false;
+    }
+    let Some(client) = primary_client() else {
+        return false;
+    };
+    if client.worker.is_healthy().await {
+        true
+    } else {
+        controller_notify().notify_waiters();
+        false
+    }
+}
+
+pub fn control_plane_worker() -> Option<Arc<RemoteInvokeWorker>> {
+    CONTROL_PLANE_WORKER.read().clone()
+}
+
+fn build_control_plane_worker(
+    target: Option<&RemoteInvokeTarget>,
+    admin_host: &str,
+    admin_port: u16,
+    state: crate::state::SharedAdminState,
+) -> Option<Arc<RemoteInvokeWorker>> {
+    let target = target?;
+    let data_dir = state
+        .config_manager
+        .as_ref()
+        .map(|manager| manager.data_dir().to_path_buf())
+        .unwrap_or_else(bifrost_storage::data_dir);
+    let identity = match Identity::load_or_create(&data_dir) {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                data_dir = %data_dir.display(),
+                "initialize Remote Invoke control-plane fallback failed"
+            );
+            return None;
+        }
+    };
+    Some(RemoteInvokeWorker::new(
+        RemoteInvokeConfig {
+            relay_url: target.relay_url.clone(),
+            ..Default::default()
+        },
+        identity,
+        None,
+        state,
+        admin_host,
+        admin_port,
+    ))
 }
 
 pub async fn proxy_admin_request<B>(req: Request<B>, path: &str) -> Response<BoxBody>
@@ -779,6 +839,16 @@ mod tests {
         stop_runtime_controller();
         assert!(!has_active_client());
         assert!(primary_client().is_none());
+        *desired_state().write() = DesiredRemoteState {
+            targets: vec![target.clone()],
+            ..Default::default()
+        };
+        assert!(runtime_configured());
+        assert!(
+            !admin_proxy_ready().await,
+            "configured runtime without a ready child must use the local admin fallback"
+        );
+        *desired_state().write() = DesiredRemoteState::default();
         std::env::remove_var(REMOTE_INVOKE_WORKER_ENV);
     }
 

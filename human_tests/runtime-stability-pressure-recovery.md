@@ -40,10 +40,11 @@ BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressu
 - Traffic 大查询返回 503，轻量 Admin 请求仍可用。
 - 通过代理访问本地 upstream 成功，基础转发未中断。
 - Replay Send 通过同一本地 upstream 成功返回 200 和预期响应体，不被通用重任务 guard 误拦截。
-- AI/IM provider、Agent config、channel config 与 Remote Invoke status 均返回 200，不因整个 API 前缀被误判而 503。
-- AI 首页和 ASR 页面所需的 capabilities、status、task summary 与 speech pipeline status 均返回 200；AI 首页不显示 `Summary unavailable`，浏览器控制台没有这些轻量状态接口的 503。
+- AI/IM provider、Agent config、channel config 与 Remote Invoke 全部管理读取接口均不返回 5xx；Remote Invoke 隔离 Worker 尚未 ready 时使用本地状态回退，不出现全局 `pairings/pending` 503。
+- AI 首页及 ASR 页面依赖的 ASR/Voice/Speech 全部读取接口均不返回 5xx；使用真实临时 task 验证 task detail/watch、external import 状态、Daily Agent 配置/指令/记录，以及声纹、唤醒状态路由。
 - Scripts 列表与新建/保存返回 200；Scripts test 和新 AI runner turn 仍返回 503，确认只暂停执行面。
-- ASR service start 仍返回 503，确认仅保留读取控制面，不在 Critical 下启动模型或任务；读取 task summary 不触发 scheduler 懒启动。
+- ASR task 配置创建/修改/暂停/删除、Daily Agent 配置、service stop 和 Voice listener progress/stop 保持可用；模型初始化、service start、转写、task run/resume/import/retry/compress、Daily Agent run 与 Voice session/listener start 仍返回 503。
+- 临时服务上的 Playwright 逐页验证 AI Hub/Channels/Agents/Runs、ASR Scheduled/Management/Voice、任务 Overview/Daily/Daily Agent/Records、Remote Invoke 和 Scripts；任一 Admin API 5xx、请求失败或压力错误文案都视为失败。
 - Body payload 不写入缓存；doctor 能读到压力状态。
 
 ### TC-RSPR-03：恢复策略只允许 fail-open/fail-closed 和 3～5 秒窗口
@@ -87,6 +88,6 @@ cargo test -p bifrost-core lifecycle_events_rotate_before_append -- --nocapture
 | 日期 | 用例 | 结果 | 证据摘要 |
 | --- | --- | --- | --- |
 | 2026-08-22 | TC-RSPR-01 | 通过 | `cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog -- --nocapture`：8/8 通过；独立 worktree 首次执行缺少 sidecar 与 `web/dist-desktop`，按正式桌面构建链补齐测试前置后复跑通过。 |
-| 2026-08-22 | TC-RSPR-02 | 通过 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressure_degradation.sh`：23 项断言通过；除原有 Critical health、canary、Traffic 503、基础转发、Replay、payload 与 doctor 外，IM providers、AI config/channels、ASR capabilities/status/tasks、speech pipeline status、Remote Invoke status、Scripts list/save 均为 200，Scripts test、新 AI turn 与 ASR service start 仍为 503。随后在独立 Critical 实例上用 Playwright 验证 AI Hub、ASR、Channels、Agents、Runs、Remote Invoke、Scripts 新建保存、Replay Send 共 8 条 WebUI 链路，页面、控制台与网络失败均为 0。 |
+| 2026-08-22 | TC-RSPR-02 | 通过 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressure_degradation.sh` 在动态端口和临时数据目录中通过：逐项覆盖 ASR/Voice/Speech 的读取、配置、停止与重任务拒绝路由；Remote Invoke 子 Worker 在 Critical pressure 下未启动时，status、pending pairings、grants、identity、calls、shell/file-access config、SSH key 仍全部返回 200；Scripts list/save、IM/AI 配置、基础转发、Replay、payload 降级和 doctor 均符合预期。Playwright 随同临时服务逐页验证 AI Hub/Channels/Agents/Runs、ASR Scheduled/Management/Voice、任务 Overview/Daily/Daily Agent 列表/详情/Records、Remote Invoke 与 Scripts 共 14 个页面，Admin API 5xx、非导航请求失败和压力错误文案均为 0。 |
 | 2026-08-22 | TC-RSPR-03 | 通过 | 临时数据目录中 fail-open 3 秒、fail-closed 5 秒持久化成功；2 秒参数被拒绝；最终配置字段校验通过，目录自动回收。 |
 | 2026-08-22 | TC-RSPR-04 | 通过 | generation guard、owner/events 原子落盘与 lifecycle rotation 三个定向单测全部通过。 |

@@ -47,6 +47,68 @@ wait_for_admin() {
     return 1
 }
 
+request_admin_status() {
+    local method="$1"
+    local path="$2"
+    local body="${3:-}"
+    local response_file="${TEST_DATA_DIR}/last-admin-response.json"
+    local curl_args=(-sS -o "$response_file" -w '%{http_code}' -X "$method")
+    if [[ -n "$body" ]]; then
+        curl_args+=(-H 'Content-Type: application/json' --data "$body")
+    fi
+    curl_args+=("http://127.0.0.1:${PROXY_PORT}/_bifrost${path}")
+    env NO_PROXY="*" no_proxy="*" curl "${curl_args[@]}"
+}
+
+assert_pressure_allowed() {
+    local method="$1"
+    local path="$2"
+    local body="${3:-}"
+    local status
+    status="$(request_admin_status "$method" "$path" "$body")"
+    if (( status >= 500 )); then
+        echo "[FAIL] ${method} ${path} returned ${status} under pressure" >&2
+        cat "${TEST_DATA_DIR}/last-admin-response.json" >&2 || true
+        exit 1
+    fi
+    echo "[PASS] ${method} ${path} remains routed under pressure (${status})"
+}
+
+assert_pressure_blocked() {
+    local method="$1"
+    local path="$2"
+    local body="${3:-}"
+    local status
+    status="$(request_admin_status "$method" "$path" "$body")"
+    assert_equals "503" "$status" "${method} ${path} is rejected as new heavy work"
+}
+
+stop_temp_remote_invoke_worker() {
+    local deadline=$((SECONDS + 20))
+    local worker_pid=""
+    while (( SECONDS < deadline )); do
+        worker_pid="$(ps -axo pid=,ppid=,command= | awk -v parent="$PROXY_PID" '
+            $2 == parent && $0 ~ /auxiliary-worker --kind remote_invoke/ { print $1; exit }
+        ')"
+        [[ -n "$worker_pid" ]] && break
+        sleep 0.2
+    done
+    if [[ -z "$worker_pid" ]]; then
+        echo "[PASS] temporary Remote Invoke child stayed unstarted under critical pressure; testing the same fallback window"
+        return 0
+    fi
+    kill "$worker_pid"
+    local exit_deadline=$((SECONDS + 5))
+    while kill -0 "$worker_pid" 2>/dev/null && (( SECONDS < exit_deadline )); do
+        sleep 0.05
+    done
+    if kill -0 "$worker_pid" 2>/dev/null; then
+        echo "[FAIL] temporary Remote Invoke child ${worker_pid} did not exit" >&2
+        exit 1
+    fi
+    echo "[PASS] stopped temporary Remote Invoke child ${worker_pid} to test the recovery window"
+}
+
 PYTHON_BIN="$(python3_cmd)"
 UPSTREAM_PORT_FILE="${TEST_DATA_DIR}/upstream.port"
 "$PYTHON_BIN" - "$UPSTREAM_PORT" "$UPSTREAM_PORT_FILE" \
@@ -158,6 +220,83 @@ ASR_STATUS_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{h
 assert_equals "200" "$ASR_STATUS_STATUS" \
     "ASR status remains available under pressure"
 
+ASR_AUDIO_DIR="${TEST_DATA_DIR}/asr-pressure-audio"
+mkdir -p "$ASR_AUDIO_DIR"
+ASR_TASK_BODY="$(jq -nc --arg audio_dir "$ASR_AUDIO_DIR" \
+    '{name:"Pressure route audit",audio_dir:$audio_dir,enabled:false,recursive:false}')"
+ASR_TASK_CREATE_STATUS="$(request_admin_status POST "/api/asr/tasks" "$ASR_TASK_BODY")"
+assert_equals "201" "$ASR_TASK_CREATE_STATUS" \
+    "ASR task configuration can be created under pressure"
+ASR_TASK_ID="$(jq -r '.id' "${TEST_DATA_DIR}/last-admin-response.json")"
+[[ -n "$ASR_TASK_ID" && "$ASR_TASK_ID" != "null" ]]
+
+for route in \
+    "/api/asr/capabilities" \
+    "/api/asr/status" \
+    "/api/asr/moss/status" \
+    "/api/asr/diarization/status" \
+    "/api/asr/tasks" \
+    "/api/asr/tasks/${ASR_TASK_ID}" \
+    "/api/asr/tasks/${ASR_TASK_ID}/watch" \
+    "/api/asr/tasks/-/watch" \
+    "/api/asr/external-volumes" \
+    "/api/asr/tasks/${ASR_TASK_ID}/external-import" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/agents" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/runs" \
+    "/api/asr/speaker-profiles" \
+    "/api/speech/pipelines" \
+    "/api/speech/pipelines/status" \
+    "/api/speech/resources" \
+    "/api/speech/decision" \
+    "/api/voice/status" \
+    "/api/voice/sources" \
+    "/api/voice/vocabulary" \
+    "/api/voice/wake/status" \
+    "/api/voice/wake/kws/status" \
+    "/api/voice/wake/profiles" \
+    "/api/voice/wake/bindings" \
+    "/api/voice/wake/events"; do
+    assert_pressure_allowed GET "$route"
+done
+
+assert_pressure_allowed PATCH "/api/asr/tasks/${ASR_TASK_ID}" '{"enabled":false}'
+assert_pressure_allowed PUT "/api/asr/tasks/${ASR_TASK_ID}/daily-agent" '{}'
+assert_pressure_allowed POST "/api/asr/tasks/${ASR_TASK_ID}/pause?mode=long_term"
+assert_pressure_allowed POST "/api/asr/service/stop" '{}'
+assert_pressure_allowed POST "/api/voice/wake/listener/progress" '{}'
+assert_pressure_allowed POST "/api/voice/wake/listener/stop" '{}'
+
+for route in \
+    "/api/asr/init-stream" \
+    "/api/asr/moss/init-stream" \
+    "/api/asr/diarization/init-stream" \
+    "/api/asr/tasks/${ASR_TASK_ID}/files/missing/source" \
+    "/api/voice/listen-ws"; do
+    assert_pressure_blocked GET "$route"
+done
+
+for route in \
+    "/api/asr/service/start" \
+    "/api/asr/transcribe-stream" \
+    "/api/asr/offline-jobs" \
+    "/api/asr/tasks/${ASR_TASK_ID}/run" \
+    "/api/asr/tasks/${ASR_TASK_ID}/resume" \
+    "/api/asr/tasks/${ASR_TASK_ID}/external-import/run" \
+    "/api/asr/tasks/${ASR_TASK_ID}/retry-failed-chunks" \
+    "/api/asr/tasks/${ASR_TASK_ID}/retry-failed-files" \
+    "/api/asr/tasks/${ASR_TASK_ID}/compress-source-audio" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/run" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/send" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/sync" \
+    "/api/asr/speaker-profiles/identify" \
+    "/api/voice/sessions" \
+    "/api/voice/wake/kws/init" \
+    "/api/voice/wake/trigger" \
+    "/api/voice/wake/listener/start"; do
+    assert_pressure_blocked POST "$route" '{}'
+done
+
 SPEECH_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/speech/pipelines/status")"
 assert_equals "200" "$SPEECH_STATUS" \
@@ -180,6 +319,20 @@ SCRIPT_LIST_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/scripts")"
 assert_equals "200" "$SCRIPT_LIST_STATUS" \
     "script list remains available under pressure"
+
+stop_temp_remote_invoke_worker
+
+for route in \
+    "/api/remote-invoke/status" \
+    "/api/remote-invoke/pairings/pending" \
+    "/api/remote-invoke/grants" \
+    "/api/remote-invoke/identity" \
+    "/api/remote-invoke/calls?limit=100" \
+    "/api/remote-invoke/shell-config" \
+    "/api/remote-invoke/ssh-key" \
+    "/api/remote-invoke/file-access-config"; do
+    assert_pressure_allowed GET "$route"
+done
 
 SCRIPT_TEST_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' -d '{}' \
@@ -217,6 +370,20 @@ assert_json_field ".data.status" "200" "$REPLAY_RESPONSE" \
     "Replay receives the upstream response under pressure"
 assert_json_field ".data.body" "basic-forwarding-survived-pressure" "$REPLAY_RESPONSE" \
     "Replay preserves the upstream response body under pressure"
+
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+    (
+        cd "${PROJECT_DIR}/web"
+        BIFROST_LIVE_BASE_URL="http://127.0.0.1:${PROXY_PORT}" \
+        BIFROST_ASR_PRESSURE_TASK_ID="$ASR_TASK_ID" \
+            node tests/ui/asr-pressure-live-e2e.mjs
+    )
+fi
+
+ASR_TASK_DELETE_STATUS="$(request_admin_status DELETE \
+    "/api/asr/tasks/${ASR_TASK_ID}?confirm_name=Pressure%20route%20audit")"
+assert_equals "200" "$ASR_TASK_DELETE_STATUS" \
+    "ASR task configuration can be deleted under pressure"
 
 BODY_FILE_COUNT="$(find "${TEST_DATA_DIR}/body_cache" -type f 2>/dev/null | wc -l | tr -d ' ')"
 assert_equals "0" "$BODY_FILE_COUNT" "Body payload persistence is paused"

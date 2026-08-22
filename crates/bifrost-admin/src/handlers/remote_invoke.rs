@@ -18,15 +18,20 @@ pub type SharedRemoteInvokeWorker = Arc<RemoteInvokeWorker>;
 
 pub async fn handle_remote_invoke(
     req: Request<Incoming>,
-    worker: Option<SharedRemoteInvokeWorker>,
+    mut worker: Option<SharedRemoteInvokeWorker>,
     path: &str,
 ) -> Response<BoxBody> {
-    if crate::worker_runtime::worker_execution_enabled(
+    let isolated_main = crate::worker_runtime::worker_execution_enabled(
         crate::worker_runtime::WorkerKind::RemoteInvoke,
-    ) && !crate::worker_runtime::remote_invoke::is_remote_invoke_worker_process()
-        && crate::worker_runtime::remote_invoke::runtime_configured()
-    {
-        return crate::worker_runtime::remote_invoke::proxy_admin_request(req, path).await;
+    ) && !crate::worker_runtime::remote_invoke::is_remote_invoke_worker_process(
+    );
+    if isolated_main && crate::worker_runtime::remote_invoke::runtime_configured() {
+        if crate::worker_runtime::remote_invoke::admin_proxy_ready().await {
+            return crate::worker_runtime::remote_invoke::proxy_admin_request(req, path).await;
+        }
+        if supports_control_plane_fallback(req.method(), path) {
+            worker = crate::worker_runtime::remote_invoke::control_plane_worker().or(worker);
+        }
     }
 
     let Some(worker) = worker else {
@@ -116,6 +121,75 @@ pub async fn handle_remote_invoke(
     }
 
     error_response(StatusCode::NOT_FOUND, "Remote invoke endpoint not found")
+}
+
+fn supports_control_plane_fallback(method: &Method, path: &str) -> bool {
+    if *method == Method::GET {
+        return true;
+    }
+    let sub = path.strip_prefix("/api/remote-invoke").unwrap_or(path);
+    matches!(
+        (method, sub.trim_end_matches('/')),
+        (&Method::PUT, "/shell-config")
+            | (&Method::PUT, "/file-access-config")
+            | (&Method::POST, "/file-access/validate-path")
+    ) || (*method == Method::PUT
+        && sub
+            .trim_end_matches('/')
+            .strip_prefix("/file-access/grants/")
+            .and_then(|rest| rest.strip_suffix("/roots"))
+            .is_some_and(|grant_id| !grant_id.is_empty() && !grant_id.contains('/')))
+}
+
+#[cfg(test)]
+mod pressure_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_remote_admin_routes_keep_a_local_fallback() {
+        for path in [
+            "/api/remote-invoke/status",
+            "/api/remote-invoke/identity",
+            "/api/remote-invoke/grants",
+            "/api/remote-invoke/calls",
+            "/api/remote-invoke/shell-config",
+            "/api/remote-invoke/file-access-config",
+            "/api/remote-invoke/ssh-key",
+        ] {
+            assert!(
+                supports_control_plane_fallback(&Method::GET, path),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_persistent_local_mutations_use_the_fallback() {
+        assert!(supports_control_plane_fallback(
+            &Method::PUT,
+            "/api/remote-invoke/shell-config"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::PUT,
+            "/api/remote-invoke/file-access-config"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/file-access/validate-path"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::PUT,
+            "/api/remote-invoke/file-access/grants/grant-1/roots"
+        ));
+        assert!(!supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/discovery/enter"
+        ));
+        assert!(!supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/pairings/pairing-1/approve"
+        ));
+    }
 }
 
 fn handle_status(req: &Request<Incoming>, worker: &RemoteInvokeWorker) -> Response<BoxBody> {
