@@ -18,15 +18,20 @@ pub type SharedRemoteInvokeWorker = Arc<RemoteInvokeWorker>;
 
 pub async fn handle_remote_invoke(
     req: Request<Incoming>,
-    worker: Option<SharedRemoteInvokeWorker>,
+    mut worker: Option<SharedRemoteInvokeWorker>,
     path: &str,
 ) -> Response<BoxBody> {
-    if crate::worker_runtime::worker_execution_enabled(
+    let isolated_main = crate::worker_runtime::worker_execution_enabled(
         crate::worker_runtime::WorkerKind::RemoteInvoke,
-    ) && !crate::worker_runtime::remote_invoke::is_remote_invoke_worker_process()
-        && crate::worker_runtime::remote_invoke::runtime_configured()
-    {
-        return crate::worker_runtime::remote_invoke::proxy_admin_request(req, path).await;
+    ) && !crate::worker_runtime::remote_invoke::is_remote_invoke_worker_process(
+    );
+    if isolated_main && crate::worker_runtime::remote_invoke::runtime_configured() {
+        if crate::worker_runtime::remote_invoke::admin_proxy_ready().await {
+            return crate::worker_runtime::remote_invoke::proxy_admin_request(req, path).await;
+        }
+        if supports_control_plane_fallback(req.method(), path) {
+            worker = crate::worker_runtime::remote_invoke::control_plane_worker().or(worker);
+        }
     }
 
     let Some(worker) = worker else {
@@ -116,6 +121,163 @@ pub async fn handle_remote_invoke(
     }
 
     error_response(StatusCode::NOT_FOUND, "Remote invoke endpoint not found")
+}
+
+fn supports_control_plane_fallback(method: &Method, path: &str) -> bool {
+    if *method == Method::GET {
+        return true;
+    }
+    let sub = path.strip_prefix("/api/remote-invoke").unwrap_or(path);
+    let sub = sub.trim_end_matches('/');
+    matches!(
+        (method, sub),
+        (&Method::PUT, "/shell-config")
+            | (&Method::PUT, "/file-access-config")
+            | (&Method::POST, "/shell-config/match")
+            | (&Method::POST, "/file-access/validate-path")
+            | (&Method::POST, "/ssh-key")
+            | (&Method::POST, "/ssh-key/reset")
+            | (&Method::PATCH, "/ssh-key")
+            | (&Method::DELETE, "/ssh-key")
+            | (&Method::DELETE, "/calls")
+    ) || (*method == Method::PUT
+        && sub
+            .strip_prefix("/file-access/grants/")
+            .and_then(|rest| rest.strip_suffix("/roots"))
+            .is_some_and(|grant_id| !grant_id.is_empty() && !grant_id.contains('/')))
+}
+
+#[cfg(test)]
+mod pressure_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_remote_admin_routes_keep_a_local_fallback() {
+        for path in [
+            "/api/remote-invoke/status",
+            "/api/remote-invoke/identity",
+            "/api/remote-invoke/grants",
+            "/api/remote-invoke/calls",
+            "/api/remote-invoke/shell-config",
+            "/api/remote-invoke/file-access-config",
+            "/api/remote-invoke/ssh-key",
+        ] {
+            assert!(
+                supports_control_plane_fallback(&Method::GET, path),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_persistent_local_mutations_use_the_fallback() {
+        assert!(supports_control_plane_fallback(
+            &Method::PUT,
+            "/api/remote-invoke/shell-config"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::PUT,
+            "/api/remote-invoke/file-access-config"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/file-access/validate-path"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/shell-config/match"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/ssh-key"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/ssh-key/reset"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::PATCH,
+            "/api/remote-invoke/ssh-key"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::DELETE,
+            "/api/remote-invoke/ssh-key"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::DELETE,
+            "/api/remote-invoke/calls"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::PUT,
+            "/api/remote-invoke/file-access/grants/grant-1/roots"
+        ));
+        assert!(!supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/discovery/enter"
+        ));
+        assert!(!supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/pairings/pairing-1/approve"
+        ));
+        assert!(!supports_control_plane_fallback(
+            &Method::PATCH,
+            "/api/remote-invoke/grants/grant-1"
+        ));
+        assert!(!supports_control_plane_fallback(
+            &Method::DELETE,
+            "/api/remote-invoke/grants/grant-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_runtime_without_healthy_child_serves_local_control_plane() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let harness = crate::test_support::TestAdminState::builder().build();
+        let state = harness.state();
+        let _runtime_guard =
+            crate::worker_runtime::remote_invoke::configure_control_plane_fallback_for_test(
+                crate::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                    provider_id: "pressure-test".to_string(),
+                    relay_url: "https://relay.invalid.test".to_string(),
+                    session_token: "test-session".to_string(),
+                    allow_missing_session_token: false,
+                },
+                state,
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|req: Request<Incoming>| async move {
+                Ok::<_, hyper::Error>(
+                    handle_remote_invoke(req, None, "/api/remote-invoke/status").await,
+                )
+            });
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/_bifrost/api/remote-invoke/status"))
+            .header(reqwest::header::CONNECTION, "close")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let _ = response.bytes().await.unwrap();
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 fn handle_status(req: &Request<Incoming>, worker: &RemoteInvokeWorker) -> Response<BoxBody> {

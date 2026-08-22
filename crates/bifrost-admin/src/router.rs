@@ -568,30 +568,71 @@ fn is_heavy_admin_request(method: &Method, path: &str) -> bool {
         || is_heavy_script_request(method, path)
         || is_heavy_asr_request(method, path)
         || is_heavy_speech_request(method, path)
-        || path.starts_with("/api/voice")
+        || is_heavy_voice_request(method, path)
         || path.starts_with("/api/worker-jobs")
         || is_heavy_im_gateway_request(method, path)
 }
 
 fn is_heavy_asr_request(method: &Method, path: &str) -> bool {
-    if method == Method::GET
-        && matches!(
-            path,
-            "/api/asr/capabilities" | "/api/asr/status" | "/api/asr/tasks"
-        )
-    {
+    if !path.starts_with("/api/asr") {
         return false;
     }
 
-    path.starts_with("/api/asr")
+    if method == Method::GET {
+        return path.ends_with("/source")
+            || matches!(
+                path,
+                "/api/asr/init-stream"
+                    | "/api/asr/moss/init-stream"
+                    | "/api/asr/diarization/init-stream"
+            );
+    }
+
+    if matches!(method, &Method::DELETE | &Method::PATCH | &Method::PUT) {
+        return false;
+    }
+
+    method == Method::POST && !is_lightweight_asr_post(path)
+}
+
+fn is_lightweight_asr_post(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/asr/tasks"
+            | "/api/asr/service/stop"
+            | "/api/asr/speaker-profiles"
+            | "/api/asr/speaker-profiles/assisted-sessions"
+            | "/api/asr/speaker-profiles/enrollment-sessions"
+    ) || path.ends_with("/pause")
+        || path.ends_with("/cleanup-source-audio")
+        || path.ends_with("/labels")
 }
 
 fn is_heavy_speech_request(method: &Method, path: &str) -> bool {
-    if method == Method::GET && path == "/api/speech/pipelines/status" {
+    method != Method::GET && path.starts_with("/api/speech")
+}
+
+fn is_heavy_voice_request(method: &Method, path: &str) -> bool {
+    if !path.starts_with("/api/voice") {
         return false;
     }
 
-    path.starts_with("/api/speech")
+    if method == Method::GET {
+        return path == "/api/voice/listen-ws";
+    }
+
+    if matches!(method, &Method::DELETE | &Method::PATCH | &Method::PUT) {
+        return false;
+    }
+
+    method == Method::POST
+        && !matches!(
+            path,
+            "/api/voice/wake/profiles"
+                | "/api/voice/wake/bindings"
+                | "/api/voice/wake/listener/progress"
+                | "/api/voice/wake/listener/stop"
+        )
 }
 
 fn is_heavy_script_request(method: &Method, path: &str) -> bool {
@@ -653,11 +694,22 @@ mod tests {
             (Method::GET, "/api/search"),
             (Method::GET, "/api/app-icon/Safari"),
             (Method::POST, "/api/scripts/test"),
-            (Method::GET, "/api/asr/jobs"),
             (Method::GET, "/api/asr/init-stream"),
-            (Method::POST, "/api/asr/service/start"),
+            (Method::GET, "/api/asr/moss/init-stream"),
+            (Method::GET, "/api/asr/diarization/init-stream"),
             (Method::GET, "/api/asr/tasks/task/files/file/source"),
-            (Method::GET, "/api/speech/decision"),
+            (Method::POST, "/api/asr/service/start"),
+            (Method::POST, "/api/asr/transcribe-stream"),
+            (Method::POST, "/api/asr/offline-jobs"),
+            (Method::POST, "/api/asr/tasks/task/run"),
+            (Method::POST, "/api/asr/tasks/task/resume"),
+            (Method::POST, "/api/asr/tasks/task/external-import/run"),
+            (Method::POST, "/api/asr/tasks/task/daily-agent/run"),
+            (Method::POST, "/api/speech/decision"),
+            (Method::GET, "/api/voice/listen-ws"),
+            (Method::POST, "/api/voice/sessions"),
+            (Method::POST, "/api/voice/wake/kws/init"),
+            (Method::POST, "/api/voice/wake/listener/start"),
             (Method::GET, "/api/worker-jobs"),
             (Method::POST, "/api/im-gateway/messages/send"),
             (Method::POST, "/api/im-gateway/messages/upload"),
@@ -682,7 +734,43 @@ mod tests {
             (Method::GET, "/api/asr/capabilities"),
             (Method::GET, "/api/asr/status"),
             (Method::GET, "/api/asr/tasks"),
+            (Method::GET, "/api/asr/tasks/task"),
+            (Method::GET, "/api/asr/tasks/task/watch"),
+            (Method::GET, "/api/asr/tasks/task/daily-agent"),
+            (Method::GET, "/api/asr/tasks/task/daily-agent/runs"),
+            (Method::GET, "/api/asr/tasks/-/watch"),
+            (Method::GET, "/api/asr/offline-jobs/job"),
+            (Method::GET, "/api/asr/speaker-profiles"),
+            (Method::POST, "/api/asr/tasks"),
+            (Method::PATCH, "/api/asr/tasks/task"),
+            (Method::DELETE, "/api/asr/tasks/task"),
+            (Method::POST, "/api/asr/tasks/task/pause"),
+            (Method::POST, "/api/asr/tasks/task/cleanup-source-audio"),
+            (Method::POST, "/api/asr/tasks/task/files/file/labels"),
+            (Method::POST, "/api/asr/service/stop"),
+            (Method::POST, "/api/asr/speaker-profiles"),
+            (Method::POST, "/api/asr/speaker-profiles/assisted-sessions"),
+            (
+                Method::POST,
+                "/api/asr/speaker-profiles/enrollment-sessions",
+            ),
+            (Method::GET, "/api/speech/pipelines"),
             (Method::GET, "/api/speech/pipelines/status"),
+            (Method::GET, "/api/speech/resources"),
+            (Method::GET, "/api/speech/decision"),
+            (Method::GET, "/api/voice/status"),
+            (Method::GET, "/api/voice/sources"),
+            (Method::GET, "/api/voice/vocabulary"),
+            (Method::GET, "/api/voice/wake/status"),
+            (Method::GET, "/api/voice/wake/kws/status"),
+            (Method::GET, "/api/voice/wake/profiles"),
+            (Method::GET, "/api/voice/wake/bindings"),
+            (Method::GET, "/api/voice/wake/events"),
+            (Method::POST, "/api/voice/wake/profiles"),
+            (Method::POST, "/api/voice/wake/bindings"),
+            (Method::POST, "/api/voice/wake/listener/progress"),
+            (Method::POST, "/api/voice/wake/listener/stop"),
+            (Method::PUT, "/api/voice/vocabulary"),
             (Method::PUT, "/api/scripts/request/example"),
             (Method::DELETE, "/api/scripts/request/example"),
             (Method::POST, "/api/scripts/rename/request/example"),
@@ -769,8 +857,22 @@ mod tests {
         for path in [
             "/api/asr/capabilities",
             "/api/asr/status",
+            "/api/asr/moss/status",
+            "/api/asr/diarization/status",
             "/api/asr/tasks",
+            "/api/asr/external-volumes",
+            "/api/asr/speaker-profiles",
+            "/api/speech/pipelines",
             "/api/speech/pipelines/status",
+            "/api/speech/resources",
+            "/api/voice/status",
+            "/api/voice/sources",
+            "/api/voice/vocabulary",
+            "/api/voice/wake/status",
+            "/api/voice/wake/kws/status",
+            "/api/voice/wake/profiles",
+            "/api/voice/wake/bindings",
+            "/api/voice/wake/events",
         ] {
             let response = reqwest::get(format!("http://{addr}{ADMIN_PATH_PREFIX}{path}"))
                 .await
