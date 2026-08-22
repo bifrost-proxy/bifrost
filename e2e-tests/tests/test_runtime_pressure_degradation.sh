@@ -128,6 +128,51 @@ LIGHT_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_c
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/proxy/system/support")"
 assert_equals "200" "$LIGHT_STATUS" "lightweight Admin health remains available"
 
+IM_PROVIDERS_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/providers")"
+assert_equals "200" "$IM_PROVIDERS_STATUS" \
+    "IM provider control plane remains available under pressure"
+
+AI_CONFIG_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/agent")"
+assert_equals "200" "$AI_CONFIG_STATUS" \
+    "AI configuration remains available under pressure"
+
+AI_CHANNELS_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/chat/config")"
+assert_equals "200" "$AI_CHANNELS_STATUS" \
+    "AI channel configuration remains available under pressure"
+
+REMOTE_INVOKE_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/remote-invoke/status")"
+assert_equals "200" "$REMOTE_INVOKE_STATUS" \
+    "Remote Invoke control plane remains available under pressure"
+
+SCRIPT_CONTENT='export function onRequest(context, request) { return request; }'
+SCRIPT_SAVE_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    -X PUT -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg content "$SCRIPT_CONTENT" '{content:$content}')" \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/scripts/request/pressure-control-plane")"
+assert_equals "200" "$SCRIPT_SAVE_STATUS" \
+    "script create and save remains available under pressure"
+
+SCRIPT_LIST_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/scripts")"
+assert_equals "200" "$SCRIPT_LIST_STATUS" \
+    "script list remains available under pressure"
+
+SCRIPT_TEST_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/scripts/test")"
+assert_equals "503" "$SCRIPT_TEST_STATUS" \
+    "new script execution remains paused under pressure"
+
+AI_RUN_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/chat/stream")"
+assert_equals "503" "$AI_RUN_STATUS" \
+    "new AI execution remains paused under pressure"
+
 FORWARDED="$(env NO_PROXY="" no_proxy="" curl -fsS \
     --proxy "http://127.0.0.1:${PROXY_PORT}" \
     "http://127.0.0.1:${UPSTREAM_PORT}/pressure")"
