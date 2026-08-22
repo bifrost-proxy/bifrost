@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证高资源负载下 Bifrost 不因单一 Admin API 超时误杀托管进程，独立健康通道与数据面 canary 仍可判定真实存活；进入资源压力状态后停止 payload 持久化和重任务并保留基础转发；同时验证系统代理恢复策略、ownership generation 和结构化诊断产物。
+验证高资源负载下 Bifrost 不因单一 Admin API 超时误杀托管进程，独立健康通道与数据面 canary 仍可判定真实存活；进入资源压力状态后停止 payload 持久化和重任务，同时保留基础转发与用户主动发起的单次 Replay；并验证系统代理恢复策略、ownership generation 和结构化诊断产物。
 
 ## 前置条件
 
@@ -39,6 +39,7 @@ BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressu
 - 独立 loopback health listener 返回 `pressure=critical`，数据面 canary 返回 204。
 - Traffic 大查询返回 503，轻量 Admin 请求仍可用。
 - 通过代理访问本地 upstream 成功，基础转发未中断。
+- Replay Send 通过同一本地 upstream 成功返回 200 和预期响应体，不被通用重任务 guard 误拦截。
 - Body payload 不写入缓存；doctor 能读到压力状态。
 
 ### TC-RSPR-03：恢复策略只允许 fail-open/fail-closed 和 3～5 秒窗口
@@ -76,3 +77,12 @@ cargo test -p bifrost-core lifecycle_events_rotate_before_append -- --nocapture
 - suspend/resume 只有 generation 匹配且当前 OS 现场仍属于预期 owner 时才允许执行。
 - stale generation 或外部代理已接管时拒绝写系统代理。
 - owner state 原子落盘，结构化 lifecycle events 可读取且有界轮转。
+
+## 执行记录
+
+| 日期 | 用例 | 结果 | 证据摘要 |
+| --- | --- | --- | --- |
+| 2026-08-22 | TC-RSPR-01 | 通过 | `cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog -- --nocapture`：8/8 通过；独立 worktree 首次执行缺少 sidecar 与 `web/dist-desktop`，按正式桌面构建链补齐测试前置后复跑通过。 |
+| 2026-08-22 | TC-RSPR-02 | 通过 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressure_degradation.sh`：Critical health、canary、Traffic 503、轻量 Admin、基础转发、Replay Send 200、响应体、payload 停止落盘与 doctor 共 10 项断言通过。 |
+| 2026-08-22 | TC-RSPR-03 | 通过 | 临时数据目录中 fail-open 3 秒、fail-closed 5 秒持久化成功；2 秒参数被拒绝；最终配置字段校验通过，目录自动回收。 |
+| 2026-08-22 | TC-RSPR-04 | 通过 | generation guard、owner/events 原子落盘与 lifecycle rotation 三个定向单测全部通过。 |

@@ -555,13 +555,16 @@ impl AdminRouter {
 }
 
 fn is_heavy_admin_request(path: &str) -> bool {
+    // Replay is intentionally absent here. A single Replay send is an
+    // interactive data-plane request, and its executor already has a bounded
+    // concurrency semaphore. Blanket-blocking `/api/replay*` also makes the
+    // bounded collections/history UI unusable during transient pressure.
     matches!(
         path,
         "/api/traffic" | "/api/traffic/query" | "/api/traffic/statistics" | "/api/traffic/batch"
     ) || path.starts_with("/api/search")
         || path.starts_with("/api/app-icon/")
         || path.starts_with("/api/scripts")
-        || path.starts_with("/api/replay")
         || path.starts_with("/api/asr")
         || path.starts_with("/api/speech")
         || path.starts_with("/api/voice")
@@ -599,7 +602,6 @@ mod tests {
             "/api/search",
             "/api/app-icon/Safari",
             "/api/scripts",
-            "/api/replay/execute",
             "/api/asr/jobs",
             "/api/worker-jobs",
             "/api/im-gateway/config",
@@ -612,20 +614,24 @@ mod tests {
             "/api/system/overview",
             "/api/traffic/record-id",
             "/api/metrics",
+            "/api/replay/execute",
+            "/api/replay/groups",
         ] {
             assert!(!is_heavy_admin_request(path), "{path}");
         }
     }
 
     #[tokio::test]
-    async fn critical_pressure_rejects_heavy_admin_route() {
+    async fn critical_pressure_rejects_heavy_admin_route_but_preserves_replay() {
         const MARKER: &str = "BIFROST_ROUTER_PRESSURE_CHILD";
         if std::env::var_os(MARKER).is_none() {
             let status = std::process::Command::new(
                 std::env::current_exe().expect("current test executable"),
             )
             .arg("--exact")
-            .arg("router::tests::critical_pressure_rejects_heavy_admin_route")
+            .arg(
+                "router::tests::critical_pressure_rejects_heavy_admin_route_but_preserves_replay",
+            )
             .arg("--nocapture")
             .env(MARKER, "1")
             .status()
@@ -647,20 +653,22 @@ mod tests {
             .expect("bind router test listener");
         let addr = listener.local_addr().expect("router test listener addr");
         let server = tokio::spawn(async move {
-            let (stream, peer_addr) = listener.accept().await.expect("accept router request");
-            let io = TokioIo::new(stream);
-            let service = service_fn(move |req: Request<Incoming>| {
+            loop {
+                let (stream, peer_addr) = listener.accept().await.expect("accept router request");
+                let io = TokioIo::new(stream);
                 let state = state.clone();
-                async move {
-                    Ok::<_, hyper::Error>(
-                        AdminRouter::handle(req, state, None, Some(peer_addr)).await,
-                    )
-                }
-            });
-            http1::Builder::new()
-                .serve_connection(io, service)
-                .await
-                .expect("serve router request");
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state.clone();
+                        async move {
+                            Ok::<_, hyper::Error>(
+                                AdminRouter::handle(req, state, None, Some(peer_addr)).await,
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
         });
 
         let response = reqwest::get(format!(
@@ -670,6 +678,14 @@ mod tests {
         .expect("request heavy admin route");
         assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
         drop(response);
+
+        let replay_response = reqwest::get(format!(
+            "http://{addr}{ADMIN_PATH_PREFIX}/api/replay/groups"
+        ))
+        .await
+        .expect("request interactive replay route");
+        assert_eq!(replay_response.status(), reqwest::StatusCode::OK);
+        drop(replay_response);
         server.abort();
         let _ = server.await;
     }

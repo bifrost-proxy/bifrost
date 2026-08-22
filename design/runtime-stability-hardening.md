@@ -17,7 +17,7 @@
 - watchdog 不得只因 Admin API 超时终止 managed child。
 - watchdog 使用四类信号：managed child exit、独立 scheduler heartbeat、数据面 loopback canary、Admin health。
 - 独立 health lane 绑定随机 loopback 端口，由独立 OS 线程服务；主 Tokio scheduler 只更新时间戳。
-- 资源压力进入 degraded/critical 后停止 Body/WS payload 持久化，暂停图标、Traffic 大查询、脚本和附加任务，拒绝新重任务；CONNECT 与基础转发不进入拒绝路径。
+- 资源压力进入 degraded/critical 后停止 Body/WS payload 持久化，暂停图标、Traffic 大查询、脚本和附加任务，拒绝新重任务；CONNECT、基础转发与用户主动发起的单次 Replay 不进入拒绝路径。
 - 结构化 lifecycle event 落盘，覆盖 PID、退出码/信号、各探针耗时、RSS、CPU、FD、活动连接、队列、恢复耗时和 system proxy action。
 - system proxy owner state 包含 generation、target、原始代理、runtime/helper、策略和最近动作；提供 `bifrost system-proxy doctor`。
 - lifecycle helper 发现 daemon 明确消失后立即启动 replacement。
@@ -79,7 +79,8 @@
 | app icon miss / bundle 扫描 | 503，不启动新提取 |
 | Traffic list/query/batch/search | 503；轻量单条读取与健康接口保留 |
 | req/res/decode scripts | 跳过新执行并记录 pressure reason |
-| worker jobs、ASR、replay 等附加重任务 | 503，不启动新任务 |
+| worker jobs、ASR 等附加重任务 | 503，不启动新任务 |
+| 单次 Replay、Replay 收藏与历史 | 保留；继续使用并发上限，payload 持久化仍服从 pressure governor |
 
 所有拒绝使用稳定错误码/消息；降级状态变化写 lifecycle event，不对每个请求刷日志。
 
