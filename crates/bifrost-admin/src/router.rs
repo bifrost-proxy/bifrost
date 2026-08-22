@@ -629,9 +629,7 @@ mod tests {
                 std::env::current_exe().expect("current test executable"),
             )
             .arg("--exact")
-            .arg(
-                "router::tests::critical_pressure_rejects_heavy_admin_route_but_preserves_replay",
-            )
+            .arg("router::tests::critical_pressure_rejects_heavy_admin_route_but_preserves_replay")
             .arg("--nocapture")
             .env(MARKER, "1")
             .status()
