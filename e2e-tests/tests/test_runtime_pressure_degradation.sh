@@ -367,6 +367,18 @@ for route in \
     assert_pressure_allowed GET "$route"
 done
 
+assert_pressure_allowed POST "/api/remote-invoke/shell-config/match" \
+    '{"command":"printf pressure-control-plane","exec_mode":"shell_text"}'
+assert_pressure_allowed POST "/api/remote-invoke/file-access/validate-path" \
+    '{"path":"/tmp"}'
+assert_pressure_allowed POST "/api/remote-invoke/ssh-key" \
+    '{"label":"pressure-control-plane","grant_mode":"permanent"}'
+assert_pressure_allowed PATCH "/api/remote-invoke/ssh-key" \
+    '{"label":"pressure-control-plane-updated"}'
+assert_pressure_allowed POST "/api/remote-invoke/ssh-key/reset" '{}'
+assert_pressure_allowed DELETE "/api/remote-invoke/calls"
+assert_pressure_allowed DELETE "/api/remote-invoke/ssh-key"
+
 SCRIPT_TEST_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' -d '{}' \
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/scripts/test")"

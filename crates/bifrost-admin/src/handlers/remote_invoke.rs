@@ -128,14 +128,20 @@ fn supports_control_plane_fallback(method: &Method, path: &str) -> bool {
         return true;
     }
     let sub = path.strip_prefix("/api/remote-invoke").unwrap_or(path);
+    let sub = sub.trim_end_matches('/');
     matches!(
-        (method, sub.trim_end_matches('/')),
+        (method, sub),
         (&Method::PUT, "/shell-config")
             | (&Method::PUT, "/file-access-config")
+            | (&Method::POST, "/shell-config/match")
             | (&Method::POST, "/file-access/validate-path")
+            | (&Method::POST, "/ssh-key")
+            | (&Method::POST, "/ssh-key/reset")
+            | (&Method::PATCH, "/ssh-key")
+            | (&Method::DELETE, "/ssh-key")
+            | (&Method::DELETE, "/calls")
     ) || (*method == Method::PUT
         && sub
-            .trim_end_matches('/')
             .strip_prefix("/file-access/grants/")
             .and_then(|rest| rest.strip_suffix("/roots"))
             .is_some_and(|grant_id| !grant_id.is_empty() && !grant_id.contains('/')))
@@ -178,6 +184,30 @@ mod pressure_fallback_tests {
             "/api/remote-invoke/file-access/validate-path"
         ));
         assert!(supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/shell-config/match"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/ssh-key"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::POST,
+            "/api/remote-invoke/ssh-key/reset"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::PATCH,
+            "/api/remote-invoke/ssh-key"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::DELETE,
+            "/api/remote-invoke/ssh-key"
+        ));
+        assert!(supports_control_plane_fallback(
+            &Method::DELETE,
+            "/api/remote-invoke/calls"
+        ));
+        assert!(supports_control_plane_fallback(
             &Method::PUT,
             "/api/remote-invoke/file-access/grants/grant-1/roots"
         ));
@@ -188,6 +218,14 @@ mod pressure_fallback_tests {
         assert!(!supports_control_plane_fallback(
             &Method::POST,
             "/api/remote-invoke/pairings/pairing-1/approve"
+        ));
+        assert!(!supports_control_plane_fallback(
+            &Method::PATCH,
+            "/api/remote-invoke/grants/grant-1"
+        ));
+        assert!(!supports_control_plane_fallback(
+            &Method::DELETE,
+            "/api/remote-invoke/grants/grant-1"
         ));
     }
 

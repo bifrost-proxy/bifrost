@@ -84,7 +84,7 @@
 | AI/IM 新消息发送、附件上传、Agent/runner turn、schedule 手动 run | 503，不启动新重任务 |
 | AI 首页 / ASR、Voice、Speech 读取面 | 保留全部 GET 状态、配置、任务详情、日报、Daily Agent 记录、声纹与唤醒状态；仅流式初始化/WebSocket 握手除外；Critical 下读取 task summary 不懒启动 scheduler 或恢复中断任务 |
 | ASR、Voice 轻量配置与停止操作 | 保留 task/profile/binding 配置、pause、stop、cleanup、label、Daily Agent 配置；这些操作不启动模型计算或外部 Runner |
-| Remote Invoke 状态、授权、连接与访问控制管理 | 保留；隔离 Worker 尚未 ready 时从主进程已有本地状态安全读取，避免启动/重启窗口把全局页面轮询变成 503 |
+| Remote Invoke 状态与本地访问控制管理 | 保留；隔离 Worker 尚未 ready 时从主进程已有本地状态安全读取，并允许 shell policy 匹配、路径校验、SSH Key 生命周期和 Recent Calls 清理等本地控制面操作，避免启动/重启窗口把页面变成 503；discovery、pairing、grant relay 等网络操作仍等待隔离 Worker |
 | worker jobs、ASR/Voice 模型初始化、服务启动、转写、任务 run/resume/retry/import/compress、Daily Agent run/send/sync 等附加重任务 | 503，不启动新任务 |
 | 单次 Replay、Replay 收藏与历史 | 保留；继续使用并发上限，payload 持久化仍服从 pressure governor |
 
