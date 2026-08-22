@@ -190,6 +190,56 @@ mod pressure_fallback_tests {
             "/api/remote-invoke/pairings/pairing-1/approve"
         ));
     }
+
+    #[tokio::test]
+    async fn configured_runtime_without_healthy_child_serves_local_control_plane() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let harness = crate::test_support::TestAdminState::builder().build();
+        let state = harness.state();
+        let _runtime_guard =
+            crate::worker_runtime::remote_invoke::configure_control_plane_fallback_for_test(
+                crate::worker_runtime::remote_invoke::RemoteInvokeTarget {
+                    provider_id: "pressure-test".to_string(),
+                    relay_url: "https://relay.invalid.test".to_string(),
+                    session_token: "test-session".to_string(),
+                    allow_missing_session_token: false,
+                },
+                state,
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|req: Request<Incoming>| async move {
+                Ok::<_, hyper::Error>(
+                    handle_remote_invoke(req, None, "/api/remote-invoke/status").await,
+                )
+            });
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/_bifrost/api/remote-invoke/status"))
+            .header(reqwest::header::CONNECTION, "close")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let _ = response.bytes().await.unwrap();
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 fn handle_status(req: &Request<Incoming>, worker: &RemoteInvokeWorker) -> Response<BoxBody> {

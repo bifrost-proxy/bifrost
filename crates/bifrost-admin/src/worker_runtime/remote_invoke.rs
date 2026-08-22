@@ -147,6 +147,34 @@ pub fn stop_runtime_controller() {
     *CONTROL_PLANE_WORKER.write() = None;
 }
 
+#[cfg(test)]
+pub(crate) struct ControlPlaneFallbackTestGuard;
+
+#[cfg(test)]
+impl Drop for ControlPlaneFallbackTestGuard {
+    fn drop(&mut self) {
+        stop_runtime_controller();
+        *desired_state().write() = DesiredRemoteState::default();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn configure_control_plane_fallback_for_test(
+    target: RemoteInvokeTarget,
+    state: crate::state::SharedAdminState,
+) -> ControlPlaneFallbackTestGuard {
+    stop_runtime_controller();
+    *CONTROL_PLANE_WORKER.write() =
+        build_control_plane_worker(Some(&target), "127.0.0.1", state.port(), state.clone());
+    *desired_state().write() = DesiredRemoteState {
+        targets: vec![target],
+        admin_host: "127.0.0.1".to_string(),
+        admin_port: state.port(),
+        state: Some(state),
+    };
+    ControlPlaneFallbackTestGuard
+}
+
 pub fn has_active_client() -> bool {
     !ACTIVE_CLIENTS.read().is_empty()
 }
@@ -839,6 +867,9 @@ mod tests {
         stop_runtime_controller();
         assert!(!has_active_client());
         assert!(primary_client().is_none());
+        assert!(!runtime_configured());
+        assert!(!admin_proxy_ready().await);
+        assert!(control_plane_worker().is_none());
         *desired_state().write() = DesiredRemoteState {
             targets: vec![target.clone()],
             ..Default::default()
@@ -850,6 +881,21 @@ mod tests {
         );
         *desired_state().write() = DesiredRemoteState::default();
         std::env::remove_var(REMOTE_INVOKE_WORKER_ENV);
+    }
+
+    #[test]
+    fn control_plane_worker_fails_closed_when_identity_storage_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("blocked-data-dir");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config_manager =
+            Arc::new(bifrost_storage::ConfigManager::new(data_dir.clone()).unwrap());
+        std::fs::remove_dir_all(&data_dir).unwrap();
+        std::fs::write(&data_dir, b"not a directory").unwrap();
+        let state =
+            Arc::new(crate::state::AdminState::new(9).with_config_manager_shared(config_manager));
+
+        assert!(build_control_plane_worker(Some(&target()), "127.0.0.1", 9, state).is_none());
     }
 
     #[test]
@@ -935,8 +981,9 @@ while IFS= read -r line; do
   esac
 done
 "#;
-        let spec =
+        let mut spec =
             crate::worker_runtime::test_shell_worker_spec(&key, WorkerKind::RemoteInvoke, tail);
+        spec.heartbeat_timeout = Duration::from_secs(2);
         let worker = global_worker_supervisor().get_or_start(spec).await.unwrap();
         let stale_relay = "https://stale-relay.example.test".to_string();
         ACTIVE_CLIENTS.write().insert(
@@ -949,6 +996,16 @@ done
             }),
         );
         *PRIMARY_RELAY.write() = Some(stale_relay);
+        let mut configured_target = target();
+        configured_target.relay_url = "https://stale-relay.example.test".to_string();
+        *desired_state().write() = DesiredRemoteState {
+            targets: vec![configured_target],
+            state: Some(Arc::new(crate::state::AdminState::new(9))),
+            ..Default::default()
+        };
+        assert!(admin_proxy_ready().await);
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        assert!(!admin_proxy_ready().await);
         *desired_state().write() = DesiredRemoteState {
             state: Some(Arc::new(crate::state::AdminState::new(9))),
             ..Default::default()
