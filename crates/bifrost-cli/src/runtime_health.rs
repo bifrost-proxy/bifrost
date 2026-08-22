@@ -132,7 +132,6 @@ fn run_health_lane(listener: TcpListener, shared: Arc<RuntimeHealthShared>, data
 
     while !shared.stop.load(Ordering::Acquire) {
         if last_sample.elapsed() >= RESOURCE_SAMPLE_INTERVAL {
-            system.refresh_memory();
             system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
             snapshot.scheduler_heartbeat_age_ms =
                 epoch_ms().saturating_sub(shared.scheduler_heartbeat_at_ms.load(Ordering::Acquire));
@@ -148,14 +147,6 @@ fn run_health_lane(listener: TcpListener, shared: Arc<RuntimeHealthShared>, data
 
             let observed = pressure_override().unwrap_or_else(|| {
                 controller.observe(PressureInputs {
-                    rss_bytes: snapshot.rss_bytes,
-                    // Available memory includes reclaimable pages on supported
-                    // platforms; using it avoids treating file cache as hard
-                    // pressure while still reacting to genuine exhaustion.
-                    system_used_memory_bytes: system
-                        .total_memory()
-                        .saturating_sub(system.available_memory()),
-                    total_memory_bytes: system.total_memory(),
                     fd_count: snapshot.fd_count,
                     fd_limit: snapshot.fd_limit,
                     active_connections: snapshot.active_connections,

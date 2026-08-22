@@ -47,6 +47,52 @@ wait_for_admin() {
     return 1
 }
 
+request_admin_status() {
+    local method="$1"
+    local path="$2"
+    local body="${3:-}"
+    local response_file="${TEST_DATA_DIR}/last-admin-response.json"
+    local curl_args=(
+        -sS -o "$response_file" -w '%{http_code}'
+        -X "$method"
+        "http://127.0.0.1:${PROXY_PORT}/_bifrost${path}"
+    )
+    if [[ -n "$body" ]]; then
+        curl_args=(-sS -o "$response_file" -w '%{http_code}' -X "$method"
+            -H 'Content-Type: application/json' --data "$body"
+            "http://127.0.0.1:${PROXY_PORT}/_bifrost${path}")
+    fi
+    env NO_PROXY="*" no_proxy="*" curl "${curl_args[@]}"
+}
+
+assert_pressure_allowed() {
+    local method="$1"
+    local path="$2"
+    local body="${3:-}"
+    local status
+    status="$(request_admin_status "$method" "$path" "$body")"
+    if (( status >= 500 )); then
+        echo "[FAIL] ${method} ${path} returned ${status} under pressure" >&2
+        cat "${TEST_DATA_DIR}/last-admin-response.json" >&2 || true
+        exit 1
+    fi
+    echo "[PASS] ${method} ${path} remains routed under pressure (${status})"
+}
+
+assert_not_pressure_rejected() {
+    local method="$1"
+    local path="$2"
+    local body="${3:-}"
+    local status
+    status="$(request_admin_status "$method" "$path" "$body")"
+    if [[ "$status" == "503" ]]; then
+        echo "[FAIL] ${method} ${path} was rejected by the parent pressure governor" >&2
+        cat "${TEST_DATA_DIR}/last-admin-response.json" >&2 || true
+        exit 1
+    fi
+    echo "[PASS] ${method} ${path} is not pressure-gated (${status})"
+}
+
 PYTHON_BIN="$(python3_cmd)"
 UPSTREAM_PORT_FILE="${TEST_DATA_DIR}/upstream.port"
 "$PYTHON_BIN" - "$UPSTREAM_PORT" "$UPSTREAM_PORT_FILE" \
@@ -158,6 +204,81 @@ ASR_STATUS_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{h
 assert_equals "200" "$ASR_STATUS_STATUS" \
     "ASR status remains available under pressure"
 
+ASR_AUDIO_DIR="${TEST_DATA_DIR}/asr-pressure-audio"
+mkdir -p "$ASR_AUDIO_DIR"
+ASR_TASK_BODY="$(jq -nc --arg audio_dir "$ASR_AUDIO_DIR" \
+    '{name:"Pressure route audit",audio_dir:$audio_dir,enabled:false,recursive:false}')"
+ASR_TASK_CREATE_STATUS="$(request_admin_status POST "/api/asr/tasks" "$ASR_TASK_BODY")"
+assert_equals "201" "$ASR_TASK_CREATE_STATUS" \
+    "ASR task configuration can be created under pressure"
+ASR_TASK_ID="$(jq -r '.id' "${TEST_DATA_DIR}/last-admin-response.json")"
+[[ -n "$ASR_TASK_ID" && "$ASR_TASK_ID" != "null" ]]
+
+for route in \
+    "/api/asr/capabilities" \
+    "/api/asr/status" \
+    "/api/asr/moss/status" \
+    "/api/asr/diarization/status" \
+    "/api/asr/tasks" \
+    "/api/asr/tasks/-/watch" \
+    "/api/asr/tasks/${ASR_TASK_ID}" \
+    "/api/asr/tasks/${ASR_TASK_ID}/watch" \
+    "/api/asr/external-volumes" \
+    "/api/asr/tasks/${ASR_TASK_ID}/external-import" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/agents" \
+    "/api/asr/tasks/${ASR_TASK_ID}/daily-agent/runs" \
+    "/api/asr/speaker-profiles" \
+    "/api/asr/offline-jobs/missing" \
+    "/api/speech/pipelines" \
+    "/api/speech/pipelines/status" \
+    "/api/speech/resources" \
+    "/api/speech/decision?mode=realtime" \
+    "/api/voice/sources" \
+    "/api/voice/status" \
+    "/api/voice/vocabulary" \
+    "/api/voice/wake/status" \
+    "/api/voice/wake/kws/status" \
+    "/api/voice/wake/profiles" \
+    "/api/voice/wake/bindings" \
+    "/api/voice/wake/events"; do
+    assert_pressure_allowed GET "$route"
+done
+
+assert_pressure_allowed PATCH "/api/asr/tasks/${ASR_TASK_ID}" '{"enabled":false}'
+assert_pressure_allowed PUT "/api/asr/tasks/${ASR_TASK_ID}/daily-agent" '{}'
+assert_pressure_allowed POST "/api/asr/service/stop" '{}'
+assert_pressure_allowed POST "/api/voice/wake/listener/progress" '{}'
+assert_pressure_allowed POST "/api/voice/wake/listener/stop" '{}'
+
+for route in \
+    "/api/replay/groups" \
+    "/api/replay/requests" \
+    "/api/replay/requests/count" \
+    "/api/replay/history" \
+    "/api/replay/history/count" \
+    "/api/replay/stats" \
+    "/api/im-gateway/providers" \
+    "/api/im-gateway/targets" \
+    "/api/im-gateway/routes" \
+    "/api/im-gateway/schedules" \
+    "/api/im-gateway/history/events" \
+    "/api/im-gateway/history/runs" \
+    "/api/im-gateway/agent" \
+    "/api/im-gateway/agent/session-summaries" \
+    "/api/im-gateway/chat/config" \
+    "/api/worker-jobs"; do
+    assert_pressure_allowed GET "$route"
+done
+
+assert_not_pressure_rejected GET "/api/asr/transcribe-ws"
+assert_not_pressure_rejected POST "/api/asr/offline-jobs" '{}'
+assert_not_pressure_rejected POST "/api/asr/transcribe-stream" '{}'
+assert_not_pressure_rejected POST "/api/asr/speaker-profiles/identify" '{}'
+assert_pressure_allowed POST "/api/voice/sessions" '{}'
+assert_not_pressure_rejected GET "/api/voice/listen-ws"
+assert_not_pressure_rejected POST "/api/voice/wake/trigger" '{}'
+
 SPEECH_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/speech/pipelines/status")"
 assert_equals "200" "$SPEECH_STATUS" \
@@ -181,23 +302,53 @@ SCRIPT_LIST_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{
 assert_equals "200" "$SCRIPT_LIST_STATUS" \
     "script list remains available under pressure"
 
+for route in \
+    "/api/remote-invoke/status" \
+    "/api/remote-invoke/pairings/pending" \
+    "/api/remote-invoke/grants" \
+    "/api/remote-invoke/identity" \
+    "/api/remote-invoke/calls?limit=100" \
+    "/api/remote-invoke/shell-config" \
+    "/api/remote-invoke/ssh-key" \
+    "/api/remote-invoke/file-access-config"; do
+    assert_pressure_allowed GET "$route"
+done
+
 SCRIPT_TEST_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
-    -X POST -H 'Content-Type: application/json' -d '{}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"type":"request","content":"export function onRequest(context, request) { return request; }"}' \
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/scripts/test")"
-assert_equals "503" "$SCRIPT_TEST_STATUS" \
-    "new script execution remains paused under pressure"
+assert_equals "200" "$SCRIPT_TEST_STATUS" \
+    "bounded script test remains available under pressure"
 
-AI_RUN_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
-    -X POST -H 'Content-Type: application/json' -d '{}' \
-    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/chat/stream")"
-assert_equals "503" "$AI_RUN_STATUS" \
-    "new AI execution remains paused under pressure"
+assert_not_pressure_rejected POST "/api/im-gateway/chat/stream" '{}'
+assert_pressure_allowed GET "/api/worker-jobs?kind=asr&limit=100"
 
-ASR_START_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
-    -X POST -H 'Content-Type: application/json' -d '{}' \
-    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/asr/service/start")"
-assert_equals "503" "$ASR_START_STATUS" \
-    "new ASR service startup remains paused under pressure"
+ASR_RUN_STATUS="$(request_admin_status POST "/api/asr/tasks/${ASR_TASK_ID}/run")"
+assert_equals "200" "$ASR_RUN_STATUS" \
+    "ASR worker-backed task can start under parent critical pressure"
+
+ASR_WORKER_DEADLINE=$((SECONDS + 20))
+while (( SECONDS < ASR_WORKER_DEADLINE )); do
+    ASR_WORKER_JOBS="$(env NO_PROXY="*" no_proxy="*" curl -fsS \
+        "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/worker-jobs?kind=asr&limit=100")"
+    if jq -e 'length > 0' <<<"$ASR_WORKER_JOBS" >/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
+if ! jq -e 'length > 0' <<<"${ASR_WORKER_JOBS:-[]}" >/dev/null; then
+    echo "[FAIL] ASR task did not create a worker job under parent pressure" >&2
+    exit 1
+fi
+if jq -e 'any(.[]; ((.error // "") | contains("resource pressure governor")))' \
+    <<<"$ASR_WORKER_JOBS" >/dev/null; then
+    echo "[FAIL] ASR worker job was rejected by parent pressure" >&2
+    jq . <<<"$ASR_WORKER_JOBS" >&2
+    exit 1
+fi
+echo "[PASS] ASR worker job was created without pressure rejection"
+assert_pressure_allowed POST "/api/asr/tasks/${ASR_TASK_ID}/pause?mode=long_term"
 
 FORWARDED="$(env NO_PROXY="" no_proxy="" curl -fsS \
     --proxy "http://127.0.0.1:${PROXY_PORT}" \
@@ -217,6 +368,24 @@ assert_json_field ".data.status" "200" "$REPLAY_RESPONSE" \
     "Replay receives the upstream response under pressure"
 assert_json_field ".data.body" "basic-forwarding-survived-pressure" "$REPLAY_RESPONSE" \
     "Replay preserves the upstream response body under pressure"
+REPLAY_TRAFFIC_ID="$(jq -r '.data.traffic_id' <<<"$REPLAY_RESPONSE")"
+REPLAY_TRAFFIC_STATUS="$(request_admin_status GET "/api/traffic/${REPLAY_TRAFFIC_ID}")"
+assert_equals "200" "$REPLAY_TRAFFIC_STATUS" \
+    "Replay traffic detail remains readable under pressure"
+
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+    (
+        cd "${PROJECT_DIR}/web"
+        BIFROST_LIVE_BASE_URL="http://127.0.0.1:${PROXY_PORT}" \
+        BIFROST_ASR_PRESSURE_TASK_ID="$ASR_TASK_ID" \
+            node tests/ui/asr-pressure-live-e2e.mjs
+    )
+fi
+
+ASR_TASK_DELETE_STATUS="$(request_admin_status DELETE \
+    "/api/asr/tasks/${ASR_TASK_ID}?confirm_name=Pressure%20route%20audit")"
+assert_equals "200" "$ASR_TASK_DELETE_STATUS" \
+    "ASR task configuration can be deleted under pressure"
 
 BODY_FILE_COUNT="$(find "${TEST_DATA_DIR}/body_cache" -type f 2>/dev/null | wc -l | tr -d ' ')"
 assert_equals "0" "$BODY_FILE_COUNT" "Body payload persistence is paused"

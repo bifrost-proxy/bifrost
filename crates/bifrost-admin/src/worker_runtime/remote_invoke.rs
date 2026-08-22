@@ -151,6 +151,10 @@ pub fn runtime_configured() -> bool {
         && !desired_state().read().targets.is_empty()
 }
 
+pub fn admin_proxy_ready() -> bool {
+    runtime_configured() && has_active_client()
+}
+
 pub async fn proxy_admin_request<B>(req: Request<B>, path: &str) -> Response<BoxBody>
 where
     B: hyper::body::Body<Data = Bytes> + Unpin,
@@ -779,7 +783,78 @@ mod tests {
         stop_runtime_controller();
         assert!(!has_active_client());
         assert!(primary_client().is_none());
+        *desired_state().write() = DesiredRemoteState {
+            targets: vec![target.clone()],
+            ..Default::default()
+        };
+        assert!(runtime_configured());
+        assert!(
+            !admin_proxy_ready(),
+            "configured runtime without a ready child must use the local admin fallback"
+        );
+        *desired_state().write() = DesiredRemoteState::default();
         std::env::remove_var(REMOTE_INVOKE_WORKER_ENV);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configured_runtime_without_ready_child_serves_local_admin_status() {
+        let _runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
+        let _lock = ENV_LOCK.lock().await;
+        std::env::remove_var(REMOTE_INVOKE_WORKER_ENV);
+        stop_runtime_controller();
+        *desired_state().write() = DesiredRemoteState {
+            targets: vec![target()],
+            ..Default::default()
+        };
+        assert!(runtime_configured());
+        assert!(!admin_proxy_ready());
+
+        let temp = tempfile::tempdir().expect("create remote invoke test data dir");
+        let local_worker = worker(temp.path());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local admin fallback listener");
+        let addr = listener.local_addr().expect("local admin fallback addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accept local admin fallback request");
+            let service = service_fn(move |req: Request<Incoming>| {
+                let local_worker = local_worker.clone();
+                async move {
+                    Ok::<_, hyper::Error>(
+                        crate::handlers::remote_invoke::handle_remote_invoke(
+                            req,
+                            Some(local_worker),
+                            "/api/remote-invoke/status",
+                        )
+                        .await,
+                    )
+                }
+            });
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .expect("serve local admin fallback request");
+        });
+
+        let response = bifrost_core::direct_reqwest_client_builder()
+            .build()
+            .expect("build direct client")
+            .get(format!("http://{addr}/_bifrost/api/remote-invoke/status"))
+            .send()
+            .await
+            .expect("request local Remote Invoke status");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["state"],
+            "Disconnected"
+        );
+
+        server.await.expect("join local admin fallback server");
+        *desired_state().write() = DesiredRemoteState::default();
+        stop_runtime_controller();
     }
 
     #[test]

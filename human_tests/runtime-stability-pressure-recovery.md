@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证高资源负载下 Bifrost 不因单一 Admin API 超时误杀托管进程，独立健康通道与数据面 canary 仍可判定真实存活；进入资源压力状态后停止 payload 持久化和新重任务，同时保留基础转发、用户主动发起的单次 Replay，以及 AI/IM、Remote Invoke、Scripts 的配置与状态控制面；并验证系统代理恢复策略、ownership generation 和结构化诊断产物。
+验证高资源负载下 Bifrost 不因单一 Admin API 超时误杀托管进程，独立健康通道与数据面 canary 仍可判定真实存活；进入资源压力状态后停止 payload 持久化和主进程内的大型查询，但不按父进程、系统或 worker RSS 拒绝隔离 worker 启动/调用，同时保留基础转发、Replay、AI/IM、ASR、Voice、Remote Invoke 与 Scripts；并验证系统代理恢复策略、ownership generation 和结构化诊断产物。
 
 ## 前置条件
 
@@ -26,7 +26,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog -- --no
 - 只有 Admin、数据面均失败，且独立 heartbeat 超时或健康 listener 失败时才确认无响应。
 - managed child 明确退出仍走立即恢复路径；旧 runtime marker 没有 `health_port` 时 fail-safe，不误杀。
 
-### TC-RSPR-02：Critical 压力下保留转发并暂停非关键能力
+### TC-RSPR-02：Critical 压力不阻断隔离 worker 与用户操作
 
 操作步骤：
 
@@ -40,10 +40,12 @@ BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressu
 - Traffic 大查询返回 503，轻量 Admin 请求仍可用。
 - 通过代理访问本地 upstream 成功，基础转发未中断。
 - Replay Send 通过同一本地 upstream 成功返回 200 和预期响应体，不被通用重任务 guard 误拦截。
-- AI/IM provider、Agent config、channel config 与 Remote Invoke status 均返回 200，不因整个 API 前缀被误判而 503。
-- AI 首页和 ASR 页面所需的 capabilities、status、task summary 与 speech pipeline status 均返回 200；AI 首页不显示 `Summary unavailable`，浏览器控制台没有这些轻量状态接口的 503。
-- Scripts 列表与新建/保存返回 200；Scripts test 和新 AI runner turn 仍返回 503，确认只暂停执行面。
-- ASR service start 仍返回 503，确认仅保留读取控制面，不在 Critical 下启动模型或任务；读取 task summary 不触发 scheduler 懒启动。
+- AI/IM provider、Agent config、channel config 与 Remote Invoke 全部管理读取接口均不返回 5xx；Remote Invoke 隔离 Worker 尚未 ready 时使用本地状态回退，不出现全局 `pairings/pending` 503。
+- AI 首页及 ASR 页面依赖的 ASR/Voice/Speech 全部读取接口均不返回 5xx；使用真实临时 task 验证 task detail/watch、external import 状态、Daily Agent 配置/指令/记录，以及声纹、唤醒状态路由。
+- Scripts 列表、新建/保存和有沙箱上限的 Scripts test 返回 200。
+- ASR task 配置创建/修改/暂停/删除、Daily Agent 配置、service stop、Voice listener control、worker jobs 和 AI runner 路由均不返回 pressure 503；真实空目录 task run 能创建并执行 worker job。
+- 通过独立 worker 单测验证：即使父进程 pressure=critical，ASR worker 仍完成握手；worker 的高 RSS 不参与前置拒绝。
+- 临时服务上的 Playwright 逐页验证 AI Hub/Channels/Agents/Runs、ASR Scheduled/Management/Voice、任务 Overview/Daily/Daily Agent/Records、Remote Invoke 和 Scripts；任一 Admin API 5xx、请求失败或压力错误文案都视为失败。
 - Body payload 不写入缓存；doctor 能读到压力状态。
 
 ### TC-RSPR-03：恢复策略只允许 fail-open/fail-closed 和 3～5 秒窗口
@@ -90,3 +92,4 @@ cargo test -p bifrost-core lifecycle_events_rotate_before_append -- --nocapture
 | 2026-08-22 | TC-RSPR-02 | 通过 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressure_degradation.sh`：23 项断言通过；除原有 Critical health、canary、Traffic 503、基础转发、Replay、payload 与 doctor 外，IM providers、AI config/channels、ASR capabilities/status/tasks、speech pipeline status、Remote Invoke status、Scripts list/save 均为 200，Scripts test、新 AI turn 与 ASR service start 仍为 503。随后在独立 Critical 实例上用 Playwright 验证 AI Hub、ASR、Channels、Agents、Runs、Remote Invoke、Scripts 新建保存、Replay Send 共 8 条 WebUI 链路，页面、控制台与网络失败均为 0。 |
 | 2026-08-22 | TC-RSPR-03 | 通过 | 临时数据目录中 fail-open 3 秒、fail-closed 5 秒持久化成功；2 秒参数被拒绝；最终配置字段校验通过，目录自动回收。 |
 | 2026-08-22 | TC-RSPR-04 | 通过 | generation guard、owner/events 原子落盘与 lifecycle rotation 三个定向单测全部通过。 |
+| 2026-08-23 | TC-RSPR-02 | 通过 | 使用隔离构建产物和脚本自动创建的临时 data-dir/动态端口执行：50+ 个 ASR/Voice/Speech、AI/IM、Remote Invoke、worker-jobs、Scripts、Replay API 均未出现 pressure 503/5xx；真实空目录 ASR task 在 `critical` 下成功创建 worker job；Scripts Test、Replay 请求及回放流量详情均为 200；Playwright 遍历 14 个页面且没有 Admin API 4xx/5xx（导航取消除外）或请求失败。另以全新正常压力实例确认 RSS 约 106 MiB 时 health `pressure=normal`。主服务 9900/9901 未操作。 |

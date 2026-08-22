@@ -24,7 +24,7 @@ pub async fn handle_remote_invoke(
     if crate::worker_runtime::worker_execution_enabled(
         crate::worker_runtime::WorkerKind::RemoteInvoke,
     ) && !crate::worker_runtime::remote_invoke::is_remote_invoke_worker_process()
-        && crate::worker_runtime::remote_invoke::runtime_configured()
+        && crate::worker_runtime::remote_invoke::admin_proxy_ready()
     {
         return crate::worker_runtime::remote_invoke::proxy_admin_request(req, path).await;
     }

@@ -45,9 +45,6 @@ pub fn scripts_allowed() -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PressureInputs {
-    pub rss_bytes: u64,
-    pub system_used_memory_bytes: u64,
-    pub total_memory_bytes: u64,
     pub fd_count: u64,
     pub fd_limit: u64,
     pub active_connections: u64,
@@ -59,8 +56,6 @@ pub struct PressureInputs {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PressureThresholds {
-    pub memory_degraded_ratio: f64,
-    pub memory_critical_ratio: f64,
     pub fd_degraded_ratio: f64,
     pub fd_critical_ratio: f64,
     pub connection_degraded_ratio: f64,
@@ -75,8 +70,6 @@ pub struct PressureThresholds {
 impl Default for PressureThresholds {
     fn default() -> Self {
         Self {
-            memory_degraded_ratio: 0.70,
-            memory_critical_ratio: 0.85,
             fd_degraded_ratio: 0.70,
             fd_critical_ratio: 0.90,
             connection_degraded_ratio: 0.80,
@@ -139,13 +132,11 @@ impl ResourcePressureController {
 
     fn classify(&self, input: PressureInputs) -> ResourcePressureLevel {
         let ratios = [
-            ratio(input.system_used_memory_bytes, input.total_memory_bytes),
             ratio(input.fd_count, input.fd_limit),
             ratio(input.active_connections, input.connection_limit),
             ratio(input.queue_depth, input.queue_capacity),
         ];
         let critical_thresholds = [
-            self.thresholds.memory_critical_ratio,
             self.thresholds.fd_critical_ratio,
             self.thresholds.connection_critical_ratio,
             self.thresholds.queue_critical_ratio,
@@ -160,7 +151,6 @@ impl ResourcePressureController {
         }
 
         let degraded_thresholds = [
-            self.thresholds.memory_degraded_ratio,
             self.thresholds.fd_degraded_ratio,
             self.thresholds.connection_degraded_ratio,
             self.thresholds.queue_degraded_ratio,
@@ -205,9 +195,6 @@ mod tests {
 
     fn healthy() -> PressureInputs {
         PressureInputs {
-            rss_bytes: 10,
-            system_used_memory_bytes: 10,
-            total_memory_bytes: 100,
             fd_count: 10,
             fd_limit: 100,
             active_connections: 10,
@@ -254,12 +241,9 @@ mod tests {
     }
 
     #[test]
-    fn system_memory_pressure_is_not_confused_with_process_rss() {
+    fn pressure_is_driven_by_capacity_signals_not_memory_usage() {
         let mut controller = ResourcePressureController::default();
-        let mut input = healthy();
-        input.rss_bytes = 1;
-        input.system_used_memory_bytes = 90;
-        assert_eq!(controller.observe(input), ResourcePressureLevel::Critical);
+        assert_eq!(controller.observe(healthy()), ResourcePressureLevel::Normal);
     }
 
     #[test]

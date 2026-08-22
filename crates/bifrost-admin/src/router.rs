@@ -237,8 +237,7 @@ impl AdminRouter {
             return resp;
         }
 
-        let heavy_tasks_allowed = bifrost_core::heavy_tasks_allowed();
-        if !heavy_tasks_allowed && is_heavy_admin_request(req.method(), path) {
+        if !bifrost_core::heavy_tasks_allowed() && is_heavy_admin_request(path) {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "This operation is paused while Bifrost is under resource pressure",
@@ -249,7 +248,7 @@ impl AdminRouter {
         // install must not recover tasks, start watchers, or prepare model
         // assets. Activation also belongs after auth/write checks so rejected
         // requests cannot initialize the subsystem.
-        if heavy_tasks_allowed && should_activate_asr_scheduler(path) {
+        if should_activate_asr_scheduler(path) {
             crate::handlers::asr_jobs::ensure_scheduler_started().await;
         }
 
@@ -555,7 +554,7 @@ impl AdminRouter {
     }
 }
 
-fn is_heavy_admin_request(method: &Method, path: &str) -> bool {
+fn is_heavy_admin_request(path: &str) -> bool {
     // Replay is intentionally absent here. A single Replay send is an
     // interactive data-plane request, and its executor already has a bounded
     // concurrency semaphore. Blanket-blocking `/api/replay*` also makes the
@@ -565,63 +564,6 @@ fn is_heavy_admin_request(method: &Method, path: &str) -> bool {
         "/api/traffic" | "/api/traffic/query" | "/api/traffic/statistics" | "/api/traffic/batch"
     ) || path.starts_with("/api/search")
         || path.starts_with("/api/app-icon/")
-        || is_heavy_script_request(method, path)
-        || is_heavy_asr_request(method, path)
-        || is_heavy_speech_request(method, path)
-        || path.starts_with("/api/voice")
-        || path.starts_with("/api/worker-jobs")
-        || is_heavy_im_gateway_request(method, path)
-}
-
-fn is_heavy_asr_request(method: &Method, path: &str) -> bool {
-    if method == Method::GET
-        && matches!(
-            path,
-            "/api/asr/capabilities" | "/api/asr/status" | "/api/asr/tasks"
-        )
-    {
-        return false;
-    }
-
-    path.starts_with("/api/asr")
-}
-
-fn is_heavy_speech_request(method: &Method, path: &str) -> bool {
-    if method == Method::GET && path == "/api/speech/pipelines/status" {
-        return false;
-    }
-
-    path.starts_with("/api/speech")
-}
-
-fn is_heavy_script_request(method: &Method, path: &str) -> bool {
-    method == Method::POST && matches!(path, "/api/scripts/test" | "/api/scripts/test/")
-}
-
-fn is_heavy_im_gateway_request(method: &Method, path: &str) -> bool {
-    if method != Method::POST {
-        return false;
-    }
-
-    matches!(
-        path,
-        "/api/im-gateway/messages/send"
-            | "/api/im-gateway/messages/send/"
-            | "/api/im-gateway/messages/upload"
-            | "/api/im-gateway/messages/upload/"
-            | "/api/im-gateway/chat"
-            | "/api/im-gateway/chat/"
-            | "/api/im-gateway/chat/stream"
-            | "/api/im-gateway/chat/stream/"
-            | "/api/im-gateway/chat/runner-calls/stream"
-            | "/api/im-gateway/chat/runner-calls/stream/"
-            | "/api/im-gateway/chat/adapters/chatgpt-web/auth/open"
-            | "/api/im-gateway/chat/adapters/chatgpt-web/auth/open/"
-    ) || path.starts_with("/api/im-gateway/debug/")
-        || (path.starts_with("/api/im-gateway/chat/sessions/")
-            && path.trim_end_matches('/').ends_with("/guide"))
-        || (path.starts_with("/api/im-gateway/schedules/")
-            && path.trim_end_matches('/').ends_with("/run"))
 }
 
 #[derive(Serialize)]
@@ -647,29 +589,15 @@ mod tests {
 
     #[test]
     fn resource_pressure_guard_targets_heavy_admin_surfaces_only() {
-        for (method, path) in [
-            (Method::GET, "/api/traffic"),
-            (Method::GET, "/api/traffic/query"),
-            (Method::GET, "/api/search"),
-            (Method::GET, "/api/app-icon/Safari"),
-            (Method::POST, "/api/scripts/test"),
-            (Method::GET, "/api/asr/jobs"),
-            (Method::GET, "/api/asr/init-stream"),
-            (Method::POST, "/api/asr/service/start"),
-            (Method::GET, "/api/asr/tasks/task/files/file/source"),
-            (Method::GET, "/api/speech/decision"),
-            (Method::GET, "/api/worker-jobs"),
-            (Method::POST, "/api/im-gateway/messages/send"),
-            (Method::POST, "/api/im-gateway/messages/upload"),
-            (Method::POST, "/api/im-gateway/chat/stream"),
-            (
-                Method::POST,
-                "/api/im-gateway/chat/adapters/chatgpt-web/auth/open",
-            ),
-            (Method::POST, "/api/im-gateway/chat/sessions/session/guide"),
-            (Method::POST, "/api/im-gateway/schedules/schedule/run"),
+        for path in [
+            "/api/traffic",
+            "/api/traffic/query",
+            "/api/traffic/statistics",
+            "/api/traffic/batch",
+            "/api/search",
+            "/api/app-icon/Safari",
         ] {
-            assert!(is_heavy_admin_request(&method, path), "{method} {path}");
+            assert!(is_heavy_admin_request(path), "{path}");
         }
         for (method, path) in [
             (Method::GET, "/api/proxy/system/support"),
@@ -679,10 +607,64 @@ mod tests {
             (Method::POST, "/api/replay/execute"),
             (Method::GET, "/api/replay/groups"),
             (Method::GET, "/api/scripts"),
+            (Method::POST, "/api/scripts/test"),
             (Method::GET, "/api/asr/capabilities"),
             (Method::GET, "/api/asr/status"),
+            (Method::GET, "/api/asr/init-stream"),
+            (Method::GET, "/api/asr/moss/init-stream"),
+            (Method::GET, "/api/asr/diarization/init-stream"),
+            (Method::POST, "/api/asr/service/start"),
+            (Method::POST, "/api/asr/offline-jobs"),
+            (Method::POST, "/api/asr/transcribe-stream"),
             (Method::GET, "/api/asr/tasks"),
+            (Method::GET, "/api/asr/tasks/task"),
+            (Method::GET, "/api/asr/tasks/task/watch"),
+            (Method::GET, "/api/asr/tasks/task/files/file/source"),
+            (Method::GET, "/api/asr/tasks/task/daily-agent"),
+            (Method::GET, "/api/asr/tasks/task/daily-agent/runs"),
+            (Method::GET, "/api/asr/jobs"),
+            (Method::GET, "/api/asr/models"),
+            (Method::GET, "/api/asr/speaker-profiles"),
+            (Method::POST, "/api/asr/tasks"),
+            (Method::PATCH, "/api/asr/tasks/task"),
+            (Method::DELETE, "/api/asr/tasks/task"),
+            (Method::POST, "/api/asr/tasks/task/pause"),
+            (Method::POST, "/api/asr/tasks/task/cleanup-source-audio"),
+            (Method::POST, "/api/asr/tasks/task/files/file/labels"),
+            (Method::POST, "/api/asr/tasks/task/run"),
+            (Method::POST, "/api/asr/tasks/task/resume"),
+            (Method::POST, "/api/asr/tasks/task/retry-failed-chunks"),
+            (Method::POST, "/api/asr/tasks/task/retry-failed-files"),
+            (Method::POST, "/api/asr/tasks/task/compress-source-audio"),
+            (Method::POST, "/api/asr/service/stop"),
+            (Method::POST, "/api/asr/speaker-profiles"),
+            (Method::POST, "/api/asr/speaker-profiles/assisted-sessions"),
+            (
+                Method::POST,
+                "/api/asr/speaker-profiles/enrollment-sessions",
+            ),
             (Method::GET, "/api/speech/pipelines/status"),
+            (Method::GET, "/api/speech/pipelines"),
+            (Method::GET, "/api/speech/resources"),
+            (Method::GET, "/api/speech/decision"),
+            (Method::GET, "/api/voice/sources"),
+            (Method::GET, "/api/voice/status"),
+            (Method::GET, "/api/voice/vocabulary"),
+            (Method::PUT, "/api/voice/vocabulary"),
+            (Method::GET, "/api/voice/listen-ws"),
+            (Method::POST, "/api/voice/sessions"),
+            (Method::POST, "/api/voice/wake/kws/init"),
+            (Method::POST, "/api/voice/wake/listener/start"),
+            (Method::GET, "/api/voice/wake/status"),
+            (Method::GET, "/api/voice/wake/kws/status"),
+            (Method::GET, "/api/voice/wake/profiles"),
+            (Method::POST, "/api/voice/wake/profiles"),
+            (Method::GET, "/api/voice/wake/bindings"),
+            (Method::POST, "/api/voice/wake/bindings"),
+            (Method::POST, "/api/voice/wake/trigger"),
+            (Method::POST, "/api/voice/wake/listener/progress"),
+            (Method::POST, "/api/voice/wake/listener/stop"),
+            (Method::GET, "/api/voice/wake/events"),
             (Method::PUT, "/api/scripts/request/example"),
             (Method::DELETE, "/api/scripts/request/example"),
             (Method::POST, "/api/scripts/rename/request/example"),
@@ -695,8 +677,13 @@ mod tests {
             (Method::POST, "/api/im-gateway/schedules"),
             (Method::GET, "/api/remote-invoke/status"),
             (Method::POST, "/api/remote-invoke/discovery/enter"),
+            (Method::GET, "/api/worker-jobs"),
+            (Method::POST, "/api/im-gateway/messages/send"),
+            (Method::POST, "/api/im-gateway/messages/upload"),
+            (Method::POST, "/api/im-gateway/chat/stream"),
+            (Method::POST, "/api/im-gateway/schedules/schedule/run"),
         ] {
-            assert!(!is_heavy_admin_request(&method, path), "{method} {path}");
+            assert!(!is_heavy_admin_request(path), "{method} {path}");
         }
     }
 
@@ -764,13 +751,28 @@ mod tests {
         assert_eq!(replay_response.status(), reqwest::StatusCode::OK);
         drop(replay_response);
 
+        let worker_jobs_response =
+            reqwest::get(format!("http://{addr}{ADMIN_PATH_PREFIX}/api/worker-jobs"))
+                .await
+                .expect("request worker job list");
+        assert_eq!(worker_jobs_response.status(), reqwest::StatusCode::OK);
+        drop(worker_jobs_response);
+
         let previous_scheduler_state =
             crate::handlers::asr_jobs::set_scheduler_started_for_test(false).await;
         for path in [
             "/api/asr/capabilities",
             "/api/asr/status",
+            "/api/asr/moss/status",
+            "/api/asr/diarization/status",
             "/api/asr/tasks",
+            "/api/asr/external-volumes",
+            "/api/asr/speaker-profiles",
             "/api/speech/pipelines/status",
+            "/api/voice/wake/status",
+            "/api/voice/wake/profiles",
+            "/api/voice/wake/bindings",
+            "/api/voice/wake/events",
         ] {
             let response = reqwest::get(format!("http://{addr}{ADMIN_PATH_PREFIX}{path}"))
                 .await
@@ -778,10 +780,10 @@ mod tests {
             assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
         }
         let scheduler_started =
-            crate::handlers::asr_jobs::set_scheduler_started_for_test(true).await;
+            crate::handlers::asr_jobs::set_scheduler_started_for_test(false).await;
         assert!(
-            !scheduler_started,
-            "Critical-pressure task summary must not lazily start the ASR scheduler"
+            scheduler_started,
+            "Parent pressure must not prevent the ASR scheduler from starting"
         );
         crate::handlers::asr_jobs::set_scheduler_started_for_test(previous_scheduler_state).await;
 
