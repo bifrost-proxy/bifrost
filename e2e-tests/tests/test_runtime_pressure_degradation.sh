@@ -195,6 +195,15 @@ IM_PROVIDERS_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%
 assert_equals "200" "$IM_PROVIDERS_STATUS" \
     "IM provider control plane remains available under pressure"
 
+IM_PROVIDER_LIST_OUTPUT="$(env NO_PROXY="*" no_proxy="*" BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+    "$BIFROST_BIN" im provider list)"
+if echo "$IM_PROVIDER_LIST_OUTPUT" | grep -Eq '503|resource pressure'; then
+    echo "[FAIL] bifrost im provider list returned a pressure rejection" >&2
+    echo "$IM_PROVIDER_LIST_OUTPUT" >&2
+    exit 1
+fi
+echo "[PASS] bifrost im provider list uses the temporary pressured service without a 503"
+
 AI_CONFIG_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/agent")"
 assert_equals "200" "$AI_CONFIG_STATUS" \
