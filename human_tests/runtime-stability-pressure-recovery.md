@@ -41,7 +41,9 @@ BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressu
 - 通过代理访问本地 upstream 成功，基础转发未中断。
 - Replay Send 通过同一本地 upstream 成功返回 200 和预期响应体，不被通用重任务 guard 误拦截。
 - AI/IM provider、Agent config、channel config 与 Remote Invoke status 均返回 200，不因整个 API 前缀被误判而 503。
+- AI 首页和 ASR 页面所需的 capabilities、status、task summary 与 speech pipeline status 均返回 200；AI 首页不显示 `Summary unavailable`，浏览器控制台没有这些轻量状态接口的 503。
 - Scripts 列表与新建/保存返回 200；Scripts test 和新 AI runner turn 仍返回 503，确认只暂停执行面。
+- ASR service start 仍返回 503，确认仅保留读取控制面，不在 Critical 下启动模型或任务；读取 task summary 不触发 scheduler 懒启动。
 - Body payload 不写入缓存；doctor 能读到压力状态。
 
 ### TC-RSPR-03：恢复策略只允许 fail-open/fail-closed 和 3～5 秒窗口
@@ -85,6 +87,6 @@ cargo test -p bifrost-core lifecycle_events_rotate_before_append -- --nocapture
 | 日期 | 用例 | 结果 | 证据摘要 |
 | --- | --- | --- | --- |
 | 2026-08-22 | TC-RSPR-01 | 通过 | `cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog -- --nocapture`：8/8 通过；独立 worktree 首次执行缺少 sidecar 与 `web/dist-desktop`，按正式桌面构建链补齐测试前置后复跑通过。 |
-| 2026-08-22 | TC-RSPR-02 | 通过 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressure_degradation.sh`：18 项断言通过；除原有 Critical health、canary、Traffic 503、基础转发、Replay、payload 与 doctor 外，新增验证 IM providers、AI config/channels、Remote Invoke status、Scripts list/save 均为 200，Scripts test 与新 AI turn 仍为 503。 |
+| 2026-08-22 | TC-RSPR-02 | 通过 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressure_degradation.sh`：23 项断言通过；除原有 Critical health、canary、Traffic 503、基础转发、Replay、payload 与 doctor 外，IM providers、AI config/channels、ASR capabilities/status/tasks、speech pipeline status、Remote Invoke status、Scripts list/save 均为 200，Scripts test、新 AI turn 与 ASR service start 仍为 503。随后在独立 Critical 实例上用 Playwright 验证 AI Hub、ASR、Channels、Agents、Runs、Remote Invoke、Scripts 新建保存、Replay Send 共 8 条 WebUI 链路，页面、控制台与网络失败均为 0。 |
 | 2026-08-22 | TC-RSPR-03 | 通过 | 临时数据目录中 fail-open 3 秒、fail-closed 5 秒持久化成功；2 秒参数被拒绝；最终配置字段校验通过，目录自动回收。 |
 | 2026-08-22 | TC-RSPR-04 | 通过 | generation guard、owner/events 原子落盘与 lifecycle rotation 三个定向单测全部通过。 |

@@ -82,8 +82,9 @@
 | Scripts test、req/res/decode 新执行 | 503 或跳过，并记录 pressure reason |
 | AI/IM providers、channels、runner config、routes、schedules CRUD | 保留，避免整个 AI/IM 管理面失效 |
 | AI/IM 新消息发送、附件上传、Agent/runner turn、schedule 手动 run | 503，不启动新重任务 |
+| AI 首页 / ASR capabilities、status、task summary、speech pipeline status | 保留；Critical 下读取 task summary 不懒启动 scheduler 或恢复中断任务 |
 | Remote Invoke 状态、授权、连接与访问控制管理 | 保留；这些 Admin API 不直接执行远端命令 |
-| worker jobs、ASR 等附加重任务 | 503，不启动新任务 |
+| worker jobs、ASR 模型初始化、服务启动、转写与大文件读取等附加重任务 | 503，不启动新任务 |
 | 单次 Replay、Replay 收藏与历史 | 保留；继续使用并发上限，payload 持久化仍服从 pressure governor |
 
 所有拒绝使用稳定错误码/消息；降级状态变化写 lifecycle event，不对每个请求刷日志。

@@ -143,6 +143,26 @@ AI_CHANNELS_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{
 assert_equals "200" "$AI_CHANNELS_STATUS" \
     "AI channel configuration remains available under pressure"
 
+ASR_CAPABILITIES_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/asr/capabilities")"
+assert_equals "200" "$ASR_CAPABILITIES_STATUS" \
+    "AI hub ASR capabilities remain available under pressure"
+
+ASR_TASKS_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/asr/tasks")"
+assert_equals "200" "$ASR_TASKS_STATUS" \
+    "AI hub ASR task summary remains available under pressure"
+
+ASR_STATUS_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/asr/status")"
+assert_equals "200" "$ASR_STATUS_STATUS" \
+    "ASR status remains available under pressure"
+
+SPEECH_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/speech/pipelines/status")"
+assert_equals "200" "$SPEECH_STATUS" \
+    "speech pipeline status remains available under pressure"
+
 REMOTE_INVOKE_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/remote-invoke/status")"
 assert_equals "200" "$REMOTE_INVOKE_STATUS" \
@@ -172,6 +192,12 @@ AI_RUN_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_
     "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/chat/stream")"
 assert_equals "503" "$AI_RUN_STATUS" \
     "new AI execution remains paused under pressure"
+
+ASR_START_STATUS="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/asr/service/start")"
+assert_equals "503" "$ASR_START_STATUS" \
+    "new ASR service startup remains paused under pressure"
 
 FORWARDED="$(env NO_PROXY="" no_proxy="" curl -fsS \
     --proxy "http://127.0.0.1:${PROXY_PORT}" \
