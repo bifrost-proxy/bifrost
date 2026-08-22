@@ -85,6 +85,6 @@ cargo test -p bifrost-core lifecycle_events_rotate_before_append -- --nocapture
 | 日期 | 用例 | 结果 | 证据摘要 |
 | --- | --- | --- | --- |
 | 2026-08-22 | TC-RSPR-01 | 通过 | `cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog -- --nocapture`：8/8 通过；独立 worktree 首次执行缺少 sidecar 与 `web/dist-desktop`，按正式桌面构建链补齐测试前置后复跑通过。 |
-| 2026-08-22 | TC-RSPR-02 | 通过 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressure_degradation.sh`：Critical health、canary、Traffic 503、轻量 Admin、基础转发、Replay Send 200、响应体、payload 停止落盘与 doctor 共 10 项断言通过。 |
+| 2026-08-22 | TC-RSPR-02 | 通过 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_runtime_pressure_degradation.sh`：18 项断言通过；除原有 Critical health、canary、Traffic 503、基础转发、Replay、payload 与 doctor 外，新增验证 IM providers、AI config/channels、Remote Invoke status、Scripts list/save 均为 200，Scripts test 与新 AI turn 仍为 503。 |
 | 2026-08-22 | TC-RSPR-03 | 通过 | 临时数据目录中 fail-open 3 秒、fail-closed 5 秒持久化成功；2 秒参数被拒绝；最终配置字段校验通过，目录自动回收。 |
 | 2026-08-22 | TC-RSPR-04 | 通过 | generation guard、owner/events 原子落盘与 lifecycle rotation 三个定向单测全部通过。 |
