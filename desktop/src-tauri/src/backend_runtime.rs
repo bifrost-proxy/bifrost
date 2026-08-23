@@ -579,7 +579,6 @@ pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason:
     let Ok(current_port) = state.port.lock().map(|port| *port) else {
         return false;
     };
-
     if current_port == 0 {
         return false;
     }

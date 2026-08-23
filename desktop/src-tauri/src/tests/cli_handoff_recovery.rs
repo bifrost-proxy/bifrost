@@ -1,4 +1,106 @@
+use super::super::markerless_preferred_backend_is_reusable;
 use super::*;
+
+fn spawn_one_shot_system_server(data_dir: &Path, pid: u32, version: &str) -> u16 {
+    spawn_system_server(data_dir, pid, version, 1)
+}
+
+fn spawn_system_server(data_dir: &Path, pid: u32, version: &str, request_count: usize) -> u16 {
+    spawn_system_server_on("127.0.0.1", data_dir, pid, version, request_count)
+}
+
+fn spawn_system_server_on(
+    host: &str,
+    data_dir: &Path,
+    pid: u32,
+    version: &str,
+    request_count: usize,
+) -> u16 {
+    let listener = TcpListener::bind((host, 0)).expect("bind system server");
+    let port = listener.local_addr().expect("system server addr").port();
+    let data_dir_fingerprint = bifrost_storage::data_dir_fingerprint_for(data_dir);
+    let body = format!(
+        r#"{{"version":"{version}","pid":{pid},"data_dir_fingerprint":"{data_dir_fingerprint}"}}"#
+    );
+    thread::spawn(move || {
+        for _ in 0..request_count {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+fn normal_startup_reuses_markerless_bifrost_only_on_the_preferred_port() {
+    let identity = BackendSystemIdentity {
+        version: "0.0.187".to_string(),
+        pid: 456,
+        data_dir_fingerprint: Some("same-data-dir".to_string()),
+    };
+
+    assert!(markerless_preferred_backend_is_reusable(
+        false,
+        19900,
+        19900,
+        Some(&identity),
+        "same-data-dir",
+        true,
+    ));
+    assert!(!markerless_preferred_backend_is_reusable(
+        true,
+        19900,
+        19900,
+        Some(&identity),
+        "same-data-dir",
+        true,
+    ));
+    assert!(!markerless_preferred_backend_is_reusable(
+        false,
+        19901,
+        19900,
+        Some(&identity),
+        "same-data-dir",
+        true,
+    ));
+    assert!(!markerless_preferred_backend_is_reusable(
+        false,
+        19900,
+        19900,
+        None,
+        "same-data-dir",
+        true,
+    ));
+    assert!(!markerless_preferred_backend_is_reusable(
+        false,
+        19900,
+        19900,
+        Some(&identity),
+        "same-data-dir",
+        false,
+    ));
+
+    let foreign_identity = BackendSystemIdentity {
+        data_dir_fingerprint: Some("foreign-data-dir".to_string()),
+        ..identity
+    };
+    assert!(!markerless_preferred_backend_is_reusable(
+        false,
+        19900,
+        19900,
+        Some(&foreign_identity),
+        "same-data-dir",
+        true,
+    ));
+}
 
 #[test]
 fn cli_owned_upgrade_relaunch_reuses_the_target_backend_even_when_pid_is_unchanged() {

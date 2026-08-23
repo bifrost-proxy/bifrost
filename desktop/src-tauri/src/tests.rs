@@ -11,8 +11,8 @@ use super::{
     external_cli_handoff_wait, failed_cli_handoff_can_retry_immediately,
     host_window_close_behavior_for_platform, is_server_config_response,
     is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
-    mark_backend_unavailable_for_manual_start, markerless_preferred_backend_is_reusable,
-    parse_port_update_response, persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
+    mark_backend_unavailable_for_manual_start, parse_port_update_response,
+    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
     probe_backend_health_with_timeout, publish_startup_ready, read_active_upgrade_relaunch_marker,
     read_pending_desktop_install, record_startup_deadline_error, relaunch_command_for_target,
     resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
@@ -183,44 +183,6 @@ fn spawn_delayed_health_server(delay: Duration, status: u16) -> (u16, thread::Jo
         }
     });
     (port, handle)
-}
-
-fn spawn_one_shot_system_server(data_dir: &Path, pid: u32, version: &str) -> u16 {
-    spawn_system_server(data_dir, pid, version, 1)
-}
-
-fn spawn_system_server(data_dir: &Path, pid: u32, version: &str, request_count: usize) -> u16 {
-    spawn_system_server_on("127.0.0.1", data_dir, pid, version, request_count)
-}
-
-fn spawn_system_server_on(
-    host: &str,
-    data_dir: &Path,
-    pid: u32,
-    version: &str,
-    request_count: usize,
-) -> u16 {
-    let listener = TcpListener::bind((host, 0)).expect("bind system server");
-    let port = listener.local_addr().expect("system server addr").port();
-    let data_dir_fingerprint = bifrost_storage::data_dir_fingerprint_for(data_dir);
-    let body = format!(
-        r#"{{"version":"{version}","pid":{pid},"data_dir_fingerprint":"{data_dir_fingerprint}"}}"#
-    );
-    thread::spawn(move || {
-        for _ in 0..request_count {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
-            };
-            let mut buffer = [0_u8; 1024];
-            let _ = stream.read(&mut buffer);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            );
-            let _ = stream.write_all(response.as_bytes());
-        }
-    });
-    port
 }
 
 #[cfg(unix)]
@@ -1137,69 +1099,6 @@ fn normal_startup_reuses_only_the_current_data_directory_runtime() {
         19900,
         Some(&matching_identity),
         false,
-    ));
-}
-
-#[test]
-fn normal_startup_reuses_markerless_bifrost_only_on_the_preferred_port() {
-    let identity = BackendSystemIdentity {
-        version: "0.0.187".to_string(),
-        pid: 456,
-        data_dir_fingerprint: Some("same-data-dir".to_string()),
-    };
-
-    assert!(markerless_preferred_backend_is_reusable(
-        false,
-        19900,
-        19900,
-        Some(&identity),
-        "same-data-dir",
-        true,
-    ));
-    assert!(!markerless_preferred_backend_is_reusable(
-        true,
-        19900,
-        19900,
-        Some(&identity),
-        "same-data-dir",
-        true,
-    ));
-    assert!(!markerless_preferred_backend_is_reusable(
-        false,
-        19901,
-        19900,
-        Some(&identity),
-        "same-data-dir",
-        true,
-    ));
-    assert!(!markerless_preferred_backend_is_reusable(
-        false,
-        19900,
-        19900,
-        None,
-        "same-data-dir",
-        true,
-    ));
-    assert!(!markerless_preferred_backend_is_reusable(
-        false,
-        19900,
-        19900,
-        Some(&identity),
-        "same-data-dir",
-        false,
-    ));
-
-    let foreign_identity = BackendSystemIdentity {
-        data_dir_fingerprint: Some("foreign-data-dir".to_string()),
-        ..identity
-    };
-    assert!(!markerless_preferred_backend_is_reusable(
-        false,
-        19900,
-        19900,
-        Some(&foreign_identity),
-        "same-data-dir",
-        true,
     ));
 }
 
