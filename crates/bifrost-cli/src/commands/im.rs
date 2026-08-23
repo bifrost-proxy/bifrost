@@ -138,11 +138,62 @@ fn handle_im_provider(host: &str, port: u16, args: &[String]) -> Result<()> {
             print_provider_capabilities(&resp, format)?;
             Ok(())
         }
+        Some("menu") => handle_im_provider_menu(host, port, &args[1..]),
         _ => {
-            eprintln!("Usage: bifrost im provider <list|add|update|delete|status|capabilities>");
+            eprintln!(
+                "Usage: bifrost im provider <list|add|update|delete|status|capabilities|menu>"
+            );
             Ok(())
         }
     }
+}
+
+fn handle_im_provider_menu(host: &str, port: u16, args: &[String]) -> Result<()> {
+    let provider_id = args.first().ok_or_else(|| {
+        bifrost_core::BifrostError::Config(
+            "usage: bifrost im provider menu <provider> <preview|status|sync> [--publish]"
+                .to_string(),
+        )
+    })?;
+    let action = args.get(1).map(String::as_str).ok_or_else(|| {
+        bifrost_core::BifrostError::Config(
+            "menu action required: preview, status, or sync".to_string(),
+        )
+    })?;
+    let publish = args.iter().skip(2).any(|arg| arg == "--publish");
+    if args.iter().skip(2).any(|arg| arg != "--publish") || (publish && action != "sync") {
+        return Err(bifrost_core::BifrostError::Config(
+            "--publish is only valid with 'menu <provider> sync'".to_string(),
+        ));
+    }
+    let path = format!("/providers/{provider_id}/feishu/menu/{action}");
+    let url = api_url(host, port, &path);
+    let response = match action {
+        "preview" | "status" => http_get(&url)?,
+        "sync" => {
+            let (status, response) = http_post_with_status(&url, &json!({"publish": publish}))?;
+            if !(200..300).contains(&status) {
+                let detail = response["message"]
+                    .as_str()
+                    .or_else(|| response["error"].as_str())
+                    .unwrap_or("unknown menu sync error");
+                return Err(bifrost_core::BifrostError::Network(format!(
+                    "Feishu menu sync failed with HTTP {status}: {detail}"
+                )));
+            }
+            response
+        }
+        _ => {
+            return Err(bifrost_core::BifrostError::Config(
+                "menu action must be one of: preview, status, sync".to_string(),
+            ));
+        }
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).map_err(im_json_error)?
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -2267,6 +2318,8 @@ fn print_im_help() {
     println!("{}", "EXAMPLES:".bright_yellow());
     println!("    bifrost im provider list");
     println!("    bifrost im provider add feishu-main --type feishu --runner traex");
+    println!("    bifrost im provider menu feishu-main preview");
+    println!("    bifrost im provider menu feishu-main sync --publish");
     println!("    bifrost im provider add weixin-main --type weixin --runner codex");
     println!("    bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --runner 'Claude Code'");
     println!("    bifrost im provider capabilities feishu-main --format json-pretty");

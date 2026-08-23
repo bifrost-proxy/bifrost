@@ -234,13 +234,36 @@ pub(super) async fn handle_im_runner_command(
     };
     let config = ctx.external_cli_config_store.load();
     let reply = match command {
-        ImRunnerCommand::List => format_effective_im_runner(
-            ctx.group_context_store,
-            session_key,
-            ctx.agent_config,
-            &config,
-            &ctx.provider.id,
-        ),
+        ImRunnerCommand::List => {
+            let status = format_effective_im_runner(
+                ctx.group_context_store,
+                session_key,
+                ctx.agent_config,
+                &config,
+                &ctx.provider.id,
+            );
+            if ctx.provider.provider_type == ImProviderType::Feishu {
+                let options = runner_choice_options(&config);
+                if send_feishu_choice_card(
+                    ctx.client,
+                    ctx.provider,
+                    ctx.event,
+                    &format!("{status}\n\n请选择 Runner："),
+                    options,
+                    ctx.message_log_store,
+                )
+                .await
+                {
+                    return true;
+                }
+                format!(
+                    "{status}\n\n支持的 Runner：\n{}",
+                    format_im_runner_list(&config)
+                )
+            } else {
+                status
+            }
+        }
         ImRunnerCommand::Switch(runner_id) => match apply_im_runner_switch(
             ctx.provider_store,
             ctx.group_context_store,

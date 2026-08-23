@@ -696,11 +696,25 @@ pub(super) async fn handle_im_fast_command(
             effective.runner_id
         )
     } else {
-        crate::im_gateway::external_cli::format_external_cli_fast_status(
+        let status = crate::im_gateway::external_cli::format_external_cli_fast_status(
             current_tier.as_deref(),
             current_source.as_deref(),
             &effective.runner_id,
-        )
+        );
+        if ctx.provider.provider_type == ImProviderType::Feishu
+            && send_feishu_choice_card(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("{status}\n\n请选择 Fast 模式："),
+                fast_choice_options(current_tier.as_deref()),
+                ctx.message_log_store,
+            )
+            .await
+        {
+            return true;
+        }
+        status
     };
     send_agent_reply(
         ctx.client,

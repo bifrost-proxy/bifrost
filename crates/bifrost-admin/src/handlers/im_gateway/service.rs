@@ -496,6 +496,7 @@ pub struct ImGatewayService {
     pub outbox_store: Arc<crate::im_gateway::ImOutboxStore>,
     pub group_context_store: Arc<ImGroupContextStore>,
     pub feishu_group_permission_store: Arc<crate::im_gateway::FeishuGroupPermissionStore>,
+    pub feishu_menu_state_store: Arc<crate::im_gateway::feishu_menu::FeishuMenuStateStore>,
     pub connection_manager: Arc<ImConnectionManager>,
     pub agent_config_store: Arc<ImAgentConfigStore>,
     pub agent_session_manager: Arc<ImAgentSessionManager>,
@@ -553,6 +554,9 @@ impl ImGatewayService {
             group_context_store: Arc::new(ImGroupContextStore::new(data_dir)),
             feishu_group_permission_store: Arc::new(
                 crate::im_gateway::FeishuGroupPermissionStore::new(data_dir),
+            ),
+            feishu_menu_state_store: Arc::new(
+                crate::im_gateway::feishu_menu::FeishuMenuStateStore::new(data_dir),
             ),
             connection_manager: Arc::new(ImConnectionManager::new_with_data_dir(data_dir)),
             agent_config_store,
@@ -828,6 +832,19 @@ impl ImGatewayService {
                     }
                 }
             }
+
+            // Reconcile the command menu once while restoring persisted
+            // providers. The provisioner is digest-idempotent, so providers
+            // that already have the current draft incur no remote writes.
+            // Keep this outside the reconnect supervisor: transport retries
+            // must never create application configuration churn.
+            super::feishu_menu::reconcile_feishu_menu_for_connect(
+                self,
+                &provider,
+                false,
+                "startup_auto_connect",
+            )
+            .await;
 
             let app_secret = provider.secret_ref.clone().unwrap_or_default();
 

@@ -19,7 +19,7 @@ pub(crate) const FEISHU_CHOICE_CARD_TTL: Duration = Duration::from_secs(24 * 60 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FeishuChoiceCardBinding {
     pub provider_id: String,
-    pub chat_id: String,
+    pub chat_id: Option<String>,
     pub chat_type: String,
     pub user_id: String,
 }
@@ -35,7 +35,8 @@ pub(crate) struct FeishuChoiceCardOption {
 struct SlashChoiceValue {
     bifrost_action: String,
     provider_id: String,
-    chat_id: String,
+    #[serde(default)]
+    chat_id: Option<String>,
     chat_type: String,
     user_id: String,
     command: String,
@@ -279,11 +280,17 @@ fn validate_slash_choice_value(
     if value.user_id != operator_id {
         return Err("card action user binding mismatch".to_string());
     }
-    if value.chat_id != open_chat_id {
-        return Err("card action chat binding mismatch".to_string());
-    }
     if !matches!(value.chat_type.as_str(), "p2p" | "group") {
         return Err("card action has unsupported chat type".to_string());
+    }
+    match value.chat_id.as_deref() {
+        Some(chat_id) if chat_id != open_chat_id => {
+            return Err("card action chat binding mismatch".to_string());
+        }
+        None if value.chat_type != "p2p" => {
+            return Err("card action without a chat binding must be p2p".to_string());
+        }
+        _ => {}
     }
     if value.expires_at_ms <= now_ms {
         return Err("card action has expired".to_string());
@@ -295,16 +302,17 @@ fn validate_slash_choice_value(
 }
 
 pub(crate) fn is_allowed_choice_command(command: &str) -> bool {
-    let mut parts = command.split_whitespace();
-    let Some(name) = parts.next() else {
+    let mut command_parts = command.trim().splitn(2, char::is_whitespace);
+    let Some(name) = command_parts.next() else {
         return false;
     };
-    let Some(argument) = parts.next() else {
+    let Some(argument) = command_parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return false;
     };
-    if parts.next().is_some() {
-        return false;
-    }
 
     if name.eq_ignore_ascii_case("/resume") {
         return matches!(
@@ -333,6 +341,16 @@ pub(crate) fn is_allowed_choice_command(command: &str) -> bool {
                 parse_external_cli_effort_slash_command(command),
                 Some(Ok(ExternalCliEffortSlashCommand::Clear))
             ));
+    }
+    if name.eq_ignore_ascii_case("/runner") {
+        return argument.len() <= 96
+            && argument.chars().count() <= 96
+            && argument.chars().all(|character| {
+                character == ' ' || (!character.is_control() && !character.is_whitespace())
+            });
+    }
+    if name.eq_ignore_ascii_case("/fast") {
+        return matches!(argument.to_ascii_lowercase().as_str(), "on" | "off");
     }
     false
 }
@@ -378,7 +396,7 @@ mod tests {
     fn binding(chat_type: &str) -> FeishuChoiceCardBinding {
         FeishuChoiceCardBinding {
             provider_id: "feishu-main".to_string(),
-            chat_id: "oc_chat".to_string(),
+            chat_id: Some("oc_chat".to_string()),
             chat_type: chat_type.to_string(),
             user_id: "ou_owner".to_string(),
         }
@@ -531,6 +549,10 @@ mod tests {
             ("p2p", "/model clear"),
             ("group", "/effort xhigh"),
             ("p2p", "/effort clear"),
+            ("p2p", "/runner Traex"),
+            ("p2p", "/runner 本地开发 Runner"),
+            ("p2p", "/fast on"),
+            ("p2p", "/fast off"),
         ] {
             let raw = callback(command, chat_type, 20_000);
             let event = normalize_feishu_card_action(&raw, "feishu-main", 10_000)
@@ -544,6 +566,30 @@ mod tests {
             assert_eq!(event.source.message_id, None);
             assert_eq!(event.message.unwrap().text, command);
         }
+    }
+
+    #[test]
+    fn feishu_card_action_accepts_unbound_p2p_card_and_rejects_unbound_group_card() {
+        let unbound = |chat_type: &str| {
+            serde_json::json!({
+                "bifrostAction": "slash_choice",
+                "providerId": "feishu-main",
+                "chatId": null,
+                "chatType": chat_type,
+                "userId": "ou_owner",
+                "command": "/runner Traex",
+                "expiresAtMs": 20_000
+            })
+            .to_string()
+        };
+        let p2p = select_callback(&unbound("p2p"), "ou_owner", "oc_callback");
+        let event = normalize_feishu_card_action(&p2p, "feishu-main", 10_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.source.chat_id.as_deref(), Some("oc_callback"));
+
+        let group = select_callback(&unbound("group"), "ou_owner", "oc_callback");
+        assert!(normalize_feishu_card_action(&group, "feishu-main", 10_000).is_err());
     }
 
     #[test]
@@ -594,6 +640,11 @@ mod tests {
             ),
             select_callback(
                 &binding_value_string("/resume abc def", "p2p", 20_000),
+                "ou_owner",
+                "oc_chat",
+            ),
+            select_callback(
+                &binding_value_string("/runner line\nbreak", "p2p", 20_000),
                 "ou_owner",
                 "oc_chat",
             ),

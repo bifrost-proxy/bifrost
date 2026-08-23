@@ -90,6 +90,8 @@ http://127.0.0.1:9900/_bifrost/
 bifrost install-skill -y
 ```
 
+飞书 Bot 可直接使用 Bifrost 内置的“会话 / Agent / 工具”两级指令菜单。菜单点击会映射到已有 `/status`、`/model`、`/runner`、`/effort`、`/fast` 等命令，并复用原有 Owner、Session 和选择卡片链路；显式连接 provider 时会自动同步菜单草稿。预览、状态、手工同步和发布方式见 [`docs/cli.md`](docs/cli.md#im-gatewayim)。
+
 ASR Daily Agent 支持把一篇日报拆成多个独立研究问题，并由 ChatGPT Web 分别创建会话。研究 fan-out 可选配置 `chatgpt_project_url`；配置后，新会话会归档到指定 ChatGPT Project，同时仍强制使用 Chat 模式和 Pro 模型：
 
 ```json

@@ -815,6 +815,10 @@ bifrost im provider list
 bifrost im provider add feishu-main --type feishu --runner traex
 bifrost im provider add weixin-main --type weixin --runner codex
 bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --enabled true
+bifrost im provider menu feishu-main preview
+bifrost im provider menu feishu-main status
+bifrost im provider menu feishu-main sync
+bifrost im provider menu feishu-main sync --publish
 bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx
 bifrost im send --text "hello owner"
 bifrost im send --target oncall --text "hello group"
@@ -833,6 +837,10 @@ bifrost im messages list --direction inbound
 - 手动凭据配置：已持有 App ID / Secret 时继续传 `--app-id`、`--secret env:NAME`、`--owner-open-id` 等字段。Feishu / Weixin / WeChat provider 仍必须绑定 Runner。
 
 Runner 选择规则：交互式终端中未传 `--runner` 时会展示启用 Runner 列表，使用上下键和回车选择；stdin 非交互时必须显式传 `--runner`，否则命令会报错并列出可用 Runner。`--runner` 会校验是否存在且启用，支持常见别名如 `codex`、`traex` / `trae`、`Claude Code`；错误信息会同时提示当前可用 Runner 和内置默认 Runner 类型。Feishu / Weixin provider 的 `base_url` 由 provider 类型固定管理，CLI 不接受 `--base-url`，避免把不同平台的 OpenAPI 入口写错到 provider 配置中。
+
+飞书 Bot 使用 Bifrost 内置两级指令菜单：一级分为“会话”“Agent”“工具”，二级菜单覆盖状态、恢复、队列、停止、模型、Runner、推理强度、Fast、当前目录和帮助。菜单点击事件通过固定 `event_key` 白名单转换为现有 slash command，因此继续复用 Owner、私聊 Session、命令分发和选择卡片；外部事件不能携带任意命令。飞书菜单事件不包含群聊 ID，所以菜单只操作点击者与 Bot 的私聊会话，不会猜测最近群聊。
+
+显式连接飞书 provider 时，Bifrost 会先尽力把菜单和 `application.bot.menu_v6` 事件订阅同步到应用草稿，再建立 WebSocket；同步失败会写入状态和日志，但不阻断已有 Bot 连接。服务启动恢复历史上已启用的飞书 provider 时也会在连接前执行一次同样的 draft reconcile，让升级前已经建联的应用自动补齐菜单；已保存的 desired digest 相同时跳过远端写入。QR 创建的新应用会额外尝试发布；手工导入 App ID / Secret 的应用及启动恢复默认不自动发布，避免改变同时包含 Web App 或 Mini App 的应用默认能力。可先运行 `preview` 查看期望配置，用 `status` 查看最近同步结果，执行 `sync` 更新草稿；只有明确执行 `sync --publish` 才提交新应用版本。普通 WebSocket 断线重连只恢复传输连接，不重复写配置或发布。
 
 需要 provider 的 IM 命令都支持 `--provider <id>` 显式指定。未提供 `--provider` 时，CLI 会复用统一选择逻辑：只有一个 enabled provider 时自动选择；多个 enabled provider 且处于交互式终端时展示列表让用户选择；多个 provider 且 stdin 非交互时会要求显式传 `--provider`。`bifrost im send` 未传 `--target` 时默认发送给所选 provider 的 owner，因此 provider 需要配置 `owner_open_id`（可在创建时用 `--owner-open-id`，或由后端连接飞书后自动检测）。
 
@@ -876,7 +884,7 @@ IM Gateway 子命令按对象划分：
 
 | 对象 | 说明 | 常见动作 |
 | --- | --- | --- |
-| `provider` | IM 平台连接配置，例如 Feishu、WeChat、Webhook | `list/add/update/delete/test` |
+| `provider` | IM 平台连接配置，例如 Feishu、WeChat、Webhook；支持预览和同步飞书 Bot 菜单 | `list/add/update/delete/test/menu` |
 | `target` | 消息接收目标，例如群、用户、owner | `list/add/update/delete` |
 | `send` | 主动发送消息 | `--text`、`--image-file`、`--image-key`、`--card-file`、`--card-json`、`--card-title`、`--card-text`、`--card-image-file`、`--card-image-key`、`--target`、`--provider` |
 | `route` | 把收到的事件路由到脚本 | 按 event、regex、script 触发 |

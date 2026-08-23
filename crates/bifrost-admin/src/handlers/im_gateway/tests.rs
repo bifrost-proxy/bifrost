@@ -5566,6 +5566,7 @@ pub(super) async fn outbound_bundle_uploads_binary_assets_and_sends_ordered_feis
     provider_server.abort();
 }
 
+mod feishu_menu_tests;
 mod provider_agent_tests;
 mod status_query_tests;
 mod thread_query_tests;

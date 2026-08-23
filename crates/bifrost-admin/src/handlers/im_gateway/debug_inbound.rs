@@ -93,6 +93,19 @@ struct MockBotJoinedRequest {
     event_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MockFeishuMenuRequest {
+    provider_id: String,
+    event_key: String,
+    #[serde(default)]
+    operator_open_id: Option<String>,
+    #[serde(default)]
+    event_id: Option<String>,
+    #[serde(default)]
+    timestamp: Option<u64>,
+}
+
 pub(super) async fn handle_debug(
     req: Request<Incoming>,
     service: &SharedImGatewayService,
@@ -103,8 +116,95 @@ pub(super) async fn handle_debug(
         "/mock-inbound" => handle_mock_inbound(req, service).await,
         "/mock-card-action" => handle_mock_card_action(req, service).await,
         "/mock-bot-joined" => handle_mock_bot_joined(req, service).await,
+        "/mock-feishu-menu" => handle_mock_feishu_menu(req, service).await,
         _ => error_response(StatusCode::NOT_FOUND, "IM Gateway debug endpoint not found"),
     }
+}
+
+async fn handle_mock_feishu_menu(
+    req: Request<Incoming>,
+    service: &SharedImGatewayService,
+) -> Response<BoxBody> {
+    if req.method() != Method::POST {
+        return method_not_allowed();
+    }
+    let body: MockFeishuMenuRequest = match read_body_json(req).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    inject_mock_feishu_menu(body, service).await
+}
+
+async fn inject_mock_feishu_menu(
+    body: MockFeishuMenuRequest,
+    service: &SharedImGatewayService,
+) -> Response<BoxBody> {
+    let provider_id = body.provider_id.trim();
+    if provider_id.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "providerId is required");
+    }
+    let Some(provider) = service.provider_store.get(provider_id) else {
+        return error_response(StatusCode::NOT_FOUND, "provider not found");
+    };
+    if provider.provider_type != ImProviderType::Feishu {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "mock menu event requires a Feishu provider",
+        );
+    }
+    let operator_open_id = body
+        .operator_open_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(provider.owner_open_id.as_deref())
+        .unwrap_or("mock-user");
+    let event_id = body
+        .event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("mock-feishu-menu-{}", uuid_short()));
+    let raw = serde_json::json!({
+        "header": {
+            "event_id": event_id,
+            "event_type": crate::im_gateway::feishu_menu::FEISHU_BOT_MENU_EVENT
+        },
+        "event": {
+            "operator": {
+                "operator_id": {"open_id": operator_open_id}
+            },
+            "event_key": body.event_key.trim(),
+            "timestamp": body.timestamp.unwrap_or_else(now_ms)
+        }
+    });
+    let Some(event) = crate::im_gateway::feishu::normalize_feishu_event(&raw, provider_id) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid or unsupported Feishu menu event",
+        );
+    };
+    let command = event
+        .message
+        .as_ref()
+        .map(|message| message.text.clone())
+        .unwrap_or_default();
+    let tx = ensure_mock_event_sink(service, &provider);
+    if tx.send(event).is_err() {
+        service.mock_event_sinks.write().remove(&provider.id);
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mock inbound sink is closed",
+        );
+    }
+    json_response(&serde_json::json!({
+        "success": true,
+        "providerId": provider.id,
+        "eventId": event_id,
+        "operatorOpenId": operator_open_id,
+        "command": command
+    }))
 }
 
 async fn handle_mock_bot_joined(
@@ -606,6 +706,107 @@ mod tests {
             chat_id: chat_id.to_string(),
             event_id: Some(" evt-bot-joined-debug ".to_string()),
         }
+    }
+
+    fn menu_request(provider_id: &str, event_key: &str) -> MockFeishuMenuRequest {
+        MockFeishuMenuRequest {
+            provider_id: provider_id.to_string(),
+            event_key: event_key.to_string(),
+            operator_open_id: Some(" ou_owner ".to_string()),
+            event_id: Some(" evt-menu-debug ".to_string()),
+            timestamp: Some(1_787_000_000_000),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_feishu_menu_validates_allowlist_and_injects_command_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        service
+            .provider_store
+            .add(provider("debug-menu-provider"))
+            .unwrap();
+        let mut weixin = provider("debug-menu-weixin");
+        weixin.provider_type = ImProviderType::Weixin;
+        service.provider_store.add(weixin).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-menu-provider".to_string(), tx);
+
+        assert_eq!(
+            inject_mock_feishu_menu(
+                menu_request("debug-menu-provider", "bifrost.runner.select"),
+                &service,
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let event = rx.try_recv().expect("mock menu event");
+        assert_eq!(event.event_id, "evt-menu-debug");
+        assert_eq!(event.source.user_id.as_deref(), Some("ou_owner"));
+        assert_eq!(event.source.chat_id, None);
+        assert_eq!(event.source.chat_type.as_deref(), Some("p2p"));
+        assert_eq!(event.message.unwrap().text, "/runner");
+
+        assert_eq!(
+            inject_mock_feishu_menu(menu_request("debug-menu-provider", "/stop"), &service,)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            inject_mock_feishu_menu(menu_request("missing", "bifrost.help"), &service)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            inject_mock_feishu_menu(menu_request("debug-menu-weixin", "bifrost.help"), &service,)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        assert_eq!(
+            inject_mock_feishu_menu(menu_request(" ", "bifrost.help"), &service)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut fallback_identity = menu_request("debug-menu-provider", "bifrost.help");
+        fallback_identity.operator_open_id = Some(" ".to_string());
+        fallback_identity.event_id = Some(" ".to_string());
+        fallback_identity.timestamp = None;
+        assert_eq!(
+            inject_mock_feishu_menu(fallback_identity, &service)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let fallback = rx.try_recv().expect("fallback menu event");
+        assert!(fallback.event_id.starts_with("mock-feishu-menu-"));
+        assert_eq!(fallback.source.user_id.as_deref(), Some("mock-user"));
+
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-menu-provider".to_string(), closed_tx);
+        assert_eq!(
+            inject_mock_feishu_menu(
+                menu_request("debug-menu-provider", "bifrost.help"),
+                &service,
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]

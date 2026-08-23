@@ -48,6 +48,7 @@ mod chat_gateway;
 mod debug_inbound;
 mod event_loop;
 mod feishu_group_permission;
+mod feishu_menu;
 mod messages;
 mod providers;
 pub(crate) mod schedules;
@@ -73,6 +74,8 @@ use agent_reply_target::*;
 use busy_message_mode::*;
 use event_loop::*;
 use feishu_group_permission::*;
+#[cfg(test)]
+use feishu_menu::*;
 #[allow(unused_imports)]
 use messages::*;
 pub(crate) use messages::{

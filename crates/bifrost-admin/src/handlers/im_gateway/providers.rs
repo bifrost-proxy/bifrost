@@ -101,6 +101,13 @@ pub(super) async fn handle_providers(
         if let Some(id) = extract_segment_before(id_and_rest, "/capabilities") {
             return handle_provider_capabilities(&req, service, id);
         }
+        for action in ["preview", "status", "sync"] {
+            let suffix = format!("/feishu/menu/{action}");
+            if let Some(id) = extract_segment_before(id_and_rest, &suffix) {
+                return super::feishu_menu::handle_provider_feishu_menu(req, service, id, action)
+                    .await;
+            }
+        }
         // Check for /:id/connect
         if let Some(id) = extract_segment_before(id_and_rest, "/connect") {
             return handle_provider_connect(req, service, id).await;
@@ -819,6 +826,9 @@ fn confirmed_feishu_setup_response(
         if let Some(provider) = service.provider_store.get(provider_id) {
             response["provider"] = sanitize_provider(&provider);
         }
+        if let Some(menu_state) = service.feishu_menu_state_store.get(provider_id) {
+            response["menu"] = serde_json::to_value(menu_state).unwrap_or_default();
+        }
     }
     response
 }
@@ -865,6 +875,8 @@ async fn maybe_create_pending_feishu_setup_provider(
         .map_err(|error| error.to_string())?;
     pending.created_provider_id = Some(config.id.clone());
     if pending.auto_connect {
+        super::feishu_menu::reconcile_feishu_menu_for_connect(service, &config, true, "qr_setup")
+            .await;
         if let Err(error) = dispatch_provider_event_connection(service, &config.id).await {
             warn!(
                 provider_id = %config.id,
@@ -1028,11 +1040,19 @@ pub(super) async fn handle_provider_feishu_setup_create_provider(
     normalize_provider_agent_config(&mut config);
     match service.provider_store.add(config.clone()) {
         Ok(()) => {
+            let menu = super::feishu_menu::reconcile_feishu_menu_for_connect(
+                service,
+                &config,
+                true,
+                "qr_setup_manual_create",
+            )
+            .await;
             service.feishu_setup_pending.write().remove(session_id);
             save_pending_feishu_setups(service);
             json_response(&serde_json::json!({
                 "success": true,
                 "provider": sanitize_provider(&config),
+                "menu": menu,
             }))
         }
         Err(e) => error_response(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -1052,10 +1072,24 @@ pub(super) async fn handle_provider_connect(
         return method_not_allowed();
     }
 
-    match dispatch_provider_event_connection(service, id).await {
-        Ok(()) => {
-            json_response(&serde_json::json!({"success": true, "message": "Connection started"}))
+    let menu = match service.provider_store.get(id) {
+        Some(provider) => {
+            super::feishu_menu::reconcile_feishu_menu_for_connect(
+                service,
+                &provider,
+                false,
+                "explicit_connect",
+            )
+            .await
         }
+        None => serde_json::Value::Null,
+    };
+    match dispatch_provider_event_connection(service, id).await {
+        Ok(()) => json_response(&serde_json::json!({
+            "success": true,
+            "message": "Connection started",
+            "menu": menu,
+        })),
         Err(error) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Failed to start connection: {error}"),

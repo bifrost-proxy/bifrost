@@ -258,6 +258,7 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [feishu-progress-card.md](./feishu-progress-card.md) | Feishu Progress Card | 19 | 飞书 Agent progress card 归并逐字符 assistant stream，并消除 Codex reasoning 前缀后 commentary delta/final 快照重放造成的过程重复；执行过程默认折叠，运行态只单独展示最新解释，当前工具与本轮成败统计合入过程标题单行展示，终态移除“最新进展”；连续 10 秒无事件时局部保活刷新，底部展示天/时/分/秒耗时与设备本地最后更新时间；展开后历史工具按 Markdown 列表逐条显示、公开解释与步骤保留段落边界、多行工具输出不粘连；过程卡、原任务卡结论与独立终态卡原位渲染复用的飞书 `image_key`；覆盖即时 Runner Session ID、主题自适应默认色、16-locale 终态卡、绝对/相对/包裹路径驱动的图片、文档、配置、Office、归档、patch/diff、音视频与 SVG/PNG 预览原生发送、Codex `:line[:column]` 归一化、源码/敏感文件排除、30 MiB 非阻塞门禁、文件变更详情、Token/周额度/耗时、长卡片执行段裁剪及 CardKit 限额降级，通过隔离 Service、mock Runner、本地 renderer 与 mock API 验证 payload |
+| [feishu-bot-menu.md](./feishu-bot-menu.md) | 飞书 Bot 指令菜单 | 4 | 会话/Agent/工具两级菜单、固定 event key 到现有 slash command、Application v7 draft/publish 与 digest 幂等、历史 Provider 启动恢复、P2P 选择卡和 Owner 安全边界 |
 | [agent-chat-history-pagination.md](./agent-chat-history-pagination.md) | Agent Chat 单会话日志与全量历史渲染 | 8 | 单 key 固定 SHA-256 JSONL，非规范历史直接清理；历史默认完整加载，重复/重叠 SSE 不覆盖首轮，delta 合并、usage 过滤与亮暗主题一致 |
 | [remove-builtin-bifrost-agent.md](./remove-builtin-bifrost-agent.md) | Remove built-in Bifrost Agent | 4 | 内置 runtime HTTP/worker/CLI/UI 入口已删除、Agent Chat 只走 external runner stream、专属代码文档测试资产已删除、Codex/Trae X/Claude Code/ChatGPT Web 与自定义 Runner 保留 |
 | [asr-scheduled-task-plan-b.md](./asr-scheduled-task-plan-b.md) | ASR 定时任务 Runtime 策略 | 44 | ASR runtime 策略、Daily Agent 外部 Runner、ChatGPT Web、IM delivery、任务详情更多菜单、恢复与性能回归 |

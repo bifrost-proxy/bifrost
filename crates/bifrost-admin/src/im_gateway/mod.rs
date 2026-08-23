@@ -6,6 +6,7 @@ pub mod event_store;
 pub mod external_cli;
 pub mod feishu;
 pub mod feishu_group_permission;
+pub mod feishu_menu;
 pub mod group_context;
 pub mod markdown_converter;
 pub mod message_log_store;

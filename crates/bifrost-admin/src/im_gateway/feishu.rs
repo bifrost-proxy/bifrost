@@ -340,12 +340,16 @@ impl FeishuProvider {
     }
 
     /// Get the base URL from config, falling back to the default Feishu API URL.
-    fn base_url(config: &ImProviderConfig) -> &str {
+    pub(crate) fn base_url(config: &ImProviderConfig) -> &str {
         config
             .base_url
             .as_deref()
             .unwrap_or(DEFAULT_BASE_URL)
             .trim_end_matches('/')
+    }
+
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.http
     }
 
     fn token_cache_key(base_url: &str, app_id: &str, app_secret: &str) -> TokenCacheKey {
@@ -2532,7 +2536,7 @@ async fn run_connection_loop(
 
 /// Normalize a raw Feishu event into the unified ImEvent model.
 ///
-/// Handles message receive and bot-added lifecycle events.
+/// Handles message receive, bot menu, and bot-added lifecycle events.
 pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Option<ImEvent> {
     let header = raw.get("header")?;
     let event_id = header.get("event_id").and_then(|v| v.as_str())?.to_string();
@@ -2540,6 +2544,9 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
 
     let normalized_event_type = match event_type_raw {
         "im.message.receive_v1" => "message.receive",
+        crate::im_gateway::feishu_menu::FEISHU_BOT_MENU_EVENT => {
+            return crate::im_gateway::feishu_menu::normalize_feishu_menu_event(raw, provider_id);
+        }
         "im.chat.member.bot.added_v1" => {
             let event = raw.get("event")?;
             let chat_id = event

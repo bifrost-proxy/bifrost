@@ -1663,6 +1663,133 @@ async fn im_provider_capabilities_command_supports_formats_and_validation() {
 }
 
 #[tokio::test]
+async fn im_provider_menu_commands_use_preview_status_and_sync_endpoints() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+    let menu_path = |action: &str| {
+        format!("/_bifrost/api/im-gateway/providers/feishu-main/feishu/menu/{action}")
+    };
+    for action in ["preview", "status"] {
+        Mock::given(method("GET"))
+            .and(path(menu_path(action)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "provider_id": "feishu-main",
+                "action": action
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_im_provider(
+            &host,
+            port,
+            &["menu".into(), "feishu-main".into(), action.into()],
+        )
+        .expect("menu read command");
+    }
+
+    Mock::given(method("POST"))
+        .and(path(menu_path("sync")))
+        .and(body_partial_json(json!({"publish": false})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "published": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    handle_im_provider(
+        &host,
+        port,
+        &["menu".into(), "feishu-main".into(), "sync".into()],
+    )
+    .expect("draft menu sync");
+
+    Mock::given(method("POST"))
+        .and(path(menu_path("sync")))
+        .and(body_partial_json(json!({"publish": true})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "published": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    handle_im_provider(
+        &host,
+        port,
+        &[
+            "menu".into(),
+            "feishu-main".into(),
+            "sync".into(),
+            "--publish".into(),
+        ],
+    )
+    .expect("published menu sync");
+}
+
+#[tokio::test]
+async fn im_provider_menu_rejects_invalid_arguments_and_surfaces_sync_errors() {
+    assert!(handle_im_provider("127.0.0.1", 1, &["menu".into()])
+        .unwrap_err()
+        .to_string()
+        .contains("usage"));
+    assert!(
+        handle_im_provider("127.0.0.1", 1, &["menu".into(), "feishu-main".into()])
+            .unwrap_err()
+            .to_string()
+            .contains("menu action required")
+    );
+    assert!(handle_im_provider(
+        "127.0.0.1",
+        1,
+        &[
+            "menu".into(),
+            "feishu-main".into(),
+            "preview".into(),
+            "--publish".into(),
+        ]
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("only valid"));
+    assert!(handle_im_provider(
+        "127.0.0.1",
+        1,
+        &["menu".into(), "feishu-main".into(), "delete".into(),]
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("preview, status, sync"));
+
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-main/feishu/menu/sync",
+        ))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "error": "unsupported_app_type",
+            "message": "PersonalAgent is not supported"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let error = handle_im_provider(
+        &host,
+        port,
+        &[
+            "menu".into(),
+            "feishu-main".into(),
+            "sync".into(),
+            "--publish".into(),
+        ],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("HTTP 422"));
+    assert!(error.to_string().contains("PersonalAgent is not supported"));
+}
+
+#[tokio::test]
 async fn im_http_helpers_preserve_status_json_and_transport_errors() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

@@ -77,6 +77,8 @@ http://127.0.0.1:9900/_bifrost/
 bifrost install-skill -y
 ```
 
+Feishu bots can use Bifrost's built-in Session / Agent / Tools two-level command menu. Menu clicks map to existing commands such as `/status`, `/model`, `/runner`, `/effort`, and `/fast`, preserving the current owner, session, and choice-card paths. An explicit provider connection automatically synchronizes the menu draft. See [`docs-en/cli.md`](docs-en/cli.md#im-gateway) for preview, status, manual sync, and publish commands.
+
 ASR Daily Agent can fan out one daily report into separate ChatGPT Web research conversations. Set the optional `chatgpt_project_url` on the research fan-out to file every new conversation in a specific ChatGPT Project while continuing to enforce Chat mode and the Pro model:
 
 ```json

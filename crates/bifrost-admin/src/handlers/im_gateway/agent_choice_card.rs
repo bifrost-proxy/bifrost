@@ -81,6 +81,50 @@ pub(super) fn effort_choice_options(
     options
 }
 
+pub(super) fn runner_choice_options(
+    config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+) -> Vec<crate::im_gateway::feishu::card_action::FeishuChoiceCardOption> {
+    config
+        .runners
+        .iter()
+        .filter(|(_, settings)| settings.enabled)
+        .filter_map(|(runner_id, _)| {
+            let option = crate::im_gateway::feishu::card_action::FeishuChoiceCardOption {
+                label: runner_id.clone(),
+                command: format!("/runner {runner_id}"),
+            };
+            crate::im_gateway::feishu::card_action::is_allowed_choice_command(&option.command)
+                .then_some(option)
+        })
+        .collect()
+}
+
+pub(super) fn fast_choice_options(
+    current_tier: Option<&str>,
+) -> Vec<crate::im_gateway::feishu::card_action::FeishuChoiceCardOption> {
+    let fast = current_tier == Some(crate::im_gateway::external_cli::CODEX_FAST_SERVICE_TIER);
+    vec![
+        crate::im_gateway::feishu::card_action::FeishuChoiceCardOption {
+            label: if fast {
+                "✓ 快速模式（当前）"
+            } else {
+                "快速模式"
+            }
+            .to_string(),
+            command: "/fast on".to_string(),
+        },
+        crate::im_gateway::feishu::card_action::FeishuChoiceCardOption {
+            label: if fast {
+                "标准模式"
+            } else {
+                "✓ 标准模式（当前）"
+            }
+            .to_string(),
+            command: "/fast off".to_string(),
+        },
+    ]
+}
+
 fn model_choice_label(model: &crate::im_gateway::external_cli::ExternalCliModelInfo) -> String {
     let display_name = model
         .display_name
@@ -221,15 +265,6 @@ pub(super) async fn send_feishu_choice_card(
     if provider.provider_type != ImProviderType::Feishu || client.feishu().is_none() {
         return false;
     }
-    let Some(chat_id) = event
-        .source
-        .chat_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
     let Some(user_id) = event
         .source
         .user_id
@@ -247,9 +282,19 @@ pub(super) async fn send_feishu_choice_card(
     } else {
         "p2p"
     };
+    let chat_id = event
+        .source
+        .chat_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if chat_type == "group" && chat_id.is_none() {
+        return false;
+    }
     let binding = crate::im_gateway::feishu::card_action::FeishuChoiceCardBinding {
         provider_id: provider.id.clone(),
-        chat_id: chat_id.to_string(),
+        chat_id,
         chat_type: chat_type.to_string(),
         user_id: user_id.to_string(),
     };
@@ -437,6 +482,43 @@ mod tests {
         assert_eq!(effort[0].command, "/effort clear");
         assert_eq!(effort[1].command, "/effort low");
         assert_eq!(effort[2].command, "/effort high");
+
+        let mut runners = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+        runners.runners.clear();
+        runners.runners.insert(
+            "runner-main".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        runners.runners.insert(
+            "runner disabled".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        runners.runners.insert(
+            "runner\nunsafe".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let runner = runner_choice_options(&runners);
+        assert_eq!(runner.len(), 1);
+        assert_eq!(runner[0].label, "runner-main");
+        assert_eq!(runner[0].command, "/runner runner-main");
+
+        let fast = fast_choice_options(Some(
+            crate::im_gateway::external_cli::CODEX_FAST_SERVICE_TIER,
+        ));
+        assert_eq!(fast[0].label, "✓ 快速模式（当前）");
+        assert_eq!(fast[1].label, "标准模式");
+        let standard = fast_choice_options(None);
+        assert_eq!(standard[0].label, "快速模式");
+        assert_eq!(standard[1].label, "✓ 标准模式（当前）");
     }
 
     #[tokio::test]
@@ -499,6 +581,37 @@ mod tests {
         assert_eq!(logs[0].status, MessageStatus::Success);
         assert_eq!(logs[0].msg_type.as_deref(), Some("interactive"));
 
+        let mut menu_event = event.clone();
+        menu_event.source.chat_id = None;
+        menu_event.source.chat_type = Some("p2p".to_string());
+        menu_event.source.message_id = None;
+        assert!(
+            send_feishu_choice_card(
+                &client,
+                &provider,
+                &menu_event,
+                "menu choice",
+                options.clone(),
+                &message_log_store,
+            )
+            .await
+        );
+        let rows = std::fs::read_to_string(&dry_run_file)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["receiveIdType"], "open_id");
+        assert_eq!(rows[1]["receiveId"], "ou_owner");
+        assert_eq!(rows[1]["sourceMessageId"], serde_json::Value::Null);
+        let menu_option_value = rows[1]["card"]["body"]["elements"][1]["options"][0]["value"]
+            .as_str()
+            .expect("menu option value string");
+        let menu_binding: serde_json::Value = serde_json::from_str(menu_option_value).unwrap();
+        assert_eq!(menu_binding["chatId"], serde_json::Value::Null);
+        assert_eq!(menu_binding["chatType"], "p2p");
+
         let mut invalid_event = event.clone();
         invalid_event.source.chat_id = None;
         assert!(
@@ -506,7 +619,7 @@ mod tests {
                 &client,
                 &provider,
                 &invalid_event,
-                "missing chat",
+                "missing group chat",
                 options.clone(),
                 &message_log_store,
             )
@@ -563,7 +676,7 @@ mod tests {
             .await
         );
         let logs = message_log_store.list();
-        assert_eq!(logs.len(), 2);
+        assert_eq!(logs.len(), 3);
         assert_eq!(logs[0].status, MessageStatus::Failed);
         assert!(logs[0]
             .error
