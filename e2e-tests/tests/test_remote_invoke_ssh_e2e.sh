@@ -165,16 +165,17 @@ PY
 run_remote_exec_target_bifrost_cli_checks() {
     local status_output local_search_output local_batch_get_output auth_status_output export_output replay_output replay_help_output
     local capture_output capture_stderr capture_exit
+    local target_data_dir_env="BIFROST_DATA_DIR=$BIFROST_DATA_DIR"
 
     log "Execute target-local bifrost status through remote exec"
     status_output="$TMPDIR/target_status_via_remote_exec.json"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --env "$target_data_dir_env" \
         -- "$BIFROST_BIN" --port "$ADMIN_PORT" status --format json >"$status_output"
-    assert_python "$status_output" 'assert obj["version"]; assert obj["running"] is True; assert obj["listener"]["port"] == int("'"$ADMIN_PORT"'")'
+    assert_python "$status_output" 'assert obj["version"], obj; assert obj["running"] is True, obj; assert obj["listener"]["port"] == int("'"$ADMIN_PORT"'"), obj'
 
     log "Execute target-local search --include through remote exec"
     local_search_output="$TMPDIR/target_search_include_via_remote_exec.ndjson"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --env "$target_data_dir_env" \
         -- "$BIFROST_BIN" --port "$ADMIN_PORT" search "$MARKER" --include bodies,headers --max-body 32768 --format ndjson \
         >"$local_search_output"
     grep -q "$MARKER" "$local_search_output"
@@ -197,7 +198,7 @@ PY
 
     log "Execute target-local traffic get --ids through remote exec"
     local_batch_get_output="$TMPDIR/target_traffic_get_ids_via_remote_exec.ndjson"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --env "$target_data_dir_env" \
         -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic get --ids "$TRAFFIC_ID" --max-body 32768 --format ndjson \
         >"$local_batch_get_output"
     grep -q "$MARKER" "$local_batch_get_output"
@@ -221,26 +222,26 @@ PY
 
     log "Execute target-local traffic auth-status through remote exec"
     auth_status_output="$TMPDIR/target_auth_status_via_remote_exec.json"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --env "$target_data_dir_env" \
         -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic auth-status "$TRAFFIC_ID" --format json >"$auth_status_output"
     assert_python "$auth_status_output" 'assert "has_jwt" in obj; assert "has_cookie" in obj'
 
     log "Execute target-local traffic export --as curl through remote exec"
     export_output="$TMPDIR/target_export_curl_via_remote_exec.txt"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --env "$target_data_dir_env" \
         -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic export "$TRAFFIC_ID" --as curl >"$export_output"
     grep -q "curl" "$export_output"
     grep -q "$MARKER" "$export_output"
 
     log "Execute target-local traffic replay --refresh-auth through remote exec"
     replay_output="$TMPDIR/target_replay_via_remote_exec.json"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --env "$target_data_dir_env" \
         -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic replay "$TRAFFIC_ID" --refresh-auth --format json >"$replay_output"
     assert_python "$replay_output" 'assert obj["success"] is True; assert obj["data"]["response"]["status"] == 200'
 
     log "Verify target-local traffic replay help exposes --patch through remote exec"
     replay_help_output="$TMPDIR/target_replay_help_via_remote_exec.txt"
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --env "$target_data_dir_env" \
         -- "$BIFROST_BIN" traffic replay --help >"$replay_help_output"
     grep -q -- "--patch <PATCH>" "$replay_help_output"
 
@@ -248,7 +249,7 @@ PY
     capture_output="$TMPDIR/target_capture_wait_via_remote_exec.json"
     capture_stderr="$TMPDIR/target_capture_wait_via_remote_exec.err"
     set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --env "$target_data_dir_env" \
         --timeout-ms 6000 \
         -- "$BIFROST_BIN" --port "$ADMIN_PORT" capture wait --host skill-remote-never.invalid --timeout 1s --format json \
         >"$capture_output" 2>"$capture_stderr"

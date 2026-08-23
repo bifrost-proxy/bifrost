@@ -139,19 +139,22 @@ async fn start_refuses_to_take_over_bifrost_from_another_data_directory() {
         "foreign runtime must not be adopted"
     );
 
-    let restart = run_bifrost(
-        caller_data_dir.path(),
-        &["-p".to_string(), port.to_string(), "restart".to_string()],
-    );
-    assert!(
-        !restart.status.success(),
-        "restart must reject a foreign runtime"
-    );
-    let restart_error = String::from_utf8_lossy(&restart.stderr);
-    assert!(
-        restart_error.contains("different data directory"),
-        "unexpected restart error: {restart_error}"
-    );
+    #[cfg(not(windows))]
+    {
+        let restart = run_bifrost(
+            caller_data_dir.path(),
+            &["-p".to_string(), port.to_string(), "restart".to_string()],
+        );
+        assert!(
+            !restart.status.success(),
+            "restart must reject a foreign runtime"
+        );
+        let restart_error = String::from_utf8_lossy(&restart.stderr);
+        assert!(
+            restart_error.contains("different data directory"),
+            "unexpected restart error: {restart_error}"
+        );
+    }
 
     std::fs::write(
         caller_data_dir.path().join("runtime.json"),
@@ -193,7 +196,9 @@ fn stop_removes_a_stale_pid_marker_without_touching_a_live_service() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve free port");
     let port = listener.local_addr().expect("free port address").port();
     drop(listener);
-    let mut exited = Command::new("/usr/bin/true")
+    let mut exited = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("__bifrost_short_lived_process__")
         .spawn()
         .expect("spawn short-lived process");
     let stale_pid = exited.id();
