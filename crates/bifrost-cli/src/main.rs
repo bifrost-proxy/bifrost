@@ -360,7 +360,7 @@ fn run_cli_main() {
             log_level,
             force,
         }) => run_restart(RestartOptions {
-            port,
+            port: port.or((cli.port != 9900).then_some(cli.port)),
             host,
             log_level,
             force,
