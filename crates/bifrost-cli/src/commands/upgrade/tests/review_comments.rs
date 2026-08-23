@@ -251,10 +251,14 @@ fn failed_companion_uses_production_macos_relaunch_command() {
 #[cfg(unix)]
 #[test]
 fn cli_restart_stops_live_process_and_strips_detached_marker() {
+    use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
 
     let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     const CHILD_ENV: &str = "BIFROST_TEST_CLI_RESTART_CHILD";
+    const SERVER_ENV: &str = "BIFROST_TEST_CLI_RESTART_SERVER";
+    const PORT_ENV: &str = "BIFROST_TEST_CLI_RESTART_PORT";
+    const READY_ENV: &str = "BIFROST_TEST_CLI_RESTART_READY";
     const TEST_NAME: &str = "commands::upgrade::tests::review_comments::cli_restart_stops_live_process_and_strips_detached_marker";
     if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
         let status = Command::new(std::env::current_exe().expect("current test executable"))
@@ -267,6 +271,41 @@ fn cli_restart_stops_live_process_and_strips_detached_marker() {
         return;
     }
 
+    if std::env::var(SERVER_ENV).ok().as_deref() == Some("1") {
+        let port = std::env::var(PORT_ENV)
+            .expect("restart server port")
+            .parse::<u16>()
+            .expect("valid restart server port");
+        let ready = std::path::PathBuf::from(
+            std::env::var_os(READY_ENV).expect("restart server ready marker"),
+        );
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port))
+            .expect("bind temporary Bifrost Admin listener");
+        std::fs::write(&ready, b"ready").expect("write restart server ready marker");
+
+        let (mut stream, _) = listener.accept().expect("accept runtime overview request");
+        let mut request = [0_u8; 2048];
+        let read = stream
+            .read(&mut request)
+            .expect("read runtime overview request");
+        assert!(String::from_utf8_lossy(&request[..read])
+            .starts_with("GET /_bifrost/api/system/overview "));
+        let fingerprint = bifrost_storage::data_dir_fingerprint();
+        let pid = std::process::id();
+        let body = format!(
+            r#"{{"server":{{"port":{port}}},"system":{{"pid":{pid},"uptime_secs":1,"version":"0.0.test","data_dir_fingerprint":"{fingerprint}"}}}}"#
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write runtime overview response");
+        std::thread::sleep(Duration::from_secs(30));
+        return;
+    }
+
     let temp = tempfile::tempdir().expect("tempdir");
     std::env::set_var("BIFROST_DATA_DIR", temp.path());
     std::env::set_var(crate::commands::start::DETACHED_DAEMON_CHILD_ENV, "1");
@@ -275,10 +314,23 @@ fn cli_restart_stops_live_process_and_strips_detached_marker() {
     let port = listener.local_addr().expect("restart port").port();
     drop(listener);
 
-    let mut proxy = Command::new("sleep")
-        .arg("30")
+    let ready = temp.path().join("restart-server-ready");
+    let mut proxy = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(CHILD_ENV, "1")
+        .env(SERVER_ENV, "1")
+        .env(PORT_ENV, port.to_string())
+        .env(READY_ENV, &ready)
+        .env("BIFROST_DATA_DIR", temp.path())
         .spawn()
-        .expect("spawn temporary proxy process");
+        .expect("spawn temporary Bifrost Admin process");
+    for _ in 0..100 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready.exists(), "temporary Bifrost Admin process is ready");
     let runtime = RuntimeInfo::new(
         proxy.id(),
         port,

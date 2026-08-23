@@ -1,5 +1,7 @@
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::get_bifrost_dir;
@@ -77,6 +79,8 @@ struct AdminRuntimeSystem {
     pid: u32,
     uptime_secs: u64,
     version: String,
+    #[serde(default)]
+    data_dir_fingerprint: Option<String>,
 }
 
 impl RuntimeInfo {
@@ -179,6 +183,28 @@ pub fn get_runtime_file() -> bifrost_core::Result<PathBuf> {
     Ok(get_bifrost_dir()?.join("runtime.json"))
 }
 
+fn with_runtime_marker_lock<T>(
+    operation: impl FnOnce() -> bifrost_core::Result<T>,
+) -> bifrost_core::Result<T> {
+    let lock_path = get_bifrost_dir()?.join("runtime.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    lock.lock_exclusive()?;
+    let result = operation();
+    let unlock_result = FileExt::unlock(&lock);
+    result.and_then(|value| {
+        unlock_result?;
+        Ok(value)
+    })
+}
+
 pub fn read_pid() -> Option<u32> {
     if let Some(info) = read_runtime_info() {
         return Some(info.pid);
@@ -203,11 +229,15 @@ fn runtime_info_from_admin_overview(
     requested_port: u16,
     overview: AdminRuntimeOverview,
     listener_pid: Option<u32>,
+    expected_data_dir_fingerprint: Option<&str>,
 ) -> Option<RuntimeInfo> {
     if overview.server.port != requested_port
         || overview.system.pid == 0
         || overview.system.version.trim().is_empty()
         || listener_pid.is_some_and(|pid| pid != overview.system.pid)
+        || expected_data_dir_fingerprint.is_some_and(|expected| {
+            overview.system.data_dir_fingerprint.as_deref() != Some(expected)
+        })
     {
         return None;
     }
@@ -235,6 +265,27 @@ fn runtime_info_from_admin_overview(
     })
 }
 
+fn preserve_recorded_runtime_metadata(
+    mut discovered: RuntimeInfo,
+    recorded: Option<&RuntimeInfo>,
+) -> RuntimeInfo {
+    let Some(recorded) = recorded
+        .filter(|recorded| recorded.port == discovered.port && recorded.pid == discovered.pid)
+    else {
+        return discovered;
+    };
+
+    discovered.socks5_port = recorded.socks5_port;
+    discovered.host = recorded.host.clone().or(discovered.host);
+    discovered.start_mode = recorded.start_mode;
+    discovered.restartable_runtime = recorded.restartable_runtime;
+    discovered.binary_path = recorded.binary_path.clone();
+    discovered.system_proxy_enabled = recorded.system_proxy_enabled;
+    discovered.system_proxy_bypass = recorded.system_proxy_bypass.clone();
+    discovered.health_port = recorded.health_port;
+    discovered
+}
+
 /// Discover a live Bifrost listener when local runtime metadata is missing or
 /// stale.
 ///
@@ -245,7 +296,7 @@ fn runtime_info_from_admin_overview(
 /// the service process because of OS permissions or PID namespaces. This prevents
 /// `start --yes` from treating an already-running Bifrost as an arbitrary port
 /// owner and terminating it.
-pub fn discover_bifrost_runtime(port: u16) -> Option<RuntimeInfo> {
+fn probe_bifrost_runtime(port: u16) -> Option<(RuntimeInfo, Option<String>)> {
     let url = format!("http://127.0.0.1:{port}/_bifrost/api/system/overview");
     let response = bifrost_core::direct_ureq_agent_builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -254,11 +305,68 @@ pub fn discover_bifrost_runtime(port: u16) -> Option<RuntimeInfo> {
         .call()
         .ok()?;
     let overview = response.into_json::<AdminRuntimeOverview>().ok()?;
+    let data_dir_fingerprint = overview.system.data_dir_fingerprint.clone();
     let listener_pid = find_process_on_port(port).map(|process| process.pid);
-    runtime_info_from_admin_overview(port, overview, listener_pid)
+    let runtime = runtime_info_from_admin_overview(port, overview, listener_pid, None)?;
+    Some((runtime, data_dir_fingerprint))
 }
 
-pub fn write_pid(pid: u32) -> bifrost_core::Result<()> {
+/// Discover a live Bifrost listener owned by the active data directory.
+///
+/// Missing identity metadata is rejected. This is intentionally stricter than
+/// merely proving that the port speaks the Bifrost Admin protocol: lifecycle
+/// commands must never stop or adopt an instance from another profile.
+pub fn discover_bifrost_runtime(port: u16) -> Option<RuntimeInfo> {
+    let expected = bifrost_storage::data_dir_fingerprint();
+    let (runtime, observed) = probe_bifrost_runtime(port)?;
+    (observed.as_deref() == Some(expected.as_str())).then_some(runtime)
+}
+
+/// Observe any Bifrost listener without granting lifecycle ownership.
+///
+/// This is only suitable for detecting that a conflicting port belongs to a
+/// Bifrost instance. Callers must not write markers or stop the returned PID.
+pub fn discover_any_bifrost_runtime(port: u16) -> Option<RuntimeInfo> {
+    probe_bifrost_runtime(port).map(|(runtime, _)| runtime)
+}
+
+/// Recover lifecycle metadata from a live Bifrost listener when the marker
+/// files are missing or stale. A healthy recorded runtime remains
+/// authoritative; otherwise the requested listener must pass the same
+/// fail-closed Admin/PID identity checks used by `status` and `start`.
+pub fn recover_bifrost_runtime(port: u16) -> Option<RuntimeInfo> {
+    let recorded = read_runtime_info();
+    if let Some(recorded) = recorded.as_ref() {
+        if inspect_process_identity(recorded.pid, recorded.started_at_ms)
+            == ProcessIdentityStatus::Alive
+        {
+            if let Some((observed, observed_fingerprint)) = probe_bifrost_runtime(recorded.port) {
+                let expected_fingerprint = bifrost_storage::data_dir_fingerprint();
+                let identity_matches = observed_fingerprint
+                    .as_deref()
+                    .is_none_or(|value| value == expected_fingerprint);
+                if observed.pid == recorded.pid && identity_matches {
+                    return Some(recorded.clone());
+                }
+            }
+        }
+    }
+
+    let discovered =
+        preserve_recorded_runtime_metadata(discover_bifrost_runtime(port)?, recorded.as_ref());
+    if let Err(error) = write_runtime_info(&discovered) {
+        tracing::warn!(
+            target: "bifrost_cli::process",
+            pid = discovered.pid,
+            port = discovered.port,
+            error = %error,
+            "discovered live Bifrost runtime but failed to repair lifecycle markers"
+        );
+    }
+    Some(discovered)
+}
+
+fn write_pid_unlocked(pid: u32) -> bifrost_core::Result<()> {
     let pid_file = get_pid_file()?;
     if let Some(parent) = pid_file.parent() {
         std::fs::create_dir_all(parent)?;
@@ -268,13 +376,15 @@ pub fn write_pid(pid: u32) -> bifrost_core::Result<()> {
 }
 
 pub fn write_runtime_info(info: &RuntimeInfo) -> bifrost_core::Result<()> {
-    let runtime_file = get_runtime_file()?;
-    if let Some(parent) = runtime_file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(info).map_err(std::io::Error::other)?;
-    std::fs::write(&runtime_file, json)?;
-    write_pid(info.pid)?;
+    with_runtime_marker_lock(|| {
+        let runtime_file = get_runtime_file()?;
+        if let Some(parent) = runtime_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(info).map_err(std::io::Error::other)?;
+        std::fs::write(&runtime_file, json)?;
+        write_pid_unlocked(info.pid)
+    })?;
     persist_runtime_lifecycle_diagnostics(info);
     Ok(())
 }
@@ -320,16 +430,40 @@ fn persist_runtime_lifecycle_diagnostics(info: &RuntimeInfo) {
     }
 }
 
-pub fn remove_pid() -> bifrost_core::Result<()> {
-    let pid_file = get_pid_file()?;
-    if pid_file.exists() {
-        std::fs::remove_file(&pid_file)?;
+pub fn remove_pid(expected_pid: u32) -> bifrost_core::Result<bool> {
+    with_runtime_marker_lock(|| {
+        let pid_file = get_pid_file()?;
+        let runtime_file = get_runtime_file()?;
+
+        remove_runtime_markers_at(&pid_file, &runtime_file, expected_pid)
+    })
+}
+
+fn remove_runtime_markers_at(
+    pid_file: &std::path::Path,
+    runtime_file: &std::path::Path,
+    expected_pid: u32,
+) -> bifrost_core::Result<bool> {
+    let pid_marker_matches = std::fs::read_to_string(pid_file)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .is_some_and(|pid| pid == expected_pid);
+    let runtime_marker_matches = std::fs::read_to_string(runtime_file)
+        .ok()
+        .and_then(|value| serde_json::from_str::<RuntimeInfo>(&value).ok())
+        .is_some_and(|runtime| runtime.pid == expected_pid);
+
+    if !pid_marker_matches && !runtime_marker_matches {
+        return Ok(false);
     }
-    let runtime_file = get_runtime_file()?;
-    if runtime_file.exists() {
-        std::fs::remove_file(&runtime_file)?;
+
+    if pid_marker_matches && pid_file.exists() {
+        std::fs::remove_file(pid_file)?;
     }
-    Ok(())
+    if runtime_marker_matches && runtime_file.exists() {
+        std::fs::remove_file(runtime_file)?;
+    }
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -804,17 +938,174 @@ mod tests {
                 pid: current_pid,
                 uptime_secs: 12,
                 version: "0.0.test".to_string(),
+                data_dir_fingerprint: Some("same-data-dir".to_string()),
             },
         };
 
-        let runtime = runtime_info_from_admin_overview(18888, overview, Some(current_pid))
-            .expect("matching Bifrost overview should be accepted");
+        let runtime = runtime_info_from_admin_overview(
+            18888,
+            overview,
+            Some(current_pid),
+            Some("same-data-dir"),
+        )
+        .expect("matching Bifrost overview should be accepted");
 
         assert_eq!(runtime.pid, current_pid);
         assert_eq!(runtime.port, 18888);
         assert_eq!(runtime.host.as_deref(), Some("127.0.0.1"));
         assert_eq!(runtime.start_mode, RuntimeStartMode::Unknown);
         assert!(!runtime.restartable_runtime);
+    }
+
+    #[test]
+    fn recovered_runtime_preserves_matching_process_lifecycle_metadata() {
+        let recorded = RuntimeInfo {
+            pid: 42,
+            port: 18888,
+            socks5_port: Some(18889),
+            host: Some("0.0.0.0".to_string()),
+            started_at_ms: Some(100),
+            start_mode: RuntimeStartMode::Desktop,
+            restartable_runtime: false,
+            binary_path: Some(PathBuf::from("/Applications/Bifrost.app/bifrost")),
+            system_proxy_enabled: Some(true),
+            system_proxy_bypass: Some("localhost".to_string()),
+            health_port: Some(18890),
+        };
+        let discovered = RuntimeInfo {
+            pid: 42,
+            port: 18888,
+            socks5_port: None,
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: Some(200),
+            start_mode: RuntimeStartMode::Unknown,
+            restartable_runtime: false,
+            binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
+            health_port: None,
+        };
+
+        let recovered = preserve_recorded_runtime_metadata(discovered, Some(&recorded));
+
+        assert_eq!(recovered.pid, 42);
+        assert_eq!(recovered.started_at_ms, Some(200));
+        assert_eq!(recovered.start_mode, RuntimeStartMode::Desktop);
+        assert_eq!(recovered.host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(recovered.socks5_port, Some(18889));
+        assert_eq!(recovered.health_port, Some(18890));
+        assert_eq!(recovered.system_proxy_enabled, Some(true));
+    }
+
+    #[test]
+    fn recovered_runtime_does_not_copy_metadata_from_another_port() {
+        let recorded = RuntimeInfo::new(
+            41,
+            18889,
+            None,
+            Some("0.0.0.0".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+        let discovered = RuntimeInfo::new(
+            42,
+            18888,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Unknown,
+        );
+
+        let recovered = preserve_recorded_runtime_metadata(discovered, Some(&recorded));
+
+        assert_eq!(recovered.pid, 42);
+        assert_eq!(recovered.start_mode, RuntimeStartMode::Unknown);
+        assert_eq!(recovered.host.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn recovered_runtime_does_not_copy_metadata_from_replaced_process() {
+        let recorded = RuntimeInfo::new(
+            41,
+            18888,
+            None,
+            Some("0.0.0.0".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+        let discovered = RuntimeInfo::new(
+            42,
+            18888,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Unknown,
+        );
+
+        let recovered = preserve_recorded_runtime_metadata(discovered, Some(&recorded));
+
+        assert_eq!(recovered.pid, 42);
+        assert_eq!(recovered.start_mode, RuntimeStartMode::Unknown);
+        assert_eq!(recovered.host.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn marker_cleanup_never_removes_another_runtime_owner() {
+        let temp = tempfile::tempdir().expect("temporary marker directory");
+        let pid_file = temp.path().join("bifrost.pid");
+        let runtime_file = temp.path().join("runtime.json");
+        let runtime = RuntimeInfo::new(
+            222,
+            18888,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        );
+        std::fs::write(&pid_file, "222").expect("write pid marker");
+        std::fs::write(
+            &runtime_file,
+            serde_json::to_vec(&runtime).expect("serialize runtime marker"),
+        )
+        .expect("write runtime marker");
+
+        assert!(!remove_runtime_markers_at(&pid_file, &runtime_file, 111)
+            .expect("mismatched cleanup succeeds without mutation"));
+        assert!(pid_file.exists());
+        assert!(runtime_file.exists());
+
+        assert!(remove_runtime_markers_at(&pid_file, &runtime_file, 222)
+            .expect("matching cleanup succeeds"));
+        assert!(!pid_file.exists());
+        assert!(!runtime_file.exists());
+    }
+
+    #[test]
+    fn marker_cleanup_removes_only_the_matching_marker_during_handoff() {
+        let temp = tempfile::tempdir().expect("temporary marker directory");
+        let pid_file = temp.path().join("bifrost.pid");
+        let runtime_file = temp.path().join("runtime.json");
+        let replacement = RuntimeInfo::new(
+            222,
+            18888,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        );
+        std::fs::write(&pid_file, "111").expect("write stale pid marker");
+        std::fs::write(
+            &runtime_file,
+            serde_json::to_vec(&replacement).expect("serialize replacement runtime marker"),
+        )
+        .expect("write replacement runtime marker");
+
+        assert!(remove_runtime_markers_at(&pid_file, &runtime_file, 111)
+            .expect("stale owner cleanup succeeds"));
+        assert!(!pid_file.exists());
+        assert!(runtime_file.exists());
+        assert_eq!(
+            serde_json::from_slice::<RuntimeInfo>(
+                &std::fs::read(&runtime_file).expect("read replacement runtime marker")
+            )
+            .expect("parse replacement runtime marker")
+            .pid,
+            222
+        );
     }
 
     #[test]
@@ -826,13 +1117,15 @@ mod tests {
                 pid: current_pid,
                 uptime_secs: 12,
                 version: "0.0.test".to_string(),
+                data_dir_fingerprint: Some("same-data-dir".to_string()),
             },
         };
 
         assert!(runtime_info_from_admin_overview(
             18888,
             overview,
-            Some(current_pid.saturating_add(1))
+            Some(current_pid.saturating_add(1)),
+            Some("same-data-dir")
         )
         .is_none());
     }
@@ -846,9 +1139,13 @@ mod tests {
                 pid: current_pid,
                 uptime_secs: 12,
                 version: "0.0.test".to_string(),
+                data_dir_fingerprint: Some("same-data-dir".to_string()),
             },
         };
-        assert!(runtime_info_from_admin_overview(18888, wrong_port, None).is_none());
+        assert!(
+            runtime_info_from_admin_overview(18888, wrong_port, None, Some("same-data-dir"))
+                .is_none()
+        );
 
         let empty_version = AdminRuntimeOverview {
             server: AdminRuntimeServer { port: 18888 },
@@ -856,9 +1153,16 @@ mod tests {
                 pid: current_pid,
                 uptime_secs: 12,
                 version: " ".to_string(),
+                data_dir_fingerprint: Some("same-data-dir".to_string()),
             },
         };
-        assert!(runtime_info_from_admin_overview(18888, empty_version, None).is_none());
+        assert!(runtime_info_from_admin_overview(
+            18888,
+            empty_version,
+            None,
+            Some("same-data-dir")
+        )
+        .is_none());
 
         let zero_pid = AdminRuntimeOverview {
             server: AdminRuntimeServer { port: 18888 },
@@ -866,9 +1170,26 @@ mod tests {
                 pid: 0,
                 uptime_secs: 12,
                 version: "0.0.test".to_string(),
+                data_dir_fingerprint: Some("same-data-dir".to_string()),
             },
         };
-        assert!(runtime_info_from_admin_overview(18888, zero_pid, None).is_none());
+        assert!(
+            runtime_info_from_admin_overview(18888, zero_pid, None, Some("same-data-dir"))
+                .is_none()
+        );
+
+        let foreign = AdminRuntimeOverview {
+            server: AdminRuntimeServer { port: 18888 },
+            system: AdminRuntimeSystem {
+                pid: current_pid,
+                uptime_secs: 12,
+                version: "0.0.test".to_string(),
+                data_dir_fingerprint: Some("foreign-data-dir".to_string()),
+            },
+        };
+        assert!(
+            runtime_info_from_admin_overview(18888, foreign, None, Some("same-data-dir")).is_none()
+        );
     }
 
     #[test]
@@ -878,6 +1199,7 @@ mod tests {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let pid = std::process::id();
+        let data_dir_fingerprint = bifrost_storage::data_dir_fingerprint();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept overview request");
             let mut request = [0_u8; 2048];
@@ -886,7 +1208,7 @@ mod tests {
             assert!(request.starts_with("GET /_bifrost/api/system/overview "));
 
             let body = format!(
-                r#"{{"server":{{"port":{port}}},"system":{{"pid":{pid},"uptime_secs":12,"version":"0.0.test"}}}}"#
+                r#"{{"server":{{"port":{port}}},"system":{{"pid":{pid},"uptime_secs":12,"version":"0.0.test","data_dir_fingerprint":"{data_dir_fingerprint}"}}}}"#
             );
             write!(
                 stream,
@@ -903,6 +1225,57 @@ mod tests {
         assert_eq!(runtime.pid, pid);
         assert_eq!(runtime.port, port);
         assert_eq!(runtime.host.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn recover_bifrost_runtime_repairs_missing_markers() {
+        const MARKER: &str = "BIFROST_RUNTIME_RECOVERY_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let temp = tempfile::tempdir().expect("temporary Bifrost data directory");
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .arg("--exact")
+            .arg("process::tests::recover_bifrost_runtime_repairs_missing_markers")
+            .arg("--nocapture")
+            .env(MARKER, "1")
+            .env("BIFROST_DATA_DIR", temp.path())
+            .status()
+            .expect("run isolated runtime recovery test");
+            assert!(status.success());
+            return;
+        }
+
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pid = std::process::id();
+        let data_dir_fingerprint = bifrost_storage::data_dir_fingerprint();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept recovery request");
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).expect("read recovery request");
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /_bifrost/api/system/overview "));
+            let body = format!(
+                r#"{{"server":{{"port":{port}}},"system":{{"pid":{pid},"uptime_secs":1,"version":"0.0.test","data_dir_fingerprint":"{data_dir_fingerprint}"}}}}"#
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write recovery response");
+        });
+
+        let recovered = recover_bifrost_runtime(port).expect("recover live runtime");
+        server.join().expect("recovery server");
+
+        assert_eq!(recovered.pid, pid);
+        assert_eq!(read_pid(), Some(pid));
+        assert_eq!(read_runtime_info().map(|runtime| runtime.port), Some(port));
     }
 
     #[test]

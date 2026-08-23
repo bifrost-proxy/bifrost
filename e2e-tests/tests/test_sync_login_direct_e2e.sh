@@ -1,6 +1,8 @@
 #!/bin/bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
+export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
 
 set -uo pipefail
 
@@ -229,10 +231,30 @@ log "Login with token only should use built-in default provider URL on fresh def
 admin_cleanup_bifrost
 export ADMIN_PORT="$(pick_free_port)"
 export BIFROST_DATA_DIR="${TEST_ROOT}/bifrost-default-data"
+mkdir -p "$BIFROST_DATA_DIR"
+printf '%s\n' \
+    '{"provider_sync":{"bytedance_internal":{"last_error":"stale login error"}},"deleted_rules":{},"basic_configs":{}}' \
+    >"$BIFROST_DATA_DIR/sync-state.json"
 admin_start_bifrost || exit 1
 LOGIN_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token ci-token-default 2>&1)"
 assert_body_contains "Login successful" "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should save token" || exit 1
 DEFAULT_STATUS="$(admin_get "/api/sync/status")"
 assert_body_contains "\"remote_base_url\":\"${DEFAULT_REMOTE_BASE_URL}\"" "$DEFAULT_STATUS" "CLI token-only login should keep built-in default URL" || exit 1
+if jq -e '.provider_sync.bytedance_internal.last_error == null' \
+    "$BIFROST_DATA_DIR/sync-state.json" >/dev/null; then
+    _log_pass "successful login clears the provider's persisted stale error"
+else
+    _log_fail \
+        "successful login clears the provider's persisted stale error" \
+        "null" \
+        "$(jq -r '.provider_sync.bytedance_internal.last_error' "$BIFROST_DATA_DIR/sync-state.json")"
+    exit 1
+fi
+if [[ "$DEFAULT_STATUS" == *"stale login error"* ]]; then
+    _log_fail "successful login response must not expose the stale error" "stale error absent" "$DEFAULT_STATUS"
+    exit 1
+else
+    _log_pass "successful login response no longer exposes the stale error"
+fi
 
 log "PASS"

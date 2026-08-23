@@ -1,7 +1,9 @@
 use bifrost_storage::set_data_dir;
 
 use crate::config::get_bifrost_dir;
-use crate::process::{is_process_running, read_pid, read_runtime_info, remove_pid};
+use crate::process::{
+    is_process_running, read_pid, read_runtime_info, recover_bifrost_runtime, remove_pid,
+};
 
 pub(crate) const STOP_INVOKED_BY_TRAY_ENV: &str = "BIFROST_TRAY_INVOKED_STOP";
 pub(crate) const DESKTOP_AUTHORIZED_STOP_ENV: &str = "BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL";
@@ -202,17 +204,24 @@ fn should_reject_desktop_owned_runtime(
         )
 }
 
-pub fn run_stop() -> bifrost_core::Result<()> {
+pub fn run_stop_on_port(recovery_port: u16) -> bifrost_core::Result<()> {
     let desktop_restart_stop = std::env::var(DESKTOP_RESTART_STOP_ENV).ok();
     let desktop_authorized_stop = std::env::var(DESKTOP_AUTHORIZED_STOP_ENV).ok();
-    run_stop_with_system_proxy_mode(stop_system_proxy_mode_for_desktop_request(
-        desktop_restart_stop.as_deref(),
-        desktop_authorized_stop.as_deref(),
-    ))
+    run_stop_with_system_proxy_mode(
+        stop_system_proxy_mode_for_desktop_request(
+            desktop_restart_stop.as_deref(),
+            desktop_authorized_stop.as_deref(),
+        ),
+        recovery_port,
+    )
 }
 
 pub fn run_stop_for_restart() -> bifrost_core::Result<()> {
-    run_stop_with_system_proxy_mode(StopSystemProxyMode::PreserveForRestart)
+    run_stop_for_restart_on_port(9900)
+}
+
+pub fn run_stop_for_restart_on_port(recovery_port: u16) -> bifrost_core::Result<()> {
+    run_stop_with_system_proxy_mode(StopSystemProxyMode::PreserveForRestart, recovery_port)
 }
 
 fn stop_system_proxy_mode_for_desktop_request(
@@ -228,14 +237,28 @@ fn stop_system_proxy_mode_for_desktop_request(
 
 fn run_stop_with_system_proxy_mode(
     system_proxy_mode: StopSystemProxyMode,
+    recovery_port: u16,
 ) -> bifrost_core::Result<()> {
     let bifrost_dir = get_bifrost_dir()?;
     set_data_dir(bifrost_dir.clone());
+    let recovered_runtime = recover_bifrost_runtime(recovery_port);
     reject_live_desktop_owned_runtime()?;
 
-    let pid = read_pid().ok_or_else(|| {
-        bifrost_core::BifrostError::NotFound("No PID file found. Is the proxy running?".to_string())
-    })?;
+    let pid = if let Some(runtime) = recovered_runtime {
+        runtime.pid
+    } else if let Some(recorded_pid) = read_pid() {
+        if is_process_running(recorded_pid) {
+            return Err(bifrost_core::BifrostError::Config(format!(
+                "PID {} is still running, but Bifrost could not verify that it belongs to the active data directory. Refusing to stop it.",
+                recorded_pid
+            )));
+        }
+        recorded_pid
+    } else {
+        return Err(bifrost_core::BifrostError::NotFound(
+            "No PID file found. Is the proxy running?".to_string(),
+        ));
+    };
 
     // A confirmed crash still needs an explicit restart handoff marker. Without
     // it, the replacement process can interpret the abrupt exit as a terminal
@@ -250,7 +273,7 @@ fn run_stop_with_system_proxy_mode(
             let _ = cleanup_proxy_state(&bifrost_dir);
         }
         cleanup_tray_helper_after_cli_stop(&bifrost_dir);
-        remove_pid()?;
+        remove_pid(pid)?;
         println!("Bifrost proxy is not running (stale PID file removed).");
         return Ok(());
     }
@@ -303,7 +326,7 @@ fn run_stop_with_system_proxy_mode(
 
             if !is_process_running(pid) {
                 cleanup_tray_helper_after_cli_stop(&bifrost_dir);
-                remove_pid()?;
+                remove_pid(pid)?;
                 println!("Bifrost proxy stopped.");
                 return Ok(());
             }
@@ -315,7 +338,7 @@ fn run_stop_with_system_proxy_mode(
             }
         }
 
-        remove_pid()?;
+        remove_pid(pid)?;
         cleanup_tray_helper_after_cli_stop(&bifrost_dir);
         println!("Bifrost proxy stopped (forced).");
     }
@@ -338,7 +361,7 @@ fn run_stop_with_system_proxy_mode(
                 pid
             );
             cleanup_tray_helper_after_cli_stop(&bifrost_dir);
-            remove_pid()?;
+            remove_pid(pid)?;
         } else {
             let terminated = unsafe { TerminateProcess(handle, 1) };
             if terminated != 0 {
@@ -346,7 +369,7 @@ fn run_stop_with_system_proxy_mode(
                     WaitForSingleObject(handle, 5000);
                 }
                 cleanup_tray_helper_after_cli_stop(&bifrost_dir);
-                remove_pid()?;
+                remove_pid(pid)?;
                 println!("Bifrost proxy stopped.");
             } else {
                 eprintln!("Failed to terminate process (PID: {}).", pid);

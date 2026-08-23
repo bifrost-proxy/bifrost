@@ -68,6 +68,24 @@ pub(super) fn existing_backend_candidate_matches_runtime(
         })
 }
 
+pub(super) fn markerless_preferred_backend_is_reusable(
+    has_any_runtime_marker: bool,
+    candidate_port: u16,
+    preferred_port: u16,
+    identity: Option<&BackendSystemIdentity>,
+    expected_data_dir_fingerprint: &str,
+    healthy: bool,
+) -> bool {
+    !has_any_runtime_marker
+        && candidate_port == preferred_port
+        && healthy
+        && identity.is_some_and(|identity| {
+            identity.pid != 0
+                && !identity.version.trim().is_empty()
+                && identity.data_dir_fingerprint.as_deref() == Some(expected_data_dir_fingerprint)
+        })
+}
+
 pub(super) fn desktop_shutdown_backend_action_for_state(
     state: &BackendState,
 ) -> DesktopShutdownBackendAction {
@@ -94,27 +112,50 @@ pub(super) fn desktop_shutdown_backend_action_for_state(
 
 pub(super) fn find_existing_backend_port(data_dir: &Path, preferred_port: u16) -> Option<u16> {
     let runtime = read_desktop_runtime_marker(data_dir);
+    let has_any_runtime_marker = has_runtime_marker(data_dir);
+    let expected_data_dir_fingerprint = bifrost_storage::data_dir_fingerprint_for(data_dir);
     for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
         let port = preferred_port.saturating_add(offset);
         if port == 0 {
             continue;
         }
 
-        let Some(marker) = runtime.as_ref().filter(|marker| marker.port == port) else {
+        let marker_targets_port = runtime.as_ref().is_some_and(|marker| marker.port == port);
+        let markerless_preferred_candidate = !has_any_runtime_marker && port == preferred_port;
+        if !marker_targets_port && !markerless_preferred_candidate {
             continue;
-        };
+        }
+
         let identity = probe_backend_identity(port);
-        if existing_backend_candidate_matches_runtime(
-            Some(marker),
+        let healthy = probe_backend_health(port);
+        let marker_matches = runtime.as_ref().is_some_and(|marker| {
+            existing_backend_candidate_matches_runtime(
+                Some(marker),
+                port,
+                identity.as_ref(),
+                healthy,
+            )
+        });
+        let markerless_preferred = markerless_preferred_backend_is_reusable(
+            has_any_runtime_marker,
             port,
+            preferred_port,
             identity.as_ref(),
-            probe_backend_health(port),
-        ) {
+            &expected_data_dir_fingerprint,
+            healthy,
+        );
+        if marker_matches || markerless_preferred {
             append_desktop_bootstrap_log(
                 data_dir,
-                format!(
-                    "detected healthy backend candidate owned by the current data directory on port {port} before spawning"
-                ),
+                if marker_matches {
+                    format!(
+                        "detected healthy backend candidate owned by the current data directory on port {port} before spawning"
+                    )
+                } else {
+                    format!(
+                        "detected healthy Bifrost backend on preferred port {port} with missing lifecycle markers; reusing it without claiming ownership"
+                    )
+                },
             );
             return Some(port);
         }

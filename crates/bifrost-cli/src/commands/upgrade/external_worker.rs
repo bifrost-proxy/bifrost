@@ -3,7 +3,7 @@ use colored::Colorize;
 use std::time::Duration;
 
 use crate::config::get_bifrost_dir;
-use crate::process::{discover_bifrost_runtime, read_runtime_info, RuntimeInfo, RuntimeStartMode};
+use crate::process::{read_runtime_info, recover_bifrost_runtime, RuntimeInfo, RuntimeStartMode};
 
 const ADMIN_UPGRADE_REQUEST_TIMEOUT_SECS: u64 = 45;
 const DESKTOP_UPGRADE_ORIGIN_HEADER: &str = "x-bifrost-desktop-upgrade-origin";
@@ -22,7 +22,7 @@ pub(super) fn is_external_cli_worker() -> bool {
 /// Delegate out of the daemon-owned worker process tree before replacing Bifrost.
 pub(super) fn delegate_upgrade() -> Result<(), BifrostError> {
     let runtime = read_runtime_info().and_then(|runtime| {
-        let discovered = discover_bifrost_runtime(runtime.port)?;
+        let discovered = recover_bifrost_runtime(runtime.port)?;
         runtime_identity_matches(&runtime, &discovered).then_some(runtime)
     });
     let outcome = delegate_upgrade_with(runtime, request_admin_upgrade)?;

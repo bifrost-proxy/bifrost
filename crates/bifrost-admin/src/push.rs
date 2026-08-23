@@ -3303,9 +3303,12 @@ mod coverage_boost {
     use tokio::time::{sleep, timeout, Duration};
     // wiremock::MockServer is not available as a dev-dependency in this crate.
 
-    fn make_minimal_manager() -> PushManager {
-        let state = Arc::new(AdminState::new(0));
-        PushManager::new(state)
+    fn make_minimal_manager() -> (TempDir, PushManager) {
+        let temp_dir = TempDir::new().expect("create minimal push-manager data dir");
+        let rules_storage = bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules"))
+            .expect("create minimal push-manager rules storage");
+        let state = Arc::new(AdminState::new_for_test(0, rules_storage));
+        (temp_dir, PushManager::new(state))
     }
 
     #[test]
@@ -3332,7 +3335,7 @@ mod coverage_boost {
 
     #[test]
     fn build_values_data_none_when_no_values_storage() {
-        let manager = make_minimal_manager();
+        let (_temp_dir, manager) = make_minimal_manager();
         assert!(manager.build_values_data().is_none());
     }
 
@@ -3588,7 +3591,7 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn targeted_resource_snapshots_ignore_unsubscribed_client() {
-        let manager = make_minimal_manager();
+        let (_temp_dir, manager) = make_minimal_manager();
         let (client, mut rx) =
             manager.register_client("resource-unsubscribed".to_string(), Default::default());
 
@@ -3621,7 +3624,7 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn build_scripts_data_none_without_script_manager() {
-        let manager = make_minimal_manager();
+        let (_temp_dir, manager) = make_minimal_manager();
         assert!(manager.build_scripts_data().await.is_none());
     }
 
@@ -3800,7 +3803,7 @@ mod coverage_boost {
 
     #[test]
     fn broadcast_traffic_deleted_sends_message() {
-        let manager = make_minimal_manager();
+        let (_temp_dir, manager) = make_minimal_manager();
         let (client, mut rx) =
             PushClient::new("traffic-del".to_string(), ClientSubscription::default());
         let client = Arc::new(client);
@@ -3818,7 +3821,7 @@ mod coverage_boost {
 
     #[test]
     fn broadcast_replay_history_updated_sends_message() {
-        let manager = make_minimal_manager();
+        let (_temp_dir, manager) = make_minimal_manager();
         let (client, mut rx) =
             PushClient::new("history-del".to_string(), ClientSubscription::default());
         let client = Arc::new(client);
@@ -3840,7 +3843,7 @@ mod coverage_boost {
 
     #[test]
     fn broadcast_breakpoint_messages_send_to_clients() {
-        let manager = make_minimal_manager();
+        let (_temp_dir, manager) = make_minimal_manager();
         let (client, mut rx) = PushClient::new("bp".to_string(), ClientSubscription::default());
         let client = Arc::new(client);
         manager.clients.insert(client.id, client.clone());
@@ -4039,7 +4042,7 @@ mod coverage_boost {
     async fn subscribe_once_without_traffic_store_returns_none_immediately() {
         // Build an AdminState that has no traffic store, then ensure the call
         // does not block.
-        let manager = make_minimal_manager();
+        let (_temp_dir, manager) = make_minimal_manager();
         let outcome = timeout(
             Duration::from_secs(1),
             manager.subscribe_once(|_| true, Duration::from_secs(60)),

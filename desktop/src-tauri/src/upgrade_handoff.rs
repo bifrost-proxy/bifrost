@@ -105,6 +105,8 @@ pub(super) fn deferred_desktop_install_version_error(
 pub(super) struct BackendSystemIdentity {
     pub(super) version: String,
     pub(super) pid: u32,
+    #[serde(default)]
+    pub(super) data_dir_fingerprint: Option<String>,
 }
 
 pub(super) fn probe_backend_identity(port: u16) -> Option<BackendSystemIdentity> {
@@ -130,7 +132,16 @@ pub(super) fn external_cli_backend_matches_handoff(
     version_matches && (process_restarted || marker.target_version.is_some())
 }
 
+pub(super) fn backend_identity_matches_data_dir(
+    identity: &BackendSystemIdentity,
+    data_dir: &Path,
+) -> bool {
+    identity.data_dir_fingerprint.as_deref()
+        == Some(bifrost_storage::data_dir_fingerprint_for(data_dir).as_str())
+}
+
 pub(super) fn wait_for_external_cli_backend(
+    data_dir: &Path,
     marker: &DesktopUpgradeRelaunchMarker,
     timeout: Duration,
 ) -> bool {
@@ -138,7 +149,10 @@ pub(super) fn wait_for_external_cli_backend(
     loop {
         if probe_backend_identity(marker.proxy_port)
             .as_ref()
-            .is_some_and(|identity| external_cli_backend_matches_handoff(marker, identity))
+            .is_some_and(|identity| {
+                backend_identity_matches_data_dir(identity, data_dir)
+                    && external_cli_backend_matches_handoff(marker, identity)
+            })
         {
             return true;
         }
@@ -208,7 +222,7 @@ pub(super) fn resolve_external_cli_backend_handoff(
             marker.observed_external_core_pid, marker.proxy_port, marker.target_version
         ),
     );
-    if wait_for_external_cli_backend(marker, timeout) {
+    if wait_for_external_cli_backend(data_dir, marker, timeout) {
         append_desktop_bootstrap_log(
             data_dir,
             format!(

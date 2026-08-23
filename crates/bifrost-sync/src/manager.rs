@@ -315,6 +315,12 @@ fn record_provider_sync_error(state: &mut SyncStateFile, provider_id: &str, erro
     meta.last_error = Some(error);
 }
 
+fn clear_provider_sync_error(state: &mut SyncStateFile, provider_id: &str) {
+    if let Some(meta) = state.provider_sync.get_mut(provider_id) {
+        meta.last_error = None;
+    }
+}
+
 fn sync_action_has_changes(action: Option<SyncAction>) -> bool {
     matches!(
         action,
@@ -389,6 +395,22 @@ fn build_provider_statuses(
     let github_gist_auth_error = github_gist_last_error
         .as_deref()
         .is_some_and(is_github_gist_auth_error);
+    let bytedance_last_error = (bytedance_selected
+        && !runtime
+            .last_error
+            .as_deref()
+            .is_some_and(is_github_gist_error))
+    .then(|| runtime.last_error.clone())
+    .flatten()
+    .or_else(|| bytedance_meta.and_then(|meta| meta.last_error.clone()));
+    let cloud_last_error = (cloud_selected
+        && !runtime
+            .last_error
+            .as_deref()
+            .is_some_and(is_github_gist_error))
+    .then(|| runtime.last_error.clone())
+    .flatten()
+    .or_else(|| cloud_meta.and_then(|meta| meta.last_error.clone()));
     let bytedance_connected =
         bytedance_session.is_some() || (bytedance_selected && legacy_current_connected);
     let cloud_connected = cloud_session.is_some() || (cloud_selected && legacy_current_connected);
@@ -409,19 +431,14 @@ fn build_provider_statuses(
                 || (bytedance_selected && provider_sessions.is_empty() && runtime.authorized),
             reason: if bytedance_selected {
                 runtime.reason.clone()
+            } else if bytedance_session.is_some() && bytedance_last_error.is_some() {
+                SyncReason::Error
             } else if bytedance_session.is_some() {
                 SyncReason::Ready
             } else {
                 SyncReason::Unauthorized
             },
-            last_error: (bytedance_selected
-                && !runtime
-                    .last_error
-                    .as_deref()
-                    .is_some_and(is_github_gist_error))
-            .then(|| runtime.last_error.clone())
-            .flatten()
-            .or_else(|| bytedance_meta.and_then(|meta| meta.last_error.clone())),
+            last_error: bytedance_last_error,
             last_sync_at: bytedance_meta.and_then(|meta| meta.last_sync_at.clone()),
             last_sync_action: bytedance_meta.and_then(|meta| meta.last_sync_action),
             last_changed_sync_at: bytedance_meta.and_then(|meta| meta.last_changed_sync_at.clone()),
@@ -456,19 +473,14 @@ fn build_provider_statuses(
                 || (cloud_selected && provider_sessions.is_empty() && runtime.authorized),
             reason: if cloud_selected {
                 runtime.reason.clone()
+            } else if cloud_session.is_some() && cloud_last_error.is_some() {
+                SyncReason::Error
             } else if cloud_session.is_some() {
                 SyncReason::Ready
             } else {
                 SyncReason::Unauthorized
             },
-            last_error: (cloud_selected
-                && !runtime
-                    .last_error
-                    .as_deref()
-                    .is_some_and(is_github_gist_error))
-            .then(|| runtime.last_error.clone())
-            .flatten()
-            .or_else(|| cloud_meta.and_then(|meta| meta.last_error.clone())),
+            last_error: cloud_last_error,
             last_sync_at: cloud_meta.and_then(|meta| meta.last_sync_at.clone()),
             last_sync_action: cloud_meta.and_then(|meta| meta.last_sync_action),
             last_changed_sync_at: cloud_meta.and_then(|meta| meta.last_changed_sync_at.clone()),
@@ -935,8 +947,16 @@ impl SyncManager {
                         user,
                     },
                 );
+                clear_provider_sync_error(&mut state, provider_id);
             }
             self.persist_state(&state)?;
+        }
+        {
+            let mut runtime = self.runtime.write().await;
+            runtime.last_error = None;
+            if runtime.authorized {
+                runtime.reason = SyncReason::Ready;
+            }
         }
         self.wake.notify_one();
         Ok(())
@@ -2795,7 +2815,13 @@ impl SyncManager {
                 } => {
                     let updated_remote = client
                         .update_env(config, token, &remote_env, &local_rule.content)
-                        .await?;
+                        .await
+                        .map_err(|error| {
+                            BifrostError::Network(format!(
+                                "failed to update remote rule '{}': {error}",
+                                local_rule.name
+                            ))
+                        })?;
                     let mut synced_rule = local_rule.clone();
                     synced_rule.mark_synced(
                         updated_remote.id.clone(),
@@ -2816,7 +2842,13 @@ impl SyncManager {
                             &local_rule.name,
                             &local_rule.content,
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| {
+                            BifrostError::Network(format!(
+                                "failed to create remote rule '{}': {error}",
+                                local_rule.name
+                            ))
+                        })?;
                     let mut synced_rule = local_rule.clone();
                     synced_rule.mark_synced(
                         created.id.clone(),
@@ -3652,6 +3684,79 @@ mod tests {
         assert_eq!(
             gist.check_interval_secs,
             Some(GITHUB_GIST_AUTO_SYNC_MIN_INTERVAL_SECS)
+        );
+    }
+
+    #[tokio::test]
+    async fn status_marks_connected_provider_sync_failure_as_error() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                "bifrost_cloud".to_string(),
+                SyncProviderSession {
+                    token: "cloud-token".to_string(),
+                    remote_base_url: "https://sync.example.test".to_string(),
+                    user: Some(test_user("cloud-user")),
+                },
+            );
+            record_provider_sync_error(
+                &mut state,
+                "bifrost_cloud",
+                "failed to create remote rule 'bad name'".to_string(),
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        let status = manager.status().await;
+        let cloud = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bifrost_cloud")
+            .expect("cloud provider");
+
+        assert!(cloud.connected);
+        assert!(cloud.authorized);
+        assert_eq!(cloud.reason, SyncReason::Error);
+        assert_eq!(
+            cloud.last_error.as_deref(),
+            Some("failed to create remote rule 'bad name'")
+        );
+
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                remote_base_url: Some("https://sync.example.test".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                "bytedance_internal".to_string(),
+                SyncProviderSession {
+                    token: "bytedance-token".to_string(),
+                    remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("bytedance-user")),
+                },
+            );
+            record_provider_sync_error(
+                &mut state,
+                "bytedance_internal",
+                "failed to update remote rule 'bad name'".to_string(),
+            );
+        }
+        let status = manager.status().await;
+        let bytedance = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bytedance_internal")
+            .expect("ByteDance provider");
+        assert_eq!(bytedance.reason, SyncReason::Error);
+        assert_eq!(
+            bytedance.last_error.as_deref(),
+            Some("failed to update remote rule 'bad name'")
         );
     }
 
@@ -4904,6 +5009,22 @@ mod tests {
             .unwrap();
         let manager = SyncManager::new(config_manager.clone(), 9900).unwrap();
 
+        {
+            let mut state = manager.state.lock();
+            record_provider_sync_error(
+                &mut state,
+                "bytedance_internal",
+                "stale login error".to_string(),
+            );
+            manager.persist_state(&state).unwrap();
+        }
+        {
+            let mut runtime = manager.runtime.write().await;
+            runtime.authorized = true;
+            runtime.reason = SyncReason::Error;
+            runtime.last_error = Some("stale login error".to_string());
+        }
+
         manager.save_token("login-token".to_string()).await.unwrap();
 
         let config = config_manager.config().await;
@@ -4911,6 +5032,13 @@ mod tests {
         assert!(config.sync.auto_sync);
         assert!(status.has_session);
         assert_eq!(manager.state.lock().token.as_deref(), Some("login-token"));
+        let provider = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bytedance_internal")
+            .expect("ByteDance provider");
+        assert!(provider.last_error.is_none());
+        assert_eq!(provider.reason, SyncReason::Ready);
     }
 
     #[tokio::test]
@@ -6418,6 +6546,107 @@ mod tests {
 
         let state = manager.state.lock();
         assert_eq!(state.last_sync_action, Some(SyncAction::NoChange));
+    }
+
+    #[tokio::test]
+    async fn sync_rules_create_error_identifies_the_local_rule() {
+        let server = MockServer::start().await;
+        let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+        let rules_storage = config_manager.rules_storage().await;
+        let invalid_name = "share/task - owner (production)";
+        rules_storage
+            .save(&RuleFile::new(
+                invalid_name,
+                "example.test host://127.0.0.1:3000",
+            ))
+            .unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "message": "ok",
+                "data": { "list": [] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "code": 400,
+                "message": "Validation error: Validation not on name failed",
+                "data": null
+            })))
+            .mount(&server)
+            .await;
+
+        let sync_config = config_manager.config().await.sync.clone();
+        let client = SyncHttpClient::new(&sync_config).unwrap();
+        let error = manager
+            .sync_rules(&client, &sync_config, "token", &test_user("user-1"))
+            .await
+            .expect_err("remote validation failure should fail sync");
+        let message = error.to_string();
+        assert!(message.contains("failed to create remote rule"));
+        assert!(message.contains(invalid_name));
+        assert!(message.contains("Validation not on name failed"));
+    }
+
+    #[tokio::test]
+    async fn sync_rules_update_error_identifies_the_local_rule() {
+        let server = MockServer::start().await;
+        let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+        let rules_storage = config_manager.rules_storage().await;
+        let invalid_name = "share/task - owner (production)";
+        let mut local_rule =
+            RuleFile::new(invalid_name, "changed.example.test host://127.0.0.1:3000");
+        local_rule.mark_synced(
+            "env-invalid",
+            "user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        local_rule.touch_local_change();
+        rules_storage.save(&local_rule).unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "message": "ok",
+                "data": {
+                    "list": [{
+                        "id": "env-invalid",
+                        "user_id": "user-1",
+                        "name": invalid_name,
+                        "rule": "old.example.test host://127.0.0.1:3000",
+                        "create_time": "2026-01-01T00:00:00Z",
+                        "update_time": "2026-01-01T00:00:00Z"
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/v4/env/env-invalid"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "code": 400,
+                "message": "Validation error: Validation not on name failed",
+                "data": null
+            })))
+            .mount(&server)
+            .await;
+
+        let sync_config = config_manager.config().await.sync.clone();
+        let client = SyncHttpClient::new(&sync_config).unwrap();
+        let error = manager
+            .sync_rules(&client, &sync_config, "token", &test_user("user-1"))
+            .await
+            .expect_err("remote validation failure should fail sync");
+        let message = error.to_string();
+        assert!(message.contains("failed to update remote rule"));
+        assert!(message.contains(invalid_name));
+        assert!(message.contains("Validation not on name failed"));
     }
 
     #[tokio::test]

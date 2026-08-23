@@ -1,8 +1,111 @@
+use super::super::markerless_preferred_backend_is_reusable;
 use super::*;
+
+fn spawn_one_shot_system_server(data_dir: &Path, pid: u32, version: &str) -> u16 {
+    spawn_system_server(data_dir, pid, version, 1)
+}
+
+fn spawn_system_server(data_dir: &Path, pid: u32, version: &str, request_count: usize) -> u16 {
+    spawn_system_server_on("127.0.0.1", data_dir, pid, version, request_count)
+}
+
+fn spawn_system_server_on(
+    host: &str,
+    data_dir: &Path,
+    pid: u32,
+    version: &str,
+    request_count: usize,
+) -> u16 {
+    let listener = TcpListener::bind((host, 0)).expect("bind system server");
+    let port = listener.local_addr().expect("system server addr").port();
+    let data_dir_fingerprint = bifrost_storage::data_dir_fingerprint_for(data_dir);
+    let body = format!(
+        r#"{{"version":"{version}","pid":{pid},"data_dir_fingerprint":"{data_dir_fingerprint}"}}"#
+    );
+    thread::spawn(move || {
+        for _ in 0..request_count {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+fn normal_startup_reuses_markerless_bifrost_only_on_the_preferred_port() {
+    let identity = BackendSystemIdentity {
+        version: "0.0.187".to_string(),
+        pid: 456,
+        data_dir_fingerprint: Some("same-data-dir".to_string()),
+    };
+
+    assert!(markerless_preferred_backend_is_reusable(
+        false,
+        19900,
+        19900,
+        Some(&identity),
+        "same-data-dir",
+        true,
+    ));
+    assert!(!markerless_preferred_backend_is_reusable(
+        true,
+        19900,
+        19900,
+        Some(&identity),
+        "same-data-dir",
+        true,
+    ));
+    assert!(!markerless_preferred_backend_is_reusable(
+        false,
+        19901,
+        19900,
+        Some(&identity),
+        "same-data-dir",
+        true,
+    ));
+    assert!(!markerless_preferred_backend_is_reusable(
+        false,
+        19900,
+        19900,
+        None,
+        "same-data-dir",
+        true,
+    ));
+    assert!(!markerless_preferred_backend_is_reusable(
+        false,
+        19900,
+        19900,
+        Some(&identity),
+        "same-data-dir",
+        false,
+    ));
+
+    let foreign_identity = BackendSystemIdentity {
+        data_dir_fingerprint: Some("foreign-data-dir".to_string()),
+        ..identity
+    };
+    assert!(!markerless_preferred_backend_is_reusable(
+        false,
+        19900,
+        19900,
+        Some(&foreign_identity),
+        "same-data-dir",
+        true,
+    ));
+}
 
 #[test]
 fn cli_owned_upgrade_relaunch_reuses_the_target_backend_even_when_pid_is_unchanged() {
-    let target_port = spawn_one_shot_system_server(456, "0.0.156");
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let target_port = spawn_one_shot_system_server(temp_dir.path(), 456, "0.0.156");
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::super::current_time_millis(),
@@ -16,7 +119,6 @@ fn cli_owned_upgrade_relaunch_reuses_the_target_backend_even_when_pid_is_unchang
         rollback: None,
     };
 
-    let temp_dir = tempfile::tempdir().expect("temp dir");
     let (child, port) = ensure_backend_running(
         Path::new("/must-not-launch-a-second-core"),
         temp_dir.path(),
@@ -49,15 +151,17 @@ fn cli_owned_upgrade_relaunch_reuses_the_target_backend_even_when_pid_is_unchang
         &BackendSystemIdentity {
             version: "0.0.156".to_string(),
             pid: 124,
+            data_dir_fingerprint: Some(bifrost_storage::data_dir_fingerprint_for(temp_dir.path(),)),
         }
     ));
 
-    let old_version_port = spawn_one_shot_system_server(457, "0.0.155");
+    let old_version_port = spawn_one_shot_system_server(temp_dir.path(), 457, "0.0.155");
     let old_version_marker = DesktopUpgradeRelaunchMarker {
         proxy_port: old_version_port,
         ..marker.clone()
     };
     assert!(!wait_for_external_cli_backend(
+        temp_dir.path(),
         &old_version_marker,
         Duration::ZERO
     ));
@@ -72,6 +176,9 @@ fn cli_owned_upgrade_relaunch_reuses_the_target_backend_even_when_pid_is_unchang
             &BackendSystemIdentity {
                 version: "0.0.156".to_string(),
                 pid: 124,
+                data_dir_fingerprint: Some(bifrost_storage::data_dir_fingerprint_for(
+                    temp_dir.path(),
+                )),
             }
         ),
         "legacy markers without a target version still require PID rotation"
@@ -135,7 +242,13 @@ fn failed_cli_owned_handoff_retries_without_another_thirty_second_wait() {
 #[test]
 fn cli_owned_upgrade_relaunch_takes_over_wrong_version_core_owned_by_same_data_dir() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let target_port = spawn_system_server_on(super::super::BACKEND_BIND_HOST, 456, "0.0.162", 2);
+    let target_port = spawn_system_server_on(
+        super::super::BACKEND_BIND_HOST,
+        temp_dir.path(),
+        456,
+        "0.0.162",
+        2,
+    );
     fs::write(
         temp_dir.path().join("runtime.json"),
         format!(r#"{{"pid":456,"port":{target_port},"runtime_start_mode":"daemon"}}"#),
@@ -174,7 +287,7 @@ fn healthy_target_backend_completes_and_clears_cli_upgrade_handoff() {
     use bifrost_core::upgrade_progress::{read_progress, UpgradePhase};
 
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let port = spawn_one_shot_system_server(456, "0.0.163");
+    let port = spawn_one_shot_system_server(temp_dir.path(), 456, "0.0.163");
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::super::current_time_millis(),
@@ -216,7 +329,7 @@ fn healthy_target_backend_completes_and_clears_cli_upgrade_handoff() {
 #[test]
 fn healthy_wrong_version_backend_does_not_bypass_cli_upgrade_handoff() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let port = spawn_one_shot_system_server(457, "0.0.162");
+    let port = spawn_one_shot_system_server(temp_dir.path(), 457, "0.0.162");
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::super::current_time_millis(),
@@ -250,7 +363,7 @@ fn healthy_target_backend_on_another_port_does_not_complete_cli_upgrade_handoff(
     use bifrost_core::upgrade_progress::{read_progress, UpgradePhase};
 
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let active_port = spawn_one_shot_system_server(456, "0.0.163");
+    let active_port = spawn_one_shot_system_server(temp_dir.path(), 456, "0.0.163");
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::super::current_time_millis(),

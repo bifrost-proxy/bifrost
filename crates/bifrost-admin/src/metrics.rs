@@ -598,6 +598,7 @@ pub fn start_metrics_collector_task(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
     pub version: String,
+    pub data_dir_fingerprint: String,
     pub device_name: String,
     pub os: String,
     pub arch: String,
@@ -624,6 +625,7 @@ impl SystemInfo {
         let storage = current_storage_info(std::env::current_dir().ok().as_deref());
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
+            data_dir_fingerprint: bifrost_storage::data_dir_fingerprint(),
             device_name: System::host_name().unwrap_or_else(|| "unknown".to_string()),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),

@@ -185,35 +185,6 @@ fn spawn_delayed_health_server(delay: Duration, status: u16) -> (u16, thread::Jo
     (port, handle)
 }
 
-fn spawn_one_shot_system_server(pid: u32, version: &str) -> u16 {
-    spawn_system_server(pid, version, 1)
-}
-
-fn spawn_system_server(pid: u32, version: &str, request_count: usize) -> u16 {
-    spawn_system_server_on("127.0.0.1", pid, version, request_count)
-}
-
-fn spawn_system_server_on(host: &str, pid: u32, version: &str, request_count: usize) -> u16 {
-    let listener = TcpListener::bind((host, 0)).expect("bind system server");
-    let port = listener.local_addr().expect("system server addr").port();
-    let body = format!(r#"{{"version":"{version}","pid":{pid}}}"#);
-    thread::spawn(move || {
-        for _ in 0..request_count {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
-            };
-            let mut buffer = [0_u8; 1024];
-            let _ = stream.read(&mut buffer);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            );
-            let _ = stream.write_all(response.as_bytes());
-        }
-    });
-    port
-}
-
 #[cfg(unix)]
 fn spawn_persistent_health_server(stop: Arc<AtomicBool>) -> (u16, thread::JoinHandle<()>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind health server");
@@ -1069,6 +1040,7 @@ fn desktop_shutdown_stops_only_a_backend_owned_by_the_desktop() {
     let identity = BackendSystemIdentity {
         version: "0.0.163".to_string(),
         pid: 456,
+        data_dir_fingerprint: Some("same-data-dir".to_string()),
     };
     assert!(runtime_marker_matches_active_backend(
         &runtime, 19900, &identity
@@ -1090,10 +1062,12 @@ fn normal_startup_reuses_only_the_current_data_directory_runtime() {
     let matching_identity = BackendSystemIdentity {
         version: "0.0.165".to_string(),
         pid: 456,
+        data_dir_fingerprint: Some("same-data-dir".to_string()),
     };
     let foreign_identity = BackendSystemIdentity {
         version: "0.0.165".to_string(),
         pid: 789,
+        data_dir_fingerprint: Some("same-data-dir".to_string()),
     };
 
     assert!(existing_backend_candidate_matches_runtime(

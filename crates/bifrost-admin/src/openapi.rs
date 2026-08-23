@@ -319,6 +319,7 @@ fn generate_components() -> serde_json::Value {
                     "rules_count": {"type": "integer"},
                     "traffic_count": {"type": "integer"},
                     "version": {"type": "string"},
+                    "data_dir_fingerprint": {"type": "string", "description": "Non-reversible identity of the active Bifrost data directory"},
                     "uptime_seconds": {"type": "integer"}
                 }
             },

@@ -62,8 +62,11 @@ function capabilityTags(provider: SyncProviderStatus) {
 }
 
 export function syncProviderStatusBadge(provider: SyncProviderStatus) {
-  if (provider.last_error || (provider.connected && !provider.authorized)) {
+  if (provider.connected && !provider.authorized) {
     return { color: "red", label: "Reconnect required" };
+  }
+  if (provider.last_error && provider.reason === "error") {
+    return { color: "red", label: "Sync error" };
   }
   if (provider.connected) {
     return { color: "green", label: "Connected" };
@@ -77,7 +80,15 @@ export function syncProviderStatusBadge(provider: SyncProviderStatus) {
   return { color: undefined, label: "Not connected" };
 }
 
-export function shouldShowSyncProviderOverviewAlert(providers: SyncProviderStatus[]) {
+export function syncProviderActionableError(provider: SyncProviderStatus) {
+  return provider.authorized && provider.reason === "ready"
+    ? null
+    : provider.last_error;
+}
+
+export function shouldShowSyncProviderOverviewAlert(
+  providers: SyncProviderStatus[],
+) {
   return !providers.some((provider) => provider.connected);
 }
 
@@ -201,7 +212,9 @@ export default function SyncTab({
     ? syncStatus.providers
     : fallbackProviders;
   const [firstRunOpen, setFirstRunOpen] = useState(false);
-  const [selectedProviderId, setSelectedProviderId] = useState(providers[0]?.id);
+  const [selectedProviderId, setSelectedProviderId] = useState(
+    providers[0]?.id,
+  );
   const bifrostCloudProvider = providers.find(
     (provider) => provider.id === "bifrost_cloud",
   );
@@ -212,7 +225,9 @@ export default function SyncTab({
   const [githubTokenModalOpen, setGithubTokenModalOpen] = useState(false);
   const [githubTokenDraft, setGithubTokenDraft] = useState("");
   const selectedProvider = useMemo(
-    () => providers.find((provider) => provider.id === selectedProviderId) || providers[0],
+    () =>
+      providers.find((provider) => provider.id === selectedProviderId) ||
+      providers[0],
     [providers, selectedProviderId],
   );
   const showOverviewAlert = shouldShowSyncProviderOverviewAlert(providers);
@@ -242,7 +257,8 @@ export default function SyncTab({
     }
     return {
       ...provider,
-      remote_base_url: bifrostCloudUrlDraft.trim() || provider.remote_base_url || null,
+      remote_base_url:
+        bifrostCloudUrlDraft.trim() || provider.remote_base_url || null,
     };
   };
 
@@ -258,7 +274,9 @@ export default function SyncTab({
   };
 
   const handleGithubGistSignIn = () => {
-    const githubProvider = providers.find((provider) => provider.id === "github_gist");
+    const githubProvider = providers.find(
+      (provider) => provider.id === "github_gist",
+    );
     if (!githubProvider || !githubTokenDraft.trim()) {
       return;
     }
@@ -297,159 +315,171 @@ export default function SyncTab({
         style={{
           display: "grid",
           gap: 16,
-          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 380px), 1fr))",
+          gridTemplateColumns:
+            "repeat(auto-fit, minmax(min(100%, 380px), 1fr))",
           maxWidth: 1440,
           width: "100%",
         }}
       >
-        {providers.map((provider) => (
-          <Card
-            key={provider.id}
-            size="small"
-            data-testid={`settings-sync-provider-card-${provider.id}`}
-            title={
-              <Space>
-                <CloudOutlined />
-                <span>{provider.name}</span>
-              </Space>
-            }
-            extra={providerStatusTag(provider)}
-          >
-            <Space direction="vertical" size={12} style={{ width: "100%" }}>
-              <Text type="secondary">{provider.description}</Text>
-              {provider.id === "github_gist" ? (
-                <Alert
-                  type={provider.last_error ? "error" : "info"}
-                  showIcon
-                  message={
-                    provider.last_error
-                      ? "GitHub Gist token needs attention"
-                      : "Generate a GitHub token with the gist scope, then paste it into Bifrost."
-                  }
-                  description={
-                    provider.last_error ||
-                    "Rules and basic settings are stored in a private Gist snapshot. Do not sync secrets here."
-                  }
-                  action={
-                    <Button
-                      size="small"
-                      href={GITHUB_GIST_TOKEN_URL}
-                      target="_blank"
-                      rel="noreferrer"
-                      icon={<GithubOutlined />}
-                      data-testid="settings-sync-provider-github-gist-token-link"
-                    >
-                      {provider.last_error ? "New Token" : "Generate Token"}
-                    </Button>
-                  }
-                  data-testid={
-                    provider.last_error
-                      ? "settings-sync-provider-error-github_gist"
-                      : "settings-sync-provider-github-gist-info"
-                  }
-                />
-              ) : null}
-              {provider.id !== "github_gist" && provider.last_error ? (
-                <Alert
-                  type="error"
-                  showIcon
-                  message={`${provider.name} needs attention`}
-                  description={provider.last_error}
-                  data-testid={`settings-sync-provider-error-${provider.id}`}
-                />
-              ) : null}
-              {capabilityTags(provider)}
-              <Descriptions
-                size="small"
-                column={1}
-                items={[
-                  {
-                    key: "account",
-                    label: "Account",
-                    children:
-                      provider.user?.user_id ||
-                      (provider.connected ? "Signed in" : "Not signed in"),
-                  },
-                  {
-                    key: "remote",
-                    label: "Remote",
-                    children:
-                      provider.id === "bifrost_cloud" ? (
-                        <Space.Compact style={{ width: "100%" }}>
-                          <Input
-                            value={bifrostCloudUrlDraft}
-                            onChange={(event) => {
-                              setBifrostCloudUrlDirty(true);
-                              setBifrostCloudUrlDraft(event.target.value);
-                            }}
-                            placeholder={BIFROST_CLOUD_URL_PLACEHOLDER}
-                            prefix={<LinkOutlined />}
-                            data-testid="settings-sync-provider-bifrost-cloud-url-input"
-                          />
-                          <Button
-                            type="primary"
-                            onClick={() => handleBifrostCloudUrlSave(provider)}
-                            loading={syncLoading}
-                            data-testid="settings-sync-provider-bifrost-cloud-url-save"
-                          >
-                            Save
-                          </Button>
-                        </Space.Compact>
-                      ) : (
-                        provider.remote_base_url || "GitHub Gist"
-                      ),
-                  },
-                  {
-                    key: "invoke",
-                    label: "Remote Invoke",
-                    children: provider.capabilities.remote_invoke
-                      ? provider.remote_invoke_registered
-                        ? "Registered"
-                        : "Supported"
-                      : "Not supported",
-                  },
-                  {
-                    key: "lastChange",
-                    label: "Last change",
-                    children: formatProviderLastChange(provider),
-                  },
-                  {
-                    key: "lastCheck",
-                    label: "Last check",
-                    children: formatProviderLastCheck(provider),
-                  },
-                  {
-                    key: "checkInterval",
-                    label: "Check interval",
-                    children: formatProviderCheckInterval(provider),
-                  },
-                ]}
-              />
-              <Space wrap>
-                <Button
-                  type={provider.connected ? "default" : "primary"}
-                  icon={provider.id === "github_gist" ? <GithubOutlined /> : <LoginOutlined />}
-                  onClick={() => handleProviderSignIn(provider)}
-                  disabled={syncLoading}
-                  loading={syncLoading}
-                  data-testid={`settings-sync-provider-login-${provider.id}`}
-                >
-                  {provider.connected ? "Reconnect" : "Sign In"}
-                </Button>
-                {provider.connected ? (
-                  <Button
-                    icon={<LogoutOutlined />}
-                    onClick={() => handleProviderSignOut(provider)}
-                    loading={syncLoading}
-                    data-testid={`settings-sync-provider-logout-${provider.id}`}
-                  >
-                    Sign Out
-                  </Button>
+        {providers.map((provider) => {
+          const actionableError = syncProviderActionableError(provider);
+          return (
+            <Card
+              key={provider.id}
+              size="small"
+              data-testid={`settings-sync-provider-card-${provider.id}`}
+              title={
+                <Space>
+                  <CloudOutlined />
+                  <span>{provider.name}</span>
+                </Space>
+              }
+              extra={providerStatusTag(provider)}
+            >
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <Text type="secondary">{provider.description}</Text>
+                {provider.id === "github_gist" ? (
+                  <Alert
+                    type={actionableError ? "error" : "info"}
+                    showIcon
+                    message={
+                      actionableError
+                        ? "GitHub Gist token needs attention"
+                        : "Generate a GitHub token with the gist scope, then paste it into Bifrost."
+                    }
+                    description={
+                      actionableError ||
+                      "Rules and basic settings are stored in a private Gist snapshot. Do not sync secrets here."
+                    }
+                    action={
+                      <Button
+                        size="small"
+                        href={GITHUB_GIST_TOKEN_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        icon={<GithubOutlined />}
+                        data-testid="settings-sync-provider-github-gist-token-link"
+                      >
+                        {actionableError ? "New Token" : "Generate Token"}
+                      </Button>
+                    }
+                    data-testid={
+                      actionableError
+                        ? "settings-sync-provider-error-github_gist"
+                        : "settings-sync-provider-github-gist-info"
+                    }
+                  />
                 ) : null}
+                {provider.id !== "github_gist" && actionableError ? (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message={`${provider.name} needs attention`}
+                    description={actionableError}
+                    data-testid={`settings-sync-provider-error-${provider.id}`}
+                  />
+                ) : null}
+                {capabilityTags(provider)}
+                <Descriptions
+                  size="small"
+                  column={1}
+                  items={[
+                    {
+                      key: "account",
+                      label: "Account",
+                      children:
+                        provider.user?.user_id ||
+                        (provider.connected ? "Signed in" : "Not signed in"),
+                    },
+                    {
+                      key: "remote",
+                      label: "Remote",
+                      children:
+                        provider.id === "bifrost_cloud" ? (
+                          <Space.Compact style={{ width: "100%" }}>
+                            <Input
+                              value={bifrostCloudUrlDraft}
+                              onChange={(event) => {
+                                setBifrostCloudUrlDirty(true);
+                                setBifrostCloudUrlDraft(event.target.value);
+                              }}
+                              placeholder={BIFROST_CLOUD_URL_PLACEHOLDER}
+                              prefix={<LinkOutlined />}
+                              data-testid="settings-sync-provider-bifrost-cloud-url-input"
+                            />
+                            <Button
+                              type="primary"
+                              onClick={() =>
+                                handleBifrostCloudUrlSave(provider)
+                              }
+                              loading={syncLoading}
+                              data-testid="settings-sync-provider-bifrost-cloud-url-save"
+                            >
+                              Save
+                            </Button>
+                          </Space.Compact>
+                        ) : (
+                          provider.remote_base_url || "GitHub Gist"
+                        ),
+                    },
+                    {
+                      key: "invoke",
+                      label: "Remote Invoke",
+                      children: provider.capabilities.remote_invoke
+                        ? provider.remote_invoke_registered
+                          ? "Registered"
+                          : "Supported"
+                        : "Not supported",
+                    },
+                    {
+                      key: "lastChange",
+                      label: "Last change",
+                      children: formatProviderLastChange(provider),
+                    },
+                    {
+                      key: "lastCheck",
+                      label: "Last check",
+                      children: formatProviderLastCheck(provider),
+                    },
+                    {
+                      key: "checkInterval",
+                      label: "Check interval",
+                      children: formatProviderCheckInterval(provider),
+                    },
+                  ]}
+                />
+                <Space wrap>
+                  <Button
+                    type={provider.connected ? "default" : "primary"}
+                    icon={
+                      provider.id === "github_gist" ? (
+                        <GithubOutlined />
+                      ) : (
+                        <LoginOutlined />
+                      )
+                    }
+                    onClick={() => handleProviderSignIn(provider)}
+                    disabled={syncLoading}
+                    loading={syncLoading}
+                    data-testid={`settings-sync-provider-login-${provider.id}`}
+                  >
+                    {provider.connected ? "Reconnect" : "Sign In"}
+                  </Button>
+                  {provider.connected ? (
+                    <Button
+                      icon={<LogoutOutlined />}
+                      onClick={() => handleProviderSignOut(provider)}
+                      loading={syncLoading}
+                      data-testid={`settings-sync-provider-logout-${provider.id}`}
+                    >
+                      Sign Out
+                    </Button>
+                  ) : null}
+                </Space>
               </Space>
-            </Space>
-          </Card>
-        ))}
+            </Card>
+          );
+        })}
       </div>
 
       <Modal
@@ -482,9 +512,10 @@ export default function SyncTab({
             }
           />
           <Text type="secondary">
-            Enter a GitHub token with the gist scope. The token is stored locally and
-            used only for your Gist-backed sync provider. Bifrost stores rules and
-            basic settings in a private Gist snapshot, so avoid syncing secrets.
+            Enter a GitHub token with the gist scope. The token is stored
+            locally and used only for your Gist-backed sync provider. Bifrost
+            stores rules and basic settings in a private Gist snapshot, so avoid
+            syncing secrets.
           </Text>
           <Input.Password
             value={githubTokenDraft}
