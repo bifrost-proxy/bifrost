@@ -17,7 +17,8 @@
 - watchdog 不得只因 Admin API 超时终止 managed child。
 - watchdog 使用四类信号：managed child exit、独立 scheduler heartbeat、数据面 loopback canary、Admin health。
 - 独立 health lane 绑定随机 loopback 端口，由独立 OS 线程服务；主 Tokio scheduler 只更新时间戳。
-- 资源压力进入 degraded/critical 后停止 Body/WS payload 持久化，暂停图标、Traffic 大查询、脚本测试和附加任务执行，拒绝新重任务；CONNECT、基础转发、用户主动发起的单次 Replay，以及 AI/IM、Remote Invoke、Scripts 的配置与状态控制面不进入拒绝路径。
+- 资源压力进入 degraded/critical 后停止 Body/WS payload 持久化，并暂停图标提取、Traffic 大查询和代理数据面脚本；CONNECT、基础转发、用户主动发起的单次 Replay，以及 AI/IM、ASR、Voice、Remote Invoke、worker jobs 和有界 Scripts Test 不进入拒绝路径。
+- 父进程、系统或 worker RSS 只用于诊断，不参与 worker 启动或调用决策；worker 资源保护由并发上限、队列容量、超时、熔断和进程隔离负责。
 - 结构化 lifecycle event 落盘，覆盖 PID、退出码/信号、各探针耗时、RSS、CPU、FD、活动连接、队列、恢复耗时和 system proxy action。
 - system proxy owner state 包含 generation、target、原始代理、runtime/helper、策略和最近动作；提供 `bifrost system-proxy doctor`。
 - lifecycle helper 发现 daemon 明确消失后立即启动 replacement。
@@ -59,14 +60,14 @@
 - listener 在命名 OS 线程运行，不占 Tokio connection semaphore。
 - 仅接受 loopback，固定响应小型 JSON；不提供修改能力。
 - Tokio task 每 500ms 更新 scheduler heartbeat，并同步 active connections / traffic queue depth。
-- health 线程采样 RSS、CPU、FD，计算 resource pressure，并通过全局原子 governor 发布 `normal/degraded/critical`。
+- health 线程采样 RSS、CPU、FD；RSS 仅用于诊断展示，resource pressure 由 FD、活动连接、traffic queue 与 scheduler lag 计算，并通过全局原子 governor 发布 `normal/degraded/critical`。
 - health lane stop handle 随主 runtime 生命周期释放；旧客户端忽略新增 runtime 字段。
 
 ## 资源压力降级
 
 信号使用带回滞的三档控制器：
 
-- `degraded`：RSS/系统内存、FD、活动连接、traffic queue 或 scheduler lag 任一达到软阈值。
+- `degraded`：FD、活动连接、traffic queue 或 scheduler lag 任一达到软阈值。主进程 RSS 只进入诊断快照；worker RSS 不参与全局判定，也不作为拒绝 worker 的依据。
 - `critical`：任一达到硬阈值。
 - 恢复：连续多个正常采样后才回到 `normal`，避免频繁抖动。
 
@@ -78,17 +79,16 @@
 | BodyStore / WsPayloadStore 新 payload | 停止持久化，已有 reader 保留 |
 | app icon miss / bundle 扫描 | 503，不启动新提取 |
 | Traffic list/query/batch/search | 503；轻量单条读取与健康接口保留 |
-| Scripts 列表、读取、保存、重命名、删除 | 保留，允许修正配置；不触发脚本执行 |
-| Scripts test、req/res/decode 新执行 | 503 或跳过，并记录 pressure reason |
+| Scripts 列表、读取、保存、重命名、删除与有 32 MiB/10 秒沙箱上限的 Scripts test | 保留；允许管理和显式测试脚本 |
+| 代理数据面 req/res/decode 脚本执行 | 暂停并记录 pressure reason，避免在主进程转发热路径继续累积工作 |
 | AI/IM providers、channels、runner config、routes、schedules CRUD | 保留，避免整个 AI/IM 管理面失效 |
-| AI/IM 新消息发送、附件上传、Agent/runner turn、schedule 手动 run | 503，不启动新重任务 |
-| AI 首页 / ASR、Voice、Speech 读取面 | 保留全部 GET 状态、配置、任务详情、日报、Daily Agent 记录、声纹与唤醒状态；仅流式初始化/WebSocket 握手除外；Critical 下读取 task summary 不懒启动 scheduler 或恢复中断任务 |
-| ASR、Voice 轻量配置与停止操作 | 保留 task/profile/binding 配置、pause、stop、cleanup、label、Daily Agent 配置；这些操作不启动模型计算或外部 Runner |
-| Remote Invoke 状态与本地访问控制管理 | 保留；隔离 Worker 尚未 ready 时从主进程已有本地状态安全读取，并允许 shell policy 匹配、路径校验、SSH Key 生命周期和 Recent Calls 清理等本地控制面操作，避免启动/重启窗口把页面变成 503；discovery、pairing、grant relay 等网络操作仍等待隔离 Worker |
-| worker jobs、ASR/Voice 模型初始化、服务启动、转写、任务 run/resume/retry/import/compress、Daily Agent run/send/sync 等附加重任务 | 503，不启动新任务 |
+| AI/IM 新消息发送、附件上传、Agent/runner turn、schedule 手动 run | 保留；worker 自身通过并发、队列、超时、熔断和进程隔离控制资源 |
+| AI 首页 / ASR、Voice、Speech 全部 API | 保留；全局 system/parent pressure 不阻止 worker 启动、调用或 ASR scheduler 恢复 |
+| Remote Invoke 状态、授权、连接与访问控制管理 | 保留；隔离 Worker 尚未 ready 时从主进程已有本地状态安全读取，避免启动/重启窗口把全局页面轮询变成 503 |
+| worker jobs 与所有隔离 worker 调用 | 保留；高 RSS 是 ASR 等复杂任务的正常特征，不能作为前置拒绝条件 |
 | 单次 Replay、Replay 收藏与历史 | 保留；继续使用并发上限，payload 持久化仍服从 pressure governor |
 
-所有拒绝使用稳定错误码/消息；降级状态变化写 lifecycle event，不对每个请求刷日志。
+压力守卫只拒绝主进程内的大型 Traffic 查询/统计/批处理、搜索和 app icon 提取。降级状态变化写 lifecycle event，不对每个请求刷日志。
 
 ## System proxy ownership generation
 
@@ -151,7 +151,7 @@ Desktop-owned runtime 不由 helper 拉起，仍由 Desktop child watchdog 管�
 
 - 单元测试：watchdog 真值表、pressure 回滞、payload/重任务降级、generation suspend/resume 决策、helper fail-open/fail-closed 时间线、旧 schema 兼容。
 - E2E：独立 data-dir + 动态端口验证 Admin 单独失败不重启、health lane/数据 canary、pressure forced mode、helper policy 与 generation conflict。
-- E2E：Critical 压力下逐项验证 AI/IM、ASR/Voice/Speech、Remote Invoke 与 Scripts 管理接口；用真实临时 ASR task 覆盖详情、配置和控制路由，同时确认初始化、转写、任务执行与新 AI turn 仍返回 503。
-- WebUI E2E：只启动独立临时 Bifrost，遍历 AI Hub/Channels/Agents/Runs、ASR 三个首页 Tab、任务 Overview/Daily/Daily Agent 列表/详情/Records、Remote Invoke 与 Scripts，共 14 个页面；任何 Admin API 5xx、请求失败或资源压力错误文案都失败。
+- E2E：Critical 压力下逐项验证 AI/IM、ASR/Voice/Speech、Remote Invoke、worker jobs 与 Scripts 接口；用真实临时 ASR task 证明 worker 可启动和执行，不出现 pressure 503。
+- WebUI E2E：只启动独立临时 Bifrost，遍历 AI Hub/Channels/Agents/Runs、ASR 三个首页 Tab、任务 Overview/Daily/Daily Agent/Records、Remote Invoke、Replay 与 Scripts，共 14 个页面；任何 Admin API 5xx、请求失败或资源压力错误文案都失败。
 - human tests：macOS Desktop pause/kill、真实 system proxy 快照恢复、fail-open 黑洞窗口、外部代理接管、doctor 证据完整性。
 - Rust 门禁：受影响 crate 测试、fmt/clippy、`make coverage-changed`，再由 GitHub Actions 执行 workspace/coverage/E2E。

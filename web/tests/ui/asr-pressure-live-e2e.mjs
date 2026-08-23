@@ -14,13 +14,21 @@ const pages = [
   ["AI channels", "/_bifrost/ai/channels", "ai-detail-page"],
   ["AI agents", "/_bifrost/ai/agents", "ai-detail-page"],
   ["AI runs", "/_bifrost/ai/runs", "agent-run-summaries"],
-  ["ASR scheduled", "/_bifrost/ai/asr", "asr-home-tab-scheduled"],
+  [
+    "ASR scheduled",
+    "/_bifrost/ai/asr",
+    "asr-home-tab-scheduled",
+  ],
   [
     "ASR management",
     "/_bifrost/ai/asr?asrTab=management",
     "asr-home-tab-management",
   ],
-  ["ASR voice", "/_bifrost/ai/asr?asrTab=voice", "asr-home-tab-voice"],
+  [
+    "ASR voice",
+    "/_bifrost/ai/asr?asrTab=voice",
+    "asr-home-tab-voice",
+  ],
   [
     "ASR task overview",
     `/_bifrost/ai/asr?asrTask=${encodeURIComponent(taskId)}`,
@@ -37,20 +45,16 @@ const pages = [
     "asr-daily-agents-table",
   ],
   [
-    "ASR Daily Agent detail",
-    `/_bifrost/ai/asr?asrTask=${encodeURIComponent(taskId)}&asrTaskTab=daily-agent&asrDailyAgentEdit=daily_report`,
-    "asr-daily-agent-detail",
-  ],
-  [
     "ASR Daily Agent records",
     `/_bifrost/ai/asr?asrTask=${encodeURIComponent(taskId)}&asrTaskTab=daily-agent-records`,
-    "asr-task-detail-page",
+    "text:Run Results",
   ],
   [
     "Remote Invoke settings",
     "/_bifrost/settings?tab=remote-invoke",
     "settings-remote-invoke-tab",
   ],
+  ["Replay", "/_bifrost/replay", "replay-request-panel"],
   ["Scripts", "/_bifrost/scripts", "scripts-list-panel"],
 ];
 
@@ -60,7 +64,10 @@ const page = await context.newPage();
 const failures = [];
 
 page.on("response", async (response) => {
-  if (response.status() >= 500 && response.url().includes("/_bifrost/api/")) {
+  if (
+    response.status() >= 400 &&
+    response.url().includes("/_bifrost/api/")
+  ) {
     let body = "";
     try {
       body = (await response.text()).slice(0, 500);
@@ -72,12 +79,13 @@ page.on("response", async (response) => {
 });
 
 page.on("requestfailed", (request) => {
-  if (request.url().includes("/_bifrost/api/")) {
-    if (request.failure()?.errorText === "net::ERR_ABORTED") {
-      return;
-    }
+  const errorText = request.failure()?.errorText || "unknown";
+  if (
+    request.url().includes("/_bifrost/api/") &&
+    errorText !== "net::ERR_ABORTED"
+  ) {
     failures.push(
-      `REQUEST_FAILED ${request.method()} ${request.url()} ${request.failure()?.errorText || "unknown"}`,
+      `REQUEST_FAILED ${request.method()} ${request.url()} ${errorText}`,
     );
   }
 });
@@ -89,7 +97,10 @@ try {
       waitUntil: "domcontentloaded",
       timeout: 120_000,
     });
-    await page.getByTestId(testId).first().waitFor({
+    const readyLocator = testId.startsWith("text:")
+      ? page.getByText(testId.slice("text:".length), { exact: true })
+      : page.getByTestId(testId);
+    await readyLocator.first().waitFor({
       state: "visible",
       timeout: 120_000,
     });

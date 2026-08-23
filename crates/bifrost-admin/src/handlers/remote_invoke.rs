@@ -236,6 +236,7 @@ mod pressure_fallback_tests {
         use hyper_util::rt::TokioIo;
         use tokio::net::TcpListener;
 
+        let _worker_runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
         let harness = crate::test_support::TestAdminState::builder().build();
         let state = harness.state();
         let _runtime_guard =

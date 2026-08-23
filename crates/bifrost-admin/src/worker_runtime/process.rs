@@ -202,12 +202,6 @@ impl Drop for RequestTrackingGuard<'_> {
 
 impl ManagedWorker {
     pub async fn spawn(spec: WorkerSpawnSpec) -> Result<Arc<Self>, String> {
-        if !bifrost_core::heavy_tasks_allowed() {
-            return Err(format!(
-                "{} worker start rejected by resource pressure governor",
-                spec.kind.as_str()
-            ));
-        }
         let startup_token = uuid::Uuid::new_v4().to_string();
         let mut command = Command::new(&spec.executable);
         command
@@ -1529,8 +1523,9 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn critical_pressure_rejects_worker_spawn_before_process_creation() {
+    async fn critical_parent_pressure_does_not_block_worker_spawn() {
         const MARKER: &str = "BIFROST_WORKER_PRESSURE_CHILD";
         if std::env::var_os(MARKER).is_none() {
             let status = std::process::Command::new(
@@ -1538,7 +1533,7 @@ mod tests {
             )
             .arg("--exact")
             .arg(
-                "worker_runtime::process::tests::critical_pressure_rejects_worker_spawn_before_process_creation",
+                "worker_runtime::process::tests::critical_parent_pressure_does_not_block_worker_spawn",
             )
             .arg("--nocapture")
             .env(MARKER, "1")
@@ -1549,17 +1544,10 @@ mod tests {
         }
 
         bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
-        let spec = WorkerSpawnSpec::new(
-            "pressure-rejected",
-            WorkerKind::Asr,
-            "/definitely/missing/bifrost-worker",
-            Vec::new(),
-        );
-        let error = ManagedWorker::spawn(spec)
+        let worker = ManagedWorker::spawn(shell_worker_spec("pressure-allowed", "sleep 1"))
             .await
-            .err()
-            .expect("spawn rejected");
-        assert!(error.contains("resource pressure governor"));
+            .expect("parent pressure must not reject an isolated worker");
+        worker.shutdown(Duration::ZERO).await.unwrap();
     }
 
     #[cfg(unix)]
