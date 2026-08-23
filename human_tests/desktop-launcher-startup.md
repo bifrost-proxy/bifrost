@@ -210,6 +210,22 @@
 - managed child 状态不可读取或 child 无法终止时，watchdog、手动重试和端口切换均停止恢复，不吞错后继续启动。
 - 真实桌面 E2E 中 sidecar stub 只收到一次 `stop`，桌面完成 failure handoff 并保持可恢复，而不是启动第二实例。
 
+### TC-DLS-13 marker 缺失时复用首选端口上的健康 Bifrost（回归）
+
+操作步骤：
+
+1. 使用临时 `BIFROST_DATA_DIR` 和动态首选端口启动隔离 Bifrost，确认 Admin identity 与 health API 均正常。
+2. 删除临时目录中的 `runtime.json` 与 `bifrost.pid`，模拟历史 CLI 与 Desktop 生命周期漂移。
+3. 启动使用同一临时数据目录和首选端口的 debug Desktop，检查 `desktop-bootstrap.log` 和实际监听端口。
+4. 另设一个健康 Bifrost 在 `preferred_port + 1`，确认 marker 缺失时不会把它当成首选实例复用。
+
+预期结果：
+
+- Desktop 复用首选端口上的健康 Bifrost，bootstrap log 包含 `missing lifecycle markers; reusing it without claiming ownership`。
+- Desktop 不启动第二个 9901 类替代实例，也不会停止或认领 markerless 外部进程。
+- 非首选端口上的 markerless Bifrost 不会被自动复用。
+- 全流程使用临时目录、动态端口并禁用系统代理，正式 App 与正式 9900 服务不受影响。
+
 ## 清理步骤
 
 ```bash
@@ -235,3 +251,4 @@ rm -rf "$TEST_DATA_DIR"
 | 2026-07-15 | TC-DLS-10 | 先记录正式 App PID `15260`，再依次执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_failure_handoff.sh` 与 `SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_deadline_handoff.sh`，最后复查正式 App PID。 | 通过：两条测试分别输出 failure handoff / deadline handoff PASS；debug App 在正式 App 同时运行时成功启动，bootstrap 与 sidecar stderr 的 session ID 断言通过；正式 App PID 前后均为 `15260`，未被测试终止。 |
 | 2026-07-15 | TC-DLS-11 | 正式 App PID `15260` 运行时执行 `RUST_LOG=warn SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`，断言独立端口、session/phase 日志和 bootstrap 行格式。 | 通过：输出 `PASS: bifrost-desktop stayed alive through launcher handoff startup window`；`warn` 环境下仍保留 startup info，所有 bootstrap 行满足单行格式，正式 App PID 前后保持 `15260`。 |
 | 2026-07-16 | TC-DLS-12 | `cargo test` 定点执行 restart stop 失败、旧端口仍健康、managed child mutex poison 三个 fail-closed 用例；随后执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_stale_backend_stop_failure_handoff.sh`。 | 通过：三个定点单测各 1 passed；真实桌面 E2E 输出 `PASS: stale backend stop failure blocked a second backend and exposed recovery UI`，sidecar 未进入第二实例启动。 |
+| 2026-08-23 | TC-DLS-13 | `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`，临时数据目录与动态连续端口；另执行 Desktop 聚焦单测 `normal_startup_reuses_markerless_bifrost_only_on_the_preferred_port`。 | 通过：Desktop bootstrap 记录 `missing lifecycle markers; reusing it without claiming ownership`；未监听 fallback 端口；退出 Desktop 后 markerless core 仍存活，随后由带端口的 CLI stop 回收。完整 Desktop ownership E2E 同时覆盖 sustained stall 与真实 child exit 恢复。 |

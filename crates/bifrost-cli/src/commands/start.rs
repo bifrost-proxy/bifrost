@@ -43,8 +43,8 @@ use crate::config::get_bifrost_dir;
 use crate::help::print_startup_help;
 use crate::parsing::{parse_cli_rules, DynamicRulesResolver, SharedDynamicRulesResolver};
 use crate::process::{
-    discover_bifrost_runtime, find_process_on_port, is_process_running, kill_process_by_pid,
-    read_pid, read_runtime_info, remove_pid, write_runtime_info, RuntimeInfo, RuntimeStartMode,
+    find_process_on_port, is_process_running, kill_process_by_pid, read_pid, read_runtime_info,
+    remove_pid, write_runtime_info, RuntimeInfo, RuntimeStartMode,
 };
 use crate::runtime_health::{spawn_scheduler_heartbeat_task, RuntimeHealthLane};
 
@@ -1737,6 +1737,7 @@ pub fn run_start(
         Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart)
     );
 
+    let mut stale_pid_to_remove = None;
     if let Some(pid) = read_pid() {
         if is_process_running(pid) {
             if let Some(runtime) = live_desktop_runtime_for_pid(pid) {
@@ -1750,7 +1751,7 @@ pub fn run_start(
             };
 
             if should_restart {
-                super::stop::run_stop()?;
+                super::stop::run_stop_on_port(port)?;
             } else {
                 println!("Start cancelled.");
                 return Ok(());
@@ -1763,7 +1764,7 @@ pub fn run_start(
                 "preserving stopped runtime info for restart handoff startup"
             );
         } else {
-            remove_pid()?;
+            stale_pid_to_remove = Some(pid);
         }
     }
 
@@ -1771,12 +1772,23 @@ pub fn run_start(
     // bind-based port check. The proxy listener enables socket reuse on some
     // platforms, so a second bind probe can appear to succeed even while the
     // live Bifrost listener is serving requests.
-    if let Some(runtime) = discover_bifrost_runtime(port) {
+    if let Some(runtime) = crate::process::recover_bifrost_runtime(port) {
         println!(
             "Bifrost proxy is already running (PID: {}, port {}). Reusing the live service; CLI start will not stop it.",
             runtime.pid, runtime.port
         );
         return Ok(());
+    }
+
+    if let Some(runtime) = crate::process::discover_any_bifrost_runtime(port) {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "Port {} is serving Bifrost PID {} from a different data directory (or an older runtime without directory identity). Refusing to reuse or stop it; choose another port or use the owning BIFROST_DATA_DIR.",
+            runtime.port, runtime.pid
+        )));
+    }
+
+    if let Some(pid) = stale_pid_to_remove {
+        remove_pid(pid)?;
     }
 
     let phase_started_at = begin_startup_phase("certificate.preflight");
@@ -2179,7 +2191,7 @@ pub fn run_foreground(
                     );
                 } else {
                     eprintln!("  ✗ Failed to enable CLI proxy: {}", e);
-                    remove_pid()?;
+                    remove_pid(pid)?;
                     return Err(e);
                 }
             }
@@ -2940,7 +2952,7 @@ pub fn run_foreground(
     }
     cleanup_standalone_cli_proxy_on_shutdown(&bifrost_dir);
     system_proxy_reconcile_stop.store(true, Ordering::Release);
-    remove_pid()?;
+    remove_pid(pid)?;
     println!("Bifrost proxy stopped.");
 
     runtime_result?;
@@ -3533,7 +3545,7 @@ pub fn run_daemon(
                     &cli_proxy_no_proxy,
                 ) {
                     eprintln!("Failed to enable CLI proxy: {}", e);
-                    remove_pid()?;
+                    remove_pid(std::process::id())?;
                     std::process::exit(1);
                 }
                 cli_proxy_enabled = true;
@@ -4014,7 +4026,7 @@ pub fn run_daemon(
                 }
             }
 
-            remove_pid()?;
+            remove_pid(std::process::id())?;
             std::process::exit(0);
         }
         Err(e) => Err(bifrost_core::BifrostError::Config(format!(

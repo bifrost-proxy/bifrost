@@ -12,7 +12,7 @@ pub(crate) use config::BifrostConfig as LegacyBifrostConfig;
 pub use config_manager::{
     ConfigChangeEvent, ConfigManager, RulesChangeOrigin, SharedConfigManager,
 };
-pub use data_dir::{data_dir, set_data_dir};
+pub use data_dir::{data_dir, data_dir_fingerprint, data_dir_fingerprint_for, set_data_dir};
 pub use local_secrets::LocalSecretKey;
 pub use remote_shell::{
     ensure_default_ssh_key_shell_policy, RemoteShellPolicy, RemoteShellProfile, RemoteShellSet,

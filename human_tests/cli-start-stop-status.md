@@ -1082,7 +1082,7 @@ PY
      --skip-cert-check --unsafe-ssl --no-system-proxy
    curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/system/overview"
    ```
-5. 在另一个动态端口启动普通 HTTP server，并对该端口执行 JSON status。
+5. 在另一个动态端口启动普通 HTTP server，并使用另一个空的临时数据目录对该端口执行 JSON status。
 6. 恢复 marker，停止隔离 daemon 与普通 HTTP server，删除临时目录。
 
 **预期结果**：
@@ -1108,6 +1108,29 @@ PY
 
 ---
 
+
+### TC-CSS-37：runtime marker 漂移后 start/stop/restart 自动修复（回归）
+
+**前置条件**：使用当前源码构建的 CLI、临时 `BIFROST_DATA_DIR` 和动态端口，并设置 `BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`--no-system-proxy`；不得操作正式 9900。
+
+**操作步骤**：
+1. 启动隔离 daemon，记录 Admin overview PID，并删除该临时目录中的 `runtime.json` 与 `bifrost.pid`。
+2. 对同一动态端口执行 `bifrost start --daemon --yes`，检查输出、PID 和重新生成的两个 marker。
+3. 再次删除两个 marker，执行带相同端口的 `bifrost restart`，轮询新 daemon ready 并记录新 PID。
+4. 再次删除两个 marker，执行 `bifrost -p "$PORT" stop`。
+5. 构造 PID 为 A 的旧 marker，再写入 PID 为 B 的新 marker，模拟旧进程迟到清理，执行 owner-aware marker cleanup。
+6. 保持实例 marker 缺失，改用另一个临时 `BIFROST_DATA_DIR` 对同一端口执行 `status`、`start --yes`、`stop` 和 `restart`。
+
+**预期结果**：
+- `start --daemon --yes` 复用原 PID，并从 Admin API 自动重建 `runtime.json` 与 `bifrost.pid`，不误杀或重复启动。
+- `restart` 不再输出 `no running daemon detected`；它识别并停止真实旧 PID，随后只启动一个新 daemon。
+- `stop` 在 marker 缺失时仍能识别并停止健康 Bifrost，而不是报 `No PID file found`。
+- PID A 的迟到清理不得删除 PID B 的新 marker。
+- 另一个数据目录不能通过 Admin fallback 接管实例：`status` 报 stopped，`start --yes`、`stop`、`restart` 均 fail-closed，原 PID 继续存活且 foreign profile 不生成 marker。
+- 测试结束后动态端口释放、临时目录删除，正式 9900 listener PID 前后不变。
+
+**执行记录**：
+- 2026-08-23 使用当前 debug 二进制执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_status_runtime_discovery_e2e.sh`，21/21 通过。隔离 daemon 删除 marker 后，`start --daemon --yes` 保持原 PID并重建 `runtime.json`/`bifrost.pid`；再次删除 marker 后，`restart --port` 找回旧 PID并替换为单一新 PID；第三次删除 marker 后，`stop -p` 正常停止实例。另一个临时数据目录对该 markerless 服务执行 status/start/stop/restart 均不能接管或终止原进程。普通 HTTP server 使用独立临时数据目录且未被误识别。单测 `marker_cleanup_removes_only_the_matching_marker_during_handoff` 额外验证旧 PID 清理不会删除新 PID 的 runtime marker。全流程使用动态端口与临时目录，执行后正式 9900 listener PID 前后保持不变。
 
 ## 清理
 

@@ -63,7 +63,7 @@ use bifrost_core::Result as BifrostResult;
 #[cfg(unix)]
 use crate::process::{
     capture_runtime_system_proxy_snapshot, is_process_running, read_pid, read_runtime_info,
-    runtime_system_proxy_host, wait_for_port_released, write_runtime_info,
+    recover_bifrost_runtime, runtime_system_proxy_host, wait_for_port_released, write_runtime_info,
     RuntimeSystemProxySnapshot,
 };
 
@@ -86,6 +86,18 @@ pub struct RestartOptions {
 
 pub fn run_restart(opts: RestartOptions) -> BifrostResult<()> {
     super::stop::reject_live_desktop_owned_runtime()?;
+    #[cfg(unix)]
+    {
+        let requested_port = opts.port.unwrap_or(DEFAULT_PORT_FALLBACK);
+        if recover_bifrost_runtime(requested_port).is_none() {
+            if let Some(runtime) = crate::process::discover_any_bifrost_runtime(requested_port) {
+                return Err(bifrost_core::BifrostError::Config(format!(
+                    "Port {} is serving Bifrost PID {} from a different data directory (or an older markerless runtime). Refusing to restart it.",
+                    runtime.port, runtime.pid
+                )));
+            }
+        }
+    }
 
     #[cfg(not(unix))]
     {
@@ -315,6 +327,8 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
     // but gives the caller a clean exit.
     std::thread::sleep(Duration::from_millis(ORPHAN_STARTUP_GRACE_MS));
 
+    let _ = recover_bifrost_runtime(forwarded.port.unwrap_or(DEFAULT_PORT_FALLBACK));
+
     // Snapshot old port.
     let old_pid = read_pid();
     let old_runtime = read_runtime_info();
@@ -332,25 +346,27 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
 
     // Stop.
     match old_pid {
-        Some(pid) if is_process_running(pid) => match super::stop::run_stop_for_restart() {
-            Ok(()) => orphan_log(&log, "run_stop ok"),
-            Err(e) => {
-                orphan_log(&log, &format!("run_stop failed: {}", e));
-                if !forwarded.force {
-                    abort_restart_handoff(
+        Some(pid) if is_process_running(pid) => {
+            match super::stop::run_stop_for_restart_on_port(old_port) {
+                Ok(()) => orphan_log(&log, "run_stop ok"),
+                Err(e) => {
+                    orphan_log(&log, &format!("run_stop failed: {}", e));
+                    if !forwarded.force {
+                        abort_restart_handoff(
+                            &log,
+                            "stop failed before restart handoff",
+                            old_pid,
+                            system_proxy_snapshot.is_some(),
+                        );
+                        return;
+                    }
+                    orphan_log(
                         &log,
-                        "stop failed before restart handoff",
-                        old_pid,
-                        system_proxy_snapshot.is_some(),
+                        "run_stop failed but --force was requested; continuing with restart handoff",
                     );
-                    return;
                 }
-                orphan_log(
-                    &log,
-                    "run_stop failed but --force was requested; continuing with restart handoff",
-                );
             }
-        },
+        }
         _ => orphan_log(&log, "no live old daemon; skipping stop"),
     }
 
@@ -610,6 +626,9 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::io::{FromRawFd, OwnedFd};
 
+    #[cfg(unix)]
+    const ORPHAN_STOP_REFUSAL_CHILD_ENV: &str = "BIFROST_TEST_ORPHAN_STOP_REFUSAL_CHILD";
+
     #[test]
     fn restart_options_default_is_empty() {
         let o = RestartOptions::default();
@@ -687,5 +706,65 @@ mod tests {
         }
         let ok = read_byte_with_timeout(&rd_fd, std::time::Duration::from_millis(50));
         assert!(!ok);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_aborts_restart_when_recorded_process_cannot_be_verified() {
+        const TEST_NAME: &str =
+            "commands::restart::tests::orphan_aborts_restart_when_recorded_process_cannot_be_verified";
+        if std::env::var(ORPHAN_STOP_REFUSAL_CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(ORPHAN_STOP_REFUSAL_CHILD_ENV, "1")
+            .env_remove("BIFROST_DATA_DIR")
+            .status()
+            .expect("spawn isolated orphan restart test");
+            assert!(status.success(), "isolated orphan restart test failed");
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("isolated Bifrost data dir");
+        std::env::set_var("BIFROST_DATA_DIR", temp.path());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve test port");
+        let port = listener.local_addr().expect("test listener address").port();
+        drop(listener);
+
+        let mut foreign_process = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn live foreign process");
+        let runtime = crate::process::RuntimeInfo::new(
+            foreign_process.id(),
+            port,
+            None,
+            Some("127.0.0.1".to_string()),
+            crate::process::RuntimeStartMode::Daemon,
+        );
+        write_runtime_info(&runtime).expect("write unverified runtime marker");
+
+        run_orphan_work(ForwardedRestart {
+            self_exe: std::path::PathBuf::from("/bin/false"),
+            port: Some(port),
+            host: None,
+            log_level: None,
+            force: false,
+        });
+
+        assert!(
+            is_process_running(foreign_process.id()),
+            "unverified process must remain alive"
+        );
+        let log = std::fs::read_to_string(orphan_log_path()).expect("read restart log");
+        assert!(log.contains("run_stop failed"), "unexpected log: {log}");
+        assert!(
+            log.contains("aborting restart handoff: stop failed before restart handoff"),
+            "unexpected log: {log}"
+        );
+
+        let _ = foreign_process.kill();
+        let _ = foreign_process.wait();
     }
 }

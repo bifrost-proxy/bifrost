@@ -23,6 +23,8 @@ Settings 页面早期把所有配置项（Proxy、TLS、Certificate、Metrics、
 - `Settings` 页面不再订阅 `settings_scopes` 中与自身直接相关的 scope，避免快照回刷。
 - 桌面端改端口后仅负责重连全局 push，不再向 Settings tab 推送配置。
 - Sync 登录成功后强制把 `auto_sync` 恢复为 `true`，避免历史本地配置把“登录即同步”的默认体验保留为 false。
+- Sync 登录成功后清除当前 Provider 的持久化错误和 runtime 陈旧错误；已授权 Provider 的普通同步失败显示 `Sync error`，只有实际未授权状态显示 `Reconnect required`。
+- 远端创建或更新规则失败时，错误必须包含本地规则名，避免远端 `Validation not on name failed` 无法定位具体规则。
 
 ### 必须不破坏
 
@@ -61,6 +63,8 @@ Settings 页面早期把所有配置项（Proxy、TLS、Certificate、Metrics、
 - `web/src/services/pushService.ts`：`SettingsScope` 联合类型保留（`system_proxy`、`tls_config`、`mobile_devices`、`trust_probe`、`performance`、`whitelist` 等）以兼容服务端 push schema，但 `Settings` 页 default 订阅集合中不再自动加入这些 scope。
 - `web/src/components/StatusBar/index.tsx`、`web/src/components/AvailabilityCheckPanel/index.tsx`、`web/src/components/AvailabilityCheckNotificationCenter/index.tsx`、`web/src/components/MobileDeviceTrustPrompt/index.tsx`、`web/src/pages/Settings/tabs/CertificateTab.tsx`：调用 `withSettingsScope(scope)` 显式补 scope 到全局订阅。
 - `crates/bifrost-sync/src/manager.rs`：`save_token` 在登录成功后强制 `sync.auto_sync = true`；回归测试 `save_token_reenables_auto_sync_after_login` 与 `tick_marks_ready_without_sync_when_auto_sync_off` 分别覆盖登录回填与关闭态 tick 行为。
+  同一登录事务还会清除当前 Provider 的 `provider_sync.last_error` 和 runtime `last_error`；Provider 状态只把真实的当前同步错误标记为 `reason=error`。
+- `web/src/pages/Settings/tabs/SyncTab.tsx`：认证失效与已授权同步失败分别展示 `Reconnect required` / `Sync error`，`authorized + ready` 的历史错误不再作为可操作告警。
 
 ## Admin API 与 CLI
 
@@ -81,6 +85,7 @@ Settings 页面早期把所有配置项（Proxy、TLS、Certificate、Metrics、
 
 - Settings tab 内的 pull-on-open 不触发 Sync 流量。
 - Sync 登录成功后由 `bifrost-sync` 后端主动把 `auto_sync` 覆盖为 `true`，前端不需感知；下一次拉取 Settings/Sync 状态时能自然看到。
+- 登录保存成功同时清除该 Provider 的陈旧错误。后续同步若失败会重新记录真实错误，并在创建/更新规则失败时附带本地规则名。
 - `system_proxy`、`tls_config` 等本地设备语义仍不参与远端 Sync。
 
 ## Phase 1：识别 & 拆通道

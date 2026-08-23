@@ -17,6 +17,9 @@ The reverse boundary is just as important: CLI start/daemon maintenance must rec
 - Desktop may still use system proxy according to user/runtime configuration, but Desktop must not install or upgrade the system-proxy cleanup LaunchDaemon.
 - CLI `start` must not stop a live Desktop-owned core. If the requested port matches the Desktop runtime, CLI reuses the existing service. If the requested port differs, CLI fails with a clear message and leaves Desktop running.
 - CLI managed-runtime restart helpers must not restart Desktop-owned cores after a crash or cleanup path; Desktop owns that lifecycle.
+- Every Admin system overview exposes a SHA-256 fingerprint of the canonical active data directory. Markerless discovery may grant lifecycle ownership only when that fingerprint matches the caller's active data directory; a legacy service without the field remains manageable only through an already-matching runtime marker.
+- Desktop may reuse a healthy markerless Bifrost only on the configured preferred port and only when the data-directory fingerprint matches. It does not claim that process, does not fall back to `preferred + 1`, and does not stop the reused process when the shell exits.
+- Runtime marker writes and removals are serialized. Cleanup from an old PID removes only markers that still name that PID, so a late shutdown cannot erase the replacement daemon's markers.
 - Tray 对 Desktop-owned runtime 不提供普通的 Service Stop。它显示 `Quit Bifrost` 并走
   Desktop graceful shutdown；如果 Desktop 已异常消失，仅允许 Tray 在 owner mode、PID
   和进程启动时间精确匹配时，以同一 data-dir 完成内部授权 stop。只有 CLI-owned runtime
@@ -50,6 +53,12 @@ BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
   - `spawn_system_proxy_launchd_install_task(...)` keeps the CLI registration path and honors `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL`.
 - `crates/bifrost-cli/src/process.rs`
   - `RuntimeStartMode::Desktop` is app-bound and is not CLI-restartable.
+  - `discover_bifrost_runtime` is the strict markerless discovery path and requires a matching data-directory fingerprint.
+  - `recover_bifrost_runtime` accepts a healthy matching legacy marker for upgrade compatibility, otherwise uses strict discovery and repairs missing markers.
+  - marker mutations use `runtime.lock` and expected-PID cleanup.
+- `desktop/src-tauri/src/runtime_ownership.rs`
+  - marker-backed reuse still requires marker/PID/health agreement.
+  - markerless reuse is restricted to the preferred port, a healthy Admin endpoint, and an exact data-directory fingerprint.
 
 ## User Goal Checklist
 
@@ -74,6 +83,10 @@ BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
 - Unit: CLI maps `BIFROST_DESKTOP_CORE=1` to `RuntimeStartMode::Desktop`.
 - Unit: CLI `start` reuses same-port Desktop runtime and rejects mismatched port without stopping Desktop.
 - Unit: `RuntimeStartMode::Desktop` is not CLI-restartable.
+- Unit: foreign or fingerprint-less markerless services are never adopted.
+- Unit: late cleanup for PID A cannot remove replacement markers for PID B.
+- E2E: deleting lifecycle markers still lets same-profile start/stop/restart recover the preferred-port service, while another data directory fails closed.
+- E2E: Desktop reuses the same-profile markerless preferred-port service without launching a fallback port or stopping that service on shell exit.
 - Unit: Desktop sidecar args do not add `--no-system-proxy` unless `BIFROST_DESKTOP_NO_SYSTEM_PROXY=1`.
 - E2E contract: focused Desktop tests run through an executable shell script.
 - Human test: review sidecar logs/source contract and CLI boundary without touching real LaunchDaemon state.

@@ -732,6 +732,23 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 
 ---
 
+### TC-ASN-37：重新登录清除陈旧错误且同步错误定位规则名（回归）
+
+**操作步骤**：
+1. 使用临时数据目录和本地 mock sync server 启动隔离 Bifrost，预置已连接 Provider 的 `provider_sync.last_error` 与 runtime `last_error`。
+2. 通过 Session API 保存新的有效 token，再读取 `/_bifrost/api/sync/status`。
+3. 创建名称不符合远端约束的本地规则，令 mock server 的创建接口返回校验错误，触发一次同步。
+4. 打开 Settings > Sync，检查 Provider 卡片状态和错误内容。
+
+**预期结果**：
+- 保存新 token 后，持久化 Provider 错误与 runtime 错误立即清除；Provider 已授权且 `reason=ready` 时不再显示历史 “Reconnect required”。
+- 真正的鉴权失败仍显示 `Reconnect required`，已授权后的同步失败显示 `Sync error`。
+- 远端拒绝创建或更新规则时，错误中包含具体本地规则名与远端校验原因，可直接定位坏规则。
+- 全流程使用临时数据目录和 mock server，不读取或覆盖正式账号 token，不操作正式 9900 服务。
+
+**真实执行记录**：
+- 2026-08-23 执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过：隔离数据目录预置 `stale login error` 后重新登录，落盘 `provider_sync.bytedance_internal.last_error` 变为 `null`，状态接口不再返回陈旧错误。`cargo test -p bifrost-sync` 161/161 通过，覆盖远端创建规则失败时返回本地规则名、非当前 Provider 错误隔离，以及已连接非当前 Provider 同步失败的 `reason=error`。`pnpm --dir web exec vitest run src/pages/Settings/tabs/SyncTab.test.ts` 6/6 通过。随后在真实 9900 页面检查 Settings > Sync，ByteDance Internal 显示 `Connected`、底部显示 `Sync: Synced`，Groups 页面已加载 Managed/Discover 数据；未执行写入或重连操作。
+
 ## 清理
 
 测试完成后清理临时数据：

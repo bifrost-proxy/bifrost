@@ -5,6 +5,8 @@ set -euo pipefail
 : "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
+export BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
+export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -114,6 +116,44 @@ main() {
     mv "${TEST_DATA_DIR}/runtime.json" "${TEST_DATA_DIR}/runtime.json.saved"
     mv "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/bifrost.pid.saved"
 
+    local foreign_data_dir foreign_status foreign_start foreign_stop foreign_restart
+    foreign_data_dir="${TEST_DATA_DIR}/foreign-profile"
+    mkdir -p "$foreign_data_dir"
+    foreign_status="$(BIFROST_DATA_DIR="$foreign_data_dir" \
+        "$BIFROST_BIN" -p "$PROXY_PORT" status --format json)"
+    assert_equals "false" "$(json_field "$foreign_status" ".running")" \
+        "status must not adopt a Bifrost from another data directory"
+    if foreign_start="$(BIFROST_DATA_DIR="$foreign_data_dir" \
+        "$BIFROST_BIN" -p "$PROXY_PORT" start --daemon --yes \
+        --skip-cert-check --unsafe-ssl --no-system-proxy 2>&1)"; then
+        _log_fail "foreign start must fail closed" "non-zero exit" "$foreign_start"
+        exit 1
+    fi
+    assert_body_contains "different data directory" "$foreign_start" \
+        "foreign start must explain the ownership mismatch"
+    if foreign_stop="$(BIFROST_DATA_DIR="$foreign_data_dir" \
+        "$BIFROST_BIN" -p "$PROXY_PORT" stop 2>&1)"; then
+        _log_fail "foreign stop must fail closed" "non-zero exit" "$foreign_stop"
+        exit 1
+    fi
+    assert_body_contains "No PID file found" "$foreign_stop" \
+        "foreign stop must not recover another profile's markerless runtime"
+    if foreign_restart="$(BIFROST_DATA_DIR="$foreign_data_dir" \
+        "$BIFROST_BIN" restart --port "$PROXY_PORT" 2>&1)"; then
+        _log_fail "foreign restart must fail closed" "non-zero exit" "$foreign_restart"
+        exit 1
+    fi
+    assert_body_contains "different data directory" "$foreign_restart" \
+        "foreign restart must explain the ownership mismatch"
+    kill -0 "$PROXY_PID" 2>/dev/null
+    if [[ -e "${foreign_data_dir}/runtime.json" || -e "${foreign_data_dir}/bifrost.pid" ]]; then
+        _log_fail "foreign lifecycle commands must not write ownership markers" \
+            "no runtime markers" "marker created"
+        exit 1
+    else
+        _log_pass "foreign lifecycle commands preserved the live owner and wrote no markers"
+    fi
+
     local status_json
     status_json="$("$BIFROST_BIN" -p "$PROXY_PORT" status --format json)"
     assert_equals "true" "$(json_field "$status_json" ".running")" \
@@ -156,6 +196,12 @@ PY
         "$(curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/overview" \
             | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')" \
         "start --yes must not replace the live process"
+    assert_equals "$PROXY_PID" \
+        "$(pid_from_runtime_file "${TEST_DATA_DIR}/runtime.json")" \
+        "start --yes should repair runtime.json after discovery"
+    assert_equals "$PROXY_PID" \
+        "$(tr -d '[:space:]' <"${TEST_DATA_DIR}/bifrost.pid")" \
+        "start --yes should repair bifrost.pid after discovery"
 
     HTTP_PORT="$(allocate_free_port)"
     "$PYTHON_BIN" -m http.server "$HTTP_PORT" \
@@ -170,9 +216,54 @@ PY
     curl -fsS "http://127.0.0.1:${HTTP_PORT}/" >/dev/null
 
     local non_bifrost_status
-    non_bifrost_status="$("$BIFROST_BIN" -p "$HTTP_PORT" status --format json)"
+    mkdir -p "${TEST_ROOT:-$TEST_DATA_DIR}/http-status-data"
+    non_bifrost_status="$(BIFROST_DATA_DIR="${TEST_ROOT:-$TEST_DATA_DIR}/http-status-data" \
+        "$BIFROST_BIN" -p "$HTTP_PORT" status --format json)"
     assert_equals "false" "$(json_field "$non_bifrost_status" ".running")" \
         "an ordinary HTTP listener must not be identified as Bifrost"
+
+    rm -f "${TEST_DATA_DIR}/runtime.json" "${TEST_DATA_DIR}/bifrost.pid"
+    local restart_output old_pid new_pid
+    old_pid="$PROXY_PID"
+    restart_output="$("$BIFROST_BIN" restart --port "$PROXY_PORT" 2>&1)"
+    assert_body_contains "old_pid=${old_pid}" "$restart_output" \
+        "restart should recover and report the live daemon when markers are missing"
+    new_pid=""
+    for _ in $(seq 1 200); do
+        new_pid="$(curl -fsS --max-time 1 \
+            "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/overview" 2>/dev/null \
+            | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' || true)"
+        if [[ -n "$new_pid" && "$new_pid" != "$old_pid" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ -z "$new_pid" || "$new_pid" == "$old_pid" ]]; then
+        _log_fail "restart should replace the recovered live daemon" "new PID" "$new_pid"
+        exit 1
+    else
+        _log_pass "restart replaced the recovered live daemon"
+    fi
+    PROXY_PID="$new_pid"
+
+    rm -f "${TEST_DATA_DIR}/runtime.json" "${TEST_DATA_DIR}/bifrost.pid"
+    local stop_output
+    stop_output="$("$BIFROST_BIN" -p "$PROXY_PORT" stop 2>&1)"
+    assert_body_contains "Bifrost proxy stopped" "$stop_output" \
+        "stop should recover a markerless daemon on the selected port"
+    for _ in $(seq 1 100); do
+        if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if kill -0 "$PROXY_PID" 2>/dev/null; then
+        _log_fail "stop should terminate the recovered daemon" "process exited" "pid $PROXY_PID still alive"
+        exit 1
+    else
+        _log_pass "stop terminated the recovered daemon"
+    fi
+    PROXY_PID=""
 
     print_test_summary
 }

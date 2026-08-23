@@ -27,10 +27,11 @@ use commands::{
     handle_metrics_command, handle_port_command, handle_rule_command, handle_script_command,
     handle_sync_command, handle_system_proxy_command, handle_upgrade, handle_value_command,
     handle_whitelist_command, remote, run_restart, run_search, run_start, run_status,
-    run_status_tui, run_stop, run_traffic_auth_status, run_traffic_clear, run_traffic_export,
-    run_traffic_get, run_traffic_list, run_traffic_replay, spawn_update_check_notice, OutputFormat,
-    RestartOptions, SearchOptions, TrafficAuthStatusOptions, TrafficExportOptions,
-    TrafficGetOptions, TrafficListOptions, TrafficReplayOptions,
+    run_status_tui, run_stop_on_port, run_traffic_auth_status, run_traffic_clear,
+    run_traffic_export, run_traffic_get, run_traffic_list, run_traffic_replay,
+    spawn_update_check_notice, OutputFormat, RestartOptions, SearchOptions,
+    TrafficAuthStatusOptions, TrafficExportOptions, TrafficGetOptions, TrafficListOptions,
+    TrafficReplayOptions,
 };
 use process::read_runtime_port;
 
@@ -352,7 +353,7 @@ fn run_cli_main() {
                 no_tray_flag,
             )
         }
-        Some(Commands::Stop) => run_stop(),
+        Some(Commands::Stop) => run_stop_on_port(cli.port),
         Some(Commands::Restart {
             port,
             host,

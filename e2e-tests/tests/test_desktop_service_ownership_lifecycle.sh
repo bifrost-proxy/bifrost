@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
+export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -384,7 +387,7 @@ if ! wait_for_log_line \
   cat "$desktop_bootstrap_log" || true
   exit 1
 fi
-if ! grep -Fq "desktop backend health degraded" "$desktop_bootstrap_log"; then
+if ! grep -Fq "desktop backend multi-signal health degraded" "$desktop_bootstrap_log"; then
   kill -CONT "$CORE_PID" >/dev/null 2>&1 || true
   echo "FAIL: sustained backend stall did not exercise the degraded watchdog path"
   cat "$desktop_bootstrap_log" || true
@@ -572,4 +575,59 @@ BIFROST_DATA_DIR="$cli_data_dir" "$CLI_BIN" stop >/dev/null
 wait_for_process_exit "$CORE_PID"
 CORE_PID=""
 
-echo "PASS: Desktop ownership stays scoped by data-dir, sustained stalls trigger bounded recovery, real exits recover, and CLI lifecycle commands preserve App ownership"
+markerless_data_dir="$TEST_ROOT/markerless-preferred"
+markerless_port="$(free_consecutive_ports)"
+markerless_fallback_port="$((markerless_port + 1))"
+mkdir -p "$markerless_data_dir"
+env -u BIFROST_DETACHED_DAEMON_CHILD \
+  BIFROST_DATA_DIR="$markerless_data_dir" \
+  BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+  BIFROST_DISABLE_TRAY=1 \
+  "$CLI_BIN" start \
+    --host 127.0.0.1 \
+    --port "$markerless_port" \
+    --daemon \
+    --skip-cert-check \
+    --no-system-proxy \
+    --no-intercept >"$TEST_ROOT/markerless-start.log" 2>&1
+if ! wait_for_runtime "$markerless_data_dir" "$markerless_port"; then
+  echo "FAIL: markerless fixture Service did not become ready"
+  cat "$TEST_ROOT/markerless-start.log" || true
+  exit 1
+fi
+CORE_PID="$(runtime_pid "$markerless_data_dir")"
+rm -f "$markerless_data_dir/runtime.json" "$markerless_data_dir/bifrost.pid"
+
+launch_desktop \
+  "$markerless_data_dir" \
+  "$markerless_port" \
+  "$TEST_ROOT/markerless-desktop-app.log" \
+  BIFROST_DETACHED_DAEMON_CHILD=1
+markerless_bootstrap_log="$markerless_data_dir/logs/desktop-bootstrap.log"
+if ! wait_for_log_line \
+  "$markerless_bootstrap_log" \
+  "missing lifecycle markers; reusing it without claiming ownership"; then
+  echo "FAIL: Desktop did not reuse the healthy markerless preferred-port Service"
+  cat "$markerless_bootstrap_log" || true
+  exit 1
+fi
+if curl -fsS --max-time 1 \
+  "http://127.0.0.1:$markerless_fallback_port/_bifrost/api/proxy/system/support" >/dev/null 2>&1
+then
+  echo "FAIL: Desktop started a fallback Service despite a healthy preferred-port Bifrost"
+  exit 1
+fi
+if ! request_desktop_shutdown "$markerless_data_dir" "$APP_PID"; then
+  echo "FAIL: Desktop app reusing the markerless Service did not exit"
+  exit 1
+fi
+APP_PID=""
+if ! process_is_running "$CORE_PID"; then
+  echo "FAIL: Desktop exit stopped a markerless Service it did not own"
+  exit 1
+fi
+BIFROST_DATA_DIR="$markerless_data_dir" "$CLI_BIN" -p "$markerless_port" stop >/dev/null
+wait_for_process_exit "$CORE_PID"
+CORE_PID=""
+
+echo "PASS: Desktop ownership stays scoped by data-dir, markerless preferred-port services are reused without a fallback instance, sustained stalls trigger bounded recovery, real exits recover, and CLI lifecycle commands preserve App ownership"

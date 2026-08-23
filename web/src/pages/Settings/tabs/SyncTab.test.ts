@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { SyncProviderStatus } from "../../../api/sync";
 import {
   shouldShowSyncProviderOverviewAlert,
+  syncProviderActionableError,
   syncProviderStatusBadge,
 } from "./SyncTab";
 
-function provider(overrides: Partial<SyncProviderStatus> = {}): SyncProviderStatus {
+function provider(
+  overrides: Partial<SyncProviderStatus> = {},
+): SyncProviderStatus {
   return {
     id: "github_gist",
     name: "GitHub Gist",
@@ -49,6 +52,27 @@ describe("syncProviderStatusBadge", () => {
       label: "Connected",
     });
   });
+
+  it("ignores a stale persisted error after the provider is authorized and ready", () => {
+    const healthy = provider({ last_error: "stale login error" });
+    expect(syncProviderStatusBadge(healthy)).toEqual({
+      color: "green",
+      label: "Connected",
+    });
+    expect(syncProviderActionableError(healthy)).toBeNull();
+  });
+
+  it("distinguishes an authorized sync failure from an authentication failure", () => {
+    const failed = provider({
+      reason: "error",
+      last_error: "failed to create remote rule 'bad name'",
+    });
+    expect(syncProviderStatusBadge(failed)).toEqual({
+      color: "red",
+      label: "Sync error",
+    });
+    expect(syncProviderActionableError(failed)).toContain("bad name");
+  });
 });
 
 describe("shouldShowSyncProviderOverviewAlert", () => {
@@ -71,7 +95,11 @@ describe("shouldShowSyncProviderOverviewAlert", () => {
   it("shows the global pluggable-sync hint only when no provider is connected", () => {
     expect(
       shouldShowSyncProviderOverviewAlert([
-        provider({ connected: false, authorized: false, reason: "unauthorized" }),
+        provider({
+          connected: false,
+          authorized: false,
+          reason: "unauthorized",
+        }),
         provider({
           id: "bifrost_cloud",
           name: "Bifrost Cloud",

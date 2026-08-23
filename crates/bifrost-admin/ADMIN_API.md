@@ -719,6 +719,7 @@ GET /api/system
 ```json
 {
   "version": "0.1.0",
+  "data_dir_fingerprint": "e3b0c44298fc1c149afbf4c8996fb924...",
   "device_name": "eden-work",
   "os": "macos",
   "arch": "aarch64",
@@ -746,6 +747,7 @@ GET /api/system/overview
 {
   "system": {
     "version": "0.1.0",
+    "data_dir_fingerprint": "e3b0c44298fc1c149afbf4c8996fb924...",
     "device_name": "eden-work",
     "os": "macos",
     "arch": "aarch64",

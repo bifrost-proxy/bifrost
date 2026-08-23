@@ -599,7 +599,9 @@ pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason:
         let Some(identity) = probe_backend_identity(current_port) else {
             return false;
         };
-        if !external_cli_backend_matches_handoff(marker, &identity) {
+        if !backend_identity_matches_data_dir(&identity, &state.data_dir)
+            || !external_cli_backend_matches_handoff(marker, &identity)
+        {
             return false;
         }
         write_desktop_upgrade_terminal_progress(
