@@ -42,6 +42,8 @@ static ACTIVE_CLIENTS: Lazy<parking_lot::RwLock<HashMap<String, Arc<RemoteWorker
     Lazy::new(|| parking_lot::RwLock::new(HashMap::new()));
 static PRIMARY_RELAY: Lazy<parking_lot::RwLock<Option<String>>> =
     Lazy::new(|| parking_lot::RwLock::new(None));
+static CONTROL_PLANE_WORKER: Lazy<parking_lot::RwLock<Option<Arc<RemoteInvokeWorker>>>> =
+    Lazy::new(|| parking_lot::RwLock::new(None));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +107,8 @@ pub fn configure_runtime_targets(
         .filter_map(normalize_target)
         .filter(|target| seen_relays.insert(target.relay_url.clone()))
         .collect::<Vec<_>>();
+    *CONTROL_PLANE_WORKER.write() =
+        build_control_plane_worker(normalized.first(), &admin_host, admin_port, state.clone());
     *desired_state().write() = DesiredRemoteState {
         targets: normalized,
         admin_host,
@@ -140,6 +144,35 @@ pub fn stop_runtime_controller() {
     controller_notify().notify_waiters();
     ACTIVE_CLIENTS.write().clear();
     *PRIMARY_RELAY.write() = None;
+    *CONTROL_PLANE_WORKER.write() = None;
+}
+
+#[cfg(test)]
+pub(crate) struct ControlPlaneFallbackTestGuard;
+
+#[cfg(test)]
+impl Drop for ControlPlaneFallbackTestGuard {
+    fn drop(&mut self) {
+        stop_runtime_controller();
+        *desired_state().write() = DesiredRemoteState::default();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn configure_control_plane_fallback_for_test(
+    target: RemoteInvokeTarget,
+    state: crate::state::SharedAdminState,
+) -> ControlPlaneFallbackTestGuard {
+    stop_runtime_controller();
+    *CONTROL_PLANE_WORKER.write() =
+        build_control_plane_worker(Some(&target), "127.0.0.1", state.port(), state.clone());
+    *desired_state().write() = DesiredRemoteState {
+        targets: vec![target],
+        admin_host: "127.0.0.1".to_string(),
+        admin_port: state.port(),
+        state: Some(state),
+    };
+    ControlPlaneFallbackTestGuard
 }
 
 pub fn has_active_client() -> bool {
@@ -151,8 +184,59 @@ pub fn runtime_configured() -> bool {
         && !desired_state().read().targets.is_empty()
 }
 
-pub fn admin_proxy_ready() -> bool {
-    runtime_configured() && has_active_client()
+pub async fn admin_proxy_ready() -> bool {
+    if !runtime_configured() {
+        return false;
+    }
+    let Some(client) = primary_client() else {
+        return false;
+    };
+    if client.worker.is_healthy().await {
+        true
+    } else {
+        controller_notify().notify_waiters();
+        false
+    }
+}
+
+pub fn control_plane_worker() -> Option<Arc<RemoteInvokeWorker>> {
+    CONTROL_PLANE_WORKER.read().clone()
+}
+
+fn build_control_plane_worker(
+    target: Option<&RemoteInvokeTarget>,
+    admin_host: &str,
+    admin_port: u16,
+    state: crate::state::SharedAdminState,
+) -> Option<Arc<RemoteInvokeWorker>> {
+    let target = target?;
+    let data_dir = state
+        .config_manager
+        .as_ref()
+        .map(|manager| manager.data_dir().to_path_buf())
+        .unwrap_or_else(bifrost_storage::data_dir);
+    let identity = match Identity::load_or_create(&data_dir) {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                data_dir = %data_dir.display(),
+                "initialize Remote Invoke control-plane fallback failed"
+            );
+            return None;
+        }
+    };
+    Some(RemoteInvokeWorker::new(
+        RemoteInvokeConfig {
+            relay_url: target.relay_url.clone(),
+            ..Default::default()
+        },
+        identity,
+        None,
+        state,
+        admin_host,
+        admin_port,
+    ))
 }
 
 pub async fn proxy_admin_request<B>(req: Request<B>, path: &str) -> Response<BoxBody>
@@ -783,78 +867,35 @@ mod tests {
         stop_runtime_controller();
         assert!(!has_active_client());
         assert!(primary_client().is_none());
+        assert!(!runtime_configured());
+        assert!(!admin_proxy_ready().await);
+        assert!(control_plane_worker().is_none());
         *desired_state().write() = DesiredRemoteState {
             targets: vec![target.clone()],
             ..Default::default()
         };
         assert!(runtime_configured());
         assert!(
-            !admin_proxy_ready(),
+            !admin_proxy_ready().await,
             "configured runtime without a ready child must use the local admin fallback"
         );
         *desired_state().write() = DesiredRemoteState::default();
         std::env::remove_var(REMOTE_INVOKE_WORKER_ENV);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn configured_runtime_without_ready_child_serves_local_admin_status() {
-        let _runtime_guard = crate::worker_runtime::worker_runtime_test_guard_async().await;
-        let _lock = ENV_LOCK.lock().await;
-        std::env::remove_var(REMOTE_INVOKE_WORKER_ENV);
-        stop_runtime_controller();
-        *desired_state().write() = DesiredRemoteState {
-            targets: vec![target()],
-            ..Default::default()
-        };
-        assert!(runtime_configured());
-        assert!(!admin_proxy_ready());
+    #[test]
+    fn control_plane_worker_fails_closed_when_identity_storage_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("blocked-data-dir");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config_manager =
+            Arc::new(bifrost_storage::ConfigManager::new(data_dir.clone()).unwrap());
+        std::fs::remove_dir_all(&data_dir).unwrap();
+        std::fs::write(&data_dir, b"not a directory").unwrap();
+        let state =
+            Arc::new(crate::state::AdminState::new(9).with_config_manager_shared(config_manager));
 
-        let temp = tempfile::tempdir().expect("create remote invoke test data dir");
-        let local_worker = worker(temp.path());
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind local admin fallback listener");
-        let addr = listener.local_addr().expect("local admin fallback addr");
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .expect("accept local admin fallback request");
-            let service = service_fn(move |req: Request<Incoming>| {
-                let local_worker = local_worker.clone();
-                async move {
-                    Ok::<_, hyper::Error>(
-                        crate::handlers::remote_invoke::handle_remote_invoke(
-                            req,
-                            Some(local_worker),
-                            "/api/remote-invoke/status",
-                        )
-                        .await,
-                    )
-                }
-            });
-            http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
-                .await
-                .expect("serve local admin fallback request");
-        });
-
-        let response = bifrost_core::direct_reqwest_client_builder()
-            .build()
-            .expect("build direct client")
-            .get(format!("http://{addr}/_bifrost/api/remote-invoke/status"))
-            .send()
-            .await
-            .expect("request local Remote Invoke status");
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(
-            response.json::<serde_json::Value>().await.unwrap()["state"],
-            "Disconnected"
-        );
-
-        server.await.expect("join local admin fallback server");
-        *desired_state().write() = DesiredRemoteState::default();
-        stop_runtime_controller();
+        assert!(build_control_plane_worker(Some(&target()), "127.0.0.1", 9, state).is_none());
     }
 
     #[test]
@@ -940,8 +981,9 @@ while IFS= read -r line; do
   esac
 done
 "#;
-        let spec =
+        let mut spec =
             crate::worker_runtime::test_shell_worker_spec(&key, WorkerKind::RemoteInvoke, tail);
+        spec.heartbeat_timeout = Duration::from_secs(2);
         let worker = global_worker_supervisor().get_or_start(spec).await.unwrap();
         let stale_relay = "https://stale-relay.example.test".to_string();
         ACTIVE_CLIENTS.write().insert(
@@ -954,6 +996,16 @@ done
             }),
         );
         *PRIMARY_RELAY.write() = Some(stale_relay);
+        let mut configured_target = target();
+        configured_target.relay_url = "https://stale-relay.example.test".to_string();
+        *desired_state().write() = DesiredRemoteState {
+            targets: vec![configured_target],
+            state: Some(Arc::new(crate::state::AdminState::new(9))),
+            ..Default::default()
+        };
+        assert!(admin_proxy_ready().await);
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        assert!(!admin_proxy_ready().await);
         *desired_state().write() = DesiredRemoteState {
             state: Some(Arc::new(crate::state::AdminState::new(9))),
             ..Default::default()

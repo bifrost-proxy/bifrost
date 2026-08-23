@@ -162,6 +162,39 @@ http_post_json() {
     http_request "$url" "POST" "$data" "$extra_headers"
 }
 
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$timeout_seconds" "$@"
+    elif command -v timeout >/dev/null 2>&1; then
+        timeout "$timeout_seconds" "$@"
+    else
+        perl -e '
+            use POSIX ":sys_wait_h";
+            my $timeout = shift @ARGV;
+            my $pid = fork();
+            if ($pid == 0) {
+                exec(@ARGV);
+                exit(1);
+            }
+            eval {
+                local $SIG{ALRM} = sub { die "timeout\n" };
+                alarm($timeout);
+                waitpid($pid, 0);
+                alarm(0);
+            };
+            if ($@ eq "timeout\n") {
+                kill("TERM", $pid);
+                waitpid($pid, 0);
+                exit(124);
+            }
+            exit($? >> 8);
+        ' "$timeout_seconds" "$@"
+    fi
+}
+
 wait_for_target_grant_id() {
     local timeout_seconds="${1:-20}"
     local grant_id=""
@@ -226,6 +259,27 @@ wait_for_grants_api() {
     done
 
     _log_fail "$message" "200" "status=${last_status}; body=${last_body:-${last_error:-<empty>}}"
+    return 1
+}
+
+wait_for_remote_worker_connected() {
+    local message="$1"
+    local timeout_seconds="${2:-60}"
+    local last_status=""
+    local last_body=""
+
+    for _ in $(seq 1 "$timeout_seconds"); do
+        http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/status"
+        last_status="$HTTP_STATUS"
+        last_body="$HTTP_BODY"
+        if [[ "$HTTP_STATUS" == "200" ]] && [[ "$(echo "$HTTP_BODY" | jq -r '.state // ""')" == "Connected" ]]; then
+            _log_pass "$message"
+            return 0
+        fi
+        sleep 1
+    done
+
+    _log_fail "$message" "HTTP 200 with state=Connected" "status=${last_status:-<empty>} body=${last_body:-<empty>}"
     return 1
 }
 
@@ -394,20 +448,10 @@ http_post_json "${CLIENT_ADMIN_URL}/api/sync/session" "{\"token\":\"${RELAY_SYNC
 assert_status "200" "$HTTP_STATUS" "保存 sync session 应返回 200"
 
 log "Wait for remote invoke worker to register with relay..."
-WORKER_READY=0
-for i in $(seq 1 30); do
-    http_get "http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/remote-invoke/status"
-    if [[ "$HTTP_STATUS" == "200" ]]; then
-        WORKER_STATE=$(echo "$HTTP_BODY" | jq -r '.state // ""')
-        if [[ "$WORKER_STATE" == "Connected" ]]; then
-            WORKER_READY=1
-            break
-        fi
-    fi
-    sleep 1
-done
-if [[ "$WORKER_READY" -eq 0 ]]; then
-    log "WARN: worker state=$WORKER_STATE (not Connected yet), continuing anyway..."
+if ! wait_for_remote_worker_connected "remote invoke worker 应连接 relay" 60; then
+    log "Remote invoke worker log:"
+    tail -200 "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null || true
+    exit 1
 fi
 
 log "Verify remote invoke status is available"
@@ -1119,8 +1163,8 @@ http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/discovery/exit" "{}"
 log "=== TC-RI-06: Security - invalid pair_code ==="
 
 INVALID_CODE_LOG="$(mktemp)"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" timeout 15 "$BIFROST_BIN" remote conn up "000000" --relay-url "$RELAY_URL" \
-    > "$INVALID_CODE_LOG" 2>&1 || true
+run_with_timeout 15 env BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "000000" --relay-url "$RELAY_URL" \
+    > "$INVALID_CODE_LOG" 2>&1
 INVALID_EXIT=$?
 
 if grep -qi "error\|failed\|not found\|invalid" "$INVALID_CODE_LOG" || [[ "$INVALID_EXIT" -ne 0 ]]; then
@@ -1160,6 +1204,14 @@ GRANT_CRYPTO_KEY="$BIFROST_DATA_DIR/admin/remote_invoke_grant_crypto.key"
 rm -f "$GRANT_CRYPTO_JSON" "$GRANT_CRYPTO_KEY"
 restart_target_client_preserve_data_dir
 
+# The local control-plane fallback intentionally serves read-only APIs before
+# the isolated execution worker is healthy. A 200 from /grants therefore no
+# longer proves that the remote data plane can receive calls after restart.
+if ! wait_for_remote_worker_connected "client 重启后 remote invoke worker 应重新连接 relay"; then
+    log "Remote invoke worker log after restart:"
+    tail -200 "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null || true
+    exit 1
+fi
 wait_for_grants_api "client 重启后 grants 列表应返回 200"
 GRANT_COUNT_AFTER_CRYPTO_LOSS=$(echo "$HTTP_BODY" | jq '.grants | length')
 if [[ "$GRANT_COUNT_AFTER_CRYPTO_LOSS" -eq 0 ]]; then
@@ -1168,7 +1220,7 @@ else
     _log_fail "TC-RI-07A: 丢失 grant crypto 后 client 仍保留幽灵 grant" "0" "$GRANT_COUNT_AFTER_CRYPTO_LOSS"
 fi
 
-STATUS_AFTER_CRYPTO_LOSS=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
+STATUS_AFTER_CRYPTO_LOSS=$(run_with_timeout 60 env BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
 
 if echo "$STATUS_AFTER_CRYPTO_LOSS" | grep -qiE "expired|revoked|connect"; then
