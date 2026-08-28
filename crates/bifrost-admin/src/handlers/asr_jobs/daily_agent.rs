@@ -1388,11 +1388,30 @@ fn chatgpt_web_daily_agent_contract(
 }
 
 fn chatgpt_web_normalized_response(response: &str) -> &str {
-    response
-        .trim()
-        .trim_start_matches("ChatGPT 说")
-        .trim_start_matches([':', '：'])
-        .trim()
+    let trimmed = response.trim();
+    let normalized = if let Some(rest) = trimmed.strip_prefix("ChatGPT 说") {
+        rest.trim_start_matches([':', '：']).trim()
+    } else {
+        trimmed
+    };
+    let Some((opener, body)) = normalized.split_once('\n') else {
+        return normalized;
+    };
+    let opener = opener.trim();
+    let is_writing_block = opener == ":::writing"
+        || (opener.starts_with(":::writing{") && opener.ends_with('}'));
+    if !is_writing_block {
+        return normalized;
+    }
+    let body = body.trim();
+    let Some((content, closer)) = body.rsplit_once('\n') else {
+        return normalized;
+    };
+    if closer.trim() == ":::" {
+        content.trim()
+    } else {
+        normalized
+    }
 }
 
 fn chatgpt_web_response_is_placeholder(normalized: &str) -> bool {
@@ -1531,6 +1550,32 @@ fn validate_chatgpt_web_daily_agent_response(
         ChatGptWebDailyAgentContract::GenericMarkdown => {
             validate_chatgpt_web_generic_markdown_response(response, date, agent_id)
         }
+    }
+}
+
+fn chatgpt_web_daily_agent_response_needs_continuation(
+    response: &str,
+    date: &str,
+    contract: ChatGptWebDailyAgentContract,
+) -> bool {
+    let normalized = chatgpt_web_normalized_response(response);
+    if chatgpt_web_response_is_placeholder(normalized) {
+        return false;
+    }
+
+    match contract {
+        ChatGptWebDailyAgentContract::DailyReport => {
+            normalized.starts_with(&format!("# {date} 日报"))
+                && normalized.contains("今日概览")
+                && !normalized.contains("证据与不确定性")
+        }
+        ChatGptWebDailyAgentContract::TomorrowTodo => {
+            let target_date = tomorrow_todo_target_date(date);
+            normalized.starts_with(&format!("# 明日 To Do List - {target_date}"))
+                && normalized.contains("明天必须完成")
+                && !normalized.contains("需要确认")
+        }
+        ChatGptWebDailyAgentContract::GenericMarkdown => false,
     }
 }
 
@@ -2129,6 +2174,11 @@ async fn run_daily_agent_inner(
                                 output_dir,
                             )
                             .is_err()
+                                && chatgpt_web_daily_agent_response_needs_continuation(
+                                    &retry_response,
+                                    &entry.date,
+                                    response_contract,
+                                )
                             {
                                 let retry_conversation_id = metadata_value(
                                     &retry_result.metadata,
@@ -2200,6 +2250,7 @@ async fn run_daily_agent_inner(
                             }
                         }
                     };
+                    let response = chatgpt_web_normalized_response(&response).to_string();
                     let report_path = PathBuf::from(&entry.report_target);
                     if let Some(parent) = report_path.parent() {
                         std::fs::create_dir_all(parent).ok();

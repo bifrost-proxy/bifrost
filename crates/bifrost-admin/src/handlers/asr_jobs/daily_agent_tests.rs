@@ -1399,6 +1399,93 @@ fn daily_agent_chatgpt_web_report_continuation_prefers_complete_rewrite() {
 }
 
 #[test]
+fn daily_agent_chatgpt_web_continuation_requires_a_valid_prefix_and_missing_tail() {
+    let truncated_daily =
+        "# 2026-06-15 日报\n\n## 今日概览\n\n正文已开始，但末尾章节尚未输出。".repeat(20);
+    assert!(chatgpt_web_daily_agent_response_needs_continuation(
+        &truncated_daily,
+        "2026-06-15",
+        ChatGptWebDailyAgentContract::DailyReport,
+    ));
+
+    let wrong_date_complete = "# 2026-08-03 日报\n\n## 今日概览\n\n正文完整。\n\n## 证据与不确定性\n\n无。".repeat(20);
+    assert!(!chatgpt_web_daily_agent_response_needs_continuation(
+        &wrong_date_complete,
+        "2026-06-15",
+        ChatGptWebDailyAgentContract::DailyReport,
+    ));
+    assert!(!chatgpt_web_daily_agent_response_needs_continuation(
+        "连接已中断。正在等待完整回复",
+        "2026-06-15",
+        ChatGptWebDailyAgentContract::DailyReport,
+    ));
+
+    let truncated_todo = "# 明日 To Do List - 2026-06-16\n\n## 明天必须完成\n\n- [ ] 完成发布。\n\n## 可选推进\n\n- [ ] 补充文档。";
+    assert!(chatgpt_web_daily_agent_response_needs_continuation(
+        truncated_todo,
+        "2026-06-15",
+        ChatGptWebDailyAgentContract::TomorrowTodo,
+    ));
+
+    assert!(!chatgpt_web_daily_agent_response_needs_continuation(
+        "# 任意 Markdown\n\n内容未知是否完整。",
+        "2026-06-15",
+        ChatGptWebDailyAgentContract::GenericMarkdown,
+    ));
+}
+
+#[test]
+fn daily_agent_chatgpt_web_unwraps_complete_writing_block_before_validation_and_save() {
+    let wrapped = r#":::writing{variant="document" id="58341"}
+# 明日 To Do List - 2026-07-31
+
+## 明天必须完成
+
+- [ ] 完成发布。
+
+## 可选推进
+
+- [ ] 补充文档。
+
+## 需要确认
+
+- [ ] 确认验收人。
+:::"#;
+
+    let validation = validate_chatgpt_web_tomorrow_todo_response(wrapped, "2026-07-30");
+    assert!(validation.is_ok(), "{validation:?}");
+    let normalized = chatgpt_web_normalized_response(wrapped);
+    assert_eq!(
+        normalized.lines().next(),
+        Some("# 明日 To Do List - 2026-07-31")
+    );
+    assert!(!normalized.contains(":::writing"));
+    assert!(!normalized.ends_with(":::"));
+    assert!(!chatgpt_web_daily_agent_response_needs_continuation(
+        wrapped,
+        "2026-07-30",
+        ChatGptWebDailyAgentContract::TomorrowTodo,
+    ));
+
+    let incomplete = r#":::writing{variant="document" id="58341"}
+# 明日 To Do List - 2026-07-31
+
+## 明天必须完成
+
+- [ ] 仍在生成。"#;
+    assert_eq!(chatgpt_web_normalized_response(incomplete), incomplete);
+    assert!(validate_chatgpt_web_tomorrow_todo_response(incomplete, "2026-07-30").is_err());
+
+    let prefixed = "ChatGPT 说：# 明日 To Do List - 2026-07-31\n\n## 明天必须完成\n\n- [ ] 完成发布。\n\n## 可选推进\n\n- [ ] 补充文档。\n\n## 需要确认\n\n- [ ] 确认验收人。";
+    assert_eq!(
+        chatgpt_web_normalized_response(prefixed)
+            .lines()
+            .next(),
+        Some("# 明日 To Do List - 2026-07-31")
+    );
+}
+
+#[test]
 fn daily_agent_change_plan_filters_to_requested_date() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();

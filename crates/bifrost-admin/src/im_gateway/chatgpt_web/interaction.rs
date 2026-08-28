@@ -244,6 +244,14 @@ pub(super) struct WaitFinalOptions<'a> {
     /// assistant message. DOM state is still useful progress telemetry, but is
     /// not authoritative enough to complete a run.
     pub(super) require_backend_finality: bool,
+    /// A conversation can occasionally render normally while its detail API
+    /// permanently returns the specific `conversation_inaccessible` 404. Only
+    /// that error may use a stable, completed DOM result after this interval.
+    pub(super) backend_inaccessible_dom_stable_for: std::time::Duration,
+    /// Persistent 429 responses can otherwise self-sustain when polling is too
+    /// frequent. A completed DOM result must remain stable for this longer
+    /// interval before rate-limit recovery may fall back to it.
+    pub(super) backend_rate_limited_dom_stable_for: std::time::Duration,
 }
 
 /// Try to construct a `WaitedFinal` directly from the SSE stream detail.
@@ -547,6 +555,7 @@ pub(super) async fn wait_final(
             config.chatgpt.poll_interval_ms,
             dom_busy,
             backend_ready_candidate.is_some(),
+            last_backend_error.as_deref(),
         );
         let now = tokio::time::Instant::now();
         let backend_poll_due = options.require_backend_finality
@@ -557,9 +566,9 @@ pub(super) async fn wait_final(
             last_backend_poll_at = Some(now);
             match get_conversation_detail(config, auth, conversation_id).await {
                 Ok(detail) => {
-                    last_backend_error = None;
                     match try_waited_final_from_conversation_detail(&detail, after_time) {
                         Some(waited) => {
+                            last_backend_error = None;
                             let signature = backend_ready_signature(&detail, &waited);
                             let settle_for = backend_terminal_content_settle_for(&waited);
                             let ready_candidate = BackendReadyCandidate {
@@ -608,10 +617,20 @@ pub(super) async fn wait_final(
                         }
                         None => {
                             backend_ready_candidate = None;
-                            tracing::info!(
-                                conversation_id,
-                                "chatgpt_web wait_final: backend current branch is not final yet"
-                            );
+                            if should_preserve_rate_limit_fallback_after_nonfinal_read(
+                                last_backend_error.as_deref(),
+                            ) {
+                                tracing::warn!(
+                                    conversation_id,
+                                    "chatgpt_web wait_final: backend detail is readable but still not final after rate limiting; preserving sparse polling and bounded DOM fallback"
+                                );
+                            } else {
+                                last_backend_error = None;
+                                tracing::info!(
+                                    conversation_id,
+                                    "chatgpt_web wait_final: backend current branch is not final yet"
+                                );
+                            }
                         }
                     }
                 }
@@ -627,8 +646,94 @@ pub(super) async fn wait_final(
         }
 
         if options.require_backend_finality {
-            match &dom_outcome {
+            let backend_dom_fallback = last_backend_error
+                .as_deref()
+                .and_then(conversation_read_error_dom_fallback_kind)
+                .map(|kind| {
+                    let stable_for = match kind {
+                        BackendReadFallbackKind::ConversationInaccessible => {
+                            options.backend_inaccessible_dom_stable_for
+                        }
+                        BackendReadFallbackKind::RateLimited => {
+                            options.backend_rate_limited_dom_stable_for
+                        }
+                    };
+                    (kind, stable_for)
+                });
+            match dom_outcome {
+                DomExtractOutcome::Ready(waited) if backend_dom_fallback.is_some() => {
+                    let (fallback_kind, required_stable_for) =
+                        backend_dom_fallback.expect("checked backend DOM fallback");
+                    let text_len = waited
+                        .final_message
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(str::len)
+                        .unwrap_or_default();
+                    let image_count = waited
+                        .final_message
+                        .get("generatedImages")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or_default();
+                    let signature = dom_ready_signature(&waited);
+                    let ready_candidate = TerminalReadyCandidate {
+                        waited,
+                        text_len,
+                        image_count,
+                        signature,
+                        stable_since: tokio::time::Instant::now(),
+                    };
+                    match terminal_ready_candidate.as_mut() {
+                        None => {
+                            let required_stable_ms = required_stable_for.as_millis();
+                            tracing::warn!(
+                                conversation_id,
+                                text_len,
+                                image_count,
+                                backend_error_kind = fallback_kind.as_str(),
+                                required_stable_ms,
+                                "chatgpt_web wait_final: backend read remains unavailable; waiting for completed DOM content to remain stable"
+                            );
+                            terminal_ready_candidate = Some(ready_candidate);
+                        }
+                        Some(candidate) if candidate.signature != signature => {
+                            tracing::warn!(
+                                conversation_id,
+                                previous_text_len = candidate.text_len,
+                                text_len,
+                                previous_image_count = candidate.image_count,
+                                image_count,
+                                backend_error_kind = fallback_kind.as_str(),
+                                "chatgpt_web wait_final: backend fallback DOM content changed; resetting timer"
+                            );
+                            terminal_ready_candidate = Some(ready_candidate);
+                        }
+                        Some(candidate) => {
+                            let stable_for =
+                                tokio::time::Instant::now().duration_since(candidate.stable_since);
+                            if stable_for >= required_stable_for {
+                                let mut waited = terminal_ready_candidate
+                                    .take()
+                                    .expect("terminal fallback candidate should exist")
+                                    .waited;
+                                waited.had_429_or_fallback = true;
+                                let stable_for_ms = stable_for.as_millis();
+                                tracing::warn!(
+                                    conversation_id,
+                                    text_len,
+                                    image_count,
+                                    backend_error_kind = fallback_kind.as_str(),
+                                    stable_for_ms,
+                                    "chatgpt_web wait_final: accepting stable completed DOM after bounded backend read failure"
+                                );
+                                return Ok(waited);
+                            }
+                        }
+                    }
+                }
                 DomExtractOutcome::Ready(_) => {
+                    terminal_ready_candidate = None;
                     tracing::info!(
                         conversation_id,
                         "chatgpt_web wait_final: DOM looks idle but backend finality is still required"
@@ -639,6 +744,7 @@ pub(super) async fn wait_final(
                     image_count,
                     reason,
                 } => {
+                    terminal_ready_candidate = None;
                     tracing::info!(
                         conversation_id,
                         text_len,
@@ -650,7 +756,8 @@ pub(super) async fn wait_final(
                 DomExtractOutcome::NotFound => {
                     tracing::debug!(
                         conversation_id,
-                        "chatgpt_web wait_final: DOM content unavailable; waiting on backend current branch"
+                        has_fallback_candidate = terminal_ready_candidate.is_some(),
+                        "chatgpt_web wait_final: DOM content unavailable for this sample; preserving any bounded backend-fallback candidate"
                     );
                 }
             }
@@ -820,8 +927,18 @@ fn backend_poll_interval(
     configured_poll_ms: u64,
     dom_busy: bool,
     has_final_candidate: bool,
+    last_backend_error: Option<&str>,
 ) -> std::time::Duration {
-    if dom_busy && !has_final_candidate {
+    // Once the backend has already produced a finished candidate, retry fast
+    // enough to confirm that exact candidate within its settle window. A
+    // transient 429 must not demote it to the slower DOM-only recovery path.
+    if has_final_candidate {
+        return std::time::Duration::from_millis(configured_poll_ms.max(3_000));
+    }
+    if last_backend_error.is_some_and(|error| error.contains("HTTP 429")) {
+        return std::time::Duration::from_secs(30);
+    }
+    if dom_busy {
         return std::time::Duration::from_secs(30);
     }
     std::time::Duration::from_millis(configured_poll_ms.max(3_000))
@@ -921,6 +1038,40 @@ pub(super) fn is_transient_conversation_read_error(error: &str) -> bool {
         || error.contains("HTTP 502")
         || error.contains("HTTP 503")
         || error.contains("HTTP 504")
+}
+
+#[derive(Clone, Copy)]
+enum BackendReadFallbackKind {
+    ConversationInaccessible,
+    RateLimited,
+}
+
+impl BackendReadFallbackKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ConversationInaccessible => "conversation_inaccessible",
+            Self::RateLimited => "rate_limited",
+        }
+    }
+}
+
+fn conversation_read_error_dom_fallback_kind(error: &str) -> Option<BackendReadFallbackKind> {
+    if error.contains("HTTP 404") && error.contains("conversation_inaccessible") {
+        return Some(BackendReadFallbackKind::ConversationInaccessible);
+    }
+    if error.contains("HTTP 429") {
+        return Some(BackendReadFallbackKind::RateLimited);
+    }
+    None
+}
+
+fn should_preserve_rate_limit_fallback_after_nonfinal_read(
+    last_backend_error: Option<&str>,
+) -> bool {
+    matches!(
+        last_backend_error.and_then(conversation_read_error_dom_fallback_kind),
+        Some(BackendReadFallbackKind::RateLimited)
+    )
 }
 
 pub(super) async fn stop_requested(path: &Path) -> bool {
@@ -3153,6 +3304,8 @@ mod tests {
                 profile_dir: Some(&config.profile_dir),
                 terminal_idle_stable_for: std::time::Duration::ZERO,
                 require_backend_finality: false,
+                backend_inaccessible_dom_stable_for: std::time::Duration::from_secs(30),
+                backend_rate_limited_dom_stable_for: std::time::Duration::from_secs(60),
             },
         )
         .await
@@ -3455,17 +3608,39 @@ mod tests {
     #[test]
     fn backend_finality_polling_is_sparse_while_dom_busy_and_fast_near_completion() {
         assert_eq!(
-            backend_poll_interval(1_000, true, false),
+            backend_poll_interval(1_000, true, false, None),
             std::time::Duration::from_secs(30)
         );
         assert_eq!(
-            backend_poll_interval(1_000, false, false),
+            backend_poll_interval(1_000, false, false, None),
             std::time::Duration::from_secs(3)
         );
         assert_eq!(
-            backend_poll_interval(1_000, true, true),
+            backend_poll_interval(1_000, true, true, None),
             std::time::Duration::from_secs(3)
         );
+        assert_eq!(
+            backend_poll_interval(
+                1_000,
+                false,
+                false,
+                Some("ChatGPT browser-context HTTP 429")
+            ),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            backend_poll_interval(1_000, false, true, Some("ChatGPT browser-context HTTP 429")),
+            std::time::Duration::from_secs(3)
+        );
+        assert!(should_preserve_rate_limit_fallback_after_nonfinal_read(
+            Some("ChatGPT browser-context HTTP 429")
+        ));
+        assert!(!should_preserve_rate_limit_fallback_after_nonfinal_read(
+            Some("ChatGPT browser-context HTTP 503")
+        ));
+        assert!(!should_preserve_rate_limit_fallback_after_nonfinal_read(
+            None
+        ));
 
         let short = WaitedFinal {
             final_message: json!({"text": "OK"}),
@@ -3608,6 +3783,8 @@ mod tests {
                 profile_dir: Some(&config.profile_dir),
                 terminal_idle_stable_for: std::time::Duration::ZERO,
                 require_backend_finality: true,
+                backend_inaccessible_dom_stable_for: std::time::Duration::from_secs(30),
+                backend_rate_limited_dom_stable_for: std::time::Duration::from_secs(60),
             },
         )
         .await
@@ -3647,6 +3824,8 @@ mod tests {
                 profile_dir: Some(&config.profile_dir),
                 terminal_idle_stable_for: std::time::Duration::ZERO,
                 require_backend_finality: true,
+                backend_inaccessible_dom_stable_for: std::time::Duration::from_secs(30),
+                backend_rate_limited_dom_stable_for: std::time::Duration::from_secs(60),
             },
         )
         .await
@@ -3656,7 +3835,11 @@ mod tests {
         };
 
         assert!(error.contains("backend did not confirm"), "{error}");
-        assert!(error.contains("HTTP 503"), "{error}");
+        assert!(error.contains("HTTP 429"), "{error}");
+        assert!(
+            take_test_backend_detail(conversation_id).is_some(),
+            "rate limiting should defer the next backend read instead of self-sustaining through rapid retries"
+        );
     }
 
     #[tokio::test]
@@ -3697,6 +3880,8 @@ mod tests {
                 profile_dir: Some(&config.profile_dir),
                 terminal_idle_stable_for: std::time::Duration::ZERO,
                 require_backend_finality: true,
+                backend_inaccessible_dom_stable_for: std::time::Duration::from_secs(30),
+                backend_rate_limited_dom_stable_for: std::time::Duration::from_secs(60),
             },
         )
         .await
@@ -3705,6 +3890,136 @@ mod tests {
         assert_eq!(waited.final_message["text"], final_text);
         assert!(waited.had_429_or_fallback);
         assert!(take_test_backend_detail(conversation_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_final_accepts_stable_dom_for_conversation_inaccessible_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config, auth) = backend_wait_runtime(&temp);
+        let conversation_id = "test-backend-conversation-inaccessible";
+        let draft_text = "draft DOM answer";
+        let final_text = "complete DOM answer";
+        set_test_backend_details(
+            conversation_id,
+            vec![Err(
+                "auth_or_challenge: ChatGPT browser-context HTTP 404: {\"detail\":{\"code\":\"conversation_inaccessible\"}}"
+                    .to_string(),
+            )],
+        );
+        set_test_dom_outcomes(
+            conversation_id,
+            vec![
+                dom_ready(draft_text),
+                dom_ready(final_text),
+                dom_ready(final_text),
+            ],
+        );
+
+        let waited = wait_final(
+            &config,
+            &auth,
+            conversation_id,
+            Some(10.0),
+            WaitFinalOptions {
+                duration: std::time::Duration::from_secs(5),
+                stop_marker_path: &temp.path().join("stop"),
+                profile_dir: Some(&config.profile_dir),
+                terminal_idle_stable_for: std::time::Duration::ZERO,
+                require_backend_finality: true,
+                backend_inaccessible_dom_stable_for: std::time::Duration::from_secs(1),
+                backend_rate_limited_dom_stable_for: std::time::Duration::from_secs(60),
+            },
+        )
+        .await
+        .expect("specific inaccessible conversation should accept stable completed DOM");
+
+        assert_eq!(waited.final_message["text"], final_text);
+        assert!(waited.had_429_or_fallback);
+    }
+
+    #[tokio::test]
+    async fn wait_final_backs_off_and_accepts_stable_dom_after_rate_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config, auth) = backend_wait_runtime(&temp);
+        let conversation_id = "test-backend-rate-limited-dom";
+        let final_text = "complete rate-limited DOM answer";
+        set_test_backend_details(
+            conversation_id,
+            vec![Err(
+                "ChatGPT browser-context HTTP 429: {\"detail\":\"Too many requests\"}".to_string(),
+            )],
+        );
+        set_test_dom_outcomes(
+            conversation_id,
+            vec![
+                dom_ready(final_text),
+                DomExtractOutcome::NotFound,
+                dom_ready(final_text),
+            ],
+        );
+
+        let waited = wait_final(
+            &config,
+            &auth,
+            conversation_id,
+            Some(10.0),
+            WaitFinalOptions {
+                duration: std::time::Duration::from_secs(4),
+                stop_marker_path: &temp.path().join("stop"),
+                profile_dir: Some(&config.profile_dir),
+                terminal_idle_stable_for: std::time::Duration::ZERO,
+                require_backend_finality: true,
+                backend_inaccessible_dom_stable_for: std::time::Duration::from_secs(30),
+                backend_rate_limited_dom_stable_for: std::time::Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect("persistent rate limit should accept a conservatively stable completed DOM");
+
+        assert_eq!(waited.final_message["text"], final_text);
+        assert!(waited.had_429_or_fallback);
+        assert!(take_test_backend_detail(conversation_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_final_generic_404_never_accepts_ready_dom() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config, auth) = backend_wait_runtime(&temp);
+        let conversation_id = "test-backend-generic-404";
+        set_test_backend_details(
+            conversation_id,
+            vec![Err(
+                "auth_or_challenge: ChatGPT browser-context HTTP 404: not found".to_string(),
+            )],
+        );
+        set_test_dom_outcomes(
+            conversation_id,
+            vec![dom_ready("must not return"), dom_ready("must not return")],
+        );
+
+        let error = match wait_final(
+            &config,
+            &auth,
+            conversation_id,
+            Some(10.0),
+            WaitFinalOptions {
+                duration: std::time::Duration::from_secs(2),
+                stop_marker_path: &temp.path().join("stop"),
+                profile_dir: Some(&config.profile_dir),
+                terminal_idle_stable_for: std::time::Duration::ZERO,
+                require_backend_finality: true,
+                backend_inaccessible_dom_stable_for: std::time::Duration::ZERO,
+                backend_rate_limited_dom_stable_for: std::time::Duration::from_secs(60),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("generic 404 must keep requiring backend finality"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("backend did not confirm"), "{error}");
+        assert!(error.contains("HTTP 404"), "{error}");
     }
 
     #[tokio::test]
@@ -3729,6 +4044,8 @@ mod tests {
                 profile_dir: Some(&config.profile_dir),
                 terminal_idle_stable_for: std::time::Duration::ZERO,
                 require_backend_finality: true,
+                backend_inaccessible_dom_stable_for: std::time::Duration::from_secs(30),
+                backend_rate_limited_dom_stable_for: std::time::Duration::from_secs(60),
             },
         )
         .await
