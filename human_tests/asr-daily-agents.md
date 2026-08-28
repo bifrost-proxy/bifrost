@@ -390,8 +390,27 @@
 - 真实补跑最终生成有效报告；失败重试前不得推进 processed watermark。
 - 正式恢复保持单任务串行，避免并发加重 ChatGPT Web 限流。
 
+### TC-ADA-24 回归：CDP 孤立 UTF-16 代理项不再中断 Daily Agent
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib cdp_json_ -- --nocapture`，验证孤立高/低代理项被替换为 `U+FFFD`，合法代理项对和转义字面量保持不变。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib cdp_client_keeps_connection_after_lone_surrogate_response -- --nocapture`，验证收到含孤立代理项的 CDP 响应后，当前请求成功返回且后续请求继续复用同一 WebSocket。
+3. 执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh`，确认 ChatGPT Web 共享浏览器、最终性门禁、Daily Agent 失败隔离与 Tomorrow ToDo 契约继续通过。
+4. 使用 `cargo install --locked --path crates/bifrost-cli --bin bifrost --root /Users/eden_studio/.local --force` 安装修复版，并通过 `bifrost restart` 重启正式 `9900` 服务；确认 PID 已更新，端口、监听地址和系统代理状态保持不变。
+5. 记录正式日志中历史 `cdp_malformed_message` 失败的 task、日期与两个 Agent；本用例使用 task `735775510b384fff8903d9c6fc54f1a3`、日期 `2025-04-12`，只通过带 `agent_id`、`date`、`force=1` 的 API 精确串行重跑。
+6. 先触发 `daily_report`，轮询到新 run 结束并检查 report 标题、必要章节、processed run id 与日志；确认 browser job 清空后，再以相同步骤触发 `tomorrow_todo`。
+7. 检查本轮日志不得新增 `CDP reader: malformed JSON, closing connection`、`cdp_malformed_message` 或因此导致的 Agent 失败；如果 Chrome 实际发出孤立代理项，应出现 `CDP reader: repaired isolated UTF-16 surrogate escape` 且连接保持可用。
+
+预期结果：
+- CDP JSON 正常消息不经过修复；仅在首次 JSON 解析失败时扫描 JSON 字符串中的 `\uXXXX`。
+- 孤立高代理项或低代理项替换为 `\uFFFD`；合法高低代理项对、字符串外文本和转义后的字面量不得改变。
+- 除孤立 UTF-16 代理项外的畸形 JSON 继续关闭连接并拒绝 pending 请求，不能扩大容错边界。
+- 安装后的正式服务保持原端口与系统代理配置，两个 Agent 均生成与各自契约一致的有效报告并写入新 run id。
+- 两个 Agent 串行运行；不得触发全局历史补跑，不得将旧 run 的成功状态误认为本轮通过。
+
 ## 执行记录
 
+- 2026-08-28：执行 TC-ADA-24 通过。历史正式日志在 task `735775510b384fff8903d9c6fc54f1a3` 的 `2025-04-12` 上重复出现 `unexpected end of hex escape at line 1 column 1997 payload_len=2184`，随后关闭 CDP 并让 `daily_report` 与 `tomorrow_todo` 都以 `cdp_malformed_message` 失败。新增 parser 与 WebSocket 单测均通过，`test_chatgpt_web_shared_profile.sh` 也通过。使用 `cargo install --locked --path crates/bifrost-cli --bin bifrost --root /Users/eden_studio/.local --force` 安装修复版后执行 `bifrost restart`，正式服务由 PID `59186` 切换为 `31046`，仍监听 `127.0.0.1:9900` 且系统代理保持启用。随后只精确串行重跑 `2025-04-12`：`daily_report` run `1787921720288-b873c30e-a202-4a3b-8261-0c00ff60d552` 成功，报告 2548 字符，首行为 `# 2025-04-12 日报`，包含 `今日概览` 与 `证据与不确定性`；`tomorrow_todo` run `1787921854972-220c7f1b-358a-4948-843a-47034db1de04` 成功，报告 96 字符，首行为 `# 明日 To Do List - 2025-04-13`，三个必需章节齐全。两个 Agent 的 report API 均返回本轮新 run id，任务最终状态均为 `success` 且 `last_error=null`；从修复版服务启动日志基线到两次运行结束，没有新增 `CDP reader: malformed JSON, closing connection` 或 `cdp_malformed_message`。本次 Chrome 没有再次发出孤立代理项，因此未出现 repair warning；孤立代理项实际修复与连接复用由确定性 WebSocket 回归测试覆盖。
 - 2026-08-20：扩展执行 TC-ADA-23 的 stale Stop 回归。运行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib --all-features busy_gate_ -- --nocapture`，3 个用例通过：后端 finished 后成功清理 stale Stop、没有 finished 证据时不点击 Stop，以及 Stop 点击失败/持续残留时按 busy 上限返回 `conversation_busy` 而不无限循环。
 - 2026-08-19：执行 TC-ADA-23 通过。单测验证 browser worker 父超时跟随 adapter timeout、瞬时 429/5xx 保留 finished candidate、后端 final 后清理 stale Stop、provisional `WEB:*` handoff 不重复发送、conversation 丢失后纠偏携带完整原始上下文，并验证 AGENTS.md 含历史固定日期时动态运行契约在其后覆盖旧日期。安装验证后的正式二进制后，仅在正式 `9900` 服务上精确串行触发 task `735775510b384fff8903d9c6fc54f1a3` 的 `2026-08-18 / daily_report` 与 `tomorrow_todo`。日报 run `1787136020872-54c9f081-26d4-4e76-8648-227726787804` 持续 435557ms 后成功，产物 34317 字节，首行为 `# 2026-08-18 日报`，包含 `今日概览` 与 `证据与不确定性`；processed state 写入同一 run id。确认 browser job 清空后才触发 TODO；TODO run `1787136511344-3c0a82dc-d609-4e0c-ba6c-972d865e03ea` 经同会话纠偏后持续 296509ms 成功，产物 2169 字节，首行为 `# 明日 To Do List - 2026-08-19`，三个必需章节齐全，processed state 写入同一 run id。两次运行均未被五分钟 worker idle 回收中断，最终 browser 活跃 job 为空；没有触发全局 Force Run，也没有并发运行两个 Daily Agent。
 - 2026-08-19：执行 TC-ADA-22 通过。隔离 worker 协议测试确认 `dailyAgentDates` 可从 ASR worker 返回主进程；父进程 handoff 测试确认完成日期在主进程持久化为 pending，worker 不再启动长时间浏览器任务；pending 测试确认日期去重、watermark 推进不隐藏 backlog、生成期间再次追加转写不会被旧报告误清 pending；ChatGPT Web mock 测试确认失败日期保留而成功日期移除。随后在临时端口 `19197/19198` 两次执行 `e2e-tests/tests/test_asr_daily_agents_api.sh` 均通过，修复后复跑的临时 task 为 `45084575493744b48974442f6661786a`，验证真实 Admin API、两个默认 Agent、mock Runner、processed records 与 report sync。测试未使用正式 `9900` 端口，脚本已清理临时服务和数据目录。

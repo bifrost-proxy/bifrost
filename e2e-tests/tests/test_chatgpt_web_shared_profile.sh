@@ -29,12 +29,14 @@ grep -q "const chatLabels = new Set(\\['Chat', '聊天'\\])" crates/bifrost-admi
 grep -q "const workLabels = new Set(\\['Work', '工作'\\])" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "\\['on', 'checked', 'active'\\].includes(dataState)" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "recover_conversation_tab_from_browser" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+grep -q "repair_lone_surrogate_escapes" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+grep -q "CDP reader: repaired isolated UTF-16 surrogate escape" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "wait_chatgpt_web_daily_agent_conversation" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "daily_agent_chatgpt_web_same_conversation_wait_timeout_ms" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "ASR daily agent entry failed; continuing with remaining entries" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "partial_success" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "tomorrow_todo_target_date" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
-grep -q "Tomorrow ToDo 日期规则" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_prompt.rs
+grep -q "明日待办目标日期" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_prompt.rs
 if grep -q "bifrost_new_chat" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs; then
   echo "ChatGPT Web new-conversation URL must not expose bifrost_new_chat" >&2
   exit 1
@@ -76,6 +78,14 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   conversation_tab_pool_capacity_is_scoped_per_profile \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  cdp_json_ \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  cdp_client_keeps_connection_after_lone_surrogate_response \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \

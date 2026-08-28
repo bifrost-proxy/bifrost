@@ -224,6 +224,8 @@ WebUI 选择 `chatgpt_web` 后：隐藏 executable/args/env/sandbox/approval pol
 
 心跳与恢复：handoff 等待期间检查浏览器进程、CDP WebSocket、页面 `Runtime.evaluate` probe；任一失败快速返回 `browser_unavailable`。短 SSE handoff 中断不能直接判失败：必须先从页面 URL、session 映射或显式 `conversationId` 恢复，再进入长轮询。
 
+CDP transport 必须兼容 Chrome 返回的孤立 UTF-16 surrogate escape。页面 DOM 文本按 JavaScript UTF-16 code unit 截断时，可能在 emoji 中间形成 `\uD800`-`\uDFFF` 单码元；该 JSON 对 CDP/RFC 8259 合法，但不能直接解码成 Rust UTF-8 `String`。Reader 只在普通 `serde_json` 解析失败且确认是孤立 surrogate 时将该码元替换为 `U+FFFD` 后继续 dispatch；合法 surrogate pair、转义后的字面 `\\uXXXX` 和其他字段保持原样。其他 malformed JSON 仍关闭连接并立即拒绝 pending requests，不能用宽松解析掩盖 transport 损坏。
+
 失败例：
 
 ~~~json
@@ -416,6 +418,10 @@ result.json
 - `chatgpt_conversation_current_node_extracts_final_text`
 - `chatgpt_wait_times_out_without_finished_assistant`
 - `chatgpt_run_artifacts_do_not_contain_cookie_or_authorization`
+- `cdp_json_repairs_only_isolated_utf16_surrogates`
+- `cdp_json_repair_preserves_surrogate_pairs_and_escaped_literals`
+- `cdp_json_rejects_non_surrogate_malformed_json`
+- `cdp_client_keeps_connection_after_lone_surrogate_response`
 
 ### E2E 测试
 
