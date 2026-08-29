@@ -17,6 +17,9 @@ grep -q "hasGeneratedImageAfterLastUser" crates/bifrost-admin/src/im_gateway/cha
 grep -q "require_backend_finality" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "try_waited_final_from_conversation_detail" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "backend confirmed finished assistant on current branch" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "conversation_read_error_dom_fallback_kind" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "should_preserve_rate_limit_fallback_after_nonfinal_read" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "accepting stable completed DOM after bounded backend read failure" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 if grep -q "DOM-only mode (no API polling)" \
   crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs; then
   echo "ChatGPT Web final wait must not regress to DOM-only finality" >&2
@@ -29,12 +32,16 @@ grep -q "const chatLabels = new Set(\\['Chat', '聊天'\\])" crates/bifrost-admi
 grep -q "const workLabels = new Set(\\['Work', '工作'\\])" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "\\['on', 'checked', 'active'\\].includes(dataState)" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "recover_conversation_tab_from_browser" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+grep -q "repair_lone_surrogate_escapes" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+grep -q "CDP reader: repaired isolated UTF-16 surrogate escape" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "wait_chatgpt_web_daily_agent_conversation" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "daily_agent_chatgpt_web_same_conversation_wait_timeout_ms" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "ASR daily agent entry failed; continuing with remaining entries" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "partial_success" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "tomorrow_todo_target_date" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
-grep -q "Tomorrow ToDo 日期规则" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_prompt.rs
+grep -q "chatgpt_web_daily_agent_response_needs_continuation" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+grep -q ":::writing" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+grep -q "明日待办目标日期" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_prompt.rs
 if grep -q "bifrost_new_chat" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs; then
   echo "ChatGPT Web new-conversation URL must not expose bifrost_new_chat" >&2
   exit 1
@@ -76,6 +83,14 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   conversation_tab_pool_capacity_is_scoped_per_profile \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  cdp_json_ \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  cdp_client_keeps_connection_after_lone_surrogate_response \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
@@ -123,6 +138,18 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   --lib -- --nocapture --test-threads=1
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  wait_final_accepts_stable_dom_for_conversation_inaccessible_only \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  wait_final_generic_404_never_accepts_ready_dom \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  wait_final_backs_off_and_accepts_stable_dom_after_rate_limit \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   is_retryable_send_error_matches_known_prefixes \
   --lib -- --nocapture
 
@@ -144,4 +171,12 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   daily_agent_chatgpt_web_tomorrow_todo \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  daily_agent_chatgpt_web_continuation_requires_a_valid_prefix_and_missing_tail \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  daily_agent_chatgpt_web_unwraps_complete_writing_block_before_validation_and_save \
   --lib -- --nocapture

@@ -923,10 +923,10 @@ mod tests {
     use super::{
         browser_process_candidate_from_line, browser_process_pid_from_line,
         clear_conversation_tabs_for_profile, conversation_tabs, get_conversation_tab,
-        page_url_matches_conversation, recovered_browser_mode_matches, register_conversation_tab,
-        select_reusable_chatgpt_page, take_or_attach_reusable_chatgpt_tab,
-        take_reusable_conversation_tab, BrowserSession, CdpClient, CdpPage,
-        CONVERSATION_TAB_POOL_SIZE,
+        page_url_matches_conversation, parse_cdp_json, recovered_browser_mode_matches,
+        register_conversation_tab, select_reusable_chatgpt_page,
+        take_or_attach_reusable_chatgpt_tab, take_reusable_conversation_tab, BrowserSession,
+        CdpClient, CdpPage, CONVERSATION_TAB_POOL_SIZE,
     };
     use dashmap::DashMap;
     use futures_util::{SinkExt, StreamExt};
@@ -964,6 +964,114 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn cdp_json_repairs_only_isolated_utf16_surrogates() {
+        let raw = r#"{"id":1,"result":{"high":"\ud83c","low":"\udfff","ascii":"ok"}}"#;
+
+        let (value, replacements) = parse_cdp_json(raw).expect("repair lone surrogates");
+
+        assert_eq!(replacements, 2);
+        assert_eq!(value["result"]["high"], "�");
+        assert_eq!(value["result"]["low"], "�");
+        assert_eq!(value["result"]["ascii"], "ok");
+    }
+
+    #[test]
+    fn cdp_json_repair_preserves_surrogate_pairs_and_escaped_literals() {
+        let raw =
+            r#"{"id":1,"result":{"lone":"\udfff","emoji":"\ud83c\uddfa","literal":"\\ud83c"}}"#;
+
+        let (value, replacements) = parse_cdp_json(raw).expect("repair mixed CDP JSON");
+
+        assert_eq!(replacements, 1);
+        assert_eq!(value["result"]["lone"], "�");
+        assert_eq!(value["result"]["emoji"], "🇺");
+        assert_eq!(value["result"]["literal"], r"\ud83c");
+    }
+
+    #[test]
+    fn cdp_json_rejects_non_surrogate_malformed_json() {
+        let error = parse_cdp_json(r#"{"id":1,"result":]"#)
+            .expect_err("non-surrogate malformed JSON must remain fatal");
+
+        assert!(error.is_syntax());
+    }
+
+    #[tokio::test]
+    async fn cdp_client_keeps_connection_after_lone_surrogate_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake CDP WebSocket");
+        let address = listener.local_addr().expect("CDP address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept CDP client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("upgrade CDP WebSocket");
+
+            let first = websocket
+                .next()
+                .await
+                .expect("first CDP request")
+                .expect("valid first request");
+            let Message::Text(first) = first else {
+                panic!("expected first text request");
+            };
+            let first: Value = serde_json::from_str(&first).expect("parse first request");
+            let first_id = first["id"].as_u64().expect("first request id");
+            websocket
+                .send(Message::Text(
+                    format!(r#"{{"id":{first_id},"result":{{"value":"\ud83c"}}}}"#).into(),
+                ))
+                .await
+                .expect("send lone surrogate response");
+
+            let second = websocket
+                .next()
+                .await
+                .expect("second CDP request")
+                .expect("valid second request");
+            let Message::Text(second) = second else {
+                panic!("expected second text request");
+            };
+            let second: Value = serde_json::from_str(&second).expect("parse second request");
+            let second_id = second["id"].as_u64().expect("second request id");
+            websocket
+                .send(Message::Text(
+                    serde_json::json!({"id": second_id, "result": {"value": "healthy"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("send healthy response");
+            while let Some(message) = websocket.next().await {
+                if matches!(message, Ok(Message::Close(_))) {
+                    break;
+                }
+            }
+        });
+        let client = CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect CDP client");
+
+        let repaired = client
+            .send("Runtime.evaluate", serde_json::json!({}))
+            .await
+            .expect("lone surrogate response should be delivered");
+        assert_eq!(repaired["value"], "�");
+        assert!(!client.is_closed());
+
+        let healthy = client
+            .send("Runtime.evaluate", serde_json::json!({}))
+            .await
+            .expect("connection should remain usable");
+        assert_eq!(healthy["value"], "healthy");
+        assert!(!client.is_closed());
+
+        client.close();
+        server.await.expect("fake CDP server finishes");
     }
 
     #[test]
@@ -1821,6 +1929,116 @@ fn drain_pending(pending: &DashMap<u64, oneshot::Sender<Result<Value, String>>>,
     }
 }
 
+/// Parse a CDP JSON message while tolerating isolated UTF-16 surrogate escapes.
+///
+/// Chrome can return strings containing a lone `\uD800`-`\uDFFF` code unit when
+/// DOM text is truncated at a UTF-16 boundary (for example, in the middle of an
+/// emoji). RFC 8259 permits that JSON representation, but Rust strings cannot
+/// represent the unpaired surrogate and `serde_json` rejects the entire CDP
+/// response. Replace only those isolated code units with U+FFFD and leave valid
+/// surrogate pairs and escaped `\\uXXXX` literals untouched.
+fn parse_cdp_json(text: &str) -> Result<(Value, usize), serde_json::Error> {
+    match serde_json::from_str::<Value>(text) {
+        Ok(value) => Ok((value, 0)),
+        Err(original_error) => {
+            let Some((repaired, replacement_count)) = repair_lone_surrogate_escapes(text) else {
+                return Err(original_error);
+            };
+            serde_json::from_str::<Value>(&repaired).map(|value| (value, replacement_count))
+        }
+    }
+}
+
+fn repair_lone_surrogate_escapes(text: &str) -> Option<(String, usize)> {
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut replacements = 0;
+    let mut in_string = false;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !in_string {
+            output.push(byte);
+            if byte == b'"' {
+                in_string = true;
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'"' => {
+                output.push(byte);
+                in_string = false;
+                index += 1;
+            }
+            b'\\' if index + 1 < bytes.len() => {
+                let escape = bytes[index + 1];
+                if escape != b'u' || index + 6 > bytes.len() {
+                    output.extend_from_slice(&bytes[index..index + 2]);
+                    index += 2;
+                    continue;
+                }
+
+                let Some(code_unit) = parse_hex_code_unit(&bytes[index + 2..index + 6]) else {
+                    output.extend_from_slice(&bytes[index..index + 2]);
+                    index += 2;
+                    continue;
+                };
+                if (0xD800..=0xDBFF).contains(&code_unit) {
+                    let paired_low_surrogate = index + 12 <= bytes.len()
+                        && bytes[index + 6] == b'\\'
+                        && bytes[index + 7] == b'u'
+                        && parse_hex_code_unit(&bytes[index + 8..index + 12])
+                            .is_some_and(|next| (0xDC00..=0xDFFF).contains(&next));
+                    if paired_low_surrogate {
+                        output.extend_from_slice(&bytes[index..index + 12]);
+                        index += 12;
+                    } else {
+                        output.extend_from_slice(br"\uFFFD");
+                        replacements += 1;
+                        index += 6;
+                    }
+                } else if (0xDC00..=0xDFFF).contains(&code_unit) {
+                    output.extend_from_slice(br"\uFFFD");
+                    replacements += 1;
+                    index += 6;
+                } else {
+                    output.extend_from_slice(&bytes[index..index + 6]);
+                    index += 6;
+                }
+            }
+            _ => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    if replacements == 0 {
+        return None;
+    }
+    String::from_utf8(output)
+        .ok()
+        .map(|repaired| (repaired, replacements))
+}
+
+fn parse_hex_code_unit(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() != 4 {
+        return None;
+    }
+    bytes.iter().try_fold(0_u16, |value, byte| {
+        let nibble = match byte {
+            b'0'..=b'9' => u16::from(byte - b'0'),
+            b'a'..=b'f' => u16::from(byte - b'a' + 10),
+            b'A'..=b'F' => u16::from(byte - b'A' + 10),
+            _ => return None,
+        };
+        Some((value << 4) | nibble)
+    })
+}
+
 pub(super) struct CdpClient {
     next_id: AtomicU64,
     sender: mpsc::UnboundedSender<Message>,
@@ -1899,17 +2117,28 @@ impl CdpClient {
 
         // Reader task: receives CDP messages, dispatches responses by id,
         // broadcasts events.  Follows Playwright's transport reliability model:
-        //  - Malformed JSON → log + break (close connection), not continue
+        //  - Isolated UTF-16 surrogate escapes → replace with U+FFFD and dispatch
+        //  - Other malformed JSON → log + break (close connection), not continue
         //  - Message dispatch panic → log + break, don't leave in dirty state
         //  - On exit: reject ALL pending requests immediately (Playwright dispose pattern)
         tokio::spawn(async move {
             let close_reason = loop {
                 match read.next().await {
                     Some(Ok(Message::Text(text))) => {
-                        // Parse JSON — malformed messages close the connection
-                        // (Playwright: "Closing websocket due to malformed JSON")
-                        let value = match serde_json::from_str::<Value>(&text) {
-                            Ok(v) => v,
+                        // Chrome may emit RFC-valid lone UTF-16 surrogate escapes
+                        // that serde_json cannot represent in a Rust String. Repair
+                        // only that case; other malformed messages still close the
+                        // connection (Playwright transport reliability model).
+                        let value = match parse_cdp_json(&text) {
+                            Ok((value, 0)) => value,
+                            Ok((value, replacement_count)) => {
+                                warn!(
+                                    replacement_count,
+                                    payload_len = text.len(),
+                                    "CDP reader: repaired isolated UTF-16 surrogate escape"
+                                );
+                                value
+                            }
                             Err(e) => {
                                 error!(
                                     error = %e,

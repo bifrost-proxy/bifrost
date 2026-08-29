@@ -1156,6 +1156,8 @@ async fn run_authenticated_operation(
                     profile_dir: Some(&config.profile_dir),
                     terminal_idle_stable_for: required_dom_terminal_idle_for(false),
                     require_backend_finality: true,
+                    backend_inaccessible_dom_stable_for: Duration::from_secs(30),
+                    backend_rate_limited_dom_stable_for: Duration::from_secs(60),
                 },
             )
             .await?;
@@ -1344,6 +1346,8 @@ async fn run_authenticated_operation(
                             profile_dir: Some(&config.profile_dir),
                             terminal_idle_stable_for: required_dom_terminal_idle_for(false),
                             require_backend_finality: true,
+                            backend_inaccessible_dom_stable_for: Duration::from_secs(30),
+                            backend_rate_limited_dom_stable_for: Duration::from_secs(60),
                         },
                     )
                     .await?;
@@ -1861,6 +1865,8 @@ async fn ask_send_and_wait(
                     .any(|event_type| event_type == "stream_handoff"),
             ),
             require_backend_finality: true,
+            backend_inaccessible_dom_stable_for: Duration::from_secs(30),
+            backend_rate_limited_dom_stable_for: Duration::from_secs(60),
         },
     )
     .await

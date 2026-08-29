@@ -390,8 +390,80 @@
 - 真实补跑最终生成有效报告；失败重试前不得推进 processed watermark。
 - 正式恢复保持单任务串行，避免并发加重 ChatGPT Web 限流。
 
+### TC-ADA-24 回归：CDP 孤立 UTF-16 代理项不再中断 Daily Agent
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib cdp_json_ -- --nocapture`，验证孤立高/低代理项被替换为 `U+FFFD`，合法代理项对和转义字面量保持不变。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib cdp_client_keeps_connection_after_lone_surrogate_response -- --nocapture`，验证收到含孤立代理项的 CDP 响应后，当前请求成功返回且后续请求继续复用同一 WebSocket。
+3. 执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh`，确认 ChatGPT Web 共享浏览器、最终性门禁、Daily Agent 失败隔离与 Tomorrow ToDo 契约继续通过。
+4. 使用 `cargo install --locked --path crates/bifrost-cli --bin bifrost --root /Users/eden_studio/.local --force` 安装修复版，并通过 `bifrost restart` 重启正式 `9900` 服务；确认 PID 已更新，端口、监听地址和系统代理状态保持不变。
+5. 记录正式日志中历史 `cdp_malformed_message` 失败的 task、日期与两个 Agent；本用例使用 task `735775510b384fff8903d9c6fc54f1a3`、日期 `2025-04-12`，只通过带 `agent_id`、`date`、`force=1` 的 API 精确串行重跑。
+6. 先触发 `daily_report`，轮询到新 run 结束并检查 report 标题、必要章节、processed run id 与日志；确认 browser job 清空后，再以相同步骤触发 `tomorrow_todo`。
+7. 检查本轮日志不得新增 `CDP reader: malformed JSON, closing connection`、`cdp_malformed_message` 或因此导致的 Agent 失败；如果 Chrome 实际发出孤立代理项，应出现 `CDP reader: repaired isolated UTF-16 surrogate escape` 且连接保持可用。
+
+预期结果：
+- CDP JSON 正常消息不经过修复；仅在首次 JSON 解析失败时扫描 JSON 字符串中的 `\uXXXX`。
+- 孤立高代理项或低代理项替换为 `\uFFFD`；合法高低代理项对、字符串外文本和转义后的字面量不得改变。
+- 除孤立 UTF-16 代理项外的畸形 JSON 继续关闭连接并拒绝 pending 请求，不能扩大容错边界。
+- 安装后的正式服务保持原端口与系统代理配置，两个 Agent 均生成与各自契约一致的有效报告并写入新 run id。
+- 两个 Agent 串行运行；不得触发全局历史补跑，不得将旧 run 的成功状态误认为本轮通过。
+
+### TC-ADA-25 回归：完整但日期错误的正文不得误判为截断
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_continuation_requires_a_valid_prefix_and_missing_tail --lib -- --nocapture`。
+2. 构造一份完整的 `# 2026-08-03 日报`，但将当前目标日期设为 `2026-06-15`；确认该响应校验失败，但不进入续写分支。
+3. 构造一份以 `# 2026-06-15 日报` 开头并包含 `## 今日概览`，但缺少 `## 证据与不确定性` 的响应；确认它仍可进入同会话续写。
+4. 检查 `test_chatgpt_web_shared_profile.sh` 的源码哨兵与定向测试，确认新判定函数不会被后续重构删除。
+5. 安装修复版并重启正式 `9900` 服务，将 `daily_report` 指令中的历史固定日期改为使用任务提示的动态目标日期。
+6. 精确触发曾误判的真实日期，检查新 run 只产生一次正常 `browser.run`，最终正文标题使用源日期，日志不再出现 `response appears truncated; requesting continuation`。
+7. 确认 `result.json.metadata["io.stdoutTruncated"]` 即使为 `true`，只要 `result.response` 通过最终契约，Agent 仍直接成功，不发送续写。
+
+预期结果：
+- 日期或标题错误的完整正文保留原始契约错误，不进入最多三次的截断续写。
+- 只有正确标题和前置章节已存在、最后必需章节缺失时才请求续写。
+- 保留真实长输出被截断时的同会话恢复能力，同时避免完整正文的无效循环和 token 浪费。
+- stdout 预览截断与最终 `response` 契约分离，不把 `io.stdoutTruncated` 当作报告截断证据。
+
+### TC-ADA-26 回归：会话详情不可访问或限流时完整正文不再无限等待
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin wait_final_accepts_stable_dom_for_conversation_inaccessible_only --lib -- --nocapture`，确认特定 404 可在完整 DOM 稳定后收敛。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin wait_final_generic_404_never_accepts_ready_dom --lib -- --nocapture`，确认普通 404 即使 DOM Ready 也不会误放行。
+3. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin wait_final_backs_off_and_accepts_stable_dom_after_rate_limit --lib -- --nocapture`，确认 HTTP 429 后按 30 秒稀疏读取，间歇 DOM `NotFound` 不清空稳定候选。
+4. 执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh`，确认 backend-first 最终性、CDP 复用、Daily Agent 契约与新兜底共同通过。
+5. 安装修复版并重启正式 `9900` 服务；精确重跑曾在页面完成、但 detail API 返回 `conversation_inaccessible` 或交替出现 429 / 可读但未 final detail 的日期与单个 Agent。
+6. 检查日志出现 `accepting stable completed DOM after bounded backend read failure`；404 兜底至少稳定 30 秒，429 兜底至少稳定 60 秒。
+7. 检查外层 run 成功、报告标题日期和必需章节正确、processed run id 已更新，且只产生一次 `browser.run`，没有被当成截断再请求续写。
+
+预期结果：
+- HTTP 404 仅在错误体包含 `conversation_inaccessible` 时允许 30 秒稳定 DOM fallback；普通 404、403、5xx 不允许。
+- HTTP 429 使用 30 秒稀疏轮询与 60 秒稳定 DOM fallback；中间可读但未 final 的 detail 和偶发 DOM `NotFound` 不清空限流候选。
+- DOM 必须是已提交的正式 assistant 消息，Stop/streaming 信号消失；正文变化或明确 Streaming 会重新计时。
+- 后端在稳定窗口内恢复并确认 final 时仍以后端当前分支终态为准；兜底结果标记 `had_429_or_fallback=true`。
+- 页面已生成的完整报告不再空等到总 timeout，也不会触发 Daily Agent 的错误截断续写循环。
+
+### TC-ADA-27 回归：完整 Writing Block 正文不得误判为截断并重复执行
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_unwraps_complete_writing_block_before_validation_and_save --lib -- --nocapture`。
+2. 用完整的 `:::writing{variant="document" id="..."}` / `:::` 包住一份符合 Tomorrow ToDo 契约的 Markdown；确认校验前只剥离这一层容器，正文直接通过。
+3. 移除末尾 closing marker；确认未闭合容器保持原样并校验失败，不把仍在生成的片段误放行。
+4. 安装修复版并重启正式 `9900` 服务，精确重跑真实 `2026-07-30 / tomorrow_todo`；保留原始 ChatGPT Web 子 run 的首行为 Writing Block opener 作为证据。
+5. 检查外层 Agent 只运行一次、保存报告首行为 `# 明日 To Do List - 2026-07-31`，三个必需章节齐全，文件不包含 `:::writing` 或独立 closing marker。
+6. 继续串行补跑全部 pending 日期，最终确认 `/watch` 显示 `processed_documents=270`、`pending_documents=0`，并核对 135 份 daily report 与 135 份 tomorrow todo report。
+
+预期结果：
+- 完整 Writing Block 只去掉 UI 容器，不改变正文；保存文件是纯 Markdown。
+- 未闭合 Writing Block 不被误认为最终正文。
+- 完整正文不再进入“response appears truncated; requesting continuation”循环，也不会重复创建 browser child run。
+- 本机安装后的全部 Daily Agent backlog 真实完成，不能以旧 report 文件或 synthesized filesystem run 冒充 processed 成功。
+
 ## 执行记录
 
+- 2026-08-29：执行 TC-ADA-25 / TC-ADA-26 / TC-ADA-27 的正式服务回归。修复版安装到 `/Users/eden_studio/.local/bin/bifrost` 后重启，正式服务 PID 为 `60808`，监听 `127.0.0.1:9900` 且系统代理保持启用。`2026-07-30 / tomorrow_todo` 的原始 ChatGPT Web 子响应首行为 `:::writing{variant="document" id="58314"}`，正文和 closing marker 均完整；旧逻辑因首行不是标题而误判截断并重复执行，修复后同一外层 run 成功，保存文件首行为 `# 明日 To Do List - 2026-07-31`、三个章节齐全且无 Writing Block。`2026-08-21` 与 `2026-08-24` 的日志先记录 429 后 detail 可读但未 final，随后保留稀疏轮询与有界 DOM fallback，分别在 `stable_for_ms=63640` 和 `stable_for_ms=60445` 收敛成功；`2026-07-29` / `2026-07-30` 期间歇 DOM `NotFound` 未再重置已有候选。首次 `2026-08-25 / daily_report` 因 `Page.enable` CDP command timeout 失败，重启同一已安装二进制的浏览器执行态后精确重跑成功，未复现内容或截断问题。最终 task `735775510b384fff8903d9c6fc54f1a3` 的 `/watch` 显示 `run_status=completed`、`processed_documents=270`、`pending_documents=0`、`report_files=270`、`indexed_reports=270`；状态文件中 `daily_report=135`、`tomorrow_todo=135` 且全部为真实 processed 记录。最后补跑此前只有 filesystem-scan report、没有 processed 记录的 `2026-07-31 / daily_report` 后，pending 从 1 降为 0，排除了以旧文件冒充完成的情况。
+
+- 2026-08-28：执行 TC-ADA-24 通过。历史正式日志在 task `735775510b384fff8903d9c6fc54f1a3` 的 `2025-04-12` 上重复出现 `unexpected end of hex escape at line 1 column 1997 payload_len=2184`，随后关闭 CDP 并让 `daily_report` 与 `tomorrow_todo` 都以 `cdp_malformed_message` 失败。新增 parser 与 WebSocket 单测均通过，`test_chatgpt_web_shared_profile.sh` 也通过。使用 `cargo install --locked --path crates/bifrost-cli --bin bifrost --root /Users/eden_studio/.local --force` 安装修复版后执行 `bifrost restart`，正式服务由 PID `59186` 切换为 `31046`，仍监听 `127.0.0.1:9900` 且系统代理保持启用。随后只精确串行重跑 `2025-04-12`：`daily_report` run `1787921720288-b873c30e-a202-4a3b-8261-0c00ff60d552` 成功，报告 2548 字符，首行为 `# 2025-04-12 日报`，包含 `今日概览` 与 `证据与不确定性`；`tomorrow_todo` run `1787921854972-220c7f1b-358a-4948-843a-47034db1de04` 成功，报告 96 字符，首行为 `# 明日 To Do List - 2025-04-13`，三个必需章节齐全。两个 Agent 的 report API 均返回本轮新 run id，任务最终状态均为 `success` 且 `last_error=null`；从修复版服务启动日志基线到两次运行结束，没有新增 `CDP reader: malformed JSON, closing connection` 或 `cdp_malformed_message`。本次 Chrome 没有再次发出孤立代理项，因此未出现 repair warning；孤立代理项实际修复与连接复用由确定性 WebSocket 回归测试覆盖。
 - 2026-08-20：扩展执行 TC-ADA-23 的 stale Stop 回归。运行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib --all-features busy_gate_ -- --nocapture`，3 个用例通过：后端 finished 后成功清理 stale Stop、没有 finished 证据时不点击 Stop，以及 Stop 点击失败/持续残留时按 busy 上限返回 `conversation_busy` 而不无限循环。
 - 2026-08-19：执行 TC-ADA-23 通过。单测验证 browser worker 父超时跟随 adapter timeout、瞬时 429/5xx 保留 finished candidate、后端 final 后清理 stale Stop、provisional `WEB:*` handoff 不重复发送、conversation 丢失后纠偏携带完整原始上下文，并验证 AGENTS.md 含历史固定日期时动态运行契约在其后覆盖旧日期。安装验证后的正式二进制后，仅在正式 `9900` 服务上精确串行触发 task `735775510b384fff8903d9c6fc54f1a3` 的 `2026-08-18 / daily_report` 与 `tomorrow_todo`。日报 run `1787136020872-54c9f081-26d4-4e76-8648-227726787804` 持续 435557ms 后成功，产物 34317 字节，首行为 `# 2026-08-18 日报`，包含 `今日概览` 与 `证据与不确定性`；processed state 写入同一 run id。确认 browser job 清空后才触发 TODO；TODO run `1787136511344-3c0a82dc-d609-4e0c-ba6c-972d865e03ea` 经同会话纠偏后持续 296509ms 成功，产物 2169 字节，首行为 `# 明日 To Do List - 2026-08-19`，三个必需章节齐全，processed state 写入同一 run id。两次运行均未被五分钟 worker idle 回收中断，最终 browser 活跃 job 为空；没有触发全局 Force Run，也没有并发运行两个 Daily Agent。
 - 2026-08-19：执行 TC-ADA-22 通过。隔离 worker 协议测试确认 `dailyAgentDates` 可从 ASR worker 返回主进程；父进程 handoff 测试确认完成日期在主进程持久化为 pending，worker 不再启动长时间浏览器任务；pending 测试确认日期去重、watermark 推进不隐藏 backlog、生成期间再次追加转写不会被旧报告误清 pending；ChatGPT Web mock 测试确认失败日期保留而成功日期移除。随后在临时端口 `19197/19198` 两次执行 `e2e-tests/tests/test_asr_daily_agents_api.sh` 均通过，修复后复跑的临时 task 为 `45084575493744b48974442f6661786a`，验证真实 Admin API、两个默认 Agent、mock Runner、processed records 与 report sync。测试未使用正式 `9900` 端口，脚本已清理临时服务和数据目录。
