@@ -222,9 +222,9 @@ WebUI 选择 `chatgpt_web` 后：隐藏 executable/args/env/sandbox/approval pol
 
 ### ExecutionBrowserController
 
-执行阶段由 `ExecutionBrowserController` 负责。真实 IM 稳定性验证期默认 headed，便于观察页面输入与发送；稳定后可切回 headless。主流程：headed 启动或复用 Edge/Chromium 与 runner profile；等待可见 composer（非隐藏 textarea）；新会话先从进程内 `ConversationTab` 池取出最近使用的 live target，池为空时从浏览器 `/json/list` attach 已存在的 ChatGPT target，只在两者都不存在时创建 fallback tab。复用 target 若已在首页则直接使用，若位于 `/c/{conversation_id}` 才导航到规范化后的 `base_url + "/"`，不关闭/重开 tab、不做无意义 refresh、不附加 Bifrost 私有 query 参数；随后通过发送无 `conversation_id` 的首条消息创建新对话，并把同一 target 重新注册到新 conversation id。续接会话打开或复用 `/c/{conversation_id}`，等待可见 composer 后插入文本并点击发送；捕获 `/backend-api/f/conversation` SSE handoff 获取 `conversation_id` 与 `turn_exchange_id`；SSE 没有完整 final 时通过 browser-context 轮询 `GET /backend-api/conversation/{conversation_id}`，沿 `current_node` 当前分支等待 assistant 同时达到 `finished_successfully + end_turn`，DOM 只用于降低明显 busy 阶段的读取频率和输出诊断；每次 read 使用有界超时，短暂 5xx 按 heartbeat-visible 状态继续重试。明确的 HTTP 404 + `conversation_inaccessible` 可在正式 assistant DOM 无 streaming 信号且签名连续稳定 30 秒后收敛；持续或交替出现的 HTTP 429 改为每 30 秒稀疏读取，并保留限流状态跨越“可读但当前分支尚未 final”的中间响应，只有同一完成 DOM 连续稳定 60 秒后才可保守收敛。采样期间偶发 `NotFound` 不清空已有稳定候选，正文签名变化或明确 Streaming 状态会立即重置计时。普通 404、403 和 5xx 不得走 DOM 兜底；其余长时间不可读按总 timeout 收敛为失败，不返回未经后端或有界稳定策略确认的 DOM 片段，也不永久占住 IM 队列。
+执行阶段由 `ExecutionBrowserController` 负责。真实 IM 稳定性验证期默认 headed，便于观察页面输入与发送；稳定后可切回 headless。主流程：headed 启动或复用 Edge/Chromium 与 runner profile；等待可见 composer（非隐藏 textarea）；新会话先从进程内 `ConversationTab` 池取出最近使用的 live target，池为空时从浏览器 `/json/list` attach 已存在的 ChatGPT target，只在两者都不存在时创建 fallback tab。复用 target 若已在首页则直接使用，若位于 `/c/{conversation_id}` 才导航到规范化后的 `base_url + "/"`，不关闭/重开 tab、不做无意义 refresh、不附加 Bifrost 私有 query 参数；随后通过发送无 `conversation_id` 的首条消息创建新对话，并把同一 target 重新注册到新 conversation id。续接会话打开或复用 `/c/{conversation_id}`，等待可见 composer 后插入文本并点击发送；捕获 `/backend-api/f/conversation` POST 后，handoff 只负责确认提交并取得 `conversation_id / turn_exchange_id`，不能继续占用整轮模型 timeout 等待 `Network.loadingFinished`。页面 URL 已出现真实 `/c/{conversation_id}` 且已渲染消息节点，或短 SSE 已给出 conversation id 时，最多保留 3 秒 fast-final 窗口后立即把最终态所有权交给 `wait_final`；SSE 没有完整 final 时通过 browser-context 轮询 `GET /backend-api/conversation/{conversation_id}`，沿 `current_node` 当前分支等待 assistant 同时达到 `finished_successfully + end_turn`，DOM 只用于降低明显 busy 阶段的读取频率和输出诊断；每次 read 使用有界超时，短暂 5xx 按 heartbeat-visible 状态继续重试。明确的 HTTP 404 + `conversation_inaccessible` 可在正式 assistant DOM 无 streaming 信号且签名连续稳定 30 秒后收敛；持续或交替出现的 HTTP 429 改为每 30 秒稀疏读取，并保留限流状态跨越“可读但当前分支尚未 final”的中间响应，只有同一完成 DOM 连续稳定 60 秒后才可保守收敛。采样期间偶发 `NotFound` 不清空已有稳定候选，正文签名变化或明确 Streaming 状态会立即重置计时。普通 404、403 和 5xx 不得走 DOM 兜底；其余长时间不可读按总 timeout 收敛为失败，不返回未经后端或有界稳定策略确认的 DOM 片段，也不永久占住 IM 队列。
 
-心跳与恢复：handoff 等待期间检查浏览器进程、CDP WebSocket、页面 `Runtime.evaluate` probe；任一失败快速返回 `browser_unavailable`。短 SSE handoff 中断不能直接判失败：必须先从页面 URL、session 映射或显式 `conversationId` 恢复，再进入长轮询。
+心跳与恢复：handoff 等待期间检查浏览器进程、CDP WebSocket、页面 `Runtime.evaluate` probe。POST 尚未捕获时，失败可快速返回 `browser_unavailable` 并由整轮发送重试；POST 已捕获后禁止重发。续接请求优先使用调用方已知的会话 id；新会话再依次从当前页面 URL、浏览器 `/json/list` 中同一 target 的 URL 恢复 conversation id，然后进入长轮询。若证据仍不足，返回不可重试的 `submitted_handoff_unresolved`，不能因为 CDP 重连制造重复任务。短 SSE handoff 中断同样不能直接判失败或等待到模型总超时。
 
 CDP transport 必须兼容 Chrome 返回的孤立 UTF-16 surrogate escape。页面 DOM 文本按 JavaScript UTF-16 code unit 截断时，可能在 emoji 中间形成 `\uD800`-`\uDFFF` 单码元；该 JSON 对 CDP/RFC 8259 合法，但不能直接解码成 Rust UTF-8 `String`。Reader 只在普通 `serde_json` 解析失败且确认是孤立 surrogate 时将该码元替换为 `U+FFFD` 后继续 dispatch；合法 surrogate pair、转义后的字面 `\\uXXXX` 和其他字段保持原样。其他 malformed JSON 仍关闭连接并立即拒绝 pending requests，不能用宽松解析掩盖 transport 损坏。
 
@@ -424,6 +424,10 @@ result.json
 - `cdp_json_repair_preserves_surrogate_pairs_and_escaped_literals`
 - `cdp_json_rejects_non_surrogate_malformed_json`
 - `cdp_client_keeps_connection_after_lone_surrogate_response`
+- `handoff_returns_after_post_and_committed_page_without_loading_finished`
+- `submitted_append_reuses_known_conversation_after_cdp_disconnect`
+- `find_page_by_target_id_returns_only_exact_devtools_target`
+- `committed_handoff_probe_requires_real_conversation_with_rendered_turn`
 - `daily_agent_chatgpt_web_continuation_requires_a_valid_prefix_and_missing_tail`
 - `daily_agent_chatgpt_web_unwraps_complete_writing_block_before_validation_and_save`
 - `wait_final_backs_off_and_accepts_stable_dom_after_rate_limit`

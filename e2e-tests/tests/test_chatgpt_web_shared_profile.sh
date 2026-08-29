@@ -34,6 +34,9 @@ grep -q "\\['on', 'checked', 'active'\\].includes(dataState)" crates/bifrost-adm
 grep -q "recover_conversation_tab_from_browser" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "repair_lone_surrogate_escapes" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "CDP reader: repaired isolated UTF-16 surrogate escape" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+grep -q "submitted_handoff_unresolved" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "handoff_returned_before_sse_finished" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "find_page_by_target_id" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "wait_chatgpt_web_daily_agent_conversation" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "daily_agent_chatgpt_web_same_conversation_wait_timeout_ms" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "ASR daily agent entry failed; continuing with remaining entries" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
@@ -151,6 +154,18 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   is_retryable_send_error_matches_known_prefixes \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  handoff_returns_after_post_and_committed_page_without_loading_finished \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  submitted_append_reuses_known_conversation_after_cdp_disconnect \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  find_page_by_target_id_returns_only_exact_devtools_target \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \

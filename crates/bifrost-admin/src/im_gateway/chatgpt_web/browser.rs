@@ -729,6 +729,24 @@ impl BrowserSession {
         Ok(Some(page))
     }
 
+    /// Find one exact DevTools target without opening, closing, or navigating it.
+    ///
+    /// The send handoff uses this after a submitted request loses its CDP
+    /// WebSocket. The browser HTTP endpoint can remain available even when the
+    /// target's old WebSocket has reset, allowing us to recover the committed
+    /// conversation URL instead of submitting the prompt a second time.
+    pub(super) async fn find_page_by_target_id(
+        &self,
+        target_id: &str,
+    ) -> Result<Option<CdpPage>, String> {
+        let list: Vec<CdpPage> = wait_for_json(
+            &format!("http://127.0.0.1:{}/json/list", self.port),
+            Duration::from_secs(5),
+        )
+        .await?;
+        Ok(list.into_iter().find(|page| page.id == target_id))
+    }
+
     /// Find an already-open ChatGPT tab that can be repurposed for a fresh
     /// conversation. This never creates, closes, or refreshes a target.
     pub(super) async fn find_chatgpt_page(
@@ -1316,6 +1334,56 @@ mod tests {
             .expect("lookup succeeds");
 
         assert!(reused.is_none());
+        server.await.expect("fake server finishes");
+    }
+
+    #[tokio::test]
+    async fn find_page_by_target_id_returns_only_exact_devtools_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake DevTools HTTP");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept DevTools request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            let body = serde_json::json!([
+                {
+                    "id": "other-target",
+                    "url": "https://chatgpt.com/c/other",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools/page/other-target"
+                },
+                {
+                    "id": "submitted-target",
+                    "url": "https://chatgpt.com/c/committed-conversation",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools/page/submitted-target"
+                }
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let browser = BrowserSession::for_test_with_port(
+            PathBuf::from("/tmp/chatgpt-web-tests-profile-target-lookup"),
+            port,
+        );
+
+        let page = browser
+            .find_page_by_target_id("submitted-target")
+            .await
+            .expect("target lookup succeeds")
+            .expect("submitted target exists");
+
+        assert_eq!(page.id, "submitted-target");
+        assert_eq!(page.url, "https://chatgpt.com/c/committed-conversation");
         server.await.expect("fake server finishes");
     }
 
