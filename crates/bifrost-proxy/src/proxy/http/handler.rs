@@ -3762,7 +3762,11 @@ pub async fn handle_http_request(
                     if let Some(ref body_store) = state.body_store {
                         match body_store.read().start_stream(record_id, "sse_raw") {
                             Ok(writer) => {
-                                record.response_body_ref = Some(writer.body_ref());
+                                record.response_body_ref = Some(
+                                    writer
+                                        .body_ref()
+                                        .with_content_encoding(res_content_encoding.as_deref()),
+                                );
                                 sse_stream_writer = Some(writer);
                             }
                             Err(e) => {

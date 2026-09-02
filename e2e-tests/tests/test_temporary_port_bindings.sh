@@ -94,6 +94,7 @@ fi
 TEST_DATA_DIR=""
 PROXY_PID=""
 HTML_PID=""
+GZIP_SSE_CURL_PID=""
 
 cleanup() {
     if [[ -n "${TEST_DATA_DIR}" ]]; then
@@ -107,6 +108,7 @@ cleanup() {
     fi
     safe_cleanup_proxy "$PROXY_PID"
     safe_cleanup_proxy "$HTML_PID"
+    safe_cleanup_proxy "$GZIP_SSE_CURL_PID"
     if [[ -n "$TEST_DATA_DIR" && -d "$TEST_DATA_DIR" ]]; then
         rm -rf "$TEST_DATA_DIR"
     fi
@@ -150,12 +152,26 @@ start_html_server_once() {
     local log_file="$1"
     python3 - "$HTML_PORT" <<'PY' > "${log_file}" 2>&1 &
 import http.server
+import gzip
 import sys
+import time
 
 port = int(sys.argv[1])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/gzip-sse":
+            body = gzip.compress(
+                b"data: first compressed event\n\ndata: second compressed event\n\n"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Encoding", "gzip")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            time.sleep(30)
+            return
         body = b"<html><body>badge fixture</body></html>"
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -655,7 +671,13 @@ main() {
         "http://127.0.0.1:${HTML_PORT}/multi-gzip" \
         > "${TEST_DATA_DIR}/multi-gzip-response.json"
 
-    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id nested_gzip_record_id multi_gzip_record_id
+    curl -fsS --max-time 35 --noproxy '' \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        "http://127.0.0.1:${HTML_PORT}/gzip-sse" \
+        > "${TEST_DATA_DIR}/gzip-sse-response.bin" &
+    GZIP_SSE_CURL_PID=$!
+
+    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id nested_gzip_record_id multi_gzip_record_id gzip_sse_record_id
     temp_record_id="$(wait_for_record "/temp-port" "${TEMP_PORT}")"
     main_record_id="$(wait_for_record "/main-port" "${MAIN_PORT}")"
     direct_temp_record_id="$(wait_for_record "/direct-temp" "${TEMP_PORT}")"
@@ -663,6 +685,7 @@ main() {
     stacked_record_id="$(wait_for_record "/stacked-body" "${MAIN_PORT}")"
     nested_gzip_record_id="$(wait_for_record "/nested-gzip" "${MAIN_PORT}")"
     multi_gzip_record_id="$(wait_for_record "/multi-gzip" "${MAIN_PORT}")"
+    gzip_sse_record_id="$(wait_for_record "/gzip-sse" "${MAIN_PORT}")"
     assert_traffic_stacked_body_plaintext "${stacked_record_id}" "${stacked_body}"
     assert_traffic_preserves_application_gzip "${nested_gzip_record_id}" "${TEST_DATA_DIR}/application-gzip.bin"
     assert_traffic_stacked_body_plaintext "${multi_gzip_record_id}" "${multi_gzip_body}"
@@ -730,6 +753,29 @@ for side in ("request", "response"):
     assert base64.b64decode(chunk["bytes_b64"], validate=True).decode() == expected_body, (side, chunk)
 PY
     _log_pass "CLI traffic search decodes encoded bodies for keyword, JSON filter, and includes"
+
+    curl -fsS "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/batch?ids=${stacked_record_id}&include=bodies" \
+        > "${TEST_DATA_DIR}/traffic-batch-stacked.ndjson"
+    python3 - "${TEST_DATA_DIR}/traffic-batch-stacked.ndjson" "${stacked_body}" <<'PY'
+import base64
+import json
+import sys
+
+path, expected_body = sys.argv[1:]
+item = json.loads(open(path).readline())
+for side in ("request", "response"):
+    chunk = item["bodies"][side]
+    assert base64.b64decode(chunk["bytes_b64"], validate=True).decode() == expected_body, (side, chunk)
+PY
+    _log_pass "Traffic batch API decodes content-encoded request and response bodies"
+
+    curl -fsS --max-time 5 \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${gzip_sse_record_id}/sse/stream?from=begin" \
+        > "${TEST_DATA_DIR}/gzip-sse-events.txt"
+    assert_body_contains "data: first compressed event" "$(cat "${TEST_DATA_DIR}/gzip-sse-events.txt")" "Compressed SSE stream decodes its first event"
+    assert_body_contains "data: second compressed event" "$(cat "${TEST_DATA_DIR}/gzip-sse-events.txt")" "Compressed SSE stream decodes its second event"
+    safe_cleanup_proxy "$GZIP_SSE_CURL_PID"
+    GZIP_SSE_CURL_PID=""
 
     export_network_file "${main_record_id}" "${TEST_DATA_DIR}/main-network-export.bifrost"
     assert_network_export_active_rules "${TEST_DATA_DIR}/main-network-export.bifrost" "default_port" "${MAIN_PORT}" "main-only.test status://209" "temp-only.test status://210"

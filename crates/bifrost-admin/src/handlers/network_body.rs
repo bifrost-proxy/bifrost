@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use std::io::Read;
 
-const MAX_DECOMPRESSED_BODY_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_DECOMPRESSED_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 pub(super) struct ExportBody {
     pub text: Option<String>,
@@ -53,8 +53,20 @@ pub(crate) fn decode_content_encoded_body(
     bytes: Vec<u8>,
     content_encoding: Option<&str>,
 ) -> Vec<u8> {
+    decode_content_encoded_body_with_limit(
+        bytes,
+        content_encoding,
+        DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+    )
+}
+
+pub(crate) fn decode_content_encoded_body_with_limit(
+    bytes: Vec<u8>,
+    content_encoding: Option<&str>,
+    max_output_bytes: usize,
+) -> Vec<u8> {
     content_encoding
-        .and_then(|encoding| decompress(&bytes, encoding).ok())
+        .and_then(|encoding| decompress_with_limit(&bytes, encoding, max_output_bytes).ok())
         .unwrap_or(bytes)
 }
 
@@ -173,8 +185,16 @@ pub(super) fn content_encoding_is_supported(content_encoding: &str) -> bool {
 }
 
 pub(super) fn decompress(data: &[u8], content_encoding: &str) -> std::io::Result<Vec<u8>> {
+    decompress_with_limit(data, content_encoding, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES)
+}
+
+pub(super) fn decompress_with_limit(
+    data: &[u8],
+    content_encoding: &str,
+    max_output_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
     let mut decoded = data.to_vec();
-    let mut remaining_output_bytes = MAX_DECOMPRESSED_BODY_BYTES;
+    let mut remaining_output_bytes = max_output_bytes;
     for encoding in content_encoding
         .split(',')
         .map(str::trim)
@@ -335,7 +355,7 @@ mod tests {
 
     #[test]
     fn content_encoding_layers_share_the_preview_budget() {
-        let original = vec![b'a'; MAX_DECOMPRESSED_BODY_BYTES];
+        let original = vec![b'a'; DEFAULT_MAX_DECOMPRESSED_BODY_BYTES];
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gzip.write_all(&original).unwrap();
         let gzip = gzip.finish().unwrap();
@@ -434,7 +454,7 @@ mod tests {
 
     #[test]
     fn decompression_limit_falls_back_to_lossless_base64() {
-        let oversized = vec![b'a'; MAX_DECOMPRESSED_BODY_BYTES + 1];
+        let oversized = vec![b'a'; DEFAULT_MAX_DECOMPRESSED_BODY_BYTES + 1];
         let mut compressed = Vec::new();
         {
             use flate2::{write::GzEncoder, Compression};

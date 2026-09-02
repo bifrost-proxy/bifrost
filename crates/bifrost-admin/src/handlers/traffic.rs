@@ -5,7 +5,10 @@ use tokio_stream::StreamExt;
 use base64::Engine as _;
 
 use super::frames::{get_frame_detail, get_frames, subscribe_frames, unsubscribe_frames};
-use super::network_body::decode_content_encoded_body;
+use super::network_body::{
+    content_encoding_is_supported, decode_content_encoded_body_with_limit, decompress_with_limit,
+    DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+};
 use super::{
     error_response, full_body, json_response, method_not_allowed, success_response, BoxBody,
 };
@@ -572,11 +575,38 @@ async fn stream_sse_events_from_body_ref(
             };
             stream_sse_events_from_file(cfg, &mut seq, &mut parser, tx).await
         }
-        BodyRef::ContentEncoded { body_ref, .. } => {
+        encoded_ref @ BodyRef::ContentEncoded { .. } => {
+            let max_output_bytes = configured_decompress_output_bytes(&state).await;
+            let Some(content_encoding) = encoded_ref.content_encoding().map(str::to_string) else {
+                return Ok(());
+            };
+            if !content_encoding_is_supported(&content_encoding) {
+                return Ok(());
+            }
+            let mut decoded = None;
+            for _ in 0..80 {
+                if let Some(bytes) = load_body_bytes_async(&state, &encoded_ref).await {
+                    if let Ok(bytes) =
+                        decompress_with_limit(&bytes, &content_encoding, max_output_bytes)
+                    {
+                        decoded = Some(bytes);
+                        break;
+                    }
+                }
+                if state.sse_hub.is_open(connection_id) != Some(true) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            let Some(decoded) = decoded else {
+                return Ok(());
+            };
             Box::pin(stream_sse_events_from_body_ref(
                 state,
                 connection_id,
-                *body_ref,
+                BodyRef::Inline {
+                    data: String::from_utf8_lossy(&decoded).to_string(),
+                },
                 from,
                 batch_size,
                 tail_bytes,
@@ -879,10 +909,16 @@ fn should_emit_synthetic_finish(
 
 #[cfg(test)]
 mod sse_stream_tests {
+    use std::io::Write;
+
+    use flate2::{write::GzEncoder, Compression};
+
     use super::{
         parse_sse_stream_from, parse_sse_stream_options, should_emit_synthetic_finish,
-        split_sse_events_text, SseIncrementalParser, SseStreamFrom,
+        split_sse_events_text, stream_sse_events_from_body_ref, SseIncrementalParser,
+        SseStreamFrom,
     };
+    use crate::test_support::TestAdminState;
 
     #[test]
     fn test_parse_sse_stream_from_default_begin() {
@@ -956,6 +992,41 @@ mod sse_stream_tests {
         assert!(!should_emit_synthetic_finish(None, true, true));
         assert!(!should_emit_synthetic_finish(None, false, false));
         assert!(!should_emit_synthetic_finish(Some(123), true, false));
+    }
+
+    #[tokio::test]
+    async fn content_encoded_sse_body_is_decoded_before_event_parsing() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = b"data: first\n\ndata: second\n\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).expect("compress SSE body");
+        let compressed = encoder.finish().expect("finish gzip body");
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("encoded-sse", "res", &compressed)
+            .expect("store encoded SSE body")
+            .with_content_encoding(Some("gzip"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        stream_sse_events_from_body_ref(
+            harness.state(),
+            "encoded-sse",
+            body_ref,
+            SseStreamFrom::Begin,
+            1,
+            0,
+            tx,
+        )
+        .await
+        .expect("stream decoded SSE events");
+
+        let mut output = String::new();
+        while let Some(chunk) = rx.recv().await {
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        assert!(output.contains("data: first"), "{output}");
+        assert!(output.contains("data: second"), "{output}");
     }
 }
 
@@ -1412,6 +1483,8 @@ async fn build_batch_body_chunk(
 ) -> Option<serde_json::Value> {
     let body_ref = body_ref?;
     let bytes = load_body_bytes_async(state, body_ref).await?;
+    let max_output_bytes = configured_decompress_output_bytes(state).await;
+    let bytes = decode_stored_body(body_ref, bytes, true, max_output_bytes);
     let original_size = bytes.len();
     let (slice, truncated) = if original_size > max_body_bytes {
         (&bytes[..max_body_bytes], true)
@@ -1846,13 +1919,28 @@ async fn load_body_bytes_async(state: &SharedAdminState, body_ref: &BodyRef) -> 
     }
 }
 
+async fn configured_decompress_output_bytes(state: &SharedAdminState) -> usize {
+    match state.config_manager.as_ref() {
+        Some(config_manager) => {
+            config_manager
+                .config()
+                .await
+                .sandbox
+                .limits
+                .max_decompress_output_bytes
+        }
+        None => DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+    }
+}
+
 fn decode_stored_body(
     body_ref: &BodyRef,
     bytes: Vec<u8>,
     decode_content_encoding: bool,
+    max_output_bytes: usize,
 ) -> Vec<u8> {
     if decode_content_encoding {
-        decode_content_encoded_body(bytes, body_ref.content_encoding())
+        decode_content_encoded_body_with_limit(bytes, body_ref.content_encoding(), max_output_bytes)
     } else {
         bytes
     }
@@ -1864,7 +1952,9 @@ async fn get_body_content_async(
     base64_output: bool,
     decode_content_encoding: bool,
 ) -> Response<BoxBody> {
-    let decode = |bytes| decode_stored_body(body_ref, bytes, decode_content_encoding);
+    let max_output_bytes = configured_decompress_output_bytes(state).await;
+    let decode =
+        |bytes| decode_stored_body(body_ref, bytes, decode_content_encoding, max_output_bytes);
     if base64_output {
         return match load_body_bytes_async(state, body_ref).await {
             Some(bytes) => {
@@ -1922,9 +2012,11 @@ async fn get_body_bytes_async(
     content_type: &str,
     decode_content_encoding: bool,
 ) -> Response<BoxBody> {
+    let max_output_bytes = configured_decompress_output_bytes(state).await;
     match load_body_bytes_async(state, body_ref).await {
         Some(bytes) => {
-            let bytes = decode_stored_body(body_ref, bytes, decode_content_encoding);
+            let bytes =
+                decode_stored_body(body_ref, bytes, decode_content_encoding, max_output_bytes);
             Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", content_type)
@@ -1940,9 +2032,13 @@ async fn get_body_bytes_async(
 mod stored_body_tests {
     use std::io::Write;
 
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use bifrost_storage::{SandboxConfigUpdate, SandboxLimitsConfigUpdate};
     use flate2::{write::GzEncoder, Compression};
+    use http_body_util::BodyExt;
 
-    use super::{decode_stored_body, BodyRef};
+    use super::{decode_stored_body, get_body_content_async, BodyRef};
+    use crate::test_support::TestAdminState;
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -1961,26 +2057,93 @@ mod stored_body_tests {
         let encoded_ref = decoded_ref.clone().with_content_encoding(Some("gzip"));
 
         assert_eq!(
-            decode_stored_body(&decoded_ref, application_gzip.clone(), true),
+            decode_stored_body(
+                &decoded_ref,
+                application_gzip.clone(),
+                true,
+                super::DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+            ),
             application_gzip,
             "an already-decoded HTTP representation must keep its application gzip layer"
         );
         assert_eq!(
-            decode_stored_body(&encoded_ref, wire_body.clone(), true),
+            decode_stored_body(
+                &encoded_ref,
+                wire_body.clone(),
+                true,
+                super::DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+            ),
             application_gzip,
             "a marked wire body must lose exactly one HTTP gzip layer"
         );
         assert_eq!(
-            decode_stored_body(&encoded_ref, wire_body.clone(), false),
+            decode_stored_body(
+                &encoded_ref,
+                wire_body.clone(),
+                false,
+                super::DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+            ),
             wire_body,
             "raw=1 must preserve the captured wire body"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_decompression_limit_is_honored_by_body_reads() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = vec![b'a'; 1024];
+        let compressed = gzip(&plaintext);
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("configured-limit", "res", &compressed)
+            .expect("store compressed body")
+            .with_content_encoding(Some("gzip"));
+        harness
+            .config_manager
+            .update_sandbox_config(SandboxConfigUpdate {
+                limits: Some(SandboxLimitsConfigUpdate {
+                    max_decompress_output_bytes: Some(plaintext.len() - 1),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("lower decompression limit");
+
+        let response = get_body_content_async(&harness.state(), &body_ref, true, true).await;
+        let payload: serde_json::Value = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("collect response")
+                .to_bytes(),
+        )
+        .expect("parse body response");
+
+        assert_eq!(
+            STANDARD
+                .decode(payload["data_base64"].as_str().expect("base64 body"))
+                .expect("decode response body"),
+            compressed,
+            "an over-limit body must fall back to the original wire bytes"
         );
     }
 }
 
 #[cfg(test)]
 mod batch_query_tests {
-    use super::{parse_batch_traffic_query, BATCH_GET_DEFAULT_MAX_BODY_BYTES, BATCH_GET_MAX_IDS};
+    use std::io::Write;
+
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use flate2::{write::GzEncoder, Compression};
+
+    use super::{
+        build_batch_body_chunk, parse_batch_traffic_query, BATCH_GET_DEFAULT_MAX_BODY_BYTES,
+        BATCH_GET_MAX_IDS,
+    };
+    use crate::test_support::TestAdminState;
 
     #[test]
     fn parse_basic_ids() {
@@ -2042,6 +2205,39 @@ mod batch_query_tests {
     fn parse_trims_empty_segments() {
         let p = parse_batch_traffic_query(Some("ids=a,,b,,c,")).expect("ok");
         assert_eq!(p.ids, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn batch_body_chunk_decodes_content_encoded_references() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = br#"{"batch":"decoded plaintext"}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).expect("compress batch body");
+        let compressed = encoder.finish().expect("finish gzip body");
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("encoded-batch", "req", &compressed)
+            .expect("store encoded batch body")
+            .with_content_encoding(Some("gzip"));
+
+        let chunk = build_batch_body_chunk(
+            &harness.state(),
+            Some(&body_ref),
+            Some("application/json"),
+            usize::MAX,
+        )
+        .await
+        .expect("build batch body chunk");
+
+        assert_eq!(
+            STANDARD
+                .decode(chunk["bytes_b64"].as_str().expect("base64 body"))
+                .expect("decode included body"),
+            plaintext
+        );
+        assert_eq!(chunk["size"], plaintext.len());
+        assert_eq!(chunk["truncated"], false);
     }
 }
 
