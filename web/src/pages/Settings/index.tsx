@@ -1002,8 +1002,10 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       const status = await openSyncLogin();
       applySyncStatus(status);
       message.success("Remote sign-in window opened");
-    } catch {
-      message.error("Failed to open remote sign-in page");
+    } catch (error) {
+      message.error(
+        normalizeApiErrorMessage(error, "Failed to open remote sign-in page"),
+      );
     }
   }, [applySyncStatus]);
 
@@ -1054,8 +1056,13 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
         const status = await openSyncLogin();
         applySyncStatus(status);
         message.success(`${provider.name} sign-in window opened`);
-      } catch {
-        message.error(`Failed to open ${provider.name} sign-in page`);
+      } catch (error) {
+        message.error(
+          normalizeApiErrorMessage(
+            error,
+            `Failed to open ${provider.name} sign-in page`,
+          ),
+        );
       } finally {
         setSyncLoading(false);
       }

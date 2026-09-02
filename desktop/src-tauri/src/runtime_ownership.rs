@@ -86,6 +86,61 @@ pub(super) fn markerless_preferred_backend_is_reusable(
         })
 }
 
+pub(super) struct BackendRecoveryCandidate<'a> {
+    pub(super) runtime: Option<&'a DesktopRuntimeMarker>,
+    pub(super) has_any_runtime_marker: bool,
+    pub(super) managed_child_pid: Option<u32>,
+    pub(super) candidate_port: u16,
+    pub(super) preferred_port: u16,
+    pub(super) identity: Option<&'a BackendSystemIdentity>,
+    pub(super) expected_data_dir_fingerprint: &'a str,
+    pub(super) healthy: bool,
+}
+
+pub(super) fn backend_candidate_is_trusted_for_recovery(
+    candidate: BackendRecoveryCandidate<'_>,
+) -> bool {
+    let BackendRecoveryCandidate {
+        runtime,
+        has_any_runtime_marker,
+        managed_child_pid,
+        candidate_port,
+        preferred_port,
+        identity,
+        expected_data_dir_fingerprint,
+        healthy,
+    } = candidate;
+    let Some(identity) =
+        identity.filter(|identity| identity.pid != 0 && !identity.version.trim().is_empty())
+    else {
+        return false;
+    };
+    if !healthy {
+        return false;
+    }
+
+    let identity_matches_data_dir =
+        identity.data_dir_fingerprint.as_deref() == Some(expected_data_dir_fingerprint);
+    let legacy_identity_without_fingerprint = identity.data_dir_fingerprint.is_none();
+    let marker_or_child_matches = managed_child_pid == Some(identity.pid)
+        || existing_backend_candidate_matches_runtime(
+            runtime,
+            candidate_port,
+            Some(identity),
+            healthy,
+        );
+
+    (marker_or_child_matches && (identity_matches_data_dir || legacy_identity_without_fingerprint))
+        || markerless_preferred_backend_is_reusable(
+            has_any_runtime_marker,
+            candidate_port,
+            preferred_port,
+            Some(identity),
+            expected_data_dir_fingerprint,
+            healthy,
+        )
+}
+
 pub(super) fn desktop_shutdown_backend_action_for_state(
     state: &BackendState,
 ) -> DesktopShutdownBackendAction {

@@ -119,6 +119,7 @@ pub(super) fn launch_backend_on_available_port(
             continue;
         }
 
+        let stderr_offset = sidecar_stderr_offset(data_dir);
         let mut child = start_backend(binary_path, data_dir, startup_session_id, port)?;
         match wait_for_backend(&mut child, data_dir, port, Duration::from_secs(20)) {
             Ok(()) => {
@@ -129,9 +130,12 @@ pub(super) fn launch_backend_on_available_port(
                 return Ok((child, port));
             }
             Err(error) => {
+                let confirmed_bind_conflict = error.kind == BackendWaitFailureKind::ChildExited
+                    && sidecar_stderr_reports_port_conflict_since(data_dir, port, stderr_offset);
                 let should_retry_port = should_retry_backend_candidate(
                     error.kind,
                     is_port_available(port),
+                    confirmed_bind_conflict,
                     offset < MAX_PORT_INCREMENT_ATTEMPTS,
                 );
                 let error_message = format!(
@@ -153,7 +157,7 @@ pub(super) fn launch_backend_on_available_port(
                     append_desktop_bootstrap_log(
                         data_dir,
                         format!(
-                            "backend child exited while port {port} became unavailable; retrying the next candidate port"
+                            "backend child exited after a confirmed bind race on port {port}; retrying the next candidate port"
                         ),
                     );
                     continue;
@@ -171,11 +175,35 @@ pub(super) fn launch_backend_on_available_port(
 pub(super) fn should_retry_backend_candidate(
     failure_kind: BackendWaitFailureKind,
     port_is_available_after_exit: bool,
+    stderr_reports_bind_conflict: bool,
     has_more_candidates: bool,
 ) -> bool {
     failure_kind == BackendWaitFailureKind::ChildExited
-        && !port_is_available_after_exit
+        && (stderr_reports_bind_conflict || !port_is_available_after_exit)
         && has_more_candidates
+}
+
+pub(super) fn sidecar_stderr_offset(data_dir: &Path) -> u64 {
+    fs::metadata(log_dir(data_dir).join("desktop-sidecar.err.log"))
+        .map(|metadata| metadata.len())
+        .unwrap_or_default()
+}
+
+pub(super) fn sidecar_stderr_reports_port_conflict_since(
+    data_dir: &Path,
+    port: u16,
+    offset: u64,
+) -> bool {
+    let Ok(contents) = fs::read(log_dir(data_dir).join("desktop-sidecar.err.log")) else {
+        return false;
+    };
+    let start = usize::try_from(offset)
+        .unwrap_or(contents.len())
+        .min(contents.len());
+    let appended = String::from_utf8_lossy(&contents[start..]);
+    appended.contains(&format!(
+        "Port {BACKEND_BIND_HOST}:{port} is already in use"
+    ))
 }
 
 pub(super) fn bootstrap_desktop_backend(app: &AppHandle) {
@@ -620,14 +648,50 @@ pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason:
                 identity.pid
             ),
         );
-    } else if !probe_backend_health(current_port) {
-        return false;
+    } else {
+        let healthy = probe_backend_health(current_port);
+        let identity = probe_backend_identity(current_port);
+        let runtime = read_desktop_runtime_marker(&state.data_dir);
+        let has_any_runtime_marker = has_runtime_marker(&state.data_dir);
+        let managed_child_pid = state
+            .child
+            .lock()
+            .ok()
+            .and_then(|child| child.as_ref().map(Child::id));
+        let preferred_port = state
+            .expected_port
+            .lock()
+            .map(|port| *port)
+            .unwrap_or_default();
+        let expected_data_dir_fingerprint =
+            bifrost_storage::data_dir_fingerprint_for(&state.data_dir);
+        if !backend_candidate_is_trusted_for_recovery(BackendRecoveryCandidate {
+            runtime: runtime.as_ref(),
+            has_any_runtime_marker,
+            managed_child_pid,
+            candidate_port: current_port,
+            preferred_port,
+            identity: identity.as_ref(),
+            expected_data_dir_fingerprint: &expected_data_dir_fingerprint,
+            healthy,
+        }) {
+            return false;
+        }
     }
 
     clear_backend_unavailable_after_healthy_probe(state, current_port, reason)
 }
 
-pub(super) fn clear_backend_unavailable_after_healthy_probe(
+pub(super) fn backend_unavailable_gate_active(state: &BackendState) -> bool {
+    !state.startup_ready.load(Ordering::SeqCst)
+        || state
+            .startup_error
+            .lock()
+            .map(|error| error.is_some())
+            .unwrap_or(true)
+}
+
+fn clear_backend_unavailable_after_healthy_probe(
     state: &BackendState,
     current_port: u16,
     reason: &str,

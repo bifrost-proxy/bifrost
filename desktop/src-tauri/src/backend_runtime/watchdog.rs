@@ -347,11 +347,12 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
         match disposition {
             WatchdogProbeDisposition::Healthy => {
                 if probe.admin.healthy {
-                    clear_backend_unavailable_after_healthy_probe(
-                        &state,
-                        current_port,
-                        "desktop backend watchdog observed healthy backend",
-                    );
+                    if backend_unavailable_gate_active(&state) {
+                        clear_backend_unavailable_if_healthy(
+                            &state,
+                            "desktop backend watchdog observed healthy backend",
+                        );
+                    }
                 } else if !isolated_admin_failure_active {
                     append_desktop_bootstrap_log(
                         &state.data_dir,
@@ -373,10 +374,9 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                 failures,
                 degraded_for,
             } => {
-                if probe.admin.healthy {
-                    clear_backend_unavailable_after_healthy_probe(
+                if probe.admin.healthy && backend_unavailable_gate_active(&state) {
+                    clear_backend_unavailable_if_healthy(
                         &state,
-                        current_port,
                         "desktop backend watchdog observed recovered backend",
                     );
                 }
@@ -420,10 +420,9 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
                 );
                 if !confirmation.confirmed_unresponsive() {
                     watchdog_health.reset();
-                    if confirmation.admin.healthy {
-                        clear_backend_unavailable_after_healthy_probe(
+                    if confirmation.admin.healthy && backend_unavailable_gate_active(&state) {
+                        clear_backend_unavailable_if_healthy(
                             &state,
-                            current_port,
                             "desktop backend watchdog confirmation observed recovered backend",
                         );
                     }

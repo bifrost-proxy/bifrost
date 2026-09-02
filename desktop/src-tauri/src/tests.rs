@@ -1,10 +1,10 @@
 use super::{
-    append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-    configure_backend_stop_command, configure_desktop_backend_environment,
-    confirms_managed_runtime_unresponsive, deferred_desktop_install_version_error,
-    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
-    desktop_shutdown_backend_action, desktop_sidecar_rust_log, desktop_startup_deadline,
-    desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    append_desktop_bootstrap_log, backend_candidate_is_trusted_for_recovery,
+    begin_backend_recovery, clear_backend_unavailable_if_healthy, configure_backend_stop_command,
+    configure_desktop_backend_environment, confirms_managed_runtime_unresponsive,
+    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
+    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
+    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
     ensure_backend_running, ensure_backend_running_with_cli_wait,
     existing_backend_candidate_matches_runtime, external_cli_backend_matches_handoff,
@@ -19,19 +19,20 @@ use super::{
     resolve_external_cli_backend_handoff, runtime_marker_matches_active_backend,
     sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
     should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
+    sidecar_stderr_offset, sidecar_stderr_reports_port_conflict_since,
     startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
     upgrade_handoff_requires_backend_release, upgrade_relaunch_uses_external_cli_backend,
     uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_backend_stop_helper,
     wait_for_child_exit, wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
     write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendRecoveryBudget,
-    BackendSignalSnapshot, BackendState, BackendSystemIdentity, BackendWaitFailureKind,
-    BackendWatchdogHealth, DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker,
-    DesktopShutdownBackendAction, DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff,
-    HostWindowCloseBehavior, PendingDesktopInstall, StartupDeadlineDisposition,
-    SustainedReadinessAction, WatchdogProbeDisposition, BACKEND_WATCHDOG_MAX_RECOVERIES,
-    BACKEND_WATCHDOG_RECOVERY_WINDOW, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV,
-    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    BackendRecoveryCandidate, BackendSignalSnapshot, BackendState, BackendSystemIdentity,
+    BackendWaitFailureKind, BackendWatchdogHealth, DesktopConfig, DesktopInstallRollback,
+    DesktopRuntimeMarker, DesktopShutdownBackendAction, DesktopUpgradeRelaunchMarker,
+    ExternalCliBackendHandoff, HostWindowCloseBehavior, PendingDesktopInstall,
+    StartupDeadlineDisposition, SustainedReadinessAction, WatchdogProbeDisposition,
+    BACKEND_WATCHDOG_MAX_RECOVERIES, BACKEND_WATCHDOG_RECOVERY_WINDOW,
+    DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
+    DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 #[cfg(target_os = "macos")]
 use super::{macos_menu_action, MacosMenuAction, MACOS_APP_QUIT_MENU_ID};
@@ -160,6 +161,35 @@ fn spawn_one_shot_health_server() -> u16 {
             let _ = stream.read(&mut buffer);
             let _ = stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
+        }
+    });
+    port
+}
+
+fn spawn_system_identity_server(
+    data_dir: &Path,
+    pid: u32,
+    version: &str,
+    request_count: usize,
+) -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind system server");
+    let port = listener.local_addr().expect("system server addr").port();
+    let data_dir_fingerprint = bifrost_storage::data_dir_fingerprint_for(data_dir);
+    let body = format!(
+        r#"{{"version":"{version}","pid":{pid},"data_dir_fingerprint":"{data_dir_fingerprint}"}}"#
+    );
+    thread::spawn(move || {
+        for _ in 0..request_count {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = stream.write_all(response.as_bytes());
         }
     });
     port
@@ -1125,7 +1155,7 @@ fn external_backend_health_failure_requires_manual_start() {
 }
 
 #[test]
-fn healthy_external_backend_clears_manual_start_gate() {
+fn health_only_external_backend_cannot_clear_manual_start_gate() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let port = spawn_one_shot_health_server();
     let state = test_backend_state(
@@ -1138,22 +1168,41 @@ fn healthy_external_backend_clears_manual_start_gate() {
         ),
     );
 
-    assert!(clear_backend_unavailable_if_healthy(
+    assert!(!clear_backend_unavailable_if_healthy(
         &state,
         "test observed recovered backend",
     ));
-    assert!(state.startup_ready.load(Ordering::SeqCst));
+    assert!(!state.startup_ready.load(Ordering::SeqCst));
     assert!(state
         .startup_error
         .lock()
         .expect("startup error lock")
-        .is_none());
+        .is_some());
+}
+
+#[test]
+fn matching_markerless_backend_clears_manual_start_gate() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let port = spawn_system_identity_server(temp_dir.path(), 456, "0.0.188", 2);
+    let state = test_backend_state(
+        temp_dir.path().to_path_buf(),
+        port,
+        false,
+        Some("Bifrost service is not running.".to_string()),
+    );
+
+    assert!(clear_backend_unavailable_if_healthy(
+        &state,
+        "test observed matching recovered backend",
+    ));
+    assert!(state.startup_ready.load(Ordering::SeqCst));
+    assert!(state.startup_error.lock().expect("error lock").is_none());
 }
 
 #[test]
 fn healthy_backend_still_clears_manual_start_gate_during_app_managed_upgrade() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let port = spawn_one_shot_health_server();
+    let port = spawn_system_identity_server(temp_dir.path(), 456, "0.0.163", 2);
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::current_time_millis(),
@@ -1295,27 +1344,159 @@ fn port_retry_only_handles_confirmed_bind_races() {
     assert!(should_retry_backend_candidate(
         BackendWaitFailureKind::ChildExited,
         false,
+        false,
+        true
+    ));
+    assert!(should_retry_backend_candidate(
+        BackendWaitFailureKind::ChildExited,
+        true,
+        true,
         true
     ));
     assert!(!should_retry_backend_candidate(
         BackendWaitFailureKind::ChildExited,
         true,
+        false,
         true
     ));
     assert!(!should_retry_backend_candidate(
         BackendWaitFailureKind::TimedOut,
         false,
+        true,
         true
     ));
     assert!(!should_retry_backend_candidate(
         BackendWaitFailureKind::ChildInspection,
         false,
+        true,
         true
     ));
     assert!(!should_retry_backend_candidate(
         BackendWaitFailureKind::ChildExited,
         false,
+        true,
         false
+    ));
+}
+
+#[test]
+fn bind_conflict_detection_reads_only_new_sidecar_stderr() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let logs = super::log_dir(temp_dir.path());
+    fs::create_dir_all(&logs).expect("create logs");
+    let stderr_path = logs.join("desktop-sidecar.err.log");
+    fs::write(
+        &stderr_path,
+        "Error: Network error: Port 0.0.0.0:9900 is already in use\n",
+    )
+    .expect("write old stderr");
+    let offset = sidecar_stderr_offset(temp_dir.path());
+
+    assert!(!sidecar_stderr_reports_port_conflict_since(
+        temp_dir.path(),
+        9900,
+        offset
+    ));
+    let mut stderr = fs::OpenOptions::new()
+        .append(true)
+        .open(&stderr_path)
+        .expect("open stderr");
+    writeln!(
+        stderr,
+        "Error: Network error: Port 0.0.0.0:9901 is already in use"
+    )
+    .expect("append stderr");
+
+    assert!(!sidecar_stderr_reports_port_conflict_since(
+        temp_dir.path(),
+        9900,
+        offset
+    ));
+    assert!(sidecar_stderr_reports_port_conflict_since(
+        temp_dir.path(),
+        9901,
+        offset
+    ));
+}
+
+#[test]
+fn recovery_requires_current_data_directory_identity() {
+    let identity = BackendSystemIdentity {
+        version: "0.0.188".to_string(),
+        pid: 456,
+        data_dir_fingerprint: Some("foreign-data-dir".to_string()),
+    };
+
+    assert!(!backend_candidate_is_trusted_for_recovery(
+        BackendRecoveryCandidate {
+            runtime: None,
+            has_any_runtime_marker: false,
+            managed_child_pid: None,
+            candidate_port: 9900,
+            preferred_port: 9900,
+            identity: Some(&identity),
+            expected_data_dir_fingerprint: "current-data-dir",
+            healthy: true,
+        }
+    ));
+
+    let runtime = DesktopRuntimeMarker {
+        pid: 456,
+        port: 9900,
+        health_port: None,
+        start_mode: Some("desktop".to_string()),
+    };
+    assert!(!backend_candidate_is_trusted_for_recovery(
+        BackendRecoveryCandidate {
+            runtime: Some(&runtime),
+            has_any_runtime_marker: true,
+            managed_child_pid: None,
+            candidate_port: 9900,
+            preferred_port: 9900,
+            identity: Some(&identity),
+            expected_data_dir_fingerprint: "current-data-dir",
+            healthy: true,
+        }
+    ));
+}
+
+#[test]
+fn recovery_keeps_legacy_marker_backed_identity_compatibility() {
+    let runtime = DesktopRuntimeMarker {
+        pid: 456,
+        port: 9900,
+        health_port: None,
+        start_mode: Some("desktop".to_string()),
+    };
+    let legacy_identity = BackendSystemIdentity {
+        version: "0.0.150".to_string(),
+        pid: 456,
+        data_dir_fingerprint: None,
+    };
+
+    assert!(backend_candidate_is_trusted_for_recovery(
+        BackendRecoveryCandidate {
+            runtime: Some(&runtime),
+            has_any_runtime_marker: true,
+            managed_child_pid: None,
+            candidate_port: 9900,
+            preferred_port: 9900,
+            identity: Some(&legacy_identity),
+            expected_data_dir_fingerprint: "current-data-dir",
+            healthy: true,
+        }
+    ));
+    assert!(!backend_candidate_is_trusted_for_recovery(
+        BackendRecoveryCandidate {
+            runtime: None,
+            has_any_runtime_marker: false,
+            managed_child_pid: None,
+            candidate_port: 9900,
+            preferred_port: 9900,
+            identity: Some(&legacy_identity),
+            expected_data_dir_fingerprint: "current-data-dir",
+            healthy: true,
+        }
     ));
 }
 
