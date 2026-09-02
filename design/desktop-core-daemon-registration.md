@@ -19,6 +19,8 @@ The reverse boundary is just as important: CLI start/daemon maintenance must rec
 - CLI managed-runtime restart helpers must not restart Desktop-owned cores after a crash or cleanup path; Desktop owns that lifecycle.
 - Every Admin system overview exposes a SHA-256 fingerprint of the canonical active data directory. Markerless discovery may grant lifecycle ownership only when that fingerprint matches the caller's active data directory; a legacy service without the field remains manageable only through an already-matching runtime marker.
 - Desktop may reuse a healthy markerless Bifrost only on the configured preferred port and only when the data-directory fingerprint matches. It does not claim that process, does not fall back to `preferred + 1`, and does not stop the reused process when the shell exits.
+- A health response alone never clears Desktop's startup/manual-recovery gate. Recovery also requires a non-empty Core identity and either a matching managed child, a matching runtime marker, or the existing markerless-preferred-port rule. Markerless recovery requires the exact current data-directory fingerprint; marker/child-backed legacy Cores may omit the field, but an explicit mismatch is always rejected. This prevents an unrelated listener on the remembered port from being treated as the Desktop Core without breaking legacy marker compatibility.
+- If the preferred port is won by another process between the availability check and sidecar bind, Desktop recognizes the bind error appended by that launch attempt and retries the next candidate even when the competing listener has already disappeared by the post-exit check.
 - Runtime marker writes and removals are serialized. Cleanup from an old PID removes only markers that still name that PID, so a late shutdown cannot erase the replacement daemon's markers.
 - Tray 对 Desktop-owned runtime 不提供普通的 Service Stop。它显示 `Quit Bifrost` 并走
   Desktop graceful shutdown；如果 Desktop 已异常消失，仅允许 Tray 在 owner mode、PID
@@ -59,6 +61,11 @@ BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
 - `desktop/src-tauri/src/runtime_ownership.rs`
   - marker-backed reuse still requires marker/PID/health agreement.
   - markerless reuse is restricted to the preferred port, a healthy Admin endpoint, and an exact data-directory fingerprint.
+  - manual recovery applies the identity/ownership boundary before making the WebView ready, preserving marker-backed compatibility for legacy identities without a fingerprint.
+- `desktop/src-tauri/src/backend_runtime.rs` and `desktop/src-tauri/src/backend_runtime/port_retry.rs`
+  - sidecar bind-race detection reads only stderr appended after the current spawn, so stale historical errors cannot trigger a false port fallback.
+- `desktop/src-tauri/src/backend_runtime/watchdog.rs`
+  - a healthy Admin probe can start recovery validation, but cannot bypass the identity/ownership gate.
 
 ## User Goal Checklist
 
@@ -84,6 +91,8 @@ BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
 - Unit: CLI `start` reuses same-port Desktop runtime and rejects mismatched port without stopping Desktop.
 - Unit: `RuntimeStartMode::Desktop` is not CLI-restartable.
 - Unit: foreign or fingerprint-less markerless services are never adopted.
+- Unit: a health-only or foreign-data-directory listener cannot clear the manual-start gate, while a matching markerless preferred-port Core can.
+- Unit: only a bind-conflict line appended by the current sidecar launch authorizes post-exit fallback to the next port.
 - Unit: late cleanup for PID A cannot remove replacement markers for PID B.
 - E2E: deleting lifecycle markers still lets same-profile start/stop/restart recover the preferred-port service, while another data directory fails closed.
 - E2E: Desktop reuses the same-profile markerless preferred-port service without launching a fallback port or stopping that service on shell exit.

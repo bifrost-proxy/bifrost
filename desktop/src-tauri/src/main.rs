@@ -569,11 +569,11 @@ fn main() {
         .expect("failed to build desktop app")
         .run(|app_handle, event| {
             match event {
-                tauri::RunEvent::ExitRequested { api, .. } => {
-                    if should_intercept_exit(app_handle) {
-                        api.prevent_exit();
-                        request_desktop_shutdown(app_handle);
-                    }
+                tauri::RunEvent::ExitRequested { api, .. }
+                    if should_intercept_exit(app_handle) =>
+                {
+                    api.prevent_exit();
+                    request_desktop_shutdown(app_handle);
                 }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen {

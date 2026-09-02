@@ -749,6 +749,26 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 **真实执行记录**：
 - 2026-08-23 执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过：隔离数据目录预置 `stale login error` 后重新登录，落盘 `provider_sync.bytedance_internal.last_error` 变为 `null`，状态接口不再返回陈旧错误。`cargo test -p bifrost-sync` 161/161 通过，覆盖远端创建规则失败时返回本地规则名、非当前 Provider 错误隔离，以及已连接非当前 Provider 同步失败的 `reason=error`。`pnpm --dir web exec vitest run src/pages/Settings/tabs/SyncTab.test.ts` 6/6 通过。随后在真实 9900 页面检查 Settings > Sync，ByteDance Internal 显示 `Connected`、底部显示 `Sync: Synced`，Groups 页面已加载 Managed/Discover 数据；未执行写入或重连操作。
 
+---
+
+### TC-ASN-38：Desktop Sync 登录失败保留 Core 原始错误（回归）
+
+**操作步骤**：
+1. 执行 WebUI 定点测试：
+   ```bash
+   pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "Settings Sync 登录失败时展示 Core 返回的具体错误"
+   ```
+2. 测试将 Sync status/config 返回为成功，将 `POST /_bifrost/api/sync/login` 返回为 HTTP 500，并携带可操作的 Core ownership 错误。
+3. 分别在亮色和暗色主题点击 ByteDance Internal 的 Sign In，检查错误 toast。
+
+**预期结果**：
+- 两种主题都显示服务端返回的完整错误原因，而不是统一替换为 `Failed to open ByteDance Internal sign-in page`。
+- 登录失败不改变 Provider 的授权状态，不误报登录窗口已经打开。
+- 测试只拦截本地页面请求，不打开真实 SSO 页面、不写入 token、不修改系统代理。
+
+**真实执行记录**：
+- 2026-09-02：执行定点 Playwright 用例通过（1 passed）。首次运行因本机缺少 Playwright Chromium 在浏览器启动前失败，安装对应 runtime 后原命令复跑成功；亮色与暗色主题均显示 Core 返回的完整 ownership 错误，未出现通用错误替换，也未连接真实 SSO 或写入 token。
+
 ## 清理
 
 测试完成后清理临时数据：

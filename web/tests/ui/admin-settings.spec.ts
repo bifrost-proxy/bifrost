@@ -1671,6 +1671,73 @@ test("Settings Sync 展示三类 Provider 卡片并支持首登弹窗关闭与�
   await expect.poll(() => Promise.resolve(loginOpened)).toBe(true);
 });
 
+test("Settings Sync 登录失败时展示 Core 返回的具体错误", async ({ page }) => {
+  const statusBody = {
+    enabled: true,
+    auto_sync: true,
+    remote_base_url: DEFAULT_REMOTE_BASE_URL,
+    has_session: false,
+    reachable: true,
+    authorized: false,
+    syncing: false,
+    reason: "unauthorized",
+    last_sync_at: null,
+    last_sync_action: null,
+    last_error: null,
+    user: null,
+    first_run_prompt_required: false,
+    providers: [
+      {
+        id: "bytedance_internal",
+        name: "ByteDance Internal",
+        description: "Internal trusted sync and Remote Invoke provider.",
+        remote_base_url: DEFAULT_REMOTE_BASE_URL,
+        connected: false,
+        enabled: true,
+        reachable: true,
+        authorized: false,
+        user: null,
+        capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+        remote_invoke_registered: false,
+      },
+    ],
+  };
+  const backendError =
+    "Desktop Core ownership changed while opening the sign-in page; restart Bifrost Desktop";
+
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(statusBody),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(statusBody),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/login", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: backendError }),
+    });
+  });
+
+  await openPage(page, "settings?tab=sync");
+  const signIn = page.getByTestId("settings-sync-provider-login-bytedance_internal");
+  await signIn.click();
+  await waitForToast(page, backendError);
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await signIn.click();
+  await waitForToast(page, backendError);
+});
+
 test("Settings Sync GitHub Gist 支持 token 登录", async ({ page }) => {
   let loginPayload: { provider_id?: string; token?: string } | null = null;
   const baseStatus = {

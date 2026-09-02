@@ -226,6 +226,23 @@
 - 非首选端口上的 markerless Bifrost 不会被自动复用。
 - 全流程使用临时目录、动态端口并禁用系统代理，正式 App 与正式 9900 服务不受影响。
 
+### TC-DLS-14 端口抢占与陌生 Core 不得伪造 Desktop 恢复（回归）
+
+操作步骤：
+
+1. 执行 `node scripts/prepare-tauri-sidecar.mjs debug`，准备当前 checkout 的 Desktop sidecar 资源。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml health_only_external_backend_cannot_clear_manual_start_gate`。
+3. 执行 `SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml matching_markerless_backend_clears_manual_start_gate`。
+4. 执行 `SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml bind_conflict_detection_reads_only_new_sidecar_stderr`。
+5. 执行 `SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml port_retry_only_handles_confirmed_bind_races`。
+
+预期结果：
+
+- 只返回 HTTP 200、但不提供匹配 Core identity 的监听者不能清除启动错误，Desktop 不会把登录请求发给它。
+- identity、data-dir fingerprint 与首选端口均匹配的 markerless Bifrost 仍可恢复，保持 TC-DLS-13 的兼容语义。
+- 历史 sidecar stderr 中旧的端口冲突不触发回退；只有本次启动新增且端口一致的 bind error 才触发下一候选端口。
+- 全部测试使用临时目录和动态端口，不停止正式 Core、不修改系统代理、不读取用户登录凭证。
+
 ## 清理步骤
 
 ```bash
@@ -252,3 +269,4 @@ rm -rf "$TEST_DATA_DIR"
 | 2026-07-15 | TC-DLS-11 | 正式 App PID `15260` 运行时执行 `RUST_LOG=warn SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`，断言独立端口、session/phase 日志和 bootstrap 行格式。 | 通过：输出 `PASS: bifrost-desktop stayed alive through launcher handoff startup window`；`warn` 环境下仍保留 startup info，所有 bootstrap 行满足单行格式，正式 App PID 前后保持 `15260`。 |
 | 2026-07-16 | TC-DLS-12 | `cargo test` 定点执行 restart stop 失败、旧端口仍健康、managed child mutex poison 三个 fail-closed 用例；随后执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_stale_backend_stop_failure_handoff.sh`。 | 通过：三个定点单测各 1 passed；真实桌面 E2E 输出 `PASS: stale backend stop failure blocked a second backend and exposed recovery UI`，sidecar 未进入第二实例启动。 |
 | 2026-08-23 | TC-DLS-13 | `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`，临时数据目录与动态连续端口；另执行 Desktop 聚焦单测 `normal_startup_reuses_markerless_bifrost_only_on_the_preferred_port`。 | 通过：Desktop bootstrap 记录 `missing lifecycle markers; reusing it without claiming ownership`；未监听 fallback 端口；退出 Desktop 后 markerless core 仍存活，随后由带端口的 CLI stop 回收。完整 Desktop ownership E2E 同时覆盖 sustained stall 与真实 child exit 恢复。 |
+| 2026-09-02 | TC-DLS-14 | 先构建当前 debug CLI 并执行 `node scripts/prepare-tauri-sidecar.mjs debug`，随后依次执行 4 个 Desktop 聚焦测试；同时复核 `desktop-sidecar.err.log` 的本次启动 offset 隔离。 | 通过：health-only 外部监听未清除 manual-start gate；匹配 data-dir fingerprint 的 markerless 首选端口 Core 正常恢复；旧 stderr 未触发冲突，新追加且端口匹配的 bind error 正确触发；4 个定点测试各 1 passed。 |

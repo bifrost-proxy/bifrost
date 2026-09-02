@@ -151,20 +151,6 @@ fn test_backend_state(
     }
 }
 
-fn spawn_one_shot_health_server() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind health server");
-    let port = listener.local_addr().expect("health server addr").port();
-    thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
-            let mut buffer = [0_u8; 1024];
-            let _ = stream.read(&mut buffer);
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
-        }
-    });
-    port
-}
-
 fn spawn_delayed_health_server(delay: Duration, status: u16) -> (u16, thread::JoinHandle<()>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind delayed health server");
     let port = listener
@@ -1125,92 +1111,6 @@ fn external_backend_health_failure_requires_manual_start() {
 }
 
 #[test]
-fn healthy_external_backend_clears_manual_start_gate() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let port = spawn_one_shot_health_server();
-    let state = test_backend_state(
-        temp_dir.path().to_path_buf(),
-        port,
-        false,
-        Some(
-            "Bifrost service is not running. Start the service from Bifrost Desktop to continue."
-                .to_string(),
-        ),
-    );
-
-    assert!(clear_backend_unavailable_if_healthy(
-        &state,
-        "test observed recovered backend",
-    ));
-    assert!(state.startup_ready.load(Ordering::SeqCst));
-    assert!(state
-        .startup_error
-        .lock()
-        .expect("startup error lock")
-        .is_none());
-}
-
-#[test]
-fn healthy_backend_still_clears_manual_start_gate_during_app_managed_upgrade() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let port = spawn_one_shot_health_server();
-    let marker = DesktopUpgradeRelaunchMarker {
-        schema_version: 1,
-        created_at_ms: super::current_time_millis(),
-        old_app_pid: 123,
-        old_core_pid: Some(456),
-        observed_external_core_pid: None,
-        proxy_port: port,
-        app_target: "/tmp/Bifrost.app".to_string(),
-        target_version: Some("0.0.163".to_string()),
-        pending_install: None,
-        rollback: None,
-    };
-    let state = test_backend_state(
-        temp_dir.path().to_path_buf(),
-        port,
-        false,
-        Some("previous app-managed handoff failed".to_string()),
-    );
-    *state.upgrade_relaunch.lock().expect("marker lock") = Some(marker);
-
-    assert!(clear_backend_unavailable_if_healthy(
-        &state,
-        "test observed app-managed recovered backend",
-    ));
-    assert!(state.startup_ready.load(Ordering::SeqCst));
-    assert!(state.startup_error.lock().expect("error lock").is_none());
-}
-
-#[test]
-fn unhealthy_external_backend_keeps_manual_start_gate() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
-    let port = listener.local_addr().expect("reserved addr").port();
-    drop(listener);
-    let state = test_backend_state(
-        temp_dir.path().to_path_buf(),
-        port,
-        false,
-        Some("Bifrost service is not running.".to_string()),
-    );
-
-    assert!(!clear_backend_unavailable_if_healthy(
-        &state,
-        "test observed missing backend",
-    ));
-    assert!(!state.startup_ready.load(Ordering::SeqCst));
-    assert_eq!(
-        state
-            .startup_error
-            .lock()
-            .expect("startup error lock")
-            .as_deref(),
-        Some("Bifrost service is not running.")
-    );
-}
-
-#[test]
 fn launcher_handoff_allows_ready_or_terminal_startup_state() {
     assert!(should_handoff_to_main(true, false, true));
     assert!(should_handoff_to_main(false, true, true));
@@ -1295,26 +1195,37 @@ fn port_retry_only_handles_confirmed_bind_races() {
     assert!(should_retry_backend_candidate(
         BackendWaitFailureKind::ChildExited,
         false,
+        false,
+        true
+    ));
+    assert!(should_retry_backend_candidate(
+        BackendWaitFailureKind::ChildExited,
+        true,
+        true,
         true
     ));
     assert!(!should_retry_backend_candidate(
         BackendWaitFailureKind::ChildExited,
         true,
+        false,
         true
     ));
     assert!(!should_retry_backend_candidate(
         BackendWaitFailureKind::TimedOut,
         false,
+        true,
         true
     ));
     assert!(!should_retry_backend_candidate(
         BackendWaitFailureKind::ChildInspection,
         false,
+        true,
         true
     ));
     assert!(!should_retry_backend_candidate(
         BackendWaitFailureKind::ChildExited,
         false,
+        true,
         false
     ));
 }
