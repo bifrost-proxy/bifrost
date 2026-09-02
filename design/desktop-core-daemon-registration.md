@@ -62,7 +62,7 @@ BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
   - marker-backed reuse still requires marker/PID/health agreement.
   - markerless reuse is restricted to the preferred port, a healthy Admin endpoint, and an exact data-directory fingerprint.
   - manual recovery applies the identity/ownership boundary before making the WebView ready, preserving marker-backed compatibility for legacy identities without a fingerprint.
-- `desktop/src-tauri/src/backend_runtime.rs`
+- `desktop/src-tauri/src/backend_runtime.rs` and `desktop/src-tauri/src/backend_runtime/port_retry.rs`
   - sidecar bind-race detection reads only stderr appended after the current spawn, so stale historical errors cannot trigger a false port fallback.
 - `desktop/src-tauri/src/backend_runtime/watchdog.rs`
   - a healthy Admin probe can start recovery validation, but cannot bypass the identity/ownership gate.
