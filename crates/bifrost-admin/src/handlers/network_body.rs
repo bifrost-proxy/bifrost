@@ -481,6 +481,54 @@ mod tests {
     }
 
     #[test]
+    fn partial_decoding_supports_standard_stream_codings_and_bounds_output() {
+        let plaintext = b"data: standard coding\n\n";
+
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        zlib.write_all(plaintext).unwrap();
+        assert_eq!(
+            decompress_partial_with_limit(&zlib.finish().unwrap(), "deflate", 1024).unwrap(),
+            plaintext
+        );
+
+        let mut raw_deflate =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        raw_deflate.write_all(plaintext).unwrap();
+        assert_eq!(
+            decompress_partial_with_limit(&raw_deflate.finish().unwrap(), "deflate", 1024).unwrap(),
+            plaintext
+        );
+
+        let mut brotli = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut brotli, 4096, 5, 22);
+            encoder.write_all(plaintext).unwrap();
+        }
+        assert_eq!(
+            decompress_partial_with_limit(&brotli, "br", 1024).unwrap(),
+            plaintext
+        );
+
+        let zstd = zstd::stream::encode_all(plaintext.as_slice(), 1).unwrap();
+        assert_eq!(
+            decompress_partial_with_limit(&zstd, "zstd", 1024).unwrap(),
+            plaintext
+        );
+        assert_eq!(
+            decompress_partial_with_limit(plaintext, "identity", 1024).unwrap(),
+            plaintext
+        );
+        assert!(decompress_partial_with_limit(plaintext, "x-company-codec", 1024).is_err());
+
+        let oversized = vec![b'a'; 16 * 1024];
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&oversized).unwrap();
+        let error = decompress_partial_with_limit(&gzip.finish().unwrap(), "gzip", 8)
+            .expect_err("partial decoding must enforce its output limit");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn content_encoding_layers_share_the_preview_budget() {
         let original = vec![b'a'; DEFAULT_MAX_DECOMPRESSED_BODY_BYTES];
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

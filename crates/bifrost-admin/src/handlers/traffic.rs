@@ -887,8 +887,8 @@ mod sse_stream_tests {
 
     use super::{
         parse_sse_stream_from, parse_sse_stream_options, should_emit_synthetic_finish,
-        split_sse_events_text, stream_sse_events_from_body_ref, SseIncrementalParser,
-        SseStreamFrom,
+        split_sse_events_text, stream_content_encoded_sse_events, stream_sse_events_from_body_ref,
+        SseIncrementalParser, SseStreamFrom,
     };
     use crate::body_store::BodyRef;
     use crate::test_support::TestAdminState;
@@ -1000,6 +1000,76 @@ mod sse_stream_tests {
         }
         assert!(output.contains("data: first"), "{output}");
         assert!(output.contains("data: second"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn content_encoded_sse_batches_complete_and_trailing_events() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = b"data: first\n\ndata: trailing";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).expect("compress SSE body");
+        let compressed = encoder.finish().expect("finish gzip body");
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("encoded-sse-batch", "res", &compressed)
+            .expect("store encoded SSE body")
+            .with_content_encoding(Some("gzip"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        stream_content_encoded_sse_events(harness.state(), "encoded-sse-batch", body_ref, 10, tx)
+            .await
+            .expect("stream decoded SSE batch");
+
+        let output = rx.recv().await.expect("batched stream output");
+        let output = String::from_utf8(output.to_vec()).unwrap();
+        let data = output
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE batch data line");
+        let batch: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(batch["batch"], true);
+        assert_eq!(batch["events"].as_array().unwrap().len(), 3);
+        assert!(batch["events"][0]["raw"]
+            .as_str()
+            .unwrap()
+            .contains("data: first"));
+        assert!(batch["events"][1]["raw"]
+            .as_str()
+            .unwrap()
+            .contains("data: trailing"));
+        assert_eq!(batch["events"][2]["event"], "finish");
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn encoded_sse_helper_ignores_unmarked_and_custom_coded_bodies() {
+        let harness = TestAdminState::builder().build();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        stream_content_encoded_sse_events(
+            harness.state(),
+            "unmarked-sse",
+            BodyRef::Inline {
+                data: "data: plain\n\n".to_string(),
+            },
+            1,
+            tx,
+        )
+        .await
+        .expect("unmarked body is handled by the normal SSE path");
+        assert!(rx.recv().await.is_none());
+
+        let custom_ref = harness
+            .body_store
+            .read()
+            .store("custom-sse", "res", b"custom wire bytes")
+            .unwrap()
+            .with_content_encoding(Some("x-company-codec"));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        stream_content_encoded_sse_events(harness.state(), "custom-sse", custom_ref, 1, tx)
+            .await
+            .expect("custom coding is left for the custom decoder");
+        assert!(rx.recv().await.is_none());
     }
 
     #[tokio::test]
