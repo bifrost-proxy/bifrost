@@ -272,6 +272,107 @@ fn imported_network_bodies_persist_plaintext_and_raw_bytes() {
     );
 }
 
+#[test]
+fn imported_oversized_compressed_body_preserves_its_encoding_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
+        dir.path().join("bodies"),
+        1024 * 1024,
+        1,
+        64 * 1024,
+        std::time::Duration::from_secs(1),
+    )));
+    let plaintext = vec![b'a'; DEFAULT_MAX_DECOMPRESSED_BODY_BYTES + 1];
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&plaintext).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let record: NetworkRecord = serde_json::from_value(serde_json::json!({
+        "id": "REQ-import-oversized-gzip",
+        "method": "GET",
+        "url": "https://example.test/import-oversized-gzip",
+        "status": 200,
+        "response_headers": [["content-encoding", "gzip"]],
+        "response_body_base64": STANDARD.encode(&compressed),
+        "duration_ms": 1,
+        "timestamp": 1
+    }))
+    .unwrap();
+    let mut traffic = network_record_to_traffic_record(&record);
+
+    persist_imported_bodies(&record, &mut traffic, &body_store)
+        .expect("persist oversized compressed body as wire bytes");
+
+    let store = body_store.read();
+    let response_ref = traffic.response_body_ref.as_ref().unwrap();
+    assert_eq!(response_ref.content_encoding().as_deref(), Some("gzip"));
+    assert_eq!(
+        store.load_bytes(response_ref).as_deref(),
+        Some(compressed.as_slice())
+    );
+    assert_eq!(
+        decompress_with_limit(
+            &store.load_bytes(response_ref).unwrap(),
+            response_ref.content_encoding().as_deref().unwrap(),
+            plaintext.len(),
+        )
+        .unwrap(),
+        plaintext
+    );
+}
+
+#[tokio::test]
+async fn network_import_handler_rejects_body_when_persistence_is_paused() {
+    const CHILD: &str = "BIFROST_NETWORK_IMPORT_PRESSURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "handlers::bifrost_file::tests::network_import_handler_rejects_body_when_persistence_is_paused",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let traffic_store =
+        Arc::new(crate::TrafficDbStore::new(dir.path().join("traffic"), 100, 0, None).unwrap());
+    let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
+        dir.path().join("bodies"),
+        1024 * 1024,
+        1,
+        64 * 1024,
+        std::time::Duration::from_secs(1),
+    )));
+    let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+    let state = Arc::new(
+        crate::state::AdminState::new_for_test(TEST_ADMIN_PORT, storage)
+            .with_traffic_db_store_shared(traffic_store.clone())
+            .with_body_store(body_store),
+    );
+    let record: NetworkRecord = serde_json::from_value(serde_json::json!({
+        "id": "REQ-import-pressure",
+        "method": "POST",
+        "url": "https://example.test/import-pressure",
+        "status": 200,
+        "request_body": "must not be dropped",
+        "duration_ms": 1,
+        "timestamp": 1
+    }))
+    .unwrap();
+    let content = BifrostFileWriter::write_network("import-pressure", None, &[record]).unwrap();
+
+    bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Critical);
+    let response = import_network(&content, &state).await;
+    bifrost_core::publish_resource_pressure(bifrost_core::ResourcePressureLevel::Normal);
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(traffic_store.get_by_id("OUT-REQ-import-pressure").is_none());
+}
+
 #[tokio::test]
 async fn network_import_handler_persists_bodies_in_recorded_traffic() {
     let dir = tempfile::tempdir().unwrap();

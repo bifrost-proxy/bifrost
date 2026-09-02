@@ -252,9 +252,13 @@ pub(super) async fn import_network(content: &str, state: &SharedAdminState) -> R
     })
 }
 
-type ImportedBodyBytes = (Option<Vec<u8>>, Option<Vec<u8>>);
+struct ImportedBodyBytes {
+    primary: Option<Vec<u8>>,
+    raw: Option<Vec<u8>>,
+    primary_content_encoding: Option<String>,
+}
 
-pub(super) fn imported_body_bytes(
+fn imported_body_bytes(
     text: Option<&str>,
     body_base64: Option<&str>,
     headers: &Option<Vec<(String, String)>>,
@@ -266,12 +270,46 @@ pub(super) fn imported_body_bytes(
                 .map_err(|error| format!("invalid base64 body data: {error}"))
         })
         .transpose()?;
-    let primary = text.map(|value| value.as_bytes().to_vec()).or_else(|| {
-        raw.as_ref().map(|bytes| {
-            decode_content_encoded_body(bytes.clone(), content_encoding_value(headers).as_deref())
-        })
-    });
-    Ok((primary, raw))
+    let content_encoding = content_encoding_value(headers);
+    let (primary, primary_content_encoding) = if let Some(text) = text {
+        (Some(text.as_bytes().to_vec()), None)
+    } else if let Some(bytes) = raw.as_ref() {
+        match content_encoding.as_deref() {
+            Some(encoding) if content_encoding_is_supported(encoding) => {
+                match decompress_with_limit(bytes, encoding, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES) {
+                    Ok(decoded) => (Some(decoded), None),
+                    Err(_) => (Some(bytes.clone()), Some(encoding.to_string())),
+                }
+            }
+            _ => (Some(bytes.clone()), None),
+        }
+    } else {
+        (None, None)
+    };
+    Ok(ImportedBodyBytes {
+        primary,
+        raw,
+        primary_content_encoding,
+    })
+}
+
+fn store_imported_body(
+    store: &crate::BodyStore,
+    record_id: &str,
+    kind: &str,
+    bytes: Option<&[u8]>,
+    content_encoding: Option<&str>,
+) -> Result<Option<crate::BodyRef>, String> {
+    let Some(bytes) = bytes.filter(|bytes| !bytes.is_empty()) else {
+        return Ok(None);
+    };
+    let body_ref = store
+        .store(record_id, kind, bytes)
+        .ok_or_else(|| format!("{kind} body persistence is unavailable"))?;
+    if !body_ref.is_file() {
+        return Err(format!("{kind} body could not be persisted losslessly"));
+    }
+    Ok(Some(body_ref.with_content_encoding(content_encoding)))
 }
 
 pub(super) fn persist_imported_bodies(
@@ -279,32 +317,64 @@ pub(super) fn persist_imported_bodies(
     traffic_record: &mut TrafficRecord,
     body_store: &crate::SharedBodyStore,
 ) -> Result<(), String> {
-    let (request, raw_request) = imported_body_bytes(
+    let request = imported_body_bytes(
         network_record.request_body.as_deref(),
         network_record.request_body_base64.as_deref(),
         &network_record.request_headers,
     )
     .map_err(|error| format!("Record {} request body: {error}", network_record.id))?;
-    let (response, raw_response) = imported_body_bytes(
+    let response = imported_body_bytes(
         network_record.response_body.as_deref(),
         network_record.response_body_base64.as_deref(),
         effective_response_headers(network_record),
     )
     .map_err(|error| format!("Record {} response body: {error}", network_record.id))?;
     let store = body_store.read();
-    traffic_record.request_body_ref = request
-        .as_deref()
-        .and_then(|bytes| store.store(&traffic_record.id, "req", bytes));
-    traffic_record.response_body_ref = response
-        .as_deref()
-        .and_then(|bytes| store.store(&traffic_record.id, "res", bytes));
-    traffic_record.raw_request_body_ref = raw_request
-        .as_deref()
-        .and_then(|bytes| store.store(&traffic_record.id, "req_raw", bytes));
-    traffic_record.raw_response_body_ref = raw_response
-        .as_deref()
-        .and_then(|bytes| store.store(&traffic_record.id, "res_raw", bytes));
-    Ok(())
+    let persistence_result = (|| {
+        traffic_record.request_body_ref = store_imported_body(
+            &store,
+            &traffic_record.id,
+            "req",
+            request.primary.as_deref(),
+            request.primary_content_encoding.as_deref(),
+        )?;
+        traffic_record.response_body_ref = store_imported_body(
+            &store,
+            &traffic_record.id,
+            "res",
+            response.primary.as_deref(),
+            response.primary_content_encoding.as_deref(),
+        )?;
+        traffic_record.raw_request_body_ref = store_imported_body(
+            &store,
+            &traffic_record.id,
+            "req_raw",
+            request.raw.as_deref(),
+            None,
+        )?;
+        traffic_record.raw_response_body_ref = store_imported_body(
+            &store,
+            &traffic_record.id,
+            "res_raw",
+            response.raw.as_deref(),
+            None,
+        )?;
+        Ok(())
+    })();
+    if persistence_result.is_err() {
+        for body_ref in [
+            traffic_record.request_body_ref.take(),
+            traffic_record.response_body_ref.take(),
+            traffic_record.raw_request_body_ref.take(),
+            traffic_record.raw_response_body_ref.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            store.remove(&body_ref);
+        }
+    }
+    persistence_result.map_err(|error: String| format!("Record {}: {error}", network_record.id))
 }
 
 pub(super) fn validate_network_body_base64(records: &[NetworkRecord]) -> Result<(), String> {

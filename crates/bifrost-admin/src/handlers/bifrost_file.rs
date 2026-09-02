@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use super::network_body::{
-    body_size, content_encoding_value, decode_content_encoded_body, export_content_encoded_body,
-    header_value, legacy_lossy_body_warning, preview_body,
+    body_size, content_encoding_is_supported, content_encoding_value, decompress_with_limit,
+    export_content_encoded_body, header_value, legacy_lossy_body_warning, preview_body,
+    DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
 };
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
