@@ -238,6 +238,22 @@ export_network_file() {
         > "${output}"
 }
 
+import_network_file() {
+    local file="$1"
+    curl -fsS \
+        -H 'Content-Type: text/plain' \
+        -X POST \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/bifrost-file/import" \
+        --data-binary "@${file}" \
+        | python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+assert result["success"] is True, result
+assert result["file_type"] == "network", result
+assert result["data"]["record_count"] == 1, result
+'
+}
+
 assert_network_export_active_rules() {
     local file="$1"
     local expected_source="$2"
@@ -367,6 +383,22 @@ assert actual == expected, (direction, len(actual), len(expected))
 ' "$expected_file" "$direction"
         _log_pass "Traffic ${direction} body removes exactly one HTTP gzip layer"
     done
+}
+
+assert_traffic_raw_body_bytes() {
+    local id="$1"
+    local direction="$2"
+    local expected_file="$3"
+    curl -fsS \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${id}/${direction}-body?raw=1&encoding=base64" \
+        | python3 -c '
+import base64, json, pathlib, sys
+expected_file, direction = sys.argv[1:]
+payload = json.load(sys.stdin)
+actual = base64.b64decode(payload["data_base64"], validate=True)
+expected = pathlib.Path(expected_file).read_bytes()
+assert actual == expected, (direction, len(actual), len(expected))
+' "$expected_file" "$direction"
 }
 
 record_id_for_path_and_port() {
@@ -660,6 +692,12 @@ main() {
     assert_network_export_stacked_body "${TEST_DATA_DIR}/stacked-network-export.bifrost" "${stacked_body}"
     assert_network_preview_stacked_body "${TEST_DATA_DIR}/stacked-network-export.bifrost" "${stacked_body}"
     _log_pass "Traffic detail and Network export decode repeated stacked request and response encodings"
+
+    import_network_file "${TEST_DATA_DIR}/stacked-network-export.bifrost"
+    assert_traffic_stacked_body_plaintext "OUT-${stacked_record_id}" "${stacked_body}"
+    _log_pass "Imported Network record persists decoded request and response bodies"
+    assert_traffic_raw_body_bytes "OUT-${stacked_record_id}" request "${TEST_DATA_DIR}/stacked-request.bin"
+    _log_pass "Imported Network record preserves raw request bytes"
 
     "$BIFROST_BIN" port destroy "${TEMP_PORT}"
     if curl -sS --max-time 2 -x "http://127.0.0.1:${TEMP_PORT}" "http://temp-only.test/" >/dev/null 2>&1; then

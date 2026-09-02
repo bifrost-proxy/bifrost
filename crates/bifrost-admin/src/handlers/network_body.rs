@@ -30,7 +30,7 @@ pub(super) fn body_size(text: Option<&str>, body_base64: Option<&str>) -> usize 
         .unwrap_or(0)
 }
 
-fn content_encoding_value(headers: &Option<Vec<(String, String)>>) -> Option<String> {
+pub(super) fn content_encoding_value(headers: &Option<Vec<(String, String)>>) -> Option<String> {
     let values = headers
         .as_ref()?
         .iter()
@@ -161,19 +161,33 @@ fn looks_like_legacy_lossy_body(text: &str, headers: &Option<Vec<(String, String
 
 fn decompress(data: &[u8], content_encoding: &str) -> std::io::Result<Vec<u8>> {
     let mut decoded = data.to_vec();
+    let mut remaining_output_bytes = MAX_DECOMPRESSED_BODY_BYTES;
     for encoding in content_encoding
         .split(',')
         .map(str::trim)
         .filter(|encoding| !encoding.is_empty())
         .rev()
     {
-        decoded = match encoding.to_ascii_lowercase().as_str() {
+        let next = match encoding.to_ascii_lowercase().as_str() {
             "identity" => decoded,
-            "gzip" | "x-gzip" => read_limited(GzDecoder::new(decoded.as_slice()))?,
-            "deflate" => read_limited(ZlibDecoder::new(decoded.as_slice()))
-                .or_else(|_| read_limited(DeflateDecoder::new(decoded.as_slice())))?,
-            "br" => read_limited(brotli::Decompressor::new(decoded.as_slice(), 4096))?,
-            "zstd" => read_limited(zstd::stream::read::Decoder::new(decoded.as_slice())?)?,
+            "gzip" | "x-gzip" => {
+                read_limited(GzDecoder::new(decoded.as_slice()), remaining_output_bytes)?
+            }
+            "deflate" => read_limited(ZlibDecoder::new(decoded.as_slice()), remaining_output_bytes)
+                .or_else(|_| {
+                    read_limited(
+                        DeflateDecoder::new(decoded.as_slice()),
+                        remaining_output_bytes,
+                    )
+                })?,
+            "br" => read_limited(
+                brotli::Decompressor::new(decoded.as_slice(), 4096),
+                remaining_output_bytes,
+            )?,
+            "zstd" => read_limited(
+                zstd::stream::read::Decoder::new(decoded.as_slice())?,
+                remaining_output_bytes,
+            )?,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -181,17 +195,19 @@ fn decompress(data: &[u8], content_encoding: &str) -> std::io::Result<Vec<u8>> {
                 ));
             }
         };
+        if !encoding.eq_ignore_ascii_case("identity") {
+            remaining_output_bytes -= next.len();
+        }
+        decoded = next;
     }
     Ok(decoded)
 }
 
-fn read_limited(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
-    let mut limited = reader
-        .by_ref()
-        .take((MAX_DECOMPRESSED_BODY_BYTES as u64) + 1);
+fn read_limited(mut reader: impl Read, max_output_bytes: usize) -> std::io::Result<Vec<u8>> {
+    let mut limited = reader.by_ref().take((max_output_bytes as u64) + 1);
     let mut output = Vec::new();
     limited.read_to_end(&mut output)?;
-    if output.len() > MAX_DECOMPRESSED_BODY_BYTES {
+    if output.len() > max_output_bytes {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "decompressed body exceeds the preview limit",
@@ -298,6 +314,24 @@ mod tests {
         assert_eq!(decompress(&zstd, "zstd").unwrap(), plaintext);
         assert_eq!(decompress(plaintext, "identity").unwrap(), plaintext);
         assert!(decompress(plaintext, "compress").is_err());
+    }
+
+    #[test]
+    fn content_encoding_layers_share_the_preview_budget() {
+        let original = vec![b'a'; MAX_DECOMPRESSED_BODY_BYTES];
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&original).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let mut deflate =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        deflate.write_all(&gzip).unwrap();
+        let wire = deflate.finish().unwrap();
+
+        let error = decompress(&wire, "gzip, deflate")
+            .expect_err("successful layers must share one preview budget");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("preview limit"));
     }
 
     #[test]

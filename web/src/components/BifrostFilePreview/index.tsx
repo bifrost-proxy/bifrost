@@ -107,6 +107,15 @@ function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelP
             )
           }
         />
+        {(preview.network.warnings ?? []).map((warning) => (
+          <Alert
+            key={warning}
+            style={{ marginTop: 12 }}
+            type="warning"
+            showIcon
+            message={warning}
+          />
+        ))}
         <List
           size="small"
           style={{ marginTop: 16, maxHeight: 360, overflow: "auto" }}

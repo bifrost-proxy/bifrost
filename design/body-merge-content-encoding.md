@@ -79,8 +79,9 @@ api.example.com resMerge://({"test":"qwe"})
 
 - 普通缓冲请求/响应在写入 `request_body_ref` / `response_body_ref` 前解码。
 - 流式请求和超过内存阈值的文件型响应先原样转发并落盘，并在 `BodyRef::ContentEncoded` 中持久化实际的编码链；Traffic body、Network 导出和预览只对带该标记的引用解码，因此不阻塞网络转发热路径，也不会根据旧 header 把已经解码的应用数据再解一层。
-- 展示与导出的解压输出限制为 10 MiB；超限、损坏或未知编码保留原始落盘引用，不伪造明文。Traffic API 的 `raw=1` 优先读取独立 raw 引用；不存在 raw 引用时沿用既有的 body 引用回退语义。
+- 展示与导出的完整编码链共享 10 MiB 解压输出预算，不会让每层单独重复消耗 10 MiB；超限、损坏或未知编码保留原始落盘引用，不伪造明文。Traffic API 的 `raw=1` 优先读取独立 raw 引用；不存在 raw 引用时沿用既有的 body 引用回退语义。
 - network `.bifrost` 导出保留原始字节的 base64，同时写入可解码的明文；导入预览优先展示明文，旧版本已做 lossy UTF-8 转换的不可逆数据给出明确警告。
+- 确认导入 Network 包时，明文 Body 会写入主引用，可用的 base64 原始字节会写入 raw 引用；多记录包同样扫描并展示旧 lossy Body 警告。
 
 ### HTTP / HTTPS 落地
 
@@ -177,7 +178,9 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `body::apply_body_rules_preserving_encoding_unknown_encoding_passthrough`：未识别编码保持原 Body 与原编码。
 - `decompress::multiple_content_codings`：重复 header / 逗号链按逆序完整解码，并覆盖 `x-gzip` 别名。
 - `network_body::repeated_content_encoding_headers_and_x_gzip_are_decoded`：Network 包内字节按重复编码 header 解码；未知编码保持原字节。
+- `decompress::test_multiple_content_codings_share_one_output_budget`：多层编码共享同一解压预算，避免按层重复分配上限。
 - `traffic::stored_body_tests::only_decodes_refs_marked_as_content_encoded`：Traffic 读取只解码带持久化编码标记的 wire body，已经移除 HTTP 外层编码的 `application/gzip` 数据不会被二次解码。
+- `bifrost_file::imported_network_bodies_persist_plaintext_and_raw_bytes`：Network 导入后主 Body 与 raw Body 都可继续读取。
 - `body::apply_body_rules_preserving_encoding_decode_failure_passthrough`：头声明 gzip 但 Body 实际是 identity，解压失败保留原字节。
 - `body::apply_content_injection_preserving_encoding_gzip_html`：gzip HTML 注入 badge/inline script 后仍是有效 gzip 且解码后 HTML 结构正确。
 - `scripts::script_gzip_roundtrip`：gzip Body 进入脚本前会解码为文本，脚本写回 Body 后仍可按 gzip 重新编码。

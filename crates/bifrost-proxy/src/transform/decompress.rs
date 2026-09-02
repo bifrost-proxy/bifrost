@@ -50,18 +50,19 @@ pub fn try_decompress_body_with_limit(
     }
 
     let mut decoded = data.to_vec();
+    let mut remaining_output_bytes = max_output_bytes;
     for encoding in content_encoding
         .split(',')
         .map(str::trim)
         .filter(|encoding| !encoding.is_empty())
         .rev()
     {
-        decoded = match encoding.to_ascii_lowercase().as_str() {
+        let next = match encoding.to_ascii_lowercase().as_str() {
             "identity" => decoded,
-            "gzip" | "x-gzip" => decompress_gzip_limited(&decoded, max_output_bytes)?,
-            "deflate" => decompress_deflate_limited(&decoded, max_output_bytes)?,
-            "br" => decompress_brotli_limited(&decoded, max_output_bytes)?,
-            "zstd" => decompress_zstd_limited(&decoded, max_output_bytes)?,
+            "gzip" | "x-gzip" => decompress_gzip_limited(&decoded, remaining_output_bytes)?,
+            "deflate" => decompress_deflate_limited(&decoded, remaining_output_bytes)?,
+            "br" => decompress_brotli_limited(&decoded, remaining_output_bytes)?,
+            "zstd" => decompress_zstd_limited(&decoded, remaining_output_bytes)?,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -69,6 +70,10 @@ pub fn try_decompress_body_with_limit(
                 ));
             }
         };
+        if !encoding.eq_ignore_ascii_case("identity") {
+            remaining_output_bytes -= next.len();
+        }
+        decoded = next;
     }
     Ok(decoded)
 }
@@ -270,6 +275,28 @@ mod tests {
         let result =
             try_decompress_body_with_limit(&brotli, "gzip, br", 1024).expect("decode chain");
         assert_eq!(result, original);
+    }
+
+    #[test]
+    fn test_multiple_content_codings_share_one_output_budget() {
+        use flate2::write::{GzEncoder, ZlibEncoder};
+        use flate2::Compression;
+        use std::io::Write;
+
+        let original = vec![b'a'; 1024];
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&original).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let mut deflate = ZlibEncoder::new(Vec::new(), Compression::default());
+        deflate.write_all(&gzip).unwrap();
+        let wire = deflate.finish().unwrap();
+        let shared_limit = original.len() + gzip.len() - 1;
+
+        let error = try_decompress_body_with_limit(&wire, "gzip, deflate", shared_limit)
+            .expect_err("successful layers must share one output budget");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("too large"));
     }
 
     #[test]
