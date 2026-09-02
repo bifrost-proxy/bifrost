@@ -675,6 +675,75 @@ mod sse_stream_tests {
     }
 
     #[tokio::test]
+    async fn content_encoded_sse_file_range_decodes_only_the_selected_wire_bytes() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = b"data: selected range\n\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let path = harness.data_dir().join("encoded-sse-range.bin");
+        let prefix = b"ignored-prefix";
+        let mut file = prefix.to_vec();
+        file.extend_from_slice(&compressed);
+        file.extend_from_slice(b"ignored-suffix");
+        std::fs::write(&path, file).unwrap();
+        let body_ref = BodyRef::FileRange {
+            path: path.to_string_lossy().to_string(),
+            offset: prefix.len() as u64,
+            size: compressed.len(),
+        }
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+
+        stream_content_encoded_sse_events(
+            harness.state(),
+            "encoded-sse-range",
+            body_ref,
+            SseStreamFrom::Begin,
+            1,
+            0,
+            tx,
+        )
+        .await
+        .unwrap();
+
+        let mut output = String::new();
+        while let Some(chunk) = rx.recv().await {
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        assert!(output.contains("data: selected range"), "{output}");
+        assert!(!output.contains("ignored"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn content_encoded_sse_missing_file_finishes_without_events() {
+        let harness = TestAdminState::builder().build();
+        let path = harness.data_dir().join("missing-encoded-sse.gz");
+        let body_ref = BodyRef::File {
+            path: path.to_string_lossy().to_string(),
+            size: 1,
+        }
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        stream_content_encoded_sse_events(
+            harness.state(),
+            "missing-encoded-sse",
+            body_ref,
+            SseStreamFrom::Begin,
+            1,
+            0,
+            tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
     async fn content_encoded_sse_batches_complete_and_trailing_events() {
         let harness = TestAdminState::builder().build();
         let plaintext = b"data: first\n\ndata: trailing";

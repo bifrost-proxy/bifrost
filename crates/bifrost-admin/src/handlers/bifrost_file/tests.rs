@@ -84,6 +84,55 @@ async fn network_export_preserves_gzip_request_and_exposes_plaintext() {
 }
 
 #[tokio::test]
+async fn network_export_shares_one_decompression_budget_across_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+    let state = Arc::new(
+        crate::state::AdminState::new_for_test(TEST_ADMIN_PORT, storage).with_body_store(Arc::new(
+            parking_lot::RwLock::new(crate::BodyStore::new(
+                dir.path().join("bodies"),
+                1024 * 1024,
+                1,
+                64 * 1024,
+                std::time::Duration::from_secs(1),
+            )),
+        )),
+    );
+    let plaintext = b"one package budget";
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(plaintext).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let mut traffic = TrafficRecord::new(
+        "REQ-budget-export".to_string(),
+        "GET".to_string(),
+        "https://example.test/budget".to_string(),
+    );
+    traffic.response_body_ref = state
+        .body_store
+        .as_ref()
+        .and_then(|store| store.read().store(&traffic.id, "res", &compressed))
+        .map(|body_ref| body_ref.with_content_encoding(Some("gzip")).unwrap());
+    let mut remaining = plaintext.len();
+
+    let first = traffic_to_network_record_with_budget(&traffic, true, &state, &mut remaining).await;
+    let second =
+        traffic_to_network_record_with_budget(&traffic, true, &state, &mut remaining).await;
+
+    assert_eq!(
+        first.response_body.as_deref(),
+        std::str::from_utf8(plaintext).ok()
+    );
+    assert_eq!(remaining, 0);
+    assert!(second.response_body.is_none());
+    assert_eq!(
+        STANDARD
+            .decode(second.response_body_base64.unwrap())
+            .unwrap(),
+        compressed
+    );
+}
+
+#[tokio::test]
 async fn network_reexport_uses_imported_raw_body_refs_losslessly() {
     let dir = tempfile::tempdir().unwrap();
     let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
@@ -652,6 +701,102 @@ async fn network_import_rolls_back_all_staged_bodies_when_a_later_record_fails()
     let sizes = body_store.read().sizes_by_id().unwrap();
     assert!(!sizes.contains_key("OUT-REQ-import-staged-first"));
     assert!(!sizes.contains_key("OUT-REQ-import-staged-second"));
+}
+
+#[tokio::test]
+async fn concurrent_network_imports_reserve_ids_through_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let traffic_store =
+        Arc::new(crate::TrafficDbStore::new(dir.path().join("traffic"), 100, 0, None).unwrap());
+    let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
+        dir.path().join("bodies"),
+        1024 * 1024,
+        1,
+        64 * 1024,
+        std::time::Duration::from_secs(1),
+    )));
+    let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+    let state = Arc::new(
+        crate::state::AdminState::new_for_test(TEST_ADMIN_PORT, storage)
+            .with_traffic_db_store_shared(traffic_store.clone())
+            .with_body_store(body_store.clone()),
+    );
+    let record: NetworkRecord = serde_json::from_value(serde_json::json!({
+        "id": "REQ-concurrent-import",
+        "method": "POST",
+        "url": "https://example.test/concurrent",
+        "status": 200,
+        "request_body": "must survive losing import rollback",
+        "duration_ms": 1,
+        "timestamp": 1
+    }))
+    .unwrap();
+    let content = BifrostFileWriter::write_network("concurrent", None, &[record]).unwrap();
+
+    let (first, second) = tokio::join!(
+        import_network(&content, &state),
+        import_network(&content, &state)
+    );
+    let statuses = [first.status(), second.status()];
+
+    assert!(statuses.contains(&StatusCode::OK));
+    assert!(statuses.contains(&StatusCode::CONFLICT));
+    let imported = traffic_store
+        .get_by_id("OUT-REQ-concurrent-import")
+        .expect("winning import remains committed");
+    assert_eq!(
+        imported
+            .request_body_ref
+            .as_ref()
+            .and_then(|body_ref| body_store.read().load_bytes(body_ref))
+            .as_deref(),
+        Some(b"must survive losing import rollback".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn network_import_rolls_back_bodies_when_database_commit_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let traffic_store =
+        Arc::new(crate::TrafficDbStore::new(dir.path().join("traffic"), 100, 0, None).unwrap());
+    let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
+        dir.path().join("bodies"),
+        1024 * 1024,
+        1,
+        64 * 1024,
+        std::time::Duration::from_secs(1),
+    )));
+    let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+    let state = Arc::new(
+        crate::state::AdminState::new_for_test(TEST_ADMIN_PORT, storage)
+            .with_traffic_db_store_shared(traffic_store.clone())
+            .with_body_store(body_store.clone()),
+    );
+    let record: NetworkRecord = serde_json::from_value(serde_json::json!({
+        "id": "REQ-db-failure-import",
+        "method": "GET",
+        "url": "https://example.test/db-failure",
+        "status": 200,
+        "response_body": "staged then rolled back",
+        "duration_ms": 1,
+        "timestamp": 1
+    }))
+    .unwrap();
+    let content = BifrostFileWriter::write_network("db-failure", None, &[record]).unwrap();
+    traffic_store.try_record_batch(Vec::new()).unwrap();
+    traffic_store.set_write_query_only(true).unwrap();
+
+    let response = import_network(&content, &state).await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(traffic_store
+        .get_by_id("OUT-REQ-db-failure-import")
+        .is_none());
+    assert!(!body_store
+        .read()
+        .sizes_by_id()
+        .unwrap()
+        .contains_key("OUT-REQ-db-failure-import"));
 }
 
 #[test]

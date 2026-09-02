@@ -1,8 +1,271 @@
-use super::super::body::{configured_decompress_output_bytes, load_body_bytes_async};
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
+
+use super::super::body::configured_decompress_output_bytes;
 use super::*;
-use crate::handlers::network_body::{
-    content_encoding_is_supported, decompress_partial_with_limit, decompress_with_limit,
-};
+use crate::handlers::network_body::content_encoding_is_supported;
+
+#[derive(Default)]
+struct DecoderOutput {
+    bytes: Vec<u8>,
+}
+
+struct OutputWriter(Arc<Mutex<DecoderOutput>>);
+
+impl Write for OutputWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct DecodeBudget {
+    used: usize,
+    max: usize,
+    exceeded: bool,
+}
+
+struct BudgetWriter {
+    inner: Box<dyn Write + Send>,
+    budget: Arc<Mutex<DecodeBudget>>,
+}
+
+impl Write for BudgetWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        {
+            let mut budget = self.budget.lock().unwrap();
+            if buf.len() > budget.max.saturating_sub(budget.used) {
+                budget.exceeded = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "decompressed body exceeds the preview limit",
+                ));
+            }
+            budget.used = budget.used.saturating_add(buf.len());
+        }
+        self.inner.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+enum DeflateDecoderState {
+    Pending {
+        downstream: Option<Box<dyn Write + Send>>,
+        prefix: Vec<u8>,
+    },
+    Zlib(flate2::write::ZlibDecoder<Box<dyn Write + Send>>),
+    Raw(flate2::write::DeflateDecoder<Box<dyn Write + Send>>),
+}
+
+struct StreamingDeflateDecoder {
+    state: DeflateDecoderState,
+}
+
+impl StreamingDeflateDecoder {
+    fn new(downstream: Box<dyn Write + Send>) -> Self {
+        Self {
+            state: DeflateDecoderState::Pending {
+                downstream: Some(downstream),
+                prefix: Vec::with_capacity(2),
+            },
+        }
+    }
+
+    fn initialize_if_ready(&mut self) -> io::Result<()> {
+        let DeflateDecoderState::Pending { downstream, prefix } = &mut self.state else {
+            return Ok(());
+        };
+        if prefix.len() < 2 {
+            return Ok(());
+        }
+
+        let is_zlib =
+            prefix[0] & 0x0f == 8 && ((u16::from(prefix[0]) << 8) | u16::from(prefix[1])) % 31 == 0;
+        let downstream = downstream.take().expect("deflate downstream is present");
+        let initial = std::mem::take(prefix);
+        if is_zlib {
+            let mut decoder = flate2::write::ZlibDecoder::new(downstream);
+            decoder.write_all(&initial)?;
+            self.state = DeflateDecoderState::Zlib(decoder);
+        } else {
+            let mut decoder = flate2::write::DeflateDecoder::new(downstream);
+            decoder.write_all(&initial)?;
+            self.state = DeflateDecoderState::Raw(decoder);
+        }
+        Ok(())
+    }
+}
+
+impl Write for StreamingDeflateDecoder {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let DeflateDecoderState::Pending { prefix, .. } = &mut self.state {
+            prefix.extend_from_slice(buf);
+            self.initialize_if_ready()?;
+            return Ok(buf.len());
+        }
+        match &mut self.state {
+            DeflateDecoderState::Zlib(decoder) => decoder.write(buf),
+            DeflateDecoderState::Raw(decoder) => decoder.write(buf),
+            DeflateDecoderState::Pending { .. } => unreachable!(),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.state {
+            DeflateDecoderState::Pending { downstream, .. } => {
+                if let Some(downstream) = downstream {
+                    downstream.flush()
+                } else {
+                    Ok(())
+                }
+            }
+            DeflateDecoderState::Zlib(decoder) => decoder.flush(),
+            DeflateDecoderState::Raw(decoder) => decoder.flush(),
+        }
+    }
+}
+
+struct IncrementalContentDecoder {
+    writer: Box<dyn Write + Send>,
+    output: Arc<Mutex<DecoderOutput>>,
+    budget: Arc<Mutex<DecodeBudget>>,
+}
+
+impl IncrementalContentDecoder {
+    fn new(content_encoding: &str, max_output_bytes: usize) -> io::Result<Self> {
+        let output = Arc::new(Mutex::new(DecoderOutput::default()));
+        let budget = Arc::new(Mutex::new(DecodeBudget {
+            used: 0,
+            max: max_output_bytes,
+            exceeded: false,
+        }));
+        let mut writer: Box<dyn Write + Send> = Box::new(OutputWriter(output.clone()));
+
+        for encoding in content_encoding
+            .split(',')
+            .map(str::trim)
+            .filter(|encoding| !encoding.is_empty())
+        {
+            if encoding.eq_ignore_ascii_case("identity") {
+                continue;
+            }
+            let downstream: Box<dyn Write + Send> = Box::new(BudgetWriter {
+                inner: writer,
+                budget: budget.clone(),
+            });
+            writer = match encoding.to_ascii_lowercase().as_str() {
+                "gzip" | "x-gzip" => Box::new(flate2::write::MultiGzDecoder::new(downstream)),
+                "deflate" => Box::new(StreamingDeflateDecoder::new(downstream)),
+                "br" => Box::new(brotli::DecompressorWriter::new(downstream, 4096)),
+                "zstd" => Box::new(zstd::stream::write::Decoder::new(downstream)?),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("unsupported content-encoding: {encoding}"),
+                    ));
+                }
+            };
+        }
+
+        Ok(Self {
+            writer,
+            output,
+            budget,
+        })
+    }
+
+    fn push(&mut self, wire_bytes: &[u8]) -> io::Result<Vec<u8>> {
+        self.writer.write_all(wire_bytes)?;
+        self.writer.flush()?;
+        Ok(std::mem::take(&mut self.output.lock().unwrap().bytes))
+    }
+
+    fn take_output(&self) -> Vec<u8> {
+        std::mem::take(&mut self.output.lock().unwrap().bytes)
+    }
+
+    fn exceeded_limit(&self) -> bool {
+        self.budget.lock().unwrap().exceeded
+    }
+}
+
+async fn emit_decoded_events(
+    decoded: &[u8],
+    parser: &mut SseIncrementalParser,
+    seq: &mut u64,
+    batch: &mut Vec<crate::sse::SseEvent>,
+    batch_size: usize,
+    last_event_was_finish: &mut bool,
+    tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
+) -> Result<(), ()> {
+    let mut produced = Vec::new();
+    parser.push_bytes(decoded, &mut produced);
+    for raw in produced {
+        *seq = seq.saturating_add(1);
+        let event = sse_event_from_raw(*seq, now_ms(), raw);
+        *last_event_was_finish = event.event.as_deref() == Some("finish");
+        if batch_size <= 1 {
+            if tx
+                .send(bytes::Bytes::from(sse_json_line(&event)))
+                .await
+                .is_err()
+            {
+                return Err(());
+            }
+        } else {
+            batch.push(event);
+            if batch.len() >= batch_size {
+                let payload = sse_json_batch_line(batch);
+                batch.clear();
+                if tx.send(bytes::Bytes::from(payload)).await.is_err() {
+                    return Err(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn emit_limit_error(
+    max_output_bytes: usize,
+    seq: &mut u64,
+    batch: &mut Vec<crate::sse::SseEvent>,
+    batch_size: usize,
+    tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
+) {
+    *seq = seq.saturating_add(1);
+    let error_event = crate::sse::SseEvent {
+        seq: *seq,
+        ts: now_ms(),
+        id: None,
+        event: Some("error".to_string()),
+        retry: None,
+        data: format!(
+            "decoded SSE body exceeds the configured {} byte limit",
+            max_output_bytes
+        ),
+        raw: None,
+        parse_error: true,
+    };
+    if batch_size <= 1 {
+        let _ = tx
+            .send(bytes::Bytes::from(sse_json_line(&error_event)))
+            .await;
+    } else {
+        batch.push(error_event);
+        let _ = tx
+            .send(bytes::Bytes::from(sse_json_batch_line(batch)))
+            .await;
+    }
+}
 
 pub(super) async fn stream_content_encoded_sse_events(
     state: SharedAdminState,
@@ -14,6 +277,7 @@ pub(super) async fn stream_content_encoded_sse_events(
     tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
 ) -> Result<(), ()> {
     use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
     use tokio::time::{sleep, Duration};
 
     let max_output_bytes = configured_decompress_output_bytes(&state).await;
@@ -24,16 +288,41 @@ pub(super) async fn stream_content_encoded_sse_events(
         return Ok(());
     }
 
+    let (path, start_offset, fixed_end) = match body_ref {
+        BodyRef::File { path, .. } => (path, 0, None),
+        BodyRef::FileRange {
+            path, offset, size, ..
+        } => (path, offset, Some(offset.saturating_add(size as u64))),
+        BodyRef::Inline { .. } => return Ok(()),
+    };
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(_) => return Ok(()),
+    };
+    if file
+        .seek(std::io::SeekFrom::Start(start_offset))
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    let mut decoder = match IncrementalContentDecoder::new(&content_encoding, max_output_bytes) {
+        Ok(decoder) => decoder,
+        Err(_) => return Ok(()),
+    };
     let mut parser = SseIncrementalParser::new();
-    let mut decoded_offset = 0usize;
-    let mut initialized_offset = false;
     let mut seq = 0u64;
     let mut batch = Vec::new();
     let batch_size = batch_size.max(1);
     let mut last_force_flush_refresh = Instant::now();
-    let mut closed_idle_retries = 0u8;
+    let mut closed_eof_retries = 0u8;
     let mut saw_closed = false;
     let mut last_event_was_finish = false;
+    let mut offset = start_offset;
+    let mut buf = vec![0u8; 8192];
+    let mut tail_pending = (from == SseStreamFrom::Tail).then(Vec::new);
+    let mut decoder_failed = false;
 
     loop {
         if last_force_flush_refresh.elapsed() >= Duration::from_secs(5) {
@@ -45,116 +334,101 @@ pub(super) async fn stream_content_encoded_sse_events(
         if !is_open {
             saw_closed = true;
         }
-        let mut made_progress = false;
-        let mut member_is_complete = false;
-        if let Some(wire_bytes) = load_body_bytes_async(&state, &body_ref).await {
-            let decoded =
-                match decompress_with_limit(&wire_bytes, &content_encoding, max_output_bytes) {
-                    Ok(decoded) => {
-                        member_is_complete = true;
-                        Ok(decoded)
-                    }
-                    Err(complete_error) => decompress_partial_with_limit(
-                        &wire_bytes,
-                        &content_encoding,
-                        max_output_bytes,
-                    )
-                    .map_err(|partial_error| (complete_error, partial_error)),
-                };
-            if let Ok(decoded) = decoded {
-                if !initialized_offset && (!decoded.is_empty() || !is_open) {
-                    decoded_offset = if from == SseStreamFrom::Tail && tail_bytes > 0 {
-                        decoded.len().saturating_sub(tail_bytes)
-                    } else {
-                        0
-                    };
-                    initialized_offset = true;
-                }
-                if decoded.len() >= decoded_offset {
-                    let new_bytes = &decoded[decoded_offset..];
-                    made_progress = !new_bytes.is_empty();
-                    decoded_offset = decoded.len();
-                    let mut produced = Vec::new();
-                    parser.push_bytes(new_bytes, &mut produced);
-                    for raw in produced {
-                        seq = seq.saturating_add(1);
-                        let event = sse_event_from_raw(seq, now_ms(), raw);
-                        last_event_was_finish = event.event.as_deref() == Some("finish");
-                        if batch_size <= 1 {
-                            if tx
-                                .send(bytes::Bytes::from(sse_json_line(&event)))
-                                .await
-                                .is_err()
-                            {
-                                return Ok(());
-                            }
-                        } else {
-                            batch.push(event);
-                            if batch.len() >= batch_size {
-                                let payload = sse_json_batch_line(&batch);
-                                batch.clear();
-                                if tx.send(bytes::Bytes::from(payload)).await.is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if let Err((complete_error, partial_error)) = decoded {
-                let hit_limit = [&complete_error, &partial_error].iter().any(|error| {
-                    error
-                        .to_string()
-                        .contains("decompressed body exceeds the preview limit")
-                });
-                if hit_limit {
-                    seq = seq.saturating_add(1);
-                    let error_event = crate::sse::SseEvent {
-                        seq,
-                        ts: now_ms(),
-                        id: None,
-                        event: Some("error".to_string()),
-                        retry: None,
-                        data: format!(
-                            "decoded SSE body exceeds the configured {} byte limit",
-                            max_output_bytes
-                        ),
-                        raw: None,
-                        parse_error: true,
-                    };
-                    if batch_size <= 1 {
-                        let _ = tx
-                            .send(bytes::Bytes::from(sse_json_line(&error_event)))
-                            .await;
-                    } else {
-                        batch.push(error_event);
-                        let _ = tx
-                            .send(bytes::Bytes::from(sse_json_batch_line(&batch)))
-                            .await;
-                    }
-                    return Ok(());
-                }
+        if let Some(end) = fixed_end {
+            if offset >= end {
+                break;
             }
         }
 
-        // A complete prefix may still receive another gzip member (and
-        // `identity` is complete for every prefix), so only finish after the
-        // upstream connection itself has closed.
-        if member_is_complete && !is_open {
-            break;
+        let to_read = fixed_end
+            .map(|end| (end.saturating_sub(offset) as usize).min(buf.len()))
+            .unwrap_or(buf.len());
+        let read = if decoder_failed || to_read == 0 {
+            0
+        } else {
+            file.read(&mut buf[..to_read]).await.unwrap_or_default()
+        };
+
+        if read > 0 {
+            closed_eof_retries = 0;
+            offset = offset.saturating_add(read as u64);
+            match decoder.push(&buf[..read]) {
+                Ok(decoded) => {
+                    if let Some(pending) = &mut tail_pending {
+                        pending.extend_from_slice(&decoded);
+                    } else if emit_decoded_events(
+                        &decoded,
+                        &mut parser,
+                        &mut seq,
+                        &mut batch,
+                        batch_size,
+                        &mut last_event_was_finish,
+                        &tx,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(_) if decoder.exceeded_limit() => {
+                    emit_limit_error(max_output_bytes, &mut seq, &mut batch, batch_size, &tx).await;
+                    return Ok(());
+                }
+                Err(_) => decoder_failed = true,
+            }
+            continue;
         }
 
+        let trailing = decoder.take_output();
+        if !trailing.is_empty() {
+            if let Some(pending) = &mut tail_pending {
+                pending.extend_from_slice(&trailing);
+            } else if emit_decoded_events(
+                &trailing,
+                &mut parser,
+                &mut seq,
+                &mut batch,
+                batch_size,
+                &mut last_event_was_finish,
+                &tx,
+            )
+            .await
+            .is_err()
+            {
+                return Ok(());
+            }
+        }
+
+        if let Some(pending) = tail_pending.take() {
+            let start = pending.len().saturating_sub(tail_bytes);
+            if emit_decoded_events(
+                &pending[start..],
+                &mut parser,
+                &mut seq,
+                &mut batch,
+                batch_size,
+                &mut last_event_was_finish,
+                &tx,
+            )
+            .await
+            .is_err()
+            {
+                return Ok(());
+            }
+        }
+
+        if fixed_end.is_some() {
+            break;
+        }
         if !is_open {
-            if made_progress {
-                closed_idle_retries = 0;
-            } else {
-                closed_idle_retries = closed_idle_retries.saturating_add(1);
-                if closed_idle_retries >= 10 {
-                    break;
-                }
+            closed_eof_retries = closed_eof_retries.saturating_add(1);
+            if closed_eof_retries >= 10 {
+                break;
             }
             sleep(Duration::from_millis(50)).await;
         } else {
-            closed_idle_retries = 0;
+            closed_eof_retries = 0;
             sleep(Duration::from_millis(100)).await;
         }
     }
@@ -170,7 +444,7 @@ pub(super) async fn stream_content_encoded_sse_events(
         }
     }
 
-    if should_emit_synthetic_finish(None, saw_closed, last_event_was_finish) {
+    if should_emit_synthetic_finish(fixed_end, saw_closed, last_event_was_finish) {
         seq = seq.saturating_add(1);
         let finish_event = crate::sse::SseEvent {
             seq,
@@ -196,4 +470,130 @@ pub(super) async fn stream_content_encoded_sse_events(
             .await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::{
+        emit_decoded_events, DecoderOutput, DeflateDecoderState, IncrementalContentDecoder,
+        OutputWriter, StreamingDeflateDecoder,
+    };
+    use crate::handlers::traffic::sse_stream::SseIncrementalParser;
+    use std::sync::{Arc, Mutex};
+
+    fn decode_in_small_wire_chunks(encoding: &str, wire: &[u8]) -> Vec<u8> {
+        let mut decoder = IncrementalContentDecoder::new(encoding, 1024).unwrap();
+        let mut decoded = Vec::new();
+        for chunk in wire.chunks(3) {
+            decoded.extend(decoder.push(chunk).unwrap());
+        }
+        decoded.extend(decoder.take_output());
+        decoded
+    }
+
+    #[test]
+    fn incremental_decoder_supports_all_standard_stream_codings() {
+        let plaintext = b"data: standard coding\n\n";
+
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(plaintext).unwrap();
+        assert_eq!(
+            decode_in_small_wire_chunks("gzip", &gzip.finish().unwrap()),
+            plaintext
+        );
+
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        zlib.write_all(plaintext).unwrap();
+        assert_eq!(
+            decode_in_small_wire_chunks("deflate", &zlib.finish().unwrap()),
+            plaintext
+        );
+
+        let mut raw =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        raw.write_all(plaintext).unwrap();
+        assert_eq!(
+            decode_in_small_wire_chunks("deflate", &raw.finish().unwrap()),
+            plaintext
+        );
+
+        let mut br = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut br, 4096, 5, 22);
+            encoder.write_all(plaintext).unwrap();
+        }
+        assert_eq!(decode_in_small_wire_chunks("br", &br), plaintext);
+
+        let zstd = zstd::stream::encode_all(plaintext.as_slice(), 1).unwrap();
+        assert_eq!(decode_in_small_wire_chunks("zstd", &zstd), plaintext);
+    }
+
+    #[test]
+    fn streaming_deflate_handles_short_prefix_flush_and_initialized_writes() {
+        let plaintext = b"data: split deflate prefix\n\n";
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let wire = encoder.finish().unwrap();
+        let output = Arc::new(Mutex::new(DecoderOutput::default()));
+        let mut decoder = StreamingDeflateDecoder::new(Box::new(OutputWriter(output.clone())));
+
+        decoder.initialize_if_ready().unwrap();
+        decoder.write_all(&wire[..1]).unwrap();
+        decoder.flush().unwrap();
+        decoder.write_all(&wire[1..2]).unwrap();
+        decoder.initialize_if_ready().unwrap();
+        decoder.write_all(&wire[2..]).unwrap();
+        decoder.flush().unwrap();
+
+        assert_eq!(output.lock().unwrap().bytes, plaintext);
+
+        let mut empty = StreamingDeflateDecoder {
+            state: DeflateDecoderState::Pending {
+                downstream: None,
+                prefix: Vec::new(),
+            },
+        };
+        empty.flush().unwrap();
+    }
+
+    #[test]
+    fn incremental_decoder_rejects_unknown_coding_and_enforces_budget() {
+        assert!(IncrementalContentDecoder::new("x-company", 1024).is_err());
+
+        let plaintext = b"data: exceeds tiny budget\n\n";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let wire = encoder.finish().unwrap();
+        let mut decoder = IncrementalContentDecoder::new("gzip", 4).unwrap();
+
+        assert!(decoder.push(&wire).is_err());
+        assert!(decoder.exceeded_limit());
+    }
+
+    #[tokio::test]
+    async fn decoded_event_delivery_reports_closed_single_and_batch_channels() {
+        for batch_size in [1, 2] {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            drop(rx);
+            let mut parser = SseIncrementalParser::new();
+            let mut seq = 0;
+            let mut batch = Vec::new();
+            let mut last_event_was_finish = false;
+
+            assert!(emit_decoded_events(
+                b"data: cannot deliver\n\ndata: second event\n\n",
+                &mut parser,
+                &mut seq,
+                &mut batch,
+                batch_size,
+                &mut last_event_was_finish,
+                &tx,
+            )
+            .await
+            .is_err());
+        }
+    }
 }

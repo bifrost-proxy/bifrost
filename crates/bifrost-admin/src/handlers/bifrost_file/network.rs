@@ -1,5 +1,8 @@
 use super::*;
 
+static NETWORK_IMPORT_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+
 pub(super) fn build_network_preview(records: &[NetworkRecord]) -> NetworkPreview {
     let mut hosts = BTreeSet::new();
     let preview_records: Vec<NetworkPreviewRecord> = records
@@ -211,6 +214,11 @@ pub(super) async fn import_network(content: &str, state: &SharedAdminState) -> R
         return error_response(StatusCode::BAD_REQUEST, &message);
     }
 
+    // Reserve the complete imported ID set until both body staging and the
+    // database transaction finish. This prevents concurrent imports from
+    // overwriting or rolling back each other's body files.
+    let _import_guard = NETWORK_IMPORT_LOCK.lock().await;
+
     let imported_ids = file
         .content
         .iter()
@@ -270,8 +278,15 @@ pub(super) async fn import_network(content: &str, state: &SharedAdminState) -> R
     }
 
     let record_count = staged_records.len();
-    for traffic_record in staged_records {
-        traffic_db_store.record(traffic_record);
+    if let Err(error) = traffic_db_store.try_record_batch(staged_records) {
+        if let Some(body_store) = state.body_store.as_ref() {
+            let _ = body_store.write().delete_by_ids(&persisted_ids);
+        }
+        tracing::error!(%error, record_count, "failed to commit imported network records");
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to commit imported Network records",
+        );
     }
 
     if record_count > 0 {

@@ -1,6 +1,8 @@
 use super::body::{configured_decompress_output_bytes, load_body_bytes_async};
 use super::*;
-use crate::handlers::network_body::{content_encoding_is_supported, decompress_with_limit_metered};
+use crate::handlers::network_body::{
+    content_encoding_is_supported, decompress_prefix_with_limit_metered,
+};
 use base64::Engine as _;
 
 const BATCH_GET_MAX_IDS: usize = 200;
@@ -199,19 +201,23 @@ async fn build_batch_body_chunk(
 ) -> Option<serde_json::Value> {
     let body_ref = body_ref?;
     let bytes = load_body_bytes_async(state, body_ref).await?;
-    let bytes = decode_batch_body(body_ref, bytes, max_body_bytes, remaining_decompress_bytes);
-    let original_size = bytes.len();
-    let (slice, truncated) = if original_size > max_body_bytes {
-        (&bytes[..max_body_bytes], true)
+    let decoded = decode_batch_body(body_ref, bytes, max_body_bytes, remaining_decompress_bytes);
+    let reported_size = if decoded.truncated {
+        decoded.bytes.len().saturating_add(1)
     } else {
-        (&bytes[..], false)
+        decoded.bytes.len()
+    };
+    let (slice, truncated) = if decoded.bytes.len() > max_body_bytes {
+        (&decoded.bytes[..max_body_bytes], true)
+    } else {
+        (&decoded.bytes[..], decoded.truncated)
     };
     let encoded = base64::engine::general_purpose::STANDARD.encode(slice);
     let mut obj = serde_json::Map::new();
     obj.insert("bytes_b64".to_string(), serde_json::Value::String(encoded));
     obj.insert(
         "size".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(original_size)),
+        serde_json::Value::Number(serde_json::Number::from(reported_size)),
     );
     obj.insert("truncated".to_string(), serde_json::Value::Bool(truncated));
     if let Some(ct) = content_type {
@@ -223,17 +229,29 @@ async fn build_batch_body_chunk(
     Some(serde_json::Value::Object(obj))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedBatchBody {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
 fn decode_batch_body(
     body_ref: &BodyRef,
     bytes: Vec<u8>,
     max_body_bytes: usize,
     remaining_decompress_bytes: &mut usize,
-) -> Vec<u8> {
+) -> DecodedBatchBody {
     let Some(content_encoding) = body_ref.content_encoding() else {
-        return bytes;
+        return DecodedBatchBody {
+            bytes,
+            truncated: false,
+        };
     };
     if !content_encoding_is_supported(&content_encoding) {
-        return bytes;
+        return DecodedBatchBody {
+            bytes,
+            truncated: false,
+        };
     }
 
     // The batch endpoint only needs enough decoded data to fill its preview.
@@ -241,18 +259,28 @@ fn decode_batch_body(
     // so one request cannot multiply that work by the 200-ID batch limit.
     let decode_limit = (*remaining_decompress_bytes).min(max_body_bytes.saturating_add(1));
     if decode_limit == 0 {
-        return bytes;
+        return DecodedBatchBody {
+            bytes,
+            truncated: false,
+        };
     }
-    match decompress_with_limit_metered(&bytes, &content_encoding, decode_limit) {
-        Ok((decoded, consumed)) => {
-            *remaining_decompress_bytes = remaining_decompress_bytes.saturating_sub(consumed);
-            decoded
+    match decompress_prefix_with_limit_metered(&bytes, &content_encoding, decode_limit) {
+        Ok(decoded) => {
+            *remaining_decompress_bytes =
+                remaining_decompress_bytes.saturating_sub(decoded.consumed);
+            DecodedBatchBody {
+                bytes: decoded.bytes,
+                truncated: decoded.truncated,
+            }
         }
         Err(_) => {
             // A decoder may consume the entire allowance before reporting an
             // invalid or oversized stream, so account for the worst case.
             *remaining_decompress_bytes = remaining_decompress_bytes.saturating_sub(decode_limit);
-            bytes
+            DecodedBatchBody {
+                bytes,
+                truncated: false,
+            }
         }
     }
 }
@@ -418,9 +446,11 @@ mod batch_query_tests {
         let first = decode_batch_body(&body_ref, compressed.clone(), usize::MAX, &mut remaining);
         let second = decode_batch_body(&body_ref, compressed.clone(), usize::MAX, &mut remaining);
 
-        assert_eq!(first, plaintext);
+        assert_eq!(first.bytes, plaintext);
+        assert!(!first.truncated);
         assert_eq!(remaining, 0);
-        assert_eq!(second, compressed);
+        assert_eq!(second.bytes, compressed);
+        assert!(!second.truncated);
     }
 
     #[test]
@@ -449,20 +479,56 @@ mod batch_query_tests {
 
         let mut remaining = 3;
         assert_eq!(
-            decode_batch_body(&plain_ref, raw.clone(), 2, &mut remaining),
+            decode_batch_body(&plain_ref, raw.clone(), 2, &mut remaining).bytes,
             raw
         );
         assert_eq!(remaining, 3);
         assert_eq!(
-            decode_batch_body(&custom_ref, raw.clone(), 2, &mut remaining),
+            decode_batch_body(&custom_ref, raw.clone(), 2, &mut remaining).bytes,
             raw
         );
         assert_eq!(remaining, 3);
         assert_eq!(
-            decode_batch_body(&invalid_gzip_ref, raw.clone(), 2, &mut remaining),
+            decode_batch_body(&invalid_gzip_ref, raw.clone(), 2, &mut remaining).bytes,
             raw
         );
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_compressed_batch_body_returns_decoded_prefix() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = b"decoded body longer than preview";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("batch-truncated", "res", &compressed)
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        let mut remaining = usize::MAX;
+
+        let chunk = build_batch_body_chunk(
+            &harness.state(),
+            Some(&body_ref),
+            Some("text/plain"),
+            7,
+            &mut remaining,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            STANDARD
+                .decode(chunk["bytes_b64"].as_str().unwrap())
+                .unwrap(),
+            &plaintext[..7]
+        );
+        assert_eq!(chunk["truncated"], true);
+        assert!(chunk["size"].as_u64().unwrap() > 7);
     }
 
     #[tokio::test]

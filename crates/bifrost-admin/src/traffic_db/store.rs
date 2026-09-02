@@ -180,6 +180,13 @@ pub struct TrafficSearchFields {
 }
 
 impl TrafficDbStore {
+    #[cfg(test)]
+    pub(crate) fn set_write_query_only(&self, enabled: bool) -> rusqlite::Result<()> {
+        self.write_conn
+            .lock()
+            .pragma_update(None, "query_only", if enabled { "ON" } else { "OFF" })
+    }
+
     #[inline]
     pub fn has_traffic_event_subscribers(&self) -> bool {
         self.tx.receiver_count() > 0
@@ -604,8 +611,15 @@ impl TrafficDbStore {
     }
 
     pub fn record_batch(&self, records: Vec<TrafficRecord>) {
+        let batch_size = records.len();
+        if let Err(error) = self.try_record_batch(records) {
+            tracing::error!(%error, batch_size, "[TRAFFIC_DB] Failed to insert record batch");
+        }
+    }
+
+    pub fn try_record_batch(&self, records: Vec<TrafficRecord>) -> rusqlite::Result<()> {
         if records.is_empty() {
-            return;
+            return Ok(());
         }
 
         let mut records_with_seq = Vec::with_capacity(records.len());
@@ -619,23 +633,13 @@ impl TrafficDbStore {
 
         let mut conn = self.write_conn.lock();
         let previous_dimensions = {
-            let result = (|| -> rusqlite::Result<Vec<Option<TrafficStatisticsDimensions>>> {
-                let tx = conn.transaction()?;
-                let mut previous = Vec::with_capacity(records_with_seq.len());
-                for (seq, record) in &records_with_seq {
-                    previous.push(Self::insert_record_tx(&tx, *seq, record)?);
-                }
-                tx.commit()?;
-                Ok(previous)
-            })();
-
-            match result {
-                Ok(previous) => previous,
-                Err(e) => {
-                    tracing::error!(error = %e, batch_size = batch_len, "[TRAFFIC_DB] Failed to insert record batch");
-                    return;
-                }
+            let tx = conn.transaction()?;
+            let mut previous = Vec::with_capacity(records_with_seq.len());
+            for (seq, record) in &records_with_seq {
+                previous.push(Self::insert_record_tx(&tx, *seq, record)?);
             }
+            tx.commit()?;
+            previous
         };
 
         let mut inserted_count = 0usize;
@@ -677,6 +681,7 @@ impl TrafficDbStore {
         if old / CLEANUP_CHECK_INTERVAL != new / CLEANUP_CHECK_INTERVAL {
             self.maybe_cleanup();
         }
+        Ok(())
     }
 
     pub fn update_by_id<F>(&self, id: &str, updater: F) -> bool

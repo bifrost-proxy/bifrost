@@ -98,6 +98,19 @@ fn content_encoding_marker_path(path: &str) -> PathBuf {
     PathBuf::from(format!("{path}.content-encoding"))
 }
 
+fn retention_modified_time(path: &std::path::Path, own_modified: SystemTime) -> SystemTime {
+    let Some(path_text) = path.to_str() else {
+        return own_modified;
+    };
+    let Some(body_path) = path_text.strip_suffix(".content-encoding") else {
+        return own_modified;
+    };
+    fs::metadata(body_path)
+        .and_then(|metadata| metadata.modified())
+        .map(|body_modified| body_modified.max(own_modified))
+        .unwrap_or(own_modified)
+}
+
 pub struct BodyStore {
     temp_dir: PathBuf,
     max_memory_size: usize,
@@ -528,6 +541,7 @@ impl BodyStore {
             if path.is_file() {
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
+                        let modified = retention_modified_time(&path, modified);
                         if let Ok(age) = now.duration_since(modified) {
                             if age > retention_duration && fs::remove_file(&path).is_ok() {
                                 removed_count += 1;
@@ -826,6 +840,21 @@ mod tests {
             data: "wire".to_string(),
         };
         assert!(inline.with_content_encoding(Some("gzip")).is_err());
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn content_encoding_sidecar_inherits_live_body_retention() {
+        let dir = create_test_dir();
+        let body_path = dir.join("active_sse_raw");
+        fs::write(&body_path, b"live wire bytes").unwrap();
+        let sidecar = content_encoding_marker_path(&body_path.to_string_lossy());
+        fs::write(&sidecar, "gzip").unwrap();
+        let stale_sidecar_time = SystemTime::UNIX_EPOCH;
+
+        let effective = retention_modified_time(&sidecar, stale_sidecar_time);
+
+        assert!(effective > stale_sidecar_time);
         cleanup_test_dir(&dir);
     }
 

@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use tokio::time::Sleep;
 
 use crate::server::BoxBody;
-use crate::transform::decompress::decompress_body_with_limit;
+use crate::transform::decompress::{decompress_body_with_limit, try_decompress_body_with_limit};
 
 mod openai_like;
 
@@ -63,35 +63,106 @@ fn body_store_background_semaphore() -> Arc<Semaphore> {
         .clone()
 }
 
+#[derive(Default)]
+struct StoredResponseBodies {
+    primary: Option<BodyRef>,
+    raw: Option<BodyRef>,
+}
+
+fn stores_decoded_http_body(content_encoding: Option<&str>) -> bool {
+    content_encoding.is_some_and(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"))
+    })
+}
+
+fn store_buffered_response_bodies(
+    store: &bifrost_admin::BodyStore,
+    record_id: &str,
+    body: &[u8],
+    content_encoding: Option<&str>,
+    max_decompress_output_bytes: usize,
+) -> StoredResponseBodies {
+    let should_decode = stores_decoded_http_body(content_encoding);
+    let decoded = if max_decompress_output_bytes > 0 {
+        content_encoding.and_then(|encoding| {
+            try_decompress_body_with_limit(body, encoding, max_decompress_output_bytes).ok()
+        })
+    } else {
+        None
+    };
+    if should_decode {
+        if let Some(decoded) = decoded {
+            return StoredResponseBodies {
+                primary: store.store(record_id, "res", &decoded),
+                raw: store.store(record_id, "res_raw", body),
+            };
+        }
+    }
+
+    let primary = store.store(record_id, "res", body).and_then(|body_ref| {
+        let cleanup_ref = body_ref.clone();
+        match body_ref.with_content_encoding(content_encoding) {
+            Ok(body_ref) => Some(body_ref),
+            Err(error) => {
+                store.remove(&cleanup_ref);
+                tracing::warn!(%error, %record_id, "failed to persist buffered response content encoding");
+                None
+            }
+        }
+    });
+    StoredResponseBodies { primary, raw: None }
+}
+
 fn schedule_decompressed_response_body_store(
     state: Arc<AdminState>,
     body_store: SharedBodyStore,
     record_id: String,
     body: Vec<u8>,
-) -> Option<BodyRef> {
+    content_encoding: Option<String>,
+    max_decompress_output_bytes: usize,
+) -> StoredResponseBodies {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return store_body_sync(&body_store, &record_id, "res", &body);
+        return store_buffered_response_bodies(
+            &body_store.read(),
+            &record_id,
+            &body,
+            content_encoding.as_deref(),
+            max_decompress_output_bytes,
+        );
     };
 
     handle.spawn(async move {
         let semaphore = body_store_background_semaphore();
         let _permit = semaphore.acquire_owned().await.ok();
         let record_id_for_store = record_id.clone();
-        let body_ref = tokio::task::spawn_blocking(move || {
-            store_body_sync(&body_store, &record_id_for_store, "res", &body)
+        let stored = tokio::task::spawn_blocking(move || {
+            store_buffered_response_bodies(
+                &body_store.read(),
+                &record_id_for_store,
+                &body,
+                content_encoding.as_deref(),
+                max_decompress_output_bytes,
+            )
         })
         .await
-        .ok()
-        .flatten();
+        .unwrap_or_default();
 
-        if let Some(body_ref) = body_ref {
+        if stored.primary.is_some() || stored.raw.is_some() {
             state.update_traffic_by_id(&record_id, move |record| {
-                record.response_body_ref = Some(body_ref.clone());
+                if stored.primary.is_some() {
+                    record.response_body_ref = stored.primary.clone();
+                }
+                if stored.raw.is_some() {
+                    record.raw_response_body_ref = stored.raw.clone();
+                }
             });
         }
     });
 
-    None
+    StoredResponseBodies::default()
 }
 
 fn store_response_body_or_schedule(
@@ -101,24 +172,27 @@ fn store_response_body_or_schedule(
     body: Vec<u8>,
     content_encoding: Option<String>,
     max_decompress_output_bytes: usize,
-) -> Option<BodyRef> {
+) -> StoredResponseBodies {
     if state.get_super_performance_mode() {
-        return None;
+        return StoredResponseBodies::default();
     }
-    let decompressed = decompress_body_with_limit(
-        &body,
-        content_encoding.as_deref(),
-        max_decompress_output_bytes,
-    );
     if let Some(store) = body_store.try_read() {
-        return store.store(&record_id, "res", decompressed.as_ref());
+        return store_buffered_response_bodies(
+            &store,
+            &record_id,
+            &body,
+            content_encoding.as_deref(),
+            max_decompress_output_bytes,
+        );
     }
 
     schedule_decompressed_response_body_store(
         state,
         body_store,
         record_id,
-        decompressed.as_ref().to_vec(),
+        body,
+        content_encoding,
+        max_decompress_output_bytes,
     )
 }
 
@@ -212,15 +286,18 @@ impl TeeBodyDropGuard {
                 self.finished = true;
                 return;
             }
-            let response_body_ref = if let Some(writer) = self.file_writer.take() {
+            let stored_response_bodies = if let Some(writer) = self.file_writer.take() {
                 match writer
                     .finish()
                     .with_content_encoding(self.content_encoding.as_deref())
                 {
-                    Ok(body_ref) => Some(body_ref),
+                    Ok(body_ref) => StoredResponseBodies {
+                        primary: Some(body_ref),
+                        raw: None,
+                    },
                     Err(error) => {
                         tracing::warn!(%error, record_id = %self.record_id, "failed to persist response content encoding");
-                        None
+                        StoredResponseBodies::default()
                     }
                 }
             } else if !self.buffer.is_empty() {
@@ -240,10 +317,10 @@ impl TeeBodyDropGuard {
                         max_decompress_output_bytes,
                     )
                 } else {
-                    None
+                    StoredResponseBodies::default()
                 }
             } else {
-                None
+                StoredResponseBodies::default()
             };
 
             let body_bytes = self.total_bytes;
@@ -256,8 +333,11 @@ impl TeeBodyDropGuard {
                         timing.first_byte_ms = Some(record.duration_ms);
                     }
                 }
-                if response_body_ref.is_some() {
-                    record.response_body_ref = response_body_ref.clone();
+                if stored_response_bodies.primary.is_some() {
+                    record.response_body_ref = stored_response_bodies.primary.clone();
+                }
+                if stored_response_bodies.raw.is_some() {
+                    record.raw_response_body_ref = stored_response_bodies.raw.clone();
                 }
             });
 
@@ -1089,23 +1169,17 @@ mod tests {
 
     #[tokio::test]
     async fn response_body_storage_waits_in_background_when_body_store_is_busy() {
-        let dir = std::env::temp_dir().join(format!(
-            "bifrost-tee-body-store-eventual-{}",
-            std::process::id()
+        let (state, dir) = test_state_with_body_store("body-store-eventual");
+        let body_store = state.body_store.as_ref().unwrap().clone();
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            "eventual-body".to_string(),
+            "GET".to_string(),
+            "http://example.test/eventual".to_string(),
         ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let body_store = Arc::new(RwLock::new(BodyStore::new(
-            dir.clone(),
-            1024 * 1024,
-            1,
-            64 * 1024,
-            Duration::from_secs(1),
-        )));
-        let state = Arc::new(AdminState::new(0).with_body_store(body_store.clone()));
         let busy_writer = body_store.write();
 
-        let body_ref = store_response_body_or_schedule(
-            state,
+        let stored = store_response_body_or_schedule(
+            state.clone(),
             body_store.clone(),
             "eventual-body".to_string(),
             b"body".to_vec(),
@@ -1113,12 +1187,18 @@ mod tests {
             1024 * 1024,
         );
 
-        assert!(body_ref.is_none());
+        assert!(stored.primary.is_none());
+        assert!(stored.raw.is_none());
         assert!(!dir.join("eventual-body_res").exists());
         drop(busy_writer);
 
         for _ in 0..50 {
-            if dir.join("eventual-body_res").exists() {
+            let body_ref = state
+                .traffic_db_store
+                .as_ref()
+                .and_then(|store| store.get_by_id("eventual-body"))
+                .and_then(|record| record.response_body_ref);
+            if dir.join("eventual-body_res").exists() && body_ref.is_some() {
                 let saved = std::fs::read(dir.join("eventual-body_res")).unwrap();
                 assert_eq!(saved, b"body");
                 let _ = std::fs::remove_dir_all(dir);
@@ -1425,6 +1505,153 @@ mod tests {
         assert_eq!(
             store.load_bytes(response_ref).as_deref(),
             Some(response_wire.as_ref())
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn buffered_compressed_response_keeps_plaintext_and_wire_bytes() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+
+        let (state, dir) = test_state_with_body_store("buffered-content-encoded");
+        let record_id = "buffered-content-encoded";
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            record_id.into(),
+            "GET".into(),
+            "http://example.test/".into(),
+        ));
+        let plaintext = b"buffered gzip plaintext";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let wire = encoder.finish().unwrap();
+
+        let response = create_tee_body_with_store(
+            crate::server::full_body(Bytes::from(wire.clone())),
+            Some(state.clone()),
+            record_id.into(),
+            TeeBodyCaptureOptions {
+                max_body_size: Some(1024),
+                content_encoding: Some("gzip".to_string()),
+                traffic_type: None,
+                monitor_connection: false,
+                response_headers_size: 0,
+            },
+        );
+        response.collect().await.unwrap();
+
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .and_then(|store| store.get_by_id(record_id))
+            .unwrap();
+        let store = state.body_store.as_ref().unwrap().read();
+        assert_eq!(
+            store
+                .load_bytes(record.response_body_ref.as_ref().unwrap())
+                .as_deref(),
+            Some(plaintext.as_slice())
+        );
+        assert_eq!(
+            store
+                .load_bytes(record.raw_response_body_ref.as_ref().unwrap())
+                .as_deref(),
+            Some(wire.as_slice())
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn buffered_response_falls_back_to_encoded_wire_when_decode_is_unavailable() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-tee-buffered-fallback-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = BodyStore::new(
+            dir.clone(),
+            1024 * 1024,
+            1,
+            64 * 1024,
+            Duration::from_secs(1),
+        );
+        let stored = store_buffered_response_bodies(
+            &store,
+            "decode-disabled",
+            b"wire body",
+            Some("gzip"),
+            0,
+        );
+
+        let primary = stored.primary.expect("wire fallback should be stored");
+        assert!(stored.raw.is_none());
+        assert_eq!(primary.content_encoding().as_deref(), Some("gzip"));
+        assert_eq!(
+            store.load_bytes(&primary).as_deref(),
+            Some(b"wire body".as_slice())
+        );
+
+        let invalid_encoding = "gzip,".repeat(80);
+        let invalid = store_buffered_response_bodies(
+            &store,
+            "invalid-metadata",
+            b"wire body",
+            Some(&invalid_encoding),
+            0,
+        );
+        assert!(invalid.primary.is_none());
+        assert!(!dir.join("invalid-metadata_res").exists());
+
+        let state = Arc::new(
+            AdminState::new(0)
+                .with_body_store(Arc::new(RwLock::new(store)))
+                .with_super_performance_mode(true),
+        );
+        let skipped = store_response_body_or_schedule(
+            state.clone(),
+            state.body_store.as_ref().unwrap().clone(),
+            "super-performance".to_string(),
+            b"not stored".to_vec(),
+            None,
+            1024,
+        );
+        assert!(skipped.primary.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn buffered_response_store_works_without_an_async_runtime() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+
+        let (state, dir) = test_state_with_body_store("sync-buffered-store");
+        let body_store = state.body_store.as_ref().unwrap().clone();
+        let plaintext = b"synchronous buffered response";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let wire = encoder.finish().unwrap();
+
+        let stored = schedule_decompressed_response_body_store(
+            state,
+            body_store.clone(),
+            "sync-buffered-store".to_string(),
+            wire.clone(),
+            Some("gzip".to_string()),
+            1024,
+        );
+
+        let store = body_store.read();
+        assert_eq!(
+            store
+                .load_bytes(stored.primary.as_ref().unwrap())
+                .as_deref(),
+            Some(plaintext.as_slice())
+        );
+        assert_eq!(
+            store.load_bytes(stored.raw.as_ref().unwrap()).as_deref(),
+            Some(wire.as_slice())
         );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);

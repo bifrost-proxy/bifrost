@@ -76,11 +76,47 @@ pub(super) fn export_body(bytes: Vec<u8>, headers: &Option<Vec<(String, String)>
     export_content_encoded_body(bytes, content_encoding_value(headers).as_deref())
 }
 
+#[cfg(test)]
 pub(super) fn export_content_encoded_body(
     bytes: Vec<u8>,
     content_encoding: Option<&str>,
 ) -> ExportBody {
-    let decoded = content_encoding.and_then(|encoding| decompress(&bytes, encoding).ok());
+    let mut budget = DEFAULT_MAX_DECOMPRESSED_BODY_BYTES;
+    export_content_encoded_body_with_budget(bytes, content_encoding, &mut budget)
+}
+
+pub(super) fn export_content_encoded_body_with_budget(
+    bytes: Vec<u8>,
+    content_encoding: Option<&str>,
+    remaining_decompress_bytes: &mut usize,
+) -> ExportBody {
+    let standard_compressed = content_encoding.is_some_and(|encoding| {
+        content_encoding_is_supported(encoding)
+            && encoding
+                .split(',')
+                .map(str::trim)
+                .any(|coding| !coding.eq_ignore_ascii_case("identity"))
+    });
+    let decoded = if standard_compressed && *remaining_decompress_bytes > 0 {
+        match decompress_with_limit_metered(
+            &bytes,
+            content_encoding.unwrap(),
+            *remaining_decompress_bytes,
+        ) {
+            Ok((decoded, consumed)) => {
+                *remaining_decompress_bytes = remaining_decompress_bytes.saturating_sub(consumed);
+                Some(decoded)
+            }
+            Err(_) => {
+                *remaining_decompress_bytes = 0;
+                None
+            }
+        }
+    } else if standard_compressed {
+        None
+    } else {
+        content_encoding.and_then(|encoding| decompress(&bytes, encoding).ok())
+    };
 
     if let Some(decoded) = decoded {
         let was_decoded = decoded != bytes;
@@ -258,11 +294,94 @@ pub(crate) fn decompress_with_limit_metered(
     Ok((decoded, max_output_bytes - remaining_output_bytes))
 }
 
+pub(crate) struct DecompressedPrefix {
+    pub bytes: Vec<u8>,
+    pub consumed: usize,
+    pub truncated: bool,
+}
+
+/// Decode at most `max_output_bytes` and preserve the decoded prefix when the
+/// final representation is larger than the caller's preview allowance.
+pub(crate) fn decompress_prefix_with_limit_metered(
+    data: &[u8],
+    content_encoding: &str,
+    max_output_bytes: usize,
+) -> std::io::Result<DecompressedPrefix> {
+    let encodings = content_encoding
+        .split(',')
+        .map(str::trim)
+        .filter(|encoding| !encoding.is_empty())
+        .collect::<Vec<_>>();
+    let mut decoded = data.to_vec();
+    let mut remaining_output_bytes = max_output_bytes;
+    let mut final_truncated = false;
+
+    for (index, encoding) in encodings.iter().rev().enumerate() {
+        if encoding.eq_ignore_ascii_case("identity") {
+            continue;
+        }
+        let (next, truncated) = match encoding.to_ascii_lowercase().as_str() {
+            "gzip" | "x-gzip" => read_limited_prefix(
+                MultiGzDecoder::new(decoded.as_slice()),
+                remaining_output_bytes,
+            )?,
+            "deflate" => {
+                read_limited_prefix(ZlibDecoder::new(decoded.as_slice()), remaining_output_bytes)
+                    .or_else(|_| {
+                        read_limited_prefix(
+                            DeflateDecoder::new(decoded.as_slice()),
+                            remaining_output_bytes,
+                        )
+                    })?
+            }
+            "br" => read_limited_prefix(
+                brotli::Decompressor::new(decoded.as_slice(), 4096),
+                remaining_output_bytes,
+            )?,
+            "zstd" => read_limited_prefix(
+                zstd::stream::read::Decoder::new(decoded.as_slice())?,
+                remaining_output_bytes,
+            )?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unsupported content-encoding: {encoding}"),
+                ));
+            }
+        };
+        remaining_output_bytes = remaining_output_bytes.saturating_sub(next.len());
+        decoded = next;
+
+        if truncated {
+            let has_later_decoder = encodings
+                .iter()
+                .rev()
+                .skip(index + 1)
+                .any(|later| !later.eq_ignore_ascii_case("identity"));
+            if has_later_decoder {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "intermediate decompressed body exceeds the preview limit",
+                ));
+            }
+            final_truncated = true;
+            break;
+        }
+    }
+
+    Ok(DecompressedPrefix {
+        bytes: decoded,
+        consumed: max_output_bytes - remaining_output_bytes,
+        truncated: final_truncated,
+    })
+}
+
 /// Decode the currently available prefix of a streaming HTTP body.
 ///
 /// Streaming compressors commonly omit their final trailer until the
 /// connection closes. The regular decoder intentionally treats that as an
 /// error; SSE tailing needs the plaintext produced before that EOF instead.
+#[cfg(test)]
 pub(crate) fn decompress_partial_with_limit(
     data: &[u8],
     content_encoding: &str,
@@ -340,6 +459,21 @@ fn read_limited(mut reader: impl Read, max_output_bytes: usize) -> std::io::Resu
     Ok(output)
 }
 
+fn read_limited_prefix(
+    mut reader: impl Read,
+    max_output_bytes: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut limited = reader
+        .by_ref()
+        .take((max_output_bytes as u64).saturating_add(1));
+    let mut output = Vec::new();
+    limited.read_to_end(&mut output)?;
+    let truncated = output.len() > max_output_bytes;
+    output.truncate(max_output_bytes);
+    Ok((output, truncated))
+}
+
+#[cfg(test)]
 fn read_limited_partial(
     mut reader: impl Read,
     max_output_bytes: usize,
@@ -466,6 +600,91 @@ mod tests {
         assert_eq!(decompress(&zstd, "zstd").unwrap(), plaintext);
         assert_eq!(decompress(plaintext, "identity").unwrap(), plaintext);
         assert!(decompress(plaintext, "compress").is_err());
+    }
+
+    #[test]
+    fn decompressed_prefix_supports_every_standard_coding_and_rejects_invalid_chains() {
+        let plaintext = b"decoded preview longer than its limit";
+
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        zlib.write_all(plaintext).unwrap();
+        let zlib = zlib.finish().unwrap();
+        assert_eq!(
+            decompress_prefix_with_limit_metered(&zlib, "identity, deflate", 7)
+                .unwrap()
+                .bytes,
+            &plaintext[..7]
+        );
+
+        let mut raw =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        raw.write_all(plaintext).unwrap();
+        assert_eq!(
+            decompress_prefix_with_limit_metered(&raw.finish().unwrap(), "deflate", 7)
+                .unwrap()
+                .bytes,
+            &plaintext[..7]
+        );
+
+        let mut br = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut br, 4096, 5, 22);
+            encoder.write_all(plaintext).unwrap();
+        }
+        assert_eq!(
+            decompress_prefix_with_limit_metered(&br, "br", 7)
+                .unwrap()
+                .bytes,
+            &plaintext[..7]
+        );
+
+        let zstd = zstd::stream::encode_all(plaintext.as_slice(), 1).unwrap();
+        assert_eq!(
+            decompress_prefix_with_limit_metered(&zstd, "zstd", 7)
+                .unwrap()
+                .bytes,
+            &plaintext[..7]
+        );
+        assert_eq!(
+            decompress_prefix_with_limit_metered(plaintext, "identity", 128)
+                .unwrap()
+                .bytes,
+            plaintext
+        );
+        assert!(decompress_prefix_with_limit_metered(plaintext, "x-company", 7).is_err());
+
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(plaintext).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let mut outer = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        outer.write_all(&gzip).unwrap();
+        assert!(
+            decompress_prefix_with_limit_metered(&outer.finish().unwrap(), "gzip, deflate", 7)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn export_budget_handles_malformed_and_binary_decoded_bodies_losslessly() {
+        let malformed = b"not actually gzip".to_vec();
+        let mut malformed_budget = 64;
+        let exported = export_content_encoded_body_with_budget(
+            malformed.clone(),
+            Some("gzip"),
+            &mut malformed_budget,
+        );
+        assert_eq!(malformed_budget, 0);
+        assert_eq!(exported.text.as_deref(), Some("not actually gzip"));
+
+        let binary = vec![0xff, 0, 0xfe];
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&binary).unwrap();
+        let wire = gzip.finish().unwrap();
+        let mut binary_budget = 64;
+        let exported =
+            export_content_encoded_body_with_budget(wire.clone(), Some("gzip"), &mut binary_budget);
+        assert!(exported.text.is_none());
+        assert_eq!(STANDARD.decode(exported.base64.unwrap()).unwrap(), wire);
     }
 
     #[test]

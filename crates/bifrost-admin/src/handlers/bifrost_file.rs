@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use super::network_body::{
     body_size, content_encoding_is_supported, content_encoding_value, decompress_with_limit,
-    export_content_encoded_body, header_value, legacy_lossy_body_warning, preview_body,
+    export_content_encoded_body_with_budget, header_value, legacy_lossy_body_warning, preview_body,
     DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
 };
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
@@ -646,6 +646,12 @@ async fn handle_export_network(
     let include_body = request.include_body.unwrap_or(true);
     let mut records: Vec<NetworkRecord> = Vec::new();
     let mut missing_ids: Vec<String> = Vec::new();
+    let mut remaining_decompress_bytes = state
+        .config_manager
+        .as_ref()
+        .and_then(|manager| manager.try_config())
+        .map(|config| config.sandbox.limits.max_decompress_output_bytes)
+        .unwrap_or(DEFAULT_MAX_DECOMPRESSED_BODY_BYTES);
 
     if request.record_ids.is_empty() {
         return error_response(
@@ -662,7 +668,15 @@ async fn handle_export_network(
         };
 
         if let Some(traffic) = traffic {
-            records.push(traffic_to_network_record(&traffic, include_body, &state).await);
+            records.push(
+                traffic_to_network_record_with_budget(
+                    &traffic,
+                    include_body,
+                    &state,
+                    &mut remaining_decompress_bytes,
+                )
+                .await,
+            );
         } else {
             missing_ids.push(id.clone());
         }
@@ -731,10 +745,32 @@ fn validate_network_export_records(
     Ok(())
 }
 
+#[cfg(test)]
 async fn traffic_to_network_record(
     traffic: &TrafficRecord,
     include_body: bool,
     state: &SharedAdminState,
+) -> NetworkRecord {
+    let mut remaining_decompress_bytes = state
+        .config_manager
+        .as_ref()
+        .and_then(|manager| manager.try_config())
+        .map(|config| config.sandbox.limits.max_decompress_output_bytes)
+        .unwrap_or(DEFAULT_MAX_DECOMPRESSED_BODY_BYTES);
+    traffic_to_network_record_with_budget(
+        traffic,
+        include_body,
+        state,
+        &mut remaining_decompress_bytes,
+    )
+    .await
+}
+
+async fn traffic_to_network_record_with_budget(
+    traffic: &TrafficRecord,
+    include_body: bool,
+    state: &SharedAdminState,
+    remaining_decompress_bytes: &mut usize,
 ) -> NetworkRecord {
     let mut request_body = None;
     let mut request_body_base64 = None;
@@ -746,8 +782,11 @@ async fn traffic_to_network_record(
             let store = body_store.read();
             if let Some(ref body_ref) = traffic.request_body_ref {
                 if let Some(bytes) = store.load_bytes(body_ref) {
-                    let exported =
-                        export_content_encoded_body(bytes, body_ref.content_encoding().as_deref());
+                    let exported = export_content_encoded_body_with_budget(
+                        bytes,
+                        body_ref.content_encoding().as_deref(),
+                        remaining_decompress_bytes,
+                    );
                     request_body = exported.text;
                     request_body_base64 = exported.base64;
                 }
@@ -759,8 +798,11 @@ async fn traffic_to_network_record(
             }
             if let Some(ref body_ref) = traffic.response_body_ref {
                 if let Some(bytes) = store.load_bytes(body_ref) {
-                    let exported =
-                        export_content_encoded_body(bytes, body_ref.content_encoding().as_deref());
+                    let exported = export_content_encoded_body_with_budget(
+                        bytes,
+                        body_ref.content_encoding().as_deref(),
+                        remaining_decompress_bytes,
+                    );
                     response_body = exported.text;
                     response_body_base64 = exported.base64;
                 }
