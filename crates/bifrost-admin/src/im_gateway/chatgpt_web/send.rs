@@ -210,7 +210,10 @@ async fn send_with_temporary_headed_fallback(
 
 /// Check if a send error is transient and worth retrying the whole operation.
 fn is_retryable_send_error(error: &str) -> bool {
-    if error.contains("stopButton=VISIBLE") || error.contains("conversation_busy:") {
+    if error.starts_with("submitted_handoff_unresolved:")
+        || error.contains("stopButton=VISIBLE")
+        || error.contains("conversation_busy:")
+    {
         return false;
     }
     error.contains("browser_send_not_submitted")
@@ -1429,6 +1432,16 @@ async fn send_with_browser_once(
                     send.event_types.push("browser_ui".to_string());
                     break send;
                 }
+                Err(error) if !request_ids.is_empty() => {
+                    break reconcile_submitted_handoff_error(
+                        cdp,
+                        &browser,
+                        target_id.as_deref(),
+                        conversation_id,
+                        &error,
+                    )
+                    .await?;
+                }
                 Err(error) if error.starts_with("sse_interrupted") || error.starts_with("timeout") => {
                     let recovered = current_conversation_id(cdp).await?;
                     let mut event_types =
@@ -1732,6 +1745,107 @@ async fn create_tab_with_cdp_retry(
     ))
 }
 
+fn add_handoff_event_type(event_types: &mut Vec<String>, event_type: &str) {
+    if !event_types.iter().any(|existing| existing == event_type) {
+        event_types.push(event_type.to_string());
+    }
+}
+
+fn recovered_submitted_handoff(
+    conversation_id: String,
+    turn_exchange_id: Option<String>,
+    mut event_types: Vec<String>,
+    recovery_source: &str,
+) -> SendResult {
+    add_handoff_event_type(&mut event_types, "browser_post_captured");
+    add_handoff_event_type(&mut event_types, "handoff_recovered_after_sse_interrupt");
+    add_handoff_event_type(&mut event_types, recovery_source);
+    SendResult {
+        conversation_id: Some(conversation_id),
+        turn_exchange_id,
+        event_types,
+        sse_detail: None,
+    }
+}
+
+async fn recover_submitted_conversation_id(
+    cdp: &CdpClient,
+    browser: &BrowserSession,
+    target_id: Option<&str>,
+    fallback_conversation_id: Option<&str>,
+) -> Option<(String, &'static str)> {
+    // An append operation already knows its conversation id. Once its POST is
+    // observed, that explicit id is more authoritative than the page URL,
+    // which the user or frontend can navigate away from concurrently.
+    if let Some(conversation_id) = fallback_conversation_id
+        .filter(|conversation_id| !is_provisional_web_conversation_id(conversation_id))
+    {
+        return Some((
+            conversation_id.to_string(),
+            "handoff_conversation_reused_after_submission",
+        ));
+    }
+
+    if !cdp.is_closed() {
+        match probe_handoff_page(cdp).await {
+            Ok(Some(conversation_id)) => {
+                return Some((conversation_id, "handoff_conversation_recovered_from_page"));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                debug!(%error, "chatgpt_web handoff: current page recovery probe failed");
+            }
+        }
+    }
+
+    if let Some(target_id) = target_id {
+        match browser.find_page_by_target_id(target_id).await {
+            Ok(Some(page)) => {
+                if let Some(conversation_id) = extract_conversation_id_from_url(&page.url)
+                    .filter(|conversation_id| !is_provisional_web_conversation_id(conversation_id))
+                {
+                    return Some((
+                        conversation_id,
+                        "handoff_conversation_recovered_from_target",
+                    ));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                debug!(%error, target_id, "chatgpt_web handoff: target recovery probe failed");
+            }
+        }
+    }
+
+    None
+}
+
+async fn reconcile_submitted_handoff_error(
+    cdp: &CdpClient,
+    browser: &BrowserSession,
+    target_id: Option<&str>,
+    fallback_conversation_id: Option<&str>,
+    error: &str,
+) -> Result<SendResult, String> {
+    let Some((conversation_id, recovery_source)) =
+        recover_submitted_conversation_id(cdp, browser, target_id, fallback_conversation_id).await
+    else {
+        return Err(submitted_handoff_unresolved(error));
+    };
+    Ok(recovered_submitted_handoff(
+        conversation_id,
+        None,
+        Vec::new(),
+        recovery_source,
+    ))
+}
+
+fn submitted_handoff_unresolved(error: &str) -> String {
+    format!(
+        "submitted_handoff_unresolved: ChatGPT Web accepted the prompt, but the conversation id could not be recovered; refusing to resend: {error}"
+    )
+}
+
 /// Wait until a default execution context is available in the CDP target.
 /// Newly created tabs may not have a context yet if the page hasn't loaded.
 /// We retry a simple JS evaluation until it succeeds or we time out.
@@ -1792,9 +1906,24 @@ async fn wait_send_handoff(
             return Err(error);
         }
         if tokio::time::Instant::now() >= next_page_probe {
-            if let Err(error) = probe_handoff_page(cdp).await {
-                warn!(%error, "chatgpt_web handoff page heartbeat failed");
-                return Err(error);
+            match probe_handoff_page(cdp).await {
+                Ok(Some(conversation_id)) if !request_ids.is_empty() => {
+                    info!(
+                        conversation_id,
+                        "chatgpt_web handoff: committed conversation visible on page; handing off to finality wait"
+                    );
+                    return Ok(recovered_submitted_handoff(
+                        conversation_id,
+                        turn_exchange_id,
+                        event_types,
+                        "handoff_conversation_recovered_from_page",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(%error, "chatgpt_web handoff page heartbeat failed");
+                    return Err(error);
+                }
             }
             next_page_probe =
                 tokio::time::Instant::now() + Duration::from_secs(HANDOFF_HEARTBEAT_INTERVAL_SECS);
@@ -1829,6 +1958,7 @@ async fn wait_send_handoff(
                             "chatgpt_web handoff: captured f/conversation POST"
                         );
                         request_ids.insert(request_id.to_string());
+                        next_page_probe = tokio::time::Instant::now();
                     }
                 }
             }
@@ -1874,14 +2004,38 @@ async fn wait_send_handoff(
                             event_types = partial.event_types;
                             info!(
                                 conversation_id = ?conversation_id,
-                                "chatgpt_web handoff: got conversation_id from SSE stream, waiting for stream to finish"
+                                "chatgpt_web handoff: got conversation_id from SSE stream; allowing a brief fast-final grace period"
                             );
-                            // Continue monitoring the SSE stream until loadingFinished
-                            // using the OVERALL deadline (not a short 3s window).
-                            // This avoids the need for separate API polling in wait_final.
+                            // Preserve the fast path when the SSE completes immediately, but
+                            // never let stream closure own the full model timeout. Once the
+                            // grace period elapses, wait_final becomes the sole finality owner.
+                            let sse_fast_final_deadline =
+                                tokio::time::Instant::now() + Duration::from_secs(3);
                             loop {
-                                let remain =
-                                    deadline.saturating_duration_since(tokio::time::Instant::now());
+                                let now = tokio::time::Instant::now();
+                                if now >= sse_fast_final_deadline {
+                                    add_handoff_event_type(
+                                        &mut event_types,
+                                        "browser_post_captured",
+                                    );
+                                    add_handoff_event_type(
+                                        &mut event_types,
+                                        "handoff_returned_before_sse_finished",
+                                    );
+                                    info!(
+                                        conversation_id = ?conversation_id,
+                                        "chatgpt_web handoff: SSE still open after grace period; handing off to finality wait"
+                                    );
+                                    return Ok(SendResult {
+                                        conversation_id,
+                                        turn_exchange_id,
+                                        event_types,
+                                        sse_detail: None,
+                                    });
+                                }
+                                let remain = deadline
+                                    .min(sse_fast_final_deadline)
+                                    .saturating_duration_since(now);
                                 if remain.is_zero() {
                                     info!("chatgpt_web handoff: deadline reached while waiting for SSE completion");
                                     break;
@@ -2364,12 +2518,38 @@ async fn wait_for_committed_conversation_after_uncaptured_submit(
     Err(format!("conversation_busy: submitted without captured POST but provisional conversation did not commit within {}s: {diagnostic_summary}", duration.as_secs()))
 }
 
-async fn probe_handoff_page(cdp: &CdpClient) -> Result<(), String> {
+fn committed_conversation_id_from_handoff_probe(value: &Value) -> Option<String> {
+    let decoded = value
+        .as_str()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .unwrap_or_else(|| value.clone());
+    let conversation_id = decoded.get("urlCid").and_then(Value::as_str)?.trim();
+    let turn_count = decoded
+        .get("turnCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if conversation_id.is_empty()
+        || turn_count == 0
+        || is_provisional_web_conversation_id(conversation_id)
+    {
+        return None;
+    }
+    Some(conversation_id.to_string())
+}
+
+async fn probe_handoff_page(cdp: &CdpClient) -> Result<Option<String>, String> {
     let result = cdp
         .send_with_timeout(
             "Runtime.evaluate",
             json!({
-                "expression": "({ href: location.href, readyState: document.readyState })",
+                "expression": r#"(() => {
+                    const match = location.href.match(/\/c\/([^/?#]+)/);
+                    const urlCid = match ? decodeURIComponent(match[1]) : null;
+                    const turnCount = document.querySelectorAll(
+                      '[data-message-id], [data-testid^="conversation-turn-"]'
+                    ).length;
+                    return { href: location.href, readyState: document.readyState, urlCid, turnCount };
+                })()"#,
                 "returnByValue": true
             }),
             Duration::from_secs(HANDOFF_PAGE_PROBE_TIMEOUT_SECS),
@@ -2377,7 +2557,12 @@ async fn probe_handoff_page(cdp: &CdpClient) -> Result<(), String> {
         .await
         .map_err(|error| handoff_page_heartbeat_error(&error))?;
     debug!(?result, "chatgpt_web handoff page heartbeat ok");
-    Ok(())
+    let value = result
+        .get("result")
+        .and_then(|result| result.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(committed_conversation_id_from_handoff_probe(&value))
 }
 
 pub(in crate::im_gateway::chatgpt_web) fn handoff_heartbeat_error(
@@ -2601,7 +2786,6 @@ async fn navigate_with_cdp_retry(cdp: &CdpClient, url: &str) -> Result<Value, St
     }
 }
 
-#[cfg(test)]
 pub(in crate::im_gateway::chatgpt_web) fn extract_conversation_id_from_url(
     url: &str,
 ) -> Option<String> {
@@ -4256,12 +4440,37 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     async fn mock_cdp(values: Vec<Value>) -> CdpClient {
+        mock_cdp_with_initial_events(values, Vec::new()).await
+    }
+
+    async fn mock_cdp_with_initial_events(
+        values: Vec<Value>,
+        initial_events: Vec<Value>,
+    ) -> CdpClient {
+        mock_cdp_with_events_and_response_bodies(values, initial_events, Vec::new()).await
+    }
+
+    async fn mock_cdp_with_events_and_response_bodies(
+        values: Vec<Value>,
+        initial_events: Vec<Value>,
+        response_bodies: Vec<Value>,
+    ) -> CdpClient {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let mut values = VecDeque::from(values);
+            let mut response_bodies = VecDeque::from(response_bodies);
+            if !initial_events.is_empty() {
+                sleep(Duration::from_millis(100)).await;
+                for event in initial_events {
+                    socket
+                        .send(Message::Text(event.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            }
             while let Some(Ok(message)) = socket.next().await {
                 let Message::Text(text) = message else {
                     continue;
@@ -4279,6 +4488,11 @@ mod tests {
                     } else {
                         json!({"id": id, "result": {"result": {"value": value}}})
                     }
+                } else if method == "Network.getResponseBody" {
+                    json!({
+                        "id": id,
+                        "result": response_bodies.pop_front().unwrap_or_else(|| json!({}))
+                    })
                 } else {
                     json!({"id": id, "result": {}})
                 };
@@ -4335,6 +4549,325 @@ mod tests {
         assert!(!is_retryable_send_error(
             "conversation_busy: send button not actionable after composer injection: page=https://chatgpt.com/c/abc, stopButton=VISIBLE(response in progress?)"
         ));
+        assert!(!is_retryable_send_error(
+            "submitted_handoff_unresolved: CDP connection closed after POST"
+        ));
+    }
+
+    #[test]
+    fn committed_handoff_probe_requires_real_conversation_with_rendered_turn() {
+        assert_eq!(
+            committed_conversation_id_from_handoff_probe(
+                &json!({"urlCid": "conv-123", "turnCount": 2})
+            )
+            .as_deref(),
+            Some("conv-123")
+        );
+        assert_eq!(
+            committed_conversation_id_from_handoff_probe(&json!(
+                r#"{"urlCid":"conv-from-json","turnCount":1}"#
+            ))
+            .as_deref(),
+            Some("conv-from-json")
+        );
+        assert!(committed_conversation_id_from_handoff_probe(
+            &json!({"urlCid": "WEB:temporary", "turnCount": 2})
+        )
+        .is_none());
+        assert!(committed_conversation_id_from_handoff_probe(
+            &json!({"urlCid": "conv-without-turn", "turnCount": 0})
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn handoff_returns_after_post_and_committed_page_without_loading_finished() {
+        let cdp = mock_cdp_with_initial_events(
+            vec![json!({
+                "href": "https://chatgpt.com/c/conv-committed",
+                "readyState": "complete",
+                "urlCid": "conv-committed",
+                "turnCount": 2
+            })],
+            vec![json!({
+                "method": "Network.requestWillBeSent",
+                "params": {
+                    "requestId": "request-1",
+                    "request": {
+                        "method": "POST",
+                        "url": F_CONVERSATION_URL
+                    }
+                }
+            })],
+        )
+        .await;
+        let mut events = cdp.subscribe();
+        let temp = tempfile::tempdir().unwrap();
+        let mut browser = BrowserSession::for_test(temp.path().join("profile"));
+        let mut request_ids = BTreeSet::new();
+
+        let result = wait_send_handoff(
+            &cdp,
+            &mut browser,
+            &mut events,
+            0,
+            Duration::from_secs(2),
+            &temp.path().join("stop"),
+            &mut request_ids,
+        )
+        .await
+        .expect("committed page should hand off without loadingFinished");
+
+        assert_eq!(result.conversation_id.as_deref(), Some("conv-committed"));
+        assert_eq!(request_ids, BTreeSet::from(["request-1".to_string()]));
+        assert!(result
+            .event_types
+            .iter()
+            .any(|event| event == "browser_post_captured"));
+        assert!(result
+            .event_types
+            .iter()
+            .any(|event| event == "handoff_conversation_recovered_from_page"));
+    }
+
+    #[tokio::test]
+    async fn submitted_append_reuses_known_conversation_after_cdp_disconnect() {
+        let cdp = mock_cdp(Vec::new()).await;
+        cdp.close();
+        let temp = tempfile::tempdir().unwrap();
+        let browser = BrowserSession::for_test(temp.path().join("profile"));
+
+        let result = reconcile_submitted_handoff_error(
+            &cdp,
+            &browser,
+            Some("target-append"),
+            Some("existing-conversation"),
+            "CDP disconnected",
+        )
+        .await
+        .expect("known append conversation should survive CDP disconnect");
+
+        assert_eq!(
+            result.conversation_id.as_deref(),
+            Some("existing-conversation")
+        );
+        assert!(result
+            .event_types
+            .iter()
+            .any(|event| event == "handoff_conversation_reused_after_submission"));
+    }
+
+    #[tokio::test]
+    async fn submitted_fresh_run_recovers_conversation_from_live_page() {
+        let cdp = mock_cdp(vec![json!({
+            "href": "https://chatgpt.com/c/live-conversation",
+            "urlCid": "live-conversation",
+            "turnCount": 1
+        })])
+        .await;
+        let temp = tempfile::tempdir().unwrap();
+        let browser = BrowserSession::for_test(temp.path().join("profile"));
+
+        let recovered = recover_submitted_conversation_id(&cdp, &browser, None, None)
+            .await
+            .expect("live page should recover the fresh conversation");
+
+        assert_eq!(
+            recovered,
+            (
+                "live-conversation".to_string(),
+                "handoff_conversation_recovered_from_page"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn submitted_fresh_run_recovers_conversation_from_original_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let cdp = mock_cdp(Vec::new()).await;
+        cdp.close();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = json!([{
+                "id": "submitted-target",
+                "url": "https://chatgpt.com/c/target-conversation",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools/page/submitted-target"
+            }])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let browser = BrowserSession::for_test_with_port(temp.path().join("profile"), port);
+
+        let recovered =
+            recover_submitted_conversation_id(&cdp, &browser, Some("submitted-target"), None)
+                .await
+                .expect("original target URL should recover the fresh conversation");
+
+        assert_eq!(
+            recovered,
+            (
+                "target-conversation".to_string(),
+                "handoff_conversation_recovered_from_target"
+            )
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn submitted_recovery_returns_none_without_committed_page_or_target() {
+        let cdp = mock_cdp(vec![json!({"urlCid": null, "turnCount": 0})]).await;
+        let temp = tempfile::tempdir().unwrap();
+        let browser = BrowserSession::for_test(temp.path().join("profile"));
+
+        assert!(
+            recover_submitted_conversation_id(&cdp, &browser, None, None)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn submitted_recovery_ignores_page_probe_error_without_other_evidence() {
+        let cdp = mock_cdp(vec![json!({"__cdp_error": "execution context destroyed"})]).await;
+        let temp = tempfile::tempdir().unwrap();
+        let browser = BrowserSession::for_test(temp.path().join("profile"));
+
+        assert!(
+            recover_submitted_conversation_id(&cdp, &browser, None, None)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn submitted_recovery_ignores_target_probe_error_without_other_evidence() {
+        let cdp = mock_cdp(vec![json!({"urlCid": null, "turnCount": 0})]).await;
+        let temp = tempfile::tempdir().unwrap();
+        let browser = BrowserSession::for_test_with_port(temp.path().join("profile"), 1);
+
+        assert!(
+            recover_submitted_conversation_id(&cdp, &browser, Some("missing-target"), None)
+                .await
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unresolved_submitted_handoff_error_is_explicitly_non_retryable() {
+        let error = submitted_handoff_unresolved("conversation id missing");
+
+        assert!(error.starts_with("submitted_handoff_unresolved:"));
+        assert!(error.contains("refusing to resend"));
+        assert!(!is_retryable_send_error(&error));
+    }
+
+    #[tokio::test]
+    async fn submitted_handoff_without_recovery_evidence_refuses_resend() {
+        let cdp = mock_cdp(vec![json!({"urlCid": null, "turnCount": 0})]).await;
+        let temp = tempfile::tempdir().unwrap();
+        let browser = BrowserSession::for_test(temp.path().join("profile"));
+
+        let error =
+            reconcile_submitted_handoff_error(&cdp, &browser, None, None, "handoff timed out")
+                .await
+                .expect_err("submitted request without a conversation id must not be resent");
+
+        assert!(error.starts_with("submitted_handoff_unresolved:"));
+        assert!(error.contains("handoff timed out"));
+    }
+
+    #[tokio::test]
+    async fn handoff_returns_partial_sse_after_fast_final_grace_period() {
+        let partial_sse = "data: {\"type\":\"stream_handoff\",\"conversation_id\":\"sse-conversation\",\"turn_exchange_id\":\"turn-1\"}\n\n";
+        let cdp = mock_cdp_with_events_and_response_bodies(
+            vec![json!({"urlCid": null, "turnCount": 0})],
+            vec![
+                json!({
+                    "method": "Network.requestWillBeSent",
+                    "params": {
+                        "requestId": "request-sse",
+                        "request": {"method": "POST", "url": F_CONVERSATION_URL}
+                    }
+                }),
+                json!({
+                    "method": "Network.dataReceived",
+                    "params": {"requestId": "request-sse"}
+                }),
+            ],
+            vec![json!({"body": partial_sse, "base64Encoded": false})],
+        )
+        .await;
+        let mut events = cdp.subscribe();
+        let temp = tempfile::tempdir().unwrap();
+        let mut browser = BrowserSession::for_test(temp.path().join("profile"));
+        let mut request_ids = BTreeSet::new();
+
+        let result = wait_send_handoff(
+            &cdp,
+            &mut browser,
+            &mut events,
+            0,
+            Duration::from_secs(5),
+            &temp.path().join("stop"),
+            &mut request_ids,
+        )
+        .await
+        .expect("open SSE should hand finality ownership over after the grace period");
+
+        assert_eq!(result.conversation_id.as_deref(), Some("sse-conversation"));
+        assert_eq!(result.turn_exchange_id.as_deref(), Some("turn-1"));
+        assert!(result
+            .event_types
+            .iter()
+            .any(|event| event == "handoff_returned_before_sse_finished"));
+    }
+
+    #[tokio::test]
+    async fn handoff_page_probe_failure_after_post_returns_fast_error() {
+        let cdp = mock_cdp_with_initial_events(
+            vec![json!({"__cdp_error": "execution context destroyed"})],
+            vec![json!({
+                "method": "Network.requestWillBeSent",
+                "params": {
+                    "requestId": "request-probe-error",
+                    "request": {"method": "POST", "url": F_CONVERSATION_URL}
+                }
+            })],
+        )
+        .await;
+        let mut events = cdp.subscribe();
+        let temp = tempfile::tempdir().unwrap();
+        let mut browser = BrowserSession::for_test(temp.path().join("profile"));
+        let mut request_ids = BTreeSet::new();
+
+        let error = wait_send_handoff(
+            &cdp,
+            &mut browser,
+            &mut events,
+            0,
+            Duration::from_secs(2),
+            &temp.path().join("stop"),
+            &mut request_ids,
+        )
+        .await
+        .expect_err("page probe failure should return instead of owning the model timeout");
+
+        assert!(error.starts_with("browser_unavailable:"));
+        assert!(error.contains("execution context destroyed"));
+        assert_eq!(
+            request_ids,
+            BTreeSet::from(["request-probe-error".to_string()])
+        );
     }
 
     #[test]
