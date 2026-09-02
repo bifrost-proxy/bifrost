@@ -178,6 +178,34 @@ fn response_body_search_finds_decoded_bp_body() {
 }
 
 #[test]
+fn request_body_scope_searches_the_primary_body_reference() {
+    let db = make_db();
+    let mut record = TrafficRecord::new(
+        "REQ-search-request-body".to_string(),
+        "POST".to_string(),
+        "https://example.com/request-body".to_string(),
+    );
+    record.request_body_ref = Some(BodyRef::Inline {
+        data: r#"{"marker":"request-body-unique-needle"}"#.to_string(),
+    });
+    db.record(record);
+
+    let response = SearchEngine::new(db, None).search(&SearchRequest {
+        keyword: "request-body-unique-needle".to_string(),
+        scope: SearchScope {
+            all: false,
+            request_body: true,
+            ..Default::default()
+        },
+        limit: Some(20),
+        ..Default::default()
+    });
+
+    assert_eq!(response.total_matched, 1);
+    assert_eq!(response.results[0].matches[0].field, "request_body");
+}
+
+#[test]
 fn response_body_search_matches_ascii_file_body_without_lowercase_allocation() {
     let dir = TempDir::new().expect("temp dir");
     let db = Arc::new(
@@ -258,7 +286,8 @@ fn encoded_file_body_is_decoded_for_search_json_filter_and_include() {
         .read()
         .store("REQ-search-encoded", "res", &compressed)
         .expect("store compressed body")
-        .with_content_encoding(Some("gzip"));
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
     let mut record = TrafficRecord::new(
         "REQ-search-encoded".to_string(),
         "GET".to_string(),
@@ -329,12 +358,20 @@ fn encoded_body_cache_honors_per_body_and_request_budgets() {
         .read()
         .store("budget-first", "res", &compressed)
         .unwrap()
-        .with_content_encoding(Some("gzip"));
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
     let second = body_store
         .read()
         .store("budget-second", "res", &compressed)
         .unwrap()
-        .with_content_encoding(Some("gzip"));
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
+    let custom = body_store
+        .read()
+        .store("budget-custom", "res", b"custom-wire-needle")
+        .unwrap()
+        .with_content_encoding(Some("x-company-codec"))
+        .unwrap();
     let engine = SearchEngine::new(db, Some(body_store))
         .with_decompression_budget(plaintext.len(), plaintext.len());
     let mut cache = BodyReadCache::new(plaintext.len());
@@ -369,6 +406,13 @@ fn encoded_body_cache_honors_per_body_and_request_budgets() {
             .unwrap(),
         compressed,
         "the configured per-body limit must be honored"
+    );
+    assert_eq!(
+        limited_engine
+            .load_body_bytes_cached("res:custom", &custom, &mut limited_cache)
+            .unwrap(),
+        b"custom-wire-needle",
+        "unknown codings must remain available to custom decoders"
     );
 }
 

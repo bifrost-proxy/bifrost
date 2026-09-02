@@ -40,7 +40,7 @@ async fn network_export_preserves_gzip_request_and_exposes_plaintext() {
         .body_store
         .as_ref()
         .and_then(|store| store.read().store(&traffic.id, "req", &compressed))
-        .map(|body_ref| body_ref.with_content_encoding(Some("gzip")));
+        .map(|body_ref| body_ref.with_content_encoding(Some("gzip")).unwrap());
     traffic.response_headers = Some(vec![
         ("content-type".to_string(), "application/json".to_string()),
         ("content-encoding".to_string(), "gzip".to_string()),
@@ -49,7 +49,7 @@ async fn network_export_preserves_gzip_request_and_exposes_plaintext() {
         .body_store
         .as_ref()
         .and_then(|store| store.read().store(&traffic.id, "res", &compressed))
-        .map(|body_ref| body_ref.with_content_encoding(Some("gzip")));
+        .map(|body_ref| body_ref.with_content_encoding(Some("gzip")).unwrap());
 
     let record = traffic_to_network_record(&traffic, true, &state).await;
 
@@ -78,6 +78,62 @@ async fn network_export_preserves_gzip_request_and_exposes_plaintext() {
     assert_eq!(
         base64::engine::general_purpose::STANDARD
             .decode(encoded)
+            .unwrap(),
+        compressed
+    );
+}
+
+#[tokio::test]
+async fn network_reexport_uses_imported_raw_body_refs_losslessly() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+    let state = Arc::new(
+        crate::state::AdminState::new_for_test(TEST_ADMIN_PORT, storage).with_body_store(Arc::new(
+            parking_lot::RwLock::new(crate::BodyStore::new(
+                dir.path().join("bodies"),
+                1024 * 1024,
+                1,
+                64 * 1024,
+                std::time::Duration::from_secs(1),
+            )),
+        )),
+    );
+    let plaintext = br#"{"message":"imported plaintext"}"#;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(plaintext).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let mut traffic = TrafficRecord::new(
+        "OUT-REQ-reexport-raw".to_string(),
+        "POST".to_string(),
+        "https://example.test/reexport".to_string(),
+    );
+    {
+        let store = state.body_store.as_ref().unwrap().read();
+        traffic.request_body_ref = store.store(&traffic.id, "req", plaintext);
+        traffic.response_body_ref = store.store(&traffic.id, "res", plaintext);
+        traffic.raw_request_body_ref = store.store(&traffic.id, "req_raw", &compressed);
+        traffic.raw_response_body_ref = store.store(&traffic.id, "res_raw", &compressed);
+    }
+
+    let exported = traffic_to_network_record(&traffic, true, &state).await;
+
+    assert_eq!(
+        exported.request_body.as_deref(),
+        std::str::from_utf8(plaintext).ok()
+    );
+    assert_eq!(
+        exported.response_body.as_deref(),
+        std::str::from_utf8(plaintext).ok()
+    );
+    assert_eq!(
+        STANDARD
+            .decode(exported.request_body_base64.expect("raw request base64"))
+            .unwrap(),
+        compressed
+    );
+    assert_eq!(
+        STANDARD
+            .decode(exported.response_body_base64.expect("raw response base64"))
             .unwrap(),
         compressed
     );
@@ -474,7 +530,42 @@ async fn network_import_rejects_invalid_base64_before_recording_any_rows() {
 }
 
 #[tokio::test]
-async fn network_import_handler_warns_when_body_store_is_unavailable() {
+async fn network_import_rejects_duplicate_and_existing_ids_before_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let traffic_store =
+        Arc::new(crate::TrafficDbStore::new(dir.path().join("traffic"), 100, 0, None).unwrap());
+    let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+    let state = Arc::new(
+        crate::state::AdminState::new_for_test(TEST_ADMIN_PORT, storage)
+            .with_traffic_db_store_shared(traffic_store.clone()),
+    );
+    let record: NetworkRecord = serde_json::from_value(serde_json::json!({
+        "id": "REQ-conflicting-import",
+        "method": "GET",
+        "url": "https://example.test/conflict",
+        "status": 200,
+        "duration_ms": 1,
+        "timestamp": 1
+    }))
+    .unwrap();
+    let duplicate = BifrostFileWriter::write_network(
+        "duplicate-import",
+        None,
+        &[record.clone(), record.clone()],
+    )
+    .unwrap();
+    let response = import_network(&duplicate, &state).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let existing = network_record_to_traffic_record(&record);
+    traffic_store.record(existing);
+    let conflict = BifrostFileWriter::write_network("conflict-import", None, &[record]).unwrap();
+    let response = import_network(&conflict, &state).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn network_import_handler_rejects_bodies_when_body_store_is_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let traffic_store =
         Arc::new(crate::TrafficDbStore::new(dir.path().join("traffic"), 100, 0, None).unwrap());
@@ -497,20 +588,70 @@ async fn network_import_handler_warns_when_body_store_is_unavailable() {
         BifrostFileWriter::write_network("import-no-body-store", None, &[record]).unwrap();
 
     let response = import_network(&content, &state).await;
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let imported = traffic_store
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(traffic_store
         .get_by_id("OUT-REQ-import-no-body-store")
-        .expect("imported traffic record");
+        .is_none());
+}
 
-    assert!(imported.request_body_ref.is_none());
-    assert!(result["warnings"].as_array().is_some_and(|warnings| {
-        warnings.iter().any(|warning| {
-            warning
-                .as_str()
-                .is_some_and(|text| text.contains("body store is unavailable"))
-        })
-    }));
+#[tokio::test]
+async fn network_import_rolls_back_all_staged_bodies_when_a_later_record_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let traffic_store =
+        Arc::new(crate::TrafficDbStore::new(dir.path().join("traffic"), 100, 0, None).unwrap());
+    let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
+        dir.path().join("bodies"),
+        1024 * 1024,
+        1,
+        64 * 1024,
+        std::time::Duration::from_secs(1),
+    )));
+    let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+    let state = Arc::new(
+        crate::state::AdminState::new_for_test(TEST_ADMIN_PORT, storage)
+            .with_traffic_db_store_shared(traffic_store.clone())
+            .with_body_store(body_store.clone()),
+    );
+    let first_body = "a".repeat(70 * 1024);
+    let first: NetworkRecord = serde_json::from_value(serde_json::json!({
+        "id": "REQ-import-staged-first",
+        "method": "POST",
+        "url": "https://example.test/first",
+        "status": 200,
+        "request_body": first_body,
+        "duration_ms": 1,
+        "timestamp": 1
+    }))
+    .unwrap();
+    let overlong_encoding = std::iter::repeat_n("gzip", 60)
+        .collect::<Vec<_>>()
+        .join(",");
+    let second: NetworkRecord = serde_json::from_value(serde_json::json!({
+        "id": "REQ-import-staged-second",
+        "method": "GET",
+        "url": "https://example.test/second",
+        "status": 200,
+        "response_headers": [["content-encoding", overlong_encoding]],
+        "response_body_base64": STANDARD.encode(b"not-valid-gzip"),
+        "duration_ms": 1,
+        "timestamp": 2
+    }))
+    .unwrap();
+    let content =
+        BifrostFileWriter::write_network("staged-import", None, &[first, second]).unwrap();
+
+    let response = import_network(&content, &state).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(traffic_store
+        .get_by_id("OUT-REQ-import-staged-first")
+        .is_none());
+    assert!(traffic_store
+        .get_by_id("OUT-REQ-import-staged-second")
+        .is_none());
+    let sizes = body_store.read().sizes_by_id().unwrap();
+    assert!(!sizes.contains_key("OUT-REQ-import-staged-first"));
+    assert!(!sizes.contains_key("OUT-REQ-import-staged-second"));
 }
 
 #[test]

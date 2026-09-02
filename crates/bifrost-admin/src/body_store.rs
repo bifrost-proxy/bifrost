@@ -34,20 +34,28 @@ impl BodyRef {
     /// changing its enum shape would break both existing clients and stored
     /// traffic. The sidecar keeps that contract stable while surviving a
     /// process restart.
-    pub fn with_content_encoding(self, content_encoding: Option<&str>) -> Self {
+    pub fn with_content_encoding(self, content_encoding: Option<&str>) -> std::io::Result<Self> {
         match content_encoding
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
             Some(content_encoding) => {
-                if content_encoding.len() <= 256 {
-                    if let Some(path) = self.file_path() {
-                        let _ = fs::write(content_encoding_marker_path(path), content_encoding);
-                    }
+                if content_encoding.len() > 256 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "content-encoding metadata exceeds 256 bytes",
+                    ));
                 }
-                self
+                let path = self.file_path().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "content-encoding metadata requires a file-backed body",
+                    )
+                })?;
+                fs::write(content_encoding_marker_path(path), content_encoding)?;
+                Ok(self)
             }
-            None => self,
+            None => Ok(self),
         }
     }
 
@@ -671,16 +679,16 @@ impl BodyStore {
 }
 
 fn extract_base_id(file_name: &str) -> &str {
-    if let Some(prefix_end) = file_name.find('-') {
-        if let Some(second_dash) = file_name[prefix_end + 1..].find('-') {
-            let digits_start = prefix_end + 1 + second_dash + 1;
-            let digits_end = file_name[digits_start..]
-                .find(|c: char| !c.is_ascii_digit())
-                .map(|pos| digits_start + pos)
-                .unwrap_or(file_name.len());
-            if digits_end < file_name.len() && file_name.as_bytes()[digits_end] == b'_' {
-                return &file_name[..digits_end];
-            }
+    for suffix in [
+        "_res_openai_like",
+        "_sse_raw",
+        "_req_raw",
+        "_res_raw",
+        "_req",
+        "_res",
+    ] {
+        if let Some(id) = file_name.strip_suffix(suffix) {
+            return id;
         }
     }
     file_name
@@ -770,7 +778,7 @@ mod tests {
             path: path.clone(),
             size: 10,
         };
-        let encoded = stored.clone().with_content_encoding(Some("gzip"));
+        let encoded = stored.clone().with_content_encoding(Some("gzip")).unwrap();
 
         assert!(matches!(
             encoded.storage_ref(),
@@ -791,18 +799,47 @@ mod tests {
     }
 
     #[test]
+    fn content_encoding_metadata_rejects_unpersistable_sidecars() {
+        let dir = create_test_dir();
+        let path = dir.join("wire-body").to_string_lossy().to_string();
+        let stored = BodyRef::File {
+            path: path.clone(),
+            size: 10,
+        };
+        let overlong = "gzip,".repeat(60);
+        let error = stored
+            .clone()
+            .with_content_encoding(Some(&overlong))
+            .expect_err("overlong metadata must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        fs::create_dir_all(content_encoding_marker_path(&path)).unwrap();
+        let error = stored
+            .with_content_encoding(Some("gzip"))
+            .expect_err("sidecar write failure must be visible");
+        assert_ne!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let inline = BodyRef::Inline {
+            data: "wire".to_string(),
+        };
+        assert!(inline.with_content_encoding(Some("gzip")).is_err());
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
     fn overwriting_or_removing_a_body_clears_its_encoding_sidecar() {
         let dir = create_test_dir();
         let store = BodyStore::new(dir.clone(), 1024, 7, 64 * 1024, Duration::from_millis(200));
         let encoded = store
             .store("sidecar", "res", b"wire")
             .unwrap()
-            .with_content_encoding(Some("gzip"));
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
         assert_eq!(encoded.content_encoding().as_deref(), Some("gzip"));
 
         let replaced = store.store("sidecar", "res", b"plaintext").unwrap();
         assert_eq!(replaced.content_encoding(), None);
-        let encoded = replaced.with_content_encoding(Some("br"));
+        let encoded = replaced.with_content_encoding(Some("br")).unwrap();
         store.remove(&encoded);
         assert_eq!(encoded.content_encoding(), None);
 
@@ -994,6 +1031,14 @@ mod tests {
             "REQ-69c50db8-165720"
         );
         assert_eq!(
+            extract_base_id("OUT-REQ-69c50db8-165720_req_raw"),
+            "OUT-REQ-69c50db8-165720"
+        );
+        assert_eq!(
+            extract_base_id("OUT-REQ-69c50db8-165720_res_raw"),
+            "OUT-REQ-69c50db8-165720"
+        );
+        assert_eq!(
             extract_base_id("REQ-69c62cd8-072562_res_openai_like"),
             "REQ-69c62cd8-072562"
         );
@@ -1009,19 +1054,21 @@ mod tests {
         let dir = create_test_dir();
         let store = BodyStore::new(dir.clone(), 1, 7, 64 * 1024, Duration::from_millis(200));
 
-        let id = "REQ-69c50db8-165720";
+        let id = "OUT-REQ-69c50db8-165720";
         store.store(id, "req", b"request body").unwrap();
         store.store(id, "res", b"response body").unwrap();
         store.store(id, "sse_raw", b"sse raw data").unwrap();
+        store.store(id, "req_raw", b"raw request").unwrap();
+        store.store(id, "res_raw", b"raw response").unwrap();
         store
             .store(id, "res_openai_like", b"openai like data")
             .unwrap();
 
         let stats = store.stats();
-        assert_eq!(stats.file_count, 4);
+        assert_eq!(stats.file_count, 6);
 
         let removed = store.delete_by_ids(&[id.to_string()]).unwrap();
-        assert_eq!(removed, 4);
+        assert_eq!(removed, 6);
 
         let stats = store.stats();
         assert_eq!(stats.file_count, 0);

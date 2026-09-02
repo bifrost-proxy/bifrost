@@ -2338,7 +2338,8 @@ mod tests {
                     .to_string(),
                 size: 11,
             }
-            .with_content_encoding(Some("gzip")),
+            .with_content_encoding(Some("gzip"))
+            .unwrap(),
         );
         record.socket_status = Some(crate::traffic::SocketStatus {
             is_open: false,

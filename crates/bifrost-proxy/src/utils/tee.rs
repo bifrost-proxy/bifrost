@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 use tokio::time::Sleep;
 
 use crate::server::BoxBody;
-use crate::transform::decompress::decompress_body_with_limit;
+use crate::transform::decompress::{decompress_body_with_limit, try_decompress_body_with_limit};
 
 // Keep hot-path metrics updates coarse-grained so high-throughput relays do
 // not burn CPU on bookkeeping.
@@ -173,7 +173,29 @@ fn derive_openai_like_sse_body_ref(
         return None;
     }
     let body_store = state.body_store.as_ref()?;
-    let raw_body = body_store.read().load(body_ref)?;
+    let wire_body = body_store.read().load_bytes(body_ref)?;
+    let max_decompress_output_bytes = state
+        .config_manager
+        .as_ref()
+        .and_then(|manager| manager.try_config())
+        .map(|config| config.sandbox.limits.max_decompress_output_bytes)
+        .unwrap_or(10 * 1024 * 1024)
+        .min(MAX_DERIVED_OPENAI_LIKE_SSE_BODY_BYTES);
+    let decoded = match body_ref.content_encoding() {
+        Some(content_encoding) => match try_decompress_body_with_limit(
+            &wire_body,
+            &content_encoding,
+            max_decompress_output_bytes,
+        ) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                tracing::debug!(%error, record_id, %content_encoding, "Skipping OpenAI-like SSE derivation because decoding failed");
+                return None;
+            }
+        },
+        None => wire_body,
+    };
+    let raw_body = String::from_utf8(decoded).ok()?;
     let assembled = match catch_unwind(AssertUnwindSafe(|| {
         assemble_openai_like_response_body_from_text(&raw_body)
     })) {
@@ -250,11 +272,16 @@ impl TeeBodyDropGuard {
                 return;
             }
             let response_body_ref = if let Some(writer) = self.file_writer.take() {
-                Some(
-                    writer
-                        .finish()
-                        .with_content_encoding(self.content_encoding.as_deref()),
-                )
+                match writer
+                    .finish()
+                    .with_content_encoding(self.content_encoding.as_deref())
+                {
+                    Ok(body_ref) => Some(body_ref),
+                    Err(error) => {
+                        tracing::warn!(%error, record_id = %self.record_id, "failed to persist response content encoding");
+                        None
+                    }
+                }
             } else if !self.buffer.is_empty() {
                 if let Some(ref body_store) = state.body_store {
                     let max_decompress_output_bytes = state
@@ -613,7 +640,10 @@ impl Drop for RequestTeeBodyDropGuard {
             let body_ref = writer
                 .finish()
                 .with_content_encoding(self.content_encoding.as_deref());
-            if let Ok(mut slot) = self.capture.body_ref.lock() {
+            if let Err(ref error) = body_ref {
+                tracing::warn!(%error, record_id = %self.record_id, "failed to persist request content encoding");
+            }
+            if let (Ok(mut slot), Ok(body_ref)) = (self.capture.body_ref.lock(), body_ref) {
                 *slot = Some(body_ref);
             }
             if let Some(ref state) = self.admin_state {
@@ -732,10 +762,17 @@ impl Drop for SseTeeBodyDropGuard {
 impl SseTeeBodyDropGuard {
     fn store_body_and_update_record(&mut self) {
         if let Some(ref state) = self.admin_state {
-            let response_body_ref = self.file_writer.take().map(|writer| {
-                writer
+            let response_body_ref = self.file_writer.take().and_then(|writer| {
+                match writer
                     .finish()
                     .with_content_encoding(self.content_encoding.as_deref())
+                {
+                    Ok(body_ref) => Some(body_ref),
+                    Err(error) => {
+                        tracing::warn!(%error, record_id = %self.record_id, "failed to persist SSE content encoding");
+                        None
+                    }
+                }
             });
             let derived_response_body_ref =
                 derive_openai_like_sse_body_ref(state, &self.record_id, &response_body_ref);
@@ -1449,6 +1486,118 @@ mod tests {
             Some(response_wire.as_ref())
         );
         drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn streaming_body_refs_are_not_published_when_encoding_metadata_fails() {
+        let (state, dir) = test_state_with_body_store("invalid-content-encoding");
+        let record_id = "invalid-content-encoding";
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            record_id.into(),
+            "POST".into(),
+            "http://example.test/events".into(),
+        ));
+        let invalid_encoding = "gzip,".repeat(80);
+
+        let (request, capture) = create_request_tee_body(
+            crate::server::full_body(Bytes::from_static(b"request-wire")),
+            Some(state.clone()),
+            record_id.into(),
+            Some(invalid_encoding.clone()),
+        );
+        request.collect().await.unwrap();
+        assert!(capture.take().is_none());
+
+        let response = create_tee_body_with_store(
+            crate::server::full_body(Bytes::from_static(b"response-wire")),
+            Some(state.clone()),
+            record_id.into(),
+            TeeBodyCaptureOptions {
+                max_body_size: Some(1),
+                content_encoding: Some(invalid_encoding.clone()),
+                traffic_type: None,
+                monitor_connection: false,
+                response_headers_size: 0,
+            },
+        );
+        response.collect().await.unwrap();
+
+        let writer =
+            start_body_stream(state.body_store.as_ref().unwrap(), record_id, "sse_raw").unwrap();
+        let sse = create_sse_tee_body(
+            crate::server::full_body(Bytes::from_static(b"data: event\n\n")),
+            Some(state.clone()),
+            record_id.into(),
+            Some(TrafficType::Http),
+            Some(writer),
+            Some(invalid_encoding),
+            1024,
+        );
+        sse.boxed().collect().await.unwrap();
+
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .and_then(|store| store.get_by_id(record_id))
+            .unwrap();
+        assert!(record.request_body_ref.is_none());
+        assert!(record.response_body_ref.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_compressed_sse_is_not_derived_as_openai_content() {
+        let (state, dir) = test_state_with_body_store("malformed-sse-derive");
+        let record_id = "malformed-sse-derive";
+        let body_ref = state
+            .body_store
+            .as_ref()
+            .unwrap()
+            .read()
+            .store(record_id, "sse_raw", b"not gzip")
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+
+        assert!(derive_openai_like_sse_body_ref(&state, record_id, &Some(body_ref)).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compressed_sse_is_decoded_before_openai_like_derivation() {
+        use std::io::Write;
+
+        let (state, dir) = test_state_with_body_store("compressed-sse-derive");
+        let record_id = "compressed-sse-derive";
+        let raw = concat!(
+            "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(raw.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let body_ref = state
+            .body_store
+            .as_ref()
+            .unwrap()
+            .read()
+            .store(record_id, "sse_raw", &compressed)
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+
+        let derived = derive_openai_like_sse_body_ref(&state, record_id, &Some(body_ref))
+            .expect("derive compressed SSE body");
+        let body = state
+            .body_store
+            .as_ref()
+            .unwrap()
+            .read()
+            .load(&derived)
+            .expect("load derived body");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["choices"][0]["message"]["content"], "hello");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

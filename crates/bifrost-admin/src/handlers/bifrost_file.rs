@@ -752,12 +752,22 @@ async fn traffic_to_network_record(
                     request_body_base64 = exported.base64;
                 }
             }
+            if let Some(ref raw_body_ref) = traffic.raw_request_body_ref {
+                if let Some(bytes) = store.load_bytes(raw_body_ref) {
+                    request_body_base64 = Some(STANDARD.encode(bytes));
+                }
+            }
             if let Some(ref body_ref) = traffic.response_body_ref {
                 if let Some(bytes) = store.load_bytes(body_ref) {
                     let exported =
                         export_content_encoded_body(bytes, body_ref.content_encoding().as_deref());
                     response_body = exported.text;
                     response_body_base64 = exported.base64;
+                }
+            }
+            if let Some(ref raw_body_ref) = traffic.raw_response_body_ref {
+                if let Some(bytes) = store.load_bytes(raw_body_ref) {
+                    response_body_base64 = Some(STANDARD.encode(bytes));
                 }
             }
         }

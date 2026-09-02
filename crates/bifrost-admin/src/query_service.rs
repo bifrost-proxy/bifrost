@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::body_store::BodyRef;
 use crate::handlers::network_body::{
-    decode_content_encoded_body, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+    decode_content_encoded_body_with_limit, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
 };
 use crate::push::SharedPushManager;
 use crate::search::{
@@ -326,6 +326,7 @@ impl AdminQueryService {
         match body_ref {
             BodyRef::Inline { data } => Ok(json!({ "success": true, "data": data })),
             BodyRef::File { .. } | BodyRef::FileRange { .. } => {
+                let max_output_bytes = configured_decompress_output_bytes(&self.state).await;
                 let body_store =
                     self.state.body_store.clone().ok_or_else(|| {
                         BifrostError::Config("Body store not configured".to_string())
@@ -333,9 +334,10 @@ impl AdminQueryService {
                 let loaded = tokio::task::spawn_blocking(move || {
                     let store = body_store.read();
                     store.load_bytes(&body_ref).map(|bytes| {
-                        let decoded = decode_content_encoded_body(
+                        let decoded = decode_content_encoded_body_with_limit(
                             bytes,
                             body_ref.content_encoding().as_deref(),
+                            max_output_bytes,
                         );
                         String::from_utf8_lossy(&decoded).to_string()
                     })
@@ -573,6 +575,7 @@ mod tests {
 
     use crate::push::{start_push_tasks, ClientSubscription, PushMessage};
     use crate::test_support::TestAdminState;
+    use bifrost_storage::{SandboxConfigUpdate, SandboxLimitsConfigUpdate};
 
     #[test]
     fn test_search_request_from_command_preserves_filters() {
@@ -638,7 +641,8 @@ mod tests {
             .read()
             .store("query-service-encoded", "res", &compressed)
             .expect("store compressed body")
-            .with_content_encoding(Some("gzip"));
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
         let mut record = TrafficRecord::new(
             "query-service-encoded".to_string(),
             "GET".to_string(),
@@ -661,6 +665,46 @@ mod tests {
         assert_eq!(
             detail["response_body"]["data"],
             String::from_utf8_lossy(plaintext).as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn traffic_get_honors_configured_decompression_limit() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = vec![b'a'; 1024];
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&plaintext).expect("compress body");
+        let compressed = encoder.finish().expect("finish gzip body");
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("query-service-limit", "res", &compressed)
+            .expect("store compressed body")
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        harness
+            .config_manager
+            .update_sandbox_config(SandboxConfigUpdate {
+                limits: Some(SandboxLimitsConfigUpdate {
+                    max_decompress_output_bytes: Some(plaintext.len() - 1),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("lower decompression limit");
+
+        let service = AdminQueryService::new(harness.state());
+        let body = service
+            .load_body_json(Some(&body_ref))
+            .await
+            .expect("load body response");
+
+        assert_ne!(body["data"], String::from_utf8_lossy(&plaintext).as_ref());
+        assert_eq!(
+            body["data"],
+            String::from_utf8_lossy(&compressed).as_ref(),
+            "CLI reads must use the active configured limit"
         );
     }
 

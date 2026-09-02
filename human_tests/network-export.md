@@ -103,7 +103,7 @@ cd /Users/eden/work/github/bifrost-network-empty-bifrost-export
 - 2026-09-02：已执行 `cargo test -p bifrost-proxy transform::decompress::tests`（9/9 通过），覆盖完整 Content-Encoding 链逆序解码、相邻 gzip member、共享解压预算和自定义编码原样保留。
 - 2026-09-02：已执行 `cargo test -p bifrost-admin handlers::traffic::sse_stream_tests::`（6/6 通过）、`handlers::traffic::stored_body_tests::`（2/2 通过）和 `handlers::traffic::batch_query_tests::`（8/8 通过），覆盖压缩 SSE 事件恢复、配置化解压上限与批量 Body 解码。
 - 2026-09-02：已按仓库门禁无 filter 执行 `RUST_TEST_THREADS=1 SKIP_FRONTEND_BUILD=1 make coverage-changed`，最终变更生产 Rust 行覆盖率为 91.22%（291/319），通过 90% 门禁。
-- 2026-09-02：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，72/72 通过；真实 `gzip, deflate` 双层压缩 POST 及响应经代理录制、`traffic get`、批量 Body API、正文搜索、响应 JSONPath 过滤、include body、Network 导出、预览和重新导入后，两侧明文 JSON、内容类型、导入 Body 与原始请求字节断言通过；另验证多个相邻 gzip member 全部解码、打开状态的 gzip SSE 恢复全部事件，以及 `application/gzip` payload 外叠 HTTP gzip 时请求/响应只移除 HTTP 外层编码。
+- 2026-09-03：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，73/73 通过；真实 `gzip, deflate` 双层压缩 POST 及响应经代理录制、`traffic get`、批量 Body API、正文搜索、响应 JSONPath 过滤、include body、Network 导出、预览和重新导入后，两侧明文 JSON、内容类型、导入 Body 与原始请求字节断言通过；另验证多个相邻 gzip member 全部解码、打开状态的 gzip SSE 恢复全部事件且不会在完整 member 后提前关闭，以及 `application/gzip` payload 外叠 HTTP gzip 时请求/响应只移除 HTTP 外层编码。
 - 2026-09-02：已按 TC-NE-05 独立人工执行 release 二进制，使用临时数据目录、动态端口 `62396/62397`、`--no-system-proxy` 及禁用托盘/登录提示环境变量；Traffic 请求/响应、Network 导出及预览的双层压缩明文断言通过，`x-company-codec` 请求/响应二进制字节保持不变，服务按精确 PID 清理。
 
 ## 清理步骤

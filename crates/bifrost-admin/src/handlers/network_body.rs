@@ -49,6 +49,7 @@ pub(super) fn decode_body_for_display(
     decode_content_encoded_body(bytes, content_encoding_value(headers).as_deref())
 }
 
+#[cfg(test)]
 pub(crate) fn decode_content_encoded_body(
     bytes: Vec<u8>,
     content_encoding: Option<&str>,
@@ -325,7 +326,9 @@ pub(crate) fn decompress_partial_with_limit(
 }
 
 fn read_limited(mut reader: impl Read, max_output_bytes: usize) -> std::io::Result<Vec<u8>> {
-    let mut limited = reader.by_ref().take((max_output_bytes as u64) + 1);
+    let mut limited = reader
+        .by_ref()
+        .take((max_output_bytes as u64).saturating_add(1));
     let mut output = Vec::new();
     limited.read_to_end(&mut output)?;
     if output.len() > max_output_bytes {
@@ -526,6 +529,14 @@ mod tests {
         let error = decompress_partial_with_limit(&gzip.finish().unwrap(), "gzip", 8)
             .expect_err("partial decoding must enforce its output limit");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn decompression_limit_accepts_usize_max_without_overflow() {
+        assert_eq!(
+            decompress_with_limit(b"plain body", "identity", usize::MAX).unwrap(),
+            b"plain body"
+        );
     }
 
     #[test]

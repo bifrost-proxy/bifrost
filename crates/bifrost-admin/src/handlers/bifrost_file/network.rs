@@ -203,7 +203,6 @@ pub(super) async fn import_network(content: &str, state: &SharedAdminState) -> R
     };
 
     let mut warnings: Vec<String> = Vec::new();
-    let mut record_count = 0;
 
     if let Err(message) = validate_network_import_records(file.content.len()) {
         return error_response(StatusCode::BAD_REQUEST, message);
@@ -212,26 +211,67 @@ pub(super) async fn import_network(content: &str, state: &SharedAdminState) -> R
         return error_response(StatusCode::BAD_REQUEST, &message);
     }
 
+    let imported_ids = file
+        .content
+        .iter()
+        .map(|record| format!("OUT-{}", record.id))
+        .collect::<Vec<_>>();
+    let unique_ids = imported_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    if unique_ids.len() != imported_ids.len() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Network file contains duplicate record IDs",
+        );
+    }
+    if let Some(existing_id) = imported_ids
+        .iter()
+        .find(|id| traffic_db_store.get_by_id(id).is_some())
+    {
+        return error_response(
+            StatusCode::CONFLICT,
+            &format!("Traffic record {existing_id} already exists"),
+        );
+    }
+
+    let has_bodies = file.content.iter().any(|record| {
+        record.request_body.is_some()
+            || record.request_body_base64.is_some()
+            || record.response_body.is_some()
+            || record.response_body_base64.is_some()
+    });
+    if has_bodies && state.body_store.is_none() {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Network bodies cannot be imported because the body store is unavailable",
+        );
+    }
+
+    // Persist every body before publishing any Traffic row. If one body fails,
+    // remove all files staged by this import so callers never observe a partial
+    // package and retries cannot overwrite an existing imported record.
+    let mut staged_records = Vec::with_capacity(file.content.len());
+    let mut persisted_ids = Vec::new();
     for network_record in &file.content {
         let mut traffic_record = network_record_to_traffic_record(network_record);
         if let Some(body_store) = state.body_store.as_ref() {
             if let Err(message) =
                 persist_imported_bodies(network_record, &mut traffic_record, body_store)
             {
+                if !persisted_ids.is_empty() {
+                    let _ = body_store.write().delete_by_ids(&persisted_ids);
+                }
                 return error_response(StatusCode::BAD_REQUEST, &message);
             }
-        } else if network_record.request_body.is_some()
-            || network_record.request_body_base64.is_some()
-            || network_record.response_body.is_some()
-            || network_record.response_body_base64.is_some()
-        {
-            warnings.push(format!(
-                "Record {} bodies could not be persisted because the body store is unavailable",
-                network_record.id
-            ));
+            persisted_ids.push(traffic_record.id.clone());
         }
+        staged_records.push(traffic_record);
+    }
+
+    let record_count = staged_records.len();
+    for traffic_record in staged_records {
         traffic_db_store.record(traffic_record);
-        record_count += 1;
     }
 
     if record_count > 0 {
@@ -309,7 +349,14 @@ fn store_imported_body(
     if !body_ref.is_file() {
         return Err(format!("{kind} body could not be persisted losslessly"));
     }
-    Ok(Some(body_ref.with_content_encoding(content_encoding)))
+    let cleanup_ref = body_ref.clone();
+    match body_ref.with_content_encoding(content_encoding) {
+        Ok(body_ref) => Ok(Some(body_ref)),
+        Err(error) => {
+            store.remove(&cleanup_ref);
+            Err(format!("{kind} body metadata persistence failed: {error}"))
+        }
+    }
 }
 
 pub(super) fn persist_imported_bodies(

@@ -1,10 +1,16 @@
+use super::super::body::{configured_decompress_output_bytes, load_body_bytes_async};
 use super::*;
+use crate::handlers::network_body::{
+    content_encoding_is_supported, decompress_partial_with_limit, decompress_with_limit,
+};
 
 pub(super) async fn stream_content_encoded_sse_events(
     state: SharedAdminState,
     connection_id: &str,
     body_ref: BodyRef,
+    from: SseStreamFrom,
     batch_size: usize,
+    tail_bytes: usize,
     tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
 ) -> Result<(), ()> {
     use std::time::Instant;
@@ -20,6 +26,7 @@ pub(super) async fn stream_content_encoded_sse_events(
 
     let mut parser = SseIncrementalParser::new();
     let mut decoded_offset = 0usize;
+    let mut initialized_offset = false;
     let mut seq = 0u64;
     let mut batch = Vec::new();
     let batch_size = batch_size.max(1);
@@ -41,14 +48,28 @@ pub(super) async fn stream_content_encoded_sse_events(
         let mut made_progress = false;
         let mut member_is_complete = false;
         if let Some(wire_bytes) = load_body_bytes_async(&state, &body_ref).await {
-            let decoded = decompress_with_limit(&wire_bytes, &content_encoding, max_output_bytes)
-                .inspect(|_| {
-                    member_is_complete = true;
-                })
-                .or_else(|_| {
-                    decompress_partial_with_limit(&wire_bytes, &content_encoding, max_output_bytes)
-                });
+            let decoded =
+                match decompress_with_limit(&wire_bytes, &content_encoding, max_output_bytes) {
+                    Ok(decoded) => {
+                        member_is_complete = true;
+                        Ok(decoded)
+                    }
+                    Err(complete_error) => decompress_partial_with_limit(
+                        &wire_bytes,
+                        &content_encoding,
+                        max_output_bytes,
+                    )
+                    .map_err(|partial_error| (complete_error, partial_error)),
+                };
             if let Ok(decoded) = decoded {
+                if !initialized_offset && (!decoded.is_empty() || !is_open) {
+                    decoded_offset = if from == SseStreamFrom::Tail && tail_bytes > 0 {
+                        decoded.len().saturating_sub(tail_bytes)
+                    } else {
+                        0
+                    };
+                    initialized_offset = true;
+                }
                 if decoded.len() >= decoded_offset {
                     let new_bytes = &decoded[decoded_offset..];
                     made_progress = !new_bytes.is_empty();
@@ -79,12 +100,46 @@ pub(super) async fn stream_content_encoded_sse_events(
                         }
                     }
                 }
+            } else if let Err((complete_error, partial_error)) = decoded {
+                let hit_limit = [&complete_error, &partial_error].iter().any(|error| {
+                    error
+                        .to_string()
+                        .contains("decompressed body exceeds the preview limit")
+                });
+                if hit_limit {
+                    seq = seq.saturating_add(1);
+                    let error_event = crate::sse::SseEvent {
+                        seq,
+                        ts: now_ms(),
+                        id: None,
+                        event: Some("error".to_string()),
+                        retry: None,
+                        data: format!(
+                            "decoded SSE body exceeds the configured {} byte limit",
+                            max_output_bytes
+                        ),
+                        raw: None,
+                        parse_error: true,
+                    };
+                    if batch_size <= 1 {
+                        let _ = tx
+                            .send(bytes::Bytes::from(sse_json_line(&error_event)))
+                            .await;
+                    } else {
+                        batch.push(error_event);
+                        let _ = tx
+                            .send(bytes::Bytes::from(sse_json_batch_line(&batch)))
+                            .await;
+                    }
+                    return Ok(());
+                }
             }
         }
 
-        // A finalized compressed member cannot receive more plaintext. Return
-        // promptly even if the transport connection itself is still open.
-        if member_is_complete {
+        // A complete prefix may still receive another gzip member (and
+        // `identity` is complete for every prefix), so only finish after the
+        // upstream connection itself has closed.
+        if member_is_complete && !is_open {
             break;
         }
 

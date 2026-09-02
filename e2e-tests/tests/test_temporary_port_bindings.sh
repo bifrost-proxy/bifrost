@@ -769,9 +769,16 @@ for side in ("request", "response"):
 PY
     _log_pass "Traffic batch API decodes content-encoded request and response bodies"
 
-    curl -fsS --max-time 5 \
+    if curl -fsS --max-time 5 \
         "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${gzip_sse_record_id}/sse/stream?from=begin" \
-        > "${TEST_DATA_DIR}/gzip-sse-events.txt"
+        > "${TEST_DATA_DIR}/gzip-sse-events.txt"; then
+        _log_fail "Compressed SSE stream remains live with its upstream" "curl timeout while upstream is open" "stream closed early"
+        return 1
+    elif [[ "$?" -ne 28 ]]; then
+        _log_fail "Compressed SSE stream remains live with its upstream" "curl timeout (28)" "unexpected curl failure"
+        return 1
+    fi
+    _log_pass "Compressed SSE stream remains live with its upstream"
     assert_body_contains "data: first compressed event" "$(cat "${TEST_DATA_DIR}/gzip-sse-events.txt")" "Compressed SSE stream decodes its first event"
     assert_body_contains "data: second compressed event" "$(cat "${TEST_DATA_DIR}/gzip-sse-events.txt")" "Compressed SSE stream decodes its second event"
     safe_cleanup_proxy "$GZIP_SSE_CURL_PID"

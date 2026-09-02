@@ -91,9 +91,9 @@ fn should_skip_http_forward_header(name: &str, target_authority_changed: bool) -
     ) || (target_authority_changed && n == "host")
 }
 
-fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Option<String> {
+fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Result<Option<String>, String> {
     if body.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let headers = Some(headers.to_vec());
@@ -103,12 +103,13 @@ fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Option<Strin
         Some(encoding) if !super::network_body::content_encoding_is_supported(encoding) => {
             body.to_vec()
         }
-        Some(encoding) => {
-            super::network_body::decompress(body, encoding).unwrap_or_else(|_| body.to_vec())
-        }
+        Some(encoding) => super::network_body::decompress(body, encoding)
+            .map_err(|error| format!("failed to decode {encoding} replay response: {error}"))?,
     };
 
-    Some(String::from_utf8_lossy(&decoded).to_string())
+    String::from_utf8(decoded)
+        .map(Some)
+        .map_err(|_| "replay response body is not valid UTF-8".to_string())
 }
 
 #[cfg(test)]
@@ -129,7 +130,7 @@ mod replay_body_decode_tests {
         let gz = enc.finish().unwrap();
 
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        let decoded = decode_replay_body(&headers, &gz).unwrap();
+        let decoded = decode_replay_body(&headers, &gz).unwrap().unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(raw));
     }
 
@@ -533,7 +534,13 @@ async fn execute_replay_unified(
             .collect();
 
         let response_body = match response.bytes().await {
-            Ok(b) => decode_replay_body(&response_headers, &b),
+            Ok(b) => match decode_replay_body(&response_headers, &b) {
+                Ok(body) => body,
+                Err(error) => {
+                    drop(permit);
+                    return error_response(StatusCode::BAD_GATEWAY, &error);
+                }
+            },
             Err(_) => None,
         };
 
@@ -2962,14 +2969,16 @@ mod replay_extra_tests {
     #[test]
     fn decode_replay_body_returns_none_for_empty_body() {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        assert!(decode_replay_body(&headers, b"").is_none());
+        assert!(decode_replay_body(&headers, b"").unwrap().is_none());
     }
 
     #[test]
     fn decode_replay_body_passes_through_unknown_encoding() {
         let body = br#"{"ok":true}"#;
         let headers = vec![("content-encoding".to_string(), "unknown".to_string())];
-        let decoded = decode_replay_body(&headers, body).expect("decoded");
+        let decoded = decode_replay_body(&headers, body)
+            .expect("decode result")
+            .expect("decoded body");
         assert_eq!(decoded, String::from_utf8_lossy(body));
     }
 }
@@ -3383,7 +3392,9 @@ mod coverage_boost_extra {
         let compressed = encoder.finish().unwrap();
 
         let headers = vec![("content-encoding".to_string(), "deflate".to_string())];
-        let decoded = decode_replay_body(&headers, &compressed).expect("decoded body");
+        let decoded = decode_replay_body(&headers, &compressed)
+            .expect("decode result")
+            .expect("decoded body");
         assert_eq!(decoded, String::from_utf8_lossy(raw));
     }
 
@@ -3399,7 +3410,9 @@ mod coverage_boost_extra {
         }
 
         let headers = vec![("content-encoding".to_string(), "br".to_string())];
-        let decoded = decode_replay_body(&headers, &out).expect("decoded body");
+        let decoded = decode_replay_body(&headers, &out)
+            .expect("decode result")
+            .expect("decoded body");
         assert_eq!(decoded, String::from_utf8_lossy(raw));
     }
 
@@ -3409,7 +3422,9 @@ mod coverage_boost_extra {
         let compressed =
             zstd::stream::encode_all(std::io::Cursor::new(raw), 0).expect("encode zstd");
         let headers = vec![("content-encoding".to_string(), "zstd".to_string())];
-        let decoded = decode_replay_body(&headers, &compressed).expect("decoded body");
+        let decoded = decode_replay_body(&headers, &compressed)
+            .expect("decode result")
+            .expect("decoded body");
         assert_eq!(decoded, String::from_utf8_lossy(raw));
     }
 
@@ -3529,7 +3544,7 @@ mod coverage_boost_v2 {
             ("content-encoding".to_string(), "gzip, br".to_string()),
             ("other".to_string(), "ignored".to_string()),
         ];
-        let decoded = decode_replay_body(&headers, &br).unwrap();
+        let decoded = decode_replay_body(&headers, &br).unwrap().unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(raw));
     }
 
@@ -3550,41 +3565,37 @@ mod coverage_boost_v2 {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
 
         assert_eq!(
-            decode_replay_body(&headers, &body).as_deref(),
+            decode_replay_body(&headers, &body).unwrap().as_deref(),
             Some("first member second member")
         );
     }
 
     #[test]
-    fn decode_replay_body_preserves_invalid_gzip() {
+    fn decode_replay_body_rejects_invalid_gzip() {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        let decoded = decode_replay_body(&headers, b"not-a-gzip");
-        assert_eq!(decoded.as_deref(), Some("not-a-gzip"));
+        assert!(decode_replay_body(&headers, b"not-a-gzip").is_err());
     }
 
     #[test]
-    fn decode_replay_body_preserves_invalid_deflate() {
+    fn decode_replay_body_rejects_invalid_deflate() {
         let headers = vec![("content-encoding".to_string(), "deflate".to_string())];
-        let decoded = decode_replay_body(&headers, b"not-deflate");
-        assert_eq!(decoded.as_deref(), Some("not-deflate"));
+        assert!(decode_replay_body(&headers, b"not-deflate").is_err());
     }
 
     #[test]
-    fn decode_replay_body_preserves_invalid_brotli() {
+    fn decode_replay_body_rejects_invalid_brotli() {
         let headers = vec![("content-encoding".to_string(), "br".to_string())];
-        let decoded = decode_replay_body(&headers, b"not-br");
-        assert_eq!(decoded.as_deref(), Some("not-br"));
+        assert!(decode_replay_body(&headers, b"not-br").is_err());
     }
 
     #[test]
-    fn decode_replay_body_preserves_invalid_zstd() {
+    fn decode_replay_body_rejects_invalid_zstd() {
         let headers = vec![("content-encoding".to_string(), "zstd".to_string())];
-        let decoded = decode_replay_body(&headers, b"not-zstd");
-        assert_eq!(decoded.as_deref(), Some("not-zstd"));
+        assert!(decode_replay_body(&headers, b"not-zstd").is_err());
     }
 
     #[test]
-    fn decode_replay_body_preserves_wire_bytes_when_output_exceeds_limit() {
+    fn decode_replay_body_rejects_output_that_exceeds_limit() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
         use std::io::Write;
@@ -3596,10 +3607,7 @@ mod coverage_boost_v2 {
         let wire = encoder.finish().unwrap();
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
 
-        assert_eq!(
-            decode_replay_body(&headers, &wire).unwrap().as_bytes(),
-            String::from_utf8_lossy(&wire).as_bytes()
-        );
+        assert!(decode_replay_body(&headers, &wire).is_err());
     }
 
     #[test]
@@ -4362,7 +4370,7 @@ mod coverage_boost_v3 {
     fn decode_replay_body_is_case_insensitive_for_header_name() {
         let body = br"plain-text";
         let headers = vec![("Content-Encoding".to_string(), "".to_string())];
-        let decoded = decode_replay_body(&headers, body).unwrap();
+        let decoded = decode_replay_body(&headers, body).unwrap().unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(body));
     }
 
@@ -4378,7 +4386,7 @@ mod coverage_boost_v3 {
         let gz = enc.finish().unwrap();
 
         let headers = vec![("content-encoding".to_string(), "  gzip  ".to_string())];
-        let decoded = decode_replay_body(&headers, &gz).unwrap();
+        let decoded = decode_replay_body(&headers, &gz).unwrap().unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(raw));
     }
 
@@ -4499,25 +4507,22 @@ mod coverage_boost_v3 {
     #[test]
     fn decode_replay_body_returns_none_for_empty_body() {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        assert_eq!(decode_replay_body(&headers, b""), None);
+        assert_eq!(decode_replay_body(&headers, b""), Ok(None));
     }
 
     #[test]
     fn decode_replay_body_defaults_to_identity_when_header_missing() {
         let body = br"plain-body";
         let headers: Vec<(String, String)> = Vec::new();
-        let decoded = decode_replay_body(&headers, body).unwrap();
+        let decoded = decode_replay_body(&headers, body).unwrap().unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(body));
     }
 
     #[test]
-    fn decode_replay_body_preserves_invalid_gzip_payload() {
+    fn decode_replay_body_rejects_invalid_gzip_payload() {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
         let body = b"not-a-valid-gzip-stream";
-        assert_eq!(
-            decode_replay_body(&headers, body).as_deref(),
-            Some("not-a-valid-gzip-stream")
-        );
+        assert!(decode_replay_body(&headers, body).is_err());
     }
 }
 #[cfg(test)]
