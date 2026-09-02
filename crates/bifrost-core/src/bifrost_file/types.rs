@@ -205,8 +205,16 @@ pub struct NetworkRecord {
     pub original_response_headers: Option<Vec<(String, String)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_body: Option<String>,
+    /// Original request body bytes when the payload cannot be represented as
+    /// plain UTF-8 or has a Content-Encoding that must remain recoverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_body: Option<String>,
+    /// Original response body bytes when the payload cannot be represented as
+    /// plain UTF-8 or has a Content-Encoding that must remain recoverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_base64: Option<String>,
     pub duration_ms: u64,
     pub timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

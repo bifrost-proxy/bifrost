@@ -45,6 +45,7 @@ export interface NetworkPreview {
   hosts: string[];
   records: NetworkPreviewRecord[];
   single_record?: NetworkPreviewDetail | null;
+  warnings?: string[];
 }
 
 export interface NetworkPreviewRecord {

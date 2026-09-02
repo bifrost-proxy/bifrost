@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 WebUI Traffic/Network 右键导出 `.bifrost` 请求文件时，导出内容不仅包含选中的请求，还包含该请求进入 Bifrost 时对应端口正在生效的规则快照。默认代理端口和自定义临时端口必须明确区分，避免用户反馈问题时排查方拿到错误的规则上下文。
+验证 WebUI Traffic/Network 右键导出 `.bifrost` 请求文件时，导出内容不仅包含选中的请求，还包含该请求进入 Bifrost 时对应端口正在生效的规则快照。默认代理端口和自定义临时端口必须明确区分，避免用户反馈问题时排查方拿到错误的规则上下文。压缩或二进制 Body 必须可逆保存，预览应展示可解码的明文，不能用 UTF-8 lossy 字符串破坏原始字节。
 
 ## 前置条件
 
@@ -67,12 +67,28 @@ cd /Users/eden/work/github/bifrost-network-empty-bifrost-export
 - 缺失的 `listener_port` 在导入恢复为 Traffic record 时按默认值 `0` 处理。
 - 缺失的 `active_rules` 按 `None` 处理，不影响旧文件导入。
 
+### TC-NE-05：gzip Body 导出后明文可读且原始字节可恢复
+
+**操作步骤**：
+1. 启动真实 Bifrost 服务，使用临时 `BIFROST_DATA_DIR`、随机主端口和 `--no-system-proxy`。
+2. 通过代理发送 `Content-Type: application/json`、`Content-Encoding: gzip` 的 POST 请求。
+3. 等待 Traffic DB 生成记录，调用 Network 导出接口并解析 `.bifrost`。
+4. 调用 Network 预览接口查看同一个导出文件。
+
+**预期结果**：
+- `request_body` 是解压后的 JSON 明文，不包含替换字符 `�`。
+- `request_body_base64` 可解码为原始 gzip 字节，再解压后与 JSON 明文完全一致。
+- 单条记录预览的 Body 面板展示 JSON 明文，并从请求头恢复 `application/json` 内容类型。
+- 对旧版本已经 lossy 导出的压缩 Body，预览隐藏乱码并提示需要使用新版本重新导出。
+
 ## 执行记录
 
 - 2026-05-20：已执行 `cargo test -p bifrost-admin network_export -- --nocapture`，6 个后端导出用例通过，覆盖空选择拦截、默认端口快照、默认规则目录缺失空快照和自定义端口快照。
 - 2026-05-20：已执行 `cargo test -p bifrost-core parse_network_accepts_legacy_record_without_active_rules -- --nocapture`，旧 Network record 缺少 `listener_port` / `active_rules` 时解析通过。
 - 2026-05-20：已执行 `cd web && pnpm vitest run src/api/bifrost-file.test.ts`，5 个前端 import/export helper 用例通过，覆盖空 Network 导出提示。
 - 2026-05-20：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，55/55 通过；其中新增断言确认默认端口导出包含 `default_port` 生效规则快照，自定义端口导出包含 `custom_port` 生效规则快照，且两者不互相混入。
+- 2026-09-02：已执行 `cargo test -p bifrost-admin handlers::bifrost_file::tests:: -- --nocapture`（22/22 通过）及 `cargo test -p bifrost-admin handlers::network_body::tests:: -- --nocapture`（4/4 通过），覆盖 gzip Body 明文导出、原始字节可恢复、新格式预览解压、旧 lossy 文件警告和旧格式兼容。
+- 2026-09-02：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，62/62 通过；真实 gzip POST 经代理录制、Network 导出和预览后，明文 JSON、内容类型和 base64 原始字节断言通过。
 
 ## 清理步骤
 

@@ -264,7 +264,9 @@ mod tests {
             response_headers: None,
             original_response_headers: None,
             request_body: None,
+            request_body_base64: None,
             response_body: None,
+            response_body_base64: None,
             duration_ms: 78,
             timestamp: 1779283635053,
             matched_rules: Some(vec![MatchedRuleExport {

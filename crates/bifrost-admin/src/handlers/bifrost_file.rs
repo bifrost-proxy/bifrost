@@ -10,6 +10,7 @@ use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+use super::network_body::{export_body, header_value, preview_body};
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
 use crate::traffic::TrafficRecord;
@@ -50,6 +51,8 @@ pub struct NetworkPreview {
     pub records: Vec<NetworkPreviewRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub single_record: Option<NetworkPreviewDetail>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -335,13 +338,35 @@ fn build_network_preview(records: &[NetworkRecord]) -> NetworkPreview {
         hosts.insert(traffic_record.host);
     }
 
+    let mut warnings = Vec::new();
     let single_record = records
         .first()
         .filter(|_| records.len() == 1)
-        .map(|record| NetworkPreviewDetail {
-            record: network_record_to_traffic_record(record),
-            request_body: record.request_body.clone(),
-            response_body: record.response_body.clone(),
+        .map(|record| {
+            let request_body = preview_body(
+                record.request_body.as_deref(),
+                record.request_body_base64.as_deref(),
+                &record.request_headers,
+                "request",
+            );
+            let response_headers = record
+                .response_headers
+                .as_ref()
+                .map(|_| &record.response_headers)
+                .unwrap_or(&record.original_response_headers);
+            let response_body = preview_body(
+                record.response_body.as_deref(),
+                record.response_body_base64.as_deref(),
+                response_headers,
+                "response",
+            );
+            warnings.extend(request_body.warning);
+            warnings.extend(response_body.warning);
+            NetworkPreviewDetail {
+                record: network_record_to_traffic_record(record),
+                request_body: request_body.text,
+                response_body: response_body.text,
+            }
         });
 
     NetworkPreview {
@@ -349,6 +374,7 @@ fn build_network_preview(records: &[NetworkRecord]) -> NetworkPreview {
         hosts: hosts.into_iter().take(20).collect(),
         records: preview_records,
         single_record,
+        warnings,
     }
 }
 
@@ -543,7 +569,8 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         method: record.method.clone(),
         url: record.url.clone(),
         status: record.status,
-        content_type: None,
+        content_type: header_value(&record.response_headers, "content-type")
+            .or_else(|| header_value(&record.original_response_headers, "content-type")),
         request_size,
         response_size,
         upload_bytes: request_size,
@@ -576,7 +603,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         is_tunnel: false,
         has_rule_hit: record.has_rule_hit.unwrap_or(has_rule_hit),
         matched_rules,
-        request_content_type: None,
+        request_content_type: header_value(&record.request_headers, "content-type"),
         is_websocket: false,
         is_sse: false,
         is_h3: false,
@@ -1009,16 +1036,31 @@ async fn traffic_to_network_record(
     state: &SharedAdminState,
 ) -> NetworkRecord {
     let mut request_body = None;
+    let mut request_body_base64 = None;
     let mut response_body = None;
+    let mut response_body_base64 = None;
 
     if include_body {
         if let Some(ref body_store) = state.body_store {
             let store = body_store.read();
             if let Some(ref body_ref) = traffic.request_body_ref {
-                request_body = store.load(body_ref);
+                if let Some(bytes) = store.load_bytes(body_ref) {
+                    let exported = export_body(bytes, &traffic.request_headers);
+                    request_body = exported.text;
+                    request_body_base64 = exported.base64;
+                }
             }
             if let Some(ref body_ref) = traffic.response_body_ref {
-                response_body = store.load(body_ref);
+                if let Some(bytes) = store.load_bytes(body_ref) {
+                    let response_headers = traffic
+                        .response_headers
+                        .as_ref()
+                        .map(|_| &traffic.response_headers)
+                        .unwrap_or(&traffic.original_response_headers);
+                    let exported = export_body(bytes, response_headers);
+                    response_body = exported.text;
+                    response_body_base64 = exported.base64;
+                }
             }
         }
     }
@@ -1056,7 +1098,9 @@ async fn traffic_to_network_record(
             .or_else(|| traffic.original_response_headers.clone()),
         original_response_headers: traffic.original_response_headers.clone(),
         request_body,
+        request_body_base64,
         response_body,
+        response_body_base64,
         duration_ms: traffic.duration_ms,
         timestamp: traffic.timestamp,
         matched_rules,
@@ -1639,7 +1683,146 @@ fn toml_to_json(toml_val: toml::Value) -> serde_json::Value {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use base64::Engine;
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn network_export_preserves_gzip_request_and_exposes_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().to_path_buf()).unwrap();
+        let state = Arc::new(
+            crate::state::AdminState::new_for_test(9900, storage).with_body_store(Arc::new(
+                parking_lot::RwLock::new(crate::BodyStore::new(
+                    dir.path().join("bodies"),
+                    1024 * 1024,
+                    1,
+                    64 * 1024,
+                    std::time::Duration::from_secs(1),
+                )),
+            )),
+        );
+        let plaintext = br#"{"message":"hello from gzip"}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut traffic = TrafficRecord::new(
+            "REQ-gzip-export".to_string(),
+            "POST".to_string(),
+            "https://example.test/gzip".to_string(),
+        );
+        traffic.request_headers = Some(vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("content-encoding".to_string(), "gzip".to_string()),
+        ]);
+        traffic.request_body_ref = state
+            .body_store
+            .as_ref()
+            .and_then(|store| store.read().store(&traffic.id, "req", &compressed));
+        traffic.response_headers = Some(vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("content-encoding".to_string(), "gzip".to_string()),
+        ]);
+        traffic.response_body_ref = state
+            .body_store
+            .as_ref()
+            .and_then(|store| store.read().store(&traffic.id, "res", &compressed));
+
+        let record = traffic_to_network_record(&traffic, true, &state).await;
+
+        assert_eq!(
+            record.request_body.as_deref(),
+            std::str::from_utf8(plaintext).ok()
+        );
+        let encoded = record
+            .request_body_base64
+            .as_deref()
+            .expect("compressed request should remain recoverable");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            compressed
+        );
+        assert_eq!(
+            record.response_body.as_deref(),
+            std::str::from_utf8(plaintext).ok()
+        );
+        let encoded = record
+            .response_body_base64
+            .as_deref()
+            .expect("compressed response should remain recoverable");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            compressed
+        );
+    }
+
+    #[test]
+    fn preview_hides_legacy_lossy_compressed_body_and_warns() {
+        let content = r#"01 network
+
+[meta]
+name = "legacy-lossy"
+version = "1.0.0"
+created_at = "2026-09-02T04:04:10Z"
+
+[options]
+count = 1
+
+---
+[{"id":"REQ-lossy","method":"POST","url":"https://example.test/gzip","status":200,"request_headers":[["content-type","application/json"],["content-encoding","gzip"]],"request_body":"\u001f��garbled","duration_ms":1,"timestamp":1}]
+"#;
+
+        let preview = build_preview(content).expect("legacy network preview");
+        let network = preview.network.expect("network preview");
+        let detail = network.single_record.expect("single record detail");
+
+        assert!(detail.request_body.is_none());
+        assert!(network
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("older Bifrost version")));
+    }
+
+    #[test]
+    fn preview_decodes_lossless_gzip_body_field() {
+        let plaintext = br#"{"message":"hello from package"}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let record: NetworkRecord = serde_json::from_value(serde_json::json!({
+            "id": "REQ-base64-preview",
+            "method": "POST",
+            "url": "https://example.test/gzip",
+            "status": 200,
+            "request_headers": [
+                ["content-type", "application/json"],
+                ["content-encoding", "gzip"]
+            ],
+            "request_body_base64": base64::engine::general_purpose::STANDARD.encode(compressed),
+            "duration_ms": 1,
+            "timestamp": 1
+        }))
+        .unwrap();
+
+        let preview = build_network_preview(&[record]);
+        let detail = preview.single_record.expect("single record detail");
+
+        assert_eq!(
+            detail.request_body.as_deref(),
+            std::str::from_utf8(plaintext).ok()
+        );
+        assert_eq!(
+            detail.record.request_content_type.as_deref(),
+            Some("application/json")
+        );
+        assert!(preview.warnings.is_empty());
+    }
 
     #[test]
     fn network_record_import_preserves_routing_diagnostics() {
@@ -1662,7 +1845,9 @@ mod tests {
             response_headers: None,
             original_response_headers: None,
             request_body: None,
+            request_body_base64: None,
             response_body: None,
+            response_body_base64: None,
             duration_ms: 78,
             timestamp: 1779283635053,
             matched_rules: Some(vec![MatchedRuleExport {
@@ -1760,7 +1945,9 @@ example.com proxy://127.0.0.1:8080
             )]),
             original_response_headers: None,
             request_body: Some(r#"{"name":"preview"}"#.to_string()),
+            request_body_base64: None,
             response_body: Some(r#"{"ok":true}"#.to_string()),
+            response_body_base64: None,
             duration_ms: 42,
             timestamp: 1779283635053,
             matched_rules: None,
@@ -1781,6 +1968,14 @@ example.com proxy://127.0.0.1:8080
         let detail = network.single_record.expect("single record detail");
         assert_eq!(detail.record.id, "OUT-REQ-preview");
         assert_eq!(detail.record.host, "api.example.test");
+        assert_eq!(
+            detail.record.content_type.as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(
+            detail.record.request_content_type.as_deref(),
+            Some("application/json")
+        );
         assert_eq!(
             detail.record.original_response_headers,
             Some(vec![(
@@ -1846,7 +2041,9 @@ example.com proxy://127.0.0.1:8080
             response_headers: Some(delivered.clone()),
             original_response_headers: Some(original.clone()),
             request_body: None,
+            request_body_base64: None,
             response_body: None,
+            response_body_base64: None,
             duration_ms: 1,
             timestamp: 1,
             matched_rules: None,
@@ -2260,7 +2457,9 @@ example.com proxy://127.0.0.1:8080
             response_headers: None,
             original_response_headers: None,
             request_body: None,
+            request_body_base64: None,
             response_body: None,
+            response_body_base64: None,
             duration_ms: 0,
             timestamp: 0,
             matched_rules: None,
@@ -2295,7 +2494,9 @@ example.com proxy://127.0.0.1:8080
             response_headers: None,
             original_response_headers: None,
             request_body: None,
+            request_body_base64: None,
             response_body: None,
+            response_body_base64: None,
             duration_ms: 0,
             timestamp: 0,
             matched_rules: None,

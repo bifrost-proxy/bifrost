@@ -161,6 +161,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        body = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, format, *args):
         return
 
@@ -254,6 +264,47 @@ contents = [item.get("content", "") for item in active["rules"]]
 assert any(expected_rule in content for content in contents), active
 assert all(forbidden_rule not in content for content in contents), active
 PY
+}
+
+assert_network_export_gzip_body() {
+    local file="$1"
+    local expected_body="$2"
+    python3 - "$file" "$expected_body" <<'PY'
+import base64
+import gzip
+import json
+import sys
+from pathlib import Path
+
+path, expected_body = sys.argv[1:]
+text = Path(path).read_text()
+records = json.loads(text.split("\n---\n", 1)[1])
+assert len(records) == 1, records
+record = records[0]
+assert record["request_body"] == expected_body, record
+raw = base64.b64decode(record["request_body_base64"], validate=True)
+assert gzip.decompress(raw).decode() == expected_body, record
+PY
+}
+
+assert_network_preview_gzip_body() {
+    local file="$1"
+    local expected_body="$2"
+    curl -fsS \
+        -H 'Content-Type: text/plain' \
+        -X POST \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/bifrost-file/preview" \
+        --data-binary "@${file}" \
+        | python3 -c '
+import json, sys
+expected_body = sys.argv[1]
+preview = json.load(sys.stdin)
+network = preview["network"]
+detail = network["single_record"]
+assert detail["request_body"] == expected_body, detail
+assert detail["record"]["request_content_type"] == "application/json", detail
+assert not network.get("warnings"), network
+' "$expected_body"
 }
 
 record_id_for_path_and_port() {
@@ -476,11 +527,23 @@ main() {
     assert_body_contains "inline:updated-only.test" "$(cat "${TEST_DATA_DIR}/update.log")" "port update accepts rule text"
     assert_body_contains "updated-rule" "$(proxy_body "${UPDATE_PORT}" "http://updated-only.test/after-update")" "updated temporary port should use new inline rule"
 
-    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id
+    local gzip_body='{"message":"hello from gzip e2e"}'
+    python3 -c 'import gzip, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(gzip.compress(sys.argv[2].encode()))' \
+        "${TEST_DATA_DIR}/gzip-request.bin" "${gzip_body}"
+    curl -fsS --max-time 5 \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        -H 'Content-Type: application/json' \
+        -H 'Content-Encoding: gzip' \
+        --data-binary "@${TEST_DATA_DIR}/gzip-request.bin" \
+        "http://127.0.0.1:${HTML_PORT}/gzip-body" \
+        > "${TEST_DATA_DIR}/gzip-response.json"
+
+    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id gzip_record_id
     temp_record_id="$(wait_for_record "/temp-port" "${TEMP_PORT}")"
     main_record_id="$(wait_for_record "/main-port" "${MAIN_PORT}")"
     direct_temp_record_id="$(wait_for_record "/direct-temp" "${TEMP_PORT}")"
     direct_main_record_id="$(wait_for_record "/direct-main" "${MAIN_PORT}")"
+    gzip_record_id="$(wait_for_record "/gzip-body" "${MAIN_PORT}")"
     assert_body_contains "\"lp\":${TEMP_PORT}" "$(traffic_json)" "Traffic API compact records include temporary listener port"
     assert_body_contains "\"lp\":${MAIN_PORT}" "$(traffic_json)" "Traffic API compact records include main listener port"
     assert_body_contains "\"listener_port\":${TEMP_PORT}" "$(traffic_detail_json "${temp_record_id}")" "Traffic detail includes temporary listener port"
@@ -515,6 +578,11 @@ main() {
     export_network_file "${temp_record_id}" "${TEST_DATA_DIR}/temp-network-export.bifrost"
     assert_network_export_active_rules "${TEST_DATA_DIR}/temp-network-export.bifrost" "custom_port" "${TEMP_PORT}" "temp-only.test status://210" "main-only.test status://209"
     _log_pass "Network export includes custom-port active rules for temporary listener traffic"
+
+    export_network_file "${gzip_record_id}" "${TEST_DATA_DIR}/gzip-network-export.bifrost"
+    assert_network_export_gzip_body "${TEST_DATA_DIR}/gzip-network-export.bifrost" "${gzip_body}"
+    assert_network_preview_gzip_body "${TEST_DATA_DIR}/gzip-network-export.bifrost" "${gzip_body}"
+    _log_pass "Network export exposes gzip request plaintext and preserves original bytes"
 
     "$BIFROST_BIN" port destroy "${TEMP_PORT}"
     if curl -sS --max-time 2 -x "http://127.0.0.1:${TEMP_PORT}" "http://temp-only.test/" >/dev/null 2>&1; then

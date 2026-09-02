@@ -81,7 +81,12 @@ function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelP
 
   if (preview.network) {
     if (preview.network.single_record) {
-      return <SingleNetworkPreview detail={preview.network.single_record} />;
+      return (
+        <SingleNetworkPreview
+          detail={preview.network.single_record}
+          warnings={preview.network.warnings ?? []}
+        />
+      );
     }
 
     return (
@@ -137,7 +142,13 @@ function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelP
   );
 }
 
-function SingleNetworkPreview({ detail }: { detail: NetworkPreviewDetail }) {
+function SingleNetworkPreview({
+  detail,
+  warnings,
+}: {
+  detail: NetworkPreviewDetail;
+  warnings: string[];
+}) {
   const record = normalizePreviewTrafficRecord(detail);
   return (
     <div style={{ marginTop: 12 }}>
@@ -147,6 +158,15 @@ function SingleNetworkPreview({ detail }: { detail: NetworkPreviewDetail }) {
         message="1 request will be imported into Network"
         description="Review the request detail below, then confirm to import."
       />
+      {warnings.map((warning) => (
+        <Alert
+          key={warning}
+          style={{ marginTop: 12 }}
+          type="warning"
+          showIcon
+          message={warning}
+        />
+      ))}
       <div
         style={{
           height: 560,
