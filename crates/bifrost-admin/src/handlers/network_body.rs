@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use std::io::Read;
 
 const MAX_DECOMPRESSED_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -49,7 +49,7 @@ pub(super) fn decode_body_for_display(
     decode_content_encoded_body(bytes, content_encoding_value(headers).as_deref())
 }
 
-pub(super) fn decode_content_encoded_body(
+pub(crate) fn decode_content_encoded_body(
     bytes: Vec<u8>,
     content_encoding: Option<&str>,
 ) -> Vec<u8> {
@@ -159,7 +159,20 @@ fn looks_like_legacy_lossy_body(text: &str, headers: &Option<Vec<(String, String
                 .any(|character| character.is_control() && !character.is_whitespace()))
 }
 
-fn decompress(data: &[u8], content_encoding: &str) -> std::io::Result<Vec<u8>> {
+pub(super) fn content_encoding_is_supported(content_encoding: &str) -> bool {
+    content_encoding
+        .split(',')
+        .map(str::trim)
+        .filter(|encoding| !encoding.is_empty())
+        .all(|encoding| {
+            matches!(
+                encoding.to_ascii_lowercase().as_str(),
+                "identity" | "gzip" | "x-gzip" | "deflate" | "br" | "zstd"
+            )
+        })
+}
+
+pub(super) fn decompress(data: &[u8], content_encoding: &str) -> std::io::Result<Vec<u8>> {
     let mut decoded = data.to_vec();
     let mut remaining_output_bytes = MAX_DECOMPRESSED_BODY_BYTES;
     for encoding in content_encoding
@@ -170,9 +183,10 @@ fn decompress(data: &[u8], content_encoding: &str) -> std::io::Result<Vec<u8>> {
     {
         let next = match encoding.to_ascii_lowercase().as_str() {
             "identity" => decoded,
-            "gzip" | "x-gzip" => {
-                read_limited(GzDecoder::new(decoded.as_slice()), remaining_output_bytes)?
-            }
+            "gzip" | "x-gzip" => read_limited(
+                MultiGzDecoder::new(decoded.as_slice()),
+                remaining_output_bytes,
+            )?,
             "deflate" => read_limited(ZlibDecoder::new(decoded.as_slice()), remaining_output_bytes)
                 .or_else(|_| {
                     read_limited(
@@ -288,6 +302,9 @@ mod tests {
     fn supported_content_encodings_are_decompressed() {
         let plaintext = b"encoded payload";
 
+        assert!(content_encoding_is_supported("gzip, br, identity"));
+        assert!(!content_encoding_is_supported("gzip, x-company-codec"));
+
         let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         zlib.write_all(plaintext).unwrap();
         assert_eq!(
@@ -395,6 +412,24 @@ mod tests {
         let alias_headers = Some(vec![("Content-Encoding".to_string(), "x-gzip".to_string())]);
         let alias = export_body(gzip, &alias_headers);
         assert_eq!(alias.text.as_deref(), Some("repeated header body"));
+    }
+
+    #[test]
+    fn concatenated_gzip_members_are_all_decoded() {
+        fn gzip_member(data: &[u8]) -> Vec<u8> {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let mut wire = gzip_member(b"first member ");
+        wire.extend_from_slice(&gzip_member(b"second member"));
+
+        assert_eq!(
+            decompress(&wire, "gzip").expect("decode all gzip members"),
+            b"first member second member"
+        );
     }
 
     #[test]

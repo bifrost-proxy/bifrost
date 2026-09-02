@@ -14,6 +14,7 @@ use super::types::{
 use crate::body_store::{BodyRef, SharedBodyStore};
 use crate::connection_monitor::SharedConnectionMonitor;
 use crate::frame_store::SharedFrameStore;
+use crate::handlers::network_body::decode_content_encoded_body;
 use crate::traffic_db::{
     QueryParams, SharedTrafficDbStore, TextMatchMode, TrafficSearchFields, TrafficSummaryCompact,
 };
@@ -597,20 +598,13 @@ impl SearchEngine {
                     Ok(v) => BodyCacheEntry::Json(v),
                     Err(_) => BodyCacheEntry::NonJson,
                 },
-                Some(other) => {
-                    if let Some(ref store) = self.body_store {
-                        let guard = store.read();
-                        match guard.load(other) {
-                            Some(content) => match serde_json::from_str::<JsonValue>(&content) {
-                                Ok(v) => BodyCacheEntry::Json(v),
-                                Err(_) => BodyCacheEntry::NonJson,
-                            },
-                            None => BodyCacheEntry::Missing,
-                        }
-                    } else {
-                        BodyCacheEntry::Missing
-                    }
-                }
+                Some(other) => match self.load_decoded_body_bytes(other) {
+                    Some(bytes) => match serde_json::from_slice::<JsonValue>(&bytes) {
+                        Ok(v) => BodyCacheEntry::Json(v),
+                        Err(_) => BodyCacheEntry::NonJson,
+                    },
+                    None => BodyCacheEntry::Missing,
+                },
                 None => BodyCacheEntry::Missing,
             };
             body_cache.insert(cache_key.clone(), entry);
@@ -698,15 +692,23 @@ impl SearchEngine {
         match body_ref {
             BodyRef::Inline { data } => self.search_text(data, keyword, field),
             BodyRef::File { .. } | BodyRef::FileRange { .. } | BodyRef::ContentEncoded { .. } => {
-                if let Some(ref body_store) = self.body_store {
-                    let bytes = body_store.read().load_bytes(body_ref);
-                    if let Some(bytes) = bytes {
-                        return self.search_body_bytes(&bytes, keyword, field);
-                    }
+                if let Some(bytes) = self.load_decoded_body_bytes(body_ref) {
+                    return self.search_body_bytes(&bytes, keyword, field);
                 }
                 None
             }
         }
+    }
+
+    fn load_decoded_body_bytes(&self, body_ref: &BodyRef) -> Option<Vec<u8>> {
+        let bytes = match body_ref {
+            BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
+            other => self.body_store.as_ref()?.read().load_bytes(other),
+        }?;
+        Some(decode_content_encoded_body(
+            bytes,
+            body_ref.content_encoding(),
+        ))
     }
 
     fn search_body_bytes(&self, bytes: &[u8], keyword: &str, field: &str) -> Option<MatchLocation> {
@@ -1079,17 +1081,7 @@ impl SearchEngine {
             record_id
         );
         if !body_bytes_cache.contains_key(&cache_key) {
-            let bytes = match body_ref {
-                BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
-                other => {
-                    if let Some(ref store) = self.body_store {
-                        let guard = store.read();
-                        guard.load_bytes(other)
-                    } else {
-                        None
-                    }
-                }
-            };
+            let bytes = self.load_decoded_body_bytes(body_ref);
             body_bytes_cache.insert(cache_key.clone(), bytes);
         }
         let bytes = body_bytes_cache.get(&cache_key)?.as_ref()?;
@@ -1339,6 +1331,7 @@ fn eval_value_condition(value: &JsonValue, condition: &FilterCondition) -> bool 
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1572,6 +1565,135 @@ mod tests {
         assert!(response.results[0].matches[0]
             .preview
             .contains("STORAGE-BODY-Needle-42"));
+    }
+
+    #[test]
+    fn encoded_file_body_is_decoded_for_search_json_filter_and_include() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+        let dir = TempDir::new().expect("temp dir");
+        let db = Arc::new(
+            TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+                .expect("traffic db"),
+        );
+        let body_store = Arc::new(RwLock::new(BodyStore::new(
+            dir.path().join("body_cache"),
+            0,
+            7,
+            64 * 1024,
+            Duration::from_millis(100),
+        )));
+        let plaintext = br#"{"marker":"encoded-search-needle","ok":true}"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plaintext).expect("compress body");
+        let compressed = encoder.finish().expect("finish gzip body");
+        let body_ref = body_store
+            .read()
+            .store("REQ-search-encoded", "res", &compressed)
+            .expect("store compressed body")
+            .with_content_encoding(Some("gzip"));
+        let mut record = TrafficRecord::new(
+            "REQ-search-encoded".to_string(),
+            "GET".to_string(),
+            "https://example.com/encoded".to_string(),
+        );
+        record.response_body_ref = Some(body_ref);
+        db.record(record);
+        let engine = SearchEngine::new(db, Some(body_store));
+
+        let response = engine.search(&SearchRequest {
+            keyword: "encoded-search-needle".to_string(),
+            scope: SearchScope {
+                all: false,
+                response_body: true,
+                ..Default::default()
+            },
+            filters: SearchFilters {
+                conditions: vec![FilterCondition {
+                    field: "res.body.$.ok".to_string(),
+                    operator: "equals".to_string(),
+                    value: "true".to_string(),
+                }],
+                ..Default::default()
+            },
+            include: crate::search::SearchInclude {
+                response_body: true,
+                ..Default::default()
+            },
+            limit: Some(20),
+            ..Default::default()
+        });
+
+        assert_eq!(response.total_matched, 1);
+        assert!(response.results[0].matches[0]
+            .preview
+            .contains("encoded-search-needle"));
+        let chunk = response.results[0]
+            .bodies
+            .as_ref()
+            .and_then(|bodies| bodies.response.as_ref())
+            .expect("included response body");
+        assert_eq!(
+            BASE64.decode(&chunk.bytes_b64).expect("decode base64"),
+            plaintext
+        );
+        assert_eq!(chunk.size, plaintext.len());
+    }
+
+    #[test]
+    fn file_body_json_filter_handles_non_json_and_missing_files() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = Arc::new(
+            TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+                .expect("traffic db"),
+        );
+        let body_store = Arc::new(RwLock::new(BodyStore::new(
+            dir.path().join("body_cache"),
+            0,
+            7,
+            64 * 1024,
+            Duration::from_millis(100),
+        )));
+        let mut non_json = TrafficRecord::new(
+            "REQ-search-non-json".to_string(),
+            "GET".to_string(),
+            "https://example.com/non-json".to_string(),
+        );
+        non_json.response_body_ref =
+            body_store
+                .read()
+                .store("REQ-search-non-json", "res", b"plain text is not JSON");
+        db.record(non_json);
+        let mut missing = TrafficRecord::new(
+            "REQ-search-missing".to_string(),
+            "GET".to_string(),
+            "https://example.com/missing".to_string(),
+        );
+        missing.response_body_ref = Some(BodyRef::File {
+            path: dir
+                .path()
+                .join("body_cache/missing")
+                .to_string_lossy()
+                .to_string(),
+            size: 64,
+        });
+        db.record(missing);
+        let engine = SearchEngine::new(db, Some(body_store));
+
+        let response = engine.search(&SearchRequest {
+            filters: SearchFilters {
+                conditions: vec![FilterCondition {
+                    field: "res.body.$.ok".to_string(),
+                    operator: "equals".to_string(),
+                    value: "true".to_string(),
+                }],
+                ..Default::default()
+            },
+            limit: Some(20),
+            ..Default::default()
+        });
+
+        assert_eq!(response.total_matched, 0);
     }
 
     fn make_db() -> Arc<TrafficDbStore> {

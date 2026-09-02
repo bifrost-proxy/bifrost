@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use std::io::{Read, Write};
 
 const DEFAULT_MAX_DECOMPRESS_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
@@ -82,7 +82,7 @@ fn decompress_gzip_limited(
     data: &[u8],
     max_output_bytes: usize,
 ) -> Result<Vec<u8>, std::io::Error> {
-    let mut decoder = GzDecoder::new(data);
+    let mut decoder = MultiGzDecoder::new(data);
     read_to_end_limited(&mut decoder, max_output_bytes)
 }
 
@@ -238,6 +238,25 @@ mod tests {
 
         let result = decompress_body(&compressed, Some("gzip"));
         assert_eq!(result.as_ref(), original);
+    }
+
+    #[test]
+    fn test_decompresses_all_concatenated_gzip_members() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        fn gzip_member(data: &[u8]) -> Vec<u8> {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let mut compressed = gzip_member(b"first member ");
+        compressed.extend_from_slice(&gzip_member(b"second member"));
+
+        let result = decompress_body(&compressed, Some("gzip"));
+        assert_eq!(result.as_ref(), b"first member second member");
     }
 
     #[test]

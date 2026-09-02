@@ -23,7 +23,7 @@ pub mod group_rules;
 pub mod im_gateway;
 pub mod metrics;
 pub mod mobile_devices;
-mod network_body;
+pub(crate) mod network_body;
 pub mod notification;
 pub mod ports;
 pub mod power;

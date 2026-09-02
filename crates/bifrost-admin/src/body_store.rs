@@ -750,6 +750,20 @@ mod tests {
     }
 
     #[test]
+    fn content_encoded_storage_ref_unwraps_to_the_physical_reference() {
+        let stored = BodyRef::Inline {
+            data: "wire bytes".to_string(),
+        };
+        let encoded = stored.clone().with_content_encoding(Some("gzip"));
+
+        assert!(matches!(
+            encoded.storage_ref(),
+            BodyRef::Inline { data } if data == "wire bytes"
+        ));
+        assert!(std::ptr::eq(stored.storage_ref(), &stored));
+    }
+
+    #[test]
     fn test_store_file_large_body() {
         let dir = create_test_dir();
         let store = BodyStore::new(dir.clone(), 10, 7, 64 * 1024, Duration::from_millis(200));

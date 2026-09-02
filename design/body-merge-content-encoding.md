@@ -79,7 +79,9 @@ api.example.com resMerge://({"test":"qwe"})
 
 - 普通缓冲请求/响应在写入 `request_body_ref` / `response_body_ref` 前解码。
 - 流式请求和超过内存阈值的文件型响应先原样转发并落盘，并在 `BodyRef::ContentEncoded` 中持久化实际的编码链；Traffic body、Network 导出和预览只对带该标记的引用解码，因此不阻塞网络转发热路径，也不会根据旧 header 把已经解码的应用数据再解一层。
+- `traffic get`、全文搜索、JSONPath Body 条件过滤和搜索结果 `include` 统一读取上述标记并解码，避免 CLI/远程查询路径重新把 wire bytes 当 UTF-8 文本。
 - 展示与导出的完整编码链共享 10 MiB 解压输出预算，不会让每层单独重复消耗 10 MiB；超限、损坏或未知编码保留原始落盘引用，不伪造明文。Traffic API 的 `raw=1` 优先读取独立 raw 引用；不存在 raw 引用时沿用既有的 body 引用回退语义。
+- gzip 使用多 member 解码语义，合法的相邻 gzip member 会在同一 10 MiB 预算内全部展开并顺序拼接。
 - network `.bifrost` 导出保留原始字节的 base64，同时写入可解码的明文；导入预览优先展示明文，旧版本已做 lossy UTF-8 转换的不可逆数据给出明确警告。
 - 确认导入 Network 包时，明文 Body 会写入主引用，可用的 base64 原始字节会写入 raw 引用；多记录包同样扫描并展示旧 lossy Body 警告。
 
@@ -180,6 +182,9 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `network_body::repeated_content_encoding_headers_and_x_gzip_are_decoded`：Network 包内字节按重复编码 header 解码；未知编码保持原字节。
 - `decompress::test_multiple_content_codings_share_one_output_budget`：多层编码共享同一解压预算，避免按层重复分配上限。
 - `traffic::stored_body_tests::only_decodes_refs_marked_as_content_encoded`：Traffic 读取只解码带持久化编码标记的 wire body，已经移除 HTTP 外层编码的 `application/gzip` 数据不会被二次解码。
+- `query_service::traffic_get_decodes_content_encoded_file_body`：CLI/Remote Invoke 共用的 `traffic get` 查询服务返回解码后的文件型 body。
+- `search::encoded_file_body_is_decoded_for_search_json_filter_and_include`：关键词搜索、JSONPath 条件与 include body 同时读取解码后的文件型 body。
+- `network_body::concatenated_gzip_members_are_all_decoded` / `decompress::test_decompresses_all_concatenated_gzip_members`：管理端与代理端完整解码相邻 gzip member。
 - `bifrost_file::imported_network_bodies_persist_plaintext_and_raw_bytes`：Network 导入后主 Body 与 raw Body 都可继续读取。
 - `body::apply_body_rules_preserving_encoding_decode_failure_passthrough`：头声明 gzip 但 Body 实际是 identity，解压失败保留原字节。
 - `body::apply_content_injection_preserving_encoding_gzip_html`：gzip HTML 注入 badge/inline script 后仍是有效 gzip 且解码后 HTML 结构正确。
@@ -199,6 +204,7 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `e2e-tests/tests/test_body_https_reqmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 请求经过 `reqMerge` 后仍保持有效 gzip。
 - `e2e-tests/tests/test_body_https_resmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
 - `e2e-tests/tests/test_replay_rules.sh`：本地 echo/SSE/WebSocket 上游验证 Replay custom rules，`request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵，`req_res_script.txt` 覆盖 Replay 的 Request/Response Script，`bp_decode.txt` 覆盖 Replay Traffic 落库前的 `decode://bp`。
+- `e2e-tests/tests/test_temporary_port_bindings.sh`：真实代理记录双层编码和多 member gzip 请求/响应，验证 Traffic API、`traffic get`、搜索关键词、响应 JSONPath 过滤、include body、Network 导出/预览/导入均返回明文，同时 raw body 仍可恢复 wire bytes。
 
 ### 真实场景测试 human_tests
 

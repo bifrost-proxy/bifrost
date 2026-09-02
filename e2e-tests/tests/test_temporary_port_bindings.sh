@@ -166,7 +166,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         request_body = self.rfile.read(length)
-        echo_encoded_body = self.path in ("/stacked-body", "/nested-gzip")
+        echo_encoded_body = self.path in ("/stacked-body", "/nested-gzip", "/multi-gzip")
         body = request_body if echo_encoded_body else b'{"ok":true}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -644,15 +644,29 @@ main() {
         "http://127.0.0.1:${HTML_PORT}/nested-gzip" \
         > "${TEST_DATA_DIR}/nested-gzip-response.bin"
 
-    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id nested_gzip_record_id
+    local multi_gzip_body='{"message":"hello from concatenated gzip members"}'
+    python3 -c 'import gzip, pathlib, sys; body=sys.argv[2].encode(); middle=len(body)//2; pathlib.Path(sys.argv[1]).write_bytes(gzip.compress(body[:middle]) + gzip.compress(body[middle:]))' \
+        "${TEST_DATA_DIR}/multi-gzip-wire.bin" "${multi_gzip_body}"
+    curl -fsS --max-time 5 --noproxy '' \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        -H 'Content-Type: application/json' \
+        -H 'Content-Encoding: gzip' \
+        --data-binary "@${TEST_DATA_DIR}/multi-gzip-wire.bin" \
+        "http://127.0.0.1:${HTML_PORT}/multi-gzip" \
+        > "${TEST_DATA_DIR}/multi-gzip-response.json"
+
+    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id nested_gzip_record_id multi_gzip_record_id
     temp_record_id="$(wait_for_record "/temp-port" "${TEMP_PORT}")"
     main_record_id="$(wait_for_record "/main-port" "${MAIN_PORT}")"
     direct_temp_record_id="$(wait_for_record "/direct-temp" "${TEMP_PORT}")"
     direct_main_record_id="$(wait_for_record "/direct-main" "${MAIN_PORT}")"
     stacked_record_id="$(wait_for_record "/stacked-body" "${MAIN_PORT}")"
     nested_gzip_record_id="$(wait_for_record "/nested-gzip" "${MAIN_PORT}")"
+    multi_gzip_record_id="$(wait_for_record "/multi-gzip" "${MAIN_PORT}")"
     assert_traffic_stacked_body_plaintext "${stacked_record_id}" "${stacked_body}"
     assert_traffic_preserves_application_gzip "${nested_gzip_record_id}" "${TEST_DATA_DIR}/application-gzip.bin"
+    assert_traffic_stacked_body_plaintext "${multi_gzip_record_id}" "${multi_gzip_body}"
+    _log_pass "Traffic request and response decode every concatenated gzip member"
     assert_body_contains "\"lp\":${TEMP_PORT}" "$(traffic_json)" "Traffic API compact records include temporary listener port"
     assert_body_contains "\"lp\":${MAIN_PORT}" "$(traffic_json)" "Traffic API compact records include main listener port"
     assert_body_contains "\"listener_port\":${TEMP_PORT}" "$(traffic_detail_json "${temp_record_id}")" "Traffic detail includes temporary listener port"
@@ -679,6 +693,43 @@ main() {
     _log_pass "CLI traffic search excludes main listener port when filtering temporary port"
     "$BIFROST_BIN" traffic get --port "${MAIN_PORT}" "${temp_record_id}" --format json > "${TEST_DATA_DIR}/traffic-get.json"
     assert_body_contains "\"listener_port\":${TEMP_PORT}" "$(cat "${TEST_DATA_DIR}/traffic-get.json")" "CLI traffic get JSON includes temporary listener port"
+    "$BIFROST_BIN" traffic get --port "${MAIN_PORT}" "${stacked_record_id}" --request-body --response-body --format json > "${TEST_DATA_DIR}/traffic-get-stacked.json"
+    python3 - "${TEST_DATA_DIR}/traffic-get-stacked.json" "${stacked_body}" <<'PY'
+import json
+import sys
+
+path, expected = sys.argv[1:]
+detail = json.load(open(path))
+assert detail["request_body"]["success"] is True, detail
+assert detail["response_body"]["success"] is True, detail
+assert detail["request_body"]["data"] == expected, detail
+assert detail["response_body"]["data"] == expected, detail
+PY
+    _log_pass "CLI traffic get decodes content-encoded request and response bodies"
+
+    "$BIFROST_BIN" -p "${MAIN_PORT}" traffic search "hello from stacked encoding e2e" \
+        --req-body \
+        --res-json '$.message=hello from stacked encoding e2e' \
+        --listener-port "${MAIN_PORT}" \
+        --include bodies \
+        --format json \
+        --max-results 20 \
+        --max-scan 200 \
+        > "${TEST_DATA_DIR}/traffic-search-stacked.json"
+    python3 - "${TEST_DATA_DIR}/traffic-search-stacked.json" "${stacked_record_id}" "${stacked_body}" <<'PY'
+import base64
+import json
+import sys
+
+path, expected_id, expected_body = sys.argv[1:]
+payload = json.load(open(path))
+item = next(item for item in payload["results"] if item["id"] == expected_id)
+assert "hello from stacked encoding e2e" in item["matches"][0]["preview"], item
+for side in ("request", "response"):
+    chunk = item["bodies"][side]
+    assert base64.b64decode(chunk["bytes_b64"], validate=True).decode() == expected_body, (side, chunk)
+PY
+    _log_pass "CLI traffic search decodes encoded bodies for keyword, JSON filter, and includes"
 
     export_network_file "${main_record_id}" "${TEST_DATA_DIR}/main-network-export.bifrost"
     assert_network_export_active_rules "${TEST_DATA_DIR}/main-network-export.bifrost" "default_port" "${MAIN_PORT}" "main-only.test status://209" "temp-only.test status://210"

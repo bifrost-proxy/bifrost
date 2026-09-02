@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -43,6 +42,7 @@ static REPLAY_SEMAPHORE: once_cell::sync::Lazy<Arc<Semaphore>> =
 
 static REPLAY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
 fn get_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -96,36 +96,14 @@ fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Option<Strin
         return None;
     }
 
-    let encoding = get_header_value(headers, "content-encoding")
-        .unwrap_or("")
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-
-    let decoded = match encoding.as_str() {
-        "" => body.to_vec(),
-        "gzip" => {
-            let mut d = flate2::read::GzDecoder::new(std::io::Cursor::new(body));
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).ok()?;
-            out
+    let headers = Some(headers.to_vec());
+    let encoding = super::network_body::content_encoding_value(&headers);
+    let decoded = match encoding.as_deref() {
+        None | Some("") => body.to_vec(),
+        Some(encoding) if !super::network_body::content_encoding_is_supported(encoding) => {
+            body.to_vec()
         }
-        "deflate" => {
-            let mut d = flate2::read::ZlibDecoder::new(std::io::Cursor::new(body));
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).ok()?;
-            out
-        }
-        "br" => {
-            let mut d = brotli::Decompressor::new(std::io::Cursor::new(body), 4096);
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).ok()?;
-            out
-        }
-        "zstd" => zstd::stream::decode_all(std::io::Cursor::new(body)).ok()?,
-        _ => body.to_vec(),
+        Some(encoding) => super::network_body::decompress(body, encoding).ok()?,
     };
 
     Some(String::from_utf8_lossy(&decoded).to_string())
@@ -3530,7 +3508,7 @@ mod coverage_boost_v2 {
     use crate::test_support::TestAdminState;
 
     #[test]
-    fn decode_replay_body_uses_first_encoding_when_multiple() {
+    fn decode_replay_body_decodes_complete_encoding_chain() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
         use std::io::Write;
@@ -3539,13 +3517,40 @@ mod coverage_boost_v2 {
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(raw).unwrap();
         let gz = enc.finish().unwrap();
+        let mut br = Vec::new();
+        {
+            let mut enc = brotli::CompressorWriter::new(&mut br, 4096, 5, 22);
+            enc.write_all(&gz).unwrap();
+        }
 
         let headers = vec![
             ("content-encoding".to_string(), "gzip, br".to_string()),
             ("other".to_string(), "ignored".to_string()),
         ];
-        let decoded = decode_replay_body(&headers, &gz).unwrap();
+        let decoded = decode_replay_body(&headers, &br).unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn decode_replay_body_decodes_all_gzip_members() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        fn gzip_member(data: &[u8]) -> Vec<u8> {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let mut body = gzip_member(b"first member ");
+        body.extend_from_slice(&gzip_member(b"second member"));
+        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
+
+        assert_eq!(
+            decode_replay_body(&headers, &body).as_deref(),
+            Some("first member second member")
+        );
     }
 
     #[test]

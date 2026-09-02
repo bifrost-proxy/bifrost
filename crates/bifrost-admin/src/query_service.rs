@@ -9,6 +9,7 @@ use bifrost_core::{BifrostError, Result};
 use serde_json::{json, Value};
 
 use crate::body_store::BodyRef;
+use crate::handlers::network_body::decode_content_encoded_body;
 use crate::push::SharedPushManager;
 use crate::search::{
     FilterCondition, SearchEngine, SearchFilters, SearchInclude, SearchProgress, SearchRequest,
@@ -311,7 +312,11 @@ impl AdminQueryService {
                     })?;
                 let loaded = tokio::task::spawn_blocking(move || {
                     let store = body_store.read();
-                    store.load(&body_ref)
+                    store.load_bytes(&body_ref).map(|bytes| {
+                        let decoded =
+                            decode_content_encoded_body(bytes, body_ref.content_encoding());
+                        String::from_utf8_lossy(&decoded).to_string()
+                    })
                 })
                 .await
                 .map_err(|e| BifrostError::Config(format!("body load task join failed: {e}")))?;
@@ -541,6 +546,7 @@ mod tests {
     use bifrost_command::{
         SearchFilters as CommandSearchFilters, SearchScope as CommandSearchScope,
     };
+    use std::io::Write;
     use tokio::time::{timeout, Duration};
 
     use crate::push::{start_push_tasks, ClientSubscription, PushMessage};
@@ -596,6 +602,66 @@ mod tests {
         assert_eq!(params.direction, Direction::Forward);
         assert_eq!(params.host_contains.as_deref(), Some("example.com"));
         assert_eq!(params.listener_port, Some(50831));
+    }
+
+    #[tokio::test]
+    async fn traffic_get_decodes_content_encoded_file_body() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = br#"{"marker":"traffic-get-plaintext"}"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plaintext).expect("compress body");
+        let compressed = encoder.finish().expect("finish gzip body");
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("query-service-encoded", "res", &compressed)
+            .expect("store compressed body")
+            .with_content_encoding(Some("gzip"));
+        let mut record = TrafficRecord::new(
+            "query-service-encoded".to_string(),
+            "GET".to_string(),
+            "http://example.test/query-service-encoded".to_string(),
+        );
+        record.status = 200;
+        record.response_body_ref = Some(body_ref);
+        harness.traffic_db.record(record);
+        let service = AdminQueryService::new(harness.state());
+
+        let detail = service
+            .get_traffic_json(&TrafficGetArgs {
+                id: "query-service-encoded".to_string(),
+                response_body: true,
+                ..TrafficGetArgs::default()
+            })
+            .await
+            .expect("get traffic detail");
+
+        assert_eq!(
+            detail["response_body"]["data"],
+            String::from_utf8_lossy(plaintext).as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn traffic_get_reports_missing_file_body_without_panicking() {
+        let harness = TestAdminState::builder().build();
+        let service = AdminQueryService::new(harness.state());
+        let body_ref = BodyRef::File {
+            path: harness
+                .data_dir()
+                .join("missing-traffic-body")
+                .to_string_lossy()
+                .to_string(),
+            size: 128,
+        };
+
+        let body = service
+            .load_body_json(Some(&body_ref))
+            .await
+            .expect("missing body is represented in the response");
+
+        assert_eq!(body["success"], false);
+        assert!(body["data"].is_null());
     }
 
     #[tokio::test]
