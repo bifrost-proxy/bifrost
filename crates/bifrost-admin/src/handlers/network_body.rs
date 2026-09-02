@@ -22,6 +22,14 @@ pub(super) fn header_value(headers: &Option<Vec<(String, String)>>, name: &str) 
         .map(|(_, value)| value.clone())
 }
 
+pub(super) fn body_size(text: Option<&str>, body_base64: Option<&str>) -> usize {
+    text.map(str::len)
+        .or_else(|| {
+            body_base64.and_then(|encoded| STANDARD.decode(encoded).ok().map(|bytes| bytes.len()))
+        })
+        .unwrap_or(0)
+}
+
 fn content_encoding_value(headers: &Option<Vec<(String, String)>>) -> Option<String> {
     let values = headers
         .as_ref()?
@@ -78,7 +86,7 @@ pub(super) fn preview_body(
     label: &str,
 ) -> PreviewBody {
     if let Some(text) = text {
-        if looks_like_legacy_lossy_body(text, headers) {
+        if body_base64.is_none() && looks_like_legacy_lossy_body(text, headers) {
             return PreviewBody {
                 text: None,
                 warning: Some(format!(
@@ -205,6 +213,30 @@ mod tests {
             STANDARD.decode(identity.base64.unwrap()).unwrap(),
             vec![0xff, 0x00, 0xfe]
         );
+    }
+
+    #[test]
+    fn base64_body_size_is_lossless_and_invalid_base64_is_empty() {
+        assert_eq!(body_size(None, Some("AAECAw==")), 4);
+        assert_eq!(body_size(Some("plain"), Some("AAECAw==")), 5);
+        assert_eq!(body_size(None, Some("not base64")), 0);
+    }
+
+    #[test]
+    fn lossless_base64_prevents_legacy_replacement_character_false_positive() {
+        let headers = Some(vec![(
+            "Content-Encoding".to_string(),
+            "gzip".to_string(),
+        )]);
+        let preview = preview_body(
+            Some("valid \u{fffd}\u{fffd} text"),
+            Some("AAECAw=="),
+            &headers,
+            "request",
+        );
+
+        assert_eq!(preview.text.as_deref(), Some("valid \u{fffd}\u{fffd} text"));
+        assert!(preview.warning.is_none());
     }
 
     #[test]

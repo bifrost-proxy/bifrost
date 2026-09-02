@@ -10,7 +10,7 @@ use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-use super::network_body::{export_body, header_value, preview_body};
+use super::network_body::{body_size, export_body, header_value, preview_body};
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
 use crate::traffic::TrafficRecord;
@@ -327,8 +327,14 @@ fn build_network_preview(records: &[NetworkRecord]) -> NetworkPreview {
                 protocol: traffic_record.protocol,
                 client_app: record.client_app.clone(),
                 duration_ms: record.duration_ms,
-                request_size: record.request_body.as_ref().map_or(0, |body| body.len()),
-                response_size: record.response_body.as_ref().map_or(0, |body| body.len()),
+                request_size: body_size(
+                    record.request_body.as_deref(),
+                    record.request_body_base64.as_deref(),
+                ),
+                response_size: body_size(
+                    record.response_body.as_deref(),
+                    record.response_body_base64.as_deref(),
+                ),
             }
         })
         .collect();
@@ -546,8 +552,14 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
 
     let imported_id = format!("OUT-{}", record.id);
 
-    let request_size = record.request_body.as_ref().map_or(0, |b| b.len());
-    let response_size = record.response_body.as_ref().map_or(0, |b| b.len());
+    let request_size = body_size(
+        record.request_body.as_deref(),
+        record.request_body_base64.as_deref(),
+    );
+    let response_size = body_size(
+        record.response_body.as_deref(),
+        record.response_body_base64.as_deref(),
+    );
     let (original_response_headers, response_headers) =
         if let Some(original) = &record.original_response_headers {
             let delivered = record

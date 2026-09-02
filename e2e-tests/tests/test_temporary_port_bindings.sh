@@ -573,7 +573,7 @@ main() {
     local stacked_body='{"message":"hello from stacked encoding e2e"}'
     python3 -c 'import gzip, pathlib, sys, zlib; pathlib.Path(sys.argv[1]).write_bytes(zlib.compress(gzip.compress(sys.argv[2].encode())))' \
         "${TEST_DATA_DIR}/stacked-request.bin" "${stacked_body}"
-    curl -fsS --max-time 5 \
+    curl -fsS --max-time 5 --noproxy '' \
         -x "http://127.0.0.1:${MAIN_PORT}" \
         -H 'Content-Type: application/json' \
         -H 'Content-Encoding: gzip' \
