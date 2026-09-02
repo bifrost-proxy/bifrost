@@ -63,6 +63,18 @@ fn content_encoding_header_value(headers: &hyper::HeaderMap) -> Option<String> {
     (!values.is_empty()).then(|| values.join(", "))
 }
 
+pub(in crate::proxy::http) fn content_encoding_is_identity(content_encoding: &str) -> bool {
+    let mut tokens = content_encoding
+        .split(',')
+        .map(str::trim)
+        .filter(|encoding| !encoding.is_empty());
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    first.eq_ignore_ascii_case("identity")
+        && tokens.all(|encoding| encoding.eq_ignore_ascii_case("identity"))
+}
+
 pub(in crate::proxy::http) fn set_content_encoding_header(
     headers: &mut hyper::HeaderMap,
     content_encoding: Option<&str>,
@@ -171,5 +183,14 @@ mod content_encoding_tests {
             response_content_encoding(&parts).as_deref(),
             Some("gzip, br")
         );
+    }
+
+    #[test]
+    fn only_identity_tokens_are_classified_as_unencoded() {
+        assert!(content_encoding_is_identity("identity"));
+        assert!(content_encoding_is_identity(" identity, IDENTITY "));
+        assert!(!content_encoding_is_identity(""));
+        assert!(!content_encoding_is_identity("identity, gzip"));
+        assert!(!content_encoding_is_identity("x-company-codec"));
     }
 }

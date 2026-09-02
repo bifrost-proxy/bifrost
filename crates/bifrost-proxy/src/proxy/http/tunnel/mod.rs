@@ -45,8 +45,9 @@ use self::host_rule::parse_host_rule;
 use self::io::{BufferedIo, CombinedAsyncRw};
 
 use super::body_metadata::{
-    buffered_res_body_mode, normalize_req_headers, normalize_res_headers,
-    response_content_encoding, set_content_encoding_header, streaming_res_body_mode, BodyMode,
+    buffered_res_body_mode, content_encoding_is_identity, normalize_req_headers,
+    normalize_res_headers, response_content_encoding, set_content_encoding_header,
+    streaming_res_body_mode, BodyMode,
 };
 use super::breakpoint::breakpoint_tls_interception_required as bp_tls;
 use super::breakpoint::{
@@ -3941,7 +3942,7 @@ async fn handle_intercepted_request_with_protocol(
                 .unwrap());
         }
         if response_content_encoding(&res_parts)
-            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+            .is_some_and(|encoding| !content_encoding_is_identity(&encoding))
         {
             return Ok(Response::builder()
                 .status(hyper::StatusCode::BAD_GATEWAY)

@@ -98,11 +98,11 @@ cd /Users/eden/work/github/bifrost-network-empty-bifrost-export
 - 2026-05-20：已执行 `cargo test -p bifrost-core parse_network_accepts_legacy_record_without_active_rules -- --nocapture`，旧 Network record 缺少 `listener_port` / `active_rules` 时解析通过。
 - 2026-05-20：已执行 `cd web && pnpm vitest run src/api/bifrost-file.test.ts`，5 个前端 import/export helper 用例通过，覆盖空 Network 导出提示。
 - 2026-05-20：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，55/55 通过；其中新增断言确认默认端口导出包含 `default_port` 生效规则快照，自定义端口导出包含 `custom_port` 生效规则快照，且两者不互相混入。
-- 2026-09-02：已执行 `cargo test -p bifrost-admin handlers::bifrost_file::tests:: -- --nocapture`（27/27 通过）及 `cargo test -p bifrost-admin handlers::network_body::tests:: -- --nocapture`（10/10 通过），覆盖所有内置 HTTP 压缩算法、双层编码、相邻 gzip member、共享解压预算、未知编码透传、原始字节可恢复、导入 Body 持久化、新格式预览解压、多记录旧 lossy 文件警告和旧格式兼容。
+- 2026-09-02：已执行 `cargo test -p bifrost-admin handlers::bifrost_file::tests:: -- --nocapture`（30/30 通过）及 `cargo test -p bifrost-admin handlers::network_body::tests:: -- --nocapture`（10/10 通过），覆盖所有内置 HTTP 压缩算法、双层编码、相邻 gzip member、共享解压预算、未知编码透传、原始字节可恢复、导入 Body 持久化、非法 base64 在写入任何记录前整体拒绝、新格式预览解压、多记录包无批量解压、旧 lossy 文件警告和旧格式兼容。
 - 2026-09-02：已执行 `cargo test -p bifrost-admin query_service::tests`（5/5 通过）、`cargo test -p bifrost-admin search::engine::tests`（13/13 通过）和 `cargo test -p bifrost-admin decode_replay_body`（13/13 通过），覆盖 `traffic get`、关键词搜索、JSONPath 条件、include body 与 Replay 响应的标准 HTTP 编码解码，以及缺失/非 JSON Body 的回退行为；未知自定义编码仍透传。
 - 2026-09-02：已执行 `cargo test -p bifrost-proxy transform::decompress::tests`（9/9 通过），覆盖完整 Content-Encoding 链逆序解码、相邻 gzip member、共享解压预算和自定义编码原样保留。
 - 2026-09-02：已执行 `cargo test -p bifrost-admin handlers::traffic::sse_stream_tests::`（6/6 通过）、`handlers::traffic::stored_body_tests::`（2/2 通过）和 `handlers::traffic::batch_query_tests::`（8/8 通过），覆盖压缩 SSE 事件恢复、配置化解压上限与批量 Body 解码。
-- 2026-09-02：已按仓库门禁无 filter 执行 `RUST_TEST_THREADS=1 SKIP_FRONTEND_BUILD=1 make coverage-changed`，变更生产 Rust 行覆盖率为 91.89%（272/296），通过 90% 门禁。
+- 2026-09-02：已按仓库门禁无 filter 执行 `RUST_TEST_THREADS=1 SKIP_FRONTEND_BUILD=1 make coverage-changed`，最终变更生产 Rust 行覆盖率为 91.22%（291/319），通过 90% 门禁。
 - 2026-09-02：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，72/72 通过；真实 `gzip, deflate` 双层压缩 POST 及响应经代理录制、`traffic get`、批量 Body API、正文搜索、响应 JSONPath 过滤、include body、Network 导出、预览和重新导入后，两侧明文 JSON、内容类型、导入 Body 与原始请求字节断言通过；另验证多个相邻 gzip member 全部解码、打开状态的 gzip SSE 恢复全部事件，以及 `application/gzip` payload 外叠 HTTP gzip 时请求/响应只移除 HTTP 外层编码。
 - 2026-09-02：已按 TC-NE-05 独立人工执行 release 二进制，使用临时数据目录、动态端口 `62396/62397`、`--no-system-proxy` 及禁用托盘/登录提示环境变量；Traffic 请求/响应、Network 导出及预览的双层压缩明文断言通过，`x-company-codec` 请求/响应二进制字节保持不变，服务按精确 PID 清理。
 

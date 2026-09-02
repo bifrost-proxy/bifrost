@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use super::network_body::{
     body_size, content_encoding_value, decode_content_encoded_body, export_content_encoded_body,
-    header_value, preview_body,
+    header_value, legacy_lossy_body_warning, preview_body,
 };
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
@@ -269,6 +269,7 @@ fn build_preview(content: &str) -> Result<PreviewResponse, String> {
         BifrostFileType::Network => {
             let file = BifrostFileParser::parse_network(content)
                 .map_err(|e| format!("Failed to parse network file: {}", e))?;
+            validate_network_body_base64(&file.content)?;
             Ok(PreviewResponse {
                 file_type,
                 meta,
@@ -351,28 +352,26 @@ fn build_network_preview(records: &[NetworkRecord]) -> NetworkPreview {
     let mut warnings = Vec::new();
     if records.len() > 1 {
         for record in records {
-            let request = preview_body(
-                record.request_body.as_deref(),
-                record.request_body_base64.as_deref(),
-                &record.request_headers,
-                "request",
-            );
-            let response = preview_body(
-                record.response_body.as_deref(),
-                record.response_body_base64.as_deref(),
-                effective_response_headers(record),
-                "response",
-            );
+            let request_warning = record.request_body.as_deref().and_then(|text| {
+                legacy_lossy_body_warning(
+                    text,
+                    record.request_body_base64.as_deref(),
+                    &record.request_headers,
+                    "request",
+                )
+            });
+            let response_warning = record.response_body.as_deref().and_then(|text| {
+                legacy_lossy_body_warning(
+                    text,
+                    record.response_body_base64.as_deref(),
+                    effective_response_headers(record),
+                    "response",
+                )
+            });
             warnings.extend(
-                request
-                    .warning
+                request_warning
                     .into_iter()
-                    .map(|warning| format!("Record {}: {warning}", record.id)),
-            );
-            warnings.extend(
-                response
-                    .warning
-                    .into_iter()
+                    .chain(response_warning)
                     .map(|warning| format!("Record {}: {warning}", record.id)),
             );
         }
@@ -520,11 +519,18 @@ async fn import_network(content: &str, state: &SharedAdminState) -> Response<Box
     if let Err(message) = validate_network_import_records(file.content.len()) {
         return error_response(StatusCode::BAD_REQUEST, message);
     }
+    if let Err(message) = validate_network_body_base64(&file.content) {
+        return error_response(StatusCode::BAD_REQUEST, &message);
+    }
 
     for network_record in &file.content {
         let mut traffic_record = network_record_to_traffic_record(network_record);
         if let Some(body_store) = state.body_store.as_ref() {
-            persist_imported_bodies(network_record, &mut traffic_record, body_store);
+            if let Err(message) =
+                persist_imported_bodies(network_record, &mut traffic_record, body_store)
+            {
+                return error_response(StatusCode::BAD_REQUEST, &message);
+            }
         } else if network_record.request_body.is_some()
             || network_record.request_body_base64.is_some()
             || network_record.response_body.is_some()
@@ -557,35 +563,45 @@ async fn import_network(content: &str, state: &SharedAdminState) -> Response<Box
     })
 }
 
+type ImportedBodyBytes = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 fn imported_body_bytes(
     text: Option<&str>,
     body_base64: Option<&str>,
     headers: &Option<Vec<(String, String)>>,
-) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    let raw = body_base64.and_then(|encoded| STANDARD.decode(encoded).ok());
+) -> Result<ImportedBodyBytes, String> {
+    let raw = body_base64
+        .map(|encoded| {
+            STANDARD
+                .decode(encoded)
+                .map_err(|error| format!("invalid base64 body data: {error}"))
+        })
+        .transpose()?;
     let primary = text.map(|value| value.as_bytes().to_vec()).or_else(|| {
         raw.as_ref().map(|bytes| {
             decode_content_encoded_body(bytes.clone(), content_encoding_value(headers).as_deref())
         })
     });
-    (primary, raw)
+    Ok((primary, raw))
 }
 
 fn persist_imported_bodies(
     network_record: &NetworkRecord,
     traffic_record: &mut TrafficRecord,
     body_store: &crate::SharedBodyStore,
-) {
+) -> Result<(), String> {
     let (request, raw_request) = imported_body_bytes(
         network_record.request_body.as_deref(),
         network_record.request_body_base64.as_deref(),
         &network_record.request_headers,
-    );
+    )
+    .map_err(|error| format!("Record {} request body: {error}", network_record.id))?;
     let (response, raw_response) = imported_body_bytes(
         network_record.response_body.as_deref(),
         network_record.response_body_base64.as_deref(),
         effective_response_headers(network_record),
-    );
+    )
+    .map_err(|error| format!("Record {} response body: {error}", network_record.id))?;
     let store = body_store.read();
     traffic_record.request_body_ref = request
         .as_deref()
@@ -599,6 +615,26 @@ fn persist_imported_bodies(
     traffic_record.raw_response_body_ref = raw_response
         .as_deref()
         .and_then(|bytes| store.store(&traffic_record.id, "res_raw", bytes));
+    Ok(())
+}
+
+fn validate_network_body_base64(records: &[NetworkRecord]) -> Result<(), String> {
+    for record in records {
+        for (label, encoded) in [
+            ("request_body_base64", record.request_body_base64.as_deref()),
+            (
+                "response_body_base64",
+                record.response_body_base64.as_deref(),
+            ),
+        ] {
+            if let Some(encoded) = encoded {
+                STANDARD.decode(encoded).map_err(|error| {
+                    format!("Record {} has invalid {label}: {error}", record.id)
+                })?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
@@ -1921,6 +1957,66 @@ count = 1
     }
 
     #[test]
+    fn multi_record_preview_does_not_decompress_lossless_body_fields() {
+        let encoded_binary = STANDARD.encode([0, 1, 2, 3]);
+        let encoded_record: NetworkRecord = serde_json::from_value(serde_json::json!({
+            "id": "REQ-encoded-multi",
+            "method": "GET",
+            "url": "https://example.test/encoded",
+            "status": 200,
+            "response_headers": [["content-encoding", "gzip"]],
+            "response_body_base64": encoded_binary,
+            "duration_ms": 1,
+            "timestamp": 1
+        }))
+        .unwrap();
+        let clean_record: NetworkRecord = serde_json::from_value(serde_json::json!({
+            "id": "REQ-clean-multi",
+            "method": "GET",
+            "url": "https://example.test/clean",
+            "status": 200,
+            "duration_ms": 1,
+            "timestamp": 2
+        }))
+        .unwrap();
+
+        let preview = build_network_preview(&[encoded_record, clean_record]);
+
+        assert!(preview.single_record.is_none());
+        assert!(preview.warnings.is_empty());
+    }
+
+    #[test]
+    fn malformed_lossless_body_fields_are_rejected() {
+        for (request_body_base64, response_body_base64, expected_label) in [
+            (Some("%%%"), None, "request_body_base64"),
+            (None, Some("%%%"), "response_body_base64"),
+        ] {
+            let record: NetworkRecord = serde_json::from_value(serde_json::json!({
+                "id": "REQ-invalid-base64",
+                "method": "POST",
+                "url": "https://example.test/invalid-base64",
+                "status": 200,
+                "request_body_base64": request_body_base64,
+                "response_body_base64": response_body_base64,
+                "duration_ms": 1,
+                "timestamp": 1
+            }))
+            .unwrap();
+
+            let error = validate_network_body_base64(std::slice::from_ref(&record))
+                .expect_err("invalid lossless body must be rejected before import");
+            assert!(error.contains("REQ-invalid-base64"), "{error}");
+            assert!(error.contains(expected_label), "{error}");
+
+            let content = BifrostFileWriter::write_network("invalid-base64", None, &[record])
+                .expect("serialize invalid package fixture");
+            let error = build_preview(&content).expect_err("preview must reject invalid base64");
+            assert!(error.contains(expected_label), "{error}");
+        }
+    }
+
+    #[test]
     fn imported_network_bodies_persist_plaintext_and_raw_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
@@ -1951,7 +2047,8 @@ count = 1
         .unwrap();
         let mut traffic = network_record_to_traffic_record(&record);
 
-        persist_imported_bodies(&record, &mut traffic, &body_store);
+        persist_imported_bodies(&record, &mut traffic, &body_store)
+            .expect("persist valid imported bodies");
 
         let store = body_store.read();
         assert_eq!(
@@ -2045,6 +2142,47 @@ count = 1
                 .as_deref(),
             Some(b"response plaintext".as_slice())
         );
+    }
+
+    #[tokio::test]
+    async fn network_import_rejects_invalid_base64_before_recording_any_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let traffic_store =
+            Arc::new(crate::TrafficDbStore::new(dir.path().join("traffic"), 100, 0, None).unwrap());
+        let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+        let state = Arc::new(
+            crate::state::AdminState::new_for_test(9900, storage)
+                .with_traffic_db_store_shared(traffic_store.clone()),
+        );
+        let valid: NetworkRecord = serde_json::from_value(serde_json::json!({
+            "id": "REQ-valid-before-invalid",
+            "method": "GET",
+            "url": "https://example.test/valid",
+            "status": 200,
+            "duration_ms": 1,
+            "timestamp": 1
+        }))
+        .unwrap();
+        let invalid: NetworkRecord = serde_json::from_value(serde_json::json!({
+            "id": "REQ-invalid-import",
+            "method": "POST",
+            "url": "https://example.test/invalid",
+            "status": 200,
+            "response_body_base64": "%%%",
+            "duration_ms": 1,
+            "timestamp": 2
+        }))
+        .unwrap();
+        let content =
+            BifrostFileWriter::write_network("invalid-import", None, &[valid, invalid]).unwrap();
+
+        let response = import_network(&content, &state).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(traffic_store
+            .get_by_id("OUT-REQ-valid-before-invalid")
+            .is_none());
+        assert!(traffic_store.get_by_id("OUT-REQ-invalid-import").is_none());
     }
 
     #[tokio::test]

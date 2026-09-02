@@ -252,6 +252,11 @@ expect_bad_gateway(
     "/encoded",
     b"resStreamScript does not support encoded upstream SSE responses",
 )
+identity_conn, identity_stream = response("sse-identity.local", "/identity")
+assert identity_stream.readline() == b"data: ready\n"
+assert identity_stream.readline() == b"\n"
+assert identity_stream.readline() == b"event: done\n"
+identity_conn.close()
 expect_bad_gateway(
     "sse-init-error.local",
     "/stream",
@@ -299,6 +304,10 @@ expect_bad_gateway(
     b"resStreamScript does not support encoded upstream SSE responses",
     secure=True,
 )
+identity_status, identity_body = secure_request("sse-tunnel-identity.local", "/identity")
+assert identity_status == 200, (identity_status, identity_body)
+assert b"data: ready\n\n" in identity_body, identity_body
+assert b"event: done\ndata: end\n\n" in identity_body, identity_body
 expect_bad_gateway(
     "sse-tunnel-init-error.local",
     "/stream",

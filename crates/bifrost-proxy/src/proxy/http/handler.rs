@@ -82,9 +82,9 @@ use self::decode::{
     apply_decode_scripts_for_storage, get_values_from_state, DecodeForStorageResult,
 };
 use super::body_metadata::{
-    buffered_res_body_mode, header_content_encoding, is_no_body_response, normalize_req_headers,
-    normalize_res_headers, response_content_encoding, set_content_encoding_header,
-    streaming_res_body_mode, BodyMode,
+    buffered_res_body_mode, content_encoding_is_identity, header_content_encoding,
+    is_no_body_response, normalize_req_headers, normalize_res_headers, response_content_encoding,
+    set_content_encoding_header, streaming_res_body_mode, BodyMode,
 };
 use super::breakpoint::{
     apply_edited_response_status, apply_edited_response_status_and_body, body_limit,
@@ -3469,7 +3469,7 @@ pub async fn handle_http_request(
                 .unwrap());
         }
         if response_content_encoding(&res_parts)
-            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+            .is_some_and(|encoding| !content_encoding_is_identity(&encoding))
         {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)

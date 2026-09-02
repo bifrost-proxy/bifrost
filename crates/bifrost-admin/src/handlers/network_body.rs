@@ -110,12 +110,10 @@ pub(super) fn preview_body(
     label: &str,
 ) -> PreviewBody {
     if let Some(text) = text {
-        if body_base64.is_none() && looks_like_legacy_lossy_body(text, headers) {
+        if let Some(warning) = legacy_lossy_body_warning(text, body_base64, headers, label) {
             return PreviewBody {
                 text: None,
-                warning: Some(format!(
-                    "The {label} body was corrupted by an older Bifrost version during export. Re-export the request with an updated Bifrost to view its plaintext body."
-                )),
+                warning: Some(warning),
             };
         }
         return PreviewBody {
@@ -154,6 +152,19 @@ pub(super) fn preview_body(
             )),
         },
     }
+}
+
+pub(super) fn legacy_lossy_body_warning(
+    text: &str,
+    body_base64: Option<&str>,
+    headers: &Option<Vec<(String, String)>>,
+    label: &str,
+) -> Option<String> {
+    (body_base64.is_none() && looks_like_legacy_lossy_body(text, headers)).then(|| {
+        format!(
+            "The {label} body was corrupted by an older Bifrost version during export. Re-export the request with an updated Bifrost to view its plaintext body."
+        )
+    })
 }
 
 fn looks_like_legacy_lossy_body(text: &str, headers: &Option<Vec<(String, String)>>) -> bool {

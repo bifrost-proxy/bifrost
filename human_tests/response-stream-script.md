@@ -54,9 +54,9 @@
 
 1. 客户端请求携带 `Accept-Encoding: gzip`，通过命中 `resStreamScript` 的规则访问 fixture。
 2. 检查 fixture 实际收到的请求头。
-3. 分别让 fixture 强制返回 `Content-Encoding: gzip` 的 SSE，以及 `Content-Type: application/json`。
+3. 分别让 fixture 强制返回 `Content-Encoding: gzip` 的 SSE、两个重复的 `Content-Encoding: identity`，以及 `Content-Type: application/json`。
 
-预期：上游请求被改写为 `Accept-Encoding: identity`；上游仍压缩或返回非 SSE 时代理返回明确 502，不删除编码头后转发乱码，也不静默跳过规则。
+预期：上游请求被改写为 `Accept-Encoding: identity`；上游仍压缩或返回非 SSE 时代理返回明确 502，不删除编码头后转发乱码，也不静默跳过规则；仅包含重复 `identity` 的无操作编码链在 HTTP 与 HTTPS MITM 中均正常逐事件转换。
 
 ## TC-RSS-08：响应过滤、冲突与 Header 语义
 
@@ -125,3 +125,4 @@
 - TC-RSS-12：确认 `scripts/ci/proxy-coverage-shell-tests.txt` 已纳入 `test_response_stream_script.sh`；执行 `cargo build --bin bifrost` 后运行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_response_stream_script.sh`，Transform、上游 Mock、直接状态 Mock、接近 16 MiB event 与超限错误五条链路全部通过，输出 `response stream script E2E passed`。
 - TC-RSS-13：执行同一真实 E2E，覆盖 HTTP 与 HTTPS intercepted 的成功/冲突/非 SSE/编码/初始化失败，direct status 错误，尾部 event 与回调异常，以及 inline req/res 修改；所有断言通过。
 - TC-RSS-14：执行 `bash e2e-tests/tests/test_site_docs_sync.sh` 通过；随后执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`，逐项检查中英文 `scripting.html` 与 `rules/scripts.html`，确认 `resStreamScript`、Transform、Mock、逐事件语义、`timeout_ms` 和根路径规则参考链接全部存在，结果通过。
+- 2026-09-02：复跑 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_response_stream_script.sh`，新增 HTTP 与 HTTPS MITM 重复 `identity` 响应头场景，均正常输出转换事件与 `onEnd` 事件；gzip 场景仍返回明确 502。

@@ -84,7 +84,7 @@ api.example.com resMerge://({"test":"qwe"})
 - Traffic Body 读取使用当前 `sandbox.limits.max_decompress_output_bytes`，没有配置管理器时才回退到 10 MiB 默认值。
 - gzip 使用多 member 解码语义，合法的相邻 gzip member 会在同一 10 MiB 预算内全部展开并顺序拼接。
 - network `.bifrost` 导出保留原始字节的 base64，同时写入可解码的明文；导入预览优先展示明文，旧版本已做 lossy UTF-8 转换的不可逆数据给出明确警告。
-- 确认导入 Network 包时，明文 Body 会写入主引用，可用的 base64 原始字节会写入 raw 引用；多记录包同样扫描并展示旧 lossy Body 警告。
+- 确认导入 Network 包时，明文 Body 会写入主引用，可用的 base64 原始字节会写入 raw 引用；非法 lossless base64 在预览和导入前直接拒绝。多记录包只扫描无需解压的旧 lossy 文本特征并展示警告，不按记录重复消耗解压预算。
 
 ### HTTP / HTTPS 落地
 
@@ -190,6 +190,9 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `traffic::stored_body_tests::configured_decompression_limit_is_honored_by_body_reads`：Traffic Body 读取遵循运行时配置的解压上限，超限时保留 wire bytes。
 - `network_body::concatenated_gzip_members_are_all_decoded` / `decompress::test_decompresses_all_concatenated_gzip_members`：管理端与代理端完整解码相邻 gzip member。
 - `bifrost_file::imported_network_bodies_persist_plaintext_and_raw_bytes`：Network 导入后主 Body 与 raw Body 都可继续读取。
+- `bifrost_file::malformed_lossless_body_fields_are_rejected`：请求和响应的非法 lossless base64 在预览/导入前返回校验错误，不静默丢弃。
+- `bifrost_file::multi_record_preview_does_not_decompress_lossless_body_fields`：多记录摘要只检测旧 lossy 文本，不批量展开压缩 Body。
+- `body_metadata::only_identity_tokens_are_classified_as_unencoded`：重复 `identity` 字段仍视为无编码，混合标准或自定义编码不会误判。
 - `body::apply_body_rules_preserving_encoding_decode_failure_passthrough`：头声明 gzip 但 Body 实际是 identity，解压失败保留原字节。
 - `body::apply_content_injection_preserving_encoding_gzip_html`：gzip HTML 注入 badge/inline script 后仍是有效 gzip 且解码后 HTML 结构正确。
 - `scripts::script_gzip_roundtrip`：gzip Body 进入脚本前会解码为文本，脚本写回 Body 后仍可按 gzip 重新编码。
@@ -209,6 +212,7 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `e2e-tests/tests/test_body_https_resmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
 - `e2e-tests/tests/test_replay_rules.sh`：本地 echo/SSE/WebSocket 上游验证 Replay custom rules，`request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵，`req_res_script.txt` 覆盖 Replay 的 Request/Response Script，`bp_decode.txt` 覆盖 Replay Traffic 落库前的 `decode://bp`。
 - `e2e-tests/tests/test_temporary_port_bindings.sh`：真实代理记录双层编码、多 member gzip 请求/响应和 gzip SSE，验证 Traffic API、`traffic get`、批量 Body API、搜索关键词、响应 JSONPath 过滤、include body、SSE 事件恢复、Network 导出/预览/导入均返回明文，同时 raw body 仍可恢复 wire bytes。
+- `e2e-tests/tests/test_response_stream_script.sh`：HTTP 与 HTTPS MITM 上游返回两个 `Content-Encoding: identity` 时，`resStreamScript` 仍正常逐事件转换；真正的 gzip 编码继续明确拒绝。
 
 ### 真实场景测试 human_tests
 
