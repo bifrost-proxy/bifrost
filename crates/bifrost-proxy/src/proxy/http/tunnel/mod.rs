@@ -2507,8 +2507,12 @@ async fn handle_intercepted_request_with_protocol(
                 );
                 skip_req_scripts = true;
                 if admin_state.is_some() {
-                    let (tee_body, capture) =
-                        create_request_tee_body(body, admin_state.clone(), req_id.to_string());
+                    let (tee_body, capture) = create_request_tee_body(
+                        body,
+                        admin_state.clone(),
+                        req_id.to_string(),
+                        req_content_encoding.clone(),
+                    );
                     streaming_body = Some(tee_body);
                     req_body_capture = Some(capture);
                 } else {
@@ -2550,6 +2554,7 @@ async fn handle_intercepted_request_with_protocol(
                                 replay_body,
                                 admin_state.clone(),
                                 req_id.to_string(),
+                                req_content_encoding.clone(),
                             );
                             streaming_body = Some(tee_body);
                             req_body_capture = Some(capture);
@@ -2602,6 +2607,7 @@ async fn handle_intercepted_request_with_protocol(
                             replay_body,
                             admin_state.clone(),
                             req_id.to_string(),
+                            req_content_encoding.clone(),
                         );
                         streaming_body = Some(tee_body);
                         req_body_capture = Some(capture);
@@ -2639,8 +2645,12 @@ async fn handle_intercepted_request_with_protocol(
         Vec::new()
     } else {
         if admin_state.is_some() {
-            let (tee_body, capture) =
-                create_request_tee_body(body, admin_state.clone(), req_id.to_string());
+            let (tee_body, capture) = create_request_tee_body(
+                body,
+                admin_state.clone(),
+                req_id.to_string(),
+                req_content_encoding.clone(),
+            );
             streaming_body = Some(tee_body);
             req_body_capture = Some(capture);
         } else {
@@ -4547,6 +4557,7 @@ async fn handle_intercepted_request_with_protocol(
                 record_id,
                 Some(traffic_type),
                 sse_stream_writer,
+                res_content_encoding.clone(),
                 max_body_buffer_size,
             );
             let final_body = wrap_throttled_body(tee_body.boxed(), resolved_rules.res_speed);

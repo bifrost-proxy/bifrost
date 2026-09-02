@@ -2330,9 +2330,12 @@ mod tests {
         record.request_body_ref = Some(BodyRef::Inline {
             data: "{\"hello\":1}".to_string(),
         });
-        record.response_body_ref = Some(BodyRef::Inline {
-            data: "{\"ok\":true}".to_string(),
-        });
+        record.response_body_ref = Some(
+            BodyRef::Inline {
+                data: "{\"ok\":true}".to_string(),
+            }
+            .with_content_encoding(Some("gzip")),
+        );
         record.socket_status = Some(crate::traffic::SocketStatus {
             is_open: false,
             send_count: 3,
@@ -2355,6 +2358,13 @@ mod tests {
             loaded.request_body_ref,
             Some(BodyRef::Inline { .. })
         ));
+        assert_eq!(
+            loaded
+                .response_body_ref
+                .as_ref()
+                .and_then(BodyRef::content_encoding),
+            Some("gzip")
+        );
         assert_eq!(loaded.error_message.as_deref(), Some("upstream timeout"));
         assert_eq!(
             loaded.socket_status.as_ref().and_then(|s| s.close_code),

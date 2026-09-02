@@ -2252,6 +2252,7 @@ pub async fn handle_http_request(
                         body,
                         admin_state.clone(),
                         ctx.id_str().to_string(),
+                        req_content_encoding.clone(),
                     );
                     streaming_body = Some(tee_body);
                     req_body_capture = Some(capture);
@@ -2321,6 +2322,7 @@ pub async fn handle_http_request(
                                 replay_body,
                                 admin_state.clone(),
                                 ctx.id_str().to_string(),
+                                req_content_encoding.clone(),
                             );
                             streaming_body = Some(tee_body);
                             req_body_capture = Some(capture);
@@ -2399,6 +2401,7 @@ pub async fn handle_http_request(
                             replay_body,
                             admin_state.clone(),
                             ctx.id_str().to_string(),
+                            req_content_encoding.clone(),
                         );
                         streaming_body = Some(tee_body);
                         req_body_capture = Some(capture);
@@ -2453,8 +2456,12 @@ pub async fn handle_http_request(
         (Bytes::new(), Bytes::new())
     } else {
         if admin_state.is_some() {
-            let (tee_body, capture) =
-                create_request_tee_body(body, admin_state.clone(), ctx.id_str().to_string());
+            let (tee_body, capture) = create_request_tee_body(
+                body,
+                admin_state.clone(),
+                ctx.id_str().to_string(),
+                req_content_encoding.clone(),
+            );
             streaming_body = Some(tee_body);
             req_body_capture = Some(capture);
         } else {
@@ -3852,6 +3859,7 @@ pub async fn handle_http_request(
                 record_id.to_string(),
                 Some(traffic_type),
                 sse_stream_writer,
+                res_content_encoding.clone(),
                 max_body_buffer_size,
             );
             let final_body = wrap_throttled_body(tee_body.boxed(), resolved_rules.res_speed);

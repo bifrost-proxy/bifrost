@@ -5,7 +5,7 @@ use tokio_stream::StreamExt;
 use base64::Engine as _;
 
 use super::frames::{get_frame_detail, get_frames, subscribe_frames, unsubscribe_frames};
-use super::network_body::decode_body_for_display;
+use super::network_body::decode_content_encoded_body;
 use super::{
     error_response, full_body, json_response, method_not_allowed, success_response, BoxBody,
 };
@@ -571,6 +571,18 @@ async fn stream_sse_events_from_body_ref(
                 tail_bytes,
             };
             stream_sse_events_from_file(cfg, &mut seq, &mut parser, tx).await
+        }
+        BodyRef::ContentEncoded { body_ref, .. } => {
+            Box::pin(stream_sse_events_from_body_ref(
+                state,
+                connection_id,
+                *body_ref,
+                from,
+                batch_size,
+                tail_bytes,
+                tx,
+            ))
+            .await
         }
     }
 }
@@ -1702,13 +1714,7 @@ async fn get_request_body(
             };
 
             if let Some(body_ref) = body_ref {
-                get_body_content_async(
-                    &state,
-                    body_ref,
-                    query_wants_base64(query),
-                    (!want_raw).then_some(&record.request_headers),
-                )
-                .await
+                get_body_content_async(&state, body_ref, query_wants_base64(query), !want_raw).await
             } else {
                 json_response(&serde_json::json!({
                     "success": true,
@@ -1751,18 +1757,7 @@ async fn get_response_body(
             };
 
             if let Some(body_ref) = body_ref {
-                let response_headers = record
-                    .response_headers
-                    .as_ref()
-                    .map(|_| &record.response_headers)
-                    .unwrap_or(&record.original_response_headers);
-                get_body_content_async(
-                    &state,
-                    body_ref,
-                    query_wants_base64(query),
-                    (!want_raw).then_some(response_headers),
-                )
-                .await
+                get_body_content_async(&state, body_ref, query_wants_base64(query), !want_raw).await
             } else {
                 json_response(&serde_json::json!({
                     "success": true,
@@ -1805,11 +1800,6 @@ async fn get_response_body_content(
             };
 
             if let Some(body_ref) = body_ref {
-                let response_headers = record
-                    .response_headers
-                    .as_ref()
-                    .map(|_| &record.response_headers)
-                    .unwrap_or(&record.original_response_headers);
                 get_body_bytes_async(
                     &state,
                     body_ref,
@@ -1817,7 +1807,7 @@ async fn get_response_body_content(
                         .content_type
                         .as_deref()
                         .unwrap_or("application/octet-stream"),
-                    (!want_raw).then_some(response_headers),
+                    !want_raw,
                 )
                 .await
             } else {
@@ -1835,7 +1825,7 @@ async fn get_response_body_content(
 }
 
 async fn load_body_bytes_async(state: &SharedAdminState, body_ref: &BodyRef) -> Option<Vec<u8>> {
-    match body_ref {
+    match body_ref.storage_ref() {
         BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
         BodyRef::File { .. } | BodyRef::FileRange { .. } => {
             if let Some(ref body_store) = state.body_store {
@@ -1852,6 +1842,19 @@ async fn load_body_bytes_async(state: &SharedAdminState, body_ref: &BodyRef) -> 
                 None
             }
         }
+        BodyRef::ContentEncoded { .. } => unreachable!("storage_ref removes encoding wrappers"),
+    }
+}
+
+fn decode_stored_body(
+    body_ref: &BodyRef,
+    bytes: Vec<u8>,
+    decode_content_encoding: bool,
+) -> Vec<u8> {
+    if decode_content_encoding {
+        decode_content_encoded_body(bytes, body_ref.content_encoding())
+    } else {
+        bytes
     }
 }
 
@@ -1859,12 +1862,9 @@ async fn get_body_content_async(
     state: &SharedAdminState,
     body_ref: &BodyRef,
     base64_output: bool,
-    decode_headers: Option<&Option<Vec<(String, String)>>>,
+    decode_content_encoding: bool,
 ) -> Response<BoxBody> {
-    let decode = |bytes| match decode_headers {
-        Some(headers) => decode_body_for_display(bytes, headers),
-        None => bytes,
-    };
+    let decode = |bytes| decode_stored_body(body_ref, bytes, decode_content_encoding);
     if base64_output {
         return match load_body_bytes_async(state, body_ref).await {
             Some(bytes) => {
@@ -1891,7 +1891,7 @@ async fn get_body_content_async(
                 "size": bytes.len()
             }))
         }
-        None => match body_ref {
+        None => match body_ref.storage_ref() {
             BodyRef::File { path, size } | BodyRef::FileRange { path, size, .. }
                 if state.body_store.is_none() =>
             {
@@ -1909,6 +1909,9 @@ async fn get_body_content_async(
             BodyRef::Inline { .. } => {
                 error_response(StatusCode::NOT_FOUND, "Body content not found")
             }
+            BodyRef::ContentEncoded { .. } => {
+                unreachable!("storage_ref removes encoding wrappers")
+            }
         },
     }
 }
@@ -1917,14 +1920,11 @@ async fn get_body_bytes_async(
     state: &SharedAdminState,
     body_ref: &BodyRef,
     content_type: &str,
-    decode_headers: Option<&Option<Vec<(String, String)>>>,
+    decode_content_encoding: bool,
 ) -> Response<BoxBody> {
     match load_body_bytes_async(state, body_ref).await {
         Some(bytes) => {
-            let bytes = match decode_headers {
-                Some(headers) => decode_body_for_display(bytes, headers),
-                None => bytes,
-            };
+            let bytes = decode_stored_body(body_ref, bytes, decode_content_encoding);
             Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", content_type)
@@ -1933,6 +1933,48 @@ async fn get_body_bytes_async(
                 .unwrap()
         }
         None => error_response(StatusCode::NOT_FOUND, "Body content not found"),
+    }
+}
+
+#[cfg(test)]
+mod stored_body_tests {
+    use std::io::Write;
+
+    use flate2::{write::GzEncoder, Compression};
+
+    use super::{decode_stored_body, BodyRef};
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(bytes).expect("write gzip fixture");
+        encoder.finish().expect("finish gzip fixture")
+    }
+
+    #[test]
+    fn only_decodes_refs_marked_as_content_encoded() {
+        let application_gzip = gzip(b"application payload");
+        let wire_body = gzip(&application_gzip);
+        let decoded_ref = BodyRef::File {
+            path: "decoded-body".to_string(),
+            size: application_gzip.len(),
+        };
+        let encoded_ref = decoded_ref.clone().with_content_encoding(Some("gzip"));
+
+        assert_eq!(
+            decode_stored_body(&decoded_ref, application_gzip.clone(), true),
+            application_gzip,
+            "an already-decoded HTTP representation must keep its application gzip layer"
+        );
+        assert_eq!(
+            decode_stored_body(&encoded_ref, wire_body.clone(), true),
+            application_gzip,
+            "a marked wire body must lose exactly one HTTP gzip layer"
+        );
+        assert_eq!(
+            decode_stored_body(&encoded_ref, wire_body.clone(), false),
+            wire_body,
+            "raw=1 must preserve the captured wire body"
+        );
     }
 }
 

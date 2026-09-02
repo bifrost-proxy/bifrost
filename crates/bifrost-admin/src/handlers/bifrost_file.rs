@@ -10,7 +10,7 @@ use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-use super::network_body::{body_size, export_body, header_value, preview_body};
+use super::network_body::{body_size, export_content_encoded_body, header_value, preview_body};
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
 use crate::traffic::TrafficRecord;
@@ -1057,19 +1057,14 @@ async fn traffic_to_network_record(
             let store = body_store.read();
             if let Some(ref body_ref) = traffic.request_body_ref {
                 if let Some(bytes) = store.load_bytes(body_ref) {
-                    let exported = export_body(bytes, &traffic.request_headers);
+                    let exported = export_content_encoded_body(bytes, body_ref.content_encoding());
                     request_body = exported.text;
                     request_body_base64 = exported.base64;
                 }
             }
             if let Some(ref body_ref) = traffic.response_body_ref {
                 if let Some(bytes) = store.load_bytes(body_ref) {
-                    let response_headers = traffic
-                        .response_headers
-                        .as_ref()
-                        .map(|_| &traffic.response_headers)
-                        .unwrap_or(&traffic.original_response_headers);
-                    let exported = export_body(bytes, response_headers);
+                    let exported = export_content_encoded_body(bytes, body_ref.content_encoding());
                     response_body = exported.text;
                     response_body_base64 = exported.base64;
                 }
@@ -1732,7 +1727,8 @@ mod tests {
         traffic.request_body_ref = state
             .body_store
             .as_ref()
-            .and_then(|store| store.read().store(&traffic.id, "req", &compressed));
+            .and_then(|store| store.read().store(&traffic.id, "req", &compressed))
+            .map(|body_ref| body_ref.with_content_encoding(Some("gzip")));
         traffic.response_headers = Some(vec![
             ("content-type".to_string(), "application/json".to_string()),
             ("content-encoding".to_string(), "gzip".to_string()),
@@ -1740,7 +1736,8 @@ mod tests {
         traffic.response_body_ref = state
             .body_store
             .as_ref()
-            .and_then(|store| store.read().store(&traffic.id, "res", &compressed));
+            .and_then(|store| store.read().store(&traffic.id, "res", &compressed))
+            .map(|body_ref| body_ref.with_content_encoding(Some("gzip")));
 
         let record = traffic_to_network_record(&traffic, true, &state).await;
 

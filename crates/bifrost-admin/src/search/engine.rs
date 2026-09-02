@@ -697,7 +697,7 @@ impl SearchEngine {
     fn search_body(&self, body_ref: &BodyRef, keyword: &str, field: &str) -> Option<MatchLocation> {
         match body_ref {
             BodyRef::Inline { data } => self.search_text(data, keyword, field),
-            BodyRef::File { .. } | BodyRef::FileRange { .. } => {
+            BodyRef::File { .. } | BodyRef::FileRange { .. } | BodyRef::ContentEncoded { .. } => {
                 if let Some(ref body_store) = self.body_store {
                     let bytes = body_store.read().load_bytes(body_ref);
                     if let Some(bytes) = bytes {

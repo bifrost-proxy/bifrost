@@ -25,19 +25,63 @@ pub enum BodyRef {
         offset: u64,
         size: usize,
     },
+    /// A body persisted with its HTTP content-coding still applied.
+    ///
+    /// Buffered proxy paths store the decoded representation directly, while
+    /// streaming paths may need to persist wire bytes. Keeping this marker on
+    /// the reference prevents readers from guessing from headers and decoding
+    /// an already-decoded application payload a second time.
+    ContentEncoded {
+        body_ref: Box<BodyRef>,
+        content_encoding: String,
+    },
 }
 
 impl BodyRef {
+    pub fn with_content_encoding(self, content_encoding: Option<&str>) -> Self {
+        match content_encoding
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(content_encoding) => BodyRef::ContentEncoded {
+                body_ref: Box::new(self),
+                content_encoding: content_encoding.to_string(),
+            },
+            None => self,
+        }
+    }
+
+    pub fn content_encoding(&self) -> Option<&str> {
+        match self {
+            BodyRef::ContentEncoded {
+                content_encoding, ..
+            } => Some(content_encoding),
+            _ => None,
+        }
+    }
+
+    pub fn storage_ref(&self) -> &BodyRef {
+        match self {
+            BodyRef::ContentEncoded { body_ref, .. } => body_ref.storage_ref(),
+            _ => self,
+        }
+    }
+
     pub fn size(&self) -> usize {
         match self {
             BodyRef::Inline { data } => data.len(),
             BodyRef::File { size, .. } => *size,
             BodyRef::FileRange { size, .. } => *size,
+            BodyRef::ContentEncoded { body_ref, .. } => body_ref.size(),
         }
     }
 
     pub fn is_file(&self) -> bool {
-        matches!(self, BodyRef::File { .. } | BodyRef::FileRange { .. })
+        match self {
+            BodyRef::File { .. } | BodyRef::FileRange { .. } => true,
+            BodyRef::ContentEncoded { body_ref, .. } => body_ref.is_file(),
+            BodyRef::Inline { .. } => false,
+        }
     }
 }
 
@@ -410,6 +454,7 @@ impl BodyStore {
                 contents.truncate(read_size);
                 Some(String::from_utf8_lossy(&contents).to_string())
             }
+            BodyRef::ContentEncoded { body_ref, .. } => self.load(body_ref),
         }
     }
 
@@ -445,6 +490,7 @@ impl BodyStore {
                 contents.truncate(read_size);
                 Some(contents)
             }
+            BodyRef::ContentEncoded { body_ref, .. } => self.load_bytes(body_ref),
         }
     }
 
@@ -524,6 +570,7 @@ impl BodyStore {
                 let _ = fs::remove_file(path);
             }
             BodyRef::Inline { .. } => {}
+            BodyRef::ContentEncoded { body_ref, .. } => self.remove(body_ref),
         }
     }
 

@@ -304,7 +304,7 @@ impl AdminQueryService {
 
         match body_ref {
             BodyRef::Inline { data } => Ok(json!({ "success": true, "data": data })),
-            BodyRef::File { .. } | BodyRef::FileRange { .. } => {
+            BodyRef::File { .. } | BodyRef::FileRange { .. } | BodyRef::ContentEncoded { .. } => {
                 let body_store =
                     self.state.body_store.clone().ok_or_else(|| {
                         BifrostError::Config("Body store not configured".to_string())

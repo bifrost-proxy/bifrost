@@ -166,11 +166,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         request_body = self.rfile.read(length)
-        stacked_encoding = self.path == "/stacked-body"
-        body = request_body if stacked_encoding else b'{"ok":true}'
+        echo_encoded_body = self.path in ("/stacked-body", "/nested-gzip")
+        body = request_body if echo_encoded_body else b'{"ok":true}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        if stacked_encoding:
+        if echo_encoded_body:
             for content_encoding in self.headers.get_all("Content-Encoding", []):
                 self.send_header("Content-Encoding", content_encoding)
         self.send_header("Content-Length", str(len(body)))
@@ -347,6 +347,25 @@ assert payload["data"] == expected_body, (direction, payload)
             _log_fail "Traffic ${direction} body is decoded" "$expected_body" "$actual"
             return 1
         fi
+    done
+}
+
+assert_traffic_preserves_application_gzip() {
+    local id="$1"
+    local expected_file="$2"
+    local direction
+    for direction in request response; do
+        curl -fsS \
+            "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${id}/${direction}-body?encoding=base64" \
+            | python3 -c '
+import base64, json, pathlib, sys
+expected_file, direction = sys.argv[1:]
+payload = json.load(sys.stdin)
+actual = base64.b64decode(payload["data_base64"], validate=True)
+expected = pathlib.Path(expected_file).read_bytes()
+assert actual == expected, (direction, len(actual), len(expected))
+' "$expected_file" "$direction"
+        _log_pass "Traffic ${direction} body removes exactly one HTTP gzip layer"
     done
 }
 
@@ -582,13 +601,26 @@ main() {
         "http://127.0.0.1:${HTML_PORT}/stacked-body" \
         > "${TEST_DATA_DIR}/stacked-response.json"
 
-    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id
+    local nested_gzip_body='{"message":"application gzip must remain compressed"}'
+    python3 -c 'import gzip, pathlib, sys; inner=gzip.compress(sys.argv[2].encode()); pathlib.Path(sys.argv[1]).write_bytes(inner); pathlib.Path(sys.argv[3]).write_bytes(gzip.compress(inner))' \
+        "${TEST_DATA_DIR}/application-gzip.bin" "${nested_gzip_body}" "${TEST_DATA_DIR}/nested-gzip-wire.bin"
+    curl -fsS --max-time 5 --noproxy '' \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        -H 'Content-Type: application/gzip' \
+        -H 'Content-Encoding: gzip' \
+        --data-binary "@${TEST_DATA_DIR}/nested-gzip-wire.bin" \
+        "http://127.0.0.1:${HTML_PORT}/nested-gzip" \
+        > "${TEST_DATA_DIR}/nested-gzip-response.bin"
+
+    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id nested_gzip_record_id
     temp_record_id="$(wait_for_record "/temp-port" "${TEMP_PORT}")"
     main_record_id="$(wait_for_record "/main-port" "${MAIN_PORT}")"
     direct_temp_record_id="$(wait_for_record "/direct-temp" "${TEMP_PORT}")"
     direct_main_record_id="$(wait_for_record "/direct-main" "${MAIN_PORT}")"
     stacked_record_id="$(wait_for_record "/stacked-body" "${MAIN_PORT}")"
+    nested_gzip_record_id="$(wait_for_record "/nested-gzip" "${MAIN_PORT}")"
     assert_traffic_stacked_body_plaintext "${stacked_record_id}" "${stacked_body}"
+    assert_traffic_preserves_application_gzip "${nested_gzip_record_id}" "${TEST_DATA_DIR}/application-gzip.bin"
     assert_body_contains "\"lp\":${TEMP_PORT}" "$(traffic_json)" "Traffic API compact records include temporary listener port"
     assert_body_contains "\"lp\":${MAIN_PORT}" "$(traffic_json)" "Traffic API compact records include main listener port"
     assert_body_contains "\"listener_port\":${TEMP_PORT}" "$(traffic_detail_json "${temp_record_id}")" "Traffic detail includes temporary listener port"

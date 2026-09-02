@@ -78,7 +78,7 @@ api.example.com resMerge://({"test":"qwe"})
 ### Traffic 抓取与展示
 
 - 普通缓冲请求/响应在写入 `request_body_ref` / `response_body_ref` 前解码。
-- 流式请求和超过内存阈值的文件型响应先原样转发并落盘；Traffic body、Network 导出和预览读取时根据记录中的请求/响应 header 按同一编码链解码，因此不阻塞网络转发热路径，也能修复历史已落盘的压缩记录。
+- 流式请求和超过内存阈值的文件型响应先原样转发并落盘，并在 `BodyRef::ContentEncoded` 中持久化实际的编码链；Traffic body、Network 导出和预览只对带该标记的引用解码，因此不阻塞网络转发热路径，也不会根据旧 header 把已经解码的应用数据再解一层。
 - 展示与导出的解压输出限制为 10 MiB；超限、损坏或未知编码保留原始落盘引用，不伪造明文。Traffic API 的 `raw=1` 优先读取独立 raw 引用；不存在 raw 引用时沿用既有的 body 引用回退语义。
 - network `.bifrost` 导出保留原始字节的 base64，同时写入可解码的明文；导入预览优先展示明文，旧版本已做 lossy UTF-8 转换的不可逆数据给出明确警告。
 
@@ -176,7 +176,8 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `body::apply_body_rules_preserving_encoding_gzip_to_identity`：gzip 响应 JSON 同时删除最终 `Content-Encoding` 后，输出为 identity JSON。
 - `body::apply_body_rules_preserving_encoding_unknown_encoding_passthrough`：未识别编码保持原 Body 与原编码。
 - `decompress::multiple_content_codings`：重复 header / 逗号链按逆序完整解码，并覆盖 `x-gzip` 别名。
-- `network_body::repeated_content_encoding_headers_and_x_gzip_are_decoded`：流式落盘字节在 Traffic / Network 读取边界按重复编码 header 解码；未知编码保持原字节。
+- `network_body::repeated_content_encoding_headers_and_x_gzip_are_decoded`：Network 包内字节按重复编码 header 解码；未知编码保持原字节。
+- `traffic::stored_body_tests::only_decodes_refs_marked_as_content_encoded`：Traffic 读取只解码带持久化编码标记的 wire body，已经移除 HTTP 外层编码的 `application/gzip` 数据不会被二次解码。
 - `body::apply_body_rules_preserving_encoding_decode_failure_passthrough`：头声明 gzip 但 Body 实际是 identity，解压失败保留原字节。
 - `body::apply_content_injection_preserving_encoding_gzip_html`：gzip HTML 注入 badge/inline script 后仍是有效 gzip 且解码后 HTML 结构正确。
 - `scripts::script_gzip_roundtrip`：gzip Body 进入脚本前会解码为文本，脚本写回 Body 后仍可按 gzip 重新编码。
@@ -237,7 +238,7 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 ## 风险与决策点
 
 - 未识别编码策略：本方案选择“透传 + warning”，不尝试猜测。组合 `Content-Encoding` 已支持，但组合链中只要包含未知、自定义、加密、专用格式或依赖外部字典的 coding，就整链保留原字节并交给自定义 decoder。
-- 文件型 body 保持代理热路径原样落盘，Traffic / Network 读取时才有界解压；这消除了异步更新 Traffic 引用与最终记录写入之间的竞态。超出安全解压上限时仍返回原字节，这是防压缩炸弹边界，不应通过取消上限绕过。
+- 文件型 body 保持代理热路径原样落盘，并把编码链和引用一起持久化，Traffic / Network 读取时才有界解压；这消除了异步更新 Traffic 引用与最终记录写入之间的竞态，也避免仅凭 header 猜测导致双层 gzip 被多解一层。超出安全解压上限时仍返回原字节，这是防压缩炸弹边界，不应通过取消上限绕过。
 - 保编码链路是否引入拷贝开销：所有非命中 Body 规则的请求走 identity 短路，不做无谓的解压/再压缩；命中规则时的一次解压 + 一次压缩是必要开销。
 - Replay 与普通代理保编码链路必须共用 `apply_body_rules_preserving_encoding`，避免两套实现漂移；如果 Replay 出现新的规则类型，必须先补 replay 侧再上普通代理，否则会出现“Replay 有效但真实代理无效”的产品倒挂。
 - HTTPS path 级 Body 规则要求先命中 `tlsIntercept://`；文档、CLI 提示与规则编辑器 hint 需要同步说明这一前置条件，避免用户以为规则未生效而反复调试。

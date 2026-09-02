@@ -41,21 +41,33 @@ fn content_encoding_value(headers: &Option<Vec<(String, String)>>) -> Option<Str
     (!values.is_empty()).then(|| values.join(", "))
 }
 
+#[cfg(test)]
 pub(super) fn decode_body_for_display(
     bytes: Vec<u8>,
     headers: &Option<Vec<(String, String)>>,
 ) -> Vec<u8> {
-    content_encoding_value(headers)
-        .as_deref()
+    decode_content_encoded_body(bytes, content_encoding_value(headers).as_deref())
+}
+
+pub(super) fn decode_content_encoded_body(
+    bytes: Vec<u8>,
+    content_encoding: Option<&str>,
+) -> Vec<u8> {
+    content_encoding
         .and_then(|encoding| decompress(&bytes, encoding).ok())
         .unwrap_or(bytes)
 }
 
+#[cfg(test)]
 pub(super) fn export_body(bytes: Vec<u8>, headers: &Option<Vec<(String, String)>>) -> ExportBody {
-    let content_encoding = content_encoding_value(headers);
-    let decoded = content_encoding
-        .as_deref()
-        .and_then(|encoding| decompress(&bytes, encoding).ok());
+    export_content_encoded_body(bytes, content_encoding_value(headers).as_deref())
+}
+
+pub(super) fn export_content_encoded_body(
+    bytes: Vec<u8>,
+    content_encoding: Option<&str>,
+) -> ExportBody {
+    let decoded = content_encoding.and_then(|encoding| decompress(&bytes, encoding).ok());
 
     if let Some(decoded) = decoded {
         let was_decoded = decoded != bytes;

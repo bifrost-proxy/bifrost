@@ -250,7 +250,11 @@ impl TeeBodyDropGuard {
                 return;
             }
             let response_body_ref = if let Some(writer) = self.file_writer.take() {
-                Some(writer.finish())
+                Some(
+                    writer
+                        .finish()
+                        .with_content_encoding(self.content_encoding.as_deref()),
+                )
             } else if !self.buffer.is_empty() {
                 if let Some(ref body_store) = state.body_store {
                     let max_decompress_output_bytes = state
@@ -599,13 +603,16 @@ struct RequestTeeBodyDropGuard {
     admin_state: Option<Arc<AdminState>>,
     record_id: String,
     file_writer: Option<BodyStreamWriter>,
+    content_encoding: Option<String>,
     capture: BodyCaptureHandle,
 }
 
 impl Drop for RequestTeeBodyDropGuard {
     fn drop(&mut self) {
         if let Some(writer) = self.file_writer.take() {
-            let body_ref = writer.finish();
+            let body_ref = writer
+                .finish()
+                .with_content_encoding(self.content_encoding.as_deref());
             if let Ok(mut slot) = self.capture.body_ref.lock() {
                 *slot = Some(body_ref);
             }
@@ -675,6 +682,7 @@ pub fn create_request_tee_body(
     body: impl Body<Data = Bytes, Error = hyper::Error> + Send + Sync + 'static,
     admin_state: Option<Arc<AdminState>>,
     record_id: String,
+    content_encoding: Option<String>,
 ) -> (BoxBody, BodyCaptureHandle) {
     let capture = BodyCaptureHandle {
         body_ref: Arc::new(Mutex::new(None)),
@@ -691,6 +699,7 @@ pub fn create_request_tee_body(
         admin_state,
         record_id,
         file_writer: None,
+        content_encoding,
         capture: BodyCaptureHandle {
             body_ref: capture.body_ref.clone(),
         },
@@ -709,6 +718,7 @@ struct SseTeeBodyDropGuard {
     finished: bool,
     traffic_type: Option<TrafficType>,
     file_writer: Option<BodyStreamWriter>,
+    content_encoding: Option<String>,
 }
 
 impl Drop for SseTeeBodyDropGuard {
@@ -722,7 +732,11 @@ impl Drop for SseTeeBodyDropGuard {
 impl SseTeeBodyDropGuard {
     fn store_body_and_update_record(&mut self) {
         if let Some(ref state) = self.admin_state {
-            let response_body_ref = self.file_writer.take().map(|w| w.finish());
+            let response_body_ref = self.file_writer.take().map(|writer| {
+                writer
+                    .finish()
+                    .with_content_encoding(self.content_encoding.as_deref())
+            });
             let derived_response_body_ref =
                 derive_openai_like_sse_body_ref(state, &self.record_id, &response_body_ref);
             let had_body_bytes = self.total_bytes > 0;
@@ -778,6 +792,7 @@ where
         record_id: String,
         traffic_type: Option<TrafficType>,
         file_writer: Option<BodyStreamWriter>,
+        content_encoding: Option<String>,
         max_buffer_size: usize,
     ) -> Self {
         let flush_interval = file_writer
@@ -799,6 +814,7 @@ where
                 finished: false,
                 traffic_type,
                 file_writer,
+                content_encoding,
             },
             prev_byte: None,
             event_size: 0,
@@ -962,6 +978,7 @@ pub fn create_sse_tee_body<B>(
     record_id: String,
     traffic_type: Option<TrafficType>,
     file_writer: Option<BodyStreamWriter>,
+    content_encoding: Option<String>,
     max_buffer_size: usize,
 ) -> SseTeeBody<B>
 where
@@ -974,6 +991,7 @@ where
         record_id,
         traffic_type,
         file_writer,
+        content_encoding,
         max_buffer_size,
     )
 }
@@ -1190,6 +1208,7 @@ mod tests {
             crate::server::full_body(Bytes::from_static(b"streaming-request")),
             Some(Arc::clone(&state)),
             "super-mode-stream".to_string(),
+            None,
         );
         let request_bytes = request_body.collect().await.unwrap().to_bytes();
 
@@ -1260,6 +1279,7 @@ mod tests {
             record_id.into(),
             Some(TrafficType::Http),
             Some(writer),
+            None,
             1024,
         );
         assert!(!body.is_end_stream());
@@ -1283,7 +1303,7 @@ mod tests {
     #[tokio::test]
     async fn sse_chunk_parser_covers_split_boundaries_overflow_and_no_state() {
         let body = crate::server::full_body(Bytes::new());
-        let mut tee = SseTeeBody::new(body, None, "none".into(), None, None, 3);
+        let mut tee = SseTeeBody::new(body, None, "none".into(), None, None, None, 3);
         tee.process_sse_chunk(b"abcd");
         assert!(tee.overflowed);
         tee.process_sse_chunk(b"\n");
@@ -1298,6 +1318,7 @@ mod tests {
             crate::server::full_body(Bytes::new()),
             None,
             "capped".into(),
+            None,
             None,
             None,
             usize::MAX,
@@ -1319,6 +1340,7 @@ mod tests {
             crate::server::full_body(Bytes::from_static(b"request-body")),
             Some(state.clone()),
             record_id.into(),
+            None,
         );
         assert_eq!(request.size_hint().lower(), 12);
         assert_eq!(
@@ -1368,6 +1390,65 @@ mod tests {
         assert!(store_response_body(&None, "none", b"response").is_none());
         assert!(store_request_body(&None, "empty", b"", None).is_none());
         assert!(store_response_body(&None, "empty", b"").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn streaming_body_refs_persist_their_content_encoding() {
+        let (state, dir) = test_state_with_body_store("content-encoded");
+        let record_id = "content-encoded-stream";
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            record_id.into(),
+            "POST".into(),
+            "http://example.test/".into(),
+        ));
+
+        let request_wire = Bytes::from_static(b"request-wire");
+        let (request, _) = create_request_tee_body(
+            crate::server::full_body(request_wire.clone()),
+            Some(state.clone()),
+            record_id.into(),
+            Some("gzip".to_string()),
+        );
+        assert_eq!(request.collect().await.unwrap().to_bytes(), request_wire);
+
+        let response_wire = Bytes::from_static(b"response-wire");
+        let response = create_tee_body_with_store(
+            crate::server::full_body(response_wire.clone()),
+            Some(state.clone()),
+            record_id.into(),
+            TeeBodyCaptureOptions {
+                max_body_size: Some(1),
+                content_encoding: Some("br".to_string()),
+                traffic_type: None,
+                monitor_connection: false,
+                response_headers_size: 0,
+            },
+        );
+        assert_eq!(response.collect().await.unwrap().to_bytes(), response_wire);
+
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .and_then(|store| store.get_by_id(record_id))
+            .expect("traffic record");
+        let request_ref = record.request_body_ref.as_ref().expect("request body ref");
+        let response_ref = record
+            .response_body_ref
+            .as_ref()
+            .expect("response body ref");
+        assert_eq!(request_ref.content_encoding(), Some("gzip"));
+        assert_eq!(response_ref.content_encoding(), Some("br"));
+        let store = state.body_store.as_ref().expect("body store").read();
+        assert_eq!(
+            store.load_bytes(request_ref).as_deref(),
+            Some(request_wire.as_ref())
+        );
+        assert_eq!(
+            store.load_bytes(response_ref).as_deref(),
+            Some(response_wire.as_ref())
+        );
+        drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
