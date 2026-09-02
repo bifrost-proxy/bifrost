@@ -43,20 +43,24 @@ pub(in crate::proxy::http) fn is_no_body_response(status: StatusCode, method: &s
 }
 
 pub(in crate::proxy::http) fn response_content_encoding(parts: &ResponseParts) -> Option<String> {
-    parts
-        .headers
-        .get(hyper::header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+    content_encoding_header_value(&parts.headers)
 }
 
 pub(in crate::proxy::http) fn header_content_encoding(
     headers: &hyper::HeaderMap,
 ) -> Option<String> {
-    headers
-        .get(hyper::header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+    content_encoding_header_value(headers)
+}
+
+fn content_encoding_header_value(headers: &hyper::HeaderMap) -> Option<String> {
+    let values = headers
+        .get_all(hyper::header::CONTENT_ENCODING)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(", "))
 }
 
 pub(in crate::proxy::http) fn set_content_encoding_header(
@@ -133,5 +137,39 @@ pub(in crate::proxy::http) fn normalize_res_headers(
                 HeaderValue::from_str(&len.to_string()).unwrap(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod content_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_content_encoding_fields_are_combined_in_wire_order() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.append(
+            hyper::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        headers.append(
+            hyper::header::CONTENT_ENCODING,
+            HeaderValue::from_static("br"),
+        );
+
+        assert_eq!(
+            header_content_encoding(&headers).as_deref(),
+            Some("gzip, br")
+        );
+
+        let response = hyper::Response::builder()
+            .header(hyper::header::CONTENT_ENCODING, "gzip")
+            .header(hyper::header::CONTENT_ENCODING, "br")
+            .body(())
+            .unwrap();
+        let (parts, _) = response.into_parts();
+        assert_eq!(
+            response_content_encoding(&parts).as_deref(),
+            Some("gzip, br")
+        );
     }
 }

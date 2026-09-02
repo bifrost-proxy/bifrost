@@ -5,6 +5,7 @@ use tokio_stream::StreamExt;
 use base64::Engine as _;
 
 use super::frames::{get_frame_detail, get_frames, subscribe_frames, unsubscribe_frames};
+use super::network_body::decode_body_for_display;
 use super::{
     error_response, full_body, json_response, method_not_allowed, success_response, BoxBody,
 };
@@ -1701,7 +1702,13 @@ async fn get_request_body(
             };
 
             if let Some(body_ref) = body_ref {
-                get_body_content_async(&state, body_ref, query_wants_base64(query)).await
+                get_body_content_async(
+                    &state,
+                    body_ref,
+                    query_wants_base64(query),
+                    (!want_raw).then_some(&record.request_headers),
+                )
+                .await
             } else {
                 json_response(&serde_json::json!({
                     "success": true,
@@ -1744,7 +1751,18 @@ async fn get_response_body(
             };
 
             if let Some(body_ref) = body_ref {
-                get_body_content_async(&state, body_ref, query_wants_base64(query)).await
+                let response_headers = record
+                    .response_headers
+                    .as_ref()
+                    .map(|_| &record.response_headers)
+                    .unwrap_or(&record.original_response_headers);
+                get_body_content_async(
+                    &state,
+                    body_ref,
+                    query_wants_base64(query),
+                    (!want_raw).then_some(response_headers),
+                )
+                .await
             } else {
                 json_response(&serde_json::json!({
                     "success": true,
@@ -1787,6 +1805,11 @@ async fn get_response_body_content(
             };
 
             if let Some(body_ref) = body_ref {
+                let response_headers = record
+                    .response_headers
+                    .as_ref()
+                    .map(|_| &record.response_headers)
+                    .unwrap_or(&record.original_response_headers);
                 get_body_bytes_async(
                     &state,
                     body_ref,
@@ -1794,6 +1817,7 @@ async fn get_response_body_content(
                         .content_type
                         .as_deref()
                         .unwrap_or("application/octet-stream"),
+                    (!want_raw).then_some(response_headers),
                 )
                 .await
             } else {
@@ -1835,54 +1859,42 @@ async fn get_body_content_async(
     state: &SharedAdminState,
     body_ref: &BodyRef,
     base64_output: bool,
+    decode_headers: Option<&Option<Vec<(String, String)>>>,
 ) -> Response<BoxBody> {
+    let decode = |bytes| match decode_headers {
+        Some(headers) => decode_body_for_display(bytes, headers),
+        None => bytes,
+    };
     if base64_output {
         return match load_body_bytes_async(state, body_ref).await {
-            Some(bytes) => json_response(&serde_json::json!({
+            Some(bytes) => {
+                let bytes = decode(bytes);
+                json_response(&serde_json::json!({
                 "success": true,
                 "data": String::from_utf8_lossy(&bytes),
                 "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
                 "encoding": "base64",
                 "size": bytes.len()
-            })),
+                }))
+            }
             None => error_response(StatusCode::NOT_FOUND, "Body content not found"),
         };
     }
 
-    match body_ref {
-        BodyRef::Inline { data } => json_response(&serde_json::json!({
-            "success": true,
-            "data": data,
-            "encoding": "text",
-            "size": data.len()
-        })),
-        BodyRef::File { path, size } | BodyRef::FileRange { path, size, .. } => {
-            if let Some(ref body_store) = state.body_store {
-                let body_store_clone = body_store.clone();
-                let body_ref_clone = body_ref.clone();
-                let path_clone = path.clone();
-
-                let data = tokio::task::spawn_blocking(move || {
-                    let store = body_store_clone.read();
-                    store.load(&body_ref_clone)
-                })
-                .await
-                .ok()
-                .flatten();
-
-                match data {
-                    Some(content) => json_response(&serde_json::json!({
-                        "success": true,
-                        "data": content,
-                        "encoding": "text",
-                        "size": size
-                    })),
-                    None => error_response(
-                        StatusCode::NOT_FOUND,
-                        &format!("Body file not found: {}", path_clone),
-                    ),
-                }
-            } else {
+    match load_body_bytes_async(state, body_ref).await {
+        Some(bytes) => {
+            let bytes = decode(bytes);
+            json_response(&serde_json::json!({
+                "success": true,
+                "data": String::from_utf8_lossy(&bytes),
+                "encoding": "text",
+                "size": bytes.len()
+            }))
+        }
+        None => match body_ref {
+            BodyRef::File { path, size } | BodyRef::FileRange { path, size, .. }
+                if state.body_store.is_none() =>
+            {
                 json_response(&serde_json::json!({
                     "success": false,
                     "error": "Body store not configured",
@@ -1890,7 +1902,14 @@ async fn get_body_content_async(
                     "size": size
                 }))
             }
-        }
+            BodyRef::File { path, .. } | BodyRef::FileRange { path, .. } => error_response(
+                StatusCode::NOT_FOUND,
+                &format!("Body file not found: {path}"),
+            ),
+            BodyRef::Inline { .. } => {
+                error_response(StatusCode::NOT_FOUND, "Body content not found")
+            }
+        },
     }
 }
 
@@ -1898,14 +1917,21 @@ async fn get_body_bytes_async(
     state: &SharedAdminState,
     body_ref: &BodyRef,
     content_type: &str,
+    decode_headers: Option<&Option<Vec<(String, String)>>>,
 ) -> Response<BoxBody> {
     match load_body_bytes_async(state, body_ref).await {
-        Some(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", content_type)
-            .header("Cache-Control", "no-store")
-            .body(full_body(bytes))
-            .unwrap(),
+        Some(bytes) => {
+            let bytes = match decode_headers {
+                Some(headers) => decode_body_for_display(bytes, headers),
+                None => bytes,
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", content_type)
+                .header("Cache-Control", "no-store")
+                .body(full_body(bytes))
+                .unwrap()
+        }
         None => error_response(StatusCode::NOT_FOUND, "Body content not found"),
     }
 }

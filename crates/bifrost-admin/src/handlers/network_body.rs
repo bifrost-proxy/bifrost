@@ -22,23 +22,46 @@ pub(super) fn header_value(headers: &Option<Vec<(String, String)>>, name: &str) 
         .map(|(_, value)| value.clone())
 }
 
-pub(super) fn export_body(bytes: Vec<u8>, headers: &Option<Vec<(String, String)>>) -> ExportBody {
-    if let Ok(text) = std::str::from_utf8(&bytes) {
-        return ExportBody {
-            text: Some(text.to_string()),
-            base64: None,
-        };
-    }
+fn content_encoding_value(headers: &Option<Vec<(String, String)>>) -> Option<String> {
+    let values = headers
+        .as_ref()?
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(", "))
+}
 
-    let content_encoding = header_value(headers, "content-encoding");
+pub(super) fn decode_body_for_display(
+    bytes: Vec<u8>,
+    headers: &Option<Vec<(String, String)>>,
+) -> Vec<u8> {
+    content_encoding_value(headers)
+        .as_deref()
+        .and_then(|encoding| decompress(&bytes, encoding).ok())
+        .unwrap_or(bytes)
+}
+
+pub(super) fn export_body(bytes: Vec<u8>, headers: &Option<Vec<(String, String)>>) -> ExportBody {
+    let content_encoding = content_encoding_value(headers);
     let decoded = content_encoding
         .as_deref()
         .and_then(|encoding| decompress(&bytes, encoding).ok());
 
     if let Some(decoded) = decoded {
+        let was_decoded = decoded != bytes;
+        let text = String::from_utf8(decoded).ok();
         return ExportBody {
-            text: String::from_utf8(decoded).ok(),
-            base64: Some(STANDARD.encode(bytes)),
+            base64: (was_decoded || text.is_none()).then(|| STANDARD.encode(bytes)),
+            text,
+        };
+    }
+
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        return ExportBody {
+            text: Some(text.to_string()),
+            base64: None,
         };
     }
 
@@ -81,7 +104,7 @@ pub(super) fn preview_body(
             warning: Some(format!("The {label} body contains invalid base64 data.")),
         };
     };
-    let content_encoding = header_value(headers, "content-encoding");
+    let content_encoding = content_encoding_value(headers);
     let decoded = content_encoding
         .as_deref()
         .and_then(|encoding| decompress(&bytes, encoding).ok())
@@ -117,25 +140,29 @@ fn looks_like_legacy_lossy_body(text: &str, headers: &Option<Vec<(String, String
 }
 
 fn decompress(data: &[u8], content_encoding: &str) -> std::io::Result<Vec<u8>> {
-    let encoding = content_encoding
+    let mut decoded = data.to_vec();
+    for encoding in content_encoding
         .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-
-    match encoding.as_str() {
-        "" | "identity" => Ok(data.to_vec()),
-        "gzip" => read_limited(GzDecoder::new(data)),
-        "deflate" => read_limited(ZlibDecoder::new(data))
-            .or_else(|_| read_limited(DeflateDecoder::new(data))),
-        "br" => read_limited(brotli::Decompressor::new(data, 4096)),
-        "zstd" => read_limited(zstd::stream::read::Decoder::new(data)?),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("unsupported content-encoding: {content_encoding}"),
-        )),
+        .map(str::trim)
+        .filter(|encoding| !encoding.is_empty())
+        .rev()
+    {
+        decoded = match encoding.to_ascii_lowercase().as_str() {
+            "identity" => decoded,
+            "gzip" | "x-gzip" => read_limited(GzDecoder::new(decoded.as_slice()))?,
+            "deflate" => read_limited(ZlibDecoder::new(decoded.as_slice()))
+                .or_else(|_| read_limited(DeflateDecoder::new(decoded.as_slice())))?,
+            "br" => read_limited(brotli::Decompressor::new(decoded.as_slice(), 4096))?,
+            "zstd" => read_limited(zstd::stream::read::Decoder::new(decoded.as_slice())?)?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unsupported content-encoding: {encoding}"),
+                ));
+            }
+        };
     }
+    Ok(decoded)
 }
 
 fn read_limited(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
@@ -165,6 +192,17 @@ mod tests {
         assert!(exported.text.is_none());
         assert_eq!(
             STANDARD.decode(exported.base64.unwrap()).unwrap(),
+            vec![0xff, 0x00, 0xfe]
+        );
+
+        let identity_headers = Some(vec![(
+            "Content-Encoding".to_string(),
+            "identity".to_string(),
+        )]);
+        let identity = export_body(vec![0xff, 0x00, 0xfe], &identity_headers);
+        assert!(identity.text.is_none());
+        assert_eq!(
+            STANDARD.decode(identity.base64.unwrap()).unwrap(),
             vec![0xff, 0x00, 0xfe]
         );
     }
@@ -219,6 +257,69 @@ mod tests {
         assert_eq!(decompress(&zstd, "zstd").unwrap(), plaintext);
         assert_eq!(decompress(plaintext, "identity").unwrap(), plaintext);
         assert!(decompress(plaintext, "compress").is_err());
+    }
+
+    #[test]
+    fn multiple_content_codings_decode_in_reverse_and_custom_codings_stay_raw() {
+        let plaintext = b"multiply encoded package body";
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(plaintext).unwrap();
+        let gzip = gzip.finish().unwrap();
+
+        let mut brotli = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut brotli, 4096, 5, 22);
+            encoder.write_all(&gzip).unwrap();
+        }
+        assert_eq!(
+            decompress(&brotli, "gzip, br").expect("decode chain"),
+            plaintext
+        );
+
+        let custom_headers = Some(vec![(
+            "content-encoding".to_string(),
+            "gzip, x-company-codec".to_string(),
+        )]);
+        let exported = export_body(brotli.clone(), &custom_headers);
+        assert!(exported.text.is_none());
+        assert_eq!(STANDARD.decode(exported.base64.unwrap()).unwrap(), brotli);
+    }
+
+    #[test]
+    fn repeated_content_encoding_headers_and_x_gzip_are_decoded() {
+        let plaintext = b"repeated header body";
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(plaintext).unwrap();
+        let gzip = gzip.finish().unwrap();
+
+        let mut brotli = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut brotli, 4096, 5, 22);
+            encoder.write_all(&gzip).unwrap();
+        }
+        let repeated_headers = Some(vec![
+            ("Content-Encoding".to_string(), "gzip".to_string()),
+            ("content-encoding".to_string(), "br".to_string()),
+        ]);
+        assert_eq!(
+            decode_body_for_display(brotli.clone(), &repeated_headers),
+            plaintext
+        );
+        let repeated = export_body(brotli.clone(), &repeated_headers);
+        assert_eq!(repeated.text.as_deref(), Some("repeated header body"));
+
+        let custom_headers = Some(vec![(
+            "Content-Encoding".to_string(),
+            "x-company-codec".to_string(),
+        )]);
+        assert_eq!(
+            decode_body_for_display(brotli.clone(), &custom_headers),
+            brotli
+        );
+
+        let alias_headers = Some(vec![("Content-Encoding".to_string(), "x-gzip".to_string())]);
+        let alias = export_body(gzip, &alias_headers);
+        assert_eq!(alias.text.as_deref(), Some("repeated header body"));
     }
 
     #[test]

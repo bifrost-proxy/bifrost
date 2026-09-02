@@ -67,18 +67,20 @@ cd /Users/eden/work/github/bifrost-network-empty-bifrost-export
 - 缺失的 `listener_port` 在导入恢复为 Traffic record 时按默认值 `0` 处理。
 - 缺失的 `active_rules` 按 `None` 处理，不影响旧文件导入。
 
-### TC-NE-05：gzip Body 导出后明文可读且原始字节可恢复
+### TC-NE-05：标准 HTTP 压缩 Body 在请求和响应侧均展示明文
 
 **操作步骤**：
 1. 启动真实 Bifrost 服务，使用临时 `BIFROST_DATA_DIR`、随机主端口和 `--no-system-proxy`。
-2. 通过代理发送 `Content-Type: application/json`、`Content-Encoding: gzip` 的 POST 请求。
+2. 通过代理发送 `Content-Type: application/json`、`Content-Encoding: gzip, deflate` 的双层压缩 POST 请求，并让上游响应返回相同编码链。
 3. 等待 Traffic DB 生成记录，调用 Network 导出接口并解析 `.bifrost`。
 4. 调用 Network 预览接口查看同一个导出文件。
 
 **预期结果**：
-- `request_body` 是解压后的 JSON 明文，不包含替换字符 `�`。
-- `request_body_base64` 可解码为原始 gzip 字节，再解压后与 JSON 明文完全一致。
-- 单条记录预览的 Body 面板展示 JSON 明文，并从请求头恢复 `application/json` 内容类型。
+- `request_body` 和 `response_body` 都是解压后的 JSON 明文，不包含替换字符 `�`。
+- `Content-Encoding` 中多个编码（包括重复 header 字段）按应用顺序的逆序解码；内置支持 `gzip`（含 `x-gzip` 兼容别名）、`deflate`、`br`、`zstd` 和 `identity`。
+- 对仍持有原始压缩引用的流式记录，`request_body_base64` 可解码为原始双层压缩字节，再解压后与 JSON 明文完全一致。
+- 单条记录预览的 Request/Response Body 面板均展示 JSON 明文，并恢复两侧 `application/json` 内容类型。
+- 遇到未知或自定义编码时不做部分解码，保留完整原始字节交给自定义 decoder。
 - 对旧版本已经 lossy 导出的压缩 Body，预览隐藏乱码并提示需要使用新版本重新导出。
 
 ## 执行记录
@@ -87,8 +89,10 @@ cd /Users/eden/work/github/bifrost-network-empty-bifrost-export
 - 2026-05-20：已执行 `cargo test -p bifrost-core parse_network_accepts_legacy_record_without_active_rules -- --nocapture`，旧 Network record 缺少 `listener_port` / `active_rules` 时解析通过。
 - 2026-05-20：已执行 `cd web && pnpm vitest run src/api/bifrost-file.test.ts`，5 个前端 import/export helper 用例通过，覆盖空 Network 导出提示。
 - 2026-05-20：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，55/55 通过；其中新增断言确认默认端口导出包含 `default_port` 生效规则快照，自定义端口导出包含 `custom_port` 生效规则快照，且两者不互相混入。
-- 2026-09-02：已执行 `cargo test -p bifrost-admin handlers::bifrost_file::tests:: -- --nocapture`（22/22 通过）及 `cargo test -p bifrost-admin handlers::network_body::tests:: -- --nocapture`（4/4 通过），覆盖 gzip Body 明文导出、原始字节可恢复、新格式预览解压、旧 lossy 文件警告和旧格式兼容。
-- 2026-09-02：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，62/62 通过；真实 gzip POST 经代理录制、Network 导出和预览后，明文 JSON、内容类型和 base64 原始字节断言通过。
+- 2026-09-02：已执行 `cargo test -p bifrost-admin handlers::bifrost_file::tests:: -- --nocapture`（22/22 通过）及 `cargo test -p bifrost-admin handlers::network_body::tests:: -- --nocapture`（6/6 通过），覆盖所有内置 HTTP 压缩算法、双层编码、未知编码透传、原始字节可恢复、新格式预览解压、旧 lossy 文件警告和旧格式兼容。
+- 2026-09-02：已执行 `cargo test -p bifrost-proxy transform::decompress::tests::test_ -- --nocapture`（7/7 通过），覆盖完整 Content-Encoding 链逆序解码和自定义编码原样保留。
+- 2026-09-02：已执行 `e2e-tests/tests/test_temporary_port_bindings.sh`，62/62 通过；真实 `gzip, deflate` 双层压缩 POST 及响应经代理录制、Network 导出和预览后，两侧明文 JSON、内容类型和原始请求字节断言通过。
+- 2026-09-02：已按 TC-NE-05 独立人工执行 release 二进制，使用临时数据目录、动态端口 `62396/62397`、`--no-system-proxy` 及禁用托盘/登录提示环境变量；Traffic 请求/响应、Network 导出及预览的双层压缩明文断言通过，`x-company-codec` 请求/响应二进制字节保持不变，服务按精确 PID 清理。
 
 ## 清理步骤
 
