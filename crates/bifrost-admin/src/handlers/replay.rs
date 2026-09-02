@@ -98,6 +98,13 @@ fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Result<Optio
 
     let headers = Some(headers.to_vec());
     let encoding = super::network_body::content_encoding_value(&headers);
+    let has_standard_compression = encoding.as_deref().is_some_and(|encoding| {
+        super::network_body::content_encoding_is_supported(encoding)
+            && encoding
+                .split(',')
+                .map(str::trim)
+                .any(|coding| !coding.eq_ignore_ascii_case("identity"))
+    });
     let decoded = match encoding.as_deref() {
         None | Some("") => body.to_vec(),
         Some(encoding) if !super::network_body::content_encoding_is_supported(encoding) => {
@@ -107,9 +114,13 @@ fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Result<Optio
             .map_err(|error| format!("failed to decode {encoding} replay response: {error}"))?,
     };
 
-    String::from_utf8(decoded)
-        .map(Some)
-        .map_err(|_| "replay response body is not valid UTF-8".to_string())
+    if has_standard_compression {
+        String::from_utf8(decoded)
+            .map(Some)
+            .map_err(|_| "decoded replay response body is not valid UTF-8".to_string())
+    } else {
+        Ok(Some(String::from_utf8_lossy(&decoded).into_owned()))
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +143,21 @@ mod replay_body_decode_tests {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
         let decoded = decode_replay_body(&headers, &gz).unwrap().unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn unencoded_binary_response_does_not_fail_replay() {
+        let body = b"\xff\x00\xfe";
+        let decoded = decode_replay_body(&[], body).unwrap().unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(body));
+    }
+
+    #[test]
+    fn identity_binary_response_does_not_fail_replay() {
+        let headers = vec![("content-encoding".to_string(), "identity".to_string())];
+        let body = b"\xff\x00\xfe";
+        let decoded = decode_replay_body(&headers, body).unwrap().unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(body));
     }
 
     #[test]

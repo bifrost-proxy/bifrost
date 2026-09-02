@@ -909,7 +909,9 @@ mod sse_stream_tests {
             .await
         });
 
-        let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        // Coverage instrumentation can delay the first filesystem poll; this
+        // remains bounded while avoiding a scheduler-sensitive one-second cap.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .unwrap()
             .unwrap();
@@ -920,13 +922,13 @@ mod sse_stream_tests {
         let mut wire = first_member;
         wire.extend_from_slice(&second_member);
         std::fs::write(&path, wire).unwrap();
-        let second = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .unwrap()
             .unwrap();
         assert!(String::from_utf8_lossy(&second).contains("data: second"));
         harness.state().sse_hub.set_closed(connection_id);
-        tokio::time::timeout(std::time::Duration::from_secs(1), stream)
+        tokio::time::timeout(std::time::Duration::from_secs(5), stream)
             .await
             .expect("gzip stream should close")
             .expect("stream task")

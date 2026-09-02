@@ -1,5 +1,6 @@
-use super::body::{configured_decompress_output_bytes, decode_stored_body, load_body_bytes_async};
+use super::body::{configured_decompress_output_bytes, load_body_bytes_async};
 use super::*;
+use crate::handlers::network_body::{content_encoding_is_supported, decompress_with_limit_metered};
 use base64::Engine as _;
 
 const BATCH_GET_MAX_IDS: usize = 200;
@@ -96,6 +97,7 @@ pub(super) async fn batch_traffic(
 
     let service = AdminQueryService::new(state.clone());
     let mut out = Vec::<u8>::new();
+    let mut remaining_decompress_bytes = configured_decompress_output_bytes(&state).await;
     for id in &params.ids {
         let line = match service.get_traffic_record(id).await {
             Ok(record) => {
@@ -117,6 +119,7 @@ pub(super) async fn batch_traffic(
                             body_ref,
                             record.request_content_type.as_deref(),
                             params.max_body_bytes,
+                            &mut remaining_decompress_bytes,
                         )
                         .await
                         {
@@ -133,6 +136,7 @@ pub(super) async fn batch_traffic(
                             body_ref,
                             record.content_type.as_deref(),
                             params.max_body_bytes,
+                            &mut remaining_decompress_bytes,
                         )
                         .await
                         {
@@ -191,11 +195,11 @@ async fn build_batch_body_chunk(
     body_ref: Option<&BodyRef>,
     content_type: Option<&str>,
     max_body_bytes: usize,
+    remaining_decompress_bytes: &mut usize,
 ) -> Option<serde_json::Value> {
     let body_ref = body_ref?;
     let bytes = load_body_bytes_async(state, body_ref).await?;
-    let max_output_bytes = configured_decompress_output_bytes(state).await;
-    let bytes = decode_stored_body(body_ref, bytes, true, max_output_bytes);
+    let bytes = decode_batch_body(body_ref, bytes, max_body_bytes, remaining_decompress_bytes);
     let original_size = bytes.len();
     let (slice, truncated) = if original_size > max_body_bytes {
         (&bytes[..max_body_bytes], true)
@@ -219,18 +223,83 @@ async fn build_batch_body_chunk(
     Some(serde_json::Value::Object(obj))
 }
 
+fn decode_batch_body(
+    body_ref: &BodyRef,
+    bytes: Vec<u8>,
+    max_body_bytes: usize,
+    remaining_decompress_bytes: &mut usize,
+) -> Vec<u8> {
+    let Some(content_encoding) = body_ref.content_encoding() else {
+        return bytes;
+    };
+    if !content_encoding_is_supported(&content_encoding) {
+        return bytes;
+    }
+
+    // The batch endpoint only needs enough decoded data to fill its preview.
+    // Share the configured decompression allowance across every requested body
+    // so one request cannot multiply that work by the 200-ID batch limit.
+    let decode_limit = (*remaining_decompress_bytes).min(max_body_bytes.saturating_add(1));
+    if decode_limit == 0 {
+        return bytes;
+    }
+    match decompress_with_limit_metered(&bytes, &content_encoding, decode_limit) {
+        Ok((decoded, consumed)) => {
+            *remaining_decompress_bytes = remaining_decompress_bytes.saturating_sub(consumed);
+            decoded
+        }
+        Err(_) => {
+            // A decoder may consume the entire allowance before reporting an
+            // invalid or oversized stream, so account for the worst case.
+            *remaining_decompress_bytes = remaining_decompress_bytes.saturating_sub(decode_limit);
+            bytes
+        }
+    }
+}
+
 #[cfg(test)]
 mod batch_query_tests {
     use std::io::Write;
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use flate2::{write::GzEncoder, Compression};
+    use hyper::{body::Incoming, Request};
 
     use super::{
-        build_batch_body_chunk, parse_batch_traffic_query, BATCH_GET_DEFAULT_MAX_BODY_BYTES,
-        BATCH_GET_MAX_IDS,
+        batch_traffic, build_batch_body_chunk, decode_batch_body, parse_batch_traffic_query,
+        BATCH_GET_DEFAULT_MAX_BODY_BYTES, BATCH_GET_MAX_IDS,
     };
+    use crate::state::SharedAdminState;
     use crate::test_support::TestAdminState;
+
+    async fn spawn_batch_server(state: SharedAdminState) -> (String, tokio::task::JoinHandle<()>) {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind batch test listener");
+        let addr = listener.local_addr().expect("batch test listener addr");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state.clone();
+                        async move { Ok::<_, hyper::Error>(batch_traffic(req, state).await) }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), server)
+    }
 
     #[test]
     fn parse_basic_ids() {
@@ -309,11 +378,13 @@ mod batch_query_tests {
             .with_content_encoding(Some("gzip"))
             .unwrap();
 
+        let mut remaining = usize::MAX;
         let chunk = build_batch_body_chunk(
             &harness.state(),
             Some(&body_ref),
             Some("application/json"),
             usize::MAX,
+            &mut remaining,
         )
         .await
         .expect("build batch body chunk");
@@ -326,5 +397,101 @@ mod batch_query_tests {
         );
         assert_eq!(chunk["size"], plaintext.len());
         assert_eq!(chunk["truncated"], false);
+    }
+
+    #[test]
+    fn batch_body_decoding_shares_one_output_budget() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = b"sixteen-byte-msg";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("batch-budget", "req", &compressed)
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        let mut remaining = plaintext.len();
+
+        let first = decode_batch_body(&body_ref, compressed.clone(), usize::MAX, &mut remaining);
+        let second = decode_batch_body(&body_ref, compressed.clone(), usize::MAX, &mut remaining);
+
+        assert_eq!(first, plaintext);
+        assert_eq!(remaining, 0);
+        assert_eq!(second, compressed);
+    }
+
+    #[test]
+    fn batch_body_decoding_preserves_unencoded_custom_and_invalid_bytes() {
+        let harness = TestAdminState::builder().build();
+        let raw = vec![0, 159, 146, 150];
+        let plain_ref = harness
+            .body_store
+            .read()
+            .store("batch-plain", "req", &raw)
+            .unwrap();
+        let custom_ref = harness
+            .body_store
+            .read()
+            .store("batch-custom", "req", &raw)
+            .unwrap()
+            .with_content_encoding(Some("x-private-cipher"))
+            .unwrap();
+        let invalid_gzip_ref = harness
+            .body_store
+            .read()
+            .store("batch-invalid", "req", &raw)
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+
+        let mut remaining = 3;
+        assert_eq!(
+            decode_batch_body(&plain_ref, raw.clone(), 2, &mut remaining),
+            raw
+        );
+        assert_eq!(remaining, 3);
+        assert_eq!(
+            decode_batch_body(&custom_ref, raw.clone(), 2, &mut remaining),
+            raw
+        );
+        assert_eq!(remaining, 3);
+        assert_eq!(
+            decode_batch_body(&invalid_gzip_ref, raw.clone(), 2, &mut remaining),
+            raw
+        );
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn batch_endpoint_initializes_shared_budget_and_validates_query() {
+        let harness = TestAdminState::builder().build();
+        let (base, server) = spawn_batch_server(harness.state()).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build batch test client");
+
+        let response = client
+            .get(format!("{base}/api/traffic/batch?ids=missing"))
+            .send()
+            .await
+            .expect("request batch endpoint");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let line: serde_json::Value =
+            serde_json::from_str(response.text().await.expect("read batch response").trim())
+                .expect("parse batch response");
+        assert_eq!(line["id"], "missing");
+        assert_eq!(line["ok"], false);
+
+        let invalid = client
+            .get(format!("{base}/api/traffic/batch"))
+            .send()
+            .await
+            .expect("request invalid batch endpoint");
+        assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+        server.abort();
     }
 }

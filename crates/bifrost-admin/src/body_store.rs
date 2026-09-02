@@ -679,6 +679,9 @@ impl BodyStore {
 }
 
 fn extract_base_id(file_name: &str) -> &str {
+    let file_name = file_name
+        .strip_suffix(".content-encoding")
+        .unwrap_or(file_name);
     for suffix in [
         "_res_openai_like",
         "_sse_raw",
@@ -1047,6 +1050,31 @@ mod tests {
             "REQ-abcdef01-000001"
         );
         assert_eq!(extract_base_id("some_unknown_file"), "some_unknown");
+        assert_eq!(
+            extract_base_id("REQ-69c50db8-165720_sse_raw.content-encoding"),
+            "REQ-69c50db8-165720"
+        );
+    }
+
+    #[test]
+    fn test_delete_by_ids_removes_content_encoding_sidecar() {
+        let dir = create_test_dir();
+        let store = BodyStore::new(dir.clone(), 1, 7, 64 * 1024, Duration::from_millis(200));
+        let id = "REQ-encoded-sse";
+        let body_ref = store
+            .store(id, "sse_raw", b"compressed SSE payload")
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        let body_path = body_ref.file_path().unwrap().to_string();
+        let sidecar = content_encoding_marker_path(&body_path);
+        assert!(sidecar.exists());
+
+        let removed = store.delete_by_ids(&[id.to_string()]).unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(!sidecar.exists());
+        cleanup_test_dir(&dir);
     }
 
     #[test]
