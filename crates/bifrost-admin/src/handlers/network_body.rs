@@ -224,10 +224,7 @@ mod tests {
 
     #[test]
     fn lossless_base64_prevents_legacy_replacement_character_false_positive() {
-        let headers = Some(vec![(
-            "Content-Encoding".to_string(),
-            "gzip".to_string(),
-        )]);
+        let headers = Some(vec![("Content-Encoding".to_string(), "gzip".to_string())]);
         let preview = preview_body(
             Some("valid \u{fffd}\u{fffd} text"),
             Some("AAECAw=="),
