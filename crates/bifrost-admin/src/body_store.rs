@@ -25,46 +25,42 @@ pub enum BodyRef {
         offset: u64,
         size: usize,
     },
-    /// A body persisted with its HTTP content-coding still applied.
-    ///
-    /// Buffered proxy paths store the decoded representation directly, while
-    /// streaming paths may need to persist wire bytes. Keeping this marker on
-    /// the reference prevents readers from guessing from headers and decoding
-    /// an already-decoded application payload a second time.
-    ContentEncoded {
-        body_ref: Box<BodyRef>,
-        content_encoding: String,
-    },
 }
 
 impl BodyRef {
+    /// Persist HTTP content-coding metadata beside the body file.
+    ///
+    /// `BodyRef` is a public API and a postcard-persisted database value, so
+    /// changing its enum shape would break both existing clients and stored
+    /// traffic. The sidecar keeps that contract stable while surviving a
+    /// process restart.
     pub fn with_content_encoding(self, content_encoding: Option<&str>) -> Self {
         match content_encoding
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            Some(content_encoding) => BodyRef::ContentEncoded {
-                body_ref: Box::new(self),
-                content_encoding: content_encoding.to_string(),
-            },
+            Some(content_encoding) => {
+                if content_encoding.len() <= 256 {
+                    if let Some(path) = self.file_path() {
+                        let _ = fs::write(content_encoding_marker_path(path), content_encoding);
+                    }
+                }
+                self
+            }
             None => self,
         }
     }
 
-    pub fn content_encoding(&self) -> Option<&str> {
-        match self {
-            BodyRef::ContentEncoded {
-                content_encoding, ..
-            } => Some(content_encoding),
-            _ => None,
-        }
+    pub fn content_encoding(&self) -> Option<String> {
+        let path = self.file_path()?;
+        fs::read_to_string(content_encoding_marker_path(path))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
     }
 
     pub fn storage_ref(&self) -> &BodyRef {
-        match self {
-            BodyRef::ContentEncoded { body_ref, .. } => body_ref.storage_ref(),
-            _ => self,
-        }
+        self
     }
 
     pub fn size(&self) -> usize {
@@ -72,17 +68,26 @@ impl BodyRef {
             BodyRef::Inline { data } => data.len(),
             BodyRef::File { size, .. } => *size,
             BodyRef::FileRange { size, .. } => *size,
-            BodyRef::ContentEncoded { body_ref, .. } => body_ref.size(),
         }
     }
 
     pub fn is_file(&self) -> bool {
         match self {
             BodyRef::File { .. } | BodyRef::FileRange { .. } => true,
-            BodyRef::ContentEncoded { body_ref, .. } => body_ref.is_file(),
             BodyRef::Inline { .. } => false,
         }
     }
+
+    fn file_path(&self) -> Option<&str> {
+        match self {
+            BodyRef::File { path, .. } | BodyRef::FileRange { path, .. } => Some(path),
+            BodyRef::Inline { .. } => None,
+        }
+    }
+}
+
+fn content_encoding_marker_path(path: &str) -> PathBuf {
+    PathBuf::from(format!("{path}.content-encoding"))
 }
 
 pub struct BodyStore {
@@ -297,6 +302,7 @@ impl BodyStore {
         // 即使 body 很小，也优先落盘，避免在内存中形成一份 UTF-8/losy 的拷贝导致内存膨胀。
         let filename = format!("{}_{}", id, kind);
         let path = self.temp_dir.join(&filename);
+        let _ = fs::remove_file(content_encoding_marker_path(&path.to_string_lossy()));
 
         match fs::File::create(&path) {
             Ok(mut file) => {
@@ -327,6 +333,7 @@ impl BodyStore {
 
         let filename = format!("{}_{}", id, kind);
         let path = self.temp_dir.join(&filename);
+        let _ = fs::remove_file(content_encoding_marker_path(&path.to_string_lossy()));
 
         match fs::File::create(&path) {
             Ok(mut file) => {
@@ -360,6 +367,7 @@ impl BodyStore {
         self.acquire_stream_slot()?;
         let filename = format!("{}_{}", id, kind);
         let path = self.temp_dir.join(&filename);
+        let _ = fs::remove_file(content_encoding_marker_path(&path.to_string_lossy()));
         let file = match fs::File::create(&path) {
             Ok(file) => file,
             Err(error) => {
@@ -425,7 +433,7 @@ impl BodyStore {
     pub fn load(&self, body_ref: &BodyRef) -> Option<String> {
         match body_ref {
             BodyRef::Inline { data } => Some(data.clone()),
-            BodyRef::File { path, size } => {
+            BodyRef::File { path, size, .. } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
@@ -435,7 +443,9 @@ impl BodyStore {
                 file.read_to_end(&mut contents).ok()?;
                 Some(String::from_utf8_lossy(&contents).to_string())
             }
-            BodyRef::FileRange { path, offset, size } => {
+            BodyRef::FileRange {
+                path, offset, size, ..
+            } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
@@ -454,14 +464,13 @@ impl BodyStore {
                 contents.truncate(read_size);
                 Some(String::from_utf8_lossy(&contents).to_string())
             }
-            BodyRef::ContentEncoded { body_ref, .. } => self.load(body_ref),
         }
     }
 
     pub fn load_bytes(&self, body_ref: &BodyRef) -> Option<Vec<u8>> {
         match body_ref {
             BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
-            BodyRef::File { path, size } => {
+            BodyRef::File { path, size, .. } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
@@ -471,7 +480,9 @@ impl BodyStore {
                 file.read_to_end(&mut contents).ok()?;
                 Some(contents)
             }
-            BodyRef::FileRange { path, offset, size } => {
+            BodyRef::FileRange {
+                path, offset, size, ..
+            } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
@@ -490,7 +501,6 @@ impl BodyStore {
                 contents.truncate(read_size);
                 Some(contents)
             }
-            BodyRef::ContentEncoded { body_ref, .. } => self.load_bytes(body_ref),
         }
     }
 
@@ -568,9 +578,9 @@ impl BodyStore {
         match body_ref {
             BodyRef::File { path, .. } | BodyRef::FileRange { path, .. } => {
                 let _ = fs::remove_file(path);
+                let _ = fs::remove_file(content_encoding_marker_path(path));
             }
             BodyRef::Inline { .. } => {}
-            BodyRef::ContentEncoded { body_ref, .. } => self.remove(body_ref),
         }
     }
 
@@ -583,6 +593,9 @@ impl BodyStore {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_file() {
+                        if path.to_string_lossy().ends_with(".content-encoding") {
+                            continue;
+                        }
                         file_count += 1;
                         if let Ok(metadata) = entry.metadata() {
                             total_size += metadata.len();
@@ -750,17 +763,50 @@ mod tests {
     }
 
     #[test]
-    fn content_encoded_storage_ref_unwraps_to_the_physical_reference() {
-        let stored = BodyRef::Inline {
-            data: "wire bytes".to_string(),
+    fn content_encoding_metadata_keeps_the_existing_public_variant() {
+        let dir = create_test_dir();
+        let path = dir.join("wire-body").to_string_lossy().to_string();
+        let stored = BodyRef::File {
+            path: path.clone(),
+            size: 10,
         };
         let encoded = stored.clone().with_content_encoding(Some("gzip"));
 
         assert!(matches!(
             encoded.storage_ref(),
-            BodyRef::Inline { data } if data == "wire bytes"
+            BodyRef::File { path: stored_path, .. } if stored_path == &path
         ));
+        assert_eq!(encoded.content_encoding().as_deref(), Some("gzip"));
+        let json = serde_json::to_value(&encoded).unwrap();
+        assert!(json.get("File").is_some());
+        assert!(json.get("ContentEncoded").is_none());
+
+        let legacy: BodyRef = serde_json::from_value(serde_json::json!({
+            "File": { "path": "legacy", "size": 3 }
+        }))
+        .unwrap();
+        assert_eq!(legacy.content_encoding(), None);
         assert!(std::ptr::eq(stored.storage_ref(), &stored));
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn overwriting_or_removing_a_body_clears_its_encoding_sidecar() {
+        let dir = create_test_dir();
+        let store = BodyStore::new(dir.clone(), 1024, 7, 64 * 1024, Duration::from_millis(200));
+        let encoded = store
+            .store("sidecar", "res", b"wire")
+            .unwrap()
+            .with_content_encoding(Some("gzip"));
+        assert_eq!(encoded.content_encoding().as_deref(), Some("gzip"));
+
+        let replaced = store.store("sidecar", "res", b"plaintext").unwrap();
+        assert_eq!(replaced.content_encoding(), None);
+        let encoded = replaced.with_content_encoding(Some("br"));
+        store.remove(&encoded);
+        assert_eq!(encoded.content_encoding(), None);
+
+        cleanup_test_dir(&dir);
     }
 
     #[test]

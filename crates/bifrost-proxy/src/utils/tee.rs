@@ -1437,8 +1437,8 @@ mod tests {
             .response_body_ref
             .as_ref()
             .expect("response body ref");
-        assert_eq!(request_ref.content_encoding(), Some("gzip"));
-        assert_eq!(response_ref.content_encoding(), Some("br"));
+        assert_eq!(request_ref.content_encoding().as_deref(), Some("gzip"));
+        assert_eq!(response_ref.content_encoding().as_deref(), Some("br"));
         let store = state.body_store.as_ref().expect("body store").read();
         assert_eq!(
             store.load_bytes(request_ref).as_deref(),

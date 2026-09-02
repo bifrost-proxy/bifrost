@@ -9,7 +9,9 @@ use bifrost_core::{BifrostError, Result};
 use serde_json::{json, Value};
 
 use crate::body_store::BodyRef;
-use crate::handlers::network_body::decode_content_encoded_body;
+use crate::handlers::network_body::{
+    decode_content_encoded_body, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+};
 use crate::push::SharedPushManager;
 use crate::search::{
     FilterCondition, SearchEngine, SearchFilters, SearchInclude, SearchProgress, SearchRequest,
@@ -26,6 +28,20 @@ async fn join_clear_task<T>(
     task.await
         .map_err(|e| BifrostError::Config(format!("{label} clear task join failed: {e}")))?
         .map_err(BifrostError::Config)
+}
+
+async fn configured_decompress_output_bytes(state: &SharedAdminState) -> usize {
+    match state.config_manager.as_ref() {
+        Some(config_manager) => {
+            config_manager
+                .config()
+                .await
+                .sandbox
+                .limits
+                .max_decompress_output_bytes
+        }
+        None => DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+    }
 }
 
 #[derive(Clone)]
@@ -82,6 +98,7 @@ impl AdminQueryService {
         let body_store = self.state.body_store.clone();
         let frame_store = self.state.frame_store.clone();
         let connection_monitor = Some(self.state.connection_monitor.clone());
+        let max_decompress_output_bytes = configured_decompress_output_bytes(&self.state).await;
         let state = self.state.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -90,7 +107,8 @@ impl AdminQueryService {
                 body_store,
                 frame_store,
                 connection_monitor,
-            );
+            )
+            .with_decompression_limit(max_decompress_output_bytes);
             let mut response = engine.search(&request);
             for result in &mut response.results {
                 let mut record = result.record.clone();
@@ -121,6 +139,7 @@ impl AdminQueryService {
         let body_store = self.state.body_store.clone();
         let frame_store = self.state.frame_store.clone();
         let connection_monitor = Some(self.state.connection_monitor.clone());
+        let max_decompress_output_bytes = configured_decompress_output_bytes(&self.state).await;
         let state = self.state.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -129,7 +148,8 @@ impl AdminQueryService {
                 body_store,
                 frame_store,
                 connection_monitor,
-            );
+            )
+            .with_decompression_limit(max_decompress_output_bytes);
             let mut response = engine.search_stream(&request, on_result, on_progress);
             for result in &mut response.results {
                 let mut record = result.record.clone();
@@ -305,7 +325,7 @@ impl AdminQueryService {
 
         match body_ref {
             BodyRef::Inline { data } => Ok(json!({ "success": true, "data": data })),
-            BodyRef::File { .. } | BodyRef::FileRange { .. } | BodyRef::ContentEncoded { .. } => {
+            BodyRef::File { .. } | BodyRef::FileRange { .. } => {
                 let body_store =
                     self.state.body_store.clone().ok_or_else(|| {
                         BifrostError::Config("Body store not configured".to_string())
@@ -313,8 +333,10 @@ impl AdminQueryService {
                 let loaded = tokio::task::spawn_blocking(move || {
                     let store = body_store.read();
                     store.load_bytes(&body_ref).map(|bytes| {
-                        let decoded =
-                            decode_content_encoded_body(bytes, body_ref.content_encoding());
+                        let decoded = decode_content_encoded_body(
+                            bytes,
+                            body_ref.content_encoding().as_deref(),
+                        );
                         String::from_utf8_lossy(&decoded).to_string()
                     })
                 })

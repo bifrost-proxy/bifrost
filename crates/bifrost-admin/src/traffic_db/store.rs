@@ -2331,8 +2331,12 @@ mod tests {
             data: "{\"hello\":1}".to_string(),
         });
         record.response_body_ref = Some(
-            BodyRef::Inline {
-                data: "{\"ok\":true}".to_string(),
+            BodyRef::File {
+                path: dir
+                    .join("encoded-response-body")
+                    .to_string_lossy()
+                    .to_string(),
+                size: 11,
             }
             .with_content_encoding(Some("gzip")),
         );
@@ -2362,7 +2366,8 @@ mod tests {
             loaded
                 .response_body_ref
                 .as_ref()
-                .and_then(BodyRef::content_encoding),
+                .and_then(BodyRef::content_encoding)
+                .as_deref(),
             Some("gzip")
         );
         assert_eq!(loaded.error_message.as_deref(), Some("upstream timeout"));

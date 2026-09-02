@@ -206,7 +206,9 @@ impl WsPayloadStore {
 
     pub fn read_range(&self, body_ref: &BodyRef) -> Option<Vec<u8>> {
         let (path, offset, size) = match body_ref {
-            BodyRef::FileRange { path, offset, size } => (path, *offset, *size),
+            BodyRef::FileRange {
+                path, offset, size, ..
+            } => (path, *offset, *size),
             _ => return None,
         };
 

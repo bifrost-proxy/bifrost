@@ -182,7 +182,7 @@ fn looks_like_legacy_lossy_body(text: &str, headers: &Option<Vec<(String, String
                 .any(|character| character.is_control() && !character.is_whitespace()))
 }
 
-pub(super) fn content_encoding_is_supported(content_encoding: &str) -> bool {
+pub(crate) fn content_encoding_is_supported(content_encoding: &str) -> bool {
     content_encoding
         .split(',')
         .map(str::trim)
@@ -199,11 +199,20 @@ pub(super) fn decompress(data: &[u8], content_encoding: &str) -> std::io::Result
     decompress_with_limit(data, content_encoding, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES)
 }
 
-pub(super) fn decompress_with_limit(
+pub(crate) fn decompress_with_limit(
     data: &[u8],
     content_encoding: &str,
     max_output_bytes: usize,
 ) -> std::io::Result<Vec<u8>> {
+    decompress_with_limit_metered(data, content_encoding, max_output_bytes)
+        .map(|(decoded, _)| decoded)
+}
+
+pub(crate) fn decompress_with_limit_metered(
+    data: &[u8],
+    content_encoding: &str,
+    max_output_bytes: usize,
+) -> std::io::Result<(Vec<u8>, usize)> {
     let mut decoded = data.to_vec();
     let mut remaining_output_bytes = max_output_bytes;
     for encoding in content_encoding
@@ -245,6 +254,73 @@ pub(super) fn decompress_with_limit(
         }
         decoded = next;
     }
+    Ok((decoded, max_output_bytes - remaining_output_bytes))
+}
+
+/// Decode the currently available prefix of a streaming HTTP body.
+///
+/// Streaming compressors commonly omit their final trailer until the
+/// connection closes. The regular decoder intentionally treats that as an
+/// error; SSE tailing needs the plaintext produced before that EOF instead.
+pub(crate) fn decompress_partial_with_limit(
+    data: &[u8],
+    content_encoding: &str,
+    max_output_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut decoded = data.to_vec();
+    let mut remaining_output_bytes = max_output_bytes;
+    for encoding in content_encoding
+        .split(',')
+        .map(str::trim)
+        .filter(|encoding| !encoding.is_empty())
+        .rev()
+    {
+        let next = match encoding.to_ascii_lowercase().as_str() {
+            "identity" => decoded,
+            "gzip" | "x-gzip" => read_limited_partial(
+                MultiGzDecoder::new(decoded.as_slice()),
+                remaining_output_bytes,
+            )?,
+            "deflate" => {
+                match read_limited_partial(
+                    ZlibDecoder::new(decoded.as_slice()),
+                    remaining_output_bytes,
+                ) {
+                    Ok(bytes) if !bytes.is_empty() => bytes,
+                    _ => read_limited_partial(
+                        DeflateDecoder::new(decoded.as_slice()),
+                        remaining_output_bytes,
+                    )?,
+                }
+            }
+            "br" => read_limited_partial(
+                brotli::Decompressor::new(decoded.as_slice(), 4096),
+                remaining_output_bytes,
+            )?,
+            "zstd" => read_limited_partial(
+                zstd::stream::read::Decoder::new(decoded.as_slice())?,
+                remaining_output_bytes,
+            )?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unsupported content-encoding: {encoding}"),
+                ));
+            }
+        };
+        if !encoding.eq_ignore_ascii_case("identity") {
+            remaining_output_bytes =
+                remaining_output_bytes
+                    .checked_sub(next.len())
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "decompressed body exceeds the preview limit",
+                        )
+                    })?;
+        }
+        decoded = next;
+    }
     Ok(decoded)
 }
 
@@ -257,6 +333,31 @@ fn read_limited(mut reader: impl Read, max_output_bytes: usize) -> std::io::Resu
             std::io::ErrorKind::InvalidData,
             "decompressed body exceeds the preview limit",
         ));
+    }
+    Ok(output)
+}
+
+fn read_limited_partial(
+    mut reader: impl Read,
+    max_output_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                if output.len().saturating_add(read) > max_output_bytes {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "decompressed body exceeds the preview limit",
+                    ));
+                }
+                output.extend_from_slice(&chunk[..read]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error),
+        }
     }
     Ok(output)
 }
@@ -362,6 +463,21 @@ mod tests {
         assert_eq!(decompress(&zstd, "zstd").unwrap(), plaintext);
         assert_eq!(decompress(plaintext, "identity").unwrap(), plaintext);
         assert!(decompress(plaintext, "compress").is_err());
+    }
+
+    #[test]
+    fn partial_gzip_stream_exposes_plaintext_before_the_trailer_arrives() {
+        let plaintext = b"data: still-open\n\n";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        encoder.flush().unwrap();
+        let growing_wire = encoder.get_ref().clone();
+
+        assert!(decompress(&growing_wire, "gzip").is_err());
+        assert_eq!(
+            decompress_partial_with_limit(&growing_wire, "gzip", 1024).unwrap(),
+            plaintext
+        );
     }
 
     #[test]

@@ -6,8 +6,8 @@ use base64::Engine as _;
 
 use super::frames::{get_frame_detail, get_frames, subscribe_frames, unsubscribe_frames};
 use super::network_body::{
-    content_encoding_is_supported, decode_content_encoded_body_with_limit, decompress_with_limit,
-    DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+    content_encoding_is_supported, decode_content_encoded_body_with_limit,
+    decompress_partial_with_limit, decompress_with_limit, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
 };
 use super::{
     error_response, full_body, json_response, method_not_allowed, success_response, BoxBody,
@@ -17,6 +17,9 @@ use crate::push::{SharedPushManager, MAX_ID_LEN, MAX_SUBSCRIBED_IDS};
 use crate::query_service::AdminQueryService;
 use crate::state::{AdminState, SharedAdminState};
 use crate::traffic_db::{QueryParams, TrafficSummaryCompact};
+
+mod content_encoded_sse;
+use content_encoded_sse::stream_content_encoded_sse_events;
 
 fn empty_query_result() -> crate::traffic_db::QueryResult {
     crate::traffic_db::QueryResult {
@@ -548,6 +551,12 @@ async fn stream_sse_events_from_body_ref(
             }
             Ok(())
         }
+        encoded_ref @ (BodyRef::File { .. } | BodyRef::FileRange { .. })
+            if encoded_ref.content_encoding().is_some() =>
+        {
+            stream_content_encoded_sse_events(state, connection_id, encoded_ref, batch_size, tx)
+                .await
+        }
         BodyRef::File { path, .. } => {
             let cfg = SseFileStreamConfig {
                 state,
@@ -561,7 +570,9 @@ async fn stream_sse_events_from_body_ref(
             };
             stream_sse_events_from_file(cfg, &mut seq, &mut parser, tx).await
         }
-        BodyRef::FileRange { path, offset, size } => {
+        BodyRef::FileRange {
+            path, offset, size, ..
+        } => {
             let end = offset.saturating_add(size as u64);
             let cfg = SseFileStreamConfig {
                 state,
@@ -574,45 +585,6 @@ async fn stream_sse_events_from_body_ref(
                 tail_bytes,
             };
             stream_sse_events_from_file(cfg, &mut seq, &mut parser, tx).await
-        }
-        encoded_ref @ BodyRef::ContentEncoded { .. } => {
-            let max_output_bytes = configured_decompress_output_bytes(&state).await;
-            let Some(content_encoding) = encoded_ref.content_encoding().map(str::to_string) else {
-                return Ok(());
-            };
-            if !content_encoding_is_supported(&content_encoding) {
-                return Ok(());
-            }
-            let mut decoded = None;
-            for _ in 0..80 {
-                if let Some(bytes) = load_body_bytes_async(&state, &encoded_ref).await {
-                    if let Ok(bytes) =
-                        decompress_with_limit(&bytes, &content_encoding, max_output_bytes)
-                    {
-                        decoded = Some(bytes);
-                        break;
-                    }
-                }
-                if state.sse_hub.is_open(connection_id) != Some(true) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-            let Some(decoded) = decoded else {
-                return Ok(());
-            };
-            Box::pin(stream_sse_events_from_body_ref(
-                state,
-                connection_id,
-                BodyRef::Inline {
-                    data: String::from_utf8_lossy(&decoded).to_string(),
-                },
-                from,
-                batch_size,
-                tail_bytes,
-                tx,
-            ))
-            .await
         }
     }
 }
@@ -918,6 +890,7 @@ mod sse_stream_tests {
         split_sse_events_text, stream_sse_events_from_body_ref, SseIncrementalParser,
         SseStreamFrom,
     };
+    use crate::body_store::BodyRef;
     use crate::test_support::TestAdminState;
 
     #[test]
@@ -1027,6 +1000,66 @@ mod sse_stream_tests {
         }
         assert!(output.contains("data: first"), "{output}");
         assert!(output.contains("data: second"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn unfinished_gzip_sse_stream_remains_live_past_two_seconds() {
+        let harness = TestAdminState::builder().build();
+        let connection_id = "encoded-sse-growing";
+        let path = harness.data_dir().join("encoded-sse-growing.gz");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"data: first\n\n").unwrap();
+        encoder.flush().unwrap();
+        std::fs::write(&path, encoder.get_ref()).unwrap();
+        let body_ref = BodyRef::File {
+            path: path.to_string_lossy().to_string(),
+            size: encoder.get_ref().len(),
+        }
+        .with_content_encoding(Some("gzip"));
+        harness.state().sse_hub.register(connection_id);
+        let state = harness.state();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let stream = tokio::spawn(async move {
+            stream_sse_events_from_body_ref(
+                state,
+                connection_id,
+                body_ref,
+                SseStreamFrom::Begin,
+                1,
+                0,
+                tx,
+            )
+            .await
+        });
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("first event should be decoded before gzip finalization")
+            .expect("stream output");
+        assert!(String::from_utf8_lossy(&first).contains("data: first"));
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        assert!(
+            !stream.is_finished(),
+            "an open SSE must not stop after two seconds"
+        );
+
+        encoder.write_all(b"data: second\n\n").unwrap();
+        encoder.flush().unwrap();
+        std::fs::write(&path, encoder.get_ref()).unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("second event should arrive while the gzip member is open")
+            .expect("stream output");
+        assert!(String::from_utf8_lossy(&second).contains("data: second"));
+
+        let final_wire = encoder.finish().unwrap();
+        std::fs::write(&path, final_wire).unwrap();
+        harness.state().sse_hub.set_closed(connection_id);
+        tokio::time::timeout(std::time::Duration::from_secs(2), stream)
+            .await
+            .expect("closed stream should finish")
+            .expect("stream task")
+            .expect("stream result");
     }
 }
 
@@ -1915,7 +1948,6 @@ async fn load_body_bytes_async(state: &SharedAdminState, body_ref: &BodyRef) -> 
                 None
             }
         }
-        BodyRef::ContentEncoded { .. } => unreachable!("storage_ref removes encoding wrappers"),
     }
 }
 
@@ -1940,7 +1972,11 @@ fn decode_stored_body(
     max_output_bytes: usize,
 ) -> Vec<u8> {
     if decode_content_encoding {
-        decode_content_encoded_body_with_limit(bytes, body_ref.content_encoding(), max_output_bytes)
+        decode_content_encoded_body_with_limit(
+            bytes,
+            body_ref.content_encoding().as_deref(),
+            max_output_bytes,
+        )
     } else {
         bytes
     }
@@ -1982,7 +2018,7 @@ async fn get_body_content_async(
             }))
         }
         None => match body_ref.storage_ref() {
-            BodyRef::File { path, size } | BodyRef::FileRange { path, size, .. }
+            BodyRef::File { path, size, .. } | BodyRef::FileRange { path, size, .. }
                 if state.body_store.is_none() =>
             {
                 json_response(&serde_json::json!({
@@ -1998,9 +2034,6 @@ async fn get_body_content_async(
             ),
             BodyRef::Inline { .. } => {
                 error_response(StatusCode::NOT_FOUND, "Body content not found")
-            }
-            BodyRef::ContentEncoded { .. } => {
-                unreachable!("storage_ref removes encoding wrappers")
             }
         },
     }
@@ -2037,7 +2070,7 @@ mod stored_body_tests {
     use flate2::{write::GzEncoder, Compression};
     use http_body_util::BodyExt;
 
-    use super::{decode_stored_body, get_body_content_async, BodyRef};
+    use super::{decode_stored_body, get_body_content_async};
     use crate::test_support::TestAdminState;
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
@@ -2048,13 +2081,20 @@ mod stored_body_tests {
 
     #[test]
     fn only_decodes_refs_marked_as_content_encoded() {
+        let harness = TestAdminState::builder().build();
         let application_gzip = gzip(b"application payload");
         let wire_body = gzip(&application_gzip);
-        let decoded_ref = BodyRef::File {
-            path: "decoded-body".to_string(),
-            size: application_gzip.len(),
-        };
-        let encoded_ref = decoded_ref.clone().with_content_encoding(Some("gzip"));
+        let decoded_ref = harness
+            .body_store
+            .read()
+            .store("decoded-body", "res", &application_gzip)
+            .expect("store decoded body");
+        let encoded_ref = harness
+            .body_store
+            .read()
+            .store("encoded-body", "res", &wire_body)
+            .expect("store encoded body")
+            .with_content_encoding(Some("gzip"));
 
         assert_eq!(
             decode_stored_body(
