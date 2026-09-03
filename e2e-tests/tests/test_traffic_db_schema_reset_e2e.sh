@@ -140,7 +140,7 @@ conn.close()
 assert "devtools_client_req_id" in columns, columns
 assert "idx_devtools_client_req_id" in indexes, indexes
 assert record_count == 0, record_count
-assert schema_version == "14", schema_version
+assert schema_version == "15", schema_version
 PY
 
 log_pass "Legacy traffic DB was reset and Bifrost started successfully"
