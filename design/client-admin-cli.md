@@ -1,10 +1,10 @@
-# CLI 直连远程 Admin 方案
+# Bifrost Client 直连远程 Admin 方案
 
 ## 1. 背景与目标
 
 Bifrost CLI 当前默认围绕本机数据目录和本机运行时工作：一部分命令直接读取 `RulesStorage`、`ValuesStorage`、`AuthDb` 等本地存储，另一部分命令固定请求 `127.0.0.1:<port>` 的 Admin API。即使用户已经通过 `bifrost admin remote enable` 开启远程管理，CLI 也没有一个统一方式把同一条命令发送到另一台 Bifrost。
 
-本方案新增 **CLI Admin Direct** 模式：用户保存或临时指定远端 IP、端口或域名，通过 Admin 用户名和密码登录，之后在原命令前增加全局 `--remote` 标识即可直接操作该实例。它与浏览器通过远程地址访问 WebUI 是同一管理平面，使用同一套 `/_bifrost/api/*`、Admin JWT 和权限边界。
+本方案新增 **Bifrost Client** 模式：当前 CLI 作为管理客户端，用户保存或临时指定远端 IP、端口或域名，通过 Admin 用户名和密码登录，再在 `bifrost client` 后直接执行原有管理命令。它与浏览器通过远程地址访问 WebUI 是同一管理平面，使用同一套 `/_bifrost/api/*`、Admin JWT 和权限边界。
 
 本方案不是 Remote Invoke 的别名、扩展或新 transport。现有 `bifrost remote ...` 继续表示经 Relay、pairing/grant 和 Remote Invoke worker 发起的受限远程调用。
 
@@ -14,17 +14,17 @@ Bifrost CLI 当前默认围绕本机数据目录和本机运行时工作：一�
 
 - 支持用 IP、`IP:port`、域名或完整 `http(s)://` URL 直连开启了 Admin Remote Access 的 Bifrost。
 - 支持保存多个命名目标，并通过 Admin 用户名/密码登录；登录成功后复用有时限的 Bearer JWT。
-- 原命令和参数保持不变，只通过命令前的 `--remote` 选择执行目标。
-- 只有一个已配置远端时，裸 `--remote` 自动选中；存在多个远端时，TTY 交互选择，非 TTY 要求显式选择。
+- 原命令和参数保持不变，只增加 `bifrost client` 前缀进入客户端模式。
+- 只有一个已配置远端时，`bifrost client <command>` 自动选中；存在多个远端时，TTY 交互选择，非 TTY 要求 `--target` 显式选择。
 - 显式选择支持别名、IP、`IP:port`、域名和完整 URL。
 - HTTP、SSE 和 WebSocket 请求统一携带远端 Admin 凭据，401 时能给出准确登录提示或在交互终端重新登录。
 - 所有可由 WebUI 远程完成的管理行为最终都通过 Admin API 对等支持，不通过远端文件读取或 shell 命令绕行。
-- 远程模式下不支持的命令必须明确报错，绝不能静默落回本机数据目录。
+- Client 模式下不支持的命令必须明确报错，绝不能静默落回本机数据目录。
 
 ### 必须不破坏
 
 - 不改变 `bifrost remote conn/file/traffic/exec/job/...` 的 Remote Invoke 语义、协议、授权或输出。
-- 不改变未传 `--remote` 时的本地 CLI 行为和数据目录解析。
+- 不改变未使用 `client` 前缀时的本地 CLI 行为和数据目录解析。
 - 不把密码、JWT 或 Authorization header 写入普通配置、命令历史、日志、错误输出或进程参数。
 - 不把 Admin JWT 转发到跨 origin 重定向目标，也不让 Admin 直连请求意外经过当前 Bifrost 代理形成环路。
 - JSON、NDJSON 和脚本消费的 stdout schema 保持不变；目标提示写 stderr，不能污染机器可读输出。
@@ -35,11 +35,12 @@ Bifrost CLI 当前默认围绕本机数据目录和本机运行时工作：一�
 - 验证 REST、SSE、WebSocket 均携带 Bearer token，不出现某类接口单独 401。
 - 验证一个目标自动选择、多个目标 TTY 选择、多个目标非 TTY 拒绝、显式别名/地址选择。
 - 验证错误密码、Remote Access 未开启、JWT 过期/撤销、TLS 校验失败和服务不可达的错误分类。
-- 验证 `bifrost remote ...` 的 Remote Invoke 回归不变，并验证 `bifrost --remote remote ...` 被明确拒绝。
+- 验证 `bifrost remote ...` 的 Remote Invoke 回归不变，并验证 `bifrost client remote ...` 被明确拒绝。
 
 ### 必须交付（实施阶段）
 
-- CLI 使用文档、shell completion、Admin API/OpenAPI、自动测试和 `human_tests/` 用例同步更新。
+- CLI 使用文档、shell completion、Admin API/OpenAPI、Agent Skill 权威文档、自动测试和 `human_tests/` 用例同步更新。
+- 安装后的通用 `bifrost` skill 能识别 Client 直连场景，指导 Agent 配置目标、登录、查询流量和管理规则/配置；`bifrost-remote` skill 同步说明与 Remote Invoke 的选择边界。
 - 完成两轮 Review/Fix/Test、本地针对性验证、提交、PR 和远端 CI 看护。
 
 ## 3. 术语与硬边界
@@ -47,21 +48,21 @@ Bifrost CLI 当前默认围绕本机数据目录和本机运行时工作：一�
 | 名称 | CLI 入口 | 网络路径 | 鉴权/授权 | 能力来源 |
 | --- | --- | --- | --- | --- |
 | 本地模式 | `bifrost traffic list` | 本机存储或 `127.0.0.1` Admin API | loopback 免登录 | 当前数据目录和本机进程 |
-| Admin Direct | `bifrost --remote=devbox traffic list` | CLI 直连 `http(s)://devbox/_bifrost/api/*` | Admin 用户名/密码换 Bearer JWT | 与远程 WebUI 对等的 Admin API |
+| Client | `bifrost client --target devbox traffic list` | CLI 直连 `http(s)://devbox/_bifrost/api/*` | Admin 用户名/密码换 Bearer JWT | 与远程 WebUI 对等的 Admin API |
 | Remote Invoke | `bifrost remote traffic list` | caller → Relay → target worker | Sync 身份、pairing、grant、端到端加密 | Remote Invoke allowlist/executor |
 
 ```mermaid
 flowchart LR
     CLI[Bifrost CLI]
     Local[Local target context]
-    Direct[Admin Direct target context]
+    Direct[Client target context]
     Admin[Target Admin API]
     Relay[Remote Invoke Relay]
     Worker[Target Remote Invoke worker]
 
-    CLI -->|no --remote| Local
+    CLI -->|normal command| Local
     Local -->|loopback or local storage| Admin
-    CLI -->|--remote optional selector| Direct
+    CLI -->|client prefix plus optional target| Direct
     Direct -->|HTTP SSE WebSocket plus Bearer JWT| Admin
     CLI -->|remote subcommand| Relay
     Relay -->|pairing grant encrypted frames| Worker
@@ -72,11 +73,11 @@ flowchart LR
 
 强制边界如下：
 
-1. `--remote` 只改变 Admin 命令的执行目标，不创建 Remote Invoke call。
-2. Admin Direct 不依赖 Sync 登录、Relay、client id、pair code、grant、Remote Invoke command allowlist、shell policy 或 file policy。
-3. Remote Invoke 不读取 Admin Direct 的 target profile、密码或 JWT。
+1. `client` 表示当前 CLI 以 Admin 客户端身份直连目标，不创建 Remote Invoke call。
+2. Client 模式不依赖 Sync 登录、Relay、client id、pair code、grant、Remote Invoke command allowlist、shell policy 或 file policy。
+3. Remote Invoke 不读取 Client profile、密码或 JWT。
 4. 缺少 Admin API 的命令要先补 API，不能通过 `remote exec`、SSH 或远端文件 API补洞。
-5. 两套能力在代码中使用不同模块名：建议 `admin_target` / `admin_client` 与既有 `remote` / `remote_invoke` 分离，禁止把新实现放进 `commands/remote.rs`。
+5. 两套能力在代码中使用不同模块名：建议 `client_target` / `admin_client` 与既有 `remote` / `remote_invoke` 分离，禁止把新实现放进 `commands/remote.rs`。
 
 ## 4. CLI 设计
 
@@ -84,43 +85,48 @@ flowchart LR
 
 ```bash
 # 唯一已配置目标：自动选择
-bifrost --remote traffic list
+bifrost client traffic list
 
 # 多目标：按别名选择
-bifrost --remote=devbox traffic list
+bifrost client --target devbox traffic list
 
 # 临时按 IP、IP:port 或域名选择
-bifrost --remote=10.0.0.8:9900 status
-bifrost --remote=devbox.example.com:9900 search api.example.com
-bifrost --remote=https://devbox.example.com traffic get 123
+bifrost client --target 10.0.0.8:9900 status
+bifrost client --target devbox.example.com:9900 search api.example.com
+bifrost client --target https://devbox.example.com traffic get 123
 ```
 
-`--remote` 是全局可选值参数，Clap 定义应使用 `num_args = 0..=1`、`default_missing_value = "auto"` 和 `require_equals = true`。因此：
+`client` 是顶层执行模式，`--target` 是它自己的可选参数。因此：
 
-- `bifrost --remote traffic list` 中的 `traffic` 一定被解析为原子命令，而不是 `--remote` 的值。
-- 指定目标时必须写 `--remote=devbox`，语法稳定且 completion 可预测。
-- 规范写法把 `--remote` 放在子命令前；即使 Clap 支持 global arg 出现在后方，文档和 completion 不推广后置写法。
+- `bifrost client traffic list` 明确表示“作为 client，在目标上执行原 `traffic list`”。
+- `bifrost client --target devbox traffic list` 中目标选择与业务命令分离，没有可选值吞掉子命令的问题。
+- `client` 后的原命令及参数保持原顺序；`--target` 固定放在原命令前。
+- `client` 比 `--remote` 更适合作为稳定命令空间，可容纳 target 管理、登录状态和后续 client 级诊断。
+- 不采用可选位置参数 `bifrost client [target] <command>`：目标别名可能与 `traffic`、`rule` 等命令同名，解析和 completion 都会产生歧义。多目标时显式 `--target` 更稳。
 
 不采用下列方案：
 
 - `bifrost remote <原命令>`：已经属于 Remote Invoke，复用会导致同一语法对应两套安全模型。
-- `bifrost --target remote ...`：语义更通用，但没有直接表达用户需要的远程标识，且需要额外枚举 local/remote。
-- `bifrost --admin-remote ...`：边界最明确，但日常命令过长。帮助文本中使用 “Admin Direct” 解释 `--remote` 即可。
+- `bifrost --remote[=<target>] <原命令>`：flag 表达的是一次路由修饰，无法自然承载目标管理与登录；可选值还需要特殊解析规则。
+- `bifrost --client[=<target>] <原命令>`：仍然有可选值和子命令边界问题，也弱化了 Client 作为完整工作模式的心智模型。
+- `bifrost admin-client ...`：边界清晰但命令过长；帮助文本用 “Admin API client” 解释 `client` 即可。
+
+仓库中已有 `bifrost remote --client-id`，其中 client 指 Remote Invoke target 的实例身份；也有 traffic 的 client IP/app 字段。顶层 `bifrost client` 则表示当前 CLI 的角色。三者处于不同命令上下文，不构成语法冲突，但帮助文案必须始终写清 `Admin API client`，不能只显示模糊的 “client id”。配置中的远端设备统一称为 **target**，不称为 client，避免把调用方与被调用方混为一谈。
 
 ### 4.2 目标管理命令
 
-新增独立的本地客户端配置命令 `bifrost target`，不占用 `remote` 命令树：
+目标管理放在 Client 命令空间内，不占用 `remote` 命令树：
 
 ```bash
-bifrost target add devbox --url http://10.0.0.8:9900
-bifrost target add prod --url https://bifrost.example.com --ca-cert ./corp-ca.pem
-bifrost target list
-bifrost target show devbox
-bifrost target login devbox --username admin
-printf '%s' "$BIFROST_ADMIN_PASSWORD" | bifrost target login devbox --username admin --password-stdin
-bifrost target logout devbox
-bifrost target rename devbox lab-mac
-bifrost target remove lab-mac
+bifrost client target add devbox --url http://10.0.0.8:9900
+bifrost client target add prod --url https://bifrost.example.com --ca-cert ./corp-ca.pem
+bifrost client target list
+bifrost client target show devbox
+bifrost client target login devbox --username admin
+printf '%s' "$BIFROST_ADMIN_PASSWORD" | bifrost client target login devbox --username admin --password-stdin
+bifrost client target logout devbox
+bifrost client target rename devbox lab-mac
+bifrost client target remove lab-mac
 ```
 
 行为约束：
@@ -130,38 +136,38 @@ bifrost target remove lab-mac
 - `target logout` 删除本地保存的 JWT，不宣称服务端 token 已失效。当前 `/api/auth/logout` 不维护单 token denylist；需要远端失效所有 token 时使用经确认的 `admin revoke-all`。
 - `target remove` 同时删除对应 credential-store 项；如果删除失败，必须报出可操作的清理提示。
 - `target list` 只展示别名、规范化 URL、用户名、TLS 模式、登录态和 token 到期时间，不展示 token。
-- `target` 命令管理的是调用端本地 profile，本身始终是 `LocalOnly`；`bifrost --remote target ...` 必须拒绝。
+- `client target` 管理的是调用端本地 profile，不连接某个被选中的目标，因此不接受外层 `--target`。
 - 完整 URL/authority 若未匹配保存的 profile，则构造仅本次进程有效的临时目标。TTY 可询问用户名和密码并只在内存保存 token；非 TTY 必须提供 `BIFROST_ADMIN_TOKEN`，或先执行 `target add` 与 `target login`。
 
 ### 4.3 目标选择算法
 
-`--remote=<selector>` 按以下顺序解析：
+`bifrost client --target <selector> <command>` 的 selector 按以下顺序解析：
 
 1. 精确匹配 profile 别名（别名大小写不敏感，但保存时保留原始展示名）。
 2. 解析完整 `http://` 或 `https://` URL，并与已保存目标的 canonical URL 匹配。
 3. 解析 authority：IPv4、`host:port`、域名、`[IPv6]:port`；未提供端口时使用 `9900`。
 4. 裸 host/authority 默认按 `http://` 解释，因为现有 Bifrost Admin listener 通常是 HTTP；CLI 必须显示传输安全提示。
 
-裸 `--remote` 的解析：
+省略 `--target` 的解析：
 
-- 0 个目标：退出并提示先执行 `bifrost target add`，不猜测局域网设备。
+- 0 个目标：退出并提示先执行 `bifrost client target add`，不猜测局域网设备。
 - 1 个目标：自动选择。
 - 多个目标且存在可用 controlling terminal：按别名排序展示交互选择，附 URL 和登录态。stdout 被重定向为 JSON/NDJSON 时，交互 UI 仍只写 controlling terminal 或 stderr，不污染 stdout。
-- 多个目标且非 TTY：退出码 2，并列出可用别名；不使用“上次使用”偷偷选中。自动化应使用 `--remote=<alias>` 或 `BIFROST_REMOTE_TARGET=<alias>`。
+- 多个目标且非 TTY：退出码 2，并列出可用别名；不使用“上次使用”偷偷选中。自动化应使用 `client --target <alias>` 或 `BIFROST_CLIENT_TARGET=<alias>`。
 
-显式 CLI 值优先于 `BIFROST_REMOTE_TARGET`；环境变量只在出现裸 `--remote` 时参与选择。地址与多个别名发生歧义时，别名优先，错误信息提示可用完整 URL 消歧。
+显式 `--target` 优先于 `BIFROST_CLIENT_TARGET`；环境变量只在省略 `--target` 时参与选择。地址与多个别名发生歧义时，别名优先，错误信息提示可用完整 URL 消歧。
 
 ### 4.4 命令兼容与禁止组合
 
-远程模式只改变 execution context，原子命令的参数和输出保持不变。例如 `traffic get`、`rule add`、`config tls` 不新增一套 remote 专用参数结构。
+Client 模式只改变 execution context，原子命令的参数和输出保持不变。例如 `traffic get`、`rule add`、`config tls` 不新增一套 client 专用参数结构。
 
 下列组合必须在发网络请求前拒绝：
 
-- `bifrost --remote remote ...`：不能在 Admin Direct 外再套 Remote Invoke。
+- `bifrost client remote ...`：不能在 Client 模式外再套 Remote Invoke。
 - hidden worker、`start`、`self-update` handoff 等进程内部命令。
 - 任何仍被标记为 `LocalOnly` 的主机侧命令。
 
-错误必须包含命令名、所选目标和原因，并给出可行替代方案；不得删除 `--remote` 后自动重试本地命令。
+错误必须包含命令名、所选目标和原因，并给出可行替代方案；不得去掉 `client` 前缀后自动重试本地命令。
 
 ## 5. 配置与凭据
 
@@ -196,7 +202,7 @@ profile 不保存 password、JWT、Cookie 或 Authorization header。`id` 是 cr
 - macOS Keychain、Windows Credential Manager、Linux Secret Service 为首选持久化后端。实现可引入跨平台 keyring crate，但必须验证无桌面 session 的 Linux 错误行为。
 - 保存的是 Admin JWT 和 `expires_at`，默认不保存管理员密码。密码只在登录请求生命周期内存在，并在可行时使用 secrecy/zeroize 类型缩短内存暴露。
 - 安全存储不可用时，默认拒绝把 JWT 降级写入 TOML；允许本次命令登录后仅在内存使用，并明确提示不会持久化。
-- 自动化可通过 `BIFROST_ADMIN_TOKEN` 提供短期 token，或用 `target login --password-stdin` 写入可用的安全存储。环境 token 只允许绑定到本次显式 `--remote=<selector>`，裸 `--remote` 禁止把未绑定 token 自动套到某个 profile；其优先级高于 credential store，并永不回显。
+- 自动化可通过 `BIFROST_ADMIN_TOKEN` 提供短期 token，或用 `client target login --password-stdin` 写入可用的安全存储。环境 token 只允许绑定到本次显式 `client --target <selector>`；省略 `--target` 时禁止把未绑定 token 自动套到某个 profile。环境 token 优先于 credential store，并永不回显。
 - 日志和错误必须对 `Authorization`、登录 body、token query 参数做统一脱敏。Debug/trace 也不例外。
 
 ### 5.3 URL 与 TLS
@@ -232,7 +238,7 @@ profile 不保存 password、JWT、Cookie 或 Authorization header。`id` 是 cr
 ### 6.3 注销与撤销
 
 - `target logout` 是本地凭据清理。
-- `bifrost --remote=<target> admin revoke-all` 调用服务端 `/api/auth/revoke-all`，使该实例所有旧 JWT 失效；必须二次确认并在成功后清掉本地 token。
+- `bifrost client --target <target> admin revoke-all` 调用服务端 `/api/auth/revoke-all`，使该实例所有旧 JWT 失效；必须二次确认并在成功后清掉本地 token。
 - `admin remote enable` 只能在目标机本地执行；远端关闭状态下 `/auth/login` 会拒绝登录，CLI 不提供绕过该 bootstrap 边界的通道。
 - 改密码后服务端的实际 session 语义以 API 为准；客户端不假定改密码自动撤销所有 JWT。
 
@@ -245,7 +251,7 @@ profile 不保存 password、JWT、Cookie 或 Authorization header。`id` 是 cr
 ```rust
 enum AdminTarget {
     Local(LocalTarget),
-    Remote(RemoteTarget),
+    Client(ClientTarget),
 }
 
 struct ExecutionContext {
@@ -256,7 +262,7 @@ struct ExecutionContext {
 }
 ```
 
-`LocalTarget` 继续根据当前数据目录和 runtime metadata 找到有效端口；`RemoteTarget` 只包含规范化 endpoint、显示身份、TLS policy 和 credential reference，绝不持有远端数据目录路径。
+`LocalTarget` 继续根据当前数据目录和 runtime metadata 找到有效端口；`ClientTarget` 只包含规范化 endpoint、显示身份、TLS policy 和 credential reference，绝不持有远端数据目录路径。
 
 每个命令声明 target capability：
 
@@ -271,6 +277,18 @@ enum TargetCapability {
 ```
 
 dispatch 在执行前统一校验，避免 handler 自己猜测是否远程。长期目标是 handler 接收 `&ExecutionContext` 或更窄的 service trait，而不是 `(host, port)` 或直接调用 `data_dir()`。
+
+#### 复用原命令解析
+
+不能复制一份业务 `ClientCommands`，否则每次新增 CLI 参数都要维护两套 schema。推荐把 `Client` 作为顶层 variant，但只让它解析 client 级 envelope 与尾部 argv：
+
+1. 根 `Cli` 正常解析全局参数和 `Commands::Client(ClientInvocation)`，因此 `--log-level` 等真正全局选项仍保持现状。
+2. `ClientInvocation` 只解析 envelope 参数 `--target <selector>`，并用一个 `Vec<OsString>` positional（`trailing_var_arg = true`、`allow_hyphen_values = true`）无损保留剩余 argv；不用 `Vec<String>`，避免破坏非 UTF-8 本地文件参数。
+3. 若保留 argv 的第一个 token 是保留字 `target`，将完整 argv 交给独立且很小的 `ClientTargetCli` 解析，处理调用端本地 profile；`target` 禁止注册为普通业务命令，因而分流无歧义。其他第一个 token 必须是现有顶层命令。
+4. 业务 argv 使用同一个根 `Cli::try_parse_from` 加合成的程序名二次解析，只取解析出的 `Commands`；外层已解析的全局配置继续作为唯一值，内层若出现根级全局参数则明确拒绝并提示把它们放到 `client` 前。
+5. 对得到的原 `Commands` 执行 capability 校验，再用 `ExecutionContext::Client` dispatch。二次解析必须拒绝 `Client`、`Remote`、hidden worker、空命令和其他不允许嵌套的命令，且最大嵌套深度固定为一。
+
+这样 `rule add`、`traffic list` 等 Clap 定义、帮助、默认值和 handler 参数结构只有一份。二次解析层必须有参数保真与错误渲染测试，确保 `--`、短参数、带连字符值和非 UTF-8 路径不被 envelope 改写。`bifrost client --help` 与 shell completion 则从同一个根 `CommandFactory` 按 capability 过滤生成，不能手写一份容易漂移的命令列表。
 
 ### 7.2 AdminApiClient
 
@@ -291,12 +309,12 @@ dispatch 在执行前统一校验，避免 handler 自己猜测是否远程。�
 
 ### 7.3 远端 API 是唯一事实源
 
-远程模式下：
+Client 模式下：
 
 - rules、values、scripts、config、AuthDb、traffic DB 都只能通过目标 Admin API 访问。
 - CLI 仍可读取调用端提供的输入文件，例如 `rule add --file ./rule.txt` 或 `import ./bundle.bifrost`；文件内容由 CLI 上传，路径本身不在远端解析。
 - 导出文件写在调用端；服务端返回导出 payload/stream。
-- 命令需要目标机文件路径时，必须明确标注为 remote path 并由专用 Admin API 验证；默认不把调用端路径解释成目标机路径。
+- 命令需要目标机文件路径时，必须明确标注为 target path 并由专用 Admin API 验证；默认不把调用端路径解释成目标机路径。
 - 不存在 API 时返回 `UnsupportedRemoteCommand`，直到补齐经过权限审查的 API。
 
 ### 7.4 服务能力协商
@@ -325,18 +343,74 @@ CLI 不用版本号猜能力。旧服务没有 capabilities 时只启用一组�
 | `admin remote status` | AdminRead | 可远程查询 |
 | `admin remote enable` | LocalOnly | Remote Access 关闭时远端无法登录取得 JWT，因而不能经远端 API 自举；必须在目标机本地 bootstrap |
 | `admin remote disable` | AdminWrite 高风险 | 可经已认证会话调用，但会切断后续远程登录；要求显式 `--yes`，响应成功后清理本地 token |
-| `sync`、`login` | AdminRead/AdminWrite | 这里的 login 是目标实例自身 Sync 登录，不是 Admin Direct 登录；帮助文案必须消歧 |
+| `sync`、`login` | AdminRead/AdminWrite | 这里的 login 是目标实例自身 Sync 登录，不是 Client Admin 登录；帮助文案必须消歧 |
 | `import`、`export` | AdminRead/AdminWrite | 调用端读写文件，内容走 bifrost-file API |
 | `im`、`agent`、可由 Web 管理的 `ai/asr` | AdminRead/AdminWrite/AdminStream | 复用 im-gateway/worker-jobs/asr/voice Admin API，补齐 SSE/WS Bearer |
 | `system-proxy`、`keep-awake`、`upgrade` | AdminWrite 高风险 | 操作的是目标机；显示目标并要求确认，使用 proxy/power/system API |
 | `ca` | 分命令判定 | 查询/下载证书可远程；安装到系统 keychain 是调用端或目标端语义歧义，V1 标记 LocalOnly，后续拆明确动词 |
-| `target`、`voice sources/listen`、桌面 `app`、`cli-proxy`、`install-skill`、`completions` | LocalOnly | 管理调用端 profile，或依赖调用端硬件、桌面、shell、文件系统；`--remote` 明确拒绝 |
+| `client target` | envelope-only（不进入 registry） | 管理调用端本地 profile，不进入业务命令 capability registry，也不连接远端 |
+| `voice sources/listen`、桌面 `app`、`cli-proxy`、`install-skill`、`completions` | LocalOnly | 依赖调用端硬件、桌面、shell 或文件系统；作为 `client` 尾部业务命令时明确拒绝 |
 | `start` | LocalOnly | 未运行的服务无法通过自身 Admin API 启动；用目标机 service manager 或 Remote Invoke 是另一条显式路径 |
 | `stop`、`restart` | LocalOnly（V1） | Admin API 当前无安全完整的服务生命周期协议；不能用 shell 偷渡。未来需 supervisor + operation receipt 单独设计 |
-| `remote`、`setting shell/ssh-key/grant` | RemoteInvokeOnly/LocalOnly | 保持 Remote Invoke 管理面，不接受 `--remote` 叠加 |
-| hidden worker/self-update handoff | LocalOnly | 进程内部协议，永不暴露为 Admin Direct |
+| `remote`、`setting shell/ssh-key/grant` | RemoteInvokeOnly/LocalOnly | 保持 Remote Invoke 管理面，不接受 `client` 嵌套 |
+| hidden worker/self-update handoff | LocalOnly | 进程内部协议，永不暴露为 Client 模式 |
 
 “所有接口可工作”的完成标准不是一次性把所有命令标为 supported，而是：每个公开命令都有显式 capability；所有标记 Admin* 的分支都通过统一 client；所有 LocalOnly/RemoteInvokeOnly 分支在 dispatch 前稳定拒绝。
+
+### 8.1 Agent Skill 集成
+
+Client 是现有管理命令的远端执行上下文，应进入通用 `bifrost` skill，而不是新建第三个 skill。仓库根目录 `SKILL.md` 是通用 skill 的权威源，`bifrost install-skill` 已将它作为内嵌/在线资源分发；实施时修改权威源，不直接编辑开发机上已经安装的 `~/.agents/skills/bifrost/SKILL.md`。
+
+通用 skill 需要新增以下内容：
+
+1. frontmatter description 增加触发语义：通过 IP、端口、域名或已保存 target 直连另一台 Bifrost，查询 traffic/status，或管理 rule/value/script/config/whitelist 等 Admin 能力；`bifrost-remote` 的 description 则收窄为 Remote Invoke、远端文件和 shell 场景。
+2. 启动检查增加目标判定：先区分本机管理、Client Admin 直连、Remote Invoke 三种模式，不能把用户说的“远端”一律路由到 `bifrost-remote`。
+3. 增加 `bifrost client` 专节，给 Agent 提供 target list/add/login/logout、单目标自动选择、多目标显式选择、非 TTY 凭据和错误恢复流程。
+4. 现有 rule、traffic、config 等命令示例不复制一整套；说明在命令前加 `bifrost client [--target <selector>]` 即复用同一参数和输出，并补一组最常用的完整示例。
+5. 增加安全约束：不探测局域网、不猜 target、不在参数或日志中放密码/token、写操作前确认 alias + origin、401 最多重登一次、403 不改走其他通道、Client 不支持时不得静默执行本地命令。
+
+Agent 推荐流程如下：
+
+```bash
+# 查看已配置目标；只有一个目标时，后续可省略 --target
+bifrost client target list
+
+# 首次登记并安全登录
+bifrost client target add devbox --url http://10.0.0.8:9900 --allow-insecure-http
+printf '%s' "$BIFROST_ADMIN_PASSWORD" | \
+  bifrost client target login devbox --username admin --password-stdin
+
+# 查询远端实例
+bifrost client --target devbox status --format json
+bifrost client --target devbox traffic list --limit 20 --format json
+bifrost client --target devbox traffic search api.example.com
+
+# 管理远端实例；参数与本地命令一致
+bifrost client --target devbox rule list
+bifrost client --target devbox rule add debug-api -c "api.example.com reqHeaders://X-Debug=1"
+bifrost client --target devbox config get tls.enabled
+```
+
+非交互 Agent 的规则要更严格：多个 profile 必须传 `--target` 或 `BIFROST_CLIENT_TARGET`；临时目标使用 `BIFROST_ADMIN_TOKEN` 时必须显式传 `--target`；需要密码登录时只使用 `--password-stdin`。Agent 可以读取命令的 JSON/NDJSON stdout，但不得把 token、密码或完整敏感 traffic 内容写入低信任日志或聊天。
+
+`skill_remote.md` 仍是 Remote Invoke 的权威 skill，但要在适用场景和能力表前增加路由提示：
+
+| 用户意图 | Agent 应选择 | 原因 |
+| --- | --- | --- |
+| 已知目标 IP/域名，像 WebUI 一样查流量、改规则或配置 | 通用 `bifrost` skill + `bifrost client` | 直连 Admin API，与 Web 管理面对等 |
+| 读写目标机任意文件、修改远端仓库、执行 shell/构建 | `bifrost-remote` skill + `bifrost remote` | 需要 Remote Invoke 的 file/shell policy 与 grant |
+| 服务未运行，或需要启动进程、处理 OS/VCS 文件操作 | `bifrost-remote`（需明确授权）或目标机 service manager | Admin API 本身不可达或没有该能力 |
+
+两份 skill 不能互相复制完整命令手册。通用 `SKILL.md` 持有 Client 工作流；`skill_remote.md` 只保留一段路由边界和指向通用 skill 的提示。现有 `skill_remote.md` 中“没有专门 remote 子命令就使用 `remote exec`”的表述必须收窄：对 Bifrost Admin 管理能力优先使用 `bifrost client`，只有用户明确需要 shell/file 能力且已授权时才使用 Remote Invoke，且不能在 Client 失败后自动降级。
+
+Skill 必须按实际交付阶段声明能力，不能提前教 Agent 调用尚未迁移的命令。Phase 1 只列 status/metrics/traffic/search/capture；Phase 2 再加入 rule/value/script/config/whitelist 等写能力；Phase 3 再加入流式和高风险管理面。Agent 遇到 capability 不支持或退出码 6 时应报告版本/能力不兼容，不得改用本机数据目录或自动切换到 `remote exec`。
+
+Skill 分发与文档同步范围：
+
+- 更新根 `SKILL.md` 与 `skill_remote.md`，确保在线下载和编译时 `include_str!` 的内嵌副本一致。
+- 更新 `docs/agent-skill.md`、`docs-en/agent-skill.md` 及其站点同步源，修正“连接另一台机器一律使用 bifrost-remote”的旧路由描述。
+- 更新 CLI 文档中的 `install-skill` 说明，明确安装包同时教会 Agent 使用 Client Admin 直连和 Remote Invoke。
+- 扩展 install-skill 测试，断言安装后的通用 skill 包含 `bifrost client target`、traffic/rule 示例和禁止本地回退约束，remote skill 包含两种远端模式的选择边界。
 
 ## 9. 输出、交互与错误语义
 
@@ -365,13 +439,13 @@ CLI 不用版本号猜能力。旧服务没有 capabilities 时只启用一组�
 | 3 | DNS、连接、TLS、timeout 等 transport 错误 |
 | 4 | 未登录、token 过期且无法重登、用户名密码错误 |
 | 5 | 403 或服务端明确拒绝 |
-| 6 | CLI/服务 API 不兼容或命令不支持远程模式 |
+| 6 | CLI/服务 API 不兼容或命令不支持 Client 模式 |
 
-已有命令若有更细的稳定退出码，保留原语义；上述分类用于 Admin Direct 公共错误层。
+已有命令若有更细的稳定退出码，保留原语义；上述分类用于 Client 公共错误层。
 
 ## 10. 安全与审计
 
-- Admin Direct 的权限等同远程 WebUI 管理员，默认是整机 Bifrost 管理权限，不借用 Remote Invoke 的细粒度 grant。帮助和首次登录必须明确这一点。
+- Client 直连的权限等同远程 WebUI 管理员，默认是整机 Bifrost 管理权限，不借用 Remote Invoke 的细粒度 grant。帮助和首次登录必须明确这一点。
 - 服务端继续以 `remote_access_enabled` 为总开关，并使用现有 bcrypt 校验、登录节流、JWT `jti`/`revoke_before` 和登录审计。
 - CLI 设置稳定 User-Agent（含 CLI 版本）与随机 request id，便于服务端审计；不得伪造浏览器 Origin 绕过保护。
 - 建议后续扩展 Admin audit：记录 authenticated principal、request id、command capability、资源摘要与结果，不记录请求 body 中的 secret。
@@ -383,22 +457,24 @@ CLI 不用版本号猜能力。旧服务没有 capabilities 时只启用一组�
 
 ### Phase 1：目标、认证与只读核心链路
 
-1. 在 `cli.rs` 增加全局 `--remote[=<selector>]` 和 `target` 命令。
-2. 新增 `commands/admin_target/`：profile store、selector、credential store、login。
+1. 在 `cli.rs` 增加顶层 `client` envelope 和 `client target` 命令。
+2. 新增 `commands/client/`：argv envelope、profile store、selector、credential store、login。
 3. 抽取 `AdminEndpoint` 和统一 `AdminApiClient`，接入 Bearer、错误映射、redaction、direct transport。
 4. 引入 `ExecutionContext` 和命令 capability registry。
 5. 先迁移 `status`、`metrics`、`traffic list/get/search`、`capture wait`，覆盖 REST/SSE。
 6. 增加 capabilities 协商；旧服务只启用明确兼容的只读接口。
-7. 主要落点为 `crates/bifrost-cli/src/cli.rs`、`crates/bifrost-cli/src/main.rs`、`crates/bifrost-cli/src/commands/admin_target/` 与通用 client 模块；Remote Invoke 的 `cli/remote.rs` 和 `commands/remote.rs` 只增加冲突回归测试，不承载新逻辑。
+7. 同步通用 skill 的 Client 触发词、target/login 和 Phase 1 命令，Remote skill 加模式路由边界；不能提前宣传 Phase 2/3 能力。
+8. 主要落点为 `crates/bifrost-cli/src/cli.rs`、`crates/bifrost-cli/src/main.rs`、`crates/bifrost-cli/src/commands/client/` 与通用 Admin API client 模块；Remote Invoke 的 `cli/remote.rs` 和 `commands/remote.rs` 只增加冲突回归测试，不承载新逻辑。
 
 Phase 1 完成标志：局域网地址登录后，核心查询命令与本地模式参数/输出一致；多目标选择稳定；Remote Invoke 回归不变。
 
 ### Phase 2：配置与内容读写对等
 
 1. 迁移 rule/group/port/value/script/config/whitelist/account。
-2. 删除这些 handler 中 remote path 下的 `data_dir()`、Storage、AuthDb 直读；补齐缺少的 Admin API。
+2. 删除这些 handler 中 Client path 下的 `data_dir()`、Storage、AuthDb 直读；补齐缺少的 Admin API。
 3. import/export 采用调用端文件 + 远端 payload 语义。
 4. 建立统一远端破坏性操作确认。
+5. 同步通用 skill，只新增本阶段已经通过 capability/E2E 验证的写命令示例。
 
 Phase 2 完成标志：WebUI 的规则、脚本、values、访问控制和配置能力都能用相同 CLI 命令远程完成。
 
@@ -408,30 +484,32 @@ Phase 2 完成标志：WebUI 的规则、脚本、values、访问控制和配置
 2. 迁移 sync、keep-awake、system-proxy、upgrade 等高风险管理行为。
 3. 为长任务增加 operation id、断线恢复和幂等语义；已收到 frame 的连接不自动重放。
 4. 完成 Admin audit 的命令级审计。
+5. 同步通用 skill 的流式和高风险命令说明，并要求 Agent 在写操作前显示 target identity。
 
 ### Phase 4：收口与兼容清理
 
 1. 所有公开命令进入 capability registry，测试确保没有隐式 local fallback。
 2. 删除散落的 URL 拼接和固定 `127.0.0.1` Admin client 构造。
-3. 更新 CLI/Skill 文档，明确 Admin Direct 与 Remote Invoke 的选择指南。
+3. 更新根 `SKILL.md`、`skill_remote.md`、CLI/Agent Skill 中英文文档和安装产物断言，明确 Client 直连与 Remote Invoke 的 Agent 选择指南。
 4. 评估是否为受 supervisor 管理的进程单独设计远程 restart；不在本方案中承诺裸进程可远程启动。
 
 ## 12. 验证方案（实施阶段）
 
 ### 12.1 单元与组件测试
 
-- Clap：裸 `--remote` 不吞掉子命令；`--remote=alias/url/host:port` 正确解析；与 `remote`/LocalOnly 命令冲突。
+- Clap/envelope：`client <command>` 复用原 parser；`client --target alias/url/host:port <command>` 正确解析；`client target` 正确分流；`--`、短参数、带连字符值和非 UTF-8 路径保持原样；根级全局参数放在 `client` 后时给出迁移提示；递归 `client client` 与 `client remote` 被拒绝。
 - selector：0/1/N profile、TTY/non-TTY、环境变量优先级、别名与 URL 歧义。
 - URL：IPv4/IPv6/域名、默认端口、路径规范化、userinfo/fragment/非法 scheme、HTTP 安全提示。
 - credential：keychain CRUD、rename 保持引用、过期清理、安全存储不可用、输出/日志无 secret。
 - client：所有 HTTP method 注入 Bearer；跨 origin redirect 不转发；401 只重登一次；403 不重登；mutation timeout 不重放。
 - stream：SSE/WS 握手携带 Bearer；收到首帧后断线不自动重放；取消能关闭连接。
-- dispatch：每个公开 command variant 都有 capability；Remote 模式永不触发 Storage/AuthDb 本地实现。
-- formatter：同一 fixture 在 Local 与 Admin Direct 下产生相同 stdout。
+- dispatch：每个公开 command variant 都有 capability；Client 模式永不触发 Storage/AuthDb 本地实现。
+- formatter：同一 fixture 在 Local 与 Client 下产生相同 stdout。
+- skill installer：embedded 与下载源安装后的通用 skill 包含 Client 触发词、target/login/traffic/rule 工作流和安全边界；remote skill 包含模式选择表，且不再建议用 `remote exec` 替代可用的 Client Admin 命令。
 
 ### 12.2 E2E
 
-按 `e2e-test` 流程新增 Admin Direct suite，至少覆盖：
+按 `e2e-test` 流程新增 Client Admin suite，至少覆盖：
 
 1. 临时数据目录、动态非 `9900` 端口启动目标服务，启用 remote access 并设置管理员密码。
 2. 通过局域网 IP 登录，执行 status/metrics/traffic/search/capture。
@@ -445,28 +523,29 @@ Phase 2 完成标志：WebUI 的规则、脚本、values、访问控制和配置
 
 ### 12.3 真实场景测试
 
-实施时创建 `human_tests/remote-admin-cli.md` 并同步 `human_tests/readme.md`，至少包含：
+实施时创建 `human_tests/client-admin-cli.md` 并同步 `human_tests/readme.md`，至少包含：
 
-- TC-RAC-01：单目标裸 `--remote` 登录和查询。
-- TC-RAC-02：多目标交互选择及显式 alias/IP/domain 选择。
-- TC-RAC-03：远程 rules/values/scripts/config CRUD 与 WebUI 同步可见。
-- TC-RAC-04：traffic 实时更新、capture SSE、push/WebSocket 均通过 Bearer。
-- TC-RAC-05：401 重登、403、错误密码节流、remote-disabled。
-- TC-RAC-06：HTTP 风险提示、HTTPS/自定义 CA、跨 origin redirect 拒绝。
-- TC-RAC-07：LocalOnly 和 `bifrost --remote remote ...` 拒绝且不触碰本地数据。
-- TC-RAC-08：Remote Invoke 原命令行为不变。
+- TC-CAC-01：单目标 `bifrost client <command>` 自动选择、登录和查询。
+- TC-CAC-02：多目标交互选择及显式 alias/IP/domain 选择。
+- TC-CAC-03：远程 rules/values/scripts/config CRUD 与 WebUI 同步可见。
+- TC-CAC-04：traffic 实时更新、capture SSE、push/WebSocket 均通过 Bearer。
+- TC-CAC-05：401 重登、403、错误密码节流、remote-disabled。
+- TC-CAC-06：HTTP 风险提示、HTTPS/自定义 CA、跨 origin redirect 拒绝。
+- TC-CAC-07：LocalOnly、`bifrost client client ...` 和 `bifrost client remote ...` 拒绝且不触碰本地数据。
+- TC-CAC-08：Remote Invoke 原命令行为不变。
+- TC-CAC-09：执行 `bifrost install-skill` 后，Agent 能从已安装的通用 skill 正确选择 Client，完成 target 选择、远端 traffic 查询与 rule/config 管理；涉及文件或 shell 时转向 `bifrost-remote`。
 
 ### 12.4 验证路由
 
 - 本文档阶段只有设计 Markdown 变更：执行结构、链接、术语、命令示例、绝对路径和 diff 一致性检查；Rust build、coverage、E2E、human_tests 不适用。
-- 实施阶段涉及 Rust CLI/Admin 生产代码：运行受影响 crate 单测、fmt、clippy、`make coverage-changed`，按阶段选择 Admin Direct E2E 和上述 human tests。高成本全 workspace/full coverage 交给远端 CI，除非影响面或失败归因要求本地复现。
+- 实施阶段涉及 Rust CLI/Admin 生产代码：运行受影响 crate 单测、fmt、clippy、`make coverage-changed`，按阶段选择 Client Admin E2E 和上述 human tests。高成本全 workspace/full coverage 交给远端 CI，除非影响面或失败归因要求本地复现。
 
 ## 13. Review / Fix / Test 闭环
 
 ### 第 1 轮
 
-- 复核用户目标：命令前 remote 标识、单目标自动、多目标选择、账号密码登录、原命令不变。
-- 复核安全边界：Admin Direct 与 Remote Invoke 不共享 transport/credential/grant；remote path 不落回本地存储。
+- 复核用户目标：使用 `client` 命令空间、单目标自动、多目标选择、账号密码登录、原命令不变。
+- 复核安全边界：Client 直连与 Remote Invoke 不共享 transport/credential/grant；client path 不落回本地存储。
 - 复核当前代码映射：`main.rs` 固定 loopback、rule/value/script/whitelist/admin 的本地存储路径、Admin router 的 API 覆盖。
 - 检查 `git status --short`、`git diff --check`、`git diff`，修复命名、矩阵和示例遗漏。
 
@@ -474,24 +553,26 @@ Phase 2 完成标志：WebUI 的规则、脚本、values、访问控制和配置
 
 - 基于最新 diff 逐项复查 target 选择、认证生命周期、TLS、输出兼容、退出码、破坏性操作和迁移阶段。
 - 专门检查是否错误承诺所有 OS 本地命令可经 Admin API 执行，是否存在 Remote Invoke shell/file fallback。
+- 复查根 `SKILL.md`、`skill_remote.md`、install-skill 内嵌资源与站点文档的同步清单，确保 Agent 能稳定区分 Client 和 Remote Invoke。
 - 检查文档没有本机绝对路径、敏感凭据示例或互相冲突的命令语法。
 - 再次执行 `git status --short`、`git diff --check`、`git diff`；发现问题则修复并追加下一轮。
 
 ## 14. 明确不在本方案内
 
 - 不新增 Relay 协议、Remote Invoke command、grant scope 或 pairing 流程。
-- 不用 Admin Direct 读取/编辑目标机任意文件或执行 shell。
-- 不自动发现局域网设备；bare `--remote` 只在已配置 profiles 中选择。
+- 不用 Client 直连读取/编辑目标机任意文件或执行 shell。
+- 不自动发现局域网设备；省略 `--target` 时只在已配置 profiles 中选择。
 - 不保存明文管理员密码，不承诺无安全存储时跨进程免登录。
 - 不承诺通过未运行的 Bifrost Admin API 启动目标服务。
 - 不在 V1 实现跨多台设备广播同一条破坏性命令。
 
 ## 15. 最终决策摘要
 
-1. 用户入口采用 `bifrost --remote[=<selector>] <原命令>`；显式值使用等号避免吞掉子命令。
-2. 目标与登录态由 `bifrost target ...` 管理；一个目标自动选，多目标 TTY 选、非 TTY 显式选。
+1. 用户入口采用 `bifrost client [--target <selector>] <原命令>`，表达“当前 CLI 作为 Admin API client”。
+2. 目标与登录态由 `bifrost client target ...` 管理；一个目标自动选，多目标 TTY 选、非 TTY 显式选。
 3. 远端执行只走 Admin API + Bearer JWT，与 WebUI Remote Access 对等。
 4. `bifrost remote ...` 永远保留为 Remote Invoke；两者不共享 Relay、grant、worker、shell 或 file 能力。
 5. 引入统一 `ExecutionContext`、command capability registry 和 `AdminApiClient`，消除固定 loopback 与各模块自行拼 URL。
 6. 远程命令要么明确走远端 API，要么明确拒绝，绝不回退到本地数据目录。
 7. 先交付核心只读链路，再完成 WebUI 管理能力对等，最后迁移长连接和高风险操作。
+8. 通用 `bifrost` skill 负责教 Agent 使用 Client Admin 直连；`bifrost-remote` skill 继续专注 Remote Invoke，只补两者的路由边界。
