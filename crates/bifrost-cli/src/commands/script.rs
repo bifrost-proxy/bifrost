@@ -340,7 +340,78 @@ fn rename_offline_script(
 }
 
 pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()> {
+    if super::client::is_active() {
+        return handle_client_script_command(action, &ConfigApiClient::new("127.0.0.1", 9900));
+    }
     handle_script_command_with_runtime(action, super::config::runtime::live_config_api_client)
+}
+
+fn handle_client_script_command(
+    action: ScriptCommands,
+    client: &ConfigApiClient,
+) -> bifrost_core::Result<()> {
+    match action {
+        ScriptCommands::List { r#type } => {
+            let response: serde_json::Value = client
+                .get("/scripts")
+                .map_err(bifrost_core::BifrostError::Config)?;
+            let selected = r#type.map(|value| vec![value]).unwrap_or_else(|| {
+                vec![
+                    "request".to_string(),
+                    "response".to_string(),
+                    "decode".to_string(),
+                    "parser".to_string(),
+                ]
+            });
+            let mut total = 0;
+            for script_type in selected {
+                let scripts = response
+                    .get(&script_type)
+                    .and_then(|value| value.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if !scripts.is_empty() {
+                    println!("{} scripts ({}):", script_type, scripts.len());
+                    for script in scripts {
+                        if let Some(name) = script.get("name").and_then(|value| value.as_str()) {
+                            println!("  {name}");
+                            total += 1;
+                        }
+                    }
+                }
+            }
+            if total == 0 {
+                println!("No scripts found.");
+            }
+            Ok(())
+        }
+        ScriptCommands::Show { args } => {
+            let selection = parse_lookup_args(&args, "show/get")?;
+            let Some(script_type) = selection.script_type else {
+                return Err(bifrost_core::BifrostError::Config(
+                    "Client mode requires an explicit script type for show".to_string(),
+                ));
+            };
+            let response = client
+                .get_script(&script_type.to_string(), &selection.name)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script: {} ({})", selection.name, script_type);
+            println!("Content:");
+            println!(
+                "{}",
+                response
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+            );
+            Ok(())
+        }
+        ScriptCommands::Run { .. } => Err(bifrost_core::BifrostError::Config(
+            "script run is not supported in Client mode yet; the command was not executed locally"
+                .to_string(),
+        )),
+        other => handle_online_script_command(other, client),
+    }
 }
 
 fn handle_script_command_with_runtime(

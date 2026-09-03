@@ -50,12 +50,12 @@ struct RuleGroup {
 }
 
 fn fetch_rules_from_api(port: u16) -> Option<Vec<RuleGroup>> {
-    let url = format!("http://127.0.0.1:{}/_bifrost/api/rules", port);
-    let response = bifrost_core::direct_ureq_agent_builder()
+    let url = super::client::api_url(port, "/rules");
+    let agent = bifrost_core::direct_ureq_agent_builder()
+        .redirects(0)
         .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .get(&url)
-        .call();
+        .build();
+    let response = super::client::authenticated_request(&agent, "GET", &url).call();
     match response {
         Ok(resp) => resp.into_json().ok(),
         Err(_) => None,
@@ -66,11 +66,12 @@ fn fetch_json_from_api<T>(port: u16, path: &str) -> Result<T, String>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let url = format!("http://127.0.0.1:{}/_bifrost/api{}", port, path);
-    let response = bifrost_core::direct_ureq_agent_builder()
+    let url = super::client::api_url(port, path);
+    let agent = bifrost_core::direct_ureq_agent_builder()
+        .redirects(0)
         .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .get(&url)
+        .build();
+    let response = super::client::authenticated_request(&agent, "GET", &url)
         .call()
         .map_err(|e| e.to_string())?;
 
@@ -519,11 +520,65 @@ pub fn run_status(
     format: crate::cli::StatusFormat,
     requested_port: u16,
 ) -> bifrost_core::Result<()> {
+    if super::client::is_active() {
+        return run_client_status(format);
+    }
     let gathered = gather_status(requested_port);
     match format {
         crate::cli::StatusFormat::Text => render_status_text(&gathered),
         crate::cli::StatusFormat::Json => render_status_json(&gathered, false),
         crate::cli::StatusFormat::JsonPretty => render_status_json(&gathered, true),
+    }
+    Ok(())
+}
+
+fn run_client_status(format: crate::cli::StatusFormat) -> bifrost_core::Result<()> {
+    let client = super::config::client::ConfigApiClient::new("127.0.0.1", 9900);
+    let overview: serde_json::Value = client
+        .get_system_overview()
+        .map_err(bifrost_core::BifrostError::Config)?;
+    match format {
+        crate::cli::StatusFormat::Json => println!("{}", overview),
+        crate::cli::StatusFormat::JsonPretty => println!(
+            "{}",
+            serde_json::to_string_pretty(&overview).unwrap_or_else(|_| overview.to_string())
+        ),
+        crate::cli::StatusFormat::Text => {
+            println!("Bifrost Proxy Status");
+            println!("====================");
+            println!();
+            println!("Status: Running");
+            if let Some(system) = overview.get("system") {
+                if let Some(version) = system.get("version").and_then(|value| value.as_str()) {
+                    println!("Version: {version}");
+                }
+                if let Some(uptime) = system.get("uptime").and_then(|value| value.as_u64()) {
+                    println!("Uptime: {uptime}s");
+                }
+            }
+            if let Some(port) = overview
+                .pointer("/server/port")
+                .and_then(|value| value.as_u64())
+            {
+                println!("Port: {port}");
+            }
+            if let Some(recorded) = overview
+                .pointer("/traffic/recorded")
+                .and_then(|value| value.as_u64())
+            {
+                println!("Traffic records: {recorded}");
+            }
+            if let Some(enabled) = overview
+                .pointer("/rules/enabled")
+                .and_then(|value| value.as_u64())
+            {
+                let total = overview
+                    .pointer("/rules/total")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(enabled);
+                println!("Rules: {enabled}/{total} enabled");
+            }
+        }
     }
     Ok(())
 }

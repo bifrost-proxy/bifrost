@@ -15,12 +15,195 @@ use bifrost_sync::{SyncAction, SyncManager};
 use crate::cli::RuleCommands;
 
 pub fn handle_rule_command(action: RuleCommands) -> bifrost_core::Result<()> {
+    if super::client::is_active() {
+        return handle_client_rule_command(
+            action,
+            &super::config::client::ConfigApiClient::new("127.0.0.1", 9900),
+        );
+    }
     match action {
         RuleCommands::Sync => handle_rule_sync(),
         RuleCommands::Rename { name, new_name } => handle_rule_rename(&name, &new_name),
         RuleCommands::Reorder { names } => handle_rule_reorder(&names),
         RuleCommands::Active => handle_rule_active(),
         other => handle_rule_local(other),
+    }
+}
+
+fn handle_client_rule_command(
+    action: RuleCommands,
+    client: &super::config::client::ConfigApiClient,
+) -> bifrost_core::Result<()> {
+    match action {
+        RuleCommands::List => {
+            let rules: Vec<serde_json::Value> = client
+                .get("/rules")
+                .map_err(bifrost_core::BifrostError::Config)?;
+            if rules.is_empty() {
+                println!("No rules found.");
+            } else {
+                println!("Rules ({}):", rules.len());
+                for rule in rules {
+                    let name = rule
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let enabled = rule
+                        .get("enabled")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let global = rule
+                        .get("is_global_default")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    if global {
+                        println!(
+                            "  {} [{}, global, protected]",
+                            name,
+                            if enabled { "enabled" } else { "disabled" }
+                        );
+                    } else {
+                        println!(
+                            "  {} [{}]",
+                            name,
+                            if enabled { "enabled" } else { "disabled" }
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        RuleCommands::Active => handle_rule_active(),
+        RuleCommands::Add {
+            name,
+            content,
+            file,
+            allow_invalid,
+            json,
+        } => {
+            let content = load_rule_content(content, file)?;
+            let response: serde_json::Value = client.post(
+                "/rules",
+                &serde_json::json!({"name": name, "content": content, "allow_invalid": allow_invalid}),
+            ).map_err(bifrost_core::BifrostError::Config)?;
+            if json {
+                println!("{}", response);
+            } else {
+                println!("Rule '{}' added successfully.", name);
+            }
+            Ok(())
+        }
+        RuleCommands::Update {
+            name,
+            content,
+            file,
+            allow_invalid,
+            json,
+        } => {
+            let content = load_rule_content(content, file)?;
+            let response: serde_json::Value = client
+                .put(
+                    &format!("/rules/{}", urlencoding::encode(&name)),
+                    &serde_json::json!({"content": content, "allow_invalid": allow_invalid}),
+                )
+                .map_err(bifrost_core::BifrostError::Config)?;
+            if json {
+                println!("{}", response);
+            } else {
+                println!("Rule '{}' updated successfully.", name);
+            }
+            Ok(())
+        }
+        RuleCommands::Delete { name } => {
+            let _: serde_json::Value = client
+                .delete(&format!("/rules/{}", urlencoding::encode(&name)))
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Rule '{}' deleted successfully.", name);
+            Ok(())
+        }
+        RuleCommands::Enable { name } => {
+            let verb = "enable";
+            let _: serde_json::Value = client
+                .put(
+                    &format!("/rules/{}/{}", urlencoding::encode(&name), verb),
+                    &serde_json::json!({}),
+                )
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Rule '{}' {}d.", name, verb);
+            Ok(())
+        }
+        RuleCommands::Disable { name } => {
+            let _: serde_json::Value = client
+                .put(
+                    &format!("/rules/{}/disable", urlencoding::encode(&name)),
+                    &serde_json::json!({}),
+                )
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Rule '{}' disabled.", name);
+            Ok(())
+        }
+        RuleCommands::Show { name } => {
+            let rule: serde_json::Value = client
+                .get(&format!("/rules/{}", urlencoding::encode(&name)))
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!(
+                "Rule: {}",
+                rule.get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&name)
+            );
+            println!(
+                "Status: {}",
+                if rule
+                    .get("enabled")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!("Content:");
+            println!(
+                "{}",
+                rule.get("content")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+            );
+            Ok(())
+        }
+        RuleCommands::Rename { name, new_name } => handle_rule_rename(&name, &new_name),
+        RuleCommands::Reorder { names } => handle_rule_reorder(&names),
+        RuleCommands::Share {
+            name,
+            target_url,
+            content,
+            file,
+            exclusive_scope: _,
+        } => {
+            let content = match (content, file) {
+                (Some(content), file) => load_rule_content(Some(content), file)?,
+                (None, Some(file)) => load_rule_content(None, Some(file))?,
+                (None, None) => {
+                    let rule: serde_json::Value = client
+                        .get(&format!("/rules/{}", urlencoding::encode(&name)))
+                        .map_err(bifrost_core::BifrostError::Config)?;
+                    rule.get("content")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                }
+            };
+            let payload =
+                new_rule_share_payload(share_payload_name_from_rule(&name, None), content)?;
+            println!("{}", append_rule_share_query(&target_url, &payload)?);
+            Ok(())
+        }
+        RuleCommands::Sync => Err(bifrost_core::BifrostError::Config(
+            "rule sync is not supported in Client mode; the command was not executed locally"
+                .to_string(),
+        )),
     }
 }
 
@@ -570,7 +753,11 @@ fn handle_rule_sync() -> bifrost_core::Result<()> {
 }
 
 fn handle_rule_rename(name: &str, new_name: &str) -> bifrost_core::Result<()> {
-    let port = crate::process::read_runtime_port().unwrap_or(9900);
+    let port = if super::client::is_active() {
+        9900
+    } else {
+        crate::process::read_runtime_port().unwrap_or(9900)
+    };
     let client = super::config::client::ConfigApiClient::new("127.0.0.1", port);
 
     client
@@ -582,7 +769,11 @@ fn handle_rule_rename(name: &str, new_name: &str) -> bifrost_core::Result<()> {
 }
 
 fn handle_rule_reorder(names: &[String]) -> bifrost_core::Result<()> {
-    let port = crate::process::read_runtime_port().unwrap_or(9900);
+    let port = if super::client::is_active() {
+        9900
+    } else {
+        crate::process::read_runtime_port().unwrap_or(9900)
+    };
     let client = super::config::client::ConfigApiClient::new("127.0.0.1", port);
 
     client
@@ -629,15 +820,12 @@ pub(crate) struct ActiveSummaryResponse {
 pub(crate) fn fetch_active_summary_from_api(
     port: u16,
 ) -> bifrost_core::Result<ActiveSummaryResponse> {
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/rules/active-summary",
-        port
-    );
-    let response = bifrost_core::direct_ureq_agent_builder()
+    let url = super::client::api_url(port, "/rules/active-summary");
+    let agent = bifrost_core::direct_ureq_agent_builder()
+        .redirects(0)
         .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .get(&url)
-        .call();
+        .build();
+    let response = super::client::authenticated_request(&agent, "GET", &url).call();
 
     let resp: ActiveSummaryResponse = match response {
         Ok(r) => r.into_json::<ActiveSummaryResponse>().map_err(|e| {
@@ -729,7 +917,11 @@ pub(crate) fn format_active_summary_lines(resp: &ActiveSummaryResponse) -> Vec<S
 }
 
 fn handle_rule_active() -> bifrost_core::Result<()> {
-    let port = crate::process::read_runtime_port().unwrap_or(9900);
+    let port = if super::client::is_active() {
+        9900
+    } else {
+        crate::process::read_runtime_port().unwrap_or(9900)
+    };
     let resp = fetch_active_summary_from_api(port)?;
 
     for line in format_active_summary_lines(&resp) {

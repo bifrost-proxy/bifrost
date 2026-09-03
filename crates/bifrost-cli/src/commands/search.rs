@@ -22,6 +22,7 @@ use serde::Deserialize;
 
 fn direct_agent(timeout: Duration) -> ureq::Agent {
     bifrost_core::direct_ureq_agent_builder()
+        .redirects(0)
         .timeout(timeout)
         .build()
 }
@@ -371,9 +372,9 @@ pub fn parse_include_tokens(tokens: &[String]) -> (bool, bool, bool, bool) {
 }
 
 fn check_proxy_running(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{}/_bifrost/api/metrics", port);
-    direct_agent(Duration::from_secs(2))
-        .get(&url)
+    let url = super::client::api_url(port, "/metrics");
+    let agent = direct_agent(Duration::from_secs(2));
+    super::client::authenticated_request(&agent, "GET", &url)
         .call()
         .is_ok()
 }
@@ -508,14 +509,11 @@ fn start_search_stream(
     options: &SearchOptions,
     cursor: Option<u64>,
 ) -> Result<Box<dyn std::io::Read + Send>, String> {
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/search/stream",
-        options.port
-    );
+    let url = super::client::api_url(options.port, "/search/stream");
     let body = build_search_request_body(options, cursor);
 
-    let response = direct_agent(Duration::from_secs(600))
-        .post(&url)
+    let agent = direct_agent(Duration::from_secs(600));
+    let response = super::client::authenticated_request(&agent, "POST", &url)
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())
         .map_err(|e| network_request_error(&url, &e))?;
@@ -1382,13 +1380,11 @@ impl InteractiveApp {
         }
 
         let id = &self.results[self.selected_index].record.id;
-        let url = format!(
-            "http://127.0.0.1:{}/_bifrost/api/traffic/{}",
-            self.options.port, id
-        );
+        let url = super::client::api_url(self.options.port, &format!("/traffic/{id}"));
 
         self.loading = true;
-        match direct_agent(Duration::from_secs(5)).get(&url).call() {
+        let agent = direct_agent(Duration::from_secs(5));
+        match super::client::authenticated_request(&agent, "GET", &url).call() {
             Ok(resp) => {
                 if let Ok(detail) = resp.into_json::<TrafficDetail>() {
                     self.detail_record = Some(detail);
@@ -1412,16 +1408,13 @@ impl InteractiveApp {
             None => return,
         };
 
-        let req_url = format!(
-            "http://127.0.0.1:{}/_bifrost/api/traffic/{}/request-body",
-            self.options.port, id
-        );
-        let res_url = format!(
-            "http://127.0.0.1:{}/_bifrost/api/traffic/{}/response-body",
-            self.options.port, id
-        );
+        let req_url =
+            super::client::api_url(self.options.port, &format!("/traffic/{id}/request-body"));
+        let res_url =
+            super::client::api_url(self.options.port, &format!("/traffic/{id}/response-body"));
 
-        if let Ok(resp) = direct_agent(Duration::from_secs(5)).get(&req_url).call() {
+        let agent = direct_agent(Duration::from_secs(5));
+        if let Ok(resp) = super::client::authenticated_request(&agent, "GET", &req_url).call() {
             if let Ok(body) = resp.into_json::<serde_json::Value>() {
                 if let Some(data) = body.get("data") {
                     if !data.is_null() {
@@ -1431,7 +1424,7 @@ impl InteractiveApp {
             }
         }
 
-        if let Ok(resp) = direct_agent(Duration::from_secs(5)).get(&res_url).call() {
+        if let Ok(resp) = super::client::authenticated_request(&agent, "GET", &res_url).call() {
             if let Ok(body) = resp.into_json::<serde_json::Value>() {
                 if let Some(data) = body.get("data") {
                     if !data.is_null() {

@@ -1,6 +1,6 @@
 ---
 name: "bifrost"
-description: "使用 bifrost CLI 管理代理生命周期、规则、证书、脚本、系统代理、运行时配置、流量查询与远程调用；也用于通过 Bifrost IM Gateway 配置飞书/Lark、微信/Weixin 机器人，并向机器人 owner、已配置 target 或指定飞书群聊/用户发送文本、Markdown、图片、文件附件和飞书原生卡片。当用户提到启动/停止/检查 bifrost、TLS 拦截、规则或脚本、流量搜索（包括用 Referer/Origin 等请求头关联某站点页面发起的第三方请求）或少于 6 位的请求 ID、JWT/Cookie 诊断、重放/导出/等待请求、远程 shell/授权/文件操作，或提到‘用 bifrost/机器人发飞书或微信消息’‘给 owner 发消息’‘给指定群发 Markdown/图片/文件/卡片’‘配置 IM provider/target’时触发。"
+description: "使用 bifrost CLI 管理代理生命周期、规则、证书、脚本、系统代理、运行时配置与流量；也用于 Client 模式通过 IP、端口、域名或已保存 target 直连另一台 Bifrost 的 Admin API，以及通过 IM Gateway 配置飞书/Lark、微信/Weixin 机器人并发送文本、Markdown、图片、文件和卡片。当用户提到启动/停止/检查 bifrost、TLS 拦截、规则或脚本、流量搜索、JWT/Cookie 诊断、重放/导出/等待请求、Client 直连远端 Bifrost，或用机器人发消息时触发。远端 shell、任意文件和仓库操作属于独立的 bifrost-remote / Remote Invoke 技能。"
 ---
 
 # Bifrost
@@ -811,11 +811,37 @@ bifrost install-skill -t universal             # 仅安装到通用 .agents/skil
 bifrost install-skill -t all -y                # 自动安装到所有支持的工具
 ```
 
-通用 `bifrost` skill 覆盖本机代理、规则、流量、IM Gateway CLI 配置和 Agent 采证工作流；专用 `bifrost-remote` skill 覆盖连接另一台机器、远程查流量、远程文件、远程脚本和授权 shell 边界。
+通用 `bifrost` skill 覆盖本机代理、Client Admin 直连、规则、流量、IM Gateway CLI 配置和 Agent 采证工作流；专用 `bifrost-remote` skill 只覆盖 Relay/授权下的远程文件、远程进程和 shell 边界。
 
-### 23. 远程调用 (Remote)
+### 23. Client 直连另一台 Bifrost
 
-`bifrost install-skill` 会同时安装通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户明确要连接另一台机器、使用 SSH key / pair code、远程查询流量或通过 `shell.exec` 操作目标设备时，应优先使用 `bifrost-remote` skill 中的完整流程。
+当用户给出了另一台 Bifrost 的 IP、端口、域名或已保存 target，并希望像 WebUI 一样查询流量、修改规则或管理配置时，使用 `bifrost client`。Client 直连目标 Admin API，使用管理员账号密码换取 Bearer JWT；它不经过 Relay，也不需要 pair code、SSH key 或 Remote Invoke grant。
+
+```bash
+# 目标机需先在本地执行：bifrost admin remote enable
+bifrost client target add devbox --url http://10.0.0.8:9900 --allow-insecure-http
+printf '%s' "$BIFROST_ADMIN_PASSWORD" | \
+  bifrost client target login devbox --username admin --password-stdin
+
+# 只有一个目标时可以省略 --target；多个目标的非交互调用必须显式选择
+bifrost client --target devbox status --format json
+bifrost client --target devbox traffic list --limit 20 --format json
+bifrost client --target devbox search api.example.com --format json
+bifrost client --target devbox rule list
+bifrost client --target devbox config get tls.enabled
+```
+
+Client 工作流规则：
+
+- 先执行 `bifrost client target list`。零目标时登记并登录；唯一目标会自动选择；多个目标时传 `--target` 或 `BIFROST_CLIENT_TARGET`，不要猜目标。
+- 非交互登录只用 `--password-stdin`，不要把密码放入 argv、日志或回答。临时地址可显式传 `--target` 并用 `BIFROST_ADMIN_TOKEN` 提供本次 token。
+- 写操作前确认 target 别名和 origin。明文 HTTP 会暴露密码和 token，仅在可信局域网显式使用 `--allow-insecure-http`。
+- 401 时显式重新执行 `bifrost client target login <name>`；当前不会自动重登。403、网络错误或不支持命令不得改走本机数据目录或自动降级到 Remote Invoke。
+- 支持 status、traffic/search/capture/metrics、rule/group/port、value/script、config/whitelist/account、部分 admin、sync/login 和 import/export。`status --tui`、`rule sync`、`script run`、AI/IM/Agent、系统级及进程生命周期命令当前不支持 Client。以 CLI 错误为准，禁止去掉 `client` 前缀重试。
+
+### 24. 远程调用 (Remote Invoke)
+
+`bifrost install-skill` 会同时安装通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户需要读取/修改目标机任意文件、操作远端仓库、运行构建或 shell，或者明确使用 SSH key / pair code 时，使用 `bifrost-remote` skill。Client Admin 与 Remote Invoke 是两套对等且隔离的远程模式。
 
 本节只保留快速索引（完整流程、错误码、典型 workflow 见 `skill_remote.md`）：
 
@@ -845,12 +871,12 @@ Relay HTTPS 私有 CA / 企业 MITM 优先通过系统 trust store 或 `BIFROST_
 
 边界说明：
 
-- 只读查询类操作需要目标设备先启动 Bifrost、在 Remote Invoke 页面启用 SSH key 或配对码授权，并由 caller 用 `bifrost remote conn status` 验证连接。
+- `bifrost remote traffic` 是 Relay-backed 查询，需要目标设备启用 Remote Invoke 并由 caller 用 `bifrost remote conn status` 验证连接；已知 Admin endpoint 且目标服务可达时，优先使用上一节的 `bifrost client traffic`。
 - 远程设备控制类操作还需要目标设备启用 Shell Access profile/policy，并在授权请求中选择 `selected` 或 `all` 访问模式。
-- `remote traffic clear` 是写操作，不提供 remote CLI 子命令；如确需清理目标设备流量记录，应在明确 shell 授权后通过 `remote exec` 执行目标机本地命令或 API。
+- `remote traffic clear` 是写操作，不提供 Remote Invoke 子命令；已配置 Admin target 时使用 `bifrost client --target <name> traffic clear`，不要为了管理 Bifrost 自动申请 shell。
 - `remote shell ...` 与 `remote grant ...` 是当前机器本地管理命令（已 deprecated，请改用 `bifrost setting shell` / `bifrost setting grant`）；caller 要管理目标设备时，应通过 `remote exec` 执行目标机命令。
 - `shell.exec` 受目标终端 Shell Access policy 约束；当前不能承诺 OS 级 sandbox 隔离。
-- rule/config/script/value/CA/系统代理等没有专门的 `bifrost remote <module>` 子命令时，不代表不能远程操作；应走已授权的 `remote exec`。
+- rule/config/script/value 等 Bifrost Admin 管理优先使用 `bifrost client`。CA、系统代理或尚未迁移的能力若确实需要目标机 shell，必须由用户明确授权 Remote Invoke；Client 失败后不得自动降级。
 - 修改远端文件优先使用 `remote file read/edit/patch/write/move/delete`；临时脚本优先使用 `remote run`，不要用 `remote exec + heredoc/base64/echo` 拼接文件内容。
 - 长时间静默的构建、测试、轮询命令优先 `remote exec --detach` 或 `remote run --detach`，再用 `remote job list/status/logs/watch` 续接，避免 300 秒无事件 idle timeout。
 

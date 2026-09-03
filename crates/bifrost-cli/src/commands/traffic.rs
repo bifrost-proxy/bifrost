@@ -10,6 +10,7 @@ use super::OutputFormat;
 
 fn direct_agent(timeout: Duration) -> ureq::Agent {
     bifrost_core::direct_ureq_agent_builder()
+        .redirects(0)
         .timeout(timeout)
         .build()
 }
@@ -169,14 +170,13 @@ impl From<TrafficSummaryLegacy> for TrafficRow {
 }
 
 pub fn run_traffic_list(options: TrafficListOptions) -> Result<()> {
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic{}",
+    let url = super::client::api_url(
         options.port,
-        build_traffic_list_query(&options)
+        &format!("/traffic{}", build_traffic_list_query(&options)),
     );
 
-    let resp = direct_agent(Duration::from_secs(10))
-        .get(&url)
+    let agent = direct_agent(Duration::from_secs(10));
+    let resp = super::client::authenticated_request(&agent, "GET", &url)
         .call()
         .map_err(|e| network_request_error(&url, &e))?;
 
@@ -349,15 +349,12 @@ fn run_traffic_batch_get(options: &TrafficGetOptions) -> Result<()> {
         query.push_str(&mb.to_string());
     }
 
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic/batch?{}",
-        options.port, query
-    );
+    let url = super::client::api_url(options.port, &format!("/traffic/batch?{query}"));
 
     // Bodies can be large; pick a generous timeout proportional to id count.
     let timeout = Duration::from_secs(10 + (options.ids.len() as u64).min(120));
-    let resp = direct_agent(timeout)
-        .get(&url)
+    let agent = direct_agent(timeout);
+    let resp = super::client::authenticated_request(&agent, "GET", &url)
         .call()
         .map_err(|e| network_request_error(&url, &e))?;
 
@@ -453,16 +450,10 @@ enum FetchTrafficError {
 }
 
 fn fetch_traffic_record(port: u16, id: &str) -> std::result::Result<Value, FetchTrafficError> {
-    let record_url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic/{}",
-        port,
-        urlencoding::encode(id)
-    );
+    let record_url = super::client::api_url(port, &format!("/traffic/{}", urlencoding::encode(id)));
 
-    let resp = match direct_agent(Duration::from_secs(10))
-        .get(&record_url)
-        .call()
-    {
+    let agent = direct_agent(Duration::from_secs(10));
+    let resp = match super::client::authenticated_request(&agent, "GET", &record_url).call() {
         Ok(r) => r,
         Err(ureq::Error::Status(404, _)) => return Err(FetchTrafficError::NotFound),
         Err(e) => {
@@ -491,15 +482,13 @@ fn fetch_traffic_body(port: u16, id: &str, is_request: bool) -> Option<Value> {
         "response-body"
     };
 
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/{}",
+    let url = super::client::api_url(
         port,
-        urlencoding::encode(id),
-        suffix
+        &format!("/traffic/{}/{}", urlencoding::encode(id), suffix),
     );
 
-    let resp = direct_agent(Duration::from_secs(10))
-        .get(&url)
+    let agent = direct_agent(Duration::from_secs(10));
+    let resp = super::client::authenticated_request(&agent, "GET", &url)
         .call()
         .ok()?;
     let body = resp.into_string().ok()?;
@@ -559,9 +548,9 @@ fn find_id_by_sequence_suffix(port: u16, suffix: &str) -> Result<SeqSuffixResult
 }
 
 fn fetch_server_sequence(port: u16) -> Result<u64> {
-    let url = format!("http://127.0.0.1:{}/_bifrost/api/traffic?limit=1", port);
-    let resp = direct_agent(Duration::from_secs(10))
-        .get(&url)
+    let url = super::client::api_url(port, "/traffic?limit=1");
+    let agent = direct_agent(Duration::from_secs(10));
+    let resp = super::client::authenticated_request(&agent, "GET", &url)
         .call()
         .map_err(|e| network_request_error(&url, &e))?;
     let body = resp
@@ -585,12 +574,13 @@ fn fetch_server_sequence(port: u16) -> Result<u64> {
 
 fn find_id_by_exact_sequence(port: u16, seq: u64) -> Result<Option<String>> {
     let cursor = seq.saturating_add(1);
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic?limit=1&cursor={}&direction=backward",
-        port, cursor
+    let url = super::client::api_url(
+        port,
+        &format!("/traffic?limit=1&cursor={cursor}&direction=backward"),
     );
 
-    let resp = match direct_agent(Duration::from_secs(10)).get(&url).call() {
+    let agent = direct_agent(Duration::from_secs(10));
+    let resp = match super::client::authenticated_request(&agent, "GET", &url).call() {
         Ok(r) => r,
         Err(e) => return Err(network_request_error(&url, &e)),
     };
@@ -616,9 +606,9 @@ fn find_id_by_exact_sequence(port: u16, seq: u64) -> Result<Option<String>> {
 }
 
 fn select_traffic_id(port: u16, hint: Option<&str>) -> Result<String> {
-    let url = format!("http://127.0.0.1:{}/_bifrost/api/traffic?limit=100", port);
-    let resp = direct_agent(Duration::from_secs(10))
-        .get(&url)
+    let url = super::client::api_url(port, "/traffic?limit=100");
+    let agent = direct_agent(Duration::from_secs(10));
+    let resp = super::client::authenticated_request(&agent, "GET", &url)
         .call()
         .map_err(|e| network_request_error(&url, &e))?;
 
@@ -1424,13 +1414,13 @@ pub struct AuthSummaryView {
 }
 
 pub fn run_traffic_auth_status(options: TrafficAuthStatusOptions) -> Result<()> {
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/auth-status",
+    let url = super::client::api_url(
         options.port,
-        urlencoding::encode(&options.id)
+        &format!("/traffic/{}/auth-status", urlencoding::encode(&options.id)),
     );
 
-    let resp = match direct_agent(Duration::from_secs(10)).get(&url).call() {
+    let agent = direct_agent(Duration::from_secs(10));
+    let resp = match super::client::authenticated_request(&agent, "GET", &url).call() {
         Ok(r) => r,
         Err(ureq::Error::Status(404, _)) => {
             return Err(BifrostError::NotFound(format!(
@@ -1650,13 +1640,12 @@ fn resolve_traffic_id(port: u16, id: &str) -> Result<String> {
 
 pub fn run_traffic_export(opts: TrafficExportOptions) -> Result<()> {
     let id = resolve_traffic_id(opts.port, &opts.id)?;
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/export?format={}",
-        opts.port, id, opts.as_format
+    let url = super::client::api_url(
+        opts.port,
+        &format!("/traffic/{id}/export?format={}", opts.as_format),
     );
     let agent = direct_agent(Duration::from_secs(15));
-    let resp = agent
-        .get(&url)
+    let resp = super::client::authenticated_request(&agent, "GET", &url)
         .call()
         .map_err(|e| network_request_error(&url, &e))?;
     let body = resp
@@ -1779,13 +1768,9 @@ pub fn run_traffic_replay(opts: TrafficReplayOptions) -> Result<()> {
         "timeout_ms": timeout_ms,
     });
 
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/replay",
-        opts.port, id
-    );
+    let url = super::client::api_url(opts.port, &format!("/traffic/{id}/replay"));
     let agent = direct_agent(Duration::from_millis(timeout_ms.saturating_add(15_000)));
-    let resp = agent
-        .post(&url)
+    let resp = super::client::authenticated_request(&agent, "POST", &url)
         .set("Content-Type", "application/json")
         .send_string(&serde_json::to_string(&body_json).unwrap())
         .map_err(|e| network_request_error(&url, &e))?;

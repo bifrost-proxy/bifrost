@@ -6,6 +6,9 @@ use crate::cli::WhitelistCommands;
 use crate::config::get_bifrost_dir;
 
 pub fn handle_whitelist_command(action: WhitelistCommands) -> bifrost_core::Result<()> {
+    if super::client::is_active() {
+        return handle_client_whitelist_command(action, &ConfigApiClient::new("127.0.0.1", 9900));
+    }
     let bifrost_dir = get_bifrost_dir()?;
     set_data_dir(bifrost_dir.clone());
 
@@ -249,5 +252,108 @@ pub fn handle_whitelist_command(action: WhitelistCommands) -> bifrost_core::Resu
         }
     }
 
+    Ok(())
+}
+
+fn handle_client_whitelist_command(
+    action: WhitelistCommands,
+    client: &ConfigApiClient,
+) -> bifrost_core::Result<()> {
+    match action {
+        WhitelistCommands::List | WhitelistCommands::Status => {
+            let value = client
+                .get_whitelist()
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            );
+        }
+        WhitelistCommands::Add { ip_or_cidr } => {
+            let _: serde_json::Value = client
+                .post("/whitelist", &serde_json::json!({"ip_or_cidr": ip_or_cidr}))
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Added '{}' to whitelist.", ip_or_cidr);
+        }
+        WhitelistCommands::Remove { ip_or_cidr } => {
+            let _: serde_json::Value = client
+                .delete_with_body_public(
+                    "/whitelist",
+                    &serde_json::json!({"ip_or_cidr": ip_or_cidr}),
+                )
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Removed '{}' from whitelist.", ip_or_cidr);
+        }
+        WhitelistCommands::AllowLan { enable } => {
+            let allow = enable.parse::<bool>().map_err(|_| {
+                bifrost_core::BifrostError::Config(format!(
+                    "Invalid value '{enable}'. Use 'true' or 'false'."
+                ))
+            })?;
+            client
+                .set_allow_lan(allow)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!(
+                "LAN (private network) access {}.",
+                if allow { "enabled" } else { "disabled" }
+            );
+        }
+        WhitelistCommands::Mode { mode } => match mode {
+            Some(mode) => {
+                client
+                    .set_access_mode(&mode)
+                    .map_err(bifrost_core::BifrostError::Config)?;
+                println!("Access mode set to: {mode}");
+            }
+            None => {
+                let value = client
+                    .get_access_mode()
+                    .map_err(bifrost_core::BifrostError::Config)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
+                );
+            }
+        },
+        WhitelistCommands::Pending => {
+            let pending = client
+                .get_pending()
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&pending).unwrap_or_default()
+            );
+        }
+        WhitelistCommands::Approve { ip } => {
+            client
+                .approve_pending(&ip)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Approved access for: {ip}");
+        }
+        WhitelistCommands::Reject { ip } => {
+            client
+                .reject_pending(&ip)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Rejected access for: {ip}");
+        }
+        WhitelistCommands::ClearPending => {
+            client
+                .clear_pending()
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("All pending access requests cleared.");
+        }
+        WhitelistCommands::AddTemporary { ip } => {
+            client
+                .add_temporary(&ip)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Temporary access granted for: {ip}");
+        }
+        WhitelistCommands::RemoveTemporary { ip } => {
+            client
+                .remove_temporary(&ip)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Temporary access removed for: {ip}");
+        }
+    }
     Ok(())
 }

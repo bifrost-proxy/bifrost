@@ -213,6 +213,19 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .join("bifrost")
                     .join("SKILL.md");
                 assert_installed_skill(&target)?;
+                let client_skill = fs::read_to_string(&target)
+                    .map_err(|e| format!("Failed to read Client skill: {e}"))?;
+                assert_client_skill_content(&client_skill)?;
+
+                let remote_target = tmp
+                    .join(".agents")
+                    .join("skills")
+                    .join("bifrost-remote")
+                    .join("SKILL.md");
+                assert_installed_skill(&remote_target)?;
+                let remote_skill = fs::read_to_string(&remote_target)
+                    .map_err(|e| format!("Failed to read Remote Invoke skill: {e}"))?;
+                assert_remote_skill_content(&remote_skill)?;
 
                 cleanup_dir(&tmp);
                 Ok(())
@@ -270,6 +283,38 @@ fn assert_skill_content(content: &str) -> Result<(), String> {
     }
     if !content.contains("bifrost") && !content.contains("Bifrost") {
         return Err("Installed skill does not contain expected bifrost content".to_string());
+    }
+    Ok(())
+}
+
+fn assert_client_skill_content(content: &str) -> Result<(), String> {
+    for required in [
+        "bifrost client target add",
+        "bifrost client target login",
+        "bifrost client --target devbox traffic list",
+        "bifrost client --target devbox rule list",
+        "不得改走本机数据目录或自动降级到 Remote Invoke",
+    ] {
+        if !content.contains(required) {
+            return Err(format!(
+                "Installed bifrost skill is missing Client guidance: {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn assert_remote_skill_content(content: &str) -> Result<(), String> {
+    for required in [
+        "先选择正确的远程模式",
+        "通用 `bifrost` skill 的 `bifrost client`",
+        "不得自动改用 `remote exec`",
+    ] {
+        if !content.contains(required) {
+            return Err(format!(
+                "Installed bifrost-remote skill is missing mode boundary: {required}"
+            ));
+        }
     }
     Ok(())
 }

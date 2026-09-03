@@ -479,7 +479,11 @@ impl TemporaryPortManager for CliTemporaryPortManager {
 }
 
 pub fn handle_port_command(action: PortCommands) -> bifrost_core::Result<()> {
-    let port = crate::process::read_runtime_port().unwrap_or(9900);
+    let port = if super::client::is_active() {
+        9900
+    } else {
+        crate::process::read_runtime_port().unwrap_or(9900)
+    };
     let client = PortApiClient::new(port);
     match action {
         PortCommands::Bind {
@@ -691,10 +695,11 @@ impl PortApiClient {
 
     fn destroy(&self, port: u16) -> bifrost_core::Result<()> {
         let url = self.url(&format!("/_bifrost/api/ports/{port}"));
-        bifrost_core::direct_ureq_agent_builder()
+        let agent = bifrost_core::direct_ureq_agent_builder()
+            .redirects(0)
             .timeout(std::time::Duration::from_secs(3))
-            .build()
-            .delete(&url)
+            .build();
+        super::client::authenticated_request(&agent, "DELETE", &url)
             .call()
             .map_err(|e| self.api_error("DELETE", &url, e))?;
         Ok(())
@@ -702,10 +707,11 @@ impl PortApiClient {
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> bifrost_core::Result<T> {
         let url = self.url(path);
-        bifrost_core::direct_ureq_agent_builder()
+        let agent = bifrost_core::direct_ureq_agent_builder()
+            .redirects(0)
             .timeout(std::time::Duration::from_secs(3))
-            .build()
-            .get(&url)
+            .build();
+        super::client::authenticated_request(&agent, "GET", &url)
             .call()
             .map_err(|e| self.api_error("GET", &url, e))?
             .into_json()
@@ -718,10 +724,11 @@ impl PortApiClient {
         body: &T,
     ) -> bifrost_core::Result<R> {
         let url = self.url(path);
-        bifrost_core::direct_ureq_agent_builder()
+        let agent = bifrost_core::direct_ureq_agent_builder()
+            .redirects(0)
             .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .post(&url)
+            .build();
+        super::client::authenticated_request(&agent, "POST", &url)
             .send_json(serde_json::to_value(body).unwrap_or_default())
             .map_err(|e| self.api_error("POST", &url, e))?
             .into_json()
@@ -734,10 +741,11 @@ impl PortApiClient {
         body: &T,
     ) -> bifrost_core::Result<R> {
         let url = self.url(path);
-        bifrost_core::direct_ureq_agent_builder()
+        let agent = bifrost_core::direct_ureq_agent_builder()
+            .redirects(0)
             .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .patch(&url)
+            .build();
+        super::client::authenticated_request(&agent, "PATCH", &url)
             .send_json(serde_json::to_value(body).unwrap_or_default())
             .map_err(|e| self.api_error("PATCH", &url, e))?
             .into_json()
@@ -745,7 +753,11 @@ impl PortApiClient {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}{}", self.admin_port, path)
+        if let Some(base_url) = super::client::active_base_url() {
+            format!("{}{}", base_url.trim_end_matches('/'), path)
+        } else {
+            format!("http://127.0.0.1:{}{}", self.admin_port, path)
+        }
     }
 
     fn api_error(&self, method: &str, url: &str, error: ureq::Error) -> bifrost_core::BifrostError {

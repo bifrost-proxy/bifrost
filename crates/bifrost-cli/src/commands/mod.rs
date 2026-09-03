@@ -9,6 +9,7 @@ mod ca;
 mod caller_stream_frame;
 mod capture;
 mod cli_proxy;
+pub mod client;
 mod completions;
 pub(crate) mod config;
 mod group;
@@ -57,6 +58,7 @@ pub use asr::handle_ai_command;
 pub use ca::*;
 pub use capture::{parse_duration, run_capture_wait, CaptureOutputFormat, CaptureWaitOptions};
 pub use cli_proxy::handle_cli_proxy_command;
+pub use client::handle_client;
 pub use config::handle_config_command;
 pub use group::handle_group_command;
 pub use install_skill::handle_install_skill;
@@ -95,6 +97,9 @@ pub fn handle_version_check(host: &str, port: u16) -> bifrost_core::Result<()> {
     let info = match client.version_check() {
         Ok(info) => info,
         Err(e) => {
+            if client::is_active() {
+                return Err(bifrost_core::BifrostError::Network(e));
+            }
             debug!(error = %e, "failed to reach running proxy, falling back to direct check");
             return handle_version_check_standalone();
         }

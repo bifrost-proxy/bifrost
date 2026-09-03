@@ -142,17 +142,14 @@ pub fn run_capture_wait(options: CaptureWaitOptions) -> i32 {
     // Add a generous read timeout so ureq does not cut the wait early.
     let read_timeout = options.timeout.saturating_add(Duration::from_secs(15));
     let agent = direct_ureq_agent_builder()
+        .redirects(0)
         .timeout_read(read_timeout)
         .timeout_connect(Duration::from_secs(5))
         .build();
 
-    let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/capture/wait",
-        options.port
-    );
+    let url = super::client::api_url(options.port, "/capture/wait");
     let started = std::time::Instant::now();
-    let response = agent
-        .post(&url)
+    let response = super::client::authenticated_request(&agent, "POST", &url)
         .send_json(serde_json::to_value(&body).unwrap());
     let elapsed_ms = started.elapsed().as_millis() as u64;
 

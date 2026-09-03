@@ -119,7 +119,60 @@ fn route_online_value_command(
 }
 
 pub fn handle_value_command(action: ValueCommands) -> bifrost_core::Result<()> {
+    if super::client::is_active() {
+        return handle_client_value_command(action, &ConfigApiClient::new("127.0.0.1", 9900));
+    }
     handle_value_command_with_runtime(action, super::config::runtime::live_config_api_client)
+}
+
+fn handle_client_value_command(
+    action: ValueCommands,
+    client: &ConfigApiClient,
+) -> bifrost_core::Result<()> {
+    match action {
+        ValueCommands::List => {
+            let response: serde_json::Value = client
+                .get("/values")
+                .map_err(bifrost_core::BifrostError::Config)?;
+            let entries = response
+                .get("values")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if entries.is_empty() {
+                println!("No values defined.");
+            } else {
+                println!("Values ({}):", entries.len());
+                println!("====================");
+                for entry in entries {
+                    let name = entry
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let value = entry
+                        .get("value")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    println!("  {} = {}", name, value.replace('\n', "\\n"));
+                }
+            }
+            Ok(())
+        }
+        ValueCommands::Show { name } => {
+            let response: serde_json::Value = client
+                .get(&format!("/values/{}", urlencoding::encode(&name)))
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!(
+                "{}",
+                response
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+            );
+            Ok(())
+        }
+        other => handle_online_value_command(other, client),
+    }
 }
 
 fn handle_value_command_with_runtime(
