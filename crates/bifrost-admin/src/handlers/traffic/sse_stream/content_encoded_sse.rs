@@ -30,7 +30,7 @@ struct DecodeBudget {
 }
 
 struct BudgetWriter {
-    inner: Box<dyn Write + Send>,
+    inner: Box<dyn Write + Send + Sync>,
     budget: Arc<Mutex<DecodeBudget>>,
 }
 
@@ -58,11 +58,17 @@ impl Write for BudgetWriter {
 
 enum DeflateDecoderState {
     Pending {
-        downstream: Option<Box<dyn Write + Send>>,
+        downstream: Option<Box<dyn Write + Send + Sync>>,
         prefix: Vec<u8>,
     },
-    Zlib(flate2::write::ZlibDecoder<Box<dyn Write + Send>>),
-    Raw(flate2::write::DeflateDecoder<Box<dyn Write + Send>>),
+    ZlibProbe {
+        decoder: flate2::write::ZlibDecoder<Box<dyn Write + Send + Sync>>,
+        downstream: Option<Box<dyn Write + Send + Sync>>,
+        input: Vec<u8>,
+        output: Arc<Mutex<DecoderOutput>>,
+    },
+    Zlib(flate2::write::ZlibDecoder<Box<dyn Write + Send + Sync>>),
+    Raw(flate2::write::DeflateDecoder<Box<dyn Write + Send + Sync>>),
 }
 
 struct StreamingDeflateDecoder {
@@ -70,7 +76,7 @@ struct StreamingDeflateDecoder {
 }
 
 impl StreamingDeflateDecoder {
-    fn new(downstream: Box<dyn Write + Send>) -> Self {
+    fn new(downstream: Box<dyn Write + Send + Sync>) -> Self {
         Self {
             state: DeflateDecoderState::Pending {
                 downstream: Some(downstream),
@@ -92,9 +98,26 @@ impl StreamingDeflateDecoder {
         let downstream = downstream.take().expect("deflate downstream is present");
         let initial = std::mem::take(prefix);
         if is_zlib {
-            let mut decoder = flate2::write::ZlibDecoder::new(downstream);
-            decoder.write_all(&initial)?;
-            self.state = DeflateDecoderState::Zlib(decoder);
+            let output = Arc::new(Mutex::new(DecoderOutput::default()));
+            let mut decoder = flate2::write::ZlibDecoder::new(
+                Box::new(OutputWriter(output.clone())) as Box<dyn Write + Send + Sync>,
+            );
+            if decoder.write_all(&initial).is_err() {
+                let mut decoder = flate2::write::DeflateDecoder::new(downstream);
+                decoder.write_all(&initial)?;
+                self.state = DeflateDecoderState::Raw(decoder);
+            } else if !output.lock().unwrap().bytes.is_empty() {
+                let mut decoder = flate2::write::ZlibDecoder::new(downstream);
+                decoder.write_all(&initial)?;
+                self.state = DeflateDecoderState::Zlib(decoder);
+            } else {
+                self.state = DeflateDecoderState::ZlibProbe {
+                    decoder,
+                    downstream: Some(downstream),
+                    input: initial,
+                    output,
+                };
+            }
         } else {
             let mut decoder = flate2::write::DeflateDecoder::new(downstream);
             decoder.write_all(&initial)?;
@@ -111,10 +134,53 @@ impl Write for StreamingDeflateDecoder {
             self.initialize_if_ready()?;
             return Ok(buf.len());
         }
+        if matches!(self.state, DeflateDecoderState::ZlibProbe { .. }) {
+            let placeholder = DeflateDecoderState::Pending {
+                downstream: None,
+                prefix: Vec::new(),
+            };
+            let DeflateDecoderState::ZlibProbe {
+                mut decoder,
+                mut downstream,
+                mut input,
+                output,
+            } = std::mem::replace(&mut self.state, placeholder)
+            else {
+                unreachable!();
+            };
+            input.extend_from_slice(buf);
+            if decoder.write_all(buf).is_err() {
+                let mut raw = flate2::write::DeflateDecoder::new(
+                    downstream
+                        .take()
+                        .expect("deflate probe downstream is present"),
+                );
+                raw.write_all(&input)?;
+                self.state = DeflateDecoderState::Raw(raw);
+            } else if !output.lock().unwrap().bytes.is_empty() {
+                let mut zlib = flate2::write::ZlibDecoder::new(
+                    downstream
+                        .take()
+                        .expect("deflate probe downstream is present"),
+                );
+                zlib.write_all(&input)?;
+                self.state = DeflateDecoderState::Zlib(zlib);
+            } else {
+                self.state = DeflateDecoderState::ZlibProbe {
+                    decoder,
+                    downstream,
+                    input,
+                    output,
+                };
+            }
+            return Ok(buf.len());
+        }
         match &mut self.state {
             DeflateDecoderState::Zlib(decoder) => decoder.write(buf),
             DeflateDecoderState::Raw(decoder) => decoder.write(buf),
-            DeflateDecoderState::Pending { .. } => unreachable!(),
+            DeflateDecoderState::Pending { .. } | DeflateDecoderState::ZlibProbe { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -127,14 +193,56 @@ impl Write for StreamingDeflateDecoder {
                     Ok(())
                 }
             }
+            DeflateDecoderState::ZlibProbe { .. } => {
+                let placeholder = DeflateDecoderState::Pending {
+                    downstream: None,
+                    prefix: Vec::new(),
+                };
+                let DeflateDecoderState::ZlibProbe {
+                    mut decoder,
+                    mut downstream,
+                    input,
+                    output,
+                } = std::mem::replace(&mut self.state, placeholder)
+                else {
+                    unreachable!();
+                };
+                if decoder.flush().is_err() {
+                    let mut raw = flate2::write::DeflateDecoder::new(
+                        downstream
+                            .take()
+                            .expect("deflate probe downstream is present"),
+                    );
+                    raw.write_all(&input)?;
+                    raw.flush()?;
+                    self.state = DeflateDecoderState::Raw(raw);
+                } else if !output.lock().unwrap().bytes.is_empty() {
+                    let mut zlib = flate2::write::ZlibDecoder::new(
+                        downstream
+                            .take()
+                            .expect("deflate probe downstream is present"),
+                    );
+                    zlib.write_all(&input)?;
+                    zlib.flush()?;
+                    self.state = DeflateDecoderState::Zlib(zlib);
+                } else {
+                    self.state = DeflateDecoderState::ZlibProbe {
+                        decoder,
+                        downstream,
+                        input,
+                        output,
+                    };
+                }
+                Ok(())
+            }
             DeflateDecoderState::Zlib(decoder) => decoder.flush(),
             DeflateDecoderState::Raw(decoder) => decoder.flush(),
         }
     }
 }
 
-struct IncrementalContentDecoder {
-    writer: Box<dyn Write + Send>,
+pub struct IncrementalContentDecoder {
+    writer: Box<dyn Write + Send + Sync>,
     output: Arc<Mutex<DecoderOutput>>,
     budget: Arc<Mutex<DecodeBudget>>,
     wire_prefix: WirePrefixValidator,
@@ -194,14 +302,14 @@ impl WirePrefixValidator {
 }
 
 impl IncrementalContentDecoder {
-    fn new(content_encoding: &str, max_output_bytes: usize) -> io::Result<Self> {
+    pub fn new(content_encoding: &str, max_output_bytes: usize) -> io::Result<Self> {
         let output = Arc::new(Mutex::new(DecoderOutput::default()));
         let budget = Arc::new(Mutex::new(DecodeBudget {
             used: 0,
             max: max_output_bytes,
             exceeded: false,
         }));
-        let mut writer: Box<dyn Write + Send> = Box::new(OutputWriter(output.clone()));
+        let mut writer: Box<dyn Write + Send + Sync> = Box::new(OutputWriter(output.clone()));
 
         for encoding in content_encoding
             .split(',')
@@ -211,7 +319,7 @@ impl IncrementalContentDecoder {
             if encoding.eq_ignore_ascii_case("identity") {
                 continue;
             }
-            let downstream: Box<dyn Write + Send> = Box::new(BudgetWriter {
+            let downstream: Box<dyn Write + Send + Sync> = Box::new(BudgetWriter {
                 inner: writer,
                 budget: budget.clone(),
             });
@@ -237,7 +345,7 @@ impl IncrementalContentDecoder {
         })
     }
 
-    fn push(&mut self, wire_bytes: &[u8]) -> io::Result<Vec<u8>> {
+    pub fn push(&mut self, wire_bytes: &[u8]) -> io::Result<Vec<u8>> {
         let Some(wire_bytes) = self.wire_prefix.validate(wire_bytes)? else {
             return Ok(Vec::new());
         };
@@ -246,11 +354,11 @@ impl IncrementalContentDecoder {
         Ok(std::mem::take(&mut self.output.lock().unwrap().bytes))
     }
 
-    fn take_output(&self) -> Vec<u8> {
+    pub fn take_output(&self) -> Vec<u8> {
         std::mem::take(&mut self.output.lock().unwrap().bytes)
     }
 
-    fn exceeded_limit(&self) -> bool {
+    pub fn exceeded_limit(&self) -> bool {
         self.budget.lock().unwrap().exceeded
     }
 }
@@ -645,6 +753,53 @@ mod tests {
             },
         };
         empty.flush().unwrap();
+    }
+
+    #[test]
+    fn streaming_deflate_retries_raw_after_false_zlib_header_match() {
+        let plaintext = b"data: raw false zlib match!\n\n";
+        assert_eq!(plaintext.len(), 29);
+        // A raw stored block whose first two bytes also satisfy the zlib header
+        // checksum: 0x081d % 31 == 0.
+        let mut wire = vec![0x08, 0x1d, 0x00, 0xe2, 0xff];
+        wire.extend_from_slice(plaintext);
+        wire.extend_from_slice(&[0x01, 0x00, 0x00, 0xff, 0xff]);
+        let output = Arc::new(Mutex::new(DecoderOutput::default()));
+        let mut decoder = StreamingDeflateDecoder::new(Box::new(OutputWriter(output.clone())));
+
+        decoder.write_all(&wire[..2]).unwrap();
+        decoder.flush().unwrap();
+        decoder.write_all(&wire[2..]).unwrap();
+        decoder.flush().unwrap();
+
+        assert_eq!(output.lock().unwrap().bytes, plaintext);
+    }
+
+    #[test]
+    fn streaming_deflate_selects_zlib_or_raw_from_a_complete_first_chunk() {
+        let plaintext = b"data: complete first chunk!\n\n";
+        let mut zlib_encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        zlib_encoder.write_all(plaintext).unwrap();
+        let zlib_wire = zlib_encoder.finish().unwrap();
+        let zlib_output = Arc::new(Mutex::new(DecoderOutput::default()));
+        let mut zlib = StreamingDeflateDecoder::new(Box::new(OutputWriter(zlib_output.clone())));
+        zlib.write_all(&zlib_wire).unwrap();
+        zlib.flush().unwrap();
+        assert_eq!(zlib_output.lock().unwrap().bytes, plaintext);
+
+        assert_eq!(plaintext.len(), 29);
+        // This valid raw stored block starts with a pair that also passes the
+        // two-byte zlib header checksum, so the tentative zlib decoder must
+        // reject it and replay the complete first chunk through raw deflate.
+        let mut raw_wire = vec![0x08, 0x1d, 0x00, 0xe2, 0xff];
+        raw_wire.extend_from_slice(plaintext);
+        raw_wire.extend_from_slice(&[0x01, 0x00, 0x00, 0xff, 0xff]);
+        let raw_output = Arc::new(Mutex::new(DecoderOutput::default()));
+        let mut raw = StreamingDeflateDecoder::new(Box::new(OutputWriter(raw_output.clone())));
+        raw.write_all(&raw_wire).unwrap();
+        raw.flush().unwrap();
+        assert_eq!(raw_output.lock().unwrap().bytes, plaintext);
     }
 
     #[test]

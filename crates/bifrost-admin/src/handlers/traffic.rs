@@ -14,6 +14,7 @@ use crate::traffic_db::{QueryParams, TrafficSummaryCompact};
 
 mod sse_stream;
 use sse_stream::subscribe_sse_stream;
+pub use sse_stream::IncrementalContentDecoder;
 mod batch;
 use batch::batch_traffic;
 mod body;

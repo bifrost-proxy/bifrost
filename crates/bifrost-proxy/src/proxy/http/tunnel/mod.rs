@@ -2831,18 +2831,17 @@ async fn handle_intercepted_request_with_protocol(
             );
             pending.has_rule_hit = has_rules;
             pending.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
-            pending.request_body_ref = if !body_bytes.is_empty() {
+            if !body_bytes.is_empty() {
                 store_request_body(
                     &admin_state,
                     req_id,
                     &body_bytes,
                     req_content_encoding.as_deref(),
                 )
+                .apply_to(&mut pending);
             } else if let Some(ref capture) = req_body_capture {
-                capture.clone_ref()
-            } else {
-                None
-            };
+                pending.request_body_ref = capture.clone_ref();
+            }
             if !req_script_results.is_empty() {
                 pending.req_script_results = Some(req_script_results.clone());
             }
@@ -3275,18 +3274,17 @@ async fn handle_intercepted_request_with_protocol(
                 record.has_rule_hit = has_rules;
                 record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
                 record.error_message = Some(error_msg);
-                record.request_body_ref = if !body_bytes.is_empty() {
+                if !body_bytes.is_empty() {
                     store_request_body(
                         &admin_state,
                         req_id,
                         &body_bytes,
                         req_content_encoding.as_deref(),
                     )
+                    .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    capture.clone_ref().or_else(|| capture.take())
-                } else {
-                    None
-                };
+                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                }
 
                 record.response_body_ref = if state.get_super_performance_mode() {
                     None
@@ -4225,18 +4223,17 @@ async fn handle_intercepted_request_with_protocol(
                     record.req_script_results = Some(req_script_results.clone());
                 }
 
-                record.request_body_ref = if !body_bytes.is_empty() {
+                if !body_bytes.is_empty() {
                     store_request_body(
                         &admin_state,
                         &record_id,
                         &body_bytes,
                         req_content_encoding.as_deref(),
                     )
+                    .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    capture.clone_ref().or_else(|| capture.take())
-                } else {
-                    None
-                };
+                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                }
 
                 if is_sse && !state.get_super_performance_mode() {
                     if let Some(ref body_store) = state.body_store {
@@ -4451,18 +4448,18 @@ async fn handle_intercepted_request_with_protocol(
                         });
                         record.request_headers = Some(final_req_headers.clone());
                         record.original_response_headers = Some(original_res_headers.clone());
-                        record.request_body_ref = if !body_bytes.is_empty() {
+                        if !body_bytes.is_empty() {
                             store_request_body(
                                 &admin_state,
                                 req_id,
                                 &body_bytes,
                                 req_content_encoding.as_deref(),
                             )
+                            .apply_to(&mut record);
                         } else if let Some(ref capture) = req_body_capture {
-                            capture.clone_ref().or_else(|| capture.take())
-                        } else {
-                            None
-                        };
+                            record.request_body_ref =
+                                capture.clone_ref().or_else(|| capture.take());
+                        }
                         if !state.get_super_performance_mode() {
                             if let Some(ref body_store) = state.body_store {
                                 let store = body_store.read();
@@ -4731,18 +4728,17 @@ async fn handle_intercepted_request_with_protocol(
             record.req_script_results = Some(req_script_results.clone());
         }
 
-        record.request_body_ref = if !body_bytes.is_empty() {
+        if !body_bytes.is_empty() {
             store_request_body(
                 &admin_state,
                 req_id,
                 &body_bytes,
                 req_content_encoding.as_deref(),
             )
+            .apply_to(&mut record);
         } else if let Some(ref capture) = req_body_capture {
-            capture.clone_ref().or_else(|| capture.take())
-        } else {
-            None
-        };
+            record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+        }
 
         if !state.get_super_performance_mode() {
             if let Some(ref body_store) = state.body_store {
@@ -6434,18 +6430,17 @@ fn record_direct_status_traffic(
     }
     record.request_size = request_body.len();
     record.upload_bytes = request_body.len();
-    record.request_body_ref = if !request_body.is_empty() {
+    if !request_body.is_empty() {
         store_request_body(
             &Some(Arc::clone(state)),
             req_id,
             request_body,
             request_content_encoding,
         )
+        .apply_to(&mut record);
     } else if let Some(capture) = req_body_capture {
-        capture.clone_ref().or_else(|| capture.take())
-    } else {
-        None
-    };
+        record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+    }
     record.original_response_headers = Some(mock_res_headers);
     record.has_rule_hit = has_rules;
     record.matched_rules = crate::utils::build_matched_rules(resolved_rules);

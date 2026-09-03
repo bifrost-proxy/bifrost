@@ -2,6 +2,7 @@ use super::*;
 
 mod content_encoded_sse;
 use content_encoded_sse::stream_content_encoded_sse_events;
+pub use content_encoded_sse::IncrementalContentDecoder;
 
 pub(super) async fn subscribe_sse_stream(
     state: SharedAdminState,

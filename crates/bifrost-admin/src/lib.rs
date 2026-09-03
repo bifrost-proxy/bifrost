@@ -90,6 +90,7 @@ pub use frame_store::{start_frame_cleanup_task, FrameStore, FrameStoreStats, Sha
 pub use handlers::im_gateway::{ImGatewayService, SharedImGatewayService};
 pub use handlers::scripts::ScriptManager;
 pub use handlers::sync::handle_sync_login_callback;
+pub use handlers::traffic::IncrementalContentDecoder;
 pub mod asr_streaming {
     pub use crate::handlers::asr_streaming::{
         append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment,

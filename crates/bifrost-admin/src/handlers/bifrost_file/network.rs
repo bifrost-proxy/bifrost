@@ -261,12 +261,16 @@ pub(super) async fn import_network(content: &str, state: &SharedAdminState) -> R
     // package and retries cannot overwrite an existing imported record.
     let mut staged_records = Vec::with_capacity(file.content.len());
     let mut persisted_ids = Vec::new();
+    let mut remaining_decompress_bytes = configured_network_export_decompress_budget(state).await;
     for network_record in &file.content {
         let mut traffic_record = network_record_to_traffic_record(network_record);
         if let Some(body_store) = state.body_store.as_ref() {
-            if let Err(message) =
-                persist_imported_bodies(network_record, &mut traffic_record, body_store)
-            {
+            if let Err(message) = persist_imported_bodies(
+                network_record,
+                &mut traffic_record,
+                body_store,
+                &mut remaining_decompress_bytes,
+            ) {
                 if !persisted_ids.is_empty() {
                     let _ = body_store.write().delete_by_ids(&persisted_ids);
                 }
@@ -317,6 +321,7 @@ fn imported_body_bytes(
     text: Option<&str>,
     body_base64: Option<&str>,
     headers: &Option<Vec<(String, String)>>,
+    remaining_decompress_bytes: &mut usize,
 ) -> Result<ImportedBodyBytes, String> {
     let raw = body_base64
         .map(|encoded| {
@@ -330,11 +335,23 @@ fn imported_body_bytes(
         (Some(text.as_bytes().to_vec()), None)
     } else if let Some(bytes) = raw.as_ref() {
         match content_encoding.as_deref() {
-            Some(encoding) if content_encoding_is_supported(encoding) => {
-                match decompress_with_limit(bytes, encoding, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES) {
-                    Ok(decoded) => (Some(decoded), None),
-                    Err(_) => (Some(bytes.clone()), Some(encoding.to_string())),
+            Some(encoding)
+                if content_encoding_is_supported(encoding) && *remaining_decompress_bytes > 0 =>
+            {
+                match decompress_with_limit_metered(bytes, encoding, *remaining_decompress_bytes) {
+                    Ok((decoded, consumed)) => {
+                        *remaining_decompress_bytes =
+                            remaining_decompress_bytes.saturating_sub(consumed);
+                        (Some(decoded), None)
+                    }
+                    Err(_) => {
+                        *remaining_decompress_bytes = 0;
+                        (Some(bytes.clone()), Some(encoding.to_string()))
+                    }
                 }
+            }
+            Some(encoding) if content_encoding_is_supported(encoding) => {
+                (Some(bytes.clone()), Some(encoding.to_string()))
             }
             _ => (Some(bytes.clone()), None),
         }
@@ -378,17 +395,20 @@ pub(super) fn persist_imported_bodies(
     network_record: &NetworkRecord,
     traffic_record: &mut TrafficRecord,
     body_store: &crate::SharedBodyStore,
+    remaining_decompress_bytes: &mut usize,
 ) -> Result<(), String> {
     let request = imported_body_bytes(
         network_record.request_body.as_deref(),
         network_record.request_body_base64.as_deref(),
         &network_record.request_headers,
+        remaining_decompress_bytes,
     )
     .map_err(|error| format!("Record {} request body: {error}", network_record.id))?;
     let response = imported_body_bytes(
         network_record.response_body.as_deref(),
         network_record.response_body_base64.as_deref(),
         effective_response_headers(network_record),
+        remaining_decompress_bytes,
     )
     .map_err(|error| format!("Record {} response body: {error}", network_record.id))?;
     let store = body_store.read();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::network_body::decompress_with_limit;
 use async_trait::async_trait;
 use base64::Engine;
 use flate2::{write::GzEncoder, Compression};
@@ -340,8 +341,14 @@ fn imported_network_bodies_persist_plaintext_and_raw_bytes() {
     .unwrap();
     let mut traffic = network_record_to_traffic_record(&record);
 
-    persist_imported_bodies(&record, &mut traffic, &body_store)
-        .expect("persist valid imported bodies");
+    let mut remaining_decompress_bytes = DEFAULT_MAX_DECOMPRESSED_BODY_BYTES;
+    persist_imported_bodies(
+        &record,
+        &mut traffic,
+        &body_store,
+        &mut remaining_decompress_bytes,
+    )
+    .expect("persist valid imported bodies");
 
     let store = body_store.read();
 
@@ -406,8 +413,14 @@ fn imported_oversized_compressed_body_preserves_its_encoding_marker() {
     .unwrap();
     let mut traffic = network_record_to_traffic_record(&record);
 
-    persist_imported_bodies(&record, &mut traffic, &body_store)
-        .expect("persist oversized compressed body as wire bytes");
+    let mut remaining_decompress_bytes = DEFAULT_MAX_DECOMPRESSED_BODY_BYTES;
+    persist_imported_bodies(
+        &record,
+        &mut traffic,
+        &body_store,
+        &mut remaining_decompress_bytes,
+    )
+    .expect("persist oversized compressed body as wire bytes");
 
     let store = body_store.read();
     let response_ref = traffic.response_body_ref.as_ref().unwrap();

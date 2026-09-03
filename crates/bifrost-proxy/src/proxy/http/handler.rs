@@ -1171,12 +1171,13 @@ fn record_direct_status_traffic(
     record.original_request_headers = request_snapshot.original_headers.clone();
     record.request_size = request_snapshot.body.len();
     record.upload_bytes = request_snapshot.body.len();
-    record.request_body_ref = store_request_body(
+    store_request_body(
         &Some(Arc::clone(state)),
         ctx.id_str(),
         &request_snapshot.body,
         request_snapshot.content_encoding.as_deref(),
-    );
+    )
+    .apply_to(&mut record);
     record.original_response_headers = Some(mock_res_headers);
     record.has_rule_hit = has_rules;
     record.matched_rules = crate::utils::build_matched_rules(resolved_rules);
@@ -2621,18 +2622,17 @@ pub async fn handle_http_request(
             apply_request_context(&mut pending, ctx);
             pending.has_rule_hit = has_rules;
             pending.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
-            pending.request_body_ref = if !final_body.is_empty() {
+            if !final_body.is_empty() {
                 store_request_body(
                     &admin_state,
                     ctx.id_str(),
                     &final_body,
                     output_req_content_encoding.as_deref(),
                 )
+                .apply_to(&mut pending);
             } else if let Some(ref capture) = req_body_capture {
-                capture.clone_ref()
-            } else {
-                None
-            };
+                pending.request_body_ref = capture.clone_ref();
+            }
             state.record_traffic(pending);
         }
     }
@@ -2774,17 +2774,18 @@ pub async fn handle_http_request(
                 record.has_rule_hit = has_rules;
                 record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
                 record.error_message = Some(error_msg.clone());
-                record.request_body_ref = if !final_body.is_empty() {
+                if !final_body.is_empty() {
                     store_request_body(
                         &admin_state,
                         ctx.id_str(),
                         &final_body,
                         req_content_encoding.as_deref(),
                     )
+                    .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    capture.clone_ref().or_else(|| capture.take())
+                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
                 } else if state.get_super_performance_mode() {
-                    None
+                    record.request_body_ref = None;
                 } else if let Some(ref body_store) = state.body_store {
                     let store = body_store.read();
                     let decompressed_req_body = decompress_body_with_limit(
@@ -2792,7 +2793,8 @@ pub async fn handle_http_request(
                         req_content_encoding.as_deref(),
                         max_decompress_output_bytes,
                     );
-                    store.store(ctx.id_str(), "req", decompressed_req_body.as_ref())
+                    record.request_body_ref =
+                        store.store(ctx.id_str(), "req", decompressed_req_body.as_ref());
                 } else {
                     store_request_body(
                         &admin_state,
@@ -2800,7 +2802,8 @@ pub async fn handle_http_request(
                         &final_body,
                         req_content_encoding.as_deref(),
                     )
-                };
+                    .apply_to(&mut record);
+                }
 
                 record.response_body_ref = if state.get_super_performance_mode() {
                     None
@@ -3741,18 +3744,17 @@ pub async fn handle_http_request(
                     }
                 }
 
-                record.request_body_ref = if !body_bytes.is_empty() {
+                if !body_bytes.is_empty() {
                     store_request_body(
                         &admin_state,
                         record_id,
                         &body_bytes,
                         req_content_encoding.as_deref(),
                     )
+                    .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    capture.clone_ref().or_else(|| capture.take())
-                } else {
-                    None
-                };
+                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                }
 
                 if !req_script_results.is_empty() {
                     record.req_script_results = Some(req_script_results.clone());
@@ -9549,7 +9551,10 @@ mod coverage_90_wave {
                 "tcp connect error",
             ),
         ] {
-            let state = Arc::new(AdminState::new(19101));
+            let harness = bifrost_admin::test_support::TestAdminState::builder()
+                .port(19101)
+                .build();
+            let state = harness.state();
             state
                 .breakpoint_manager
                 .update_settings(BreakpointSettings {

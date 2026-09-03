@@ -1,11 +1,53 @@
 use std::sync::{Arc, OnceLock};
 
-use bifrost_admin::{AdminState, BodyRef, SharedBodyStore};
+use bifrost_admin::{AdminState, BodyRef, BodyStreamWriter, SharedBodyStore, TrafficRecord};
 use tokio::sync::Semaphore;
 
 use crate::transform::decompress::try_decompress_body_with_limit;
 
 const DEFAULT_BODY_STORE_BACKGROUND_CONCURRENCY: usize = 1;
+
+#[derive(Default)]
+pub struct StoredRequestBodies {
+    primary: Option<BodyRef>,
+    raw: Option<BodyRef>,
+}
+
+impl StoredRequestBodies {
+    pub fn apply_to(self, record: &mut TrafficRecord) {
+        record.request_body_ref = self.primary;
+        record.raw_request_body_ref = self.raw;
+    }
+
+    pub fn into_primary(self) -> Option<BodyRef> {
+        self.primary
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_none() && self.raw.is_none()
+    }
+}
+
+pub(super) fn finish_body_stream_with_encoding(
+    body_store: Option<&SharedBodyStore>,
+    writer: BodyStreamWriter,
+    content_encoding: Option<&str>,
+    record_id: &str,
+    body_kind: &str,
+) -> Option<BodyRef> {
+    let body_ref = writer.finish();
+    let cleanup_ref = body_ref.clone();
+    match body_ref.with_content_encoding(content_encoding) {
+        Ok(body_ref) => Some(body_ref),
+        Err(error) => {
+            if let Some(body_store) = body_store {
+                body_store.read().remove(&cleanup_ref);
+            }
+            tracing::warn!(%error, %record_id, %body_kind, "failed to persist streamed body content encoding");
+            None
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct StoredResponseBodies {
@@ -72,6 +114,44 @@ fn store_buffered_response_bodies(
         }
     });
     StoredResponseBodies { primary, raw: None }
+}
+
+pub(super) fn store_buffered_request_bodies(
+    store: &bifrost_admin::BodyStore,
+    record_id: &str,
+    body: &[u8],
+    content_encoding: Option<&str>,
+    max_decompress_output_bytes: usize,
+) -> StoredRequestBodies {
+    let should_decode = stores_decoded_http_body(content_encoding);
+    let decoded = if max_decompress_output_bytes > 0 {
+        content_encoding.and_then(|encoding| {
+            try_decompress_body_with_limit(body, encoding, max_decompress_output_bytes).ok()
+        })
+    } else {
+        None
+    };
+    if should_decode {
+        if let Some(decoded) = decoded {
+            return StoredRequestBodies {
+                primary: store.store(record_id, "req", &decoded),
+                raw: store.store(record_id, "req_raw", body),
+            };
+        }
+    }
+
+    let primary = store.store(record_id, "req", body).and_then(|body_ref| {
+        let cleanup_ref = body_ref.clone();
+        match body_ref.with_content_encoding(content_encoding) {
+            Ok(body_ref) => Some(body_ref),
+            Err(error) => {
+                store.remove(&cleanup_ref);
+                tracing::warn!(%error, %record_id, "failed to persist buffered request content encoding");
+                None
+            }
+        }
+    });
+    StoredRequestBodies { primary, raw: None }
 }
 
 fn schedule_decompressed_response_body_store(
@@ -243,6 +323,40 @@ mod tests {
     }
 
     #[test]
+    fn buffered_compressed_request_keeps_plaintext_and_wire_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-tee-buffered-request-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let store = BodyStore::new(
+            dir.clone(),
+            1024 * 1024,
+            1,
+            64 * 1024,
+            Duration::from_secs(1),
+        );
+        let plaintext = b"buffered request plaintext";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let wire = encoder.finish().unwrap();
+
+        let stored = store_buffered_request_bodies(&store, "request", &wire, Some("gzip"), 1024);
+
+        assert_eq!(
+            store
+                .load_bytes(stored.primary.as_ref().unwrap())
+                .as_deref(),
+            Some(plaintext.as_slice())
+        );
+        assert_eq!(
+            store.load_bytes(stored.raw.as_ref().unwrap()).as_deref(),
+            Some(wire.as_slice())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn buffered_response_falls_back_to_encoded_wire_when_decode_is_unavailable() {
         let dir = std::env::temp_dir().join(format!(
             "bifrost-tee-buffered-fallback-{}",
@@ -282,6 +396,16 @@ mod tests {
         );
         assert!(invalid.primary.is_none());
         assert!(!dir.join("invalid-metadata_res").exists());
+
+        let invalid_request = store_buffered_request_bodies(
+            &store,
+            "invalid-request-metadata",
+            b"wire body",
+            Some(&invalid_encoding),
+            0,
+        );
+        assert!(invalid_request.primary.is_none());
+        assert!(!dir.join("invalid-request-metadata_req").exists());
 
         let state = Arc::new(
             AdminState::new(0)

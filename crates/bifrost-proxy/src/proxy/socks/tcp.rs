@@ -1939,8 +1939,8 @@ impl SocksHandler {
             if let Some(body_offset) = body_start {
                 if body_offset < request_data.len() {
                     let body_data = &request_data[body_offset..];
-                    record.request_body_ref =
-                        store_request_body(&admin_state, &req_id, body_data, None);
+                    store_request_body(&admin_state, &req_id, body_data, None)
+                        .apply_to(&mut record);
                 }
             }
 

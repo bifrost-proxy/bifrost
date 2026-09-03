@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bifrost_admin::{
-    AdminState, BodyRef, BodyStreamWriter, FrameDirection, SharedBodyStore, TrafficType,
+    AdminState, BodyRef, BodyStreamWriter, FrameDirection, IncrementalContentDecoder,
+    SharedBodyStore, TrafficType,
 };
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
@@ -13,13 +14,17 @@ use memchr::memchr;
 use tokio::time::Sleep;
 
 use crate::server::BoxBody;
-use crate::transform::decompress::decompress_body_with_limit;
-
 mod buffered_response_store;
 mod openai_like;
+mod socket_summary;
 
-use buffered_response_store::{store_response_body_or_schedule, StoredResponseBodies};
+pub use buffered_response_store::StoredRequestBodies;
+use buffered_response_store::{
+    finish_body_stream_with_encoding, store_buffered_request_bodies,
+    store_response_body_or_schedule, StoredResponseBodies,
+};
 use openai_like::derive_openai_like_sse_body_ref;
+use socket_summary::persist_socket_summary;
 
 // Keep hot-path metrics updates coarse-grained so high-throughput relays do
 // not burn CPU on bookkeeping.
@@ -55,31 +60,6 @@ fn start_body_stream(
     kind: &str,
 ) -> std::io::Result<BodyStreamWriter> {
     body_store.read().start_stream(record_id, kind)
-}
-
-fn persist_socket_summary(state: &AdminState, record_id: &str, total_bytes: usize) {
-    if state.get_super_performance_mode() {
-        return;
-    }
-    let status = state.sse_hub.get_socket_status(record_id).map(|mut s| {
-        s.is_open = false;
-        s
-    });
-    let frame_count = status.as_ref().map(|s| s.frame_count).unwrap_or(0);
-    let last_frame_id = frame_count as u64;
-    let mut response_size = status.as_ref().map(|s| s.receive_bytes).unwrap_or(0) as usize;
-    if response_size == 0 {
-        response_size = total_bytes;
-    }
-    state.update_traffic_by_id(record_id, move |record| {
-        record.response_size = response_size;
-        record.download_bytes = response_size;
-        record.frame_count = frame_count;
-        record.last_frame_id = last_frame_id;
-        if let Some(ref s) = status {
-            record.socket_status = Some(s.clone());
-        }
-    });
 }
 
 struct TeeBodyDropGuard {
@@ -140,18 +120,18 @@ impl TeeBodyDropGuard {
                 return;
             }
             let stored_response_bodies = if let Some(writer) = self.file_writer.take() {
-                match writer
-                    .finish()
-                    .with_content_encoding(self.content_encoding.as_deref())
-                {
-                    Ok(body_ref) => StoredResponseBodies {
+                match finish_body_stream_with_encoding(
+                    state.body_store.as_ref(),
+                    writer,
+                    self.content_encoding.as_deref(),
+                    &self.record_id,
+                    "response",
+                ) {
+                    Some(body_ref) => StoredResponseBodies {
                         primary: Some(body_ref),
                         raw: None,
                     },
-                    Err(error) => {
-                        tracing::warn!(%error, record_id = %self.record_id, "failed to persist response content encoding");
-                        StoredResponseBodies::default()
-                    }
+                    None => StoredResponseBodies::default(),
                 }
             } else if !self.buffer.is_empty() {
                 if let Some(ref body_store) = state.body_store {
@@ -511,13 +491,16 @@ struct RequestTeeBodyDropGuard {
 impl Drop for RequestTeeBodyDropGuard {
     fn drop(&mut self) {
         if let Some(writer) = self.file_writer.take() {
-            let body_ref = writer
-                .finish()
-                .with_content_encoding(self.content_encoding.as_deref());
-            if let Err(ref error) = body_ref {
-                tracing::warn!(%error, record_id = %self.record_id, "failed to persist request content encoding");
-            }
-            if let (Ok(mut slot), Ok(body_ref)) = (self.capture.body_ref.lock(), body_ref) {
+            let body_ref = finish_body_stream_with_encoding(
+                self.admin_state
+                    .as_ref()
+                    .and_then(|state| state.body_store.as_ref()),
+                writer,
+                self.content_encoding.as_deref(),
+                &self.record_id,
+                "request",
+            );
+            if let (Ok(mut slot), Some(body_ref)) = (self.capture.body_ref.lock(), body_ref) {
                 *slot = Some(body_ref);
             }
             if let Some(ref state) = self.admin_state {
@@ -637,16 +620,13 @@ impl SseTeeBodyDropGuard {
     fn store_body_and_update_record(&mut self) {
         if let Some(ref state) = self.admin_state {
             let response_body_ref = self.file_writer.take().and_then(|writer| {
-                match writer
-                    .finish()
-                    .with_content_encoding(self.content_encoding.as_deref())
-                {
-                    Ok(body_ref) => Some(body_ref),
-                    Err(error) => {
-                        tracing::warn!(%error, record_id = %self.record_id, "failed to persist SSE content encoding");
-                        None
-                    }
-                }
+                finish_body_stream_with_encoding(
+                    state.body_store.as_ref(),
+                    writer,
+                    self.content_encoding.as_deref(),
+                    &self.record_id,
+                    "SSE response",
+                )
             });
             let derived_response_body_ref =
                 derive_openai_like_sse_body_ref(state, &self.record_id, &response_body_ref);
@@ -689,8 +669,15 @@ pub struct SseTeeBody<B = Incoming> {
     event_size: usize,
     max_buffer_size: usize,
     overflowed: bool,
+    event_decoder: SseEventBodyDecoder,
     flush_interval: Option<std::time::Duration>,
     flush_sleep: Option<Pin<Box<Sleep>>>,
+}
+
+enum SseEventBodyDecoder {
+    Plaintext,
+    Encoded(IncrementalContentDecoder),
+    Unsupported,
 }
 
 impl<B> SseTeeBody<B>
@@ -715,6 +702,18 @@ where
         if let Some(ref state) = admin_state {
             state.sse_hub.register(&record_id);
         }
+        let max_decompress_output_bytes = admin_state
+            .as_ref()
+            .and_then(|state| state.config_manager.as_ref())
+            .and_then(|manager| manager.try_config())
+            .map(|config| config.sandbox.limits.max_decompress_output_bytes)
+            .unwrap_or(10 * 1024 * 1024);
+        let event_decoder = match content_encoding.as_deref() {
+            None => SseEventBodyDecoder::Plaintext,
+            Some(encoding) => IncrementalContentDecoder::new(encoding, max_decompress_output_bytes)
+                .map(SseEventBodyDecoder::Encoded)
+                .unwrap_or(SseEventBodyDecoder::Unsupported),
+        };
 
         Self {
             inner,
@@ -731,6 +730,7 @@ where
             event_size: 0,
             max_buffer_size,
             overflowed: false,
+            event_decoder,
             flush_interval,
             flush_sleep,
         }
@@ -790,6 +790,33 @@ where
 
             i = pos + 1;
         }
+    }
+
+    fn process_sse_wire_chunk(&mut self, data: &[u8]) {
+        if matches!(self.event_decoder, SseEventBodyDecoder::Plaintext) {
+            self.process_sse_chunk(data);
+            return;
+        }
+        let decoded = match &mut self.event_decoder {
+            SseEventBodyDecoder::Encoded(decoder) => decoder.push(data),
+            SseEventBodyDecoder::Plaintext => unreachable!(),
+            SseEventBodyDecoder::Unsupported => return,
+        };
+        match decoded {
+            Ok(decoded) => self.process_sse_chunk(&decoded),
+            Err(error) => {
+                tracing::debug!(%error, record_id = %self.guard.record_id, "failed to decode SSE body for event accounting");
+                self.event_decoder = SseEventBodyDecoder::Unsupported;
+            }
+        }
+    }
+
+    fn finish_sse_event_decoder(&mut self) {
+        let trailing = match &self.event_decoder {
+            SseEventBodyDecoder::Encoded(decoder) => decoder.take_output(),
+            SseEventBodyDecoder::Plaintext | SseEventBodyDecoder::Unsupported => Vec::new(),
+        };
+        self.process_sse_chunk(&trailing);
     }
 }
 
@@ -858,15 +885,17 @@ where
                         }
                     }
 
-                    self.process_sse_chunk(data);
+                    self.process_sse_wire_chunk(data);
                 }
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(e))) => {
+                self.finish_sse_event_decoder();
                 self.guard.store_body_and_update_record();
                 Poll::Ready(Some(Err(e)))
             }
             Poll::Ready(None) => {
+                self.finish_sse_event_decoder();
                 self.guard.store_body_and_update_record();
                 Poll::Ready(None)
             }
@@ -912,14 +941,14 @@ pub fn store_request_body(
     record_id: &str,
     body_data: &[u8],
     content_encoding: Option<&str>,
-) -> Option<BodyRef> {
+) -> StoredRequestBodies {
     if body_data.is_empty() {
-        return None;
+        return StoredRequestBodies::default();
     }
 
     if let Some(ref state) = admin_state {
         if state.get_super_performance_mode() {
-            return None;
+            return StoredRequestBodies::default();
         }
         if let Some(ref body_store) = state.body_store {
             let max_decompress_output_bytes = state
@@ -928,15 +957,16 @@ pub fn store_request_body(
                 .and_then(|cm| cm.try_config())
                 .map(|cfg| cfg.sandbox.limits.max_decompress_output_bytes)
                 .unwrap_or(10 * 1024 * 1024);
-            let decompressed = decompress_body_with_limit(
+            return store_buffered_request_bodies(
+                &body_store.read(),
+                record_id,
                 body_data,
                 content_encoding,
                 max_decompress_output_bytes,
             );
-            return store_body_sync(body_store, record_id, "req", decompressed.as_ref());
         }
     }
-    None
+    StoredRequestBodies::default()
 }
 
 pub fn store_response_body(
@@ -962,6 +992,7 @@ pub fn store_response_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::time::Duration;
 
     use bifrost_admin::{BodyStore, TrafficDbStore};
@@ -1083,12 +1114,13 @@ mod tests {
                 .with_body_store(body_store)
                 .with_super_performance_mode(true),
         );
+        persist_socket_summary(&state, "super-mode-body", 7);
         let admin_state = Some(state);
 
         let req_ref = store_request_body(&admin_state, "super-mode-body", b"request", None);
         let res_ref = store_response_body(&admin_state, "super-mode-body", b"response");
 
-        assert!(req_ref.is_none());
+        assert!(req_ref.is_empty());
         assert!(res_ref.is_none());
         assert!(!dir.join("super-mode-body_req").exists());
         assert!(!dir.join("super-mode-body_res").exists());
@@ -1212,6 +1244,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn content_encoded_sse_counts_decoded_events() {
+        let (state, dir) = test_state_with_body_store("compressed-sse-counts");
+        let record_id = "compressed-sse-counts";
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            record_id.into(),
+            "GET".into(),
+            "http://example.test/events".into(),
+        ));
+        let writer =
+            start_body_stream(state.body_store.as_ref().unwrap(), record_id, "sse_raw").unwrap();
+        let plaintext = b"data: first\n\ndata: second\n\n";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let wire = Bytes::from(encoder.finish().unwrap());
+
+        let body = create_sse_tee_body(
+            crate::server::full_body(wire.clone()),
+            Some(state.clone()),
+            record_id.into(),
+            Some(TrafficType::Http),
+            Some(writer),
+            Some("gzip".to_string()),
+            1024,
+        );
+        assert_eq!(body.boxed().collect().await.unwrap().to_bytes(), wire);
+
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .and_then(|store| store.get_by_id(record_id))
+            .expect("traffic record");
+        assert_eq!(record.frame_count, 2);
+        assert_eq!(record.last_frame_id, 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn sse_chunk_parser_covers_split_boundaries_overflow_and_no_state() {
         let body = crate::server::full_body(Bytes::new());
         let mut tee = SseTeeBody::new(body, None, "none".into(), None, None, None, 3);
@@ -1295,11 +1364,15 @@ mod tests {
             .expect("traffic record");
         assert!(record.request_body_ref.is_some());
         assert!(record.response_body_ref.is_some());
-        assert!(store_request_body(&Some(state.clone()), "direct", b"request", None).is_some());
+        assert!(
+            store_request_body(&Some(state.clone()), "direct", b"request", None)
+                .into_primary()
+                .is_some()
+        );
         assert!(store_response_body(&Some(state), "direct", b"response").is_some());
-        assert!(store_request_body(&None, "none", b"request", None).is_none());
+        assert!(store_request_body(&None, "none", b"request", None).is_empty());
         assert!(store_response_body(&None, "none", b"response").is_none());
-        assert!(store_request_body(&None, "empty", b"", None).is_none());
+        assert!(store_request_body(&None, "empty", b"", None).is_empty());
         assert!(store_response_body(&None, "empty", b"").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1417,6 +1490,9 @@ mod tests {
             .unwrap();
         assert!(record.request_body_ref.is_none());
         assert!(record.response_body_ref.is_none());
+        assert!(!std::fs::read_dir(&dir).unwrap().flatten().any(|entry| {
+            entry.path().is_file() && entry.file_name().to_string_lossy().starts_with(record_id)
+        }));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
