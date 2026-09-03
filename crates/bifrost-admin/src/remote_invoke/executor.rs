@@ -3328,6 +3328,7 @@ impl RemoteInvokeExecutor {
                     "total_matched": response.total_matched,
                     "next_cursor": response.next_cursor,
                     "has_more": response.has_more,
+                    "partial_reason": response.partial_reason,
                     "search_id": response.search_id,
                 });
                 emit_search_chunk(

@@ -33,6 +33,7 @@ struct BodyReadCache {
     bytes: HashMap<String, Option<Vec<u8>>>,
     json: HashMap<String, BodyCacheEntry>,
     remaining_decompressed_bytes: usize,
+    decompression_budget_exhausted: bool,
 }
 
 impl BodyReadCache {
@@ -41,6 +42,7 @@ impl BodyReadCache {
             bytes: HashMap::new(),
             json: HashMap::new(),
             remaining_decompressed_bytes: max_decompressed_bytes,
+            decompression_budget_exhausted: false,
         }
     }
 
@@ -202,6 +204,7 @@ impl SearchEngine {
         let mut iterations = 0;
         let mut db_has_more = true;
         let mut timed_out = false;
+        let mut decompression_budget_exhausted = false;
 
         let mut body_cache = BodyReadCache::new(self.max_search_decompressed_bytes);
         let include = &request.include;
@@ -219,7 +222,10 @@ impl SearchEngine {
         let mut newest_ts_ms: Option<i64> = None;
         let mut scanned_count: usize = 0;
 
-        while results.len() < max_results && total_searched < max_total_searched && db_has_more {
+        'search: while results.len() < max_results
+            && total_searched < max_total_searched
+            && db_has_more
+        {
             if started_at.elapsed() >= SEARCH_TIMEOUT {
                 warn!(
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
@@ -271,6 +277,9 @@ impl SearchEngine {
             };
 
             for compact in &query_result.records {
+                let previous_cursor = current_cursor;
+                let previous_oldest_ts_ms = oldest_ts_ms;
+                let previous_newest_ts_ms = newest_ts_ms;
                 total_searched += 1;
                 scanned_count += 1;
                 current_cursor = Some(compact.seq);
@@ -294,14 +303,23 @@ impl SearchEngine {
 
                 let fields = fields_map.get(&compact.id);
 
-                if !request.filters.conditions.is_empty()
-                    && !self.matches_conditions_compact_with_cache(
+                let conditions_match = request.filters.conditions.is_empty()
+                    || self.matches_conditions_compact_with_cache(
                         compact,
                         fields,
                         &request.filters.conditions,
                         &mut body_cache,
-                    )
-                {
+                    );
+                if body_cache.decompression_budget_exhausted {
+                    decompression_budget_exhausted = true;
+                    total_searched = total_searched.saturating_sub(1);
+                    scanned_count = scanned_count.saturating_sub(1);
+                    current_cursor = previous_cursor;
+                    oldest_ts_ms = previous_oldest_ts_ms;
+                    newest_ts_ms = previous_newest_ts_ms;
+                    break 'search;
+                }
+                if !conditions_match {
                     body_cache.remove_record(&compact.id);
                     if total_searched >= max_total_searched {
                         break;
@@ -309,9 +327,18 @@ impl SearchEngine {
                     continue;
                 }
 
-                if let Some(mut result) =
-                    self.search_compact(scope, &keyword_lower, compact, fields, &mut body_cache)
-                {
+                let result =
+                    self.search_compact(scope, &keyword_lower, compact, fields, &mut body_cache);
+                if body_cache.decompression_budget_exhausted {
+                    decompression_budget_exhausted = true;
+                    total_searched = total_searched.saturating_sub(1);
+                    scanned_count = scanned_count.saturating_sub(1);
+                    current_cursor = previous_cursor;
+                    oldest_ts_ms = previous_oldest_ts_ms;
+                    newest_ts_ms = previous_newest_ts_ms;
+                    break 'search;
+                }
+                if let Some(mut result) = result {
                     if need_hydrate {
                         self.hydrate_result_item(
                             &mut result,
@@ -320,6 +347,15 @@ impl SearchEngine {
                             include,
                             &mut body_cache,
                         );
+                        if body_cache.decompression_budget_exhausted {
+                            decompression_budget_exhausted = true;
+                            total_searched = total_searched.saturating_sub(1);
+                            scanned_count = scanned_count.saturating_sub(1);
+                            current_cursor = previous_cursor;
+                            oldest_ts_ms = previous_oldest_ts_ms;
+                            newest_ts_ms = previous_newest_ts_ms;
+                            break 'search;
+                        }
                     }
                     results.push(result);
                     if let Some(last) = results.last() {
@@ -348,7 +384,9 @@ impl SearchEngine {
             });
         }
 
-        let has_more = timed_out || (db_has_more && total_searched < max_total_searched);
+        let has_more = timed_out
+            || decompression_budget_exhausted
+            || (db_has_more && total_searched < max_total_searched);
         let total_matched = results.len();
 
         debug!(
@@ -367,6 +405,8 @@ impl SearchEngine {
             total_matched,
             next_cursor: current_cursor,
             has_more,
+            partial_reason: decompression_budget_exhausted
+                .then(|| "decompression_budget_exhausted".to_string()),
             search_id,
             searched_range: SearchedRange {
                 oldest_ts_ms,
@@ -761,6 +801,7 @@ impl SearchEngine {
         &self,
         body_ref: &BodyRef,
         remaining_decompressed_bytes: &mut usize,
+        decompression_budget_exhausted: &mut bool,
     ) -> Option<Vec<u8>> {
         let bytes = match body_ref {
             BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
@@ -776,8 +817,10 @@ impl SearchEngine {
         let output_limit = self
             .max_decompress_output_bytes
             .min(*remaining_decompressed_bytes);
+        let globally_limited = *remaining_decompressed_bytes < self.max_decompress_output_bytes;
         if output_limit == 0 {
-            return Some(bytes);
+            *decompression_budget_exhausted = true;
+            return None;
         }
         match decompress_with_limit_metered(&bytes, &content_encoding, output_limit) {
             Ok((decoded, consumed_bytes)) => {
@@ -792,7 +835,12 @@ impl SearchEngine {
                 // the request-wide budget through the raw fallback path.
                 *remaining_decompressed_bytes =
                     remaining_decompressed_bytes.saturating_sub(output_limit);
-                Some(bytes)
+                if globally_limited {
+                    *decompression_budget_exhausted = true;
+                    None
+                } else {
+                    Some(bytes)
+                }
             }
         }
     }
@@ -804,8 +852,11 @@ impl SearchEngine {
         body_cache: &'a mut BodyReadCache,
     ) -> Option<&'a [u8]> {
         if !body_cache.bytes.contains_key(cache_key) {
-            let bytes = self
-                .load_decoded_body_bytes(body_ref, &mut body_cache.remaining_decompressed_bytes);
+            let bytes = self.load_decoded_body_bytes(
+                body_ref,
+                &mut body_cache.remaining_decompressed_bytes,
+                &mut body_cache.decompression_budget_exhausted,
+            );
             body_cache.bytes.insert(cache_key.to_string(), bytes);
         }
         body_cache.bytes.get(cache_key)?.as_deref()

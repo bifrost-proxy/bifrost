@@ -23,10 +23,9 @@ pub(super) fn header_value(headers: &Option<Vec<(String, String)>>, name: &str) 
 }
 
 pub(super) fn body_size(text: Option<&str>, body_base64: Option<&str>) -> usize {
-    text.map(str::len)
-        .or_else(|| {
-            body_base64.and_then(|encoded| STANDARD.decode(encoded).ok().map(|bytes| bytes.len()))
-        })
+    body_base64
+        .and_then(|encoded| STANDARD.decode(encoded).ok().map(|bytes| bytes.len()))
+        .or_else(|| text.map(str::len))
         .unwrap_or(0)
 }
 
@@ -522,7 +521,8 @@ mod tests {
     #[test]
     fn base64_body_size_is_lossless_and_invalid_base64_is_empty() {
         assert_eq!(body_size(None, Some("AAECAw==")), 4);
-        assert_eq!(body_size(Some("plain"), Some("AAECAw==")), 5);
+        assert_eq!(body_size(Some("decoded plaintext"), Some("AAECAw==")), 4);
+        assert_eq!(body_size(Some("plain"), Some("not base64")), 5);
         assert_eq!(body_size(None, Some("not base64")), 0);
     }
 
@@ -566,6 +566,21 @@ mod tests {
 
         assert!(content_encoding_is_supported("gzip, br, identity"));
         assert!(!content_encoding_is_supported("gzip, x-company-codec"));
+
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(plaintext).unwrap();
+        let gzip = gzip.finish().unwrap();
+        assert_eq!(
+            decode_content_encoded_body(gzip.clone(), Some("gzip")),
+            plaintext
+        );
+
+        let mut outer = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        outer.write_all(&gzip).unwrap();
+        assert!(
+            decompress_with_limit(&outer.finish().unwrap(), "gzip, deflate", plaintext.len())
+                .is_err()
+        );
 
         let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         zlib.write_all(plaintext).unwrap();

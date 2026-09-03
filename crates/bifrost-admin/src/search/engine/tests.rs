@@ -390,13 +390,17 @@ fn encoded_body_cache_honors_per_body_and_request_budgets() {
         plaintext,
         "the second phase must reuse the first decoded value"
     );
-    assert_eq!(
-        engine
-            .load_body_bytes_cached("res:second", &second, &mut cache)
-            .unwrap(),
-        compressed,
-        "a second body cannot exceed the request-wide decode budget"
-    );
+    assert!(engine
+        .load_body_bytes_cached("res:second", &second, &mut cache)
+        .is_none());
+    assert!(cache.decompression_budget_exhausted);
+
+    let mut mid_body_cache = BodyReadCache::new(plaintext.len() - 1);
+    assert!(engine
+        .load_body_bytes_cached("res:mid-body", &first, &mut mid_body_cache)
+        .is_none());
+    assert!(mid_body_cache.decompression_budget_exhausted);
+    assert_eq!(mid_body_cache.remaining_decompressed_bytes, 0);
 
     let limited_engine = engine.with_decompression_limit(plaintext.len() - 1);
     let mut limited_cache = BodyReadCache::new(plaintext.len() * 2);
@@ -413,6 +417,138 @@ fn encoded_body_cache_honors_per_body_and_request_budgets() {
             .unwrap(),
         b"custom-wire-needle",
         "unknown codings must remain available to custom decoders"
+    );
+}
+
+#[test]
+fn search_reports_partial_results_when_decompression_budget_is_exhausted() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = Arc::new(
+        TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+            .expect("traffic db"),
+    );
+    let body_store = Arc::new(RwLock::new(BodyStore::new(
+        dir.path().join("body_cache"),
+        0,
+        7,
+        64 * 1024,
+        Duration::from_millis(100),
+    )));
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(b"budget-exhaustion-needle").unwrap();
+    let compressed = encoder.finish().unwrap();
+    let body_ref = body_store
+        .read()
+        .store("budget-exhausted", "res", &compressed)
+        .unwrap()
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
+    let mut record = TrafficRecord::new(
+        "budget-exhausted".to_string(),
+        "GET".to_string(),
+        "https://example.com/budget".to_string(),
+    );
+    record.response_body_ref = Some(body_ref);
+    db.record(record);
+
+    let response = SearchEngine::new(db, Some(body_store))
+        .with_decompression_budget(1024, 0)
+        .search(&SearchRequest {
+            keyword: "budget-exhaustion-needle".to_string(),
+            scope: SearchScope {
+                all: false,
+                response_body: true,
+                ..Default::default()
+            },
+            limit: Some(20),
+            ..Default::default()
+        });
+
+    assert!(response.results.is_empty());
+    assert_eq!(response.total_searched, 0);
+    assert!(response.has_more);
+    assert_eq!(
+        response.partial_reason.as_deref(),
+        Some("decompression_budget_exhausted")
+    );
+}
+
+#[test]
+fn search_budget_exhaustion_rolls_back_filter_and_hydration_records() {
+    let dir = TempDir::new().expect("temp dir");
+    let db = Arc::new(
+        TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+            .expect("traffic db"),
+    );
+    let body_store = Arc::new(RwLock::new(BodyStore::new(
+        dir.path().join("body_cache"),
+        0,
+        7,
+        64 * 1024,
+        Duration::from_millis(100),
+    )));
+    let plaintext = br#"{"marker":"filter-budget-needle"}"#;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(plaintext).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let body_ref = body_store
+        .read()
+        .store("budget-rollback", "res", &compressed)
+        .unwrap()
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
+    let mut record = TrafficRecord::new(
+        "budget-rollback".to_string(),
+        "GET".to_string(),
+        "https://example.com/hydration-budget-needle".to_string(),
+    );
+    record.response_body_ref = Some(body_ref);
+    db.record(record);
+    let engine = SearchEngine::new(db, Some(body_store)).with_decompression_budget(1024, 0);
+
+    let filter_response = engine.search(&SearchRequest {
+        keyword: "hydration-budget-needle".to_string(),
+        scope: SearchScope {
+            all: false,
+            url: true,
+            ..Default::default()
+        },
+        filters: SearchFilters {
+            conditions: vec![FilterCondition {
+                field: "res.body.$.marker".to_string(),
+                operator: "equals".to_string(),
+                value: "filter-budget-needle".to_string(),
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    assert_eq!(filter_response.total_searched, 0);
+    assert!(filter_response.has_more);
+    assert_eq!(
+        filter_response.partial_reason.as_deref(),
+        Some("decompression_budget_exhausted")
+    );
+
+    let hydration_response = engine.search(&SearchRequest {
+        keyword: "hydration-budget-needle".to_string(),
+        scope: SearchScope {
+            all: false,
+            url: true,
+            ..Default::default()
+        },
+        include: crate::search::SearchInclude {
+            response_body: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    assert!(hydration_response.results.is_empty());
+    assert_eq!(hydration_response.total_searched, 0);
+    assert!(hydration_response.has_more);
+    assert_eq!(
+        hydration_response.partial_reason.as_deref(),
+        Some("decompression_budget_exhausted")
     );
 }
 

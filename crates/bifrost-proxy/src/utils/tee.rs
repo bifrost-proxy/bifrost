@@ -17,6 +17,8 @@ use crate::server::BoxBody;
 mod buffered_response_store;
 mod openai_like;
 mod socket_summary;
+#[cfg(test)]
+mod sse_tests;
 
 pub use buffered_response_store::StoredRequestBodies;
 use buffered_response_store::{
@@ -680,6 +682,14 @@ enum SseEventBodyDecoder {
     Unsupported,
 }
 
+pub struct SseTeeOptions {
+    pub traffic_type: Option<TrafficType>,
+    pub file_writer: Option<BodyStreamWriter>,
+    pub content_encoding: Option<String>,
+    pub max_buffer_size: usize,
+    pub max_decompress_output_bytes: usize,
+}
+
 impl<B> SseTeeBody<B>
 where
     B: Body<Data = Bytes, Error = hyper::Error> + Unpin + Send + Sync + 'static,
@@ -688,11 +698,15 @@ where
         inner: B,
         admin_state: Option<Arc<AdminState>>,
         record_id: String,
-        traffic_type: Option<TrafficType>,
-        file_writer: Option<BodyStreamWriter>,
-        content_encoding: Option<String>,
-        max_buffer_size: usize,
+        options: SseTeeOptions,
     ) -> Self {
+        let SseTeeOptions {
+            traffic_type,
+            file_writer,
+            content_encoding,
+            max_buffer_size,
+            max_decompress_output_bytes,
+        } = options;
         let flush_interval = file_writer
             .as_ref()
             .map(|w| w.flush_interval())
@@ -702,12 +716,6 @@ where
         if let Some(ref state) = admin_state {
             state.sse_hub.register(&record_id);
         }
-        let max_decompress_output_bytes = admin_state
-            .as_ref()
-            .and_then(|state| state.config_manager.as_ref())
-            .and_then(|manager| manager.try_config())
-            .map(|config| config.sandbox.limits.max_decompress_output_bytes)
-            .unwrap_or(10 * 1024 * 1024);
         let event_decoder = match content_encoding.as_deref() {
             None => SseEventBodyDecoder::Plaintext,
             Some(encoding) => IncrementalContentDecoder::new(encoding, max_decompress_output_bytes)
@@ -812,8 +820,14 @@ where
     }
 
     fn finish_sse_event_decoder(&mut self) {
-        let trailing = match &self.event_decoder {
-            SseEventBodyDecoder::Encoded(decoder) => decoder.take_output(),
+        let trailing = match &mut self.event_decoder {
+            SseEventBodyDecoder::Encoded(decoder) => match decoder.finish() {
+                Ok(trailing) => trailing,
+                Err(error) => {
+                    tracing::debug!(%error, record_id = %self.guard.record_id, "failed to finalize SSE body decoder for event accounting");
+                    Vec::new()
+                }
+            },
             SseEventBodyDecoder::Plaintext | SseEventBodyDecoder::Unsupported => Vec::new(),
         };
         self.process_sse_chunk(&trailing);
@@ -916,24 +930,15 @@ pub fn create_sse_tee_body<B>(
     body: B,
     admin_state: Option<Arc<AdminState>>,
     record_id: String,
-    traffic_type: Option<TrafficType>,
-    file_writer: Option<BodyStreamWriter>,
-    content_encoding: Option<String>,
-    max_buffer_size: usize,
+    mut options: SseTeeOptions,
 ) -> SseTeeBody<B>
 where
     B: Body<Data = Bytes, Error = hyper::Error> + Unpin + Send + Sync + 'static,
 {
-    let max_buffer_size = max_buffer_size.min(DEFAULT_MAX_SSE_EVENT_BUFFER_BYTES);
-    SseTeeBody::new(
-        body,
-        admin_state,
-        record_id,
-        traffic_type,
-        file_writer,
-        content_encoding,
-        max_buffer_size,
-    )
+    options.max_buffer_size = options
+        .max_buffer_size
+        .min(DEFAULT_MAX_SSE_EVENT_BUFFER_BYTES);
+    SseTeeBody::new(body, admin_state, record_id, options)
 }
 
 pub fn store_request_body(
@@ -992,12 +997,10 @@ pub fn store_response_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::time::Duration;
-
     use bifrost_admin::{BodyStore, TrafficDbStore};
     use parking_lot::RwLock;
-
+    use std::io::Write;
+    use std::time::Duration;
     #[test]
     fn tee_body_skips_connection_monitor_when_tracking_disabled() {
         let state = Arc::new(AdminState::new(0));
@@ -1015,13 +1018,10 @@ mod tests {
             response_headers_size: 0,
             file_writer: None,
         };
-
         guard.store_body_and_update_record();
-
         assert_eq!(state.connection_monitor.connection_count(), 0);
         assert!(state.connection_monitor.get_status("plain-http").is_none());
     }
-
     #[test]
     fn tee_body_updates_connection_monitor_when_tracking_enabled() {
         let state = Arc::new(AdminState::new(0));
@@ -1040,9 +1040,7 @@ mod tests {
             response_headers_size: 0,
             file_writer: None,
         };
-
         guard.store_body_and_update_record();
-
         let status = state
             .connection_monitor
             .get_status("streaming")
@@ -1050,7 +1048,6 @@ mod tests {
         assert!(!status.is_open);
         assert_eq!(status.receive_bytes, 64);
     }
-
     #[tokio::test]
     async fn response_body_storage_waits_in_background_when_body_store_is_busy() {
         let (state, dir) = test_state_with_body_store("body-store-eventual");
@@ -1061,7 +1058,6 @@ mod tests {
             "http://example.test/eventual".to_string(),
         ));
         let busy_writer = body_store.write();
-
         let stored = store_response_body_or_schedule(
             state.clone(),
             body_store.clone(),
@@ -1070,12 +1066,10 @@ mod tests {
             None,
             1024 * 1024,
         );
-
         assert!(stored.primary.is_none());
         assert!(stored.raw.is_none());
         assert!(!dir.join("eventual-body_res").exists());
         drop(busy_writer);
-
         for _ in 0..50 {
             let body_ref = state
                 .traffic_db_store
@@ -1090,7 +1084,6 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-
         let _ = std::fs::remove_dir_all(dir);
         panic!("background body storage did not finish");
     }
@@ -1202,6 +1195,21 @@ mod tests {
         )
     }
 
+    fn sse_options(
+        traffic_type: Option<TrafficType>,
+        file_writer: Option<BodyStreamWriter>,
+        content_encoding: Option<String>,
+        max_buffer_size: usize,
+    ) -> SseTeeOptions {
+        SseTeeOptions {
+            traffic_type,
+            file_writer,
+            content_encoding,
+            max_buffer_size,
+            max_decompress_output_bytes: 1024,
+        }
+    }
+
     #[tokio::test]
     async fn sse_tee_persists_raw_and_derived_bodies_and_socket_summary() {
         let (state, dir) = test_state_with_body_store("sse");
@@ -1220,10 +1228,7 @@ mod tests {
             crate::server::full_body(payload.clone()),
             Some(state.clone()),
             record_id.into(),
-            Some(TrafficType::Http),
-            Some(writer),
-            None,
-            1024,
+            sse_options(Some(TrafficType::Http), Some(writer), None, 1024),
         );
         assert!(!body.is_end_stream());
         assert_eq!(body.size_hint().lower(), payload.len() as u64);
@@ -1263,10 +1268,12 @@ mod tests {
             crate::server::full_body(wire.clone()),
             Some(state.clone()),
             record_id.into(),
-            Some(TrafficType::Http),
-            Some(writer),
-            Some("gzip".to_string()),
-            1024,
+            sse_options(
+                Some(TrafficType::Http),
+                Some(writer),
+                Some("gzip".to_string()),
+                1024,
+            ),
         );
         assert_eq!(body.boxed().collect().await.unwrap().to_bytes(), wire);
 
@@ -1283,7 +1290,7 @@ mod tests {
     #[tokio::test]
     async fn sse_chunk_parser_covers_split_boundaries_overflow_and_no_state() {
         let body = crate::server::full_body(Bytes::new());
-        let mut tee = SseTeeBody::new(body, None, "none".into(), None, None, None, 3);
+        let mut tee = SseTeeBody::new(body, None, "none".into(), sse_options(None, None, None, 3));
         tee.process_sse_chunk(b"abcd");
         assert!(tee.overflowed);
         tee.process_sse_chunk(b"\n");
@@ -1298,10 +1305,7 @@ mod tests {
             crate::server::full_body(Bytes::new()),
             None,
             "capped".into(),
-            None,
-            None,
-            None,
-            usize::MAX,
+            sse_options(None, None, None, usize::MAX),
         );
         assert_eq!(capped.max_buffer_size, DEFAULT_MAX_SSE_EVENT_BUFFER_BYTES);
     }
@@ -1327,10 +1331,7 @@ mod tests {
             request.collect().await.unwrap().to_bytes(),
             Bytes::from_static(b"request-body")
         );
-        // The drop guard transfers the captured body reference into the traffic
-        // record, so the caller-side handle is intentionally empty afterwards.
         assert!(capture.clone_ref().or_else(|| capture.take()).is_none());
-
         let response = create_tee_body_with_store(
             crate::server::full_body(Bytes::from_static(b"response-body")),
             Some(state.clone()),
@@ -1347,7 +1348,6 @@ mod tests {
             response.collect().await.unwrap().to_bytes(),
             Bytes::from_static(b"response-body")
         );
-
         let metrics = create_metrics_body(
             crate::server::full_body(Bytes::from_static(b"metrics")),
             Some(state.clone()),
@@ -1476,10 +1476,12 @@ mod tests {
             crate::server::full_body(Bytes::from_static(b"data: event\n\n")),
             Some(state.clone()),
             record_id.into(),
-            Some(TrafficType::Http),
-            Some(writer),
-            Some(invalid_encoding),
-            1024,
+            sse_options(
+                Some(TrafficType::Http),
+                Some(writer),
+                Some(invalid_encoding),
+                1024,
+            ),
         );
         sse.boxed().collect().await.unwrap();
 

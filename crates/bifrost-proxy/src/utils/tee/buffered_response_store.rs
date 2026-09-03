@@ -78,6 +78,44 @@ fn stores_decoded_http_body(content_encoding: Option<&str>) -> bool {
     })
 }
 
+fn body_ref_is_lossless(body_ref: &BodyRef, bytes: &[u8]) -> bool {
+    match body_ref {
+        BodyRef::File { size, .. } | BodyRef::FileRange { size, .. } => *size == bytes.len(),
+        BodyRef::Inline { data } => data.as_bytes() == bytes,
+    }
+}
+
+fn remove_file_backed_ref(store: &bifrost_admin::BodyStore, body_ref: Option<&BodyRef>) {
+    if let Some(body_ref) = body_ref.filter(|body_ref| body_ref.is_file()) {
+        store.remove(body_ref);
+    }
+}
+
+fn store_decoded_and_raw(
+    store: &bifrost_admin::BodyStore,
+    record_id: &str,
+    primary_kind: &str,
+    raw_kind: &str,
+    decoded: &[u8],
+    wire: &[u8],
+) -> Option<(BodyRef, BodyRef)> {
+    let primary = store.store(record_id, primary_kind, decoded);
+    let raw = store.store(record_id, raw_kind, wire);
+    if primary
+        .as_ref()
+        .is_some_and(|body_ref| body_ref_is_lossless(body_ref, decoded))
+        && raw
+            .as_ref()
+            .is_some_and(|body_ref| body_ref_is_lossless(body_ref, wire))
+    {
+        return Some((primary.unwrap(), raw.unwrap()));
+    }
+
+    remove_file_backed_ref(store, primary.as_ref());
+    remove_file_backed_ref(store, raw.as_ref());
+    None
+}
+
 fn store_buffered_response_bodies(
     store: &bifrost_admin::BodyStore,
     record_id: &str,
@@ -95,10 +133,14 @@ fn store_buffered_response_bodies(
     };
     if should_decode {
         if let Some(decoded) = decoded {
-            return StoredResponseBodies {
-                primary: store.store(record_id, "res", &decoded),
-                raw: store.store(record_id, "res_raw", body),
-            };
+            if let Some((primary, raw)) =
+                store_decoded_and_raw(store, record_id, "res", "res_raw", &decoded, body)
+            {
+                return StoredResponseBodies {
+                    primary: Some(primary),
+                    raw: Some(raw),
+                };
+            }
         }
     }
 
@@ -133,10 +175,14 @@ pub(super) fn store_buffered_request_bodies(
     };
     if should_decode {
         if let Some(decoded) = decoded {
-            return StoredRequestBodies {
-                primary: store.store(record_id, "req", &decoded),
-                raw: store.store(record_id, "req_raw", body),
-            };
+            if let Some((primary, raw)) =
+                store_decoded_and_raw(store, record_id, "req", "req_raw", &decoded, body)
+            {
+                return StoredRequestBodies {
+                    primary: Some(primary),
+                    raw: Some(raw),
+                };
+            }
         }
     }
 
@@ -353,6 +399,68 @@ mod tests {
             store.load_bytes(stored.raw.as_ref().unwrap()).as_deref(),
             Some(wire.as_slice())
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn buffered_compressed_bodies_never_publish_lossy_inline_raw_refs() {
+        let parent = std::env::temp_dir().join(format!(
+            "bifrost-tee-lossy-raw-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let not_a_directory = parent.join("body-store-file");
+        std::fs::write(&not_a_directory, b"occupied").unwrap();
+        let store = BodyStore::new(
+            not_a_directory,
+            1024 * 1024,
+            1,
+            64 * 1024,
+            Duration::from_secs(1),
+        );
+        let plaintext = vec![b'x'; 16 * 1024];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plaintext).unwrap();
+        let wire = encoder.finish().unwrap();
+
+        let response =
+            store_buffered_response_bodies(&store, "response", &wire, Some("gzip"), 32 * 1024);
+        assert!(response.raw.is_none());
+        assert!(response.primary.is_none());
+
+        let request =
+            store_buffered_request_bodies(&store, "request", &wire, Some("gzip"), 32 * 1024);
+        assert!(request.raw.is_none());
+        assert!(request.primary.is_none());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn file_backed_cleanup_removes_abandoned_body() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-tee-abandoned-body-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("abandoned");
+        std::fs::write(&path, b"wire").unwrap();
+        let store = BodyStore::new(
+            dir.clone(),
+            1024 * 1024,
+            1,
+            64 * 1024,
+            Duration::from_secs(1),
+        );
+        let body_ref = BodyRef::File {
+            path: path.to_string_lossy().into_owned(),
+            size: 4,
+        };
+
+        remove_file_backed_ref(&store, Some(&body_ref));
+
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

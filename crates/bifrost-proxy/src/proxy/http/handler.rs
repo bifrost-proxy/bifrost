@@ -62,7 +62,8 @@ use crate::utils::logging::{format_rules_detail, format_rules_summary, RequestCo
 use crate::utils::mock::{generate_mock_response, should_intercept_response};
 use crate::utils::tee::{
     create_metrics_body, create_request_tee_body, create_sse_tee_body, create_tee_body_with_store,
-    store_request_body, store_response_body, BodyCaptureHandle, TeeBodyCaptureOptions,
+    store_request_body, store_response_body, BodyCaptureHandle, SseTeeOptions,
+    TeeBodyCaptureOptions,
 };
 use crate::utils::throttle::wrap_throttled_body;
 use crate::utils::upstream_stability::connect_tcp;
@@ -3869,10 +3870,13 @@ pub async fn handle_http_request(
                 res_body,
                 admin_state.clone(),
                 record_id.to_string(),
-                Some(traffic_type),
-                sse_stream_writer,
-                res_content_encoding.clone(),
-                max_body_buffer_size,
+                SseTeeOptions {
+                    traffic_type: Some(traffic_type),
+                    file_writer: sse_stream_writer,
+                    content_encoding: res_content_encoding.clone(),
+                    max_buffer_size: max_body_buffer_size,
+                    max_decompress_output_bytes,
+                },
             );
             let final_body = wrap_throttled_body(tee_body.boxed(), resolved_rules.res_speed);
             let body = with_trailers(final_body, &resolved_rules);

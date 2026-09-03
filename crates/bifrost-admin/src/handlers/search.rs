@@ -107,6 +107,8 @@ struct SearchStreamDonePayload {
     total_matched: usize,
     next_cursor: Option<u64>,
     has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partial_reason: Option<String>,
     search_id: String,
     searched_range: SearchedRange,
 }
@@ -215,6 +217,7 @@ async fn execute_search_stream(
                     total_matched: response.total_matched,
                     next_cursor: response.next_cursor,
                     has_more: response.has_more,
+                    partial_reason: response.partial_reason,
                     search_id: response.search_id,
                     searched_range: response.searched_range,
                 };
