@@ -52,6 +52,12 @@ fn generate_components() -> serde_json::Value {
                 "scheme": "bearer",
                 "bearerFormat": "JWT",
                 "description": "JWT token from /api/auth/login"
+            },
+            "adminSessionCookie": {
+                "type": "apiKey",
+                "in": "cookie",
+                "name": "bifrost_admin_session",
+                "description": "HttpOnly browser session cookie issued by /api/auth/login or /api/auth/session"
             }
         },
         "schemas": {
@@ -437,6 +443,17 @@ fn generate_paths() -> serde_json::Value {
                 "summary": "Log out",
                 "operationId": "logout",
                 "responses": {"200": {"description": "Logged out"}}
+            }
+        },
+        "/api/auth/session": {
+            "get": {
+                "tags": ["Auth"],
+                "summary": "Establish the HttpOnly browser session cookie from an authenticated session",
+                "operationId": "establishBrowserSession",
+                "responses": {
+                    "200": {"description": "Browser session cookie established"},
+                    "401": {"description": "Missing or invalid session"}
+                }
             }
         },
         "/api/auth/passwd": {
@@ -1695,5 +1712,15 @@ mod tests {
             put_request_schema["$ref"].as_str(),
             Some("#/components/schemas/UpdatePerformanceConfigRequest")
         );
+    }
+
+    #[test]
+    fn auth_openapi_documents_browser_session_cookie() {
+        let spec = generate_openapi_spec();
+        let cookie = &spec.components["securitySchemes"]["adminSessionCookie"];
+        assert_eq!(cookie["type"], "apiKey");
+        assert_eq!(cookie["in"], "cookie");
+        assert_eq!(cookie["name"], "bifrost_admin_session");
+        assert!(spec.paths.get("/api/auth/session").is_some());
     }
 }

@@ -46,6 +46,16 @@ export async function fetchAdminAuthStatus(): Promise<AdminAuthStatus> {
   return (await resp.json()) as AdminAuthStatus;
 }
 
+export async function ensureAdminBrowserSession(): Promise<void> {
+  const resp = await apiFetch('/api/auth/session', {
+    method: 'GET',
+    cache: 'no-store',
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to establish browser session: ${resp.status}`);
+  }
+}
+
 export async function changeAdminPassword(
   password: string,
   username?: string,
@@ -75,7 +85,9 @@ export async function setRemoteAccess(
   });
   if (!resp.ok) {
     const data = (await resp.json().catch(() => ({}))) as { error?: string };
-    throw new Error(data.error || `Failed to set remote access: ${resp.status}`);
+    throw new Error(
+      data.error || `Failed to set remote access: ${resp.status}`,
+    );
   }
   return (await resp.json()) as AdminAuthStatus;
 }
@@ -119,4 +131,3 @@ export async function fetchLoginAudit(
   }
   return (await resp.json()) as LoginAuditResponse;
 }
-

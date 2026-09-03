@@ -2,38 +2,62 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Spin } from 'antd';
 
-import { fetchAdminAuthStatus, getAdminToken } from '../services/adminAuth';
+import {
+  clearAdminToken,
+  ensureAdminBrowserSession,
+  fetchAdminAuthStatus,
+} from '../services/adminAuth';
 
-export default function AdminAuthGate({ children }: { children: React.ReactNode }) {
+export default function AdminAuthGate({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   const [ready, setReady] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
     let cancelled = false;
-    void fetchAdminAuthStatus()
-      .then((status) => {
-        if (cancelled) {
-          return;
+    void (async () => {
+      let status;
+      try {
+        status = await fetchAdminAuthStatus();
+      } catch {
+        // Keep existing offline/startup behavior: inability to fetch status is
+        // not enough evidence to force a login redirect.
+        if (!cancelled) {
+          setReady(true);
         }
-        if (status.auth_required) {
-          const token = getAdminToken();
-          if (!token) {
+        return;
+      }
+
+      if (cancelled) {
+        return;
+      }
+      if (status.auth_required) {
+        try {
+          // Existing installations may already have a valid localStorage JWT
+          // but no HttpOnly session cookie yet. Conversely, a valid HttpOnly
+          // cookie can outlive cleared browser storage. Let the server accept
+          // either credential before mounting native EventSource/WebSocket
+          // channels.
+          await ensureAdminBrowserSession();
+        } catch {
+          if (!cancelled) {
+            clearAdminToken();
             const next = `${location.pathname}${location.search}`;
             navigate(`/login?next=${encodeURIComponent(next || '/traffic')}`, {
               replace: true,
             });
-            return;
           }
+          return;
         }
+      }
+      if (!cancelled) {
         setReady(true);
-      })
-      .catch(() => {
-        // If status cannot be fetched, keep existing behavior (avoid misjudging offline/starting core as needing login).
-        if (!cancelled) {
-          setReady(true);
-        }
-      });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -48,4 +72,3 @@ export default function AdminAuthGate({ children }: { children: React.ReactNode 
   }
   return <>{children}</>;
 }
-

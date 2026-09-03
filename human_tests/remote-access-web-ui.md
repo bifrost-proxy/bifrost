@@ -4,7 +4,10 @@
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 准备一台同局域网的设备，或使用本机的局域网 IP（如 `192.168.8.31`）
 3. 确保端口 8800 未被防火墙阻止
@@ -250,6 +253,29 @@
 - 显示 "All sessions revoked" 消息
 - 登录记录表格仍然保留之前的记录（审计日志不会被清除）
 - 记录数不变
+
+---
+
+### TC-RA-18：远程登录后所有浏览器原生流式连接正常鉴权
+
+**前置条件**：已开启远程访问，并通过局域网 IP 完成登录
+
+**操作步骤**：
+1. 使用浏览器打开 `http://<局域网IP>:8800/_bifrost/traffic`
+2. 在开发者工具 Network 中筛选 `stream` 和 `WS`
+3. 确认主实时通道 `/_bifrost/api/push` 完成 WebSocket `101 Switching Protocols`
+4. 确认 `/_bifrost/api/whitelist/pending/stream` 和 `/_bifrost/api/config/ip-tls/pending/stream` 返回 `200`，且保持连接
+5. 分别打开一条 WebSocket 流量和一条 SSE 流量的 Messages 详情，确认对应 `frames/stream` 与 `sse/stream` 不返回 `401`
+6. 打开 DevTools、Replay WebSocket 和 ASR 实时语音入口，确认各自 WebSocket 不因缺少鉴权而返回 `401`
+7. 产生一条新的代理请求，观察 Network 列表无需刷新即可出现该请求
+8. 在本机执行 `bifrost admin revoke-all`，然后刷新远程页面
+
+**预期结果**：
+- 登录响应签发路径限定为 `/_bifrost` 的 `HttpOnly; SameSite=Strict` 会话 Cookie
+- 普通 REST、所有 EventSource 和所有 WebSocket 管理端入口均可使用同源会话 Cookie 鉴权
+- Network 列表通过 `/_bifrost/api/push` 实时新增流量，不再出现原问题中的 `401`
+- 原有 Bearer JWT API 调用继续可用，localhost/127.0.0.1 免登录行为不变
+- `revoke-all` 后旧 Bearer token 与旧会话 Cookie 均失效，远程页面返回登录页
 
 ---
 

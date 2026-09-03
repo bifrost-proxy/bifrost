@@ -17,6 +17,10 @@ use crate::admin_auth::{
     validate_password_strength, verify_admin_credentials, MAX_LOGIN_ATTEMPTS, MIN_PASSWORD_LENGTH,
 };
 use crate::state::SharedAdminState;
+use crate::ADMIN_PATH_PREFIX;
+
+pub const ADMIN_SESSION_COOKIE_NAME: &str = "bifrost_admin_session";
+const ADMIN_SESSION_COOKIE_MAX_AGE_SECS: i64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -215,8 +219,9 @@ pub async fn handle_auth(
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
-        // 对于浏览器/CLI：同时支持 Authorization: Bearer 与显式 token 返回。
-        // 这里不使用 Cookie，避免引入 CSRF/跨域复杂度。
+        // CLI 和普通浏览器 API 继续使用显式 token；HttpOnly Cookie 让无法
+        // 自定义 Authorization header 的同源 EventSource/WebSocket 也能鉴权。
+        // SameSite=Strict 配合 router 的 CSRF/Origin 检查限制浏览器跨站使用。
         let mut resp = json_response(&LoginResponse {
             token: token.clone(),
             expires_at,
@@ -225,6 +230,12 @@ pub async fn handle_auth(
         resp.headers_mut().insert(
             header::AUTHORIZATION,
             format!("Bearer {token}").parse().unwrap(),
+        );
+        resp.headers_mut().insert(
+            header::SET_COOKIE,
+            admin_session_cookie(&token, ADMIN_SESSION_COOKIE_MAX_AGE_SECS)
+                .parse()
+                .expect("admin session cookie must be a valid header"),
         );
         return resp;
     }
@@ -236,8 +247,51 @@ pub async fn handle_auth(
         return Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
+            .header(header::SET_COOKIE, clear_admin_session_cookie())
             .body(super::full_body("{\"success\":true}"))
             .unwrap();
+    }
+
+    if path == "/api/auth/session" {
+        if *req.method() != Method::GET {
+            return method_not_allowed();
+        }
+        let tokens = [
+            extract_bearer_token(&req),
+            extract_admin_session_cookie(&req),
+        ];
+        if tokens.iter().all(Option::is_none) {
+            return error_response(StatusCode::UNAUTHORIZED, "Missing authenticated session");
+        }
+        let mut authenticated = None;
+        let mut last_error = None;
+        for token in tokens.into_iter().flatten() {
+            match crate::admin_auth::validate_admin_jwt(&state, &token) {
+                Ok(claims) => {
+                    authenticated = Some((token, claims));
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let Some((token, claims)) = authenticated else {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                &format!(
+                    "Unauthorized: {}",
+                    last_error.expect("at least one credential was validated")
+                ),
+            );
+        };
+        let max_age_secs = (claims.exp - chrono::Utc::now().timestamp()).max(0);
+        let mut resp = json_response(&serde_json::json!({ "success": true }));
+        resp.headers_mut().insert(
+            header::SET_COOKIE,
+            admin_session_cookie(&token, max_age_secs)
+                .parse()
+                .expect("admin session cookie must be a valid header"),
+        );
+        return resp;
     }
 
     if path == "/api/auth/passwd" {
@@ -369,10 +423,17 @@ pub async fn handle_auth(
         }
 
         info!("All admin sessions revoked via API");
-        return json_response(&serde_json::json!({
+        let mut resp = json_response(&serde_json::json!({
             "success": true,
             "message": "All sessions revoked"
         }));
+        resp.headers_mut().insert(
+            header::SET_COOKIE,
+            clear_admin_session_cookie()
+                .parse()
+                .expect("admin session clear cookie must be a valid header"),
+        );
+        return resp;
     }
 
     error_response(StatusCode::NOT_FOUND, "API endpoint not found")
@@ -397,6 +458,34 @@ pub fn extract_bearer_token<T>(req: &Request<T>) -> Option<String> {
         return None;
     }
     Some(token.to_string())
+}
+
+pub fn extract_admin_session_cookie<T>(req: &Request<T>) -> Option<String> {
+    req.headers()
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|cookie| cookie.trim().split_once('='))
+        .find_map(|(name, value)| {
+            if name.trim() != ADMIN_SESSION_COOKIE_NAME {
+                return None;
+            }
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        })
+}
+
+fn admin_session_cookie(token: &str, max_age_secs: i64) -> String {
+    format!(
+        "{ADMIN_SESSION_COOKIE_NAME}={token}; Path={ADMIN_PATH_PREFIX}; Max-Age={max_age_secs}; HttpOnly; SameSite=Strict"
+    )
+}
+
+fn clear_admin_session_cookie() -> String {
+    format!(
+        "{ADMIN_SESSION_COOKIE_NAME}=; Path={ADMIN_PATH_PREFIX}; Max-Age=0; HttpOnly; SameSite=Strict"
+    )
 }
 
 #[cfg(test)]
@@ -429,5 +518,64 @@ mod tests {
             .body(())
             .unwrap();
         assert_eq!(extract_bearer_token(&req), None);
+    }
+
+    #[test]
+    fn test_extract_admin_session_cookie_finds_exact_cookie_name() {
+        let req = Request::builder()
+            .uri("/")
+            .header(
+                header::COOKIE,
+                "theme=dark; bifrost_admin_session=header.payload.signature; other=1",
+            )
+            .body(())
+            .unwrap();
+        assert_eq!(
+            extract_admin_session_cookie(&req),
+            Some("header.payload.signature".to_string())
+        );
+
+        let req = Request::builder()
+            .uri("/")
+            .header(header::COOKIE, "not_bifrost_admin_session=wrong")
+            .body(())
+            .unwrap();
+        assert_eq!(extract_admin_session_cookie(&req), None);
+    }
+
+    #[test]
+    fn test_extract_admin_session_cookie_rejects_empty_or_malformed_value() {
+        for cookie in [
+            "bifrost_admin_session=",
+            "bifrost_admin_session",
+            "theme=dark",
+        ] {
+            let req = Request::builder()
+                .uri("/")
+                .header(header::COOKIE, cookie)
+                .body(())
+                .unwrap();
+            assert_eq!(extract_admin_session_cookie(&req), None, "{cookie}");
+        }
+    }
+
+    #[test]
+    fn test_admin_session_cookie_is_scoped_and_not_script_readable() {
+        let cookie = admin_session_cookie("token", ADMIN_SESSION_COOKIE_MAX_AGE_SECS);
+        assert!(cookie.starts_with("bifrost_admin_session=token;"));
+        assert!(cookie.contains("Path=/_bifrost"));
+        assert!(cookie.contains("Max-Age=604800"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+    }
+
+    #[test]
+    fn test_clear_admin_session_cookie_expires_cookie_at_same_path() {
+        let cookie = clear_admin_session_cookie();
+        assert!(cookie.starts_with("bifrost_admin_session=;"));
+        assert!(cookie.contains("Path=/_bifrost"));
+        assert!(cookie.contains("Max-Age=0"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
     }
 }
