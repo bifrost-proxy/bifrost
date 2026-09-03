@@ -305,7 +305,8 @@ pub(crate) struct DecompressedPrefix {
 pub(crate) fn decompress_prefix_with_limit_metered(
     data: &[u8],
     content_encoding: &str,
-    max_output_bytes: usize,
+    max_prefix_bytes: usize,
+    max_work_bytes: usize,
 ) -> std::io::Result<DecompressedPrefix> {
     let encodings = content_encoding
         .split(',')
@@ -313,35 +314,38 @@ pub(crate) fn decompress_prefix_with_limit_metered(
         .filter(|encoding| !encoding.is_empty())
         .collect::<Vec<_>>();
     let mut decoded = data.to_vec();
-    let mut remaining_output_bytes = max_output_bytes;
+    let mut remaining_work_bytes = max_work_bytes;
     let mut final_truncated = false;
+    let decoder_count = encodings
+        .iter()
+        .filter(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+        .count();
+    let mut decoder_index = 0usize;
 
-    for (index, encoding) in encodings.iter().rev().enumerate() {
+    for encoding in encodings.iter().rev() {
         if encoding.eq_ignore_ascii_case("identity") {
             continue;
         }
-        let (next, truncated) = match encoding.to_ascii_lowercase().as_str() {
-            "gzip" | "x-gzip" => read_limited_prefix(
-                MultiGzDecoder::new(decoded.as_slice()),
-                remaining_output_bytes,
-            )?,
-            "deflate" => {
-                read_limited_prefix(ZlibDecoder::new(decoded.as_slice()), remaining_output_bytes)
-                    .or_else(|_| {
-                        read_limited_prefix(
-                            DeflateDecoder::new(decoded.as_slice()),
-                            remaining_output_bytes,
-                        )
-                    })?
+        decoder_index = decoder_index.saturating_add(1);
+        let is_final_decoder = decoder_index == decoder_count;
+        let output_limit = if is_final_decoder {
+            remaining_work_bytes.min(max_prefix_bytes)
+        } else {
+            remaining_work_bytes
+        };
+        let decode = |reader: &mut dyn Read| {
+            if is_final_decoder {
+                read_limited_prefix(reader, output_limit)
+            } else {
+                read_limited(reader, output_limit).map(|bytes| (bytes, false))
             }
-            "br" => read_limited_prefix(
-                brotli::Decompressor::new(decoded.as_slice(), 4096),
-                remaining_output_bytes,
-            )?,
-            "zstd" => read_limited_prefix(
-                zstd::stream::read::Decoder::new(decoded.as_slice())?,
-                remaining_output_bytes,
-            )?,
+        };
+        let (next, truncated) = match encoding.to_ascii_lowercase().as_str() {
+            "gzip" | "x-gzip" => decode(&mut MultiGzDecoder::new(decoded.as_slice()))?,
+            "deflate" => decode(&mut ZlibDecoder::new(decoded.as_slice()))
+                .or_else(|_| decode(&mut DeflateDecoder::new(decoded.as_slice())))?,
+            "br" => decode(&mut brotli::Decompressor::new(decoded.as_slice(), 4096))?,
+            "zstd" => decode(&mut zstd::stream::read::Decoder::new(decoded.as_slice())?)?,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -349,21 +353,10 @@ pub(crate) fn decompress_prefix_with_limit_metered(
                 ));
             }
         };
-        remaining_output_bytes = remaining_output_bytes.saturating_sub(next.len());
+        remaining_work_bytes = remaining_work_bytes.saturating_sub(next.len());
         decoded = next;
 
         if truncated {
-            let has_later_decoder = encodings
-                .iter()
-                .rev()
-                .skip(index + 1)
-                .any(|later| !later.eq_ignore_ascii_case("identity"));
-            if has_later_decoder {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "intermediate decompressed body exceeds the preview limit",
-                ));
-            }
             final_truncated = true;
             break;
         }
@@ -371,7 +364,7 @@ pub(crate) fn decompress_prefix_with_limit_metered(
 
     Ok(DecompressedPrefix {
         bytes: decoded,
-        consumed: max_output_bytes - remaining_output_bytes,
+        consumed: max_work_bytes - remaining_work_bytes,
         truncated: final_truncated,
     })
 }
@@ -610,7 +603,7 @@ mod tests {
         zlib.write_all(plaintext).unwrap();
         let zlib = zlib.finish().unwrap();
         assert_eq!(
-            decompress_prefix_with_limit_metered(&zlib, "identity, deflate", 7)
+            decompress_prefix_with_limit_metered(&zlib, "identity, deflate", 7, 1024)
                 .unwrap()
                 .bytes,
             &plaintext[..7]
@@ -620,7 +613,7 @@ mod tests {
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
         raw.write_all(plaintext).unwrap();
         assert_eq!(
-            decompress_prefix_with_limit_metered(&raw.finish().unwrap(), "deflate", 7)
+            decompress_prefix_with_limit_metered(&raw.finish().unwrap(), "deflate", 7, 1024)
                 .unwrap()
                 .bytes,
             &plaintext[..7]
@@ -632,7 +625,7 @@ mod tests {
             encoder.write_all(plaintext).unwrap();
         }
         assert_eq!(
-            decompress_prefix_with_limit_metered(&br, "br", 7)
+            decompress_prefix_with_limit_metered(&br, "br", 7, 1024)
                 .unwrap()
                 .bytes,
             &plaintext[..7]
@@ -640,28 +633,34 @@ mod tests {
 
         let zstd = zstd::stream::encode_all(plaintext.as_slice(), 1).unwrap();
         assert_eq!(
-            decompress_prefix_with_limit_metered(&zstd, "zstd", 7)
+            decompress_prefix_with_limit_metered(&zstd, "zstd", 7, 1024)
                 .unwrap()
                 .bytes,
             &plaintext[..7]
         );
         assert_eq!(
-            decompress_prefix_with_limit_metered(plaintext, "identity", 128)
+            decompress_prefix_with_limit_metered(plaintext, "identity", 128, 1024)
                 .unwrap()
                 .bytes,
             plaintext
         );
-        assert!(decompress_prefix_with_limit_metered(plaintext, "x-company", 7).is_err());
+        assert!(decompress_prefix_with_limit_metered(plaintext, "x-company", 7, 1024).is_err());
 
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gzip.write_all(plaintext).unwrap();
         let gzip = gzip.finish().unwrap();
         let mut outer = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         outer.write_all(&gzip).unwrap();
-        assert!(
-            decompress_prefix_with_limit_metered(&outer.finish().unwrap(), "gzip, deflate", 7)
-                .is_err()
-        );
+        let decoded = decompress_prefix_with_limit_metered(
+            &outer.finish().unwrap(),
+            "gzip, deflate",
+            7,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(decoded.bytes, &plaintext[..7]);
+        assert!(decoded.truncated);
+        assert!(decoded.consumed > decoded.bytes.len());
     }
 
     #[test]

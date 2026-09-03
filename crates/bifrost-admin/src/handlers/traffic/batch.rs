@@ -257,14 +257,19 @@ fn decode_batch_body(
     // The batch endpoint only needs enough decoded data to fill its preview.
     // Share the configured decompression allowance across every requested body
     // so one request cannot multiply that work by the 200-ID batch limit.
-    let decode_limit = (*remaining_decompress_bytes).min(max_body_bytes.saturating_add(1));
-    if decode_limit == 0 {
+    let preview_limit = max_body_bytes.saturating_add(1);
+    if *remaining_decompress_bytes == 0 {
         return DecodedBatchBody {
             bytes,
             truncated: false,
         };
     }
-    match decompress_prefix_with_limit_metered(&bytes, &content_encoding, decode_limit) {
+    match decompress_prefix_with_limit_metered(
+        &bytes,
+        &content_encoding,
+        preview_limit,
+        *remaining_decompress_bytes,
+    ) {
         Ok(decoded) => {
             *remaining_decompress_bytes =
                 remaining_decompress_bytes.saturating_sub(decoded.consumed);
@@ -274,9 +279,10 @@ fn decode_batch_body(
             }
         }
         Err(_) => {
-            // A decoder may consume the entire allowance before reporting an
-            // invalid or oversized stream, so account for the worst case.
-            *remaining_decompress_bytes = remaining_decompress_bytes.saturating_sub(decode_limit);
+            // A decoder chain may consume the entire shared allowance before
+            // reporting an invalid or oversized intermediate stream, so
+            // account for the worst case.
+            *remaining_decompress_bytes = 0;
             DecodedBatchBody {
                 bytes,
                 truncated: false,
@@ -529,6 +535,34 @@ mod batch_query_tests {
         );
         assert_eq!(chunk["truncated"], true);
         assert!(chunk["size"].as_u64().unwrap() > 7);
+    }
+
+    #[test]
+    fn stacked_codings_return_the_final_decoded_prefix() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = b"stacked body longer than preview";
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(plaintext).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let mut brotli = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut brotli, 4096, 5, 22);
+            encoder.write_all(&gzip).unwrap();
+        }
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("batch-stacked-prefix", "res", &brotli)
+            .unwrap()
+            .with_content_encoding(Some("gzip, br"))
+            .unwrap();
+        let mut remaining = 1024;
+
+        let decoded = decode_batch_body(&body_ref, brotli, 7, &mut remaining);
+
+        assert_eq!(decoded.bytes, &plaintext[..8]);
+        assert!(decoded.truncated);
+        assert!(remaining < 1024 - 7);
     }
 
     #[tokio::test]

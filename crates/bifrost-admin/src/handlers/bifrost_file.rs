@@ -646,12 +646,7 @@ async fn handle_export_network(
     let include_body = request.include_body.unwrap_or(true);
     let mut records: Vec<NetworkRecord> = Vec::new();
     let mut missing_ids: Vec<String> = Vec::new();
-    let mut remaining_decompress_bytes = state
-        .config_manager
-        .as_ref()
-        .and_then(|manager| manager.try_config())
-        .map(|config| config.sandbox.limits.max_decompress_output_bytes)
-        .unwrap_or(DEFAULT_MAX_DECOMPRESSED_BODY_BYTES);
+    let mut remaining_decompress_bytes = configured_network_export_decompress_budget(&state).await;
 
     if request.record_ids.is_empty() {
         return error_response(
@@ -711,6 +706,20 @@ async fn handle_export_network(
         .unwrap()
 }
 
+async fn configured_network_export_decompress_budget(state: &SharedAdminState) -> usize {
+    match state.config_manager.as_ref() {
+        Some(manager) => {
+            manager
+                .config()
+                .await
+                .sandbox
+                .limits
+                .max_decompress_output_bytes
+        }
+        None => DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+    }
+}
+
 fn validate_network_import_records(record_count: usize) -> Result<(), &'static str> {
     if record_count == 0 {
         Err(EMPTY_NETWORK_IMPORT_ERROR)
@@ -751,12 +760,7 @@ async fn traffic_to_network_record(
     include_body: bool,
     state: &SharedAdminState,
 ) -> NetworkRecord {
-    let mut remaining_decompress_bytes = state
-        .config_manager
-        .as_ref()
-        .and_then(|manager| manager.try_config())
-        .map(|config| config.sandbox.limits.max_decompress_output_bytes)
-        .unwrap_or(DEFAULT_MAX_DECOMPRESSED_BODY_BYTES);
+    let mut remaining_decompress_bytes = configured_network_export_decompress_budget(state).await;
     traffic_to_network_record_with_budget(
         traffic,
         include_body,

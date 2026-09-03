@@ -1143,7 +1143,7 @@ mod sse_stream_tests {
     }
 
     #[tokio::test]
-    async fn closed_malformed_encoded_sse_stops_after_bounded_retries() {
+    async fn malformed_encoded_sse_emits_terminal_error() {
         let harness = TestAdminState::builder().build();
         let body_ref = harness
             .body_store
@@ -1170,9 +1170,46 @@ mod sse_stream_tests {
         .expect("closed malformed stream must stop")
         .unwrap();
 
-        let finish = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
-        assert!(finish.contains("\"event\":\"finish\""), "{finish}");
+        let error = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(error.contains("\"event\":\"error\""), "{error}");
+        assert!(error.contains("failed to decode"), "{error}");
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn active_malformed_encoded_sse_does_not_hang() {
+        let harness = TestAdminState::builder().build();
+        let connection_id = "malformed-active-sse";
+        let body_ref = harness
+            .body_store
+            .read()
+            .store(connection_id, "res", b"not gzip")
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        harness.state().sse_hub.register(connection_id);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            stream_content_encoded_sse_events(
+                harness.state(),
+                connection_id,
+                body_ref,
+                SseStreamFrom::Begin,
+                1,
+                0,
+                tx,
+            ),
+        )
+        .await
+        .expect("active malformed stream must terminate")
+        .unwrap();
+
+        let error = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(error.contains("\"event\":\"error\""), "{error}");
+        assert!(rx.recv().await.is_none());
+        harness.state().sse_hub.unregister(connection_id);
     }
 
     #[tokio::test]

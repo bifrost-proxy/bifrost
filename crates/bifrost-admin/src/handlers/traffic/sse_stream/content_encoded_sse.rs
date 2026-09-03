@@ -137,6 +137,60 @@ struct IncrementalContentDecoder {
     writer: Box<dyn Write + Send>,
     output: Arc<Mutex<DecoderOutput>>,
     budget: Arc<Mutex<DecodeBudget>>,
+    wire_prefix: WirePrefixValidator,
+}
+
+enum WirePrefixValidator {
+    None,
+    Gzip(Vec<u8>),
+    Zstd(Vec<u8>),
+}
+
+impl WirePrefixValidator {
+    fn for_content_encoding(content_encoding: &str) -> Self {
+        let outermost = content_encoding
+            .split(',')
+            .map(str::trim)
+            .rfind(|encoding| !encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity"));
+        match outermost.map(str::to_ascii_lowercase).as_deref() {
+            Some("gzip" | "x-gzip") => Self::Gzip(Vec::with_capacity(2)),
+            Some("zstd") => Self::Zstd(Vec::with_capacity(4)),
+            _ => Self::None,
+        }
+    }
+
+    fn validate(&mut self, wire_bytes: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        let (prefix, required) = match self {
+            Self::None => return Ok(Some(wire_bytes.to_vec())),
+            Self::Gzip(prefix) => (prefix, 2),
+            Self::Zstd(prefix) => (prefix, 4),
+        };
+        prefix.extend_from_slice(wire_bytes);
+        if prefix.len() < required {
+            return Ok(None);
+        }
+
+        let valid = match self {
+            Self::Gzip(prefix) => prefix.starts_with(&[0x1f, 0x8b]),
+            Self::Zstd(prefix) => {
+                prefix.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+                    || (prefix[0] & 0xf0 == 0x50 && prefix[1..4] == [0x2a, 0x4d, 0x18])
+            }
+            Self::None => unreachable!(),
+        };
+        if !valid {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid content-encoding frame header",
+            ));
+        }
+
+        let buffered = match std::mem::replace(self, Self::None) {
+            Self::Gzip(prefix) | Self::Zstd(prefix) => prefix,
+            Self::None => unreachable!(),
+        };
+        Ok(Some(buffered))
+    }
 }
 
 impl IncrementalContentDecoder {
@@ -179,11 +233,15 @@ impl IncrementalContentDecoder {
             writer,
             output,
             budget,
+            wire_prefix: WirePrefixValidator::for_content_encoding(content_encoding),
         })
     }
 
     fn push(&mut self, wire_bytes: &[u8]) -> io::Result<Vec<u8>> {
-        self.writer.write_all(wire_bytes)?;
+        let Some(wire_bytes) = self.wire_prefix.validate(wire_bytes)? else {
+            return Ok(Vec::new());
+        };
+        self.writer.write_all(&wire_bytes)?;
         self.writer.flush()?;
         Ok(std::mem::take(&mut self.output.lock().unwrap().bytes))
     }
@@ -267,6 +325,35 @@ async fn emit_limit_error(
     }
 }
 
+async fn emit_decode_error(
+    seq: &mut u64,
+    batch: &mut Vec<crate::sse::SseEvent>,
+    batch_size: usize,
+    tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
+) {
+    *seq = seq.saturating_add(1);
+    let error_event = crate::sse::SseEvent {
+        seq: *seq,
+        ts: now_ms(),
+        id: None,
+        event: Some("error".to_string()),
+        retry: None,
+        data: "failed to decode content-encoded SSE body".to_string(),
+        raw: None,
+        parse_error: true,
+    };
+    if batch_size <= 1 {
+        let _ = tx
+            .send(bytes::Bytes::from(sse_json_line(&error_event)))
+            .await;
+    } else {
+        batch.push(error_event);
+        let _ = tx
+            .send(bytes::Bytes::from(sse_json_batch_line(batch)))
+            .await;
+    }
+}
+
 pub(super) async fn stream_content_encoded_sse_events(
     state: SharedAdminState,
     connection_id: &str,
@@ -322,8 +409,6 @@ pub(super) async fn stream_content_encoded_sse_events(
     let mut offset = start_offset;
     let mut buf = vec![0u8; 8192];
     let mut tail_pending = (from == SseStreamFrom::Tail).then(Vec::new);
-    let mut decoder_failed = false;
-
     loop {
         if last_force_flush_refresh.elapsed() >= Duration::from_secs(5) {
             state.sse_hub.request_force_flush(connection_id, 30_000);
@@ -343,7 +428,7 @@ pub(super) async fn stream_content_encoded_sse_events(
         let to_read = fixed_end
             .map(|end| (end.saturating_sub(offset) as usize).min(buf.len()))
             .unwrap_or(buf.len());
-        let read = if decoder_failed || to_read == 0 {
+        let read = if to_read == 0 {
             0
         } else {
             file.read(&mut buf[..to_read]).await.unwrap_or_default()
@@ -375,7 +460,10 @@ pub(super) async fn stream_content_encoded_sse_events(
                     emit_limit_error(max_output_bytes, &mut seq, &mut batch, batch_size, &tx).await;
                     return Ok(());
                 }
-                Err(_) => decoder_failed = true,
+                Err(_) => {
+                    emit_decode_error(&mut seq, &mut batch, batch_size, &tx).await;
+                    return Ok(());
+                }
             }
             continue;
         }
@@ -562,6 +650,12 @@ mod tests {
     #[test]
     fn incremental_decoder_rejects_unknown_coding_and_enforces_budget() {
         assert!(IncrementalContentDecoder::new("x-company", 1024).is_err());
+
+        for encoding in ["gzip", "x-gzip", "zstd", "deflate, gzip"] {
+            let mut decoder = IncrementalContentDecoder::new(encoding, 1024).unwrap();
+            assert!(decoder.push(b"n").unwrap().is_empty());
+            assert!(decoder.push(b"ot a valid frame").is_err(), "{encoding}");
+        }
 
         let plaintext = b"data: exceeds tiny budget\n\n";
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

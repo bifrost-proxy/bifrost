@@ -498,8 +498,19 @@ async fn execute_replay_unified(
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
 
+        let max_decompress_output_bytes = match state.config_manager.as_ref() {
+            Some(config_manager) => {
+                config_manager
+                    .config()
+                    .await
+                    .sandbox
+                    .limits
+                    .max_decompress_output_bytes
+            }
+            None => super::network_body::DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+        };
         let response_body = match response.bytes().await {
-            Ok(b) => match decode_replay_body(&response_headers, &b) {
+            Ok(b) => match decode_replay_body(&response_headers, &b, max_decompress_output_bytes) {
                 Ok(body) => body,
                 Err(error) => {
                     drop(permit);

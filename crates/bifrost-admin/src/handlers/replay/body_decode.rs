@@ -1,6 +1,7 @@
 pub(super) fn decode_replay_body(
     headers: &[(String, String)],
     body: &[u8],
+    max_output_bytes: usize,
 ) -> Result<Option<String>, String> {
     if body.is_empty() {
         return Ok(None);
@@ -13,8 +14,10 @@ pub(super) fn decode_replay_body(
         Some(encoding) if !super::super::network_body::content_encoding_is_supported(encoding) => {
             body.to_vec()
         }
-        Some(encoding) => super::super::network_body::decompress(body, encoding)
-            .map_err(|error| format!("failed to decode {encoding} replay response: {error}"))?,
+        Some(encoding) => {
+            super::super::network_body::decompress_with_limit(body, encoding, max_output_bytes)
+                .map_err(|error| format!("failed to decode {encoding} replay response: {error}"))?
+        }
     };
 
     Ok(Some(String::from_utf8_lossy(&decoded).into_owned()))
@@ -22,7 +25,16 @@ pub(super) fn decode_replay_body(
 
 #[cfg(test)]
 mod tests {
-    use super::decode_replay_body;
+    use super::decode_replay_body as decode_replay_body_with_limit;
+
+    const TEST_LIMIT: usize = 1024 * 1024;
+
+    fn decode_replay_body(
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Option<String>, String> {
+        decode_replay_body_with_limit(headers, body, TEST_LIMIT)
+    }
 
     #[test]
     fn decode_gzip_response_body() {
@@ -54,6 +66,25 @@ mod tests {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
         let decoded = decode_replay_body(&headers, &gz).unwrap().unwrap();
         assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn configured_decompression_limit_is_honored() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"larger than limit").unwrap();
+        let wire = encoder.finish().unwrap();
+        let error = decode_replay_body_with_limit(
+            &[("content-encoding".to_string(), "gzip".to_string())],
+            &wire,
+            4,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("exceeds the preview limit"), "{error}");
     }
 
     #[test]
