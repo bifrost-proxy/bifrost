@@ -253,45 +253,7 @@ pub async fn handle_auth(
     }
 
     if path == "/api/auth/session" {
-        if *req.method() != Method::GET {
-            return method_not_allowed();
-        }
-        let tokens = [
-            extract_bearer_token(&req),
-            extract_admin_session_cookie(&req),
-        ];
-        if tokens.iter().all(Option::is_none) {
-            return error_response(StatusCode::UNAUTHORIZED, "Missing authenticated session");
-        }
-        let mut authenticated = None;
-        let mut last_error = None;
-        for token in tokens.into_iter().flatten() {
-            match crate::admin_auth::validate_admin_jwt(&state, &token) {
-                Ok(claims) => {
-                    authenticated = Some((token, claims));
-                    break;
-                }
-                Err(error) => last_error = Some(error),
-            }
-        }
-        let Some((token, claims)) = authenticated else {
-            return error_response(
-                StatusCode::UNAUTHORIZED,
-                &format!(
-                    "Unauthorized: {}",
-                    last_error.expect("at least one credential was validated")
-                ),
-            );
-        };
-        let max_age_secs = (claims.exp - chrono::Utc::now().timestamp()).max(0);
-        let mut resp = json_response(&serde_json::json!({ "success": true }));
-        resp.headers_mut().insert(
-            header::SET_COOKIE,
-            admin_session_cookie(&token, max_age_secs)
-                .parse()
-                .expect("admin session cookie must be a valid header"),
-        );
-        return resp;
+        return handle_session_request(&req, &state);
     }
 
     if path == "/api/auth/passwd" {
@@ -439,6 +401,45 @@ pub async fn handle_auth(
     error_response(StatusCode::NOT_FOUND, "API endpoint not found")
 }
 
+fn handle_session_request<B>(req: &Request<B>, state: &SharedAdminState) -> Response<BoxBody> {
+    if *req.method() != Method::GET {
+        return method_not_allowed();
+    }
+    let tokens = [extract_bearer_token(req), extract_admin_session_cookie(req)];
+    if tokens.iter().all(Option::is_none) {
+        return error_response(StatusCode::UNAUTHORIZED, "Missing authenticated session");
+    }
+    let mut authenticated = None;
+    let mut last_error = None;
+    for token in tokens.into_iter().flatten() {
+        match crate::admin_auth::validate_admin_jwt(state, &token) {
+            Ok(claims) => {
+                authenticated = Some((token, claims));
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let Some((token, claims)) = authenticated else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "Unauthorized: {}",
+                last_error.expect("at least one credential was validated")
+            ),
+        );
+    };
+    let max_age_secs = (claims.exp - chrono::Utc::now().timestamp()).max(0);
+    let mut resp = json_response(&serde_json::json!({ "success": true }));
+    resp.headers_mut().insert(
+        header::SET_COOKIE,
+        admin_session_cookie(&token, max_age_secs)
+            .parse()
+            .expect("admin session cookie must be a valid header"),
+    );
+    resp
+}
+
 fn require_json_content_type<B>(req: &Request<B>) -> bool {
     req.headers()
         .get(header::CONTENT_TYPE)
@@ -491,7 +492,73 @@ fn clear_admin_session_cookie() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin_auth_db::AuthDb;
     use hyper::Request;
+    use std::sync::Arc;
+
+    fn authenticated_state() -> (SharedAdminState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let auth_db = AuthDb::open(&tmp.path().join("auth.db")).expect("auth db");
+        (
+            Arc::new(crate::AdminState::new(0).with_auth_db(auth_db)),
+            tmp,
+        )
+    }
+
+    #[test]
+    fn session_endpoint_requires_get_and_a_credential() {
+        let (state, _tmp) = authenticated_state();
+        let post = Request::builder().method(Method::POST).body(()).unwrap();
+        assert_eq!(
+            handle_session_request(&post, &state).status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+
+        let missing = Request::builder().method(Method::GET).body(()).unwrap();
+        assert_eq!(
+            handle_session_request(&missing, &state).status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn session_endpoint_falls_back_from_invalid_bearer_to_valid_cookie() {
+        let (state, _tmp) = authenticated_state();
+        let (token, _) = issue_admin_jwt(&state, "admin").expect("issue jwt");
+        let req = Request::builder()
+            .method(Method::GET)
+            .header(header::AUTHORIZATION, "Bearer invalid")
+            .header(
+                header::COOKIE,
+                format!("{ADMIN_SESSION_COOKIE_NAME}={token}"),
+            )
+            .body(())
+            .unwrap();
+
+        let response = handle_session_request(&req, &state);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(
+                |value| value.starts_with(&format!("{ADMIN_SESSION_COOKIE_NAME}={token};"))
+            ));
+    }
+
+    #[test]
+    fn session_endpoint_rejects_invalid_credentials() {
+        let (state, _tmp) = authenticated_state();
+        let req = Request::builder()
+            .method(Method::GET)
+            .header(header::AUTHORIZATION, "Bearer invalid")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            handle_session_request(&req, &state).status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
 
     #[test]
     fn test_extract_bearer_token_accepts_bearer_and_lowercase() {
