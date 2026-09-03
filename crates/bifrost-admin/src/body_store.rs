@@ -28,6 +28,49 @@ pub enum BodyRef {
 }
 
 impl BodyRef {
+    /// Persist HTTP content-coding metadata beside the body file.
+    ///
+    /// `BodyRef` is a public API and a postcard-persisted database value, so
+    /// changing its enum shape would break both existing clients and stored
+    /// traffic. The sidecar keeps that contract stable while surviving a
+    /// process restart.
+    pub fn with_content_encoding(self, content_encoding: Option<&str>) -> std::io::Result<Self> {
+        match content_encoding
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(content_encoding) => {
+                if content_encoding.len() > 256 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "content-encoding metadata exceeds 256 bytes",
+                    ));
+                }
+                let path = self.file_path().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "content-encoding metadata requires a file-backed body",
+                    )
+                })?;
+                fs::write(content_encoding_marker_path(path), content_encoding)?;
+                Ok(self)
+            }
+            None => Ok(self),
+        }
+    }
+
+    pub fn content_encoding(&self) -> Option<String> {
+        let path = self.file_path()?;
+        fs::read_to_string(content_encoding_marker_path(path))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn storage_ref(&self) -> &BodyRef {
+        self
+    }
+
     pub fn size(&self) -> usize {
         match self {
             BodyRef::Inline { data } => data.len(),
@@ -37,8 +80,35 @@ impl BodyRef {
     }
 
     pub fn is_file(&self) -> bool {
-        matches!(self, BodyRef::File { .. } | BodyRef::FileRange { .. })
+        match self {
+            BodyRef::File { .. } | BodyRef::FileRange { .. } => true,
+            BodyRef::Inline { .. } => false,
+        }
     }
+
+    fn file_path(&self) -> Option<&str> {
+        match self {
+            BodyRef::File { path, .. } | BodyRef::FileRange { path, .. } => Some(path),
+            BodyRef::Inline { .. } => None,
+        }
+    }
+}
+
+fn content_encoding_marker_path(path: &str) -> PathBuf {
+    PathBuf::from(format!("{path}.content-encoding"))
+}
+
+fn retention_modified_time(path: &std::path::Path, own_modified: SystemTime) -> SystemTime {
+    let Some(path_text) = path.to_str() else {
+        return own_modified;
+    };
+    let Some(body_path) = path_text.strip_suffix(".content-encoding") else {
+        return own_modified;
+    };
+    fs::metadata(body_path)
+        .and_then(|metadata| metadata.modified())
+        .map(|body_modified| body_modified.max(own_modified))
+        .unwrap_or(own_modified)
 }
 
 pub struct BodyStore {
@@ -253,6 +323,7 @@ impl BodyStore {
         // 即使 body 很小，也优先落盘，避免在内存中形成一份 UTF-8/losy 的拷贝导致内存膨胀。
         let filename = format!("{}_{}", id, kind);
         let path = self.temp_dir.join(&filename);
+        let _ = fs::remove_file(content_encoding_marker_path(&path.to_string_lossy()));
 
         match fs::File::create(&path) {
             Ok(mut file) => {
@@ -283,6 +354,7 @@ impl BodyStore {
 
         let filename = format!("{}_{}", id, kind);
         let path = self.temp_dir.join(&filename);
+        let _ = fs::remove_file(content_encoding_marker_path(&path.to_string_lossy()));
 
         match fs::File::create(&path) {
             Ok(mut file) => {
@@ -316,6 +388,7 @@ impl BodyStore {
         self.acquire_stream_slot()?;
         let filename = format!("{}_{}", id, kind);
         let path = self.temp_dir.join(&filename);
+        let _ = fs::remove_file(content_encoding_marker_path(&path.to_string_lossy()));
         let file = match fs::File::create(&path) {
             Ok(file) => file,
             Err(error) => {
@@ -381,7 +454,7 @@ impl BodyStore {
     pub fn load(&self, body_ref: &BodyRef) -> Option<String> {
         match body_ref {
             BodyRef::Inline { data } => Some(data.clone()),
-            BodyRef::File { path, size } => {
+            BodyRef::File { path, size, .. } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
@@ -391,7 +464,9 @@ impl BodyStore {
                 file.read_to_end(&mut contents).ok()?;
                 Some(String::from_utf8_lossy(&contents).to_string())
             }
-            BodyRef::FileRange { path, offset, size } => {
+            BodyRef::FileRange {
+                path, offset, size, ..
+            } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
@@ -416,7 +491,7 @@ impl BodyStore {
     pub fn load_bytes(&self, body_ref: &BodyRef) -> Option<Vec<u8>> {
         match body_ref {
             BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
-            BodyRef::File { path, size } => {
+            BodyRef::File { path, size, .. } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
@@ -426,7 +501,9 @@ impl BodyStore {
                 file.read_to_end(&mut contents).ok()?;
                 Some(contents)
             }
-            BodyRef::FileRange { path, offset, size } => {
+            BodyRef::FileRange {
+                path, offset, size, ..
+            } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
@@ -464,6 +541,7 @@ impl BodyStore {
             if path.is_file() {
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
+                        let modified = retention_modified_time(&path, modified);
                         if let Ok(age) = now.duration_since(modified) {
                             if age > retention_duration && fs::remove_file(&path).is_ok() {
                                 removed_count += 1;
@@ -522,6 +600,7 @@ impl BodyStore {
         match body_ref {
             BodyRef::File { path, .. } | BodyRef::FileRange { path, .. } => {
                 let _ = fs::remove_file(path);
+                let _ = fs::remove_file(content_encoding_marker_path(path));
             }
             BodyRef::Inline { .. } => {}
         }
@@ -536,6 +615,9 @@ impl BodyStore {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_file() {
+                        if path.to_string_lossy().ends_with(".content-encoding") {
+                            continue;
+                        }
                         file_count += 1;
                         if let Ok(metadata) = entry.metadata() {
                             total_size += metadata.len();
@@ -611,16 +693,19 @@ impl BodyStore {
 }
 
 fn extract_base_id(file_name: &str) -> &str {
-    if let Some(prefix_end) = file_name.find('-') {
-        if let Some(second_dash) = file_name[prefix_end + 1..].find('-') {
-            let digits_start = prefix_end + 1 + second_dash + 1;
-            let digits_end = file_name[digits_start..]
-                .find(|c: char| !c.is_ascii_digit())
-                .map(|pos| digits_start + pos)
-                .unwrap_or(file_name.len());
-            if digits_end < file_name.len() && file_name.as_bytes()[digits_end] == b'_' {
-                return &file_name[..digits_end];
-            }
+    let file_name = file_name
+        .strip_suffix(".content-encoding")
+        .unwrap_or(file_name);
+    for suffix in [
+        "_res_openai_like",
+        "_sse_raw",
+        "_req_raw",
+        "_res_raw",
+        "_req",
+        "_res",
+    ] {
+        if let Some(id) = file_name.strip_suffix(suffix) {
+            return id;
         }
     }
     file_name
@@ -698,6 +783,97 @@ mod tests {
         // 新策略：即使 body 很小也优先落盘，避免 Inline 导致 TrafficRecord 常驻内存变大。
         assert!(matches!(body_ref, BodyRef::File { .. }));
         assert_eq!(store.load(&body_ref).unwrap(), "Hello, World!");
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn content_encoding_metadata_keeps_the_existing_public_variant() {
+        let dir = create_test_dir();
+        let path = dir.join("wire-body").to_string_lossy().to_string();
+        let stored = BodyRef::File {
+            path: path.clone(),
+            size: 10,
+        };
+        let encoded = stored.clone().with_content_encoding(Some("gzip")).unwrap();
+
+        assert!(matches!(
+            encoded.storage_ref(),
+            BodyRef::File { path: stored_path, .. } if stored_path == &path
+        ));
+        assert_eq!(encoded.content_encoding().as_deref(), Some("gzip"));
+        let json = serde_json::to_value(&encoded).unwrap();
+        assert!(json.get("File").is_some());
+        assert!(json.get("ContentEncoded").is_none());
+
+        let legacy: BodyRef = serde_json::from_value(serde_json::json!({
+            "File": { "path": "legacy", "size": 3 }
+        }))
+        .unwrap();
+        assert_eq!(legacy.content_encoding(), None);
+        assert!(std::ptr::eq(stored.storage_ref(), &stored));
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn content_encoding_metadata_rejects_unpersistable_sidecars() {
+        let dir = create_test_dir();
+        let path = dir.join("wire-body").to_string_lossy().to_string();
+        let stored = BodyRef::File {
+            path: path.clone(),
+            size: 10,
+        };
+        let overlong = "gzip,".repeat(60);
+        let error = stored
+            .clone()
+            .with_content_encoding(Some(&overlong))
+            .expect_err("overlong metadata must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        fs::create_dir_all(content_encoding_marker_path(&path)).unwrap();
+        let error = stored
+            .with_content_encoding(Some("gzip"))
+            .expect_err("sidecar write failure must be visible");
+        assert_ne!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let inline = BodyRef::Inline {
+            data: "wire".to_string(),
+        };
+        assert!(inline.with_content_encoding(Some("gzip")).is_err());
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn content_encoding_sidecar_inherits_live_body_retention() {
+        let dir = create_test_dir();
+        let body_path = dir.join("active_sse_raw");
+        fs::write(&body_path, b"live wire bytes").unwrap();
+        let sidecar = content_encoding_marker_path(&body_path.to_string_lossy());
+        fs::write(&sidecar, "gzip").unwrap();
+        let stale_sidecar_time = SystemTime::UNIX_EPOCH;
+
+        let effective = retention_modified_time(&sidecar, stale_sidecar_time);
+
+        assert!(effective > stale_sidecar_time);
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn overwriting_or_removing_a_body_clears_its_encoding_sidecar() {
+        let dir = create_test_dir();
+        let store = BodyStore::new(dir.clone(), 1024, 7, 64 * 1024, Duration::from_millis(200));
+        let encoded = store
+            .store("sidecar", "res", b"wire")
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        assert_eq!(encoded.content_encoding().as_deref(), Some("gzip"));
+
+        let replaced = store.store("sidecar", "res", b"plaintext").unwrap();
+        assert_eq!(replaced.content_encoding(), None);
+        let encoded = replaced.with_content_encoding(Some("br")).unwrap();
+        store.remove(&encoded);
+        assert_eq!(encoded.content_encoding(), None);
 
         cleanup_test_dir(&dir);
     }
@@ -887,6 +1063,14 @@ mod tests {
             "REQ-69c50db8-165720"
         );
         assert_eq!(
+            extract_base_id("OUT-REQ-69c50db8-165720_req_raw"),
+            "OUT-REQ-69c50db8-165720"
+        );
+        assert_eq!(
+            extract_base_id("OUT-REQ-69c50db8-165720_res_raw"),
+            "OUT-REQ-69c50db8-165720"
+        );
+        assert_eq!(
             extract_base_id("REQ-69c62cd8-072562_res_openai_like"),
             "REQ-69c62cd8-072562"
         );
@@ -895,6 +1079,31 @@ mod tests {
             "REQ-abcdef01-000001"
         );
         assert_eq!(extract_base_id("some_unknown_file"), "some_unknown");
+        assert_eq!(
+            extract_base_id("REQ-69c50db8-165720_sse_raw.content-encoding"),
+            "REQ-69c50db8-165720"
+        );
+    }
+
+    #[test]
+    fn test_delete_by_ids_removes_content_encoding_sidecar() {
+        let dir = create_test_dir();
+        let store = BodyStore::new(dir.clone(), 1, 7, 64 * 1024, Duration::from_millis(200));
+        let id = "REQ-encoded-sse";
+        let body_ref = store
+            .store(id, "sse_raw", b"compressed SSE payload")
+            .unwrap()
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        let body_path = body_ref.file_path().unwrap().to_string();
+        let sidecar = content_encoding_marker_path(&body_path);
+        assert!(sidecar.exists());
+
+        let removed = store.delete_by_ids(&[id.to_string()]).unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(!sidecar.exists());
+        cleanup_test_dir(&dir);
     }
 
     #[test]
@@ -902,19 +1111,21 @@ mod tests {
         let dir = create_test_dir();
         let store = BodyStore::new(dir.clone(), 1, 7, 64 * 1024, Duration::from_millis(200));
 
-        let id = "REQ-69c50db8-165720";
+        let id = "OUT-REQ-69c50db8-165720";
         store.store(id, "req", b"request body").unwrap();
         store.store(id, "res", b"response body").unwrap();
         store.store(id, "sse_raw", b"sse raw data").unwrap();
+        store.store(id, "req_raw", b"raw request").unwrap();
+        store.store(id, "res_raw", b"raw response").unwrap();
         store
             .store(id, "res_openai_like", b"openai like data")
             .unwrap();
 
         let stats = store.stats();
-        assert_eq!(stats.file_count, 4);
+        assert_eq!(stats.file_count, 6);
 
         let removed = store.delete_by_ids(&[id.to_string()]).unwrap();
-        assert_eq!(removed, 4);
+        assert_eq!(removed, 6);
 
         let stats = store.stats();
         assert_eq!(stats.file_count, 0);

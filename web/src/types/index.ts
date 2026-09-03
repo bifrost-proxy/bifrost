@@ -828,6 +828,7 @@ export interface SearchResponse {
   total_matched: number;
   next_cursor: number | null;
   has_more: boolean;
+  partial_reason?: string;
   search_id: string;
 }
 

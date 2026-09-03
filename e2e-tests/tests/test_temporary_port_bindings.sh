@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+: "${BIFROST_DISABLE_TRAY:=1}"
+export BIFROST_DISABLE_TRAY
 
 set -euo pipefail
 
@@ -85,13 +87,14 @@ fi
 if [[ -z "${HTML_PORT:-}" ]]; then
     assign_local_test_port HTML_PORT
 fi
-BIFROST_BIN="${PROJECT_DIR}/target/debug/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
 if [[ ! -x "$BIFROST_BIN" ]]; then
     BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
 fi
 TEST_DATA_DIR=""
 PROXY_PID=""
 HTML_PID=""
+GZIP_SSE_CURL_PID=""
 
 cleanup() {
     if [[ -n "${TEST_DATA_DIR}" ]]; then
@@ -105,6 +108,7 @@ cleanup() {
     fi
     safe_cleanup_proxy "$PROXY_PID"
     safe_cleanup_proxy "$HTML_PID"
+    safe_cleanup_proxy "$GZIP_SSE_CURL_PID"
     if [[ -n "$TEST_DATA_DIR" && -d "$TEST_DATA_DIR" ]]; then
         rm -rf "$TEST_DATA_DIR"
     fi
@@ -148,15 +152,43 @@ start_html_server_once() {
     local log_file="$1"
     python3 - "$HTML_PORT" <<'PY' > "${log_file}" 2>&1 &
 import http.server
+import gzip
 import sys
+import time
 
 port = int(sys.argv[1])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/gzip-sse":
+            body = gzip.compress(
+                b"data: first compressed event\n\ndata: second compressed event\n\n"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Encoding", "gzip")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            time.sleep(30)
+            return
         body = b"<html><body>badge fixture</body></html>"
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        request_body = self.rfile.read(length)
+        echo_encoded_body = self.path in ("/stacked-body", "/nested-gzip", "/multi-gzip")
+        body = request_body if echo_encoded_body else b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        if echo_encoded_body:
+            for content_encoding in self.headers.get_all("Content-Encoding", []):
+                self.send_header("Content-Encoding", content_encoding)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -222,6 +254,22 @@ export_network_file() {
         > "${output}"
 }
 
+import_network_file() {
+    local file="$1"
+    curl -fsS \
+        -H 'Content-Type: text/plain' \
+        -X POST \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/bifrost-file/import" \
+        --data-binary "@${file}" \
+        | python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+assert result["success"] is True, result
+assert result["file_type"] == "network", result
+assert result["data"]["record_count"] == 1, result
+'
+}
+
 assert_network_export_active_rules() {
     local file="$1"
     local expected_source="$2"
@@ -254,6 +302,119 @@ contents = [item.get("content", "") for item in active["rules"]]
 assert any(expected_rule in content for content in contents), active
 assert all(forbidden_rule not in content for content in contents), active
 PY
+}
+
+assert_network_export_stacked_body() {
+    local file="$1"
+    local expected_body="$2"
+    python3 - "$file" "$expected_body" <<'PY'
+import base64
+import gzip
+import json
+import sys
+import zlib
+from pathlib import Path
+
+path, expected_body = sys.argv[1:]
+text = Path(path).read_text()
+records = json.loads(text.split("\n---\n", 1)[1])
+assert len(records) == 1, records
+record = records[0]
+assert record["request_body"] == expected_body, record
+assert record["response_body"] == expected_body, record
+raw = base64.b64decode(record["request_body_base64"], validate=True)
+assert gzip.decompress(zlib.decompress(raw)).decode() == expected_body, record
+if record.get("response_body_base64"):
+    raw = base64.b64decode(record["response_body_base64"], validate=True)
+    assert gzip.decompress(zlib.decompress(raw)).decode() == expected_body, record
+PY
+}
+
+assert_network_preview_stacked_body() {
+    local file="$1"
+    local expected_body="$2"
+    curl -fsS \
+        -H 'Content-Type: text/plain' \
+        -X POST \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/bifrost-file/preview" \
+        --data-binary "@${file}" \
+        | python3 -c '
+import json, sys
+expected_body = sys.argv[1]
+preview = json.load(sys.stdin)
+network = preview["network"]
+detail = network["single_record"]
+assert detail["request_body"] == expected_body, detail
+assert detail["response_body"] == expected_body, detail
+assert detail["record"]["request_content_type"] == "application/json", detail
+assert detail["record"]["content_type"] == "application/json", detail
+assert not network.get("warnings"), network
+' "$expected_body"
+}
+
+assert_traffic_stacked_body_plaintext() {
+    local id="$1"
+    local expected_body="$2"
+    local direction
+    for direction in request response; do
+        local matched="false"
+        local attempt
+        for attempt in {1..40}; do
+            if curl -fsS \
+                "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${id}/${direction}-body" \
+                | python3 -c '
+import json, sys
+expected_body, direction = sys.argv[1:]
+payload = json.load(sys.stdin)
+assert payload["data"] == expected_body, (direction, payload)
+' "$expected_body" "$direction" 2>/dev/null; then
+                matched="true"
+                break
+            fi
+            sleep 0.05
+        done
+        if [[ "$matched" != "true" ]]; then
+            local actual
+            actual="$(curl -fsS "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${id}/${direction}-body" || true)"
+            _log_fail "Traffic ${direction} body is decoded" "$expected_body" "$actual"
+            return 1
+        fi
+    done
+}
+
+assert_traffic_preserves_application_gzip() {
+    local id="$1"
+    local expected_file="$2"
+    local direction
+    for direction in request response; do
+        curl -fsS \
+            "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${id}/${direction}-body?encoding=base64" \
+            | python3 -c '
+import base64, json, pathlib, sys
+expected_file, direction = sys.argv[1:]
+payload = json.load(sys.stdin)
+actual = base64.b64decode(payload["data_base64"], validate=True)
+expected = pathlib.Path(expected_file).read_bytes()
+assert actual == expected, (direction, len(actual), len(expected))
+' "$expected_file" "$direction"
+        _log_pass "Traffic ${direction} body removes exactly one HTTP gzip layer"
+    done
+}
+
+assert_traffic_raw_body_bytes() {
+    local id="$1"
+    local direction="$2"
+    local expected_file="$3"
+    curl -fsS \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${id}/${direction}-body?raw=1&encoding=base64" \
+        | python3 -c '
+import base64, json, pathlib, sys
+expected_file, direction = sys.argv[1:]
+payload = json.load(sys.stdin)
+actual = base64.b64decode(payload["data_base64"], validate=True)
+expected = pathlib.Path(expected_file).read_bytes()
+assert actual == expected, (direction, len(actual), len(expected))
+' "$expected_file" "$direction"
 }
 
 record_id_for_path_and_port() {
@@ -476,11 +637,59 @@ main() {
     assert_body_contains "inline:updated-only.test" "$(cat "${TEST_DATA_DIR}/update.log")" "port update accepts rule text"
     assert_body_contains "updated-rule" "$(proxy_body "${UPDATE_PORT}" "http://updated-only.test/after-update")" "updated temporary port should use new inline rule"
 
-    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id
+    local stacked_body='{"message":"hello from stacked encoding e2e"}'
+    python3 -c 'import gzip, pathlib, sys, zlib; pathlib.Path(sys.argv[1]).write_bytes(zlib.compress(gzip.compress(sys.argv[2].encode())))' \
+        "${TEST_DATA_DIR}/stacked-request.bin" "${stacked_body}"
+    curl -fsS --max-time 5 --noproxy '' \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        -H 'Content-Type: application/json' \
+        -H 'Content-Encoding: gzip' \
+        -H 'Content-Encoding: deflate' \
+        --data-binary "@${TEST_DATA_DIR}/stacked-request.bin" \
+        "http://127.0.0.1:${HTML_PORT}/stacked-body" \
+        > "${TEST_DATA_DIR}/stacked-response.json"
+
+    local nested_gzip_body='{"message":"application gzip must remain compressed"}'
+    python3 -c 'import gzip, pathlib, sys; inner=gzip.compress(sys.argv[2].encode()); pathlib.Path(sys.argv[1]).write_bytes(inner); pathlib.Path(sys.argv[3]).write_bytes(gzip.compress(inner))' \
+        "${TEST_DATA_DIR}/application-gzip.bin" "${nested_gzip_body}" "${TEST_DATA_DIR}/nested-gzip-wire.bin"
+    curl -fsS --max-time 5 --noproxy '' \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        -H 'Content-Type: application/gzip' \
+        -H 'Content-Encoding: gzip' \
+        --data-binary "@${TEST_DATA_DIR}/nested-gzip-wire.bin" \
+        "http://127.0.0.1:${HTML_PORT}/nested-gzip" \
+        > "${TEST_DATA_DIR}/nested-gzip-response.bin"
+
+    local multi_gzip_body='{"message":"hello from concatenated gzip members"}'
+    python3 -c 'import gzip, pathlib, sys; body=sys.argv[2].encode(); middle=len(body)//2; pathlib.Path(sys.argv[1]).write_bytes(gzip.compress(body[:middle]) + gzip.compress(body[middle:]))' \
+        "${TEST_DATA_DIR}/multi-gzip-wire.bin" "${multi_gzip_body}"
+    curl -fsS --max-time 5 --noproxy '' \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        -H 'Content-Type: application/json' \
+        -H 'Content-Encoding: gzip' \
+        --data-binary "@${TEST_DATA_DIR}/multi-gzip-wire.bin" \
+        "http://127.0.0.1:${HTML_PORT}/multi-gzip" \
+        > "${TEST_DATA_DIR}/multi-gzip-response.json"
+
+    curl -fsS --max-time 35 --noproxy '' \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        "http://127.0.0.1:${HTML_PORT}/gzip-sse" \
+        > "${TEST_DATA_DIR}/gzip-sse-response.bin" &
+    GZIP_SSE_CURL_PID=$!
+
+    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id nested_gzip_record_id multi_gzip_record_id gzip_sse_record_id
     temp_record_id="$(wait_for_record "/temp-port" "${TEMP_PORT}")"
     main_record_id="$(wait_for_record "/main-port" "${MAIN_PORT}")"
     direct_temp_record_id="$(wait_for_record "/direct-temp" "${TEMP_PORT}")"
     direct_main_record_id="$(wait_for_record "/direct-main" "${MAIN_PORT}")"
+    stacked_record_id="$(wait_for_record "/stacked-body" "${MAIN_PORT}")"
+    nested_gzip_record_id="$(wait_for_record "/nested-gzip" "${MAIN_PORT}")"
+    multi_gzip_record_id="$(wait_for_record "/multi-gzip" "${MAIN_PORT}")"
+    gzip_sse_record_id="$(wait_for_record "/gzip-sse" "${MAIN_PORT}")"
+    assert_traffic_stacked_body_plaintext "${stacked_record_id}" "${stacked_body}"
+    assert_traffic_preserves_application_gzip "${nested_gzip_record_id}" "${TEST_DATA_DIR}/application-gzip.bin"
+    assert_traffic_stacked_body_plaintext "${multi_gzip_record_id}" "${multi_gzip_body}"
+    _log_pass "Traffic request and response decode every concatenated gzip member"
     assert_body_contains "\"lp\":${TEMP_PORT}" "$(traffic_json)" "Traffic API compact records include temporary listener port"
     assert_body_contains "\"lp\":${MAIN_PORT}" "$(traffic_json)" "Traffic API compact records include main listener port"
     assert_body_contains "\"listener_port\":${TEMP_PORT}" "$(traffic_detail_json "${temp_record_id}")" "Traffic detail includes temporary listener port"
@@ -507,6 +716,73 @@ main() {
     _log_pass "CLI traffic search excludes main listener port when filtering temporary port"
     "$BIFROST_BIN" traffic get --port "${MAIN_PORT}" "${temp_record_id}" --format json > "${TEST_DATA_DIR}/traffic-get.json"
     assert_body_contains "\"listener_port\":${TEMP_PORT}" "$(cat "${TEST_DATA_DIR}/traffic-get.json")" "CLI traffic get JSON includes temporary listener port"
+    "$BIFROST_BIN" traffic get --port "${MAIN_PORT}" "${stacked_record_id}" --request-body --response-body --format json > "${TEST_DATA_DIR}/traffic-get-stacked.json"
+    python3 - "${TEST_DATA_DIR}/traffic-get-stacked.json" "${stacked_body}" <<'PY'
+import json
+import sys
+
+path, expected = sys.argv[1:]
+detail = json.load(open(path))
+assert detail["request_body"]["success"] is True, detail
+assert detail["response_body"]["success"] is True, detail
+assert detail["request_body"]["data"] == expected, detail
+assert detail["response_body"]["data"] == expected, detail
+PY
+    _log_pass "CLI traffic get decodes content-encoded request and response bodies"
+
+    "$BIFROST_BIN" -p "${MAIN_PORT}" traffic search "hello from stacked encoding e2e" \
+        --req-body \
+        --res-json '$.message=hello from stacked encoding e2e' \
+        --listener-port "${MAIN_PORT}" \
+        --include bodies \
+        --format json \
+        --max-results 20 \
+        --max-scan 200 \
+        > "${TEST_DATA_DIR}/traffic-search-stacked.json"
+    python3 - "${TEST_DATA_DIR}/traffic-search-stacked.json" "${stacked_record_id}" "${stacked_body}" <<'PY'
+import base64
+import json
+import sys
+
+path, expected_id, expected_body = sys.argv[1:]
+payload = json.load(open(path))
+item = next(item for item in payload["results"] if item["id"] == expected_id)
+assert "hello from stacked encoding e2e" in item["matches"][0]["preview"], item
+for side in ("request", "response"):
+    chunk = item["bodies"][side]
+    assert base64.b64decode(chunk["bytes_b64"], validate=True).decode() == expected_body, (side, chunk)
+PY
+    _log_pass "CLI traffic search decodes encoded bodies for keyword, JSON filter, and includes"
+
+    curl -fsS "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/batch?ids=${stacked_record_id}&include=bodies" \
+        > "${TEST_DATA_DIR}/traffic-batch-stacked.ndjson"
+    python3 - "${TEST_DATA_DIR}/traffic-batch-stacked.ndjson" "${stacked_body}" <<'PY'
+import base64
+import json
+import sys
+
+path, expected_body = sys.argv[1:]
+item = json.loads(open(path).readline())
+for side in ("request", "response"):
+    chunk = item["bodies"][side]
+    assert base64.b64decode(chunk["bytes_b64"], validate=True).decode() == expected_body, (side, chunk)
+PY
+    _log_pass "Traffic batch API decodes content-encoded request and response bodies"
+
+    if curl -fsS --max-time 5 \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${gzip_sse_record_id}/sse/stream?from=begin" \
+        > "${TEST_DATA_DIR}/gzip-sse-events.txt"; then
+        _log_fail "Compressed SSE stream remains live with its upstream" "curl timeout while upstream is open" "stream closed early"
+        return 1
+    elif [[ "$?" -ne 28 ]]; then
+        _log_fail "Compressed SSE stream remains live with its upstream" "curl timeout (28)" "unexpected curl failure"
+        return 1
+    fi
+    _log_pass "Compressed SSE stream remains live with its upstream"
+    assert_body_contains "data: first compressed event" "$(cat "${TEST_DATA_DIR}/gzip-sse-events.txt")" "Compressed SSE stream decodes its first event"
+    assert_body_contains "data: second compressed event" "$(cat "${TEST_DATA_DIR}/gzip-sse-events.txt")" "Compressed SSE stream decodes its second event"
+    safe_cleanup_proxy "$GZIP_SSE_CURL_PID"
+    GZIP_SSE_CURL_PID=""
 
     export_network_file "${main_record_id}" "${TEST_DATA_DIR}/main-network-export.bifrost"
     assert_network_export_active_rules "${TEST_DATA_DIR}/main-network-export.bifrost" "default_port" "${MAIN_PORT}" "main-only.test status://209" "temp-only.test status://210"
@@ -515,6 +791,17 @@ main() {
     export_network_file "${temp_record_id}" "${TEST_DATA_DIR}/temp-network-export.bifrost"
     assert_network_export_active_rules "${TEST_DATA_DIR}/temp-network-export.bifrost" "custom_port" "${TEMP_PORT}" "temp-only.test status://210" "main-only.test status://209"
     _log_pass "Network export includes custom-port active rules for temporary listener traffic"
+
+    export_network_file "${stacked_record_id}" "${TEST_DATA_DIR}/stacked-network-export.bifrost"
+    assert_network_export_stacked_body "${TEST_DATA_DIR}/stacked-network-export.bifrost" "${stacked_body}"
+    assert_network_preview_stacked_body "${TEST_DATA_DIR}/stacked-network-export.bifrost" "${stacked_body}"
+    _log_pass "Traffic detail and Network export decode repeated stacked request and response encodings"
+
+    import_network_file "${TEST_DATA_DIR}/stacked-network-export.bifrost"
+    assert_traffic_stacked_body_plaintext "OUT-${stacked_record_id}" "${stacked_body}"
+    _log_pass "Imported Network record persists decoded request and response bodies"
+    assert_traffic_raw_body_bytes "OUT-${stacked_record_id}" request "${TEST_DATA_DIR}/stacked-request.bin"
+    _log_pass "Imported Network record preserves raw request bytes"
 
     "$BIFROST_BIN" port destroy "${TEMP_PORT}"
     if curl -sS --max-time 2 -x "http://127.0.0.1:${TEMP_PORT}" "http://temp-only.test/" >/dev/null 2>&1; then

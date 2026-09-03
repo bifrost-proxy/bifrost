@@ -18,7 +18,10 @@ class Handler(BaseHTTPRequestHandler):
     def _headers(self, content_type="text/event-stream", content_encoding=None):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
-        if content_encoding is not None:
+        if isinstance(content_encoding, tuple):
+            for encoding in content_encoding:
+                self.send_header("Content-Encoding", encoding)
+        elif content_encoding is not None:
             self.send_header("Content-Encoding", content_encoding)
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
@@ -37,6 +40,8 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/encoded":
                 self._headers(content_encoding="gzip")
                 self._write(b"data: encoded\n\n")
+            elif self.path == "/identity":
+                self._headers(content_encoding=("identity", "identity"))
             else:
                 self._headers()
 

@@ -9,6 +9,7 @@ sse-tail-end-error.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript:
 sse-conflict.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resScript://missing-response resStreamScript://{transform_stream}
 sse-json.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
 sse-encoded.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
+sse-identity.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream}
 sse-init-error.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://missing-stream
 sse-multiple.local http://127.0.0.1:__SSE_UPSTREAM_PORT__ resStreamScript://{transform_stream} resStreamScript://{event_error_stream}
 sse-direct-conflict.local statusCode://200 resScript://missing-response resStreamScript://{mock_stream}
@@ -25,6 +26,8 @@ sse-tunnel-json.local tlsIntercept://
 https://sse-tunnel-json.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resStreamScript://{transform_stream}
 sse-tunnel-encoded.local tlsIntercept://
 https://sse-tunnel-encoded.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resStreamScript://{transform_stream}
+sse-tunnel-identity.local tlsIntercept://
+https://sse-tunnel-identity.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resStreamScript://{transform_stream}
 sse-tunnel-init-error.local tlsIntercept://
 https://sse-tunnel-init-error.local/ http://127.0.0.1:__SSE_UPSTREAM_PORT__/ resStreamScript://missing-stream
 

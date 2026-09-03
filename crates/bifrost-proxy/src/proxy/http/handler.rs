@@ -62,7 +62,8 @@ use crate::utils::logging::{format_rules_detail, format_rules_summary, RequestCo
 use crate::utils::mock::{generate_mock_response, should_intercept_response};
 use crate::utils::tee::{
     create_metrics_body, create_request_tee_body, create_sse_tee_body, create_tee_body_with_store,
-    store_request_body, store_response_body, BodyCaptureHandle, TeeBodyCaptureOptions,
+    store_request_body, store_response_body, BodyCaptureHandle, SseTeeOptions,
+    TeeBodyCaptureOptions,
 };
 use crate::utils::throttle::wrap_throttled_body;
 use crate::utils::upstream_stability::connect_tcp;
@@ -82,9 +83,9 @@ use self::decode::{
     apply_decode_scripts_for_storage, get_values_from_state, DecodeForStorageResult,
 };
 use super::body_metadata::{
-    buffered_res_body_mode, header_content_encoding, is_no_body_response, normalize_req_headers,
-    normalize_res_headers, response_content_encoding, set_content_encoding_header,
-    streaming_res_body_mode, BodyMode,
+    buffered_res_body_mode, content_encoding_is_identity, header_content_encoding,
+    is_no_body_response, normalize_req_headers, normalize_res_headers, response_content_encoding,
+    set_content_encoding_header, streaming_res_body_mode, BodyMode,
 };
 use super::breakpoint::{
     apply_edited_response_status, apply_edited_response_status_and_body, body_limit,
@@ -1171,12 +1172,13 @@ fn record_direct_status_traffic(
     record.original_request_headers = request_snapshot.original_headers.clone();
     record.request_size = request_snapshot.body.len();
     record.upload_bytes = request_snapshot.body.len();
-    record.request_body_ref = store_request_body(
+    store_request_body(
         &Some(Arc::clone(state)),
         ctx.id_str(),
         &request_snapshot.body,
         request_snapshot.content_encoding.as_deref(),
-    );
+    )
+    .apply_to(&mut record);
     record.original_response_headers = Some(mock_res_headers);
     record.has_rule_hit = has_rules;
     record.matched_rules = crate::utils::build_matched_rules(resolved_rules);
@@ -2252,6 +2254,7 @@ pub async fn handle_http_request(
                         body,
                         admin_state.clone(),
                         ctx.id_str().to_string(),
+                        req_content_encoding.clone(),
                     );
                     streaming_body = Some(tee_body);
                     req_body_capture = Some(capture);
@@ -2321,6 +2324,7 @@ pub async fn handle_http_request(
                                 replay_body,
                                 admin_state.clone(),
                                 ctx.id_str().to_string(),
+                                req_content_encoding.clone(),
                             );
                             streaming_body = Some(tee_body);
                             req_body_capture = Some(capture);
@@ -2399,6 +2403,7 @@ pub async fn handle_http_request(
                             replay_body,
                             admin_state.clone(),
                             ctx.id_str().to_string(),
+                            req_content_encoding.clone(),
                         );
                         streaming_body = Some(tee_body);
                         req_body_capture = Some(capture);
@@ -2453,8 +2458,12 @@ pub async fn handle_http_request(
         (Bytes::new(), Bytes::new())
     } else {
         if admin_state.is_some() {
-            let (tee_body, capture) =
-                create_request_tee_body(body, admin_state.clone(), ctx.id_str().to_string());
+            let (tee_body, capture) = create_request_tee_body(
+                body,
+                admin_state.clone(),
+                ctx.id_str().to_string(),
+                req_content_encoding.clone(),
+            );
             streaming_body = Some(tee_body);
             req_body_capture = Some(capture);
         } else {
@@ -2614,18 +2623,17 @@ pub async fn handle_http_request(
             apply_request_context(&mut pending, ctx);
             pending.has_rule_hit = has_rules;
             pending.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
-            pending.request_body_ref = if !final_body.is_empty() {
+            if !final_body.is_empty() {
                 store_request_body(
                     &admin_state,
                     ctx.id_str(),
                     &final_body,
                     output_req_content_encoding.as_deref(),
                 )
+                .apply_to(&mut pending);
             } else if let Some(ref capture) = req_body_capture {
-                capture.clone_ref()
-            } else {
-                None
-            };
+                pending.request_body_ref = capture.clone_ref();
+            }
             state.record_traffic(pending);
         }
     }
@@ -2767,17 +2775,18 @@ pub async fn handle_http_request(
                 record.has_rule_hit = has_rules;
                 record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
                 record.error_message = Some(error_msg.clone());
-                record.request_body_ref = if !final_body.is_empty() {
+                if !final_body.is_empty() {
                     store_request_body(
                         &admin_state,
                         ctx.id_str(),
                         &final_body,
                         req_content_encoding.as_deref(),
                     )
+                    .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    capture.clone_ref().or_else(|| capture.take())
+                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
                 } else if state.get_super_performance_mode() {
-                    None
+                    record.request_body_ref = None;
                 } else if let Some(ref body_store) = state.body_store {
                     let store = body_store.read();
                     let decompressed_req_body = decompress_body_with_limit(
@@ -2785,7 +2794,8 @@ pub async fn handle_http_request(
                         req_content_encoding.as_deref(),
                         max_decompress_output_bytes,
                     );
-                    store.store(ctx.id_str(), "req", decompressed_req_body.as_ref())
+                    record.request_body_ref =
+                        store.store(ctx.id_str(), "req", decompressed_req_body.as_ref());
                 } else {
                     store_request_body(
                         &admin_state,
@@ -2793,7 +2803,8 @@ pub async fn handle_http_request(
                         &final_body,
                         req_content_encoding.as_deref(),
                     )
-                };
+                    .apply_to(&mut record);
+                }
 
                 record.response_body_ref = if state.get_super_performance_mode() {
                     None
@@ -3462,7 +3473,7 @@ pub async fn handle_http_request(
                 .unwrap());
         }
         if response_content_encoding(&res_parts)
-            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+            .is_some_and(|encoding| !content_encoding_is_identity(&encoding))
         {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -3734,18 +3745,17 @@ pub async fn handle_http_request(
                     }
                 }
 
-                record.request_body_ref = if !body_bytes.is_empty() {
+                if !body_bytes.is_empty() {
                     store_request_body(
                         &admin_state,
                         record_id,
                         &body_bytes,
                         req_content_encoding.as_deref(),
                     )
+                    .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    capture.clone_ref().or_else(|| capture.take())
-                } else {
-                    None
-                };
+                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                }
 
                 if !req_script_results.is_empty() {
                     record.req_script_results = Some(req_script_results.clone());
@@ -3755,8 +3765,18 @@ pub async fn handle_http_request(
                     if let Some(ref body_store) = state.body_store {
                         match body_store.read().start_stream(record_id, "sse_raw") {
                             Ok(writer) => {
-                                record.response_body_ref = Some(writer.body_ref());
-                                sse_stream_writer = Some(writer);
+                                match writer
+                                    .body_ref()
+                                    .with_content_encoding(res_content_encoding.as_deref())
+                                {
+                                    Ok(body_ref) => {
+                                        record.response_body_ref = Some(body_ref);
+                                        sse_stream_writer = Some(writer);
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(%error, %record_id, "failed to persist SSE content encoding");
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, record_id = %record_id, "failed to start sse raw stream writer");
@@ -3850,9 +3870,13 @@ pub async fn handle_http_request(
                 res_body,
                 admin_state.clone(),
                 record_id.to_string(),
-                Some(traffic_type),
-                sse_stream_writer,
-                max_body_buffer_size,
+                SseTeeOptions {
+                    traffic_type: Some(traffic_type),
+                    file_writer: sse_stream_writer,
+                    content_encoding: res_content_encoding.clone(),
+                    max_buffer_size: max_body_buffer_size,
+                    max_decompress_output_bytes,
+                },
             );
             let final_body = wrap_throttled_body(tee_body.boxed(), resolved_rules.res_speed);
             let body = with_trailers(final_body, &resolved_rules);
@@ -9531,7 +9555,10 @@ mod coverage_90_wave {
                 "tcp connect error",
             ),
         ] {
-            let state = Arc::new(AdminState::new(19101));
+            let harness = bifrost_admin::test_support::TestAdminState::builder()
+                .port(19101)
+                .build();
+            let state = harness.state();
             state
                 .breakpoint_manager
                 .update_settings(BreakpointSettings {

@@ -3,40 +3,43 @@ use flate2::Compression;
 use std::io::Write;
 
 pub fn compress_body(data: &[u8], content_encoding: &str) -> std::io::Result<Vec<u8>> {
-    let encoding = content_encoding
+    let mut encoded = data.to_vec();
+    for encoding in content_encoding
         .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-
-    match encoding.as_str() {
-        "" | "identity" => Ok(data.to_vec()),
-        "gzip" => {
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(data)?;
-            encoder.finish()
-        }
-        // Most clients interpret "deflate" as zlib wrapped stream.
-        "deflate" => {
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(data)?;
-            encoder.finish()
-        }
-        "br" => {
-            let mut out = Vec::new();
-            {
-                let mut encoder = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
-                encoder.write_all(data)?;
+        .map(str::trim)
+        .filter(|encoding| !encoding.is_empty())
+    {
+        encoded = match encoding.to_ascii_lowercase().as_str() {
+            "identity" => encoded,
+            "gzip" | "x-gzip" => {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(&encoded)?;
+                encoder.finish()?
             }
-            Ok(out)
-        }
-        "zstd" => zstd::stream::encode_all(std::io::Cursor::new(data), 0),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("unsupported content-encoding: {}", content_encoding),
-        )),
+            // Most clients interpret "deflate" as zlib wrapped stream.
+            "deflate" => {
+                let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(&encoded)?;
+                encoder.finish()?
+            }
+            "br" => {
+                let mut out = Vec::new();
+                {
+                    let mut encoder = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
+                    encoder.write_all(&encoded)?;
+                }
+                out
+            }
+            "zstd" => zstd::stream::encode_all(std::io::Cursor::new(encoded), 0)?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unsupported content-encoding: {encoding}"),
+                ));
+            }
+        };
     }
+    Ok(encoded)
 }
 
 #[cfg(test)]
@@ -50,6 +53,11 @@ mod tests {
         let compressed = compress_body(original, "gzip").unwrap();
         let decompressed = try_decompress_body_with_limit(&compressed, "gzip", 1024).unwrap();
         assert_eq!(decompressed, original);
+
+        let compressed_alias = compress_body(original, "x-gzip").unwrap();
+        let decompressed_alias =
+            try_decompress_body_with_limit(&compressed_alias, "x-gzip", 1024).unwrap();
+        assert_eq!(decompressed_alias, original);
     }
 
     #[test]
@@ -57,7 +65,11 @@ mod tests {
         let data = b"plain text";
         assert_eq!(compress_body(data, "").unwrap(), data);
         assert_eq!(compress_body(data, "identity").unwrap(), data);
-        assert_eq!(compress_body(data, "identity, gzip").unwrap(), data);
+        let encoded = compress_body(data, "identity, gzip").unwrap();
+        assert_eq!(
+            try_decompress_body_with_limit(&encoded, "identity, gzip", 1024).unwrap(),
+            data
+        );
     }
 
     #[test]
@@ -81,6 +93,16 @@ mod tests {
         let original = b"hello zstd";
         let compressed = compress_body(original, "zstd").unwrap();
         let decompressed = try_decompress_body_with_limit(&compressed, "zstd", 1024).unwrap();
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_multiple_content_codings_roundtrip() {
+        let original = b"stacked encoding roundtrip";
+
+        let compressed = compress_body(original, "gzip, br").unwrap();
+        let decompressed = try_decompress_body_with_limit(&compressed, "gzip, br", 1024).unwrap();
+
         assert_eq!(decompressed, original);
     }
 

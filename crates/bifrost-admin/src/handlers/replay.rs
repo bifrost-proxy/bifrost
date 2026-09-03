@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -38,11 +37,62 @@ use crate::request_rules::{apply_all_request_rules, build_applied_rules, Applied
 use crate::state::SharedAdminState;
 use crate::traffic::{FrameDirection, FrameType, MatchedRule, TrafficRecord};
 
+mod body_decode;
+
+use body_decode::decode_replay_body;
+
 static REPLAY_SEMAPHORE: once_cell::sync::Lazy<Arc<Semaphore>> =
     once_cell::sync::Lazy::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_REPLAYS)));
 
 static REPLAY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+struct ReplayWireResponse {
+    body: Bytes,
+    content_encoded: bool,
+    standard_decoded: bool,
+}
+
+impl ReplayWireResponse {
+    fn new(headers: &[(String, String)], body: Bytes) -> Self {
+        let encoding = super::network_body::content_encoding_value(&Some(headers.to_vec()));
+        let content_encoded = encoding.as_deref().is_some_and(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|coding| !coding.is_empty())
+                .any(|coding| !coding.eq_ignore_ascii_case("identity"))
+        });
+        let standard_decoded = content_encoded
+            && encoding
+                .as_deref()
+                .is_some_and(super::network_body::content_encoding_is_supported);
+        Self {
+            body,
+            content_encoded,
+            standard_decoded,
+        }
+    }
+
+    fn decoder_input(&self, decoded_body: Option<&Bytes>) -> Option<Bytes> {
+        if self.standard_decoded {
+            decoded_body.cloned()
+        } else {
+            Some(self.body.clone())
+        }
+    }
+}
+
+fn decode_replay_wire_response(
+    headers: &[(String, String)],
+    body: Bytes,
+    max_output_bytes: usize,
+) -> Result<(Option<String>, ReplayWireResponse), String> {
+    let decoded = decode_replay_body(headers, &body, max_output_bytes)?;
+    let capture = ReplayWireResponse::new(headers, body);
+    Ok((decoded, capture))
+}
+
+#[cfg(test)]
 fn get_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -91,67 +141,9 @@ fn should_skip_http_forward_header(name: &str, target_authority_changed: bool) -
     ) || (target_authority_changed && n == "host")
 }
 
-fn decode_replay_body(headers: &[(String, String)], body: &[u8]) -> Option<String> {
-    if body.is_empty() {
-        return None;
-    }
-
-    let encoding = get_header_value(headers, "content-encoding")
-        .unwrap_or("")
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-
-    let decoded = match encoding.as_str() {
-        "" => body.to_vec(),
-        "gzip" => {
-            let mut d = flate2::read::GzDecoder::new(std::io::Cursor::new(body));
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).ok()?;
-            out
-        }
-        "deflate" => {
-            let mut d = flate2::read::ZlibDecoder::new(std::io::Cursor::new(body));
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).ok()?;
-            out
-        }
-        "br" => {
-            let mut d = brotli::Decompressor::new(std::io::Cursor::new(body), 4096);
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).ok()?;
-            out
-        }
-        "zstd" => zstd::stream::decode_all(std::io::Cursor::new(body)).ok()?,
-        _ => body.to_vec(),
-    };
-
-    Some(String::from_utf8_lossy(&decoded).to_string())
-}
-
 #[cfg(test)]
-mod replay_body_decode_tests {
-    use super::{
-        decode_replay_body, replay_target_authority_changed, should_skip_http_forward_header,
-    };
-
-    #[test]
-    fn decode_gzip_response_body() {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use std::io::Write;
-
-        let raw = br#"{"ok":true,"msg":"hello"}"#;
-        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(raw).unwrap();
-        let gz = enc.finish().unwrap();
-
-        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        let decoded = decode_replay_body(&headers, &gz).unwrap();
-        assert_eq!(decoded, String::from_utf8_lossy(raw));
-    }
+mod replay_forward_header_tests {
+    use super::{replay_target_authority_changed, should_skip_http_forward_header};
 
     #[test]
     fn replay_forward_skips_stale_host_when_rule_changes_target() {
@@ -552,9 +544,30 @@ async fn execute_replay_unified(
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
 
-        let response_body = match response.bytes().await {
-            Ok(b) => decode_replay_body(&response_headers, &b),
-            Err(_) => None,
+        let max_decompress_output_bytes = match state.config_manager.as_ref() {
+            Some(config_manager) => {
+                config_manager
+                    .config()
+                    .await
+                    .sandbox
+                    .limits
+                    .max_decompress_output_bytes
+            }
+            None => super::network_body::DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+        };
+        let (response_body, response_wire) = match response.bytes().await {
+            Ok(body) => match decode_replay_wire_response(
+                &response_headers,
+                body,
+                max_decompress_output_bytes,
+            ) {
+                Ok((decoded, capture)) => (decoded, Some(capture)),
+                Err(error) => {
+                    drop(permit);
+                    return error_response(StatusCode::BAD_GATEWAY, &error);
+                }
+            },
+            Err(_) => (None, None),
         };
 
         let (mut status, mut response_headers, mut response_body) =
@@ -588,6 +601,7 @@ async fn execute_replay_unified(
             status,
             &response_headers,
             response_body.as_deref(),
+            response_wire.as_ref(),
             duration_ms,
             &matched_rules,
             &resolved_rules,
@@ -722,6 +736,7 @@ async fn record_traffic_for_unified(
     status: u16,
     response_headers: &[(String, String)],
     response_body: Option<&str>,
+    response_wire: Option<&ReplayWireResponse>,
     duration_ms: u64,
     matched_rules: &[MatchedRule],
     resolved_rules: &bifrost_core::ResolvedRules,
@@ -752,7 +767,17 @@ async fn record_traffic_for_unified(
     let mut request_body_for_storage = applied_request.body.clone();
     let mut response_body_for_storage = response_body.map(|body| Bytes::from(body.to_string()));
     let mut raw_request_body_ref = None;
-    let mut raw_response_body_ref = None;
+    let raw_response_body_ref = response_wire.and_then(|capture| {
+        (capture.content_encoded || !script_rules.decode_scripts.is_empty())
+            .then(|| {
+                state.body_store.as_ref().and_then(|body_store| {
+                    body_store
+                        .read()
+                        .store(&traffic_id, "res_raw", &capture.body)
+                })
+            })
+            .flatten()
+    });
     let mut decode_req_script_results = Vec::new();
     let mut decode_res_script_results = Vec::new();
 
@@ -794,10 +819,10 @@ async fn record_traffic_for_unified(
             decode_req_script_results = results;
         }
 
-        if let Some(body) = response_body_for_storage.clone() {
-            if let Some(ref body_store) = state.body_store {
-                raw_response_body_ref = body_store.read().store(&traffic_id, "res_raw", &body);
-            }
+        let response_decode_input = response_wire
+            .and_then(|capture| capture.decoder_input(response_body_for_storage.as_ref()))
+            .or_else(|| response_body_for_storage.clone());
+        if let Some(body) = response_decode_input {
             let (decoded, results) = apply_replay_decode_scripts(
                 state,
                 &script_rules.decode_scripts,
@@ -831,7 +856,10 @@ async fn record_traffic_for_unified(
     });
 
     let request_size = applied_request.body.as_ref().map(|b| b.len()).unwrap_or(0);
-    let response_size = response_body.map(|b| b.len()).unwrap_or(0);
+    let response_size = response_wire
+        .map(|capture| capture.body.len())
+        .or_else(|| response_body.map(str::len))
+        .unwrap_or(0);
 
     let record = TrafficRecord {
         id: traffic_id.clone(),
@@ -2978,20 +3006,6 @@ mod replay_extra_tests {
         assert_eq!(get_header_value(&headers, "X-TEST"), Some("1"));
         assert_eq!(get_header_value(&headers, "missing"), None);
     }
-
-    #[test]
-    fn decode_replay_body_returns_none_for_empty_body() {
-        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        assert!(decode_replay_body(&headers, b"").is_none());
-    }
-
-    #[test]
-    fn decode_replay_body_passes_through_unknown_encoding() {
-        let body = br#"{"ok":true}"#;
-        let headers = vec![("content-encoding".to_string(), "unknown".to_string())];
-        let decoded = decode_replay_body(&headers, body).expect("decoded");
-        assert_eq!(decoded, String::from_utf8_lossy(body));
-    }
 }
 
 #[cfg(test)]
@@ -3292,6 +3306,7 @@ mod coverage_boost {
             200,
             &[("content-type".to_string(), "text/plain".to_string())],
             Some("res-body"),
+            Some(&ReplayWireResponse::new(&[], Bytes::from("res-body"))),
             123,
             &matched_rules,
             &resolved_rules,
@@ -3392,48 +3407,6 @@ mod coverage_boost_extra {
     use crate::test_support::TestAdminState;
 
     #[test]
-    fn decode_deflate_response_body_roundtrip() {
-        use flate2::write::ZlibEncoder;
-        use flate2::Compression;
-        use std::io::Write;
-
-        let raw = br#"{"ok":true,"encoding":"deflate"}"#;
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(raw).unwrap();
-        let compressed = encoder.finish().unwrap();
-
-        let headers = vec![("content-encoding".to_string(), "deflate".to_string())];
-        let decoded = decode_replay_body(&headers, &compressed).expect("decoded body");
-        assert_eq!(decoded, String::from_utf8_lossy(raw));
-    }
-
-    #[test]
-    fn decode_brotli_response_body_roundtrip() {
-        use std::io::Write;
-
-        let raw = br"hello brotli replay";
-        let mut out = Vec::new();
-        {
-            let mut encoder = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
-            encoder.write_all(raw).unwrap();
-        }
-
-        let headers = vec![("content-encoding".to_string(), "br".to_string())];
-        let decoded = decode_replay_body(&headers, &out).expect("decoded body");
-        assert_eq!(decoded, String::from_utf8_lossy(raw));
-    }
-
-    #[test]
-    fn decode_zstd_response_body_roundtrip() {
-        let raw = br"hello zstd replay";
-        let compressed =
-            zstd::stream::encode_all(std::io::Cursor::new(raw), 0).expect("encode zstd");
-        let headers = vec![("content-encoding".to_string(), "zstd".to_string())];
-        let decoded = decode_replay_body(&headers, &compressed).expect("decoded body");
-        assert_eq!(decoded, String::from_utf8_lossy(raw));
-    }
-
-    #[test]
     fn build_upstream_websocket_handshake_includes_headers_and_skips_hop_by_hop() {
         let headers = vec![
             ("User-Agent".to_string(), "test-agent".to_string()),
@@ -3530,53 +3503,6 @@ mod coverage_boost_v2 {
     use crate::test_support::TestAdminState;
 
     #[test]
-    fn decode_replay_body_uses_first_encoding_when_multiple() {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use std::io::Write;
-
-        let raw = br#"{"ok":true,"msg":"multi"}"#;
-        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(raw).unwrap();
-        let gz = enc.finish().unwrap();
-
-        let headers = vec![
-            ("content-encoding".to_string(), "gzip, br".to_string()),
-            ("other".to_string(), "ignored".to_string()),
-        ];
-        let decoded = decode_replay_body(&headers, &gz).unwrap();
-        assert_eq!(decoded, String::from_utf8_lossy(raw));
-    }
-
-    #[test]
-    fn decode_replay_body_returns_none_on_invalid_gzip() {
-        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        let decoded = decode_replay_body(&headers, b"not-a-gzip");
-        assert!(decoded.is_none());
-    }
-
-    #[test]
-    fn decode_replay_body_returns_none_on_invalid_deflate() {
-        let headers = vec![("content-encoding".to_string(), "deflate".to_string())];
-        let decoded = decode_replay_body(&headers, b"not-deflate");
-        assert!(decoded.is_none());
-    }
-
-    #[test]
-    fn decode_replay_body_returns_none_on_invalid_brotli() {
-        let headers = vec![("content-encoding".to_string(), "br".to_string())];
-        let decoded = decode_replay_body(&headers, b"not-br");
-        assert!(decoded.is_none());
-    }
-
-    #[test]
-    fn decode_replay_body_returns_none_on_invalid_zstd() {
-        let headers = vec![("content-encoding".to_string(), "zstd".to_string())];
-        let decoded = decode_replay_body(&headers, b"not-zstd");
-        assert!(decoded.is_none());
-    }
-
-    #[test]
     fn effective_authority_supports_ws_and_wss_with_default_ports() {
         assert_eq!(
             effective_authority("ws://example.test/path"),
@@ -3641,6 +3567,58 @@ mod coverage_boost_v2 {
         assert_eq!(status, 200);
         assert_eq!(out_headers, headers);
         assert_eq!(out_body, body);
+    }
+
+    #[test]
+    fn replay_wire_response_routes_standard_and_custom_codings() {
+        use std::io::Write;
+
+        use flate2::{write::GzEncoder, Compression};
+
+        let decoded = Bytes::from_static(b"decoded response");
+        let gzip_headers = vec![("Content-Encoding".to_string(), "gzip".to_string())];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&decoded).unwrap();
+        let gzip_wire = Bytes::from(encoder.finish().unwrap());
+        let (decoded_body, captured) =
+            decode_replay_wire_response(&gzip_headers, gzip_wire.clone(), 1024).unwrap();
+        assert_eq!(decoded_body.as_deref(), Some("decoded response"));
+        assert_eq!(captured.body, gzip_wire);
+        assert!(decode_replay_wire_response(
+            &gzip_headers,
+            Bytes::from_static(b"malformed gzip"),
+            1024
+        )
+        .is_err());
+
+        let standard = ReplayWireResponse::new(
+            &[("Content-Encoding".to_string(), "gzip, br".to_string())],
+            Bytes::from_static(b"standard wire"),
+        );
+        assert!(standard.content_encoded);
+        assert!(standard.standard_decoded);
+        assert_eq!(
+            standard.decoder_input(Some(&decoded)).as_deref(),
+            Some(decoded.as_ref())
+        );
+
+        let custom = ReplayWireResponse::new(
+            &[("Content-Encoding".to_string(), "x-company".to_string())],
+            Bytes::from_static(b"\xff\x00custom wire"),
+        );
+        assert!(custom.content_encoded);
+        assert!(!custom.standard_decoded);
+        assert_eq!(
+            custom.decoder_input(Some(&decoded)).as_deref(),
+            Some(b"\xff\x00custom wire".as_slice())
+        );
+
+        let identity = ReplayWireResponse::new(
+            &[("Content-Encoding".to_string(), "identity".to_string())],
+            Bytes::from_static(b"identity wire"),
+        );
+        assert!(!identity.content_encoded);
+        assert!(!identity.standard_decoded);
     }
 
     #[tokio::test]
@@ -3708,6 +3686,10 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn record_traffic_for_unified_without_scripts_stores_basic_fields() {
+        use std::io::Write;
+
+        use flate2::{write::GzEncoder, Compression};
+
         let harness = TestAdminState::builder().build();
         let state = harness.state();
 
@@ -3728,13 +3710,23 @@ mod coverage_boost_v2 {
         };
         let values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
+        let response_headers = vec![
+            ("content-type".to_string(), "text/plain".to_string()),
+            ("content-encoding".to_string(), "gzip".to_string()),
+        ];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"res-body").unwrap();
+        let response_wire =
+            ReplayWireResponse::new(&response_headers, Bytes::from(encoder.finish().unwrap()));
+        let response_wire_bytes = response_wire.body.clone();
         let traffic_id = record_traffic_for_unified(
             &state,
             "replay-basic",
             &applied,
             201,
-            &[("content-type".to_string(), "text/plain".to_string())],
+            &response_headers,
             Some("res-body"),
+            Some(&response_wire),
             250,
             &matched_rules,
             &resolved_rules,
@@ -3754,7 +3746,32 @@ mod coverage_boost_v2 {
         assert_eq!(record.status, 201);
         assert_eq!(record.method, "POST".to_string());
         assert_eq!(record.request_size, applied.body.as_ref().unwrap().len());
-        assert!(record.response_size >= "res-body".len());
+        assert_eq!(record.response_size, response_wire_bytes.len());
+        let body_store = state.body_store.as_ref().expect("body store must exist");
+        assert_eq!(
+            body_store
+                .read()
+                .load_bytes(
+                    record
+                        .response_body_ref
+                        .as_ref()
+                        .expect("response body ref")
+                )
+                .as_deref(),
+            Some(b"res-body".as_slice())
+        );
+        assert_eq!(
+            body_store
+                .read()
+                .load_bytes(
+                    record
+                        .raw_response_body_ref
+                        .as_ref()
+                        .expect("raw response body ref")
+                )
+                .as_deref(),
+            Some(response_wire_bytes.as_ref())
+        );
         assert!(record.is_replay);
     }
 
@@ -3930,6 +3947,7 @@ mod coverage_boost_v2 {
             &applied,
             200,
             &[],
+            None,
             None,
             10,
             &matched_rules,
@@ -4333,30 +4351,6 @@ mod coverage_boost_v3 {
     }
 
     #[test]
-    fn decode_replay_body_is_case_insensitive_for_header_name() {
-        let body = br"plain-text";
-        let headers = vec![("Content-Encoding".to_string(), "".to_string())];
-        let decoded = decode_replay_body(&headers, body).unwrap();
-        assert_eq!(decoded, String::from_utf8_lossy(body));
-    }
-
-    #[test]
-    fn decode_replay_body_trims_whitespace_in_encoding() {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use std::io::Write;
-
-        let raw = br"hello";
-        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(raw).unwrap();
-        let gz = enc.finish().unwrap();
-
-        let headers = vec![("content-encoding".to_string(), "  gzip  ".to_string())];
-        let decoded = decode_replay_body(&headers, &gz).unwrap();
-        assert_eq!(decoded, String::from_utf8_lossy(raw));
-    }
-
-    #[test]
     fn get_header_value_finds_case_insensitive_name() {
         let headers = vec![
             ("Content-Type".to_string(), "text/plain".to_string()),
@@ -4468,27 +4462,6 @@ mod coverage_boost_v3 {
     #[test]
     fn should_skip_http_forward_header_skips_host_when_authority_changed() {
         assert!(should_skip_http_forward_header("Host", true));
-    }
-
-    #[test]
-    fn decode_replay_body_returns_none_for_empty_body() {
-        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        assert_eq!(decode_replay_body(&headers, b""), None);
-    }
-
-    #[test]
-    fn decode_replay_body_defaults_to_identity_when_header_missing() {
-        let body = br"plain-body";
-        let headers: Vec<(String, String)> = Vec::new();
-        let decoded = decode_replay_body(&headers, body).unwrap();
-        assert_eq!(decoded, String::from_utf8_lossy(body));
-    }
-
-    #[test]
-    fn decode_replay_body_returns_none_for_invalid_gzip_payload() {
-        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
-        let body = b"not-a-valid-gzip-stream";
-        assert_eq!(decode_replay_body(&headers, body), None);
     }
 }
 #[cfg(test)]

@@ -12,8 +12,9 @@
 
 ### 必须实现
 
-- gzip / brotli / zstd 请求 Body 命中 `reqBody` / `reqPrepend` / `reqAppend` / `reqReplace` / `reqMerge` 后，最终发给上游的 Body 与最终 `Content-Encoding` 保持一致；如果规则删除了 `Content-Encoding`，Body 以 identity 输出。
-- gzip / brotli / zstd 响应 Body 命中同类响应规则后，客户端使用 `--compressed` 能读到合并/替换后的明文；如果规则删除了 `Content-Encoding`，客户端读到 identity Body。
+- gzip（含 `x-gzip` 兼容别名）/ deflate / brotli / zstd 请求 Body 命中 `reqBody` / `reqPrepend` / `reqAppend` / `reqReplace` / `reqMerge` 后，最终发给上游的 Body 与最终 `Content-Encoding` 保持一致；如果规则删除了 `Content-Encoding`，Body 以 identity 输出。
+- gzip（含 `x-gzip` 兼容别名）/ deflate / brotli / zstd 响应 Body 命中同类响应规则后，客户端使用 `--compressed` 能读到合并/替换后的明文；如果规则删除了 `Content-Encoding`，客户端读到 identity Body。
+- `Content-Encoding` 的逗号分隔编码链和重复 header 字段按线上顺序合并、按逆序完整解码；请求与响应的 Traffic detail、network `.bifrost` 导出和导入预览均展示明文。
 - HTTPS 解包链路（MITM）与普通 HTTP 走同一份保编码 Body 规则代码，不允许存在两套实现导致行为分叉。
 - mock、immediate response、rawfile 响应也走保编码 Body 规则和内容注入，携带压缩响应时不会绕过修复。
 - `reqScript` / `resScript` 进入脚本前按当前 `Content-Encoding` 解码为文本；脚本写回 Body 后按脚本最终 Header 重新编码或输出 identity。
@@ -24,7 +25,7 @@
 ### 必须不破坏
 
 - Body 规则不命中的请求走原有零拷贝快路径，不做无谓的解压/再压缩。
-- 未知 `Content-Encoding` 或 identity Body 保持原字节，不引入损坏的压缩输出。
+- 未知、自定义、加密或依赖外部字典的 `Content-Encoding` 与 identity Body 保持原字节，不引入损坏的压缩输出，并继续留给自定义 decoder 处理。
 - 解压失败（例如上游头声明 gzip 但 Body 实际是 identity）时保持原始 Body 与原编码，避免生成损坏响应。
 - `delete://reqHeaders.Content-Encoding` 或 `reqHeaders://(Content-Encoding: gzip)` 修改最终编码时，Body 与最终 `Content-Encoding` 必须保持一致，不允许头声明与实际编码错位。
 - WebSocket / 二进制 tunnel / SSE stream 路径不因新增保编码链路引入强制 body collect。
@@ -55,9 +56,9 @@ api.example.com resMerge://({"test":"qwe"})
 
 如果 Header 类规则改动了 `Content-Encoding`（例如 `delete://resHeaders.Content-Encoding` 强制走 identity，或 `resHeaders://(Content-Encoding: gzip)` 强制转 gzip），Body 输出必须按最终 header 重新编码。头声明与实际编码错位是 Bifrost 视角下的“损坏响应”，任何路径都不允许出现。
 
-### “未识别编码保持透传”
+### “标准自包含压缩默认解码，未识别编码保持透传”
 
-对于未知 / 未实现的 `Content-Encoding`（例如 `sdch`、多层 `gzip, br` 复合编码），保编码流水线不尝试解压。命中 Body 规则时，`apply_body_rules_preserving_encoding` 直接返回原 Body 与原编码，日志记录 warning，避免生成任何损坏输出。
+对 gzip / `x-gzip` / deflate / br / zstd 以及 identity，Bifrost 默认支持单层和组合链；多个 coding 按声明顺序编码、按逆序解码，重复的 `Content-Encoding` header 字段先按线上顺序合并。对于未知、自定义、加密、专用格式或需要协商字典才能恢复的编码，保编码流水线不猜测、不执行，直接保留原 Body 与原编码，交给用户配置的自定义 decoder，避免生成任何损坏输出。
 
 ## 技术细节
 
@@ -72,7 +73,18 @@ api.example.com resMerge://({"test":"qwe"})
 - `apply_content_injection_preserving_encoding(body, injection_rules, source_encoding, final_encoding, content_type, ctx) -> Bytes`
   新增。HTML/JS/CSS 注入的保编码封装。
 
-`crates/bifrost-proxy/src/transform/compress.rs` / `decompress.rs`：负责 gzip / br / zstd / identity 的编解码，并暴露“未知编码返回 None”这一显式语义，供保编码链路做 fallback 判断。
+`crates/bifrost-proxy/src/transform/compress.rs` / `decompress.rs`：负责 gzip / `x-gzip` / deflate / br / zstd / identity 的组合编解码。编码按 header 声明顺序执行，解码按逆序执行；任一环节未知或失败时整条链回退原字节，供保编码链路和自定义 decoder 做 fallback 判断。
+
+### Traffic 抓取与展示
+
+- 普通缓冲请求/响应在写入 `request_body_ref` / `response_body_ref` 前解码。
+- 流式请求和超过内存阈值的文件型响应先原样转发并落盘，并在 `BodyRef::ContentEncoded` 中持久化实际的编码链；Traffic body、Network 导出和预览只对带该标记的引用解码，因此不阻塞网络转发热路径，也不会根据旧 header 把已经解码的应用数据再解一层。
+- `traffic get`、批量 Body API、全文搜索、JSONPath Body 条件过滤、搜索结果 `include` 和 SSE 事件恢复统一读取上述标记并解码，避免 CLI/远程查询路径重新把 wire bytes 当 UTF-8 文本。
+- 展示与导出的完整编码链共享 10 MiB 解压输出预算，不会让每层单独重复消耗 10 MiB；超限、损坏或未知编码保留原始落盘引用，不伪造明文。Traffic API 的 `raw=1` 优先读取独立 raw 引用；不存在 raw 引用时沿用既有的 body 引用回退语义。
+- Traffic Body 读取使用当前 `sandbox.limits.max_decompress_output_bytes`，没有配置管理器时才回退到 10 MiB 默认值。
+- gzip 使用多 member 解码语义，合法的相邻 gzip member 会在同一 10 MiB 预算内全部展开并顺序拼接。
+- network `.bifrost` 导出保留原始字节的 base64，同时写入可解码的明文；导入预览优先展示明文，旧版本已做 lossy UTF-8 转换的不可逆数据给出明确警告。
+- 确认导入 Network 包时，明文 Body 会写入主引用，可用的 base64 原始字节会写入 raw 引用；非法 lossless base64 在预览和导入前直接拒绝。多记录包只扫描无需解压的旧 lossy 文本特征并展示警告，不按记录重复消耗解压预算。
 
 ### HTTP / HTTPS 落地
 
@@ -167,6 +179,20 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `body::apply_body_rules_preserving_encoding_gzip_resMerge`：gzip 响应 JSON 经过 `resMerge` 后，解压结果包含新增字段并覆盖相同 key，输出仍是 gzip。
 - `body::apply_body_rules_preserving_encoding_gzip_to_identity`：gzip 响应 JSON 同时删除最终 `Content-Encoding` 后，输出为 identity JSON。
 - `body::apply_body_rules_preserving_encoding_unknown_encoding_passthrough`：未识别编码保持原 Body 与原编码。
+- `decompress::multiple_content_codings`：重复 header / 逗号链按逆序完整解码，并覆盖 `x-gzip` 别名。
+- `network_body::repeated_content_encoding_headers_and_x_gzip_are_decoded`：Network 包内字节按重复编码 header 解码；未知编码保持原字节。
+- `decompress::test_multiple_content_codings_share_one_output_budget`：多层编码共享同一解压预算，避免按层重复分配上限。
+- `traffic::stored_body_tests::only_decodes_refs_marked_as_content_encoded`：Traffic 读取只解码带持久化编码标记的 wire body，已经移除 HTTP 外层编码的 `application/gzip` 数据不会被二次解码。
+- `query_service::traffic_get_decodes_content_encoded_file_body`：CLI/Remote Invoke 共用的 `traffic get` 查询服务返回解码后的文件型 body。
+- `search::encoded_file_body_is_decoded_for_search_json_filter_and_include`：关键词搜索、JSONPath 条件与 include body 同时读取解码后的文件型 body。
+- `traffic::batch_query_tests::batch_body_chunk_decodes_content_encoded_references`：批量 Body API 在截断、计算大小和 base64 编码前先解码带标记的请求/响应引用。
+- `traffic::sse_stream_tests::content_encoded_sse_body_is_decoded_before_event_parsing`：SSE 事件解析器只消费完成 HTTP 解码后的字节。
+- `traffic::stored_body_tests::configured_decompression_limit_is_honored_by_body_reads`：Traffic Body 读取遵循运行时配置的解压上限，超限时保留 wire bytes。
+- `network_body::concatenated_gzip_members_are_all_decoded` / `decompress::test_decompresses_all_concatenated_gzip_members`：管理端与代理端完整解码相邻 gzip member。
+- `bifrost_file::imported_network_bodies_persist_plaintext_and_raw_bytes`：Network 导入后主 Body 与 raw Body 都可继续读取。
+- `bifrost_file::malformed_lossless_body_fields_are_rejected`：请求和响应的非法 lossless base64 在预览/导入前返回校验错误，不静默丢弃。
+- `bifrost_file::multi_record_preview_does_not_decompress_lossless_body_fields`：多记录摘要只检测旧 lossy 文本，不批量展开压缩 Body。
+- `body_metadata::only_identity_tokens_are_classified_as_unencoded`：重复 `identity` 字段仍视为无编码，混合标准或自定义编码不会误判。
 - `body::apply_body_rules_preserving_encoding_decode_failure_passthrough`：头声明 gzip 但 Body 实际是 identity，解压失败保留原字节。
 - `body::apply_content_injection_preserving_encoding_gzip_html`：gzip HTML 注入 badge/inline script 后仍是有效 gzip 且解码后 HTML 结构正确。
 - `scripts::script_gzip_roundtrip`：gzip Body 进入脚本前会解码为文本，脚本写回 Body 后仍可按 gzip 重新编码。
@@ -185,6 +211,8 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `e2e-tests/tests/test_body_https_reqmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 请求经过 `reqMerge` 后仍保持有效 gzip。
 - `e2e-tests/tests/test_body_https_resmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
 - `e2e-tests/tests/test_replay_rules.sh`：本地 echo/SSE/WebSocket 上游验证 Replay custom rules，`request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵，`req_res_script.txt` 覆盖 Replay 的 Request/Response Script，`bp_decode.txt` 覆盖 Replay Traffic 落库前的 `decode://bp`。
+- `e2e-tests/tests/test_temporary_port_bindings.sh`：真实代理记录双层编码、多 member gzip 请求/响应和 gzip SSE，验证 Traffic API、`traffic get`、批量 Body API、搜索关键词、响应 JSONPath 过滤、include body、SSE 事件恢复、Network 导出/预览/导入均返回明文，同时 raw body 仍可恢复 wire bytes。
+- `e2e-tests/tests/test_response_stream_script.sh`：HTTP 与 HTTPS MITM 上游返回两个 `Content-Encoding: identity` 时，`resStreamScript` 仍正常逐事件转换；真正的 gzip 编码继续明确拒绝。
 
 ### 真实场景测试 human_tests
 
@@ -226,7 +254,8 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 
 ## 风险与决策点
 
-- 未识别编码策略：本方案选择“透传 + warning”，不尝试猜测。若后续需要支持复合 `Content-Encoding`（如 `gzip, br`），需要在 `decompress.rs` 增加多级解压支持并对应更新单元测试。
+- 未识别编码策略：本方案选择“透传 + warning”，不尝试猜测。组合 `Content-Encoding` 已支持，但组合链中只要包含未知、自定义、加密、专用格式或依赖外部字典的 coding，就整链保留原字节并交给自定义 decoder。
+- 文件型 body 保持代理热路径原样落盘，并把编码链和引用一起持久化，Traffic / Network 读取时才有界解压；这消除了异步更新 Traffic 引用与最终记录写入之间的竞态，也避免仅凭 header 猜测导致双层 gzip 被多解一层。超出安全解压上限时仍返回原字节，这是防压缩炸弹边界，不应通过取消上限绕过。
 - 保编码链路是否引入拷贝开销：所有非命中 Body 规则的请求走 identity 短路，不做无谓的解压/再压缩；命中规则时的一次解压 + 一次压缩是必要开销。
 - Replay 与普通代理保编码链路必须共用 `apply_body_rules_preserving_encoding`，避免两套实现漂移；如果 Replay 出现新的规则类型，必须先补 replay 侧再上普通代理，否则会出现“Replay 有效但真实代理无效”的产品倒挂。
 - HTTPS path 级 Body 规则要求先命中 `tlsIntercept://`；文档、CLI 提示与规则编辑器 hint 需要同步说明这一前置条件，避免用户以为规则未生效而反复调试。

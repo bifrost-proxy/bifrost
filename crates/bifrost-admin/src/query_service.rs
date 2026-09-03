@@ -9,6 +9,9 @@ use bifrost_core::{BifrostError, Result};
 use serde_json::{json, Value};
 
 use crate::body_store::BodyRef;
+use crate::handlers::network_body::{
+    decode_content_encoded_body_with_limit, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+};
 use crate::push::SharedPushManager;
 use crate::search::{
     FilterCondition, SearchEngine, SearchFilters, SearchInclude, SearchProgress, SearchRequest,
@@ -25,6 +28,20 @@ async fn join_clear_task<T>(
     task.await
         .map_err(|e| BifrostError::Config(format!("{label} clear task join failed: {e}")))?
         .map_err(BifrostError::Config)
+}
+
+async fn configured_decompress_output_bytes(state: &SharedAdminState) -> usize {
+    match state.config_manager.as_ref() {
+        Some(config_manager) => {
+            config_manager
+                .config()
+                .await
+                .sandbox
+                .limits
+                .max_decompress_output_bytes
+        }
+        None => DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+    }
 }
 
 #[derive(Clone)]
@@ -81,6 +98,7 @@ impl AdminQueryService {
         let body_store = self.state.body_store.clone();
         let frame_store = self.state.frame_store.clone();
         let connection_monitor = Some(self.state.connection_monitor.clone());
+        let max_decompress_output_bytes = configured_decompress_output_bytes(&self.state).await;
         let state = self.state.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -89,7 +107,8 @@ impl AdminQueryService {
                 body_store,
                 frame_store,
                 connection_monitor,
-            );
+            )
+            .with_decompression_limit(max_decompress_output_bytes);
             let mut response = engine.search(&request);
             for result in &mut response.results {
                 let mut record = result.record.clone();
@@ -120,6 +139,7 @@ impl AdminQueryService {
         let body_store = self.state.body_store.clone();
         let frame_store = self.state.frame_store.clone();
         let connection_monitor = Some(self.state.connection_monitor.clone());
+        let max_decompress_output_bytes = configured_decompress_output_bytes(&self.state).await;
         let state = self.state.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -128,7 +148,8 @@ impl AdminQueryService {
                 body_store,
                 frame_store,
                 connection_monitor,
-            );
+            )
+            .with_decompression_limit(max_decompress_output_bytes);
             let mut response = engine.search_stream(&request, on_result, on_progress);
             for result in &mut response.results {
                 let mut record = result.record.clone();
@@ -305,13 +326,21 @@ impl AdminQueryService {
         match body_ref {
             BodyRef::Inline { data } => Ok(json!({ "success": true, "data": data })),
             BodyRef::File { .. } | BodyRef::FileRange { .. } => {
+                let max_output_bytes = configured_decompress_output_bytes(&self.state).await;
                 let body_store =
                     self.state.body_store.clone().ok_or_else(|| {
                         BifrostError::Config("Body store not configured".to_string())
                     })?;
                 let loaded = tokio::task::spawn_blocking(move || {
                     let store = body_store.read();
-                    store.load(&body_ref)
+                    store.load_bytes(&body_ref).map(|bytes| {
+                        let decoded = decode_content_encoded_body_with_limit(
+                            bytes,
+                            body_ref.content_encoding().as_deref(),
+                            max_output_bytes,
+                        );
+                        String::from_utf8_lossy(&decoded).to_string()
+                    })
                 })
                 .await
                 .map_err(|e| BifrostError::Config(format!("body load task join failed: {e}")))?;
@@ -541,10 +570,12 @@ mod tests {
     use bifrost_command::{
         SearchFilters as CommandSearchFilters, SearchScope as CommandSearchScope,
     };
+    use std::io::Write;
     use tokio::time::{timeout, Duration};
 
     use crate::push::{start_push_tasks, ClientSubscription, PushMessage};
     use crate::test_support::TestAdminState;
+    use bifrost_storage::{SandboxConfigUpdate, SandboxLimitsConfigUpdate};
 
     #[test]
     fn test_search_request_from_command_preserves_filters() {
@@ -596,6 +627,107 @@ mod tests {
         assert_eq!(params.direction, Direction::Forward);
         assert_eq!(params.host_contains.as_deref(), Some("example.com"));
         assert_eq!(params.listener_port, Some(50831));
+    }
+
+    #[tokio::test]
+    async fn traffic_get_decodes_content_encoded_file_body() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = br#"{"marker":"traffic-get-plaintext"}"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plaintext).expect("compress body");
+        let compressed = encoder.finish().expect("finish gzip body");
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("query-service-encoded", "res", &compressed)
+            .expect("store compressed body")
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        let mut record = TrafficRecord::new(
+            "query-service-encoded".to_string(),
+            "GET".to_string(),
+            "http://example.test/query-service-encoded".to_string(),
+        );
+        record.status = 200;
+        record.response_body_ref = Some(body_ref);
+        harness.traffic_db.record(record);
+        let service = AdminQueryService::new(harness.state());
+
+        let detail = service
+            .get_traffic_json(&TrafficGetArgs {
+                id: "query-service-encoded".to_string(),
+                response_body: true,
+                ..TrafficGetArgs::default()
+            })
+            .await
+            .expect("get traffic detail");
+
+        assert_eq!(
+            detail["response_body"]["data"],
+            String::from_utf8_lossy(plaintext).as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn traffic_get_honors_configured_decompression_limit() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = vec![b'a'; 1024];
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&plaintext).expect("compress body");
+        let compressed = encoder.finish().expect("finish gzip body");
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("query-service-limit", "res", &compressed)
+            .expect("store compressed body")
+            .with_content_encoding(Some("gzip"))
+            .unwrap();
+        harness
+            .config_manager
+            .update_sandbox_config(SandboxConfigUpdate {
+                limits: Some(SandboxLimitsConfigUpdate {
+                    max_decompress_output_bytes: Some(plaintext.len() - 1),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("lower decompression limit");
+
+        let service = AdminQueryService::new(harness.state());
+        let body = service
+            .load_body_json(Some(&body_ref))
+            .await
+            .expect("load body response");
+
+        assert_ne!(body["data"], String::from_utf8_lossy(&plaintext).as_ref());
+        assert_eq!(
+            body["data"],
+            String::from_utf8_lossy(&compressed).as_ref(),
+            "CLI reads must use the active configured limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn traffic_get_reports_missing_file_body_without_panicking() {
+        let harness = TestAdminState::builder().build();
+        let service = AdminQueryService::new(harness.state());
+        let body_ref = BodyRef::File {
+            path: harness
+                .data_dir()
+                .join("missing-traffic-body")
+                .to_string_lossy()
+                .to_string(),
+            size: 128,
+        };
+
+        let body = service
+            .load_body_json(Some(&body_ref))
+            .await
+            .expect("missing body is represented in the response");
+
+        assert_eq!(body["success"], false);
+        assert!(body["data"].is_null());
     }
 
     #[tokio::test]

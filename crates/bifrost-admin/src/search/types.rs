@@ -193,6 +193,8 @@ pub struct SearchResponse {
     pub total_matched: usize,
     pub next_cursor: Option<u64>,
     pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_reason: Option<String>,
     pub search_id: String,
     #[serde(default)]
     pub searched_range: SearchedRange,

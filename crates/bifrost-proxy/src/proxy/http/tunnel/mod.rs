@@ -45,8 +45,9 @@ use self::host_rule::parse_host_rule;
 use self::io::{BufferedIo, CombinedAsyncRw};
 
 use super::body_metadata::{
-    buffered_res_body_mode, normalize_req_headers, normalize_res_headers,
-    response_content_encoding, set_content_encoding_header, streaming_res_body_mode, BodyMode,
+    buffered_res_body_mode, content_encoding_is_identity, normalize_req_headers,
+    normalize_res_headers, response_content_encoding, set_content_encoding_header,
+    streaming_res_body_mode, BodyMode,
 };
 use super::breakpoint::breakpoint_tls_interception_required as bp_tls;
 use super::breakpoint::{
@@ -102,7 +103,8 @@ use crate::utils::process_info::{
 };
 use crate::utils::tee::{
     create_metrics_body, create_request_tee_body, create_sse_tee_body, create_tee_body_with_store,
-    store_request_body, store_response_body, BodyCaptureHandle, TeeBodyCaptureOptions,
+    store_request_body, store_response_body, BodyCaptureHandle, SseTeeOptions,
+    TeeBodyCaptureOptions,
 };
 use crate::utils::throttle::wrap_throttled_body;
 use crate::utils::upstream_stability::connect_tcp;
@@ -2507,8 +2509,12 @@ async fn handle_intercepted_request_with_protocol(
                 );
                 skip_req_scripts = true;
                 if admin_state.is_some() {
-                    let (tee_body, capture) =
-                        create_request_tee_body(body, admin_state.clone(), req_id.to_string());
+                    let (tee_body, capture) = create_request_tee_body(
+                        body,
+                        admin_state.clone(),
+                        req_id.to_string(),
+                        req_content_encoding.clone(),
+                    );
                     streaming_body = Some(tee_body);
                     req_body_capture = Some(capture);
                 } else {
@@ -2550,6 +2556,7 @@ async fn handle_intercepted_request_with_protocol(
                                 replay_body,
                                 admin_state.clone(),
                                 req_id.to_string(),
+                                req_content_encoding.clone(),
                             );
                             streaming_body = Some(tee_body);
                             req_body_capture = Some(capture);
@@ -2602,6 +2609,7 @@ async fn handle_intercepted_request_with_protocol(
                             replay_body,
                             admin_state.clone(),
                             req_id.to_string(),
+                            req_content_encoding.clone(),
                         );
                         streaming_body = Some(tee_body);
                         req_body_capture = Some(capture);
@@ -2639,8 +2647,12 @@ async fn handle_intercepted_request_with_protocol(
         Vec::new()
     } else {
         if admin_state.is_some() {
-            let (tee_body, capture) =
-                create_request_tee_body(body, admin_state.clone(), req_id.to_string());
+            let (tee_body, capture) = create_request_tee_body(
+                body,
+                admin_state.clone(),
+                req_id.to_string(),
+                req_content_encoding.clone(),
+            );
             streaming_body = Some(tee_body);
             req_body_capture = Some(capture);
         } else {
@@ -2820,18 +2832,17 @@ async fn handle_intercepted_request_with_protocol(
             );
             pending.has_rule_hit = has_rules;
             pending.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
-            pending.request_body_ref = if !body_bytes.is_empty() {
+            if !body_bytes.is_empty() {
                 store_request_body(
                     &admin_state,
                     req_id,
                     &body_bytes,
                     req_content_encoding.as_deref(),
                 )
+                .apply_to(&mut pending);
             } else if let Some(ref capture) = req_body_capture {
-                capture.clone_ref()
-            } else {
-                None
-            };
+                pending.request_body_ref = capture.clone_ref();
+            }
             if !req_script_results.is_empty() {
                 pending.req_script_results = Some(req_script_results.clone());
             }
@@ -3264,18 +3275,17 @@ async fn handle_intercepted_request_with_protocol(
                 record.has_rule_hit = has_rules;
                 record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
                 record.error_message = Some(error_msg);
-                record.request_body_ref = if !body_bytes.is_empty() {
+                if !body_bytes.is_empty() {
                     store_request_body(
                         &admin_state,
                         req_id,
                         &body_bytes,
                         req_content_encoding.as_deref(),
                     )
+                    .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    capture.clone_ref().or_else(|| capture.take())
-                } else {
-                    None
-                };
+                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                }
 
                 record.response_body_ref = if state.get_super_performance_mode() {
                     None
@@ -3931,7 +3941,7 @@ async fn handle_intercepted_request_with_protocol(
                 .unwrap());
         }
         if response_content_encoding(&res_parts)
-            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+            .is_some_and(|encoding| !content_encoding_is_identity(&encoding))
         {
             return Ok(Response::builder()
                 .status(hyper::StatusCode::BAD_GATEWAY)
@@ -4214,26 +4224,33 @@ async fn handle_intercepted_request_with_protocol(
                     record.req_script_results = Some(req_script_results.clone());
                 }
 
-                record.request_body_ref = if !body_bytes.is_empty() {
+                if !body_bytes.is_empty() {
                     store_request_body(
                         &admin_state,
                         &record_id,
                         &body_bytes,
                         req_content_encoding.as_deref(),
                     )
+                    .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    capture.clone_ref().or_else(|| capture.take())
-                } else {
-                    None
-                };
+                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                }
 
                 if is_sse && !state.get_super_performance_mode() {
                     if let Some(ref body_store) = state.body_store {
                         match body_store.read().start_stream(&record_id, "sse_raw") {
-                            Ok(writer) => {
-                                record.response_body_ref = Some(writer.body_ref());
-                                sse_stream_writer = Some(writer);
-                            }
+                            Ok(writer) => match writer
+                                .body_ref()
+                                .with_content_encoding(res_content_encoding.as_deref())
+                            {
+                                Ok(body_ref) => {
+                                    record.response_body_ref = Some(body_ref);
+                                    sse_stream_writer = Some(writer);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, %record_id, "failed to persist SSE content encoding");
+                                }
+                            },
                             Err(e) => {
                                 tracing::warn!(error = %e, record_id = %record_id, "failed to start sse raw stream writer");
                             }
@@ -4432,18 +4449,18 @@ async fn handle_intercepted_request_with_protocol(
                         });
                         record.request_headers = Some(final_req_headers.clone());
                         record.original_response_headers = Some(original_res_headers.clone());
-                        record.request_body_ref = if !body_bytes.is_empty() {
+                        if !body_bytes.is_empty() {
                             store_request_body(
                                 &admin_state,
                                 req_id,
                                 &body_bytes,
                                 req_content_encoding.as_deref(),
                             )
+                            .apply_to(&mut record);
                         } else if let Some(ref capture) = req_body_capture {
-                            capture.clone_ref().or_else(|| capture.take())
-                        } else {
-                            None
-                        };
+                            record.request_body_ref =
+                                capture.clone_ref().or_else(|| capture.take());
+                        }
                         if !state.get_super_performance_mode() {
                             if let Some(ref body_store) = state.body_store {
                                 let store = body_store.read();
@@ -4545,9 +4562,13 @@ async fn handle_intercepted_request_with_protocol(
                 res_body,
                 admin_state.clone(),
                 record_id,
-                Some(traffic_type),
-                sse_stream_writer,
-                max_body_buffer_size,
+                SseTeeOptions {
+                    traffic_type: Some(traffic_type),
+                    file_writer: sse_stream_writer,
+                    content_encoding: res_content_encoding.clone(),
+                    max_buffer_size: max_body_buffer_size,
+                    max_decompress_output_bytes,
+                },
             );
             let final_body = wrap_throttled_body(tee_body.boxed(), resolved_rules.res_speed);
             let body = with_trailers(final_body, &resolved_rules);
@@ -4711,18 +4732,17 @@ async fn handle_intercepted_request_with_protocol(
             record.req_script_results = Some(req_script_results.clone());
         }
 
-        record.request_body_ref = if !body_bytes.is_empty() {
+        if !body_bytes.is_empty() {
             store_request_body(
                 &admin_state,
                 req_id,
                 &body_bytes,
                 req_content_encoding.as_deref(),
             )
+            .apply_to(&mut record);
         } else if let Some(ref capture) = req_body_capture {
-            capture.clone_ref().or_else(|| capture.take())
-        } else {
-            None
-        };
+            record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+        }
 
         if !state.get_super_performance_mode() {
             if let Some(ref body_store) = state.body_store {
@@ -6414,18 +6434,17 @@ fn record_direct_status_traffic(
     }
     record.request_size = request_body.len();
     record.upload_bytes = request_body.len();
-    record.request_body_ref = if !request_body.is_empty() {
+    if !request_body.is_empty() {
         store_request_body(
             &Some(Arc::clone(state)),
             req_id,
             request_body,
             request_content_encoding,
         )
+        .apply_to(&mut record);
     } else if let Some(capture) = req_body_capture {
-        capture.clone_ref().or_else(|| capture.take())
-    } else {
-        None
-    };
+        record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+    }
     record.original_response_headers = Some(mock_res_headers);
     record.has_rule_hit = has_rules;
     record.matched_rules = crate::utils::build_matched_rules(resolved_rules);

@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use std::io::{Read, Write};
 
 const DEFAULT_MAX_DECOMPRESS_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
@@ -21,25 +21,17 @@ pub fn decompress_body_with_limit(
         return Bytes::copy_from_slice(data);
     }
 
-    let encoding = match content_encoding {
-        Some(e) => e.to_lowercase(),
+    let content_encoding = match content_encoding {
+        Some(encoding) => encoding,
         None => return Bytes::copy_from_slice(data),
     };
 
-    let result = match encoding.as_str() {
-        "gzip" => decompress_gzip_limited(data, max_output_bytes),
-        "deflate" => decompress_deflate_limited(data, max_output_bytes),
-        "br" => decompress_brotli_limited(data, max_output_bytes),
-        "zstd" => decompress_zstd_limited(data, max_output_bytes),
-        _ => return Bytes::copy_from_slice(data),
-    };
-
-    match result {
+    match try_decompress_body_with_limit(data, content_encoding, max_output_bytes) {
         Ok(decompressed) => Bytes::from(decompressed),
         Err(e) => {
             tracing::debug!(
                 "Failed to decompress {} body (limit={}): {}",
-                encoding,
+                content_encoding,
                 max_output_bytes,
                 e
             );
@@ -57,31 +49,40 @@ pub fn try_decompress_body_with_limit(
         return Ok(data.to_vec());
     }
 
-    let encoding = content_encoding
+    let mut decoded = data.to_vec();
+    let mut remaining_output_bytes = max_output_bytes;
+    for encoding in content_encoding
         .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-
-    match encoding.as_str() {
-        "" | "identity" => Ok(data.to_vec()),
-        "gzip" => decompress_gzip_limited(data, max_output_bytes),
-        "deflate" => decompress_deflate_limited(data, max_output_bytes),
-        "br" => decompress_brotli_limited(data, max_output_bytes),
-        "zstd" => decompress_zstd_limited(data, max_output_bytes),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("unsupported content-encoding: {}", content_encoding),
-        )),
+        .map(str::trim)
+        .filter(|encoding| !encoding.is_empty())
+        .rev()
+    {
+        let next = match encoding.to_ascii_lowercase().as_str() {
+            "identity" => decoded,
+            "gzip" | "x-gzip" => decompress_gzip_limited(&decoded, remaining_output_bytes)?,
+            "deflate" => decompress_deflate_limited(&decoded, remaining_output_bytes)?,
+            "br" => decompress_brotli_limited(&decoded, remaining_output_bytes)?,
+            "zstd" => decompress_zstd_limited(&decoded, remaining_output_bytes)?,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unsupported content-encoding: {encoding}"),
+                ));
+            }
+        };
+        if !encoding.eq_ignore_ascii_case("identity") {
+            remaining_output_bytes -= next.len();
+        }
+        decoded = next;
     }
+    Ok(decoded)
 }
 
 fn decompress_gzip_limited(
     data: &[u8],
     max_output_bytes: usize,
 ) -> Result<Vec<u8>, std::io::Error> {
-    let mut decoder = GzDecoder::new(data);
+    let mut decoder = MultiGzDecoder::new(data);
     read_to_end_limited(&mut decoder, max_output_bytes)
 }
 
@@ -177,10 +178,13 @@ impl Write for LimitedWriter<'_> {
 }
 
 pub fn get_content_encoding(headers: &[(String, String)]) -> Option<String> {
-    headers
+    let values = headers
         .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
-        .map(|(_, v)| v.clone())
+        .filter(|(key, _)| key.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(", "))
 }
 
 #[cfg(test)]
@@ -202,6 +206,26 @@ mod tests {
     }
 
     #[test]
+    fn test_content_encoding_headers_are_combined_and_x_gzip_is_supported() {
+        let headers = vec![
+            ("Content-Encoding".to_string(), "gzip".to_string()),
+            ("content-encoding".to_string(), "br".to_string()),
+        ];
+        assert_eq!(get_content_encoding(&headers).as_deref(), Some("gzip, br"));
+
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"alias").unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert_eq!(
+            decompress_body(&compressed, Some("x-gzip")).as_ref(),
+            b"alias"
+        );
+    }
+
+    #[test]
     fn test_decompress_gzip() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
@@ -217,6 +241,25 @@ mod tests {
     }
 
     #[test]
+    fn test_decompresses_all_concatenated_gzip_members() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        fn gzip_member(data: &[u8]) -> Vec<u8> {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let mut compressed = gzip_member(b"first member ");
+        compressed.extend_from_slice(&gzip_member(b"second member"));
+
+        let result = decompress_body(&compressed, Some("gzip"));
+        assert_eq!(result.as_ref(), b"first member second member");
+    }
+
+    #[test]
     fn test_decompress_deflate() {
         use flate2::write::DeflateEncoder;
         use flate2::Compression;
@@ -229,5 +272,62 @@ mod tests {
 
         let result = decompress_body(&compressed, Some("deflate"));
         assert_eq!(result.as_ref(), original);
+    }
+
+    #[test]
+    fn test_decompresses_multiple_content_codings_in_reverse_order() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let original = b"multiply encoded body";
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(original).unwrap();
+        let gzip = gzip.finish().unwrap();
+
+        let mut brotli = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut brotli, 4096, 5, 22);
+            encoder.write_all(&gzip).unwrap();
+        }
+
+        let result =
+            try_decompress_body_with_limit(&brotli, "gzip, br", 1024).expect("decode chain");
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn test_multiple_content_codings_share_one_output_budget() {
+        use flate2::write::{GzEncoder, ZlibEncoder};
+        use flate2::Compression;
+        use std::io::Write;
+
+        let original = vec![b'a'; 1024];
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&original).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let mut deflate = ZlibEncoder::new(Vec::new(), Compression::default());
+        deflate.write_all(&gzip).unwrap();
+        let wire = deflate.finish().unwrap();
+        let shared_limit = original.len() + gzip.len() - 1;
+
+        let error = try_decompress_body_with_limit(&wire, "gzip, deflate", shared_limit)
+            .expect_err("successful layers must share one output budget");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn test_unknown_content_coding_preserves_original_body() {
+        let original = b"custom encoded body";
+
+        let result = decompress_body_with_limit(original, Some("gzip, x-company-codec"), 1024);
+
+        assert_eq!(result.as_ref(), original);
+        let error = try_decompress_body_with_limit(original, "gzip, x-company-codec", 1024)
+            .expect_err("custom coding must be left to custom decoders");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("x-company-codec"));
     }
 }
