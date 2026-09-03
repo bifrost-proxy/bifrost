@@ -1440,6 +1440,120 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sse_event_counter_covers_empty_split_and_overflow_boundaries() {
+        let mut counter = SseEventCounter::new(3);
+        assert_eq!(counter.process(b""), 0);
+        assert_eq!(counter.process(b"abcd"), 0);
+        assert!(counter.overflowed);
+
+        assert_eq!(counter.process(b"\n"), 0);
+        assert_eq!(counter.process(b"\n"), 1);
+        assert!(!counter.overflowed);
+
+        assert_eq!(counter.process(b"abcd\n\n"), 1);
+        assert!(!counter.overflowed);
+        assert_eq!(counter.process(b"x\r"), 0);
+        assert_eq!(counter.process(b"\n\n"), 1);
+    }
+
+    #[tokio::test]
+    async fn sse_tee_marks_partial_observation_on_decode_failure() {
+        let (state, dir) = test_state_with_body_store("partial-sse-observation");
+        let record_id = "partial-sse-observation";
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            record_id.into(),
+            "GET".into(),
+            "http://example.test/events".into(),
+        ));
+
+        let mut tee = SseTeeBody::new(
+            crate::server::full_body(Bytes::new()),
+            Some(state.clone()),
+            record_id.into(),
+            sse_options(None, None, Some("gzip".to_string()), 1024),
+        );
+        tee.process_sse_wire_chunk(&Bytes::from_static(b"not gzip"));
+
+        for _ in 0..50 {
+            let marked = state
+                .traffic_db_store
+                .as_ref()
+                .and_then(|store| store.get_by_id(record_id))
+                .and_then(|record| record.body_metadata)
+                .and_then(|metadata| metadata.response)
+                .is_some_and(|metadata| metadata.observation_partial);
+            if marked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tee.finish_sse_event_decoder();
+        tee.process_sse_wire_chunk(&Bytes::from_static(b"ignored after finish"));
+        tee.guard.store_body_and_update_record();
+
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .and_then(|store| store.get_by_id(record_id))
+            .expect("traffic record");
+        assert!(
+            record
+                .body_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.response.as_ref())
+                .is_some_and(|metadata| metadata.observation_partial),
+            "decode failure must be visible as a partial SSE observation"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn encoded_sse_observer_marks_partial_when_queue_is_full() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let partial = Arc::new(AtomicBool::new(false));
+        let mut observer = EncodedSseObserver {
+            sender: Some(sender),
+            partial: partial.clone(),
+        };
+
+        observer.observe(&Bytes::from_static(b"first"));
+        observer.observe(&Bytes::from_static(b"second"));
+
+        assert!(partial.load(Ordering::Relaxed));
+        assert!(observer.sender.is_none());
+    }
+
+    #[tokio::test]
+    async fn encoded_sse_without_state_is_unsupported_and_super_mode_is_disabled() {
+        let mut unsupported = SseTeeBody::new(
+            crate::server::full_body(Bytes::new()),
+            None,
+            "unsupported".into(),
+            sse_options(None, None, Some("gzip".to_string()), 1024),
+        );
+        unsupported.process_sse_wire_chunk(&Bytes::from_static(b"ignored"));
+        unsupported.finish_sse_event_decoder();
+        assert!(matches!(
+            unsupported.event_decoder,
+            SseEventBodyDecoder::Unsupported
+        ));
+
+        let state = Arc::new(AdminState::new(0).with_super_performance_mode(true));
+        let mut disabled = SseTeeBody::new(
+            crate::server::full_body(Bytes::new()),
+            Some(state),
+            "disabled".into(),
+            sse_options(None, None, Some("gzip".to_string()), 1024),
+        );
+        disabled.process_sse_wire_chunk(&Bytes::from_static(b"ignored"));
+        disabled.finish_sse_event_decoder();
+        assert!(matches!(
+            disabled.event_decoder,
+            SseEventBodyDecoder::Disabled
+        ));
+    }
+
     #[tokio::test]
     async fn normal_request_response_and_metrics_tee_paths_store_and_forward() {
         let (state, dir) = test_state_with_body_store("normal");

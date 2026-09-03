@@ -114,7 +114,7 @@ mod tests {
     use bifrost_admin::{AdminState, BodyStore};
     use parking_lot::RwLock;
 
-    use super::derive_openai_like_sse_body_ref;
+    use super::{derive_openai_like_sse_body_ref, schedule_openai_like_sse_body_derivation};
 
     fn test_state_with_body_store(prefix: &str) -> (Arc<AdminState>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -190,5 +190,15 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["choices"][0]["message"]["content"], "hello");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scheduling_derivation_without_runtime_is_a_noop() {
+        schedule_openai_like_sse_body_derivation(
+            Arc::new(AdminState::new(0)),
+            "no-runtime".to_string(),
+            None,
+            None,
+        );
     }
 }

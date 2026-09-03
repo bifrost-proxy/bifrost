@@ -39,9 +39,9 @@ fn store_canonical_body(
 ) -> Option<BodyRef> {
     let body_ref = store.store(record_id, kind, body)?;
     if stores_encoded_wire(content_encoding) && !body_ref_is_lossless(&body_ref, body) {
-        if body_ref.is_file() {
-            store.remove(&body_ref);
-        }
+        // `remove` is intentionally unconditional: it deletes file-backed
+        // refs and is a no-op for the lossy inline fallback.
+        store.remove(&body_ref);
         return None;
     }
     Some(body_ref)
