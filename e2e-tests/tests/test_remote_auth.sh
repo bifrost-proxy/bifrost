@@ -16,6 +16,7 @@ HTTP_STATUS=""
 HTTP_HEADERS=""
 HTTP_BODY=""
 CURL_ERROR=""
+COOKIE_JAR=""
 
 http_request() {
     local url="$1"
@@ -42,6 +43,10 @@ http_request() {
 
     if [[ -n "$proxy" ]]; then
         curl_args+=(--proxy "$proxy")
+    fi
+
+    if [[ -n "${COOKIE_JAR:-}" ]]; then
+        curl_args+=(-b "$COOKIE_JAR" -c "$COOKIE_JAR")
     fi
 
     if [[ -n "$data" ]]; then
@@ -120,9 +125,11 @@ export HTTP_PORT
 cleanup() {
     admin_cleanup_bifrost || true
     "$MOCK_SERVERS_SCRIPT" stop >/dev/null 2>&1 || true
+    [[ -z "${COOKIE_JAR:-}" ]] || rm -f "$COOKIE_JAR" >/dev/null 2>&1 || true
     rm -rf "$BIFROST_DATA_DIR" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+COOKIE_JAR="$(mktemp)"
 
 log() { echo "[remote-auth-e2e] $*"; }
 
@@ -216,8 +223,30 @@ ADMIN_URL_127="http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 get_non_loopback_ip() {
     local ip
     ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}') || true
+    if [[ -z "${ip:-}" ]] && command -v route >/dev/null 2>&1 && command -v ipconfig >/dev/null 2>&1; then
+        local interface
+        interface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}') || true
+        if [[ -n "${interface:-}" ]]; then
+            ip=$(ipconfig getifaddr "$interface" 2>/dev/null) || true
+        fi
+    fi
     if [[ -z "${ip:-}" ]]; then
         ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
+    fi
+    if [[ -z "${ip:-}" ]]; then
+        ip=$(python3 - <<'PY'
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    sock.connect(("1.1.1.1", 80))
+    candidate = sock.getsockname()[0]
+    if not candidate.startswith("127."):
+        print(candidate)
+finally:
+    sock.close()
+PY
+        ) || true
     fi
     echo "${ip:-}"
 }
@@ -263,6 +292,10 @@ log "Login -> get token"
 LOGIN_PAYLOAD=$(jq -cn --arg u "admin" --arg p "$ADMIN_PASSWORD" '{username:$u,password:$p}')
 http_post_json "${ADMIN_URL_127}/api/auth/login" "$LOGIN_PAYLOAD"
 assert_status "200" "$HTTP_STATUS" "登录接口应返回 200"
+assert_header_contains "Set-Cookie" "bifrost_admin_session=" "$HTTP_HEADERS" "登录应签发浏览器会话 Cookie"
+assert_header_contains "Set-Cookie" "Path=/_bifrost" "$HTTP_HEADERS" "会话 Cookie 应限制在管理端路径"
+assert_header_contains "Set-Cookie" "HttpOnly" "$HTTP_HEADERS" "会话 Cookie 不应暴露给页面脚本"
+assert_header_contains "Set-Cookie" "SameSite=Strict" "$HTTP_HEADERS" "会话 Cookie 应禁止跨站发送"
 TOKEN=$(echo "$HTTP_BODY" | jq -r '.token')
 if [[ -z "${TOKEN:-}" || "$TOKEN" == "null" ]]; then
     echo "Failed to get token from login response: $HTTP_BODY" >&2
@@ -291,6 +324,37 @@ if [[ -n "${NON_LOOPBACK_IP:-}" ]]; then
     else
         assert_status "200" "$HTTP_STATUS" "非 loopback 携带有效 Token 应返回 200"
     fi
+
+    log "Bootstrap a host-scoped browser cookie from an existing Bearer session"
+    http_get "${ADMIN_URL_NON_LB}/api/auth/session" "Authorization: Bearer ${TOKEN}"
+    if [[ "$HTTP_STATUS" == "000" ]]; then
+        _log_warning "非 loopback 地址不可达（curl 连接失败），跳过 Cookie 与原生流式连接断言"
+    else
+        assert_status "200" "$HTTP_STATUS" "旧 Bearer 会话应能建立浏览器 Cookie"
+        assert_header_contains "Set-Cookie" "bifrost_admin_session=" "$HTTP_HEADERS" "会话引导接口应签发浏览器 Cookie"
+
+        log "Case: browser session bootstrap also accepts the HttpOnly cookie alone"
+        http_get "${ADMIN_URL_NON_LB}/api/auth/session"
+        assert_status "200" "$HTTP_STATUS" "localStorage Token 缺失时有效 Cookie 仍应保持浏览器会话"
+
+        log "Case: non-loopback REST API with login cookie -> 200"
+        http_get "${ADMIN_URL_NON_LB}/api/rules"
+        assert_status "200" "$HTTP_STATUS" "非 loopback 会话 Cookie 应覆盖普通 REST API"
+
+        log "Case: all native browser SSE endpoints accept login cookie"
+        for stream_path in \
+            "/api/whitelist/pending/stream?x_client_id=e2e-cookie" \
+            "/api/config/ip-tls/pending/stream?x_client_id=e2e-cookie"; do
+            http_get "${ADMIN_URL_NON_LB}${stream_path}"
+            stream_status="$(printf '%s\n' "$HTTP_HEADERS" | awk 'toupper($1) ~ /^HTTP\// {status=$2} END {print status}')"
+            assert_status "200" "$stream_status" "非 loopback 会话 Cookie 应授权 SSE ${stream_path}"
+        done
+
+        log "Case: native browser WebSocket endpoint accepts login cookie"
+        http_get "${ADMIN_URL_NON_LB}/api/push?x_client_id=e2e-cookie" $'Connection: Upgrade\nUpgrade: websocket\nSec-WebSocket-Version: 13\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\nOrigin: http://'"${NON_LOOPBACK_IP}:${ADMIN_PORT}"
+        websocket_status="$(printf '%s\n' "$HTTP_HEADERS" | awk 'toupper($1) ~ /^HTTP\// {status=$2} END {print status}')"
+        assert_status "101" "$websocket_status" "非 loopback 会话 Cookie 应授权主 Push WebSocket"
+    fi
 else
     _log_warning "无法获取非 loopback IP，跳过非本地鉴权断言"
 fi
@@ -310,7 +374,21 @@ if [[ -n "${NON_LOOPBACK_IP:-}" ]]; then
     else
         assert_status "401" "$HTTP_STATUS" "revoke-all 后非 loopback 旧 Token 应失效返回 401"
     fi
+
+    log "Case: non-loopback old cookie after revoke-all -> 401"
+    http_get "${ADMIN_URL_NON_LB}/api/rules"
+    if [[ "$HTTP_STATUS" == "000" ]]; then
+        _log_warning "非 loopback 地址不可达（curl 连接失败），跳过 Cookie 吊销断言"
+    else
+        assert_status "401" "$HTTP_STATUS" "revoke-all 后非 loopback 旧 Cookie 应失效"
+    fi
 fi
+
+log "Case: logout clears the browser session cookie"
+http_post_json "${ADMIN_URL_127}/api/auth/logout" "{}"
+assert_status "200" "$HTTP_STATUS" "登出接口应返回 200"
+assert_header_contains "Set-Cookie" "bifrost_admin_session=;" "$HTTP_HEADERS" "登出应清空浏览器会话 Cookie"
+assert_header_contains "Set-Cookie" "Max-Age=0" "$HTTP_HEADERS" "登出 Cookie 应立即过期"
 
 log "Ensure data plane forwarding still works after enabling/revoking admin auth"
 proxy_get "http://127.0.0.1:${ADMIN_PORT}" "http://example.com/remote-auth-post"

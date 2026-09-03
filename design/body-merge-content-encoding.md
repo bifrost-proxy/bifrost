@@ -77,14 +77,21 @@ api.example.com resMerge://({"test":"qwe"})
 
 ### Traffic 抓取与展示
 
-- 普通缓冲请求/响应在写入 `request_body_ref` / `response_body_ref` 前解码。
-- 流式请求和超过内存阈值的文件型响应先原样转发并落盘，并在 `BodyRef::ContentEncoded` 中持久化实际的编码链；Traffic body、Network 导出和预览只对带该标记的引用解码，因此不阻塞网络转发热路径，也不会根据旧 header 把已经解码的应用数据再解一层。
-- `traffic get`、批量 Body API、全文搜索、JSONPath Body 条件过滤、搜索结果 `include` 和 SSE 事件恢复统一读取上述标记并解码，避免 CLI/远程查询路径重新把 wire bytes 当 UTF-8 文本。
+- `request_body_ref` / `response_body_ref` 是唯一的 canonical wire bytes；普通缓冲 Body、流式 Body 和大文件 Body 都不在代理热路径生成第二份明文副本。
+- 实际 `Content-Encoding` 写入 Traffic detail 的版本化 `body_metadata_blob`，与 Body 引用在同一 SQLite 事务中提交。v14 的 `.content-encoding` sidecar 只做读取兼容，新流量不再创建 sidecar。
+- `traffic get`、Traffic Body API、批量 Body API、全文搜索、JSONPath Body 条件过滤、搜索结果 `include`、SSE 事件恢复和 Network 导出统一使用“metadata 优先、旧 sidecar 回退”的 logical-body loader，避免直接把 wire bytes 当 UTF-8，也避免对已经是明文的旧记录二次解码。
+- `raw=1` 优先读取 decode/script 流程显式保留的 raw 引用；普通代理流量没有独立 raw 引用时直接回退 canonical wire ref，因此 raw 恢复不需要双份落盘。
 - 展示与导出的完整编码链共享 10 MiB 解压输出预算，不会让每层单独重复消耗 10 MiB；超限、损坏或未知编码保留原始落盘引用，不伪造明文。Traffic API 的 `raw=1` 优先读取独立 raw 引用；不存在 raw 引用时沿用既有的 body 引用回退语义。
 - Traffic Body 读取使用当前 `sandbox.limits.max_decompress_output_bytes`，没有配置管理器时才回退到 10 MiB 默认值。
 - gzip 使用多 member 解码语义，合法的相邻 gzip member 会在同一 10 MiB 预算内全部展开并顺序拼接。
-- network `.bifrost` 导出保留原始字节的 base64，同时写入可解码的明文；导入预览优先展示明文，旧版本已做 lossy UTF-8 转换的不可逆数据给出明确警告。
-- 确认导入 Network 包时，明文 Body 会写入主引用，可用的 base64 原始字节会写入 raw 引用；非法 lossless base64 在预览和导入前直接拒绝。多记录包只扫描无需解压的旧 lossy 文本特征并展示警告，不按记录重复消耗解压预算。
+- network `.bifrost` 导出保留 wire bytes 的 base64，同时写入供人查看的明文；导入预览优先展示明文，旧版本已做 lossy UTF-8 转换的不可逆数据给出明确警告。
+- 确认导入 Network 包时，有 base64 就把它作为 canonical wire body 写入主引用并把编码链写入 DB metadata；只有没有 base64 的旧包才回退写入明文。导入阶段不解压、不创建 raw 副本，也不消耗展示/搜索的解压预算；非法 base64 或超长 encoding metadata 在写入任何记录前整体拒绝。
+
+### SSE 热路径
+
+- identity SSE 只做有界换行扫描；压缩 SSE 的增量解码和事件计数由有界后台 observer 完成。
+- `poll_frame` 对压缩 SSE 只执行 `Bytes::clone()` 和 `try_send`，不等待队列、不执行解压、flush 或正文扫描。observer 队列满或解码失败时立即停止观察并把 `observation_partial` 写入 Traffic metadata，转发和 wire 落盘继续进行。
+- Super Performance Mode 不创建 decoder/observer。SSE 结束后的 OpenAI-like 派生正文也在 blocking worker 中生成，结束帧不再同步整文件读取和重解压。
 
 ### HTTP / HTTPS 落地
 

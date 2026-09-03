@@ -13,7 +13,7 @@ use crate::handlers::{
     app_icon::handle_app_icon,
     asr::handle_asr,
     audit::handle_audit,
-    auth::{extract_bearer_token, handle_auth},
+    auth::{extract_admin_session_cookie, extract_bearer_token, handle_auth},
     bifrost_file::handle_bifrost_file,
     breakpoint::handle_breakpoint,
     capture::handle_capture,
@@ -468,26 +468,37 @@ impl AdminRouter {
             return None;
         }
 
-        let token = extract_bearer_token(req).or_else(|| {
-            if path == "/api/asr/transcribe-ws" || path == "/api/voice/listen-ws" {
-                query_token(req.uri().query())
-            } else {
-                None
-            }
-        });
-        let Some(token) = token else {
+        let query_token = if path == "/api/asr/transcribe-ws" || path == "/api/voice/listen-ws" {
+            query_token(req.uri().query())
+        } else {
+            None
+        };
+        let tokens = [
+            extract_bearer_token(req),
+            extract_admin_session_cookie(req),
+            query_token,
+        ];
+        if tokens.iter().all(Option::is_none) {
             return Some(error_response(
                 StatusCode::UNAUTHORIZED,
                 "Missing bearer token",
             ));
-        };
-        if let Err(e) = validate_admin_jwt(state, &token) {
-            return Some(error_response(
-                StatusCode::UNAUTHORIZED,
-                &format!("Unauthorized: {e}"),
-            ));
         }
-        None
+
+        let mut last_error = None;
+        for token in tokens.into_iter().flatten() {
+            match validate_admin_jwt(state, &token) {
+                Ok(_) => return None,
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Some(error_response(
+            StatusCode::UNAUTHORIZED,
+            &format!(
+                "Unauthorized: {}",
+                last_error.expect("at least one credential was validated")
+            ),
+        ))
     }
 
     fn check_browser_write_guard<T>(
@@ -1202,6 +1213,93 @@ mod tests {
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/asr/status", remote_peer())
             .expect("regular API should still require Authorization header");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_check_api_auth_accepts_session_cookie_for_all_browser_connection_types() {
+        let (state, _tmp) = new_state_remote_enabled();
+        let (token, _) = crate::admin_auth::issue_admin_jwt(&state, "admin").expect("issue jwt");
+
+        // Keep this list aligned with every native EventSource/WebSocket entry
+        // in web/src. Those APIs cannot attach an Authorization header. A
+        // regular REST path is included to prove the fallback is router-wide.
+        for path in [
+            "/api/system/status",
+            "/api/push",
+            "/api/whitelist/pending/stream",
+            "/api/config/ip-tls/pending/stream",
+            "/api/traffic/record-id/frames/stream",
+            "/api/traffic/record-id/sse/stream",
+            "/api/devtools/sessions/session-id/ws",
+            "/api/replay/execute/ws",
+            "/api/asr/transcribe-ws",
+            "/api/voice/listen-ws",
+        ] {
+            let req = Request::builder()
+                .uri(format!("/_bifrost{path}"))
+                .header(
+                    hyper::header::COOKIE,
+                    format!("theme=dark; bifrost_admin_session={token}"),
+                )
+                .body(())
+                .unwrap();
+            let resp = AdminRouter::check_api_auth(&req, &state, path, remote_peer());
+            assert!(
+                resp.is_none(),
+                "session cookie should authorize browser connection path {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_api_auth_rejects_invalid_session_cookie_for_remote_stream() {
+        let (state, _tmp) = new_state_remote_enabled();
+        let req = Request::builder()
+            .uri("/_bifrost/api/push")
+            .header(hyper::header::COOKIE, "bifrost_admin_session=invalid-token")
+            .body(())
+            .unwrap();
+        let resp = AdminRouter::check_api_auth(&req, &state, "/api/push", remote_peer())
+            .expect("invalid session cookie should be rejected");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_check_api_auth_rejects_revoked_session_cookie() {
+        let (state, _tmp) = new_state_remote_enabled();
+        let (token, _) = crate::admin_auth::issue_admin_jwt(&state, "admin").expect("issue jwt");
+        crate::admin_auth::revoke_all_admin_sessions(&state).expect("revoke sessions");
+        let req = Request::builder()
+            .uri("/_bifrost/api/push")
+            .header(
+                hyper::header::COOKIE,
+                format!("bifrost_admin_session={token}"),
+            )
+            .body(())
+            .unwrap();
+        let resp = AdminRouter::check_api_auth(&req, &state, "/api/push", remote_peer())
+            .expect("revoked session cookie should be rejected");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_check_api_auth_accepts_valid_cookie_when_bearer_is_stale() {
+        let (state, _tmp) = new_state_remote_enabled();
+        let (token, _) = crate::admin_auth::issue_admin_jwt(&state, "admin").expect("issue jwt");
+        let req = Request::builder()
+            .uri("/_bifrost/api/system/status")
+            .header(hyper::header::AUTHORIZATION, "Bearer stale-token")
+            .header(
+                hyper::header::COOKIE,
+                format!("bifrost_admin_session={token}"),
+            )
+            .body(())
+            .unwrap();
+        let resp = AdminRouter::check_api_auth(&req, &state, "/api/system/status", remote_peer());
+        assert!(
+            resp.is_none(),
+            "authentication methods are alternatives, so a valid cookie must win"
+        );
     }
 
     #[test]

@@ -2,7 +2,32 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use std::io::Read;
 
+use crate::BodyRef;
+
 pub(crate) const DEFAULT_MAX_DECOMPRESSED_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Resolve content-coding from transactional Traffic metadata first, while
+/// retaining read compatibility with body sidecars written by older builds.
+pub(crate) fn stored_body_content_encoding(
+    body_ref: &BodyRef,
+    metadata_content_encoding: Option<&str>,
+) -> Option<String> {
+    metadata_content_encoding
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| body_ref.content_encoding())
+}
+
+pub(crate) fn decode_stored_body_with_limit(
+    body_ref: &BodyRef,
+    bytes: Vec<u8>,
+    metadata_content_encoding: Option<&str>,
+    max_output_bytes: usize,
+) -> Vec<u8> {
+    let content_encoding = stored_body_content_encoding(body_ref, metadata_content_encoding);
+    decode_content_encoded_body_with_limit(bytes, content_encoding.as_deref(), max_output_bytes)
+}
 
 pub(super) struct ExportBody {
     pub text: Option<String>,

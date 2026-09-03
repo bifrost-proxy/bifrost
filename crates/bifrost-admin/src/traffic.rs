@@ -94,6 +94,33 @@ pub struct RequestTiming {
     pub total_ms: u64,
 }
 
+pub const TRAFFIC_BODY_METADATA_VERSION: u8 = 1;
+const MAX_BODY_CONTENT_ENCODING_BYTES: usize = 256;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBodyMetadata {
+    pub content_encoding: Option<String>,
+    #[serde(default)]
+    pub observation_partial: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficBodyMetadata {
+    pub version: u8,
+    pub request: Option<StoredBodyMetadata>,
+    pub response: Option<StoredBodyMetadata>,
+}
+
+impl Default for TrafficBodyMetadata {
+    fn default() -> Self {
+        Self {
+            version: TRAFFIC_BODY_METADATA_VERSION,
+            request: None,
+            response: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrafficRecord {
     pub id: String,
@@ -125,6 +152,12 @@ pub struct TrafficRecord {
     pub response_body_ref: Option<BodyRef>,
     #[serde(default)]
     pub derived_response_body_ref: Option<BodyRef>,
+    /// Versioned metadata for the canonical wire body references above.
+    ///
+    /// Legacy records may have no metadata here and keep their encoding in a
+    /// `.content-encoding` sidecar. New records never create those sidecars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_metadata: Option<TrafficBodyMetadata>,
     /// 原始（未 decode）请求体引用：用于 decode 失败回溯或对比。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_request_body_ref: Option<BodyRef>,
@@ -228,6 +261,7 @@ impl TrafficRecord {
             request_body_ref: None,
             response_body_ref: None,
             derived_response_body_ref: None,
+            body_metadata: None,
             raw_request_body_ref: None,
             raw_response_body_ref: None,
             client_ip: String::new(),
@@ -260,6 +294,109 @@ impl TrafficRecord {
             decode_res_script_results: None,
             devtools_client_req_id: None,
         }
+    }
+
+    pub fn set_request_body_content_encoding(&mut self, content_encoding: Option<&str>) {
+        self.set_body_content_encoding(true, content_encoding);
+    }
+
+    pub fn set_response_body_content_encoding(&mut self, content_encoding: Option<&str>) {
+        self.set_body_content_encoding(false, content_encoding);
+    }
+
+    fn set_body_content_encoding(&mut self, request: bool, content_encoding: Option<&str>) {
+        let content_encoding = content_encoding
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| value.len() <= MAX_BODY_CONTENT_ENCODING_BYTES)
+            .map(str::to_string);
+        if self
+            .body_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.version != TRAFFIC_BODY_METADATA_VERSION)
+        {
+            self.body_metadata = None;
+        }
+        match content_encoding {
+            Some(content_encoding) => {
+                let metadata = self
+                    .body_metadata
+                    .get_or_insert_with(TrafficBodyMetadata::default);
+                let body = if request {
+                    &mut metadata.request
+                } else {
+                    &mut metadata.response
+                };
+                body.get_or_insert_with(StoredBodyMetadata::default)
+                    .content_encoding = Some(content_encoding);
+            }
+            None => {
+                if let Some(metadata) = self.body_metadata.as_mut() {
+                    let body = if request {
+                        &mut metadata.request
+                    } else {
+                        &mut metadata.response
+                    };
+                    if let Some(body) = body.as_mut() {
+                        body.content_encoding = None;
+                        if !body.observation_partial {
+                            *body = StoredBodyMetadata::default();
+                        }
+                    }
+                    if body.as_ref().is_some_and(|body| {
+                        body.content_encoding.is_none() && !body.observation_partial
+                    }) {
+                        *body = None;
+                    }
+                    if metadata.request.is_none() && metadata.response.is_none() {
+                        self.body_metadata = None;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn mark_response_body_observation_partial(&mut self) {
+        if self
+            .body_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.version != TRAFFIC_BODY_METADATA_VERSION)
+        {
+            self.body_metadata = None;
+        }
+        let metadata = self
+            .body_metadata
+            .get_or_insert_with(TrafficBodyMetadata::default);
+        metadata
+            .response
+            .get_or_insert_with(StoredBodyMetadata::default)
+            .observation_partial = true;
+    }
+
+    pub fn request_body_content_encoding(&self) -> Option<String> {
+        self.body_metadata
+            .as_ref()
+            .filter(|metadata| metadata.version == TRAFFIC_BODY_METADATA_VERSION)
+            .and_then(|metadata| metadata.request.as_ref())
+            .and_then(|metadata| metadata.content_encoding.clone())
+            .or_else(|| {
+                self.request_body_ref
+                    .as_ref()
+                    .and_then(BodyRef::content_encoding)
+            })
+    }
+
+    pub fn response_body_content_encoding(&self) -> Option<String> {
+        self.body_metadata
+            .as_ref()
+            .filter(|metadata| metadata.version == TRAFFIC_BODY_METADATA_VERSION)
+            .and_then(|metadata| metadata.response.as_ref())
+            .and_then(|metadata| metadata.content_encoding.clone())
+            .or_else(|| {
+                self.response_body_ref
+                    .as_ref()
+                    .and_then(BodyRef::content_encoding)
+            })
     }
 
     pub fn set_h3(&mut self) {
@@ -443,5 +580,68 @@ mod tests {
         assert!(matches!(value, Value::Object(_)));
         assert!(value.get("derived_response_body_ref").is_some());
         assert!(value["derived_response_body_ref"].is_null());
+    }
+
+    #[test]
+    fn body_metadata_setters_preserve_partial_state_and_clear_stale_encoding() {
+        let mut record = TrafficRecord::new(
+            "REQ-body-metadata".to_string(),
+            "GET".to_string(),
+            "https://example.com/encoded".to_string(),
+        );
+
+        record.mark_response_body_observation_partial();
+        record.set_response_body_content_encoding(Some(" gzip "));
+        assert_eq!(
+            record.response_body_content_encoding().as_deref(),
+            Some("gzip")
+        );
+        assert!(record
+            .body_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.response.as_ref())
+            .is_some_and(|metadata| metadata.observation_partial));
+
+        record.set_response_body_content_encoding(None);
+        assert_eq!(record.response_body_content_encoding(), None);
+        assert!(record
+            .body_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.response.as_ref())
+            .is_some_and(|metadata| metadata.observation_partial));
+    }
+
+    #[test]
+    fn body_metadata_ignores_overlong_and_unknown_versions() {
+        let mut record = TrafficRecord::new(
+            "REQ-body-metadata-version".to_string(),
+            "GET".to_string(),
+            "https://example.com/encoded".to_string(),
+        );
+        record.set_request_body_content_encoding(Some(&"x".repeat(257)));
+        assert!(record.body_metadata.is_none());
+
+        record.body_metadata = Some(TrafficBodyMetadata {
+            version: TRAFFIC_BODY_METADATA_VERSION + 1,
+            request: Some(StoredBodyMetadata {
+                content_encoding: Some("future".to_string()),
+                observation_partial: false,
+            }),
+            response: None,
+        });
+        assert_eq!(record.request_body_content_encoding(), None);
+
+        record.set_request_body_content_encoding(Some("br"));
+        assert_eq!(
+            record.request_body_content_encoding().as_deref(),
+            Some("br")
+        );
+        assert_eq!(
+            record
+                .body_metadata
+                .as_ref()
+                .map(|metadata| metadata.version),
+            Some(TRAFFIC_BODY_METADATA_VERSION)
+        );
     }
 }

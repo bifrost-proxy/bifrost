@@ -1,19 +1,21 @@
 use std::io::Write;
 
 use bytes::Bytes;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::{SseEventBodyDecoder, SseTeeBody, SseTeeOptions};
 
-#[test]
-fn sse_event_decoder_uses_the_limit_resolved_by_the_async_handler() {
+#[tokio::test]
+async fn sse_event_decoder_uses_the_limit_resolved_by_the_async_handler() {
     let plaintext = b"data: exceeds tiny configured limit\n\n";
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(plaintext).unwrap();
-    let wire = encoder.finish().unwrap();
+    let wire = Bytes::from(encoder.finish().unwrap());
     let body = crate::server::full_body(Bytes::new());
     let mut tee = SseTeeBody::new(
         body,
-        None,
+        Some(Arc::new(bifrost_admin::AdminState::new(0))),
         "configured-limit".to_string(),
         SseTeeOptions {
             traffic_type: None,
@@ -26,23 +28,31 @@ fn sse_event_decoder_uses_the_limit_resolved_by_the_async_handler() {
 
     tee.process_sse_wire_chunk(&wire);
 
-    assert!(matches!(
-        tee.event_decoder,
-        SseEventBodyDecoder::Unsupported
-    ));
+    for _ in 0..50 {
+        let partial = match &tee.event_decoder {
+            SseEventBodyDecoder::Encoded(observer) => observer.partial.load(Ordering::Relaxed),
+            _ => false,
+        };
+        if partial {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("bounded SSE observer did not reject output over the configured limit");
 }
 
-#[test]
-fn sse_event_decoder_finalization_rejects_a_truncated_trailer() {
+#[tokio::test]
+async fn sse_event_decoder_finalization_rejects_a_truncated_trailer() {
     let plaintext = b"data: complete event\n\n";
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(plaintext).unwrap();
     let mut wire = encoder.finish().unwrap();
     wire.truncate(wire.len() - 4);
+    let wire = Bytes::from(wire);
     let body = crate::server::full_body(Bytes::new());
     let mut tee = SseTeeBody::new(
         body,
-        None,
+        Some(Arc::new(bifrost_admin::AdminState::new(0))),
         "truncated-trailer".to_string(),
         SseTeeOptions {
             traffic_type: None,
@@ -59,4 +69,15 @@ fn sse_event_decoder_finalization_rejects_a_truncated_trailer() {
     tee.finish_sse_event_decoder();
 
     assert!(matches!(tee.event_decoder, SseEventBodyDecoder::Encoded(_)));
+    for _ in 0..50 {
+        let partial = match &tee.event_decoder {
+            SseEventBodyDecoder::Encoded(observer) => observer.partial.load(Ordering::Relaxed),
+            _ => false,
+        };
+        if partial {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("truncated SSE trailer was not rejected during finalization");
 }

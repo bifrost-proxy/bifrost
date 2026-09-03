@@ -1,22 +1,64 @@
 use std::sync::{Arc, OnceLock};
 
 use bifrost_admin::{AdminState, BodyRef, BodyStreamWriter, SharedBodyStore, TrafficRecord};
+use bytes::Bytes;
 use tokio::sync::Semaphore;
 
-use crate::transform::decompress::try_decompress_body_with_limit;
-
 const DEFAULT_BODY_STORE_BACKGROUND_CONCURRENCY: usize = 1;
+const MAX_BODY_CONTENT_ENCODING_BYTES: usize = 256;
+
+fn normalize_content_encoding(content_encoding: Option<&str>) -> Option<String> {
+    content_encoding
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_BODY_CONTENT_ENCODING_BYTES)
+        .map(str::to_string)
+}
+
+fn stores_encoded_wire(content_encoding: Option<&str>) -> bool {
+    content_encoding.is_some_and(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"))
+    })
+}
+
+fn body_ref_is_lossless(body_ref: &BodyRef, bytes: &[u8]) -> bool {
+    match body_ref {
+        BodyRef::File { size, .. } | BodyRef::FileRange { size, .. } => *size == bytes.len(),
+        BodyRef::Inline { data } => data.as_bytes() == bytes,
+    }
+}
+
+fn store_canonical_body(
+    store: &bifrost_admin::BodyStore,
+    record_id: &str,
+    kind: &str,
+    body: &[u8],
+    content_encoding: Option<&str>,
+) -> Option<BodyRef> {
+    let body_ref = store.store(record_id, kind, body)?;
+    if stores_encoded_wire(content_encoding) && !body_ref_is_lossless(&body_ref, body) {
+        // `remove` is intentionally unconditional: it deletes file-backed
+        // refs and is a no-op for the lossy inline fallback.
+        store.remove(&body_ref);
+        return None;
+    }
+    Some(body_ref)
+}
 
 #[derive(Default)]
 pub struct StoredRequestBodies {
     primary: Option<BodyRef>,
-    raw: Option<BodyRef>,
+    content_encoding: Option<String>,
 }
 
 impl StoredRequestBodies {
     pub fn apply_to(self, record: &mut TrafficRecord) {
         record.request_body_ref = self.primary;
-        record.raw_request_body_ref = self.raw;
+        if record.request_body_ref.is_some() {
+            record.set_request_body_content_encoding(self.content_encoding.as_deref());
+        }
     }
 
     pub fn into_primary(self) -> Option<BodyRef> {
@@ -24,35 +66,23 @@ impl StoredRequestBodies {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.primary.is_none() && self.raw.is_none()
+        self.primary.is_none()
     }
 }
 
-pub(super) fn finish_body_stream_with_encoding(
-    body_store: Option<&SharedBodyStore>,
+pub(super) fn finish_body_stream(
+    _body_store: Option<&SharedBodyStore>,
     writer: BodyStreamWriter,
-    content_encoding: Option<&str>,
-    record_id: &str,
-    body_kind: &str,
+    _record_id: &str,
+    _body_kind: &str,
 ) -> Option<BodyRef> {
-    let body_ref = writer.finish();
-    let cleanup_ref = body_ref.clone();
-    match body_ref.with_content_encoding(content_encoding) {
-        Ok(body_ref) => Some(body_ref),
-        Err(error) => {
-            if let Some(body_store) = body_store {
-                body_store.read().remove(&cleanup_ref);
-            }
-            tracing::warn!(%error, %record_id, %body_kind, "failed to persist streamed body content encoding");
-            None
-        }
-    }
+    Some(writer.finish())
 }
 
 #[derive(Default)]
 pub(super) struct StoredResponseBodies {
     pub(super) primary: Option<BodyRef>,
-    pub(super) raw: Option<BodyRef>,
+    pub(super) content_encoding: Option<String>,
 }
 
 fn body_store_background_semaphore() -> Arc<Semaphore> {
@@ -69,93 +99,17 @@ fn body_store_background_semaphore() -> Arc<Semaphore> {
         .clone()
 }
 
-fn stores_decoded_http_body(content_encoding: Option<&str>) -> bool {
-    content_encoding.is_some_and(|value| {
-        value
-            .split(',')
-            .map(str::trim)
-            .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"))
-    })
-}
-
-fn body_ref_is_lossless(body_ref: &BodyRef, bytes: &[u8]) -> bool {
-    match body_ref {
-        BodyRef::File { size, .. } | BodyRef::FileRange { size, .. } => *size == bytes.len(),
-        BodyRef::Inline { data } => data.as_bytes() == bytes,
-    }
-}
-
-fn remove_file_backed_ref(store: &bifrost_admin::BodyStore, body_ref: Option<&BodyRef>) {
-    if let Some(body_ref) = body_ref.filter(|body_ref| body_ref.is_file()) {
-        store.remove(body_ref);
-    }
-}
-
-fn store_decoded_and_raw(
-    store: &bifrost_admin::BodyStore,
-    record_id: &str,
-    primary_kind: &str,
-    raw_kind: &str,
-    decoded: &[u8],
-    wire: &[u8],
-) -> Option<(BodyRef, BodyRef)> {
-    let primary = store.store(record_id, primary_kind, decoded);
-    let raw = store.store(record_id, raw_kind, wire);
-    if primary
-        .as_ref()
-        .is_some_and(|body_ref| body_ref_is_lossless(body_ref, decoded))
-        && raw
-            .as_ref()
-            .is_some_and(|body_ref| body_ref_is_lossless(body_ref, wire))
-    {
-        return Some((primary.unwrap(), raw.unwrap()));
-    }
-
-    remove_file_backed_ref(store, primary.as_ref());
-    remove_file_backed_ref(store, raw.as_ref());
-    None
-}
-
 fn store_buffered_response_bodies(
     store: &bifrost_admin::BodyStore,
     record_id: &str,
     body: &[u8],
     content_encoding: Option<&str>,
-    max_decompress_output_bytes: usize,
+    _max_decompress_output_bytes: usize,
 ) -> StoredResponseBodies {
-    let should_decode = stores_decoded_http_body(content_encoding);
-    let decoded = if max_decompress_output_bytes > 0 {
-        content_encoding.and_then(|encoding| {
-            try_decompress_body_with_limit(body, encoding, max_decompress_output_bytes).ok()
-        })
-    } else {
-        None
-    };
-    if should_decode {
-        if let Some(decoded) = decoded {
-            if let Some((primary, raw)) =
-                store_decoded_and_raw(store, record_id, "res", "res_raw", &decoded, body)
-            {
-                return StoredResponseBodies {
-                    primary: Some(primary),
-                    raw: Some(raw),
-                };
-            }
-        }
+    StoredResponseBodies {
+        primary: store_canonical_body(store, record_id, "res", body, content_encoding),
+        content_encoding: normalize_content_encoding(content_encoding),
     }
-
-    let primary = store.store(record_id, "res", body).and_then(|body_ref| {
-        let cleanup_ref = body_ref.clone();
-        match body_ref.with_content_encoding(content_encoding) {
-            Ok(body_ref) => Some(body_ref),
-            Err(error) => {
-                store.remove(&cleanup_ref);
-                tracing::warn!(%error, %record_id, "failed to persist buffered response content encoding");
-                None
-            }
-        }
-    });
-    StoredResponseBodies { primary, raw: None }
 }
 
 pub(super) fn store_buffered_request_bodies(
@@ -163,48 +117,19 @@ pub(super) fn store_buffered_request_bodies(
     record_id: &str,
     body: &[u8],
     content_encoding: Option<&str>,
-    max_decompress_output_bytes: usize,
+    _max_decompress_output_bytes: usize,
 ) -> StoredRequestBodies {
-    let should_decode = stores_decoded_http_body(content_encoding);
-    let decoded = if max_decompress_output_bytes > 0 {
-        content_encoding.and_then(|encoding| {
-            try_decompress_body_with_limit(body, encoding, max_decompress_output_bytes).ok()
-        })
-    } else {
-        None
-    };
-    if should_decode {
-        if let Some(decoded) = decoded {
-            if let Some((primary, raw)) =
-                store_decoded_and_raw(store, record_id, "req", "req_raw", &decoded, body)
-            {
-                return StoredRequestBodies {
-                    primary: Some(primary),
-                    raw: Some(raw),
-                };
-            }
-        }
+    StoredRequestBodies {
+        primary: store_canonical_body(store, record_id, "req", body, content_encoding),
+        content_encoding: normalize_content_encoding(content_encoding),
     }
-
-    let primary = store.store(record_id, "req", body).and_then(|body_ref| {
-        let cleanup_ref = body_ref.clone();
-        match body_ref.with_content_encoding(content_encoding) {
-            Ok(body_ref) => Some(body_ref),
-            Err(error) => {
-                store.remove(&cleanup_ref);
-                tracing::warn!(%error, %record_id, "failed to persist buffered request content encoding");
-                None
-            }
-        }
-    });
-    StoredRequestBodies { primary, raw: None }
 }
 
 fn schedule_decompressed_response_body_store(
     state: Arc<AdminState>,
     body_store: SharedBodyStore,
     record_id: String,
-    body: Vec<u8>,
+    body: Bytes,
     content_encoding: Option<String>,
     max_decompress_output_bytes: usize,
 ) -> StoredResponseBodies {
@@ -234,13 +159,11 @@ fn schedule_decompressed_response_body_store(
         .await
         .unwrap_or_default();
 
-        if stored.primary.is_some() || stored.raw.is_some() {
+        if stored.primary.is_some() {
             state.update_traffic_by_id(&record_id, move |record| {
                 if stored.primary.is_some() {
                     record.response_body_ref = stored.primary.clone();
-                }
-                if stored.raw.is_some() {
-                    record.raw_response_body_ref = stored.raw.clone();
+                    record.set_response_body_content_encoding(stored.content_encoding.as_deref());
                 }
             });
         }
@@ -253,7 +176,7 @@ pub(super) fn store_response_body_or_schedule(
     state: Arc<AdminState>,
     body_store: SharedBodyStore,
     record_id: String,
-    body: Vec<u8>,
+    body: Bytes,
     content_encoding: Option<String>,
     max_decompress_output_bytes: usize,
 ) -> StoredResponseBodies {
@@ -319,7 +242,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffered_compressed_response_keeps_plaintext_and_wire_bytes() {
+    async fn buffered_compressed_response_keeps_wire_bytes_and_db_metadata() {
         let (state, dir) = test_state_with_body_store("buffered-content-encoded");
         let record_id = "buffered-content-encoded";
         state.record_traffic(bifrost_admin::TrafficRecord::new(
@@ -356,20 +279,26 @@ mod tests {
             store
                 .load_bytes(record.response_body_ref.as_ref().unwrap())
                 .as_deref(),
-            Some(plaintext.as_slice())
+            Some(wire.as_slice())
+        );
+        assert!(record.raw_response_body_ref.is_none());
+        assert_eq!(
+            record.response_body_content_encoding().as_deref(),
+            Some("gzip")
         );
         assert_eq!(
-            store
-                .load_bytes(record.raw_response_body_ref.as_ref().unwrap())
-                .as_deref(),
-            Some(wire.as_slice())
+            record
+                .response_body_ref
+                .as_ref()
+                .and_then(BodyRef::content_encoding),
+            None
         );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn buffered_compressed_request_keeps_plaintext_and_wire_bytes() {
+    fn buffered_compressed_request_keeps_wire_bytes_and_metadata() {
         let dir = std::env::temp_dir().join(format!(
             "bifrost-tee-buffered-request-{}-{}",
             std::process::id(),
@@ -393,17 +322,18 @@ mod tests {
             store
                 .load_bytes(stored.primary.as_ref().unwrap())
                 .as_deref(),
-            Some(plaintext.as_slice())
-        );
-        assert_eq!(
-            store.load_bytes(stored.raw.as_ref().unwrap()).as_deref(),
             Some(wire.as_slice())
+        );
+        assert_eq!(stored.content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(
+            stored.primary.as_ref().and_then(BodyRef::content_encoding),
+            None
         );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn buffered_compressed_bodies_never_publish_lossy_inline_raw_refs() {
+    fn buffered_compressed_bodies_never_publish_lossy_inline_wire_bytes() {
         let parent = std::env::temp_dir().join(format!(
             "bifrost-tee-lossy-raw-{}-{}",
             std::process::id(),
@@ -426,46 +356,16 @@ mod tests {
 
         let response =
             store_buffered_response_bodies(&store, "response", &wire, Some("gzip"), 32 * 1024);
-        assert!(response.raw.is_none());
         assert!(response.primary.is_none());
 
         let request =
             store_buffered_request_bodies(&store, "request", &wire, Some("gzip"), 32 * 1024);
-        assert!(request.raw.is_none());
         assert!(request.primary.is_none());
         let _ = std::fs::remove_dir_all(parent);
     }
 
     #[test]
-    fn file_backed_cleanup_removes_abandoned_body() {
-        let dir = std::env::temp_dir().join(format!(
-            "bifrost-tee-abandoned-body-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("abandoned");
-        std::fs::write(&path, b"wire").unwrap();
-        let store = BodyStore::new(
-            dir.clone(),
-            1024 * 1024,
-            1,
-            64 * 1024,
-            Duration::from_secs(1),
-        );
-        let body_ref = BodyRef::File {
-            path: path.to_string_lossy().into_owned(),
-            size: 4,
-        };
-
-        remove_file_backed_ref(&store, Some(&body_ref));
-
-        assert!(!path.exists());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn buffered_response_falls_back_to_encoded_wire_when_decode_is_unavailable() {
+    fn buffered_response_always_stores_encoded_wire_without_sidecar() {
         let dir = std::env::temp_dir().join(format!(
             "bifrost-tee-buffered-fallback-{}",
             std::process::id()
@@ -487,8 +387,8 @@ mod tests {
         );
 
         let primary = stored.primary.expect("wire fallback should be stored");
-        assert!(stored.raw.is_none());
-        assert_eq!(primary.content_encoding().as_deref(), Some("gzip"));
+        assert_eq!(stored.content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(primary.content_encoding(), None);
         assert_eq!(
             store.load_bytes(&primary).as_deref(),
             Some(b"wire body".as_slice())
@@ -502,8 +402,10 @@ mod tests {
             Some(&invalid_encoding),
             0,
         );
-        assert!(invalid.primary.is_none());
-        assert!(!dir.join("invalid-metadata_res").exists());
+        assert!(invalid.primary.is_some());
+        assert_eq!(invalid.content_encoding, None);
+        assert!(dir.join("invalid-metadata_res").exists());
+        assert!(!dir.join("invalid-metadata_res.content-encoding").exists());
 
         let invalid_request = store_buffered_request_bodies(
             &store,
@@ -512,8 +414,12 @@ mod tests {
             Some(&invalid_encoding),
             0,
         );
-        assert!(invalid_request.primary.is_none());
-        assert!(!dir.join("invalid-request-metadata_req").exists());
+        assert!(invalid_request.primary.is_some());
+        assert_eq!(invalid_request.content_encoding, None);
+        assert!(dir.join("invalid-request-metadata_req").exists());
+        assert!(!dir
+            .join("invalid-request-metadata_req.content-encoding")
+            .exists());
 
         let state = Arc::new(
             AdminState::new(0)
@@ -524,7 +430,7 @@ mod tests {
             state.clone(),
             state.body_store.as_ref().unwrap().clone(),
             "super-performance".to_string(),
-            b"not stored".to_vec(),
+            Bytes::from_static(b"not stored"),
             None,
             1024,
         );
@@ -545,7 +451,7 @@ mod tests {
             state,
             body_store.clone(),
             "sync-buffered-store".to_string(),
-            wire.clone(),
+            Bytes::from(wire.clone()),
             Some("gzip".to_string()),
             1024,
         );
@@ -555,11 +461,12 @@ mod tests {
             store
                 .load_bytes(stored.primary.as_ref().unwrap())
                 .as_deref(),
-            Some(plaintext.as_slice())
-        );
-        assert_eq!(
-            store.load_bytes(stored.raw.as_ref().unwrap()).as_deref(),
             Some(wire.as_slice())
+        );
+        assert_eq!(stored.content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(
+            stored.primary.as_ref().and_then(BodyRef::content_encoding),
+            None
         );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);

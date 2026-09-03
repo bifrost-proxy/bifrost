@@ -282,18 +282,23 @@ fn encoded_file_body_is_decoded_for_search_json_filter_and_include() {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(plaintext).expect("compress body");
     let compressed = encoder.finish().expect("finish gzip body");
-    let body_ref = body_store
+    let request_body_ref = body_store
+        .read()
+        .store("REQ-search-encoded", "req", &compressed)
+        .expect("store compressed request body");
+    let response_body_ref = body_store
         .read()
         .store("REQ-search-encoded", "res", &compressed)
-        .expect("store compressed body")
-        .with_content_encoding(Some("gzip"))
-        .unwrap();
+        .expect("store compressed response body");
     let mut record = TrafficRecord::new(
         "REQ-search-encoded".to_string(),
         "GET".to_string(),
         "https://example.com/encoded".to_string(),
     );
-    record.response_body_ref = Some(body_ref);
+    record.request_body_ref = Some(request_body_ref);
+    record.response_body_ref = Some(response_body_ref);
+    record.set_request_body_content_encoding(Some("gzip"));
+    record.set_response_body_content_encoding(Some("gzip"));
     db.record(record);
     let engine = SearchEngine::new(db, Some(body_store));
 
@@ -313,6 +318,7 @@ fn encoded_file_body_is_decoded_for_search_json_filter_and_include() {
             ..Default::default()
         },
         include: crate::search::SearchInclude {
+            request_body: true,
             response_body: true,
             ..Default::default()
         },
@@ -324,11 +330,19 @@ fn encoded_file_body_is_decoded_for_search_json_filter_and_include() {
     assert!(response.results[0].matches[0]
         .preview
         .contains("encoded-search-needle"));
-    let chunk = response.results[0]
+    let bodies = response.results[0]
         .bodies
         .as_ref()
-        .and_then(|bodies| bodies.response.as_ref())
-        .expect("included response body");
+        .expect("included bodies");
+    let request_chunk = bodies.request.as_ref().expect("included request body");
+    assert_eq!(
+        BASE64
+            .decode(&request_chunk.bytes_b64)
+            .expect("decode request base64"),
+        plaintext
+    );
+    assert_eq!(request_chunk.size, plaintext.len());
+    let chunk = bodies.response.as_ref().expect("included response body");
     assert_eq!(
         BASE64.decode(&chunk.bytes_b64).expect("decode base64"),
         plaintext

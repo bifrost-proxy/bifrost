@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
+const PREVIOUS_SCHEMA_VERSION: u32 = 14;
 
 #[derive(Debug)]
 pub enum InitError {
@@ -31,17 +32,6 @@ impl std::fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
-pub fn check_schema_version(conn: &Connection) -> Result<(), InitError> {
-    let current_version = get_schema_version(conn);
-    if current_version != 0 && current_version != SCHEMA_VERSION {
-        return Err(InitError::VersionMismatch {
-            current: current_version,
-            expected: SCHEMA_VERSION,
-        });
-    }
-    Ok(())
-}
-
 pub fn init_database(conn: &mut Connection) -> Result<(), InitError> {
     conn.execute_batch(
         "
@@ -54,13 +44,44 @@ pub fn init_database(conn: &mut Connection) -> Result<(), InitError> {
         ",
     )?;
 
-    check_schema_version(conn)?;
-    conn.execute_batch(SCHEMA_SQL)?;
+    let current_version = get_schema_version(conn);
+    if current_version != 0
+        && current_version != PREVIOUS_SCHEMA_VERSION
+        && current_version != SCHEMA_VERSION
+    {
+        return Err(InitError::VersionMismatch {
+            current: current_version,
+            expected: SCHEMA_VERSION,
+        });
+    }
 
-    conn.execute(
+    let transaction = conn.transaction()?;
+    if current_version == PREVIOUS_SCHEMA_VERSION {
+        let has_body_metadata = {
+            let mut statement = transaction.prepare("PRAGMA table_info(traffic_record_details)")?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for column in columns {
+                if column? == "body_metadata_blob" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_body_metadata {
+            transaction.execute(
+                "ALTER TABLE traffic_record_details ADD COLUMN body_metadata_blob BLOB",
+                [],
+            )?;
+        }
+    }
+    transaction.execute_batch(SCHEMA_SQL)?;
+    transaction.execute(
         "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
         [SCHEMA_VERSION.to_string()],
     )?;
+    transaction.commit()?;
 
     Ok(())
 }
@@ -138,6 +159,7 @@ CREATE TABLE IF NOT EXISTS traffic_record_details (
     derived_response_body_ref_blob BLOB,
     raw_request_body_ref_blob BLOB,
     raw_response_body_ref_blob BLOB,
+    body_metadata_blob BLOB,
     actual_url TEXT,
     actual_host TEXT,
     original_request_headers_blob BLOB,
@@ -208,6 +230,7 @@ pub fn get_insert_detail_sql() -> &'static str {
         id, timing_blob, request_headers_blob, original_response_headers_blob,
         matched_rules_blob, request_body_ref_blob, response_body_ref_blob,
         derived_response_body_ref_blob, raw_request_body_ref_blob, raw_response_body_ref_blob,
+        body_metadata_blob,
         actual_url, actual_host, original_request_headers_blob,
         response_headers_blob, socket_status_blob, req_script_results_blob,
         res_script_results_blob, decode_req_script_results_blob,
@@ -216,10 +239,11 @@ pub fn get_insert_detail_sql() -> &'static str {
         ?1, ?2, ?3, ?4,
         ?5, ?6, ?7,
         ?8, ?9, ?10,
-        ?11, ?12, ?13,
-        ?14, ?15, ?16,
-        ?17, ?18,
-        ?19, ?20
+        ?11,
+        ?12, ?13, ?14,
+        ?15, ?16, ?17,
+        ?18, ?19,
+        ?20, ?21
     )
     "#
 }
@@ -262,6 +286,7 @@ pub fn get_update_detail_sql() -> &'static str {
         id, timing_blob, request_headers_blob, original_response_headers_blob,
         matched_rules_blob, request_body_ref_blob, response_body_ref_blob,
         derived_response_body_ref_blob, raw_request_body_ref_blob, raw_response_body_ref_blob,
+        body_metadata_blob,
         actual_url, actual_host, original_request_headers_blob,
         response_headers_blob, socket_status_blob, req_script_results_blob,
         res_script_results_blob, decode_req_script_results_blob,
@@ -270,10 +295,11 @@ pub fn get_update_detail_sql() -> &'static str {
         ?1, ?2, ?3, ?4,
         ?5, ?6, ?7,
         ?8, ?9, ?10,
-        ?11, ?12, ?13,
-        ?14, ?15, ?16,
-        ?17, ?18,
-        ?19, ?20
+        ?11,
+        ?12, ?13, ?14,
+        ?15, ?16, ?17,
+        ?18, ?19,
+        ?20, ?21
     )
     ON CONFLICT(id) DO UPDATE SET
         timing_blob = excluded.timing_blob,
@@ -285,6 +311,7 @@ pub fn get_update_detail_sql() -> &'static str {
         derived_response_body_ref_blob = excluded.derived_response_body_ref_blob,
         raw_request_body_ref_blob = excluded.raw_request_body_ref_blob,
         raw_response_body_ref_blob = excluded.raw_response_body_ref_blob,
+        body_metadata_blob = excluded.body_metadata_blob,
         actual_url = excluded.actual_url,
         actual_host = excluded.actual_host,
         original_request_headers_blob = excluded.original_request_headers_blob,

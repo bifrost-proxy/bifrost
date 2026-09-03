@@ -288,22 +288,24 @@ impl AdminQueryService {
 
         if args.request_body {
             detail["request_body"] = self
-                .load_body_json(
+                .load_body_json_with_encoding(
                     record
                         .request_body_ref
                         .as_ref()
                         .or(record.raw_request_body_ref.as_ref()),
+                    record.request_body_content_encoding(),
                 )
                 .await?;
         }
 
         if args.response_body {
             detail["response_body"] = self
-                .load_body_json(
+                .load_body_json_with_encoding(
                     record
                         .response_body_ref
                         .as_ref()
                         .or(record.raw_response_body_ref.as_ref()),
+                    record.response_body_content_encoding(),
                 )
                 .await?;
         }
@@ -318,13 +320,25 @@ impl AdminQueryService {
         }
     }
 
-    async fn load_body_json(&self, body_ref: Option<&BodyRef>) -> Result<Value> {
+    async fn load_body_json_with_encoding(
+        &self,
+        body_ref: Option<&BodyRef>,
+        content_encoding: Option<String>,
+    ) -> Result<Value> {
         let Some(body_ref) = body_ref.cloned() else {
             return Ok(json!(null));
         };
+        let content_encoding = content_encoding.or_else(|| body_ref.content_encoding());
 
         match body_ref {
-            BodyRef::Inline { data } => Ok(json!({ "success": true, "data": data })),
+            BodyRef::Inline { data } => {
+                let decoded = decode_content_encoded_body_with_limit(
+                    data.into_bytes(),
+                    content_encoding.as_deref(),
+                    configured_decompress_output_bytes(&self.state).await,
+                );
+                Ok(json!({ "success": true, "data": String::from_utf8_lossy(&decoded) }))
+            }
             BodyRef::File { .. } | BodyRef::FileRange { .. } => {
                 let max_output_bytes = configured_decompress_output_bytes(&self.state).await;
                 let body_store =
@@ -336,7 +350,7 @@ impl AdminQueryService {
                     store.load_bytes(&body_ref).map(|bytes| {
                         let decoded = decode_content_encoded_body_with_limit(
                             bytes,
-                            body_ref.content_encoding().as_deref(),
+                            content_encoding.as_deref(),
                             max_output_bytes,
                         );
                         String::from_utf8_lossy(&decoded).to_string()
@@ -351,6 +365,11 @@ impl AdminQueryService {
                 }))
             }
         }
+    }
+
+    #[cfg(test)]
+    async fn load_body_json(&self, body_ref: Option<&BodyRef>) -> Result<Value> {
+        self.load_body_json_with_encoding(body_ref, None).await
     }
 
     async fn clear_traffic_by_ids(&self, ids: Vec<String>) -> Result<String> {
@@ -640,9 +659,7 @@ mod tests {
             .body_store
             .read()
             .store("query-service-encoded", "res", &compressed)
-            .expect("store compressed body")
-            .with_content_encoding(Some("gzip"))
-            .unwrap();
+            .expect("store compressed body");
         let mut record = TrafficRecord::new(
             "query-service-encoded".to_string(),
             "GET".to_string(),
@@ -650,6 +667,7 @@ mod tests {
         );
         record.status = 200;
         record.response_body_ref = Some(body_ref);
+        record.set_response_body_content_encoding(Some("gzip"));
         harness.traffic_db.record(record);
         let service = AdminQueryService::new(harness.state());
 
