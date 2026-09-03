@@ -641,6 +641,79 @@ pub fn authenticated_request(agent: &ureq::Agent, method: &str, url: &str) -> ur
 mod tests {
     use super::*;
 
+    fn target(name: &str, base_url: &str) -> ClientTarget {
+        ClientTarget {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            base_url: base_url.to_string(),
+            username: default_admin_username(),
+            allow_insecure_http: base_url.starts_with("http://"),
+        }
+    }
+
+    #[test]
+    fn client_admin_cli_unit_boundaries_fail_closed() {
+        assert!(normalize_base_url("").is_err());
+        assert!(normalize_base_url("://").is_err());
+        assert!(normalize_base_url("ftp://example.com").is_err());
+        assert!(normalize_base_url("http://user@example.com").is_err());
+        assert!(normalize_base_url("http://example.com?secret=1").is_err());
+        assert!(normalize_base_url("http://example.com/other").is_err());
+
+        let only = target("Lab", "http://192.0.2.10:8800");
+        let single = TargetStore {
+            version: 1,
+            targets: vec![only.clone()],
+        };
+        assert_eq!(find_target(&single, "lab").unwrap(), &only);
+        assert_eq!(
+            find_target(&single, "http://192.0.2.10:8800").unwrap(),
+            &only
+        );
+        assert!(find_target(&single, "missing.example").is_err());
+        assert_eq!(select_target(&single, None).unwrap(), only);
+
+        let empty = TargetStore::default();
+        assert!(select_target(&empty, None).is_err());
+        let temporary = select_target(&empty, Some("192.0.2.20:8811")).unwrap();
+        assert!(temporary.id.starts_with("temporary:"));
+        assert!(credential_for(&temporary, false).is_err());
+
+        let multiple = TargetStore {
+            version: 1,
+            targets: vec![
+                target("one", "http://192.0.2.1:8800"),
+                target("two", "http://192.0.2.2:8800"),
+            ],
+        };
+        assert!(select_target(&multiple, None).is_err());
+
+        assert!(handle_client(ClientInvocation {
+            target: None,
+            args: Vec::new(),
+        })
+        .is_err());
+        assert!(handle_client(ClientInvocation {
+            target: Some("one".to_string()),
+            args: vec![OsString::from("target"), OsString::from("list")],
+        })
+        .is_err());
+        assert!(handle_client(ClientInvocation {
+            target: None,
+            args: vec![OsString::from("definitely-not-a-command")],
+        })
+        .is_err());
+        assert!(target_command(vec![OsString::from("--definitely-invalid")]).is_err());
+
+        assert_eq!(
+            api_url(8812, "/traffic"),
+            "http://127.0.0.1:8812/_bifrost/api/traffic"
+        );
+        let agent = bifrost_core::direct_ureq_agent_builder().build();
+        let request = authenticated_request(&agent, "GET", "http://127.0.0.1:9/");
+        assert_eq!(request.header("Authorization"), None);
+    }
+
     #[test]
     fn normalizes_supported_target_forms() {
         assert_eq!(
