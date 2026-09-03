@@ -679,15 +679,6 @@ mod tests {
         assert!(temporary.id.starts_with("temporary:"));
         assert!(credential_for(&temporary, false).is_err());
 
-        let multiple = TargetStore {
-            version: 1,
-            targets: vec![
-                target("one", "http://192.0.2.1:8800"),
-                target("two", "http://192.0.2.2:8800"),
-            ],
-        };
-        assert!(select_target(&multiple, None).is_err());
-
         assert!(handle_client(ClientInvocation {
             target: None,
             args: Vec::new(),

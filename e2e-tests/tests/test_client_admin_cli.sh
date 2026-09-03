@@ -237,7 +237,12 @@ assert_json "$(client status --format json-pretty)" ".server.port == ${TARGET_PO
 [[ -f "${CALLER_DATA_DIR}/cli/admin-targets.toml" ]] || fail "target profile was not persisted"
 [[ -f "${CALLER_DATA_DIR}/cli/admin-credentials.toml" ]] || fail "credential file was not persisted"
 if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* && "$(uname -s)" != CYGWIN* ]]; then
-    [[ "$(stat -f '%Lp' "${CALLER_DATA_DIR}/cli/admin-credentials.toml" 2>/dev/null || stat -c '%a' "${CALLER_DATA_DIR}/cli/admin-credentials.toml")" == "600" ]] \
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        credential_mode="$(stat -c '%a' "${CALLER_DATA_DIR}/cli/admin-credentials.toml")"
+    else
+        credential_mode="$(stat -f '%Lp' "${CALLER_DATA_DIR}/cli/admin-credentials.toml")"
+    fi
+    [[ "$credential_mode" == "600" ]] \
         || fail "credential file permissions are not 0600"
     pass "saved JWT uses a separate 0600 credential file"
 fi
