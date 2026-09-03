@@ -311,7 +311,7 @@ fn malformed_lossless_body_fields_are_rejected() {
 }
 
 #[test]
-fn imported_network_bodies_persist_plaintext_and_raw_bytes() {
+fn imported_network_bodies_persist_canonical_wire_bytes_and_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
         dir.path().join("bodies"),
@@ -358,7 +358,7 @@ fn imported_network_bodies_persist_plaintext_and_raw_bytes() {
             .as_ref()
             .and_then(|body_ref| store.load_bytes(body_ref))
             .as_deref(),
-        Some(plaintext.as_slice())
+        Some(compressed.as_slice())
     );
     assert_eq!(
         traffic
@@ -366,28 +366,26 @@ fn imported_network_bodies_persist_plaintext_and_raw_bytes() {
             .as_ref()
             .and_then(|body_ref| store.load_bytes(body_ref))
             .as_deref(),
-        Some(plaintext.as_slice())
-    );
-    assert_eq!(
-        traffic
-            .raw_request_body_ref
-            .as_ref()
-            .and_then(|body_ref| store.load_bytes(body_ref))
-            .as_deref(),
         Some(compressed.as_slice())
     );
+    assert!(traffic.raw_request_body_ref.is_none());
+    assert!(traffic.raw_response_body_ref.is_none());
     assert_eq!(
-        traffic
-            .raw_response_body_ref
-            .as_ref()
-            .and_then(|body_ref| store.load_bytes(body_ref))
-            .as_deref(),
-        Some(compressed.as_slice())
+        traffic.request_body_content_encoding().as_deref(),
+        Some("gzip")
+    );
+    assert_eq!(
+        traffic.response_body_content_encoding().as_deref(),
+        Some("gzip")
+    );
+    assert_eq!(
+        remaining_decompress_bytes,
+        DEFAULT_MAX_DECOMPRESSED_BODY_BYTES
     );
 }
 
 #[test]
-fn imported_oversized_compressed_body_preserves_its_encoding_marker() {
+fn imported_oversized_compressed_body_preserves_its_db_encoding_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
         dir.path().join("bodies"),
@@ -424,7 +422,11 @@ fn imported_oversized_compressed_body_preserves_its_encoding_marker() {
 
     let store = body_store.read();
     let response_ref = traffic.response_body_ref.as_ref().unwrap();
-    assert_eq!(response_ref.content_encoding().as_deref(), Some("gzip"));
+    assert_eq!(response_ref.content_encoding(), None);
+    assert_eq!(
+        traffic.response_body_content_encoding().as_deref(),
+        Some("gzip")
+    );
     assert_eq!(
         store.load_bytes(response_ref).as_deref(),
         Some(compressed.as_slice())
@@ -432,7 +434,7 @@ fn imported_oversized_compressed_body_preserves_its_encoding_marker() {
     assert_eq!(
         decompress_with_limit(
             &store.load_bytes(response_ref).unwrap(),
-            response_ref.content_encoding().as_deref().unwrap(),
+            traffic.response_body_content_encoding().as_deref().unwrap(),
             plaintext.len(),
         )
         .unwrap(),

@@ -1,6 +1,6 @@
 use super::*;
 use crate::handlers::network_body::{
-    decode_content_encoded_body_with_limit, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+    decode_stored_body_with_limit, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
 };
 use base64::Engine as _;
 
@@ -32,7 +32,14 @@ pub(super) async fn get_request_body(
             };
 
             if let Some(body_ref) = body_ref {
-                get_body_content_async(&state, body_ref, query_wants_base64(query), !want_raw).await
+                get_body_content_with_encoding_async(
+                    &state,
+                    body_ref,
+                    record.request_body_content_encoding().as_deref(),
+                    query_wants_base64(query),
+                    !want_raw,
+                )
+                .await
             } else {
                 json_response(&serde_json::json!({
                     "success": true,
@@ -75,7 +82,14 @@ pub(super) async fn get_response_body(
             };
 
             if let Some(body_ref) = body_ref {
-                get_body_content_async(&state, body_ref, query_wants_base64(query), !want_raw).await
+                get_body_content_with_encoding_async(
+                    &state,
+                    body_ref,
+                    record.response_body_content_encoding().as_deref(),
+                    query_wants_base64(query),
+                    !want_raw,
+                )
+                .await
             } else {
                 json_response(&serde_json::json!({
                     "success": true,
@@ -118,9 +132,10 @@ pub(super) async fn get_response_body_content(
             };
 
             if let Some(body_ref) = body_ref {
-                get_body_bytes_async(
+                get_body_bytes_with_encoding_async(
                     &state,
                     body_ref,
+                    record.response_body_content_encoding().as_deref(),
                     record
                         .content_type
                         .as_deref()
@@ -180,32 +195,53 @@ pub(super) async fn configured_decompress_output_bytes(state: &SharedAdminState)
     }
 }
 
+pub(super) fn decode_stored_body_with_encoding(
+    body_ref: &BodyRef,
+    bytes: Vec<u8>,
+    content_encoding: Option<&str>,
+    decode_content_encoding: bool,
+    max_output_bytes: usize,
+) -> Vec<u8> {
+    if decode_content_encoding {
+        decode_stored_body_with_limit(body_ref, bytes, content_encoding, max_output_bytes)
+    } else {
+        bytes
+    }
+}
+
+#[cfg(test)]
 pub(super) fn decode_stored_body(
     body_ref: &BodyRef,
     bytes: Vec<u8>,
     decode_content_encoding: bool,
     max_output_bytes: usize,
 ) -> Vec<u8> {
-    if decode_content_encoding {
-        decode_content_encoded_body_with_limit(
-            bytes,
-            body_ref.content_encoding().as_deref(),
-            max_output_bytes,
-        )
-    } else {
-        bytes
-    }
+    decode_stored_body_with_encoding(
+        body_ref,
+        bytes,
+        None,
+        decode_content_encoding,
+        max_output_bytes,
+    )
 }
 
-pub(super) async fn get_body_content_async(
+pub(super) async fn get_body_content_with_encoding_async(
     state: &SharedAdminState,
     body_ref: &BodyRef,
+    content_encoding: Option<&str>,
     base64_output: bool,
     decode_content_encoding: bool,
 ) -> Response<BoxBody> {
     let max_output_bytes = configured_decompress_output_bytes(state).await;
-    let decode =
-        |bytes| decode_stored_body(body_ref, bytes, decode_content_encoding, max_output_bytes);
+    let decode = |bytes| {
+        decode_stored_body_with_encoding(
+            body_ref,
+            bytes,
+            content_encoding,
+            decode_content_encoding,
+            max_output_bytes,
+        )
+    };
     if base64_output {
         return match load_body_bytes_async(state, body_ref).await {
             Some(bytes) => {
@@ -254,17 +290,40 @@ pub(super) async fn get_body_content_async(
     }
 }
 
-pub(super) async fn get_body_bytes_async(
+#[cfg(test)]
+pub(super) async fn get_body_content_async(
     state: &SharedAdminState,
     body_ref: &BodyRef,
+    base64_output: bool,
+    decode_content_encoding: bool,
+) -> Response<BoxBody> {
+    get_body_content_with_encoding_async(
+        state,
+        body_ref,
+        None,
+        base64_output,
+        decode_content_encoding,
+    )
+    .await
+}
+
+pub(super) async fn get_body_bytes_with_encoding_async(
+    state: &SharedAdminState,
+    body_ref: &BodyRef,
+    content_encoding: Option<&str>,
     content_type: &str,
     decode_content_encoding: bool,
 ) -> Response<BoxBody> {
     let max_output_bytes = configured_decompress_output_bytes(state).await;
     match load_body_bytes_async(state, body_ref).await {
         Some(bytes) => {
-            let bytes =
-                decode_stored_body(body_ref, bytes, decode_content_encoding, max_output_bytes);
+            let bytes = decode_stored_body_with_encoding(
+                body_ref,
+                bytes,
+                content_encoding,
+                decode_content_encoding,
+                max_output_bytes,
+            );
             Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", content_type)
@@ -274,6 +333,17 @@ pub(super) async fn get_body_bytes_async(
         }
         None => error_response(StatusCode::NOT_FOUND, "Body content not found"),
     }
+}
+
+#[cfg(test)]
+pub(super) async fn get_body_bytes_async(
+    state: &SharedAdminState,
+    body_ref: &BodyRef,
+    content_type: &str,
+    decode_content_encoding: bool,
+) -> Response<BoxBody> {
+    get_body_bytes_with_encoding_async(state, body_ref, None, content_type, decode_content_encoding)
+        .await
 }
 
 #[cfg(test)]
@@ -456,6 +526,56 @@ mod stored_body_tests {
         assert_eq!(
             binary.into_body().collect().await.unwrap().to_bytes(),
             "decoded response"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_routes_decode_db_metadata_and_raw_falls_back_to_canonical_wire() {
+        let harness = TestAdminState::builder().build();
+        let plaintext = b"human-readable response";
+        let compressed = gzip(plaintext);
+        let body_ref = harness
+            .body_store
+            .read()
+            .store("body-routes-metadata", "res", &compressed)
+            .expect("store canonical wire body");
+        let mut record = TrafficRecord::new(
+            "body-routes-metadata".to_string(),
+            "GET".to_string(),
+            "https://example.test/body-metadata".to_string(),
+        );
+        record.response_body_ref = Some(body_ref);
+        record.set_response_body_content_encoding(Some("gzip"));
+        record.content_type = Some("text/plain".to_string());
+        harness.traffic_db.record(record);
+        let state = harness.state();
+
+        let decoded =
+            response_json(get_response_body(state.clone(), "body-routes-metadata", None).await)
+                .await;
+        assert_eq!(decoded["data"], String::from_utf8_lossy(plaintext).as_ref());
+
+        let raw = response_json(
+            get_response_body(
+                state.clone(),
+                "body-routes-metadata",
+                Some("raw=1&encoding=base64"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            STANDARD
+                .decode(raw["data_base64"].as_str().expect("base64 wire body"))
+                .expect("decode wire body"),
+            compressed
+        );
+
+        let content = get_response_body_content(state, "body-routes-metadata", None).await;
+        assert_eq!(content.status(), StatusCode::OK);
+        assert_eq!(
+            content.into_body().collect().await.unwrap().to_bytes(),
+            plaintext.as_slice()
         );
     }
 

@@ -144,7 +144,8 @@ pub use temp_ports::{
     TemporaryPortStatus, TemporaryPortUpdateRequest,
 };
 pub use traffic::{
-    FrameDirection, FrameType, MatchedRule, RequestTiming, SocketStatus, TrafficRecord,
+    FrameDirection, FrameType, MatchedRule, RequestTiming, SocketStatus, StoredBodyMetadata,
+    TrafficBodyMetadata, TrafficRecord, TRAFFIC_BODY_METADATA_VERSION,
 };
 pub use traffic_db::{
     start_db_cleanup_task, Direction, QueryParams, QueryResult, SharedTrafficDbStore,

@@ -1,4 +1,5 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::Arc;
 
 use bifrost_admin::{
     assemble_openai_like_response_body_from_text, AdminState, BodyRef,
@@ -9,10 +10,11 @@ use crate::transform::decompress::try_decompress_body_with_limit;
 
 const MAX_DERIVED_OPENAI_LIKE_SSE_BODY_BYTES: usize = MAX_OPENAI_LIKE_SSE_ASSEMBLY_INPUT_BYTES;
 
-pub(super) fn derive_openai_like_sse_body_ref(
+fn derive_openai_like_sse_body_ref(
     state: &AdminState,
     record_id: &str,
     response_body_ref: &Option<BodyRef>,
+    content_encoding: Option<&str>,
 ) -> Option<BodyRef> {
     if state.get_super_performance_mode() {
         return None;
@@ -36,7 +38,10 @@ pub(super) fn derive_openai_like_sse_body_ref(
         .map(|config| config.sandbox.limits.max_decompress_output_bytes)
         .unwrap_or(10 * 1024 * 1024)
         .min(MAX_DERIVED_OPENAI_LIKE_SSE_BODY_BYTES);
-    let decoded = match body_ref.content_encoding() {
+    let content_encoding = content_encoding
+        .map(str::to_string)
+        .or_else(|| body_ref.content_encoding());
+    let decoded = match content_encoding {
         Some(content_encoding) => match try_decompress_body_with_limit(
             &wire_body,
             &content_encoding,
@@ -67,6 +72,37 @@ pub(super) fn derive_openai_like_sse_body_ref(
     body_store
         .read()
         .store(record_id, "res_openai_like", assembled.as_bytes())
+}
+
+pub(super) fn schedule_openai_like_sse_body_derivation(
+    state: Arc<AdminState>,
+    record_id: String,
+    response_body_ref: Option<BodyRef>,
+    content_encoding: Option<String>,
+) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        let state_for_work = state.clone();
+        let record_id_for_work = record_id.clone();
+        let derived = tokio::task::spawn_blocking(move || {
+            derive_openai_like_sse_body_ref(
+                &state_for_work,
+                &record_id_for_work,
+                &response_body_ref,
+                content_encoding.as_deref(),
+            )
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(derived) = derived {
+            state.update_traffic_by_id(&record_id, move |record| {
+                record.derived_response_body_ref = Some(derived.clone());
+            });
+        }
+    });
 }
 
 #[cfg(test)]
@@ -113,7 +149,10 @@ mod tests {
             .with_content_encoding(Some("gzip"))
             .unwrap();
 
-        assert!(derive_openai_like_sse_body_ref(&state, record_id, &Some(body_ref)).is_none());
+        assert!(
+            derive_openai_like_sse_body_ref(&state, record_id, &Some(body_ref), Some("gzip"))
+                .is_none()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -138,8 +177,9 @@ mod tests {
             .with_content_encoding(Some("gzip"))
             .unwrap();
 
-        let derived = derive_openai_like_sse_body_ref(&state, record_id, &Some(body_ref))
-            .expect("derive compressed SSE body");
+        let derived =
+            derive_openai_like_sse_body_ref(&state, record_id, &Some(body_ref), Some("gzip"))
+                .expect("derive compressed SSE body");
         let body = state
             .body_store
             .as_ref()

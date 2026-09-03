@@ -79,7 +79,7 @@ fn network_record_import_uses_default_protocol_for_invalid_url() {
 }
 
 #[test]
-fn imported_compressed_bodies_share_one_package_budget() {
+fn imported_compressed_bodies_defer_decoding_and_preserve_the_package_budget() {
     let dir = tempfile::tempdir().unwrap();
     let body_store = Arc::new(parking_lot::RwLock::new(crate::BodyStore::new(
         dir.path().join("bodies"),
@@ -126,16 +126,24 @@ fn imported_compressed_bodies_share_one_package_budget() {
     )
     .unwrap();
 
-    assert_eq!(remaining_decompress_bytes, 0);
+    assert_eq!(remaining_decompress_bytes, plaintext.len());
     let store = body_store.read();
     assert_eq!(
         store
             .load_bytes(first_traffic.request_body_ref.as_ref().unwrap())
             .as_deref(),
-        Some(plaintext.as_slice())
+        Some(compressed.as_slice())
     );
     let second_ref = second_traffic.request_body_ref.as_ref().unwrap();
-    assert_eq!(second_ref.content_encoding().as_deref(), Some("gzip"));
+    assert_eq!(second_ref.content_encoding(), None);
+    assert_eq!(
+        first_traffic.request_body_content_encoding().as_deref(),
+        Some("gzip")
+    );
+    assert_eq!(
+        second_traffic.request_body_content_encoding().as_deref(),
+        Some("gzip")
+    );
     assert_eq!(
         store.load_bytes(second_ref).as_deref(),
         Some(compressed.as_slice())

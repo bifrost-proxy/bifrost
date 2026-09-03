@@ -15,7 +15,7 @@ use crate::body_store::{BodyRef, SharedBodyStore};
 use crate::connection_monitor::SharedConnectionMonitor;
 use crate::frame_store::SharedFrameStore;
 use crate::handlers::network_body::{
-    content_encoding_is_supported, decompress_with_limit_metered,
+    content_encoding_is_supported, decompress_with_limit_metered, stored_body_content_encoding,
     DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
 };
 use crate::traffic_db::{
@@ -482,6 +482,7 @@ impl SearchEngine {
             if let Some(body_ref) = fields.and_then(|f| f.request_body_ref.as_ref()) {
                 if let Some(m) = self.search_body(
                     body_ref,
+                    fields.and_then(|f| f.request_body_content_encoding.as_deref()),
                     keyword,
                     "request_body",
                     &format!("req:{}", compact.id),
@@ -493,13 +494,19 @@ impl SearchEngine {
         }
 
         if scope.should_search_response_body() {
-            if let Some(body_ref) = fields.and_then(|f| {
+            if let Some((body_ref, content_encoding)) = fields.and_then(|f| {
                 f.derived_response_body_ref
                     .as_ref()
-                    .or(f.response_body_ref.as_ref())
+                    .map(|body_ref| (body_ref, None))
+                    .or_else(|| {
+                        f.response_body_ref
+                            .as_ref()
+                            .map(|body_ref| (body_ref, f.response_body_content_encoding.as_deref()))
+                    })
             }) {
                 if let Some(m) = self.search_body(
                     body_ref,
+                    content_encoding,
                     keyword,
                     "response_body",
                     &format!("res:{}", compact.id),
@@ -659,9 +666,13 @@ impl SearchEngine {
                     condition,
                 )
             } else if let Some(path) = field.strip_prefix("req.body.") {
-                let body_ref = fields.and_then(|f| f.request_body_ref.as_ref());
+                let body = fields.and_then(|f| {
+                    f.request_body_ref
+                        .as_ref()
+                        .map(|body_ref| (body_ref, f.request_body_content_encoding.as_deref()))
+                });
                 self.eval_body_json_condition(
-                    body_ref,
+                    body,
                     &compact.id,
                     BodySide::Request,
                     path,
@@ -669,13 +680,18 @@ impl SearchEngine {
                     body_cache,
                 )
             } else if let Some(path) = field.strip_prefix("res.body.") {
-                let body_ref = fields.and_then(|f| {
+                let body = fields.and_then(|f| {
                     f.derived_response_body_ref
                         .as_ref()
-                        .or(f.response_body_ref.as_ref())
+                        .map(|body_ref| (body_ref, None))
+                        .or_else(|| {
+                            f.response_body_ref.as_ref().map(|body_ref| {
+                                (body_ref, f.response_body_content_encoding.as_deref())
+                            })
+                        })
                 });
                 self.eval_body_json_condition(
-                    body_ref,
+                    body,
                     &compact.id,
                     BodySide::Response,
                     path,
@@ -694,7 +710,7 @@ impl SearchEngine {
 
     fn eval_body_json_condition(
         &self,
-        body_ref: Option<&BodyRef>,
+        body: Option<(&BodyRef, Option<&str>)>,
         record_id: &str,
         side: BodySide,
         path: &str,
@@ -710,9 +726,14 @@ impl SearchEngine {
             record_id
         );
         if !body_cache.json.contains_key(&cache_key) {
-            let entry = match body_ref
-                .and_then(|body_ref| self.load_body_bytes_cached(&cache_key, body_ref, body_cache))
-            {
+            let entry = match body.and_then(|(body_ref, content_encoding)| {
+                self.load_body_bytes_cached_with_encoding(
+                    &cache_key,
+                    body_ref,
+                    content_encoding,
+                    body_cache,
+                )
+            }) {
                 Some(bytes) => match serde_json::from_slice::<JsonValue>(bytes) {
                     Ok(v) => BodyCacheEntry::Json(v),
                     Err(_) => BodyCacheEntry::NonJson,
@@ -803,18 +824,25 @@ impl SearchEngine {
     fn search_body(
         &self,
         body_ref: &BodyRef,
+        content_encoding: Option<&str>,
         keyword: &str,
         field: &str,
         cache_key: &str,
         body_cache: &mut BodyReadCache,
     ) -> Option<MatchLocation> {
-        let bytes = self.load_body_bytes_cached(cache_key, body_ref, body_cache)?;
+        let bytes = self.load_body_bytes_cached_with_encoding(
+            cache_key,
+            body_ref,
+            content_encoding,
+            body_cache,
+        )?;
         self.search_body_bytes(bytes, keyword, field)
     }
 
     fn load_decoded_body_bytes(
         &self,
         body_ref: &BodyRef,
+        metadata_content_encoding: Option<&str>,
         remaining_decompressed_bytes: &mut usize,
         decompression_budget_exhausted: &mut bool,
         current_record_started_with_fresh_budget: bool,
@@ -824,7 +852,9 @@ impl SearchEngine {
             BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
             other => self.body_store.as_ref()?.read().load_bytes(other),
         }?;
-        let Some(content_encoding) = body_ref.content_encoding() else {
+        let Some(content_encoding) =
+            stored_body_content_encoding(body_ref, metadata_content_encoding)
+        else {
             return Some(bytes);
         };
         if !content_encoding_is_supported(&content_encoding) {
@@ -865,15 +895,17 @@ impl SearchEngine {
         }
     }
 
-    fn load_body_bytes_cached<'a>(
+    fn load_body_bytes_cached_with_encoding<'a>(
         &self,
         cache_key: &str,
         body_ref: &BodyRef,
+        content_encoding: Option<&str>,
         body_cache: &'a mut BodyReadCache,
     ) -> Option<&'a [u8]> {
         if !body_cache.bytes.contains_key(cache_key) {
             let bytes = self.load_decoded_body_bytes(
                 body_ref,
+                content_encoding,
                 &mut body_cache.remaining_decompressed_bytes,
                 &mut body_cache.decompression_budget_exhausted,
                 body_cache.current_record_started_with_fresh_budget,
@@ -882,6 +914,16 @@ impl SearchEngine {
             body_cache.bytes.insert(cache_key.to_string(), bytes);
         }
         body_cache.bytes.get(cache_key)?.as_deref()
+    }
+
+    #[cfg(test)]
+    fn load_body_bytes_cached<'a>(
+        &self,
+        cache_key: &str,
+        body_ref: &BodyRef,
+        body_cache: &'a mut BodyReadCache,
+    ) -> Option<&'a [u8]> {
+        self.load_body_bytes_cached_with_encoding(cache_key, body_ref, None, body_cache)
     }
 
     fn search_body_bytes(&self, bytes: &[u8], keyword: &str, field: &str) -> Option<MatchLocation> {
@@ -924,6 +966,7 @@ impl SearchEngine {
                     if let Some(body_ref) = &frame.payload_ref {
                         if let Some(m) = self.search_body(
                             body_ref,
+                            None,
                             keyword,
                             field,
                             &format!("frame:{connection_id}:{}", frame.frame_id),
@@ -956,6 +999,7 @@ impl SearchEngine {
                         if let Some(body_ref) = &frame.payload_ref {
                             if let Some(m) = self.search_body(
                                 body_ref,
+                                None,
                                 keyword,
                                 field,
                                 &format!("frame:{connection_id}:{}", frame.frame_id),
@@ -1210,11 +1254,15 @@ impl SearchEngine {
         if include.request_body || include.response_body {
             let limit = include.body_limit();
             let request_chunk = if include.request_body {
-                let body_ref = fields.and_then(|f| f.request_body_ref.as_ref());
+                let body = fields.and_then(|f| {
+                    f.request_body_ref
+                        .as_ref()
+                        .map(|body_ref| (body_ref, f.request_body_content_encoding.as_deref()))
+                });
                 self.load_body_chunk(
                     &compact.id,
                     BodySide::Request,
-                    body_ref,
+                    body,
                     compact.req_ct.clone(),
                     limit,
                     body_cache,
@@ -1223,15 +1271,20 @@ impl SearchEngine {
                 None
             };
             let response_chunk = if include.response_body {
-                let body_ref = fields.and_then(|f| {
+                let body = fields.and_then(|f| {
                     f.derived_response_body_ref
                         .as_ref()
-                        .or(f.response_body_ref.as_ref())
+                        .map(|body_ref| (body_ref, None))
+                        .or_else(|| {
+                            f.response_body_ref.as_ref().map(|body_ref| {
+                                (body_ref, f.response_body_content_encoding.as_deref())
+                            })
+                        })
                 });
                 self.load_body_chunk(
                     &compact.id,
                     BodySide::Response,
-                    body_ref,
+                    body,
                     compact.ct.clone(),
                     limit,
                     body_cache,
@@ -1252,12 +1305,12 @@ impl SearchEngine {
         &self,
         record_id: &str,
         side: BodySide,
-        body_ref: Option<&BodyRef>,
+        body: Option<(&BodyRef, Option<&str>)>,
         content_type: Option<String>,
         limit: usize,
         body_cache: &mut BodyReadCache,
     ) -> Option<BodyChunk> {
-        let body_ref = body_ref?;
+        let (body_ref, content_encoding) = body?;
         let cache_key = format!(
             "{}:{}",
             match side {
@@ -1266,7 +1319,12 @@ impl SearchEngine {
             },
             record_id
         );
-        let bytes = self.load_body_bytes_cached(&cache_key, body_ref, body_cache)?;
+        let bytes = self.load_body_bytes_cached_with_encoding(
+            &cache_key,
+            body_ref,
+            content_encoding,
+            body_cache,
+        )?;
         let original_size = bytes.len();
         let (slice, truncated) = if original_size > limit {
             (&bytes[..limit], true)

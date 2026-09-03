@@ -125,6 +125,7 @@ struct SerializedDetailFields {
     derived_res_body_blob: SerializedBlob,
     raw_req_body_blob: SerializedBlob,
     raw_res_body_blob: SerializedBlob,
+    body_metadata_blob: SerializedBlob,
     orig_req_headers_blob: SerializedBlob,
     res_headers_modified_blob: SerializedBlob,
     req_script_results_blob: SerializedBlob,
@@ -177,6 +178,8 @@ pub struct TrafficSearchFields {
     pub request_body_ref: Option<BodyRef>,
     pub response_body_ref: Option<BodyRef>,
     pub derived_response_body_ref: Option<BodyRef>,
+    pub request_body_content_encoding: Option<String>,
+    pub response_body_content_encoding: Option<String>,
 }
 
 impl TrafficDbStore {
@@ -395,6 +398,10 @@ impl TrafficDbStore {
             .raw_response_body_ref
             .as_ref()
             .and_then(|b| encode_detail_blob(b).ok());
+        let body_metadata_blob = record
+            .body_metadata
+            .as_ref()
+            .and_then(|metadata| encode_detail_blob(metadata).ok());
         let orig_req_headers_blob = record
             .original_request_headers
             .as_ref()
@@ -431,6 +438,7 @@ impl TrafficDbStore {
             derived_res_body_blob,
             raw_req_body_blob,
             raw_res_body_blob,
+            body_metadata_blob,
             orig_req_headers_blob,
             res_headers_modified_blob,
             req_script_results_blob,
@@ -470,6 +478,7 @@ impl TrafficDbStore {
             derived_res_body_blob,
             raw_req_body_blob,
             raw_res_body_blob,
+            body_metadata_blob,
             orig_req_headers_blob,
             res_headers_modified_blob,
             req_script_results_blob,
@@ -551,6 +560,7 @@ impl TrafficDbStore {
                 derived_res_body_blob,
                 raw_req_body_blob,
                 raw_res_body_blob,
+                body_metadata_blob,
                 &record.actual_url,
                 &record.actual_host,
                 orig_req_headers_blob,
@@ -752,6 +762,7 @@ impl TrafficDbStore {
             derived_res_body_blob,
             raw_req_body_blob,
             raw_res_body_blob,
+            body_metadata_blob,
             orig_req_headers_blob,
             res_headers_modified_blob,
             req_script_results_blob,
@@ -810,6 +821,7 @@ impl TrafficDbStore {
                     derived_res_body_blob,
                     raw_req_body_blob,
                     raw_res_body_blob,
+                    body_metadata_blob,
                     &record.actual_url,
                     &record.actual_host,
                     orig_req_headers_blob,
@@ -1036,6 +1048,9 @@ impl TrafficDbStore {
             columns.push("td.response_body_ref_blob");
             columns.push("td.derived_response_body_ref_blob");
         }
+        if need_request_body_ref || need_response_body_ref {
+            columns.push("td.body_metadata_blob");
+        }
 
         // 全部不需要也就不查。
         if columns.len() == 1 {
@@ -1052,6 +1067,8 @@ impl TrafficDbStore {
                             request_body_ref: None,
                             response_body_ref: None,
                             derived_response_body_ref: None,
+                            request_body_content_encoding: None,
+                            response_body_content_encoding: None,
                         },
                     )
                 })
@@ -1127,10 +1144,29 @@ impl TrafficDbStore {
 
             let derived_response_body_ref: Option<BodyRef> = if need_response_body_ref {
                 let blob: Option<Vec<u8>> = row.get(idx)?;
+                idx += 1;
                 blob.and_then(|b| decode_detail_blob(&b).ok())
             } else {
                 None
             };
+
+            let body_metadata: Option<crate::TrafficBodyMetadata> =
+                if need_request_body_ref || need_response_body_ref {
+                    let blob: Option<Vec<u8>> = row.get(idx)?;
+                    blob.and_then(|b| decode_detail_blob(&b).ok())
+                } else {
+                    None
+                };
+            let request_body_content_encoding = body_metadata
+                .as_ref()
+                .filter(|metadata| metadata.version == crate::TRAFFIC_BODY_METADATA_VERSION)
+                .and_then(|metadata| metadata.request.as_ref())
+                .and_then(|metadata| metadata.content_encoding.clone());
+            let response_body_content_encoding = body_metadata
+                .as_ref()
+                .filter(|metadata| metadata.version == crate::TRAFFIC_BODY_METADATA_VERSION)
+                .and_then(|metadata| metadata.response.as_ref())
+                .and_then(|metadata| metadata.content_encoding.clone());
 
             Ok(TrafficSearchFields {
                 id: id.clone(),
@@ -1140,6 +1176,8 @@ impl TrafficDbStore {
                 request_body_ref,
                 response_body_ref,
                 derived_response_body_ref,
+                request_body_content_encoding,
+                response_body_content_encoding,
             })
         }) {
             Ok(i) => i,
@@ -1346,6 +1384,7 @@ impl TrafficDbStore {
             request_body_ref: None,
             response_body_ref: None,
             derived_response_body_ref: None,
+            body_metadata: None,
             raw_request_body_ref: None,
             raw_response_body_ref: None,
             actual_url: None,
@@ -1366,7 +1405,7 @@ impl TrafficDbStore {
             .query_row(
                 "SELECT timing_blob, request_headers_blob, original_response_headers_blob, \
                  matched_rules_blob, request_body_ref_blob, response_body_ref_blob, \
-                 derived_response_body_ref_blob, raw_request_body_ref_blob, raw_response_body_ref_blob, actual_url, actual_host, \
+                 derived_response_body_ref_blob, raw_request_body_ref_blob, raw_response_body_ref_blob, body_metadata_blob, actual_url, actual_host, \
                  original_request_headers_blob, response_headers_blob, \
                  socket_status_blob, req_script_results_blob, res_script_results_blob, \
                  decode_req_script_results_blob, decode_res_script_results_blob, error_message \
@@ -1382,13 +1421,14 @@ impl TrafficDbStore {
                     let derived_res_body_blob: Option<Vec<u8>> = row.get(6)?;
                     let raw_req_body_blob: Option<Vec<u8>> = row.get(7)?;
                     let raw_res_body_blob: Option<Vec<u8>> = row.get(8)?;
-                    let orig_req_headers_blob: Option<Vec<u8>> = row.get(11)?;
-                    let res_headers_modified_blob: Option<Vec<u8>> = row.get(12)?;
-                    let socket_status_blob: Option<Vec<u8>> = row.get(13)?;
-                    let req_script_results_blob: Option<Vec<u8>> = row.get(14)?;
-                    let res_script_results_blob: Option<Vec<u8>> = row.get(15)?;
-                    let decode_req_results_blob: Option<Vec<u8>> = row.get(16)?;
-                    let decode_res_results_blob: Option<Vec<u8>> = row.get(17)?;
+                    let body_metadata_blob: Option<Vec<u8>> = row.get(9)?;
+                    let orig_req_headers_blob: Option<Vec<u8>> = row.get(12)?;
+                    let res_headers_modified_blob: Option<Vec<u8>> = row.get(13)?;
+                    let socket_status_blob: Option<Vec<u8>> = row.get(14)?;
+                    let req_script_results_blob: Option<Vec<u8>> = row.get(15)?;
+                    let res_script_results_blob: Option<Vec<u8>> = row.get(16)?;
+                    let decode_req_results_blob: Option<Vec<u8>> = row.get(17)?;
+                    let decode_res_results_blob: Option<Vec<u8>> = row.get(18)?;
 
                     record.timing = timing_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.request_headers =
@@ -1406,8 +1446,10 @@ impl TrafficDbStore {
                         raw_req_body_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.raw_response_body_ref =
                         raw_res_body_blob.and_then(|b| decode_detail_blob(&b).ok());
-                    record.actual_url = row.get(9)?;
-                    record.actual_host = row.get(10)?;
+                    record.body_metadata =
+                        body_metadata_blob.and_then(|b| decode_detail_blob(&b).ok());
+                    record.actual_url = row.get(10)?;
+                    record.actual_host = row.get(11)?;
                     record.original_request_headers =
                         orig_req_headers_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.response_headers =
@@ -1423,7 +1465,7 @@ impl TrafficDbStore {
                         decode_req_results_blob.and_then(|b| serde_json::from_slice(&b).ok());
                     record.decode_res_script_results =
                         decode_res_results_blob.and_then(|b| serde_json::from_slice(&b).ok());
-                    record.error_message = row.get(18)?;
+                    record.error_message = row.get(19)?;
                     Ok(())
                 },
             )
@@ -2110,6 +2152,53 @@ mod tests {
     }
 
     #[test]
+    fn test_v14_database_migrates_body_metadata_without_losing_records() {
+        let dir = create_test_dir();
+        let db_path = dir.join("traffic.db");
+        {
+            let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+            store.record(TrafficRecord::new(
+                "v14-preserved".to_string(),
+                "GET".to_string(),
+                "https://example.test/preserved".to_string(),
+            ));
+        }
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "ALTER TABLE traffic_record_details DROP COLUMN body_metadata_blob",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE metadata SET value = '14' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        assert!(store.get_by_id("v14-preserved").is_some());
+        assert!(sqlite_column_exists(
+            &db_path,
+            "traffic_record_details",
+            "body_metadata_blob"
+        ));
+        let conn = Connection::open(&db_path).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, super::super::schema::SCHEMA_VERSION.to_string());
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
     fn test_broken_current_traffic_db_is_reset_instead_of_failing_startup() {
         let dir = create_test_dir();
         let db_path = dir.join("traffic.db");
@@ -2285,6 +2374,8 @@ mod tests {
         record.response_body_ref = Some(BodyRef::Inline {
             data: "world".to_string(),
         });
+        record.set_request_body_content_encoding(Some("gzip"));
+        record.set_response_body_content_encoding(Some("br"));
         store.record(record);
 
         let ids = ["req-1" as &str];
@@ -2302,6 +2393,8 @@ mod tests {
             .is_some_and(|h| h.iter().any(|(k, v)| k == "Y-Test" && v == "2")));
         assert!(matches!(f.request_body_ref, Some(BodyRef::Inline { .. })));
         assert!(matches!(f.response_body_ref, Some(BodyRef::Inline { .. })));
+        assert_eq!(f.request_body_content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(f.response_body_content_encoding.as_deref(), Some("br"));
 
         let m2 = store.get_search_fields_by_ids(&ids, false, false, false, false, false);
         let f2 = m2.get("req-1").expect("missing fields");
@@ -2310,6 +2403,8 @@ mod tests {
         assert!(f2.response_headers.is_none());
         assert!(f2.request_body_ref.is_none());
         assert!(f2.response_body_ref.is_none());
+        assert!(f2.request_body_content_encoding.is_none());
+        assert!(f2.response_body_content_encoding.is_none());
 
         cleanup_test_dir(&dir);
     }
@@ -2335,17 +2430,16 @@ mod tests {
         record.request_body_ref = Some(BodyRef::Inline {
             data: "{\"hello\":1}".to_string(),
         });
-        record.response_body_ref = Some(
-            BodyRef::File {
-                path: dir
-                    .join("encoded-response-body")
-                    .to_string_lossy()
-                    .to_string(),
-                size: 11,
-            }
-            .with_content_encoding(Some("gzip"))
-            .unwrap(),
-        );
+        record.response_body_ref = Some(BodyRef::File {
+            path: dir
+                .join("encoded-response-body")
+                .to_string_lossy()
+                .to_string(),
+            size: 11,
+        });
+        record.set_request_body_content_encoding(Some("br"));
+        record.set_response_body_content_encoding(Some("gzip"));
+        record.mark_response_body_observation_partial();
         record.socket_status = Some(crate::traffic::SocketStatus {
             is_open: false,
             send_count: 3,
@@ -2369,13 +2463,18 @@ mod tests {
             Some(BodyRef::Inline { .. })
         ));
         assert_eq!(
-            loaded
-                .response_body_ref
-                .as_ref()
-                .and_then(BodyRef::content_encoding)
-                .as_deref(),
+            loaded.response_body_content_encoding().as_deref(),
             Some("gzip")
         );
+        assert_eq!(
+            loaded.request_body_content_encoding().as_deref(),
+            Some("br")
+        );
+        assert!(loaded
+            .body_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.response.as_ref())
+            .is_some_and(|metadata| metadata.observation_partial));
         assert_eq!(loaded.error_message.as_deref(), Some("upstream timeout"));
         assert_eq!(
             loaded.socket_status.as_ref().and_then(|s| s.close_code),

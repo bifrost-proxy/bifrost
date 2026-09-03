@@ -12,8 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use super::network_body::{
-    body_size, content_encoding_is_supported, content_encoding_value,
-    decompress_with_limit_metered, export_content_encoded_body_with_budget, header_value,
+    body_size, content_encoding_value, export_content_encoded_body_with_budget, header_value,
     legacy_lossy_body_warning, preview_body, DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
 };
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
@@ -788,7 +787,7 @@ async fn traffic_to_network_record_with_budget(
                 if let Some(bytes) = store.load_bytes(body_ref) {
                     let exported = export_content_encoded_body_with_budget(
                         bytes,
-                        body_ref.content_encoding().as_deref(),
+                        traffic.request_body_content_encoding().as_deref(),
                         remaining_decompress_bytes,
                     );
                     request_body = exported.text;
@@ -804,7 +803,7 @@ async fn traffic_to_network_record_with_budget(
                 if let Some(bytes) = store.load_bytes(body_ref) {
                     let exported = export_content_encoded_body_with_budget(
                         bytes,
-                        body_ref.content_encoding().as_deref(),
+                        traffic.response_body_content_encoding().as_deref(),
                         remaining_decompress_bytes,
                     );
                     response_body = exported.text;

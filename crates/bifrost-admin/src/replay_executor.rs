@@ -1185,6 +1185,7 @@ impl ReplayExecutor {
             request_body_ref,
             response_body_ref,
             derived_response_body_ref: None,
+            body_metadata: None,
             raw_request_body_ref,
             raw_response_body_ref,
             actual_url: if has_changes {

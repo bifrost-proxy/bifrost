@@ -313,7 +313,6 @@ pub(super) async fn import_network(content: &str, state: &SharedAdminState) -> R
 
 struct ImportedBodyBytes {
     primary: Option<Vec<u8>>,
-    raw: Option<Vec<u8>>,
     primary_content_encoding: Option<String>,
 }
 
@@ -321,9 +320,9 @@ fn imported_body_bytes(
     text: Option<&str>,
     body_base64: Option<&str>,
     headers: &Option<Vec<(String, String)>>,
-    remaining_decompress_bytes: &mut usize,
+    _remaining_decompress_bytes: &mut usize,
 ) -> Result<ImportedBodyBytes, String> {
-    let raw = body_base64
+    let wire = body_base64
         .map(|encoded| {
             STANDARD
                 .decode(encoded)
@@ -331,36 +330,21 @@ fn imported_body_bytes(
         })
         .transpose()?;
     let content_encoding = content_encoding_value(headers);
-    let (primary, primary_content_encoding) = if let Some(text) = text {
+    if content_encoding
+        .as_deref()
+        .is_some_and(|encoding| encoding.len() > 256)
+    {
+        return Err("content-encoding metadata exceeds 256 bytes".to_string());
+    }
+    let (primary, primary_content_encoding) = if let Some(bytes) = wire {
+        (Some(bytes), content_encoding)
+    } else if let Some(text) = text {
         (Some(text.as_bytes().to_vec()), None)
-    } else if let Some(bytes) = raw.as_ref() {
-        match content_encoding.as_deref() {
-            Some(encoding)
-                if content_encoding_is_supported(encoding) && *remaining_decompress_bytes > 0 =>
-            {
-                match decompress_with_limit_metered(bytes, encoding, *remaining_decompress_bytes) {
-                    Ok((decoded, consumed)) => {
-                        *remaining_decompress_bytes =
-                            remaining_decompress_bytes.saturating_sub(consumed);
-                        (Some(decoded), None)
-                    }
-                    Err(_) => {
-                        *remaining_decompress_bytes = 0;
-                        (Some(bytes.clone()), Some(encoding.to_string()))
-                    }
-                }
-            }
-            Some(encoding) if content_encoding_is_supported(encoding) => {
-                (Some(bytes.clone()), Some(encoding.to_string()))
-            }
-            _ => (Some(bytes.clone()), None),
-        }
     } else {
         (None, None)
     };
     Ok(ImportedBodyBytes {
         primary,
-        raw,
         primary_content_encoding,
     })
 }
@@ -370,7 +354,6 @@ fn store_imported_body(
     record_id: &str,
     kind: &str,
     bytes: Option<&[u8]>,
-    content_encoding: Option<&str>,
 ) -> Result<Option<crate::BodyRef>, String> {
     let Some(bytes) = bytes.filter(|bytes| !bytes.is_empty()) else {
         return Ok(None);
@@ -381,14 +364,7 @@ fn store_imported_body(
     if !body_ref.is_file() {
         return Err(format!("{kind} body could not be persisted losslessly"));
     }
-    let cleanup_ref = body_ref.clone();
-    match body_ref.with_content_encoding(content_encoding) {
-        Ok(body_ref) => Ok(Some(body_ref)),
-        Err(error) => {
-            store.remove(&cleanup_ref);
-            Err(format!("{kind} body metadata persistence failed: {error}"))
-        }
-    }
+    Ok(Some(body_ref))
 }
 
 pub(super) fn persist_imported_bodies(
@@ -418,29 +394,21 @@ pub(super) fn persist_imported_bodies(
             &traffic_record.id,
             "req",
             request.primary.as_deref(),
-            request.primary_content_encoding.as_deref(),
         )?;
         traffic_record.response_body_ref = store_imported_body(
             &store,
             &traffic_record.id,
             "res",
             response.primary.as_deref(),
-            response.primary_content_encoding.as_deref(),
         )?;
-        traffic_record.raw_request_body_ref = store_imported_body(
-            &store,
-            &traffic_record.id,
-            "req_raw",
-            request.raw.as_deref(),
-            None,
-        )?;
-        traffic_record.raw_response_body_ref = store_imported_body(
-            &store,
-            &traffic_record.id,
-            "res_raw",
-            response.raw.as_deref(),
-            None,
-        )?;
+        if traffic_record.request_body_ref.is_some() {
+            traffic_record
+                .set_request_body_content_encoding(request.primary_content_encoding.as_deref());
+        }
+        if traffic_record.response_body_ref.is_some() {
+            traffic_record
+                .set_response_body_content_encoding(response.primary_content_encoding.as_deref());
+        }
         Ok(())
     })();
     if persistence_result.is_err() {
@@ -562,6 +530,7 @@ pub(super) fn network_record_to_traffic_record(record: &NetworkRecord) -> Traffi
         request_body_ref: None,
         response_body_ref: None,
         derived_response_body_ref: None,
+        body_metadata: None,
         raw_request_body_ref: None,
         raw_response_body_ref: None,
         client_ip: "imported".to_string(),

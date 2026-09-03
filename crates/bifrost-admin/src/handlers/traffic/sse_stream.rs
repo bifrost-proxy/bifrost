@@ -1,7 +1,9 @@
 use super::*;
 
 mod content_encoded_sse;
+#[cfg(test)]
 use content_encoded_sse::stream_content_encoded_sse_events;
+use content_encoded_sse::stream_content_encoded_sse_events_with_encoding;
 pub use content_encoded_sse::IncrementalContentDecoder;
 
 pub(super) async fn subscribe_sse_stream(
@@ -42,6 +44,7 @@ pub(super) async fn subscribe_sse_stream(
     // - 避免出现 count 增长但详情页 messages 长时间空的情况
     state.sse_hub.request_force_flush(id, 30_000);
 
+    let response_content_encoding = record.response_body_content_encoding();
     let body_ref = match record.response_body_ref {
         Some(r) => r,
         None => {
@@ -61,6 +64,7 @@ pub(super) async fn subscribe_sse_stream(
         state.clone(),
         id.to_string(),
         body_ref,
+        response_content_encoding,
         opts.from,
         opts.batch_size,
         max_body_size,
@@ -147,6 +151,7 @@ fn build_sse_disk_stream(
     state: SharedAdminState,
     connection_id: String,
     body_ref: BodyRef,
+    content_encoding: Option<String>,
     from: SseStreamFrom,
     batch_size: usize,
     tail_bytes: usize,
@@ -156,12 +161,12 @@ fn build_sse_disk_stream(
     let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
 
     tokio::spawn(async move {
-        let _ = stream_sse_events_from_body_ref(
+        let _ = stream_sse_events_from_body_ref_with_encoding(
             state,
             &connection_id,
             body_ref,
-            from,
-            batch_size,
+            content_encoding,
+            SseStreamOptions { from, batch_size },
             tail_bytes,
             tx,
         )
@@ -171,15 +176,16 @@ fn build_sse_disk_stream(
     ReceiverStream::new(rx).map(|b| Ok::<_, hyper::Error>(hyper::body::Frame::data(b)))
 }
 
-async fn stream_sse_events_from_body_ref(
+async fn stream_sse_events_from_body_ref_with_encoding(
     state: SharedAdminState,
     connection_id: &str,
     body_ref: BodyRef,
-    from: SseStreamFrom,
-    batch_size: usize,
+    metadata_content_encoding: Option<String>,
+    options: SseStreamOptions,
     tail_bytes: usize,
     tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
 ) -> Result<(), ()> {
+    let SseStreamOptions { from, batch_size } = options;
     let mut seq: u64 = 0;
     let mut parser = SseIncrementalParser::new();
 
@@ -215,14 +221,18 @@ async fn stream_sse_events_from_body_ref(
             Ok(())
         }
         encoded_ref @ (BodyRef::File { .. } | BodyRef::FileRange { .. })
-            if encoded_ref.content_encoding().is_some() =>
+            if crate::handlers::network_body::stored_body_content_encoding(
+                &encoded_ref,
+                metadata_content_encoding.as_deref(),
+            )
+            .is_some() =>
         {
-            stream_content_encoded_sse_events(
+            stream_content_encoded_sse_events_with_encoding(
                 state,
                 connection_id,
                 encoded_ref,
-                from,
-                batch_size,
+                metadata_content_encoding,
+                options,
                 tail_bytes,
                 tx,
             )
@@ -258,6 +268,28 @@ async fn stream_sse_events_from_body_ref(
             stream_sse_events_from_file(cfg, &mut seq, &mut parser, tx).await
         }
     }
+}
+
+#[cfg(test)]
+async fn stream_sse_events_from_body_ref(
+    state: SharedAdminState,
+    connection_id: &str,
+    body_ref: BodyRef,
+    from: SseStreamFrom,
+    batch_size: usize,
+    tail_bytes: usize,
+    tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
+) -> Result<(), ()> {
+    stream_sse_events_from_body_ref_with_encoding(
+        state,
+        connection_id,
+        body_ref,
+        None,
+        SseStreamOptions { from, batch_size },
+        tail_bytes,
+        tx,
+    )
+    .await
 }
 
 struct SseFileStreamConfig {
@@ -559,7 +591,8 @@ mod sse_stream_tests {
     use super::{
         parse_sse_stream_from, parse_sse_stream_options, should_emit_synthetic_finish,
         split_sse_events_text, stream_content_encoded_sse_events, stream_sse_events_from_body_ref,
-        SseIncrementalParser, SseStreamFrom,
+        stream_sse_events_from_body_ref_with_encoding, SseIncrementalParser, SseStreamFrom,
+        SseStreamOptions,
     };
     use crate::body_store::BodyRef;
     use crate::test_support::TestAdminState;
@@ -650,17 +683,18 @@ mod sse_stream_tests {
             .body_store
             .read()
             .store("encoded-sse", "res", &compressed)
-            .expect("store encoded SSE body")
-            .with_content_encoding(Some("gzip"))
-            .unwrap();
+            .expect("store encoded SSE body");
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
 
-        stream_sse_events_from_body_ref(
+        stream_sse_events_from_body_ref_with_encoding(
             harness.state(),
             "encoded-sse",
             body_ref,
-            SseStreamFrom::Begin,
-            1,
+            Some("gzip".to_string()),
+            SseStreamOptions {
+                from: SseStreamFrom::Begin,
+                batch_size: 1,
+            },
             0,
             tx,
         )

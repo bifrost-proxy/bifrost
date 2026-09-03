@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -22,10 +23,10 @@ mod sse_tests;
 
 pub use buffered_response_store::StoredRequestBodies;
 use buffered_response_store::{
-    finish_body_stream_with_encoding, store_buffered_request_bodies,
-    store_response_body_or_schedule, StoredResponseBodies,
+    finish_body_stream, store_buffered_request_bodies, store_response_body_or_schedule,
+    StoredResponseBodies,
 };
-use openai_like::derive_openai_like_sse_body_ref;
+use openai_like::schedule_openai_like_sse_body_derivation;
 use socket_summary::persist_socket_summary;
 
 // Keep hot-path metrics updates coarse-grained so high-throughput relays do
@@ -122,16 +123,15 @@ impl TeeBodyDropGuard {
                 return;
             }
             let stored_response_bodies = if let Some(writer) = self.file_writer.take() {
-                match finish_body_stream_with_encoding(
+                match finish_body_stream(
                     state.body_store.as_ref(),
                     writer,
-                    self.content_encoding.as_deref(),
                     &self.record_id,
                     "response",
                 ) {
                     Some(body_ref) => StoredResponseBodies {
                         primary: Some(body_ref),
-                        raw: None,
+                        content_encoding: self.content_encoding.clone(),
                     },
                     None => StoredResponseBodies::default(),
                 }
@@ -147,7 +147,7 @@ impl TeeBodyDropGuard {
                         state.clone(),
                         body_store.clone(),
                         self.record_id.clone(),
-                        self.buffer.split().freeze().to_vec(),
+                        self.buffer.split().freeze(),
                         self.content_encoding.clone(),
                         max_decompress_output_bytes,
                     )
@@ -170,9 +170,9 @@ impl TeeBodyDropGuard {
                 }
                 if stored_response_bodies.primary.is_some() {
                     record.response_body_ref = stored_response_bodies.primary.clone();
-                }
-                if stored_response_bodies.raw.is_some() {
-                    record.raw_response_body_ref = stored_response_bodies.raw.clone();
+                    record.set_response_body_content_encoding(
+                        stored_response_bodies.content_encoding.as_deref(),
+                    );
                 }
             });
 
@@ -493,12 +493,11 @@ struct RequestTeeBodyDropGuard {
 impl Drop for RequestTeeBodyDropGuard {
     fn drop(&mut self) {
         if let Some(writer) = self.file_writer.take() {
-            let body_ref = finish_body_stream_with_encoding(
+            let body_ref = finish_body_stream(
                 self.admin_state
                     .as_ref()
                     .and_then(|state| state.body_store.as_ref()),
                 writer,
-                self.content_encoding.as_deref(),
                 &self.record_id,
                 "request",
             );
@@ -507,9 +506,11 @@ impl Drop for RequestTeeBodyDropGuard {
             }
             if let Some(ref state) = self.admin_state {
                 let capture = self.capture.clone();
+                let content_encoding = self.content_encoding.clone();
                 state.update_traffic_by_id(&self.record_id, move |record| {
                     if let Some(body_ref) = capture.take() {
                         record.request_body_ref = Some(body_ref);
+                        record.set_request_body_content_encoding(content_encoding.as_deref());
                     }
                 });
             }
@@ -608,6 +609,7 @@ struct SseTeeBodyDropGuard {
     traffic_type: Option<TrafficType>,
     file_writer: Option<BodyStreamWriter>,
     content_encoding: Option<String>,
+    observation_partial: bool,
 }
 
 impl Drop for SseTeeBodyDropGuard {
@@ -622,17 +624,22 @@ impl SseTeeBodyDropGuard {
     fn store_body_and_update_record(&mut self) {
         if let Some(ref state) = self.admin_state {
             let response_body_ref = self.file_writer.take().and_then(|writer| {
-                finish_body_stream_with_encoding(
+                finish_body_stream(
                     state.body_store.as_ref(),
                     writer,
-                    self.content_encoding.as_deref(),
                     &self.record_id,
                     "SSE response",
                 )
             });
-            let derived_response_body_ref =
-                derive_openai_like_sse_body_ref(state, &self.record_id, &response_body_ref);
+            schedule_openai_like_sse_body_derivation(
+                state.clone(),
+                self.record_id.clone(),
+                response_body_ref.clone(),
+                self.content_encoding.clone(),
+            );
             let had_body_bytes = self.total_bytes > 0;
+            let content_encoding = self.content_encoding.clone();
+            let observation_partial = self.observation_partial;
             state.sse_hub.set_closed(&self.record_id);
             state.update_traffic_by_id(&self.record_id, move |record| {
                 let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
@@ -653,7 +660,12 @@ impl SseTeeBodyDropGuard {
                     timing.total_ms = record.duration_ms;
                 }
                 record.response_body_ref = response_body_ref.clone();
-                record.derived_response_body_ref = derived_response_body_ref.clone();
+                if response_body_ref.is_some() {
+                    record.set_response_body_content_encoding(content_encoding.as_deref());
+                }
+                if observation_partial {
+                    record.mark_response_body_observation_partial();
+                }
             });
             persist_socket_summary(state, &self.record_id, self.total_bytes);
             state.sse_hub.unregister(&self.record_id);
@@ -667,10 +679,7 @@ const DEFAULT_MAX_SSE_EVENT_BUFFER_BYTES: usize = 256 * 1024;
 pub struct SseTeeBody<B = Incoming> {
     inner: B,
     guard: SseTeeBodyDropGuard,
-    prev_byte: Option<u8>,
-    event_size: usize,
-    max_buffer_size: usize,
-    overflowed: bool,
+    plaintext_counter: SseEventCounter,
     event_decoder: SseEventBodyDecoder,
     flush_interval: Option<std::time::Duration>,
     flush_sleep: Option<Pin<Box<Sleep>>>,
@@ -678,8 +687,151 @@ pub struct SseTeeBody<B = Incoming> {
 
 enum SseEventBodyDecoder {
     Plaintext,
-    Encoded(IncrementalContentDecoder),
+    Encoded(EncodedSseObserver),
     Unsupported,
+    Disabled,
+}
+
+const SSE_OBSERVER_QUEUE_CAPACITY: usize = 64;
+
+#[derive(Default)]
+struct SseEventCounter {
+    prev_byte: Option<u8>,
+    event_size: usize,
+    max_buffer_size: usize,
+    overflowed: bool,
+}
+
+impl SseEventCounter {
+    fn new(max_buffer_size: usize) -> Self {
+        Self {
+            max_buffer_size,
+            ..Self::default()
+        }
+    }
+
+    fn process(&mut self, data: &[u8]) -> usize {
+        if data.is_empty() {
+            return 0;
+        }
+        let mut event_count = 0usize;
+        let mut i = 0;
+        while i < data.len() {
+            let Some(rel) = memchr(b'\n', &data[i..]) else {
+                if !self.overflowed {
+                    self.event_size = self.event_size.saturating_add(data.len() - i);
+                    if self.max_buffer_size > 0 && self.event_size > self.max_buffer_size {
+                        self.overflowed = true;
+                    }
+                }
+                self.prev_byte = Some(*data.last().unwrap());
+                return event_count;
+            };
+            let pos = i + rel;
+            if pos > i && !self.overflowed {
+                self.event_size = self.event_size.saturating_add(pos - i);
+                if self.max_buffer_size > 0 && self.event_size > self.max_buffer_size {
+                    self.overflowed = true;
+                }
+            }
+            if pos > i {
+                self.prev_byte = Some(data[pos - 1]);
+            }
+            if self.prev_byte == Some(b'\n') {
+                if self.event_size > 0 {
+                    event_count = event_count.saturating_add(1);
+                }
+                self.event_size = 0;
+                self.overflowed = false;
+                self.prev_byte = Some(b'\n');
+            } else {
+                if !self.overflowed {
+                    self.event_size = self.event_size.saturating_add(1);
+                    if self.max_buffer_size > 0 && self.event_size > self.max_buffer_size {
+                        self.overflowed = true;
+                    }
+                }
+                self.prev_byte = Some(b'\n');
+            }
+            i = pos + 1;
+        }
+        event_count
+    }
+}
+
+struct EncodedSseObserver {
+    sender: Option<tokio::sync::mpsc::Sender<Bytes>>,
+    partial: Arc<AtomicBool>,
+}
+
+impl EncodedSseObserver {
+    fn new(
+        state: Arc<AdminState>,
+        record_id: String,
+        content_encoding: String,
+        max_output_bytes: usize,
+        max_buffer_size: usize,
+    ) -> std::io::Result<Self> {
+        let mut decoder = IncrementalContentDecoder::new(&content_encoding, max_output_bytes)?;
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<Bytes>(SSE_OBSERVER_QUEUE_CAPACITY);
+        let partial = Arc::new(AtomicBool::new(false));
+        let partial_for_worker = partial.clone();
+        tokio::spawn(async move {
+            let mut counter = SseEventCounter::new(max_buffer_size);
+            let mut event_count = 0usize;
+            while let Some(bytes) = receiver.recv().await {
+                match decoder.push(&bytes) {
+                    Ok(decoded) => {
+                        event_count = event_count.saturating_add(counter.process(&decoded));
+                    }
+                    Err(error) => {
+                        partial_for_worker.store(true, Ordering::Relaxed);
+                        tracing::debug!(%error, %record_id, "failed to decode SSE body in observer");
+                        break;
+                    }
+                }
+            }
+            if !partial_for_worker.load(Ordering::Relaxed) {
+                match decoder.finish() {
+                    Ok(decoded) => {
+                        event_count = event_count.saturating_add(counter.process(&decoded));
+                    }
+                    Err(error) => {
+                        partial_for_worker.store(true, Ordering::Relaxed);
+                        tracing::debug!(%error, %record_id, "failed to finalize SSE body observer");
+                    }
+                }
+            }
+            let observation_partial = partial_for_worker.load(Ordering::Relaxed);
+            state.update_traffic_by_id(&record_id, move |record| {
+                record.frame_count = record.frame_count.max(event_count);
+                record.last_frame_id = record.last_frame_id.max(event_count as u64);
+                if observation_partial {
+                    record.mark_response_body_observation_partial();
+                }
+            });
+        });
+        Ok(Self {
+            sender: Some(sender),
+            partial,
+        })
+    }
+
+    fn observe(&mut self, bytes: &Bytes) {
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        if sender.try_send(bytes.clone()).is_err() {
+            self.partial.store(true, Ordering::Relaxed);
+            self.sender = None;
+        }
+    }
+
+    fn finish_nonblocking(&mut self) -> bool {
+        self.sender.take();
+        self.partial.load(Ordering::Relaxed)
+    }
 }
 
 pub struct SseTeeOptions {
@@ -713,14 +865,30 @@ where
             .filter(|d| !d.is_zero());
         let flush_sleep = flush_interval.map(|d| Box::pin(tokio::time::sleep(d)));
 
-        if let Some(ref state) = admin_state {
-            state.sse_hub.register(&record_id);
+        let super_performance_mode = admin_state
+            .as_ref()
+            .is_some_and(|state| state.get_super_performance_mode());
+        if !super_performance_mode {
+            if let Some(ref state) = admin_state {
+                state.sse_hub.register(&record_id);
+            }
         }
-        let event_decoder = match content_encoding.as_deref() {
-            None => SseEventBodyDecoder::Plaintext,
-            Some(encoding) => IncrementalContentDecoder::new(encoding, max_decompress_output_bytes)
+        let event_decoder = if super_performance_mode {
+            SseEventBodyDecoder::Disabled
+        } else {
+            match (admin_state.as_ref(), content_encoding.as_deref()) {
+                (_, None) => SseEventBodyDecoder::Plaintext,
+                (Some(state), Some(encoding)) => EncodedSseObserver::new(
+                    state.clone(),
+                    record_id.clone(),
+                    encoding.to_string(),
+                    max_decompress_output_bytes,
+                    max_buffer_size,
+                )
                 .map(SseEventBodyDecoder::Encoded)
                 .unwrap_or(SseEventBodyDecoder::Unsupported),
+                (None, Some(_)) => SseEventBodyDecoder::Unsupported,
+            }
         };
 
         Self {
@@ -733,11 +901,9 @@ where
                 traffic_type,
                 file_writer,
                 content_encoding,
+                observation_partial: false,
             },
-            prev_byte: None,
-            event_size: 0,
-            max_buffer_size,
-            overflowed: false,
+            plaintext_counter: SseEventCounter::new(max_buffer_size),
             event_decoder,
             flush_interval,
             flush_sleep,
@@ -749,88 +915,28 @@ where
     }
 
     fn process_sse_chunk(&mut self, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-
-        let mut i = 0;
-        while i < data.len() {
-            let Some(rel) = memchr(b'\n', &data[i..]) else {
-                if !self.overflowed {
-                    self.event_size = self.event_size.saturating_add(data.len() - i);
-                    if self.max_buffer_size > 0 && self.event_size > self.max_buffer_size {
-                        self.overflowed = true;
-                    }
-                }
-                self.prev_byte = Some(*data.last().unwrap());
-                return;
-            };
-
-            let pos = i + rel;
-            if pos > i {
-                if !self.overflowed {
-                    self.event_size = self.event_size.saturating_add(pos - i);
-                    if self.max_buffer_size > 0 && self.event_size > self.max_buffer_size {
-                        self.overflowed = true;
-                    }
-                }
-                self.prev_byte = Some(data[pos - 1]);
+        let count = self.plaintext_counter.process(data);
+        if let Some(ref state) = self.guard.admin_state {
+            for _ in 0..count {
+                state.sse_hub.add_receive_event(&self.guard.record_id);
             }
-
-            if self.prev_byte == Some(b'\n') {
-                if self.event_size > 0 {
-                    if let Some(ref state) = self.guard.admin_state {
-                        state.sse_hub.add_receive_event(&self.guard.record_id);
-                    }
-                }
-                self.event_size = 0;
-                self.overflowed = false;
-                self.prev_byte = Some(b'\n');
-            } else {
-                if !self.overflowed {
-                    self.event_size = self.event_size.saturating_add(1);
-                    if self.max_buffer_size > 0 && self.event_size > self.max_buffer_size {
-                        self.overflowed = true;
-                    }
-                }
-                self.prev_byte = Some(b'\n');
-            }
-
-            i = pos + 1;
         }
     }
 
-    fn process_sse_wire_chunk(&mut self, data: &[u8]) {
+    fn process_sse_wire_chunk(&mut self, data: &Bytes) {
         if matches!(self.event_decoder, SseEventBodyDecoder::Plaintext) {
             self.process_sse_chunk(data);
             return;
         }
-        let decoded = match &mut self.event_decoder {
-            SseEventBodyDecoder::Encoded(decoder) => decoder.push(data),
-            SseEventBodyDecoder::Plaintext => unreachable!(),
-            SseEventBodyDecoder::Unsupported => return,
-        };
-        match decoded {
-            Ok(decoded) => self.process_sse_chunk(&decoded),
-            Err(error) => {
-                tracing::debug!(%error, record_id = %self.guard.record_id, "failed to decode SSE body for event accounting");
-                self.event_decoder = SseEventBodyDecoder::Unsupported;
-            }
+        if let SseEventBodyDecoder::Encoded(observer) = &mut self.event_decoder {
+            observer.observe(data);
         }
     }
 
     fn finish_sse_event_decoder(&mut self) {
-        let trailing = match &mut self.event_decoder {
-            SseEventBodyDecoder::Encoded(decoder) => match decoder.finish() {
-                Ok(trailing) => trailing,
-                Err(error) => {
-                    tracing::debug!(%error, record_id = %self.guard.record_id, "failed to finalize SSE body decoder for event accounting");
-                    Vec::new()
-                }
-            },
-            SseEventBodyDecoder::Plaintext | SseEventBodyDecoder::Unsupported => Vec::new(),
-        };
-        self.process_sse_chunk(&trailing);
+        if let SseEventBodyDecoder::Encoded(observer) = &mut self.event_decoder {
+            self.guard.observation_partial |= observer.finish_nonblocking();
+        }
     }
 }
 
@@ -1062,12 +1168,11 @@ mod tests {
             state.clone(),
             body_store.clone(),
             "eventual-body".to_string(),
-            b"body".to_vec(),
+            Bytes::from_static(b"body"),
             None,
             1024 * 1024,
         );
         assert!(stored.primary.is_none());
-        assert!(stored.raw.is_none());
         assert!(!dir.join("eventual-body_res").exists());
         drop(busy_writer);
         for _ in 0..50 {
@@ -1235,11 +1340,22 @@ mod tests {
         let collected = body.boxed().collect().await.unwrap().to_bytes();
         assert_eq!(collected, payload);
 
-        let record = state
+        let mut record = state
             .traffic_db_store
             .as_ref()
             .and_then(|store| store.get_by_id(record_id))
             .expect("traffic record");
+        for _ in 0..50 {
+            if record.derived_response_body_ref.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            record = state
+                .traffic_db_store
+                .as_ref()
+                .and_then(|store| store.get_by_id(record_id))
+                .expect("traffic record");
+        }
         assert!(record.response_body_ref.is_some());
         assert!(record.derived_response_body_ref.is_some());
         assert_eq!(record.frame_count, 2);
@@ -1277,11 +1393,22 @@ mod tests {
         );
         assert_eq!(body.boxed().collect().await.unwrap().to_bytes(), wire);
 
-        let record = state
+        let mut record = state
             .traffic_db_store
             .as_ref()
             .and_then(|store| store.get_by_id(record_id))
             .expect("traffic record");
+        for _ in 0..50 {
+            if record.frame_count == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            record = state
+                .traffic_db_store
+                .as_ref()
+                .and_then(|store| store.get_by_id(record_id))
+                .expect("traffic record");
+        }
         assert_eq!(record.frame_count, 2);
         assert_eq!(record.last_frame_id, 2);
         let _ = std::fs::remove_dir_all(dir);
@@ -1292,12 +1419,12 @@ mod tests {
         let body = crate::server::full_body(Bytes::new());
         let mut tee = SseTeeBody::new(body, None, "none".into(), sse_options(None, None, None, 3));
         tee.process_sse_chunk(b"abcd");
-        assert!(tee.overflowed);
+        assert!(tee.plaintext_counter.overflowed);
         tee.process_sse_chunk(b"\n");
         tee.process_sse_chunk(b"\n");
-        assert!(!tee.overflowed);
+        assert!(!tee.plaintext_counter.overflowed);
         tee.process_sse_chunk(b"x\n\n");
-        assert_eq!(tee.event_size, 0);
+        assert_eq!(tee.plaintext_counter.event_size, 0);
         let collected = tee.boxed().collect().await.unwrap().to_bytes();
         assert!(collected.is_empty());
 
@@ -1307,7 +1434,10 @@ mod tests {
             "capped".into(),
             sse_options(None, None, None, usize::MAX),
         );
-        assert_eq!(capped.max_buffer_size, DEFAULT_MAX_SSE_EVENT_BUFFER_BYTES);
+        assert_eq!(
+            capped.plaintext_counter.max_buffer_size,
+            DEFAULT_MAX_SSE_EVENT_BUFFER_BYTES
+        );
     }
 
     #[tokio::test]
@@ -1421,8 +1551,22 @@ mod tests {
             .response_body_ref
             .as_ref()
             .expect("response body ref");
-        assert_eq!(request_ref.content_encoding().as_deref(), Some("gzip"));
-        assert_eq!(response_ref.content_encoding().as_deref(), Some("br"));
+        assert_eq!(request_ref.content_encoding(), None);
+        assert_eq!(response_ref.content_encoding(), None);
+        assert_eq!(
+            record.request_body_content_encoding().as_deref(),
+            Some("gzip")
+        );
+        assert_eq!(
+            record.response_body_content_encoding().as_deref(),
+            Some("br")
+        );
+        assert!(!dir
+            .join(format!("{record_id}_req.content-encoding"))
+            .exists());
+        assert!(!dir
+            .join(format!("{record_id}_res.content-encoding"))
+            .exists());
         let store = state.body_store.as_ref().expect("body store").read();
         assert_eq!(
             store.load_bytes(request_ref).as_deref(),
@@ -1437,7 +1581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_body_refs_are_not_published_when_encoding_metadata_fails() {
+    async fn overlong_encoding_is_ignored_without_losing_wire_bodies() {
         let (state, dir) = test_state_with_body_store("invalid-content-encoding");
         let record_id = "invalid-content-encoding";
         state.record_traffic(bifrost_admin::TrafficRecord::new(
@@ -1447,14 +1591,13 @@ mod tests {
         ));
         let invalid_encoding = "gzip,".repeat(80);
 
-        let (request, capture) = create_request_tee_body(
+        let (request, _) = create_request_tee_body(
             crate::server::full_body(Bytes::from_static(b"request-wire")),
             Some(state.clone()),
             record_id.into(),
             Some(invalid_encoding.clone()),
         );
         request.collect().await.unwrap();
-        assert!(capture.take().is_none());
 
         let response = create_tee_body_with_store(
             crate::server::full_body(Bytes::from_static(b"response-wire")),
@@ -1490,11 +1633,19 @@ mod tests {
             .as_ref()
             .and_then(|store| store.get_by_id(record_id))
             .unwrap();
-        assert!(record.request_body_ref.is_none());
-        assert!(record.response_body_ref.is_none());
-        assert!(!std::fs::read_dir(&dir).unwrap().flatten().any(|entry| {
-            entry.path().is_file() && entry.file_name().to_string_lossy().starts_with(record_id)
-        }));
+        assert!(record.request_body_ref.is_some());
+        assert!(record.response_body_ref.is_some());
+        assert_eq!(record.request_body_content_encoding(), None);
+        assert_eq!(record.response_body_content_encoding(), None);
+        assert!(!dir
+            .join(format!("{record_id}_req.content-encoding"))
+            .exists());
+        assert!(!dir
+            .join(format!("{record_id}_res.content-encoding"))
+            .exists());
+        assert!(!dir
+            .join(format!("{record_id}_sse_raw.content-encoding"))
+            .exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

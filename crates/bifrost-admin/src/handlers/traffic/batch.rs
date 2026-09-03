@@ -2,6 +2,7 @@ use super::body::{configured_decompress_output_bytes, load_body_bytes_async};
 use super::*;
 use crate::handlers::network_body::{
     content_encoding_is_supported, decompress_prefix_with_limit_metered,
+    stored_body_content_encoding,
 };
 use base64::Engine as _;
 
@@ -116,9 +117,10 @@ pub(super) async fn batch_traffic(
                             .request_body_ref
                             .as_ref()
                             .or(record.raw_request_body_ref.as_ref());
-                        if let Some(chunk) = build_batch_body_chunk(
+                        if let Some(chunk) = build_batch_body_chunk_with_encoding(
                             &state,
                             body_ref,
+                            record.request_body_content_encoding().as_deref(),
                             record.request_content_type.as_deref(),
                             params.max_body_bytes,
                             &mut remaining_decompress_bytes,
@@ -133,9 +135,10 @@ pub(super) async fn batch_traffic(
                             .response_body_ref
                             .as_ref()
                             .or(record.raw_response_body_ref.as_ref());
-                        if let Some(chunk) = build_batch_body_chunk(
+                        if let Some(chunk) = build_batch_body_chunk_with_encoding(
                             &state,
                             body_ref,
+                            record.response_body_content_encoding().as_deref(),
                             record.content_type.as_deref(),
                             params.max_body_bytes,
                             &mut remaining_decompress_bytes,
@@ -192,16 +195,23 @@ pub(super) async fn batch_traffic(
         .unwrap()
 }
 
-async fn build_batch_body_chunk(
+async fn build_batch_body_chunk_with_encoding(
     state: &SharedAdminState,
     body_ref: Option<&BodyRef>,
+    content_encoding: Option<&str>,
     content_type: Option<&str>,
     max_body_bytes: usize,
     remaining_decompress_bytes: &mut usize,
 ) -> Option<serde_json::Value> {
     let body_ref = body_ref?;
     let bytes = load_body_bytes_async(state, body_ref).await?;
-    let decoded = decode_batch_body(body_ref, bytes, max_body_bytes, remaining_decompress_bytes);
+    let decoded = decode_batch_body_with_encoding(
+        body_ref,
+        bytes,
+        content_encoding,
+        max_body_bytes,
+        remaining_decompress_bytes,
+    );
     let reported_size = if decoded.truncated {
         decoded.bytes.len().saturating_add(1)
     } else {
@@ -229,19 +239,40 @@ async fn build_batch_body_chunk(
     Some(serde_json::Value::Object(obj))
 }
 
+#[cfg(test)]
+async fn build_batch_body_chunk(
+    state: &SharedAdminState,
+    body_ref: Option<&BodyRef>,
+    content_type: Option<&str>,
+    max_body_bytes: usize,
+    remaining_decompress_bytes: &mut usize,
+) -> Option<serde_json::Value> {
+    build_batch_body_chunk_with_encoding(
+        state,
+        body_ref,
+        None,
+        content_type,
+        max_body_bytes,
+        remaining_decompress_bytes,
+    )
+    .await
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct DecodedBatchBody {
     bytes: Vec<u8>,
     truncated: bool,
 }
 
-fn decode_batch_body(
+fn decode_batch_body_with_encoding(
     body_ref: &BodyRef,
     bytes: Vec<u8>,
+    metadata_content_encoding: Option<&str>,
     max_body_bytes: usize,
     remaining_decompress_bytes: &mut usize,
 ) -> DecodedBatchBody {
-    let Some(content_encoding) = body_ref.content_encoding() else {
+    let Some(content_encoding) = stored_body_content_encoding(body_ref, metadata_content_encoding)
+    else {
         return DecodedBatchBody {
             bytes,
             truncated: false,
@@ -292,6 +323,22 @@ fn decode_batch_body(
 }
 
 #[cfg(test)]
+fn decode_batch_body(
+    body_ref: &BodyRef,
+    bytes: Vec<u8>,
+    max_body_bytes: usize,
+    remaining_decompress_bytes: &mut usize,
+) -> DecodedBatchBody {
+    decode_batch_body_with_encoding(
+        body_ref,
+        bytes,
+        None,
+        max_body_bytes,
+        remaining_decompress_bytes,
+    )
+}
+
+#[cfg(test)]
 mod batch_query_tests {
     use std::io::Write;
 
@@ -300,8 +347,9 @@ mod batch_query_tests {
     use hyper::{body::Incoming, Request};
 
     use super::{
-        batch_traffic, build_batch_body_chunk, decode_batch_body, parse_batch_traffic_query,
-        BATCH_GET_DEFAULT_MAX_BODY_BYTES, BATCH_GET_MAX_IDS,
+        batch_traffic, build_batch_body_chunk, build_batch_body_chunk_with_encoding,
+        decode_batch_body, parse_batch_traffic_query, BATCH_GET_DEFAULT_MAX_BODY_BYTES,
+        BATCH_GET_MAX_IDS,
     };
     use crate::state::SharedAdminState;
     use crate::test_support::TestAdminState;
@@ -408,14 +456,13 @@ mod batch_query_tests {
             .body_store
             .read()
             .store("encoded-batch", "req", &compressed)
-            .expect("store encoded batch body")
-            .with_content_encoding(Some("gzip"))
-            .unwrap();
+            .expect("store encoded batch body");
 
         let mut remaining = usize::MAX;
-        let chunk = build_batch_body_chunk(
+        let chunk = build_batch_body_chunk_with_encoding(
             &harness.state(),
             Some(&body_ref),
+            Some("gzip"),
             Some("application/json"),
             usize::MAX,
             &mut remaining,

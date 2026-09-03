@@ -646,12 +646,12 @@ async fn emit_decode_error(
     }
 }
 
-pub(super) async fn stream_content_encoded_sse_events(
+pub(super) async fn stream_content_encoded_sse_events_with_encoding(
     state: SharedAdminState,
     connection_id: &str,
     body_ref: BodyRef,
-    from: SseStreamFrom,
-    batch_size: usize,
+    metadata_content_encoding: Option<String>,
+    options: SseStreamOptions,
     tail_bytes: usize,
     tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
 ) -> Result<(), ()> {
@@ -659,8 +659,12 @@ pub(super) async fn stream_content_encoded_sse_events(
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     use tokio::time::{sleep, Duration};
 
+    let SseStreamOptions { from, batch_size } = options;
     let max_output_bytes = configured_decompress_output_bytes(&state).await;
-    let Some(content_encoding) = body_ref.content_encoding() else {
+    let Some(content_encoding) = crate::handlers::network_body::stored_body_content_encoding(
+        &body_ref,
+        metadata_content_encoding.as_deref(),
+    ) else {
         return Ok(());
     };
     if !content_encoding_is_supported(&content_encoding) {
@@ -878,6 +882,28 @@ pub(super) async fn stream_content_encoded_sse_events(
             .await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) async fn stream_content_encoded_sse_events(
+    state: SharedAdminState,
+    connection_id: &str,
+    body_ref: BodyRef,
+    from: SseStreamFrom,
+    batch_size: usize,
+    tail_bytes: usize,
+    tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
+) -> Result<(), ()> {
+    stream_content_encoded_sse_events_with_encoding(
+        state,
+        connection_id,
+        body_ref,
+        None,
+        SseStreamOptions { from, batch_size },
+        tail_bytes,
+        tx,
+    )
+    .await
 }
 
 #[cfg(test)]

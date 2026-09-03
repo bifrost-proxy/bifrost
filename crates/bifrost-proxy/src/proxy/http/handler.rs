@@ -3765,18 +3765,11 @@ pub async fn handle_http_request(
                     if let Some(ref body_store) = state.body_store {
                         match body_store.read().start_stream(record_id, "sse_raw") {
                             Ok(writer) => {
-                                match writer
-                                    .body_ref()
-                                    .with_content_encoding(res_content_encoding.as_deref())
-                                {
-                                    Ok(body_ref) => {
-                                        record.response_body_ref = Some(body_ref);
-                                        sse_stream_writer = Some(writer);
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(%error, %record_id, "failed to persist SSE content encoding");
-                                    }
-                                }
+                                record.response_body_ref = Some(writer.body_ref());
+                                record.set_response_body_content_encoding(
+                                    res_content_encoding.as_deref(),
+                                );
+                                sse_stream_writer = Some(writer);
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, record_id = %record_id, "failed to start sse raw stream writer");
