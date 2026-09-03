@@ -400,6 +400,7 @@ fn encoded_body_cache_honors_per_body_and_request_budgets() {
         .load_body_bytes_cached("res:mid-body", &first, &mut mid_body_cache)
         .is_none());
     assert!(mid_body_cache.decompression_budget_exhausted);
+    assert!(mid_body_cache.current_record_exceeds_decompression_budget);
     assert_eq!(mid_body_cache.remaining_decompressed_bytes, 0);
 
     let limited_engine = engine.with_decompression_limit(plaintext.len() - 1);
@@ -451,26 +452,228 @@ fn search_reports_partial_results_when_decompression_budget_is_exhausted() {
     record.response_body_ref = Some(body_ref);
     db.record(record);
 
-    let response = SearchEngine::new(db, Some(body_store))
-        .with_decompression_budget(1024, 0)
-        .search(&SearchRequest {
-            keyword: "budget-exhaustion-needle".to_string(),
-            scope: SearchScope {
-                all: false,
-                response_body: true,
-                ..Default::default()
-            },
-            limit: Some(20),
+    let engine = SearchEngine::new(db, Some(body_store)).with_decompression_budget(1024, 0);
+    let request = SearchRequest {
+        keyword: "budget-exhaustion-needle".to_string(),
+        scope: SearchScope {
+            all: false,
+            response_body: true,
             ..Default::default()
-        });
+        },
+        limit: Some(20),
+        ..Default::default()
+    };
+    let response = engine.search(&request);
 
     assert!(response.results.is_empty());
-    assert_eq!(response.total_searched, 0);
+    assert_eq!(response.total_searched, 1);
+    assert!(response.next_cursor.is_some());
     assert!(response.has_more);
     assert_eq!(
         response.partial_reason.as_deref(),
         Some("decompression_budget_exhausted")
     );
+
+    let continuation = engine.search(&SearchRequest {
+        cursor: response.next_cursor,
+        ..request
+    });
+    assert!(continuation.results.is_empty());
+    assert_eq!(continuation.total_searched, 0);
+    assert!(!continuation.has_more);
+    assert!(continuation.partial_reason.is_none());
+}
+
+#[test]
+fn search_advances_when_one_records_bodies_exceed_a_fresh_budget_together() {
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    let dir = TempDir::new().expect("temp dir");
+    let db = Arc::new(
+        TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+            .expect("traffic db"),
+    );
+    let body_store = Arc::new(RwLock::new(BodyStore::new(
+        dir.path().join("body_cache"),
+        0,
+        7,
+        64 * 1024,
+        Duration::from_millis(100),
+    )));
+    let request_body_ref = body_store
+        .read()
+        .store("aggregate-budget", "req", &gzip(b"request1"))
+        .unwrap()
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
+    let response_body_ref = body_store
+        .read()
+        .store("aggregate-budget", "res", &gzip(b"response-budget-needle"))
+        .unwrap()
+        .with_content_encoding(Some("gzip"))
+        .unwrap();
+    let mut record = TrafficRecord::new(
+        "aggregate-budget".to_string(),
+        "POST".to_string(),
+        "https://example.com/aggregate".to_string(),
+    );
+    record.request_body_ref = Some(request_body_ref);
+    record.response_body_ref = Some(response_body_ref);
+    db.record(record);
+
+    let engine = SearchEngine::new(db, Some(body_store)).with_decompression_budget(1024, 12);
+    let request = SearchRequest {
+        keyword: "response-budget-needle".to_string(),
+        scope: SearchScope {
+            all: false,
+            request_body: true,
+            response_body: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let response = engine.search(&request);
+    assert_eq!(response.total_searched, 1);
+    assert!(response.has_more);
+    assert_eq!(
+        response.partial_reason.as_deref(),
+        Some("decompression_budget_exhausted")
+    );
+
+    let continuation = engine.search(&SearchRequest {
+        cursor: response.next_cursor,
+        ..request
+    });
+    assert!(!continuation.has_more);
+    assert!(continuation.partial_reason.is_none());
+}
+
+#[test]
+fn search_rolls_back_a_record_that_can_fit_the_next_fresh_budget() {
+    fn setup(
+        label: &str,
+        consumer_url: &str,
+        consumer_body: &[u8],
+        target_url: &str,
+        target_body: &[u8],
+        budget: usize,
+    ) -> (TempDir, SearchEngine) {
+        fn gzip(bytes: &[u8]) -> Vec<u8> {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(bytes).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let dir = TempDir::new().expect("temp dir");
+        let db = Arc::new(
+            TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+                .expect("traffic db"),
+        );
+        let body_store = Arc::new(RwLock::new(BodyStore::new(
+            dir.path().join("body_cache"),
+            0,
+            7,
+            64 * 1024,
+            Duration::from_millis(100),
+        )));
+        for (suffix, url, body) in [
+            ("target", target_url, target_body),
+            ("consumer", consumer_url, consumer_body),
+        ] {
+            let id = format!("{label}-{suffix}");
+            let body_ref = body_store
+                .read()
+                .store(&id, "res", &gzip(body))
+                .unwrap()
+                .with_content_encoding(Some("gzip"))
+                .unwrap();
+            let mut record = TrafficRecord::new(id, "GET".to_string(), url.to_string());
+            record.response_body_ref = Some(body_ref);
+            db.record(record);
+        }
+        (
+            dir,
+            SearchEngine::new(db, Some(body_store)).with_decompression_budget(1024, budget),
+        )
+    }
+
+    let (_keyword_dir, keyword_engine) = setup(
+        "keyword-rollback",
+        "https://example.com/consumer",
+        b"consumer",
+        "https://example.com/target",
+        b"target-needle",
+        16,
+    );
+    let keyword_response = keyword_engine.search(&SearchRequest {
+        keyword: "target-needle".to_string(),
+        scope: SearchScope {
+            all: false,
+            response_body: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    assert_eq!(keyword_response.total_searched, 1);
+    assert!(keyword_response.has_more);
+
+    let (_condition_dir, condition_engine) = setup(
+        "condition-rollback",
+        "https://example.com/condition-consumer",
+        br#"{"marker":"no"}"#,
+        "https://example.com/condition-target",
+        br#"{"marker":"yes"}"#,
+        20,
+    );
+    let condition_response = condition_engine.search(&SearchRequest {
+        keyword: "condition-target".to_string(),
+        scope: SearchScope {
+            all: false,
+            url: true,
+            ..Default::default()
+        },
+        filters: SearchFilters {
+            conditions: vec![FilterCondition {
+                field: "res.body.$.marker".to_string(),
+                operator: "equals".to_string(),
+                value: "yes".to_string(),
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    assert_eq!(condition_response.total_searched, 1);
+    assert!(condition_response.has_more);
+
+    let (_hydration_dir, hydration_engine) = setup(
+        "hydration-rollback",
+        "https://example.com/hydration-consumer",
+        b"consumer",
+        "https://example.com/hydration-target",
+        b"target response body",
+        24,
+    );
+    let hydration_response = hydration_engine.search(&SearchRequest {
+        keyword: "hydration".to_string(),
+        scope: SearchScope {
+            all: false,
+            url: true,
+            ..Default::default()
+        },
+        include: crate::search::SearchInclude {
+            response_body: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    assert_eq!(hydration_response.total_searched, 1);
+    assert_eq!(hydration_response.results.len(), 1);
+    assert!(hydration_response.has_more);
 }
 
 #[test]
@@ -523,7 +726,8 @@ fn search_budget_exhaustion_rolls_back_filter_and_hydration_records() {
         },
         ..Default::default()
     });
-    assert_eq!(filter_response.total_searched, 0);
+    assert_eq!(filter_response.total_searched, 1);
+    assert!(filter_response.next_cursor.is_some());
     assert!(filter_response.has_more);
     assert_eq!(
         filter_response.partial_reason.as_deref(),
@@ -544,7 +748,8 @@ fn search_budget_exhaustion_rolls_back_filter_and_hydration_records() {
         ..Default::default()
     });
     assert!(hydration_response.results.is_empty());
-    assert_eq!(hydration_response.total_searched, 0);
+    assert_eq!(hydration_response.total_searched, 1);
+    assert!(hydration_response.next_cursor.is_some());
     assert!(hydration_response.has_more);
     assert_eq!(
         hydration_response.partial_reason.as_deref(),

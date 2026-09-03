@@ -489,3 +489,29 @@ pub struct WsPayloadStoreStats {
     pub active_writers: usize,
     pub max_open_files: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appended_payload_round_trips_through_file_range_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WsPayloadStore::new(
+            dir.path().to_path_buf(),
+            64 * 1024,
+            Duration::from_secs(1),
+            4,
+            7,
+        );
+        let body_ref = store
+            .append_bytes("coverage-connection", b"payload bytes")
+            .expect("payload ref");
+
+        assert!(store.is_ws_payload_ref(&body_ref));
+        assert_eq!(
+            store.read_range(&body_ref).as_deref(),
+            Some(b"payload bytes".as_slice())
+        );
+    }
+}

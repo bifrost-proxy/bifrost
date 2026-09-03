@@ -32,8 +32,11 @@ enum BodyCacheEntry {
 struct BodyReadCache {
     bytes: HashMap<String, Option<Vec<u8>>>,
     json: HashMap<String, BodyCacheEntry>,
+    max_decompressed_bytes: usize,
     remaining_decompressed_bytes: usize,
     decompression_budget_exhausted: bool,
+    current_record_started_with_fresh_budget: bool,
+    current_record_exceeds_decompression_budget: bool,
 }
 
 impl BodyReadCache {
@@ -41,8 +44,11 @@ impl BodyReadCache {
         Self {
             bytes: HashMap::new(),
             json: HashMap::new(),
+            max_decompressed_bytes,
             remaining_decompressed_bytes: max_decompressed_bytes,
             decompression_budget_exhausted: false,
+            current_record_started_with_fresh_budget: true,
+            current_record_exceeds_decompression_budget: false,
         }
     }
 
@@ -277,6 +283,9 @@ impl SearchEngine {
             };
 
             for compact in &query_result.records {
+                body_cache.current_record_started_with_fresh_budget =
+                    body_cache.remaining_decompressed_bytes == body_cache.max_decompressed_bytes;
+                body_cache.current_record_exceeds_decompression_budget = false;
                 let previous_cursor = current_cursor;
                 let previous_oldest_ts_ms = oldest_ts_ms;
                 let previous_newest_ts_ms = newest_ts_ms;
@@ -312,11 +321,13 @@ impl SearchEngine {
                     );
                 if body_cache.decompression_budget_exhausted {
                     decompression_budget_exhausted = true;
-                    total_searched = total_searched.saturating_sub(1);
-                    scanned_count = scanned_count.saturating_sub(1);
-                    current_cursor = previous_cursor;
-                    oldest_ts_ms = previous_oldest_ts_ms;
-                    newest_ts_ms = previous_newest_ts_ms;
+                    if !body_cache.current_record_exceeds_decompression_budget {
+                        total_searched = total_searched.saturating_sub(1);
+                        scanned_count = scanned_count.saturating_sub(1);
+                        current_cursor = previous_cursor;
+                        oldest_ts_ms = previous_oldest_ts_ms;
+                        newest_ts_ms = previous_newest_ts_ms;
+                    }
                     break 'search;
                 }
                 if !conditions_match {
@@ -331,11 +342,13 @@ impl SearchEngine {
                     self.search_compact(scope, &keyword_lower, compact, fields, &mut body_cache);
                 if body_cache.decompression_budget_exhausted {
                     decompression_budget_exhausted = true;
-                    total_searched = total_searched.saturating_sub(1);
-                    scanned_count = scanned_count.saturating_sub(1);
-                    current_cursor = previous_cursor;
-                    oldest_ts_ms = previous_oldest_ts_ms;
-                    newest_ts_ms = previous_newest_ts_ms;
+                    if !body_cache.current_record_exceeds_decompression_budget {
+                        total_searched = total_searched.saturating_sub(1);
+                        scanned_count = scanned_count.saturating_sub(1);
+                        current_cursor = previous_cursor;
+                        oldest_ts_ms = previous_oldest_ts_ms;
+                        newest_ts_ms = previous_newest_ts_ms;
+                    }
                     break 'search;
                 }
                 if let Some(mut result) = result {
@@ -349,11 +362,13 @@ impl SearchEngine {
                         );
                         if body_cache.decompression_budget_exhausted {
                             decompression_budget_exhausted = true;
-                            total_searched = total_searched.saturating_sub(1);
-                            scanned_count = scanned_count.saturating_sub(1);
-                            current_cursor = previous_cursor;
-                            oldest_ts_ms = previous_oldest_ts_ms;
-                            newest_ts_ms = previous_newest_ts_ms;
+                            if !body_cache.current_record_exceeds_decompression_budget {
+                                total_searched = total_searched.saturating_sub(1);
+                                scanned_count = scanned_count.saturating_sub(1);
+                                current_cursor = previous_cursor;
+                                oldest_ts_ms = previous_oldest_ts_ms;
+                                newest_ts_ms = previous_newest_ts_ms;
+                            }
                             break 'search;
                         }
                     }
@@ -802,6 +817,8 @@ impl SearchEngine {
         body_ref: &BodyRef,
         remaining_decompressed_bytes: &mut usize,
         decompression_budget_exhausted: &mut bool,
+        current_record_started_with_fresh_budget: bool,
+        current_record_exceeds_decompression_budget: &mut bool,
     ) -> Option<Vec<u8>> {
         let bytes = match body_ref {
             BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
@@ -820,6 +837,7 @@ impl SearchEngine {
         let globally_limited = *remaining_decompressed_bytes < self.max_decompress_output_bytes;
         if output_limit == 0 {
             *decompression_budget_exhausted = true;
+            *current_record_exceeds_decompression_budget = current_record_started_with_fresh_budget;
             return None;
         }
         match decompress_with_limit_metered(&bytes, &content_encoding, output_limit) {
@@ -837,6 +855,8 @@ impl SearchEngine {
                     remaining_decompressed_bytes.saturating_sub(output_limit);
                 if globally_limited {
                     *decompression_budget_exhausted = true;
+                    *current_record_exceeds_decompression_budget =
+                        current_record_started_with_fresh_budget;
                     None
                 } else {
                     Some(bytes)
@@ -856,6 +876,8 @@ impl SearchEngine {
                 body_ref,
                 &mut body_cache.remaining_decompressed_bytes,
                 &mut body_cache.decompression_budget_exhausted,
+                body_cache.current_record_started_with_fresh_budget,
+                &mut body_cache.current_record_exceeds_decompression_budget,
             );
             body_cache.bytes.insert(cache_key.to_string(), bytes);
         }
