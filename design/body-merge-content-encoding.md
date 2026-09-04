@@ -193,6 +193,7 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `query_service::traffic_get_decodes_content_encoded_file_body`：CLI/Remote Invoke 共用的 `traffic get` 查询服务返回解码后的文件型 body。
 - `search::encoded_file_body_is_decoded_for_search_json_filter_and_include`：关键词搜索、JSONPath 条件与 include body 同时读取解码后的文件型 body。
 - `handler::plaintext_success_records_rule_encoded_request_for_admin_and_search`：请求规则新增 gzip 后，成功转发分支落库的是最终 wire body 而不是规则处理前 body，关键词、JSONPath 与 include 均读取明文。
+- `body_cache_request_body_with_rule`：HTTP 请求 Body 规则生效后，上游收到的正文与 Traffic canonical request body 都是最终转发正文，避免最终请求头与规则前正文错配；与 HTTPS/MITM 路径保持一致。
 - `tunnel::intercepted_streaming_rule_added_encoding_is_plaintext_in_search`：HTTPS/MITM streaming 请求在规则补写 gzip 后保留 body ref 和最终 encoding metadata，搜索读取明文。
 - `handler::unknown_length_oversized_request_and_response_use_admin_streaming_tees` / `tunnel::intercepted_unknown_length_oversized_bodies_use_admin_streaming_tees`：请求体超过转换上限而跳过 Body 规则时，不把仅由规则补写的 gzip 头应用到未压缩 wire body；HTTP 与 HTTPS/MITM 都保持原始编码、正文和 Traffic metadata 一致。
 - `tee::request_tee_persists_content_encoding_updated_after_body_completion` / `request_tee_clears_encoding_without_clearing_completed_body`：body 已消费后更新或清除编码仍同步 Traffic metadata，且清除编码不清空 body。

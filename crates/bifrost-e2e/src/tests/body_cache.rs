@@ -288,8 +288,11 @@ async fn test_request_body_with_rule() -> Result<(), String> {
         .read()
         .load(&body_ref)
         .ok_or("Failed to load request body")?;
-    if !data.contains("original-content") {
-        return Err(format!("Expected original body in store, got: {}", data));
+    if !data.contains("modified-content") {
+        return Err(format!(
+            "Expected final forwarded body in store, got: {}",
+            data
+        ));
     }
 
     Ok(())
