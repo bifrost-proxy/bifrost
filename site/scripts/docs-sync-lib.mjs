@@ -77,6 +77,15 @@ const knownPages = new Map(
       },
     ],
     [
+      "docs/client-admin.md",
+      {
+        target: "reference/client-admin.md",
+        title: "Client 远程管理",
+        description: "通过 Admin API 直连并管理另一台 Bifrost 的目标配置、登录、安全边界与常用工作流。",
+        order: 115,
+      },
+    ],
+    [
       "docs/rule.md",
       {
         target: "reference/rule-engine.md",
@@ -319,6 +328,15 @@ const knownEnglishPages = new Map(
         title: "CLI Command Reference",
         description: "Bifrost CLI commands, flags, environment variables, and workflows.",
         order: 110,
+      },
+    ],
+    [
+      "docs-en/client-admin.md",
+      {
+        target: "en/reference/client-admin.md",
+        title: "Client Remote Administration",
+        description: "Configure targets, authenticate, and manage another Bifrost directly through its Admin API.",
+        order: 115,
       },
     ],
     [

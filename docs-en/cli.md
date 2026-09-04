@@ -32,6 +32,7 @@ The top-level help intentionally stays short. Exact flag parsing is defined by e
 | `upgrade`, `update`, `version-check` | Check for new versions and upgrade the binary; `update` is an alias for `upgrade`. |
 | `config` | Inspect and modify runtime config, connections, cache, and performance status. |
 | `admin` | Manage Admin remote access, passwords, sessions, and audit logs. |
+| `client` | Connect directly to a remote Admin API by target IP, port, or domain. See the [Client remote administration guide](./client-admin.md). |
 | `capture` | Wait for the next matching traffic record, useful for browser/app debugging and agent evidence collection. |
 | `traffic`, `search` | List, get, search, export, replay, diagnose, and clear traffic records. |
 | `install-skill` | Install the Bifrost Agent Skill into AI coding tools. |

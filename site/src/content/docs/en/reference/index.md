@@ -18,6 +18,7 @@ This directory contains the English documentation set for Bifrost. It mirrors th
 - [Connect a mobile device to Bifrost](../getting-started/mobile-proxy)
 - [CLI quick start](../getting-started/cli-quick-start)
 - [CLI command reference](./cli)
+- [Client remote administration guide](./client-admin)
 - [Desktop installation and build](../getting-started/desktop)
 
 ## Rule System

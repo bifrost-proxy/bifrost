@@ -42,8 +42,8 @@ The installer writes two skills:
     └── SKILL.md
 ```
 
-- `bifrost`: local proxy, rules, traffic analysis, agent evidence workflows, and IM Gateway CLI setup.
-- `bifrost-remote`: pair-code / SSH-key authorization, remote traffic, remote files, remote run/job, and authorized shell operations.
+- `bifrost`: local proxy management plus Client mode for direct Admin API access to another Bifrost by IP, port, domain, or saved target.
+- `bifrost-remote`: pair-code / SSH-key authorization, Relay-backed queries, remote files, remote run/job, and authorized shell operations.
 
 ## Install a Specific Target
 
@@ -105,7 +105,23 @@ skill_remote.md -> bifrost-remote/SKILL.md
 
 The original skill content, including standard YAML frontmatter, is installed without extra wrapping.
 
-`install-skill` only writes skill documentation. It does not start the proxy, change system proxy settings, import rules, create remote grants, or authorize shell access. Remote access must still be explicitly granted by the user with a pair code or SSH key.
+`install-skill` only writes skill documentation. It does not start the proxy, change system proxy settings, import rules, save Client targets, log in to Admin, create Remote Invoke grants, or authorize shell access. Client access requires Admin Remote Access to be enabled locally on the target and an Admin login. Remote Invoke still requires explicit pair-code or SSH-key authorization.
+
+## Two Remote Modes
+
+When the target Bifrost IP, port, or domain is known and the task is to inspect traffic/status or manage rules, values, scripts, config, or whitelist state, the agent uses Client mode from the general skill:
+
+```bash
+bifrost client target add devbox --url http://10.0.0.8:9900 --allow-insecure-http
+printf '%s' "$BIFROST_ADMIN_PASSWORD" | \
+  bifrost client target login devbox --username admin --password-stdin
+bifrost client --target devbox traffic list --format json
+bifrost client --target devbox rule list
+```
+
+Client mode is equivalent to remote WebUI administration and connects directly to the Admin API. The target must first run `bifrost admin remote enable` locally. `--target` may be omitted when exactly one target exists; non-interactive calls with multiple targets must select one explicitly. After a 401, log in explicitly again. A Client error or unsupported command must never fall back to local data or Remote Invoke.
+
+Use the `bifrost-remote` skill only for arbitrary target files, remote repository changes, shell commands, builds, or process execution. That mode uses Relay, pairing, and grants; it does not read Client targets or Admin JWTs.
 
 ## Using IM Gateway After Install
 
@@ -153,7 +169,7 @@ cp ./skill_remote.md ~/.claude/skills/bifrost-remote/SKILL.md
 
 After installation, start a new session in the target agent and ask it to perform a Bifrost operation such as “start the proxy” or “inspect traffic.” If it discovers the skill and calls the `bifrost` CLI correctly, the general skill is working.
 
-To verify the remote skill, ask the agent to connect to another Bifrost machine using a pair code or SSH key; it should enter the `bifrost-remote` workflow.
+To verify both remote modes, ask the agent to log in to another Bifrost by a known IP and inspect traffic or edit a rule; it should use `bifrost client target` from the general skill. Ask it to modify files or run a shell through a pair code or SSH key; only that request should enter the `bifrost-remote` workflow. The modes must never silently fall back to each other.
 
 Update the skills with:
 

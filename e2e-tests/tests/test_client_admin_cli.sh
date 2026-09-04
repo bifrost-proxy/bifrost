@@ -107,9 +107,18 @@ PY
 }
 
 cleanup() {
-    [[ -z "$CAPTURE_PID" ]] || terminate_process_tree "$CAPTURE_PID" || true
-    [[ -z "$ECHO_PID" ]] || terminate_process_tree "$ECHO_PID" || true
-    [[ -z "$TARGET_PID" ]] || terminate_process_tree "$TARGET_PID" 2 || true
+    if [[ -n "$CAPTURE_PID" ]]; then
+        terminate_process_tree "$CAPTURE_PID" || true
+        wait "$CAPTURE_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$ECHO_PID" ]]; then
+        terminate_process_tree "$ECHO_PID" || true
+        wait "$ECHO_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$TARGET_PID" ]]; then
+        terminate_process_tree "$TARGET_PID" 2 || true
+        wait "$TARGET_PID" 2>/dev/null || true
+    fi
     local attempt
     for attempt in 1 2 3 4 5; do
         rm -rf "$RUN_ROOT" 2>/dev/null || true

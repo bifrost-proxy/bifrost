@@ -496,7 +496,7 @@ impl ConfigApiClient {
         match error {
             ureq::Error::Status(_, response) => self.response_error(method, path, response),
             ureq::Error::Transport(error) => format!(
-                "Failed to connect to Bifrost Admin API for {method} {}: {error}",
+                "Failed to connect to Bifrost admin API for {method} {}: {error}",
                 self.url(path)
             ),
         }
@@ -517,10 +517,13 @@ impl ConfigApiClient {
             .filter(|message| !message.is_empty())
             .unwrap_or_else(|| format!("HTTP {status}"));
         if status == 401 {
-            format!("Admin authentication failed for {method} {}: {message}. Run `bifrost client target login <target>` again", self.url(path))
+            format!(
+                "Admin authentication failed for {method} {}: {message}. Run `bifrost client target login <target>` again",
+                self.url(path)
+            )
         } else {
             format!(
-                "Admin API {method} {} failed with HTTP {status}: {message}",
+                "Failed to connect to Bifrost admin API for {method} {}: HTTP {status}: {message}",
                 self.url(path)
             )
         }
@@ -873,6 +876,34 @@ mod tests {
         let error = client.get_metrics().unwrap_err();
 
         assert!(error.contains("HTTP 302"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn admin_api_status_errors_preserve_the_legacy_connection_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/sync/login"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(json!({"error": "remote URL must use HTTPS"})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let error = client
+            .post_public::<serde_json::Value, _>("/sync/login", &json!({"token": "invalid"}))
+            .unwrap_err();
+
+        assert!(
+            error.starts_with("Failed to connect to Bifrost admin API"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("HTTP 400"), "unexpected error: {error}");
+        assert!(
+            error.contains("remote URL must use HTTPS"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

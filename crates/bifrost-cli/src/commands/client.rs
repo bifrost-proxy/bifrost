@@ -653,6 +653,15 @@ mod tests {
 
     #[test]
     fn client_admin_cli_unit_boundaries_fail_closed() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(client_admin_cli_unit_boundaries_fail_closed_with_large_stack)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn client_admin_cli_unit_boundaries_fail_closed_with_large_stack() {
         assert!(normalize_base_url("").is_err());
         assert!(normalize_base_url("://").is_err());
         assert!(normalize_base_url("ftp://example.com").is_err());

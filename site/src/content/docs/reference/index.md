@@ -18,6 +18,7 @@ editLink: false
 - [移动端连接 PC、Mac 或 Linux 上的 Bifrost](../getting-started/mobile-proxy)
 - [CLI 快速开始](../getting-started/cli-quick-start)
 - [CLI 详细命令](./cli)
+- [Client 远程管理使用手册](./client-admin)
 - [桌面版安装与构建](../getting-started/desktop)
 
 ## 规则系统

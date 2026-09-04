@@ -40,8 +40,8 @@ bifrost install-skill -y
     └── SKILL.md
 ```
 
-- `bifrost`：本机代理、规则、流量分析、Agent 采证和 IM Gateway CLI 配置。
-- `bifrost-remote`：pair code / SSH key 授权、远程流量、远程文件、remote run/job 和授权 shell 操作。
+- `bifrost`：本机代理，以及通过 IP、端口、域名或已保存 target 直连另一台 Bifrost Admin API 的 Client 模式。
+- `bifrost-remote`：pair code / SSH key 授权、Relay-backed 查询、远程文件、remote run/job 和授权 shell 操作。
 
 ## 安装到指定目标
 
@@ -103,7 +103,23 @@ skill_remote.md -> bifrost-remote/SKILL.md
 
 原样安装，保留标准 YAML frontmatter，不做额外包装。
 
-`install-skill` 只写入技能文档：不会启动代理、修改系统代理、导入规则、创建远端授权或授予 shell 权限。远程连接仍必须由用户通过 pair code 或 SSH key 显式授权。
+`install-skill` 只写入技能文档：不会启动代理、修改系统代理、导入规则、保存 Client target、登录 Admin、创建 Remote Invoke 授权或授予 shell 权限。Client 直连需要目标机先在本地开启 Admin Remote Access 并登录；Remote Invoke 仍必须由用户通过 pair code 或 SSH key 显式授权。
+
+## 两种远程模式
+
+已知目标 Bifrost 的 IP、端口或域名，并希望查询 traffic/status 或管理 rule/value/script/config/whitelist 时，Agent 使用通用 Skill 的 Client 工作流：
+
+```bash
+bifrost client target add devbox --url http://10.0.0.8:9900 --allow-insecure-http
+printf '%s' "$BIFROST_ADMIN_PASSWORD" | \
+  bifrost client target login devbox --username admin --password-stdin
+bifrost client --target devbox traffic list --format json
+bifrost client --target devbox rule list
+```
+
+Client 与远程 WebUI 对等，直连 Admin API。目标机需先在本地运行 `bifrost admin remote enable`。只有一个 target 时可省略 `--target`；多个 target 的非交互调用必须显式选择。401 后显式重新登录，Client 失败或命令不受支持时不得读取本机数据，也不得自动降级到 Remote Invoke。
+
+需要读取或修改目标机任意文件、操作远端仓库、执行 shell/构建/进程时，才使用 `bifrost-remote` Skill。该模式走 Relay、pairing 和 grant，不读取 Client target 或 Admin JWT。
 
 ## 安装后使用 IM Gateway CLI
 
@@ -151,7 +167,7 @@ cp ./skill_remote.md ~/.claude/skills/bifrost-remote/SKILL.md
 
 安装后，在对应 Agent 中开启新会话并请求“启动代理”“查看流量”等 Bifrost 操作；如果 Agent 能发现 Skill 并正确调用 `bifrost` CLI，说明安装成功。
 
-验证远程 Skill 时，可以要求“连接另一台机器的 Bifrost，并通过 pair code 或 SSH key 授权”；Agent 应进入 `bifrost-remote` 流程。
+验证两种远程模式时：要求“通过已知 IP 登录另一台 Bifrost 并查询流量/修改规则”，Agent 应使用通用 skill 的 `bifrost client target` 流程；要求“通过 pair code 或 SSH key 修改另一台机器的文件或执行 shell”，Agent 才应进入 `bifrost-remote`。两种模式不得自动互相降级。
 
 更新技能：
 

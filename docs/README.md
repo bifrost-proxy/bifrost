@@ -11,6 +11,7 @@
 - [移动端连接 PC、Mac 或 Linux 上的 Bifrost](./mobile-proxy.md)
 - [CLI 快速开始](./cli-quick-start.md)
 - [CLI 详细命令](./cli.md)
+- [Client 远程管理使用手册](./client-admin.md)
 - [桌面版安装与构建](./desktop.md)
 
 ## 规则系统
