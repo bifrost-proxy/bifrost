@@ -57,7 +57,7 @@ bifrost port destroy 18888
 
 普通用户首次体验不要加测试隔离参数。`--no-system-proxy` 和临时 `BIFROST_DATA_DIR` 只用于 CI、自动化测试、并发实验或破坏性配置验证。
 
-## 场景 2：直连管理另一台 Bifrost
+## Client：直连管理另一台 Bifrost
 
 目标机本地先设置 Admin 密码并启用远程 Admin：
 
@@ -81,7 +81,7 @@ bifrost client --target devbox rule list
 
 明文 HTTP 只适用于可信局域网；跨不可信网络应使用 HTTPS、VPN 或 SSH tunnel。Client 只管理目标 Bifrost 的 Admin API，不支持目标机文件、shell 或进程操作；这些场景应显式使用 `bifrost remote`。完整配置、安全说明和故障排查见 [Client 远程管理使用手册](./client-admin.md)。
 
-## 场景 3：让流量进入 Bifrost
+## 场景 2：让流量进入 Bifrost
 
 普通用户启动 `bifrost start -d` 后，系统代理会自动接管浏览器和桌面应用流量。单个命令也可以显式指定代理，这样最可控：
 
@@ -113,7 +113,7 @@ bifrost cli-proxy disable
 
 未指定 `--shell` 时自动识别 Bash、Zsh、Fish 或 PowerShell；无法识别时显式传入 `--shell`。写入或移除失败时，CLI 会给出完整可复制块、profile 路径和手工删除指引。Bifrost 正常退出或崩溃后会自动清理所有受管 profile；`restart` 交接期间保留它们。`start --cli-proxy` 仅作为旧用法兼容保留，新配置优先使用专用子命令。
 
-## 场景 4：把某个域名转发到本地服务
+## 场景 3：把某个域名转发到本地服务
 
 HTTP 或不需要路径匹配的 HTTPS 透传场景，可以从最小 host 规则开始：
 
@@ -147,7 +147,7 @@ api.example.com host://{local-api-target.txt}
 
 只有特别大的 mock body、PAC 脚本、大段 header 块，或确实需要被很多规则长期共享的内容，才建议使用 `bifrost value set <NAME> <VALUE>` 创建全局 Values。`${env.API_TOKEN}`、`${path}`、`${reqHeaders.authorization}` 等是运行时模板变量，展开时依赖当前请求上下文。
 
-## 场景 5：按需调试 HTTPS 和路径规则
+## 场景 4：按需调试 HTTPS 和路径规则
 
 如果你要按 HTTPS URL 的 path 匹配，例如 `api.example.com/v1/users https://10.0.0.10:8443`，只要规则 matcher 有明确域名/IP 作用域，Bifrost 会在全局 TLS 抓包关闭时自动对该域名解包，以便读取内部路径；matcher 前不需要强制写 `https://`。不要默认开启全局 TLS 抓包，优先用域名白名单、应用白名单或规则级 `tlsIntercept://` 精确控制范围。对范围很宽的 wildcard/regex，或没有明确 host 作用域的规则，请显式收窄范围，避免影响带 SSL pinning 的应用。
 
@@ -188,7 +188,7 @@ bifrost start --app-intercept-include "*Chrome,*curl"
 bifrost start --app-intercept-exclude "*Safari*"
 ```
 
-## 场景 6：改请求、响应或模拟异常
+## 场景 5：改请求、响应或模拟异常
 
 规则快速入门：
 
@@ -229,7 +229,7 @@ example.com host://127.0.0.1:3000 lineProps://disabled
 
 更多 operation 的值格式和模板变量见 [操作符说明](./operation.md)。
 
-## 场景 7：从流量记录定位问题
+## 场景 6：从流量记录定位问题
 
 先看最近流量，再看单条或批量详情。本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏，以下输出按捕获原文返回：
 
@@ -282,7 +282,7 @@ bifrost search "keyword" --proxy-port 18888
 - HTTPS 请求是否需要 `tlsIntercept://` 才能看到 path。
 - 入口端口是否是你绑定规则的临时端口。
 
-## 场景 8：用临时端口隔离多组规则
+## 场景 7：用临时端口隔离多组规则
 
 临时端口适合同时调试多套规则，互不影响主端口：
 
@@ -297,7 +297,7 @@ bifrost port destroy 18888
 
 临时端口共享同一个 `BIFROST_DATA_DIR` 中的 values、scripts、证书和流量库，但只使用 `port bind` / `port update` 显式绑定的规则。
 
-## 场景 9：同一个服务服务多个应用或开发任务
+## 场景 8：同一个服务服务多个应用或开发任务
 
 多人协作、多个 App 联调、多个 Agent 任务并行时，不需要为每个任务启动一个 Bifrost。推荐保持一个主服务常驻，用不同临时端口承载不同任务的规则。这样证书、系统代理、Web UI、traffic 数据库都共享，但每个任务的规则入口相互隔离。
 
@@ -339,7 +339,7 @@ bifrost port active 18882
 - Agent 协作时，把端口号写进指令，例如“只分析 `listener_port=18882` 的流量”，避免把其他应用流量混进结论。
 - 任务结束后只销毁对应端口：`bifrost port destroy 18882`，不要停止整个主服务。
 
-## 场景 10：管理访问范围
+## 场景 9：管理访问范围
 
 默认访问限制为本机。需要局域网访问时，优先使用白名单或交互审批：
 
@@ -353,7 +353,7 @@ bifrost whitelist approve <ip>
 
 `allow_all` 会暴露代理能力，除非你明确知道网络边界和认证策略，否则不要用于共享网络。
 
-## 场景 11：通过 Remote Invoke 操作另一台机器
+## 场景 10：远程操作另一台 Bifrost
 
 首次连接或重新授权：
 
@@ -396,7 +396,7 @@ bifrost remote --client-id macbook run --script-file ./query.py --interpreter py
 bifrost remote exec -- bifrost setting shell list
 ```
 
-## 场景 12：备份、迁移、同步和补全
+## 场景 11：备份、迁移、同步和补全
 
 离线迁移用 `.bifrost` 文件：
 
@@ -423,7 +423,7 @@ Shell 补全：
 bifrost completions zsh
 ```
 
-## 场景 13：添加飞书或微信 IM 通道
+## 场景 12：添加飞书或微信 IM 通道
 
 IM Gateway 适合把飞书或微信变成 Bifrost 的 Agent 会话入口。首次添加 provider 时先确认 Bifrost 服务已启动，再用 `im provider add` 进入交互式配置：
 
@@ -445,7 +445,7 @@ IM 通道连接成功后会收到上线通知和可用命令帮助。所有外�
 
 Agent skill 的完整协作流程见下一节。
 
-## 场景 14：和 Agent 协作开发业务 Skill
+## 场景 13：和 Agent 协作开发业务 Skill
 
 这个场景适合把一个真实系统、内部平台或桌面应用的网络协议沉淀成专属 Agent skill。核心思路是：先让 Bifrost 记录可复现的真实请求和响应，再让 Agent 读取这些证据，总结认证方式、接口顺序、字段含义和错误格式，最后写成可复用的 skill。
 
