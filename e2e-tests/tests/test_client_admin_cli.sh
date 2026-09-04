@@ -407,9 +407,9 @@ client port update "$TEMP_PORT" --rule "$RULE_NAME" --name client-e2e >/dev/null
 client port destroy "$TEMP_PORT" >/dev/null
 pass "remote temporary port lifecycle works"
 
-env NO_PROXY= no_proxy= curl -fsS --proxy "http://127.0.0.1:${TARGET_PORT}" \
-    "http://client-e2e.test/traffic-marker-${TARGET_PORT}" >/dev/null
-traffic_json="$(client traffic list --host client-e2e.test --format json)"
+env NO_PROXY= no_proxy= curl -sS --proxy "http://127.0.0.1:${TARGET_PORT}" \
+    "http://${LAN_IP}:${TARGET_PORT}/traffic-marker-${TARGET_PORT}" >/dev/null
+traffic_json="$(client traffic list --host "$LAN_IP" --format json)"
 assert_json "$traffic_json" '.records | length >= 1' "remote traffic list returns target records"
 TRAFFIC_ID="$(jq -r '.records[0].id' <<<"$traffic_json")"
 TRAFFIC_SEQUENCE="$(jq -r '.records[0].seq' <<<"$traffic_json")"
@@ -419,16 +419,17 @@ assert_json "$(client traffic get "$TRAFFIC_SEQUENCE" --format json)" '.id != nu
 assert_json "$(client traffic get --ids "$TRAFFIC_ID" --format json)" 'length >= 1' "remote traffic batch detail uses Admin API"
 client traffic auth-status "$TRAFFIC_ID" --format json >/dev/null
 assert_contains "$(client traffic export "$TRAFFIC_ID" --as curl)" "curl" "remote traffic export uses Admin API"
-assert_json "$(client traffic replay "$TRAFFIC_ID" --format json)" '.status != null or .status_code != null or .success != null' "remote traffic replay uses Admin API"
+replay_json="$(client traffic replay "$TRAFFIC_ID" --format json)"
+assert_json "$replay_json" '.success == true and (.data.response.status | type) == "number"' "remote traffic replay uses Admin API"
 search_json="$(client search "traffic-marker-${TARGET_PORT}" --format json)"
 assert_json "$search_json" '.results | length >= 1' "remote SSE search returns target records"
 
-client capture wait --host client-e2e.test --path capture-marker --timeout 10s --format json \
+client capture wait --host "$LAN_IP" --path capture-marker --timeout 10s --format json \
     >"$CAPTURE_OUTPUT" 2>"${RUN_ROOT}/capture.err" &
 CAPTURE_PID=$!
 sleep 0.5
-env NO_PROXY= no_proxy= curl -fsS --proxy "http://127.0.0.1:${TARGET_PORT}" \
-    "http://client-e2e.test/capture-marker" >/dev/null
+env NO_PROXY= no_proxy= curl -sS --proxy "http://127.0.0.1:${TARGET_PORT}" \
+    "http://${LAN_IP}:${TARGET_PORT}/capture-marker" >/dev/null
 wait "$CAPTURE_PID"
 CAPTURE_PID=""
 assert_json "$(cat "$CAPTURE_OUTPUT")" '.matched == true' "remote capture stream receives authenticated traffic"
