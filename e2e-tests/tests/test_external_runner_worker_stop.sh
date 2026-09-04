@@ -32,6 +32,20 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
 PY
 )}"
 
+remove_test_dir() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 0
+
+  for _ in $(seq 1 5); do
+    rm -rf "$dir" 2>/dev/null && return 0
+    [[ -e "$dir" ]] || return 0
+    sleep 0.2
+  done
+
+  echo "WARN: failed to remove temporary test directory: $dir" >&2
+  return 0
+}
+
 cleanup() {
   if [[ -x "${BIFROST_BIN:-}" ]]; then
     BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
@@ -40,7 +54,7 @@ cleanup() {
   if [[ "${KEEP_TEST_DIR:-false}" == "true" ]]; then
     echo "[external-runner-worker-stop] keeping test dir: $TEST_DIR" >&2
   else
-    rm -rf "$TEST_DIR"
+    remove_test_dir "$TEST_DIR"
   fi
 }
 trap cleanup EXIT
