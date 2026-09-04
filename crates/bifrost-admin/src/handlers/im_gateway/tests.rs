@@ -1802,7 +1802,8 @@ pub(super) async fn agent_reply_download_link_with_image_content_type_uses_image
 }
 
 #[tokio::test(flavor = "current_thread")]
-pub(super) async fn agent_reply_rejects_remote_file_above_im_upload_limit_before_body_read() {
+pub(super) async fn agent_reply_rejects_remote_file_above_feishu_upload_limit_before_body_read() {
+    let max_bytes = crate::im_gateway::feishu::MAX_OUTBOUND_FILE_BYTES;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind oversized attachment server");
@@ -1823,7 +1824,7 @@ pub(super) async fn agent_reply_rejects_remote_file_above_im_upload_limit_before
         let _ = stream.read(&mut request).await;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            MAX_AGENT_REPLY_ATTACHMENT_BYTES + 1
+            max_bytes + 1
         );
         let _ = stream.write_all(response.as_bytes()).await;
     });
@@ -1832,13 +1833,13 @@ pub(super) async fn agent_reply_rejects_remote_file_above_im_upload_limit_before
         url: format!("http://127.0.0.1:{port}/oversized.bin"),
     };
 
-    let error = download_agent_reply_remote_attachment(&attachment)
+    let error = download_remote_attachment_with_limit(&attachment, max_bytes)
         .await
         .expect_err("oversized remote file must be rejected before buffering its body");
 
-    assert_eq!(MAX_AGENT_REPLY_ATTACHMENT_BYTES, 30 * 1024 * 1024);
+    assert_eq!(max_bytes, 100 * 1024 * 1024);
     assert!(
-        error.to_string().contains("IM 通道上传文件 30 MiB 上限"),
+        error.to_string().contains("IM 通道上传文件 100 MiB 上限"),
         "unexpected oversized attachment error: {error}"
     );
     server.await.expect("oversized attachment server");
@@ -2027,7 +2028,7 @@ pub(super) async fn agent_reply_attachment_failures_are_logged_and_reported_with
     let mut oversized = std::fs::File::create(&oversized_path).expect("create oversized file");
     oversized.write_all(b"x").expect("seed oversized file");
     oversized
-        .set_len(MAX_AGENT_REPLY_ATTACHMENT_BYTES + 1)
+        .set_len(crate::im_gateway::feishu::MAX_OUTBOUND_FILE_BYTES + 1)
         .expect("extend oversized sparse file");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2136,7 +2137,7 @@ pub(super) async fn agent_reply_attachment_failures_are_logged_and_reported_with
     let content = notice.content.as_deref().expect("notice content");
     assert!(content.contains("附件发送提示（不影响任务结论）"));
     assert!(content.contains("IM 通道不允许上传空文件"));
-    assert!(content.contains("IM 通道上传文件 30 MiB 上限"));
+    assert!(content.contains("IM 通道上传文件 100 MiB 上限"));
     assert!(content.contains("远程附件下载失败"));
 }
 
@@ -4088,6 +4089,17 @@ pub(super) fn outbound_capabilities_distinguish_feishu_and_weixin() {
         crate::im_gateway::types::ImSendSupportLevel::Native
     );
     assert_eq!(
+        feishu_caps.part("file").expect("file capability").max_bytes,
+        Some(100 * 1024 * 1024)
+    );
+    assert_eq!(
+        feishu_caps
+            .part("image")
+            .expect("image capability")
+            .max_bytes,
+        Some(10 * 1024 * 1024)
+    );
+    assert_eq!(
         feishu_caps
             .part("native_card")
             .expect("card capability")
@@ -4111,6 +4123,10 @@ pub(super) fn outbound_capabilities_distinguish_feishu_and_weixin() {
     assert_eq!(
         weixin_caps.part("file").expect("file capability").support,
         crate::im_gateway::types::ImSendSupportLevel::Native
+    );
+    assert_eq!(
+        weixin_caps.part("file").expect("file capability").max_bytes,
+        Some(30 * 1024 * 1024)
     );
     assert_eq!(
         weixin_caps.part("video").expect("video capability").support,

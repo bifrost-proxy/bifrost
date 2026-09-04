@@ -45,7 +45,9 @@ const CONTROLLER_RECONCILE_SECS: u64 = 15;
 const WORKER_REQUEST_TIMEOUT_SECS: u64 = 120;
 const SEND_REQUEST_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const SEND_RESPONSE_MAX_BYTES: usize = 256 * 1024;
-const UPLOAD_REQUEST_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const UPLOAD_REQUEST_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const _: () =
+    assert!(UPLOAD_REQUEST_MAX_BYTES >= crate::im_gateway::feishu::MAX_OUTBOUND_FILE_BYTES);
 
 static CONTROLLER_STARTED: AtomicBool = AtomicBool::new(false);
 static CONTROLLER_STOPPING: AtomicBool = AtomicBool::new(false);

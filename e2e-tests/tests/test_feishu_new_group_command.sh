@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-unset BIFROST_DETACHED_DAEMON_CHILD BIFROST_EXTERNAL_CLI_WORKER
+export BIFROST_DISABLE_TRAY=1
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+
+unset BIFROST_DETACHED_DAEMON_CHILD BIFROST_EXTERNAL_CLI_WORKER
 export CARGO_NET_OFFLINE="${CARGO_NET_OFFLINE:-true}"
 
 # Fail closed for network access. This scenario is self-contained and must only

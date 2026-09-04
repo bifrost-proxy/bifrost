@@ -406,6 +406,26 @@ mod tests {
     }
 
     #[test]
+    fn feishu_context_advertises_100_mib_file_limit() {
+        let provider = provider(ImProviderType::Feishu);
+        let event = test_event(ImProviderType::Feishu, "group");
+        let capabilities =
+            crate::im_gateway::feishu::FeishuProvider::new().channel_capabilities(&provider);
+        let target = agent_reply_target_ref(&provider, &event).expect("target");
+
+        let context = render_im_agent_outbound_context(
+            &provider,
+            &event,
+            Some(&target),
+            &capabilities,
+            OutboundReadiness::Ready,
+        );
+
+        assert!(context.contains("- image: native, max_bytes=10485760"));
+        assert!(context.contains("- file: native, max_bytes=104857600"));
+    }
+
+    #[test]
     fn unsupported_and_unsafe_routes_fail_closed_without_send_command() {
         let mut provider = provider(ImProviderType::Webhook);
         let event = test_event(ImProviderType::Webhook, "p2p");

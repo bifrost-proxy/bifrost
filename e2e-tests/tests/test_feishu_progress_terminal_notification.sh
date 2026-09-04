@@ -228,7 +228,7 @@ flow_png_path = pathlib.Path(test_dir) / "terminal-e2e-flow.png"
 flow_png_path.write_bytes(image_path.read_bytes())
 oversized_path = pathlib.Path(test_dir) / "terminal-e2e-oversized.bin"
 with oversized_path.open("wb") as handle:
-    handle.truncate(30 * 1024 * 1024 + 1)
+    handle.truncate(100 * 1024 * 1024 + 1)
 upload_failure_path = pathlib.Path(test_dir) / "terminal-e2e-upload-failure.txt"
 upload_failure_path.write_text("upload should fail without failing the task", encoding="utf-8")
 runner_code = r'''
@@ -462,7 +462,7 @@ assert "E2E_FINAL_SUMMARY_WITH_ATTACHMENT_FAILURE" in json.dumps(attachment_term
 attachment_notice_text = json.dumps(attachment_notice_card["body"], ensure_ascii=False)
 assert "附件发送提示（不影响任务结论）" in attachment_notice_text, attachment_notice_card
 assert "terminal-e2e-oversized.bin" in attachment_notice_text, attachment_notice_card
-assert "IM 通道上传文件 30 MiB 上限" in attachment_notice_text, attachment_notice_card
+assert "IM 通道上传文件 100 MiB 上限" in attachment_notice_text, attachment_notice_card
 assert "terminal-e2e-upload-failure.txt" in attachment_notice_text, attachment_notice_card
 assert "234006" in attachment_notice_text, attachment_notice_card
 assert "任务结论已正常发布" in attachment_notice_text, attachment_notice_card

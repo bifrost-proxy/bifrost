@@ -3,9 +3,7 @@ use super::*;
 pub(super) const IMAGE_ONLY_AGENT_PROMPT: &str = "请理解这张图片，并根据图片内容回答。";
 pub(super) const MAX_AGENT_ATTACHMENTS_PER_MESSAGE: usize = 6;
 pub(super) const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
-/// Feishu and the verified Weixin iLink attachment path both use a 30 MiB
-/// preflight limit so a generated attachment cannot turn an otherwise
-/// successful terminal reply into a doomed upload.
+/// Fallback for providers that do not publish a file-size capability.
 pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 30 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub(super) const MAX_FEISHU_REFERENCED_TOTAL_FILE_BYTES: u64 = 250 * 1024 * 1024;

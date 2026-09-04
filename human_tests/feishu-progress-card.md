@@ -247,18 +247,18 @@
 - 普通 `.txt`、`.tar.gz`、`.yaml` 和 `.svg` 分别调用 `/im/v1/files` 并发送 `msg_type=file`，图片内联不破坏非图片附件；`.rs` 源码链接不调用上传接口。
 - 无真实租户凭据时，本地完整 HTTP/CardKit payload 契约必须通过，并明确将飞书客户端肉眼渲染标记为未执行，而不是假设通过。
 
-### TC-FPC-13：出站文件 30 MiB 平台上限与非阻塞失败提示
+### TC-FPC-13：出站文件 100 MiB 产品上限与非阻塞失败提示
 
 **操作步骤**：
 1. 使用当前 debug 二进制执行隔离 Service + mock Runner + loopback Feishu OpenAPI：
    ```bash
    SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_feishu_progress_terminal_notification.sh
    ```
-2. mock Runner 的成功结论同时显式链接一个 `30 MiB + 1 byte` 稀疏文件和一个小文本文件；mock `/im/v1/files` 对小文本文件返回飞书错误码 `234006`。
+2. mock Runner 的成功结论同时显式链接一个 `100 MiB + 1 byte` 稀疏文件和一个小文本文件；mock `/im/v1/files` 对小文本文件返回飞书错误码 `234006`。
 3. 检查请求日志：绿色 `Task completed` 终态卡先发布；超限文件不进入 `/im/v1/files`；小文件发生一次上传尝试但不产生 `msg_type=file` 消息；随后只补发一张汇总提示卡。
-4. 检查提示卡和消息日志包含两个失败文件名、30 MiB 平台上限、上传错误码及“任务结论已正常发布”；确认 Bifrost 进程仍健康且 Session 已 idle。
+4. 检查提示卡和消息日志包含两个失败文件名、100 MiB 产品上限、上传错误码及“任务结论已正常发布”；确认 Bifrost 进程仍健康且 Session 已 idle。
 
-**预期结果**：飞书官方上传文件接口只支持不超过 30 MB，Bifrost 不采用不可实现的 250 MB 出站单文件上限。超限、空文件、上传失败或文件消息发送失败均只影响对应附件，其余附件继续；终态卡和任务状态不回滚，提示卡发送失败也不会使事件循环或服务异常。入站引用消息仍独立执行 100 MiB 单文件、250 MiB 单 Turn 总预算。
+**预期结果**：Bifrost 允许不超过 100 MiB 的飞书出站文件进入上传链路，`100 MiB + 1 byte` 在本地拒绝。飞书公开接口文档仍声明 30 MB 上限，因此平台返回 `234006` 时按单附件失败降级。超限、空文件、上传失败或文件消息发送失败均只影响对应附件，其余附件继续；终态卡和任务状态不回滚，提示卡发送失败也不会使事件循环或服务异常。入站引用消息仍独立执行 100 MiB 单文件、250 MiB 单 Turn 总预算。
 
 ### TC-FPC-14：执行过程历史步骤与多行输出不再粘连
 
@@ -299,7 +299,7 @@
 - 本地及远程显式链接中的 `yaml/yml`、`toml`、`ini`、`cfg`、`conf/cnf`、`config`、`properties`、`xml`、`jsonc/json5`、`hcl`、`tfvars`、`plist`、`xcconfig` 被识别为配置附件；远程 YAML/TOML/XML MIME 能生成对应后缀。
 - `.rs/.py/.js/.ts/.go/.sql/.css` 等源码后缀不自动发送；即使 Markdown 标签包含 `file/附件/download`，或 URL 来自受信下载域名、通过 `filename=` 查询参数携带源码名，也不能绕过拒绝判断。
 - `.env` 等未列入配置白名单且可能携带敏感凭据的文件不因后缀自动发送；系统不扫描工作目录，只处理最终回复显式链接。
-- 配置附件继续受普通文件、去重、30 MiB 与非阻塞失败规则约束，不改变任务成功状态。
+- 配置附件继续受普通文件、去重、飞书 100 MiB / Weixin 30 MiB provider 上限与非阻塞失败规则约束，不改变任务成功状态。
 
 ### TC-FPC-16：Codex reasoning 前缀后的 commentary 终态快照不重复
 
@@ -385,7 +385,7 @@
 - PNG/JPEG/GIF/WEBP/BMP 走图片消息；文档、配置、Office、归档、patch/diff、音频、视频和 SVG 走既有文件/媒体模式。
 - SVG 有同名 PNG 时发送 PNG 预览，同时保留 SVG 文件；飞书不把 `image/svg+xml` 错传给不支持 SVG 的图片 API。
 - canonical path 去重；缺失文件、目录、fenced code block 中的示例、源码和 `.env*`/credentials/secrets/私钥不发送。
-- 显式 Markdown 图片仍在 CardKit 原位复用 `image_key`；新增路径发现不破坏终态卡、失败通知和 30 MiB 非阻塞门禁。
+- 显式 Markdown 图片仍在 CardKit 原位复用 `image_key`；新增路径发现不破坏终态卡、失败通知和 provider-aware 非阻塞门禁。
 
 ## 清理步骤
 
@@ -408,7 +408,7 @@
 
 - 2026-08-11：PASS（TC-FPC-14 执行过程可读性回归）— 截图与群消息 `om_x100b688669cf78b8c2a0077a2205800` 先确认旧卡将普通单换行折叠为空格，造成 `select_page` / `evaluate_script` 等历史步骤和公开解释粘成一整行。更新用例后立即逐条执行：历史 30 工具窗口、旧工具列表与 300 字符详情裁剪 3 个聚焦单测全部通过；`im_gateway_progress_card_budget_and_codex_resources` renderer E2E 通过，直接断言 `agent_process_log` 中公开解释与 `- \`tool_N\` · 完成 · 10ms` 之间存在空段落，最后一个工具详情保留 `LATEST_MARKER\nSECOND_OUTPUT_LINE`，完整 CardKit JSON 仍小于 24 KiB，最近 5 次可展开详情、主题自适应和裁剪边界不变。首次 E2E 构建因磁盘仅余 396 MiB 在链接阶段报 `errno=28`，仅清理 `bifrost-e2e` 可再生成构建缓存后重跑；随后一次断言误在 JSON 序列化字符串中匹配真实换行，改为读取详情组件 `content` 后复跑通过。当前运行中的正式 Bifrost 仍是修复前二进制，未重启承载本 Agent 的服务，因此未伪造修复后飞书客户端截图结论；线上肉眼复核留待新版本部署后执行。
 
-- 2026-08-11：PASS（TC-FPC-13 出站文件上限与失败降级）— 官方文档确认 `POST /open-apis/im/v1/files` 单文件不得超过 30 MB、空文件禁止、超限错误码 `234006`，因此未采用不可实现的 250 MB 出站上限。首次黑盒执行发现测试夹具的 `.bin` 链接标签未包含“file/附件”，按产品“只发送显式附件链接”的安全规则未被识别；修正标签为显式 file 后立即复跑通过。隔离 Service + mock Runner + loopback Feishu OpenAPI 验证绿色 `Task completed` 终态卡先成功发布，`30 MiB + 1 byte` 文件未调用上传接口，小文件上传返回 `234006` 后未发送 file 消息，两项失败汇总到一张“附件发送提示（不影响任务结论）”卡；Session 正常 idle、Bifrost 服务继续健康。测试 trap 已清理临时目录和所属进程。
+- 2026-09-05：PASS（TC-FPC-13 出站文件 100 MiB 产品上限与失败降级）— 隔离 Service + mock Runner + loopback Feishu OpenAPI 验证绿色 `Task completed` 终态卡先成功发布，`100 MiB + 1 byte` 稀疏文件在本地被拒绝且未调用上传接口，小文件上传返回飞书错误码 `234006` 后未发送 file 消息；两项失败汇总到一张“附件发送提示（不影响任务结论）”卡。另由出站发送 E2E 验证 `32 MiB + 1 byte` 文件可完整穿过 CLI、Admin、worker spool 与 mock Feishu 上传链路，证明旧 30/32 MiB 内部门槛已移除。Session 正常 idle、服务继续健康，测试 trap 已清理临时目录和所属进程。飞书公开文档仍声明上传不超过 30 MB，因此 30–100 MiB 文件若被平台拒绝，继续按逐附件失败降级。
 
 - 2026-08-11：PASS（rebase 后终态过程说明回归复测）— TC-FPC-12 在最新 `origin/main` 上首次重跑时发现：同一图片在 `AssistantDelta` 中已转换为 `image_key`，但 `TurnFinished` 仍携带本地路径，导致最终结论未从过程时间线去重，`agent_process_sum` 错误覆盖最新过程说明。修复文本比较键对 Markdown 图片目标的归一化，并新增 `progress_registry_keeps_delta_explanation_when_terminal_reuses_uploaded_image`；聚焦 Registry、共享解析器和黑盒 E2E 复测均通过，终态同时保留 `E2E_LATEST_EXPLANATION` 与 `E2E_FINAL_SUMMARY_SUCCESS`，图片仍只上传一次并渲染为 `img_v3_terminal_e2e`。
 

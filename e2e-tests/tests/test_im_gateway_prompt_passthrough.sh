@@ -4,6 +4,7 @@ set -euo pipefail
 unset BIFROST_DETACHED_DAEMON_CHILD
 unset BIFROST_EXTERNAL_CLI_WORKER
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+export BIFROST_DISABLE_TRAY=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -267,7 +268,7 @@ def assert_context(prompt, message, conversation, destination):
     assert "- text: native" in prompt, prompt
     assert "- markdown: native" in prompt, prompt
     assert "- image: native, max_bytes=10485760" in prompt, prompt
-    assert "- file: native, max_bytes=31457280" in prompt, prompt
+    assert "- file: native, max_bytes=104857600" in prompt, prompt
     assert "- native_card: native" in prompt, prompt
     assert "--image/--image-file" in prompt, prompt
     assert "--card-title" in prompt, prompt
