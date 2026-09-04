@@ -31,8 +31,11 @@ CAPTURE_OUTPUT="${RUN_ROOT}/capture.json"
 TARGET_PID=""
 ECHO_PID=""
 CAPTURE_PID=""
-TARGET_PORT="$(allocate_free_port)"
-ECHO_PORT="$(allocate_free_port)"
+# The umbrella E2E runner assigns each shell test a disjoint port range. Use
+# those ports when present so parallel tests cannot claim a port in the gap
+# between allocate_free_port probing and this test binding its listeners.
+TARGET_PORT="${ADMIN_PORT:-$(allocate_free_port)}"
+ECHO_PORT="${ECHO_HTTP_PORT:-$(allocate_free_port)}"
 ADMIN_PASSWORD="client-e2e-pass-${TARGET_PORT}"
 UPDATED_ADMIN_PASSWORD="client-e2e-updated-${TARGET_PORT}"
 RULE_NAME="client_admin_e2e_${TARGET_PORT}"
@@ -107,6 +110,13 @@ PY
 }
 
 cleanup() {
+    local exit_status=$?
+    if [[ "$exit_status" -ne 0 ]]; then
+        echo "Client Admin CLI E2E failed; target log follows:" >&2
+        tail -200 "$TARGET_LOG" >&2 2>/dev/null || true
+        echo "Client Admin CLI E2E failed; echo log follows:" >&2
+        tail -100 "$ECHO_LOG" >&2 2>/dev/null || true
+    fi
     if [[ -n "$CAPTURE_PID" ]]; then
         terminate_process_tree "$CAPTURE_PID" || true
         wait "$CAPTURE_PID" 2>/dev/null || true
@@ -125,6 +135,7 @@ cleanup() {
         [[ -e "$RUN_ROOT" ]] || break
         sleep 0.2
     done
+    return "$exit_status"
 }
 trap cleanup EXIT
 

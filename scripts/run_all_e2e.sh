@@ -727,6 +727,7 @@ shell_test_weight() {
     test_group_sync_no_logstorm_e2e.sh) echo 38 ;;
     test_sse_frames.sh) echo 38 ;;
     test_body_cache_sync_cleanup_admin_api.sh) echo 33 ;;
+    test_client_admin_cli.sh) echo 32 ;;
     test_traffic_push_e2e.sh) echo 32 ;;
     test_total_size_cleanup_admin_api.sh) echo 31 ;;
     test_frames_admin_api.sh) echo 29 ;;
@@ -756,6 +757,7 @@ shell_test_runs_serial_in_parallel_shell_job() {
     test_memory_pressure_e2e.sh|\
     test_runtime_pressure_degradation.sh|\
     test_large_body_protection.sh|\
+    test_client_admin_cli.sh|\
     test_cli_start_interactive_restart_e2e.sh|\
     test_body_cache_sync_cleanup_admin_api.sh|\
     test_process_resolution_performance.sh|\
@@ -1269,6 +1271,7 @@ run_shell_tests_parallel() {
   # measures the fixture itself rather than sibling resource contention.
   local STARTUP_SENSITIVE_TESTS=(
     "test_body_cache_sync_cleanup_admin_api.sh"
+    "test_client_admin_cli.sh"
     "test_process_resolution_performance.sh"
     "test_super_performance_mode.sh"
     "test_upgrade_tls_trust_e2e.sh"
