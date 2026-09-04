@@ -20,22 +20,19 @@ require_command() {
 
 require_command curl
 require_command jq
-require_command python3
 
 BIFROST_BIN="${BIFROST_BIN:-${ROOT_DIR}/target/release/bifrost}"
 TARGET_DATA_DIR="${RUN_ROOT}/target"
 CALLER_DATA_DIR="${RUN_ROOT}/caller"
 TARGET_LOG="${RUN_ROOT}/target.log"
-ECHO_LOG="${RUN_ROOT}/echo.log"
 CAPTURE_OUTPUT="${RUN_ROOT}/capture.json"
 TARGET_PID=""
-ECHO_PID=""
 CAPTURE_PID=""
 # The umbrella E2E runner assigns each shell test a disjoint port range. Use
 # those ports when present so parallel tests cannot claim a port in the gap
 # between allocate_free_port probing and this test binding its listeners.
 TARGET_PORT="${ADMIN_PORT:-$(allocate_free_port)}"
-ECHO_PORT="${ECHO_HTTP_PORT:-$(allocate_free_port)}"
+TEMPORARY_TARGET_PORT="${ECHO_HTTP_PORT:-$(allocate_free_port)}"
 ADMIN_PASSWORD="client-e2e-pass-${TARGET_PORT}"
 UPDATED_ADMIN_PASSWORD="client-e2e-updated-${TARGET_PORT}"
 RULE_NAME="client_admin_e2e_${TARGET_PORT}"
@@ -90,7 +87,7 @@ get_non_loopback_ip() {
     if [[ -z "$ip" ]]; then
         ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
     fi
-    if [[ -z "$ip" ]]; then
+    if [[ -z "$ip" ]] && command -v python3 >/dev/null 2>&1; then
         ip="$(python3 - <<'PY'
 import socket
 
@@ -114,16 +111,10 @@ cleanup() {
     if [[ "$exit_status" -ne 0 ]]; then
         echo "Client Admin CLI E2E failed; target log follows:" >&2
         tail -200 "$TARGET_LOG" >&2 2>/dev/null || true
-        echo "Client Admin CLI E2E failed; echo log follows:" >&2
-        tail -100 "$ECHO_LOG" >&2 2>/dev/null || true
     fi
     if [[ -n "$CAPTURE_PID" ]]; then
         terminate_process_tree "$CAPTURE_PID" || true
         wait "$CAPTURE_PID" 2>/dev/null || true
-    fi
-    if [[ -n "$ECHO_PID" ]]; then
-        terminate_process_tree "$ECHO_PID" || true
-        wait "$ECHO_PID" 2>/dev/null || true
     fi
     if [[ -n "$TARGET_PID" ]]; then
         terminate_process_tree "$TARGET_PID" 2 || true
@@ -152,13 +143,6 @@ LAN_IP="$(get_non_loopback_ip)" || {
     exit 1
 }
 TARGET_URL="http://${LAN_IP}:${TARGET_PORT}"
-
-python3 "${ROOT_DIR}/e2e-tests/mock_servers/http_echo_server.py" "$ECHO_PORT" >"$ECHO_LOG" 2>&1 &
-ECHO_PID=$!
-wait_for_http_ready "http://127.0.0.1:${ECHO_PORT}/health" 30 0.2 || {
-    tail -100 "$ECHO_LOG" >&2 || true
-    exit 1
-}
 
 BIFROST_DATA_DIR="$TARGET_DATA_DIR" \
     BIFROST_DISABLE_TRAY=1 \
@@ -301,7 +285,7 @@ printf '%s\n' 'this is not valid = [' >"${MALFORMED_CALLER_DATA_DIR}/cli/admin-t
 set +e
 no_target_output="$(BIFROST_DATA_DIR="$EMPTY_CALLER_DATA_DIR" "$BIFROST_BIN" client status 2>&1)"
 no_target_rc=$?
-temporary_target_output="$(client --target "http://${LAN_IP}:${ECHO_PORT}" status 2>&1)"
+temporary_target_output="$(client --target "http://${LAN_IP}:${TEMPORARY_TARGET_PORT}" status 2>&1)"
 temporary_target_rc=$?
 malformed_store_output="$(BIFROST_DATA_DIR="$MALFORMED_CALLER_DATA_DIR" "$BIFROST_BIN" client target list 2>&1)"
 malformed_store_rc=$?
@@ -313,10 +297,10 @@ assert_contains "$temporary_target_output" "temporary target requires" "temporar
 [[ "$malformed_store_rc" -ne 0 ]] || fail "malformed target store unexpectedly loaded"
 assert_contains "$malformed_store_output" "failed to parse" "malformed target state fails closed"
 
-client rule add "$RULE_NAME" -c "client-e2e.test host://127.0.0.1:${ECHO_PORT}" >/dev/null
+client rule add "$RULE_NAME" -c "client-e2e.test status://200 resBody://(client-admin-e2e)" >/dev/null
 assert_contains "$(client rule show "$RULE_NAME")" "client-e2e.test" "remote rule CRUD uses Admin API"
 assert_contains "$(client rule list)" "$RULE_NAME" "remote rule list uses Admin API"
-client rule update "$RULE_NAME" -c "client-e2e.test host://127.0.0.1:${ECHO_PORT}" >/dev/null
+client rule update "$RULE_NAME" -c "client-e2e.test status://200 resBody://(client-admin-e2e)" >/dev/null
 client rule disable "$RULE_NAME" >/dev/null
 client rule enable "$RULE_NAME" >/dev/null
 client rule rename "$RULE_NAME" "${RULE_NAME}_renamed" >/dev/null
