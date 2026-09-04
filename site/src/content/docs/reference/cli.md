@@ -53,6 +53,7 @@ bifrost <command> <subcommand> --help
 | `upgrade` / `update` / `version-check` | 检查新版本、升级二进制；`update` 是 `upgrade` 的别名 | [升级与版本检查](#升级与版本检查upgrade--update--version-check) |
 | `config` | 查看和修改运行时配置、连接、缓存、性能状态 | [配置项管理](#配置项管理) |
 | `admin` | 管理 Admin 远程访问、密码、会话、审计日志 | [管理端远程访问与鉴权](#管理端远程访问与鉴权admin) |
+| `client` | 通过目标 IP、端口或域名直连远端 Admin API | [Client 远程管理使用手册](./client-admin) |
 | `capture` | 等待下一条匹配条件的流量记录，适合浏览器/桌面应用联调和 Agent 采证 | [等待捕获](#等待捕获capture-wait) |
 | `traffic` / `search` | 查看、获取、搜索、导出、重放、诊断和清除流量记录 | [流量查看与搜索](#流量查看与搜索) |
 | `install-skill` | 安装 Bifrost Agent Skill 文档到 AI coding tools | [安装 Skill](#安装-skillinstall-skill) |
@@ -652,6 +653,8 @@ bifrost admin audit --json
 | `revoke-all` | 注销所有 admin session | 会让已登录管理端重新登录 |
 | `audit` | 查看登录审计日志 | `--json` 适合 Agent 或脚本读取 |
 
+目标机启用远程 Admin 后，可以从另一台机器使用 `bifrost client` 直连管理。Client 使用 Admin 用户名、密码和 JWT，与基于 Relay、pairing 和 grant 的 `bifrost remote` 相互独立。完整设置步骤、支持命令、安全边界与故障排查见 [Client 远程管理使用手册](./client-admin)。
+
 ### traffic 清理（clear）
 
 ```bash
@@ -830,6 +833,7 @@ bifrost im send --card-title "Deploy report" --card-text "**Done**" --card-image
 bifrost im route add deploy --event message.receive --regex '^/deploy' --script-file ./deploy.sh
 bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh
 bifrost im schedule add agent-daily --target oncall --cron '0 9 * * *' --agent-prompt 'Summarize traffic' --agent-runner-id codex --agent-model gpt-5 --agent-reasoning-effort high --agent-enable web_search
+bifrost im schedule preview agent-daily --provider feishu-main --target oncall --target-mode configured_target --cron '0 9 * * 1-5' --timezone Asia/Shanghai --agent-prompt 'Summarize traffic' --agent-runner-id traex --idempotency-key im:event-digest --format json-pretty
 bifrost im messages list --direction inbound
 ```
 
@@ -844,11 +848,13 @@ Runner 选择规则：交互式终端中未传 `--runner` 时会展示启用 Run
 
 IM 通道建立后，Bifrost 会先推送上线通知和可用命令帮助。所有外部 Runner 都显示 `/help`、`/status`、`/pwd`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop` 等 IM 通道命令；`/q` 不带参数列出当前线程队列，`/pwd` 输出当前线程工作目录，`/runner` 不带参数输出当前有效 Runner；飞书还显示 `/new <群名>`，仅当前 Provider 的 `owner_open_id` 可使用。执行 `/new 发布项目群` 会创建同名私有群，将命令发送者设为群主，并自动把当前应用机器人加入群、设为群管理员；同一飞书消息重投不会重复建群。飞书应用需开通创建群能力（`im:chat:create`），现有消息发送权限仍用于向新群发送欢迎消息。Codex / Traex / Claude Code 等 Runner 只在适配器支持时显示 `/models`、`/model`、`/efforts`、`/effort`。Codex Runner 额外支持 `/fast`、`/fast on`、`/fast off`、`/fast status`，用于按当前 IM session 切换或查询快速模式；其他 Runner 收到 `/fast` 会明确返回不支持。Bifrost 不会默认开启 Codex Fast：只有 Runner 显式配置 `service_tier` 或用户执行 `/fast` session 命令时才传入该配置；否则由 Codex 使用自身默认模式。
 
-飞书机器人加入群聊后，每个群使用独立 Session Key、上下文游标、Runner 和工作目录。群内没有 @ 的 slash 命令由所有机器人广播消费；带明确 @ 时只有被提及的机器人消费，其他机器人不读引用、不改状态。普通群消息只写入各 Provider 自己的群上下文账本，不调用模型；`@机器人`、`/g`、`/q` 或现有 slash 指令才触发处理。模型触发时会收到从上一次执行之后到本次触发之前的有效多人对话，最后一条触发消息只出现一次。每行都采用 `<at id=发送者 open_id>显示名</at>：消息内容`，方便 Agent 准确 @ 原发送人；事件没有显示名时使用 `<at id=发送者 open_id></at>`，不把冗长 open_id 重复到可见文本中。第一次启动该群的模型 Session 时，Prompt 只额外带群名称和群 ID；后续不重复群信息，也不注入 provider、Session Key、消息 ID、序号、时间戳、mentions 等工程字段。没有累积消息时完全省略背景区域，只发送最后一条触发消息。可用工具由运行环境安装的 Skill 注入，Bifrost 不在业务 Prompt 中指定工具。群聊与单聊使用同一套 slash 命令；群内 `/cwd` 和 `/runner` 只修改当前群绑定。要接收未 @ 的普通群消息，飞书应用必须订阅 `im.message.receive_v1`，申请敏感权限 `im:message.group_msg` 并重新发布版本；只有 `im:message.group_at_msg:readonly` 时，飞书不会把普通群消息推送给 Bifrost，因此模型输入也不会出现未投递的群聊背景。群名解析还需要“获取群组信息”（如 `im:chat:readonly`）能力。
+飞书机器人加入群聊后，每个群使用独立 Session Key、上下文游标、Runner 和工作目录。群内没有 @ 的 slash 命令由所有机器人广播消费；带明确 @ 时只有被提及的机器人消费，其他机器人不读引用、不改状态。普通群消息只写入各 Provider 自己的群上下文账本，不调用模型；`@机器人`、`/g`、`/q` 或现有 slash 指令才触发处理。模型触发时会收到从上一次执行之后到本次触发之前的有效多人对话，最后一条触发消息只出现一次。每行都采用 `<at id=发送者 open_id>显示名</at>：消息内容`，方便 Agent 准确 @ 原发送人；事件没有显示名时使用 `<at id=发送者 open_id></at>`，不把冗长 open_id 重复到可见文本中。第一次启动该群的模型 Session 时，Prompt 只额外带群名称和群 ID；后续不重复群信息，也不注入 provider、Session Key、消息 ID、序号、时间戳、mentions 等工程字段。没有累积消息时完全省略背景区域，只发送最后一条触发消息。可用工具由运行环境安装的 Skill 注入，Bifrost 不在业务 Prompt 中指定工具。群聊与单聊使用同一套 slash 命令；群内 `/cwd` 和 `/runner` 只修改当前群绑定。要接收未 @ 的普通群消息，飞书应用必须订阅 `im.message.receive_v1`，申请敏感权限 `im:message.group_msg` 并重新发布版本；只有 `im:message.group_at_msg:readonly` 时，飞书不会把普通群消息推送给 Bifrost，因此模型输入也不会出现未投递的群聊背景。若同时订阅 `im.chat.member.bot.added_v1` 并授予 `im:chat.members:bot_access`，Bifrost 会在机器人入群后自动检查 `im:message.group_msg`；缺失时在群内发送一次提示，附带 `https://open.larkoffice.com/app/<app_id>/auth` 直达申请页，已授权则保持静默。检查失败不会误报缺权限；功能上线前已存在的群在第一条可见群消息时懒检查。本地 `event_types` 不会替代飞书开放平台订阅。群名解析还需要“获取群组信息”（如 `im:chat:readonly`）能力。
 
 回复引用消息时，Bifrost 通过飞书消息读取 API 获取文本或交互卡片可见内容，并校验消息仍属于当前群；不同机器上的机器人无需共享内存、JSON 或 SQLite。应用需具备 `im:message:readonly` 与 `im:message.group_msg`，权限变更后创建并发布新版本；缺权限时机器人会直接给出这组申请指引。Bifrost 生成的飞书卡片不再显示占空间的顶部标题栏。由群消息或单聊消息触发的回复使用飞书原生消息回复关系，因此客户端会在卡片上方显示简洁引用；任务计划、工具记录等卡片内部折叠区标题仍保留。上线通知、定时任务和管理端主动发送没有可引用的来源消息，仍直接发送到目标会话，但卡片同样保持无顶部标题。
 
 `bifrost im schedule add/update` 创建 Agent schedule 时可用 `--agent-runner-id` 选择 Runner，并通过 `--agent-model`、`--agent-profile`、`--agent-profile-v2`、`--agent-sandbox`、`--agent-reasoning-effort`、`--agent-reasoning-summary`、`--agent-approval-policy`、`--agent-danger-full-access`、`--agent-bypass-hook-trust`、`--agent-skip-git-repo-check`、`--agent-ignore-user-config`、`--agent-ignore-rules`、`--agent-add-dir`、`--agent-config`、`--agent-enable`、`--agent-disable` 等参数写入 `agent.adapter_config`。这些 schedule 级参数会在运行时覆盖 Runner 默认 Codex adapter 配置；历史 `--agent-search` 仅作为兼容入口映射为 `--enable web_search`，不再生成当前 Codex CLI 不支持的 `--search`。
+
+自然语言或自动化创建 schedule 时，先用 `schedule preview` 严格校验 cron、IANA timezone、Provider/Target 绑定并查看未来三次执行时间，取得用户确认后再用完全相同的参数执行 `schedule add`。`--idempotency-key` 防止消息重投造成重复创建；同 key 不同请求会返回冲突。创建默认启用，可用 `--disabled` 暂存。重叠运行通过 `--concurrency-policy forbid|skip_if_running|queue_one` 控制，失败重试通过 `--retry-max` 和 `--retry-delay-ms` 控制。Codex、Traex、Claude Code 与 ChatGPT Web 都复用同一控制面和 External Runner 运行时。
 
 ### 本地语音输入（ai voice）
 

@@ -46,6 +46,7 @@ bifrost <command> <subcommand> --help
 | `upgrade` / `update` / `version-check` | 检查新版本、升级二进制；`update` 是 `upgrade` 的别名 | [升级与版本检查](#升级与版本检查upgrade--update--version-check) |
 | `config` | 查看和修改运行时配置、连接、缓存、性能状态 | [配置项管理](#配置项管理) |
 | `admin` | 管理 Admin 远程访问、密码、会话、审计日志 | [管理端远程访问与鉴权](#管理端远程访问与鉴权admin) |
+| `client` | 通过目标 IP、端口或域名直连远端 Admin API | [Client 远程管理使用手册](./client-admin.md) |
 | `capture` | 等待下一条匹配条件的流量记录，适合浏览器/桌面应用联调和 Agent 采证 | [等待捕获](#等待捕获capture-wait) |
 | `traffic` / `search` | 查看、获取、搜索、导出、重放、诊断和清除流量记录 | [流量查看与搜索](#流量查看与搜索) |
 | `install-skill` | 安装 Bifrost Agent Skill 文档到 AI coding tools | [安装 Skill](#安装-skillinstall-skill) |
@@ -644,6 +645,8 @@ bifrost admin audit --json
 | `passwd` | 设置或修改 admin 密码 | 交互式隐藏输入；脚本可用 `--password-stdin` |
 | `revoke-all` | 注销所有 admin session | 会让已登录管理端重新登录 |
 | `audit` | 查看登录审计日志 | `--json` 适合 Agent 或脚本读取 |
+
+目标机启用远程 Admin 后，可以从另一台机器使用 `bifrost client` 直连管理。Client 使用 Admin 用户名、密码和 JWT，与基于 Relay、pairing 和 grant 的 `bifrost remote` 相互独立。完整设置步骤、支持命令、安全边界与故障排查见 [Client 远程管理使用手册](./client-admin.md)。
 
 ### traffic 清理（clear）
 

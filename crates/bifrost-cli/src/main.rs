@@ -40,6 +40,11 @@ const DEFAULT_PORT: u16 = 9900;
 const WINDOWS_CLI_MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 fn get_effective_port(cli_port: u16) -> u16 {
+    // Client child commands address the selected remote origin through the
+    // injected Admin endpoint. Do not consult this machine's runtime file.
+    if commands::client::is_active() {
+        return cli_port;
+    }
     if cli_port != DEFAULT_PORT {
         return cli_port;
     }
@@ -99,6 +104,7 @@ fn should_run_update_notice(stdout_is_terminal: bool, command: Option<&Commands>
     !matches!(
         command,
         Some(Commands::VersionCheck)
+            | Some(Commands::Client(_))
             | Some(Commands::Upgrade { .. })
             | Some(Commands::App { .. })
             | Some(Commands::SelfUpdate { .. })
@@ -223,7 +229,9 @@ fn run_cli_main() {
     let is_daemon_mode = matches!(&cli.command, Some(Commands::Start { daemon: true, .. }))
         && !is_detached_daemon_child;
 
-    let _log_guard = if is_daemon_mode {
+    let is_client_mode =
+        matches!(&cli.command, Some(Commands::Client(_))) || commands::client::is_active();
+    let _log_guard = if is_daemon_mode || is_client_mode {
         None
     } else {
         let log_dir = cli
@@ -263,6 +271,7 @@ fn run_cli_main() {
     }
 
     let result = match cli.command {
+        Some(Commands::Client(invocation)) => commands::handle_client(invocation),
         Some(Commands::AuxiliaryWorker {
             kind,
             data_dir: _,
@@ -367,7 +376,13 @@ fn run_cli_main() {
         }),
         Some(Commands::Status { tui, format }) => {
             if tui {
-                run_status_tui()
+                if commands::client::is_active() {
+                    Err(BifrostError::Config(
+                        "status --tui is not supported in Client mode yet".to_string(),
+                    ))
+                } else {
+                    run_status_tui()
+                }
             } else {
                 run_status(format, cli.port)
             }

@@ -49,6 +49,9 @@ fn set_password(db: &AuthDb, password: &str) -> Result<()> {
 }
 
 pub fn handle_admin_command(action: AdminCommands) -> Result<()> {
+    if super::client::is_active() {
+        return handle_client_admin_command(action);
+    }
     match action {
         AdminCommands::Remote { action } => {
             let db = open_auth_db()?;
@@ -176,4 +179,126 @@ pub fn handle_admin_command(action: AdminCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_client_admin_command(action: AdminCommands) -> Result<()> {
+    let client = super::config::client::ConfigApiClient::new("127.0.0.1", 9900);
+    match action {
+        AdminCommands::Remote {
+            action: AdminRemoteCommands::Enable,
+        } => Err(BifrostError::Config(
+            "remote access must be enabled locally on the target before Client login".to_string(),
+        )),
+        AdminCommands::Remote {
+            action: AdminRemoteCommands::Status,
+        } => {
+            let status: serde_json::Value = client
+                .get_public("/auth/status")
+                .map_err(BifrostError::Config)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&status).unwrap_or_default()
+            );
+            Ok(())
+        }
+        AdminCommands::Remote {
+            action: AdminRemoteCommands::Disable,
+        } => {
+            let status: serde_json::Value = client
+                .post_public("/auth/remote", &serde_json::json!({"enabled": false}))
+                .map_err(BifrostError::Config)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&status).unwrap_or_default()
+            );
+            Ok(())
+        }
+        AdminCommands::Passwd {
+            username,
+            password_stdin,
+        } => {
+            let password = if password_stdin {
+                read_password_from_stdin()?
+            } else {
+                prompt_new_password().map_err(|error| {
+                    BifrostError::Config(format!("Failed to read password: {error}"))
+                })?
+            };
+            let _: serde_json::Value = client
+                .post_public(
+                    "/auth/passwd",
+                    &serde_json::json!({"username": username, "password": password}),
+                )
+                .map_err(BifrostError::Config)?;
+            println!("Admin password updated on client target.");
+            Ok(())
+        }
+        AdminCommands::RevokeAll => {
+            let _: serde_json::Value = client
+                .post_public("/auth/revoke-all", &serde_json::json!({}))
+                .map_err(BifrostError::Config)?;
+            println!("All admin sessions revoked on client target.");
+            Ok(())
+        }
+        AdminCommands::Audit {
+            limit,
+            offset,
+            json,
+        } => {
+            let response: serde_json::Value = client
+                .get_public(&format!(
+                    "/admin/audit?limit={}&offset={}",
+                    limit.clamp(1, 500),
+                    offset
+                ))
+                .map_err(BifrostError::Config)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&response).unwrap_or_default()
+                );
+                return Ok(());
+            }
+            let total = response
+                .get("total")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
+            let items = response
+                .get("items")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if items.is_empty() {
+                println!("No audit records.");
+                return Ok(());
+            }
+            println!(
+                "Admin login audit (total: {}, showing: {}):",
+                total,
+                items.len()
+            );
+            println!("====================================================");
+            for item in items {
+                let id = item.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
+                let ts = item.get("ts").and_then(|value| value.as_i64()).unwrap_or(0);
+                let username = item
+                    .get("username")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let ip = item
+                    .get("ip")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let ua = item
+                    .get("ua")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                println!(
+                    "- id={id} ts={ts} user={username} ip={ip} ua={}",
+                    truncate_chars_with_suffix(ua, 120, "...")
+                );
+            }
+            Ok(())
+        }
+    }
 }

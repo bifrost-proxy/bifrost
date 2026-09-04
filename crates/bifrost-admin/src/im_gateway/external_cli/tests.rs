@@ -118,7 +118,12 @@ impl EnvGuard {
 
 #[tokio::test]
 async fn main_broker_routes_guide_model_update_and_stop_to_the_main_process_registry() {
-    let _registry_guard = external_cli_env_guard_async().await;
+    let env_guard = crate::worker_runtime::im_broker::broker_test_lock().await;
+    let data_dir_guard = crate::test_env::bifrost_data_dir_lock();
+    let _registry_guard = ExternalCliEnvGuard {
+        _env_guard: env_guard,
+        _data_dir_guard: data_dir_guard,
+    };
     let _worker = EnvGuard::set_str("BIFROST_IM_GATEWAY_WORKER", "1");
     let endpoint = crate::worker_runtime::im_broker::ensure_main_broker()
         .await

@@ -306,6 +306,7 @@ filtered_shell_tests="$(
 [[ "$filtered_shell_tests" == $'test_trustworthy_traffic_metrics.sh\ntest_socks5_tls_rules.sh' ]]
 for startup_sensitive_test in \
   test_body_cache_sync_cleanup_admin_api.sh \
+  test_client_admin_cli.sh \
   test_process_resolution_performance.sh \
   test_super_performance_mode.sh \
   test_upgrade_tls_trust_e2e.sh; do

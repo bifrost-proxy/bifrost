@@ -2,13 +2,66 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub struct ConfigApiClient {
     base_url: String,
+    bearer_token: Option<String>,
 }
 
 impl ConfigApiClient {
     pub fn new(host: &str, port: u16) -> Self {
+        if let Ok(base_url) = std::env::var("BIFROST_INTERNAL_CLIENT_BASE_URL") {
+            // This value is emitted only by the validated Client envelope. If
+            // it is malformed, preserve it so the request fails closed; never
+            // fall back to this machine's loopback Admin API.
+            return Self {
+                base_url: format!("{}/_bifrost/api", base_url.trim_end_matches('/')),
+                bearer_token: std::env::var("BIFROST_INTERNAL_CLIENT_TOKEN").ok(),
+            };
+        }
         Self {
             base_url: format!("http://{}:{}/_bifrost/api", host, port),
+            bearer_token: None,
         }
+    }
+
+    pub fn from_base_url(base_url: &str, bearer_token: Option<String>) -> Result<Self, String> {
+        let base_url = base_url.trim_end_matches('/');
+        if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+            return Err("Admin API base URL must use http or https".to_string());
+        }
+        Ok(Self {
+            base_url: format!("{base_url}/_bifrost/api"),
+            bearer_token,
+        })
+    }
+
+    pub fn bearer_token(&self) -> Option<&str> {
+        self.bearer_token.as_deref()
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    pub fn request(&self, method: &str, path: &str) -> ureq::Request {
+        let agent = bifrost_core::direct_ureq_agent_builder()
+            .redirects(0)
+            .build();
+        let request = agent.request(method, &self.url(path));
+        match self.bearer_token() {
+            Some(token) => request.set("Authorization", &format!("Bearer {token}")),
+            None => request,
+        }
+    }
+
+    pub fn get_public<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        self.read_json(self.request("GET", path).call(), "GET", path)
+    }
+
+    pub fn post_public<T: DeserializeOwned, R: Serialize>(
+        &self,
+        path: &str,
+        body: &R,
+    ) -> Result<T, String> {
+        self.read_json(self.request("POST", path).send_json(body), "POST", path)
     }
 
     pub fn get_tls_config(&self) -> Result<TlsConfigResponse, String> {
@@ -357,91 +410,32 @@ impl ConfigApiClient {
         self.post_text_response("/bifrost-file/export/scripts", &body)
     }
 
-    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = bifrost_core::direct_ureq_agent().get(&url).call().map_err(|e| {
-            format!(
-                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
-                url, e
-            )
-        })?;
-
-        let body = resp
-            .into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))
+    pub(crate) fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        self.read_json(self.request("GET", path).call(), "GET", path)
     }
 
-    fn put<T: DeserializeOwned, R: Serialize>(&self, path: &str, body: &R) -> Result<T, String> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = bifrost_core::direct_ureq_agent()
-            .put(&url)
-            .send_json(body)
-            .map_err(|e| {
-            format!(
-                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
-                url, e
-            )
-        })?;
-
-        let body = resp
-            .into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))
+    pub(crate) fn put<T: DeserializeOwned, R: Serialize>(
+        &self,
+        path: &str,
+        body: &R,
+    ) -> Result<T, String> {
+        self.read_json(self.request("PUT", path).send_json(body), "PUT", path)
     }
 
-    fn post<T: DeserializeOwned, R: Serialize>(&self, path: &str, body: &R) -> Result<T, String> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = bifrost_core::direct_ureq_agent()
-            .post(&url)
-            .send_json(body)
-            .map_err(|e| {
-            format!(
-                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
-                url, e
-            )
-        })?;
-
-        let body = resp
-            .into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))
+    pub(crate) fn post<T: DeserializeOwned, R: Serialize>(
+        &self,
+        path: &str,
+        body: &R,
+    ) -> Result<T, String> {
+        self.read_json(self.request("POST", path).send_json(body), "POST", path)
     }
 
     fn patch<T: DeserializeOwned, R: Serialize>(&self, path: &str, body: &R) -> Result<T, String> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = bifrost_core::direct_ureq_agent()
-            .request("PATCH", &url)
-            .send_json(body)
-            .map_err(|e| {
-            format!(
-                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
-                url, e
-            )
-        })?;
-
-        let body = resp
-            .into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))
+        self.read_json(self.request("PATCH", path).send_json(body), "PATCH", path)
     }
 
-    fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = bifrost_core::direct_ureq_agent()
-            .delete(&url)
-            .call()
-            .map_err(|e| {
-            format!(
-                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
-                url, e
-            )
-        })?;
-
-        let body = resp
-            .into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))
+    pub(crate) fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        self.read_json(self.request("DELETE", path).call(), "DELETE", path)
     }
 
     fn delete_with_body<T: DeserializeOwned, R: Serialize>(
@@ -449,34 +443,23 @@ impl ConfigApiClient {
         path: &str,
         body: &R,
     ) -> Result<T, String> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = bifrost_core::direct_ureq_agent()
-            .delete(&url)
-            .send_json(body)
-            .map_err(|e| {
-            format!(
-                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
-                url, e
-            )
-        })?;
-        let body = resp
-            .into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))
+        self.read_json(self.request("DELETE", path).send_json(body), "DELETE", path)
+    }
+
+    pub(crate) fn delete_with_body_public<T: DeserializeOwned, R: Serialize>(
+        &self,
+        path: &str,
+        body: &R,
+    ) -> Result<T, String> {
+        self.delete_with_body(path, body)
     }
 
     fn post_text<T: DeserializeOwned>(&self, path: &str, text: &str) -> Result<T, String> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = bifrost_core::direct_ureq_agent()
-            .post(&url)
+        let resp = self
+            .request("POST", path)
             .set("Content-Type", "text/plain")
             .send_string(text)
-            .map_err(|e| {
-            format!(
-                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
-                url, e
-            )
-        })?;
+            .map_err(|e| self.request_error("POST", path, e))?;
         let body = resp
             .into_string()
             .map_err(|e| format!("Failed to read response: {}", e))?;
@@ -484,18 +467,66 @@ impl ConfigApiClient {
     }
 
     fn post_text_response<R: Serialize>(&self, path: &str, body: &R) -> Result<String, String> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = bifrost_core::direct_ureq_agent()
-            .post(&url)
+        let resp = self
+            .request("POST", path)
             .send_json(body)
-            .map_err(|e| {
-            format!(
-                "Failed to connect to Bifrost admin API at {}\nIs the proxy server running?\n\nHint: Start the proxy with: bifrost start\n\nError: {}",
-                url, e
-            )
-        })?;
+            .map_err(|e| self.request_error("POST", path, e))?;
         resp.into_string()
             .map_err(|e| format!("Failed to read response: {}", e))
+    }
+
+    fn read_json<T: DeserializeOwned>(
+        &self,
+        response: Result<ureq::Response, ureq::Error>,
+        method: &str,
+        path: &str,
+    ) -> Result<T, String> {
+        let response = response.map_err(|error| self.request_error(method, path, error))?;
+        if !(200..300).contains(&response.status()) {
+            return Err(self.response_error(method, path, response));
+        }
+        let body = response
+            .into_string()
+            .map_err(|error| format!("Failed to read Admin API response: {error}"))?;
+        serde_json::from_str(&body)
+            .map_err(|error| format!("Failed to parse Admin API response: {error}"))
+    }
+
+    fn request_error(&self, method: &str, path: &str, error: ureq::Error) -> String {
+        match error {
+            ureq::Error::Status(_, response) => self.response_error(method, path, response),
+            ureq::Error::Transport(error) => format!(
+                "Failed to connect to Bifrost admin API for {method} {}: {error}",
+                self.url(path)
+            ),
+        }
+    }
+
+    fn response_error(&self, method: &str, path: &str, response: ureq::Response) -> String {
+        let status = response.status();
+        let body = response.into_string().unwrap_or_default();
+        let message = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .or_else(|| value.get("message"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        if status == 401 {
+            format!(
+                "Admin authentication failed for {method} {}: {message}. Run `bifrost client target login <target>` again",
+                self.url(path)
+            )
+        } else {
+            format!(
+                "Failed to connect to Bifrost admin API for {method} {}: HTTP {status}: {message}",
+                self.url(path)
+            )
+        }
     }
 }
 
@@ -763,7 +794,7 @@ pub struct UpdateSyncConfigRequest {
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -800,6 +831,79 @@ mod tests {
         assert_eq!(resp.http1_max_header_size, 8192);
         assert_eq!(resp.http2_max_header_list_size, 16384);
         assert_eq!(resp.websocket_handshake_max_header_size, 4096);
+    }
+
+    #[tokio::test]
+    async fn client_base_url_injects_bearer_for_admin_requests() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/metrics"))
+            .and(header("authorization", "Bearer client-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"requests": 1})))
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            ConfigApiClient::from_base_url(&mock_server.uri(), Some("client-secret".to_string()))
+                .unwrap();
+        let response = client.get_metrics().unwrap();
+
+        assert_eq!(response["requests"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn client_base_url_does_not_follow_redirects_with_bearer() {
+        let destination = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/stolen"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(0)
+            .mount(&destination)
+            .await;
+
+        let source = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/metrics"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/stolen", destination.uri())),
+            )
+            .mount(&source)
+            .await;
+
+        let client =
+            ConfigApiClient::from_base_url(&source.uri(), Some("secret".to_string())).unwrap();
+        let error = client.get_metrics().unwrap_err();
+
+        assert!(error.contains("HTTP 302"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn admin_api_status_errors_preserve_the_legacy_connection_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/sync/login"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(json!({"error": "remote URL must use HTTPS"})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let error = client
+            .post_public::<serde_json::Value, _>("/sync/login", &json!({"token": "invalid"}))
+            .unwrap_err();
+
+        assert!(
+            error.starts_with("Failed to connect to Bifrost admin API"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("HTTP 400"), "unexpected error: {error}");
+        assert!(
+            error.contains("remote URL must use HTTPS"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

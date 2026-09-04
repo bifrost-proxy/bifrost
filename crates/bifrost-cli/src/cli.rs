@@ -1,7 +1,8 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use bifrost_storage::DEFAULT_REMOTE_BASE_URL;
-use clap::{ArgAction, Parser, Subcommand, ValueEnum, ValueHint};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
 
 fn sync_token_login_url() -> String {
@@ -201,6 +202,60 @@ pub struct Cli {
 
     #[arg(long, default_value = "7", help = "Number of days to retain log files")]
     pub log_retention_days: u32,
+}
+
+#[derive(Args)]
+pub struct ClientInvocation {
+    #[arg(long, help = "Saved target name, address, or http(s) URL")]
+    pub target: Option<String>,
+
+    #[arg(
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        help = "Existing Bifrost command, or `target` to manage saved targets"
+    )]
+    pub args: Vec<OsString>,
+}
+
+#[derive(Parser)]
+#[command(
+    name = "bifrost client target",
+    about = "Manage Bifrost Client targets"
+)]
+pub struct ClientTargetCli {
+    #[command(subcommand)]
+    pub action: ClientTargetCommands,
+}
+
+#[derive(Subcommand)]
+pub enum ClientTargetCommands {
+    #[command(about = "Save a Bifrost Admin API target")]
+    Add {
+        name: String,
+        #[arg(long, help = "Target IP, host[:port], or http(s) URL")]
+        url: String,
+        #[arg(long, help = "Allow credentials over plain HTTP")]
+        allow_insecure_http: bool,
+    },
+    #[command(about = "List saved targets")]
+    List,
+    #[command(about = "Show one saved target")]
+    Show { name: String },
+    #[command(about = "Log in and save an Admin API session")]
+    Login {
+        name: String,
+        #[arg(long, default_value = "admin")]
+        username: String,
+        #[arg(long, help = "Read the password from stdin")]
+        password_stdin: bool,
+    },
+    #[command(about = "Delete the locally saved Admin API session")]
+    Logout { name: String },
+    #[command(about = "Rename a saved target")]
+    Rename { name: String, new_name: String },
+    #[command(about = "Remove a saved target and its local session")]
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -554,6 +609,11 @@ previous runtime settings."
         #[command(subcommand)]
         action: AdminCommands,
     },
+    #[command(
+        about = "Act as an Admin API client for another Bifrost instance",
+        long_about = "Connect directly to another Bifrost Admin API. Existing commands keep their normal syntax after this prefix. Use `bifrost client target --help` to manage saved targets. This is separate from Remote Invoke (`bifrost remote`)."
+    )]
+    Client(ClientInvocation),
     #[command(about = "Manage local AI tools")]
     Ai {
         #[command(subcommand)]

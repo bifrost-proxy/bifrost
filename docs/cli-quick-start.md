@@ -13,7 +13,8 @@
 | 查某个请求为什么没命中规则 | `bifrost traffic list/get/search` | 先看 `matched_rules`、入口端口、请求 URL、协议 |
 | 同一个服务支持多个应用或开发任务 | `bifrost port bind ...` | 一个常驻 Bifrost 共享证书、配置和流量库；每个任务用独立端口绑定独立规则 |
 | 局域网或多人访问 | `--access-mode` / `whitelist` | 不要直接用 `allow_all` 暴露未授权代理 |
-| 操作另一台机器的 Bifrost | `bifrost remote ...` | `setting` 总是本机；远端配置要通过 `remote exec` 在远端执行 |
+| 直连另一台 Bifrost 的 Admin API | `bifrost client ...` | 已知 IP/域名时，像远程 WebUI 一样查流量、改规则和配置 |
+| 操作另一台机器的文件、shell 或进程 | `bifrost remote ...` | `setting` 总是本机；远端 OS 操作要通过 Remote Invoke |
 | 备份、迁移或同步规则 | `import` / `export` / `sync` | `.bifrost` 文件用于离线迁移，`sync` 用于远端同步服务 |
 | 添加飞书或微信 IM 通道 | `im provider add` | 终端展示授权链接或二维码，扫码后自动创建并连接 provider |
 | 和 Agent 协作开发业务 Skill | `install-skill` + `traffic list/get/search` | 先抓完整或应用专属流量，再让 Agent 基于真实请求和响应沉淀 skill |
@@ -55,6 +56,30 @@ bifrost port destroy 18888
 ```
 
 普通用户首次体验不要加测试隔离参数。`--no-system-proxy` 和临时 `BIFROST_DATA_DIR` 只用于 CI、自动化测试、并发实验或破坏性配置验证。
+
+## Client：直连管理另一台 Bifrost
+
+目标机本地先设置 Admin 密码并启用远程 Admin：
+
+```bash
+bifrost admin passwd
+bifrost admin remote enable
+```
+
+调用端保存并登录目标，然后给原业务命令加上 `client --target <name>` 前缀：
+
+```bash
+bifrost client target add devbox \
+  --url http://10.0.0.8:9900 \
+  --allow-insecure-http
+printf '%s' "$BIFROST_ADMIN_PASSWORD" | \
+  bifrost client target login devbox --username admin --password-stdin
+bifrost client --target devbox status --format json
+bifrost client --target devbox traffic list --limit 20
+bifrost client --target devbox rule list
+```
+
+明文 HTTP 只适用于可信局域网；跨不可信网络应使用 HTTPS、VPN 或 SSH tunnel。Client 只管理目标 Bifrost 的 Admin API，不支持目标机文件、shell 或进程操作；这些场景应显式使用 `bifrost remote`。完整配置、安全说明和故障排查见 [Client 远程管理使用手册](./client-admin.md)。
 
 ## 场景 2：让流量进入 Bifrost
 

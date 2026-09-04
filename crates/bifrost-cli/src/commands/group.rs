@@ -14,17 +14,26 @@ where
 const DEFAULT_PORT: u16 = 9900;
 
 fn get_effective_port() -> u16 {
-    crate::process::read_runtime_port().unwrap_or(DEFAULT_PORT)
+    if super::client::is_active() {
+        DEFAULT_PORT
+    } else {
+        crate::process::read_runtime_port().unwrap_or(DEFAULT_PORT)
+    }
 }
 
 fn base_url_for_port(port: u16) -> String {
-    format!("http://127.0.0.1:{}/_bifrost/api", port)
+    super::client::api_url(port, "")
 }
 
 fn agent() -> ureq::Agent {
     bifrost_core::direct_ureq_agent_builder()
+        .redirects(0)
         .timeout(std::time::Duration::from_secs(10))
         .build()
+}
+
+fn request(agent: &ureq::Agent, method: &str, url: &str) -> ureq::Request {
+    super::client::authenticated_request(agent, method, url)
 }
 
 fn api_error(url: &str, err: ureq::Error) -> bifrost_core::BifrostError {
@@ -187,7 +196,10 @@ fn handle_group_list(
         url.push_str(&format!("&keyword={}", urlencoding::encode(kw)));
     }
 
-    let resp = agent().get(&url).call().map_err(|e| api_error(&url, e))?;
+    let agent = agent();
+    let resp = request(&agent, "GET", &url)
+        .call()
+        .map_err(|e| api_error(&url, e))?;
     let body: RemoteResponse<RemoteListPayload<RemoteGroup>> = resp.into_json().map_err(|e| {
         bifrost_core::BifrostError::Config(format!("Failed to parse response: {e}"))
     })?;
@@ -247,7 +259,10 @@ fn handle_group_show(port: u16, group_id: &str) -> bifrost_core::Result<()> {
         base_url_for_port(port),
         urlencoding::encode(group_id)
     );
-    let resp = agent().get(&url).call().map_err(|e| api_error(&url, e))?;
+    let agent = agent();
+    let resp = request(&agent, "GET", &url)
+        .call()
+        .map_err(|e| api_error(&url, e))?;
     let body: RemoteResponse<RemoteGroup> = resp.into_json().map_err(|e| {
         bifrost_core::BifrostError::Config(format!("Failed to parse response: {e}"))
     })?;
@@ -310,7 +325,10 @@ fn handle_group_rule_list(port: u16, group_id: &str) -> bifrost_core::Result<()>
         base_url_for_port(port),
         urlencoding::encode(group_id)
     );
-    let resp = agent().get(&url).call().map_err(|e| api_error(&url, e))?;
+    let agent = agent();
+    let resp = request(&agent, "GET", &url)
+        .call()
+        .map_err(|e| api_error(&url, e))?;
     let body: GroupRulesResponse = resp.into_json().map_err(|e| {
         bifrost_core::BifrostError::Config(format!("Failed to parse response: {e}"))
     })?;
@@ -343,7 +361,10 @@ fn handle_group_rule_show(port: u16, group_id: &str, rule_name: &str) -> bifrost
         urlencoding::encode(group_id),
         urlencoding::encode(rule_name)
     );
-    let resp = agent().get(&url).call().map_err(|e| api_error(&url, e))?;
+    let agent = agent();
+    let resp = request(&agent, "GET", &url)
+        .call()
+        .map_err(|e| api_error(&url, e))?;
     let detail: GroupRuleDetail = resp.into_json().map_err(|e| {
         bifrost_core::BifrostError::Config(format!("Failed to parse response: {e}"))
     })?;
@@ -406,8 +427,8 @@ fn handle_group_rule_add(
         "allow_invalid": allow_invalid,
     });
 
-    let resp = agent()
-        .post(&url)
+    let agent = agent();
+    let resp = request(&agent, "POST", &url)
         .send_json(&body)
         .map_err(|e| api_error(&url, e))?;
     let detail: GroupRuleDetail = resp.into_json().map_err(|e| {
@@ -439,8 +460,8 @@ fn handle_group_rule_update(
         "allow_invalid": allow_invalid,
     });
 
-    let resp = agent()
-        .put(&url)
+    let agent = agent();
+    let resp = request(&agent, "PUT", &url)
         .send_json(&body)
         .map_err(|e| api_error(&url, e))?;
     let detail: GroupRuleDetail = resp.into_json().map_err(|e| {
@@ -459,8 +480,8 @@ fn handle_group_rule_delete(port: u16, group_id: &str, name: &str) -> bifrost_co
         urlencoding::encode(name)
     );
 
-    let resp = agent()
-        .delete(&url)
+    let agent = agent();
+    let resp = request(&agent, "DELETE", &url)
         .call()
         .map_err(|e| api_error(&url, e))?;
     let body: SuccessResponse = resp.into_json().map_err(|e| {
@@ -490,8 +511,8 @@ fn handle_group_rule_toggle(
         action
     );
 
-    let resp = agent()
-        .put(&url)
+    let agent = agent();
+    let resp = request(&agent, "PUT", &url)
         .send_bytes(&[])
         .map_err(|e| api_error(&url, e))?;
     let body: SuccessResponse = resp.into_json().map_err(|e| {

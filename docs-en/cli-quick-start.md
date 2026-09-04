@@ -16,7 +16,8 @@ This guide is organized by tasks instead of listing every flag. For the full com
 | Understand why a request missed rules | `bifrost traffic list/get/search` | Check matched rules, entry port, URL, and protocol. |
 | Serve multiple apps or tasks | `bifrost port bind ...` | One service can host multiple isolated entry ports. |
 | LAN or team access | `--access-mode`, `whitelist` | Do not expose an unauthorized proxy with `allow_all`. |
-| Operate a remote Bifrost | `bifrost remote ...` | `setting` is always local; remote config requires remote execution. |
+| Administer a Bifrost directly by IP or domain | `bifrost client ...` | Use the target Admin API for traffic, rules, config, and status. |
+| Operate remote files, shells, or processes | `bifrost remote ...` | `setting` is always local; OS-level work requires Remote Invoke. |
 | Add a Feishu or Weixin IM channel | `bifrost im provider add ...` | Print an auth URL or QR code in the terminal and finish provider setup after scan or authorization. |
 
 ## Safe Multi-port Debugging
@@ -37,6 +38,30 @@ bifrost restart
 bifrost port list
 bifrost port destroy 18888
 ```
+
+## Administer Another Bifrost Directly
+
+On the target, set an Admin password and enable remote Admin locally:
+
+```bash
+bifrost admin passwd
+bifrost admin remote enable
+```
+
+On the caller, save and log in to the target, then prefix an existing business command with `client --target <name>`:
+
+```bash
+bifrost client target add devbox \
+  --url http://10.0.0.8:9900 \
+  --allow-insecure-http
+printf '%s' "$BIFROST_ADMIN_PASSWORD" | \
+  bifrost client target login devbox --username admin --password-stdin
+bifrost client --target devbox status --format json
+bifrost client --target devbox traffic list --limit 20
+bifrost client --target devbox rule list
+```
+
+Use plain HTTP only on a trusted LAN; use HTTPS, a VPN, or an SSH tunnel across untrusted networks. Client manages the target Bifrost Admin API but cannot operate target files, shells, or processes. Use `bifrost remote` explicitly for those tasks. See the [Client remote administration guide](./client-admin.md) for target selection, security, supported commands, and troubleshooting.
 
 ## Send Traffic Through Bifrost
 

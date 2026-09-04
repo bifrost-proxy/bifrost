@@ -1,13 +1,23 @@
 ---
 
 name: "bifrost-remote"
-description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接管理、状态/流量查询、远端 shell 执行；以及对目标仓库做 coding-agent 级的文件读写/搜索/原子 edit/批量 patch/大文件分块 upload/download（受 FileAccessPolicy 约束）。触发词包括：连接另一台电脑、远程执行命令、远程改代码、远端仓库编辑/重构/批量修改文件、在远端机器上跑 coding agent、远程 grep/find/read/write/edit/patch/upload/download。重要：修改或传输远端文件必须优先使用 bifrost remote file 子命令。"
+description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：pairing/grant、远端 shell、进程和 coding-agent 级文件操作。已知 IP/端口/域名并像 WebUI 一样管理另一台 Bifrost 时应使用通用 bifrost skill 的 client 模式，不属于本技能。"
 
 ---
 
 # Bifrost Remote
 
 本技能指导 Agent 通过 `bifrost remote` 与远端 Bifrost 建立连接，并完成五类操作：**连接管理**（`conn`）、**远端 shell 执行**（`exec`）、**远端长任务续接**（`job`）、**远端文件编程**（`file`，coding-agent 友好）、**远端流量查询**（`traffic`）。
+
+## 先选择正确的远程模式
+
+| 用户意图 | 应选择 |
+| --- | --- |
+| 已知目标 IP、端口、域名或 Client target，像 WebUI 一样查 traffic/status、改 rule/value/script/config/whitelist | 通用 `bifrost` skill 的 `bifrost client` |
+| 读写目标机任意文件、修改远端仓库、执行 shell/构建/进程 | 本 skill 的 `bifrost remote` |
+| 服务未运行，需要启动它或执行 OS/VCS 操作 | 经用户明确授权的 Remote Invoke 或目标机 service manager |
+
+Client 直连 Admin API，使用管理员 JWT；Remote Invoke 走 Relay、pairing 和 grant。两者不共享 target、凭据或 fallback。`bifrost client` 失败或不支持某命令时，不得自动改用 `remote exec`；只有用户原始意图本身需要 shell/file 能力并已授权时才进入本技能。
 
 ---
 
@@ -109,7 +119,7 @@ bifrost start
 
 Shell Access 的 CLI 配置入口是 `bifrost setting shell profile add` 和 `bifrost setting shell policy add`。只有需要执行 `remote exec` 时才配置 Shell Access；纯文件读写优先配置 FileAccessPolicy 并使用 `bifrost remote file`。
 
-`bifrost setting ...` 改的是当前本机配置；给远端改 Shell Access policy、rule、config、script、value、CA 或系统代理等目标设备管理项时，如果没有专用 relay-backed 子命令，应通过已授权的 `remote exec` 在目标设备上执行等价本机命令或 API。
+`bifrost setting ...` 改的是当前本机配置。给目标 Bifrost 修改 rule、config、script、value 等 Admin 管理项时，优先切换到通用 skill 并使用 `bifrost client`。CA、系统代理、Shell Access policy 等尚未迁移且确需操作系统权限的能力，只有在用户明确授权后才使用 `remote exec`；禁止把 Client 错误当作自动申请 shell 的理由。
 
 远端流量查询只提供 `bifrost remote traffic {list,get,search}`，不提供清理类写操作。
 

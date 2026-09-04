@@ -1583,6 +1583,10 @@ jobs:
         # without ASR native runtime assets; bifrost-asr full local engines are
         # target-gated to macOS aarch64 and must stay unavailable here.
         shell: bash
+        env:
+          # libtest runs each test on a fresh thread. The full Clap command tree
+          # needs the same stack budget as the Windows CLI entrypoint.
+          RUST_MIN_STACK: "8388608"
         run: |
           cargo test --workspace --all-features --target x86_64-pc-windows-msvc -- --skip test_https_interception_websocket_applies_request_and_response_header_rules
           cargo test -p bifrost-tests --test https_proxy_test --all-features --target x86_64-pc-windows-msvc test_https_interception_websocket_applies_request_and_response_header_rules -- --test-threads=1

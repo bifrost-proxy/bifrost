@@ -163,6 +163,19 @@ fn broker_server() -> &'static tokio::sync::Mutex<Option<BrokerServer>> {
     SERVER.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
+#[cfg(test)]
+pub(crate) async fn broker_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    // Broker tests span separate Tokio runtimes but share the process-global
+    // SERVER slot and broker environment. Serialize them with external CLI
+    // tests and discard the previous runtime's task before creating an endpoint.
+    let guard = crate::im_gateway::external_cli::external_cli_test_env_lock().await;
+    if let Some(stale) = broker_server().lock().await.take() {
+        stale.task.abort();
+        let _ = stale.task.await;
+    }
+    guard
+}
+
 pub(crate) fn configure_worker_env(spec: &mut super::WorkerSpawnSpec, endpoint: &BrokerEndpoint) {
     spec.env
         .insert(BROKER_ADDR_ENV.to_string(), endpoint.addr.clone());
@@ -479,8 +492,6 @@ where
 mod tests {
     use super::*;
 
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     fn request() -> ExternalCliRunRequest {
         serde_json::from_value(serde_json::json!({ "message": "hello" })).unwrap()
     }
@@ -551,7 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn endpoint_and_worker_environment_are_stable() {
-        let _lock = ENV_LOCK.lock().await;
+        let _lock = broker_test_lock().await;
         let endpoint = ensure_main_broker().await.unwrap();
         assert!(endpoint.addr.starts_with("127.0.0.1:"));
         assert!(!endpoint.token.is_empty());
@@ -577,7 +588,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn main_broker_runs_external_cli_in_main_process_and_streams_progress() {
-        let _lock = ENV_LOCK.lock().await;
+        let _lock = broker_test_lock().await;
         std::env::remove_var("BIFROST_IM_GATEWAY_WORKER");
         let temp = tempfile::tempdir().unwrap();
         let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp.path());
@@ -624,7 +635,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn client_forwards_progress_and_handles_result_error_and_missing_config() {
-        let _lock = ENV_LOCK.lock().await;
+        let _lock = broker_test_lock().await;
 
         async fn bind() -> TcpListener {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -720,7 +731,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn clients_reject_unexpected_broker_response_types() {
-        let _lock = ENV_LOCK.lock().await;
+        let _lock = broker_test_lock().await;
 
         async fn serve_once(response: BrokerResponse) -> tokio::task::JoinHandle<()> {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -904,7 +915,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn server_cancels_runs_when_clients_disconnect_or_send_extra_frames() {
-        let _lock = ENV_LOCK.lock().await;
+        let _lock = broker_test_lock().await;
         let temp = tempfile::tempdir().unwrap();
         let _data_dir = crate::test_env::BifrostDataDirGuard::set(temp.path());
 
