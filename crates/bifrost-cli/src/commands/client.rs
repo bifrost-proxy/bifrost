@@ -651,14 +651,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn client_admin_cli_unit_boundaries_fail_closed() {
+    fn run_with_large_stack(test: fn()) {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
-            .spawn(client_admin_cli_unit_boundaries_fail_closed_with_large_stack)
+            .spawn(test)
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn client_admin_cli_unit_boundaries_fail_closed() {
+        run_with_large_stack(client_admin_cli_unit_boundaries_fail_closed_with_large_stack);
     }
 
     fn client_admin_cli_unit_boundaries_fail_closed_with_large_stack() {
@@ -776,6 +780,10 @@ mod tests {
 
     #[test]
     fn rejects_client_and_remote_nesting() {
+        run_with_large_stack(rejects_client_and_remote_nesting_with_large_stack);
+    }
+
+    fn rejects_client_and_remote_nesting_with_large_stack() {
         let client = Cli::try_parse_from(["bifrost", "client", "status"]).unwrap();
         assert!(matches!(client.command, Some(Commands::Client(_))));
         let remote = Cli::try_parse_from(["bifrost", "remote", "conn", "status"]).unwrap();
@@ -784,6 +792,12 @@ mod tests {
 
     #[test]
     fn capability_registry_accepts_admin_commands_and_rejects_local_commands() {
+        run_with_large_stack(
+            capability_registry_accepts_admin_commands_and_rejects_local_commands_with_large_stack,
+        );
+    }
+
+    fn capability_registry_accepts_admin_commands_and_rejects_local_commands_with_large_stack() {
         let supported = [
             vec!["bifrost", "status"],
             vec!["bifrost", "traffic", "list"],
@@ -822,6 +836,12 @@ mod tests {
 
     #[test]
     fn unsupported_top_level_commands_are_rejected_before_dispatch() {
+        run_with_large_stack(
+            unsupported_top_level_commands_are_rejected_before_dispatch_with_large_stack,
+        );
+    }
+
+    fn unsupported_top_level_commands_are_rejected_before_dispatch_with_large_stack() {
         let accepted = Cli::try_parse_from(["bifrost", "client", "status"]).unwrap();
         assert!(matches!(accepted.command, Some(Commands::Client(_))));
 
