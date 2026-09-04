@@ -2477,6 +2477,48 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PRA-64：回归 - 规则补写 Content-Encoding 后管理端、CLI 与搜索均展示明文
+
+**背景**：
+- 客户端可能已经发送 gzip wire body，但漏带 `Content-Encoding`，再由 `reqHeaders://(Content-Encoding: gzip)` 规则补齐编码声明。
+- Traffic 必须继续保存 canonical wire bytes，并把规则生效后的最终编码写入 metadata；管理端 Body API、终端 `traffic get`、关键字搜索、JSONPath 条件和搜索 include 都应读取同一份解压后的明文。
+- 无编码或规则删除编码时只能清除编码 metadata，不能清空已经保存的 body。
+
+**前置条件**：
+- 在仓库根目录执行。
+- 使用测试脚本自动创建的临时 `BIFROST_DATA_DIR` 和非 9900 端口，不修改系统代理。
+
+**操作步骤**：
+1. 执行真实代理、管理端 API 与 CLI 回归：
+   ```bash
+   bash e2e-tests/tests/test_temporary_port_bindings.sh
+   ```
+2. 确认脚本输出包含：
+   - `Traffic body API decodes wire gzip after a request rule adds Content-Encoding`
+   - `CLI traffic get text renders rule-added gzip as plaintext`
+   - `CLI search keyword, request JSONPath, and include decode rule-added gzip`
+3. 执行消费完成后的编码更新与清除回归：
+   ```bash
+   cargo test -p bifrost-proxy request_tee_ -- --nocapture
+   ```
+4. 执行超限 streaming 请求的编码一致性回归：
+   ```bash
+   cargo test -p bifrost-proxy unknown_length_oversized_request_and_response_use_admin_streaming_tees -- --nocapture
+   cargo test -p bifrost-proxy intercepted_unknown_length_oversized_bodies_use_admin_streaming_tees -- --nocapture
+   ```
+
+**预期结果**：
+- 请求发送的是 gzip wire bytes，客户端不带 `Content-Encoding`，规则补写后上游和 Traffic 最终请求头包含 `Content-Encoding: gzip`。
+- 管理端 request/response Body API 均返回原始 JSON 明文，不返回空内容或 gzip 乱码。
+- CLI 文本模式 `traffic get --request-body` 展示 JSON 明文。
+- CLI 搜索能同时通过正文关键字和 `req.body.$.message` JSONPath 命中，`--include bodies` 返回的请求正文解码后与原始 JSON 完全一致。
+- body 已消费后再将编码更新为 gzip，Traffic metadata 会同步更新；再清除编码时 body ref 与明文字节仍保留。
+- 请求体超过转换上限时，HTTP 与 HTTPS/MITM 都跳过无法执行的 Body 规则，并撤销仅由规则补写的 gzip 标记；上游收到完整原始明文，不会出现“明文正文 + gzip 头”。
+
+**执行记录（2026-09-04）**：PASS — `bash e2e-tests/tests/test_temporary_port_bindings.sh` 使用隔离数据目录和临时端口完成 76/76 项断言；新增的管理端 Body API、CLI 文本 `traffic get`、关键字 + request JSONPath + include 搜索均返回 `{"message":"rule added encoding e2e"}` 明文。随后执行 `cargo test -p bifrost-proxy request_tee_ -- --nocapture`，2/2 通过，确认 body 消费完成后更新/清除编码都不会丢失 body ref 或正文；HTTP 与 HTTPS/MITM 两条超限 streaming 定向回归各 1/1 通过，确认跳过正文转换时不会把规则新增的 gzip 标记错误应用到原始明文。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

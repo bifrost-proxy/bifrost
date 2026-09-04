@@ -192,6 +192,11 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `traffic::stored_body_tests::only_decodes_refs_marked_as_content_encoded`：Traffic 读取只解码带持久化编码标记的 wire body，已经移除 HTTP 外层编码的 `application/gzip` 数据不会被二次解码。
 - `query_service::traffic_get_decodes_content_encoded_file_body`：CLI/Remote Invoke 共用的 `traffic get` 查询服务返回解码后的文件型 body。
 - `search::encoded_file_body_is_decoded_for_search_json_filter_and_include`：关键词搜索、JSONPath 条件与 include body 同时读取解码后的文件型 body。
+- `handler::plaintext_success_records_rule_encoded_request_for_admin_and_search`：请求规则新增 gzip 后，成功转发分支落库的是最终 wire body 而不是规则处理前 body，关键词、JSONPath 与 include 均读取明文。
+- `body_cache_request_body_with_rule`：HTTP 请求 Body 规则生效后，上游收到的正文与 Traffic canonical request body 都是最终转发正文，避免最终请求头与规则前正文错配；与 HTTPS/MITM 路径保持一致。
+- `tunnel::intercepted_streaming_rule_added_encoding_is_plaintext_in_search`：HTTPS/MITM streaming 请求在规则补写 gzip 后保留 body ref 和最终 encoding metadata，搜索读取明文。
+- `handler::unknown_length_oversized_request_and_response_use_admin_streaming_tees` / `tunnel::intercepted_unknown_length_oversized_bodies_use_admin_streaming_tees`：请求体超过转换上限而跳过 Body 规则时，不把仅由规则补写的 gzip 头应用到未压缩 wire body；HTTP 与 HTTPS/MITM 都保持原始编码、正文和 Traffic metadata 一致。
+- `tee::request_tee_persists_content_encoding_updated_after_body_completion` / `request_tee_clears_encoding_without_clearing_completed_body`：body 已消费后更新或清除编码仍同步 Traffic metadata，且清除编码不清空 body。
 - `traffic::batch_query_tests::batch_body_chunk_decodes_content_encoded_references`：批量 Body API 在截断、计算大小和 base64 编码前先解码带标记的请求/响应引用。
 - `traffic::sse_stream_tests::content_encoded_sse_body_is_decoded_before_event_parsing`：SSE 事件解析器只消费完成 HTTP 解码后的字节。
 - `traffic::stored_body_tests::configured_decompression_limit_is_honored_by_body_reads`：Traffic Body 读取遵循运行时配置的解压上限，超限时保留 wire bytes。
@@ -218,7 +223,7 @@ Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一�
 - `e2e-tests/tests/test_body_https_reqmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 请求经过 `reqMerge` 后仍保持有效 gzip。
 - `e2e-tests/tests/test_body_https_resmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
 - `e2e-tests/tests/test_replay_rules.sh`：本地 echo/SSE/WebSocket 上游验证 Replay custom rules，`request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵，`req_res_script.txt` 覆盖 Replay 的 Request/Response Script，`bp_decode.txt` 覆盖 Replay Traffic 落库前的 `decode://bp`。
-- `e2e-tests/tests/test_temporary_port_bindings.sh`：真实代理记录双层编码、多 member gzip 请求/响应和 gzip SSE，验证 Traffic API、`traffic get`、批量 Body API、搜索关键词、响应 JSONPath 过滤、include body、SSE 事件恢复、Network 导出/预览/导入均返回明文，同时 raw body 仍可恢复 wire bytes。
+- `e2e-tests/tests/test_temporary_port_bindings.sh`：真实代理记录双层编码、多 member gzip 请求/响应、规则补写请求 `Content-Encoding: gzip` 和 gzip SSE，验证 Traffic API、`traffic get`、批量 Body API、搜索关键词、请求/响应 JSONPath 过滤、include body、SSE 事件恢复、Network 导出/预览/导入均返回明文，同时 raw body 仍可恢复 wire bytes。
 - `e2e-tests/tests/test_response_stream_script.sh`：HTTP 与 HTTPS MITM 上游返回两个 `Content-Encoding: identity` 时，`resStreamScript` 仍正常逐事件转换；真正的 gzip 编码继续明确拒绝。
 
 ### 真实场景测试 human_tests
