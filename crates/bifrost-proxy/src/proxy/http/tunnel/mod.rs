@@ -2660,6 +2660,12 @@ async fn handle_intercepted_request_with_protocol(
         }
         Vec::new()
     };
+    if skip_req_scripts && resolved_rules.status_code.is_none() {
+        set_content_encoding_header(&mut parts.headers, req_content_encoding.as_deref());
+        if let Some(capture) = req_body_capture.as_ref() {
+            capture.set_content_encoding(req_content_encoding.clone());
+        }
+    }
     if streaming_body.is_none() && has_request_body_rules(&resolved_rules) {
         let req_content_type = parts
             .headers
@@ -2842,7 +2848,7 @@ async fn handle_intercepted_request_with_protocol(
                 )
                 .apply_to(&mut pending);
             } else if let Some(ref capture) = req_body_capture {
-                pending.request_body_ref = capture.clone_ref();
+                capture.apply_to(&mut pending);
             }
             if !req_script_results.is_empty() {
                 pending.req_script_results = Some(req_script_results.clone());
@@ -3183,6 +3189,9 @@ async fn handle_intercepted_request_with_protocol(
             .body(full_body(b"Bad Gateway".to_vec()))
             .unwrap());
     }
+    if skip_req_scripts {
+        set_content_encoding_header(outgoing_req.headers_mut(), req_content_encoding.as_deref());
+    }
     sanitize_upstream_headers(outgoing_req.headers_mut());
     outgoing_req.headers_mut().remove(hyper::header::HOST);
 
@@ -3293,7 +3302,7 @@ async fn handle_intercepted_request_with_protocol(
                     )
                     .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                    capture.apply_to(&mut record);
                 }
 
                 record.response_body_ref = if state.get_super_performance_mode() {
@@ -4242,7 +4251,7 @@ async fn handle_intercepted_request_with_protocol(
                     )
                     .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                    capture.apply_to(&mut record);
                 }
 
                 if is_sse && !state.get_super_performance_mode() {
@@ -4462,8 +4471,7 @@ async fn handle_intercepted_request_with_protocol(
                             )
                             .apply_to(&mut record);
                         } else if let Some(ref capture) = req_body_capture {
-                            record.request_body_ref =
-                                capture.clone_ref().or_else(|| capture.take());
+                            capture.apply_to(&mut record);
                         }
                         if !state.get_super_performance_mode() {
                             if let Some(ref body_store) = state.body_store {
@@ -4745,7 +4753,7 @@ async fn handle_intercepted_request_with_protocol(
             )
             .apply_to(&mut record);
         } else if let Some(ref capture) = req_body_capture {
-            record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+            capture.apply_to(&mut record);
         }
 
         if !state.get_super_performance_mode() {
@@ -6447,7 +6455,7 @@ fn record_direct_status_traffic(
         )
         .apply_to(&mut record);
     } else if let Some(capture) = req_body_capture {
-        record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+        capture.apply_to(&mut record);
     }
     record.original_response_headers = Some(mock_res_headers);
     record.has_rule_hit = has_rules;
@@ -10819,6 +10827,7 @@ mod coverage_90_wave {
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let service = service_fn(|request: Request<Incoming>| async move {
+                assert!(!request.headers().contains_key(header::CONTENT_ENCODING));
                 let request_body = request.into_body().collect().await.unwrap().to_bytes();
                 assert_eq!(request_body, Bytes::from_static(b"tunnel-new-body"));
                 let frames = futures_util::stream::iter(vec![
@@ -10892,6 +10901,100 @@ mod coverage_90_wave {
             .is_some_and(|headers| headers.iter().any(|(name, value)| name
                 .eq_ignore_ascii_case("content-encoding")
                 && value == "gzip")));
+    }
+
+    #[tokio::test]
+    async fn intercepted_streaming_rule_added_encoding_is_plaintext_in_search() {
+        use base64::Engine as _;
+        use bifrost_admin::search::{
+            FilterCondition, SearchEngine, SearchFilters, SearchInclude, SearchRequest, SearchScope,
+        };
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19444)
+            .build();
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/streaming-rule-added-encoding"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&upstream)
+            .await;
+
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            req_headers: vec![("content-encoding".to_string(), "gzip".to_string())],
+            ..Default::default()
+        };
+        let plaintext = br#"{"message":"needle-tunnel-528"}"#;
+        let compressed = compress_body(plaintext, "gzip").unwrap();
+        let frames = futures_util::stream::iter(vec![Ok::<_, Infallible>(
+            hyper::body::Frame::data(Bytes::from(compressed)),
+        )]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/streaming-rule-added-encoding")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(StreamBody::new(frames))
+            .unwrap();
+
+        let response =
+            run_intercepted_request(rules, Some(harness.state()), request, 4, 2, true).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(body_bytes(response).await.is_empty());
+
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("streaming traffic record");
+        assert_eq!(
+            record.request_body_content_encoding().as_deref(),
+            Some("gzip")
+        );
+        let stored = harness
+            .body_store
+            .read()
+            .load_bytes(record.request_body_ref.as_ref().expect("request body ref"))
+            .expect("stored request body");
+        assert_eq!(
+            crate::transform::decompress_body_with_limit(&stored, Some("gzip"), 4096).as_ref(),
+            plaintext
+        );
+
+        let search =
+            SearchEngine::new(harness.traffic_db.clone(), Some(harness.body_store.clone()));
+        let result = search.search(&SearchRequest {
+            keyword: "needle-tunnel-528".to_string(),
+            scope: SearchScope {
+                request_body: true,
+                all: false,
+                ..Default::default()
+            },
+            filters: SearchFilters {
+                conditions: vec![FilterCondition {
+                    field: "req.body.$.message".to_string(),
+                    operator: "equals".to_string(),
+                    value: "needle-tunnel-528".to_string(),
+                }],
+                ..Default::default()
+            },
+            include: SearchInclude {
+                request_body: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(result.total_matched, 1);
+        let included = result.results[0]
+            .bodies
+            .as_ref()
+            .and_then(|bodies| bodies.request.as_ref())
+            .expect("included decoded request body");
+        let included = base64::engine::general_purpose::STANDARD
+            .decode(&included.bytes_b64)
+            .expect("base64 request body");
+        assert_eq!(included, plaintext);
     }
 
     #[tokio::test]
@@ -12617,6 +12720,7 @@ mod coverage_90_wave {
         let rules = ResolvedRules {
             host: Some(address.to_string()),
             host_protocol: Some(Protocol::Http),
+            req_headers: vec![("content-encoding".to_string(), "gzip".to_string())],
             req_replace: vec![("old".to_string(), "new".to_string())],
             res_replace: vec![("chunked".to_string(), "new".to_string())],
             ..Default::default()

@@ -182,7 +182,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         request_body = self.rfile.read(length)
-        echo_encoded_body = self.path in ("/stacked-body", "/nested-gzip", "/multi-gzip")
+        echo_encoded_body = self.path in (
+            "/stacked-body",
+            "/nested-gzip",
+            "/multi-gzip",
+            "/rule-added-encoding",
+        )
         body = request_body if echo_encoded_body else b'{"ok":true}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -464,6 +469,7 @@ main() {
     "$BIFROST_BIN" rule add temp-bound -c "temp-only.test status://210 resBody://(temp-bound)"
     "$BIFROST_BIN" rule add main-badge -c "badge-main.test host://127.0.0.1:${HTML_PORT}"
     "$BIFROST_BIN" rule add temp-badge -c "badge-temp.test host://127.0.0.1:${HTML_PORT}"
+    "$BIFROST_BIN" rule add rule-added-encoding -c "http://127.0.0.1:${HTML_PORT}/rule-added-encoding reqHeaders://{\"Content-Encoding\":\"gzip\"}"
     "$BIFROST_BIN" rule disable temp-bound
     "$BIFROST_BIN" rule disable temp-badge
 
@@ -671,13 +677,23 @@ main() {
         "http://127.0.0.1:${HTML_PORT}/multi-gzip" \
         > "${TEST_DATA_DIR}/multi-gzip-response.json"
 
+    local rule_added_encoding_body='{"message":"rule added encoding e2e"}'
+    python3 -c 'import gzip, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(gzip.compress(sys.argv[2].encode()))' \
+        "${TEST_DATA_DIR}/rule-added-encoding-wire.bin" "${rule_added_encoding_body}"
+    curl -fsS --max-time 5 --noproxy '' \
+        -x "http://127.0.0.1:${MAIN_PORT}" \
+        -H 'Content-Type: application/json' \
+        --data-binary "@${TEST_DATA_DIR}/rule-added-encoding-wire.bin" \
+        "http://127.0.0.1:${HTML_PORT}/rule-added-encoding" \
+        > "${TEST_DATA_DIR}/rule-added-encoding-response.bin"
+
     curl -fsS --max-time 35 --noproxy '' \
         -x "http://127.0.0.1:${MAIN_PORT}" \
         "http://127.0.0.1:${HTML_PORT}/gzip-sse" \
         > "${TEST_DATA_DIR}/gzip-sse-response.bin" &
     GZIP_SSE_CURL_PID=$!
 
-    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id nested_gzip_record_id multi_gzip_record_id gzip_sse_record_id
+    local temp_record_id main_record_id direct_temp_record_id direct_main_record_id stacked_record_id nested_gzip_record_id multi_gzip_record_id rule_added_encoding_record_id gzip_sse_record_id
     temp_record_id="$(wait_for_record "/temp-port" "${TEMP_PORT}")"
     main_record_id="$(wait_for_record "/main-port" "${MAIN_PORT}")"
     direct_temp_record_id="$(wait_for_record "/direct-temp" "${TEMP_PORT}")"
@@ -685,11 +701,14 @@ main() {
     stacked_record_id="$(wait_for_record "/stacked-body" "${MAIN_PORT}")"
     nested_gzip_record_id="$(wait_for_record "/nested-gzip" "${MAIN_PORT}")"
     multi_gzip_record_id="$(wait_for_record "/multi-gzip" "${MAIN_PORT}")"
+    rule_added_encoding_record_id="$(wait_for_record "/rule-added-encoding" "${MAIN_PORT}")"
     gzip_sse_record_id="$(wait_for_record "/gzip-sse" "${MAIN_PORT}")"
     assert_traffic_stacked_body_plaintext "${stacked_record_id}" "${stacked_body}"
     assert_traffic_preserves_application_gzip "${nested_gzip_record_id}" "${TEST_DATA_DIR}/application-gzip.bin"
     assert_traffic_stacked_body_plaintext "${multi_gzip_record_id}" "${multi_gzip_body}"
     _log_pass "Traffic request and response decode every concatenated gzip member"
+    assert_traffic_stacked_body_plaintext "${rule_added_encoding_record_id}" "${rule_added_encoding_body}"
+    _log_pass "Traffic body API decodes wire gzip after a request rule adds Content-Encoding"
     assert_body_contains "\"lp\":${TEMP_PORT}" "$(traffic_json)" "Traffic API compact records include temporary listener port"
     assert_body_contains "\"lp\":${MAIN_PORT}" "$(traffic_json)" "Traffic API compact records include main listener port"
     assert_body_contains "\"listener_port\":${TEMP_PORT}" "$(traffic_detail_json "${temp_record_id}")" "Traffic detail includes temporary listener port"
@@ -729,6 +748,9 @@ assert detail["request_body"]["data"] == expected, detail
 assert detail["response_body"]["data"] == expected, detail
 PY
     _log_pass "CLI traffic get decodes content-encoded request and response bodies"
+    "$BIFROST_BIN" traffic get --port "${MAIN_PORT}" "${rule_added_encoding_record_id}" --request-body \
+        > "${TEST_DATA_DIR}/traffic-get-rule-added-encoding.txt"
+    assert_body_contains "rule added encoding e2e" "$(cat "${TEST_DATA_DIR}/traffic-get-rule-added-encoding.txt")" "CLI traffic get text renders rule-added gzip as plaintext"
 
     "$BIFROST_BIN" -p "${MAIN_PORT}" traffic search "hello from stacked encoding e2e" \
         --req-body \
@@ -753,6 +775,28 @@ for side in ("request", "response"):
     assert base64.b64decode(chunk["bytes_b64"], validate=True).decode() == expected_body, (side, chunk)
 PY
     _log_pass "CLI traffic search decodes encoded bodies for keyword, JSON filter, and includes"
+
+    "$BIFROST_BIN" -p "${MAIN_PORT}" traffic search "rule added encoding e2e" \
+        --req-body \
+        --req-json '$.message=rule added encoding e2e' \
+        --include bodies \
+        --format json \
+        --max-results 20 \
+        --max-scan 200 \
+        > "${TEST_DATA_DIR}/traffic-search-rule-added-encoding.json"
+    python3 - "${TEST_DATA_DIR}/traffic-search-rule-added-encoding.json" "${rule_added_encoding_record_id}" "${rule_added_encoding_body}" <<'PY'
+import base64
+import json
+import sys
+
+path, expected_id, expected_body = sys.argv[1:]
+payload = json.load(open(path))
+item = next(item for item in payload["results"] if item["id"] == expected_id)
+assert "rule added encoding e2e" in item["matches"][0]["preview"], item
+request = item["bodies"]["request"]
+assert base64.b64decode(request["bytes_b64"], validate=True).decode() == expected_body, request
+PY
+    _log_pass "CLI search keyword, request JSONPath, and include decode rule-added gzip"
 
     curl -fsS "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/batch?ids=${stacked_record_id}&include=bodies" \
         > "${TEST_DATA_DIR}/traffic-batch-stacked.ndjson"

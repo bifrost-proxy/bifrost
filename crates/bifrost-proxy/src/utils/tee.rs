@@ -469,27 +469,49 @@ pub fn create_metrics_body(
 
 #[derive(Clone)]
 pub struct BodyCaptureHandle {
-    body_ref: Arc<Mutex<Option<BodyRef>>>,
-    content_encoding: Arc<Mutex<Option<String>>>,
+    state: Arc<Mutex<BodyCaptureState>>,
+    admin_state: Option<Arc<AdminState>>,
+    record_id: String,
+}
+
+struct BodyCaptureState {
+    body_ref: Option<BodyRef>,
+    content_encoding: Option<String>,
+    completed: bool,
 }
 
 impl BodyCaptureHandle {
     pub fn take(&self) -> Option<BodyRef> {
-        self.body_ref.lock().ok()?.take()
+        self.state.lock().ok()?.body_ref.take()
     }
 
     pub fn clone_ref(&self) -> Option<BodyRef> {
-        self.body_ref.lock().ok()?.clone()
+        self.state.lock().ok()?.body_ref.clone()
     }
 
-    pub fn set_content_encoding(&self, content_encoding: Option<String>) {
-        if let Ok(mut slot) = self.content_encoding.lock() {
-            *slot = content_encoding;
+    pub fn apply_to(&self, record: &mut bifrost_admin::TrafficRecord) {
+        if let Ok(state) = self.state.lock() {
+            if let Some(body_ref) = state.body_ref.clone() {
+                record.request_body_ref = Some(body_ref);
+                record.set_request_body_content_encoding(state.content_encoding.as_deref());
+            }
         }
     }
 
-    fn content_encoding(&self) -> Option<String> {
-        self.content_encoding.lock().ok()?.clone()
+    pub fn set_content_encoding(&self, content_encoding: Option<String>) {
+        if let Ok(mut capture) = self.state.lock() {
+            capture.content_encoding = content_encoding;
+            if capture.completed {
+                if let Some(ref state) = self.admin_state {
+                    let content_encoding = capture.content_encoding.clone();
+                    state.update_traffic_by_id(&self.record_id, move |record| {
+                        if record.request_body_ref.is_some() {
+                            record.set_request_body_content_encoding(content_encoding.as_deref());
+                        }
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -511,18 +533,19 @@ impl Drop for RequestTeeBodyDropGuard {
                 &self.record_id,
                 "request",
             );
-            if let (Ok(mut slot), Some(body_ref)) = (self.capture.body_ref.lock(), body_ref) {
-                *slot = Some(body_ref);
-            }
-            if let Some(ref state) = self.admin_state {
-                let capture = self.capture.clone();
-                let content_encoding = self.capture.content_encoding();
-                state.update_traffic_by_id(&self.record_id, move |record| {
-                    if let Some(body_ref) = capture.take() {
-                        record.request_body_ref = Some(body_ref);
-                        record.set_request_body_content_encoding(content_encoding.as_deref());
-                    }
-                });
+            if let Ok(mut capture) = self.capture.state.lock() {
+                capture.body_ref = body_ref;
+                capture.completed = true;
+                if let Some(ref state) = self.admin_state {
+                    let body_ref = capture.body_ref.clone();
+                    let content_encoding = capture.content_encoding.clone();
+                    state.update_traffic_by_id(&self.record_id, move |record| {
+                        if let Some(body_ref) = body_ref.clone() {
+                            record.request_body_ref = Some(body_ref);
+                            record.set_request_body_content_encoding(content_encoding.as_deref());
+                        }
+                    });
+                }
             }
         }
     }
@@ -585,8 +608,13 @@ pub fn create_request_tee_body(
     content_encoding: Option<String>,
 ) -> (BoxBody, BodyCaptureHandle) {
     let capture = BodyCaptureHandle {
-        body_ref: Arc::new(Mutex::new(None)),
-        content_encoding: Arc::new(Mutex::new(content_encoding)),
+        state: Arc::new(Mutex::new(BodyCaptureState {
+            body_ref: None,
+            content_encoding,
+            completed: false,
+        })),
+        admin_state: admin_state.clone(),
+        record_id: record_id.clone(),
     };
     if admin_state
         .as_ref()
@@ -600,10 +628,7 @@ pub fn create_request_tee_body(
         admin_state,
         record_id,
         file_writer: None,
-        capture: BodyCaptureHandle {
-            body_ref: capture.body_ref.clone(),
-            content_encoding: capture.content_encoding.clone(),
-        },
+        capture: capture.clone(),
     };
     let body = RequestTeeBody {
         inner: Box::pin(body),
@@ -1586,7 +1611,7 @@ mod tests {
             request.collect().await.unwrap().to_bytes(),
             Bytes::from_static(b"request-body")
         );
-        assert!(capture.clone_ref().or_else(|| capture.take()).is_none());
+        assert!(capture.clone_ref().is_some());
         let response = create_tee_body_with_store(
             crate::server::full_body(Bytes::from_static(b"response-body")),
             Some(state.clone()),
@@ -1633,7 +1658,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_tee_uses_content_encoding_updated_after_creation() {
+    async fn request_tee_persists_content_encoding_updated_after_body_completion() {
         let (state, dir) = test_state_with_body_store("request-encoding-update");
         let record_id = "request-encoding-update";
         state.record_traffic(bifrost_admin::TrafficRecord::new(
@@ -1648,11 +1673,11 @@ mod tests {
             record_id.into(),
             None,
         );
-        capture.set_content_encoding(Some("gzip".to_string()));
         assert_eq!(
             request.collect().await.unwrap().to_bytes(),
             Bytes::from_static(b"gzip-wire-bytes")
         );
+        capture.set_content_encoding(Some("gzip".to_string()));
 
         let record = state
             .traffic_db_store
@@ -1664,6 +1689,46 @@ mod tests {
             record.request_body_content_encoding().as_deref(),
             Some("gzip")
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn request_tee_clears_encoding_without_clearing_completed_body() {
+        let (state, dir) = test_state_with_body_store("request-encoding-clear");
+        let record_id = "request-encoding-clear";
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            record_id.into(),
+            "POST".into(),
+            "https://example.test/".into(),
+        ));
+        let plaintext = Bytes::from_static(b"plain-request-body");
+        let (request, capture) = create_request_tee_body(
+            crate::server::full_body(plaintext.clone()),
+            Some(state.clone()),
+            record_id.into(),
+            Some("gzip".to_string()),
+        );
+        assert_eq!(request.collect().await.unwrap().to_bytes(), plaintext);
+
+        capture.set_content_encoding(None);
+
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .and_then(|store| store.get_by_id(record_id))
+            .expect("traffic record");
+        assert!(record.request_body_ref.is_some());
+        assert_eq!(record.request_body_content_encoding(), None);
+        let stored = state
+            .body_store
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .read()
+                    .load_bytes(record.request_body_ref.as_ref().unwrap())
+            })
+            .expect("stored request body");
+        assert_eq!(stored, plaintext.as_ref());
         let _ = std::fs::remove_dir_all(dir);
     }
 

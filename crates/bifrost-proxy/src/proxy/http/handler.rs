@@ -2239,7 +2239,7 @@ pub async fn handle_http_request(
     let mut skip_req_scripts = false;
     let mut streaming_body: Option<BoxBody> = None;
     let mut req_body_capture: Option<BodyCaptureHandle> = None;
-    let (body_bytes, mut final_body) = if needs_req_body_read {
+    let (_body_bytes, mut final_body) = if needs_req_body_read {
         if let Some(len) = content_length {
             if len > max_body_buffer_size {
                 warn!(
@@ -2471,6 +2471,12 @@ pub async fn handle_http_request(
         }
         (Bytes::new(), Bytes::new())
     };
+    if skip_req_scripts {
+        set_content_encoding_header(&mut parts.headers, req_content_encoding.as_deref());
+        if let Some(capture) = req_body_capture.as_ref() {
+            capture.set_content_encoding(req_content_encoding.clone());
+        }
+    }
     let has_res_scripts = !resolved_rules.res_scripts.is_empty();
     let has_res_stream_scripts = !resolved_rules.res_stream_scripts.is_empty();
     let has_decode_scripts = !resolved_rules.decode_scripts.is_empty();
@@ -2632,7 +2638,7 @@ pub async fn handle_http_request(
                 )
                 .apply_to(&mut pending);
             } else if let Some(ref capture) = req_body_capture {
-                pending.request_body_ref = capture.clone_ref();
+                capture.apply_to(&mut pending);
             }
             state.record_traffic(pending);
         }
@@ -2788,7 +2794,7 @@ pub async fn handle_http_request(
                     )
                     .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                    capture.apply_to(&mut record);
                 } else if state.get_super_performance_mode() {
                     record.request_body_ref = None;
                 } else if let Some(ref body_store) = state.body_store {
@@ -3749,16 +3755,16 @@ pub async fn handle_http_request(
                     }
                 }
 
-                if !body_bytes.is_empty() {
+                if !final_body.is_empty() {
                     store_request_body(
                         &admin_state,
                         record_id,
-                        &body_bytes,
+                        &final_body,
                         final_req_content_encoding.as_deref(),
                     )
                     .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
-                    record.request_body_ref = capture.clone_ref().or_else(|| capture.take());
+                    capture.apply_to(&mut record);
                 }
 
                 if !req_script_results.is_empty() {
@@ -8718,6 +8724,7 @@ mod coverage_90_wave {
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let service = service_fn(|request: Request<Incoming>| async move {
+                assert!(!request.headers().contains_key(header::CONTENT_ENCODING));
                 let request_body = request.into_body().collect().await.unwrap().to_bytes();
                 assert_eq!(request_body, Bytes::from_static(b"stream-new-body"));
                 let frames = futures_util::stream::iter(vec![
@@ -9031,6 +9038,98 @@ mod coverage_90_wave {
             record.request_body_content_encoding().as_deref(),
             Some("gzip")
         );
+    }
+
+    #[tokio::test]
+    async fn plaintext_success_records_rule_encoded_request_for_admin_and_search() {
+        use bifrost_admin::search::{
+            FilterCondition, SearchEngine, SearchFilters, SearchInclude, SearchRequest, SearchScope,
+        };
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19102)
+            .build();
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/rule-added-encoding"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&upstream)
+            .await;
+
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            req_headers: vec![("content-encoding".to_string(), "gzip".to_string())],
+            req_append: Some(Bytes::new()),
+            ..Default::default()
+        };
+        let plaintext = Bytes::from_static(br#"{"message":"needle-528"}"#);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("http://source.test/rule-added-encoding")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, plaintext.len())
+            .body(Full::new(plaintext.clone()))
+            .unwrap();
+
+        let response =
+            run_full_request(rules, Some(harness.state()), request, 4096, 64, true).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response_body(response).await.is_empty());
+
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-handler-coverage")
+            .expect("successful traffic record");
+        assert_eq!(
+            record.request_body_content_encoding().as_deref(),
+            Some("gzip")
+        );
+        let stored = harness
+            .body_store
+            .read()
+            .load_bytes(record.request_body_ref.as_ref().expect("request body ref"))
+            .expect("stored request body");
+        assert_ne!(stored, plaintext.as_ref());
+        assert_eq!(
+            decompress_body_with_limit(&stored, Some("gzip"), 4096).as_ref(),
+            plaintext.as_ref()
+        );
+
+        let search =
+            SearchEngine::new(harness.traffic_db.clone(), Some(harness.body_store.clone()));
+        let result = search.search(&SearchRequest {
+            keyword: "needle-528".to_string(),
+            scope: SearchScope {
+                request_body: true,
+                all: false,
+                ..Default::default()
+            },
+            filters: SearchFilters {
+                conditions: vec![FilterCondition {
+                    field: "req.body.$.message".to_string(),
+                    operator: "equals".to_string(),
+                    value: "needle-528".to_string(),
+                }],
+                ..Default::default()
+            },
+            include: SearchInclude {
+                request_body: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(result.total_matched, 1);
+        let included = result.results[0]
+            .bodies
+            .as_ref()
+            .and_then(|bodies| bodies.request.as_ref())
+            .expect("included decoded request body");
+        let included = base64::engine::general_purpose::STANDARD
+            .decode(&included.bytes_b64)
+            .expect("base64 request body");
+        assert_eq!(included, plaintext.as_ref());
     }
 
     #[tokio::test]
@@ -10156,6 +10255,7 @@ mod coverage_90_wave {
         let rules = ResolvedRules {
             host: Some(address.to_string()),
             host_protocol: Some(Protocol::Http),
+            req_headers: vec![("content-encoding".to_string(), "gzip".to_string())],
             req_replace: vec![("old".to_string(), "new".to_string())],
             res_replace: vec![("chunked".to_string(), "new".to_string())],
             ..Default::default()
