@@ -9000,16 +9000,20 @@ mod coverage_90_wave {
         let rules = ResolvedRules {
             host: Some(unavailable.to_string()),
             host_protocol: Some(Protocol::Http),
+            req_headers: vec![("content-encoding".to_string(), "gzip".to_string())],
+            req_append: Some(Bytes::new()),
             replace_status: Some(520),
             res_body: Some(Bytes::from_static(b"handler-connect-error")),
             res_headers: vec![("x-handler-error".to_string(), "overridden".to_string())],
             ..Default::default()
         };
+        let body = Bytes::from_static(b"handler-request");
         let request = Request::builder()
-            .method(Method::GET)
+            .method(Method::POST)
             .uri("http://source.test/unavailable")
             .header(header::HOST, "source.test")
-            .body(Full::new(Bytes::new()))
+            .header(header::CONTENT_LENGTH, body.len())
+            .body(Full::new(body))
             .unwrap();
         let response =
             run_full_request(rules, Some(harness.state()), request, 1024, 64, true).await;
@@ -9018,6 +9022,14 @@ mod coverage_90_wave {
         assert_eq!(
             response_body(response).await,
             Bytes::from_static(b"handler-connect-error")
+        );
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-handler-coverage")
+            .expect("connection failure traffic record");
+        assert_eq!(
+            record.request_body_content_encoding().as_deref(),
+            Some("gzip")
         );
     }
 

@@ -10842,6 +10842,9 @@ mod coverage_90_wave {
 
     #[tokio::test]
     async fn intercepted_status_covers_request_and_response_body_pipelines() {
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19443)
+            .build();
         let rules = ResolvedRules {
             status_code: Some(213),
             req_prepend: Some(Bytes::from_static(b"pre-")),
@@ -10851,35 +10854,44 @@ mod coverage_90_wave {
             res_replace: vec![("old".to_string(), "new".to_string())],
             res_append: Some(Bytes::from_static(b"-tail")),
             method: Some("PUT".to_string()),
-            req_headers: vec![("X-Tunnel-Request".to_string(), "yes".to_string())],
+            req_headers: vec![
+                ("X-Tunnel-Request".to_string(), "yes".to_string()),
+                ("content-encoding".to_string(), "gzip".to_string()),
+            ],
             res_headers: vec![("X-Tunnel-Response".to_string(), "yes".to_string())],
             ..Default::default()
         };
+        let compressed = compress_body(b"old-body", "gzip").unwrap();
+        let frames = futures_util::stream::iter(vec![Ok::<_, Infallible>(
+            hyper::body::Frame::data(Bytes::from(compressed)),
+        )]);
         let request = Request::builder()
             .method(Method::POST)
             .uri("/status?one=1&two=2")
             .header(header::HOST, "source.test")
             .header(header::CONTENT_TYPE, "text/plain")
-            .header(header::CONTENT_LENGTH, "8")
             .header(header::COOKIE, "a=1")
             .header(header::COOKIE, "b=2")
-            .body(Full::new(Bytes::from_static(b"old-body")))
+            .body(StreamBody::new(frames))
             .unwrap();
-        let response = run_intercepted_request(
-            rules,
-            Some(Arc::new(AdminState::new(19443))),
-            request,
-            1024,
-            64,
-            true,
-        )
-        .await;
+        let response =
+            run_intercepted_request(rules, Some(harness.state()), request, 4, 2, true).await;
         assert_eq!(response.status().as_u16(), 213);
         assert_eq!(response.headers()["x-tunnel-response"], "yes");
         assert_eq!(
             body_bytes(response).await,
             Bytes::from_static(b"new-response-tail")
         );
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("direct status traffic record");
+        assert!(record
+            .request_headers
+            .as_ref()
+            .is_some_and(|headers| headers.iter().any(|(name, value)| name
+                .eq_ignore_ascii_case("content-encoding")
+                && value == "gzip")));
     }
 
     #[tokio::test]
@@ -11503,16 +11515,20 @@ mod coverage_90_wave {
         let rules = ResolvedRules {
             host: Some(unavailable.to_string()),
             host_protocol: Some(Protocol::Http),
+            req_headers: vec![("content-encoding".to_string(), "gzip".to_string())],
+            req_append: Some(Bytes::new()),
             replace_status: Some(521),
             res_body: Some(Bytes::from_static(b"tunnel-connect-error")),
             res_headers: vec![("x-tunnel-error".into(), "overridden".into())],
             ..Default::default()
         };
+        let body = Bytes::from_static(b"tunnel-request");
         let request = Request::builder()
-            .method(Method::GET)
+            .method(Method::POST)
             .uri("/unavailable")
             .header(header::HOST, "source.test")
-            .body(Full::new(Bytes::new()))
+            .header(header::CONTENT_LENGTH, body.len())
+            .body(Full::new(body))
             .unwrap();
         let response =
             run_intercepted_request(rules, Some(harness.state()), request, 4096, 64, true).await;
@@ -11527,6 +11543,10 @@ mod coverage_90_wave {
             .get_by_id("REQ-tunnel-coverage")
             .expect("connection failure traffic record");
         assert_eq!(record.status, 521);
+        assert_eq!(
+            record.request_body_content_encoding().as_deref(),
+            Some("gzip")
+        );
     }
 
     #[tokio::test]
