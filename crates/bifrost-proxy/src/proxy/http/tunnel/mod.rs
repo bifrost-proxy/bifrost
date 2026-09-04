@@ -2513,7 +2513,7 @@ async fn handle_intercepted_request_with_protocol(
                         body,
                         admin_state.clone(),
                         req_id.to_string(),
-                        req_content_encoding.clone(),
+                        output_req_content_encoding.clone(),
                     );
                     streaming_body = Some(tee_body);
                     req_body_capture = Some(capture);
@@ -2556,7 +2556,7 @@ async fn handle_intercepted_request_with_protocol(
                                 replay_body,
                                 admin_state.clone(),
                                 req_id.to_string(),
-                                req_content_encoding.clone(),
+                                output_req_content_encoding.clone(),
                             );
                             streaming_body = Some(tee_body);
                             req_body_capture = Some(capture);
@@ -2609,7 +2609,7 @@ async fn handle_intercepted_request_with_protocol(
                             replay_body,
                             admin_state.clone(),
                             req_id.to_string(),
-                            req_content_encoding.clone(),
+                            output_req_content_encoding.clone(),
                         );
                         streaming_body = Some(tee_body);
                         req_body_capture = Some(capture);
@@ -2651,7 +2651,7 @@ async fn handle_intercepted_request_with_protocol(
                 body,
                 admin_state.clone(),
                 req_id.to_string(),
-                req_content_encoding.clone(),
+                output_req_content_encoding.clone(),
             );
             streaming_body = Some(tee_body);
             req_body_capture = Some(capture);
@@ -2837,7 +2837,8 @@ async fn handle_intercepted_request_with_protocol(
                     &admin_state,
                     req_id,
                     &body_bytes,
-                    req_content_encoding.as_deref(),
+                    get_content_encoding(pending.request_headers.as_deref().unwrap_or_default())
+                        .as_deref(),
                 )
                 .apply_to(&mut pending);
             } else if let Some(ref capture) = req_body_capture {
@@ -3038,6 +3039,10 @@ async fn handle_intercepted_request_with_protocol(
 
             if let Some(ref state) = admin_state {
                 let final_req_headers = super::handler::headers_to_pairs(&parts.headers);
+                let final_req_content_encoding = get_content_encoding(&final_req_headers);
+                if let Some(ref capture) = req_body_capture {
+                    capture.set_content_encoding(final_req_content_encoding.clone());
+                }
                 record_direct_status_traffic(
                     state,
                     req_id,
@@ -3051,7 +3056,7 @@ async fn handle_intercepted_request_with_protocol(
                     &final_req_headers,
                     &original_req_headers,
                     &body_bytes,
-                    req_content_encoding.as_deref(),
+                    final_req_content_encoding.as_deref(),
                     &req_body_capture,
                     response_body,
                     &req_script_results,
@@ -3182,6 +3187,10 @@ async fn handle_intercepted_request_with_protocol(
     outgoing_req.headers_mut().remove(hyper::header::HOST);
 
     let final_req_headers: Vec<(String, String)> = super::headers_to_pairs(outgoing_req.headers());
+    let final_req_content_encoding = get_content_encoding(&final_req_headers);
+    if let Some(ref capture) = req_body_capture {
+        capture.set_content_encoding(final_req_content_encoding.clone());
+    }
 
     if let Some(delay_ms) = resolved_rules.req_delay {
         if verbose_logging {
@@ -3280,7 +3289,7 @@ async fn handle_intercepted_request_with_protocol(
                         &admin_state,
                         req_id,
                         &body_bytes,
-                        req_content_encoding.as_deref(),
+                        final_req_content_encoding.as_deref(),
                     )
                     .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
@@ -4229,7 +4238,7 @@ async fn handle_intercepted_request_with_protocol(
                         &admin_state,
                         &record_id,
                         &body_bytes,
-                        req_content_encoding.as_deref(),
+                        final_req_content_encoding.as_deref(),
                     )
                     .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
@@ -4449,7 +4458,7 @@ async fn handle_intercepted_request_with_protocol(
                                 &admin_state,
                                 req_id,
                                 &body_bytes,
-                                req_content_encoding.as_deref(),
+                                final_req_content_encoding.as_deref(),
                             )
                             .apply_to(&mut record);
                         } else if let Some(ref capture) = req_body_capture {
@@ -4732,7 +4741,7 @@ async fn handle_intercepted_request_with_protocol(
                 &admin_state,
                 req_id,
                 &body_bytes,
-                req_content_encoding.as_deref(),
+                final_req_content_encoding.as_deref(),
             )
             .apply_to(&mut record);
         } else if let Some(ref capture) = req_body_capture {

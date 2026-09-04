@@ -2254,7 +2254,7 @@ pub async fn handle_http_request(
                         body,
                         admin_state.clone(),
                         ctx.id_str().to_string(),
-                        req_content_encoding.clone(),
+                        output_req_content_encoding.clone(),
                     );
                     streaming_body = Some(tee_body);
                     req_body_capture = Some(capture);
@@ -2324,7 +2324,7 @@ pub async fn handle_http_request(
                                 replay_body,
                                 admin_state.clone(),
                                 ctx.id_str().to_string(),
-                                req_content_encoding.clone(),
+                                output_req_content_encoding.clone(),
                             );
                             streaming_body = Some(tee_body);
                             req_body_capture = Some(capture);
@@ -2403,7 +2403,7 @@ pub async fn handle_http_request(
                             replay_body,
                             admin_state.clone(),
                             ctx.id_str().to_string(),
-                            req_content_encoding.clone(),
+                            output_req_content_encoding.clone(),
                         );
                         streaming_body = Some(tee_body);
                         req_body_capture = Some(capture);
@@ -2462,7 +2462,7 @@ pub async fn handle_http_request(
                 body,
                 admin_state.clone(),
                 ctx.id_str().to_string(),
-                req_content_encoding.clone(),
+                output_req_content_encoding.clone(),
             );
             streaming_body = Some(tee_body);
             req_body_capture = Some(capture);
@@ -2628,7 +2628,7 @@ pub async fn handle_http_request(
                     &admin_state,
                     ctx.id_str(),
                     &final_body,
-                    output_req_content_encoding.as_deref(),
+                    header_content_encoding(&parts.headers).as_deref(),
                 )
                 .apply_to(&mut pending);
             } else if let Some(ref capture) = req_body_capture {
@@ -2681,6 +2681,10 @@ pub async fn handle_http_request(
     }
 
     let req_headers = headers_to_pairs(&parts.headers);
+    let final_req_content_encoding = header_content_encoding(&parts.headers);
+    if let Some(ref capture) = req_body_capture {
+        capture.set_content_encoding(final_req_content_encoding.clone());
+    }
 
     let mut req_headers_hashmap_cache: Option<HashMap<String, String>> = None;
     let request_body_size = if !final_body.is_empty() {
@@ -2780,7 +2784,7 @@ pub async fn handle_http_request(
                         &admin_state,
                         ctx.id_str(),
                         &final_body,
-                        req_content_encoding.as_deref(),
+                        final_req_content_encoding.as_deref(),
                     )
                     .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
@@ -2791,7 +2795,7 @@ pub async fn handle_http_request(
                     let store = body_store.read();
                     let decompressed_req_body = decompress_body_with_limit(
                         &final_body,
-                        req_content_encoding.as_deref(),
+                        final_req_content_encoding.as_deref(),
                         max_decompress_output_bytes,
                     );
                     record.request_body_ref =
@@ -2801,7 +2805,7 @@ pub async fn handle_http_request(
                         &admin_state,
                         ctx.id_str(),
                         &final_body,
-                        req_content_encoding.as_deref(),
+                        final_req_content_encoding.as_deref(),
                     )
                     .apply_to(&mut record);
                 }
@@ -3750,7 +3754,7 @@ pub async fn handle_http_request(
                         &admin_state,
                         record_id,
                         &body_bytes,
-                        req_content_encoding.as_deref(),
+                        final_req_content_encoding.as_deref(),
                     )
                     .apply_to(&mut record);
                 } else if let Some(ref capture) = req_body_capture {
@@ -4415,7 +4419,7 @@ pub async fn handle_http_request(
 
                 let decompressed_req_body = decompress_body_with_limit(
                     &final_body,
-                    req_content_encoding.as_deref(),
+                    final_req_content_encoding.as_deref(),
                     max_decompress_output_bytes,
                 );
                 let raw_req_body = decompressed_req_body.clone();
