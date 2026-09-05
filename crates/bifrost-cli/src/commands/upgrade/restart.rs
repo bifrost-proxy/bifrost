@@ -174,7 +174,26 @@ pub(super) fn cli_owns_runtime_restart(runtime_info: Option<&RuntimeInfo>) -> bo
 pub(super) fn maybe_restart_running_proxy_after_windows_deferred_install(
     deferred_install: WindowsDeferredInstall,
     restart_proxy: bool,
+    expected_cli_port: Option<u16>,
 ) -> Result<(), BifrostError> {
+    let staged_binary = deferred_install.staged_binary.clone();
+    let result = restart_proxy_after_windows_deferred_install(
+        deferred_install,
+        restart_proxy,
+        expected_cli_port,
+    );
+    cleanup_staged_binary_after_schedule(&staged_binary, result)
+}
+
+#[cfg(windows)]
+fn restart_proxy_after_windows_deferred_install(
+    deferred_install: WindowsDeferredInstall,
+    restart_proxy: bool,
+    expected_cli_port: Option<u16>,
+) -> Result<(), BifrostError> {
+    if let Some(port) = expected_cli_port {
+        live_cli_runtime_for_handoff(port)?;
+    }
     let data_dir = get_bifrost_dir()?;
     let runtime_info = read_runtime_info();
     if !restart_proxy || !cli_owns_runtime_restart(runtime_info.as_ref()) {
@@ -193,6 +212,11 @@ pub(super) fn maybe_restart_running_proxy_after_windows_deferred_install(
     };
 
     let Some(pid) = pid else {
+        if expected_cli_port.is_some() {
+            return Err(BifrostError::Config(
+                "CLI owner exited during upgrade; refusing Desktop continuation".to_string(),
+            ));
+        }
         stop_tray_helper_before_windows_deferred_install(&data_dir);
         schedule_windows_deferred_install(deferred_install, None)?;
         println!(
@@ -688,6 +712,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$postRestartDesktop = $env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL
+Remove-Item Env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL -ErrorAction SilentlyContinue
+$expectedCliPort = $env:BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL
+Remove-Item Env:BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL -ErrorAction SilentlyContinue
 function Write-UpgradeLog([string]$Message) {
   $timestamp = (Get-Date).ToString("o")
   Add-Content -LiteralPath $LogPath -Value "$timestamp $Message"
@@ -867,6 +895,19 @@ try {
       if ($child.ExitCode -ne 0) {
         throw "restart command exited with code $($child.ExitCode)"
       }
+    }
+  }
+
+  if ($postRestartDesktop) {
+    $env:BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL = $expectedCliPort
+    $env:BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL = if ($postRestartDesktop -eq "required") { "1" } else { "0" }
+    $env:BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART = "1"
+    $env:BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION = $TargetVersion
+    $env:BIFROST_EXTERNAL_CLI_WORKER = "0"
+    Write-UpgradeLog "CLI restart ready; updating Desktop companion"
+    & $TargetPath upgrade
+    if ($LASTEXITCODE -ne 0) {
+      throw "Desktop companion exited with code $LASTEXITCODE"
     }
   }
 
@@ -1156,18 +1197,37 @@ pub(super) fn build_restart_args(
     args
 }
 
+pub(super) fn live_cli_runtime_for_handoff(port: u16) -> Result<RuntimeInfo, BifrostError> {
+    read_runtime_info()
+        .filter(|runtime| runtime.port == port && cli_owns_runtime_restart(Some(runtime)))
+        .filter(|runtime| {
+            crate::process::discover_bifrost_runtime(port)
+                .is_some_and(|observed| observed.pid == runtime.pid)
+        })
+        .ok_or_else(|| BifrostError::Config(format!(
+            "CLI owner on port {port} disappeared or changed during upgrade; refusing Desktop continuation"
+        )))
+}
+
 pub(super) fn update_desktop_companion(
     executable: &Path,
     target_version: &str,
     behavior: UpgradeBehavior,
 ) -> Result<(), BifrostError> {
+    // Capture the verified restarted owner once. If it exits after this point,
+    // its explicit CLI handoff must still prevent Desktop from taking over.
+    let runtime = behavior
+        .expected_cli_port
+        .map(live_cli_runtime_for_handoff)
+        .transpose()?;
     if !behavior.update_desktop_app {
         return Ok(());
     }
+    let result = update_desktop_app_with_runtime(executable, target_version, runtime);
     if behavior.require_desktop_app_update {
-        update_desktop_app_after_upgrade(executable, target_version)
+        result
     } else {
-        update_desktop_app_after_upgrade_best_effort(executable, target_version);
+        report_desktop_app_update_best_effort(result);
         Ok(())
     }
 }

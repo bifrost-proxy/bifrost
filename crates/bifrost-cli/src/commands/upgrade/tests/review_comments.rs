@@ -398,6 +398,10 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
     );
     for contract in [
         "windows_deferred_desktop_companion_executable(&deferred_install)",
+        "BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL = if ($postRestartDesktop -eq \"required\")",
+        "Remove-Item Env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL",
+        "Remove-Item Env:BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL",
+        "$env:BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL = $expectedCliPort",
         "stop_tray_helper_before_windows_deferred_install(&data_dir);",
         "Wait-TargetPathWritable $TargetPath 120",
         "function Invoke-FileOperationWithRetry",
@@ -623,4 +627,22 @@ fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
         Path::new(r"C:\Users\Eden\Bifrost.exe"),
         Path::new("c:/users/eden/bifrost.exe"),
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn vanished_windows_owner_removes_pending_executable_before_scheduling() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let pending = temp.path().join(".bifrost.exe.pending.123");
+    fs::write(&pending, b"staged replacement").unwrap();
+    let install = WindowsDeferredInstall {
+        staged_binary: pending.clone(),
+        target_path: temp.path().join("bifrost.exe"),
+        target_version: "0.0.190".to_string(),
+    };
+    let error = maybe_restart_running_proxy_after_windows_deferred_install(install, true, Some(0))
+        .expect_err("missing frozen owner must fail before scheduling");
+    assert!(error.to_string().contains("disappeared or changed"));
+    assert!(!pending.exists());
 }

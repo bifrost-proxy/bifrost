@@ -26,12 +26,11 @@ use super::{
     write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendRecoveryBudget,
     BackendSignalSnapshot, BackendState, BackendSystemIdentity, BackendWaitFailureKind,
     BackendWatchdogHealth, DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker,
-    DesktopShutdownBackendAction, DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff,
-    HostWindowCloseBehavior, PendingDesktopInstall, StartupDeadlineDisposition,
-    SustainedReadinessAction, WatchdogProbeDisposition, BACKEND_WATCHDOG_MAX_RECOVERIES,
-    BACKEND_WATCHDOG_RECOVERY_WINDOW, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV,
-    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    DesktopShutdownBackendAction, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
+    PendingDesktopInstall, StartupDeadlineDisposition, SustainedReadinessAction,
+    WatchdogProbeDisposition, BACKEND_WATCHDOG_MAX_RECOVERIES, BACKEND_WATCHDOG_RECOVERY_WINDOW,
+    DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
+    DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 #[cfg(target_os = "macos")]
 use super::{macos_menu_action, MacosMenuAction, MACOS_APP_QUIT_MENU_ID};
@@ -864,7 +863,7 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
 }
 
 #[test]
-fn cli_owned_upgrade_relaunch_falls_back_to_managed_core_when_port_is_free() {
+fn cli_owned_upgrade_relaunch_refuses_takeover_when_port_is_free() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
     let target_port = listener.local_addr().expect("reserved addr").port();
@@ -891,25 +890,15 @@ fn cli_owned_upgrade_relaunch_falls_back_to_managed_core_when_port_is_free() {
         Some(&marker),
         Duration::ZERO,
     )
-    .expect_err("missing bundled binary should fail after taking the fallback path");
-
-    assert!(
-        started_at.elapsed() < Duration::from_secs(2),
-        "fallback should not wait for the normal upgrade handoff release once the port is free"
-    );
-    assert!(
-        error.to_string().contains("failed to start backend"),
-        "expected managed-core launch path, got: {error}"
-    );
-    assert!(
-        !error
-            .to_string()
-            .contains("CLI-owned backend did not restart"),
-        "free port should not keep the App trapped in CLI-owned handoff refusal"
-    );
-    let bootstrap_log =
-        fs::read_to_string(temp_dir.path().join("logs/desktop-bootstrap.log")).expect("log");
-    assert!(bootstrap_log.contains("port is free, launching desktop-managed core"));
+    .expect_err("CLI failure must not launch a Desktop core");
+    assert!(started_at.elapsed() < Duration::from_secs(2));
+    assert!(error
+        .to_string()
+        .contains("CLI-owned backend did not restart"));
+    assert!(!temp_dir
+        .path()
+        .join("logs/desktop-sidecar.out.log")
+        .exists());
 }
 
 #[test]
@@ -943,7 +932,7 @@ fn cli_owned_upgrade_relaunch_keeps_refusing_when_port_is_still_occupied() {
     drop(listener);
     assert!(error
         .to_string()
-        .contains("port is still occupied, refusing to launch a second desktop-managed core"));
+        .contains("refusing to launch a desktop-managed core"));
 }
 
 #[cfg(target_os = "macos")]
@@ -1372,4 +1361,36 @@ fn desktop_quit_rejects_failed_backend_stop_helper() {
     let error = wait_for_backend_stop_helper(&mut child, Duration::from_secs(1))
         .expect_err("failed stop helper must keep Desktop alive");
     assert!(error.to_string().contains("status"));
+}
+
+#[cfg(unix)]
+mod upgrade_owner;
+
+#[test]
+fn failed_child_cleanup_is_idempotent_after_exit() {
+    #[cfg(windows)]
+    let mut child = Command::new("cmd").args(["/C", "exit 7"]).spawn().unwrap();
+    #[cfg(not(windows))]
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .spawn()
+        .unwrap();
+    let original = child.wait().unwrap();
+    let cleaned = super::kill_child_and_wait(&mut child, Duration::from_secs(1)).unwrap();
+    assert_eq!(cleaned.code(), original.code());
+    super::terminate_child(child).expect("already-reaped child needs no further cleanup");
+}
+
+#[test]
+fn failed_child_cleanup_stops_a_live_child() {
+    #[cfg(windows)]
+    let mut child = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+        .spawn()
+        .unwrap();
+    #[cfg(not(windows))]
+    let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let status = super::kill_child_and_wait(&mut child, Duration::from_secs(2)).unwrap();
+    assert!(!status.success());
+    assert!(child.try_wait().unwrap().is_some());
 }

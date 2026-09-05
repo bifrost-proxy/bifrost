@@ -52,7 +52,6 @@ pub(super) fn ensure_backend_running_with_cli_wait(
         ),
     );
 
-    let mut fallback_from_external_cli_handoff = false;
     if let Some(marker) =
         upgrade_relaunch.filter(|marker| upgrade_relaunch_uses_external_cli_backend(marker))
     {
@@ -63,12 +62,9 @@ pub(super) fn ensure_backend_running_with_cli_wait(
                 "previous CLI-owned handoff already failed; retrying recovery without another wait",
             );
         }
-        match resolve_external_cli_backend_handoff(data_dir, marker, effective_wait)? {
-            ExternalCliBackendHandoff::Reuse(port) => return Ok((None, port)),
-            ExternalCliBackendHandoff::StartManagedFallback => {
-                fallback_from_external_cli_handoff = true;
-            }
-        }
+        let ExternalCliBackendHandoff::Reuse(port) =
+            resolve_external_cli_backend_handoff(data_dir, marker, effective_wait)?;
+        return Ok((None, port));
     }
 
     if upgrade_relaunch.is_none() {
@@ -80,25 +76,14 @@ pub(super) fn ensure_backend_running_with_cli_wait(
             return Ok((None, port));
         }
     } else if let Some(marker) = upgrade_relaunch {
-        if fallback_from_external_cli_handoff {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!(
-                    "desktop upgrade handoff fallback will start a managed backend on port {}",
-                    marker.proxy_port
-                ),
-            );
-        }
         append_desktop_bootstrap_log(
             data_dir,
             format!(
-                "desktop upgrade handoff is active; skipping existing backend reuse on port {}",
+                "desktop upgrade handoff is active; preserving port {}",
                 marker.proxy_port
             ),
         );
-        if !fallback_from_external_cli_handoff {
-            wait_for_upgrade_handoff_release(data_dir, marker);
-        }
+        wait_for_upgrade_handoff_release(data_dir, marker);
     }
 
     cleanup_existing_backend(binary_path, data_dir)?;
@@ -107,9 +92,10 @@ pub(super) fn ensure_backend_running_with_cli_wait(
         binary_path,
         data_dir,
         startup_session_id,
-        preferred_port,
+        upgrade_relaunch.map_or(preferred_port, |marker| marker.proxy_port),
+        upgrade_relaunch.is_none(),
     )?;
-    Ok((Some(child), port))
+    Ok((child, port))
 }
 
 pub(super) fn bootstrap_desktop_backend(app: &AppHandle) {
@@ -509,7 +495,32 @@ pub(super) fn mark_backend_unavailable_for_manual_start(state: &BackendState, re
     }
 }
 
+pub(super) fn refresh_upgrade_relaunch(
+    state: &BackendState,
+) -> Option<DesktopUpgradeRelaunchMarker> {
+    let mut cached = state.upgrade_relaunch.lock().ok()?;
+    if cached
+        .as_ref()
+        .is_some_and(|marker| !is_upgrade_relaunch_marker_active(marker, current_time_millis()))
+    {
+        // Re-read before discarding so a newer on-disk handoff is preserved.
+        *cached = read_active_upgrade_relaunch_marker(&state.data_dir);
+    }
+    let marker = cached.clone();
+    drop(cached);
+    if let Some(marker) = marker
+        .as_ref()
+        .filter(|marker| upgrade_relaunch_uses_external_cli_backend(marker))
+    {
+        if let Ok(mut port) = state.port.lock() {
+            *port = marker.proxy_port;
+        }
+    }
+    marker
+}
+
 pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason: &str) -> bool {
+    let upgrade_relaunch = refresh_upgrade_relaunch(state);
     let Ok(current_port) = state.port.lock().map(|port| *port) else {
         return false;
     };
@@ -517,11 +528,6 @@ pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason:
         return false;
     }
 
-    let upgrade_relaunch = state
-        .upgrade_relaunch
-        .lock()
-        .ok()
-        .and_then(|marker| marker.clone());
     if let Some(marker) = upgrade_relaunch
         .as_ref()
         .filter(|marker| upgrade_relaunch_uses_external_cli_backend(marker))
@@ -694,11 +700,7 @@ pub(super) fn start_desktop_backend_now(
         .lock()
         .map_err(|_| "failed to read desktop expected proxy port".to_string())?;
 
-    let upgrade_relaunch = state
-        .upgrade_relaunch
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone());
+    let upgrade_relaunch = refresh_upgrade_relaunch(&state);
 
     match ensure_backend_running(
         &state.binary_path,
@@ -953,12 +955,20 @@ pub(super) fn kill_child_and_wait(
     child: &mut Child,
     timeout: Duration,
 ) -> std::io::Result<ExitStatus> {
-    child.kill().map_err(|error| {
-        std::io::Error::new(
+    // Windows may reject kill() after try_wait() has already reaped the child.
+    // Also tolerate an exit racing with kill(), while preserving real failures.
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    if let Err(error) = child.kill() {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        return Err(std::io::Error::new(
             error.kind(),
             format!("process pid={} could not be killed: {error}", child.id()),
-        )
-    })?;
+        ));
+    }
 
     let kill_deadline = Instant::now() + timeout;
     while Instant::now() < kill_deadline {
@@ -1303,10 +1313,11 @@ pub(super) fn restart_backend_on_port(
         &state.data_dir,
         &state.startup_session_id,
         expected_port,
+        true,
     )?;
 
     if let Ok(mut child_guard) = state.child.lock() {
-        *child_guard = Some(child);
+        *child_guard = child;
     }
 
     publish_startup_ready(state);
