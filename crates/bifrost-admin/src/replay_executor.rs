@@ -19,6 +19,7 @@ use tokio::sync::Semaphore;
 use tokio_rustls::TlsConnector;
 use tracing::{error, info, warn};
 
+use crate::replay_content_encoding::normalize_plaintext_body_headers;
 use crate::replay_db::{ReplayHistory, RuleConfig, RuleMode, MAX_CONCURRENT_REPLAYS};
 use crate::replay_scripts::{
     apply_replay_decode_scripts, collect_script_rules, execute_replay_request_scripts,
@@ -171,6 +172,8 @@ impl ReplayExecutor {
             )
             .await;
         }
+
+        normalize_plaintext_body_headers(&mut applied_request.headers);
 
         info!(
             replay_id = %replay_id,

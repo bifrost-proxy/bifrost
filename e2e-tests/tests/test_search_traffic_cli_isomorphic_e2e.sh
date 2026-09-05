@@ -31,6 +31,7 @@ HEADER_MARKER=""
 POST_ID=""
 POST_SEQ=""
 PUT_ID=""
+GZIP_POST_ID=""
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -187,6 +188,12 @@ seed_traffic() {
     env NO_PROXY="" no_proxy="" curl -sf --proxy "http://127.0.0.1:${PROXY_PORT}" \
         -X PUT -d "marker=${BODY_MARKER}" \
         "http://localhost:${HTTP_PORT}/put" >/dev/null
+    printf '%s' "{\"limit\":1,\"marker\":\"${BODY_MARKER}\"}" | gzip -c | \
+        env NO_PROXY="" no_proxy="" curl -sf --proxy "http://127.0.0.1:${PROXY_PORT}" \
+            -H "Content-Type: application/json" \
+            -H "Content-Encoding: gzip" \
+            --data-binary @- \
+            "http://localhost:${HTTP_PORT}/compressed-request" >/dev/null
     env NO_PROXY="" no_proxy="" curl -sf --proxy "http://127.0.0.1:${PROXY_PORT}" \
         -X DELETE "http://localhost:${HTTP_PORT}/delete?marker=${SEARCH_MARKER}" >/dev/null
     env NO_PROXY="" no_proxy="" curl -skf --proxy "http://127.0.0.1:${PROXY_PORT}" \
@@ -198,13 +205,13 @@ seed_traffic() {
     local total=0
     for _ in $(seq 1 50); do
         total="$(admin_get "/traffic?limit=1" | jq -r '.total // 0' 2>/dev/null || echo 0)"
-        if [[ "$total" -ge 8 ]]; then
+        if [[ "$total" -ge 9 ]]; then
             break
         fi
         sleep 0.2
     done
 
-    if [[ "$total" -lt 8 ]]; then
+    if [[ "$total" -lt 9 ]]; then
         echo "expected traffic records were not captured" >&2
         exit 1
     fi
@@ -240,6 +247,18 @@ seed_traffic() {
     ')"
     [[ -n "$PUT_ID" ]] || {
         echo "failed to locate PUT traffic record" >&2
+        exit 1
+    }
+
+    GZIP_POST_ID="$(admin_get "/traffic?limit=50" | jq -r '
+        (.records // [])
+        | map(select(((.method // .m // "") | ascii_downcase) == "post" and ((.path // .p // "") | contains("/compressed-request"))))
+        | sort_by(.seq // .sequence // 0)
+        | last
+        | .id // empty
+    ')"
+    [[ -n "$GZIP_POST_ID" ]] || {
+        echo "failed to locate gzip POST traffic record" >&2
         exit 1
     }
 }
@@ -522,6 +541,17 @@ test_traffic_replay_failure_exit_code() {
     assert_text_contains "$replay_output" "Replay failed:" "traffic replay error summary includes Replay failed"
 }
 
+test_traffic_replay_compressed_json_patch() {
+    header "Local compressed traffic replay JSON Patch regression"
+    local replay_output response_body
+
+    replay_output="$(run_cli traffic replay "$GZIP_POST_ID" --patch '/limit=5' --format json)"
+    assert_json_expr "$replay_output" '.success == true and .data.response.status == 200' "traffic replay patches gzip JSON successfully"
+
+    response_body="$(printf '%s' "$replay_output" | jq -r '.data.response.body_b64' | base64 --decode)"
+    assert_json_expr "$response_body" '.content_encoding == "gzip" and .json.limit == 5 and (.json.marker | startswith("iso-body-"))' "upstream receives re-compressed patched JSON with gzip header"
+}
+
 test_traffic_clear_commands() {
     header "Local traffic clear coverage"
     local before after delete_output clear_output
@@ -566,6 +596,7 @@ main() {
     test_search_interactive_modes
     test_traffic_list_matrix
     test_traffic_get_and_tty
+    test_traffic_replay_compressed_json_patch
     test_traffic_replay_failure_exit_code
     test_traffic_clear_commands
 

@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use crate::replay_content_encoding::{content_encoding_value, encode_content_encoded_body};
+
 // ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
@@ -610,7 +612,8 @@ pub fn apply_refresh_auth(
 /// 重放一个请求。
 ///
 /// 步骤：
-/// 1. 如 patch_json 非空，把 body 当 JSON 解析后应用 patch；非 JSON 时返回错误。
+/// 1. 如 patch_json 非空，先按 Content-Encoding 严格解压，再把明文 body 当 JSON 解析并
+///    应用 patch，最后按原编码链重新压缩；非 JSON、未知编码或损坏压缩流均返回错误。
 /// 2. 移除 Bifrost 控制类 / hop-by-hop / Content-Length 等 header，让 http client 自己重新计算。
 /// 3. 若 `opts.refresh_auth_enabled()`，从 `auth_candidates` 找最新的同 host 认证记录，
 ///    把 Authorization / Cookie / X-Tt-* header 覆盖到 replay 请求上。
@@ -626,10 +629,30 @@ pub async fn replay_request(
 ) -> Result<ReplayResult, String> {
     let mut body_bytes: Vec<u8> = body.to_vec();
     if !opts.patch_json.is_empty() {
-        let mut value: serde_json::Value = serde_json::from_slice(&body_bytes)
+        let content_encoding = content_encoding_value(headers);
+        let decoded_body = match content_encoding.as_deref() {
+            Some(encoding) => crate::handlers::network_body::decompress_with_limit(
+                &body_bytes,
+                encoding,
+                crate::handlers::network_body::DEFAULT_MAX_DECOMPRESSED_BODY_BYTES,
+            )
+            .map_err(|error| {
+                format!("patch_json failed to decode {encoding} request body: {error}")
+            })?,
+            None => body_bytes,
+        };
+        let mut value: serde_json::Value = serde_json::from_slice(&decoded_body)
             .map_err(|e| format!("patch_json requires JSON body: {e}"))?;
         apply_json_patch(&mut value, &opts.patch_json)?;
-        body_bytes = serde_json::to_vec(&value).map_err(|e| format!("re-serialize: {e}"))?;
+        let patched_body = serde_json::to_vec(&value).map_err(|e| format!("re-serialize: {e}"))?;
+        body_bytes = match content_encoding.as_deref() {
+            Some(encoding) => {
+                encode_content_encoded_body(&patched_body, encoding).map_err(|error| {
+                    format!("patch_json failed to encode {encoding} request body: {error}")
+                })?
+            }
+            None => patched_body,
+        };
     }
 
     let strip: HashSet<&str> = [
@@ -983,6 +1006,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_request_patches_gzip_body_and_preserves_encoding() {
+        let original = br#"{"limit":1,"nested":{"keep":true}}"#;
+        let compressed = encode_content_encoded_body(original, "gzip").unwrap();
+        let client = MockClient {
+            expected_url: "https://example.com/compressed".to_string(),
+            expected_method: "POST".to_string(),
+            captured_body: std::sync::Mutex::new(None),
+            captured_headers: std::sync::Mutex::new(None),
+            response: RawResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![],
+            },
+        };
+        let opts = ReplayOptions {
+            patch_json: vec![JsonPatchOp::Replace {
+                path: "/limit".to_string(),
+                value: serde_json::json!(5),
+            }],
+            ..ReplayOptions::default()
+        };
+        let headers = vec![
+            ("Content-Encoding".to_string(), "gzip".to_string()),
+            ("Content-Length".to_string(), compressed.len().to_string()),
+        ];
+
+        replay_request(
+            &client,
+            "POST",
+            "https://example.com/compressed",
+            &headers,
+            &compressed,
+            &opts,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let captured = client.captured_body.lock().unwrap().clone().unwrap();
+        let decoded =
+            crate::handlers::network_body::decompress_with_limit(&captured, "gzip", 1024).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"limit": 5, "nested": {"keep": true}})
+        );
+
+        let captured_headers = client.captured_headers.lock().unwrap().clone().unwrap();
+        assert!(captured_headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("content-encoding") && value == "gzip"));
+        assert!(!captured_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-length")));
+    }
+
+    #[tokio::test]
+    async fn replay_request_patches_stacked_content_encoding_chain() {
+        let original = br#"{"enabled":false}"#;
+        let compressed = encode_content_encoded_body(original, "gzip, br").unwrap();
+        let client = MockClient {
+            expected_url: "https://example.com/stacked".to_string(),
+            expected_method: "PATCH".to_string(),
+            captured_body: std::sync::Mutex::new(None),
+            captured_headers: std::sync::Mutex::new(None),
+            response: RawResponse {
+                status: 204,
+                headers: vec![],
+                body: vec![],
+            },
+        };
+        let opts = ReplayOptions {
+            patch_json: vec![JsonPatchOp::Replace {
+                path: "/enabled".to_string(),
+                value: serde_json::json!(true),
+            }],
+            ..ReplayOptions::default()
+        };
+        let headers = vec![
+            ("Content-Encoding".to_string(), "gzip".to_string()),
+            ("content-encoding".to_string(), "br".to_string()),
+        ];
+
+        replay_request(
+            &client,
+            "PATCH",
+            "https://example.com/stacked",
+            &headers,
+            &compressed,
+            &opts,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let captured = client.captured_body.lock().unwrap().clone().unwrap();
+        let decoded =
+            crate::handlers::network_body::decompress_with_limit(&captured, "gzip, br", 1024)
+                .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(),
+            serde_json::json!({"enabled": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_request_patch_rejects_invalid_or_unknown_encoding() {
+        let opts = ReplayOptions {
+            patch_json: vec![JsonPatchOp::Replace {
+                path: "/value".to_string(),
+                value: serde_json::json!(2),
+            }],
+            ..ReplayOptions::default()
+        };
+
+        for (encoding, body, expected_error) in [
+            ("gzip", b"not-gzip".as_slice(), "failed to decode gzip"),
+            (
+                "x-private",
+                br#"{"value":1}"#.as_slice(),
+                "unsupported content-encoding: x-private",
+            ),
+        ] {
+            let client = MockClient {
+                expected_url: "https://example.com/error".to_string(),
+                expected_method: "POST".to_string(),
+                captured_body: std::sync::Mutex::new(None),
+                captured_headers: std::sync::Mutex::new(None),
+                response: RawResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: vec![],
+                },
+            };
+            let error = replay_request(
+                &client,
+                "POST",
+                "https://example.com/error",
+                &[("Content-Encoding".to_string(), encoding.to_string())],
+                body,
+                &opts,
+                &[],
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
+            assert!(client.captured_body.lock().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn replay_request_without_patch_passes_body_through() {
         let client = MockClient {
             expected_url: "https://example.com/x".to_string(),
@@ -1009,6 +1183,47 @@ mod tests {
         .unwrap();
         assert_eq!(r.status, 204);
         assert_eq!(r.body_b64, "");
+    }
+
+    #[tokio::test]
+    async fn replay_request_without_patch_preserves_compressed_wire_body() {
+        let compressed = encode_content_encoded_body(br#"{"value":1}"#, "gzip").unwrap();
+        let client = MockClient {
+            expected_url: "https://example.com/wire".to_string(),
+            expected_method: "POST".to_string(),
+            captured_body: std::sync::Mutex::new(None),
+            captured_headers: std::sync::Mutex::new(None),
+            response: RawResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![],
+            },
+        };
+
+        replay_request(
+            &client,
+            "POST",
+            "https://example.com/wire",
+            &[("Content-Encoding".to_string(), "gzip".to_string())],
+            &compressed,
+            &ReplayOptions::default(),
+            &[],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            client.captured_body.lock().unwrap().as_deref(),
+            Some(compressed.as_slice())
+        );
+        assert!(client
+            .captured_headers
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("content-encoding") && value == "gzip"));
     }
 
     // ---- refresh-auth tests ----

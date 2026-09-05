@@ -24,6 +24,7 @@ use super::replay_ws::{
 };
 use super::{error_response, json_response, method_not_allowed, success_response, BoxBody};
 use crate::push::SharedPushManager;
+use crate::replay_content_encoding::normalize_plaintext_body_headers;
 use crate::replay_db::{
     KeyValueItem, ReplayBody, ReplayGroup, ReplayHistory, ReplayRequest, ReplayRequestSummary,
     RequestType, RuleConfig, RuleMode, MAX_CONCURRENT_REPLAYS, MAX_HISTORY, MAX_REQUESTS,
@@ -351,6 +352,8 @@ async fn execute_replay_unified(
         )
         .await;
     }
+
+    normalize_plaintext_body_headers(&mut applied_request.headers);
 
     info!(
         replay_id = %replay_id,

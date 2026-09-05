@@ -585,6 +585,23 @@ body {{ color: #333; }}
                 extra_headers={'Content-Encoding': 'gzip'},
             )
             return True
+        if path == '/compressed-request':
+            content_encoding = self.headers.get('Content-Encoding', '').strip().lower()
+            try:
+                decoded_body = gzip.decompress(body or b'') if content_encoding in ('gzip', 'x-gzip') else (body or b'')
+                decoded_json = json.loads(decoded_body.decode('utf-8'))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self._send_json_bytes(
+                    {"error": f"invalid compressed request: {exc}"},
+                    status_code=400,
+                )
+                return True
+            self._send_json_bytes({
+                "content_encoding": content_encoding or None,
+                "json": decoded_json,
+                "method": method,
+            })
+            return True
         if path == '/brotli':
             payload = json.dumps({
                 "brotli": True,
