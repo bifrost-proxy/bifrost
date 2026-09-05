@@ -103,6 +103,7 @@
   - <https://open.feishu.cn/document/server-docs/im-v1/message/get-2>
 
 注意：以上是“入站引用资源下载”契约。最终结论中的“出站文件发送”走另一个
-`POST /open-apis/im/v1/files` 接口，官方单文件上限为 30 MB，不能使用这里的 100/250 MiB
-预算；出站限制和失败降级见
+`POST /open-apis/im/v1/files` 接口。Bifrost 按产品要求允许 100 MiB 单文件进入该上传链路；
+飞书公开文档仍声明 30 MB 上限，因此 30 MiB 以上文件可能被平台拒绝，必须保留逐附件失败降级。
+出站限制和失败降级见
 `design/feishu-progress-card-collapsed-summary-dark-theme-attachments.md`。

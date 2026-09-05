@@ -500,10 +500,15 @@ pub(super) fn is_explicit_attachment_label_or_path(label: &str, path: &str) -> b
     image_extension_from_path(path).is_some() || attachment_extension_from_path(path).is_some()
 }
 
-pub(super) async fn download_agent_reply_remote_attachment(
-    attachment: &AgentReplyRemoteAttachment,
-) -> bifrost_core::Result<AgentReplyDownloadedAttachment> {
-    download_remote_attachment_with_limit(attachment, MAX_AGENT_REPLY_ATTACHMENT_BYTES).await
+pub(super) fn agent_reply_attachment_max_bytes(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+) -> u64 {
+    client
+        .send_capabilities(provider)
+        .part("file")
+        .and_then(|capability| capability.max_bytes)
+        .unwrap_or(MAX_AGENT_REPLY_ATTACHMENT_BYTES)
 }
 
 pub(super) async fn download_remote_attachment_with_limit(
@@ -904,10 +909,11 @@ async fn upload_agent_reply_file_for_im(
             "IM 通道不允许上传空文件：{path}"
         )));
     }
-    if metadata.len() > MAX_AGENT_REPLY_ATTACHMENT_BYTES {
+    let max_bytes = agent_reply_attachment_max_bytes(client, provider);
+    if metadata.len() > max_bytes {
         return Err(bifrost_core::BifrostError::Config(format!(
             "文件超过 IM 通道上传文件 {} MiB 上限：{}",
-            MAX_AGENT_REPLY_ATTACHMENT_BYTES / 1024 / 1024,
+            max_bytes / 1024 / 1024,
             attachment.path.display()
         )));
     }

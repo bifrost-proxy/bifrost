@@ -38,6 +38,7 @@ const MAX_BACKOFF_SECS: u64 = 60;
 const INITIAL_BACKOFF_SECS: u64 = 1;
 const MAX_MESSAGE_IMAGE_RESOURCE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_MESSAGE_FILE_RESOURCE_BYTES: u64 = 100 * 1024 * 1024;
+pub(crate) const MAX_OUTBOUND_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const WS_PING_INTERVAL_SECS: u64 = 90;
 /// Maximum time we're willing to wait for *any* server-originated traffic
 /// (event / pong / server-initiated ping) before considering the connection
@@ -752,7 +753,7 @@ impl ImProvider for FeishuProvider {
                 ("text".into(), native(None)),
                 ("markdown".into(), native(None)),
                 ("image".into(), native(Some(10 * 1024 * 1024))),
-                ("file".into(), native(Some(30 * 1024 * 1024))),
+                ("file".into(), native(Some(MAX_OUTBOUND_FILE_BYTES))),
                 ("native_card".into(), native(None)),
             ]),
             requires_context: false,
@@ -1132,6 +1133,7 @@ impl FeishuProvider {
         bytes: Vec<u8>,
         mime_type: Option<&str>,
     ) -> Result<String> {
+        validate_outbound_file_size(bytes.len() as u64)?;
         let base_url = Self::base_url(config);
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
         let token = self.get_tenant_token(config, app_secret).await?;
@@ -2147,6 +2149,21 @@ impl FeishuProvider {
                 .await?;
         Ok((mime_type, bytes))
     }
+}
+
+fn validate_outbound_file_size(size: u64) -> Result<()> {
+    if size == 0 {
+        return Err(bifrost_core::BifrostError::Config(
+            "feishu outbound file upload requires non-empty bytes".to_string(),
+        ));
+    }
+    if size > MAX_OUTBOUND_FILE_BYTES {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "feishu outbound file exceeds {} MiB limit",
+            MAX_OUTBOUND_FILE_BYTES / 1024 / 1024
+        )));
+    }
+    Ok(())
 }
 
 async fn read_feishu_message_resource_body(
@@ -4396,6 +4413,19 @@ mod tests {
         assert_eq!(feishu_file_type_for_name("slides.PPT"), "ppt");
         assert_eq!(feishu_file_type_for_name("unknown.bin"), "stream");
         assert_eq!(feishu_file_type_for_name("noext"), "stream");
+    }
+
+    #[test]
+    fn outbound_file_size_accepts_100_mib_and_rejects_larger_or_empty_files() {
+        assert!(validate_outbound_file_size(MAX_OUTBOUND_FILE_BYTES).is_ok());
+
+        let oversized = validate_outbound_file_size(MAX_OUTBOUND_FILE_BYTES + 1)
+            .expect_err("files above 100 MiB must be rejected before upload");
+        assert!(oversized.to_string().contains("100 MiB limit"));
+
+        let empty =
+            validate_outbound_file_size(0).expect_err("empty files must be rejected before upload");
+        assert!(empty.to_string().contains("requires non-empty bytes"));
     }
 
     #[test]

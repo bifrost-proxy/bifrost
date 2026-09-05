@@ -65,10 +65,10 @@ Provider 声明 `ImSendCapability`（支持的消息类型、是否支持流式�
 - Provider 是已经配置的机器人或微信通道。CLI 首选 `bifrost im send <provider>` 位置参数，同时保留 `--provider <id>` 兼容形式。群内 Agent 不一定知道 Bifrost provider ID，因此 Feishu 还支持 `--bot-id <app_id>` 与 `--bot-name <display_name>`：Admin 只在 enabled Feishu provider 中精确匹配，ID 与名称同时给出时必须指向同一 provider，名称重名返回 409 而不是猜选；解析响应不回传完整 App ID。
 - Destination 只能是 `owner`、已配置的 target alias，或显式 direct receive id。Feishu 群聊使用 `--chat-id <oc_xxx>`；其他 direct 目标使用 `--receive-id-type <type> --receive-id <id>`。不得根据最近消息猜测群或用户。
 - Content Part 支持 `text`、`markdown`、`image`、`file`、`native_card`。一次命令可以包含多个 part，按命令行出现顺序串行发送；主内容、图片、文件的消息 ID 分别返回。
-- Feishu 原生支持 text、Card JSON 2.0 Markdown、image、file 和 native card；native card 必须保留调用方提供的 root header。Weixin 原生支持 text 与 image，Markdown 降级为可读文本并在回执中返回 warning，generic file 与 native card 明确返回 unsupported，不能静默转成其他内容。
+- Feishu 原生支持 text、Card JSON 2.0 Markdown、image、file 和 native card；native card 必须保留调用方提供的 root header。Weixin 原生支持 text、image、file 和 video，Markdown 降级为可读文本并在回执中返回 warning，native card 明确返回 unsupported，不能静默转成其他内容。
 - Provider capability 是运行时事实。`GET /providers/:id/capabilities` 与 `bifrost im provider capabilities <id>` 返回 destination、part、大小上限和 `requires_context`；CLI 在上传或发送前预检，服务端仍做最终校验。
 
-二进制不放进 JSON。CLI 先调用 `POST /messages/upload`，以 raw body 上传单个 image/file，并通过 query/header 传 provider、kind、文件名、MIME；Admin 在读取前检查 `Content-Length`，读取后再次检查实际字节数。图片上限 10 MiB，Feishu 文件上限 30 MiB；空文件与超限请求返回 4xx。服务端只接收客户端字节，不读取客户端本地路径，也不在日志中记录绝对路径或原始内容。
+二进制不放进 JSON。CLI 先调用 `POST /messages/upload`，以 raw body 上传单个 image/file，并通过 query/header 传 provider、kind、文件名、MIME；Admin 在读取前检查 `Content-Length`，读取后再次检查实际字节数。图片上限 10 MiB，Feishu 文件上限 100 MiB，Weixin 文件/视频上限保持 30 MiB；空文件与超限请求返回 4xx。服务端只接收客户端字节，不读取客户端本地路径，也不在日志中记录绝对路径或原始内容。IM worker 的 raw upload spool 上限同步为 100 MiB，避免 provider 已允许的 Feishu 文件仍被进程边界提前拦截。
 
 `POST /messages/send` V2 请求示例：
 

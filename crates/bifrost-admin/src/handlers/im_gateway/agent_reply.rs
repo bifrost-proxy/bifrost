@@ -185,9 +185,28 @@ pub(super) fn prepare_agent_reply_text_and_images(
     (text, images)
 }
 
+#[cfg(test)]
 pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
     markdown: &str,
     base_dir: Option<&Path>,
+) -> (
+    String,
+    Vec<AgentReplyLocalImage>,
+    Vec<AgentReplyLocalAttachment>,
+    Vec<String>,
+) {
+    prepare_agent_reply_text_and_images_with_downloads_limit(
+        markdown,
+        base_dir,
+        MAX_AGENT_REPLY_ATTACHMENT_BYTES,
+    )
+    .await
+}
+
+pub(super) async fn prepare_agent_reply_text_and_images_with_downloads_limit(
+    markdown: &str,
+    base_dir: Option<&Path>,
+    max_attachment_bytes: u64,
 ) -> (
     String,
     Vec<AgentReplyLocalImage>,
@@ -216,7 +235,8 @@ pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
         }
     }
     for remote_attachment in collect_agent_reply_remote_attachment_links(markdown) {
-        match download_agent_reply_remote_attachment(&remote_attachment).await {
+        match download_remote_attachment_with_limit(&remote_attachment, max_attachment_bytes).await
+        {
             Ok(downloaded) => {
                 if is_image_mime_or_path(downloaded.mime_type.as_deref(), &downloaded.path) {
                     linked_image_urls_to_strip.insert(remote_attachment.url);
@@ -913,9 +933,10 @@ async fn send_agent_reply_with_title_and_base_dir(
         reply_text.to_string()
     };
     let (reply_text_for_card, reply_images, reply_attachments, reply_attachment_notices) =
-        prepare_agent_reply_text_and_images_with_downloads(
+        prepare_agent_reply_text_and_images_with_downloads_limit(
             &rendered_reply_text,
             image_base_dir.as_deref(),
+            agent_reply_attachment_max_bytes(client, provider),
         )
         .await;
 
@@ -1258,9 +1279,10 @@ pub(super) async fn send_agent_reply_with_plan(
         reply_text.to_string()
     };
     let (reply_text_for_card, reply_images, reply_attachments, reply_attachment_notices) =
-        prepare_agent_reply_text_and_images_with_downloads(
+        prepare_agent_reply_text_and_images_with_downloads_limit(
             &rendered_reply_text,
             image_base_dir.as_deref(),
+            agent_reply_attachment_max_bytes(client, provider),
         )
         .await;
     let Some(reply_target) = build_agent_reply_target(

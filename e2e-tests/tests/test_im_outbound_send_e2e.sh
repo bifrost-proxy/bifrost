@@ -146,8 +146,8 @@ fi
 
 SKILL_DIR="$TEST_DIR/installed-skill"
 BIFROST_INSTALL_SKILL_SOURCE=embedded "$BIFROST_BIN" install-skill \
-  --tool codex --dir "$SKILL_DIR" -y >/dev/null
-grep -q "给指定群发 Markdown/图片/文件/卡片" "$SKILL_DIR/SKILL.md"
+  --tool universal --dir "$SKILL_DIR" -y >/dev/null
+grep -q "发送文本、Markdown、图片、文件和卡片" "$SKILL_DIR/SKILL.md"
 grep -q "bifrost im provider capabilities feishu-main" "$SKILL_DIR/SKILL.md"
 grep -q "bifrost im send feishu-main --chat-id oc_xxx" "$SKILL_DIR/SKILL.md"
 grep -q 'bifrost im send --bot-id cli_xxx --chat-id oc_xxx' "$SKILL_DIR/SKILL.md"
@@ -218,6 +218,8 @@ root = pathlib.Path(test_dir)
 }), encoding="utf-8")
 (root / "chart.png").write_bytes(b"PNG-E2E-CONTENT")
 (root / "report.pdf").write_bytes(b"PDF-E2E-CONTENT")
+with (root / "large-report.bin").open("wb") as handle:
+    handle.truncate(32 * 1024 * 1024 + 1)
 PY
 
 FEISHU_CAPS="$($BIFROST_BIN -p "$BIFROST_PORT" im provider capabilities feishu-main --format json)"
@@ -227,9 +229,12 @@ import json
 import sys
 feishu, weixin = map(json.loads, sys.argv[1:3])
 assert feishu["parts"]["file"]["support"] == "native", feishu
+assert feishu["parts"]["file"]["max_bytes"] == 100 * 1024 * 1024, feishu
+assert feishu["parts"]["image"]["max_bytes"] == 10 * 1024 * 1024, feishu
 assert feishu["parts"]["native_card"]["support"] == "native", feishu
 assert weixin["parts"]["markdown"]["support"] == "degraded", weixin
-assert weixin["parts"]["file"]["support"] == "unsupported", weixin
+assert weixin["parts"]["file"]["support"] == "native", weixin
+assert weixin["parts"]["file"]["max_bytes"] == 30 * 1024 * 1024, weixin
 assert weixin["requires_context"] is True, weixin
 PY
 
@@ -250,37 +255,45 @@ DIRECT_RESULT="$($BIFROST_BIN -p "$BIFROST_PORT" im send --bot-id cli_e2e \
   --chat-id oc_direct --markdown-file "$TEST_DIR/report.md" \
   --image "$TEST_DIR/chart.png" --file "$TEST_DIR/report.pdf" \
   --idempotency-key direct-e2e --format json)"
+LARGE_FILE_RESULT="$($BIFROST_BIN -p "$BIFROST_PORT" im send feishu-main \
+  --chat-id oc_direct --file "$TEST_DIR/large-report.bin" \
+  --idempotency-key large-file-e2e --format json)"
 
-python3 - "$OWNER_RESULT" "$TARGET_RESULT" "$DIRECT_RESULT" "$FEISHU_LOG" <<'PY'
+python3 - "$OWNER_RESULT" "$TARGET_RESULT" "$DIRECT_RESULT" "$LARGE_FILE_RESULT" "$FEISHU_LOG" <<'PY'
 import json
 import pathlib
 import sys
 
-owner, target, direct = map(json.loads, sys.argv[1:4])
+owner, target, direct, large_file = map(json.loads, sys.argv[1:5])
 assert owner["status"] == "success" and owner["destination"] == "owner", owner
 assert target["status"] == "success" and target["destination"] == "target:oncall", target
 assert direct["status"] == "success" and len(direct["receipts"]) == 3, direct
+assert large_file["status"] == "success" and len(large_file["receipts"]) == 1, large_file
 assert [item["requested_kind"] for item in direct["receipts"]] == ["markdown", "image", "file"], direct
 
-events = [json.loads(line) for line in pathlib.Path(sys.argv[4]).read_text().splitlines()]
+events = [json.loads(line) for line in pathlib.Path(sys.argv[5]).read_text().splitlines()]
 image = next(item for item in events if item["kind"] == "image_upload")
-file = next(item for item in events if item["kind"] == "file_upload")
+files = [item for item in events if item["kind"] == "file_upload"]
 assert image["body"]["filenames"] == ["chart.png"] and image["byte_count"] > 15, image
-assert file["body"]["filenames"] == ["report.pdf"] and file["byte_count"] > 15, file
+assert files[0]["body"]["filenames"] == ["report.pdf"] and files[0]["byte_count"] > 15, files
+assert files[1]["body"]["filenames"] == ["large-report.bin"], files
+assert files[1]["byte_count"] > 32 * 1024 * 1024, files
 
 messages = [item for item in events if item["kind"] == "message"]
-assert len(messages) == 5, messages
+assert len(messages) == 6, messages
 assert messages[0]["body"]["receive_id"] == "ou_e2e_owner", messages[0]
 assert "receive_id_type=open_id" in messages[0]["path"], messages[0]
 assert messages[1]["body"]["receive_id"] == "oc_oncall", messages[1]
 assert "receive_id_type=chat_id" in messages[1]["path"], messages[1]
 target_card = json.loads(messages[1]["body"]["content"])
 assert target_card["header"]["title"]["content"] == "Target card", target_card
-direct_messages = messages[2:]
+direct_messages = messages[2:5]
 assert [item["body"]["msg_type"] for item in direct_messages] == ["interactive", "image", "file"], direct_messages
 assert all(item["body"]["receive_id"] == "oc_direct" for item in direct_messages), direct_messages
 assert all(item["body"].get("uuid") for item in messages), messages
-assert len({item["body"]["uuid"] for item in messages}) == 5, messages
+assert messages[5]["body"]["msg_type"] == "file", messages[5]
+assert messages[5]["body"]["receive_id"] == "oc_direct", messages[5]
+assert len({item["body"]["uuid"] for item in messages}) == 6, messages
 PY
 
 UNKNOWN_ERR="$($BIFROST_BIN -p "$BIFROST_PORT" im send feishu-main --text hello --typo 2>&1 || true)"
