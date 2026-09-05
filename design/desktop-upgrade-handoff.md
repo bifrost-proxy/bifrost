@@ -38,13 +38,18 @@ server. Desktop ownership disables the CLI restart for the entire transaction, i
 Desktop has replaced or removed the shared runtime marker. CLI ownership runs the CLI restart to
 readiness before updating/relaunching Desktop. If that restart fails, the companion step does not run.
 Windows deferred replacement performs the companion continuation from its helper after CLI restart.
+It preserves the original strict/background requirement: a required companion failure must fail the
+transaction rather than publish completed progress.
 
 Terminal-driven companion upgrades also write `desktop-upgrade-relaunch.json`, preserving the owner
-and actual runtime port before stopping the App. Desktop-owned relaunch uses exactly that port;
+and actual runtime port before stopping the App. This snapshot requires a live Admin response whose
+PID and data-directory identity match the recorded runtime; stale or foreign records do not create a
+CLI handoff. Desktop-owned relaunch uses exactly that port;
 port conflict is a failure rather than permission to choose the next port. A failed companion removes
 only its own unchanged marker before restoring the previous App.
 
-A failed Desktop child is cleaned up by its own process handle. It must never invoke a shared
+A failed Desktop child is cleaned up by its own process handle; already-exited children count as
+successfully cleaned up, including on Windows. It must never invoke a shared
 `bifrost stop`: another CLI process may have won the bind race and now own `runtime.json`. Normal
 startup can reuse that healthy winner; an unready competing runtime causes a visible failure.
 

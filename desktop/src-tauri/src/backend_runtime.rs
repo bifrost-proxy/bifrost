@@ -939,12 +939,20 @@ pub(super) fn kill_child_and_wait(
     child: &mut Child,
     timeout: Duration,
 ) -> std::io::Result<ExitStatus> {
-    child.kill().map_err(|error| {
-        std::io::Error::new(
+    // Windows may reject kill() after try_wait() has already reaped the child.
+    // Also tolerate an exit racing with kill(), while preserving real failures.
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    if let Err(error) = child.kill() {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        return Err(std::io::Error::new(
             error.kind(),
             format!("process pid={} could not be killed: {error}", child.id()),
-        )
-    })?;
+        ));
+    }
 
     let kill_deadline = Instant::now() + timeout;
     while Instant::now() < kill_deadline {

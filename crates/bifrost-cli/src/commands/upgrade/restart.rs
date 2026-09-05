@@ -688,7 +688,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$postRestartDesktop = $env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL -eq "1"
+$postRestartDesktop = $env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL
 Remove-Item Env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL -ErrorAction SilentlyContinue
 function Write-UpgradeLog([string]$Message) {
   $timestamp = (Get-Date).ToString("o")
@@ -873,6 +873,7 @@ try {
   }
 
   if ($postRestartDesktop) {
+    $env:BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL = if ($postRestartDesktop -eq "required") { "1" } else { "0" }
     $env:BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART = "1"
     $env:BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION = $TargetVersion
     $env:BIFROST_EXTERNAL_CLI_WORKER = "0"

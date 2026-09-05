@@ -626,6 +626,7 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
         super::super::upgrade_background::PARENT_UPGRADE_LOCK_OWNER_PID_ENV,
         WEBVIEW_UPGRADE_ORIGIN_ENV,
         "BIFROST_UPGRADE_TEST_LATEST_VERSION",
+        "BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL",
     ];
     let previous: Vec<_> = env_keys
         .iter()
@@ -663,20 +664,68 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
 
     #[cfg(target_os = "macos")]
     {
-        let runtime = RuntimeInfo::new(
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut runtime = RuntimeInfo::new(
             std::process::id(),
-            18888,
+            port,
             None,
             None,
             RuntimeStartMode::Daemon,
         );
+        let marker_path = data_dir.join("desktop-upgrade-relaunch.json");
+        // A dead marker and a reused PID without a live Admin endpoint must
+        // both leave Desktop's normal stale-runtime recovery available.
+        drop(listener);
+        for pid in [u32::MAX, std::process::id()] {
+            runtime.pid = pid;
+            write_runtime_info(&runtime).unwrap();
+            update_desktop_app_after_upgrade(&success, "99.0.1").unwrap();
+            assert!(
+                !marker_path.exists(),
+                "stale runtime must not become a handoff"
+            );
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        runtime.port = listener.local_addr().unwrap().port();
+        let port = runtime.port;
+        let pid = runtime.pid;
+        let fingerprint = bifrost_storage::data_dir_fingerprint();
+        let responder = std::thread::spawn(move || {
+            // Wrong profile, mismatched PID, then three healthy observations.
+            for (response_pid, profile) in [
+                (pid, "foreign".to_string()),
+                (pid + 1, fingerprint.clone()),
+                (pid, fingerprint.clone()),
+                (pid, fingerprint.clone()),
+                (pid, fingerprint),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let count = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..count])
+                    .starts_with("GET /_bifrost/api/system/overview "));
+                let body = format!(
+                    r#"{{"server":{{"port":{port}}},"system":{{"pid":{response_pid},"uptime_secs":1,"version":"99.0.1","data_dir_fingerprint":"{profile}"}}}}"#
+                );
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
         write_runtime_info(&runtime).expect("snapshot CLI owner");
+        for _ in 0..2 {
+            update_desktop_app_after_upgrade(&success, "99.0.1").unwrap();
+            assert!(
+                !marker_path.exists(),
+                "foreign identity must not become a handoff"
+            );
+        }
         update_desktop_app_after_upgrade(&success, "99.0.1")
             .expect("caller-managed handoff success");
         let marker_path = data_dir.join("desktop-upgrade-relaunch.json");
         let marker: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
-        assert_eq!(marker["proxy_port"], 18888);
+        assert_eq!(marker["proxy_port"], port);
         assert_eq!(marker["observed_external_core_pid"], std::process::id());
         assert!(marker["old_core_pid"].is_null());
         update_desktop_app_after_upgrade(&failure, "99.0.1").expect_err("failed install");
@@ -690,6 +739,7 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
         assert!(matches!(error, BifrostError::Io(_)));
         assert!(marker_path.is_dir());
         std::fs::remove_dir(&marker_path).unwrap();
+        responder.join().unwrap();
         crate::process::remove_pid(runtime.pid).expect("remove both isolated runtime markers");
     }
     update_desktop_app_after_upgrade(&success, "99.0.1").expect("strict app success");
@@ -714,6 +764,21 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
         UpgradeBehavior::interactive(false, true),
     )
     .expect("manual app update remains best effort");
+    std::env::set_var("BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL", "1");
+    let continuation = interactive_upgrade_behavior(false, true);
+    assert!(!continuation.restart_proxy);
+    update_desktop_companion(&failure, "99.0.1", continuation)
+        .expect_err("deferred background companion failure must propagate");
+    update_desktop_companion(&success, "99.0.1", continuation)
+        .expect("deferred background companion success");
+    std::env::set_var("BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL", "0");
+    update_desktop_companion(
+        &failure,
+        "99.0.1",
+        interactive_upgrade_behavior(false, true),
+    )
+    .expect("deferred interactive companion remains best effort");
+    std::env::remove_var("BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL");
 
     std::fs::remove_file(&app_path)
         .or_else(|_| std::fs::remove_dir_all(&app_path))

@@ -1365,3 +1365,32 @@ fn desktop_quit_rejects_failed_backend_stop_helper() {
 
 #[cfg(unix)]
 mod upgrade_owner;
+
+#[test]
+fn failed_child_cleanup_is_idempotent_after_exit() {
+    #[cfg(windows)]
+    let mut child = Command::new("cmd").args(["/C", "exit 7"]).spawn().unwrap();
+    #[cfg(not(windows))]
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .spawn()
+        .unwrap();
+    let original = child.wait().unwrap();
+    let cleaned = super::kill_child_and_wait(&mut child, Duration::from_secs(1)).unwrap();
+    assert_eq!(cleaned.code(), original.code());
+    super::terminate_child(child).expect("already-reaped child needs no further cleanup");
+}
+
+#[test]
+fn failed_child_cleanup_stops_a_live_child() {
+    #[cfg(windows)]
+    let mut child = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+        .spawn()
+        .unwrap();
+    #[cfg(not(windows))]
+    let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let status = super::kill_child_and_wait(&mut child, Duration::from_secs(2)).unwrap();
+    assert!(!status.success());
+    assert!(child.try_wait().unwrap().is_some());
+}

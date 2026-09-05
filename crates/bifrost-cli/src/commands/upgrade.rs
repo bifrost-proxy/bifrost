@@ -1254,13 +1254,19 @@ pub fn handle_upgrade(_yes: bool, local_assets: Option<PathBuf>) -> Result<(), B
         )
     };
     handle_upgrade_inner(
-        UpgradeBehavior::interactive(skip_app, skip_restart),
+        interactive_upgrade_behavior(skip_app, skip_restart),
         pinned_target,
     )
 }
 
 pub(crate) fn handle_app_managed_upgrade(target_version: String) -> Result<(), BifrostError> {
     handle_upgrade_inner(app_managed_upgrade_behavior(), Some(target_version))
+}
+
+fn interactive_upgrade_behavior(skip_app: bool, skip_restart: bool) -> UpgradeBehavior {
+    let mut behavior = UpgradeBehavior::interactive(skip_app, skip_restart);
+    behavior.require_desktop_app_update = env_flag("BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL");
+    behavior
 }
 
 fn app_managed_upgrade_behavior() -> UpgradeBehavior {
@@ -1465,7 +1471,14 @@ fn handle_upgrade_inner(
             if behavior.restart_proxy && behavior.update_desktop_app {
                 // Windows replacement waits for this updater to exit. Continue
                 // the Desktop companion from the helper only after CLI readiness.
-                env::set_var("BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL", "1");
+                env::set_var(
+                    "BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL",
+                    if behavior.require_desktop_app_update {
+                        "required"
+                    } else {
+                        "optional"
+                    },
+                );
                 let result = maybe_restart_running_proxy_after_windows_deferred_install(
                     deferred_install,
                     behavior.restart_proxy,

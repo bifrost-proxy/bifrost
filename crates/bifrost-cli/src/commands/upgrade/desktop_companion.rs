@@ -547,10 +547,15 @@ pub(super) fn update_desktop_app_after_upgrade(
     let desktop_was_shut_down = false;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let relaunch_snapshot = if mode == DesktopCompanionMode::CallerManaged {
-        read_runtime_info().map(|runtime| {
-            let app_pid = running_desktop_shell_process(&app_path).map_or(0, |(pid, _)| pid);
-            caller_managed_relaunch_marker(&runtime, app_pid, &app_path, target_version)
-        })
+        read_runtime_info()
+            .filter(|runtime| {
+                crate::process::discover_bifrost_runtime(runtime.port)
+                    .is_some_and(|observed| observed.pid == runtime.pid)
+            })
+            .map(|runtime| {
+                let app_pid = running_desktop_shell_process(&app_path).map_or(0, |(pid, _)| pid);
+                caller_managed_relaunch_marker(&runtime, app_pid, &app_path, target_version)
+            })
     } else {
         None
     };
