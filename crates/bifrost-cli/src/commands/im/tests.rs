@@ -1105,9 +1105,99 @@ fn format_timestamp_handles_seconds_and_milliseconds() {
 
 #[test]
 fn handle_im_command_help_and_empty_args_do_not_error() {
-    handle_im_command("127.0.0.1", 9900, &[]).expect("empty args should show help");
-    handle_im_command("127.0.0.1", 9900, &["help".into()])
-        .expect("help subcommand should print help");
+    handle_im_command("127.0.0.1", 1, &[]).expect("empty args should show help");
+    handle_im_command("127.0.0.1", 1, &["help".into()]).expect("help subcommand should print help");
+}
+
+#[test]
+fn nested_im_help_never_contacts_the_admin_api() {
+    for args in [
+        vec!["provider", "list", "--help"],
+        vec!["provider", "add", "--help"],
+        vec!["provider", "add", "example", "--help"],
+        vec![
+            "provider",
+            "add",
+            "example",
+            "--display-name",
+            "Example",
+            "--help",
+        ],
+        vec!["provider", "update", "--help"],
+        vec!["provider", "delete", "--help"],
+        vec!["provider", "status", "--help"],
+        vec!["provider", "capabilities", "--help"],
+        vec!["target", "list", "--help"],
+        vec!["target", "add", "--help"],
+        vec!["target", "update", "--help"],
+        vec!["target", "delete", "--help"],
+        vec!["send", "--help"],
+        vec!["route", "list", "--help"],
+        vec!["route", "add", "--help"],
+        vec!["route", "pause", "--help"],
+        vec!["route", "resume", "--help"],
+        vec!["route", "delete", "--help"],
+        vec!["schedule", "list", "--help"],
+        vec!["schedule", "preview", "--help"],
+        vec!["schedule", "add", "-h"],
+        vec![
+            "schedule",
+            "add",
+            "example",
+            "--disabled",
+            "--cron",
+            "0 9 * * *",
+            "--help",
+        ],
+        vec!["schedule", "update", "--help"],
+        vec!["schedule", "pause", "--help"],
+        vec!["schedule", "resume", "--help"],
+        vec!["schedule", "run", "--help"],
+        vec!["schedule", "logs", "--help"],
+        vec!["schedule", "delete", "--help"],
+        vec!["history", "events", "--help"],
+        vec!["history", "runs", "--help"],
+        vec!["messages", "list", "--help"],
+        vec!["messages", "clear", "--help"],
+        vec!["target", "help"],
+    ] {
+        let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+        handle_im_command("127.0.0.1", 1, &args)
+            .unwrap_or_else(|error| panic!("nested help {args:?} must be offline: {error}"));
+    }
+}
+
+#[test]
+fn im_help_detection_does_not_consume_option_values() {
+    let send_args = vec!["send".into(), "--text".into(), "-h".into()];
+    assert!(!is_im_context_help_request(&send_args));
+    assert_eq!(
+        parse_send_args(&send_args[1..])
+            .expect("parse -h as text content")
+            .parts
+            .len(),
+        1
+    );
+
+    let provider_args = vec![
+        "provider".into(),
+        "add".into(),
+        "--display-name".into(),
+        "-h".into(),
+    ];
+    assert!(!is_im_context_help_request(&provider_args));
+
+    let provider_named_help = vec!["provider".into(), "add".into(), "help".into()];
+    assert!(!is_im_context_help_request(&provider_named_help));
+
+    let unknown_option_then_help = vec![
+        "provider".into(),
+        "add".into(),
+        "example".into(),
+        "--unknown".into(),
+        "--help".into(),
+    ];
+    assert!(is_im_context_help_request(&unknown_option_then_help));
 }
 
 #[test]
