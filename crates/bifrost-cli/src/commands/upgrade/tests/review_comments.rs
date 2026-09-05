@@ -400,6 +400,8 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "windows_deferred_desktop_companion_executable(&deferred_install)",
         "BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL = if ($postRestartDesktop -eq \"required\")",
         "Remove-Item Env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL",
+        "Remove-Item Env:BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL",
+        "$env:BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL = $expectedCliPort",
         "stop_tray_helper_before_windows_deferred_install(&data_dir);",
         "Wait-TargetPathWritable $TargetPath 120",
         "function Invoke-FileOperationWithRetry",

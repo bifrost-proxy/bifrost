@@ -463,11 +463,19 @@ pub(super) fn desktop_companion_environment(
     environment
 }
 
+#[cfg(test)]
 pub(super) fn update_desktop_app_after_upgrade_best_effort(
     executable: &Path,
     target_version: &str,
 ) {
-    if let Err(error) = update_desktop_app_after_upgrade(executable, target_version) {
+    report_desktop_app_update_best_effort(update_desktop_app_after_upgrade(
+        executable,
+        target_version,
+    ));
+}
+
+pub(super) fn report_desktop_app_update_best_effort(result: Result<(), BifrostError>) {
+    if let Err(error) = result {
         eprintln!(
             "{} {}",
             "⚠ Bifrost desktop app update failed; continuing CLI upgrade.".bright_yellow(),
@@ -503,10 +511,21 @@ pub(super) fn caller_managed_relaunch_marker(
     })
 }
 
+#[cfg(test)]
 pub(super) fn update_desktop_app_after_upgrade(
     executable: &Path,
     target_version: &str,
 ) -> Result<(), BifrostError> {
+    update_desktop_app_with_runtime(executable, target_version, None)
+}
+
+pub(super) fn update_desktop_app_with_runtime(
+    executable: &Path,
+    target_version: &str,
+    runtime_snapshot: Option<RuntimeInfo>,
+) -> Result<(), BifrostError> {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = &runtime_snapshot;
     let Some(app_path) = installed_desktop_app_path() else {
         return Ok(());
     };
@@ -547,10 +566,12 @@ pub(super) fn update_desktop_app_after_upgrade(
     let desktop_was_shut_down = false;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let relaunch_snapshot = if mode == DesktopCompanionMode::CallerManaged {
-        read_runtime_info()
-            .filter(|runtime| {
-                crate::process::discover_bifrost_runtime(runtime.port)
-                    .is_some_and(|observed| observed.pid == runtime.pid)
+        runtime_snapshot
+            .or_else(|| {
+                read_runtime_info().filter(|runtime| {
+                    crate::process::discover_bifrost_runtime(runtime.port)
+                        .is_some_and(|observed| observed.pid == runtime.pid)
+                })
             })
             .map(|runtime| {
                 let app_pid = running_desktop_shell_process(&app_path).map_or(0, |(pid, _)| pid);

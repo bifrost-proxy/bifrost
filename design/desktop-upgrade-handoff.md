@@ -36,7 +36,11 @@ click repeated the same 30-second wait before returning to the recovery screen.
 Before installation, the CLI snapshots `runtime_start_mode` to decide whether it may restart the
 server. Desktop ownership disables the CLI restart for the entire transaction, including after
 Desktop has replaced or removed the shared runtime marker. CLI ownership runs the CLI restart to
-readiness before updating/relaunching Desktop. If that restart fails, the companion step does not run.
+readiness before updating/relaunching Desktop. The original live CLI port remains a transaction
+requirement even if its process or marker disappears during installation. The companion step requires
+a verified CLI owner on that port and carries that snapshot into Desktop handoff; missing ownership
+fails instead of allowing normal Desktop startup. This requirement also survives Windows deferred
+replacement. If the CLI restart fails, the companion step does not run.
 Windows deferred replacement performs the companion continuation from its helper after CLI restart.
 It preserves the original strict/background requirement: a required companion failure must fail the
 transaction rather than publish completed progress.

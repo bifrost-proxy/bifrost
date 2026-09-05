@@ -1,3 +1,5 @@
+mod behavior;
+use behavior::*;
 mod desktop_companion;
 mod external_worker;
 mod install_method;
@@ -164,33 +166,7 @@ struct UpgradeBehavior {
     update_desktop_app: bool,
     require_desktop_app_update: bool,
     restart_proxy: bool,
-}
-
-impl UpgradeBehavior {
-    fn for_runtime_owner(mut self, runtime: Option<&RuntimeInfo>) -> Self {
-        // Freeze ownership before installers or Desktop shutdown can replace the
-        // shared runtime marker. A Desktop-owned core has exactly one restarter.
-        self.restart_proxy &= cli_owns_runtime_restart(runtime);
-        self
-    }
-
-    fn background() -> Self {
-        Self {
-            restart_if_already_latest: true,
-            update_desktop_app: true,
-            require_desktop_app_update: true,
-            restart_proxy: true,
-        }
-    }
-
-    fn interactive(skip_app: bool, skip_restart: bool) -> Self {
-        Self {
-            restart_if_already_latest: false,
-            update_desktop_app: !skip_app,
-            require_desktop_app_update: false,
-            restart_proxy: !skip_restart,
-        }
-    }
+    expected_cli_port: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -1263,24 +1239,6 @@ pub(crate) fn handle_app_managed_upgrade(target_version: String) -> Result<(), B
     handle_upgrade_inner(app_managed_upgrade_behavior(), Some(target_version))
 }
 
-fn interactive_upgrade_behavior(skip_app: bool, skip_restart: bool) -> UpgradeBehavior {
-    let mut behavior = UpgradeBehavior::interactive(skip_app, skip_restart);
-    behavior.require_desktop_app_update = env_flag("BIFROST_WINDOWS_REQUIRE_DESKTOP_INTERNAL");
-    behavior
-}
-
-fn app_managed_upgrade_behavior() -> UpgradeBehavior {
-    // `bifrost app upgrade` suppresses the recursive App companion only. It is
-    // still the top-level CLI updater, so a CLI-owned running core must restart
-    // onto the newly installed executable.
-    let mut behavior = UpgradeBehavior::interactive(true, false);
-    // The on-disk CLI can already be at the pinned target while a daemon still
-    // serves the previous in-memory version. The App entrypoint must converge
-    // that stale runtime just like the Admin background updater does.
-    behavior.restart_if_already_latest = true;
-    behavior
-}
-
 fn env_flag(name: &str) -> bool {
     env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
@@ -1299,7 +1257,19 @@ fn handle_upgrade_inner(
     behavior: UpgradeBehavior,
     pinned_target: Option<String>,
 ) -> Result<(), BifrostError> {
-    let behavior = behavior.for_runtime_owner(read_runtime_info().as_ref());
+    let runtime = read_runtime_info().filter(|runtime| {
+        crate::process::discover_bifrost_runtime(runtime.port)
+            .is_some_and(|observed| observed.pid == runtime.pid)
+    });
+    if runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.start_mode == RuntimeStartMode::Desktop)
+    {
+        println!(
+            "  Running proxy is owned by the desktop app; leaving restart to the app handoff."
+        );
+    }
+    let behavior = behavior.for_runtime_owner(runtime.as_ref());
     let current_version = env!("CARGO_PKG_VERSION");
 
     println!(
@@ -1479,11 +1449,19 @@ fn handle_upgrade_inner(
                         "optional"
                     },
                 );
+                if let Some(port) = behavior.expected_cli_port {
+                    env::set_var(
+                        "BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL",
+                        port.to_string(),
+                    );
+                }
                 let result = maybe_restart_running_proxy_after_windows_deferred_install(
                     deferred_install,
                     behavior.restart_proxy,
+                    behavior.expected_cli_port,
                 );
                 env::remove_var("BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL");
+                env::remove_var("BIFROST_WINDOWS_EXPECTED_CLI_PORT_INTERNAL");
                 result?;
             } else {
                 update_desktop_companion(
@@ -1494,6 +1472,7 @@ fn handle_upgrade_inner(
                 maybe_restart_running_proxy_after_windows_deferred_install(
                     deferred_install,
                     behavior.restart_proxy,
+                    behavior.expected_cli_port,
                 )?;
             }
         }
