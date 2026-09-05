@@ -495,7 +495,32 @@ pub(super) fn mark_backend_unavailable_for_manual_start(state: &BackendState, re
     }
 }
 
+pub(super) fn refresh_upgrade_relaunch(
+    state: &BackendState,
+) -> Option<DesktopUpgradeRelaunchMarker> {
+    let mut cached = state.upgrade_relaunch.lock().ok()?;
+    if cached
+        .as_ref()
+        .is_some_and(|marker| !is_upgrade_relaunch_marker_active(marker, current_time_millis()))
+    {
+        // Re-read before discarding so a newer on-disk handoff is preserved.
+        *cached = read_active_upgrade_relaunch_marker(&state.data_dir);
+    }
+    let marker = cached.clone();
+    drop(cached);
+    if let Some(marker) = marker
+        .as_ref()
+        .filter(|marker| upgrade_relaunch_uses_external_cli_backend(marker))
+    {
+        if let Ok(mut port) = state.port.lock() {
+            *port = marker.proxy_port;
+        }
+    }
+    marker
+}
+
 pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason: &str) -> bool {
+    let upgrade_relaunch = refresh_upgrade_relaunch(state);
     let Ok(current_port) = state.port.lock().map(|port| *port) else {
         return false;
     };
@@ -503,11 +528,6 @@ pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason:
         return false;
     }
 
-    let upgrade_relaunch = state
-        .upgrade_relaunch
-        .lock()
-        .ok()
-        .and_then(|marker| marker.clone());
     if let Some(marker) = upgrade_relaunch
         .as_ref()
         .filter(|marker| upgrade_relaunch_uses_external_cli_backend(marker))
@@ -680,11 +700,7 @@ pub(super) fn start_desktop_backend_now(
         .lock()
         .map_err(|_| "failed to read desktop expected proxy port".to_string())?;
 
-    let upgrade_relaunch = state
-        .upgrade_relaunch
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone());
+    let upgrade_relaunch = refresh_upgrade_relaunch(&state);
 
     match ensure_backend_running(
         &state.binary_path,

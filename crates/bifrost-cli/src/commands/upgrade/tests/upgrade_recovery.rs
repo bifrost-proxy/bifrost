@@ -77,11 +77,11 @@ fn desktop_child_progress_extends_the_stall_deadline() {
         write_progress(&data_dir, &progress);
     });
     let output = command_output_with_timeout_and_env_inner(
-        Path::new("/bin/sh"),
-        &["-c".to_string(), "sleep 1.2".to_string()],
+        Path::new("/bin/sleep"),
+        &["1.2".to_string()],
         Duration::from_secs(1),
         Duration::from_millis(25),
-        &[],
+        &[("PATH", "/nonexistent")],
         None,
         ChildActivityWatch::StructuredProgress(ChildProgressWatch::new(
             temp.path(),
@@ -91,7 +91,7 @@ fn desktop_child_progress_extends_the_stall_deadline() {
     )
     .expect("child command result");
     writer.join().expect("progress writer");
-    assert_eq!(output.status, TimedCommandStatus::Success);
+    assert_eq!(output.status, TimedCommandStatus::Success, "{output:?}");
 }
 
 #[test]

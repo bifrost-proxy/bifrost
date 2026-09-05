@@ -39,7 +39,7 @@ def system(port):
         return None
 
 
-def scenario(name, cli_running, target_matches, desktop_owned=False):
+def scenario(name, cli_running, target_matches, desktop_owned=False, late_cli=False):
     root = Path(tempfile.mkdtemp(prefix='.bifrost-e2e-upgrade-owner-', dir=ROOT))
     data = root / 'data'
     data.mkdir()
@@ -73,7 +73,7 @@ def scenario(name, cli_running, target_matches, desktop_owned=False):
         bootstrap = data / 'logs/desktop-bootstrap.log'
         def logs():
             return bootstrap.read_text() if bootstrap.exists() else ''
-        if target_matches:
+        if target_matches and not late_cli:
             wait_until(lambda: 'desktop backend start succeeded' in logs(), 45)
             runtime = json.loads((data / 'runtime.json').read_text())
             assert runtime['port'] == port, runtime
@@ -92,6 +92,14 @@ def scenario(name, cli_running, target_matches, desktop_owned=False):
                 assert system(port)['pid'] == old_pid
             else:
                 assert system(port) is None
+        if late_cli:
+            subprocess.run([str(CLI), 'start', '-d', '-p', str(port), '--host', '127.0.0.1',
+                            '--skip-cert-check', '--no-system-proxy', '--no-tray', '-y'],
+                           env=env, stdout=log_handle, stderr=log_handle, check=True, timeout=90)
+            wait_until(lambda: 'recovered CLI-owned upgrade handoff from healthy target backend' in logs(), 45)
+            assert not (data / 'desktop-upgrade-relaunch.json').exists()
+            assert 'starting sidecar;' not in logs()
+            assert json.loads((data / 'runtime.json').read_text())['runtime_start_mode'] == 'daemon'
         assert app.poll() is None, 'Desktop must remain available to show status'
         print(f'PASS {name}: original_port={port}, cli_pid={old_pid}', flush=True)
     except Exception:
@@ -118,3 +126,5 @@ if __name__ == '__main__':
     scenario('Desktop-owned relaunch preserves custom runtime port', False, True, True)
     scenario('CLI restart failure on free port does not transfer ownership', False, False)
     scenario('CLI wrong-version server is preserved', True, False)
+
+    scenario('Late CLI readiness recovers automatically on original port', False, True, late_cli=True)

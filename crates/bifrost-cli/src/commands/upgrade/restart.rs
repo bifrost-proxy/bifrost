@@ -176,6 +176,21 @@ pub(super) fn maybe_restart_running_proxy_after_windows_deferred_install(
     restart_proxy: bool,
     expected_cli_port: Option<u16>,
 ) -> Result<(), BifrostError> {
+    let staged_binary = deferred_install.staged_binary.clone();
+    let result = restart_proxy_after_windows_deferred_install(
+        deferred_install,
+        restart_proxy,
+        expected_cli_port,
+    );
+    cleanup_staged_binary_after_schedule(&staged_binary, result)
+}
+
+#[cfg(windows)]
+fn restart_proxy_after_windows_deferred_install(
+    deferred_install: WindowsDeferredInstall,
+    restart_proxy: bool,
+    expected_cli_port: Option<u16>,
+) -> Result<(), BifrostError> {
     if let Some(port) = expected_cli_port {
         live_cli_runtime_for_handoff(port)?;
     }

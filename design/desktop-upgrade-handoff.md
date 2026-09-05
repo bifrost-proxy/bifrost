@@ -136,7 +136,14 @@ the new App, which would make every new App enter helper mode, exit, and open an
    the managed core is ready; helper relaunch failure or managed-core startup failure rewrites it to
    `Failed` while preserving the selected target/source for diagnosis and retry.
 
-Expired or invalid markers are removed and normal startup continues.
+Expired or invalid markers are removed and normal startup continues. Manual retries and recovery
+polls also revalidate the cached marker, so leaving Desktop open beyond the TTL does not retain a
+permanent CLI handoff. A newer on-disk transaction is preserved when an old cached marker expires.
+The active CLI handoff port is recorded before waiting, allowing the watchdog to detect a late CLI
+restart on that port even when the Desktop configuration prefers another port.
+
+Windows deferred CLI installation cleans the staged executable on any failure before scheduling,
+including a vanished original owner; successful scheduling retains the staged file for the helper.
 
 ### Normal Startup Ownership
 

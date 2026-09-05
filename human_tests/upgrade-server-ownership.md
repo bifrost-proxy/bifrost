@@ -31,6 +31,11 @@ SKIP_FRONTEND_BUILD=1 cargo build --manifest-path desktop/src-tauri/Cargo.toml
 运行真实 CLI，交接记录要求另一个版本，再打开真实 Desktop。
 预期：报告 CLI 重启未完成，旧 CLI PID 保留，不停止它，不另启 Desktop core。
 
+## TC-USO-05 CLI 超时后在原端口就绪
+
+Desktop 配置端口与交接端口不同，先让 CLI 交接超时，再通过 CLI 在交接端口启动目标版本服务。
+预期：无需点击 Start Service，watchdog 自动识别该服务、清除交接记录；服务继续由 CLI 管理，不启动 Desktop core。
+
 ## 执行所有用例
 
 ```bash

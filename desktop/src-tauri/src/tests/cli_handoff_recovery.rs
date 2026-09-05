@@ -301,7 +301,7 @@ fn healthy_target_backend_completes_and_clears_cli_upgrade_handoff() {
     write_upgrade_relaunch_marker(temp_dir.path(), &marker).expect("write marker");
     let state = test_backend_state(
         temp_dir.path().to_path_buf(),
-        port,
+        port.saturating_add(1),
         false,
         Some("previous handoff failed".to_string()),
     );
@@ -312,6 +312,8 @@ fn healthy_target_backend_completes_and_clears_cli_upgrade_handoff() {
         "test observed recovered target backend",
     ));
     assert!(state.startup_ready.load(Ordering::SeqCst));
+    assert_eq!(*state.port.lock().unwrap(), port);
+    assert_ne!(*state.expected_port.lock().unwrap(), port);
     assert!(state
         .upgrade_relaunch
         .lock()
@@ -392,4 +394,36 @@ fn healthy_target_backend_on_another_port_does_not_complete_cli_upgrade_handoff(
         read_progress(temp_dir.path()).phase,
         UpgradePhase::Completed
     );
+}
+
+#[test]
+fn expired_cached_handoff_is_cleared_without_restarting_desktop() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_backend_state(temp.path().to_path_buf(), 19900, false, None);
+    let mut marker = DesktopUpgradeRelaunchMarker {
+        schema_version: 1,
+        created_at_ms: 0,
+        old_app_pid: 123,
+        old_core_pid: None,
+        observed_external_core_pid: Some(456),
+        proxy_port: 19901,
+        app_target: "/tmp/Bifrost.app".to_string(),
+        target_version: Some("0.0.163".to_string()),
+        pending_install: None,
+        rollback: None,
+    };
+    write_upgrade_relaunch_marker(temp.path(), &marker).unwrap();
+    *state.upgrade_relaunch.lock().unwrap() = Some(marker.clone());
+    assert!(super::super::refresh_upgrade_relaunch(&state).is_none());
+    assert!(state.upgrade_relaunch.lock().unwrap().is_none());
+    assert!(!desktop_upgrade_relaunch_marker_path(temp.path()).exists());
+    // Expiring an old cached marker must not remove a newer transaction.
+    *state.upgrade_relaunch.lock().unwrap() = Some(marker.clone());
+    marker.created_at_ms = super::super::current_time_millis();
+    marker.proxy_port = 19902;
+    write_upgrade_relaunch_marker(temp.path(), &marker).unwrap();
+    let current = super::super::refresh_upgrade_relaunch(&state).unwrap();
+    assert_eq!(current.proxy_port, 19902);
+    assert_eq!(*state.port.lock().unwrap(), 19902);
+    assert!(desktop_upgrade_relaunch_marker_path(temp.path()).exists());
 }
