@@ -45,7 +45,7 @@ cargo run -p bifrost -- --version
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
-该脚本默认会自动安装并信任 CA、安装所有 Bifrost skills，并启动后台服务。
+该脚本默认会自动安装并信任 CA、安装所有 Bifrost skills，并启动后台服务；macOS 和 Windows 还会默认安装桌面应用。只需要 CLI 时传 `--no-desktop`，或设置 `BIFROST_INSTALL_AUTO_DESKTOP=0`。
 
 安装完成后，必须重新执行：
 
@@ -139,16 +139,19 @@ bifrost start [OPTIONS]
       --app-intercept-exclude <APPS>  排除应用不拦截（逗号分隔，支持通配符）
       --app-intercept-include <APPS>  强制拦截应用（低于规则和域名，高于 IP/全局）
       --unsafe-ssl                    跳过上游 TLS 证书校验（危险，仅测试用）
+      --super-performance-mode        处理规则但不记录流量、body、frame 或更新流量数据库
       --enable-badge-injection        启用 HTML 页面注入 Bifrost 徽章
       --disable-badge-injection       禁用 HTML 页面注入 Bifrost 徽章
       --no-disconnect-on-config-change  TLS 配置变更时不自动断开受影响连接
       --rules <RULE>                  代理规则（可重复指定）
       --rules-file <PATH>             规则文件路径
       --system-proxy                  启用系统代理
+      --no-system-proxy               禁用系统代理
       --proxy-bypass <LIST>           系统代理绕行列表（逗号分隔）
       --cli-proxy                     代理运行期间启用 CLI 代理环境变量
       --cli-proxy-no-proxy <LIST>     CLI 代理 no-proxy 列表（逗号分隔）
       -y, --yes                       自动回答 yes
+      --no-tray                       禁用托盘 helper
 ```
 
 TLS 拦截优先级（从高到低）：
@@ -324,7 +327,7 @@ bifrost traffic search "debug" --proxy-port 18888
 ```bash
 bifrost script list
 bifrost script list -t request             # 按类型过滤：request, response, decode
-bifrost script add request demo -c 'module.exports = ...'
+bifrost script add request demo -c 'request.headers["X-Debug"] = "1";'
 bifrost script add response demo -f ./scripts/demo.js
 bifrost script update request demo -c '...'
 bifrost script update response demo -f ./scripts/demo-v2.js
@@ -340,6 +343,7 @@ bifrost script delete request demo
 - 类型别名：`req`→request、`res`→response、`dec`→decode
 - `show` 和 `run` 支持只传名称进行模糊匹配；如有歧义需指定类型
 - `run` 会使用内置 mock 请求/响应数据执行脚本，输出修改结果和日志
+- 脚本直接操作沙箱提供的 `request` / `response` / `ctx` 等全局对象，不使用 CommonJS `module.exports`
 
 ### 7. 变量值
 
@@ -352,7 +356,7 @@ bifrost value import ./values.json               # 支持 .txt/.kv/.json
 bifrost value delete LOCAL_SERVER
 ```
 
-- 规则中可使用 `${NAME}` 和 `${env.VAR_NAME}`
+- 规则中的全局或内嵌 Values 使用 `{NAME}`；`${env.VAR_NAME}` 用于读取 Bifrost 进程环境变量。其他 `${...}` 属于请求模板变量，不是 Values 预展开语法
 - 需要复用环境相关地址或 token 时，优先用 `value set` 而不是把值硬编码到规则里
 
 ### 8. 访问控制
@@ -494,10 +498,10 @@ bifrost traffic search openai --proxy-port 18888
 bifrost traffic auth-status 57544                                              # JWT/Cookie 诊断（valid/expired/sub/exp/cookie 名）
 bifrost traffic export 57544 --as curl                                         # 导出 curl 模板（原始捕获值）
 bifrost traffic export 57544 --as fetch -o ./repro.js                          # 导出 fetch / HAR
-bifrost traffic replay 57544 --patch /body/messages/0/content="hello"          # 重放并应用 JSON Patch
+bifrost traffic replay 57544 --patch '/messages/0/content="hello"'             # 对请求 JSON body 根节点应用 JSON Patch
 ```
 
-> 当用户提及一个少于 6 位的数字 ID 并希望查看详情时，直接执行 `bifrost traffic get <ID>`。
+> 当用户提及一个纯数字流量序号并希望查看详情时，直接执行 `bifrost traffic get <ID>`。纯数字会按 sequence suffix 查找，不限制为 6 位以内；过长或无法表示为 `u64` 的值会明确报错。
 >
 > **批量场景**：要在一次往返里取多条用 `--ids id1,id2,id3`（最多 200，默认 ndjson 输出，省 N-1 次 round-trip）。
 >
@@ -554,8 +558,8 @@ bifrost traffic replay <ID> [--patch /a/b=value]... [--patch-json <RAW_OPS>] \
     [--refresh-auth] [--timeout 30s] [--format human|json|json-pretty]
 ```
 
-- `--patch` 是 shorthand：`/headers/Authorization=Bearer xxx` 或 `/body/messages/0/content="hi"`；value 自动识别数字/字符串。
-- `--patch-json` 是 RFC6902 原生数组：`'[{"op":"replace","path":"/headers/X-A","value":"v"}]'`。
+- `--patch` 直接作用于捕获请求的 JSON body 根节点，例如 `'/messages/0/content="hi"'`。RHS 自动识别整数、浮点数、布尔值、null、JSON object/array/quoted string，其余按普通字符串处理；`/path+=value` 表示 add，`-/path` 表示 remove。
+- `--patch-json` 是作用于请求 JSON body 的 RFC6902 原生数组，例如 `'[{"op":"replace","path":"/messages/0/content","value":"hi"}]'`。它不能修改请求 headers；认证 header 刷新使用 `--refresh-auth`。
 - `--refresh-auth` 会从最近一次同 host 的成功请求里拉 `Authorization` / `Cookie` / `X-Tt-*` 注入，适合 token 过期场景。
 - export / replay 使用捕获原文或重放结果原文；复制到外部前必须手动移除 Authorization、Cookie、JWT token 等敏感值。
 
@@ -609,9 +613,9 @@ bifrost search foo --include req-body,res-headers                               
     --no-color                禁用彩色输出
 ```
 
-> JSONPath 子集支持 `$`、`.member`、`[N]`、`[*]`（不依赖外部 crate）。`--include` / `--max-body` 与 `bifrost traffic get` 行为对齐：bodies 走每条记录 LRU cache，重复查询不重复读数据库。
+> JSONPath 子集支持 `$`、`.member`、`[N]`、`[*]`（不依赖外部 crate）。`--include` / `--max-body` 与 `bifrost traffic get` 行为对齐：同一次 search 请求内通过 `HashMap` 对每条记录、每一侧的 body 读取去重；该 cache 不跨请求持久化，也不是 LRU。
 >
-> **时间预过滤**：`--since/--until/--latest` 在 SQL 层（searched_range 索引）就裁掉超窗记录，不会被 `--max-scan` 浪费扫描预算。
+> **时间预过滤**：`--since/--until/--latest` 在 SQL 层通过 `idx_timestamp` 索引裁掉超窗记录，不会被 `--max-scan` 浪费扫描预算；`searched_range` 是响应中的搜索范围统计字段。
 
 #### 按发起站点关联第三方流量（请求头溯源）
 
@@ -683,7 +687,7 @@ bifrost status --format json-pretty         # 缩进 JSON，便于人看
 bifrost status --tui                        # 交互式 TUI dashboard
 ```
 
-JSON 字段包含 `pid / version / proxy_port / admin_port / uptime_ms / system_proxy / cli_proxy / tls_intercept / rules / scripts / values / connections / traffic_count` 等，字段稳定后只增不删；脚本要做能力探测时请基于 key 存在性判断，不要按数组下标解析。
+JSON 顶层字段为 `schema_version / version / running / runtime_source / pid / uptime_sec / listener / system_proxy / tls / active_rules / data_dir / ports / errors`。监听地址与代理端口位于 `listener.host` / `listener.port`，TLS 配置位于 `tls`；脚本要做能力探测时请基于 key 存在性判断，不要按数组下标解析。Client 模式的 `status --format json` 返回远端 overview schema，不应与本机 status schema 混用。
 
 ### 14. 升级
 
@@ -801,14 +805,13 @@ bifrost im messages list --provider feishu-main --direction inbound
 
 ### 22. 安装 Skill 到 AI 工具
 
-bifrost 支持将自身的 `SKILL.md` 文档安装到各种 AI 编码辅助工具中（如 Claude Code、Codex、Trae、Cursor、GitHub Copilot 等），也兼容更多遵循通用 Agent Skills 目录规范的运行时。
+`bifrost install-skill` 支持标准 Agent Skills 目录 `.agents/skills` 和 Claude Code 目录 `.claude/skills`。其他运行时能否读取 `.agents/skills` 取决于其自身兼容性；CLI 不再提供 Codex、Trae、Cursor 或 GitHub Copilot 的独立安装 target。
 
 ```bash
-bifrost install-skill --cwd                    # 安装到当前项目目录（如 .claude/.codex/.agents/.github/.trae/.cursor）
-bifrost install-skill -t trae                  # 仅安装到 Trae
-bifrost install-skill -t github-copilot        # 仅安装到 GitHub Copilot
+bifrost install-skill --cwd                    # 安装到当前项目的 .agents/skills 与 .claude/skills
 bifrost install-skill -t universal             # 仅安装到通用 .agents/skills 目录
-bifrost install-skill -t all -y                # 自动安装到所有支持的工具
+bifrost install-skill -t claude-code           # 仅安装到 Claude Code .claude/skills 目录
+bifrost install-skill -t all -y                # 同时安装 universal 与 claude-code
 ```
 
 通用 `bifrost` skill 覆盖本机代理、Client Admin 直连、规则、流量、IM Gateway CLI 配置和 Agent 采证工作流；专用 `bifrost-remote` skill 只覆盖 Relay/授权下的远程文件、远程进程和 shell 边界。
@@ -843,7 +846,7 @@ Client 工作流规则：
 
 `bifrost install-skill` 会同时安装通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户需要读取/修改目标机任意文件、操作远端仓库、运行构建或 shell，或者明确使用 SSH key / pair code 时，使用 `bifrost-remote` skill。Client Admin 与 Remote Invoke 是两套对等且隔离的远程模式。
 
-本节只保留快速索引（完整流程、错误码、典型 workflow 见 `skill_remote.md`）：
+本节只保留快速索引。完整流程、错误码和典型 workflow 请读取 `bifrost install-skill` 同时安装的独立 `bifrost-remote` skill；不要在已安装的 `bifrost` skill 目录内查找不存在的相对文件 `skill_remote.md`。
 
 ```bash
 bifrost remote conn up --ssh-key <path>         # 使用导出的 SSH key 建立长期授权
@@ -920,7 +923,7 @@ bifrost script update request add-header -f ./scripts/add-header-v2.js
 ```bash
 bifrost search example --domain example.com --format json-pretty
 bifrost traffic list --host example.com --limit 20
-bifrost traffic get <id> --request-body --response-body  # <id> 为少于 6 位的数字序号
+bifrost traffic get <id> --request-body --response-body  # 纯数字按 sequence suffix 查找
 ```
 
 ### 排查某个站点页面触发的第三方请求
@@ -1028,10 +1031,10 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 - 如果用户没有要求修改系统或 shell 环境，不要开启 `--system-proxy`、`--cli-proxy`，也不要执行 `system-proxy enable`、`cli-proxy enable/disable`
 - **TLS 拦截默认关闭**，不要主动全局开启 `--intercept`（详见 §3 TLS/CA）
 - 如果用户只想验证规则，不必启用 TLS 拦截
-- 当用户提供一个少于 6 位的纯数字（如 57544、12345），且上下文含有「详情」「内容」「请求」「查看」等关键词时，应识别为 `bifrost traffic get <ID> --request-body --response-body` 操作；如果用户给了 ≥2 个 ID 应直接走 `bifrost traffic get --ids ID1,ID2,...` 批量
+- 当用户提供一个纯数字流量序号（如 57544、12345），且上下文含有「详情」「内容」「请求」「查看」等关键词时，应识别为 `bifrost traffic get <ID> --request-body --response-body` 操作；纯数字按 sequence suffix 查找，不限制为 6 位以内。如果用户给了 ≥2 个 ID，应直接走 `bifrost traffic get --ids ID1,ID2,...` 批量
 - **敏感输出**：`traffic get` / `traffic export` / `search --include` 当前按捕获原文输出，不要把 Authorization/Cookie/JWT/邮箱/手机号写到日志、聊天或可复用 skill 里
 - 想知道 token/JWT 是否过期、属于谁，优先用 `bifrost traffic auth-status <ID>`，不要让 user 自己 decode JWT
-- 想在外部 shell / 浏览器复现请求，用 `bifrost traffic export <ID> --as curl|fetch|har`；想直接重放并修改 body/headers 用 `bifrost traffic replay <ID> --patch ...`，不要自己手动拼 curl
+- 想在外部 shell / 浏览器复现请求，用 `bifrost traffic export <ID> --as curl|fetch|har`；想直接重放并修改 JSON body 用 `bifrost traffic replay <ID> --patch ...`。`--patch` 不修改 headers，认证 header 只能按需用 `--refresh-auth` 刷新
 - 需要捕获一次后续请求（比如「等我点击那个按钮」），用 `bifrost capture wait` 而不是 `traffic list` 轮询
 - 用户要找“某站点页面发起的第三方请求”时，先用站点域名配合 `--req-header` 搜索 `Referer` / `Origin` 线索，并用 `--latest` 限定操作时间窗；不要误用只过滤目的地的 `--host` / `--domain`，也不要把严格等值的 `--req-header-eq` 当成 glob 搜索
 - 写脚本/CI 集成时 `bifrost status` 必须加 `--format json`；不要去 grep text 输出
@@ -1040,7 +1043,7 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 
 ## 9. 远程文件 API（coding agent 友好）
 
-受 `FileAccessPolicy` 约束的远程文件访问能力，面向 Claude Code / Cursor / Codex 等 coding agent 打磨。默认策略：`roots=[cwd]`，`denies=[**/.git/**, **/target/**, **/*.key, **/*.pem]`，默认遵守最近 `.gitignore`（可用 `--no-ignore` 关闭）。
+受 `FileAccessPolicy` 约束、面向 coding agent 的远程文件访问能力。默认策略为 `roots=[cwd]`，并拒绝 `.git`、`target`、`node_modules`、`.ssh`、`.aws`、`.gnupg`、`Library/Keychains`、`*.key`、`*.pem`、`*.pfx`、`*.p12`、`.env`、`.env.*`、`.npmrc`、`.netrc`、`id_rsa*`；默认遵守最近 `.gitignore`（可用 `--no-ignore` 关闭）。
 
 ### 授权模型（grant scope）
 
@@ -1095,8 +1098,8 @@ bifrost remote file upload <local> <remote> [--chunk-size <bytes>] \
 
 ### coding-agent 关键语义
 
-- **gitignore 感知**：`list` / `glob` / `search` 默认跳过 `.gitignore` 命中的路径；agent 需要扫隐藏/忽略文件时加 `--no-ignore`。
-- **truncated 标志**：`list` / `glob` / `search` / `read` 超过上限时在 JSON 响应中返回 `"truncated": true`；agent 应据此分片重试或收窄范围。
+- **gitignore 感知**：`list` / `glob` / `find` 默认跳过 `.gitignore` 命中的路径；agent 需要扫隐藏/忽略文件时加 `--no-ignore`。旧命令 `remote file search` 已移除，不是兼容 alias。
+- **truncated 标志**：`list` / `glob` / `find` / `read` 超过上限时在 JSON 响应中返回 `"truncated": true`；agent 应据此分片重试或收窄范围。
 - **完整文件 sha256**：`read` 在 `truncated=true` 时响应体额外带 `file_sha256`（整文件哈希，不是截断片段的），用于 agent 做 resume / 一致性校验。
 - **分块大文件传输**：`upload` / `download` 走 `file.upload_*` / `file.download_*` 分块协议，支持 `--chunk-size`、`--resume`、逐块 sha256 和整文件 sha256 校验。上传需要 `remote_file_write`，下载只需要 `remote_file_read`。
 - **Symlink 语义**：`stat` 和 `list` 对符号链接采用 **lstat** 语义，不跟随链接，额外返回 `symlink_target`；Windows 上自动去除 `\\?\` / `\\?\UNC\` NT verbatim 前缀，跨平台一致。

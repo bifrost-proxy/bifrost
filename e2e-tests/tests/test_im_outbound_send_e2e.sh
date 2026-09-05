@@ -300,5 +300,16 @@ UNKNOWN_ERR="$($BIFROST_BIN -p "$BIFROST_PORT" im send feishu-main --text hello 
 grep -q "unknown im send option '--typo'" <<<"$UNKNOWN_ERR"
 HELP_OUTPUT="$($BIFROST_BIN im send --help)"
 grep -q "bifrost im send \[PROVIDER\]" <<<"$HELP_OUTPUT"
+for help_args in \
+  "provider add --help" \
+  "target add --help" \
+  "route add --help" \
+  "schedule preview --help" \
+  "schedule add --help" \
+  "history events --help" \
+  "messages clear --help"; do
+  DEEP_HELP_OUTPUT="$($BIFROST_BIN -p 1 im $help_args)"
+  grep -q "Usage: bifrost im" <<<"$DEEP_HELP_OUTPUT"
+done
 
 echo "[im-outbound-send] passed"

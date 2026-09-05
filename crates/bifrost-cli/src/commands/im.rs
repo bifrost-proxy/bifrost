@@ -10,8 +10,10 @@ use qrcode::{render::unicode, QrCode};
 use serde_json::{json, Value};
 use tracing::debug;
 
+mod help;
 mod schedule;
 
+use help::{is_im_context_help_request, print_im_context_help};
 use schedule::handle_im_schedule;
 
 use bifrost_core::{text::truncate_chars_with_suffix, Result};
@@ -23,6 +25,10 @@ const DEFAULT_BUILTIN_RUNNERS_HINT: &str = "codex, traex, Claude Code";
 pub fn handle_im_command(host: &str, port: u16, args: &[String]) -> Result<()> {
     if args.is_empty() {
         print_im_help();
+        return Ok(());
+    }
+    if is_im_context_help_request(args) {
+        print_im_context_help(args);
         return Ok(());
     }
 
