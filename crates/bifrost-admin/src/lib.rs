@@ -34,6 +34,7 @@ mod query_service;
 pub mod remote_invoke;
 pub mod replay;
 pub(crate) mod replay_body_rules;
+mod replay_content_encoding;
 pub mod replay_db;
 pub mod replay_executor;
 pub(crate) mod replay_response_rules;

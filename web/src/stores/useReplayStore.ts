@@ -211,16 +211,21 @@ function toHistoryApiParams(
   return { limit, offset };
 }
 
-function buildReplayRequestFromTrafficRecord(
+export function buildReplayRequestFromTrafficRecord(
   record: TrafficRecord,
   requestBody: string | null,
 ): { request: ReplayRequest; requestType: RequestType } {
-  const headers: ReplayKeyValueItem[] = (record.request_headers || []).map(([key, value]) => ({
-    id: generateId(),
-    key,
-    value,
-    enabled: true,
-  }));
+  const headers: ReplayKeyValueItem[] = (record.request_headers || [])
+    .filter(([key]) => {
+      const normalized = key.trim().toLowerCase();
+      return normalized !== 'content-encoding' && normalized !== 'content-length';
+    })
+    .map(([key, value]) => ({
+      id: generateId(),
+      key,
+      value,
+      enabled: true,
+    }));
 
   let body: ReplayBody = { type: 'none' };
   if (requestBody) {

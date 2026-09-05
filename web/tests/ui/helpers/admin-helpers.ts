@@ -214,7 +214,7 @@ export async function sendProxyRequestWithResponse(
   options: {
     method?: string;
     headers?: Record<string, string>;
-    body?: string;
+    body?: string | Buffer;
   } = {},
 ): Promise<ProxyResponse> {
   const target = new URL(url);

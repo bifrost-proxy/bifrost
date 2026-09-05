@@ -1,10 +1,12 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+import { gzipSync } from "node:zlib";
 import {
   apiBase,
   clearReplay,
   clearTraffic,
   openPage,
   sendProxyRequest,
+  sendProxyRequestWithResponse,
   startMockHttpServer,
   uniqueName,
   waitForTrafficRow,
@@ -16,6 +18,17 @@ test.beforeEach(async ({ request }) => {
   await clearTraffic(request);
   await clearReplay(request);
 });
+
+async function dismissConnectedDeviceModal(page: Page) {
+  await page.addLocatorHandler(
+    page.getByRole("dialog").filter({
+      hasText: "Install Bifrost CA profile on connected iPhone?",
+    }),
+    async (dialog) => {
+      await dialog.getByRole("button", { name: "Not now" }).click();
+    },
+  );
+}
 
 test("从其他 tab 切到 Replay 时立即加载已保存请求列表", async ({
   page,
@@ -173,6 +186,47 @@ test("从 Traffic 导入后首次保存的模板在执行后可见历史，刷�
     await page.getByTestId("replay-mode-history").click();
     await expect(page.getByTestId("replay-history-scope")).toContainText(requestName);
     await expect(page.getByTestId("replay-history-item").filter({ hasText: path }).first()).toBeVisible();
+  } finally {
+    await server.close();
+  }
+});
+
+test("从 Traffic 导入 gzip 请求后以明文正文重放且不保留压缩头", async ({ page }) => {
+  const server = await startMockHttpServer();
+  const path = `/compressed-replay-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const body = JSON.stringify({ limit: 1, source: "traffic" });
+
+  try {
+    await dismissConnectedDeviceModal(page);
+    await openPage(page, "traffic");
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+
+    const captureResponse = await sendProxyRequestWithResponse(
+      `http://127.0.0.1:${server.port}${path}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Encoding": "gzip",
+        },
+        body: gzipSync(body),
+      },
+    );
+    expect(captureResponse.status).toBe(200);
+
+    const row = await waitForTrafficRow(page, path);
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Replay" }).click();
+    await expect(page).toHaveURL(/\/_bifrost\/replay$/);
+
+    const requestCountBeforeReplay = server.requests.length;
+    await page.getByTestId("replay-send-button").click();
+    await expect.poll(() => server.requests.length).toBeGreaterThan(requestCountBeforeReplay);
+
+    const replayed = server.requests.at(-1);
+    expect(replayed?.body).toBe(body);
+    expect(replayed?.headers["content-encoding"]).toBeUndefined();
+    expect(Number(replayed?.headers["content-length"])).toBe(Buffer.byteLength(body));
   } finally {
     await server.close();
   }

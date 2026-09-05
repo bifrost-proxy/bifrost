@@ -738,7 +738,7 @@ shell_test_weight() {
     test_remote_search_traffic_cli_isomorphic_e2e.sh) echo 24 ;;
     test_socks5_tls_rules.sh) echo 24 ;;
     test_super_performance_mode.sh) echo 24 ;;
-    test_search_traffic_cli_isomorphic_e2e.sh) echo 23 ;;
+    test_search_traffic_cli_isomorphic_e2e.sh) echo 25 ;;
     test_im_gateway_traex_model_slash.sh) echo 22 ;;
     test_remote_shell_exec_streaming_e2e.sh) echo 22 ;;
     test_temporary_port_bindings.sh) echo 22 ;;
