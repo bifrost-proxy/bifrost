@@ -31,6 +31,23 @@ click repeated the same 30-second wait before returning to the recovery screen.
   daemon. `bifrost stop` and `bifrost restart` reject a verified live
   `runtime_start_mode=desktop` runtime and direct the user to quit the Desktop app instead.
 
+## One restart owner per upgrade
+
+Before installation, the CLI snapshots `runtime_start_mode` to decide whether it may restart the
+server. Desktop ownership disables the CLI restart for the entire transaction, including after
+Desktop has replaced or removed the shared runtime marker. CLI ownership runs the CLI restart to
+readiness before updating/relaunching Desktop. If that restart fails, the companion step does not run.
+Windows deferred replacement performs the companion continuation from its helper after CLI restart.
+
+Terminal-driven companion upgrades also write `desktop-upgrade-relaunch.json`, preserving the owner
+and actual runtime port before stopping the App. Desktop-owned relaunch uses exactly that port;
+port conflict is a failure rather than permission to choose the next port. A failed companion removes
+only its own unchanged marker before restoring the previous App.
+
+A failed Desktop child is cleaned up by its own process handle. It must never invoke a shared
+`bifrost stop`: another CLI process may have won the bind race and now own `runtime.json`. Normal
+startup can reuse that healthy winner; an unready competing runtime causes a visible failure.
+
 ## Handoff Model
 
 The upgrade restart command writes a one-shot marker in the shared Bifrost data directory:
@@ -89,15 +106,11 @@ the new App, which would make every new App enter helper mode, exit, and open an
    version. The target version is authoritative: the PID may differ, or may remain unchanged when
    the CLI updater has already completed before Desktop relaunch. Legacy markers without a pinned
    target retain the stricter PID-change requirement.
-6. If no target backend appears:
-   - a free recorded port allows the App to fall back to its bundled managed core
-   - an occupied port whose `/api/system` PID and port match the same data directory's
-     `runtime.json` is a known old-version Bifrost core and may be stopped before managed recovery
-   - any unrelated or unverified port owner remains fail-closed and cannot be killed or shadowed by
-     a second core
-7. A previous `Failed` progress for the same CLI handoff error makes the next fixed-App startup
-   retry recovery with zero additional handoff wait. This also applies to legacy markers that did
-   not contain `target_version`, so already-affected users recover immediately after upgrading.
+6. If no target backend appears, Desktop reports a CLI restart failure. It must not start a
+   managed core, stop an old CLI core, or select an adjacent port, even when the recorded port is free.
+7. A previous `Failed` progress for the same CLI handoff error makes the next attempt recheck with
+   zero additional handoff wait. It still preserves CLI ownership; recovery requires the CLI service
+   to become ready on the recorded port.
 8. While a CLI handoff marker remains active, ordinary health polling accepts only a backend that
    satisfies the marker's target identity. A healthy wrong-version service cannot clear the startup
    gate or remove the marker. A matching target backend completes progress and clears the marker.

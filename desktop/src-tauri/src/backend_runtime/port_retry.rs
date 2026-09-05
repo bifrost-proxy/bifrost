@@ -5,8 +5,14 @@ pub(crate) fn launch_backend_on_available_port(
     data_dir: &Path,
     startup_session_id: &str,
     preferred_port: u16,
-) -> tauri::Result<(Child, u16)> {
-    for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
+    allow_port_fallback: bool,
+) -> tauri::Result<(Option<Child>, u16)> {
+    let max_offset = if allow_port_fallback {
+        MAX_PORT_INCREMENT_ATTEMPTS
+    } else {
+        0
+    };
+    for offset in 0..=max_offset {
         let port = preferred_port.saturating_add(offset);
         if port == 0 {
             continue;
@@ -23,7 +29,7 @@ pub(crate) fn launch_backend_on_available_port(
                     data_dir,
                     format!("backend became ready at http://{BACKEND_ADMIN_HOST}:{port}"),
                 );
-                return Ok((child, port));
+                return Ok((Some(child), port));
             }
             Err(error) => {
                 let confirmed_bind_conflict = error.kind == BackendWaitFailureKind::ChildExited
@@ -32,7 +38,7 @@ pub(crate) fn launch_backend_on_available_port(
                     error.kind,
                     is_port_available(port),
                     confirmed_bind_conflict,
-                    offset < MAX_PORT_INCREMENT_ATTEMPTS,
+                    offset < max_offset,
                 );
                 let error_message = format!(
                     "{error}; inspect {}",
@@ -42,13 +48,20 @@ pub(crate) fn launch_backend_on_available_port(
                     data_dir,
                     format!("backend failed to become ready on port {port}: {error_message}"),
                 );
-                if let Err(stop_error) = stop_backend_with_binary(binary_path, data_dir) {
-                    append_desktop_bootstrap_log(
-                        data_dir,
-                        format!("backend stop after failed start returned an error: {stop_error}"),
-                    );
+                // The shared runtime marker may now describe the CLI daemon
+                // that won the bind race. Never run a data-directory-wide stop
+                // to clean up this failed child.
+                terminate_child(child)?;
+                if let Some(existing_port) = find_existing_backend_port(data_dir, port) {
+                    if allow_port_fallback {
+                        return Ok((None, existing_port));
+                    }
                 }
-                let _ = terminate_child(child);
+                if read_desktop_runtime_marker(data_dir).is_some() {
+                    return Err(anyhow(format!(
+                        "{error_message}; another runtime is recorded for this data directory; refusing to start a second backend"
+                    )));
+                }
                 if should_retry_port {
                     append_desktop_bootstrap_log(
                         data_dir,

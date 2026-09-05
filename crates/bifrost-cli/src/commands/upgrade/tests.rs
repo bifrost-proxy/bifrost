@@ -661,6 +661,37 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
     std::fs::set_permissions(&failure, std::fs::Permissions::from_mode(0o755))
         .expect("chmod failure helper");
 
+    #[cfg(target_os = "macos")]
+    {
+        let runtime = RuntimeInfo::new(
+            std::process::id(),
+            18888,
+            None,
+            None,
+            RuntimeStartMode::Daemon,
+        );
+        write_runtime_info(&runtime).expect("snapshot CLI owner");
+        update_desktop_app_after_upgrade(&success, "99.0.1")
+            .expect("caller-managed handoff success");
+        let marker_path = data_dir.join("desktop-upgrade-relaunch.json");
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+        assert_eq!(marker["proxy_port"], 18888);
+        assert_eq!(marker["observed_external_core_pid"], std::process::id());
+        assert!(marker["old_core_pid"].is_null());
+        update_desktop_app_after_upgrade(&failure, "99.0.1").expect_err("failed install");
+        assert!(
+            !marker_path.exists(),
+            "failed caller-managed install removes its own handoff"
+        );
+        std::fs::create_dir(&marker_path).expect("simulate unwritable marker destination");
+        let error = update_desktop_app_after_upgrade(&success, "99.0.1")
+            .expect_err("marker persistence failure must abort before launching Desktop");
+        assert!(matches!(error, BifrostError::Io(_)));
+        assert!(marker_path.is_dir());
+        std::fs::remove_dir(&marker_path).unwrap();
+        crate::process::remove_pid(runtime.pid).expect("remove both isolated runtime markers");
+    }
     update_desktop_app_after_upgrade(&success, "99.0.1").expect("strict app success");
     let error =
         update_desktop_app_after_upgrade(&failure, "99.0.1").expect_err("strict app failure");

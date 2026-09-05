@@ -167,6 +167,13 @@ struct UpgradeBehavior {
 }
 
 impl UpgradeBehavior {
+    fn for_runtime_owner(mut self, runtime: Option<&RuntimeInfo>) -> Self {
+        // Freeze ownership before installers or Desktop shutdown can replace the
+        // shared runtime marker. A Desktop-owned core has exactly one restarter.
+        self.restart_proxy &= cli_owns_runtime_restart(runtime);
+        self
+    }
+
     fn background() -> Self {
         Self {
             restart_if_already_latest: true,
@@ -1286,6 +1293,7 @@ fn handle_upgrade_inner(
     behavior: UpgradeBehavior,
     pinned_target: Option<String>,
 ) -> Result<(), BifrostError> {
+    let behavior = behavior.for_runtime_owner(read_runtime_info().as_ref());
     let current_version = env!("CARGO_PKG_VERSION");
 
     println!(
@@ -1454,21 +1462,27 @@ fn handle_upgrade_inner(
         }
         #[cfg(windows)]
         UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
-            // The helper cannot replace the running CLI until this process
-            // exits. Run the App companion from the staged replacement binary,
-            // not from the still-running old target: the App update may depend
-            // on fixes that only exist in the version being installed. After
-            // that child exits, the same staged binary remains available for
-            // the CLI handoff.
-            update_desktop_companion(
-                windows_deferred_desktop_companion_executable(&deferred_install),
-                &cache.latest_version,
-                behavior,
-            )?;
-            maybe_restart_running_proxy_after_windows_deferred_install(
-                deferred_install,
-                behavior.restart_proxy,
-            )?
+            if behavior.restart_proxy && behavior.update_desktop_app {
+                // Windows replacement waits for this updater to exit. Continue
+                // the Desktop companion from the helper only after CLI readiness.
+                env::set_var("BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL", "1");
+                let result = maybe_restart_running_proxy_after_windows_deferred_install(
+                    deferred_install,
+                    behavior.restart_proxy,
+                );
+                env::remove_var("BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL");
+                result?;
+            } else {
+                update_desktop_companion(
+                    windows_deferred_desktop_companion_executable(&deferred_install),
+                    &cache.latest_version,
+                    behavior,
+                )?;
+                maybe_restart_running_proxy_after_windows_deferred_install(
+                    deferred_install,
+                    behavior.restart_proxy,
+                )?;
+            }
         }
     }
 

@@ -688,6 +688,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$postRestartDesktop = $env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL -eq "1"
+Remove-Item Env:BIFROST_WINDOWS_POST_RESTART_DESKTOP_INTERNAL -ErrorAction SilentlyContinue
 function Write-UpgradeLog([string]$Message) {
   $timestamp = (Get-Date).ToString("o")
   Add-Content -LiteralPath $LogPath -Value "$timestamp $Message"
@@ -867,6 +869,17 @@ try {
       if ($child.ExitCode -ne 0) {
         throw "restart command exited with code $($child.ExitCode)"
       }
+    }
+  }
+
+  if ($postRestartDesktop) {
+    $env:BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART = "1"
+    $env:BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION = $TargetVersion
+    $env:BIFROST_EXTERNAL_CLI_WORKER = "0"
+    Write-UpgradeLog "CLI restart ready; updating Desktop companion"
+    & $TargetPath upgrade
+    if ($LASTEXITCODE -ne 0) {
+      throw "Desktop companion exited with code $LASTEXITCODE"
     }
   }
 

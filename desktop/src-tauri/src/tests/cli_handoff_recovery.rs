@@ -240,7 +240,7 @@ fn failed_cli_owned_handoff_retries_without_another_thirty_second_wait() {
 }
 
 #[test]
-fn cli_owned_upgrade_relaunch_takes_over_wrong_version_core_owned_by_same_data_dir() {
+fn cli_owned_upgrade_relaunch_preserves_wrong_version_core_owned_by_same_data_dir() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let target_port = spawn_system_server_on(
         super::super::BACKEND_BIND_HOST,
@@ -267,18 +267,16 @@ fn cli_owned_upgrade_relaunch_takes_over_wrong_version_core_owned_by_same_data_d
         rollback: None,
     };
 
-    let resolution = resolve_external_cli_backend_handoff(temp_dir.path(), &marker, Duration::ZERO)
-        .expect("verified same-data-dir old core should be eligible for managed recovery");
-
-    assert!(
-        matches!(resolution, ExternalCliBackendHandoff::StartManagedFallback),
-        "verified same-data-dir core should enter safe managed recovery"
-    );
-    let bootstrap_log =
-        fs::read_to_string(temp_dir.path().join("logs/desktop-bootstrap.log")).expect("log");
-    assert!(
-        bootstrap_log.contains("matches this data directory runtime marker"),
-        "unexpected bootstrap log:\n{bootstrap_log}"
+    let before = fs::read(temp_dir.path().join("runtime.json")).expect("runtime");
+    let error = resolve_external_cli_backend_handoff(temp_dir.path(), &marker, Duration::ZERO)
+        .err()
+        .expect("CLI owner must remain responsible even when its old core is healthy");
+    assert!(error
+        .to_string()
+        .contains("CLI-owned backend did not restart"));
+    assert_eq!(
+        fs::read(temp_dir.path().join("runtime.json")).unwrap(),
+        before
     );
 }
 

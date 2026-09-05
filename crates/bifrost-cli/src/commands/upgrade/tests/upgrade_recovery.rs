@@ -186,30 +186,75 @@ fn installed_upgrade_attempts_proxy_restart_even_when_desktop_update_fails() {
 }
 
 #[test]
-fn installed_upgrade_reports_both_desktop_and_proxy_restart_failures() {
+fn installed_upgrade_does_not_launch_desktop_after_proxy_restart_failure() {
+    let desktop_called = std::cell::Cell::new(false);
     let error = finish_installed_upgrade_steps(
         UpgradeBehavior::background(),
-        || Err(BifrostError::Config("desktop failed".to_string())),
-        || Err(BifrostError::Config("restart failed".to_string())),
-    )
-    .expect_err("both steps fail");
-
-    let message = error.to_string();
-    assert!(message.contains("desktop failed"));
-    assert!(message.contains("running proxy restart also failed"));
-    assert!(message.contains("restart failed"));
-}
-
-#[test]
-fn installed_upgrade_reports_proxy_restart_failure_after_desktop_success() {
-    let error = finish_installed_upgrade_steps(
-        UpgradeBehavior::background(),
-        || Ok(()),
+        || {
+            desktop_called.set(true);
+            Ok(())
+        },
         || Err(BifrostError::Config("restart failed".to_string())),
     )
     .expect_err("proxy restart fails");
-
     assert!(error.to_string().contains("restart failed"));
+    assert!(
+        !desktop_called.get(),
+        "Desktop must not take over a failed CLI restart"
+    );
+}
+
+#[test]
+fn upgrade_restarts_cli_before_launching_desktop() {
+    let events = std::cell::RefCell::new(Vec::new());
+    finish_installed_upgrade_steps(
+        UpgradeBehavior::background(),
+        || {
+            events.borrow_mut().push("desktop");
+            Ok(())
+        },
+        || {
+            events.borrow_mut().push("cli_ready");
+            Ok(())
+        },
+    )
+    .expect("upgrade completes");
+    assert_eq!(*events.borrow(), ["cli_ready", "desktop"]);
+}
+
+#[test]
+fn upgrade_freezes_desktop_ownership_before_companion_changes_runtime() {
+    let runtime = RuntimeInfo::new(123, 19900, None, None, RuntimeStartMode::Desktop);
+    let behavior = UpgradeBehavior::background().for_runtime_owner(Some(&runtime));
+    let restart_called = std::cell::Cell::new(false);
+    finish_installed_upgrade_steps(
+        behavior,
+        || Ok(()),
+        || {
+            restart_called.set(true);
+            Ok(())
+        },
+    )
+    .expect("Desktop owns its server restart");
+    assert!(!restart_called.get());
+    for mode in [RuntimeStartMode::Daemon, RuntimeStartMode::Foreground] {
+        let runtime = RuntimeInfo::new(123, 19900, None, None, mode);
+        assert!(
+            UpgradeBehavior::background()
+                .for_runtime_owner(Some(&runtime))
+                .restart_proxy
+        );
+        assert!(
+            !UpgradeBehavior::interactive(false, true)
+                .for_runtime_owner(Some(&runtime))
+                .restart_proxy
+        );
+    }
+    assert!(
+        UpgradeBehavior::background()
+            .for_runtime_owner(None)
+            .restart_proxy
+    );
 }
 
 #[test]
@@ -280,4 +325,23 @@ fn already_latest_upgrade_interactive_preserves_no_restart_behavior() {
     .expect("interactive already-latest upgrade");
 
     assert!(!restart_called.get());
+}
+
+#[test]
+fn caller_managed_relaunch_preserves_runtime_owner_and_custom_port() {
+    for mode in [RuntimeStartMode::Desktop, RuntimeStartMode::Daemon] {
+        let runtime = RuntimeInfo::new(456, 18888, None, None, mode);
+        let marker =
+            caller_managed_relaunch_marker(&runtime, 123, Path::new("/tmp/Bifrost.app"), "0.0.190");
+        assert_eq!(marker["proxy_port"], 18888);
+        assert_eq!(marker["old_app_pid"], 123);
+        assert_eq!(marker["target_version"], "0.0.190");
+        if mode == RuntimeStartMode::Desktop {
+            assert_eq!(marker["old_core_pid"], 456);
+            assert!(marker["observed_external_core_pid"].is_null());
+        } else {
+            assert!(marker["old_core_pid"].is_null());
+            assert_eq!(marker["observed_external_core_pid"], 456);
+        }
+    }
 }

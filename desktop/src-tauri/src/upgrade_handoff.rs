@@ -165,7 +165,6 @@ pub(super) fn wait_for_external_cli_backend(
 
 pub(super) enum ExternalCliBackendHandoff {
     Reuse(u16),
-    StartManagedFallback,
 }
 
 pub(super) fn failed_cli_handoff_can_retry_immediately(
@@ -201,15 +200,6 @@ pub(super) fn external_cli_handoff_wait(
     }
 }
 
-pub(super) fn runtime_marker_matches_backend_identity(
-    data_dir: &Path,
-    port: u16,
-    identity: &BackendSystemIdentity,
-) -> bool {
-    read_desktop_runtime_marker(data_dir)
-        .is_some_and(|runtime| runtime.pid == identity.pid && runtime.port == port)
-}
-
 pub(super) fn resolve_external_cli_backend_handoff(
     data_dir: &Path,
     marker: &DesktopUpgradeRelaunchMarker,
@@ -232,35 +222,10 @@ pub(super) fn resolve_external_cli_backend_handoff(
         );
         return Ok(ExternalCliBackendHandoff::Reuse(marker.proxy_port));
     }
-    if !is_port_available(marker.proxy_port) {
-        if probe_backend_identity(marker.proxy_port)
-            .as_ref()
-            .is_some_and(|identity| {
-                runtime_marker_matches_backend_identity(data_dir, marker.proxy_port, identity)
-            })
-        {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!(
-                    "CLI-owned backend on port {} did not reach target version {:?}, but it matches this data directory runtime marker; stopping it before desktop-managed recovery",
-                    marker.proxy_port, marker.target_version
-                ),
-            );
-            return Ok(ExternalCliBackendHandoff::StartManagedFallback);
-        }
-        return Err(anyhow(format!(
-            "CLI-owned backend did not restart on port {} with target version {:?}; port is still occupied, refusing to launch a second desktop-managed core",
-            marker.proxy_port, marker.target_version
-        )));
-    }
-    append_desktop_bootstrap_log(
-        data_dir,
-        format!(
-            "CLI-owned backend did not restart on port {} with target version {:?}; port is free, launching desktop-managed core",
-            marker.proxy_port, marker.target_version
-        ),
-    );
-    Ok(ExternalCliBackendHandoff::StartManagedFallback)
+    Err(anyhow(format!(
+        "CLI-owned backend did not restart on port {} with target version {:?}; refusing to launch a desktop-managed core. Retry the CLI upgrade or restart the CLI service on its original port.",
+        marker.proxy_port, marker.target_version
+    )))
 }
 
 pub(super) fn upgrade_relaunch_uses_external_cli_backend(

@@ -480,6 +480,29 @@ pub(super) fn update_desktop_app_after_upgrade_best_effort(
     }
 }
 
+// Same schema consumed by Desktop's upgrade_handoff module. Terminal-driven
+// upgrades need this marker too: a normal App launch otherwise loses both the
+// original owner and a non-default port during the shutdown gap.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+pub(super) fn caller_managed_relaunch_marker(
+    runtime: &RuntimeInfo,
+    app_pid: u32,
+    app_path: &Path,
+    target_version: &str,
+) -> serde_json::Value {
+    let desktop_owned = runtime.start_mode == RuntimeStartMode::Desktop;
+    serde_json::json!({
+        "schema_version": 1,
+        "created_at_ms": chrono::Utc::now().timestamp_millis(),
+        "old_app_pid": app_pid,
+        "old_core_pid": desktop_owned.then_some(runtime.pid),
+        "observed_external_core_pid": (!desktop_owned).then_some(runtime.pid),
+        "proxy_port": runtime.port,
+        "app_target": app_path,
+        "target_version": target_version,
+    })
+}
+
 pub(super) fn update_desktop_app_after_upgrade(
     executable: &Path,
     target_version: &str,
@@ -523,8 +546,35 @@ pub(super) fn update_desktop_app_after_upgrade(
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let desktop_was_shut_down = false;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let relaunch_snapshot = if mode == DesktopCompanionMode::CallerManaged {
+        read_runtime_info().map(|runtime| {
+            let app_pid = running_desktop_shell_process(&app_path).map_or(0, |(pid, _)| pid);
+            caller_managed_relaunch_marker(&runtime, app_pid, &app_path, target_version)
+        })
+    } else {
+        None
+    };
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if desktop_was_shut_down {
         request_running_desktop_shutdown(&app_path)?;
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Some(snapshot) = &relaunch_snapshot {
+        let marker_result = get_bifrost_dir().and_then(|data_dir| {
+            fs::write(
+                data_dir.join("desktop-upgrade-relaunch.json"),
+                snapshot.to_string(),
+            )
+            .map_err(BifrostError::Io)
+        });
+        marker_result.map_err(|error| {
+            restore_desktop_after_failed_companion(
+                &app_path,
+                desktop_was_shut_down,
+                error,
+                crate::commands::app::restart_desktop_app,
+            )
+        })?;
     }
     let args = post_upgrade_desktop_app_args(target_version, app_path.parent(), mode);
     let environment = desktop_companion_environment(mode);
@@ -575,6 +625,13 @@ pub(super) fn update_desktop_app_after_upgrade(
         ))),
     };
     result.map_err(|error| {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(snapshot) = &relaunch_snapshot {
+            let path = parent_lock_data_dir.join("desktop-upgrade-relaunch.json");
+            if fs::read_to_string(&path).ok().as_deref() == Some(snapshot.to_string().as_str()) {
+                let _ = fs::remove_file(path);
+            }
+        }
         restore_desktop_after_failed_companion(
             &app_path,
             desktop_was_shut_down,
@@ -657,21 +714,13 @@ fn finish_upgrade_steps(
     update_desktop: impl FnOnce() -> Result<(), BifrostError>,
     restart_proxy: impl FnOnce() -> Result<(), BifrostError>,
 ) -> Result<(), BifrostError> {
-    let desktop_result = update_desktop();
-    let restart_result = if should_restart_proxy {
-        restart_proxy()
-    } else {
-        Ok(())
-    };
-
-    match (desktop_result, restart_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(desktop_error), Ok(())) => Err(desktop_error),
-        (Ok(()), Err(restart_error)) => Err(restart_error),
-        (Err(desktop_error), Err(restart_error)) => Err(BifrostError::Config(format!(
-            "{desktop_error}; running proxy restart also failed: {restart_error}"
-        ))),
+    // `start -d` returns only after daemon readiness. Desktop can then reuse
+    // that server instead of racing it during the old/new process gap. A
+    // failed CLI restart must not launch Desktop and silently change ownership.
+    if should_restart_proxy {
+        restart_proxy()?;
     }
+    update_desktop()
 }
 
 pub(super) fn restore_desktop_after_failed_companion(
