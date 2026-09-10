@@ -179,7 +179,11 @@ bifrost rule update Default --content "internal.example.test dns://10.0.0.53"
 搜索命令补充说明：
 
 - `bifrost search` 与 `bifrost traffic search` 等价
-- 基础过滤支持 `--method`、`--host`、`--path`、`--status`、`--protocol`
+- `traffic list` 和搜索默认按请求时间倒序，同时间戳按序号倒序；最新匹配优先，`--limit` 默认 50，搜索的 `--max-results` 显式覆盖 `--limit`
+- 基础过滤支持 `--method`、`--host`、`--path`、`--status`、`--protocol`；path 是字面子串，`%`、`_` 不作为通配符
+- `--req-json/--res-json` 支持根 `$`、点路径、数组下标与 `[*]`；非法路径、时间、header 等值表达式和 include 名称直接报错
+- `--latest 5m` 表示最近 5 分钟，不是只取一条；无关键词的结构化输出可直接使用过滤条件，不进入 TUI
+- `traffic get --ids ID1,ID2` 默认 NDJSON；显式 `--format json-pretty` 返回格式化的 `{"results":[...]}`
 - 搜索范围支持 `--url`、`--req-header`、`--res-header`、`--req-body`、`--res-body`
 - 兼容别名：`--headers` 会同时搜索请求头和响应头，`--body` 会同时搜索请求体和响应体
 

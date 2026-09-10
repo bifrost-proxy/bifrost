@@ -255,6 +255,7 @@ mod tests {
 cursor=10\
 &limit=200\
 &direction=forward\
+&order_by_time=true\
 &method=GET\
 &status=200\
 &status_min=100\
@@ -281,6 +282,7 @@ cursor=10\
 
         assert_eq!(params.cursor, Some(10));
         assert_eq!(params.limit, Some(200));
+        assert!(params.order_by_time);
         assert_eq!(params.direction, Direction::Forward);
         assert_eq!(params.method.as_deref(), Some("GET"));
         assert_eq!(params.status, Some(200));
@@ -544,6 +546,7 @@ fn parse_query_params_from_query_string(query: &str) -> QueryParams {
             match key {
                 "cursor" => params.cursor = value.parse().ok(),
                 "limit" => params.limit = value.parse().ok(),
+                "order_by_time" => params.order_by_time = value == "true",
                 "direction" if value == "forward" => {
                     params.direction = crate::traffic_db::Direction::Forward;
                 }

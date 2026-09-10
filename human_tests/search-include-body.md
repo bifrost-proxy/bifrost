@@ -1,39 +1,36 @@
-# Search Include Body / Headers + Traffic Batch Get
+# Search Include Body / Headers 与 Traffic Batch Get 回归
 
-针对 `bifrost search` 与 `bifrost traffic get` 在 wave-2 P0-3 新增的「一次往返带回 body+header」与「批量按 id 拉取」能力。
+## 功能与前置条件
 
-## 范围
-- crates/bifrost-admin/src/search/{types.rs,engine.rs,mod.rs}
-- crates/bifrost-admin/src/handlers/{search.rs,traffic.rs}
-- crates/bifrost-admin/src/query_service.rs
-- crates/bifrost-cli/src/cli.rs
-- crates/bifrost-cli/src/commands/{search.rs,traffic.rs}
-- crates/bifrost-command/src/lib.rs (`TrafficGetArgs.ids/max_body`, `SearchArgs.include`)
+验证真实 CLI 返回的 body/header 内容、正文上限和批量格式。需要 Rust、Python 3，从仓库根目录执行：
 
-## 测试用例
+```bash
+python3 e2e-tests/tests/test_traffic_search_matrix.py
+```
 
-| 序号 | 场景 | 预期 |
-|------|------|------|
-| 1 | `bifrost search --include req-body,res-body --max-body 65536 errno` | 每条命中带 `bodies.request` / `bodies.response`；`bytes_b64` 解码即原文（含 JSON / 二进制）；超 64 KiB 的 body `truncated=true` 且解码长度 = 65536；exit code 0 |
-| 2 | `bifrost search --include headers --format json-pretty token` | 每条命中带 `headers.request` 与 `headers.response`，每项是 `[name, value]` 二元数组；缺失 header 字段则该侧为空数组而非 null；body 字段缺省不返回 |
-| 3 | `bifrost search --include bodies,headers --format ndjson token` | `result` 行保留 `bodies.request.bytes_b64` / `bodies.response.bytes_b64` 与 `headers.request` / `headers.response`，不会因 NDJSON 流式输出丢失 include payload |
-| 4 | `bifrost traffic get --ids 1,2,3 --max-body 32768` | 默认 ndjson 输出：3 行，每行独立 `{"id":..,"summary":..,"bodies":..,"headers":..?}`；存在 / 不存在的 id 混排时缺失 id 行变 `{"id":"X","error":"not_found"}`；exit code 0 |
-| 5 | `bifrost traffic get --ids 1,2,3 --format json-pretty` | 客户端聚合成 `{"results":[...]}` 信封并 pretty-print；与单条 `traffic get <ID> --request-body --response-body` 字段对齐 |
-| 6 | `bifrost traffic get --ids $(seq -s, 1 201)` 与 `bifrost traffic get --ids` 留空 | 超 200 上限：admin 返回 HTTP 400 + `[traffic.batch.too_many_ids]`，CLI 非 0 退出；空 ids：CLI clap 直接 usage error |
+脚本编译当前代码，创建本地 HTTP fixture 与隔离代理；动态端口避开 9900，临时数据目录，禁用 tray、Sync 登录提示和系统代理。
 
-## 联调说明
-- 旧客户端（不传 `--include`）调用新 admin：`SearchRequest.include` 走 `Default`，整段 wire JSON 中省略；服务端落到原路径不读取 body store，零增量开销。
-- 新客户端调旧 admin：`SearchArgs.include` 序列化后旧 admin `#[serde(default)]` 容忍并丢弃；旧 admin 不会返回 bodies，CLI 不报错只是拿不到内容。
-- `bifrost search --include` 与 `bifrost traffic search` （远端通道）共用 `command_search_args`，远端 wave-2 admin 一致响应；远端 admin 老于 wave-2 时 fallback 行为同上。
-- batch endpoint 是 `application/x-ndjson`；ai-report 等工具应按行逐条消费、避免一次性反序列化整缓冲。
+## 用例
 
-## 边界
-- `--include` 与 `--max-body` 是搜索独立配置；`--max-body` 单独给但未启用任何 body include 时，include 块仅含 `max_body_bytes`，admin 视为无 body 输出（仅作为后续 include 启用时的默认上限）。
-- `bifrost traffic get --ids` 与位置参数 `<ID>` 严格互斥，clap usage 阶段即报错。
-- body 一律 base64 STANDARD 编码；CLI 输出 ndjson / json 信封时保留 `bytes_b64` 字段，由调用方自行解码。
-- 当前实现**不脱敏** Authorization / Cookie / 业务密钥；完整脱敏方案另开需求落地前，严禁把 batch/search include 结果转发给低信任 caller。
+在命令输出中逐条核对以下名称为 PASS，最终 failed=0。
 
-## 本次回归执行（2026-06-18）
+| 编号 | 操作与输出断言名称 | 预期 |
+|---|---|---|
+| TC-SIB-01 | `include bodies headers json/json-pretty`：`search --include bodies,headers --max-body 32` | 两侧 base64 解码恰好 32 字节，truncated=true，headers 为数组 |
+| TC-SIB-02 | `include bodies headers table/compact`，加 `--no-color` | 包含目标路径，不含 ANSI 转义 |
+| TC-SIB-03 | `include bodies headers ndjson` | result 行保留两侧 body/header，逐行 JSON 可解析 |
+| TC-SIB-04 | `batch sequence=False/True format=ndjson/json`、`batch default NDJSON` | 完整 ID 和序号解析正确；默认两行；缺失项 error=not_found 不影响成功项 |
+| TC-SIB-05 | `batch sequence=False/True format=json-pretty` | 显式 json-pretty 可整体解析为 results 数组，不能误输出 NDJSON |
+| TC-SIB-06 | `reject arguments`：ID 与 ids 同传、空 ids、201 个 ids | 全部非 0 退出，错误不伪装为空成功 |
+| TC-SIB-回归-01 | `single get format` 的五种格式和 `single get full sequence` | 精确记录身份、正文可读；单条行为不因 batch 修复改变 |
+| TC-SIB-回归-02 | `reject search/traffic search --include bodise` | 拼错 token 在 CLI 阶段拒绝，避免静默丢正文 |
 
-- TC-SIB-03 执行 `cargo test -p bifrost-cli search_result_to_json_preserves_include_payloads_for_ndjson -- --nocapture` 通过，验证 `--format ndjson` 的 `result` 对象仍包含 `bodies.*.bytes_b64` 与 `headers.*`。
-- 执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_search_traffic_cli_isomorphic_e2e.sh` 通过，其中 `search --include bodies,headers --format ndjson preserves payloads` 断言真实 CLI NDJSON `result` 行包含 `bodies.request.bytes_b64` 与 `headers.request`。
+## 数据与安全边界
+
+batch 成功项为 `id/ok/record` 加请求的 body/header；单条 get 与 batch 的正文 schema 不同。所有 body payload 使用 `bytes_b64`，当前 batch 客户端读取完整响应后输出，不承诺常量内存流式处理。
+
+当前 remote search/get 未暴露本地全部 include/batch 参数，本用例只验证本地两个搜索入口。正文和 headers 不自动脱敏，测试只用合成数据，禁止向低信任接收方发送真实 Cookie/Authorization。
+
+## 清理
+
+脚本 finally 关闭自身代理进程组与 mock 服务并删除临时目录，失败路径也执行；不修改正式服务、配置或系统代理。

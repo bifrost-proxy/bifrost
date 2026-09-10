@@ -18,7 +18,7 @@ HTTP_PORT="${HTTP_PORT:-$(allocate_free_port)}"
 HTTPS_PORT="${HTTPS_PORT:-$(allocate_free_port)}"
 ADMIN_BASE_URL="http://127.0.0.1:${PROXY_PORT}/_bifrost/api"
 MOCK_SERVER_SCRIPT="${ROOT_DIR}/e2e-tests/mock_servers/start_servers.sh"
-BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${ROOT_DIR}/target/release/bifrost}"
 
 TEST_DATA_DIR=""
 MOCK_LOG_DIR=""
@@ -600,6 +600,9 @@ main() {
     test_traffic_replay_failure_exit_code
     test_traffic_clear_commands
 
+    cleanup
+    trap - EXIT
+    SKIP_BUILD=true BIFROST_BIN="$BIFROST_BIN" python3 "${SCRIPT_DIR}/test_traffic_search_matrix.py"
     print_summary
 }
 

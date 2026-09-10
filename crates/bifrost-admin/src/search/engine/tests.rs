@@ -13,6 +13,181 @@ use crate::traffic::TrafficRecord;
 use crate::traffic_db::TrafficDbStore;
 
 #[test]
+fn streaming_limits_preserve_newest_matches_and_resume_inside_batch() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(
+        TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24)).unwrap(),
+    );
+    for i in [4, 6, 0, 2, 5, 1, 3] {
+        let mut record = TrafficRecord::new(
+            format!("record-{i}"),
+            "GET".to_string(),
+            format!("http://example.com/match/{i}"),
+        );
+        record.timestamp = 1000 + i;
+        db.record(record);
+    }
+    for direction in [
+        crate::traffic_db::Direction::Backward,
+        crate::traffic_db::Direction::Forward,
+    ] {
+        let mut cursor = None;
+        let mut timestamps = Vec::new();
+        loop {
+            let page = db.query(&crate::traffic_db::QueryParams {
+                order_by_time: true,
+                direction,
+                cursor,
+                limit: Some(2),
+                ..Default::default()
+            });
+            timestamps.extend(page.records.iter().map(|record| record.ts));
+            cursor = page.next_cursor;
+            if !page.has_more {
+                break;
+            }
+        }
+        let expected: Vec<u64> = if direction == crate::traffic_db::Direction::Backward {
+            (1000..1007).rev().collect()
+        } else {
+            (1000..1007).collect()
+        };
+        assert_eq!(timestamps, expected);
+    }
+    let engine = SearchEngine::new(db, None);
+    for max_scan in [None, Some(3)] {
+        let request = SearchRequest {
+            keyword: "match".to_string(),
+            max_results: Some(2),
+            max_scan,
+            ..Default::default()
+        };
+        let mut streamed = Vec::new();
+        let response = engine.search_stream(
+            &request,
+            |item| streamed.push(item.record.id.clone()),
+            |_| {},
+        );
+        assert_eq!(streamed, ["record-6", "record-5"]);
+        assert_eq!(response.total_matched, 2);
+        assert_eq!(response.total_searched, 2);
+        assert!(response.has_more);
+        let resumed = engine.search_stream(
+            &SearchRequest {
+                cursor: response.next_cursor,
+                max_results: Some(10),
+                ..request
+            },
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(resumed.results[0].record.id, "record-4");
+        assert_eq!(
+            resumed.total_matched,
+            if max_scan.is_some() { 3 } else { 5 }
+        );
+        assert_eq!(resumed.has_more, max_scan.is_some());
+    }
+    let response = engine.search_stream(
+        &SearchRequest {
+            keyword: "absent".to_string(),
+            max_scan: Some(2),
+            ..Default::default()
+        },
+        |_| {},
+        |_| {},
+    );
+    assert_eq!(response.total_matched, 0);
+    assert_eq!(response.total_searched, 2);
+    assert!(response.has_more);
+}
+
+#[test]
+fn time_order_uses_sequence_for_ties_and_reports_exact_last_page() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(
+        TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24)).unwrap(),
+    );
+    for i in 0..4 {
+        let mut record = TrafficRecord::new(
+            format!("tie-{i}"),
+            "GET".to_string(),
+            format!("http://example.com/tie/{i}"),
+        );
+        record.timestamp = 1000;
+        db.record(record);
+    }
+    for order_by_time in [true, false] {
+        for direction in [
+            crate::traffic_db::Direction::Backward,
+            crate::traffic_db::Direction::Forward,
+        ] {
+            let params = crate::traffic_db::QueryParams {
+                order_by_time,
+                direction,
+                limit: Some(2),
+                ..Default::default()
+            };
+            let first = db.query(&params);
+            assert!(first.has_more);
+            let last = db.query(&crate::traffic_db::QueryParams {
+                cursor: first.next_cursor,
+                ..params
+            });
+            assert!(!last.has_more);
+            let ids: Vec<_> = first
+                .records
+                .iter()
+                .chain(&last.records)
+                .map(|r| r.id.as_str())
+                .collect();
+            assert_eq!(
+                ids,
+                if direction == crate::traffic_db::Direction::Backward {
+                    vec!["tie-3", "tie-2", "tie-1", "tie-0"]
+                } else {
+                    vec!["tie-0", "tie-1", "tie-2", "tie-3"]
+                }
+            );
+        }
+    }
+    let engine = SearchEngine::new(db, None);
+    let request = SearchRequest {
+        keyword: "tie".to_string(),
+        max_results: Some(4),
+        ..Default::default()
+    };
+    let response = engine.search_stream(&request, |_| {}, |_| {});
+    assert_eq!(response.total_matched, 4);
+    assert!(!response.has_more);
+}
+
+#[test]
+fn json_null_is_distinct_from_empty_string() {
+    let condition = |value: &str| FilterCondition {
+        field: "req.body.value".to_string(),
+        operator: "equals".to_string(),
+        value: value.to_string(),
+    };
+    assert!(super::eval_value_condition(
+        &serde_json::Value::Null,
+        &condition("null")
+    ));
+    assert!(!super::eval_value_condition(
+        &serde_json::Value::Null,
+        &condition("")
+    ));
+    assert!(super::eval_value_condition(
+        &serde_json::json!(""),
+        &condition("")
+    ));
+    assert!(!super::eval_value_condition(
+        &serde_json::json!(""),
+        &condition("null")
+    ));
+}
+
+#[test]
 fn targeted_record_ids_preserve_keyword_and_filter_intersection() {
     let dir = TempDir::new().expect("temp dir");
     let db = Arc::new(

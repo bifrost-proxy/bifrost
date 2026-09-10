@@ -726,6 +726,7 @@ fn build_traffic_list_query(options: &TrafficListOptions) -> String {
     let mut params: Vec<(String, String)> = Vec::new();
 
     params.push(("limit".to_string(), options.limit.to_string()));
+    params.push(("order_by_time".to_string(), "true".to_string()));
     if let Some(cursor) = options.cursor {
         params.push(("cursor".to_string(), cursor.to_string()));
     }
@@ -1991,6 +1992,7 @@ mod tests {
         });
 
         assert!(query.contains("limit=50"));
+        assert!(query.contains("order_by_time=true"));
         assert!(query.contains("listener_port=50831"));
     }
 

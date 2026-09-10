@@ -1,260 +1,78 @@
-# Search JSONPath / Header / Time-window 过滤与 JSON 输出
+# Traffic list / search 过滤与排序
 
-## 背景
+## 功能与实现
 
-老版 `FilterCondition` 只支持 compact 字段（`url|host|path|method|content_type|client_app|client_ip|listener_port`）加上 SQL side 的 `status_ranges/protocols/content_types` 粗粒度分组。诊断 LLM/网关流量的常见诉求：
+CLI `bifrost search` 与 `bifrost traffic search` 共用搜索实现；`traffic list` 使用 SQL 过滤，搜索使用 SQL 候选集与 body/header matcher。远端 list/search 经 command service 进入相同后端。
 
-- 按响应 body 中的 JSON 字段过滤：`errno`、`choices[0].finish_reason`、`error.message`。
-- 按 header 过滤：`Authorization`、`Set-Cookie`、`x-trace-id`。
-- 按时间窗收敛：只看最近 5 分钟 5xx、只看 08:00–09:00 的调用。
-- 拿到结构化输出：脚本 / ai-report 不想解析 SSE 或 CLI table。
+### 排序与分页
 
-本设计扩展 `FilterCondition.field` 语义、新增 `time_range`、新增 CLI 标志与 JSON/NDJSON 输出，不破坏 SSE / SQL / body 落盘格式。
+- CLI list 与 search 默认按请求 `timestamp DESC, sequence DESC`，最新匹配优先；时间戳相同时按序号消除排序歧义。
+- list 显式 `--direction forward` 按时间、序号升序。默认 backward 向更早记录翻页。
+- `QueryParams.order_by_time` 只由 CLI list、command list 和 search 启用；实时增量更新仍沿用序号顺序，避免把请求时间和更新序号混用。
+- 时间排序的 cursor 仍为记录序号，SQL 根据该记录定位 `(timestamp, sequence)` 边界。数据保留清理或 clear 删除游标记录后，应重新从首屏查询。
+- SQL 多取一个候选后截断，用额外候选判断 `has_more`，整页恰好耗尽时不再返回虚假的下一页。
+- search 在每条命中后检查结果上限，不允许流式模式越过上限；在批次内截断或达到扫描上限时保留 cursor 与剩余候选提示。
+- `has_more` 表示仍有候选可扫描，不保证剩余候选一定匹配关键词。
 
-## 用户目标验证清单
+### CLI 过滤语义
 
-### 必须实现
+- list 的 host/url/path/client-app/client-ip/content-type 子串过滤按字面解释 `%`、`_`、反斜杠，绑定 SQL 参数并使用 `LIKE ... ESCAPE`；不接受 SQL 通配符语义。
+- 同类高级过滤可重复，多个条件取 AND；JSONPath 数组通配命中的多个节点取任一匹配。
+- `--req-json PATH=VALUE`、`--res-json PATH=VALUE` 支持 `$` 根、`.member`、`[0]`、`[*]`；允许省略 `$.` 前缀。值中的 `=` 保留。
+- 不支持递归下降、切片、过滤表达式。CLI 使用后端同源解析器校验，无效路径在发请求前报错；API matcher 对无效路径返回不匹配。
+- JSON null 的等值文本为 `null`，区别于空字符串。等值比较沿用大小写不敏感的文本语义，不引入 JSON 类型严格等值。
+- `--req-header-eq NAME=VALUE` / `--res-header-eq NAME=VALUE` 是等值过滤；`--req-header` / `--res-header` 是无参数的关键词搜索范围开关。
+- 布尔过滤 true/false 均生效，包括 WebSocket、SSE、H3、tunnel。
+- `--since` / `--until` 接受 RFC3339、整数 epoch 毫秒或相对时长；`--latest 5m` 等价最近 5 分钟，不是只取一条。时长支持 ms/s/m/h/d/w、小数，无单位按秒。
+- 非法路径、缺失等号、空 header 名、无效时间和 include token 均拒绝，不静默扩大查询范围。
 
-- `FilterCondition.field` 新增四类前缀：
-  - `req.body.$.<jsonpath>` / `res.body.$.<jsonpath>`
-  - `req.header.<name>` / `res.header.<name>`（header 名大小写不敏感）
-  - `ts`（unix epoch ms）
-- 新增 operator：`lt|gt|lte|gte`（仅对 `ts` 和数字型 JSON path 值生效）。
-- `SearchRequest` 新增 `time_range { since_ms, until_ms }`，SQL 层预剪枝。
-- `SearchResponse` 新增 `searched_range { oldest_ts_ms, newest_ts_ms, scanned_count }`。
-- CLI 新增标志：
-  - `--req-json path=value`（可重复）、`--res-json path=value`（可重复）
-  - `--req-header-eq name=val`（可重复）、`--res-header-eq name=val`（可重复）
-  - `--req-header name` / `--res-header name`（只在对应侧搜索匹配）
-  - `--since <duration>` / `--until <duration>` / `--latest`
-  - `--format json|json-pretty|ndjson`
-- `bifrost remote traffic search` 同步这批标志。
+### 上限与输出
 
-### 必须不破坏
+- CLI `--limit` 默认 50；显式 `--max-results` 覆盖它。`--max-scan` 限制扫描候选数量，SQL 时间窗剪枝不消耗扫描预算。
+- `searched_range` 只描述实际扫描范围，不代表数据库全量时间范围。
+- 非终端输入或非 table 输出在没有关键词时执行过滤查询，不自动进入 TUI；显式 `--interactive` 仍支持交互模式。
+- `--no-color` 的空结果也不输出 ANSI 转义。
+- search 支持 table、compact、json、json-pretty、ndjson。include 与 batch get 见 [search-include-body.md](search-include-body.md)。
 
-- 老 `FilterCondition` 分支保持不变；未知 field 走新分支。
-- 老服务端遇到带 `time_range` 的请求时 `serde` 按 `Option::default()` 处理。
-- 老 CLI 解析新 `searched_range` 时按未知字段忽略。
-- SSE search 协议、SQL schema、`BodyStore` 落盘格式一律不动。
+## 依赖与边界
 
-### 必须真实验证
+- SQLite 的复合比较完成游标定位，既有 timestamp 索引用于时间排序，不修改 schema、不删除旧库。
+- JSONPath 使用 `serde_json` 和项目自有解析器，不引入外部解释器。
+- body cache 在单次搜索内复用，超大正文受现有解压预算限制。
+- 不修改 WebUI、Sync、正式服务或系统代理。远端参数解析和 command 映射纳入单测；真实 relay 连通性另由远端专项套件验证。
 
-- `bifrost search --res-json '$.errno=90000201'` 命中包含错误码的响应。
-- `bifrost search --res-header 'set-cookie' --since 5m` 命中最近 5 分钟设置 Cookie 的响应。
-- `--until <过去时间>` 走 SQL 剪枝，`searched_range.scanned_count == 0`。
-- `--latest` 等价 `--limit 1 --max-results 1`。
+## 本次回归发现与修复
 
-## 产品语义
-
-### JSONPath 子集
-
-`crates/bifrost-admin/src/search/json_path.rs`，纯 `std + serde_json`：
-
-- 语法：`$(\.<key>|\[<idx>\]|\[\*\])*`
-- 语法元素：
-  - `$` 根
-  - `.foo` 对象成员
-  - `[0]` / `[12]` 非负整数下标
-  - `[*]` 数组通配，发散所有子元素
-- **不支持** 过滤表达式 `?(@.foo>1)`、递归通配 `..`、括号切片。
-- 路径解析失败 → 返回空 `Vec`，调用方按“不匹配”处理。
-
-### FilterCondition 求值语义
-
-- **文本类** operator（`contains|equals|not_contains|is_empty|is_not_empty|regex`）：
-  - 命中值先 stringify：标量 `to_string`，复杂对象 `Value::to_string`。
-  - `regex` 走 `Regex::is_match`。
-- **数字类** operator（`lt|gt|lte|gte`）：
-  - 值尝试 `as_f64`，`condition.value.parse::<f64>()`。
-  - 类型不匹配视为不命中。
-- Header：`fields.headers` lower-case 匹配，多值任一命中即命中；`fields = None` 时 false。
-- `ts`：`compact.ts` vs `condition.value.parse::<i64>()`；只支持 `lt|gt|lte|gte`，其他 operator 视为不命中。
-
-### time_range 预剪枝
-
-`SearchRequest.time_range.since_ms/until_ms` 下推到 `QueryParams.since_ms/until_ms`，SQL `WHERE timestamp >= ? AND timestamp <= ?` 直接筛。SQL 剪掉的记录：
-- 不进入 SearchEngine matcher。
-- 不消耗 `max_scan`。
-- 不触发 body/header 解析。
-- 空窗口 `searched_range.scanned_count == 0`。
-
-### body cache 单次搜索复用
-
-`SearchEngine` per-request 引入：
-
-```rust
-enum BodyCacheEntry {
-    Json(Value),
-    NonJson,
-    Missing,
-}
-let mut body_cache: HashMap<String, BodyCacheEntry> = HashMap::new();
-```
-
-同一记录的同侧 body 只解析一次。JSON 解析失败标记 `NonJson` 不重试。
-
-## 技术细节
-
-### 类型
-
-`crates/bifrost-admin/src/search/types.rs`：
-
-```rust
-pub struct SearchRequest {
-    // ...
-    pub time_range: Option<TimeRange>,
-    // ...
-}
-
-pub struct TimeRange {
-    pub since_ms: Option<i64>,
-    pub until_ms: Option<i64>,
-}
-
-pub struct SearchResponse {
-    // ...
-    pub searched_range: SearchedRange,
-}
-
-pub struct SearchedRange {
-    pub oldest_ts_ms: Option<i64>,
-    pub newest_ts_ms: Option<i64>,
-    pub scanned_count: usize,
-}
-```
-
-### Engine 求值
-
-`crates/bifrost-admin/src/search/engine.rs`：
-
-```rust
-let cond_needs_req_header = conds.iter().any(|c| c.field.starts_with("req.header."));
-let cond_needs_res_header = conds.iter().any(|c| c.field.starts_with("res.header."));
-let cond_needs_req_body   = conds.iter().any(|c| c.field.starts_with("req.body."));
-let cond_needs_res_body   = conds.iter().any(|c| c.field.starts_with("res.body."));
-
-// per-request body cache
-let mut body_cache: HashMap<String, BodyCacheEntry> = HashMap::new();
-
-// match 分支
-} else if let Some(rest) = field.strip_prefix("req.header.") {
-    // fields.headers.request lower-case match
-} else if let Some(path) = field.strip_prefix("req.body.") {
-    Self::eval_body_path(fields, path, condition, BodySide::Req, body_cache)
-} else if let Some(path) = field.strip_prefix("res.body.") {
-    Self::eval_body_path(fields, path, condition, BodySide::Res, body_cache)
-}
-```
-
-- `eval_body_path` 拉 `BodyStore` 内容，`serde_json::from_str`，`json_path::eval(&value, path)`。
-- 结果 nodes 迭代比较；任一命中即整条命中。
-
-### CLI
-
-`crates/bifrost-cli/src/cli.rs` Search 子命令：
-
-- `--req-json <path=value>`（可重复）
-- `--res-json <path=value>`（可重复）
-- `--req-header-eq <name=value>`（可重复）
-- `--res-header-eq <name=value>`（可重复）
-- `--req-header <name>` / `--res-header <name>`：只在该侧搜索关键词。
-- `--since <duration>` / `--until <duration>`：
-  - `30s/5m/2h/1d`：相对 `now`。
-  - RFC3339（如 `2026-06-17T10:00:00Z`）：绝对时间。
-- `--latest`：等价 `--limit 1 --max-results 1`。
-- `OutputFormat` 新增 `Ndjson`（保留 `Json/JsonPretty/Table/Compact`）。
-
-`run_simple_search` 分支：
-- `json/json-pretty/ndjson`：专门 collector；聚合 `results` + `searched_range` + `time_range` 整体/逐条输出。
-- SSE `done` 事件必须携带 `searched_range`，CLI 结构化输出能验证 SQL 预剪枝没有消耗 `max_scan`。
-
-### 远端
-
-`crates/bifrost-cli/src/cli/remote.rs` `RemoteSearchArgs` 同步这批标志。`crates/bifrost-cli/src/commands/remote.rs` 的 `command_search_args` 把它们映射成 `FilterCondition` + `time_range`。
-
-## CLI / Web / Admin API 快照
-
-| 层 | 入口 | 能力 |
+| 问题 | 修复 | 防回归证据 |
 |---|---|---|
-| CLI | `bifrost search --req-json/--res-json/...` | body JSONPath 过滤 |
-| CLI | `bifrost search --req-header-eq/--res-header-eq` | header 精确过滤 |
-| CLI | `bifrost search --since/--until/--latest` | 时间窗与最新一条 |
-| CLI | `bifrost search --format json\|json-pretty\|ndjson` | 结构化输出 |
-| CLI | `bifrost remote traffic search ...` | 远端同能力 |
-| Admin API | `POST /api/traffic/search` | `time_range` + 新 field 语义 |
-| Admin API | SSE `done` 事件 | 携带 `searched_range` |
-| Web | Traffic Search 面板 | 前端可选接入 header/body 高级过滤（本设计不改前端 UI 结构） |
+| path 的 `_` / `%` 意外成为 SQL 通配符 | 所有 SQL 子串过滤转义 | 字面路径与组合过滤精确集合断言 |
+| false 协议标记被忽略 | 统一 true/false flag 条件 | SQL 正反分支、真实 SSE 排除 |
+| streaming 超出结果上限，limit 被默认 max-results 遮蔽 | 每条命中检查上限，明确覆盖关系 | limit/max-results/max-scan 矩阵 |
+| 批内截断丢失 has_more、整页末尾误报下一页 | 保留未扫描候选，多取一个判断末页 | 续查、精确末页、扫描上限测试 |
+| 序号倒序不等于请求时间倒序 | 按时间与序号稳定排序 | 乱序写入、相同时间戳、双向游标测试 |
+| 根数组/根标量 JSONPath 损坏，null 被当空串 | 保留根路径，区分 null | 根路径、通配、压缩 JSON 真实查询 |
+| 非法过滤条件静默忽略 | clap 同源校验 | 本地两个入口与远端 parser 测试 |
+| 无关键词 JSON 查询误进 TUI | 按终端和输出格式决定默认交互 | 无关键词过滤、TTY 专项测试 |
+| 显式 batch json-pretty 输出 NDJSON | 区分格式缺省和显式选择 | batch 三格式精确解析 |
+| no-color 空结果仍含 ANSI | 移除硬编码转义 | 空结果 table/compact 断言 |
 
-## Sync 边界
+## 验证方案
 
-Traffic 存本地 SQLite，`search` 是本地/远端 admin API，不与 sync 交互。远端调用走 `bifrost remote invoke`。
+本次属于 CLI/Admin Rust 行为变更，执行以下适用验证：
 
-## Phase 拆分
+- 单元：traffic_db query/store、search engine/json_path、CLI search 和三入口参数解析；覆盖时间乱序、相同时间、末页、非法输入及根路径。
+- 真实 CLI：`python3 e2e-tests/tests/test_traffic_search_matrix.py`，独立数据目录、动态端口、本地 mock 请求，逐项断言实际输出；`crates/bifrost-cli/tests/traffic_search_cli.rs` 将同一矩阵接入 Cargo 集成测试和覆盖率。
+- 交互与原有行为：`bash e2e-tests/tests/test_search_traffic_cli_isomorphic_e2e.sh`，覆盖 aliases、TTY、clear、replay 等旧路径；该套件末尾执行新增矩阵。
+- human_tests：执行 [cli-traffic-search](../human_tests/cli-traffic-search.md)、[search-jsonpath](../human_tests/search-jsonpath.md)、[search-include-body](../human_tests/search-include-body.md)。
+- E2E 后执行 rust-project-validate；fmt、workspace clippy、workspace all-features tests、`make coverage-changed`，远端 CI 验证 coverage 门禁。
+- 不改前端，视觉与主题验证不适用。
 
-- **Phase 1**：`json_path.rs` 子集 + 单测；`FilterCondition` 新 field 分支。
-- **Phase 2**：`time_range` + SQL 剪枝 + `searched_range` 输出；body cache 复用。
-- **Phase 3**：CLI 标志（`--req-json/--res-json/--req-header-eq/--res-header-eq/--since/--until/--latest`）+ `--format ndjson`；SSE done 携带 `searched_range`。
-- **Phase 4**：`bifrost remote traffic search` 参数同步 + `command_search_args` 映射；E2E + human_tests。
+## Review / Fix / Test
 
-## 测试方案
+1. 第一轮核对用户目标与 diff，审查排序游标、输入校验、截断和本地/远端参数一致性；发现问题先补断言再修复，运行相关单元与 CLI 矩阵。
+2. 第二轮基于修复后 diff 检查文档、help、末页和组合过滤覆盖，再跑完整 CLI 套件与 Rust 门禁；若发现新问题继续追加轮次。
+3. 本地验证后提交任务分支、创建 draft PR，并跟进所有已触发 CI；只按真实执行结果汇报，不把未测试的 relay 或协议捕获称为通过。
 
-### 单元测试
+## 文档同步
 
-- `crates/bifrost-admin/src/search/json_path.rs`：10 个 `#[test]`（基本嵌套、数组下标、通配、缺失字段、根 `$`、空数组通配、边界）。
-- `crates/bifrost-admin/src/search/engine.rs`：
-  - `json_path_req_body_filter_matches`
-  - `json_path_res_body_numeric_gt_filter`
-  - `req_header_x_trace_id_filter`
-  - `time_range_prunes_out_of_window_records`
-  - `body_cache_reused_across_conditions`
-  - `non_json_body_is_marked_and_skipped`
-- `crates/bifrost-cli`：
-  - duration 解析 4 个：`5m`、`2h`、RFC3339、非法。
-  - `command_search_args` 映射 `FilterCondition` + `time_range`。
-
-### E2E 测试
-
-- `e2e-tests/tests/test_search_traffic_cli_isomorphic_e2e.sh`：
-  - `--until` 早于所有记录：`searched_range.scanned_count == 0`。
-  - `--res-json '$.errno=90000201'` 命中且 CLI JSON 输出结构化 `results + searched_range`。
-  - `--latest` 只回一条。
-
-### 真实场景测试 human_tests
-
-`human_tests/search-jsonpath.md`：
-
-- TC-SJP-01：`bifrost search --since 5m --format json-pretty` 观察 `searched_range`。
-- TC-SJP-02：`bifrost search --until 2026-01-01T00:00:00Z` 空窗口 `scanned_count == 0`。
-- TC-SJP-03：`bifrost search --latest --format json` 只输出一条。
-- TC-SJP-04：`bifrost search --req-json '$.messages[0].role=user'` 命中 LLM 请求。
-- TC-SJP-05：`bifrost search --res-header-eq 'set-cookie=session=abc'` 命中特定 Cookie。
-- TC-SJP-06：混合 `--since 1h --res-json '$.error.message*=timeout' --format ndjson`。
-
-### 覆盖率与项目校验
-
-- `cargo test -p bifrost-admin json_path`
-- `cargo test -p bifrost-admin -p bifrost-cli -p bifrost-command`
-- `cargo fmt --all -- --check`、clippy workspace 全绿
-- 本地不跑 coverage，交给远端 CI
-
-## Review / Fix / Test 闭环
-
-### 第 1 轮
-
-- 复核 `FilterCondition` 未知 field 走新分支不影响旧 filter。
-- 复核 `time_range` 空窗口 SQL 剪枝彻底：不解析 body、不消耗 max_scan。
-- 复核 body cache 只在单次 `search_internal` 生存，跨请求不复用。
-
-### 第 2 轮
-
-- 复核 CLI 参数别名与文档一致；`--since/--until` 支持 duration 与 RFC3339。
-- 复核 SSE done 事件 payload 结构（`searched_range` 存在且字段稳定）。
-- 复跑 E2E 与 human_tests，包括远端 `bifrost remote traffic search`。
-
-## 风险与决策
-
-- **只做 JSONPath 子集**：`?(@.foo>1)` 与递归 `..` 语义复杂，容易踩解析器坑；第一版明确只做常见路径，覆盖 90% LLM/网关诊断需求。
-- **数字比较容错**：`lt/gt/lte/gte` 只对 `f64` 可解析值生效，避免字符串比较歧义；文档要提醒 `errno` 之类字符串数字要用 `equals` 而不是 `gt`。
-- **body cache 命中率**：单次搜索复用足够；跨 search 复用会引入内存和一致性问题，第一版不做。
-- **`searched_range` 语义边界**：只表示实际扫描过的记录范围，不代表 SQL 全量记录；空窗口场景 `scanned_count == 0` 是明确信号。
-- **性能压力**：`--req-json/--res-json` 会拉 body，超大 body 会拖慢，建议搭配 `time_range`、`--limit` 收敛。
+同步 README 搜索说明、CLI help、search include 设计和上述 human_tests 索引；示例仅使用仓库相对路径、动态测试端口与隔离数据。

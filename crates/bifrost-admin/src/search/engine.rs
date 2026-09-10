@@ -282,7 +282,10 @@ impl SearchEngine {
                 )
             };
 
+            let candidate_count = query_result.records.len();
+            let mut processed_count = 0;
             for compact in &query_result.records {
+                processed_count += 1;
                 body_cache.current_record_started_with_fresh_budget =
                     body_cache.remaining_decompressed_bytes == body_cache.max_decompressed_bytes;
                 body_cache.current_record_exceeds_decompression_budget = false;
@@ -376,7 +379,7 @@ impl SearchEngine {
                     if let Some(last) = results.last() {
                         on_result(last);
                     }
-                    if !streaming && results.len() >= max_results {
+                    if results.len() >= max_results {
                         body_cache.remove_record(&compact.id);
                         break;
                     }
@@ -389,19 +392,17 @@ impl SearchEngine {
                 }
             }
 
-            db_has_more = query_result.has_more;
+            db_has_more = query_result.has_more || processed_count < candidate_count;
             on_progress(&SearchProgress {
                 iterations,
                 total_searched,
                 total_matched: results.len(),
                 cursor: current_cursor,
-                has_more_hint: db_has_more && total_searched < max_total_searched,
+                has_more_hint: db_has_more,
             });
         }
 
-        let has_more = timed_out
-            || decompression_budget_exhausted
-            || (db_has_more && total_searched < max_total_searched);
+        let has_more = timed_out || decompression_budget_exhausted || db_has_more;
         let total_matched = results.len();
 
         debug!(
@@ -553,6 +554,7 @@ impl SearchEngine {
             cursor,
             limit: Some(SEARCH_BATCH_SIZE),
             direction: crate::traffic_db::Direction::Backward,
+            order_by_time: true,
             record_ids: (!request.record_ids.is_empty()).then(|| request.record_ids.clone()),
             ..Default::default()
         };
@@ -1534,7 +1536,7 @@ fn eval_value_condition(value: &JsonValue, condition: &FilterCondition) -> bool 
         JsonValue::String(s) => s.clone(),
         JsonValue::Number(n) => n.to_string(),
         JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Null => String::new(),
+        JsonValue::Null => "null".to_string(),
         _ => value.to_string(),
     };
     let op = condition.operator.as_str();

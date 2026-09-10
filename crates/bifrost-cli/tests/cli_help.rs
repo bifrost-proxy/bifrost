@@ -15,6 +15,37 @@ fn run_help(args: &[&str]) -> String {
 }
 
 #[test]
+fn search_entrypoints_validate_advanced_filters_consistently() {
+    for prefix in [
+        vec!["search"],
+        vec!["traffic", "search"],
+        vec!["remote", "traffic", "search"],
+    ] {
+        for (flag, value, valid) in [
+            ("--req-json", "$[0].id=42", true),
+            ("--res-json", "$=null", true),
+            ("--req-json", "$..id=42", false),
+            ("--res-json", "$.id", false),
+            ("--req-header-eq", "X-Token=A=B", true),
+            ("--res-header-eq", "=bad", false),
+            ("--since", "2026-09-11T00:00:00Z", true),
+            ("--until", "yesterday", false),
+            ("--latest", "1.5h", true),
+            ("--latest", "-1s", false),
+        ] {
+            let mut args = vec!["bifrost"];
+            args.extend(prefix.iter().copied());
+            args.extend(["needle", flag, value]);
+            assert_eq!(
+                Cli::command().try_get_matches_from(args).is_ok(),
+                valid,
+                "{prefix:?} {flag} {value}"
+            );
+        }
+    }
+}
+
+#[test]
 fn root_help_is_short_and_links_to_docs() {
     let help = run_help(&[]);
 

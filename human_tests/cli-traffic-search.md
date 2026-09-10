@@ -13,7 +13,7 @@
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 通过代理产生一批流量记录（至少包含不同方法、不同状态码的请求）：
    ```bash
@@ -662,6 +662,35 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/post -X POST -d '{"test":"inter
 - `traffic list --port "$MAIN_PORT"` 仍表示 Admin API 端口，不作为入口端口筛选。
 
 ---
+
+## 2026-09 字面过滤与排序回归
+
+从仓库根目录执行以下命令，当前 checkout 先构建再启动；套件使用动态端口、临时数据目录和本地 fixture，禁用 tray、登录弹窗、系统代理。末尾串行运行严格 CLI 矩阵，不同时启动多个完整实例。
+
+```bash
+cargo build --bin bifrost
+BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_search_traffic_cli_isomorphic_e2e.sh
+```
+
+逐条核对下列断言为 PASS，两个摘要均 failed=0；原有 TTY、别名、clear、replay 行为由 shell 套件同时复测。
+
+| 编号 | 操作与输出断言名称 | 预期 |
+|---|---|---|
+| TC-CTS-回归-01 | `list/search literal path` 和 `list URL + path` | `_`、`%25`、星号、引号、编码中文、query、尾斜杠都是字面子串，精确结果集合一致 |
+| TC-CTS-回归-02 | `list/search combination` | method/path/host/listener-port 的 2–4 维组合取交集，不漏筛选 |
+| TC-CTS-回归-03 | `list/search newest first`、limit/max-results/max-scan | 最新时间优先；显式 max-results 覆盖 limit；只返回上限内最新匹配 |
+| TC-CTS-回归-04 | `pagination backward/forward exact union`、`exact last page`、`has more` | 两个方向无重复无漏项，截断可续查，精确末页无虚假下一页 |
+| TC-CTS-回归-05 | `list --is-sse=false/true` 与其他布尔过滤 | false 排除 SSE，true 只返回 SSE，不忽略 false |
+| TC-CTS-回归-06 | `filter-only no keyword`、`no-color empty search`、`offline` | 过滤查询不误进 TUI，空输出无 ANSI，未启动服务非 0 退出 |
+
+时间乱序写入和同时间戳的可控场景另执行：
+
+```bash
+cargo test -p bifrost-admin streaming_limits_preserve_newest_matches_and_resume_inside_batch
+cargo test -p bifrost-admin time_order_uses_sequence_for_ties_and_reports_exact_last_page
+```
+
+上述矩阵覆盖查询和格式，不将 WS/WSS/H3 真实协议捕获或真实 remote relay 连通性列为已验证。
 
 ## 执行记录
 

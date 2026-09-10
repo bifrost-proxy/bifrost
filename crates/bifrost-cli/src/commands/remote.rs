@@ -2929,7 +2929,7 @@ fn build_remote_command_checked(
                     no_color: search_args.no_color,
                     keyword: search_args.keyword.clone().unwrap_or_default(),
                     max_scan: search_args.max_scan,
-                    max_results: search_args.max_results,
+                    max_results: Some(search_args.max_results.unwrap_or(search_args.limit)),
                 },
                 streaming_prefs: None,
             })
@@ -4044,14 +4044,7 @@ fn command_search_args(args: &RemoteSearchArgs) -> SearchArgs {
             if p.is_empty() {
                 continue;
             }
-            let field = if p.starts_with('$') {
-                format!(
-                    "req.body.{}",
-                    p.trim_start_matches('$').trim_start_matches('.')
-                )
-            } else {
-                format!("req.body.{}", p)
-            };
+            let field = crate::cli::search_args::body_field("req", p);
             filters.conditions.push(FilterCondition {
                 field,
                 operator: "equals".to_string(),
@@ -4065,14 +4058,7 @@ fn command_search_args(args: &RemoteSearchArgs) -> SearchArgs {
             if p.is_empty() {
                 continue;
             }
-            let field = if p.starts_with('$') {
-                format!(
-                    "res.body.{}",
-                    p.trim_start_matches('$').trim_start_matches('.')
-                )
-            } else {
-                format!("res.body.{}", p)
-            };
+            let field = crate::cli::search_args::body_field("res", p);
             filters.conditions.push(FilterCondition {
                 field,
                 operator: "equals".to_string(),
@@ -4153,7 +4139,7 @@ fn command_search_args(args: &RemoteSearchArgs) -> SearchArgs {
         filters,
         limit: Some(args.limit),
         max_scan: args.max_scan,
-        max_results: args.max_results,
+        max_results: Some(args.max_results.unwrap_or(args.limit)),
         time_range,
         ..SearchArgs::default()
     }
@@ -11018,6 +11004,21 @@ mod coverage_boost_v2 {
         assert!(!search.scope.response_body);
         assert!(!search.scope.request_headers);
         assert!(!search.scope.response_headers);
+    }
+
+    #[test]
+    fn command_search_args_preserves_root_paths_and_result_limit() {
+        let mut args = base_search_args();
+        args.req_json = vec!["$[0].id=42".to_string()];
+        args.res_json = vec!["$=null".to_string()];
+        args.limit = 3;
+        args.max_results = None;
+        let search = command_search_args(&args);
+        assert_eq!(search.max_results, Some(3));
+        assert_eq!(search.filters.conditions[0].field, "req.body.$[0].id");
+        assert_eq!(search.filters.conditions[1].field, "res.body.$");
+        args.max_results = Some(2);
+        assert_eq!(command_search_args(&args).max_results, Some(2));
     }
 
     #[test]

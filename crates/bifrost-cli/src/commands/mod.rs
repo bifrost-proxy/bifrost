@@ -25,7 +25,7 @@ mod remote_ssh_key;
 mod restart;
 mod rule;
 mod script;
-mod search;
+pub(crate) mod search;
 mod start;
 mod status;
 mod status_tui;

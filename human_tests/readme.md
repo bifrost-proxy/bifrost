@@ -30,9 +30,9 @@
 | [share-env-exit.md](./share-env-exit.md) | Share 环境快速退出 | 5 | Share 环境页面胶囊红点与呼吸光晕、hover panel Exit 入口、原地 JSON body 退出、成功后刷新当前页面、注入页不暴露进入 Share 前的规则名、退出后恢复进入 Share 前启用的 My Rules 快照、连续 Share 链接不覆盖原始恢复快照，以及进入前空 enabled / 多 enabled 的恢复边界 |
 | [rules-filesystem-hot-reload.md](./rules-filesystem-hot-reload.md) | 规则文件系统热更新 | 6 | CLI 本地规则新增/更新/删除、直接 `.bifrost` 文件编辑和直接删除后，运行中代理与 Rules active summary 自动刷新，Group 规则无变化同步不重复写盘，sync metadata-only 变化不触发 runtime reload |
 | [cli-rule-list-legacy-skip.md](./cli-rule-list-legacy-skip.md) | CLI `rule list` `.bifrost` 文件过滤 | 2 | 非 `.bifrost` 文件自动忽略，且 group 子目录规则仍可正常读取 |
-| [cli-traffic-search.md](./cli-traffic-search.md) | CLI 流量与搜索 | 37 | traffic list/get/search/clear 命令，含多维度过滤器、代理入口端口筛选、搜索范围控制、交互式搜索 |
-| [search-jsonpath.md](./search-jsonpath.md) | Search JSONPath/Header/时间窗/NDJSON | 6 | `bifrost search` 新增 `--req-json/--res-json` JSONPath body 字段过滤、`--req-header-eq/--res-header-eq` 大小写无关 header 等值过滤、`--since/--until/--latest` 时间窗剪枝、`--format ndjson` 行式 JSON 输出与 `time_range` 透传到 admin |
-| [search-include-body.md](./search-include-body.md) | Search Include Body/Headers 与 Traffic Batch Get | 6 | `bifrost search --include` 在 JSON/NDJSON 输出中保留 body/header payload，`traffic get --ids` 批量获取 body/header 并处理缺失 id 与上限错误 |
+| [cli-traffic-search.md](./cli-traffic-search.md) | CLI 流量与搜索 | 43 | list/get/search/clear、字面 path 与多维组合、时间倒序、双向分页与精确末页、布尔排除、TTY 和错误路径 |
+| [search-jsonpath.md](./search-jsonpath.md) | Search JSONPath/Header/时间窗/NDJSON | 9 | 根/数组/通配路径、null、header 等值与范围、时间窗、非法参数拒绝及无关键词过滤 |
+| [search-include-body.md](./search-include-body.md) | Search Include Body/Headers 与 Traffic Batch Get | 8 | 五种搜索格式、body 截断、批量 ID/序号与缺失项、显式 json-pretty、非法 include |
 | [traffic-replay.md](./traffic-replay.md) | Traffic Export 与 Replay | 8 | `traffic export` 导出 curl/HAR，`traffic replay` 支持 JSON Patch、refresh-auth、旧字段兼容，并验证 admin `success:false` 时 CLI 非 0 退出、压缩 JSON Patch 后重压，以及 WebUI 导入压缩请求后按明文语义发送 |
 | [cli-ca-cert.md](./cli-ca-cert.md) | CLI CA 证书管理 | 12 | ca generate/export/info/install 命令，含强制重新生成、指定路径导出、证书格式验证 |
 | [cli-values-scripts.md](./cli-values-scripts.md) | CLI Values 与 Scripts | 32 | value/script 完整生命周期、运行态 CLI→Admin API 即时同步、异常 fail-closed、离线兼容和资源消耗回归 |
