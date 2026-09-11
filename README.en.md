@@ -156,6 +156,8 @@ bifrost search "keyword" --res-body
 bifrost rule add local-dev --content "example.com host://127.0.0.1:3000"
 ```
 
+Traffic list/search defaults to newest request time first (`timestamp DESC, sequence DESC`); list `--direction forward` explicitly uses ascending order. `--path` is a literal substring filter, not a glob. Search `--limit` defaults to 50, explicit `--max-results` overrides it, and `--max-scan` independently limits scans. For filter-only automation, use `bifrost search --req-json '$.user.id=42' --format json` to avoid the terminal TUI. JSONPath roots/arrays, case-insensitive header equality, time windows, and output formats are detailed in the [CLI reference](docs-en/cli.md).
+
 ## Documentation Index
 
 - Documentation overview: [`docs-en/README.md`](docs-en/README.md)

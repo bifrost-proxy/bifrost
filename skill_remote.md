@@ -258,21 +258,28 @@ bifrost remote conn status
 bifrost remote traffic list   --limit 50 [--cursor <c>] [--direction backward|forward] \
     [--method GET] [--status 200] [--status-min 200 --status-max 299] \
     [--protocol http|https|ws|wss|h3] [--host <substr>] [--url <substr>] [--path <substr>] \
-    [--content-type <ct>] [--client-ip <ip>] [--client-app <app>] \
+    [--content-type <ct>] [--client-ip <ip>] [--client-app <app>] [--listener-port <port>] \
     [--has-rule-hit true|false] [--is-websocket true|false] [--is-sse true|false] [--is-tunnel true|false] \
     [-f|--format table|compact|json|json-pretty] [--no-color]
 bifrost remote traffic get    <id> [--request-body --response-body]
-bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
-    [--url|--headers|--body|--req-header|--res-body] \
-    [--method GET --status 2xx --host example.com --protocol HTTPS] \
-    [--req-json $.user.name=alice] [--res-json $.data.errno=0] \
-    [--req-header-eq content-type=application/json] [--res-header-eq x-tt-logid=*] \
-    [--since 30m] [--until now] [--latest 10m]
+bifrost remote traffic search [keyword] --limit 50 --max-scan 200 \
+    [--url|--headers|--body|--req-header|--res-header|--req-body|--res-body] \
+    [--method GET --status 2xx --host example.com --path /v1/users --protocol HTTPS] \
+    [--listener-port 18888] [--max-results 10] \
+    [--req-json '$.user.name=alice'] [--res-json '$.data.errno=0'] \
+    [--req-header-eq 'content-type=application/json'] [--res-header-eq 'x-cache=HIT'] \
+    [--since 30m] [--until 5m] [--latest 10m] [--format json]
 ```
 
 输出格式走 `-f|--format`，不是 `--output`：`list/get` 支持 `table|compact|json|json-pretty`，`search` 额外支持 `ndjson`。`--no-color` 适合非交互。
 
-`remote traffic search` 已对齐本地 `bifrost search` 的核心过滤项（JSONPath、header 等值、时间窗、scope、状态/方法/host/path/protocol/content-type/domain 等）。**但 `--include` / `--max-body` 这类结果附带 body/headers 的能力，以及下列批量/导出/重放/捕获能力暂时没有 `remote` wrapper，必须通过 `remote exec` 在目标机本机执行**：
+list/search 默认按请求时间倒序，时间相同按 sequence 倒序；list 显式 `--direction forward` 改为升序。list 用返回的 `next_cursor` / `prev_cursor` 配合 `--cursor` 翻页，保留过滤条件；游标记录被清理后重新查询首屏。search 没有 CLI `--cursor`，`has_more` 只表示仍有候选可扫描，不保证后续命中。
+
+`--limit` 默认 50；显式 `--max-results` 覆盖它，`--max-scan` 默认 10000 且独立限制扫描预算。`--path` 是字面子串，`_` / `%` / 反斜杠不是通配符；list 的布尔条件 true/false 均生效。
+
+JSONPath 支持 `$` 根、`.member`、`[N]`、`[*]`，可省略对象路径 `$.` 前缀；重复条件为 AND，通配节点任一匹配即可。值按大小写不敏感文本等值比较，`null` 区别于空串，值中可含 `=`。Header 等值过滤的名称和值大小写不敏感，`*` 不是“存在/任意值”。`--since/--until` 接受 RFC3339、整数 epoch 毫秒或相对时长（ms/s/m/h/d/w，可带小数）；当前时间用 `0s`，不是 `now`。`--latest` 无单位按秒。非法路径、等值条件或时间会在发请求前报错。
+
+`remote traffic search` 已对齐本地 `bifrost search` 的核心过滤项（JSONPath、header 等值、时间窗、scope、状态/方法/host/path/protocol/content-type/domain 等）。但 `--include` / `--max-body`、批量 get、导出、重放与捕获暂时没有 Relay `remote traffic` wrapper。已授权的 Admin Client 模式可以使用对应本机命令；若当前使用 Relay 且另有 shell 授权，可通过下表的 `remote exec` 在目标机执行。**不得因 wrapper 缺失自动切换连接模式或扩大授权。**
 
 | 想做的事 | 在目标机执行（通过 `remote exec`） | 替代说明 |
 |---|---|---|
@@ -280,7 +287,7 @@ bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
 | 在 search 结果里直接带 body/headers | `bifrost remote exec -- bifrost search foo --include bodies,headers --max-body 32768 --format ndjson` | 远端 `remote traffic search` 暂不支持 `--include` |
 | JWT/Cookie 诊断 | `bifrost remote exec -- bifrost traffic auth-status <ID> --format json` | 不要让用户自己 decode JWT |
 | 导出 curl / fetch / HAR | `bifrost remote exec -- bifrost traffic export <ID> --as curl` | 输出包含捕获原文，复制前手动移除敏感值 |
-| 重放（含 JSON Patch / refresh-auth） | `bifrost remote exec -- bifrost traffic replay <ID> --patch /body/x=1 --refresh-auth` | admin 端直接发请求，不经 caller |
+| 重放（含 JSON Patch / refresh-auth） | `bifrost remote exec -- bifrost traffic replay <ID> --patch '/x=1' --refresh-auth` | admin 端直接发请求，不经 caller |
 | 等待下一条匹配的请求 | `bifrost remote exec --timeout-ms 120000 -- bifrost capture wait --host api.example.com --timeout 90s --format json` | 一定要把 `--timeout-ms` 调到 ≥ wait 超时 + 余量 |
 | 取目标机 `status` JSON | `bifrost remote exec -- bifrost status --format json` | 脚本化探测目标机就绪/版本/端口 |
 
@@ -290,7 +297,7 @@ bifrost remote traffic search <keyword> --max-results 50 --max-scan 200 \
 - `traffic replay` 是写操作（目标机会真发请求），需要目标机本地已对 admin API 授权；通过 `remote exec` 调用时同样受 Shell Access policy 约束。
 - `auth-status` / `export` / `replay` / `capture wait` 的退出码契约：成功 0；`capture wait` 超时专用 124；其他失败 1。
 
-总结：`remote traffic {list,get,search}` 涵盖了所有只读流量查询能力；批量/JWT/导出/重放/捕获走 `remote exec` 调本机 CLI。
+总结：`remote traffic {list,get,search}` 提供列表、单条详情和核心搜索；批量、include、JWT、导出、重放、捕获不在这些 wrapper 内。仅在已有对应授权时使用 Admin Client 或远端 shell，不能把查询授权当成 shell 或重放授权。
 
 清理目标设备流量记录属于写操作，不提供对应的 `bifrost remote traffic` 子命令。确需清理时，必须先取得 shell 授权，再用 `bifrost remote exec` 在目标设备上执行本机命令或 API。
 
@@ -711,13 +718,13 @@ A: `bifrost remote exec -- bifrost traffic auth-status <ID> --format json`。给
 A: `bifrost remote exec -- bifrost traffic export <ID> --as curl`。本期 export 按捕获原文输出，可能包含 Authorization/Cookie/JWT token；复制到本地、聊天或日志前必须手动移除敏感值。
 
 **Q: 我想直接重放某条请求，把 body 里的某个字段改了再发，能不能不用拼 curl？**
-A: 用 `bifrost remote exec -- bifrost traffic replay <ID> --patch /body/messages/0/content="hi" --refresh-auth`。`--patch` 是 RFC6902 shorthand 可重复，`--refresh-auth` 会从最近一次同 host 成功请求里抓 Authorization/Cookie/X-Tt-* 重新注入。重放走 admin 端，**不**经过 caller。
+A: 用 `bifrost remote exec -- bifrost traffic replay <ID> --patch '/messages/0/content="hi"' --refresh-auth`。`--patch` 是 RFC6902 shorthand 可重复，`--refresh-auth` 会从最近一次同 host 成功请求里抓 Authorization/Cookie/X-Tt-* 重新注入。重放走 admin 端，**不**经过 caller。
 
 **Q: 我想抓「我点完按钮的下一次请求」，但 traffic list 一直轮询很烦？**
 A: `bifrost remote exec --timeout-ms 120000 -- bifrost capture wait --host api.example.com --method POST --timeout 90s --format json`。一定要把 `--timeout-ms` 抬高到 ≥ 90s + 余量；底层是 admin push (subscribe_once)，不轮询数据库；超时退出码 124。
 
 **Q: search 结果只有列表，能不能一次顺手把 body 也带回来？**
-A: 用 `--include`：`bifrost remote exec -- bifrost search foo --include bodies,headers --max-body 32768 --format ndjson`。输出包含捕获原文，复制前手动移除敏感值。注意 `bifrost remote traffic search` 本身暂未透传 `--include`，必须走 `remote exec` 调本机 search。
+A: 用 `--include`：`bifrost remote exec -- bifrost search foo --include bodies,headers --max-body 32768 --format ndjson`。输出包含捕获原文，复制前手动移除敏感值。注意 `bifrost remote traffic search` 本身暂未透传 `--include`；此示例需额外 shell 授权，不能自动降级。已授权的 Admin Client 也可执行 `bifrost client --target <target> search foo --include bodies,headers --format json`。
 
 **Q: 我要一次取好几条记录，循环 N 次 `traffic get` 太慢？**
-A: `bifrost remote exec -- bifrost traffic get --ids 1001,1002,1003 --max-body 32768 --format ndjson`。单次往返，最多 200 条；同样 `bifrost remote traffic get` 暂只接受单 ID，批量必须走 `remote exec`。
+A: `bifrost remote exec -- bifrost traffic get --ids 1001,1002,1003 --max-body 32768 --format ndjson`。单次往返，最多 200 条；同样 `bifrost remote traffic get` 暂只接受单 ID；此批量示例需额外 shell 授权，也可在已授权的 Admin Client 模式使用 `traffic get --ids`，不得自动切换模式。需要正文时加 `--request-body --response-body`。

@@ -231,7 +231,9 @@ example.com host://127.0.0.1:3000 lineProps://disabled
 
 ## 场景 6：从流量记录定位问题
 
-先看最近流量，再看单条或批量详情。本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏，以下输出按捕获原文返回：
+先看最近流量，再看单条或批量详情。list/search 默认按请求时间倒序，同时间按 sequence 倒序，优先最新匹配；不是按写入顺序。`--limit` 默认 50，search 显式 `--max-results` 覆盖它，`--max-scan` 独立限制扫描数。`--path` 按字面子串匹配，`_` / `%` 不是通配符。无关键词过滤查询显式加 `--format json`，避免终端进入 TUI；完整 JSONPath、分页与格式说明见 [CLI 参考](./cli.md)。
+
+本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏，以下输出按捕获原文返回：
 
 ```bash
 bifrost traffic list
@@ -255,8 +257,8 @@ bifrost search "Bearer " --req-header
 bifrost search "cache-control" --res-header
 bifrost search "invalid_request_error" --res-body
 bifrost search "keyword" --host api.example.com --path /v1/users
-bifrost search "" --host api.example.com --req-json '$.user.id=42' --include request-body,response-body
-bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
+bifrost search --host api.example.com --req-json '$.user.id=42' --include request-body,response-body --format json
+bifrost search --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body --format json
 ```
 
 需要把捕获请求交给同事、脚本或 Agent 复现时，可以导出模板或基于原请求重放；导出内容包含捕获原文，传播前必须手动移除敏感信息：
@@ -497,7 +499,7 @@ bifrost traffic list --listener-port 18882 --limit 50
 bifrost traffic list --client-app Chrome --limit 50
 bifrost capture wait --host api.example.com --method POST --path /login --timeout 30s
 bifrost search "keyword" --host api.example.com --req-body
-bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
+bifrost search --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body --format json
 bifrost traffic get <id> --request-body --response-body
 bifrost traffic get --ids 12,13,14 --request-body --response-body --format ndjson
 bifrost traffic auth-status <id>

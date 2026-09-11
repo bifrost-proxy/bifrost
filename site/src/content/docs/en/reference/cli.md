@@ -68,7 +68,7 @@ bifrost traffic auth-status <id>
 bifrost traffic export <id> --as curl
 bifrost traffic replay <id> --patch '/json/debug=true'
 bifrost search "keyword" --req-header
-bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
+bifrost search --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body --format json
 bifrost port bind --port 18888 --rule-text "debug.test statusCode://218 resBody://debug"
 bifrost port destroy 18888
 bifrost im provider add feishu-main --type feishu --runner traex
@@ -76,6 +76,73 @@ bifrost im provider add weixin-main --type weixin --runner codex
 ```
 
 Use the command-specific `--help` output as the source of truth for every flag. This release does not redact Authorization, Cookie, JWT token, or other sensitive values from traffic detail, export, or `search --include` output; a complete redaction design will be handled separately. Treat those outputs as sensitive and manually remove secrets before publishing reusable skills or sharing evidence with lower-trust channels.
+
+## Traffic List, Search, and Get
+
+`bifrost search` and `bifrost traffic search` are equivalent. Both list and search return requests by `timestamp DESC, sequence DESC`: newest request time first, with sequence breaking ties, not insertion order. Explicit `traffic list --direction forward` uses ascending time and sequence.
+
+### Limits, Pagination, and Output
+
+- `--limit` defaults to `50`. For search, an explicit `--max-results` overrides `--limit`; the smaller value does not win. `--max-scan` independently limits candidate scans and defaults to `10000`.
+- List pagination uses `next_cursor` / `prev_cursor` from JSON output with `--cursor <SEQ>` and `--direction backward|forward`. Keep the same filters. The cursor is a record sequence resolved to its timestamp boundary; restart at the first page if the cursor record has been deleted.
+- Search `has_more` means unscanned candidates remain, not that more matches are guaranteed. `searched_range` describes only the scanned range. Search has no CLI `--cursor`; use interactive pagination, increase the budget, or narrow the time window.
+- Without a keyword, only terminal table output enters the TUI automatically. Use `--format json` for filter-only automation, or `--interactive` for the TUI.
+- Search supports `table|compact|json|json-pretty|ndjson`; list supports all of these except ndjson. `--no-color` disables colored output, including empty results.
+- `traffic get <id>` defaults to json-pretty. `traffic get --ids id1,id2,...` accepts up to 200 IDs and defaults to ndjson; explicit json/json-pretty produces a JSON array. The single ID and `--ids` are mutually exclusive. Request bodies with `--request-body` / `--response-body`; batch `--max-body` defaults to 65536 bytes per side.
+
+```bash
+bifrost traffic list --path '/v1/user_name' --limit 10 --format json
+bifrost traffic list --cursor <next_cursor> --direction backward --path '/v1/user_name' --limit 10 --format json
+bifrost search --path '/v1/user_name' --latest 30m --limit 5 --format json
+bifrost search error --limit 20 --max-results 3 --max-scan 500 --format json
+bifrost traffic get --ids 12,13 --request-body --response-body --format json-pretty
+```
+
+### Filters and JSONPath
+
+| Option | Semantics |
+| --- | --- |
+| `--host TEXT`, `--path TEXT` | Literal substring filters; `_`, `%`, and backslash are not wildcards. List also has `--url TEXT`; search `--url` instead selects the keyword search scope and takes no value. |
+| `--method METHOD`, `--status FILTER` | HTTP method and status. List uses exact status codes and supports `--status-min` / `--status-max`; search accepts `2xx`, `3xx`, `4xx`, `5xx`, or `error`. |
+| `--protocol PROTO` | List: `http`, `https`, `ws`, `wss`, `h3`; search: `HTTP`, `HTTPS`, `WS`, `WSS`. |
+| `--domain TEXT`, `--content-type TYPE` | Search domain substring and content type filters; list also supports content type. |
+| `--client-ip`, `--client-app` | List-only client IP/application filters. Application data must have been captured. |
+| `--listener-port PORT`, `--proxy-port PORT` | Filter the proxy entry port, not the Admin API connection port. |
+| `--has-rule-hit`, `--is-websocket`, `--is-sse`, `--is-tunnel` | List-only `true|false` filters. `false` excludes the corresponding traffic. |
+| `--req-json PATH=VALUE`, `--res-json PATH=VALUE` | Repeatable JSON body equality filters; conditions are ANDed. |
+| `--req-header-eq NAME=VALUE`, `--res-header-eq NAME=VALUE` | Repeatable case-insensitive name/value equality filters; `*` is literal, not an existence test. |
+| `--since TIME`, `--until TIME`, `--latest DURATION` | Search time window, applied before consuming the scan budget. |
+
+JSONPath supports root `$`, `.member`, `[N]`, and `[*]`; the `$.` prefix is optional for object paths. A wildcard matches when any selected node matches. Recursive descent, slices, and filter expressions are unsupported. Values use case-insensitive textual equality, not strict JSON type equality; `null` differs from an empty string and values may contain `=`. Quote the entire expression in the shell.
+
+Time bounds accept RFC3339, integer epoch milliseconds, or relative durations with `ms/s/m/h/d/w` and optional fractions. Use `0s` for now; `now` is invalid and integer `0` means the epoch. `--latest` accepts a duration (unitless values mean seconds), not a result count. Malformed JSONPath, missing `=`, empty header names, invalid times, and unknown include tokens fail before a request is sent.
+
+```bash
+bifrost search --req-json '$.user.id=42' --res-json '$.error=null' --format json
+bifrost search --res-json '$[0].id=42' --format json
+bifrost search --res-json '$=null' --format json
+bifrost search --req-json '$.items[*].name=alice' --format json
+bifrost search --res-header-eq 'x-cache=HIT' --since 30m --until 5m --format json
+```
+
+### Keyword Scope and Attached Content
+
+`--url`, `--headers`, `--body`, `--req-header`, `--res-header`, `--req-body`, and `--res-body` select keyword scopes and take no values. They are distinct from equality filters.
+
+Use `--include request-body,response-body,request-headers,response-headers` to attach captured content. Aliases are `req-body|res-body|req-headers|res-headers`, with `bodies` and `headers` as shortcuts. `--max-body` defaults to 65536 bytes per body. These outputs are not redacted.
+
+```bash
+bifrost search --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body --format json
+```
+
+### Remote Query Boundary
+
+`remote traffic list/search` shares newest-first ordering and core filter semantics. Remote search shares `--limit`, explicit `--max-results`, and `--max-scan`, and supports filter-only queries. Relay wrappers do not expose search `--include` / `--max-body`, batch `traffic get --ids`, export, replay, or capture. Use the corresponding local command through an already authorized Admin Client connection, or execute it on the target through separately authorized `remote exec`. Do not silently switch connection modes, read local data, or broaden permissions when a wrapper is unsupported; replay sends a real request.
+
+```bash
+bifrost remote traffic search --path '/v1/user_name' --latest 30m --limit 5 --format json
+bifrost remote traffic search error --limit 20 --max-results 3 --max-scan 500 --format json
+```
 
 ## CLI Proxy and CA Environment
 
