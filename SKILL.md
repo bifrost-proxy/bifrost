@@ -509,7 +509,7 @@ bifrost traffic replay 57544 --patch '/messages/0/content="hello"'             #
 >
 > **批量场景**：要在一次往返里取多条用 `--ids id1,id2,id3`（最多 200，默认 ndjson 输出，省 N-1 次 round-trip）。单条默认 json-pretty；批量显式 `--format json` / `json-pretty` 返回 JSON 数组，不是 NDJSON。需要正文时显式加 `--request-body` / `--response-body`，每侧上限由 `--max-body` 控制。
 >
-> **敏感输出**：本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏。`traffic get` / `traffic export` / `search --include` 按捕获原文输出；完整脱敏方案另开需求处理，当前不要把这些输出写入低信任日志、聊天或可复用 skill。
+> **敏感输出**：`traffic get` / `traffic export` / `search --include` 按捕获原文输出，可能包含 Authorization、Cookie、JWT token 等敏感信息。分享或写入日志、聊天、可复用 skill 前，先移除敏感值。
 
 `traffic list` 完整过滤参数：
 
@@ -881,7 +881,7 @@ bifrost remote job watch <call_id> --output-file ./x.log  # 续接 detached job
 
 Relay HTTPS 私有 CA / 企业 MITM 优先通过系统 trust store 或 `BIFROST_REMOTE_RELAY_CA_BUNDLE=/path/to/ca.pem` 解决；只有 CA 无法注入的受控环境，才用 `BIFROST_REMOTE_UNSAFE_SSL=1 bifrost remote ...` 作为最终兜底跳过 remote relay 证书信任校验。该环境变量只作用于 remote relay HTTP/SSE client，不等同于代理服务 `--unsafe-ssl`。
 
-> **4-tier 命名（2026 Q2）**：旧的 `remote connect / disconnect / status（顶层）/ search（顶层）` 仍有过渡别名但运行时会打印 deprecation warning，下个 minor release 会移除；`remote command exec` 已硬切为 `remote exec`，没有别名。`remote file {mv, rm, search, apply-patch}` 也已硬切为 `{move, delete, find, patch}`。CI 有 `scripts/ci/check-remote-cli-legacy.sh` 守卫，引用旧名会让流水线红。
+> **命令命名**：使用 `remote conn up/down/status`、`remote traffic search`、`remote exec` 和 `remote file move/delete/find/patch`。旧的顶层 connect/disconnect/status/search 别名会输出弃用警告；`remote command exec` 和 `remote file mv/rm/search/apply-patch` 不受支持。
 
 边界说明：
 
