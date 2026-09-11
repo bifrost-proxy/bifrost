@@ -715,7 +715,7 @@ A: 能。`patch` 现支持 `rename from/to` 与 `copy from/to` 形态，和新�
 A: `bifrost remote exec -- bifrost traffic auth-status <ID> --format json`。给出 `valid/has_jwt/has_cookie/jwt_exp_ms/jwt_user_id/cookie_exp_ms/valid_at_ms`；过期就让用户重登。**不要**自己 base64 decode JWT。
 
 **Q: 远端某请求想拿到 curl 在本地复现，怎么处理 Authorization？**
-A: `bifrost remote exec -- bifrost traffic export <ID> --as curl`。本期 export 按捕获原文输出，可能包含 Authorization/Cookie/JWT token；复制到本地、聊天或日志前必须手动移除敏感值。
+A: `bifrost remote exec -- bifrost traffic export <ID> --as curl`。export 按捕获原文输出，可能包含 Authorization/Cookie/JWT token；复制到本地、聊天或日志前必须手动移除敏感值。
 
 **Q: 我想直接重放某条请求，把 body 里的某个字段改了再发，能不能不用拼 curl？**
 A: 用 `bifrost remote exec -- bifrost traffic replay <ID> --patch '/messages/0/content="hi"' --refresh-auth`。`--patch` 是 RFC6902 shorthand 可重复，`--refresh-auth` 会从最近一次同 host 成功请求里抓 Authorization/Cookie/X-Tt-* 重新注入。重放走 admin 端，**不**经过 caller。
