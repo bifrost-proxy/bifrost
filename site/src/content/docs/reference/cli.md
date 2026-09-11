@@ -314,12 +314,29 @@ bifrost search "keyword"
 bifrost search "keyword" --method POST --host api.openai.com --path /v1/responses
 bifrost search "keyword" --req-header
 bifrost search "keyword" --res-body
-bifrost search "" --host api.example.com --req-json '$.user.id=42' --include request-body,response-body
-bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m
+bifrost search --host api.example.com --req-json '$.user.id=42' --include request-body,response-body --format json
+bifrost search --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --format json
 bifrost search "token" --req-header-eq authorization="Bearer ..." --since 2026-01-01T00:00:00Z --until 2026-01-01T01:00:00Z
 ```
 
-`bifrost search` 与 `bifrost traffic search` 等价，支持关键词搜索、基础过滤器、结构化 JSONPath / Header 精确匹配、时间范围、返回内容 include 与搜索范围控制。`traffic get` 默认查询单条详情；需要一次交给 Agent 或脚本分析多条记录时，用 `--ids` 批量读取，批量输出推荐 `--format ndjson`，避免把多条大响应合成一个巨大 JSON。
+`bifrost search` 与 `bifrost traffic search` 等价，支持关键词搜索、基础过滤器、结构化 JSONPath / Header 等值匹配、时间范围、返回内容 include 与搜索范围控制。
+
+#### 排序、上限与分页
+
+- list/search 默认按请求 `timestamp DESC, sequence DESC`，优先最新请求，不按写入顺序；时间相同按序号稳定排序。list 显式 `--direction forward` 按时间、序号升序。
+- list 用 JSON 返回的 `next_cursor` / `prev_cursor` 配合 `--cursor <SEQ>`、`--direction backward|forward` 翻页，保持过滤条件不变。游标是记录序号，服务端据此定位时间边界；游标记录被删除后重新从首屏查询。
+- list/search 的 `--limit` 默认 `50`；search 显式 `--max-results` 覆盖 `--limit`，而不是取两者较小值。`--max-scan` 默认 `10000`，独立限制候选扫描量。
+- search 的 `has_more` 表示还有候选可扫描，不保证之后还有命中；`searched_range` 只描述已扫描范围。search CLI 没有 `--cursor` 参数，交互模式可续页，非交互时扩大预算或收窄时间窗。
+- 无关键词时，仅终端 table 输出默认进入 TUI；过滤查询脚本显式使用 `--format json`。search 支持 `table|compact|json|json-pretty|ndjson`，list 不支持 ndjson，`--no-color` 可禁用彩色输出。
+- `traffic get <id>` 默认 json-pretty；`--ids id1,id2,...` 最多 200 条，默认 ndjson，显式 json/json-pretty 返回 JSON 数组。需要正文时加 `--request-body` / `--response-body`，批量 `--max-body` 默认每侧 65536 字节。单条 ID 与 `--ids` 互斥。
+
+```bash
+bifrost traffic list --path '/v1/user_name' --limit 10 --format json
+bifrost traffic list --cursor <next_cursor> --direction backward --path '/v1/user_name' --limit 10 --format json
+bifrost search --path '/v1/user_name' --latest 30m --limit 5 --format json
+bifrost search error --limit 20 --max-results 3 --max-scan 500 --format json
+bifrost traffic get --ids 12,13 --request-body --response-body --format json-pretty
+```
 
 本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏。`traffic get`、`traffic export`、`search --include` 输出均按捕获原文返回；完整脱敏方案会另开需求处理，当前不要把这些输出粘贴到低信任渠道或可复用文档。
 
@@ -334,14 +351,14 @@ bifrost search "token" --req-header-eq authorization="Bearer ..." --since 2026-0
 | `--status <FILTER>` | `traffic list` 中为精确状态码，如 `404`；`search` 中为状态段，如 `2xx`、`4xx`、`5xx`、`error` |
 | `--status-min <CODE>` / `--status-max <CODE>` | 按状态码上下界过滤，仅 `traffic list` / `remote traffic list` 支持 |
 | `--protocol <PROTO>` | `traffic list` 使用小写 `http` / `https` / `ws` / `wss` / `h3`；`search` 使用大写 `HTTP` / `HTTPS` / `WS` / `WSS` |
-| `--domain <PATTERN>` | 按域名模式过滤 |
+| `--domain <TEXT>` | 按域名子串过滤，仅 search 支持，不是 glob |
 | `--content-type <TYPE>` | 按内容类型过滤，如 `json`、`html`、`form` |
 | `--client-ip <IP>` | 按客户端 IP 过滤，仅 `traffic list` 支持 |
-| `--client-app <APP>` | 按客户端应用或进程名过滤，适合只分析某个浏览器、桌面应用或 CLI 工具产生的流量 |
+| `--client-app <APP>` | 按客户端应用或进程名过滤，仅 traffic list 支持，依赖记录中的进程信息 |
 | `--listener-port <PORT>` / `--proxy-port <PORT>` | 按流量入口代理端口过滤；`traffic list` 中的 `--port` 仍表示 Admin API 端口 |
 | `--req-json <PATH=VALUE>` / `--res-json <PATH=VALUE>` | 按请求体或响应体 JSONPath 值过滤；适合不用关键词、只按结构字段定位请求 |
 | `--req-header-eq <NAME=VALUE>` / `--res-header-eq <NAME=VALUE>` | 按请求头或响应头精确值过滤 |
-| `--since <TIME>` / `--until <TIME>` | 限定搜索时间窗口，支持 RFC3339 时间或实现支持的相对时间格式 |
+| `--since <TIME>` / `--until <TIME>` | 搜索时间窗：RFC3339、整数 epoch 毫秒或相对时长 ms/s/m/h/d/w，可带小数；当前时间写 `0s`，不是 `now` |
 | `--latest <DURATION>` | 只搜索最近一段时间，例如 `15m`、`1h` |
 | `--has-rule-hit <true|false>` | 按是否命中规则过滤，仅 `traffic list` 支持 |
 | `--is-websocket <true|false>` / `--is-sse <true|false>` / `--is-tunnel <true|false>` | 按 WebSocket、SSE 或 CONNECT 隧道流量过滤，仅 `traffic list` 支持 |
@@ -349,6 +366,20 @@ bifrost search "token" --req-header-eq authorization="Bearer ..." --since 2026-0
 入口端口过滤用于区分主代理端口、临时代理端口、远端代理端口产生的流量。例如临时端口 `50831` 的请求可以用 `traffic list --listener-port 50831` 或 `traffic search "keyword" --proxy-port 50831` 查询；顶层 `bifrost search` 与 `bifrost traffic search` 的过滤语义一致。
 
 按应用过滤依赖 Bifrost 记录到的客户端进程信息。和 `start --app-intercept-include` 配合使用时，可以把某个浏览器或桌面应用的 HTTPS 明文请求收窄成可交给 Agent 分析的证据集；若记录里没有应用名，请改用 `--host`、`--path`、`--listener-port` 等过滤器。
+
+`--host` / `--path`（以及 list 的 `--url`）按字面子串过滤，`_`、`%`、反斜杠不是通配符。多个过滤条件取 AND；list 布尔参数的 `false` 表示排除对应类型。
+
+JSONPath 支持 `$` 根、`.member`、`[N]`、`[*]`，对象路径可省略 `$.` 前缀；不支持递归下降、切片和过滤表达式。重复条件取 AND，数组通配节点任一匹配即可。值按大小写不敏感的文本等值比较，不是严格 JSON 类型比较；`null` 区别于空字符串，值中可含 `=`。Header 等值过滤的名称和值同样大小写不敏感，`*` 是字面值，不能表达“存在/任意值”。
+
+```bash
+bifrost search --req-json '$.user.id=42' --res-json '$.error=null' --format json
+bifrost search --res-json '$[0].id=42' --format json
+bifrost search --res-json '$=null' --format json
+bifrost search --req-json '$.items[*].name=alice' --format json
+bifrost search --res-header-eq 'x-cache=HIT' --since 30m --until 5m --format json
+```
+
+`--latest` 表示相对时长，不是结果条数；无单位按秒。`--since/--until` 的整数则表示 epoch 毫秒，所以当前时间用 `0s` 而不是 `0`。时间窗在 SQL 候选扫描前生效，不消耗 `--max-scan` 预算。非法 JSONPath、缺失等号、空 header 名、无效时间或未知 include token 会在发请求前报错。
 
 搜索范围与返回内容：
 
@@ -386,7 +417,7 @@ bifrost capture wait --host api.example.com --method POST --path /v1/login --tim
 bifrost traffic get --ids 12,13,14 --request-body --response-body --format ndjson
 
 # 按 JSON 字段和最近时间窗口定位失败响应，并附带响应体
-bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
+bifrost search --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --format json --include response-body
 
 # 诊断一条请求里的 JWT / Cookie 登录态是否过期
 bifrost traffic auth-status 12
@@ -774,6 +805,15 @@ bifrost remote keep-awake off
 bifrost remote keep-awake mode set force_on
 bifrost remote keep-awake mode get
 ```
+
+`remote traffic list/search` 共享最新请求优先的排序和核心过滤语义。remote search 同样以 `--limit`（默认 50）为结果上限，显式 `--max-results` 覆盖它，`--max-scan` 默认 10000；支持无关键词过滤查询。
+
+```bash
+bifrost remote traffic search --path '/v1/user_name' --latest 30m --limit 5 --format json
+bifrost remote traffic search error --limit 20 --max-results 3 --max-scan 500 --format json
+```
+
+Relay `remote traffic` 尚不支持 search `--include` / `--max-body`、批量 `get --ids`、导出、重放或捕获。已授权 Admin Client 可使用相应本机命令；已有独立 shell 授权时也可通过 `remote exec` 在目标机执行。不得因 wrapper 不支持而自动切换模式、读取本机数据或扩大授权；重放会真实发请求。
 
 `--ssh-key` 带路径时读取指定 key 文件；不带值时读取固定环境变量 `BIFROST_REMOTE_SSH_KEY`。环境变量名称固定，不支持自定义名称。
 

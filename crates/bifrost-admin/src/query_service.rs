@@ -549,6 +549,7 @@ pub fn traffic_list_params_from_command(args: &TrafficListArgs) -> QueryParams {
     QueryParams {
         cursor: args.cursor,
         limit: Some(args.limit.unwrap_or(50)),
+        order_by_time: true,
         direction: match args.direction {
             TrafficListDirection::Backward => Direction::Backward,
             TrafficListDirection::Forward => Direction::Forward,
@@ -643,6 +644,7 @@ mod tests {
         });
 
         assert_eq!(params.limit, Some(10));
+        assert!(params.order_by_time);
         assert_eq!(params.direction, Direction::Forward);
         assert_eq!(params.host_contains.as_deref(), Some("example.com"));
         assert_eq!(params.listener_port, Some(50831));

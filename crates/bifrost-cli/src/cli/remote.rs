@@ -1103,42 +1103,49 @@ pub struct RemoteSearchArgs {
     #[arg(
         long = "req-json",
         value_name = "PATH=VALUE",
+        value_parser = super::search_args::json_filter,
         help = "JSONPath filter on request body (repeatable)"
     )]
     pub req_json: Vec<String>,
     #[arg(
         long = "res-json",
         value_name = "PATH=VALUE",
+        value_parser = super::search_args::json_filter,
         help = "JSONPath filter on response body (repeatable)"
     )]
     pub res_json: Vec<String>,
     #[arg(
         long = "req-header-eq",
         value_name = "NAME=VALUE",
+        value_parser = super::search_args::header_filter,
         help = "Request header equals filter (repeatable)"
     )]
     pub req_header_eq: Vec<String>,
     #[arg(
         long = "res-header-eq",
         value_name = "NAME=VALUE",
+        value_parser = super::search_args::header_filter,
         help = "Response header equals filter (repeatable)"
     )]
     pub res_header_eq: Vec<String>,
     #[arg(
         long,
         value_name = "TIME",
+        value_parser = super::search_args::time,
         help = "Restrict to records since this time (RFC3339 or 30s/5m/2h/1d)"
     )]
     pub since: Option<String>,
     #[arg(
         long,
         value_name = "TIME",
+        value_parser = super::search_args::time,
         help = "Restrict to records until this time (RFC3339 or relative)"
     )]
     pub until: Option<String>,
     #[arg(
         long,
         value_name = "DURATION",
+        value_parser = super::search_args::duration,
         help = "Shortcut for --since now-DURATION"
     )]
     pub latest: Option<String>,
@@ -1215,8 +1222,7 @@ pub struct RemoteSearchArgs {
     pub max_scan: Option<usize>,
     #[arg(
         long = "max-results",
-        default_value = "100",
-        help = "Maximum matching results to return (default: 100)"
+        help = "Maximum matching results to return (overrides --limit)"
     )]
     pub max_results: Option<usize>,
 }

@@ -655,11 +655,15 @@ previous runtime settings."
         #[arg(short = 'y', long, help = "Skip confirmation prompt")]
         yes: bool,
     },
-    #[command(about = "Search traffic records with advanced filtering")]
+    #[command(about = "Search traffic records with advanced filtering, newest request time first")]
     Search {
         #[arg(help = "Search keyword (searches URL, headers, body)")]
         keyword: Option<String>,
-        #[arg(short, long, help = "Interactive TUI mode (default if no keyword)")]
+        #[arg(
+            short,
+            long,
+            help = "Interactive TUI mode (default without keyword only for terminal table output)"
+        )]
         interactive: bool,
         #[arg(short, long, default_value = "50", help = "Maximum results to return")]
         limit: usize,
@@ -674,42 +678,49 @@ previous runtime settings."
         #[arg(
             long = "req-json",
             value_name = "PATH=VALUE",
+            value_parser = search_args::json_filter,
             help = "JSONPath filter on request body, e.g. $.user.name=alice (repeatable)"
         )]
         req_json: Vec<String>,
         #[arg(
             long = "res-json",
             value_name = "PATH=VALUE",
+            value_parser = search_args::json_filter,
             help = "JSONPath filter on response body, e.g. $.data.errno=0 (repeatable)"
         )]
         res_json: Vec<String>,
         #[arg(
             long = "req-header-eq",
             value_name = "NAME=VALUE",
+            value_parser = search_args::header_filter,
             help = "Request header equals filter (repeatable, case-insensitive)"
         )]
         req_header_eq: Vec<String>,
         #[arg(
             long = "res-header-eq",
             value_name = "NAME=VALUE",
+            value_parser = search_args::header_filter,
             help = "Response header equals filter (repeatable, case-insensitive)"
         )]
         res_header_eq: Vec<String>,
         #[arg(
             long,
             value_name = "TIME",
+            value_parser = search_args::time,
             help = "Restrict to records since this time (RFC3339 or relative: 30s/5m/2h/1d)"
         )]
         since: Option<String>,
         #[arg(
             long,
             value_name = "TIME",
+            value_parser = search_args::time,
             help = "Restrict to records until this time (RFC3339 or relative)"
         )]
         until: Option<String>,
         #[arg(
             long,
             value_name = "DURATION",
+            value_parser = search_args::duration,
             help = "Shortcut for --since now-DURATION (e.g. 5m, 2h)"
         )]
         latest: Option<String>,
@@ -757,13 +768,13 @@ previous runtime settings."
         max_scan: Option<usize>,
         #[arg(
             long = "max-results",
-            default_value = "100",
-            help = "Maximum matching results to return (default: 100)"
+            help = "Maximum matching results to return (overrides --limit)"
         )]
         max_results: Option<usize>,
         #[arg(
             long = "include",
             value_name = "PARTS",
+            value_parser = search_args::include,
             value_delimiter = ',',
             help = "Attach extras to each result: request-body, response-body, request-headers, response-headers (aliases: req-body, res-body, req-headers, res-headers; shortcuts: bodies, headers)"
         )]
@@ -1697,7 +1708,7 @@ pub enum CaptureCommands {
 
 #[derive(Subcommand, Clone)]
 pub enum TrafficCommands {
-    #[command(about = "List traffic records")]
+    #[command(about = "List traffic records, newest request time first")]
     List {
         #[arg(long, help = "Admin API port (default: global -p or runtime port)")]
         port: Option<u16>,
@@ -1792,17 +1803,20 @@ pub enum TrafficCommands {
         #[arg(
             short,
             long,
-            default_value = "json-pretty",
             value_parser = ["table", "compact", "json", "json-pretty", "ndjson"],
-            help = "Output format: table, compact, json, json-pretty, ndjson (ndjson auto-selected for --ids unless overridden)"
+            help = "Output format: table, compact, json, json-pretty, ndjson (default: json-pretty for one ID, ndjson for --ids)"
         )]
-        format: String,
+        format: Option<String>,
     },
     #[command(about = "Search traffic records (same as `bifrost search`)")]
     Search {
         #[arg(help = "Search keyword (searches URL, headers, body)")]
         keyword: Option<String>,
-        #[arg(short, long, help = "Interactive TUI mode (default if no keyword)")]
+        #[arg(
+            short,
+            long,
+            help = "Interactive TUI mode (default without keyword only for terminal table output)"
+        )]
         interactive: bool,
         #[arg(short, long, default_value = "50", help = "Maximum results to return")]
         limit: usize,
@@ -1817,42 +1831,49 @@ pub enum TrafficCommands {
         #[arg(
             long = "req-json",
             value_name = "PATH=VALUE",
+            value_parser = search_args::json_filter,
             help = "JSONPath filter on request body (repeatable)"
         )]
         req_json: Vec<String>,
         #[arg(
             long = "res-json",
             value_name = "PATH=VALUE",
+            value_parser = search_args::json_filter,
             help = "JSONPath filter on response body (repeatable)"
         )]
         res_json: Vec<String>,
         #[arg(
             long = "req-header-eq",
             value_name = "NAME=VALUE",
+            value_parser = search_args::header_filter,
             help = "Request header equals filter (repeatable)"
         )]
         req_header_eq: Vec<String>,
         #[arg(
             long = "res-header-eq",
             value_name = "NAME=VALUE",
+            value_parser = search_args::header_filter,
             help = "Response header equals filter (repeatable)"
         )]
         res_header_eq: Vec<String>,
         #[arg(
             long,
             value_name = "TIME",
+            value_parser = search_args::time,
             help = "Restrict to records since this time (RFC3339 or 30s/5m/2h/1d)"
         )]
         since: Option<String>,
         #[arg(
             long,
             value_name = "TIME",
+            value_parser = search_args::time,
             help = "Restrict to records until this time (RFC3339 or relative)"
         )]
         until: Option<String>,
         #[arg(
             long,
             value_name = "DURATION",
+            value_parser = search_args::duration,
             help = "Shortcut for --since now-DURATION"
         )]
         latest: Option<String>,
@@ -1900,13 +1921,13 @@ pub enum TrafficCommands {
         max_scan: Option<usize>,
         #[arg(
             long = "max-results",
-            default_value = "100",
-            help = "Maximum matching results to return (default: 100)"
+            help = "Maximum matching results to return (overrides --limit)"
         )]
         max_results: Option<usize>,
         #[arg(
             long = "include",
             value_name = "PARTS",
+            value_parser = search_args::include,
             value_delimiter = ',',
             help = "Attach extras to each result: request-body, response-body, request-headers, response-headers (aliases: req-body, res-body, req-headers, res-headers; shortcuts: bodies, headers)"
         )]
@@ -2856,6 +2877,7 @@ pub enum ExportCommands {
 }
 
 pub mod remote;
+pub(crate) mod search_args;
 pub use remote::*;
 
 pub struct ImportArgs {

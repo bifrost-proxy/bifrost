@@ -503,7 +503,11 @@ bifrost traffic replay 57544 --patch '/messages/0/content="hello"'             #
 
 > 当用户提及一个纯数字流量序号并希望查看详情时，直接执行 `bifrost traffic get <ID>`。纯数字会按 sequence suffix 查找，不限制为 6 位以内；过长或无法表示为 `u64` 的值会明确报错。
 >
-> **批量场景**：要在一次往返里取多条用 `--ids id1,id2,id3`（最多 200，默认 ndjson 输出，省 N-1 次 round-trip）。
+> **排序与路径**：list/search 默认按请求时间倒序，时间相同按 sequence 倒序，先返回最新匹配而不是最后写入的记录。list 的 `--direction forward` 改为时间、序号升序。`--path` 是字面子串，`_`、`%`、反斜杠不是通配符；多个过滤条件取 AND，布尔过滤 `false` 表示排除对应类型。
+>
+> **list 分页**：从 JSON 输出取得 `next_cursor` / `prev_cursor`，通过 `--cursor` 与对应 `--direction` 续查；保留相同过滤条件。游标仍是记录序号，服务端据此定位时间边界；游标记录被清理后重新从首屏查询。
+>
+> **批量场景**：要在一次往返里取多条用 `--ids id1,id2,id3`（最多 200，默认 ndjson 输出，省 N-1 次 round-trip）。单条默认 json-pretty；批量显式 `--format json` / `json-pretty` 返回 JSON 数组，不是 NDJSON。需要正文时显式加 `--request-body` / `--response-body`，每侧上限由 `--max-body` 控制。
 >
 > **敏感输出**：本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏。`traffic get` / `traffic export` / `search --include` 按捕获原文输出；完整脱敏方案另开需求处理，当前不要把这些输出写入低信任日志、聊天或可复用 skill。
 
@@ -569,9 +573,10 @@ bifrost traffic replay <ID> [--patch /a/b=value]... [--patch-json <RAW_OPS>] \
 bifrost search openai --domain api.openai.com --method POST
 bifrost search '{"error"' --res-body --content-type json
 bifrost search --interactive                    # 交互式 TUI 模式
-bifrost search --req-json '$.user.name=alice' --res-json '$.data.errno=0'   # JSONPath 等值过滤（可重复）
-bifrost search --req-header-eq 'content-type=application/json' --res-header-eq 'x-tt-logid=*'  # header 等值过滤
-bifrost search foo --since 30m --until now                                          # 时间窗（绝对 RFC3339 或相对 30s/5m/2h/1d）
+bifrost search --req-json '$.user.name=alice' --res-json '$.data.errno=0' --format json  # 无关键词过滤查询
+bifrost search --res-json '$[0].id=42' --format json                                # 根数组；根标量用 '$=42'
+bifrost search --req-header-eq 'content-type=application/json' --res-header-eq 'x-cache=HIT' --format json
+bifrost search foo --since 30m --until 5m                                          # 30 分钟前到 5 分钟前；当前时间用 0s
 bifrost search foo --latest 10m                                                     # --latest 10m == --since now-10m
 bifrost search foo --include bodies,headers --max-body 32768                        # 在结果里直接带上 body/headers
 bifrost search foo --include req-body,res-headers                                   # 也可单独挑：req-body|res-body|req-headers|res-headers
@@ -581,9 +586,9 @@ bifrost search foo --include req-body,res-headers                               
 
 ```
 [keyword]                     搜索关键词（URL/headers/body 全文搜索）
--i, --interactive             交互式 TUI 模式（无关键词时默认进入）
+-i, --interactive             交互式 TUI（仅终端 table 输出且无关键词时默认进入）
 -l, --limit <N>               最大结果数（默认 50）
--f, --format <FMT>            输出格式：table|compact|json|json-pretty
+-f, --format <FMT>            输出格式：table|compact|json|json-pretty|ndjson
     --url                     仅搜索 URL/path
     --headers                 仅搜索 headers（请求+响应）
     --body                    仅搜索 body（请求+响应）
@@ -598,9 +603,9 @@ bifrost search foo --include req-body,res-headers                               
     --listener-port <PORT>    入口代理监听端口过滤（别名：--proxy-port）
     --protocol <PROTO>        协议过滤：HTTP|HTTPS|WS|WSS
     --content-type <TYPE>     Content-Type 过滤（json/xml/html/form 等）
-    --domain <PATTERN>        域名 pattern 过滤
+    --domain <TEXT>           域名子串过滤，不是 glob
     --max-scan <N>            最大扫描记录数（默认 10000，增大可扩大搜索范围）
-    --max-results <N>         最大返回匹配结果数（默认 100）
+    --max-results <N>         显式指定时覆盖 --limit；省略时使用 --limit（默认 50）
     --req-json PATH=VALUE     JSONPath 等值过滤请求 body，如 $.user.name=alice（可重复，AND 关系）
     --res-json PATH=VALUE     JSONPath 等值过滤响应 body，如 $.data.errno=0（可重复）
     --req-header-eq NAME=VAL  请求 header 等值过滤，大小写不敏感（可重复）
@@ -613,9 +618,15 @@ bifrost search foo --include req-body,res-headers                               
     --no-color                禁用彩色输出
 ```
 
-> JSONPath 子集支持 `$`、`.member`、`[N]`、`[*]`（不依赖外部 crate）。`--include` / `--max-body` 与 `bifrost traffic get` 行为对齐：同一次 search 请求内通过 `HashMap` 对每条记录、每一侧的 body 读取去重；该 cache 不跨请求持久化，也不是 LRU。
+> **JSONPath**：支持 `$` 根、`.member`、`[N]`、`[*]`，允许省略对象路径的 `$.` 前缀；不支持递归下降、切片或过滤表达式。重复条件取 AND，通配数组中任一节点匹配即可。值按大小写不敏感文本等值比较，`null` 不等于空字符串，值中可以包含 `=`。Shell 示例始终引用整个 `PATH=VALUE`。
 >
-> **时间预过滤**：`--since/--until/--latest` 在 SQL 层通过 `idx_timestamp` 索引裁掉超窗记录，不会被 `--max-scan` 浪费扫描预算；`searched_range` 是响应中的搜索范围统计字段。
+> **Header**：`--req-header-eq` / `--res-header-eq` 的名称和值按大小写不敏感等值比较，`*` 是字面值，不代表“任意值/存在”。`--req-header` / `--res-header` 是不带参数的关键词范围开关。
+>
+> **时间与校验**：`--since/--until` 接受 RFC3339、整数 epoch 毫秒或相对时长；相对时长用 ms/s/m/h/d/w，可带小数，`--latest` 的无单位值按秒。当前时间写 `0s`，不要写 `now`（整数 `0` 表示 epoch）。非法 JSONPath、缺失等号、空 header 名、无效时间或 include token 会在发请求前报错。
+>
+> **预算与续查**：`--max-results` 覆盖 `--limit`；`--max-scan` 独立限制候选扫描数。时间窗在 SQL 层预过滤，不浪费扫描预算。`searched_range` 只描述已扫描范围，`has_more` 表示仍有候选，不能保证还会命中。search CLI 没有 `--cursor` 参数，交互模式可续页；非交互查询可扩大预算或收窄时间窗。
+>
+> **脚本输出**：无关键词自动化查询显式指定 `--format json`，避免终端 table 模式进入 TUI。使用 `--include` / `--max-body` 附带正文时，同次搜索对每条记录、每侧 body 读取去重；缓存不跨请求。
 
 #### 按发起站点关联第三方流量（请求头溯源）
 

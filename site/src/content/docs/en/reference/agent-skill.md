@@ -177,4 +177,6 @@ Update the skills with:
 bifrost install-skill -y
 ```
 
-Each run overwrites the installed skills with the latest version.
+Each run overwrites installed skills with content from `main`, which may be newer than the installed CLI or running server. Check `bifrost --version` and command-specific `--help`; a skill refresh must not automatically upgrade or restart the proxy.
+
+Traffic skills should use newest request time first, sequence descending for ties, and literal substring `--path` filters. Search `--limit` defaults to 50 and explicit `--max-results` overrides it. Use `--format json` for filter-only queries; see the [CLI reference](./cli) for JSONPath, header equality, and time windows. Relay `remote traffic` has no batch get or search include wrapper; unsupported capabilities must not silently expand shell authorization or switch connection modes.

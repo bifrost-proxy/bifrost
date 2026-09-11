@@ -31,6 +31,10 @@ enum Token {
     Wildcard,
 }
 
+pub fn is_valid(path: &str) -> bool {
+    parse(path).is_some()
+}
+
 /// Evaluate `path` against `value` and return every matching subvalue.
 ///
 /// Returns an empty vector when the path is invalid or no element matches.

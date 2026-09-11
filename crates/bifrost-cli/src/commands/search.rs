@@ -603,10 +603,7 @@ fn stream_table_output(
         if options.format == OutputFormat::Json || options.format == OutputFormat::JsonPretty {
             println!("{{\"results\":[],\"total_matched\":0}}");
         } else {
-            println!(
-                "\x1b[33m⚠\x1b[0m No results found for '\x1b[1m{}\x1b[0m'",
-                options.keyword
-            );
+            println!("No results found for '{}'", options.keyword);
             print_search_summary(options, total_searched, total_matched, false, use_color);
         }
         return 0;
@@ -626,7 +623,7 @@ fn print_search_summary(
     use_color: bool,
 ) {
     let max_scan = options.max_scan.unwrap_or(0);
-    let max_results = options.max_results.unwrap_or(100);
+    let max_results = options.max_results.unwrap_or(options.limit);
 
     if use_color {
         if total_matched > 0 {
@@ -967,14 +964,7 @@ fn build_search_request_body(options: &SearchOptions, cursor: Option<u64>) -> se
     }
     for entry in &options.req_json {
         if let Some((path, value)) = split_eq(entry) {
-            let field = if path.starts_with('$') {
-                format!(
-                    "req.body.{}",
-                    path.trim_start_matches('$').trim_start_matches('.')
-                )
-            } else {
-                format!("req.body.{}", path)
-            };
+            let field = crate::cli::search_args::body_field("req", path);
             conditions.push(serde_json::json!({
                 "field": field,
                 "operator": "equals",
@@ -984,14 +974,7 @@ fn build_search_request_body(options: &SearchOptions, cursor: Option<u64>) -> se
     }
     for entry in &options.res_json {
         if let Some((path, value)) = split_eq(entry) {
-            let field = if path.starts_with('$') {
-                format!(
-                    "res.body.{}",
-                    path.trim_start_matches('$').trim_start_matches('.')
-                )
-            } else {
-                format!("res.body.{}", path)
-            };
+            let field = crate::cli::search_args::body_field("res", path);
             conditions.push(serde_json::json!({
                 "field": field,
                 "operator": "equals",
@@ -1036,9 +1019,7 @@ fn build_search_request_body(options: &SearchOptions, cursor: Option<u64>) -> se
         body["max_scan"] = serde_json::json!(ms);
     }
 
-    if let Some(mr) = options.max_results {
-        body["max_results"] = serde_json::json!(mr);
-    }
+    body["max_results"] = serde_json::json!(options.max_results.unwrap_or(options.limit));
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut since_ms: Option<i64> = None;
@@ -1124,7 +1105,11 @@ pub fn parse_duration_ms(input: &str) -> Option<i64> {
         "w" => 7.0 * 24.0 * 60.0 * 60.0 * 1000.0,
         _ => return None,
     };
-    Some((n * mult) as i64)
+    let millis = n * mult;
+    if !millis.is_finite() || millis < 0.0 || millis >= i64::MAX as f64 {
+        return None;
+    }
+    Some(millis as i64)
 }
 
 fn parse_time_arg(input: &str, now_ms: i64) -> Option<i64> {

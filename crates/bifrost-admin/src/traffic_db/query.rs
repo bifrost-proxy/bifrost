@@ -24,6 +24,8 @@ pub struct QueryParams {
     pub limit: Option<usize>,
     #[serde(default)]
     pub direction: Direction,
+    #[serde(default)]
+    pub order_by_time: bool,
 
     pub method: Option<String>,
     pub status: Option<u16>,
@@ -94,16 +96,18 @@ impl QueryParams {
         let mut params: Vec<QueryValue> = Vec::new();
 
         if let Some(cursor) = self.cursor {
-            match self.direction {
-                Direction::Forward => {
-                    conditions.push("sequence > ?".to_string());
-                    params.push(QueryValue::Int(cursor as i64));
-                }
-                Direction::Backward => {
-                    conditions.push("sequence < ?".to_string());
-                    params.push(QueryValue::Int(cursor as i64));
-                }
+            let operator = match self.direction {
+                Direction::Forward => ">",
+                Direction::Backward => "<",
+            };
+            if self.order_by_time {
+                conditions.push(format!(
+                    "(timestamp, sequence) {operator} (SELECT timestamp, sequence FROM traffic_records WHERE sequence = ?)"
+                ));
+            } else {
+                conditions.push(format!("sequence {operator} ?"));
             }
+            params.push(QueryValue::Int(cursor as i64));
         }
 
         if let Some(ref method) = self.method {
@@ -138,35 +142,31 @@ impl QueryParams {
             conditions.push(format!("(flags & {}) = 0", TrafficFlags::HAS_RULE_HIT));
         }
 
-        if let Some(true) = self.is_websocket {
-            conditions.push(format!("(flags & {}) != 0", TrafficFlags::IS_WEBSOCKET));
-        }
-
-        if let Some(true) = self.is_sse {
-            conditions.push(format!("(flags & {}) != 0", TrafficFlags::IS_SSE));
-        }
-
-        if let Some(true) = self.is_h3 {
-            conditions.push(format!("(flags & {}) != 0", TrafficFlags::IS_H3));
-        }
-
-        if let Some(true) = self.is_tunnel {
-            conditions.push(format!("(flags & {}) != 0", TrafficFlags::IS_TUNNEL));
+        for (filter, flag) in [
+            (self.is_websocket, TrafficFlags::IS_WEBSOCKET),
+            (self.is_sse, TrafficFlags::IS_SSE),
+            (self.is_h3, TrafficFlags::IS_H3),
+            (self.is_tunnel, TrafficFlags::IS_TUNNEL),
+        ] {
+            if let Some(enabled) = filter {
+                let operator = if enabled { "!=" } else { "=" };
+                conditions.push(format!("(flags & {flag}) {operator} 0"));
+            }
         }
 
         if let Some(ref host) = self.host_contains {
-            conditions.push("host LIKE ?".to_string());
-            params.push(QueryValue::Text(format!("%{}%", host)));
+            conditions.push("host LIKE ? ESCAPE '\\'".to_string());
+            params.push(QueryValue::Text(contains_pattern(host)));
         }
 
         if let Some(ref url) = self.url_contains {
-            conditions.push("url LIKE ?".to_string());
-            params.push(QueryValue::Text(format!("%{}%", url)));
+            conditions.push("url LIKE ? ESCAPE '\\'".to_string());
+            params.push(QueryValue::Text(contains_pattern(url)));
         }
 
         if let Some(ref path) = self.path_contains {
-            conditions.push("path LIKE ?".to_string());
-            params.push(QueryValue::Text(format!("%{}%", path)));
+            conditions.push("path LIKE ? ESCAPE '\\'".to_string());
+            params.push(QueryValue::Text(contains_pattern(path)));
         }
 
         if let Some(is_empty) = self.client_app_empty {
@@ -178,8 +178,8 @@ impl QueryParams {
         } else if let Some(ref app) = self.client_app {
             match self.client_app_match {
                 TextMatchMode::Contains => {
-                    conditions.push("client_app LIKE ?".to_string());
-                    params.push(QueryValue::Text(format!("%{}%", app)));
+                    conditions.push("client_app LIKE ? ESCAPE '\\'".to_string());
+                    params.push(QueryValue::Text(contains_pattern(app)));
                 }
                 TextMatchMode::Equals => {
                     conditions.push("client_app = ?".to_string());
@@ -197,8 +197,8 @@ impl QueryParams {
         } else if let Some(ref account_name) = self.account_name {
             match self.account_name_match {
                 TextMatchMode::Contains => {
-                    conditions.push("account_name LIKE ?".to_string());
-                    params.push(QueryValue::Text(format!("%{}%", account_name)));
+                    conditions.push("account_name LIKE ? ESCAPE '\\'".to_string());
+                    params.push(QueryValue::Text(contains_pattern(account_name)));
                 }
                 TextMatchMode::Equals => {
                     conditions.push("account_name = ?".to_string());
@@ -216,8 +216,8 @@ impl QueryParams {
         } else if let Some(ref ip) = self.client_ip {
             match self.client_ip_match {
                 TextMatchMode::Contains => {
-                    conditions.push("client_ip LIKE ?".to_string());
-                    params.push(QueryValue::Text(format!("%{}%", ip)));
+                    conditions.push("client_ip LIKE ? ESCAPE '\\'".to_string());
+                    params.push(QueryValue::Text(contains_pattern(ip)));
                 }
                 TextMatchMode::Equals => {
                     conditions.push("client_ip = ?".to_string());
@@ -232,8 +232,8 @@ impl QueryParams {
         }
 
         if let Some(ref ct) = self.content_type {
-            conditions.push("content_type LIKE ?".to_string());
-            params.push(QueryValue::Text(format!("%{}%", ct)));
+            conditions.push("content_type LIKE ? ESCAPE '\\'".to_string());
+            params.push(QueryValue::Text(contains_pattern(ct)));
         }
 
         if let Some(since_ms) = self.since_ms {
@@ -268,9 +268,11 @@ impl QueryParams {
     pub fn build_select_sql(&self) -> (String, Vec<QueryValue>) {
         let (where_clause, params) = self.build_where_clause();
 
-        let order = match self.direction {
-            Direction::Forward => "ORDER BY sequence ASC",
-            Direction::Backward => "ORDER BY sequence DESC",
+        let order = match (self.order_by_time, self.direction) {
+            (true, Direction::Forward) => "ORDER BY timestamp ASC, sequence ASC",
+            (true, Direction::Backward) => "ORDER BY timestamp DESC, sequence DESC",
+            (false, Direction::Forward) => "ORDER BY sequence ASC",
+            (false, Direction::Backward) => "ORDER BY sequence DESC",
         };
 
         let limit = self.limit.unwrap_or(100);
@@ -294,6 +296,16 @@ impl QueryParams {
         let sql = format!("SELECT COUNT(*) FROM traffic_records{}", where_clause);
         (sql, params)
     }
+}
+
+fn contains_pattern(value: &str) -> String {
+    format!(
+        "%{}%",
+        value
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +336,59 @@ pub struct QueryResult {
 #[cfg(test)]
 mod tests {
     use super::{QueryParams, QueryValue, TextMatchMode};
+
+    #[test]
+    fn literal_contains_escapes_sql_wildcards_for_every_text_filter() {
+        let value = "a_b%\\c";
+        let params = QueryParams {
+            host_contains: Some(value.to_string()),
+            url_contains: Some(value.to_string()),
+            path_contains: Some(value.to_string()),
+            client_app: Some(value.to_string()),
+            account_name: Some(value.to_string()),
+            client_ip: Some(value.to_string()),
+            content_type: Some(value.to_string()),
+            ..Default::default()
+        };
+        let (clause, values) = params.build_where_clause();
+        assert_eq!(clause.matches("ESCAPE").count(), 7);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for pattern in values {
+            let QueryValue::Text(pattern) = pattern else {
+                panic!("expected text")
+            };
+            for (text, expected) in [(value, true), ("aXb%\\c", false), ("a_bZZ\\c", false)] {
+                let matched: bool = conn
+                    .query_row(
+                        "SELECT ? LIKE ? ESCAPE '\\'",
+                        rusqlite::params![text, pattern],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(matched, expected, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn boolean_filters_match_both_true_and_false() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for enabled in [true, false] {
+            let params = QueryParams {
+                is_websocket: Some(enabled),
+                is_sse: Some(enabled),
+                is_h3: Some(enabled),
+                is_tunnel: Some(enabled),
+                ..Default::default()
+            };
+            let (clause, _) = params.build_where_clause();
+            for flags in [0, u32::MAX] {
+                let sql = format!("SELECT COUNT(*) FROM (SELECT {flags} AS flags){clause}");
+                let matched: u32 = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
+                assert_eq!(matched, u32::from((flags != 0) == enabled));
+            }
+        }
+    }
 
     #[test]
     fn build_where_clause_supports_empty_client_app_filter() {

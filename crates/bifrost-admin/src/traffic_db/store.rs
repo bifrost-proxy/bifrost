@@ -887,7 +887,10 @@ impl TrafficDbStore {
 
     fn query_internal(&self, params: &QueryParams, total_mode: QueryTotalMode) -> QueryResult {
         let conn = self.read_pool.acquire();
-        let (sql, values) = params.build_select_sql();
+        let limit = params.limit.unwrap_or(100);
+        let mut fetch_params = params.clone();
+        fetch_params.limit = Some(limit.saturating_add(1));
+        let (sql, values) = fetch_params.build_select_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> =
             values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
@@ -906,7 +909,7 @@ impl TrafficDbStore {
             }
         };
 
-        let records: Vec<TrafficSummaryCompact> = stmt
+        let mut records: Vec<TrafficSummaryCompact> = stmt
             .query_map(param_refs.as_slice(), |row| {
                 let socket_status = build_socket_status_summary(
                     row.get::<_, bool>(21)?,
@@ -963,7 +966,8 @@ impl TrafficDbStore {
             .map(|r| r.filter_map(|r| r.ok()).collect())
             .unwrap_or_default();
 
-        let has_more = records.len() >= params.limit.unwrap_or(100);
+        let has_more = records.len() > limit;
+        records.truncate(limit);
 
         let (next_cursor, prev_cursor) = if records.is_empty() {
             (None, None)

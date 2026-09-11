@@ -466,7 +466,8 @@ fn run_cli_main() {
             include,
             max_body,
         }) => {
-            let is_interactive = interactive || keyword.is_none();
+            let is_interactive = interactive
+                || (keyword.is_none() && std::io::stdin().is_terminal() && format == "table");
             let (inc_req_body, inc_res_body, inc_req_hdr, inc_res_hdr) =
                 commands::parse_include_tokens(&include);
             let options = SearchOptions {
@@ -664,14 +665,14 @@ fn run_cli_main() {
                 max_body,
                 format,
             } => {
-                // Default format: json-pretty for single id, ndjson for batch
-                // (per the CLI help; users can still pass an explicit --format).
-                let user_specified_format = format != "json-pretty";
-                let effective_format = if !ids.is_empty() && !user_specified_format {
-                    "ndjson".to_string()
-                } else {
-                    format
-                };
+                let effective_format = format.unwrap_or_else(|| {
+                    if ids.is_empty() {
+                        "json-pretty"
+                    } else {
+                        "ndjson"
+                    }
+                    .to_string()
+                });
                 let options = TrafficGetOptions {
                     port: port.unwrap_or_else(|| get_effective_port(cli.port)),
                     id,
@@ -716,7 +717,8 @@ fn run_cli_main() {
                 include,
                 max_body,
             } => {
-                let is_interactive = interactive || keyword.is_none();
+                let is_interactive = interactive
+                    || (keyword.is_none() && std::io::stdin().is_terminal() && format == "table");
                 let (inc_req_body, inc_res_body, inc_req_hdr, inc_res_hdr) =
                     commands::parse_include_tokens(&include);
                 let options = SearchOptions {

@@ -175,4 +175,6 @@ cp ./skill_remote.md ~/.claude/skills/bifrost-remote/SKILL.md
 bifrost install-skill -y
 ```
 
-每次执行都会覆盖现有 Skill，保持与最新版本一致。
+每次执行都会覆盖现有 Skill；下载内容来自 `main`，不一定与当前已安装 CLI 或服务端版本同步。先核对 `bifrost --version` 和对应子命令 `--help`，不要为更新技能自动升级或重启正在运行的代理。
+
+流量查询技能应遵循这些约定：list/search 按请求时间倒序、同时间按 sequence 倒序；`--path` 是字面子串；search 的 `--limit` 默认 50，显式 `--max-results` 覆盖它。无关键词过滤查询使用 `--format json`，JSONPath / header 等值 / 时间窗语法以 [CLI 参考](./cli) 为准。Relay `remote traffic` 不提供批量 get 或 search include，不得为缺失能力自动扩展 shell 授权或切换连接模式。
