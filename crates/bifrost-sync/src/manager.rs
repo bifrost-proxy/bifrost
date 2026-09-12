@@ -429,7 +429,15 @@ fn build_provider_statuses(
                 || (bytedance_selected && provider_sessions.is_empty() && runtime.reachable),
             authorized: bytedance_session.is_some()
                 || (bytedance_selected && provider_sessions.is_empty() && runtime.authorized),
-            reason: if bytedance_selected {
+            reason: if bytedance_selected
+                && runtime.reason == SyncReason::Ready
+                && runtime.last_error.is_none()
+                && bytedance_meta
+                    .and_then(|meta| meta.last_error.as_ref())
+                    .is_some()
+            {
+                SyncReason::Error
+            } else if bytedance_selected {
                 runtime.reason.clone()
             } else if bytedance_session.is_some() && bytedance_last_error.is_some() {
                 SyncReason::Error
@@ -471,7 +479,15 @@ fn build_provider_statuses(
                 || (cloud_selected && provider_sessions.is_empty() && runtime.reachable),
             authorized: cloud_session.is_some()
                 || (cloud_selected && provider_sessions.is_empty() && runtime.authorized),
-            reason: if cloud_selected {
+            reason: if cloud_selected
+                && runtime.reason == SyncReason::Ready
+                && runtime.last_error.is_none()
+                && cloud_meta
+                    .and_then(|meta| meta.last_error.as_ref())
+                    .is_some()
+            {
+                SyncReason::Error
+            } else if cloud_selected {
                 runtime.reason.clone()
             } else if cloud_session.is_some() && cloud_last_error.is_some() {
                 SyncReason::Error
@@ -2760,6 +2776,7 @@ impl SyncManager {
         let mut tombstone_deleted_remote_count: usize = 0;
         let mut tombstone_deleted_local_count: usize = 0;
         let mut tombstone_delete_failed_count: usize = 0;
+        let mut rule_sync_errors = Vec::new();
         for step in plan {
             match step {
                 SyncPlanStep::DeleteLocal { tombstone } => {
@@ -2813,7 +2830,7 @@ impl SyncManager {
                     local_rule,
                     remote_env,
                 } => {
-                    let updated_remote = client
+                    let updated_remote = match client
                         .update_env(config, token, &remote_env, &local_rule.content)
                         .await
                         .map_err(|error| {
@@ -2821,7 +2838,20 @@ impl SyncManager {
                                 "failed to update remote rule '{}': {error}",
                                 local_rule.name
                             ))
-                        })?;
+                        }) {
+                        Ok(updated_remote) => updated_remote,
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bifrost_sync::manager",
+                                name = %local_rule.name,
+                                remote_id = %remote_env.id,
+                                error = %error,
+                                "failed to update remote rule, continuing sync plan"
+                            );
+                            rule_sync_errors.push(error.to_string());
+                            continue;
+                        }
+                    };
                     let mut synced_rule = local_rule.clone();
                     synced_rule.mark_synced(
                         updated_remote.id.clone(),
@@ -2834,7 +2864,7 @@ impl SyncManager {
                     local_storage_changed = true;
                 }
                 SyncPlanStep::CreateRemote { local_rule } => {
-                    let created = client
+                    let created = match client
                         .create_env(
                             config,
                             token,
@@ -2848,7 +2878,19 @@ impl SyncManager {
                                 "failed to create remote rule '{}': {error}",
                                 local_rule.name
                             ))
-                        })?;
+                        }) {
+                        Ok(created) => created,
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bifrost_sync::manager",
+                                name = %local_rule.name,
+                                error = %error,
+                                "failed to create remote rule, continuing sync plan"
+                            );
+                            rule_sync_errors.push(error.to_string());
+                            continue;
+                        }
+                    };
                     let mut synced_rule = local_rule.clone();
                     synced_rule.mark_synced(
                         created.id.clone(),
@@ -2980,6 +3022,13 @@ impl SyncManager {
                 sync_at,
                 Some(sync_action),
             );
+            if !rule_sync_errors.is_empty() {
+                record_provider_sync_error(
+                    &mut current_state,
+                    provider_id,
+                    rule_sync_errors.join("; "),
+                );
+            }
         }
         if sync_action != SyncAction::NoChange {
             tracing::info!(
@@ -3004,7 +3053,15 @@ impl SyncManager {
             ));
         }
 
-        Ok(())
+        if rule_sync_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(BifrostError::Network(format!(
+                "rules sync completed with {} error(s): {}",
+                rule_sync_errors.len(),
+                rule_sync_errors.join("; ")
+            )))
+        }
     }
 
     async fn sync_basic_configs(
@@ -3757,6 +3814,45 @@ mod tests {
         assert_eq!(
             bytedance.last_error.as_deref(),
             Some("failed to update remote rule 'bad name'")
+        );
+    }
+
+    #[tokio::test]
+    async fn status_keeps_current_provider_error_visible_during_ready_cooldown() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote("https://sync.example.test").await;
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("cloud-token".to_string());
+            state.user = Some(test_user("cloud-user"));
+            record_provider_sync_error(
+                &mut state,
+                "bifrost_cloud",
+                "failed to create remote rule 'bad name'".to_string(),
+            );
+            manager.persist_state(&state).unwrap();
+        }
+        {
+            let mut runtime = manager.runtime.write().await;
+            runtime.reachable = true;
+            runtime.authorized = true;
+            runtime.reason = SyncReason::Ready;
+            runtime.last_error = None;
+        }
+
+        let status = manager.status().await;
+        let cloud = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bifrost_cloud")
+            .expect("cloud provider");
+
+        assert!(cloud.connected);
+        assert!(cloud.authorized);
+        assert_eq!(cloud.reason, SyncReason::Error);
+        assert_eq!(
+            cloud.last_error.as_deref(),
+            Some("failed to create remote rule 'bad name'")
         );
     }
 
@@ -6549,7 +6645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_rules_create_error_identifies_the_local_rule() {
+    async fn sync_rules_create_error_does_not_block_remote_pull() {
         let server = MockServer::start().await;
         let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
         let rules_storage = config_manager.rules_storage().await;
@@ -6566,7 +6662,16 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "code": 0,
                 "message": "ok",
-                "data": { "list": [] }
+                "data": {
+                    "list": [{
+                        "id": "env-remote-only",
+                        "user_id": "user-1",
+                        "name": "remote-only",
+                        "rule": "remote.example.test host://127.0.0.1:3100",
+                        "create_time": "2026-01-01T00:00:00Z",
+                        "update_time": "2026-01-02T00:00:00Z"
+                    }]
+                }
             })))
             .mount(&server)
             .await;
@@ -6590,10 +6695,42 @@ mod tests {
         assert!(message.contains("failed to create remote rule"));
         assert!(message.contains(invalid_name));
         assert!(message.contains("Validation not on name failed"));
+
+        let failed_rule = rules_storage.load(invalid_name).unwrap();
+        assert_eq!(failed_rule.sync.status, RuleSyncStatus::LocalOnly);
+        assert!(failed_rule.sync.remote_id.is_none());
+        let pulled_rule = rules_storage.load("remote-only").unwrap();
+        assert_eq!(pulled_rule.sync.status, RuleSyncStatus::Synced);
+        assert_eq!(
+            pulled_rule.sync.remote_id.as_deref(),
+            Some("env-remote-only")
+        );
+
+        {
+            let state = manager.state.lock();
+            assert_eq!(state.last_sync_action, Some(SyncAction::RemotePulled));
+            let provider = state.provider_sync.get("bifrost_cloud").unwrap();
+            assert_eq!(provider.last_sync_action, Some(SyncAction::RemotePulled));
+            assert!(provider
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains(invalid_name)));
+        }
+
+        manager
+            .sync_rules(&client, &sync_config, "token", &test_user("user-1"))
+            .await
+            .expect_err("failed local upload should remain retryable");
+        let pulled_rule_after_retry = rules_storage.load("remote-only").unwrap();
+        assert_eq!(pulled_rule_after_retry.sync.status, RuleSyncStatus::Synced);
+        assert_eq!(
+            pulled_rule_after_retry.sync.remote_id.as_deref(),
+            Some("env-remote-only")
+        );
     }
 
     #[tokio::test]
-    async fn sync_rules_update_error_identifies_the_local_rule() {
+    async fn sync_rules_update_error_does_not_block_remote_pull() {
         let server = MockServer::start().await;
         let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
         let rules_storage = config_manager.rules_storage().await;
@@ -6615,14 +6752,24 @@ mod tests {
                 "code": 0,
                 "message": "ok",
                 "data": {
-                    "list": [{
-                        "id": "env-invalid",
-                        "user_id": "user-1",
-                        "name": invalid_name,
-                        "rule": "old.example.test host://127.0.0.1:3000",
-                        "create_time": "2026-01-01T00:00:00Z",
-                        "update_time": "2026-01-01T00:00:00Z"
-                    }]
+                    "list": [
+                        {
+                            "id": "env-invalid",
+                            "user_id": "user-1",
+                            "name": invalid_name,
+                            "rule": "old.example.test host://127.0.0.1:3000",
+                            "create_time": "2026-01-01T00:00:00Z",
+                            "update_time": "2026-01-01T00:00:00Z"
+                        },
+                        {
+                            "id": "env-remote-only",
+                            "user_id": "user-1",
+                            "name": "remote-only",
+                            "rule": "remote.example.test host://127.0.0.1:3100",
+                            "create_time": "2026-01-01T00:00:00Z",
+                            "update_time": "2026-01-02T00:00:00Z"
+                        }
+                    ]
                 }
             })))
             .mount(&server)
@@ -6647,6 +6794,25 @@ mod tests {
         assert!(message.contains("failed to update remote rule"));
         assert!(message.contains(invalid_name));
         assert!(message.contains("Validation not on name failed"));
+
+        let failed_rule = rules_storage.load(invalid_name).unwrap();
+        assert_eq!(failed_rule.sync.status, RuleSyncStatus::Modified);
+        assert_eq!(failed_rule.sync.remote_id.as_deref(), Some("env-invalid"));
+        let pulled_rule = rules_storage.load("remote-only").unwrap();
+        assert_eq!(pulled_rule.sync.status, RuleSyncStatus::Synced);
+        assert_eq!(
+            pulled_rule.sync.remote_id.as_deref(),
+            Some("env-remote-only")
+        );
+
+        let state = manager.state.lock();
+        assert_eq!(state.last_sync_action, Some(SyncAction::RemotePulled));
+        let provider = state.provider_sync.get("bifrost_cloud").unwrap();
+        assert_eq!(provider.last_sync_action, Some(SyncAction::RemotePulled));
+        assert!(provider
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains(invalid_name)));
     }
 
     #[tokio::test]

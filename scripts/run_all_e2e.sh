@@ -57,6 +57,7 @@ STABLE_SHELL_TESTS=(
   "test_tls_intercept_mode_api.sh"
   "test_bifrost_file_syntax_admin_api.sh"
   "test_sync_login_direct_e2e.sh"
+  "test_sync_partial_rule_failure_e2e.sh"
   "test_upgrade_tls_trust_e2e.sh"
   "test_setting_ssh_key_cli.sh"
   "test_ssh_key_file_policy_migration.sh"
@@ -780,6 +781,7 @@ shell_test_runs_serial_in_parallel_shell_job() {
     test_qwen3_asr_runtime_guards.sh|\
     test_skill_creator_flow.sh|\
     test_sync_login_direct_e2e.sh|\
+    test_sync_partial_rule_failure_e2e.sh|\
     test_utf8_safe_preview_e2e.sh|\
     test_voice_input_runtime.sh)
       return 0
@@ -1305,6 +1307,7 @@ run_shell_tests_parallel() {
     "test_qwen3_asr_runtime_guards.sh"
     "test_skill_creator_flow.sh"
     "test_sync_login_direct_e2e.sh"
+    "test_sync_partial_rule_failure_e2e.sh"
     "test_utf8_safe_preview_e2e.sh"
     "test_voice_input_runtime.sh"
   )
