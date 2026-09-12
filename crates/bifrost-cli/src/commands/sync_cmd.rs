@@ -74,6 +74,15 @@ fn show_status(client: &ConfigApiClient) -> bifrost_core::Result<()> {
             if let Some(url) = &provider.remote_base_url {
                 println!("    URL: {}", url);
             }
+            if !provider.reason.is_empty() {
+                println!("    Reason: {}", provider.reason);
+            }
+            if let Some(action) = &provider.last_sync_action {
+                println!("    Last sync action: {}", action);
+            }
+            if let Some(error) = &provider.last_error {
+                println!("    Last error: {}", error);
+            }
             println!(
                 "    Capabilities: rules={}, config={}, remote-invoke={}",
                 provider.capabilities.rules_sync,

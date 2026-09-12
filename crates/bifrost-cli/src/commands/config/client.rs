@@ -775,6 +775,14 @@ pub struct SyncProviderStatusResponse {
     pub enabled: bool,
     pub reachable: bool,
     pub authorized: bool,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_sync_at: Option<String>,
+    #[serde(default)]
+    pub last_sync_action: Option<String>,
     pub user: Option<SyncUserInfo>,
     pub capabilities: SyncProviderCapabilitiesResponse,
     pub remote_invoke_registered: bool,

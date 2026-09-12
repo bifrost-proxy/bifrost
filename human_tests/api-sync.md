@@ -769,6 +769,30 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 **真实执行记录**：
 - 2026-09-02：执行定点 Playwright 用例通过（1 passed）。首次运行因本机缺少 Playwright Chromium 在浏览器启动前失败，安装对应 runtime 后原命令复跑成功；亮色与暗色主题均显示 Core 返回的完整 ownership 错误，未出现通用错误替换，也未连接真实 SSO 或写入 token。
 
+---
+
+### TC-ASN-39：单条本地规则上传失败不阻断远端规则拉取（回归）
+
+**操作步骤**：
+1. 执行隔离 E2E 脚本：
+   ```bash
+   bash e2e-tests/tests/test_sync_partial_rule_failure_e2e.sh
+   ```
+2. 脚本使用临时数据目录、随机 Admin 端口和本地 mock sync server 启动 Bifrost，并创建一条会被远端校验拒绝的本地规则。
+3. mock server 同时返回一条本地不存在的远端规则，触发同步后检查 Sync Provider 状态、`bifrost sync status` 输出和两条规则的同步元数据。
+4. 再触发一次同步，检查已拉取规则没有被重复创建或破坏。
+
+**预期结果**：
+- 本地坏规则上传失败后仍保持 `local_only`，不会被误标记为 `synced`。
+- 同一轮远端规则已保存到本地，状态为 `synced`，`remote_id` 与 mock server 返回值一致。
+- Provider 保持已授权，状态为 `error`，`last_changed_sync_action` 为 `remote_pulled`，错误包含坏规则名和远端校验原因；后续失败重试不得把状态错误隐藏为 `ready`。
+- `bifrost sync status` 的 Provider 区域显示 `Reason: error` 和包含坏规则名的 `Last error`。
+- 后续重试仍保留唯一一条已拉取规则，不产生重复副本。
+- 全流程不使用 9900 端口，不修改系统代理，不读取或覆盖正式数据。
+
+**真实执行记录**：
+- 2026-09-12：执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_sync_partial_rule_failure_e2e.sh` 通过。隔离实例使用临时数据目录、随机 Admin/mock 端口、托盘与自动登录弹窗禁用、`--no-system-proxy`；mock 远端拒绝坏规则上传时，同轮 `remote-only` 规则仍以 `synced` 状态和 `env-remote-only` ID 落地，Provider 保持已授权并显示包含坏规则名和远端校验原因的 `error`，再次同步未生成重复规则。
+
 ## 清理
 
 测试完成后清理临时数据：
