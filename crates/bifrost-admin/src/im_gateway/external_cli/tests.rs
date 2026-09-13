@@ -6815,6 +6815,69 @@ fn external_cli_worker_progress_is_bounded() {
 }
 
 #[test]
+fn external_cli_worker_terminal_result_discards_duplicate_live_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("result.json");
+    let mut result =
+        ExternalCliRunResult::stopped(Some("session-1".to_string()), "mock".to_string());
+    result.response = "final response".to_string();
+    result.responses = vec!["first".to_string(), "final response".to_string()];
+    result
+        .metadata
+        .insert("threadId".to_string(), "thread-1".to_string());
+    result.artifacts.run_dir = "runs/run-1".to_string();
+    result.artifacts.normalized_events = "runs/run-1/events.jsonl".to_string();
+    result.events = (0..512)
+        .map(|index| ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::ToolFinished,
+            content: "x".repeat(128 * 1024),
+            title: Some(format!("event-{index}")),
+            raw: serde_json::json!({"result": "x".repeat(1024)}),
+        })
+        .collect();
+
+    assert!(
+        serde_json::to_vec(&result).unwrap().len() > EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES as usize
+    );
+
+    write_external_cli_worker_result(&path, result).unwrap();
+    let terminal: ExternalCliRunResult =
+        read_external_cli_worker_json(&path, EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES).unwrap();
+
+    assert!(terminal.events.is_empty());
+    assert_eq!(terminal.response, "final response");
+    assert_eq!(terminal.responses, ["first", "final response"]);
+    assert_eq!(
+        terminal.metadata.get("threadId").map(String::as_str),
+        Some("thread-1")
+    );
+    assert_eq!(terminal.artifacts.run_dir, "runs/run-1");
+    assert_eq!(
+        terminal.artifacts.normalized_events,
+        "runs/run-1/events.jsonl"
+    );
+    assert!(
+        serde_json::to_vec(&terminal).unwrap().len()
+            < EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES as usize
+    );
+}
+
+#[test]
+fn external_cli_worker_terminal_result_preserves_events_within_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("result.json");
+    let result = ExternalCliRunResult::stopped(Some("session-1".to_string()), "mock".to_string());
+    let expected_events = result.events.clone();
+
+    write_external_cli_worker_result(&path, result).unwrap();
+    let terminal: ExternalCliRunResult =
+        read_external_cli_worker_json(&path, EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES).unwrap();
+
+    assert_eq!(terminal.events.len(), expected_events.len());
+    assert_eq!(terminal.events[0].content, expected_events[0].content);
+}
+
+#[test]
 fn external_cli_worker_json_spool_enforces_atomicity_limits_and_confinement() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime");

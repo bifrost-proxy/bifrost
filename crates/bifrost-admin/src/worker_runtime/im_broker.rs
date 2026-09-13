@@ -79,15 +79,14 @@ enum BrokerResponse {
 
 /// Returns the terminal result that is safe to send over the broker wire.
 ///
-/// Progress events are already delivered one frame at a time while the run is
-/// active. Keeping the same in-memory event stream on the terminal result
-/// duplicates potentially unbounded raw runner output and can make the final
-/// frame exceed `MAX_FRAME_BYTES`. The full event history remains available to
-/// the main process while the durable run artifact keeps its compact event
-/// summaries.
-fn terminal_result_for_broker(mut result: ExternalCliRunResult) -> ExternalCliRunResult {
-    result.events.clear();
-    result
+/// Progress events are preserved when the frame has room for them. Oversized
+/// event histories have already been delivered one frame at a time, so only
+/// that duplicate copy is removed before the terminal frame is serialized.
+fn terminal_result_for_broker(result: ExternalCliRunResult) -> ExternalCliRunResult {
+    crate::im_gateway::external_cli::terminal_result_within_json_limit(
+        result,
+        (MAX_FRAME_BYTES - 1024) as u64,
+    )
 }
 
 impl BrokerRequest {
@@ -558,6 +557,26 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn broker_terminal_result_preserves_events_that_fit_the_frame() {
+        let mut full_result = result();
+        full_result.events.push(ExternalCliProgressEvent {
+            event_type: crate::im_gateway::external_cli::ExternalCliProgressEventType::RunFinished,
+            content: "done".to_string(),
+            title: None,
+            raw: serde_json::json!({}),
+        });
+        let expected_events = full_result.events.clone();
+
+        let terminal_result = terminal_result_for_broker(full_result);
+
+        assert_eq!(terminal_result.events.len(), expected_events.len());
+        assert_eq!(
+            terminal_result.events[0].content,
+            expected_events[0].content
+        );
     }
 
     #[tokio::test]

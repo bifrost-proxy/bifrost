@@ -99,10 +99,12 @@ SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
 ### TC-AWI-08：External CLI 输出洪水与取消
 
 1. 使用测试 runner 生成大于 320 KiB 的最终结果，检查完整 result artifact 和受限范围读取。
-2. 再启动一个持续等待的 sessionless External CLI job。
-3. 在 queued/running 阶段调用 job cancel，并等待调用线程和 job 进入终态。
+2. 运行 `cargo test -p bifrost-admin external_cli_worker_terminal_result_discards_duplicate_live_events --lib`，构造累计超过 64 MiB 的 512 条 live event。
+3. 确认 worker 终态结果不重复携带已实时发送的 event，同时保留最终回复、分段回复、metadata 和 artifact 引用。
+4. 再启动一个持续等待的 sessionless External CLI job。
+5. 在 queued/running 阶段调用 job cancel，并等待调用线程和 job 进入终态。
 
-预期：大结果完整落盘且可分页读取；取消请求返回 202；sessionless job 稳定映射到同一 logical job，并最终为 cancelled；子进程树被回收；代理继续可用。
+预期：大结果完整落盘且可分页读取；累计 live event 超过 64 MiB 时终态结果仍可在 64 MiB 上限内序列化，不再出现 `external CLI worker JSON exceeds configured limit`；取消请求返回 202；sessionless job 稳定映射到同一 logical job，并最终为 cancelled；子进程树被回收；代理继续可用。
 
 ### TC-AWI-09：Browser Worker 操作与故障隔离
 

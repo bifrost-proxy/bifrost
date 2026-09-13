@@ -929,11 +929,7 @@ async fn run_worker_request(
                         }
                         let result_path = external_cli_worker_result_dir()
                             .join(format!("result-{}.json", uuid::Uuid::new_v4()));
-                        write_external_cli_worker_json(
-                            &result_path,
-                            &result,
-                            EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES,
-                        )?;
+                        write_external_cli_worker_result(&result_path, result)?;
                         ExternalCliWorkerEvent::Finished {
                             result: ExternalCliWorkerResultReference { result_path },
                         }
@@ -6221,6 +6217,29 @@ fn compact_external_cli_worker_progress(
         event.raw = compacted_progress_raw(&event.raw);
     }
     event
+}
+
+fn write_external_cli_worker_result(
+    path: &Path,
+    result: ExternalCliRunResult,
+) -> Result<(), String> {
+    let result = terminal_result_within_json_limit(result, EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES);
+    write_external_cli_worker_json(path, &result, EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES)
+}
+
+pub(crate) fn terminal_result_within_json_limit(
+    mut result: ExternalCliRunResult,
+    max_bytes: u64,
+) -> ExternalCliRunResult {
+    let writer = LimitedExternalCliJsonWriter {
+        inner: std::io::sink(),
+        written: 0,
+        max_bytes,
+    };
+    if serde_json::to_writer(writer, &result).is_err() {
+        result.events.clear();
+    }
+    result
 }
 
 fn external_cli_worker_runtime_root() -> PathBuf {
