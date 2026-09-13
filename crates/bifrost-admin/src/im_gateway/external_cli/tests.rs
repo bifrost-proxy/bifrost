@@ -6863,6 +6863,21 @@ fn external_cli_worker_terminal_result_discards_duplicate_live_events() {
 }
 
 #[test]
+fn external_cli_worker_terminal_result_preserves_events_within_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("result.json");
+    let result = ExternalCliRunResult::stopped(Some("session-1".to_string()), "mock".to_string());
+    let expected_events = result.events.clone();
+
+    write_external_cli_worker_result(&path, result).unwrap();
+    let terminal: ExternalCliRunResult =
+        read_external_cli_worker_json(&path, EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES).unwrap();
+
+    assert_eq!(terminal.events.len(), expected_events.len());
+    assert_eq!(terminal.events[0].content, expected_events[0].content);
+}
+
+#[test]
 fn external_cli_worker_json_spool_enforces_atomicity_limits_and_confinement() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime");
