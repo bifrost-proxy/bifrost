@@ -929,11 +929,7 @@ async fn run_worker_request(
                         }
                         let result_path = external_cli_worker_result_dir()
                             .join(format!("result-{}.json", uuid::Uuid::new_v4()));
-                        write_external_cli_worker_json(
-                            &result_path,
-                            &result,
-                            EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES,
-                        )?;
+                        write_external_cli_worker_result(&result_path, result)?;
                         ExternalCliWorkerEvent::Finished {
                             result: ExternalCliWorkerResultReference { result_path },
                         }
@@ -1602,6 +1598,11 @@ pub struct ExternalCliRunResult {
 }
 
 impl ExternalCliRunResult {
+    pub(crate) fn without_live_events(mut self) -> Self {
+        self.events.clear();
+        self
+    }
+
     fn stopped(session_key: Option<String>, adapter: String) -> Self {
         let now = now_ms();
         Self {
@@ -6221,6 +6222,14 @@ fn compact_external_cli_worker_progress(
         event.raw = compacted_progress_raw(&event.raw);
     }
     event
+}
+
+fn write_external_cli_worker_result(
+    path: &Path,
+    result: ExternalCliRunResult,
+) -> Result<(), String> {
+    let result = result.without_live_events();
+    write_external_cli_worker_json(path, &result, EXTERNAL_CLI_WORKER_RESULT_MAX_BYTES)
 }
 
 fn external_cli_worker_runtime_root() -> PathBuf {

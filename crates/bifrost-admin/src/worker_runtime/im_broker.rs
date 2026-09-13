@@ -85,9 +85,8 @@ enum BrokerResponse {
 /// frame exceed `MAX_FRAME_BYTES`. The full event history remains available to
 /// the main process while the durable run artifact keeps its compact event
 /// summaries.
-fn terminal_result_for_broker(mut result: ExternalCliRunResult) -> ExternalCliRunResult {
-    result.events.clear();
-    result
+fn terminal_result_for_broker(result: ExternalCliRunResult) -> ExternalCliRunResult {
+    result.without_live_events()
 }
 
 impl BrokerRequest {
