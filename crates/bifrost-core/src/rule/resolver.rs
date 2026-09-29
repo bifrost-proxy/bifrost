@@ -718,9 +718,7 @@ impl RulesResolver {
                 "rule matcher candidate matched"
             );
 
-            if !rule.include_filters.is_empty()
-                && !Self::matches_all_filters(&rule.include_filters, ctx)
-            {
+            if !Self::matches_include_filters(&rule.include_filters, ctx) {
                 continue;
             }
 
@@ -788,11 +786,25 @@ impl RulesResolver {
         }
     }
 
-    fn matches_all_filters(filters: &[Filter], ctx: &RequestContext) -> bool {
-        filters
-            .iter()
-            .filter(|f| Self::filter_is_evaluable(f, ctx))
-            .all(|f| Self::matches_filter(f, ctx))
+    /// Whistle combines include filters with OR semantics. During request-phase
+    /// resolution, a response-dependent include is still pending; if no request
+    /// filter matched yet, keep the rule eligible so it can be decided after the
+    /// upstream response has populated the context.
+    fn matches_include_filters(filters: &[Filter], ctx: &RequestContext) -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+
+        let mut has_pending = false;
+        for filter in filters {
+            if !Self::filter_is_evaluable(filter, ctx) {
+                has_pending = true;
+            } else if Self::matches_filter(filter, ctx) {
+                return true;
+            }
+        }
+
+        has_pending
     }
 
     fn matches_any_filter(filters: &[Filter], ctx: &RequestContext) -> bool {
@@ -881,9 +893,7 @@ impl RulesResolver {
                 continue;
             }
 
-            if !rule.include_filters.is_empty()
-                && !Self::matches_all_filters(&rule.include_filters, ctx)
-            {
+            if !Self::matches_include_filters(&rule.include_filters, ctx) {
                 continue;
             }
 

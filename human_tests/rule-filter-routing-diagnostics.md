@@ -7,6 +7,7 @@
 - `includeFilter:///account` 应按普通前缀匹配 `/account-center/...` 这类更长路径；需要路径段边界或其它复杂约束时应使用正则。
 - qianchuan 类长 `excludeFilter` 链必须在同一条规则中全部生效；任意列出的路径前缀命中后都应跳过该规则，继续后续规则。
 - 兼容 Whistle 风格 URL 通配符过滤器，如 `excludeFilter://*/api` 与 `excludeFilter://*/alice/*`；未带 `m:`、`reqH:` 等类型前缀的通配符过滤值按请求 URL pattern 匹配。
+- 多个 `includeFilter` 按 Whistle 语义使用 OR 组合；`includeFilter://webpack-hmr` 等裸目标自动按 `/webpack-hmr` 路径前缀匹配，`*/resource/` 能匹配目录下的子资源。
 - `upstreamUnsafeSsl://true` 只对命中的规则允许不安全上游 HTTPS 证书，不需要启动 Bifrost 时全局开启 `--unsafe-ssl`。
 - 网络 `.bifrost` 包必须导出 `actual_url`、`actual_host`、`listener_port`、`has_rule_hit` 等诊断字段，便于判断规则是否命中以及实际转发到了哪里。
 
@@ -218,6 +219,45 @@ BIFROST_BIN="$PWD/target/debug/bifrost" \
 - 输出不出现 `rule_filter_routing_diagnostics.txt` 的通用 runner 执行失败。
 - 输出不出现 `过滤器规则验证未实现`。
 - 专用脚本 `e2e-tests/tests/test_rule_filter_routing_diagnostics.sh` 仍负责执行 TC-RFRD-01 到 TC-RFRD-07 的真实请求断言。
+
+### TC-RFRD-09：Whistle 多 include OR 与裸路径自动补 `/`
+
+操作步骤：
+
+1. 构建当前 checkout 的 Bifrost：
+
+```bash
+cargo build --bin bifrost
+```
+
+2. 执行多行规则真实代理回归：
+
+```bash
+BIFROST_BIN="$PWD/target/debug/bifrost" \
+  e2e-tests/tests/test_multiline_rule_filter_e2e.sh
+```
+
+3. 脚本使用本地 echo 上游加载以下等价规则，并依次请求 5 条路径：
+
+```text
+line`
+life-rule.local
+reqHeaders://X-Life-Rule=matched
+includeFilter://*/h5/fulfillment-fusion/
+includeFilter://*/resource/
+includeFilter://webpack-hmr
+excludeFilter://*/life/
+`
+```
+
+预期结果：
+
+- `/h5/fulfillment-fusion/demo` 命中第一个 include，注入 `X-Life-Rule: matched`。
+- `/resource/demo.json` 命中带尾斜杠的 wildcard 目录前缀，注入 header。
+- `/webpack-hmr` 由裸目标自动补 `/` 后命中，注入 header。
+- `/other` 不命中任何 include，不注入 header。
+- `/life/resource/demo.json` 虽命中 `*/resource/`，但同时命中 exclude，最终不注入 header。
+- 脚本返回 0，且临时代理、mock 服务和数据目录均被清理。
 
 ## 清理步骤
 

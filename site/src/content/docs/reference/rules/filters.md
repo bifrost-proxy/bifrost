@@ -13,7 +13,7 @@ editLink: false
 
 ## includeFilter
 
-包含过滤器，只有满足条件的请求才会应用规则。
+包含过滤器，只有满足至少一个条件的请求才会应用规则。多个 `includeFilter` 按 OR 组合；如果同一规则还有 `excludeFilter`，任意 exclude 命中都会优先跳过该规则。
 
 ### 语法
 
@@ -32,9 +32,10 @@ pattern rules... includeFilter://condition
 | 响应头匹配 | `resH:name=value` / `resH:name=/regex/` | 应匹配响应头；⚠️ 当前 0.0.96 实现下响应阶段不评估 `resH:`，恒不命中（见下方注） |
 | 客户端 IP | `i:ip` / `i:cidr` | 匹配客户端 IP 或 CIDR |
 | 路径前缀 | `/path` | 以 `/` 开头但不以 `/` 结尾时，按普通前缀匹配：`/account` 匹配 `/account`、`/account/...`、`/account-center` 和带 query 的路径 |
+| 裸路径前缀 | `webpack-hmr` / `assets/hmr` | 不带类型前缀、域名点号和 wildcard 的目标自动补前导 `/`，分别等同 `/webpack-hmr` 与 `/assets/hmr` |
 | 路径正则 | `/regex/` | 以 `/` 开头并以 `/` 结尾时，按正则匹配路径 |
 | URL host/path | `example.com` / `example.com/api` | 包含 `.` 的过滤值会按 host 与可选 path 匹配 |
-| URL 通配符 | `*/api` / `*/alice/*` | 兼容 Whistle 风格的 URL wildcard filter；`*/api` 匹配 `/api` 及其子路径，`*/alice/*` 匹配 URL 中包含 `/alice/` 的请求 |
+| URL 通配符 | `*/api` / `*/resource/` / `*/alice/*` | 兼容 Whistle 风格 URL wildcard；`*/api` 匹配 `/api` 及其子路径，尾斜杠 `*/resource/` 匹配该目录及子资源，`*/alice/*` 匹配 URL 中包含 `/alice/` 的请求 |
 
 > 当前实现会解析 `b:` / `B:` body 过滤器，但运行时 resolver 尚未读取请求/响应 body 参与过滤，**实测行为随写法不同**：文档使用的 `b:/regex/` 形式（如 `b:/error/`）写在 `includeFilter://b:/.../`  里会 fail-closed，规则**永远不命中**（实测无论有无 body 都返回 502），写在 `excludeFilter://b:/.../`  里则永远不排除（规则照常生效）；不带斜杠的裸值形式（如 `b:foo`）则被直接忽略，规则照常命中。两种写法都无法真正按 body 过滤。不要把 body 过滤作为可用能力依赖；需要按内容筛选请使用 `bifrost search --req-body/--res-body` 查看流量证据。
 
@@ -112,23 +113,26 @@ www.example.com resBody://(cached) includeFilter://resH:X-Cache=HIT
 # 匹配特定路径
 www.example.com resHeaders://(X-Api: true) includeFilter:///api
 
+# 裸目标自动补前导 /，等同 includeFilter:///webpack-hmr
+www.example.com resHeaders://(X-HMR: true) includeFilter://webpack-hmr
+
 # 匹配路径前缀，/account 会匹配 /account-center；需要边界时使用路径正则
 www.example.com host://account.local excludeFilter:///account
 
 # 匹配路径模式（正则）
 www.example.com resDelay://1000 includeFilter:///slow
 
-# 兼容 Whistle 风格 URL 通配符过滤，排除 /static、/api 及包含 /alice/ 的 URL
-www.example.com http://localhost:5173 excludeFilter://*/static excludeFilter://*/api excludeFilter://*/alice/*
+# 兼容 Whistle 风格 URL 通配符过滤，尾斜杠目录可匹配其子资源
+www.example.com http://localhost:5173 excludeFilter://*/static excludeFilter://*/resource/ excludeFilter://*/alice/*
 ```
 
 ### 多条件组合
 
 ```bash
-# AND 条件（同时满足）
-www.example.com replaceStatus://200 includeFilter://m:POST includeFilter://s:500
+# OR 条件：POST 请求或 /webpack-hmr 路径任一命中即应用
+www.example.com resHeaders://(X-Debug: true) includeFilter://m:POST includeFilter://webpack-hmr
 
-# 方法 + 头部
+# 方法或头部任一命中
 www.example.com host://special.local includeFilter://m:POST includeFilter://h:X-Special
 ```
 
@@ -324,7 +328,7 @@ www.example.com passthrough:// includeFilter:///static
 
 ## 注意事项
 
-1. **条件顺序**：多个 `includeFilter` 之间是 AND 关系
+1. **条件组合**：多个 `includeFilter` 之间是 OR 关系；完整公式为 `!(exclude1 || exclude2 || ...) && (include1 || include2 || ...)`
 2. **优先级**：`excludeFilter` 优先于 `includeFilter`
 3. **状态码 / 响应头过滤当前不可用**：`s:` 与 `resH:` 本应用于响应阶段，但 0.0.96 实测响应阶段不评估它们，恒不命中——`includeFilter://s:` / `includeFilter://resH:` 会让规则永不应用，`excludeFilter://s:` / `excludeFilter://resH:` 是 no-op。修复前请勿依赖；请求阶段的 `m:` / `h:` / `reqH:` 不受影响。
 4. **头部大小写**：头部名称匹配不区分大小写

@@ -194,8 +194,8 @@ test_exclude_filter_blocks_modification() {
     assert_header_not_exists "X-Line-Block-Response" "$HTTP_HEADERS" "excludeFilter should suppress resHeaders modification" || return 1
 }
 
-test_method_include_filter_blocks_post() {
-    log_section "POST /api/users misses method include filter"
+test_path_include_filter_allows_post() {
+    log_section "POST /api/users matches the path include filter"
     perform_request "POST" "http://line-block-filter.local/api/users" \
         -H "Content-Type: application/json" \
         --data '{"message":"hello"}'
@@ -203,19 +203,54 @@ test_method_include_filter_blocks_post() {
     assert_status_2xx "$HTTP_STATUS" "POST request should still succeed via base forwarding rule" || return 1
     assert_json_equals '.server.type' 'http_echo_server' "$HTTP_BODY" "POST request should still reach mock echo server" || return 1
     assert_json_equals '.request.method' 'POST' "$HTTP_BODY" "mock server should observe POST method" || return 1
-    assert_json_empty '.request.headers["x-line-block-request"] // empty' "$HTTP_BODY" "method includeFilter should prevent reqHeaders modification" || return 1
-    assert_header_not_exists "X-Line-Block-Response" "$HTTP_HEADERS" "method includeFilter should prevent resHeaders modification" || return 1
+    assert_json_equals '.request.headers["x-line-block-request"]' 'matched' "$HTTP_BODY" "path includeFilter should apply with OR semantics" || return 1
+    assert_header_value "X-Line-Block-Response" "matched" "$HTTP_HEADERS" "path includeFilter should apply response modification with OR semantics" || return 1
 }
 
-test_path_include_filter_blocks_non_api() {
-    log_section "GET /home misses path include filter"
+test_method_include_filter_allows_non_api_get() {
+    log_section "GET /home matches the method include filter"
     perform_request "GET" "http://line-block-filter.local/home"
 
     assert_status_2xx "$HTTP_STATUS" "non-api request should still succeed via base forwarding rule" || return 1
     assert_json_equals '.server.type' 'http_echo_server' "$HTTP_BODY" "non-api request should still reach mock echo server" || return 1
     assert_json_equals '.request.parsed_path' '/home' "$HTTP_BODY" "non-api request should keep original path" || return 1
-    assert_json_empty '.request.headers["x-line-block-request"] // empty' "$HTTP_BODY" "path includeFilter should prevent reqHeaders modification" || return 1
-    assert_header_not_exists "X-Line-Block-Response" "$HTTP_HEADERS" "path includeFilter should prevent resHeaders modification" || return 1
+    assert_json_equals '.request.headers["x-line-block-request"]' 'matched' "$HTTP_BODY" "method includeFilter should apply with OR semantics" || return 1
+    assert_header_value "X-Line-Block-Response" "matched" "$HTTP_HEADERS" "method includeFilter should apply response modification with OR semantics" || return 1
+}
+
+test_all_include_filters_miss() {
+    log_section "POST /home misses every include filter"
+    perform_request "POST" "http://line-block-filter.local/home" \
+        -H "Content-Type: application/json" \
+        --data '{"message":"hello"}'
+
+    assert_status_2xx "$HTTP_STATUS" "request missing every include should still use base forwarding" || return 1
+    assert_json_empty '.request.headers["x-line-block-request"] // empty' "$HTTP_BODY" "reqHeaders should not apply when every include misses" || return 1
+    assert_header_not_exists "X-Line-Block-Response" "$HTTP_HEADERS" "resHeaders should not apply when every include misses" || return 1
+}
+
+assert_life_rule_header() {
+    local path="$1"
+    local expected="$2"
+    local description="$3"
+
+    perform_request "GET" "http://life-rule.local${path}"
+    assert_status_2xx "$HTTP_STATUS" "${description}: request should succeed" || return 1
+    assert_json_equals '.server.type' 'http_echo_server' "$HTTP_BODY" "${description}: request should reach echo server" || return 1
+    if [[ "$expected" == "true" ]]; then
+        assert_json_equals '.request.headers["x-life-rule"]' 'matched' "$HTTP_BODY" "${description}: rule should apply" || return 1
+    else
+        assert_json_empty '.request.headers["x-life-rule"] // empty' "$HTTP_BODY" "${description}: rule should not apply" || return 1
+    fi
+}
+
+test_whistle_compatible_include_filters() {
+    log_section "Whistle-compatible includeFilter OR and bare path normalization"
+    assert_life_rule_header "/h5/fulfillment-fusion/demo" "true" "first wildcard include"
+    assert_life_rule_header "/resource/demo.json" "true" "trailing-slash wildcard directory prefix"
+    assert_life_rule_header "/webpack-hmr" "true" "bare path include with automatic slash"
+    assert_life_rule_header "/other" "false" "all includes miss"
+    assert_life_rule_header "/life/resource/demo.json" "false" "exclude overrides matching include"
 }
 
 main() {
@@ -226,8 +261,10 @@ main() {
 
     test_include_filters_apply_on_matching_request
     test_exclude_filter_blocks_modification
-    test_method_include_filter_blocks_post
-    test_path_include_filter_blocks_non_api
+    test_path_include_filter_allows_post
+    test_method_include_filter_allows_non_api_get
+    test_all_include_filters_miss
+    test_whistle_compatible_include_filters
 
     echo ""
     echo "Assertions: ${PASSED_ASSERTIONS}/${TOTAL_ASSERTIONS} passed"

@@ -256,6 +256,17 @@ pub fn parse_filter(filter_str: &str) -> Option<Filter> {
         }
     }
 
+    // Whistle treats an otherwise untyped filter target as a path filter. Normalize
+    // the missing leading slash so `includeFilter://webpack-hmr` behaves like
+    // `includeFilter:///webpack-hmr`. Keep colon-bearing values out of this fallback
+    // so malformed typed filters (for example `s:not-a-number`) remain invalid.
+    if !filter_str.is_empty() && !filter_str.contains(':') {
+        return Some(Filter::Path(PathMatcher::Prefix(format!(
+            "/{}",
+            filter_str.trim_start_matches('/')
+        ))));
+    }
+
     None
 }
 
@@ -311,7 +322,12 @@ fn whistle_wildcard_filter_to_regex(s: &str) -> Option<Regex> {
     if let Some(path_prefix) = s.strip_prefix("*/") {
         if !path_prefix.is_empty() && !contains_wildcard(path_prefix) {
             let escaped = regex::escape(path_prefix);
-            return Regex::new(&format!(r"^.*/{}(?:[/?#].*)?$", escaped)).ok();
+            let suffix = if path_prefix.ends_with('/') {
+                ".*"
+            } else {
+                "(?:[/?#].*)?"
+            };
+            return Regex::new(&format!(r"^.*/{}{}$", escaped, suffix)).ok();
         }
     }
 
@@ -489,6 +505,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_bare_filter_as_path_prefix() {
+        let filter = parse_filter("webpack-hmr").unwrap();
+        if let Filter::Path(matcher) = filter {
+            assert!(matcher.matches("/webpack-hmr"));
+            assert!(matcher.matches("/webpack-hmr/update.json"));
+            assert!(!matcher.matches("/assets/webpack-hmr"));
+        } else {
+            panic!("Expected bare filter to be normalized as a Path filter");
+        }
+
+        let nested = parse_filter("assets/hmr").unwrap();
+        if let Filter::Path(matcher) = nested {
+            assert!(matcher.matches("/assets/hmr/client"));
+            assert!(!matcher.matches("/v1/assets/hmr/client"));
+        } else {
+            panic!("Expected nested bare filter to be normalized as a Path filter");
+        }
+    }
+
+    #[test]
     fn test_parse_body_filter() {
         let filter = parse_filter("b:/error/").unwrap();
         if let Filter::Body(regex) = filter {
@@ -631,6 +667,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_whistle_style_wildcard_directory_prefix_filter() {
+        let filter = parse_filter("*/resource/").unwrap();
+        if let Filter::Url(matcher) = filter {
+            assert!(matcher.matches(
+                "https://www.example.com/resource/",
+                "www.example.com",
+                "/resource/"
+            ));
+            assert!(matcher.matches(
+                "https://www.example.com/resource/demo.js",
+                "www.example.com",
+                "/resource/demo.js"
+            ));
+            assert!(!matcher.matches(
+                "https://www.example.com/resourceful/demo.js",
+                "www.example.com",
+                "/resourceful/demo.js"
+            ));
+        } else {
+            panic!("Expected Url wildcard filter");
+        }
+    }
+
+    #[test]
     fn test_parse_whistle_style_wildcard_filter_with_literal_query() {
         let filter = parse_filter("*/api?debug=*").unwrap();
         if let Filter::Url(matcher) = filter {
@@ -759,8 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_filter_unrecognized_returns_none() {
-        // No prefix, no dot, no slash, no wildcard → None
-        assert!(parse_filter("plainword").is_none());
+    fn test_parse_filter_empty_returns_none() {
+        assert!(parse_filter("   ").is_none());
     }
 }
