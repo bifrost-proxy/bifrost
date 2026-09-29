@@ -108,7 +108,7 @@
 | `delete`        | 🔄   | `control/delete.txt`         | 本轮新增请求头/响应头删除夹具                               |
 | `ignore` (`passthrough`) | ✅   | `control/ignore.txt`         | 已覆盖；旧 `ignore://` 输入会自动归一化为 `passthrough://` |
 | `skip`          | 🔄   | `control/skip.txt`           | 本轮新增按 pattern / operation 跳过规则                     |
-| `includeFilter` | ⚠️   | `control/include_filter.txt`, `regression/line_block_filter_effect.txt` | 已有基础场景，已补多行规则下的请求/响应链路回归 |
+| `includeFilter` | ✅   | `control/include_filter.txt`, `regression/line_block_filter_effect.txt` | 覆盖多个 include OR、全部未命中、exclude 优先、裸 path 自动补 `/`、尾斜杠 wildcard 目录前缀，以及多行规则请求/响应链路 |
 | `excludeFilter` | ⚠️   | `control/exclude_filter.txt`, `regression/line_block_filter_effect.txt` | 已有基础场景，已补多行规则下的请求/响应链路回归 |
 | `lineProps`     | ✅   | `control/line_props.txt`     | 已覆盖                                                      |
 

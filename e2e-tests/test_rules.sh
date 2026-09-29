@@ -3187,9 +3187,10 @@ run_include_filter_tests() {
     test_include_filter_semantic "if-path.local" "/api/" "GET" "/api/users" "true" "X-Path-Filter" "matched"
     test_include_filter_semantic "if-path.local" "/api/" "GET" "/home" "false" "X-Path-Filter" "matched"
 
-    test_include_filter_semantic "if-multi.local" "m:GET AND /api/" "GET" "/api/data" "true" "X-Multi-Filter" "all-matched"
-    test_include_filter_semantic "if-multi.local" "m:GET AND /api/" "POST" "/api/data" "false" "X-Multi-Filter" "all-matched"
-    test_include_filter_semantic "if-multi.local" "m:GET AND /api/" "GET" "/home" "false" "X-Multi-Filter" "all-matched"
+    test_include_filter_semantic "if-multi.local" "m:GET OR /api/" "GET" "/api/data" "true" "X-Multi-Filter" "all-matched"
+    test_include_filter_semantic "if-multi.local" "m:GET OR /api/" "POST" "/api/data" "true" "X-Multi-Filter" "all-matched"
+    test_include_filter_semantic "if-multi.local" "m:GET OR /api/" "GET" "/home" "true" "X-Multi-Filter" "all-matched"
+    test_include_filter_semantic "if-multi.local" "m:GET OR /api/" "POST" "/home" "false" "X-Multi-Filter" "all-matched"
 }
 
 run_exclude_filter_tests() {

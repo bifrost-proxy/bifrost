@@ -38,7 +38,7 @@ if-ip.local resHeaders://`X-IP-Filter:matched` includeFilter://i:127.0.0.1
 if-cidr.local http://127.0.0.1:3000
 if-cidr.local resHeaders://`X-CIDR-Filter:matched` includeFilter://i:192.168.0.0/16
 
-# IF-10 多个过滤条件 (AND 逻辑: 仅 GET 请求且路径包含 /api/ 时添加 header)
+# IF-10 多个过滤条件 (OR 逻辑: GET 请求或路径包含 /api/ 时添加 header)
 if-multi.local http://127.0.0.1:3000
 if-multi.local resHeaders://`X-Multi-Filter:all-matched` includeFilter://m:GET includeFilter:///api/
 

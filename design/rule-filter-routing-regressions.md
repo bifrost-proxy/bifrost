@@ -8,8 +8,9 @@
 2. **Whistle 兼容的 URL wildcard filter**：例如 `excludeFilter://*/api`、`excludeFilter://*/alice/*`。Whistle 文档里“不带前缀”的 filter 就是完整请求 URL 的 wildcard；Bifrost 早期只支持带 `/` 或 `regex:` 前缀，Whistle 用户直接搬规则会失效。
 3. **`upstreamUnsafeSsl://true` 单规则 HTTPS 证书豁免**：过去只能靠全局 `--unsafe-ssl` 关闭校验，粒度太粗。
 4. **`NetworkRecord` 导出丢失路由诊断字段**：`actual_url` / `actual_host` / `listener_port` / `has_rule_hit` / `error_message` 在 traffic 详情里存在，但 `.bifrost` network export 与再次 import 后消失，让“规则命中但上游失败”的 case 看起来像 miss。
+5. **Whistle 多 include 与裸 path 兼容**：多个 `includeFilter` 应按 OR 组合；`includeFilter://webpack-hmr` 应自动补成 `/webpack-hmr` path prefix；`*/resource/` 应匹配目录子资源，而任一 exclude 命中仍优先跳过规则。
 
-截至 2026-06-17 上面 4 项已经全部落地并验证。本文档同时收敛了 `lf6-cdn2-tos.bytegoofy.com … 10.37.102.138:8081`（bare host:port 走 http 未标 https 导致 502）与 `qianchuan.jinritemai.com … excludeFilter://…` 长链回归两个真实用户 case。
+截至 2026-06-17 前 4 项已经全部落地并验证；第 5 项于 2026-09-29 根据真实用户规则补充。本文档同时收敛了 `lf6-cdn2-tos.bytegoofy.com … 10.37.102.138:8081`（bare host:port 走 http 未标 https 导致 502）与 `qianchuan.jinritemai.com … excludeFilter://…` 长链回归两个真实用户 case。
 
 ## 用户目标验证清单
 
@@ -22,6 +23,9 @@
   - `*/api` 命中 `/api`, `/api?...`, `/api/...`，但不命中 `/apiary`。
   - `*/alice/*` 命中所有 URL 含 `/alice/` 的请求。
   - `?` 精确匹配一个 URL 字符。
+- 多个 include 使用 `include1 || include2 || ...`；全部未命中才拒绝规则，exclude 仍按 `exclude1 || exclude2 || ...` 优先排除。
+- 无类型裸目标 `webpack-hmr` / `assets/hmr` 自动补 `/` 后按 path prefix 匹配。
+- `*/resource/` 命中 `/resource/` 与 `/resource/demo.js`，不命中 `/resourceful/demo.js`。
 - `upstreamUnsafeSsl://true` 可作用于单条规则，让该规则命中的 HTTPS 上游跳过证书校验，不需要全局 `--unsafe-ssl`。
 - `NetworkRecord` 导出携带 `actual_url`, `actual_host`, `listener_port`, `has_rule_hit`, `error_message`，import 后 traffic 详情能完整还原。
 - `actual_url`/`actual_host` 在普通 HTTP、CONNECT tunnel、大 body / streaming 分支都被正确填充。
@@ -50,6 +54,9 @@
 - 「裸路径 filter」采用「路径前缀」语义，但边界允许 `-`, `?`, `/`, `#` 等非字母数字字符继续，保证 `/account-center` 也命中 `/account`。
 - 期望更严格的段边界匹配请显式使用 `regex:` 前缀，例如 `includeFilter://regex:^/account(/|$)`。
 - Whistle 兼容 wildcard 走独立分支：`*` 匹配任意 URL 字符（包含 `/`），`?` 匹配一个字符，两者不参与新的“路径前缀”分支。
+- 多个 include 按 OR，多个 exclude 按 OR，并由 exclude 优先；请求阶段遇到尚不可评估的响应 filter 时保留候选，响应阶段再完成 OR 裁决。
+- 无类型、无域名点号、无 wildcard 且不含 `:` 的裸值自动补 `/`，避免把无效 typed filter（如 `s:not-a-number`）误当路径。
+- `*/path/` 使用目录前缀语义，既匹配目录本身也匹配子资源。
 
 ### `upstreamUnsafeSsl://true`
 
@@ -69,8 +76,11 @@
   - 路径前缀匹配：`test_parse_plain_path_filter_matches_prefix`
   - Whistle 风格 wildcard：`test_parse_whistle_style_wildcard_path_prefix_filter`, `test_parse_whistle_style_wildcard_url_filter`, `test_parse_whistle_style_wildcard_filter_with_literal_query`
   - 关键函数：`contains_wildcard`, `whistle_wildcard_filter_to_regex`
+  - 裸目标归一化：`test_parse_bare_filter_as_path_prefix`
+  - 尾斜杠目录 prefix：`test_parse_whistle_style_wildcard_directory_prefix_filter`
 - `crates/bifrost-core/src/rule/resolver/tests.rs`
   - `test_exclude_filter_whistle_style_wildcard_path_prefix` — 端到端解析器验证
+  - `test_multiple_include_filters_use_or_semantics`、`test_exclude_filter_overrides_matching_include_filter`、`test_include_or_defers_when_only_response_filter_can_still_match` — OR、exclude 优先与两阶段裁决
 - `crates/bifrost-core/src/protocol.rs`, `crates/bifrost-core/src/syntax.rs`
   - `Protocol::UpstreamUnsafeSsl` 枚举、字符串映射、注册表（`crates/bifrost-core/src/protocol.rs` 91/360/442/456/641/731 行附近）
 - `crates/bifrost-cli/src/parsing/rules.rs`
@@ -96,6 +106,12 @@ Whistle 兼容 wildcard：
 
 ```
 example.com 10.37.102.138:8080 excludeFilter://*/api excludeFilter://*/alice/*
+```
+
+多个 include 与裸 path：
+
+```
+example.com 127.0.0.1:4108 includeFilter://*/resource/ includeFilter://webpack-hmr excludeFilter://*/life/
 ```
 
 单规则 HTTPS 跳过校验：
@@ -171,6 +187,9 @@ internal.corp.test https://10.37.102.138:8443 upstreamUnsafeSsl://true
   - 长 excludeFilter 链的排除路径正确落到 fallback host 规则
   - `upstreamUnsafeSsl://true` self-signed HTTPS upstream
   - traffic 详情 + `.bifrost` network 导出包含 `actual_url`, `actual_host`, `listener_port`, `has_rule_hit`
+- `e2e-tests/tests/test_multiline_rule_filter_e2e.sh`：
+  - 多 include OR、全部未命中、exclude 优先
+  - `*/h5/fulfillment-fusion/`、`*/resource/`、裸 `webpack-hmr` 真实代理回归
 - Fixture：`e2e-tests/rules/regression/rule_filter_routing_diagnostics.txt`；被 `FIXTURE_ONLY_RULES` 排除在通用 runner 之外（`e2e-tests/run_all_tests_parallel.sh` 第 213 行）。
 - 通用 runner 保留 `e2e-tests/test_rules.sh` 的 `excludeFilter 语义验证` 段（第 1800/1977/3025 行附近）。
 

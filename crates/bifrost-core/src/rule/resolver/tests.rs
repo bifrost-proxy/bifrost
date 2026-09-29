@@ -827,6 +827,77 @@ fn test_include_filter_method() {
 }
 
 #[test]
+fn test_multiple_include_filters_use_or_semantics() {
+    let include_filters = vec![
+        parse_filter("m:POST").unwrap(),
+        parse_filter("/webpack-hmr").unwrap(),
+    ];
+    let rules = vec![create_test_rule_with_filters(
+        "*.example.com",
+        Protocol::Host,
+        "127.0.0.1",
+        include_filters,
+        vec![],
+    )];
+    let resolver = RulesResolver::new(rules).disable_cache();
+
+    let get_hmr = RequestContext::builder()
+        .url("http://www.example.com/webpack-hmr")
+        .host("www.example.com")
+        .hostname("www.example.com")
+        .path("/webpack-hmr")
+        .pathname("/webpack-hmr")
+        .method("GET")
+        .build();
+    assert_eq!(resolver.resolve(&get_hmr).len(), 1);
+
+    let post_other = RequestContext::builder()
+        .url("http://www.example.com/other")
+        .host("www.example.com")
+        .hostname("www.example.com")
+        .path("/other")
+        .pathname("/other")
+        .method("POST")
+        .build();
+    assert_eq!(resolver.resolve(&post_other).len(), 1);
+
+    let get_other = RequestContext::builder()
+        .url("http://www.example.com/other")
+        .host("www.example.com")
+        .hostname("www.example.com")
+        .path("/other")
+        .pathname("/other")
+        .method("GET")
+        .build();
+    assert!(resolver.resolve(&get_other).is_empty());
+}
+
+#[test]
+fn test_exclude_filter_overrides_matching_include_filter() {
+    let rules = vec![create_test_rule_with_filters(
+        "*.example.com",
+        Protocol::Host,
+        "127.0.0.1",
+        vec![
+            parse_filter("m:GET").unwrap(),
+            parse_filter("/api").unwrap(),
+        ],
+        vec![parse_filter("/api/private").unwrap()],
+    )];
+    let resolver = RulesResolver::new(rules).disable_cache();
+    let ctx = RequestContext::builder()
+        .url("http://www.example.com/api/private")
+        .host("www.example.com")
+        .hostname("www.example.com")
+        .path("/api/private")
+        .pathname("/api/private")
+        .method("GET")
+        .build();
+
+    assert!(resolver.resolve(&ctx).is_empty());
+}
+
+#[test]
 fn test_exclude_filter_path() {
     let exclude_filters = vec![parse_filter("/admin/").unwrap()];
     let rules = vec![create_test_rule_with_filters(
@@ -1461,6 +1532,67 @@ fn test_response_filter_deferred_to_response_phase() {
 }
 
 #[test]
+fn test_include_or_defers_when_only_response_filter_can_still_match() {
+    use crate::rule::parser::RuleParser;
+
+    let parser = RuleParser::new();
+    let rules = parser
+        .parse_line(
+            "a.test host://127.0.0.1:18181 replaceStatus://217 includeFilter://m:POST includeFilter://s:500",
+        )
+        .unwrap();
+    let resolver = RulesResolver::new(rules).disable_cache();
+
+    let request_ctx = RequestContext::builder()
+        .url("http://a.test/")
+        .host("a.test")
+        .hostname("a.test")
+        .path("/")
+        .pathname("/")
+        .method("GET")
+        .build();
+    let request_rules = resolver.resolve(&request_ctx);
+    assert!(
+        request_rules
+            .rules
+            .iter()
+            .any(|rule| rule.rule.protocol == Protocol::Host),
+        "request phase must preserve routing while a response include is pending"
+    );
+
+    let mut response_500 = request_ctx.clone();
+    response_500.set_response(500, HashMap::new());
+    assert!(resolver
+        .resolve_uncached(&response_500)
+        .rules
+        .iter()
+        .any(|rule| rule.rule.protocol == Protocol::ReplaceStatus));
+
+    let mut response_200 = request_ctx;
+    response_200.set_response(200, HashMap::new());
+    assert!(!resolver
+        .resolve_uncached(&response_200)
+        .rules
+        .iter()
+        .any(|rule| rule.rule.protocol == Protocol::ReplaceStatus));
+
+    let mut matching_request = RequestContext::builder()
+        .url("http://a.test/")
+        .host("a.test")
+        .hostname("a.test")
+        .path("/")
+        .pathname("/")
+        .method("POST")
+        .build();
+    matching_request.set_response(200, HashMap::new());
+    assert!(resolver
+        .resolve_uncached(&matching_request)
+        .rules
+        .iter()
+        .any(|rule| rule.rule.protocol == Protocol::ReplaceStatus));
+}
+
+#[test]
 fn test_multiple_different_protocols_all_match() {
     use crate::rule::parser::RuleParser;
 
@@ -1504,6 +1636,55 @@ fn test_rules_resolver_skip_by_operation_allows_fallback_rule() {
 
     assert_eq!(header_rules.len(), 1);
     assert_eq!(header_rules[0].resolved_value, "X-Skip-Op:second");
+}
+
+#[test]
+fn test_skip_rule_multiple_include_filters_use_or_semantics() {
+    use crate::rule::parser::RuleParser;
+
+    let parser = RuleParser::new();
+    let mut rules = parser
+        .parse_line(
+            "skip-filter.local resHeaders://`X-Skip-OR:first` resHeaders://`X-Skip-OR:second`",
+        )
+        .unwrap();
+    rules.extend(
+        parser
+            .parse_line(
+                "skip-filter.local skip://operation=resHeaders://`X-Skip-OR:first` includeFilter://m:POST includeFilter:///api",
+            )
+            .unwrap(),
+    );
+    let resolver = RulesResolver::new(rules).disable_cache();
+
+    let matching_path = RequestContext::builder()
+        .url("http://skip-filter.local/api")
+        .host("skip-filter.local")
+        .hostname("skip-filter.local")
+        .path("/api")
+        .pathname("/api")
+        .method("GET")
+        .build();
+    let matching_rules = resolver.resolve(&matching_path);
+    let matching_headers = matching_rules.get_by_protocol(Protocol::ResHeaders);
+    assert_eq!(matching_headers.len(), 1);
+    assert_eq!(matching_headers[0].resolved_value, "X-Skip-OR:second");
+
+    let missing_all = RequestContext::builder()
+        .url("http://skip-filter.local/home")
+        .host("skip-filter.local")
+        .hostname("skip-filter.local")
+        .path("/home")
+        .pathname("/home")
+        .method("GET")
+        .build();
+    assert_eq!(
+        resolver
+            .resolve(&missing_all)
+            .get_by_protocol(Protocol::ResHeaders)
+            .len(),
+        2
+    );
 }
 
 #[test]

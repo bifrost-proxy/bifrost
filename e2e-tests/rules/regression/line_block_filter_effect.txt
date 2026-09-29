@@ -13,3 +13,16 @@ includeFilter://m:GET
 includeFilter:///api/
 excludeFilter:///api/internal/
 `
+
+# 用户规则兼容回归：多个 includeFilter 为 OR；裸 webpack-hmr 自动补 `/`；
+# `*/resource/` 作为目录前缀匹配其子路径；任一 excludeFilter 仍优先排除。
+line`
+life-rule.local
+reqHeaders://X-Life-Rule=matched
+includeFilter://*/h5/fulfillment-fusion/
+includeFilter://*/resource/
+includeFilter://webpack-hmr
+excludeFilter://*/life/
+`
+
+life-rule.local http://127.0.0.1:__ECHO_HTTP_PORT__

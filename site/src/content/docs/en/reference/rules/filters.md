@@ -16,7 +16,12 @@ example.com host://127.0.0.1:3000 includeFilter://m:GET
 example.com host://127.0.0.1:3000 excludeFilter:///admin/
 ```
 
-Use include filters to require a condition and exclude filters to skip a condition.
+Multiple include filters use Whistle-compatible OR semantics: a rule stays eligible when any include matches. Any matching exclude still wins. An untyped bare target is normalized as a path prefix, so `includeFilter://webpack-hmr` is equivalent to `includeFilter:///webpack-hmr`. A trailing-slash wildcard such as `*/resource/` matches that directory and its descendants.
+
+```txt
+example.com resHeaders://(X-Debug:true) includeFilter://m:POST includeFilter://webpack-hmr
+example.com resHeaders://(X-Asset:true) includeFilter://*/resource/
+```
 
 > ⚠️ **Several filter prefixes are inert at runtime in 0.0.96 (verified) — do not rely on them:**
 > - **`s:` (status) and `resH:` (response header)** are never evaluated: `includeFilter://s:` / `includeFilter://resH:` lock the rule to never apply (even when the status/header actually matches), and `excludeFilter://s:` / `excludeFilter://resH:` never exclude. They run in the request phase where the response is not yet known.

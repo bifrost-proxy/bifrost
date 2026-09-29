@@ -13,7 +13,8 @@ Bifrost 规则语法支持 `line`...`` 多行块，用于把域名匹配与 `req
 - 有一条独立的 shell E2E 脚本，专门验证多行规则 `line`...`` 的 `includeFilter` / `excludeFilter` 在代理链路真实生效。
 - 脚本用一个专属规则夹具，包含两个多行块：一个负责基础转发到 mock echo（保证所有请求可达上游），一个负责带 filter 的头修改。
 - 断言必须同时校验请求侧和响应侧：mock echo 回显的请求头 + 代理返回的响应头。
-- 覆盖 4 种命中/未命中组合：GET+/api/ 命中、GET+/api/internal/ 被 exclude、POST+/api/ 不满足 method、GET+/home 不满足路径。
+- 覆盖 OR 组合矩阵：GET+/api/ 命中、GET+/api/internal/ 被 exclude、POST+/api/ 由 path 命中、GET+/home 由 method 命中、POST+/home 全部 include 未命中。
+- 覆盖真实用户写法：`*/h5/fulfillment-fusion/`、`*/resource/`、裸 `webpack-hmr` 三个 include 任一命中；`*/life/` exclude 仍优先。
 - 脚本纳入 `scripts/run_all_e2e.sh` 的 `STABLE_SHELL_TESTS` 列表，默认回归入口跑。
 - `e2e-tests/rules/COVERAGE.md` 记录该夹具与场景。
 
@@ -37,9 +38,11 @@ Bifrost 规则语法支持 `line`...`` 多行块，用于把域名匹配与 `req
 一个 `line`...`` 块内的指令按 "同一个虚拟规则" 处理：
 
 - 匹配 pattern（第一行的 URL/host）决定这条虚拟规则是否命中；
-- `includeFilter://` 是 AND 语义，全部满足才算命中；
+- 多个 `includeFilter://` 是 Whistle 兼容的 OR 语义，任一满足即命中；
 - `excludeFilter://` 是 OR 语义，命中任意一条则跳过；
 - `reqHeaders://` / `resHeaders://` 只在最终 gate 通过后执行。
+
+完整 gate 公式为 `!(exclude1 || exclude2 || ...) && (include1 || include2 || ...)`。不带类型前缀的裸目标会自动补前导 `/` 并按 path prefix 匹配；例如 `includeFilter://webpack-hmr` 等同 `includeFilter:///webpack-hmr`。`*/resource/` 这类带尾斜杠 wildcard 是目录前缀，会匹配其子资源。
 
 因此本 E2E 需要验证的是：**候选 matcher 命中之后，filter 每次请求都按当前 method/path 重新判定**。这也是与 `multi-demand-resolver-cache.md` 的直接对应场景——resolver 缓存不能缓存 filter 结果。
 
@@ -61,6 +64,17 @@ includeFilter://m:GET
 includeFilter:///api/
 excludeFilter:///api/internal/
 `
+
+line`
+life-rule.local
+reqHeaders://X-Life-Rule=matched
+includeFilter://*/h5/fulfillment-fusion/
+includeFilter://*/resource/
+includeFilter://webpack-hmr
+excludeFilter://*/life/
+`
+
+life-rule.local http://127.0.0.1:__ECHO_HTTP_PORT__
 ```
 
 `__ECHO_HTTP_PORT__` 是占位符，脚本在运行期由 `e2e-tests/test_utils/rule_fixture.sh` 渲染成真实 mock 端口。
@@ -77,12 +91,13 @@ excludeFilter:///api/internal/
 4. 启动 Bifrost：
    - `BIFROST_DATA_DIR=.bifrost-e2e-line-block-filter-<port>-<pid>`
    - flags：`--skip-cert-check --unsafe-ssl --no-system-proxy --rules-file <rendered-fixture>`
-5. 用 curl 分别发送 4 组请求（同一个 `line-block-filter.local` 域名，通过代理直连）：
+5. 用 curl 发送基础 OR 矩阵（同一个 `line-block-filter.local` 域名，通过代理直连）：
    - `GET /api/echo` → 期望 `X-Line-Block-Request: matched` 出现在 echo 回显、`X-Line-Block-Response: matched` 出现在代理响应。
    - `GET /api/internal/echo` → 期望两个 header 都缺失，但请求仍到达 mock（基础转发规则生效）。
-   - `POST /api/echo` → 期望两个 header 都缺失（method 不满足 include）。
-   - `GET /home` → 期望两个 header 都缺失（路径不满足 include）。
-6. 断言 mock echo 服务收到了全部 4 个请求。
+   - `POST /api/echo` → path include 命中，两个 header 都存在。
+   - `GET /home` → method include 命中，两个 header 都存在。
+   - `POST /home` → 所有 include 均未命中，两个 header 都缺失。
+6. 对 `life-rule.local` 发送 5 个真实用户写法请求：前两个 wildcard、裸 path 分别命中，`/other` 全部未命中，`/life/resource/demo.json` 被 exclude 优先排除。
 7. 断言状态码为 2xx。
 8. cleanup：kill 代理、kill mock echo、清理临时数据目录。
 
@@ -126,7 +141,7 @@ excludeFilter:///api/internal/
 
 - 断言 echo 回显请求头是否含 `X-Line-Block-Request`。
 - 断言代理响应头是否含 `X-Line-Block-Response`。
-- 4 组请求命中/未命中矩阵完整覆盖。
+- OR 组合与真实用户写法的请求矩阵完整覆盖。
 
 ### Phase 3：接入回归入口
 
@@ -165,6 +180,9 @@ resolver 侧的过滤器语义已由 `crates/bifrost-core/src/rule/resolver/test
 - `test_include_filter_method`
 - `test_include_filter_header_exists`
 - `test_include_filter_client_ip`
+- `test_multiple_include_filters_use_or_semantics`
+- `test_exclude_filter_overrides_matching_include_filter`
+- `test_include_or_defers_when_only_response_filter_can_still_match`
 - `test_exclude_filter_path`
 - `test_exclude_filter_whistle_style_wildcard_url`
 - `test_exclude_filter_whistle_style_wildcard_path_prefix`
@@ -182,7 +200,7 @@ resolver 侧的过滤器语义已由 `crates/bifrost-core/src/rule/resolver/test
 bash e2e-tests/tests/test_multiline_rule_filter_e2e.sh
 ```
 
-预期：4 组请求全部按矩阵通过；无 leaked 进程；无临时目录残留。
+预期：基础 OR 矩阵和真实用户写法共 10 组请求全部通过；无 leaked 进程；无临时目录残留。
 
 ## Review/Fix/Test 闭环
 
@@ -192,7 +210,7 @@ bash e2e-tests/tests/test_multiline_rule_filter_e2e.sh
 - 复核 diff：夹具、脚本、`run_all_e2e.sh` STABLE_SHELL_TESTS、`COVERAGE.md`。
 - 重点 review：
   - 夹具占位符渲染是否正确写回 mock 端口；
-  - 4 组请求的期望矩阵是否覆盖了 method-only 未命中、path-only 未命中、exclude 命中、正常命中；
+  - 请求矩阵是否覆盖 method-only 命中、path-only 命中、全部 include 未命中、exclude 优先和三个真实 include 写法；
   - 数据目录/端口是否 PID/端口双维度隔离；
   - cleanup 是否在 assertion 失败路径也执行（`trap`）。
 - 复测：`bash e2e-tests/tests/test_multiline_rule_filter_e2e.sh` + `bash scripts/run_all_e2e.sh --tag stable-shell`。
