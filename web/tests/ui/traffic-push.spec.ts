@@ -15,6 +15,7 @@ import {
   startMockHttpServer,
   uniqueName,
 } from "./helpers/admin-helpers";
+import { stopTrackedProcess } from "./helpers/tracked-process";
 import { TLS_RECONNECT_NOTICE } from "../../src/utils/tlsInterceptionNotice";
 
 const BASE_PROXY_URL = process.env.PROXY_URL || `http://127.0.0.1:${backendPort}`;
@@ -38,15 +39,6 @@ const getRepoRoot = () => {
   return path.resolve(path.dirname(current), "../../..");
 };
 
-const isProcessAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 const isBackendReady = async () => {
   try {
     const res = await fetch(`${apiBase}/proxy/address`);
@@ -56,8 +48,9 @@ const isBackendReady = async () => {
   }
 };
 
-const waitForBackend = async () => {
+const waitForBackend = async (hasExited: () => boolean) => {
   for (let i = 0; i < 240; i += 1) {
+    if (hasExited()) return false;
     if (await isBackendReady()) {
       return true;
     }
@@ -69,22 +62,7 @@ const waitForBackend = async () => {
 const stopTrackedBackend = async () => {
   const pidFile =
     process.env.BIFROST_UI_TEST_PID_FILE || path.join(getRepoRoot(), ".ui-backend.pid");
-  try {
-    const pidText = await fs.readFile(pidFile, "utf-8");
-    const pid = Number(pidText);
-    if (Number.isNaN(pid) || !isProcessAlive(pid)) {
-      await fs.rm(pidFile, { force: true });
-      return;
-    }
-    try {
-      process.kill(-pid);
-    } catch {
-      process.kill(pid);
-    }
-    await fs.rm(pidFile, { force: true });
-  } catch {
-    void 0;
-  }
+  await stopTrackedProcess(pidFile);
 };
 
 const startTrackedBackend = async () => {
@@ -156,9 +134,15 @@ const startTrackedBackend = async () => {
     throw new Error("Failed to start tracked backend");
   }
   await fs.writeFile(pidFile, String(pid));
-  const ok = await waitForBackend();
+  const ok = await waitForBackend(
+    () => child.exitCode !== null || child.signalCode !== null,
+  );
   if (!ok) {
-    throw new Error("Tracked backend failed to start");
+    const logTail = await fs.readFile(logPath, "utf8")
+      .then((log) => log.slice(-3000)).catch(() => "");
+    throw new Error(
+      `Tracked backend failed to start (exit ${child.exitCode}, signal ${child.signalCode}): ${logTail}`,
+    );
   }
 };
 
@@ -407,6 +391,7 @@ test.describe.serial("traffic push regressions", () => {
     const server = await startMockHttpServer();
     const persistedPath = `/${uniqueName("restart-persisted")}`;
     const livePath = `/${uniqueName("restart-live")}`;
+    let failure: { error: unknown } | undefined;
 
     try {
       await sendProxyRequest(`http://127.0.0.1:${server.port}${persistedPath}`);
@@ -433,9 +418,26 @@ test.describe.serial("traffic push regressions", () => {
       } finally {
         await freshPage.close();
       }
+    } catch (error) {
+      failure = { error };
     } finally {
-      await server.close();
+      try {
+        // Keep one failed restart from cascading into every later Traffic case.
+        if (!(await isBackendReady())) {
+          await stopTrackedBackend();
+          await startTrackedBackend();
+        }
+      } catch (recoveryError) {
+        if (failure) {
+          console.error("Backend recovery also failed; preserving the original test error", recoveryError);
+        } else {
+          failure = { error: recoveryError };
+        }
+      } finally {
+        await server.close();
+      }
     }
+    if (failure) throw failure.error;
   });
 
   test("多个页面同时打开时都能完整收到实时流量", async ({ page, context, request }) => {

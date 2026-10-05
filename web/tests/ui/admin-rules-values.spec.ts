@@ -802,7 +802,10 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
 
     await openPage(page, "rules");
     await expect(ruleItem).toBeVisible();
-    await ruleItem.locator(".ant-switch").click();
+    // Row actions are intentionally pointer-disabled until hover/focus.
+    await ruleItem.hover();
+    await ruleItem.getByRole("switch").click();
+    await expect(ruleItem).toHaveAttribute("data-rule-enabled", "false");
 
     await page.getByTestId("rule-sort-select").click();
     await page.locator(".ant-select-dropdown").getByText("Name", { exact: true }).click();

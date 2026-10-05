@@ -1143,20 +1143,31 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
   page,
   request,
 }) => {
-  const remoteServer = await startMockSyncServer([
-    {
-      id: uniqueName("remote-id"),
-      user_id: "ui-sync-user",
-      name: uniqueName("status-rule"),
-      rule: "status.example.com host://127.0.0.1:3010",
-      create_time: "2026-03-20T09:00:00Z",
-      update_time: "2026-03-20T09:00:00Z",
-    },
-  ], undefined, { responseDelayMs: 250 });
+  type SyncStatus = import("../../src/api/sync").SyncStatus;
+  const readSyncStatus = async (): Promise<SyncStatus> => {
+    const response = await request.get(`${apiBase}/sync/status`);
+    expect(response.ok()).toBeTruthy();
+    return response.json();
+  };
+  const remoteServer = await startMockSyncServer(
+    [
+      {
+        id: uniqueName("remote-id"),
+        user_id: "ui-sync-user",
+        name: uniqueName("status-rule"),
+        rule: "status.example.com host://127.0.0.1:3010",
+        create_time: "2026-03-20T09:00:00Z",
+        update_time: "2026-03-20T09:00:00Z",
+      },
+    ],
+    undefined,
+    { responseDelayMs: 250 },
+  );
 
   try {
-    await request.post(`${apiBase}/sync/logout`).catch(() => undefined);
-    await request.put(`${apiBase}/sync/config`, {
+    const resetResponse = await request.post(`${apiBase}/sync/logout`);
+    expect(resetResponse.ok()).toBeTruthy();
+    const configResponse = await request.put(`${apiBase}/sync/config`, {
       data: {
         enabled: true,
         auto_sync: true,
@@ -1166,22 +1177,29 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
       },
     });
 
+    expect(configResponse.ok()).toBeTruthy();
+
     await openPage(page, "settings");
     await page.getByRole("tab", { name: /Sync/ }).click({ force: true });
     await expect
       .poll(async () => {
-        const value = await page.getByTestId("statusbar-sync").getAttribute("data-sync-state");
+        const value = await page
+          .getByTestId("statusbar-sync")
+          .getAttribute("data-sync-state");
         return value === "unauthorized" || value === "unreachable";
       })
       .toBe(true);
     await expect(page.getByTestId("settings-sync-provider-grid")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: "Remote Sync" }),
+    ).toHaveCount(0);
 
     const loginUrlResponse = await request.get(
       `${apiBase}/sync/login-url?callback_url=${encodeURIComponent(
         `http://127.0.0.1:${backendPort}/login.html`,
       )}`,
     );
+    expect(loginUrlResponse.ok()).toBeTruthy();
     const { login_url: loginUrl } = (await loginUrlResponse.json()) as {
       login_url: string;
     };
@@ -1189,8 +1207,7 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
 
     await expect
       .poll(async () => {
-        const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { authorized: boolean; reachable: boolean };
+        const body = await readSyncStatus();
         return body.authorized && body.reachable;
       })
       .toBe(true);
@@ -1200,22 +1217,26 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
 
     await expect
       .poll(async () => {
-        const value = await page.getByTestId("statusbar-sync").getAttribute("data-sync-state");
-        return value === "connected" || value === "ready" || value === "syncing";
+        const value = await page
+          .getByTestId("statusbar-sync")
+          .getAttribute("data-sync-state");
+        return (
+          value === "connected" || value === "ready" || value === "syncing"
+        );
       })
       .toBe(true);
 
-    await request.post(`${apiBase}/sync/run`);
+    const runResponse = await request.post(`${apiBase}/sync/run`);
+    expect(runResponse.ok()).toBeTruthy();
 
     await expect
       .poll(async () => {
-        const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { syncing: boolean; reason: string };
+        const body = await readSyncStatus();
         return body.syncing && body.reason;
       })
       .toBe("syncing");
 
-    await request.put(`${apiBase}/sync/config`, {
+    const unreachableResponse = await request.put(`${apiBase}/sync/config`, {
       data: {
         enabled: true,
         auto_sync: true,
@@ -1225,10 +1246,63 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
       },
     });
 
+    expect(unreachableResponse.ok()).toBeTruthy();
+
+    // A config URL change does not disconnect independently saved providers.
+    // Wait for the failed probe before clearing the still-connected mock session.
     await expect
-      .poll(async () => page.getByTestId("statusbar-sync").getAttribute("data-sync-state"))
+      .poll(async () => {
+        const status = await readSyncStatus();
+        return status.providers?.find(
+          (provider) => provider.id === "bifrost_cloud",
+        )?.reason;
+      })
+      .toBe("unreachable");
+    const retainedStatus = await readSyncStatus();
+    expect(retainedStatus).toMatchObject({
+      remote_base_url: "http://127.0.0.1:9",
+      reason: "ready",
+      reachable: true,
+      authorized: true,
+      syncing: false,
+    });
+    expect(retainedStatus.providers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "bifrost_cloud",
+          remote_base_url: remoteServer.baseUrl,
+          connected: true,
+        }),
+      ]),
+    );
+
+    const logoutResponse = await request.post(`${apiBase}/sync/logout`);
+    expect(logoutResponse.ok()).toBeTruthy();
+    await expect
+      .poll(async () => {
+        const status = await readSyncStatus();
+        return {
+          hasSession: status.has_session,
+          reachable: status.reachable,
+          syncing: status.syncing,
+          connectedProviders: status.providers?.filter(
+            (provider) => provider.connected,
+          ).length,
+        };
+      })
+      .toEqual({
+        hasSession: false,
+        reachable: false,
+        syncing: false,
+        connectedProviders: 0,
+      });
+    await expect
+      .poll(async () =>
+        page.getByTestId("statusbar-sync").getAttribute("data-sync-state"),
+      )
       .toBe("unreachable");
   } finally {
+    await request.post(`${apiBase}/sync/logout`).catch(() => undefined);
     try {
       await request.put(`${apiBase}/sync/config`, {
         data: {
@@ -2444,7 +2518,9 @@ test("Settings IM Provider instructions 使用大窗口编辑后保存覆盖值"
     .toBe("Provider base edited from large modal");
 });
 
-test("AI 一级页整合 IM Gateway 子导航并按 URL 切换独立面板", async ({ page }) => {
+test("AI Channels 按 URL 选择独立面板并保留首页与历史导航", async ({
+  page,
+}) => {
   await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
     await route.fulfill({
       status: 200,
@@ -2456,13 +2532,16 @@ test("AI 一级页整合 IM Gateway 子导航并按 URL 切换独立面板", asy
       }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/providers/*/status", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ state: "disconnected", reconnect_count: 0 }),
-    });
-  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/providers/*/status",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "disconnected", reconnect_count: 0 }),
+      });
+    },
+  );
   await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
     await route.fulfill({
       status: 200,
@@ -2484,67 +2563,106 @@ test("AI 一级页整合 IM Gateway 子导航并按 URL 切换独立面板", asy
     });
   });
   await page.route("**/_bifrost/api/im-gateway/targets", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "[]",
+    });
   });
   await page.route("**/_bifrost/api/im-gateway/routes", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "[]",
+    });
   });
   await page.route("**/_bifrost/api/im-gateway/schedules", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "[]",
+    });
   });
-  await page.route("**/_bifrost/api/im-gateway/history/events", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-  });
-  await page.route("**/_bifrost/api/im-gateway/history/runs", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-  });
-
-  await openPage(page, "ai?aiSection=im-gateway-connections&imGatewaySection=connections");
-
-  await expect(page.getByTestId("ai-section-nav")).toBeVisible();
-  await expect(page.getByTestId("ai-nav-im-gateway-connections")).toHaveAttribute(
-    "aria-current",
-    "true",
+  await page.route(
+    "**/_bifrost/api/im-gateway/history/events",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      });
+    },
   );
-  await expect(page.getByTestId("im-gateway-section-connections")).toBeVisible();
+  await page.route("**/_bifrost/api/im-gateway/history/runs", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "[]",
+    });
+  });
+
+  // Legacy entry links normalize to the new module route.
+  await openPage(
+    page,
+    "ai?aiSection=im-gateway-connections&imGatewaySection=connections",
+  );
+  await expect(page).toHaveURL(/\/_bifrost\/ai\/channels$/);
+  await expect(
+    page.getByRole("heading", { name: "IM Channels", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("ai-section-nav")).toHaveCount(0);
+  await expect(page.getByTestId("im-gateway-section-nav")).toHaveCount(0);
+  await expect(
+    page.getByTestId("im-gateway-section-connections"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("settings-im-provider-card-provider-nav-1"),
+  ).toContainText("Nav Provider");
   await expect(page.getByTestId("im-gateway-section-routes")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: /Connections/ })).toHaveCount(0);
 
-  await page.getByTestId("ai-nav-im-gateway-routes").click();
-  await expect(page).toHaveURL(/aiSection=im-gateway-routes/);
-  await expect(page).toHaveURL(/imGatewaySection=routes/);
-  await expect(page.getByTestId("ai-nav-im-gateway-routes")).toHaveAttribute(
-    "aria-current",
-    "true",
+  await page.getByTestId("ai-home-link").click();
+  await expect(page).toHaveURL(/\/_bifrost\/ai$/);
+  await expect(page.getByTestId("ai-module-hub")).toBeVisible();
+  await page.getByTestId("ai-module-card-channels").click();
+  await expect(page).toHaveURL(/\/_bifrost\/ai\/channels$/);
+  await expect(
+    page.getByTestId("im-gateway-section-connections"),
+  ).toBeVisible();
+
+  await openPage(page, "ai/channels?imGatewaySection=routes");
+  await expect(page).toHaveURL(
+    /\/_bifrost\/ai\/channels\?imGatewaySection=routes$/,
   );
   await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
-  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
-
+  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(
+    0,
+  );
   await page.reload();
-  await expect(page.getByTestId("ai-nav-im-gateway-routes")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
   await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
 
-  await page.getByTestId("ai-nav-im-gateway-history").click();
-  await expect(page).toHaveURL(/aiSection=im-gateway-history/);
-  await expect(page).toHaveURL(/imGatewaySection=history/);
+  await openPage(page, "ai/channels?imGatewaySection=history");
+  await expect(page).toHaveURL(/imGatewaySection=history$/);
   await expect(page.getByTestId("im-gateway-section-history")).toBeVisible();
   await expect(page.getByTestId("im-gateway-section-routes")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: /Events/ })).toBeVisible();
 
+  await page.goBack();
+  await expect(page).toHaveURL(/imGatewaySection=routes$/);
+  await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-section-history")).toHaveCount(0);
+  await page.goForward();
+  await expect(page).toHaveURL(/imGatewaySection=history$/);
+  await expect(page.getByTestId("im-gateway-section-history")).toBeVisible();
+
   await page.getByTestId("theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await page.getByTestId("ai-nav-im-gateway-targets").click();
-  await expect(page).toHaveURL(/aiSection=im-gateway-targets/);
-  await expect(page).toHaveURL(/imGatewaySection=targets/);
-  await expect(page.getByTestId("ai-nav-im-gateway-targets")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
+  await openPage(page, "ai/channels?imGatewaySection=targets");
+  await expect(page).toHaveURL(/imGatewaySection=targets$/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(page.getByTestId("im-gateway-section-targets")).toBeVisible();
   await expect(page.getByTestId("im-gateway-section-history")).toHaveCount(0);
+  await expect(page.getByTestId("ai-home-link")).toBeVisible();
 });
 
 test("IM Schedule 先预览确认再创建，并在亮暗主题下展示可靠性配置", async ({ page }) => {
