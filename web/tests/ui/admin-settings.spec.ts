@@ -3577,13 +3577,27 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       },
     });
 
+    // Disabling is a local modification, which takes priority over remote edits.
+    // Let that push finish before testing a separate remote-only overwrite.
     await expect
-      .poll(async () => {
-        const response = await request.get(`${apiBase}/rules/${encodeURIComponent(localRuleName)}`);
-        const body = (await response.json()) as { enabled: boolean };
-        return body.enabled;
-      })
-      .toBe(false);
+      .poll(
+        async () => {
+          const response = await request.get(
+            `${apiBase}/rules/${encodeURIComponent(localRuleName)}`,
+          );
+          return (await response.json()) as {
+            content: string;
+            enabled: boolean;
+            sync: { status: string };
+          };
+        },
+        { timeout: 10000 },
+      )
+      .toMatchObject({
+        content: expect.stringContaining("127.0.0.1:3100"),
+        enabled: false,
+        sync: { status: "synced" },
+      });
 
     const remoteOverwriteTime = new Date(Date.now() + 60_000).toISOString();
     remoteServer.upsertEnv({
@@ -3591,7 +3605,8 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       rule: "local.example.com host://127.0.0.1:3150",
       update_time: remoteOverwriteTime,
     });
-    await request.post(`${apiBase}/sync/run`);
+    const overwriteResponse = await request.post(`${apiBase}/sync/run`);
+    expect(overwriteResponse.ok()).toBeTruthy();
 
     await expect
       .poll(async () => {
@@ -3605,7 +3620,15 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
         enabled: false,
       });
 
-    await page.waitForTimeout(1500);
+    await expect
+      .poll(
+        async () => {
+          const response = await request.get(`${apiBase}/sync/status`);
+          return (await response.json()) as SyncStatus;
+        },
+        { timeout: 10000 },
+      )
+      .toMatchObject({ syncing: false, reason: "ready" });
 
     await request.put(`${apiBase}/rules/${encodeURIComponent(localRuleName)}`, {
       data: {
