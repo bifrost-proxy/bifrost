@@ -210,3 +210,7 @@ pub struct SandboxConfig {
 - 诊断 UI 测试直接设置并核对完整 model 内容，避免模拟逐字输入触发 Monaco 自动缩进和自动闭合括号。等待真实 worker 返回诊断，随后轮询可见 markers；不再依赖固定 1200ms 等待。
 - 验证路由：运行 `pnpm --dir web test:unit src/pages/Scripts/scriptEditorLanguage.test.ts`、前端类型/格式/lint 检查，以及 `pnpm --dir web test:ui tests/ui/admin-scripts.spec.ts`。实际 Monaco worker 单测覆盖四类脚本、声明 model、重复切换、缺失字段/只读属性/语法负例和 DOM 隔离；UI 进一步覆盖亮暗主题及错误修正后的 marker 清理。Rust 未变更，不触发 Rust 编译或覆盖率门禁。
 - 两轮 Review/Fix/Test：第一轮检查路径规范化、库冲突及 fixture 正确性并运行最小验证；第二轮复核声明快照生命周期、正负诊断断言和文档一致性，再复跑受影响验证。真实浏览器验证见 `human_tests/webui-scripts.md` 的 TC-WSC-05A/05B，受环境限制时必须记录阻塞，不能将 worker 测试记为浏览器通过。
+
+### QuickJS intrinsic compatibility verification
+
+The editor runtime library also explicitly declares `performance.now()`, `performance.timeOrigin`, and `queueMicrotask`, which are available in the pinned QuickJS-ng runtime. Isolated CLI probes for request, response, decode, and parser scripts confirmed their availability and confirmed that browser URL/text-encoding/base64 helpers, global fetch, timers, animation-frame APIs, document, and window are absent. Comparing all 68 request-runtime global names against the previous Monaco configuration finds no newly unrecognized names after this fix. Existing newer-ECMAScript typing gaps and microtask execution behavior are unchanged.

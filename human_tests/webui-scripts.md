@@ -497,3 +497,5 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持四种类型脚本：
 ```bash
 rm -rf .bifrost-test
 ```
+
+- 2026-10-05 compatibility follow-up: ran the current CLI against a fresh isolated data directory for request, response, decode, and parser scripts; all four reported `Success: true`. Enumerated the actual runtime globals and executed `performance.now()`/read `performance.timeOrigin`; both returned numbers. Compared all 68 request-runtime global names in the old and fixed Monaco worker configurations: no newly missing names. This verifies runtime/type compatibility only; the browser interactions in 05A/05B remain blocked until hosted browser validation completes.

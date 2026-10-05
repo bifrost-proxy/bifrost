@@ -37,14 +37,25 @@ export function configureScriptEditor(monaco: Monaco, scriptType: ScriptType) {
     {
       filePath: SCRIPT_RUNTIME_LIB_URI,
       content:
-        scriptType === "request"
+        QUICKJS_INTRINSICS +
+        (scriptType === "request"
           ? BIFROST_TYPES_REQUEST
           : scriptType === "response"
             ? BIFROST_TYPES_RESPONSE
-            : BIFROST_TYPES_DECODE,
+            : BIFROST_TYPES_DECODE),
     },
   ]);
 }
+
+// Context::full in rquickjs 0.9 uses QuickJS-ng's built-in performance object
+// and microtask scheduler. Keep those real runtime globals without importing DOM.
+const QUICKJS_INTRINSICS = `
+declare var performance: {
+  readonly timeOrigin: number;
+  now(): number;
+};
+declare function queueMicrotask(callback: () => void): void;
+`;
 
 const BIFROST_TYPES_DECODE = `
 /**

@@ -162,18 +162,51 @@ describe("Scripts Monaco runtime declarations", () => {
     ).not.toEqual([]);
   });
 
+  it.each<ScriptType>(["request", "response", "decode", "parser"])(
+    "preserves the real QuickJS timing and microtask globals in %s scripts",
+    async (type) => {
+      const harness = createLanguageHarness();
+      harness.configure(type);
+      const { diagnostics } = harness.createWorker(
+        "performance = performance; console.info(performance.now(), performance.timeOrigin); queueMicrotask(() => console.info('queued'));",
+        true,
+      );
+      expect(await diagnostics()).toEqual([]);
+      expect(await diagnostics(SCRIPT_RUNTIME_LIB_URI)).toEqual([]);
+    },
+  );
+
   it("does not advertise browser globals absent from QuickJS", async () => {
     const harness = createLanguageHarness();
     harness.configure("request");
+    // Verified against the actual request/response/decode/parser sandboxes.
+    const unavailableGlobals = [
+      "URL",
+      "URLSearchParams",
+      "TextEncoder",
+      "TextDecoder",
+      "atob",
+      "btoa",
+      "fetch",
+      "setTimeout",
+      "clearTimeout",
+      "setInterval",
+      "clearInterval",
+      "setImmediate",
+      "clearImmediate",
+      "requestAnimationFrame",
+      "cancelAnimationFrame",
+      "document",
+      "window",
+    ];
     const { diagnostics } = harness.createWorker(
-      "console.info(new Map(), Promise.resolve(1)); document.title; window.location;",
+      `console.info(new Map(), Promise.resolve(1)); ${unavailableGlobals.join(";")};`,
     );
     const errors = await diagnostics();
-    expect(errors).toHaveLength(2);
-    expect(errors.map((diagnostic) => diagnostic.messageText)).toEqual([
-      expect.stringContaining("document"),
-      expect.stringContaining("window"),
-    ]);
+    expect(errors).toHaveLength(unavailableGlobals.length);
+    expect(errors.map((diagnostic) => diagnostic.messageText)).toEqual(
+      unavailableGlobals.map((name) => expect.stringContaining(name)),
+    );
   });
 
   it("does not hide legitimate property errors caused by an untyped empty fallback", async () => {
