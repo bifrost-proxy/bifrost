@@ -117,6 +117,7 @@ ASR Daily Agent 支持把一篇日报拆成多个独立研究问题，并由 Cha
 - 规则引擎：支持路由、请求/响应改写、注入、延迟、限速、Mock、脚本处理
 - 管理界面：内置 Web UI，支持规则编辑、流量查看、脚本管理、请求重放
 - 流量重连：统计、增量查询与推送消息提供可选 `database_epoch`，用于识别替换后的数据库并重新获取流量；普通重启保留身份，兼容旧版消息。详见 [`design/traffic-db-startup-resequence.md`](design/traffic-db-startup-resequence.md)
+- 流量恢复与清理：旧备份导致已确认的请求序号回退时，Web UI 会重新读取流量；数据库清理失败时，API 返回错误并保留关联数据与连接状态。
 - Breakpoint：支持在 Web UI 中暂停命中 `breakpoint://request` / `breakpoint://response` 规则的 HTTP request/response，编辑 headers/body 后继续；详见 [`docs/breakpoint.md`](docs/breakpoint.md)
 - 资源风险告警：Performance 页与 `/_bifrost/api/system/memory` 会显示 body/ws 文件 writer 占用及接近句柄上限的告警状态
 - 脚本沙箱：基于 QuickJS，支持 `reqScript`、`resScript`、`decode`

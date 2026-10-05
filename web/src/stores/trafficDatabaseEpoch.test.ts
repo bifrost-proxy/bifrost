@@ -399,3 +399,209 @@ describe("Persistent traffic database identity", () => {
     expect(useTrafficStore.getState()).toMatchObject({ currentRecord: null, requestBody: null, responseBody: null, requestRawBody: null, responseRawBody: null, detailError: null, detailLoading: false });
   });
 });
+
+describe("Restored snapshots retaining the same database identity", () => {
+  it.each([
+    { total: 0, history: false, source: "statistics" },
+    { total: 600, history: false, source: "statistics" },
+    { total: 0, history: true, source: "statistics" },
+    { total: 600, history: true, source: "statistics" },
+    { total: 600, history: true, source: "delta" },
+    { total: 0, history: false, source: "reload" },
+  ])("recovers a same-UUID backup with $total rows, history=$history, source=$source", async ({ total, history, source }) => {
+    seed(history);
+    const restored = statistics(OLD, total + 1, total);
+    api.getTrafficStatistics.mockResolvedValue(restored);
+    api.queryTraffic.mockResolvedValue(page([]));
+    if (source === "statistics") {
+      useTrafficStore.getState().handleTrafficStatistics(restored);
+    } else if (source === "delta") {
+      useTrafficStore.getState().handleTrafficDelta(delta(OLD, [], total + 1));
+    } else {
+      api.getTrafficUpdates.mockResolvedValueOnce({
+        ...updates(OLD, []), server_sequence: total + 1, server_total: total,
+      });
+      await useTrafficStore.getState().reloadRecords();
+    }
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+    expect(useTrafficStore.getState()).toMatchObject({
+      trafficDatabaseEpoch: OLD, trafficEpochVersion: 1, records: [],
+      lastSequence: null, lastId: null, serverOldestSequence: null,
+      oldestSequence: null, hasNewer: false, serverTotal: total,
+    });
+    const replay = records("BACKUP", total ? 101 : 1, total || 1);
+    const replaySequence = total ? total + 1 : 2;
+    useTrafficStore.getState().handleTrafficDelta(delta(OLD, replay, replaySequence));
+    await flush();
+    const arrival = records("RESTARTED", (total || 1) + 1, (total || 1) + 1);
+    useTrafficStore.getState().handleTrafficDelta(delta(OLD, arrival, replaySequence + 1));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, replaySequence + 1, (total || 1) + 1));
+    await flush();
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([...replay, ...arrival].map((r) => r.id));
+    expect(useTrafficStore.getState().lastSequence).toBe((total || 1) + 1);
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    expect(push.connect).toHaveBeenLastCalledWith(expect.objectContaining({ last_sequence: (total || 1) + 1 }));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, replaySequence + 1, (total || 1) + 1));
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("recovers a same-UUID backup between initial rows and statistics before Push connects (known identity=%s)", async (knownIdentity) => {
+    if (knownIdentity) useTrafficStore.getState().handleTrafficStatistics(statistics());
+    api.getTrafficUpdates.mockResolvedValueOnce(updates(OLD, records("BEFOREBACKUP", 1001, 2000)));
+    api.getTrafficStatistics.mockResolvedValue(statistics(OLD, 601, 600));
+    await useTrafficStore.getState().fetchInitialData();
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+    expect(useTrafficStore.getState()).toMatchObject({ records: [], lastSequence: null, trafficDatabaseEpoch: OLD });
+  });
+
+  it("detects a backup whose next allocation equals the consumed record cursor", async () => {
+    seed();
+    api.getTrafficStatistics.mockResolvedValue(statistics(OLD, 2000, 1999));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 2000, 1999));
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+    expect(useTrafficStore.getState().lastSequence).toBeNull();
+  });
+
+  it("includes cached history rows beyond the replay cursor in restore proof", async () => {
+    seed(true);
+    useTrafficStore.setState({ lastSequence: 3, lastId: "REQ-OLDPROCESS-00000003" });
+    api.getTrafficStatistics.mockResolvedValue(statistics(OLD, 601, 600));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 601, 600));
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+    expect(useTrafficStore.getState().records).toEqual([]);
+  });
+
+  it("does not treat queued allocation-only metadata as a consumed row", async () => {
+    seed(true);
+    const rows = records("OLDPROCESS", 1, 3);
+    useTrafficStore.setState({ records: rows, recordsMap: new Map(rows.map((r) => [r.id, r])), lastSequence: 3, lastId: rows.at(-1)!.id, serverOldestSequence: 1, oldestSequence: 1, serverSequence: 4, serverTotal: 3 });
+    useTrafficStore.getState().handleTrafficDelta({ ...delta(OLD, [], 1001), server_total: 3 });
+    const connection = push.onConnectionChange.mock.calls.at(-1)![0];
+    connection({ connected: false });
+    connection({ connected: true });
+    api.queryTraffic.mockResolvedValue(page(rows));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 4, 3));
+    await flush();
+    expect(push.resetTrafficCursor).not.toHaveBeenCalled();
+    expect(api.getTrafficStatistics).not.toHaveBeenCalled();
+    expect(useTrafficStore.getState()).toMatchObject({ records: rows, lastSequence: 3, hasNewer: true });
+  });
+
+  it.each(["fetchUpdates", "catchUpUpdates", "reloadRecords", "fetchInitialData"] as const)("ignores pre-reconnect %s rows while confirming a restored snapshot", async (operation) => {
+    seed();
+    useTrafficStore.setState({ polling: true });
+    const old = deferred<TrafficUpdatesResponseCompact>();
+    const confirmation = deferred<TrafficStatistics>();
+    api.getTrafficUpdates.mockReturnValueOnce(old.promise);
+    const pending = useTrafficStore.getState()[operation]();
+    const connection = push.onConnectionChange.mock.calls.at(-1)![0];
+    connection({ connected: false });
+    connection({ connected: true });
+    api.getTrafficStatistics.mockReturnValueOnce(confirmation.promise);
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 601, 600));
+    old.resolve({ ...updates(OLD, records("STALE", 2001, 2001)), server_sequence: 2002 });
+    await pending;
+    confirmation.resolve(statistics(OLD, 601, 600));
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+    expect(useTrafficStore.getState().records).toEqual([]);
+    expect(useTrafficStore.getState().lastSequence).toBeNull();
+  });
+
+  it("uses a real queued pre-disconnect row even before its cursor is committed", async () => {
+    useTrafficStore.setState({ trafficDatabaseEpoch: OLD });
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().handleTrafficDelta(delta(OLD, records("OLDPROCESS", 2000, 2000), 2001));
+    expect(useTrafficStore.getState().lastSequence).toBeNull();
+    const connection = push.onConnectionChange.mock.calls.at(-1)![0];
+    connection({ connected: false });
+    connection({ connected: true });
+    api.getTrafficStatistics.mockResolvedValue(statistics(OLD, 601, 600));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 601, 600));
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+    expect(useTrafficStore.getState().records).toEqual([]);
+  });
+
+  it("preserves the old window when a fresh read disproves a stale same-UUID rollback", async () => {
+    const rows = seed(true);
+    api.getTrafficStatistics.mockResolvedValue(statistics());
+    api.queryTraffic.mockImplementation(async ({ record_ids }: { record_ids: string[] }) => page(rows.filter((r) => record_ids.includes(r.id))));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 601, 600));
+    await flush();
+    expect(api.getTrafficStatistics).toHaveBeenCalledOnce();
+    expect(push.resetTrafficCursor).not.toHaveBeenCalled();
+    expect(useTrafficStore.getState()).toMatchObject({ records: rows, lastSequence: 2000, hasNewer: true, serverOldestSequence: 1001 });
+  });
+
+  it("retries failed same-UUID rollback confirmation without discarding cached rows", async () => {
+    const rows = seed();
+    api.getTrafficStatistics.mockRejectedValueOnce(new Error("offline"));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 601, 600));
+    await flush();
+    expect(useTrafficStore.getState().records).toEqual(rows);
+    expect(push.resetTrafficCursor).not.toHaveBeenCalled();
+    api.getTrafficStatistics.mockResolvedValue(statistics(OLD, 601, 600));
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 601, 600));
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+  });
+
+  it.each(["push", "fetchUpdates", "catchUpUpdates", "reloadRecords", "fetchInitialData"] as const)("waits for fresh confirmation after a restored %s arrival withheld by the old cursor", async (source) => {
+    const rows = seed();
+    const first = deferred<TrafficStatistics>();
+    const next = deferred<TrafficStatistics>();
+    api.getTrafficStatistics.mockReturnValueOnce(first.promise).mockReturnValueOnce(next.promise).mockResolvedValue(statistics(OLD, 602, 601));
+    const initialResponse = deferred<TrafficUpdatesResponseCompact>();
+    let initial: Promise<void> | undefined;
+    if (source === "fetchInitialData") {
+      api.getTrafficUpdates.mockReturnValueOnce(initialResponse.promise);
+      initial = useTrafficStore.getState().fetchInitialData();
+    }
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 601, 600));
+    if (source === "fetchInitialData") {
+      initialResponse.resolve({ ...updates(OLD, records("RESTORED", 601, 601)), server_sequence: 602 });
+      await initial;
+    } else if (source === "push") {
+      useTrafficStore.getState().handleTrafficDelta(delta(OLD, records("RESTORED", 601, 601), 602));
+    } else {
+      useTrafficStore.setState({ polling: true });
+      api.getTrafficUpdates.mockResolvedValueOnce({ ...updates(OLD, records("RESTORED", 601, 601)), server_sequence: 602 });
+      await useTrafficStore.getState()[source]();
+    }
+    first.resolve(statistics(OLD, 601, 600));
+    await flush();
+    expect(push.resetTrafficCursor).not.toHaveBeenCalled();
+    expect(useTrafficStore.getState().records).toEqual(rows);
+    next.resolve(statistics(OLD, 602, 601));
+    await flush();
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+    expect(useTrafficStore.getState().serverSequence).toBe(602);
+    // The cursor-free initial replay supplies the same withheld row; no new
+    // unrelated request is needed to make progress after confirmation.
+    useTrafficStore.getState().handleTrafficDelta(delta(OLD, records("RESTORED", 601, 601), 602));
+    await flush();
+    expect(useTrafficStore.getState().records.map((row) => row.id)).toEqual(["REQ-RESTORED-00000601"]);
+    expect(push.resetTrafficCursor).toHaveBeenCalledOnce();
+  });
+
+  it("does not accept a same-UUID confirmation captured before a newer delivered row", async () => {
+    const rows = seed();
+    const confirmation = deferred<TrafficStatistics>();
+    api.getTrafficStatistics.mockReturnValueOnce(confirmation.promise);
+    useTrafficStore.getState().handleTrafficStatistics(statistics(OLD, 601, 600));
+    useTrafficStore.getState().handleTrafficDelta({ ...delta(OLD, records("CURRENT", 2001, 2001), 2002), has_more: true });
+    confirmation.resolve(statistics(OLD, 601, 600));
+    await flush();
+    expect(push.resetTrafficCursor).not.toHaveBeenCalled();
+    expect(useTrafficStore.getState().records.at(-1)?.id).toBe("REQ-CURRENT-00002001");
+    expect(useTrafficStore.getState().lastSequence).toBe(2001);
+    expect(useTrafficStore.getState().records).toHaveLength(rows.length);
+  });
+});

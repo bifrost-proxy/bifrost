@@ -1198,6 +1198,22 @@ async fn clear_body_cache(state: SharedAdminState) -> Response<BoxBody> {
     let mut ws_payload_removed = 0usize;
     let mut errors = Vec::new();
 
+    if let Some(ref traffic_db_store) = state.traffic_db_store {
+        // 仅保留活跃连接记录，避免清理导致进行中的连接记录缺失。
+        let active_connection_ids = state.connection_monitor.active_connection_ids();
+        let before = traffic_db_store.stats().record_count;
+        if let Err(error) = traffic_db_store.clear_with_active_ids(&active_connection_ids) {
+            tracing::error!(%error, "Failed to clear traffic database");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to clear traffic database: {error}"),
+            );
+        }
+        let after = traffic_db_store.stats().record_count;
+        traffic_removed = before.saturating_sub(after);
+        tracing::info!("Cleared traffic db records (active preserved)");
+    }
+
     if let Some(ref body_store) = state.body_store {
         match body_store.write().clear() {
             Ok(count) => {
@@ -1209,16 +1225,6 @@ async fn clear_body_cache(state: SharedAdminState) -> Response<BoxBody> {
                 errors.push(format!("body cache: {}", e));
             }
         }
-    }
-
-    if let Some(ref traffic_db_store) = state.traffic_db_store {
-        // 仅保留活跃连接记录，避免清理导致进行中的连接记录缺失。
-        let active_connection_ids = state.connection_monitor.active_connection_ids();
-        let before = traffic_db_store.stats().record_count;
-        traffic_db_store.clear_with_active_ids(&active_connection_ids);
-        let after = traffic_db_store.stats().record_count;
-        traffic_removed = before.saturating_sub(after);
-        tracing::info!("Cleared traffic db records (active preserved)");
     }
 
     if let Some(ref frame_store) = state.frame_store {
@@ -2398,6 +2404,32 @@ mod coverage_boost {
             parsed.traffic.file_retention_days,
             cfg.traffic.file_retention_days
         );
+    }
+
+    #[tokio::test]
+    async fn failed_cache_clear_preserves_related_data_and_active_connections() {
+        use crate::test_support::TrafficCleanupFixture;
+        let fixture = TrafficCleanupFixture::new();
+        fixture.reject_metadata_writes();
+        let response = clear_body_cache(fixture.harness.state()).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        fixture.assert_preserved();
+
+        fixture.allow_metadata_writes();
+        let response = clear_body_cache(fixture.harness.state()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        fixture.assert_record_data_deleted();
+        assert!(fixture
+            .harness
+            .traffic_db
+            .get_by_id(TrafficCleanupFixture::ACTIVE_ID)
+            .is_some());
+        assert!(fixture
+            .harness
+            .state()
+            .connection_monitor
+            .active_connection_ids()
+            .contains(&TrafficCleanupFixture::ACTIVE_ID.to_string()));
     }
 
     #[tokio::test]

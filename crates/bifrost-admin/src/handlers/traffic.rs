@@ -701,8 +701,10 @@ async fn clear_traffic_by_ids(
         let db_store_clone = db_store.clone();
         let ids_for_db = ids_to_delete.clone();
         let delete_task = tokio::task::spawn_blocking(move || {
-            db_store_clone.delete_by_ids(&ids_for_db);
-            Ok(())
+            db_store_clone
+                .delete_by_ids(&ids_for_db)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         });
         if let Err(e) = join_clear_task(delete_task, "traffic db delete-by-ids").await {
             tracing::error!(error = %e, "[CLEAR_TRAFFIC] Failed to delete traffic records by ids");
@@ -766,6 +768,70 @@ async fn clear_traffic_by_ids(
 mod clear_traffic_request_tests {
     use super::parse_clear_traffic_request_body;
 
+    #[tokio::test]
+    async fn failed_http_clear_preserves_related_data_and_sends_no_push() {
+        use crate::test_support::TrafficCleanupFixture;
+        for by_ids in [false, true] {
+            let fixture = TrafficCleanupFixture::new();
+            fixture.reject_metadata_writes();
+            let manager = fixture.harness.push_manager();
+            let (_, mut receiver) =
+                manager.register_client("failed-clear".to_string(), Default::default());
+            let response = if by_ids {
+                super::clear_traffic_by_ids(
+                    fixture.harness.state(),
+                    vec![
+                        TrafficCleanupFixture::RECORD_ID.to_string(),
+                        TrafficCleanupFixture::ACTIVE_ID.to_string(),
+                    ],
+                    Some(manager.clone()),
+                )
+                .await
+            } else {
+                super::clear_all_traffic(fixture.harness.state(), Some(manager.clone())).await
+            };
+            assert_eq!(response.status(), hyper::StatusCode::INTERNAL_SERVER_ERROR);
+            fixture.assert_preserved();
+            assert!(receiver.try_recv().is_err());
+            assert!(!manager.traffic_statistics_dirty_for_test());
+
+            fixture.allow_metadata_writes();
+            let response = if by_ids {
+                super::clear_traffic_by_ids(
+                    fixture.harness.state(),
+                    vec![
+                        TrafficCleanupFixture::RECORD_ID.to_string(),
+                        TrafficCleanupFixture::ACTIVE_ID.to_string(),
+                    ],
+                    Some(manager.clone()),
+                )
+                .await
+            } else {
+                super::clear_all_traffic(fixture.harness.state(), Some(manager.clone())).await
+            };
+            assert_eq!(response.status(), hyper::StatusCode::OK);
+            fixture.assert_record_data_deleted();
+            assert!(manager.traffic_statistics_dirty_for_test());
+            assert_eq!(
+                fixture
+                    .harness
+                    .traffic_db
+                    .get_by_id(TrafficCleanupFixture::ACTIVE_ID)
+                    .is_some(),
+                by_ids
+            );
+            assert_eq!(
+                fixture
+                    .harness
+                    .state()
+                    .connection_monitor
+                    .active_connection_ids()
+                    .contains(&TrafficCleanupFixture::ACTIVE_ID.to_string()),
+                by_ids
+            );
+        }
+    }
+
     #[test]
     fn malformed_clear_request_is_rejected() {
         let err = parse_clear_traffic_request_body(br#"{"ids":["one""#)
@@ -794,19 +860,18 @@ async fn clear_all_traffic(
     state: SharedAdminState,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
-    state.connection_monitor.clear();
-
     if let Some(ref db_store) = state.traffic_db_store {
         let db_store_clone = db_store.clone();
         let clear_task = tokio::task::spawn_blocking(move || {
-            db_store_clone.clear();
-            Ok(())
+            db_store_clone.clear().map_err(|error| error.to_string())
         });
         if let Err(e) = join_clear_task(clear_task, "traffic db clear-all").await {
             tracing::error!(error = %e, "[CLEAR_TRAFFIC] Failed to clear traffic records");
             return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
         }
     }
+
+    state.connection_monitor.clear();
 
     if let Some(ref body_store) = state.body_store {
         let body_store_clone = body_store.clone();

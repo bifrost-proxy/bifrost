@@ -560,6 +560,11 @@ impl PushManager {
         self.traffic_statistics_dirty.swap(false, Ordering::AcqRel)
     }
 
+    #[cfg(test)]
+    pub(crate) fn traffic_statistics_dirty_for_test(&self) -> bool {
+        self.traffic_statistics_dirty.load(Ordering::Acquire)
+    }
+
     fn send_traffic_statistics_to_client(&self, client: &Arc<PushClient>) -> bool {
         let Some(ref db_store) = self.state.traffic_db_store else {
             return true;
@@ -2578,7 +2583,7 @@ mod tests {
         assert_eq!(statistics_pushes.len(), 1, "a burst must be coalesced");
         assert_eq!(statistics_pushes[0].total_requests, 5);
 
-        store.clear();
+        store.clear().unwrap();
         manager.notify_traffic_statistics_changed();
         let cleared_statistics = timeout(Duration::from_secs(3), async {
             loop {

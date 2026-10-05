@@ -152,6 +152,7 @@ let trafficEpochRequest: {
   historyGeneration: number;
   resumeGeneration: number;
   statisticsSequence: number;
+  latestRecordSequence: number;
   databaseEpoch: string | undefined;
   followup: TrafficStatistics | null;
   promise: Promise<void>;
@@ -169,6 +170,22 @@ const trafficSelectionSyncChannel =
     ? new BroadcastChannel(TRAFFIC_SELECTION_SYNC_CHANNEL)
     : null;
 
+function observeTrafficRecordSequence(epoch: string | undefined, sequence: number) {
+  if (trafficEpochRequest && (!epoch || epoch === trafficEpochRequest.databaseEpoch)) {
+    trafficEpochRequest.latestRecordSequence = Math.max(trafficEpochRequest.latestRecordSequence, sequence);
+  }
+}
+
+function getConsumedTrafficSequence(): number {
+  const state = useTrafficStore.getState();
+  return Math.max(
+    state.lastSequence ?? 0,
+    state.records.at(-1)?.sequence ?? 0,
+    pendingBatch?.newRecords.at(-1)?.sequence ?? 0,
+    pendingBatch?.updatedRecords.at(-1)?.sequence ?? 0,
+  );
+}
+
 function acceptTrafficDatabaseEpoch(epoch?: string, serverSequence?: number): boolean {
   if (!epoch) return true; // Older backends retain sequence rollback fallback.
   const state = useTrafficStore.getState();
@@ -184,7 +201,14 @@ function acceptTrafficDatabaseEpoch(epoch?: string, serverSequence?: number): bo
     useTrafficStore.setState({ trafficDatabaseEpoch: epoch });
     return true;
   }
-  if (state.trafficDatabaseEpoch === epoch) return true;
+  if (state.trafficDatabaseEpoch === epoch) {
+    if (serverSequence === undefined || serverSequence > getConsumedTrafficSequence()) return true;
+    // Restoring a backup preserves its UUID but can roll back persisted rows.
+    // An allocation-only high-water regression is safe while real rows remain.
+    trafficResumeStatisticsPending = true;
+    void state.fetchTrafficStatistics(epoch);
+    return false;
+  }
   // Do not mix rows or retention floors across databases while confirmation is
   // pending. Cursor-free replay retrieves these arrivals after the reset.
   void state.fetchTrafficStatistics(epoch);
@@ -1147,7 +1171,15 @@ export const useTrafficStore = create<TrafficState>()(
 
       handleTrafficPush: (data: TrafficUpdatesData) => {
         const state = get();
-        if (state.paused || !acceptTrafficDatabaseEpoch(data.database_epoch, data.server_sequence)) return;
+        if (state.paused) return;
+        const accepted = acceptTrafficDatabaseEpoch(data.database_epoch, data.server_sequence);
+        // Restored rows withheld by an old cursor still prove that an earlier
+        // confirmation is stale. Keep their freshness separate from merging.
+        observeTrafficRecordSequence(data.database_epoch, Math.max(
+          data.new_records.reduce((sequence, record) => Math.max(sequence, record.sequence), 0),
+          data.updated_records.reduce((sequence, record) => Math.max(sequence, record.sequence), 0),
+        ));
+        if (!accepted) return;
         latestTrafficSequenceSinceResume = Math.max(
           latestTrafficSequenceSinceResume,
           data.server_sequence ?? 0,
@@ -1530,11 +1562,17 @@ export const useTrafficStore = create<TrafficState>()(
         const previousSequence = Math.max(
           state.serverSequence, state.lastSequence ?? 0, pendingBatch?.serverSequence ?? 0,
         );
+        const consumedRecordSequence = getConsumedTrafficSequence();
+        // server_sequence is the next allocation, so it must exceed every row
+        // already consumed. UUIDs survive backup restore; unused allocations
+        // alone (serverSequence) cannot establish that persisted rows rolled back.
+        const sameIdentityRecordRollback = identityMatches &&
+          statistics.server_sequence <= consumedRecordSequence;
         const unprovenLegacyIdentity = !state.trafficDatabaseEpoch &&
           !!statistics.database_epoch && statistics.server_sequence < previousSequence;
         // Sequence watermarks only have meaning within one database. A queued
         // old-epoch delta must not suppress a lower new-epoch statistics push.
-        if (!identityChanged && !unprovenLegacyIdentity && statistics.server_sequence < latestTrafficSequenceSinceResume) return;
+        if (!identityChanged && !unprovenLegacyIdentity && !sameIdentityRecordRollback && statistics.server_sequence < latestTrafficSequenceSinceResume) return;
         if (!identityChanged) {
           set({
             ...snapshotServerStatistics(statistics),
@@ -1549,9 +1587,9 @@ export const useTrafficStore = create<TrafficState>()(
         // Compare only this connection's traffic: empty storage can restart at 1.
         if (
           !state.paused &&
-          (identityChanged || unprovenLegacyIdentity || membershipReconciliationRequired || trafficResumeStatisticsPending)
+          (identityChanged || sameIdentityRecordRollback || unprovenLegacyIdentity || membershipReconciliationRequired || trafficResumeStatisticsPending)
         ) {
-          if (identityChanged || (!identityMatches && statistics.server_sequence < previousSequence)) {
+          if (identityChanged || sameIdentityRecordRollback || (!identityMatches && statistics.server_sequence < previousSequence)) {
             trafficEpochResetSuspected = true;
             const generation = historyBackfillGeneration;
             const resumeGeneration = trafficResumeGeneration;
@@ -1567,15 +1605,23 @@ export const useTrafficStore = create<TrafficState>()(
                     state.trafficDatabaseEpoch !== get().trafficDatabaseEpoch ||
                     generation !== historyBackfillGeneration ||
                     resumeGeneration !== trafficResumeGeneration || get().paused) return;
-                  if ((identityChanged || unprovenLegacyIdentity) && current.database_epoch !== statistics.database_epoch) {
+                  if ((identityChanged || sameIdentityRecordRollback || unprovenLegacyIdentity) && current.database_epoch !== statistics.database_epoch) {
                     // A response naming another database cannot confirm this
                     // candidate. A third identity needs its own fresh read.
                     if (current.database_epoch) get().handleTrafficStatistics(current);
                     return;
                   }
-                  if (!identityChanged && !unprovenLegacyIdentity && current.server_sequence < latestTrafficSequenceSinceResume) return;
-                  if (!identityChanged && ((!!state.trafficDatabaseEpoch && current.database_epoch === state.trafficDatabaseEpoch) ||
-                    current.server_sequence >= previousSequence)) {
+                  if (sameIdentityRecordRollback) {
+                    // A confirmation captured before newer delivered rows is
+                    // stale, even if those rows have not reached the render batch.
+                    if (current.server_sequence <= trafficEpochRequest.latestRecordSequence) return;
+                  } else if (!identityChanged && !unprovenLegacyIdentity && current.server_sequence < latestTrafficSequenceSinceResume) return;
+                  const confirmedSameIdentity = !!state.trafficDatabaseEpoch &&
+                    current.database_epoch === state.trafficDatabaseEpoch;
+                  const rollbackDisproved = confirmedSameIdentity
+                    ? current.server_sequence > consumedRecordSequence
+                    : current.server_sequence >= previousSequence;
+                  if (!identityChanged && rollbackDisproved) {
                     get().handleTrafficStatistics(current);
                     return;
                   }
@@ -1648,6 +1694,7 @@ export const useTrafficStore = create<TrafficState>()(
                 historyGeneration: generation,
                 resumeGeneration,
                 statisticsSequence: statistics.server_sequence,
+                latestRecordSequence: 0,
                 databaseEpoch: statistics.database_epoch,
                 followup: null,
                 promise: request,
@@ -1678,6 +1725,7 @@ export const useTrafficStore = create<TrafficState>()(
         }
 
         const generation = ++historyBackfillGeneration;
+        const resumeGeneration = trafficResumeGeneration;
         membershipReconciliationRequired = false;
         membershipFollowupRequired = false;
         trafficResumeStatisticsPending = false;
@@ -1689,6 +1737,14 @@ export const useTrafficStore = create<TrafficState>()(
           };
           const response = await api.getTrafficUpdates(filter);
           if (generation !== historyBackfillGeneration) return;
+          if (resumeGeneration !== trafficResumeGeneration) {
+            set({ loading: false });
+            return;
+          }
+          observeTrafficRecordSequence(response.database_epoch, Math.max(
+            response.new_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
+            response.updated_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
+          ));
           if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) {
             set({ loading: false });
             return;
@@ -1734,7 +1790,10 @@ export const useTrafficStore = create<TrafficState>()(
           await get().fetchTrafficStatistics();
         } catch (e) {
           if (generation === historyBackfillGeneration) {
-            set({ error: (e as Error).message, loading: false });
+            set({
+              loading: false,
+              ...(resumeGeneration === trafficResumeGeneration ? { error: (e as Error).message } : {}),
+            });
           }
         }
       },
@@ -1882,6 +1941,7 @@ export const useTrafficStore = create<TrafficState>()(
         const state = get();
         if (state.paused || !state.polling || state.catchingUp) return;
         const generation = historyBackfillGeneration;
+        const resumeGeneration = trafficResumeGeneration;
         let nextDelay = POLL_INTERVAL;
         try {
           const pendingIdsArray = Array.from(state.pendingIds);
@@ -1892,7 +1952,12 @@ export const useTrafficStore = create<TrafficState>()(
             limit: UPDATE_BATCH_LIMIT,
           });
           if (generation !== historyBackfillGeneration ||
-            !acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
+            resumeGeneration !== trafficResumeGeneration) return;
+          observeTrafficRecordSequence(response.database_epoch, Math.max(
+            response.new_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
+            response.updated_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
+          ));
+          if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
 
           get().handleTrafficDelta({
             database_epoch: response.database_epoch,
@@ -1924,6 +1989,7 @@ export const useTrafficStore = create<TrafficState>()(
         const state = get();
         if (state.paused || !state.polling || state.catchingUp) return;
         const generation = historyBackfillGeneration;
+        const resumeGeneration = trafficResumeGeneration;
 
         set({ catchingUp: true });
         try {
@@ -1936,7 +2002,12 @@ export const useTrafficStore = create<TrafficState>()(
           };
           const response = await api.getTrafficUpdates(filter);
           if (generation !== historyBackfillGeneration ||
-            !acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
+            resumeGeneration !== trafficResumeGeneration) return;
+          observeTrafficRecordSequence(response.database_epoch, Math.max(
+            response.new_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
+            response.updated_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
+          ));
+          if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
 
           set((prev) => ({
             serverTotal: response.server_total,
@@ -1968,13 +2039,19 @@ export const useTrafficStore = create<TrafficState>()(
 
       reloadRecords: async () => {
         const generation = historyBackfillGeneration;
+        const resumeGeneration = trafficResumeGeneration;
         try {
           const filter: TrafficUpdatesFilter = {
             limit: INITIAL_WINDOW_LIMIT,
           };
           const response = await api.getTrafficUpdates(filter);
           if (generation !== historyBackfillGeneration ||
-            !acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
+            resumeGeneration !== trafficResumeGeneration) return;
+          observeTrafficRecordSequence(response.database_epoch, Math.max(
+            response.new_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
+            response.updated_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
+          ));
+          if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
           const convertedRecords = response.new_records.map(compactTrafficSummaryToTrafficSummary);
           const preprocessedRecords = preprocessTrafficRecords(convertedRecords);
 

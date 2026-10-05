@@ -1540,16 +1540,13 @@ impl TrafficDbStore {
             .optional();
     }
 
-    pub fn clear(&self) {
-        self.clear_with_active_ids(&[]);
+    pub fn clear(&self) -> rusqlite::Result<()> {
+        self.clear_with_active_ids(&[])
     }
 
-    pub fn clear_with_active_ids(&self, active_connection_ids: &[String]) {
+    pub fn clear_with_active_ids(&self, active_connection_ids: &[String]) -> rusqlite::Result<()> {
         let conn = self.write_conn.lock();
-        if let Err(error) = self.preserve_sequence_high_water(&conn) {
-            tracing::error!(%error, "[TRAFFIC_DB] Failed to preserve sequence before clear");
-            return;
-        }
+        self.preserve_sequence_high_water(&conn)?;
 
         let active_ids_set: std::collections::HashSet<&str> =
             active_connection_ids.iter().map(|s| s.as_str()).collect();
@@ -1568,13 +1565,9 @@ impl TrafficDbStore {
             "[TRAFFIC_DB] Clearing traffic records, preserving active"
         );
 
+        let transaction = conn.unchecked_transaction()?;
         if active_connection_ids.is_empty() {
-            if let Err(e) = conn.execute("DELETE FROM traffic_records", []) {
-                tracing::error!(error = %e, "[TRAFFIC_DB] Failed to clear traffic records");
-            } else {
-                self.record_count.store(0, Ordering::Relaxed);
-                *self.traffic_statistics.write() = TrafficStatistics::default();
-            }
+            transaction.execute("DELETE FROM traffic_records", [])?;
         } else {
             let placeholders: String = active_connection_ids
                 .iter()
@@ -1587,17 +1580,20 @@ impl TrafficDbStore {
                 placeholders
             );
 
-            if let Err(e) = conn.execute(
+            transaction.execute(
                 &sql,
                 rusqlite::params_from_iter(active_connection_ids.iter()),
-            ) {
-                tracing::error!(error = %e, "[TRAFFIC_DB] Failed to clear traffic records");
-            } else {
-                let statistics = TrafficStatistics::load(&conn);
-                self.record_count
-                    .store(statistics.total_requests(), Ordering::Relaxed);
-                *self.traffic_statistics.write() = statistics;
-            }
+            )?;
+        }
+        transaction.commit()?;
+        if active_connection_ids.is_empty() {
+            self.record_count.store(0, Ordering::Relaxed);
+            *self.traffic_statistics.write() = TrafficStatistics::default();
+        } else {
+            let statistics = TrafficStatistics::load(&conn);
+            self.record_count
+                .store(statistics.total_requests(), Ordering::Relaxed);
+            *self.traffic_statistics.write() = statistics;
         }
 
         let mut cache = self.recent_cache.write();
@@ -1630,6 +1626,7 @@ impl TrafficDbStore {
         }
 
         tracing::info!("[TRAFFIC_DB] Traffic records cleared (active preserved)");
+        Ok(())
     }
 
     fn compact_with_conn(conn: &Connection, full_vacuum: bool) {
@@ -1650,18 +1647,19 @@ impl TrafficDbStore {
         Self::compact_with_conn(&conn, full_vacuum);
     }
 
-    pub fn delete_by_ids(&self, ids: &[String]) {
+    pub fn delete_by_ids(&self, ids: &[String]) -> rusqlite::Result<usize> {
         if ids.is_empty() {
-            return;
+            return Ok(0);
         }
 
         let conn = self.write_conn.lock();
-        let deleted = self.delete_by_ids_with_conn(&conn, ids);
+        let deleted = self.delete_by_ids_with_conn(&conn, ids)?;
         self.decrease_record_count(deleted);
         tracing::info!(
             count = deleted,
             "[TRAFFIC_DB] Deleted traffic records by ids"
         );
+        Ok(deleted)
     }
 
     fn cleanup_trigger_threshold(max: usize) -> usize {
@@ -1902,37 +1900,44 @@ impl TrafficDbStore {
         }
     }
 
-    fn delete_by_ids_with_conn(&self, conn: &Connection, ids: &[String]) -> usize {
+    fn delete_by_ids_with_conn(
+        &self,
+        conn: &Connection,
+        ids: &[String],
+    ) -> rusqlite::Result<usize> {
         if ids.is_empty() {
-            return 0;
+            return Ok(0);
         }
-        if let Err(error) = self.preserve_sequence_high_water(conn) {
-            tracing::error!(%error, "[TRAFFIC_DB] Failed to preserve sequence before deletion");
-            return 0;
-        }
+        self.preserve_sequence_high_water(conn)?;
+        // A failure in a later chunk must leave every row, statistic and cache
+        // entry intact, so callers can retain all associated side-store data.
+        let transaction = conn.unchecked_transaction()?;
         let mut deleted = 0usize;
+        let mut removed_dimensions = Vec::new();
         for chunk in ids.chunks(500) {
             let mut seen = std::collections::HashSet::with_capacity(chunk.len());
             let unique_ids: Vec<&String> =
                 chunk.iter().filter(|id| seen.insert(id.as_str())).collect();
             let dimensions: Vec<TrafficStatisticsDimensions> = unique_ids
                 .iter()
-                .filter_map(|id| TrafficStatisticsDimensions::load_by_id(conn, id))
+                .filter_map(|id| TrafficStatisticsDimensions::load_by_id(&transaction, id))
                 .collect();
             let placeholders: String = unique_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!("DELETE FROM traffic_records WHERE id IN ({})", placeholders);
-            if let Ok(count) = conn.execute(&sql, rusqlite::params_from_iter(unique_ids)) {
-                deleted += count;
-                if count > 0 {
-                    let mut statistics = self.traffic_statistics.write();
-                    for dimensions in &dimensions {
-                        statistics.remove(dimensions);
-                    }
-                }
+            let count = transaction.execute(&sql, rusqlite::params_from_iter(unique_ids))?;
+            deleted += count;
+            if count > 0 {
+                removed_dimensions.extend(dimensions);
             }
         }
+        transaction.commit()?;
+        let mut statistics = self.traffic_statistics.write();
+        for dimensions in &removed_dimensions {
+            statistics.remove(dimensions);
+        }
+        drop(statistics);
         self.remove_from_cache(ids);
-        deleted
+        Ok(deleted)
     }
 
     fn delete_oldest_by_limit(&self, conn: &Connection, limit: usize) -> usize {
@@ -1958,7 +1963,12 @@ impl TrafficDbStore {
             if ids.is_empty() {
                 break;
             }
-            let count = self.delete_by_ids_with_conn(conn, &ids);
+            let count = self
+                .delete_by_ids_with_conn(conn, &ids)
+                .unwrap_or_else(|error| {
+                    tracing::error!(%error, "[TRAFFIC_DB] Failed to delete oldest records");
+                    0
+                });
             if count == 0 {
                 break;
             }
@@ -1990,7 +2000,12 @@ impl TrafficDbStore {
             if ids.is_empty() {
                 break;
             }
-            let count = self.delete_by_ids_with_conn(conn, &ids);
+            let count = self
+                .delete_by_ids_with_conn(conn, &ids)
+                .unwrap_or_else(|error| {
+                    tracing::error!(%error, "[TRAFFIC_DB] Failed to delete expired records");
+                    0
+                });
             if count == 0 {
                 break;
             }
@@ -2264,9 +2279,13 @@ mod tests {
             let epoch = store.database_epoch().to_string();
             let next_sequence = store.current_sequence();
             match mode {
-                "tail" => store.delete_by_ids(&["record-2".to_string()]),
-                "clear" => store.clear(),
-                "active" => store.clear_with_active_ids(&["record-0".to_string()]),
+                "tail" => {
+                    store.delete_by_ids(&["record-2".to_string()]).unwrap();
+                }
+                "clear" => store.clear().unwrap(),
+                "active" => store
+                    .clear_with_active_ids(&["record-0".to_string()])
+                    .unwrap(),
                 "expired" => assert_eq!(
                     store.delete_expired_by_cutoff(&store.write_conn.lock(), i64::MAX as u64),
                     3
@@ -2286,7 +2305,7 @@ mod tests {
                 next_sequence,
                 "{mode}"
             );
-            store.clear();
+            store.clear().unwrap();
             drop(store);
             let reopened = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
             assert_eq!(reopened.database_epoch(), epoch, "{mode}");
@@ -2314,6 +2333,79 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_by_ids_rolls_back_all_chunks_before_updating_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrafficDbStore::new(dir.path().to_path_buf(), 2_000, 0, None).unwrap();
+        let ids: Vec<String> = (0..501).map(|index| format!("chunk-{index}")).collect();
+        store.record_batch(ids.iter().map(|id| epoch_test_record(id)).collect());
+        let before = store.traffic_statistics();
+        let cached: Vec<String> = store
+            .recent_cache
+            .read()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        store
+            .write_conn
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER reject_last_chunk BEFORE DELETE ON traffic_records
+             WHEN OLD.id = 'chunk-500'
+             BEGIN SELECT RAISE(ABORT, 'delete unavailable'); END;",
+            )
+            .unwrap();
+
+        assert!(store.delete_by_ids(&ids).is_err());
+        assert_eq!(store.count(), 501);
+        assert_eq!(store.all_ids_set().len(), 501);
+        assert_eq!(store.traffic_statistics(), before);
+        assert_eq!(
+            store
+                .recent_cache
+                .read()
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
+            cached
+        );
+        store
+            .write_conn
+            .lock()
+            .execute_batch("DROP TRIGGER reject_last_chunk")
+            .unwrap();
+        assert_eq!(store.delete_by_ids(&ids).unwrap(), 501);
+        assert_eq!(store.count(), 0);
+        assert_eq!(store.traffic_statistics().total_requests, 0);
+        assert_eq!(store.recent_cache_stats().len, 0);
+        assert_eq!(store.delete_by_ids(&[]).unwrap(), 0);
+        assert_eq!(store.delete_by_ids(&ids).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_clear_sql_failure_preserves_rows_statistics_and_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        store.record(epoch_test_record("must-survive"));
+        store.record(epoch_test_record("fails-later"));
+        let before = store.traffic_statistics();
+        store
+            .write_conn
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER reject_clear BEFORE DELETE ON traffic_records
+             WHEN OLD.id = 'fails-later'
+             BEGIN SELECT RAISE(FAIL, 'delete unavailable'); END;",
+            )
+            .unwrap();
+        assert!(store.clear().is_err());
+        assert!(store.clear_with_active_ids(&["other".to_string()]).is_err());
+        assert_eq!(store.count(), 2);
+        assert_eq!(store.traffic_statistics(), before);
+        assert_eq!(store.recent_cache_stats().len, 2);
+        assert!(store.get_by_id("must-survive").is_some());
+    }
+
+    #[test]
     fn test_database_epoch_high_water_failure_preserves_records_and_stops_cleanup() {
         let dir = tempfile::tempdir().unwrap();
         let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
@@ -2328,9 +2420,9 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'metadata unavailable'); END;",
             )
             .unwrap();
-        store.clear();
-        store.clear_with_active_ids(&["other".to_string()]);
-        store.delete_by_ids(&["must-survive".to_string()]);
+        assert!(store.clear().is_err());
+        assert!(store.clear_with_active_ids(&["other".to_string()]).is_err());
+        assert!(store.delete_by_ids(&["must-survive".to_string()]).is_err());
         {
             let conn = store.write_conn.lock();
             assert_eq!(store.delete_expired_by_cutoff(&conn, i64::MAX as u64), 0);
@@ -2897,7 +2989,9 @@ mod tests {
             assert_eq!(snapshot.account_names.get("eden"), Some(&1));
             assert_eq!(snapshot.domains.get("one.test"), Some(&1));
 
-            store.delete_by_ids(&["stats-2".to_string(), "stats-2".to_string()]);
+            store
+                .delete_by_ids(&["stats-2".to_string(), "stats-2".to_string()])
+                .unwrap();
             let snapshot = store.traffic_statistics();
             assert_eq!(snapshot.total_requests, 1);
             assert_eq!(snapshot.applications.get("Codex"), Some(&1));
@@ -2911,7 +3005,7 @@ mod tests {
         assert_eq!(snapshot.applications.get("Codex"), Some(&1));
         assert_eq!(snapshot.account_names.get("eden"), Some(&1));
 
-        reopened.clear();
+        reopened.clear().unwrap();
         let snapshot = reopened.traffic_statistics();
         assert_eq!(snapshot.total_requests, 0);
         assert!(snapshot.applications.is_empty());
@@ -3035,7 +3129,7 @@ mod tests {
         assert_eq!(store.count(), 1);
         assert_eq!(store.oldest_sequence(), Some(1));
 
-        store.clear_with_active_ids(&[]);
+        store.clear_with_active_ids(&[]).unwrap();
         assert_eq!(store.count(), 0);
         assert_eq!(store.oldest_sequence(), None);
 
@@ -3188,7 +3282,7 @@ mod tests {
         assert_eq!(reloaded.bytes_sent, 41);
         assert_eq!(reloaded.bytes_received, 79);
 
-        store.delete_by_ids(&["metric-1".to_string()]);
+        store.delete_by_ids(&["metric-1".to_string()]).unwrap();
         assert!(store.aggregate_app_metrics().is_empty());
         assert!(store.aggregate_host_metrics().is_empty());
 
@@ -3215,7 +3309,7 @@ mod tests {
         assert_eq!(store.count(), 2);
 
         let active_ids = vec!["active-1".to_string()];
-        store.clear_with_active_ids(&active_ids);
+        store.clear_with_active_ids(&active_ids).unwrap();
         assert_eq!(store.count(), 1);
         assert!(store.get_by_id("active-1").is_some());
 

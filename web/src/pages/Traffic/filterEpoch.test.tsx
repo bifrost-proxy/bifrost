@@ -211,7 +211,12 @@ describe("Traffic filters across confirmed database epochs", () => {
     vi.unstubAllGlobals();
   });
 
-  it.each([601, 10_001, 12_001])("rescans unchanged filters beyond a replacement's latest 500 rows at sequence %i", async (sequence) => {
+  it.each([
+    { sequence: 601, epoch: "new-database" },
+    { sequence: 10_001, epoch: "new-database" },
+    { sequence: 12_001, epoch: "new-database" },
+    { sequence: 601, epoch: "old-database" },
+  ])("rescans unchanged filters beyond latest 500 rows at sequence $sequence and epoch $epoch", async ({ sequence, epoch }) => {
     const tailResponse = deferredPage();
     const latestTail = Array.from({ length: 500 }, (_, index) =>
       ({ ...record(101 + index, false), id: `REQ-NEWPROCESS-${101 + index}` }),
@@ -235,7 +240,7 @@ describe("Traffic filters across confirmed database epochs", () => {
     expect(displayedIds()).toEqual(["REQ-OLDPROCESS-10000"]);
 
     const replacement = {
-      database_epoch: "new-database",
+      database_epoch: epoch,
       total_requests: 600,
       server_sequence: sequence,
       client_ips: {},
