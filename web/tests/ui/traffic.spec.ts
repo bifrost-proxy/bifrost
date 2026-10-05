@@ -387,7 +387,18 @@ const startTemporaryProxy = async (baseApiUrl: string) => {
       "content-type": "application/json",
       [csrf.header_name || "X-Bifrost-CSRF"]: csrf.csrf_token,
     },
-    body: JSON.stringify({ port: 0, host: "127.0.0.1", rule_refs: [] }),
+    body: JSON.stringify({
+      port: 0,
+      host: "127.0.0.1",
+      // A temporary listener requires a rule binding. Local upstream requests
+      // still pass through unchanged because this fixture host never matches.
+      rule_refs: [
+        {
+          type: "inline_rule",
+          content: "unused-port-fixture.test status://204",
+        },
+      ],
+    }),
   });
   const body = await response.text();
   expect(

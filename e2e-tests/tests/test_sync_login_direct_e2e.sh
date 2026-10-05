@@ -237,24 +237,33 @@ printf '%s\n' \
     >"$BIFROST_DATA_DIR/sync-state.json"
 admin_start_bifrost || exit 1
 LOGIN_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token ci-token-default 2>&1)"
-assert_body_contains "Login successful" "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should save token" || exit 1
+# Saving a token does not verify it with the provider. This fake token must not
+# make the CLI or status report successful remote authorization.
+assert_body_contains "Login token saved." "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should save token without claiming authorization" || exit 1
 DEFAULT_STATUS="$(admin_get "/api/sync/status")"
 assert_body_contains "\"remote_base_url\":\"${DEFAULT_REMOTE_BASE_URL}\"" "$DEFAULT_STATUS" "CLI token-only login should keep built-in default URL" || exit 1
+assert_json_field '.has_session' 'true' "$DEFAULT_STATUS" "token-only login should retain the saved session" || exit 1
+assert_json_field '.authorized' 'false' "$DEFAULT_STATUS" "a saved fake token should not imply remote authorization" || exit 1
+assert_json_field '.providers[] | select(.id == "bytedance_internal") | .connected' 'true' "$DEFAULT_STATUS" "default provider should retain its saved connection" || exit 1
+assert_json_field '.providers[] | select(.id == "bytedance_internal") | .authorized' 'false' "$DEFAULT_STATUS" "default provider should not treat a saved fake token as authorized" || exit 1
+DEFAULT_STATE="$(cat "$BIFROST_DATA_DIR/sync-state.json")"
+assert_json_field '.provider_sessions.bytedance_internal.token' 'ci-token-default' "$DEFAULT_STATE" "token-only login should persist the provider token" || exit 1
+assert_json_field '.provider_sessions.bytedance_internal.remote_base_url' "$DEFAULT_REMOTE_BASE_URL" "$DEFAULT_STATE" "saved provider token should use the built-in default URL" || exit 1
 if jq -e '.provider_sync.bytedance_internal.last_error == null' \
     "$BIFROST_DATA_DIR/sync-state.json" >/dev/null; then
-    _log_pass "successful login clears the provider's persisted stale error"
+    _log_pass "saving a login token clears the provider's persisted stale error"
 else
     _log_fail \
-        "successful login clears the provider's persisted stale error" \
+        "saving a login token clears the provider's persisted stale error" \
         "null" \
         "$(jq -r '.provider_sync.bytedance_internal.last_error' "$BIFROST_DATA_DIR/sync-state.json")"
     exit 1
 fi
 if [[ "$DEFAULT_STATUS" == *"stale login error"* ]]; then
-    _log_fail "successful login response must not expose the stale error" "stale error absent" "$DEFAULT_STATUS"
+    _log_fail "saved login response must not expose the stale error" "stale error absent" "$DEFAULT_STATUS"
     exit 1
 else
-    _log_pass "successful login response no longer exposes the stale error"
+    _log_pass "saved login response no longer exposes the stale error"
 fi
 
 log "PASS"

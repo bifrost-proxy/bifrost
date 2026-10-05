@@ -1238,7 +1238,7 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
       })
       .toBe("syncing");
 
-    const unreachableResponse = await request.put(`${apiBase}/sync/config`, {
+    const redirectedResponse = await request.put(`${apiBase}/sync/config`, {
       data: {
         enabled: true,
         auto_sync: true,
@@ -1248,34 +1248,66 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
       },
     });
 
-    expect(unreachableResponse.ok()).toBeTruthy();
+    expect(redirectedResponse.ok()).toBeTruthy();
 
-    // A config URL change does not disconnect independently saved providers.
-    // Wait for the failed probe before clearing the still-connected mock session.
-    await expect
-      .poll(async () => {
-        const status = await readSyncStatus();
-        return status.providers?.find(
-          (provider) => provider.id === "bifrost_cloud",
-        )?.reason;
-      })
-      .toBe("unreachable");
-    const retainedStatus = await readSyncStatus();
-    expect(retainedStatus).toMatchObject({
+    // A config URL change does not affect the independently saved provider.
+    await expect.poll(readSyncStatus).toMatchObject({
       remote_base_url: "http://127.0.0.1:9",
+      has_session: true,
       reason: "ready",
       reachable: true,
       authorized: true,
       syncing: false,
-    });
-    expect(retainedStatus.providers).toEqual(
-      expect.arrayContaining([
+      providers: expect.arrayContaining([
         expect.objectContaining({
           id: "bifrost_cloud",
           remote_base_url: remoteServer.baseUrl,
           connected: true,
+          reachable: true,
+          authorized: true,
+          reason: "ready",
         }),
       ]),
+    });
+    await expect(page.getByTestId("statusbar-sync")).toHaveAttribute(
+      "data-sync-state",
+      "ready",
+    );
+
+    // Probe the saved provider's actual URL, then fail it without logging out.
+    const restoreResponse = await request.put(`${apiBase}/sync/config`, {
+      data: { remote_base_url: remoteServer.baseUrl },
+    });
+    expect(restoreResponse.ok()).toBeTruthy();
+    await expect.poll(readSyncStatus).toMatchObject({
+      remote_base_url: remoteServer.baseUrl,
+      has_session: true,
+      reachable: true,
+      authorized: true,
+      reason: "ready",
+      syncing: false,
+    });
+    remoteServer.setAvailable(false);
+
+    await expect.poll(readSyncStatus).toMatchObject({
+      remote_base_url: remoteServer.baseUrl,
+      has_session: true,
+      reachable: false,
+      reason: "unreachable",
+      syncing: false,
+      providers: expect.arrayContaining([
+        expect.objectContaining({
+          id: "bifrost_cloud",
+          remote_base_url: remoteServer.baseUrl,
+          connected: true,
+          reachable: false,
+          reason: "unreachable",
+        }),
+      ]),
+    });
+    await expect(page.getByTestId("statusbar-sync")).toHaveAttribute(
+      "data-sync-state",
+      "unreachable",
     );
 
     const logoutResponse = await request.post(`${apiBase}/sync/logout`);
@@ -3569,7 +3601,8 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       }, { timeout: 10000 })
       .toMatchObject({
         content: expect.stringContaining("127.0.0.1:3150"),
-        enabled: true,
+        // Pulling remote content preserves the user's local enabled state.
+        enabled: false,
       });
 
     await page.waitForTimeout(1500);

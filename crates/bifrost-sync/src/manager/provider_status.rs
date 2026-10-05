@@ -334,8 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn current_provider_outage_and_recovery_preserve_saved_session() {
-        // A dedicated server really shuts down when dropped instead of returning to the pool.
-        let server = MockServer::builder().start().await;
+        let server = MockServer::start().await;
         let (_temp, manager) = manager_for_remote(&server.uri()).await;
         for probe_status in [200, 503, 200] {
             mock_health(&server, probe_status, 200).await;
@@ -359,22 +358,44 @@ mod tests {
             assert!(status.has_session);
             assert_eq!(manager.session_token().as_deref(), Some("test-token"));
         }
-        let address = *server.address();
-        drop(server);
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while let Ok(stream) = tokio::net::TcpStream::connect(address).await {
-                drop(stream);
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("dedicated mock listener should close after shutdown");
+        // Close the connection without an HTTP response. Polling for a dropped server's
+        // port to refuse connections depends on platform-specific TCP retry timing.
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/check"))
+            .respond_with_err(|_: &wiremock::Request| {
+                std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "provider transport down",
+                )
+            })
+            .expect(1..)
+            .mount(&server)
+            .await;
         manager.tick().await.unwrap();
+        server.verify().await;
         let status = manager.status().await;
+        let current = provider(&status, "bifrost_cloud");
+        assert_eq!(current.reason, SyncReason::Unreachable);
+        assert!(!current.reachable);
+        assert!(!current.authorized);
+        assert!(current.connected);
         assert_eq!(status.reason, SyncReason::Unreachable);
         assert!(!status.reachable);
         assert!(!status.authorized);
-        assert!(provider(&status, "bifrost_cloud").connected);
+        assert!(status.has_session);
+        assert!(!status.first_run_prompt_required);
+        assert_eq!(manager.session_token().as_deref(), Some("test-token"));
+
+        mock_health(&server, 200, 200).await;
+        manager.tick().await.unwrap();
+        let status = manager.status().await;
+        let current = provider(&status, "bifrost_cloud");
+        assert_eq!(current.reason, SyncReason::Ready);
+        assert!(current.connected && current.reachable && current.authorized);
+        assert_eq!(status.reason, SyncReason::Ready);
+        assert!(status.reachable && status.authorized && status.has_session);
+        assert!(!status.first_run_prompt_required);
         assert_eq!(manager.session_token().as_deref(), Some("test-token"));
     }
 

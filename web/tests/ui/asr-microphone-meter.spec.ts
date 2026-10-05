@@ -900,7 +900,12 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
     .click();
   const createDialog = page.getByRole("dialog", { name: "New Directory Task" });
   await expect(createDialog).toBeVisible();
-  await createDialog.getByTestId("asr-runtime-strategy-select").click({ force: true });
+  const runtimeSelect = createDialog.getByRole("combobox", {
+    name: "Runtime",
+    exact: true,
+  });
+  await runtimeSelect.click();
+  await expect(runtimeSelect).toHaveAttribute("aria-expanded", "true");
   const runtimeDropdown = page.locator(".ant-select-dropdown:visible");
   await expect(runtimeDropdown.getByText("Reuse / file")).toBeVisible();
   await expect(runtimeDropdown.getByText("Default for most offline tasks.")).toBeVisible();
@@ -913,6 +918,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(runtimeDropdown.getByText("Compare")).toBeVisible();
   await expect(runtimeDropdown.getByText("Diagnostic mode.")).toBeVisible();
   await page.keyboard.press("Escape");
+  await expect(runtimeSelect).toHaveAttribute("aria-expanded", "false");
   await expect(runtimeDropdown).toBeHidden();
   await createDialog.getByPlaceholder("Meeting audio watcher").fill("Recordings");
   await createDialog.getByPlaceholder("~/Recordings").fill("/tmp/asr-audio");
