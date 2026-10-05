@@ -1650,6 +1650,8 @@ mod tests {
     async fn legacy_mode_rejects_isolated_controls_without_starting_worker() {
         let _jobs_guard = crate::worker_runtime::worker_jobs_test_guard_async().await;
         let _mode_guard = MODE_TEST_LOCK.lock().await;
+        // Starting in legacy mode and stopping the controller both clear all leases.
+        let _lease_guard = LEASE_TEST_LOCK.lock().await;
         let env_name = crate::worker_runtime::execution_mode_env(WorkerKind::ImGateway);
         let _env_guard = TestEnvGuard::set(env_name, "legacy");
         *controller_endpoint().write() = None;
