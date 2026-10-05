@@ -507,19 +507,35 @@ test("Network 超级性能模式覆盖整个工作区并可跳转高亮 Performa
     traffic: { super_performance_mode: boolean };
   };
   const original = perf.traffic.super_performance_mode;
+  let releasePerformanceRequest = () => {};
 
   try {
     await request.put(`${apiBase}/config/performance`, {
       data: { super_performance_mode: true },
     });
 
-    let releasePerformanceRequest!: () => void;
     const performanceRequestGate = new Promise<void>((resolve) => {
       releasePerformanceRequest = resolve;
     });
     await page.route("**/_bifrost/api/config/performance", async (route) => {
       await performanceRequestGate;
       await route.continue();
+    });
+    // Initial performance state also arrives through push. Hold both transports
+    // so this assertion exercises unknown state, not a race with a valid snapshot.
+    await page.routeWebSocket(/\/api\/push/, (ws) => {
+      const server = ws.connectToServer();
+      ws.onMessage((message) => server.send(message));
+      server.onMessage(async (message) => {
+        const parsed = JSON.parse(String(message));
+        if (
+          parsed.type === "settings_update" &&
+          parsed.data?.scope === "performance_config"
+        ) {
+          await performanceRequestGate;
+        }
+        ws.send(message);
+      });
     });
 
     const navigation = openPage(page, "traffic");
@@ -608,6 +624,7 @@ test("Network 超级性能模式覆盖整个工作区并可跳转高亮 Performa
       )
       .not.toBe("none");
   } finally {
+    releasePerformanceRequest();
     await request.put(`${apiBase}/config/performance`, {
       data: { super_performance_mode: original },
     });

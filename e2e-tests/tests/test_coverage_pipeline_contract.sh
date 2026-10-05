@@ -42,6 +42,7 @@ bash scripts/ci/check-shell-syntax.sh
 PYTHONDONTWRITEBYTECODE=1 \
   python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
 
+# Use standard find/grep so these guards do not silently skip on hosts without rg.
 # A production release never permits Feishu loopback base URLs. Any shell E2E
 # that opts into the debug-only fake OpenAPI must exit before starting services
 # when the shared CI release binary is injected. This prevents CI from sending
@@ -54,7 +55,7 @@ while IFS= read -r feishu_loopback_test; do
   grep -Fq 'CARGO_NET_OFFLINE' "$feishu_loopback_test"
   grep -Fq 'HTTP_PROXY=http://127.0.0.1:9' "$feishu_loopback_test"
   grep -Fq 'NO_PROXY=127.0.0.1,localhost' "$feishu_loopback_test"
-done < <(rg -l 'BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1' e2e-tests/tests --glob 'test_*.sh')
+done < <(find e2e-tests/tests -type f -name 'test_*.sh' -exec grep -l 'BIFROST_E2E_ALLOW_FEISHU_LOOPBACK_BASE_URL=1' {} +)
 
 # Weixin uses the same production boundary: only debug binaries may opt into a
 # loopback iLink endpoint. Keep release-based shell CI from contacting the
@@ -66,7 +67,7 @@ while IFS= read -r weixin_loopback_test; do
     "$weixin_loopback_test"
   grep -Fq 'HTTP_PROXY=http://127.0.0.1:9' "$weixin_loopback_test"
   grep -Fq 'NO_PROXY=127.0.0.1,localhost' "$weixin_loopback_test"
-done < <(rg -l 'BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL=1' e2e-tests/tests --glob 'test_*.sh')
+done < <(find e2e-tests/tests -type f -name 'test_*.sh' -exec grep -l 'BIFROST_E2E_ALLOW_WEIXIN_LOOPBACK_BASE_URL=1' {} +)
 
 # The shared shell suite intentionally injects a production release binary,
 # which must keep skipping debug-only loopback iLink traffic. Linux CI must
@@ -195,10 +196,23 @@ grep -Fq 'schema_version' "$e2e_summary"
 python3 scripts/ci/check-e2e-capabilities.py
 grep -Fq 'Proxy E2E capability contract' "$ci_workflow"
 grep -Fq 'Layered E2E Coverage' "$layered_workflow"
-if grep -Fq 'pull_request:' "$layered_workflow"; then
-  echo "full layered coverage must not run for every pull request" >&2
-  exit 1
-fi
+# Full coverage stays off ordinary PRs; changes to this workflow verify itself.
+python3 - "$layered_workflow" <<'PY_SCOPE'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r"(?ms)^  pull_request:\n(.*?)(?=^  \S|^\S|\Z)", workflow)
+assert match, "layered workflow changes must exercise the full audit"
+assert match.group(1).strip().splitlines() == [
+    "branches: [main]",
+    "    paths:",
+    '      - ".github/workflows/coverage-e2e.yml"',
+], "full layered coverage must not run for every pull request"
+PY_SCOPE
+grep -Fq 'sudo apt-get install --yes --no-install-recommends ffmpeg ripgrep' "$layered_workflow"
+grep -Fq 'group: layered-e2e-coverage-${{ github.ref }}' "$layered_workflow"
 grep -Fq 'cron: "30 18 * * 0"' "$layered_workflow"
 grep -Fq 'workflow_dispatch:' "$layered_workflow"
 grep -Fq 'bash scripts/ci/coverage-all.sh --with-e2e' "$layered_workflow"
@@ -361,6 +375,19 @@ if grep -Fq 'Some E2E suites had failures, but coverage data was still collected
 fi
 
 run_changed_coverage_fixture() (
+  # This is a separate coverage experiment. Inheriting the outer llvm-cov
+  # wrapper makes cargo-llvm-cov 0.9+ wrap itself recursively. Keep this reset
+  # inside the fixture subshell so the real E2E server stays instrumented.
+  while IFS= read -r variable; do
+    case "$variable" in
+      CARGO_LLVM_COV | CARGO_LLVM_COV_* | __CARGO_LLVM_COV_* | \
+        LLVM_PROFILE_FILE | CARGO_TARGET_DIR | RUSTC_WRAPPER | RUSTC_WORKSPACE_WRAPPER | \
+        RUSTFLAGS | CARGO_ENCODED_RUSTFLAGS | RUSTDOCFLAGS | CARGO_ENCODED_RUSTDOCFLAGS)
+        unset "$variable"
+        ;;
+    esac
+  done < <(compgen -e)
+
   fixture_dir="$(mktemp -d)"
   trap 'rm -rf "$fixture_dir"' EXIT
   mkdir -p "$fixture_dir/crates/demo/src" "$fixture_dir/scripts/ci"
@@ -451,6 +478,23 @@ EOF
 
 if command -v cargo-llvm-cov >/dev/null 2>&1; then
   run_changed_coverage_fixture
+  # Exercise nested invocation even in an otherwise uninstrumented local run.
+  # The sentinel wrapper fails fast instead of recursively exhausting processes.
+  sentinel_wrapper="$partition_dir/outer-rustc-wrapper"
+  printf '#!/usr/bin/env bash\necho "inherited outer coverage wrapper" >&2\nexit 91\n' >"$sentinel_wrapper"
+  chmod +x "$sentinel_wrapper"
+  (
+    # Export in a subshell instead of temporary function assignments: unsetting
+    # a temporary assignment can reveal its previous, still-instrumented value.
+    export RUSTC_WRAPPER="$sentinel_wrapper"
+    export RUSTC_WORKSPACE_WRAPPER="$sentinel_wrapper"
+    export CARGO_LLVM_COV=1
+    export __CARGO_LLVM_COV_RUSTC_WRAPPER_PRE_EXISTING="$sentinel_wrapper"
+    export CARGO_TARGET_DIR="$partition_dir/outer-target"
+    export LLVM_PROFILE_FILE="$partition_dir/outer-%p.profraw"
+    export RUSTFLAGS=--invalid-outer-coverage-fixture-flag
+    run_changed_coverage_fixture
+  )
 else
   echo "Coverage changed-lines runtime fixture: SKIP (cargo-llvm-cov unavailable)"
 fi

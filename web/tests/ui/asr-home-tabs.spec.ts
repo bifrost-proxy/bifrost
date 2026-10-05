@@ -270,6 +270,10 @@ test("后台目录任务初始化 MOSS 时管理页持续显示共享下载进�
   });
 
   await openPage(page, "ai?aiSection=tools-asr&asrTab=management");
+  await expect(page).toHaveURL(/\/ai\/asr\?asrTab=management$/);
+  await expect(
+    page.getByRole("tab", { name: "ASR Management" }),
+  ).toHaveAttribute("aria-selected", "true");
   await page.getByRole("combobox", { name: "Managed ASR model" }).click();
   await page
     .locator(".ant-select-dropdown:visible")
@@ -384,7 +388,11 @@ test("历史录音声纹初始化可试听标注并在亮暗主题完成门禁",
     });
   });
 
-  await openPage(page, "ai?aiSection=tools-asr&asrTab=voice");
+  await openPage(page, "ai?view=asr&asrTab=voice");
+  await expect(page).toHaveURL(/\/ai\/asr\?asrTab=voice$/);
+  await expect(
+    page.getByRole("tab", { name: "Voiceprint & Wake" }),
+  ).toHaveAttribute("aria-selected", "true");
   await page.getByTestId("asr-assisted-enroll-button").click();
   await expect(page.getByRole("dialog", { name: "Initialize Voiceprint from Recording" })).toBeVisible();
   await page.getByTestId("asr-assisted-speaker-name").fill("Eden");

@@ -4,9 +4,16 @@ on:
   schedule:
     - cron: "30 18 * * 0"
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/coverage-e2e.yml"
+
+permissions:
+  contents: read
 
 concurrency:
-  group: layered-e2e-coverage-main
+  group: layered-e2e-coverage-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -35,6 +42,12 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
         working-directory: web
+      - name: Install full E2E dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg ripgrep
+          ffmpeg -version
+          rg --version
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview

@@ -37,3 +37,33 @@ export function resolveLegacyAiDestination(
   }
   return null;
 }
+
+const ASR_ROUTE_PARAMS = [
+  "asrTab",
+  "asrTask",
+  "asrTaskTab",
+  "asrFile",
+  "asrDay",
+  "asrDailyReport",
+  "asrDailyAgent",
+  "asrDailyAgentEdit",
+] as const;
+
+export function resolveLegacyAiRedirect(
+  params: URLSearchParams,
+): string | null {
+  const destination = resolveLegacyAiDestination(params);
+  if (!destination) return null;
+
+  const next = new URLSearchParams();
+  if (destination === "/ai/asr") {
+    for (const key of ASR_ROUTE_PARAMS) {
+      const value = params.get(key);
+      if (value !== null) next.set(key, value);
+    }
+  } else if (destination === "/ai/runs") {
+    const session = params.get("session");
+    if (session) next.set("q", session);
+  }
+  return `${destination}${next.size ? `?${next.toString()}` : ""}`;
+}

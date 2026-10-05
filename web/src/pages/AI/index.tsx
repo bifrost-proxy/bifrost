@@ -52,7 +52,7 @@ import {
 import ASR from "../ASR";
 import AgentTab from "../Settings/tabs/AgentTab";
 import ImGatewayTab from "../Settings/tabs/ImGatewayTab";
-import { resolveLegacyAiDestination } from "./aiLayout";
+import { resolveLegacyAiRedirect } from "./aiLayout";
 import {
   formatRunDuration,
   liveRunDuration,
@@ -736,17 +736,9 @@ function RunRecordsPage() {
 
 function LegacyAIEntry() {
   const [searchParams] = useSearchParams();
-  const destination = resolveLegacyAiDestination(searchParams);
+  const destination = resolveLegacyAiRedirect(searchParams);
   if (!destination) return <AIHubPage />;
-  const next = new URLSearchParams();
-  const search = searchParams.get("session");
-  if (destination === "/ai/runs" && search) next.set("q", search);
-  return (
-    <Navigate
-      replace
-      to={`${destination}${next.size ? `?${next.toString()}` : ""}`}
-    />
-  );
+  return <Navigate replace to={destination} />;
 }
 
 export default function AI() {

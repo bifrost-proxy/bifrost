@@ -75,7 +75,22 @@
 
 预期：即使 Agent Session 位于隔离 IM Worker，AI Runs 仍使用主进程权威 Worker Job 运行态显示任务；任务结束后不再误报 Running，且数据最小化边界不变。
 
+### TC-AIH-08 回归：旧 ASR 深链保留模块内部状态
+
+前置条件：使用隔离前端和固定 ASR API 数据，能力响应启用 ASR；准备一个目录任务与其 Markdown 日报。不得使用正式数据目录或 9900 端口。
+
+1. 打开 `/_bifrost/ai?aiSection=tools-asr&asrTab=management`，确认迁移到 `/ai/asr?asrTab=management` 后选中 ASR Management，显示 Model Management。
+2. 打开 `/_bifrost/ai?view=asr&asrTab=voice`，确认迁移后保留 `asrTab=voice` 并选中 Voiceprint & Wake。刷新页面后仍保持该 Tab。
+3. 打开 `/_bifrost/ai?aiSection=tools-asr&asrTask=<task-id>&asrTaskTab=daily-agent-records`，确认保留任务和 Tab，显示 Daily Agent Records。
+4. 打开旧链接 `/_bifrost/ai?aiSection=tools-asr&asrTask=<task-id>&asrDailyReport=<report-date>&asrDailyAgent=<agent-id>&historyPath=ignored`，确认日报正文与 Agent 选择正确，URL 保留日报/Agent 参数并移除 `historyPath`。刷新仍停留在同一日报；返回日报列表并用浏览器后退/前进检查列表与正文状态。
+5. 分别打开包含 `asrTask=<task-id>&asrFile=<file-key>`、`asrTask=<task-id>&asrDay=<report-date>`、`asrTask=<task-id>&asrTaskTab=daily-agent&asrDailyAgentEdit=<agent-id>` 的旧 `aiSection=tools-asr` 链接，确认文件时间线、每日文档和 Agent 编辑页保持对应选择。
+6. 切换暗色主题，重复旧管理页深链和旧声纹页深链检查；确认正文与选中 Tab 仍可见。
+
+预期：只迁移一级模块入口，ASR 内部任务、Tab、文件、日期、日报与 Agent 标识保持原值；旧入口参数不再出现在迁移后的 URL，且不带入聊天历史路径。亮暗主题均可正常导航。
+
 ## 执行记录
+
+- 2026-10-05：新增 TC-AIH-08 后立即启动隔离 Vite 与 ASR fixture API，并尝试用云端 Chromium 打开旧管理页深链；浏览器返回 `net::ERR_BLOCKED_BY_CLIENT`，未进入页面。本次手工回归受浏览器访问限制阻塞，不能记为通过；自动 Playwright 也在浏览器启动阶段因本地 socket 权限失败，路由单元测试和 TypeScript 检查另行通过。
 
 - 2026-08-17：新增 TC-AIH-07 后立即执行 `bash e2e-tests/tests/test_auxiliary_worker_isolation.sh`，输出 `[auxiliary-worker-isolation] CORE PASS`。隔离服务中的长运行 Codex Job 在 `/worker-jobs` 为 active 时，同一 `session_key` 的 `/im-gateway/agent/session-summaries` 摘要为 `running`、`running_count=1`，且响应只含 8 个 allowlist 字段；取消并等待 Job 进入 `cancelled` 后，摘要不再为 Running、`running_count=0`。测试使用动态端口和临时 `BIFROST_DATA_DIR`，未触碰本机 9900 服务。
 - 2026-08-14：使用隔离 Vite 前端与 Playwright Chromium 执行 `node_modules/.bin/playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，TC-AIH-01 至 TC-AIH-06 全部通过（`6 passed`）。首次执行为 `5 passed / 1 failed`，失败原因是测试点击 Ant Select 占位文字时被 combobox 输入层拦截；改用可交互 Select 容器和可见下拉层后，专项复测 `1 passed`，完整复测 `6 passed (25.0s)`。网络断言确认页面未请求 `/sessions/all`、`/sessions/history` 或单线程详情。

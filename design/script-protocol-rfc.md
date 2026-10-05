@@ -201,3 +201,12 @@ pub struct SandboxConfig {
 - **decode 脚本失败降级**：Traffic Detail 展示 raw + 错误提示，避免误导用户以为解析成功。
 - **文档偏差**：旧 RFC 里的“完全禁止文件/网络”表述已过时；文档必须描述“默认关闭 + 可显式 opt-in”的当前策略，并给出安全边界。
 - **多设备同步**：脚本内容 sync 需要额外的信任模型（谁能改、能否禁用 net），第一版不做，交由手动导入/导出。
+
+## Scripts 编辑器诊断隔离回归
+
+- 运行时类型定义独立维护于 `web/src/pages/Scripts/scriptEditorLanguage.ts`。只加载 ES2020 标准库，避免把浏览器 DOM API 和原生 `console` 错误暴露给 QuickJS 脚本。
+- 使用规范 URI `file:///bifrost-script-runtime.d.ts` 注册唯一 extra lib，按脚本类型一次性替换。Monaco 的定义跳转或诊断关联信息可能把声明转换成 model；切换脚本类型前销毁该快照，避免同一声明被相对路径/规范 URI 重复加载，或使用旧类型。
+- 保持语义、语法诊断启用，不忽略错误码。Parser 测试中的空请求回退必须包含 `method/host/path/url` 字符串字段；裸 `{}` 会让 TypeScript 正确推断为缺少属性，不能通过放宽运行时类型掩盖这个错误。
+- 诊断 UI 测试直接设置并核对完整 model 内容，避免模拟逐字输入触发 Monaco 自动缩进和自动闭合括号。等待真实 worker 返回诊断，随后轮询可见 markers；不再依赖固定 1200ms 等待。
+- 验证路由：运行 `pnpm --dir web test:unit src/pages/Scripts/scriptEditorLanguage.test.ts`、前端类型/格式/lint 检查，以及 `pnpm --dir web test:ui tests/ui/admin-scripts.spec.ts`。实际 Monaco worker 单测覆盖四类脚本、声明 model、重复切换、缺失字段/只读属性/语法负例和 DOM 隔离；UI 进一步覆盖亮暗主题及错误修正后的 marker 清理。Rust 未变更，不触发 Rust 编译或覆盖率门禁。
+- 两轮 Review/Fix/Test：第一轮检查路径规范化、库冲突及 fixture 正确性并运行最小验证；第二轮复核声明快照生命周期、正负诊断断言和文档一致性，再复跑受影响验证。真实浏览器验证见 `human_tests/webui-scripts.md` 的 TC-WSC-05A/05B，受环境限制时必须记录阻塞，不能将 worker 测试记为浏览器通过。
