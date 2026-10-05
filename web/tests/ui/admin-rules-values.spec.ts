@@ -958,12 +958,20 @@ test("Rules Dynamic Island 展开的 Merged Rules 支持一键复制", async ({
   const mergedContent = page.getByTestId("rules-dynamic-island-merged-content");
   await expect(mergedContent).toContainText("x-merged-copy: ok");
 
-  const shownMergedRules = (await mergedContent.textContent())?.trim();
+  // The rendered code includes line-number gutters. Compare the clipboard to
+  // the complete source, including any enabled Default or group rules.
+  const summaryResponse = await request.get(`${apiBase}/rules/active-summary`);
+  expect(summaryResponse.ok()).toBeTruthy();
+  const summary = (await summaryResponse.json()) as { merged_content: string };
+  expect(summary.merged_content).toContain(ruleContent);
+  const expectedMergedRules = summary.merged_content.trim();
   await page.getByTestId("rules-dynamic-island-copy-merged").click();
   await waitForToast(page, "Merged rules copied");
 
-  const clipboardText = await page.evaluate(async () => navigator.clipboard.readText());
-  expect(clipboardText).toBe(shownMergedRules);
+  const clipboardText = await page.evaluate(async () =>
+    navigator.clipboard.readText(),
+  );
+  expect(clipboardText).toBe(expectedMergedRules);
 });
 
 test("Rules 列表支持按 / 分组的树状展开/折叠", async ({

@@ -1,3 +1,5 @@
+// Legacy traffic suite: extract focused fixture modules as lifecycle ownership
+// is isolated, preserving the registered end-to-end cases and assertions.
 import { test, expect } from "@playwright/test";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { Agent as HttpAgent, createServer, request as httpRequest } from "node:http";
@@ -372,28 +374,30 @@ finally:
   });
 };
 
-const updateTrafficListenerPort = async (
-  dataDir: string,
-  recordId: string,
-  listenerPort: number,
-) => {
-  const dbPath = path.join(dataDir, "traffic", "traffic.db");
-  const script = `
-import sqlite3
-import sys
-
-db_path, record_id, listener_port = sys.argv[1:4]
-conn = sqlite3.connect(db_path)
-try:
-    conn.execute("UPDATE traffic_records SET listener_port = ? WHERE id = ?", (int(listener_port), record_id))
-    conn.commit()
-finally:
-    conn.close()
-`;
-
-  await execFileAsync("python3", ["-c", script, dbPath, recordId, String(listenerPort)], {
-    timeout: 10000,
+const startTemporaryProxy = async (baseApiUrl: string) => {
+  const csrfResponse = await fetch(`${baseApiUrl}/security/csrf`);
+  expect(csrfResponse.ok).toBeTruthy();
+  const csrf = (await csrfResponse.json()) as {
+    csrf_token: string;
+    header_name?: string;
+  };
+  const response = await fetch(`${baseApiUrl}/ports`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [csrf.header_name || "X-Bifrost-CSRF"]: csrf.csrf_token,
+    },
+    body: JSON.stringify({ port: 0, host: "127.0.0.1", rule_refs: [] }),
   });
+  const body = await response.text();
+  expect(
+    response.ok,
+    `temporary proxy failed (${response.status}): ${body}`,
+  ).toBeTruthy();
+  const binding = JSON.parse(body) as { port: number; status: string };
+  expect(binding.status).toBe("running");
+  expect(binding.port).toBeGreaterThan(0);
+  return binding.port;
 };
 
 const waitForClientApp = async (
@@ -1038,15 +1042,21 @@ test("主筛选器支持按代理端口过滤 Traffic", async ({ page }) => {
   const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const mainPortPath = `/port-filter-main-${token}`;
   const otherPortPath = `/port-filter-other-${token}`;
-  const otherPort = backend.port + 1;
 
   try {
     await sendProxyRequest(`http://127.0.0.1:${server.port}${mainPortPath}`, backend.proxyUrl);
-    await sendProxyRequest(`http://127.0.0.1:${server.port}${otherPortPath}`, backend.proxyUrl);
+    const otherPort = await startTemporaryProxy(backend.baseApi);
+    await sendProxyRequest(
+      `http://127.0.0.1:${server.port}${otherPortPath}`,
+      `http://127.0.0.1:${otherPort}`,
+    );
 
     const mainRecord = await waitForTrafficRecordByApi(backend.baseApi, mainPortPath);
     const otherRecord = await waitForTrafficRecordByApi(backend.baseApi, otherPortPath);
-    await updateTrafficListenerPort(backend.dataDir, otherRecord.id, otherPort);
+    expect(otherRecord.lp).toBe(otherPort);
+    await expect
+      .poll(async () => (await getTrafficStatistics(backend.baseApi)).proxy_ports)
+      .toEqual({ [backend.port]: 1, [otherPort]: 1 });
 
     const portTraffic = await queryTraffic(backend.baseApi, {
       listener_port: String(backend.port),
@@ -1100,7 +1110,6 @@ test("左侧筛选器仅在多代理端口时展示 Proxy port 并同步到 URL"
   const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const mainPortPath = `/panel-port-main-${token}`;
   const otherPortPath = `/panel-port-other-${token}`;
-  const otherPort = backend.port + 1;
 
   try {
     await sendProxyRequest(`http://127.0.0.1:${server.port}${mainPortPath}`, backend.proxyUrl);
@@ -1114,9 +1123,16 @@ test("左侧筛选器仅在多代理端口时展示 Proxy port 并同步到 URL"
     await expect(page.getByTestId("filter-section-proxy-port")).toHaveCount(0);
     expect(mainRecord.lp).toBe(backend.port);
 
-    await sendProxyRequest(`http://127.0.0.1:${server.port}${otherPortPath}`, backend.proxyUrl);
+    const otherPort = await startTemporaryProxy(backend.baseApi);
+    await sendProxyRequest(
+      `http://127.0.0.1:${server.port}${otherPortPath}`,
+      `http://127.0.0.1:${otherPort}`,
+    );
     const otherRecord = await waitForTrafficRecordByApi(backend.baseApi, otherPortPath);
-    await updateTrafficListenerPort(backend.dataDir, otherRecord.id, otherPort);
+    expect(otherRecord.lp).toBe(otherPort);
+    await expect
+      .poll(async () => (await getTrafficStatistics(backend.baseApi)).proxy_ports)
+      .toEqual({ [backend.port]: 1, [otherPort]: 1 });
 
     await page.reload();
     await expect(page.getByTestId("filter-section-proxy-port")).toBeVisible();
@@ -2559,18 +2575,13 @@ test("push 重连后已删除记录应从列表移除", async ({ page, request }
   const keepPath = `/reconnect-keep-${token}`;
   const deletePath1 = `/reconnect-del1-${token}`;
   const deletePath2 = `/reconnect-del2-${token}`;
-
-  let blockServerMessages = false;
-
-  await page.routeWebSocket(/\/api\/push/, (ws) => {
-    const srv = ws.connectToServer();
-    ws.onMessage((message) => {
-      srv.send(message);
-    });
-    srv.onMessage((message) => {
-      if (!blockServerMessages) {
-        ws.send(message);
-      }
+  let pushConnections = 0;
+  let closedPushConnections = 0;
+  page.on("websocket", (socket) => {
+    if (!socket.url().includes("/api/push")) return;
+    pushConnections += 1;
+    socket.on("close", () => {
+      closedPushConnections += 1;
     });
   });
 
@@ -2582,78 +2593,65 @@ test("push 重连后已删除记录应从列表移除", async ({ page, request }
     await page.goto("/_bifrost/traffic");
     await expect(page.getByTestId("traffic-table")).toBeVisible();
 
-    const keepRow = page.getByTestId("traffic-row").filter({ hasText: keepPath }).first();
-    const delRow1 = page.getByTestId("traffic-row").filter({ hasText: deletePath1 }).first();
-    const delRow2 = page.getByTestId("traffic-row").filter({ hasText: deletePath2 }).first();
+    const keepRow = page
+      .getByTestId("traffic-row")
+      .filter({ hasText: keepPath })
+      .first();
+    const delRow1 = page
+      .getByTestId("traffic-row")
+      .filter({ hasText: deletePath1 })
+      .first();
+    const delRow2 = page
+      .getByTestId("traffic-row")
+      .filter({ hasText: deletePath2 })
+      .first();
     await expect(keepRow).toBeVisible();
     await expect(delRow1).toBeVisible();
     await expect(delRow2).toBeVisible();
+    await expect.poll(() => pushConnections).toBeGreaterThan(0);
 
+    const keepId = await keepRow.getAttribute("data-record-id");
     const delId1 = await delRow1.getAttribute("data-record-id");
     const delId2 = await delRow2.getAttribute("data-record-id");
+    expect(keepId).toBeTruthy();
     expect(delId1).toBeTruthy();
     expect(delId2).toBeTruthy();
 
-    blockServerMessages = true;
+    await setDocumentVisibility(page, "hidden");
+    await expect.poll(() => pushConnections - closedPushConnections).toBe(0);
+    const connectionsBeforeResume = pushConnections;
 
-    await page.evaluate(() => {
-      const bt = (window as unknown as Record<string, Record<string, () => void>>).__bifrost_test;
-      if (bt) bt.pauseRealtime();
-    });
-
-    await page.waitForTimeout(1000);
-
-    const del1Resp = await request.fetch(`${apiBase}/traffic`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      data: JSON.stringify({ ids: [delId1] }),
-    });
-    expect(del1Resp.ok()).toBeTruthy();
-
-    const del2Resp = await request.fetch(`${apiBase}/traffic`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      data: JSON.stringify({ ids: [delId2] }),
-    });
-    expect(del2Resp.ok()).toBeTruthy();
-
-    const verifyDeleted = await request.get(
-      `${apiBase}/traffic/${encodeURIComponent(delId1!)}`,
+    for (const id of [delId1!, delId2!]) {
+      const response = await request.delete(`${apiBase}/traffic`, {
+        data: { ids: [id] },
+      });
+      expect(response.ok()).toBeTruthy();
+      const deleted = await request.get(
+        `${apiBase}/traffic/${encodeURIComponent(id)}`,
+      );
+      expect(deleted.status()).toBe(404);
+    }
+    const retained = await request.get(
+      `${apiBase}/traffic/${encodeURIComponent(keepId!)}`,
     );
-    expect(verifyDeleted.status()).toBe(404);
+    expect(retained.ok()).toBeTruthy();
+    // Both deletes happen offline, so all three cached rows must still be present.
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: token }),
+    ).toHaveCount(3);
 
-    await page.waitForTimeout(500);
-
-    const rowCountBeforeResume = await page.getByTestId("traffic-row").filter({ hasText: token }).count();
-
-    blockServerMessages = false;
-
-    await page.evaluate(() => {
-      const bt = (window as unknown as Record<string, Record<string, () => void>>).__bifrost_test;
-      if (bt) bt.resumeRealtime();
-    });
-
-    await page.waitForTimeout(8000);
-
-    const rowCountAfterResume = await page.getByTestId("traffic-row").filter({ hasText: token }).count();
-
+    await setDocumentVisibility(page, "visible");
+    await expect
+      .poll(() => pushConnections)
+      .toBeGreaterThan(connectionsBeforeResume);
+    await expect(delRow1).toHaveCount(0);
+    await expect(delRow2).toHaveCount(0);
     await expect(keepRow).toBeVisible();
-
-    const del1Count = await delRow1.count();
-    const del2Count = await delRow2.count();
-
-    expect(
-      del1Count + del2Count,
-      `BUG: Deleted rows still visible after push reconnect. ` +
-        `Before resume: ${rowCountBeforeResume}, after: ${rowCountAfterResume}. ` +
-        `Expected deleted rows to be removed.`,
-    ).toBe(0);
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: token }),
+    ).toHaveCount(1);
   } finally {
-    blockServerMessages = false;
-    await page.evaluate(() => {
-      const bt = (window as unknown as Record<string, Record<string, () => void>>).__bifrost_test;
-      if (bt) bt.resumeRealtime();
-    });
+    await setDocumentVisibility(page, "visible");
     await server.close();
   }
 });

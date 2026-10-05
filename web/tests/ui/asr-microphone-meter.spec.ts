@@ -1,3 +1,5 @@
+// Legacy ASR suite: separate microphone, task, and retry fixtures incrementally
+// while retaining their shared capability and media setup contracts.
 import { expect, type Page, test } from "@playwright/test";
 import { openPage } from "./helpers/admin-helpers";
 

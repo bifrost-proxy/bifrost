@@ -228,7 +228,7 @@ STATUS="$(http_status -X PUT "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/
   -H "Host: evil.example:${PROXY_PORT}")"
 [[ "$STATUS" == "403" ]]
 
-STATUS="$(http_status -x "http://127.0.0.1:${PROXY_PORT}" \
+STATUS="$(http_status --noproxy '' -x "http://127.0.0.1:${PROXY_PORT}" \
   -X PUT "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/safe-rule/disable")"
 [[ "$STATUS" == "403" ]]
 
@@ -238,7 +238,7 @@ SHARE_URL="$(
 )"
 curl -sS -o /tmp/bifrost-admin-security-share.out \
   -D /tmp/bifrost-admin-security-share.headers \
-  -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL" >/dev/null
+  --noproxy '' -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL" >/dev/null
 assert_header_matches /tmp/bifrost-admin-security-share.headers '^HTTP/.* 302' "proxied share URL redirects to local confirmation page"
 assert_header_matches /tmp/bifrost-admin-security-share.headers "^location: http://127\\.0\\.0\\.1:${PROXY_PORT}/_bifrost/share/rule\\?" "share redirect targets local admin confirmation page"
 BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-admin-security-rules-before-confirm.txt

@@ -214,7 +214,7 @@ generate_traffic() {
     log_info "Generating $count traffic records via proxy ${PROXY_PORT}..."
     
     for i in $(seq 1 "$count"); do
-        curl -sS --proxy "http://127.0.0.1:${PROXY_PORT}" \
+        curl -sS --noproxy '' --proxy "http://127.0.0.1:${PROXY_PORT}" \
             --connect-timeout 5 --max-time 10 \
             "http://127.0.0.1:${MOCK_HTTP_PORT}/get?test_id=traffic_db_test_$$_${i}" \
             -o /dev/null -w "" 2>/dev/null &
@@ -453,7 +453,7 @@ test_traffic_clear() {
     python3 - <<'PY' > "$payload_file"
 print("x" * 4096)
 PY
-    curl -sS --proxy "http://127.0.0.1:${PROXY_PORT}" \
+    curl -sS --noproxy '' --proxy "http://127.0.0.1:${PROXY_PORT}" \
         --connect-timeout 5 --max-time 10 \
         -X POST "http://127.0.0.1:${MOCK_HTTP_PORT}/post" \
         -H "Content-Type: text/plain" \

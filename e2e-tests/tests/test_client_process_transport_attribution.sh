@@ -224,6 +224,7 @@ wait_for_traffic() {
         waited=$((waited + 1))
     done
 
+    echo "Timed out waiting for traffic matching ${pattern} after ${timeout}s" >&2
     return 1
 }
 
@@ -453,23 +454,25 @@ test_https_tunnel_attribution() {
 }
 
 main() {
-    start_mock_servers
-    build_bifrost
-    write_rules
-    start_proxy
+    start_mock_servers || return 1
+    build_bifrost || return 1
+    write_rules || return 1
+    start_proxy || return 1
 
-    test_http_proxy_attribution
+    local failed_cases=0
+
+    test_http_proxy_attribution || failed_cases=$((failed_cases + 1))
     sleep 2
-    test_websocket_attribution
+    test_websocket_attribution || failed_cases=$((failed_cases + 1))
     sleep 3
-    test_https_tunnel_attribution
+    test_https_tunnel_attribution || failed_cases=$((failed_cases + 1))
     sleep 3
-    test_socks5_tls_attribution
+    test_socks5_tls_attribution || failed_cases=$((failed_cases + 1))
 
     echo ""
     echo "Assertions: ${PASSED_ASSERTIONS}/${TOTAL_ASSERTIONS} passed"
-    if [[ "${FAILED_ASSERTIONS}" -gt 0 ]]; then
-        echo "Client process attribution regressions detected: ${FAILED_ASSERTIONS} assertion(s) failed."
+    if [[ "${FAILED_ASSERTIONS}" -gt 0 || "$failed_cases" -gt 0 ]]; then
+        echo "Client process attribution regressions detected: ${FAILED_ASSERTIONS} assertion(s) and ${failed_cases} case(s) failed."
         exit 1
     fi
 

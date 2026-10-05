@@ -1,3 +1,5 @@
+// Legacy page: runtime language declarations are extracted. Split the remaining
+// editor panes and script-management flows incrementally without changing behavior.
 // Legacy page: runtime declarations now live in scriptEditorLanguage.ts; split
 // the remaining list, editor, and result panels in a dedicated refactor.
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";

@@ -43,6 +43,8 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
     }
     initRef.current = true;
     globalState.initialized = true;
+    let cancelled = false;
+    let metricsPushEnabled = false;
 
     const proxyStore = useProxyStore.getState();
     const filterPanelStore = useFilterPanelStore.getState();
@@ -50,13 +52,28 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
     const versionStore = useVersionStore.getState();
     const performanceModeStore = usePerformanceModeStore.getState();
 
+    const enableMetricsPush = () => {
+      if (metricsPushEnabled) return;
+      metricsPushEnabled = true;
+      useMetricsStore.getState().enablePush({
+        needOverview: true,
+        needMetrics: true,
+      });
+    };
+
+    const disableMetricsPush = () => {
+      if (!metricsPushEnabled) return;
+      metricsPushEnabled = false;
+      useMetricsStore.getState().disablePush();
+    };
+
     const pauseRealtime = () => {
       if (globalState.visibilityPaused) return;
       globalState.visibilityPaused = true;
       if (globalState.trafficEnabled) {
         useTrafficStore.getState().disablePush();
       }
-      useMetricsStore.getState().disablePush();
+      disableMetricsPush();
       pushService.disconnect();
     };
 
@@ -66,6 +83,9 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
       }
       if (!globalState.visibilityPaused) return;
       globalState.visibilityPaused = false;
+      // Other consumers (for example StatusBar) may retain subscriptions while
+      // hidden. Reopen the shared connection before merging resumed consumers.
+      pushService.connect(pushService.getSubscription());
       if (globalState.trafficEnabled) {
         const currentTrafficStore = useTrafficStore.getState();
         if (currentTrafficStore.polling && currentTrafficStore.usePush) {
@@ -75,10 +95,7 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
           currentTrafficStore.enablePush();
         }
       }
-      useMetricsStore.getState().enablePush({
-        needOverview: true,
-        needMetrics: true,
-      });
+      enableMetricsPush();
     };
 
     // Only browser-window visibility changes should pause realtime push.
@@ -115,6 +132,9 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
 
     const initializeGlobalData = async () => {
       await versionStore.resumeUpgradeProgress();
+      if (cancelled || globalState.forceRefresh) {
+        return;
+      }
       await Promise.allSettled([
         proxyStore.fetchSystemProxy(),
         proxyStore.fetchCliProxy(),
@@ -124,14 +144,13 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
         performanceModeStore.fetchPerformanceMode(),
       ]);
 
-      if (globalState.forceRefresh) {
+      if (cancelled || globalState.forceRefresh) {
         return;
       }
 
-      metricsStore.enablePush({
-        needOverview: true,
-        needMetrics: true,
-      });
+      if (!globalState.visibilityPaused) {
+        enableMetricsPush();
+      }
 
       if (globalState.forceRefresh) {
         return;
@@ -171,6 +190,10 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
     });
 
     return () => {
+      // StrictMode replays this effect with the same ref. Cancel this setup's
+      // pending work and allow the next setup to restore its subscriptions.
+      cancelled = true;
+      initRef.current = false;
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('pageshow', onPageShow);
@@ -179,7 +202,7 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
 
       stopAllPolling();
 
-      useMetricsStore.getState().disablePush();
+      disableMetricsPush();
       useTrafficStore.getState().stopPolling();
       globalState.initialized = false;
       globalState.visibilityPaused = false;

@@ -236,7 +236,7 @@ start_html_server() {
 proxy_body() {
     local port="$1"
     local url="$2"
-    curl -sS --max-time 5 -x "http://127.0.0.1:${port}" "${url}" || true
+    curl -sS --max-time 5 --noproxy '' -x "http://127.0.0.1:${port}" "${url}" || true
 }
 
 traffic_json() {
@@ -848,7 +848,7 @@ PY
     _log_pass "Imported Network record preserves raw request bytes"
 
     "$BIFROST_BIN" port destroy "${TEMP_PORT}"
-    if curl -sS --max-time 2 -x "http://127.0.0.1:${TEMP_PORT}" "http://temp-only.test/" >/dev/null 2>&1; then
+    if curl -sS --max-time 2 --noproxy '' -x "http://127.0.0.1:${TEMP_PORT}" "http://temp-only.test/" >/dev/null 2>&1; then
         _log_fail "temporary port destroyed" "connection failure" "request succeeded"
         return 1
     fi

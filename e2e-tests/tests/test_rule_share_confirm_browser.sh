@@ -25,7 +25,7 @@ resolve_chrome_bin() {
   if [[ -d "$ROOT_DIR/web/node_modules/@playwright/test" ]] && command -v node >/dev/null 2>&1; then
     playwright_bin="$(
       cd "$ROOT_DIR" &&
-        node <<'NODE' 2>/dev/null || true
+        node <<'NODE' 2>/dev/null
 const fs = require("fs");
 const path = require("path");
 
@@ -88,7 +88,7 @@ try {
   process.exit(0);
 }
 NODE
-    )"
+    )" || true
     if [[ -n "$playwright_bin" && -x "$playwright_bin" ]]; then
       printf '%s\n' "$playwright_bin"
       return 0

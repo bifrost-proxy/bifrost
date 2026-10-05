@@ -793,6 +793,29 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 **真实执行记录**：
 - 2026-09-12：执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_sync_partial_rule_failure_e2e.sh` 通过。隔离实例使用临时数据目录、随机 Admin/mock 端口、托盘与自动登录弹窗禁用、`--no-system-proxy`；mock 远端拒绝坏规则上传时，同轮 `remote-only` 规则仍以 `synced` 状态和 `env-remote-only` ID 落地，Provider 保持已授权并显示包含坏规则名和远端校验原因的 `error`，再次同步未生成重复规则。
 
+---
+
+### TC-ASN-40：当前 Provider 断网时保留会话并正确报告健康状态（回归）
+
+**操作步骤**：
+1. 从当前 checkout 重新构建 debug CLI。使用随机非 9900 Admin 端口、独立临时数据目录启动实例，并设置 `BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1`，启动参数包含 `--host 127.0.0.1 --skip-cert-check --no-system-proxy --access-mode allow_all`。只使用本地 mock 会话，不读取正式数据或账号。
+2. 使用 `web/tests/ui/helpers/admin-helpers.ts` 的 `startMockSyncServer()` 启动动态端口 mock。等待 `GET /_bifrost/api/proxy/address` 成功，通过 `GET /_bifrost/api/security/csrf` 获取 CSRF token，并在后续写请求中带上 `X-Bifrost-CSRF`。
+3. 向 `PUT /_bifrost/api/sync/config` 提交 `enabled=true`、`auto_sync=true`、`remote_base_url=remote.baseUrl`、`probe_interval_secs=2`、`connect_timeout_ms=250`；再向 `POST /_bifrost/api/sync/session` 提交 mock 返回的 token。轮询 `GET /_bifrost/api/sync/status`，等待 `user.user_id=ui-sync-user` 且状态为 `ready`。
+4. 调用 `remote.setAvailable(false)`，让已登录的同一 URL 返回 HTTP 503；不修改配置 URL，不清除或重写会话。调用 `POST /_bifrost/api/sync/run`，最多轮询 10 秒，检查聚合状态及 `providers` 中 `id=bifrost_cloud` 的状态。
+5. 调用 `remote.setAvailable(true)` 并再次触发同步；不重新登录，最多轮询 10 秒，检查原会话恢复为 `ready` 且用户仍为 `ui-sync-user`。
+6. 调用 `remote.close()` 真正关闭 mock 监听 socket，再触发同步并轮询状态，验证连接失败路径也报告不可达。
+7. 按本次记录的 PID 停止测试实例，关闭 mock 并清理独立数据目录；不得按全局进程名清理或操作正式 9900 服务。
+
+**预期结果**：
+- 单一已登录 Provider 的健康状态按 `ready → unreachable → ready → unreachable` 变化。
+- 聚合状态和当前 Provider 的 `reachable`、`authorized` 同步按 `true → false → true → false` 变化，已保存的会话不能把已证实的不可达状态覆盖为 `ready`。
+- 四个阶段的 `has_session` 与当前 Provider 的 `connected` 均为 `true`；恢复时复用原会话和用户，不因临时断网自动登出。
+- 此用例必须使已登录的同一 URL 不可达。仅把当前配置改到另一个失败 URL，不等于原来保存的 Provider 已断网；独立健康 Provider 的聚合语义仍需保留。
+
+**真实执行记录**：
+- 2026-10-05：真实 CLI/API 回归通过。使用 04:36 UTC 从包含本地生产修复 `ff6f4bd0` 与测试加固 `36f0e357` 的 Rust 源码构建的 debug CLI；验证时本地工作区 HEAD 为 `2ee0fdd2`，这些 hash 仅标识本地验证修订。动态 Admin/mock 端口和独立临时数据目录下，依次执行正常服务、同 URL HTTP 503、同会话恢复和监听 socket 关闭四个阶段。聚合与 Bifrost Cloud Provider 均返回 `ready / unreachable / ready / unreachable`，对应 `reachable`、`authorized` 为 `true / false / true / false`；全过程 `has_session=true`、`connected=true`，恢复后的用户仍为 `ui-sync-user`。测试实例、mock 与临时目录已清理，未修改系统代理或系统证书信任。
+- 浏览器 UI 回归仍待验证。相关 Playwright 场景为 `Settings Sync 支持登录、同步、更新覆盖与断网重连`；本条执行记录仅确认上述真实 API 行为，不把 API 通过计作浏览器验证通过。
+
 ## 清理
 
 测试完成后清理临时数据：

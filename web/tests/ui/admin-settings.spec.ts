@@ -1,5 +1,7 @@
+// Legacy serial suite: split by Settings capability as shared-state setup is
+// isolated; keep the existing end-to-end cases enabled during that migration.
 import { test, expect, type Route } from "@playwright/test";
-import { getDefaultRemoteBaseUrl } from "../../src/api/sync";
+import { getDefaultRemoteBaseUrl, type SyncStatus } from "../../src/api/sync";
 import {
   apiBase,
   backendPort,
@@ -1425,9 +1427,14 @@ test("Settings Sync 打开时会轮询刷新页面与底部状态栏", async ({ 
     .toBe("ready");
 });
 
-test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", async ({ page }) => {
+test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", async ({
+  page,
+}) => {
   let signedIn = false;
+  let serverRemoteBaseUrl = "https://sync-poll.example.test";
   let savedRemoteBaseUrl = "";
+  const draftRemoteBaseUrl = "https://custom-sync.example.test/custom/";
+  const normalizedRemoteBaseUrl = "https://custom-sync.example.test/custom";
   const providers = (cloudUrl: string) => [
     {
       id: "bytedance_internal",
@@ -1446,7 +1453,11 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", 
             email: "poll-user@example.test",
           }
         : null,
-      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      capabilities: {
+        remote_invoke: true,
+        rules_sync: true,
+        config_sync: true,
+      },
       remote_invoke_registered: signedIn,
     },
     {
@@ -1459,7 +1470,11 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", 
       reachable: false,
       authorized: false,
       user: null,
-      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      capabilities: {
+        remote_invoke: true,
+        rules_sync: true,
+        config_sync: true,
+      },
       remote_invoke_registered: false,
     },
     {
@@ -1472,85 +1487,100 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", 
       reachable: false,
       authorized: false,
       user: null,
-      capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+      capabilities: {
+        remote_invoke: false,
+        rules_sync: true,
+        config_sync: true,
+      },
       remote_invoke_registered: false,
     },
   ];
-  await page.route("**/_bifrost/api/sync/status", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        enabled: true,
-        auto_sync: true,
-        remote_base_url: "https://sync-poll.example.test",
-        has_session: signedIn,
-        reachable: true,
-        authorized: signedIn,
-        syncing: false,
-        reason: signedIn ? "ready" : "unauthorized",
-        last_sync_at: signedIn ? "2026-06-19T08:00:00Z" : null,
-        last_sync_action: signedIn ? "no_change" : null,
-        last_error: null,
-        user: signedIn
-          ? {
-              user_id: "poll-user",
-              nickname: "Poll User",
-              avatar: "",
-              email: "poll-user@example.test",
-            }
-          : null,
-        providers: providers("https://sync-poll.example.test"),
-      }),
-    });
-  });
-  await page.route("**/_bifrost/api/sync/config", async (route) => {
-    const payload = route.request().postDataJSON() as { remote_base_url?: string };
-    savedRemoteBaseUrl = payload.remote_base_url ?? "";
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        enabled: true,
-        auto_sync: true,
-        remote_base_url: savedRemoteBaseUrl,
-        has_session: true,
-        reachable: true,
-        authorized: true,
-        syncing: false,
-        reason: "ready",
-        last_sync_at: "2026-06-19T08:00:00Z",
-        last_sync_action: "no_change",
-        last_error: null,
-        user: {
+  const syncStatus = () => ({
+    enabled: true,
+    auto_sync: true,
+    remote_base_url: serverRemoteBaseUrl,
+    has_session: signedIn,
+    reachable: true,
+    authorized: signedIn,
+    syncing: false,
+    reason: signedIn ? "ready" : "unauthorized",
+    last_sync_at: signedIn ? "2026-06-19T08:00:00Z" : null,
+    last_sync_action: signedIn ? "no_change" : null,
+    last_error: null,
+    user: signedIn
+      ? {
           user_id: "poll-user",
           nickname: "Poll User",
           avatar: "",
           email: "poll-user@example.test",
-        },
-        providers: providers(savedRemoteBaseUrl),
-      }),
+        }
+      : null,
+    providers: providers(serverRemoteBaseUrl),
+  });
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(syncStatus()),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/config", async (route) => {
+    const payload = route.request().postDataJSON() as {
+      remote_base_url?: string;
+    };
+    savedRemoteBaseUrl = payload.remote_base_url ?? "";
+    // A successful config update persists into every subsequent status poll.
+    serverRemoteBaseUrl = savedRemoteBaseUrl;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(syncStatus()),
     });
   });
 
   await openPage(page, "settings?tab=sync");
-  await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(0);
-  const remoteUrlInput = page.getByTestId("settings-sync-provider-bifrost-cloud-url-input");
-  await expect(remoteUrlInput).toHaveValue("https://sync-poll.example.test");
+  await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(
+    0,
+  );
+  const remoteUrlInput = page.getByTestId(
+    "settings-sync-provider-bifrost-cloud-url-input",
+  );
+  const internalProviderCard = page.getByTestId(
+    "settings-sync-provider-card-bytedance_internal",
+  );
+  await expect(remoteUrlInput).toHaveValue(serverRemoteBaseUrl);
+  await expect(internalProviderCard).toContainText("Not signed in");
 
-  await remoteUrlInput.fill("https://custom-sync.example.test/custom/");
+  await remoteUrlInput.fill(draftRemoteBaseUrl);
+  // Change the server value too: without the dirty guard this poll would
+  // overwrite the draft even though the user has not saved it.
+  serverRemoteBaseUrl = "https://sync-updated.example.test";
   signedIn = true;
+  await expect(internalProviderCard).toContainText("poll-user", {
+    timeout: 5_000,
+  });
   await expect
-    .poll(async () => page.getByTestId("statusbar-sync").getAttribute("data-sync-state"), {
-      timeout: 5_000,
-    })
+    .poll(
+      async () =>
+        page.getByTestId("statusbar-sync").getAttribute("data-sync-state"),
+      { timeout: 5_000 },
+    )
     .toBe("ready");
-  await expect(remoteUrlInput).toHaveValue("https://custom-sync.example.test/custom/");
+  await expect(remoteUrlInput).toHaveValue(draftRemoteBaseUrl);
 
-  await page.getByTestId("settings-sync-provider-bifrost-cloud-url-save").click();
+  await page
+    .getByTestId("settings-sync-provider-bifrost-cloud-url-save")
+    .click();
   await waitForToast(page, "Bifrost Cloud URL updated");
-  expect(savedRemoteBaseUrl).toBe("https://custom-sync.example.test/custom");
-  await expect(remoteUrlInput).toHaveValue("https://custom-sync.example.test/custom/");
+  expect(savedRemoteBaseUrl).toBe(normalizedRemoteBaseUrl);
+  await expect(remoteUrlInput).toHaveValue(normalizedRemoteBaseUrl);
+
+  // Observe another Settings poll after saving, not just the config response.
+  signedIn = false;
+  await expect(internalProviderCard).toContainText("Not signed in", {
+    timeout: 5_000,
+  });
+  await expect(remoteUrlInput).toHaveValue(normalizedRemoteBaseUrl);
 });
 
 test("Settings Sync Bifrost Cloud URL 必须先通过基础校验再连接", async ({ page }) => {
@@ -3487,6 +3517,9 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       rule: "local.example.com host://127.0.0.1:3100",
       update_time: "2026-03-20T12:00:00Z",
     });
+    // Remote-only edits do not wake the five-minute auto-sync loop.
+    const pullResponse = await request.post(`${apiBase}/sync/run`);
+    expect(pullResponse.ok()).toBeTruthy();
 
     await expect
       .poll(async () => {
@@ -3561,7 +3594,9 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
     await expect
       .poll(async () => {
         const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { last_sync_action?: string | null };
+        const body = (await response.json()) as {
+          last_sync_action?: string | null;
+        };
         return body.last_sync_action ?? null;
       })
       .toBe("local_pushed");
@@ -3573,29 +3608,40 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
 
     await expect
       .poll(async () => {
-        const response = await request.get(`${apiBase}/rules/${encodeURIComponent(localRuleName)}`);
+        const response = await request.get(
+          `${apiBase}/rules/${encodeURIComponent(localRuleName)}`,
+        );
         const body = (await response.json()) as { enabled: boolean };
         return body.enabled;
       })
       .toBe(true);
 
-    await request.put(`${apiBase}/sync/config`, {
-      data: {
-        enabled: true,
-        auto_sync: true,
-        remote_base_url: "http://127.0.0.1:9",
-        probe_interval_secs: 2,
-        connect_timeout_ms: 1000,
-      },
-    });
+    // Fail the saved provider itself without changing its URL or session.
+    remoteServer.setAvailable(false);
 
     await expect
-      .poll(async () => {
-        const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { reason: string };
-        return body.reason;
-      }, { timeout: 10000 })
-      .toBe("unreachable");
+      .poll(
+        async () => {
+          const response = await request.get(`${apiBase}/sync/status`);
+          return (await response.json()) as SyncStatus;
+        },
+        { timeout: 10000 },
+      )
+      .toMatchObject({
+        remote_base_url: remoteServer.baseUrl,
+        has_session: true,
+        reachable: false,
+        reason: "unreachable",
+        providers: expect.arrayContaining([
+          expect.objectContaining({
+            id: "bifrost_cloud",
+            remote_base_url: remoteServer.baseUrl,
+            connected: true,
+            reachable: false,
+            reason: "unreachable",
+          }),
+        ]),
+      });
 
     await expect
       .poll(async () => page.getByTestId("statusbar-sync").getAttribute("data-sync-state"))
@@ -3611,12 +3657,14 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       .listEnvs()
       .find((env) => env.name === localRuleName);
     expect(remoteBeforeReconnect).toBeTruthy();
+    expect(remoteBeforeReconnect?.rule).toContain("127.0.0.1:3200");
     remoteServer.upsertEnv({
       ...remoteBeforeReconnect!,
       update_time: "2026-03-20T00:00:00Z",
     });
 
-    await request.put(`${apiBase}/sync/config`, {
+    remoteServer.setAvailable(true);
+    const reconnectResponse = await request.put(`${apiBase}/sync/config`, {
       data: {
         enabled: true,
         auto_sync: true,
@@ -3625,6 +3673,7 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
         connect_timeout_ms: 1000,
       },
     });
+    expect(reconnectResponse.ok()).toBeTruthy();
 
     await expect
       .poll(
@@ -3640,10 +3689,41 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
     await expect
       .poll(async () => {
         const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { last_sync_action?: string | null };
+        const body = (await response.json()) as {
+          last_sync_action?: string | null;
+        };
         return body.last_sync_action ?? null;
       })
       .toBe("local_pushed");
+    await expect
+      .poll(
+        async () => {
+          const response = await request.get(`${apiBase}/sync/status`);
+          return (await response.json()) as SyncStatus;
+        },
+        { timeout: 10000 },
+      )
+      .toMatchObject({
+        remote_base_url: remoteServer.baseUrl,
+        has_session: true,
+        reachable: true,
+        authorized: true,
+        reason: "ready",
+        providers: expect.arrayContaining([
+          expect.objectContaining({
+            id: "bifrost_cloud",
+            remote_base_url: remoteServer.baseUrl,
+            connected: true,
+            reachable: true,
+            authorized: true,
+            reason: "ready",
+          }),
+        ]),
+      });
+    await expect(page.getByTestId("statusbar-sync")).toHaveAttribute(
+      "data-sync-state",
+      "ready",
+    );
 
   } finally {
     try {
@@ -3654,7 +3734,7 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
         },
       });
     } catch {
-      // Ignore cleanup errors when the test intentionally stops the mock remote.
+      // Ignore cleanup errors while the mock remote is unavailable.
     }
     await remoteServer.close();
   }

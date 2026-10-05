@@ -1,3 +1,5 @@
+// Legacy store: bounded-window helpers are extracted. Continue separating fetch,
+// selection, and push-reconciliation responsibilities through focused changes.
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { TrafficSummary, TrafficRecord, ToolbarFilters, FilterCondition, TrafficUpdatesFilter, TrafficSummaryCompact, TrafficDeltaData, TrafficStatistics } from '../types';
@@ -55,6 +57,7 @@ interface TrafficState {
   pushDeltaUnsubscribe: (() => void) | null;
   pushDeletedUnsubscribe: (() => void) | null;
   pushStatisticsUnsubscribe: (() => void) | null;
+  pushConnectionUnsubscribe: (() => void) | null;
   filterVersion: number;
   initialized: boolean;
   selectedId: string | undefined;
@@ -101,7 +104,8 @@ interface TrafficState {
   setSelectedId: (id: string | undefined) => void;
   handleTrafficPush: (data: TrafficUpdatesData) => void;
   handleTrafficDelta: (data: TrafficDeltaData) => void;
-  handleTrafficDeleted: (ids: string[]) => void;
+  handleTrafficDeleted: (ids: string[], authoritativeTotal?: number) => void;
+  reconcileTrafficWindow: () => Promise<void>;
   handleTrafficStatistics: (statistics: TrafficStatistics) => void;
   enablePush: () => void;
   disablePush: () => void;
@@ -116,6 +120,7 @@ const HISTORY_BATCH_LIMIT = 500;
 const UPDATE_BATCH_LIMIT = 1000;
 const UPDATE_THROTTLE_MS = 100;
 const MAX_PENDING_IDS = 500;
+const MEMBERSHIP_QUERY_LIMIT = 500;
 
 interface BatchedUpdate {
   newRecords: TrafficSummary[];
@@ -136,6 +141,9 @@ let hasMoreBurst = 0;
 let historyBackfillGeneration = 0;
 let recordsMutationVersion = 0;
 let statisticsRequest: Promise<void> | null = null;
+let membershipRequest: Promise<void> | null = null;
+let membershipReconciliationRequired = false;
+let membershipFollowupRequired = false;
 const TRAFFIC_SELECTION_SYNC_CHANNEL = 'bifrost-traffic-selection-sync';
 const trafficSelectionSyncChannel =
   typeof BroadcastChannel !== 'undefined'
@@ -920,6 +928,7 @@ export const useTrafficStore = create<TrafficState>()(
       pushDeltaUnsubscribe: null,
       pushDeletedUnsubscribe: null,
       pushStatisticsUnsubscribe: null,
+      pushConnectionUnsubscribe: null,
       filterVersion: 0,
       initialized: false,
       selectedId: undefined,
@@ -989,7 +998,8 @@ export const useTrafficStore = create<TrafficState>()(
           state.pushUnsubscribe ||
           state.pushDeltaUnsubscribe ||
           state.pushDeletedUnsubscribe ||
-          state.pushStatisticsUnsubscribe
+          state.pushStatisticsUnsubscribe ||
+          state.pushConnectionUnsubscribe
         ) return;
 
         const unsubscribe = pushService.onTrafficUpdates((data) => {
@@ -1008,11 +1018,22 @@ export const useTrafficStore = create<TrafficState>()(
           get().handleTrafficStatistics(statistics);
         });
 
+        // Deletion notifications are not replayed. Equal-total reconnects can
+        // still replace cached rows, so check IDs after the final backlog batch.
+        const unsubscribeConnection = pushService.onConnectionChange(
+          ({ connected }) => {
+            if (!connected && get().records.length > 0) {
+              membershipReconciliationRequired = true;
+            }
+          },
+        );
+
         set({
           pushUnsubscribe: unsubscribe,
           pushDeltaUnsubscribe: unsubscribeDelta,
           pushDeletedUnsubscribe: unsubscribeDeleted,
           pushStatisticsUnsubscribe: unsubscribeStatistics,
+          pushConnectionUnsubscribe: unsubscribeConnection,
         });
 
         const subscription = {
@@ -1027,6 +1048,10 @@ export const useTrafficStore = create<TrafficState>()(
 
       disablePush: () => {
         const state = get();
+        if (state.pushConnectionUnsubscribe && state.records.length > 0) {
+          membershipReconciliationRequired = true;
+        }
+        state.pushConnectionUnsubscribe?.();
         if (state.pushUnsubscribe) {
           state.pushUnsubscribe();
         }
@@ -1044,6 +1069,7 @@ export const useTrafficStore = create<TrafficState>()(
           pushDeltaUnsubscribe: null,
           pushDeletedUnsubscribe: null,
           pushStatisticsUnsubscribe: null,
+          pushConnectionUnsubscribe: null,
         });
         pushService.updateSubscription({
           need_traffic: false,
@@ -1060,6 +1086,8 @@ export const useTrafficStore = create<TrafficState>()(
         const hasRecordChanges =
           data.new_records.length > 0 || data.updated_records.length > 0;
         const hasMetadataChanges =
+          membershipReconciliationRequired ||
+          state.records.length > data.server_total ||
           data.server_total !== state.serverTotal ||
           (data.server_sequence !== undefined && data.server_sequence !== state.serverSequence) ||
           (data.oldest_sequence !== undefined &&
@@ -1123,6 +1151,7 @@ export const useTrafficStore = create<TrafficState>()(
             if (!batch) return;
             pendingBatch = null;
             lastUpdateTime = performance.now();
+            let needsMembershipReconciliation = false;
 
             set((prevState) => {
               const recordsMap = new Map(prevState.recordsMap);
@@ -1188,19 +1217,24 @@ export const useTrafficStore = create<TrafficState>()(
                   prevState.serverOldestSequence ?? 0,
                   batch.oldestSequence,
                 );
+              const countBeforeRetention = allRecords.length;
               if (serverOldestSequence !== null) {
                 allRecords = allRecords.filter(
                   (record) => record.sequence >= serverOldestSequence,
                 );
               }
-              const latestWindowLimit = prevState.hasNewer
-                ? MAX_TRAFFIC_WINDOW_RECORDS
-                : Math.min(MAX_TRAFFIC_WINDOW_RECORDS, batch.serverTotal);
+              const retainedRemovals = countBeforeRetention - allRecords.length;
+              needsMembershipReconciliation =
+                allRecords.length > batch.serverTotal ||
+                (serverOldestSequence === prevState.serverOldestSequence &&
+                  prevState.serverTotal - batch.serverTotal > retainedRemovals);
+              // A smaller total does not identify deleted rows. Keep the bounded
+              // window intact until an authoritative ID query reconciles misses.
               const bounded = mergeBoundedTrafficWindow(
                 allRecords,
                 [],
                 'newer',
-                latestWindowLimit,
+                MAX_TRAFFIC_WINDOW_RECORDS,
               );
               allRecords = bounded.records;
               const boundaries = getBoundaryState(allRecords);
@@ -1275,6 +1309,14 @@ export const useTrafficStore = create<TrafficState>()(
                   : prevState.recordsMutation,
               };
             });
+            membershipReconciliationRequired ||= needsMembershipReconciliation;
+            if (membershipReconciliationRequired && !batch.hasMore) {
+              if (membershipRequest) {
+                membershipFollowupRequired = true;
+              } else {
+                void get().reconcileTrafficWindow();
+              }
+            }
           });
         };
 
@@ -1299,7 +1341,59 @@ export const useTrafficStore = create<TrafficState>()(
         });
       },
 
-      handleTrafficDeleted: (ids: string[]) => {
+      reconcileTrafficWindow: async () => {
+        if (!membershipRequest) {
+          membershipReconciliationRequired = false;
+          const generation = historyBackfillGeneration;
+          const recordIds = get().records.map((record) => record.id);
+          if (recordIds.length === 0) return;
+          membershipRequest = (async () => {
+            const existingIds = new Set<string>();
+            for (
+              let offset = 0;
+              offset < recordIds.length;
+              offset += MEMBERSHIP_QUERY_LIMIT
+            ) {
+              const ids = recordIds.slice(
+                offset,
+                offset + MEMBERSHIP_QUERY_LIMIT,
+              );
+              const response = await api.queryTraffic({
+                record_ids: ids,
+                limit: ids.length,
+              });
+              // Never infer deletions from an incomplete/failed query snapshot.
+              if (generation !== historyBackfillGeneration) return;
+              if (response.has_more || response.total !== response.records.length) {
+                membershipReconciliationRequired = true;
+                return;
+              }
+              for (const record of response.records) existingIds.add(record.id);
+            }
+            if (generation !== historyBackfillGeneration) return;
+            const deletedIds = recordIds.filter((id) => !existingIds.has(id));
+            // Delta metadata already included these deletions in the global total.
+            // Remove only queried IDs, preserving concurrent arrivals and paging.
+            get().handleTrafficDeleted(deletedIds, get().serverTotal);
+          })()
+            .catch(() => {
+              // Keep the visible window on transient errors. A later delta can retry.
+              if (generation === historyBackfillGeneration) {
+                membershipReconciliationRequired = true;
+              }
+            })
+            .finally(() => {
+              membershipRequest = null;
+              if (membershipFollowupRequired) {
+                membershipFollowupRequired = false;
+                void get().reconcileTrafficWindow();
+              }
+            });
+        }
+        await membershipRequest;
+      },
+
+      handleTrafficDeleted: (ids: string[], authoritativeTotal?: number) => {
         if (ids.length === 0) return;
         const idsSet = new Set(ids);
         set((prevState) => {
@@ -1332,13 +1426,15 @@ export const useTrafficStore = create<TrafficState>()(
             records,
             recordsMap,
             pendingIds,
-            serverTotal: Math.max(prevState.serverTotal - removedCount, 0),
+            serverTotal: authoritativeTotal ?? Math.max(prevState.serverTotal - removedCount, 0),
             oldestSequence: boundaries.oldestSequence,
             lastId: prevState.lastId,
             lastSequence: prevState.lastSequence,
             currentRecord: detailRemoved ? null : prevState.currentRecord,
             requestBody: detailRemoved ? null : prevState.requestBody,
             responseBody: detailRemoved ? null : prevState.responseBody,
+            requestRawBody: detailRemoved ? null : prevState.requestRawBody,
+            responseRawBody: detailRemoved ? null : prevState.responseRawBody,
             detailLoading: detailRemoved ? false : prevState.detailLoading,
             detailError: detailRemoved ? 'Request was deleted' : prevState.detailError,
             selectedId: selectedDeleted ? undefined : prevState.selectedId,
@@ -1366,6 +1462,8 @@ export const useTrafficStore = create<TrafficState>()(
         }
 
         const generation = ++historyBackfillGeneration;
+        membershipReconciliationRequired = false;
+        membershipFollowupRequired = false;
         set({ loading: true, error: null });
         try {
           const filter: TrafficUpdatesFilter = {
@@ -1849,6 +1947,8 @@ export const useTrafficStore = create<TrafficState>()(
         }
 
         historyBackfillGeneration += 1;
+        membershipReconciliationRequired = false;
+        membershipFollowupRequired = false;
         clearPendingTrafficBatch();
         set({
           records: [],

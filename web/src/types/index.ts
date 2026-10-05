@@ -410,6 +410,7 @@ export interface TrafficDeltaData {
 }
 
 export interface TrafficQueryRequest {
+  record_ids?: string[];
   cursor?: number;
   limit?: number;
   direction?: 'forward' | 'backward';

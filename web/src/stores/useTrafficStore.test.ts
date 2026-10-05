@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   FilterCondition,
   ToolbarFilters,
@@ -9,6 +9,7 @@ import type {
 
 const apiMocks = vi.hoisted(() => ({
   getTrafficPage: vi.fn(),
+  queryTraffic: vi.fn(),
   clearTraffic: vi.fn().mockResolvedValue(undefined),
   getTrafficStatistics: vi.fn().mockResolvedValue({
     total_requests: 0,
@@ -23,17 +24,17 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../api", () => apiMocks);
 
-vi.mock("../services/pushService", () => ({
-  default: {
-    onTrafficUpdates: vi.fn(),
-    onTrafficDelta: vi.fn(),
-    onTrafficDeleted: vi.fn(),
-    onTrafficStatistics: vi.fn(),
-    updateSubscription: vi.fn(),
-    connect: vi.fn(),
-    disconnectIfIdle: vi.fn(),
-  },
+const pushMocks = vi.hoisted(() => ({
+  onTrafficUpdates: vi.fn().mockReturnValue(() => {}),
+  onTrafficDelta: vi.fn().mockReturnValue(() => {}),
+  onTrafficDeleted: vi.fn().mockReturnValue(() => {}),
+  onTrafficStatistics: vi.fn().mockReturnValue(() => {}),
+  onConnectionChange: vi.fn().mockReturnValue(() => {}),
+  updateSubscription: vi.fn(),
+  connect: vi.fn(),
+  disconnectIfIdle: vi.fn(),
 }));
+vi.mock("../services/pushService", () => ({ default: pushMocks }));
 
 import {
   filterRecords,
@@ -385,9 +386,11 @@ describe("Traffic store rolling retention and burst catch-up", () => {
       newRecordsCount: 0,
     });
 
-    useTrafficStore.getState().handleTrafficDelta(
-      makeDelta(makeRecordRange(1001, 1500), 900, 1501, 601),
-    );
+    useTrafficStore
+      .getState()
+      .handleTrafficDelta(
+        makeDelta(makeRecordRange(1001, 1500), 900, 1501, 601),
+      );
     await flushTrafficBatch();
 
     const state = useTrafficStore.getState();
@@ -416,9 +419,11 @@ describe("Traffic store rolling retention and burst catch-up", () => {
       newRecordsCount: 0,
     });
 
-    useTrafficStore.getState().handleTrafficDelta(
-      makeDelta(makeRecordRange(1001, 1500), 900, 1501, 601),
-    );
+    useTrafficStore
+      .getState()
+      .handleTrafficDelta(
+        makeDelta(makeRecordRange(1001, 1500), 900, 1501, 601),
+      );
     await flushTrafficBatch();
 
     const state = useTrafficStore.getState();
@@ -449,9 +454,11 @@ describe("Traffic store rolling retention and burst catch-up", () => {
     for (let start = 501; start <= 5000; start += 500) {
       const end = start + 499;
       const floor = Math.max(1, end - 999);
-      useTrafficStore.getState().handleTrafficDelta(
-        makeDelta(makeRecordRange(start, end), 1000, end + 1, floor),
-      );
+      useTrafficStore
+        .getState()
+        .handleTrafficDelta(
+          makeDelta(makeRecordRange(start, end), 1000, end + 1, floor),
+        );
     }
     await flushTrafficBatch();
 
@@ -463,5 +470,385 @@ describe("Traffic store rolling retention and burst catch-up", () => {
     expect(state.serverOldestSequence).toBe(4001);
     expect(state.lastSequence).toBe(5000);
     expect(state.serverSequence).toBe(5001);
+  });
+});
+
+describe("Traffic store missed-deletion reconciliation", () => {
+  beforeEach(async () => {
+    useTrafficStore.getState().disablePush();
+    await useTrafficStore.getState().clearTraffic();
+    useTrafficStore.setState(useTrafficStore.getInitialState());
+    apiMocks.queryTraffic.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const seed = () => {
+    const records = makeRecordRange(1, 3);
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((record) => [record.id, record])),
+      serverTotal: 3,
+      serverSequence: 4,
+      serverOldestSequence: 1,
+      oldestSequence: 1,
+      lastSequence: 3,
+      lastId: "3",
+      selectedId: "2",
+      requestBody: "deleted request",
+      responseBody: "deleted response",
+      requestRawBody: { data: "request bytes", size: 13 },
+      responseRawBody: { data: "response bytes", size: 14 },
+    });
+    return records;
+  };
+
+  it("keeps the oldest survivor instead of guessing which rows disappeared offline", async () => {
+    const [keep] = seed();
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      ...makePage([keep], false, "forward"),
+      total: 1,
+    });
+
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 1, 4, 1));
+    await flushTrafficBatch();
+
+    const state = useTrafficStore.getState();
+    expect(state.records.map((record) => record.id)).toEqual(["1"]);
+    expect(state.recordsMap.has("1")).toBe(true);
+    expect(state.recordsMap.has("2")).toBe(false);
+    expect(state.recordsMap.has("3")).toBe(false);
+    expect(state.serverTotal).toBe(1);
+    expect(state.lastSequence).toBe(3);
+    expect(state.lastId).toBe("3");
+    expect(state.selectedId).toBeUndefined();
+    expect(state.requestBody).toBeNull();
+    expect(state.responseBody).toBeNull();
+    expect(state.requestRawBody).toBeNull();
+    expect(state.responseRawBody).toBeNull();
+    expect(state.recordsMutation.deletedIds).toEqual(["2", "3"]);
+    expect(apiMocks.queryTraffic).toHaveBeenCalledExactlyOnceWith({
+      record_ids: ["1", "2", "3"],
+      limit: 3,
+    });
+  });
+
+  it("reconciles equal-total replacements after an automatic reconnect, once backlog ends", async () => {
+    const records = seed();
+    useTrafficStore.setState({ serverTotal: 100, hasMore: true });
+    useTrafficStore.getState().enablePush();
+    const connectionChanged =
+      pushMocks.onConnectionChange.mock.calls.at(-1)![0];
+    connectionChanged({ connected: true });
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 100, 4, 1));
+    await flushTrafficBatch();
+    expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+
+    connectionChanged({ connected: false });
+    connectionChanged({ connected: true });
+    const [arrival] = makeRecordRange(4, 4);
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      ...makePage([records[0], records[2], arrival], false, "forward"),
+      total: 3,
+    });
+    useTrafficStore.getState().handleTrafficDelta({
+      ...makeDelta([arrival], 100, 5, 1),
+      has_more: true,
+    });
+    await flushTrafficBatch();
+    expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 100, 5, 1));
+    await flushTrafficBatch();
+    expect(apiMocks.queryTraffic).toHaveBeenCalledExactlyOnceWith({
+      record_ids: ["1", "2", "3", "4"],
+      limit: 4,
+    });
+    const state = useTrafficStore.getState();
+    expect(state.records.map((record) => record.id)).toEqual(["1", "3", "4"]);
+    expect(state.serverTotal).toBe(100);
+    expect(state.lastSequence).toBe(4);
+    expect(state.hasMore).toBe(true);
+  });
+
+  it("rechecks after another reconnect finishes during an in-flight lookup", async () => {
+    const records = seed();
+    useTrafficStore.setState({ serverTotal: 100 });
+    useTrafficStore.getState().enablePush();
+    const connectionChanged =
+      pushMocks.onConnectionChange.mock.calls.at(-1)![0];
+    let resolveQuery!: (page: TrafficQueryResponse) => void;
+    apiMocks.queryTraffic.mockImplementationOnce(
+      () =>
+        new Promise<TrafficQueryResponse>((resolve) => {
+          resolveQuery = resolve;
+        }),
+    );
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      ...makePage([records[0]], false, "forward"),
+      total: 1,
+    });
+    connectionChanged({ connected: false });
+    connectionChanged({ connected: true });
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 100, 4, 1));
+    await flushTrafficBatch();
+    connectionChanged({ connected: false });
+    connectionChanged({ connected: true });
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 100, 4, 1));
+    await flushTrafficBatch();
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(1);
+    resolveQuery({
+      ...makePage([records[0], records[2]], false, "forward"),
+      total: 2,
+    });
+    await flushTrafficBatch();
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(2);
+    expect(
+      useTrafficStore.getState().records.map((record) => record.id),
+    ).toEqual(["1"]);
+    expect(useTrafficStore.getState().serverTotal).toBe(100);
+  });
+
+  it("checks cached membership after push is disabled and resumed", async () => {
+    const [keep] = seed();
+    useTrafficStore.setState({ serverTotal: 100 });
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      ...makePage([keep], false, "forward"),
+      total: 1,
+    });
+    // Two unseen inserts elsewhere offset the two deleted cached records.
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 100, 6, 1));
+    await flushTrafficBatch();
+    expect(
+      useTrafficStore.getState().records.map((record) => record.id),
+    ).toEqual(["1"]);
+    expect(useTrafficStore.getState().serverTotal).toBe(100);
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles missed deletes when only part of the server history is loaded", async () => {
+    const records = seed();
+    useTrafficStore.setState({ serverTotal: 100, hasMore: true });
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      ...makePage([records[0], records[2]], false, "forward"),
+      total: 2,
+    });
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 99, 4, 1));
+    await flushTrafficBatch();
+    const state = useTrafficStore.getState();
+    expect(state.records.map((record) => record.id)).toEqual(["1", "3"]);
+    expect(state.serverTotal).toBe(99);
+    expect(state.hasMore).toBe(true);
+    expect(state.selectedId).toBeUndefined();
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["append", "retention"])(
+    "does not query membership for ordinary %s deltas",
+    async (kind) => {
+      seed();
+      const delta =
+        kind === "append"
+          ? makeDelta(makeRecordRange(4, 5), 5, 6, 1)
+          : makeDelta([], 2, 4, 2);
+      useTrafficStore.getState().handleTrafficDelta(delta);
+      await flushTrafficBatch();
+      expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+      expect(
+        useTrafficStore.getState().records.map((record) => record.id),
+      ).toEqual(kind === "append" ? ["1", "2", "3", "4", "5"] : ["2", "3"]);
+    },
+  );
+
+  it("does not query when retention only removes history outside the loaded window", async () => {
+    const records = makeRecordRange(501, 1000);
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((record) => [record.id, record])),
+      serverTotal: 1000,
+      serverSequence: 1001,
+      serverOldestSequence: 1,
+      lastSequence: 1000,
+      lastId: "1000",
+    });
+    useTrafficStore
+      .getState()
+      .handleTrafficDelta(makeDelta([], 500, 1001, 501));
+    await flushTrafficBatch();
+    expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+    expect(useTrafficStore.getState().records).toHaveLength(500);
+    expect(useTrafficStore.getState().records[0].id).toBe("501");
+  });
+
+  it("deduplicates lookups and preserves historical paging and filters", async () => {
+    const [keep] = seed();
+    const filters: FilterCondition[] = [
+      { id: "filter", field: "path", operator: "contains", value: "/1" },
+    ];
+    useTrafficStore.setState({
+      hasMore: true,
+      hasNewer: true,
+      filterConditions: filters,
+    });
+    let resolveQuery!: (page: TrafficQueryResponse) => void;
+    apiMocks.queryTraffic.mockImplementationOnce(
+      () =>
+        new Promise<TrafficQueryResponse>((resolve) => {
+          resolveQuery = resolve;
+        }),
+    );
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 1, 4, 1));
+    await flushTrafficBatch();
+    const duplicate = useTrafficStore.getState().reconcileTrafficWindow();
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(1);
+    expect(
+      useTrafficStore.getState().records.map((record) => record.id),
+    ).toEqual(["1", "2", "3"]);
+
+    // A live update advances the cursor without replacing a historical window.
+    useTrafficStore.getState().handleTrafficDelta({
+      ...makeDelta([], 2, 5, 1),
+      updates: makePage(makeRecordRange(4, 4), false, "forward").records,
+    });
+    await flushTrafficBatch();
+    resolveQuery({ ...makePage([keep], false, "forward"), total: 1 });
+    await duplicate;
+
+    const state = useTrafficStore.getState();
+    expect(state.records.map((record) => record.id)).toEqual(["1"]);
+    expect(state.lastSequence).toBe(4);
+    expect(state.serverTotal).toBe(2);
+    expect(state.hasMore).toBe(true);
+    expect(state.hasNewer).toBe(true);
+    expect(state.filterConditions).toEqual(filters);
+  });
+
+  it("does not prune an arrival outside the in-flight query", async () => {
+    const [keep] = seed();
+    let resolveQuery!: (page: TrafficQueryResponse) => void;
+    apiMocks.queryTraffic.mockImplementationOnce(
+      () =>
+        new Promise<TrafficQueryResponse>((resolve) => {
+          resolveQuery = resolve;
+        }),
+    );
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 1, 4, 1));
+    await flushTrafficBatch();
+    useTrafficStore
+      .getState()
+      .handleTrafficDelta(makeDelta(makeRecordRange(4, 4), 2, 5, 1));
+    await flushTrafficBatch();
+    resolveQuery({ ...makePage([keep], false, "forward"), total: 1 });
+    await useTrafficStore.getState().reconcileTrafficWindow();
+    const state = useTrafficStore.getState();
+    expect(state.records.map((record) => record.id)).toEqual(["1", "4"]);
+    expect(state.lastSequence).toBe(4);
+    expect(state.serverTotal).toBe(2);
+  });
+
+  it.each([
+    { has_more: true, total: 1 },
+    { has_more: false, total: 2 },
+  ])(
+    "keeps the window if membership results are incomplete: %j",
+    async (metadata) => {
+      const [keep] = seed();
+      apiMocks.queryTraffic.mockResolvedValueOnce({
+        ...makePage([keep], false, "forward"),
+        ...metadata,
+      });
+      useTrafficStore.getState().handleTrafficDelta(makeDelta([], 1, 4, 1));
+      await flushTrafficBatch();
+      expect(
+        useTrafficStore.getState().records.map((record) => record.id),
+      ).toEqual(["1", "2", "3"]);
+      expect(useTrafficStore.getState().selectedId).toBe("2");
+    },
+  );
+
+  it("preserves data on query failure and retries an unchanged delta", async () => {
+    const [keep] = seed();
+    apiMocks.queryTraffic.mockRejectedValueOnce(new Error("offline"));
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 1, 4, 1));
+    await flushTrafficBatch();
+    expect(
+      useTrafficStore.getState().records.map((record) => record.id),
+    ).toEqual(["1", "2", "3"]);
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      ...makePage([keep], false, "forward"),
+      total: 1,
+    });
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 1, 4, 1));
+    await flushTrafficBatch();
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(2);
+    expect(
+      useTrafficStore.getState().records.map((record) => record.id),
+    ).toEqual(["1"]);
+  });
+
+  it("ignores a membership response from before a clear/reset", async () => {
+    const [keep] = seed();
+    let resolveQuery!: (page: TrafficQueryResponse) => void;
+    apiMocks.queryTraffic.mockImplementationOnce(
+      () =>
+        new Promise<TrafficQueryResponse>((resolve) => {
+          resolveQuery = resolve;
+        }),
+    );
+    const pending = useTrafficStore.getState().reconcileTrafficWindow();
+    await useTrafficStore.getState().clearTraffic();
+    seed();
+    resolveQuery({ ...makePage([keep], false, "forward"), total: 1 });
+    await pending;
+    expect(
+      useTrafficStore.getState().records.map((record) => record.id),
+    ).toEqual(["1", "2", "3"]);
+    expect(useTrafficStore.getState().serverTotal).toBe(3);
+  });
+
+  it("checks a full bounded window in complete ID-only chunks", async () => {
+    const records = makeRecordRange(1, MAX_TRAFFIC_WINDOW_RECORDS);
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((record) => [record.id, record])),
+      serverTotal: records.length,
+      serverSequence: records.length + 1,
+      serverOldestSequence: 1,
+    });
+    apiMocks.queryTraffic.mockImplementation(
+      async ({ record_ids }: { record_ids: string[] }) => {
+        const survivors = records.filter(
+          (record) => record_ids.includes(record.id) && record.id !== "2",
+        );
+        return {
+          ...makePage(survivors, false, "forward"),
+          total: survivors.length,
+        };
+      },
+    );
+    useTrafficStore
+      .getState()
+      .handleTrafficDelta(
+        makeDelta([], records.length - 1, records.length + 1, 1),
+      );
+    await flushTrafficBatch();
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(2);
+    for (const [query] of apiMocks.queryTraffic.mock.calls) {
+      expect(Object.keys(query).sort()).toEqual(["limit", "record_ids"]);
+      expect(query.record_ids).toHaveLength(500);
+      expect(query.limit).toBe(500);
+    }
+    expect(useTrafficStore.getState().records).toHaveLength(
+      MAX_TRAFFIC_WINDOW_RECORDS - 1,
+    );
+    expect(useTrafficStore.getState().recordsMap.has("1")).toBe(true);
+    expect(useTrafficStore.getState().recordsMap.has("2")).toBe(false);
+    expect(useTrafficStore.getState().serverTotal).toBe(
+      MAX_TRAFFIC_WINDOW_RECORDS - 1,
+    );
   });
 });
