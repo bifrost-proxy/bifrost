@@ -104,6 +104,41 @@
 
 - 所有 `e2e-tests/tests/test_*.sh` 都被 CI shell E2E 统一入口覆盖，没有只在本地手工执行的关键脚本。
 
+### TC-TBW-06：有界重连最后一包仍有更老历史
+
+操作步骤：
+
+1. 在隔离端口运行当前源码，保留超过 2,000 条请求；可复用 `web/tests/ui/traffic.spec.ts` 的 `startIsolatedBackend`、`startMockServer` 与 `seedTrafficBatch` fixture。不要操作共享服务。
+2. 在 Chrome 打开隔离实例的 `/_bifrost/traffic`，向上浏览历史窗口，保留一个 path 筛选条件；记下窗口中间一条记录的 ID。
+3. 隐藏该页面使其取消 Traffic 订阅；在另一个连接删除所记 ID，并新增至少 1,000 条流量，保留原有更老历史。
+4. 恢复页面，在 DevTools Network 的 `/api/push` 消息中确认最后一个初始 delta 仍带 `has_more=true`，随后有当前 `traffic_statistics`。
+5. 检查被删除的中间行已经消失、未删除的旧行仍在、筛选条件和历史浏览位置保持；向上继续翻页仍能找到更老记录。
+
+预期结果：
+
+- 无需等待后续新请求，被删行就能被核对移除。
+- 当前 1,000 条窗口最多发出两次 500-ID 查询；不通过无条件历史扫描来核对删除。
+- `has_more` 的历史分页语义保持不变，新增期间不会把用户从历史窗口拉回最新位置。
+- 自动化等价路径：`pnpm --dir web test:unit -- useTrafficStore.test.ts -t "bounded reconnect"`。
+
+### TC-TBW-07：空库重启后低序号流量与共享订阅恢复
+
+操作步骤：
+
+1. 在隔离实例生成至少 1,000 条流量，浏览 Traffic 并打开一条详情；保持 Overview/Metrics 等共享订阅。
+2. 停止此测试实例，使用另一个空的临时数据目录在相同测试端口启动当前源码，显式保留 `BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 和 `--no-system-proxy` 护栏。不要删除真实用户目录。
+3. 在 DevTools 确认零总数且 `server_sequence=1` 的初始统计到达；检查前端读取一次当前统计、清理旧详情/窗口并重新建立共享 Push 连接。重复相同零快照不得产生重连循环。
+4. 发送新数据库的第一条请求；确认它显示在 Traffic，且新订阅游标从其低序号开始前进。再断开并恢复页面连接，确认这条记录仍在且未恢复旧高序号游标。
+5. 额外覆盖确认响应延迟期间生成新请求、旧统计晚到、第二次断线发生于确认请求期间，以及活动筛选在新数据库最新 500 条之外仍能找到匹配记录。
+
+预期结果：
+
+- 旧窗口先原子清理；新的低序号记录不会被旧保留水位过滤或被 1,000 条旧记录裁剪掉。
+- 仅在新统计读取确认序号重启后重置游标；读取失败保留现有窗口，并允许后续统计触发重试。
+- Overview/Metrics/Values/Settings 订阅保留；旧 socket 的迟到事件不会关闭或重复重建新 socket。
+- 确认响应已经包含新请求时仍能从无游标初始补推恢复；旧连接的查询响应不能覆盖新连接状态。
+- 自动化等价路径：`pnpm --dir web test:unit -- useTrafficStore.test.ts pushService.test.ts`。
+
 ## 清理步骤
 
 1. Playwright 用例在 `finally` 中停止各自动态端口后端和 mock server，并删除临时目录。
@@ -111,6 +146,12 @@
 3. 不删除 `.bifrost-ui-target` 构建缓存；它是仓库既有 UI 测试缓存，不含运行数据。
 
 ## 执行记录
+
+2026-10-05 有界重连与序号重启 review 回归：
+
+- TC-TBW-06/07 的 store/service 自动化先复现旧实现失败，再运行修复后的对应回归；包含完整旧窗口、新旧请求交错、查询失败/重试、共享订阅、下一次重连游标和迟到 socket 回调。
+- 最终针对性验证：6 个文件共 75 个测试通过，包括真实挂载的 Traffic 筛选 effect、全历史筛选、窗口分页和 StrictMode 共享订阅；TypeScript、修改文件的 ESLint 与 `git diff --check` 通过。独立 review 也运行相同 75 个测试通过，并确认选取的 8 个新回归在旧运行时代码上失败。
+- TC-TBW-06/07 的真实 Chrome 流程在本地未执行：本任务沿用已确认的浏览器启动 `AF_UNIX EPERM` 环境阻塞，并明确不绕过浏览器沙箱、不额外启动 Cargo 后端。不能把自动化 store/service 结果当作真实浏览器通过。
 
 2026-10-05 空库重连回归复测：
 

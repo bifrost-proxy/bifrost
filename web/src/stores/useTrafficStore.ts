@@ -34,6 +34,7 @@ interface TrafficState {
   serverTotal: number;
   serverSequence: number;
   serverOldestSequence: number | null;
+  trafficEpochVersion: number;
   hasMore: boolean;
   hasNewer: boolean;
   oldestSequence: number | null;
@@ -141,10 +142,20 @@ let hasMoreBurst = 0;
 let historyBackfillGeneration = 0;
 let recordsMutationVersion = 0;
 let statisticsRequest: Promise<void> | null = null;
+let trafficEpochRequest: {
+  historyGeneration: number;
+  resumeGeneration: number;
+  statisticsSequence: number;
+  followup: TrafficStatistics | null;
+  promise: Promise<void>;
+} | null = null;
 let membershipRequest: Promise<void> | null = null;
 let membershipReconciliationRequired = false;
 let membershipFollowupRequired = false;
 let latestTrafficSequenceSinceResume = 0;
+let trafficResumeGeneration = 0;
+let trafficResumeStatisticsPending = false;
+let trafficEpochResetSuspected = false;
 const TRAFFIC_SELECTION_SYNC_CHANNEL = 'bifrost-traffic-selection-sync';
 const trafficSelectionSyncChannel =
   typeof BroadcastChannel !== 'undefined'
@@ -906,6 +917,7 @@ export const useTrafficStore = create<TrafficState>()(
       serverTotal: 0,
       serverSequence: 0,
       serverOldestSequence: null,
+      trafficEpochVersion: 0,
       hasMore: false,
       hasNewer: false,
       oldestSequence: null,
@@ -953,8 +965,13 @@ export const useTrafficStore = create<TrafficState>()(
 
       fetchTrafficStatistics: async () => {
         if (!statisticsRequest) {
+          const generation = historyBackfillGeneration;
+          const resumeGeneration = trafficResumeGeneration;
           statisticsRequest = api.getTrafficStatistics()
             .then((statistics) => {
+              if (generation !== historyBackfillGeneration ||
+                resumeGeneration !== trafficResumeGeneration ||
+                statistics.server_sequence < latestTrafficSequenceSinceResume) return;
               set(snapshotServerStatistics(statistics));
             })
             .catch(() => {
@@ -1020,13 +1037,16 @@ export const useTrafficStore = create<TrafficState>()(
         });
 
         // Deletion notifications are not replayed. Equal-total reconnects can
-        // still replace cached rows, so check IDs after the final backlog batch.
+        // still replace cached rows; statistics also finish bounded backlogs.
         const unsubscribeConnection = pushService.onConnectionChange(
           ({ connected }) => {
             if (!connected) {
               latestTrafficSequenceSinceResume = 0;
-              if (get().records.length > 0 || pendingBatch !== null) {
+              trafficResumeGeneration += 1;
+              trafficEpochResetSuspected = false;
+              if (get().records.length > 0 || get().lastSequence !== null || pendingBatch !== null) {
                 membershipReconciliationRequired = true;
+                trafficResumeStatisticsPending = true;
               }
             }
           },
@@ -1053,8 +1073,12 @@ export const useTrafficStore = create<TrafficState>()(
       disablePush: () => {
         const state = get();
         latestTrafficSequenceSinceResume = 0;
-        if (state.pushConnectionUnsubscribe && (state.records.length > 0 || pendingBatch !== null)) {
+        trafficResumeGeneration += 1;
+        trafficEpochResetSuspected = false;
+        if (state.pushConnectionUnsubscribe &&
+          (state.records.length > 0 || state.lastSequence !== null || pendingBatch !== null)) {
           membershipReconciliationRequired = true;
+          trafficResumeStatisticsPending = true;
         }
         state.pushConnectionUnsubscribe?.();
         if (state.pushUnsubscribe) {
@@ -1461,22 +1485,119 @@ export const useTrafficStore = create<TrafficState>()(
       },
 
       handleTrafficStatistics: (statistics: TrafficStatistics) => {
+        if (statistics.server_sequence < latestTrafficSequenceSinceResume) return;
         set(snapshotServerStatistics(statistics));
-        // Empty storage sends initial statistics without a traffic delta, including
-        // when Traffic resumes on a shared socket. Reuse the normal batch path so
-        // its ID reconciliation and total update also run in that case, completing
-        // any queued backlog from before the interruption with the current total.
+        const state = get();
+        // Initial statistics follow all reconnect chunks. has_more can remain
+        // true on the final chunk because older history lies outside the bounded
+        // tail, so use this snapshot to finish membership reconciliation too.
         // Compare only this connection's traffic: empty storage can restart at 1.
         if (
-          membershipReconciliationRequired &&
-          statistics.total_requests === 0 &&
+          !state.paused &&
+          (membershipReconciliationRequired || trafficResumeStatisticsPending) &&
           statistics.server_sequence >= latestTrafficSequenceSinceResume
         ) {
+          const previousSequence = Math.max(
+            state.serverSequence,
+            state.lastSequence ?? 0,
+            pendingBatch?.serverSequence ?? 0,
+          );
+          if (statistics.server_sequence < previousSequence) {
+            if (statistics.total_requests !== 0 && !trafficEpochResetSuspected) return;
+            trafficEpochResetSuspected = true;
+            const generation = historyBackfillGeneration;
+            const resumeGeneration = trafficResumeGeneration;
+            if (trafficEpochRequest?.historyGeneration !== generation ||
+              trafficEpochRequest.resumeGeneration !== resumeGeneration) {
+              // A periodic push may have been captured before this reconnect.
+              // Confirm rollback with a fresh read before discarding its window.
+              const request = api.getTrafficStatistics()
+                .then((current) => {
+                  if (generation !== historyBackfillGeneration ||
+                    resumeGeneration !== trafficResumeGeneration || get().paused ||
+                    current.server_sequence < latestTrafficSequenceSinceResume) return;
+                  if (current.server_sequence >= previousSequence) {
+                    get().handleTrafficStatistics(current);
+                    return;
+                  }
+
+                  // The new epoch may already contain arrivals. Reopen with no
+                  // cursor so initial replay recovers them, even if the old server
+                  // subscription filtered them out. Clear the old window first:
+                  // its high sequences must not evict the new epoch's low rows.
+                  historyBackfillGeneration += 1;
+                  clearPendingTrafficBatch();
+                  membershipReconciliationRequired = false;
+                  membershipFollowupRequired = false;
+                  trafficResumeStatisticsPending = false;
+                  trafficEpochResetSuspected = false;
+                  set((latest) => ({
+                    ...snapshotServerStatistics(current),
+                    records: [],
+                    recordsMap: new Map(),
+                    currentRecord: null,
+                    selectedId: undefined,
+                    requestBody: null,
+                    responseBody: null,
+                    requestRawBody: null,
+                    responseRawBody: null,
+                    detailLoading: false,
+                    detailError: null,
+                    serverTotal: current.total_requests,
+                    lastId: null,
+                    lastSequence: null,
+                    oldestSequence: null,
+                    serverSequence: current.server_sequence,
+                    serverOldestSequence: null,
+                    trafficEpochVersion: latest.trafficEpochVersion + 1,
+                    pendingIds: new Set(),
+                    hasMore: current.total_requests > INITIAL_WINDOW_LIMIT,
+                    hasNewer: false,
+                    newRecordsCount: 0,
+                    loading: false,
+                    historyLoading: false,
+                    catchingUp: false,
+                    filterVersion: latest.filterVersion + 1,
+                    recordsMutation: createRecordsMutation({
+                      reset: true, inserted: [], updated: [], deletedIds: [],
+                    }),
+                  }));
+                  pushService.resetTrafficCursor();
+                })
+                .catch(() => {
+                  // Preserve the window and retry on the next statistics push.
+                })
+                .finally(() => {
+                  if (trafficEpochRequest?.promise !== request) return;
+                  const followup = trafficEpochRequest.followup;
+                  trafficEpochRequest = null;
+                  if (followup && trafficEpochResetSuspected &&
+                    generation === historyBackfillGeneration &&
+                    resumeGeneration === trafficResumeGeneration) {
+                    get().handleTrafficStatistics(followup);
+                  }
+                });
+              trafficEpochRequest = {
+                historyGeneration: generation,
+                resumeGeneration,
+                statisticsSequence: statistics.server_sequence,
+                followup: null,
+                promise: request,
+              };
+            } else if (statistics.server_sequence > trafficEpochRequest.statisticsSequence) {
+              // Do not lose a newer snapshot while confirmation is pending: an
+              // idle server may never push it again after this read returns.
+              trafficEpochRequest.followup = statistics;
+            }
+            return;
+          }
+          trafficResumeStatisticsPending = false;
+          trafficEpochResetSuspected = false;
           get().handleTrafficPush({
             new_records: [],
             updated_records: [],
             has_more: false,
-            server_total: 0,
+            server_total: statistics.total_requests,
             server_sequence: statistics.server_sequence,
           });
         }
@@ -1491,6 +1612,8 @@ export const useTrafficStore = create<TrafficState>()(
         const generation = ++historyBackfillGeneration;
         membershipReconciliationRequired = false;
         membershipFollowupRequired = false;
+        trafficResumeStatisticsPending = false;
+        trafficEpochResetSuspected = false;
         set({ loading: true, error: null });
         try {
           const filter: TrafficUpdatesFilter = {
@@ -1976,6 +2099,8 @@ export const useTrafficStore = create<TrafficState>()(
         historyBackfillGeneration += 1;
         membershipReconciliationRequired = false;
         membershipFollowupRequired = false;
+        trafficResumeStatisticsPending = false;
+        trafficEpochResetSuspected = false;
         clearPendingTrafficBatch();
         set({
           records: [],

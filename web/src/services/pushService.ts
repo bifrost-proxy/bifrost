@@ -432,19 +432,22 @@ class PushService {
   }
 
   private setupEventHandlers(): void {
-    if (!this.ws) return;
+    const socket = this.ws;
+    if (!socket) return;
 
-    this.ws.onopen = () => {
+    socket.onopen = () => {
+      if (this.ws !== socket) return;
       console.log('[PushService] Connected');
       this.reconnectAttempts = 0;
       // The connection URL only captures the subscription snapshot at create time.
       // If another store updates the subscription while the socket is CONNECTING,
       // send the latest merged subscription once the socket opens.
-      this.ws?.send(JSON.stringify(this.subscription));
+      socket.send(JSON.stringify(this.subscription));
       useDesktopCoreStore.getState().markReady();
     };
 
-    this.ws.onclose = (event) => {
+    socket.onclose = (event) => {
+      if (this.ws !== socket) return;
       if (!this.isManualClose) {
         this.handleConnectionIssue();
       }
@@ -457,14 +460,16 @@ class PushService {
       }
     };
 
-    this.ws.onerror = (error) => {
+    socket.onerror = (error) => {
+      if (this.ws !== socket) return;
       this.handleConnectionIssue();
       if (!this.shouldSuppressConnectionLogs()) {
         console.error('[PushService] Error:', error);
       }
     };
 
-    this.ws.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (this.ws !== socket) return;
       try {
         const message: PushMessage = JSON.parse(event.data);
         this.handleMessage(message);
@@ -622,9 +627,32 @@ class PushService {
       this.reconnectTimer = null;
     }
     if (this.ws) {
+      this.ws.onopen = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.onmessage = null;
       this.ws.close();
       this.ws = null;
+      this.notifyConnectionHandlers(false);
     }
+  }
+
+  resetTrafficCursor(): void {
+    if (this.forceRefresh) return;
+    this.subscription = {
+      ...this.subscription,
+      last_traffic_id: undefined,
+      last_sequence: undefined,
+      pending_ids: [],
+    };
+    if (!this.ws) return;
+
+    // The server keeps a monotonic cursor for each connection, so a fresh
+    // database requires a new socket. Preserve every other subscription owner.
+    // Retire callbacks before closing: a late close/message must not affect the
+    // replacement socket or restore the old connection's traffic state.
+    this.disconnect();
+    this.connect(this.subscription);
   }
 
   disableReconnectUntilRefresh(): void {

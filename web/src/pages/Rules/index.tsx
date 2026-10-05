@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { parsePath, useSearchParams } from 'react-router-dom';
 import { theme } from 'antd';
 import SplitPane from '../../components/SplitPane';
 import RuleList from './RuleList';
@@ -8,7 +8,7 @@ import { useRulesStore } from '../../stores/useRulesStore';
 import { useValuesStore } from '../../stores/useValuesStore';
 import { notifyApiBusinessError } from '../../api/client';
 import pushService from '../../services/pushService';
-import { isMacDesktopShell } from '../../runtime';
+import { isDesktopShell, isMacDesktopShell } from '../../runtime';
 
 const GROUP_PARAM = 'group';
 const RULE_PARAM = 'rule';
@@ -18,10 +18,10 @@ function selectionKey(groupId: string | null, ruleName: string | null): string {
 }
 
 function getUrlParams(): URLSearchParams {
-  const hash = window.location.hash;
-  const qIdx = hash.indexOf('?');
-  const raw = qIdx >= 0 ? hash.slice(qIdx) : window.location.search;
-  return new URLSearchParams(raw);
+  const search = isDesktopShell()
+    ? parsePath(window.location.hash.slice(1)).search
+    : window.location.search;
+  return new URLSearchParams(search);
 }
 
 function syncGroupFromUrl() {
@@ -118,6 +118,14 @@ export default function Rules() {
 
     const targetGroupId = targetGroupParam || null;
     const currentUrlSelection = selectionKey(targetGroupId, targetRuleParam || null);
+    // Router location updates can still be pending in a React transition after
+    // history has changed. A newer list selection must not restore that stale URL.
+    const browserParams = getUrlParams();
+    const browserUrlSelection = selectionKey(
+      browserParams.get(GROUP_PARAM) || null,
+      browserParams.get(RULE_PARAM) || null
+    );
+    if (currentUrlSelection !== browserUrlSelection) return;
     if (handledUrlSelectionRef.current === currentUrlSelection) return;
     handledUrlSelectionRef.current = currentUrlSelection;
 

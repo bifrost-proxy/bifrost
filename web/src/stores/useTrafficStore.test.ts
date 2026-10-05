@@ -34,6 +34,7 @@ const pushMocks = vi.hoisted(() => ({
   updateSubscription: vi.fn(),
   connect: vi.fn(),
   disconnectIfIdle: vi.fn(),
+  resetTrafficCursor: vi.fn(),
 }));
 vi.mock("../services/pushService", () => ({ default: pushMocks }));
 
@@ -480,6 +481,7 @@ describe("Traffic store missed-deletion reconciliation", () => {
     await useTrafficStore.getState().clearTraffic();
     useTrafficStore.setState(useTrafficStore.getInitialState());
     apiMocks.queryTraffic.mockReset();
+    pushMocks.resetTrafficCursor.mockClear();
   });
 
   afterEach(() => {
@@ -515,6 +517,155 @@ describe("Traffic store missed-deletion reconciliation", () => {
     account_names: {},
     domains: {},
   };
+
+  it.each(["queued", "committed"])(
+    "finishes a bounded reconnect with older history after %s chunks",
+    async (phase) => {
+      const records = makeRecordRange(1001, 2000);
+      const filters: FilterCondition[] = [
+        { id: "filter", field: "path", operator: "contains", value: "/1500" },
+      ];
+      useTrafficStore.setState({
+        records,
+        recordsMap: new Map(records.map((record) => [record.id, record])),
+        serverTotal: 2000,
+        serverSequence: 2001,
+        serverOldestSequence: 1,
+        lastSequence: 2000,
+        lastId: "2000",
+        hasMore: true,
+        hasNewer: true,
+        filterConditions: filters,
+      });
+      useTrafficStore.getState().enablePush();
+      const connectionChanged = pushMocks.onConnectionChange.mock.calls.at(-1)![0];
+      connectionChanged({ connected: false });
+      connectionChanged({ connected: true });
+      apiMocks.queryTraffic.mockImplementation(async ({ record_ids }) => {
+        const survivors = records.filter(
+          (record) => record_ids.includes(record.id) && record.id !== "1500",
+        );
+        return { ...makePage(survivors, false, "forward"), total: survivors.length };
+      });
+      // The bounded initial query has older history beyond its 1,000-row tail.
+      // Every chunk therefore has has_more=true, including the final one.
+      for (const [start, end] of [[2001, 2500], [2501, 3000]]) {
+        useTrafficStore.getState().handleTrafficDelta({
+          ...makeDelta(makeRecordRange(start, end), 2999, 3001, 1),
+          has_more: true,
+        });
+        if (phase === "committed") await flushTrafficBatch();
+      }
+      expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+      useTrafficStore.getState().handleTrafficStatistics({
+        ...emptyStatistics,
+        total_requests: 2999,
+        server_sequence: 3001,
+      });
+      await flushTrafficBatch();
+
+      const state = useTrafficStore.getState();
+      expect(state.records.map((record) => record.id)).toEqual(
+        records.filter((record) => record.id !== "1500").map((record) => record.id),
+      );
+      expect(state.serverTotal).toBe(2999);
+      expect(state.lastSequence).toBe(3000);
+      expect(state.hasMore).toBe(true);
+      expect(state.hasNewer).toBe(true);
+      expect(state.filterConditions).toEqual(filters);
+      expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(2);
+      for (const [query] of apiMocks.queryTraffic.mock.calls) {
+        expect(Object.keys(query).sort()).toEqual(["limit", "record_ids"]);
+        expect(query.record_ids).toHaveLength(500);
+        expect(query.limit).toBe(500);
+      }
+    },
+  );
+
+  it.each(["queued", "committed", "full window", "deleted window"])(
+    "accepts low-sequence traffic after an empty restart with %s old traffic",
+    async (phase) => {
+      const records = phase === "full window"
+        ? makeRecordRange(1001, 2000)
+        : makeRecordRange(101, 103);
+      useTrafficStore.setState({
+        records,
+        recordsMap: new Map(records.map((record) => [record.id, record])),
+        serverTotal: records.length,
+        serverSequence: records.at(-1)!.sequence + 1,
+        serverOldestSequence: records[0].sequence,
+        lastSequence: records.at(-1)!.sequence,
+        lastId: records.at(-1)!.id,
+        hasMore: true,
+        hasNewer: true,
+        pendingIds: new Set(["103"]),
+      });
+      useTrafficStore.getState().enablePush();
+      if (phase === "queued" || phase === "committed") {
+        useTrafficStore.getState().handleTrafficDelta({
+          ...makeDelta(makeRecordRange(104, 104), 4, 105, 101),
+          has_more: true,
+        });
+      }
+      if (phase === "committed") await flushTrafficBatch();
+      if (phase === "deleted window") {
+        useTrafficStore.getState().handleTrafficDeleted(records.map((record) => record.id));
+      }
+      const connectionChanged = pushMocks.onConnectionChange.mock.calls.at(-1)![0];
+      connectionChanged({ connected: false });
+      connectionChanged({ connected: true });
+      apiMocks.getTrafficStatistics.mockResolvedValueOnce({
+        ...emptyStatistics,
+        server_sequence: 1,
+      });
+      useTrafficStore.getState().handleTrafficStatistics({
+        ...emptyStatistics,
+        server_sequence: 1,
+      });
+      await flushTrafficBatch();
+
+      const emptyState = useTrafficStore.getState();
+      useTrafficStore.getState().handleTrafficStatistics({ ...emptyStatistics, server_sequence: 1 });
+      const [arrival] = makeRecordRange(1, 1);
+      useTrafficStore.getState().handleTrafficDelta(makeDelta([arrival], 1, 2, 1));
+      useTrafficStore.getState().handleTrafficStatistics({
+        ...emptyStatistics, total_requests: 1, server_sequence: 2,
+      });
+      // A late zero snapshot from before this arrival cannot reset it again.
+      useTrafficStore.getState().handleTrafficStatistics({
+        ...emptyStatistics,
+        server_sequence: 1,
+      });
+      await flushTrafficBatch();
+      const state = useTrafficStore.getState();
+      expect(emptyState.records).toEqual([]);
+      expect(emptyState.lastSequence).toBeNull();
+      expect(emptyState.lastId).toBeNull();
+      expect(emptyState.serverSequence).toBe(1);
+      expect(emptyState.serverOldestSequence).toBeNull();
+      expect(emptyState.hasMore).toBe(false);
+      expect(emptyState.hasNewer).toBe(false);
+      expect(emptyState.pendingIds.size).toBe(0);
+      expect(pushMocks.resetTrafficCursor).toHaveBeenCalledTimes(1);
+      expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+      expect(state.records.map((record) => record.id)).toEqual(["1"]);
+      expect(state.recordsMap.size).toBe(1);
+      expect(state.serverTotal).toBe(1);
+      expect(state.trafficStatisticsTotal).toBe(1);
+      expect(state.serverSequence).toBe(2);
+      expect(state.serverOldestSequence).toBe(1);
+      expect(state.lastSequence).toBe(1);
+      expect(state.lastId).toBe("1");
+      expect(pushMocks.updateSubscription).toHaveBeenLastCalledWith({
+        last_traffic_id: "1", last_sequence: 1, pending_ids: [],
+      });
+      useTrafficStore.getState().disablePush();
+      useTrafficStore.getState().enablePush();
+      expect(pushMocks.connect).toHaveBeenLastCalledWith({
+        last_traffic_id: "1", last_sequence: 1, pending_ids: [], need_traffic: true,
+      });
+    },
+  );
 
   it.each(["reconnect", "shared-socket resume"])(
     "removes all stale rows after %s when the server sends no traffic delta",
@@ -586,6 +737,219 @@ describe("Traffic store missed-deletion reconciliation", () => {
     },
   );
 
+  it("keeps the current epoch when a fresh read disproves stale zero statistics", async () => {
+    const records = seed();
+    useTrafficStore.setState({ hasMore: true, hasNewer: true });
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({
+      ...emptyStatistics, total_requests: 3,
+    });
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      ...makePage(records, false, "forward"), total: 3,
+    });
+    useTrafficStore.getState().handleTrafficStatistics({ ...emptyStatistics, server_sequence: 1 });
+    await flushTrafficBatch();
+    const state = useTrafficStore.getState();
+    expect(state.records).toEqual(records);
+    expect(state.serverTotal).toBe(3);
+    expect(state.serverSequence).toBe(4);
+    expect(state.lastSequence).toBe(3);
+    expect(state.serverOldestSequence).toBe(1);
+    expect(state.hasMore).toBe(true);
+    expect(state.hasNewer).toBe(true);
+    expect(pushMocks.resetTrafficCursor).not.toHaveBeenCalled();
+  });
+
+  it("preserves the window after confirmation failure and retries later statistics", async () => {
+    const records = seed();
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    apiMocks.getTrafficStatistics.mockRejectedValueOnce(new Error("offline"));
+    const restarted = { ...emptyStatistics, server_sequence: 1 };
+    useTrafficStore.getState().handleTrafficStatistics(restarted);
+    await flushTrafficBatch();
+    expect(useTrafficStore.getState().records).toEqual(records);
+    expect(useTrafficStore.getState().lastSequence).toBe(3);
+    expect(pushMocks.resetTrafficCursor).not.toHaveBeenCalled();
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce(restarted);
+    useTrafficStore.getState().handleTrafficStatistics(restarted);
+    useTrafficStore.getState().handleTrafficStatistics(restarted);
+    await flushTrafficBatch();
+    expect(useTrafficStore.getState().records).toEqual([]);
+    expect(pushMocks.resetTrafficCursor).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers an arrival created before restart confirmation returns", async () => {
+    seed();
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    let resolveStatistics!: (statistics: TrafficStatistics) => void;
+    apiMocks.getTrafficStatistics.mockImplementationOnce(
+      () => new Promise<TrafficStatistics>((resolve) => { resolveStatistics = resolve; }),
+    );
+    useTrafficStore.getState().handleTrafficStatistics({ ...emptyStatistics, server_sequence: 1 });
+    // The stale server-side cursor filtered out the first insert, but this fresh
+    // read proves the new epoch even though the database is no longer empty.
+    resolveStatistics({ ...emptyStatistics, total_requests: 1, server_sequence: 2 });
+    await flushTrafficBatch();
+    expect(pushMocks.resetTrafficCursor).toHaveBeenCalledTimes(1);
+    expect(useTrafficStore.getState().serverTotal).toBe(1);
+    useTrafficStore.getState().handleTrafficDelta(makeDelta(makeRecordRange(1, 1), 1, 2, 1));
+    await flushTrafficBatch();
+    expect(useTrafficStore.getState().records.map((record) => record.id)).toEqual(["1"]);
+    expect(useTrafficStore.getState().lastSequence).toBe(1);
+  });
+
+  it("starts a fresh confirmation when another reconnect interrupts the previous read", async () => {
+    seed();
+    useTrafficStore.getState().enablePush();
+    const connectionChanged = pushMocks.onConnectionChange.mock.calls.at(-1)![0];
+    connectionChanged({ connected: false });
+    connectionChanged({ connected: true });
+    let resolveOld!: (statistics: TrafficStatistics) => void;
+    let resolveCurrent!: (statistics: TrafficStatistics) => void;
+    apiMocks.getTrafficStatistics.mockImplementationOnce(
+      () => new Promise<TrafficStatistics>((resolve) => { resolveOld = resolve; }),
+    ).mockImplementationOnce(
+      () => new Promise<TrafficStatistics>((resolve) => { resolveCurrent = resolve; }),
+    );
+    const restarted = { ...emptyStatistics, server_sequence: 1 };
+    useTrafficStore.getState().handleTrafficStatistics(restarted);
+    connectionChanged({ connected: false });
+    connectionChanged({ connected: true });
+    useTrafficStore.getState().handleTrafficStatistics(restarted);
+    resolveOld({ ...emptyStatistics, total_requests: 3 });
+    await flushTrafficBatch();
+    expect(useTrafficStore.getState().records).toHaveLength(3);
+    useTrafficStore.getState().handleTrafficStatistics(restarted);
+    resolveCurrent(restarted);
+    await flushTrafficBatch();
+    expect(useTrafficStore.getState().records).toEqual([]);
+    expect(useTrafficStore.getState().lastSequence).toBeNull();
+    expect(useTrafficStore.getState().serverSequence).toBe(1);
+    expect(pushMocks.resetTrafficCursor).toHaveBeenCalledTimes(1);
+    expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+  });
+
+  it("retains a newer epoch snapshot received while confirmation is pending", async () => {
+    seed();
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    let resolveStatistics!: (statistics: TrafficStatistics) => void;
+    apiMocks.getTrafficStatistics.mockImplementationOnce(
+      () => new Promise<TrafficStatistics>((resolve) => { resolveStatistics = resolve; }),
+    ).mockResolvedValueOnce({ ...emptyStatistics, total_requests: 1, server_sequence: 2 });
+    const calls = apiMocks.getTrafficStatistics.mock.calls.length;
+    useTrafficStore.getState().handleTrafficStatistics({ ...emptyStatistics, server_sequence: 1 });
+    // The old server cursor filters the insert, but metadata/statistics advance.
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 1, 2, 1));
+    useTrafficStore.getState().handleTrafficStatistics({
+      ...emptyStatistics, total_requests: 1, server_sequence: 2,
+    });
+    resolveStatistics({ ...emptyStatistics, server_sequence: 1 });
+    await flushTrafficBatch();
+    expect(apiMocks.getTrafficStatistics.mock.calls.length - calls).toBe(2);
+    expect(pushMocks.resetTrafficCursor).toHaveBeenCalledTimes(1);
+    useTrafficStore.getState().handleTrafficDelta(makeDelta(makeRecordRange(1, 1), 1, 2, 1));
+    await flushTrafficBatch();
+    expect(useTrafficStore.getState().records.map((record) => record.id)).toEqual(["1"]);
+    expect(useTrafficStore.getState().lastSequence).toBe(1);
+  });
+
+  it("does not apply a confirmation captured before newer traffic arrived", async () => {
+    const records = seed();
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    let resolveStatistics!: (statistics: TrafficStatistics) => void;
+    apiMocks.getTrafficStatistics.mockImplementationOnce(
+      () => new Promise<TrafficStatistics>((resolve) => { resolveStatistics = resolve; }),
+    );
+    useTrafficStore.getState().handleTrafficStatistics({ ...emptyStatistics, server_sequence: 1 });
+    const [arrival] = makeRecordRange(4, 4);
+    useTrafficStore.getState().handleTrafficDelta({
+      ...makeDelta([arrival], 4, 5, 1), has_more: true,
+    });
+    resolveStatistics({ ...emptyStatistics, server_sequence: 1 });
+    await flushTrafficBatch();
+    expect(pushMocks.resetTrafficCursor).not.toHaveBeenCalled();
+    expect(useTrafficStore.getState().records.map((record) => record.id)).toEqual(["1", "2", "3", "4"]);
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      ...makePage([...records, arrival], false, "forward"), total: 4,
+    });
+    useTrafficStore.getState().handleTrafficStatistics({
+      ...emptyStatistics, total_requests: 4, server_sequence: 5,
+    });
+    await flushTrafficBatch();
+    expect(useTrafficStore.getState().serverTotal).toBe(4);
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a previous epoch's membership response after resetting", async () => {
+    const records = seed();
+    useTrafficStore.getState().enablePush();
+    let resolveQuery!: (page: TrafficQueryResponse) => void;
+    apiMocks.queryTraffic.mockImplementationOnce(
+      () => new Promise<TrafficQueryResponse>((resolve) => { resolveQuery = resolve; }),
+    );
+    useTrafficStore.getState().handleTrafficDelta(makeDelta([], 1, 4, 1));
+    await flushTrafficBatch();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({ ...emptyStatistics, server_sequence: 1 });
+    useTrafficStore.getState().handleTrafficStatistics({ ...emptyStatistics, server_sequence: 1 });
+    await flushTrafficBatch();
+    useTrafficStore.getState().handleTrafficDelta(makeDelta(makeRecordRange(1, 1), 1, 2, 1));
+    await flushTrafficBatch();
+    resolveQuery({ ...makePage([records[1]], false, "forward"), total: 1 });
+    await useTrafficStore.getState().reconcileTrafficWindow();
+    expect(useTrafficStore.getState().records.map((record) => record.id)).toEqual(["1"]);
+    expect(useTrafficStore.getState().lastSequence).toBe(1);
+  });
+
+  it("ignores ordinary statistics responses captured before an epoch reset", async () => {
+    seed();
+    let resolveStatistics!: (statistics: TrafficStatistics) => void;
+    apiMocks.getTrafficStatistics.mockImplementationOnce(
+      () => new Promise<TrafficStatistics>((resolve) => { resolveStatistics = resolve; }),
+    );
+    const pending = useTrafficStore.getState().fetchTrafficStatistics();
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    const restarted = { ...emptyStatistics, server_sequence: 1 };
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce(restarted);
+    useTrafficStore.getState().handleTrafficStatistics(restarted);
+    await flushTrafficBatch();
+    resolveStatistics({ ...emptyStatistics, total_requests: 3 });
+    await pending;
+    expect(useTrafficStore.getState().trafficStatisticsTotal).toBe(0);
+    expect(useTrafficStore.getState().trafficStatisticsSequence).toBe(1);
+    expect(useTrafficStore.getState().trafficEpochVersion).toBe(1);
+  });
+
+  it("does not treat lower nonzero statistics alone as a restart or replay barrier", async () => {
+    const records = seed();
+    useTrafficStore.getState().enablePush();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().enablePush();
+    const calls = apiMocks.getTrafficStatistics.mock.calls.length;
+    useTrafficStore.getState().handleTrafficStatistics({
+      ...emptyStatistics, total_requests: 1, server_sequence: 2,
+    });
+    await flushTrafficBatch();
+    expect(useTrafficStore.getState().records).toEqual(records);
+    expect(useTrafficStore.getState().serverTotal).toBe(3);
+    expect(apiMocks.getTrafficStatistics.mock.calls.length).toBe(calls);
+    expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+    expect(pushMocks.resetTrafficCursor).not.toHaveBeenCalled();
+  });
+
   it("keeps concurrent arrivals outside an empty-reconnect membership query", async () => {
     seed();
     useTrafficStore.getState().enablePush();
@@ -649,6 +1013,9 @@ describe("Traffic store missed-deletion reconciliation", () => {
         ...makePage([], false, "forward"),
         total: 0,
       });
+      if (serverSequence === 1) {
+        apiMocks.getTrafficStatistics.mockResolvedValueOnce({ ...emptyStatistics, server_sequence: 1 });
+      }
       useTrafficStore.getState().handleTrafficStatistics({
         ...emptyStatistics,
         // Restarting with empty storage resets the server sequence to 1.
@@ -661,11 +1028,15 @@ describe("Traffic store missed-deletion reconciliation", () => {
       expect(state.recordsMap.size).toBe(0);
       expect(state.serverTotal).toBe(0);
       expect(state.trafficStatisticsTotal).toBe(0);
-      expect(state.lastSequence).toBe(4);
-      expect(apiMocks.queryTraffic).toHaveBeenCalledExactlyOnceWith({
-        record_ids: ["1", "2", "3", "4"],
-        limit: 4,
-      });
+      expect(state.lastSequence).toBe(serverSequence === 1 ? null : 4);
+      if (serverSequence === 1) {
+        expect(apiMocks.queryTraffic).not.toHaveBeenCalled();
+      } else {
+        expect(apiMocks.queryTraffic).toHaveBeenCalledExactlyOnceWith({
+          record_ids: ["1", "2", "3", "4"],
+          limit: 4,
+        });
+      }
     },
   );
 
