@@ -2,17 +2,21 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getTrafficPage } from "../../api/traffic";
+import { getTrafficPage, getTrafficStatistics, queryTraffic } from "../../api/traffic";
 import { useFilterPanelStore } from "../../stores/useFilterPanelStore";
 import { useBreakpointStore } from "../../stores/useBreakpointStore";
 import { usePerformanceModeStore } from "../../stores/usePerformanceModeStore";
 import { useTrafficStore } from "../../stores/useTrafficStore";
 import type { TrafficQueryResponse, TrafficSummary } from "../../types";
 import Traffic from "./index";
+import pushService from "../../services/pushService";
 
 vi.mock("../../api/traffic", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/traffic")>()),
   getTrafficPage: vi.fn(),
+  getTrafficStatistics: vi.fn(),
+  queryTraffic: vi.fn(),
+  clearTraffic: vi.fn().mockResolvedValue({ success: true }),
 }));
 vi.mock("../../services/pushService", () => ({
   default: {
@@ -20,6 +24,13 @@ vi.mock("../../services/pushService", () => ({
     getSubscription: () => ({}),
     updateSubscription: vi.fn(),
     onSettingsUpdate: () => () => {},
+    onTrafficUpdates: () => () => {},
+    onTrafficDelta: () => () => {},
+    onTrafficDeleted: () => () => {},
+    onTrafficStatistics: () => () => {},
+    onConnectionChange: () => () => {},
+    disconnectIfIdle: vi.fn(),
+    resetTrafficCursor: vi.fn(),
   },
 }));
 vi.mock("antd", () => ({
@@ -164,8 +175,12 @@ describe("Traffic filters across confirmed database epochs", () => {
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.useFakeTimers();
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().clearTraffic();
     vi.clearAllMocks();
     vi.mocked(getTrafficPage).mockReset();
+    vi.mocked(getTrafficStatistics).mockReset();
+    vi.mocked(queryTraffic).mockReset();
     useBreakpointStore.setState({
       connectPush: vi.fn(),
       fetchSettings: vi.fn().mockResolvedValue(undefined),
@@ -187,13 +202,16 @@ describe("Traffic filters across confirmed database epochs", () => {
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
+    await act(async () => {
+      useTrafficStore.getState().disablePush();
+      root.unmount();
+    });
     container.remove();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
-  it("rescans unchanged filters beyond the new epoch's latest 500 records", async () => {
+  it("rescans unchanged filters beyond a populated replacement database's latest 500 records", async () => {
     const tailResponse = deferredPage();
     const latestTail = Array.from({ length: 500 }, (_, index) =>
       record(101 + index, false),
@@ -202,10 +220,50 @@ describe("Traffic filters across confirmed database epochs", () => {
       .mockResolvedValueOnce(page([record(10_000)]))
       .mockReturnValueOnce(tailResponse.promise)
       .mockResolvedValueOnce(page([record(50)]));
+    const oldRecord = record(10_000);
+    useTrafficStore.setState({
+      records: [oldRecord],
+      recordsMap: new Map([[oldRecord.id, oldRecord]]),
+      serverTotal: 1,
+      serverSequence: 10_001,
+      lastSequence: 10_000,
+      lastId: oldRecord.id,
+    });
     await render();
     expect(displayedIds()).toEqual(["record-10000"]);
 
-    await resetEpoch();
+    const replacement = {
+      total_requests: 600,
+      server_sequence: 601,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    };
+    vi.mocked(queryTraffic).mockResolvedValueOnce(page([]));
+    vi.mocked(getTrafficStatistics).mockResolvedValueOnce(replacement);
+    await act(async () => {
+      useTrafficStore.getState().enablePush();
+      useTrafficStore.getState().disablePush();
+      useTrafficStore.getState().enablePush();
+      // Initial replay with the stale high cursor carries only metadata. Its
+      // membership query can finish before the lower nonzero statistics arrive.
+      useTrafficStore.getState().handleTrafficDelta({
+        inserts: [], updates: [], has_more: false,
+        server_total: 600, server_sequence: 601, oldest_sequence: 1,
+      });
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(queryTraffic).toHaveBeenCalledExactlyOnceWith({
+      record_ids: [oldRecord.id], limit: 1,
+    });
+    expect(useTrafficStore.getState().lastSequence).toBe(10_000);
+    await act(async () => {
+      useTrafficStore.getState().handleTrafficStatistics(replacement);
+    });
+    expect(pushService.resetTrafficCursor).toHaveBeenCalledOnce();
+    expect(useTrafficStore.getState().trafficEpochVersion).toBe(1);
     expect(getTrafficPage).toHaveBeenCalledTimes(2);
     expect(displayedIds()).toEqual([]);
     expect(

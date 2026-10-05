@@ -1503,14 +1503,14 @@ export const useTrafficStore = create<TrafficState>()(
             pendingBatch?.serverSequence ?? 0,
           );
           if (statistics.server_sequence < previousSequence) {
-            if (statistics.total_requests !== 0 && !trafficEpochResetSuspected) return;
             trafficEpochResetSuspected = true;
             const generation = historyBackfillGeneration;
             const resumeGeneration = trafficResumeGeneration;
             if (trafficEpochRequest?.historyGeneration !== generation ||
               trafficEpochRequest.resumeGeneration !== resumeGeneration) {
               // A periodic push may have been captured before this reconnect.
-              // Confirm rollback with a fresh read before discarding its window.
+              // Confirm rollback with a fresh read before discarding its window,
+              // even when the replacement database already contains records.
               const request = api.getTrafficStatistics()
                 .then((current) => {
                   if (generation !== historyBackfillGeneration ||
@@ -1904,11 +1904,13 @@ export const useTrafficStore = create<TrafficState>()(
       },
 
       reloadRecords: async () => {
+        const generation = historyBackfillGeneration;
         try {
           const filter: TrafficUpdatesFilter = {
             limit: INITIAL_WINDOW_LIMIT,
           };
           const response = await api.getTrafficUpdates(filter);
+          if (generation !== historyBackfillGeneration) return;
           const convertedRecords = response.new_records.map(compactTrafficSummaryToTrafficSummary);
           const preprocessedRecords = preprocessTrafficRecords(convertedRecords);
 
