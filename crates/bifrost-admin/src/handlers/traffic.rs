@@ -472,7 +472,8 @@ async fn get_traffic_updates(req: Request<Incoming>, state: SharedAdminState) ->
             "updated_records": updated_records,
             "has_more": result.has_more,
             "server_total": result.total,
-            "server_sequence": result.server_sequence
+            "server_sequence": result.server_sequence,
+            "database_epoch": db_store.database_epoch()
         });
 
         json_response(&response)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -83,6 +83,10 @@ function errorMessage(error: unknown): string {
 }
 
 export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
+  return <TaskDailyAgentTab key={taskId} taskId={taskId} />;
+}
+
+function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
   const [searchParams, setSearchParams] = useSearchParams();
   const routeDetailAgentId = searchParams.get("asrDailyAgentEdit");
   const [configData, setConfigData] =
@@ -101,8 +105,12 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const [instructionsDirty, setInstructionsDirty] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState<string>("daily_report");
   const [detailAgentId, setDetailAgentId] = useState<string | null>(null);
-  const [reportSyncDir, setReportSyncDir] = useState("");
-  const [reportSyncDirDirty, setReportSyncDirDirty] = useState(false);
+  const [reportSyncDirDraft, setReportSyncDirDraft] = useState({
+    value: "",
+    dirty: false,
+  });
+  const { value: reportSyncDir, dirty: reportSyncDirDirty } = reportSyncDirDraft;
+  const latestFetchId = useRef(0);
   const [terminology, setTerminology] = useState("");
   const [terminologyDirty, setTerminologyDirty] = useState(false);
   const [contextProfileDraft, setContextProfileDraft] = useState<{
@@ -113,6 +121,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   } | null>(null);
 
   const fetchAll = useCallback(async () => {
+    const fetchId = ++latestFetchId.current;
     setLoading(true);
     try {
       const [config, runners, providers, targets] = await Promise.all([
@@ -127,27 +136,38 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
         ? preferredAgentId
         : agents[0]?.id || "daily_report";
       const instr = await getDailyAgentInstructions(taskId, nextSelectedAgentId);
+      if (fetchId !== latestFetchId.current) return;
       setConfigData(config);
       setInstructions(instr);
       setSelectedAgentId(nextSelectedAgentId);
       setInstructionsText(instr.content);
       setInstructionsDirty(false);
-      setReportSyncDir(config.config.report_sync_dir || "");
-      setReportSyncDirDirty(false);
+      // Refreshes can finish after the user starts editing, including when
+      // returning from an agent's details. Read the current draft at commit time.
+      setReportSyncDirDraft((draft) =>
+        draft.dirty
+          ? draft
+          : { value: config.config.report_sync_dir || "", dirty: false },
+      );
       setTerminology(config.config.terminology || "");
       setTerminologyDirty(false);
       setRunnerConfig(runners);
       setImProviders(providers);
       setImTargets(targets);
     } catch (error: unknown) {
-      message.error(`Failed to load Daily Agent config: ${errorMessage(error)}`);
+      if (fetchId === latestFetchId.current) {
+        message.error(`Failed to load Daily Agent config: ${errorMessage(error)}`);
+      }
     } finally {
-      setLoading(false);
+      if (fetchId === latestFetchId.current) setLoading(false);
     }
   }, [routeDetailAgentId, selectedAgentId, taskId]);
 
   useEffect(() => {
     fetchAll();
+    return () => {
+      latestFetchId.current += 1;
+    };
   }, [fetchAll]);
 
   useEffect(() => {
@@ -337,9 +357,16 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const handleSaveReportSyncDir = async () => {
     setSaving(true);
     try {
-      await updateDailyAgentConfig(taskId, { report_sync_dir: reportSyncDir });
+      const result = await updateDailyAgentConfig(taskId, {
+        report_sync_dir: reportSyncDir,
+      });
+      if (!result.ok) throw new Error("Configuration was not saved");
       message.success("Report sync directory saved");
-      setReportSyncDirDirty(false);
+      setReportSyncDirDraft((draft) =>
+        draft.value === reportSyncDir
+          ? { value: result.config.report_sync_dir || "", dirty: false }
+          : draft,
+      );
       fetchAll();
     } catch (error: unknown) {
       message.error(`Failed to save sync directory: ${errorMessage(error)}`);
@@ -1265,8 +1292,10 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                   value={reportSyncDir}
                   placeholder="Optional report sync directory"
                   onChange={(event) => {
-                    setReportSyncDir(event.target.value);
-                    setReportSyncDirDirty(true);
+                    setReportSyncDirDraft({
+                      value: event.target.value,
+                      dirty: true,
+                    });
                   }}
                   onPressEnter={handleSaveReportSyncDir}
                   disabled={saving}

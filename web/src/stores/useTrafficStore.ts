@@ -35,6 +35,7 @@ interface TrafficState {
   serverSequence: number;
   serverOldestSequence: number | null;
   trafficEpochVersion: number;
+  trafficDatabaseEpoch: string | null;
   hasMore: boolean;
   hasNewer: boolean;
   oldestSequence: number | null;
@@ -84,7 +85,7 @@ interface TrafficState {
   stopPolling: () => void;
   fetchUpdates: () => Promise<void>;
   fetchInitialData: () => Promise<void>;
-  fetchTrafficStatistics: () => Promise<void>;
+  fetchTrafficStatistics: (expectedEpoch?: string) => Promise<void>;
   backfillHistory: () => Promise<void>;
   loadNewer: () => Promise<void>;
   catchUpUpdates: () => Promise<void>;
@@ -141,11 +142,17 @@ let lastUpdateTime = 0;
 let hasMoreBurst = 0;
 let historyBackfillGeneration = 0;
 let recordsMutationVersion = 0;
-let statisticsRequest: Promise<void> | null = null;
+let statisticsRequest: {
+  historyGeneration: number;
+  resumeGeneration: number;
+  databaseEpoch: string | undefined;
+  promise: Promise<void>;
+} | null = null;
 let trafficEpochRequest: {
   historyGeneration: number;
   resumeGeneration: number;
   statisticsSequence: number;
+  databaseEpoch: string | undefined;
   followup: TrafficStatistics | null;
   promise: Promise<void>;
 } | null = null;
@@ -161,6 +168,28 @@ const trafficSelectionSyncChannel =
   typeof BroadcastChannel !== 'undefined'
     ? new BroadcastChannel(TRAFFIC_SELECTION_SYNC_CHANNEL)
     : null;
+
+function acceptTrafficDatabaseEpoch(epoch?: string, serverSequence?: number): boolean {
+  if (!epoch) return true; // Older backends retain sequence rollback fallback.
+  const state = useTrafficStore.getState();
+  if (!state.trafficDatabaseEpoch) {
+    const previousSequence = Math.max(state.serverSequence, state.lastSequence ?? 0, pendingBatch?.serverSequence ?? 0);
+    if (serverSequence !== undefined && serverSequence < previousSequence) {
+      // An older backend may have populated this window without identity. Keep
+      // legacy rollback evidence until a fresh read decides its provenance.
+      trafficResumeStatisticsPending = true;
+      void state.fetchTrafficStatistics(epoch);
+      return false;
+    }
+    useTrafficStore.setState({ trafficDatabaseEpoch: epoch });
+    return true;
+  }
+  if (state.trafficDatabaseEpoch === epoch) return true;
+  // Do not mix rows or retention floors across databases while confirmation is
+  // pending. Cursor-free replay retrieves these arrivals after the reset.
+  void state.fetchTrafficStatistics(epoch);
+  return false;
+}
 
 function capPendingIds(ids: Set<string>) {
   while (ids.size > MAX_PENDING_IDS) {
@@ -918,6 +947,7 @@ export const useTrafficStore = create<TrafficState>()(
       serverSequence: 0,
       serverOldestSequence: null,
       trafficEpochVersion: 0,
+      trafficDatabaseEpoch: null,
       hasMore: false,
       hasNewer: false,
       oldestSequence: null,
@@ -963,26 +993,32 @@ export const useTrafficStore = create<TrafficState>()(
       trafficStatisticsLoaded: false,
       recordsMutation: createEmptyRecordsMutation(),
 
-      fetchTrafficStatistics: async () => {
-        if (!statisticsRequest) {
-          const generation = historyBackfillGeneration;
-          const resumeGeneration = trafficResumeGeneration;
-          statisticsRequest = api.getTrafficStatistics()
+      fetchTrafficStatistics: async (expectedEpoch?: string) => {
+        const generation = historyBackfillGeneration;
+        const resumeGeneration = trafficResumeGeneration;
+        if (!statisticsRequest || statisticsRequest.historyGeneration !== generation ||
+          statisticsRequest.resumeGeneration !== resumeGeneration ||
+          statisticsRequest.databaseEpoch !== expectedEpoch) {
+          const request = api.getTrafficStatistics()
             .then((statistics) => {
-              if (generation !== historyBackfillGeneration ||
-                resumeGeneration !== trafficResumeGeneration ||
-                statistics.server_sequence < latestTrafficSequenceSinceResume) return;
-              set(snapshotServerStatistics(statistics));
+              if (statisticsRequest?.promise !== request ||
+                generation !== historyBackfillGeneration ||
+                resumeGeneration !== trafficResumeGeneration) return;
+              get().handleTrafficStatistics(statistics);
             })
             .catch(() => {
               // Statistics are refreshed independently from the traffic window.
               // Keep the last authoritative snapshot if a transient request fails.
             })
             .finally(() => {
-              statisticsRequest = null;
+              if (statisticsRequest?.promise === request) statisticsRequest = null;
             });
+          statisticsRequest = {
+            historyGeneration: generation, resumeGeneration,
+            databaseEpoch: expectedEpoch, promise: request,
+          };
         }
-        await statisticsRequest;
+        await statisticsRequest.promise;
       },
 
       startPolling: () => {
@@ -1111,7 +1147,7 @@ export const useTrafficStore = create<TrafficState>()(
 
       handleTrafficPush: (data: TrafficUpdatesData) => {
         const state = get();
-        if (state.paused) return;
+        if (state.paused || !acceptTrafficDatabaseEpoch(data.database_epoch, data.server_sequence)) return;
         latestTrafficSequenceSinceResume = Math.max(
           latestTrafficSequenceSinceResume,
           data.server_sequence ?? 0,
@@ -1365,6 +1401,7 @@ export const useTrafficStore = create<TrafficState>()(
 
       handleTrafficDelta: (data: TrafficDeltaData) => {
         get().handleTrafficPush({
+          database_epoch: data.database_epoch,
           new_records: data.inserts.map(compactTrafficSummaryToTrafficSummary),
           updated_records: data.updates.map(compactTrafficSummaryToTrafficSummary),
           has_more: data.has_more,
@@ -1485,38 +1522,60 @@ export const useTrafficStore = create<TrafficState>()(
       },
 
       handleTrafficStatistics: (statistics: TrafficStatistics) => {
-        if (statistics.server_sequence < latestTrafficSequenceSinceResume) return;
-        set(snapshotServerStatistics(statistics));
         const state = get();
+        const identityChanged = !!statistics.database_epoch &&
+          !!state.trafficDatabaseEpoch && statistics.database_epoch !== state.trafficDatabaseEpoch;
+        const identityMatches = !!statistics.database_epoch &&
+          statistics.database_epoch === state.trafficDatabaseEpoch;
+        const previousSequence = Math.max(
+          state.serverSequence, state.lastSequence ?? 0, pendingBatch?.serverSequence ?? 0,
+        );
+        const unprovenLegacyIdentity = !state.trafficDatabaseEpoch &&
+          !!statistics.database_epoch && statistics.server_sequence < previousSequence;
+        // Sequence watermarks only have meaning within one database. A queued
+        // old-epoch delta must not suppress a lower new-epoch statistics push.
+        if (!identityChanged && !unprovenLegacyIdentity && statistics.server_sequence < latestTrafficSequenceSinceResume) return;
+        if (!identityChanged) {
+          set({
+            ...snapshotServerStatistics(statistics),
+            trafficDatabaseEpoch: unprovenLegacyIdentity
+              ? state.trafficDatabaseEpoch
+              : statistics.database_epoch ?? state.trafficDatabaseEpoch,
+          });
+        }
         // Initial statistics follow all reconnect chunks. has_more can remain
         // true on the final chunk because older history lies outside the bounded
         // tail, so use this snapshot to finish membership reconciliation too.
         // Compare only this connection's traffic: empty storage can restart at 1.
         if (
           !state.paused &&
-          (membershipReconciliationRequired || trafficResumeStatisticsPending) &&
-          statistics.server_sequence >= latestTrafficSequenceSinceResume
+          (identityChanged || unprovenLegacyIdentity || membershipReconciliationRequired || trafficResumeStatisticsPending)
         ) {
-          const previousSequence = Math.max(
-            state.serverSequence,
-            state.lastSequence ?? 0,
-            pendingBatch?.serverSequence ?? 0,
-          );
-          if (statistics.server_sequence < previousSequence) {
+          if (identityChanged || (!identityMatches && statistics.server_sequence < previousSequence)) {
             trafficEpochResetSuspected = true;
             const generation = historyBackfillGeneration;
             const resumeGeneration = trafficResumeGeneration;
             if (trafficEpochRequest?.historyGeneration !== generation ||
-              trafficEpochRequest.resumeGeneration !== resumeGeneration) {
+              trafficEpochRequest.resumeGeneration !== resumeGeneration ||
+              trafficEpochRequest.databaseEpoch !== statistics.database_epoch) {
               // A periodic push may have been captured before this reconnect.
-              // Confirm rollback with a fresh read before discarding its window,
-              // even when the replacement database already contains records.
+              // Confirm a new identity (or legacy counter rollback) with a fresh
+              // read before discarding the current database's window.
               const request = api.getTrafficStatistics()
                 .then((current) => {
-                  if (generation !== historyBackfillGeneration ||
-                    resumeGeneration !== trafficResumeGeneration || get().paused ||
-                    current.server_sequence < latestTrafficSequenceSinceResume) return;
-                  if (current.server_sequence >= previousSequence) {
+                  if (trafficEpochRequest?.promise !== request ||
+                    state.trafficDatabaseEpoch !== get().trafficDatabaseEpoch ||
+                    generation !== historyBackfillGeneration ||
+                    resumeGeneration !== trafficResumeGeneration || get().paused) return;
+                  if ((identityChanged || unprovenLegacyIdentity) && current.database_epoch !== statistics.database_epoch) {
+                    // A response naming another database cannot confirm this
+                    // candidate. A third identity needs its own fresh read.
+                    if (current.database_epoch) get().handleTrafficStatistics(current);
+                    return;
+                  }
+                  if (!identityChanged && !unprovenLegacyIdentity && current.server_sequence < latestTrafficSequenceSinceResume) return;
+                  if (!identityChanged && ((!!state.trafficDatabaseEpoch && current.database_epoch === state.trafficDatabaseEpoch) ||
+                    current.server_sequence >= previousSequence)) {
                     get().handleTrafficStatistics(current);
                     return;
                   }
@@ -1526,6 +1585,7 @@ export const useTrafficStore = create<TrafficState>()(
                   // subscription filtered them out. Clear the old window first:
                   // its high sequences must not evict the new epoch's low rows.
                   historyBackfillGeneration += 1;
+                  latestTrafficSequenceSinceResume = 0;
                   clearPendingTrafficBatch();
                   membershipReconciliationRequired = false;
                   membershipFollowupRequired = false;
@@ -1533,6 +1593,7 @@ export const useTrafficStore = create<TrafficState>()(
                   trafficEpochResetSuspected = false;
                   set((latest) => ({
                     ...snapshotServerStatistics(current),
+                    trafficDatabaseEpoch: current.database_epoch ?? null,
                     records: [],
                     recordsMap: new Map(),
                     currentRecord: null,
@@ -1563,6 +1624,12 @@ export const useTrafficStore = create<TrafficState>()(
                     }),
                   }));
                   pushService.resetTrafficCursor();
+                  if (!get().usePush && get().polling) {
+                    const timeoutId = get().pollTimeoutId;
+                    if (timeoutId !== null) window.clearTimeout(timeoutId);
+                    set({ pollTimeoutId: null });
+                    void get().fetchUpdates();
+                  }
                 })
                 .catch(() => {
                   // Preserve the window and retry on the next statistics push.
@@ -1581,6 +1648,7 @@ export const useTrafficStore = create<TrafficState>()(
                 historyGeneration: generation,
                 resumeGeneration,
                 statisticsSequence: statistics.server_sequence,
+                databaseEpoch: statistics.database_epoch,
                 followup: null,
                 promise: request,
               };
@@ -1620,7 +1688,9 @@ export const useTrafficStore = create<TrafficState>()(
             limit: INITIAL_WINDOW_LIMIT,
           };
           const response = await api.getTrafficUpdates(filter);
-          if (generation !== historyBackfillGeneration) {
+          if (generation !== historyBackfillGeneration) return;
+          if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) {
+            set({ loading: false });
             return;
           }
 
@@ -1811,52 +1881,40 @@ export const useTrafficStore = create<TrafficState>()(
       fetchUpdates: async () => {
         const state = get();
         if (state.paused || !state.polling || state.catchingUp) return;
-
+        const generation = historyBackfillGeneration;
+        let nextDelay = POLL_INTERVAL;
         try {
           const pendingIdsArray = Array.from(state.pendingIds);
-
-          const filter: TrafficUpdatesFilter = {
+          const response = await api.getTrafficUpdates({
             after_id: state.lastId || undefined,
             after_seq: state.lastSequence || undefined,
             pending_ids: pendingIdsArray.length > 0 ? pendingIdsArray.join(',') : undefined,
             limit: UPDATE_BATCH_LIMIT,
-          };
+          });
+          if (generation !== historyBackfillGeneration ||
+            !acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
 
-          const response = await api.getTrafficUpdates(filter);
-
-          if (response.new_records.length > 0 || response.updated_records.length > 0) {
-            get().handleTrafficDelta({
-              inserts: response.new_records,
-              updates: response.updated_records,
-              has_more: response.has_more,
-              server_total: response.server_total,
-              server_sequence: response.server_sequence,
-            });
-          }
-
-          const currentState = get();
-          if (currentState.polling) {
-            if (response.has_more) {
-              hasMoreBurst += 1;
-            } else {
-              hasMoreBurst = 0;
-            }
-            const nextDelay = response.has_more
-              ? (hasMoreBurst > HAS_MORE_BURST_LIMIT ? HAS_MORE_BACKOFF_INTERVAL : POLL_MIN_INTERVAL)
-              : POLL_INTERVAL;
+          get().handleTrafficDelta({
+            database_epoch: response.database_epoch,
+            inserts: response.new_records,
+            updates: response.updated_records,
+            has_more: response.has_more,
+            server_total: response.server_total,
+            server_sequence: response.server_sequence,
+          });
+          hasMoreBurst = response.has_more ? hasMoreBurst + 1 : 0;
+          nextDelay = response.has_more
+            ? (hasMoreBurst > HAS_MORE_BURST_LIMIT ? HAS_MORE_BACKOFF_INTERVAL : POLL_MIN_INTERVAL)
+            : POLL_INTERVAL;
+        } catch (e) {
+          if (generation === historyBackfillGeneration) set({ error: (e as Error).message });
+        } finally {
+          // A failed identity confirmation must not terminate polling. A reset
+          // starts its own cursor-free poll; the prior generation cannot reschedule.
+          if (generation === historyBackfillGeneration && get().polling) {
             const timeoutId = window.setTimeout(() => {
               get().fetchUpdates();
             }, nextDelay);
-            set({ pollTimeoutId: timeoutId });
-          }
-        } catch (e) {
-          set({ error: (e as Error).message });
-
-          const currentState = get();
-          if (currentState.polling) {
-            const timeoutId = window.setTimeout(() => {
-              get().fetchUpdates();
-            }, POLL_INTERVAL);
             set({ pollTimeoutId: timeoutId });
           }
         }
@@ -1865,6 +1923,7 @@ export const useTrafficStore = create<TrafficState>()(
       catchUpUpdates: async () => {
         const state = get();
         if (state.paused || !state.polling || state.catchingUp) return;
+        const generation = historyBackfillGeneration;
 
         set({ catchingUp: true });
         try {
@@ -1876,6 +1935,8 @@ export const useTrafficStore = create<TrafficState>()(
             limit: UPDATE_BATCH_LIMIT,
           };
           const response = await api.getTrafficUpdates(filter);
+          if (generation !== historyBackfillGeneration ||
+            !acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
 
           set((prev) => ({
             serverTotal: response.server_total,
@@ -1884,6 +1945,7 @@ export const useTrafficStore = create<TrafficState>()(
 
           if (response.new_records.length > 0 || response.updated_records.length > 0) {
             get().handleTrafficDelta({
+              database_epoch: response.database_epoch,
               inserts: response.new_records,
               updates: response.updated_records,
               has_more: response.has_more,
@@ -1892,9 +1954,10 @@ export const useTrafficStore = create<TrafficState>()(
             });
           }
         } catch (e) {
+          if (generation !== historyBackfillGeneration) return;
           set({ error: (e as Error).message });
         } finally {
-          set({ catchingUp: false });
+          if (generation === historyBackfillGeneration) set({ catchingUp: false });
         }
 
         const afterState = get();
@@ -1910,7 +1973,8 @@ export const useTrafficStore = create<TrafficState>()(
             limit: INITIAL_WINDOW_LIMIT,
           };
           const response = await api.getTrafficUpdates(filter);
-          if (generation !== historyBackfillGeneration) return;
+          if (generation !== historyBackfillGeneration ||
+            !acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
           const convertedRecords = response.new_records.map(compactTrafficSummaryToTrafficSummary);
           const preprocessedRecords = preprocessTrafficRecords(convertedRecords);
 
@@ -1957,6 +2021,7 @@ export const useTrafficStore = create<TrafficState>()(
       },
 
       fetchTrafficDetail: async (id: string) => {
+        const generation = historyBackfillGeneration;
         const prevState = get();
         const preserveBodies = prevState.currentRecord?.id === id;
         set({
@@ -1969,32 +2034,34 @@ export const useTrafficStore = create<TrafficState>()(
         });
         try {
           const record = await api.getTrafficDetail(id);
+          if (generation !== historyBackfillGeneration) return;
           const summary = get().recordsMap.get(id);
           const mergedRecord = mergeDetailWithSummary(record, summary);
           set({ currentRecord: mergedRecord, detailLoading: false, detailError: null });
 
           api.getRequestBody(id).then(body => {
-            set({ requestBody: body });
+            if (generation === historyBackfillGeneration && get().currentRecord?.id === id) set({ requestBody: body });
           }).catch(() => { });
 
           if (mergedRecord.raw_request_body_ref) {
             api.getRequestBodyContent(id, { raw: true, encoding: 'base64' }).then(body => {
-              set({ requestRawBody: body });
+              if (generation === historyBackfillGeneration && get().currentRecord?.id === id) set({ requestRawBody: body });
             }).catch(() => { });
           }
 
           const isOpenSse = !!mergedRecord.is_sse && !!mergedRecord.socket_status?.is_open;
           if (!isOpenSse) {
             api.getResponseBody(id).then(body => {
-              set({ responseBody: body });
+              if (generation === historyBackfillGeneration && get().currentRecord?.id === id) set({ responseBody: body });
             }).catch(() => { });
             if (mergedRecord.raw_response_body_ref) {
               api.getResponseBodyContent(id, { raw: true, encoding: 'base64' }).then(body => {
-                set({ responseRawBody: body });
+                if (generation === historyBackfillGeneration && get().currentRecord?.id === id) set({ responseRawBody: body });
               }).catch(() => { });
             }
           }
         } catch (e) {
+          if (generation !== historyBackfillGeneration) return;
           const error = e as { response?: { data?: { error?: string } }; message?: string };
           const message = error.response?.data?.error || error.message || 'Request detail not found';
           set({

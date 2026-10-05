@@ -157,6 +157,8 @@ pub struct TrafficDeltaData {
     pub has_more: bool,
     pub server_total: usize,
     pub server_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_epoch: Option<String>,
     pub oldest_sequence: Option<u64>,
 }
 
@@ -790,6 +792,11 @@ impl PushManager {
             has_more: metadata.has_more,
             server_total: metadata.server_total,
             server_sequence: metadata.server_sequence,
+            database_epoch: self
+                .state
+                .traffic_db_store
+                .as_ref()
+                .map(|store| store.database_epoch().to_string()),
             oldest_sequence: metadata.oldest_sequence,
         });
 
@@ -2944,6 +2951,43 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(client.get_subscription().last_sequence, Some(200));
+    }
+
+    #[test]
+    fn traffic_delta_epoch_matches_store_and_accepts_legacy_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap());
+        let state = Arc::new(
+            AdminState::new_for_test(
+                9915,
+                bifrost_storage::RulesStorage::with_dir(dir.path().join("rules")).unwrap(),
+            )
+            .with_traffic_db_store_shared(store.clone()),
+        );
+        let manager = PushManager::new(state);
+        let (client, mut receiver) =
+            PushClient::new("epoch-client".to_string(), ClientSubscription::default());
+        assert!(manager.send_traffic_delta_to_client(
+            &Arc::new(client),
+            vec![compact(1, "epoch-record")],
+            vec![],
+            TrafficDeltaMetadata {
+                has_more: false,
+                server_total: 1,
+                server_sequence: 2,
+                oldest_sequence: Some(1),
+            },
+        ));
+        let PushMessage::TrafficDelta(data) = receiver.try_recv().unwrap() else {
+            panic!("expected traffic delta");
+        };
+        assert_eq!(data.database_epoch.as_deref(), Some(store.database_epoch()));
+        let mut payload = serde_json::to_value(&data).unwrap();
+        assert_eq!(payload["database_epoch"], store.database_epoch());
+        payload.as_object_mut().unwrap().remove("database_epoch");
+        let legacy: TrafficDeltaData = serde_json::from_value(payload).unwrap();
+        assert!(legacy.database_epoch.is_none());
+        assert_eq!(legacy.inserts[0].id, "epoch-record");
     }
 
     #[test]

@@ -27,6 +27,7 @@ import {
 } from '../stores/useDesktopCoreStore';
 
 export interface TrafficUpdatesData {
+  database_epoch?: string;
   new_records: TrafficSummary[];
   updated_records: TrafficSummary[];
   has_more: boolean;

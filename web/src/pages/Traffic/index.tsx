@@ -138,6 +138,7 @@ export default function Traffic() {
   const records = useTrafficStore((state) => state.records);
   const recordsMutation = useTrafficStore((state) => state.recordsMutation);
   const trafficEpochVersion = useTrafficStore((state) => state.trafficEpochVersion);
+  const trafficDatabaseEpoch = useTrafficStore((state) => state.trafficDatabaseEpoch);
   const hasMore = useTrafficStore((state) => state.hasMore);
   const hasNewer = useTrafficStore((state) => state.hasNewer);
   const historyLoading = useTrafficStore((state) => state.historyLoading);
@@ -834,7 +835,9 @@ export default function Traffic() {
   useEffect(() => {
     const generation = ++filterGenerationRef.current;
     // This scan owns the current reset, including a confirmed database epoch
-    // change. The later mutation effect must not cancel this new generation.
+    // change and the first authoritative identity. An initial scan may have
+    // read a different database before the store's first HTTP/Push response.
+    // The later mutation effect must not cancel this new generation.
     appliedMutationVersionRef.current =
       useTrafficStore.getState().recordsMutation.version;
     if (!filtersActive) {
@@ -893,6 +896,7 @@ export default function Traffic() {
     deferredToolbarFilters,
     filtersActive,
     trafficEpochVersion,
+    trafficDatabaseEpoch,
   ]);
 
   useEffect(() => {

@@ -143,6 +143,7 @@ enum QueryTotalMode {
 
 pub struct TrafficDbStore {
     db_path: PathBuf,
+    database_epoch: String,
     write_conn: Mutex<Connection>,
     read_pool: ReadPool,
     record_count: AtomicUsize,
@@ -216,7 +217,7 @@ impl TrafficDbStore {
             "[TRAFFIC_DB] Initializing SQLite traffic store"
         );
 
-        let write_conn = match Self::open_or_reset_database(&db_path) {
+        let mut write_conn = match Self::open_or_reset_database(&db_path) {
             Ok(conn) => conn,
             Err(e) => {
                 tracing::error!(error = %e, "[TRAFFIC_DB] Failed to open database");
@@ -224,9 +225,11 @@ impl TrafficDbStore {
             }
         };
 
-        let read_pool = ReadPool::new(&db_path, READ_POOL_SIZE)?;
+        // Keep additive metadata initialization outside the destructive schema
+        // recovery path: a metadata write failure must preserve existing traffic.
+        let (database_epoch, current_seq) = Self::initialize_sequence_metadata(&mut write_conn)?;
 
-        let current_seq = Self::get_max_sequence(&write_conn).unwrap_or(0);
+        let read_pool = ReadPool::new(&db_path, READ_POOL_SIZE)?;
         let traffic_statistics = TrafficStatistics::load(&write_conn);
         let record_count = traffic_statistics.total_requests();
 
@@ -241,6 +244,7 @@ impl TrafficDbStore {
 
         Ok(Self {
             db_path,
+            database_epoch,
             write_conn: Mutex::new(write_conn),
             read_pool,
             record_count: AtomicUsize::new(record_count),
@@ -290,9 +294,16 @@ impl TrafficDbStore {
     }
 
     pub fn traffic_statistics(&self) -> TrafficStatisticsSnapshot {
-        self.traffic_statistics
+        let mut snapshot = self
+            .traffic_statistics
             .read()
-            .snapshot(self.current_sequence.load(Ordering::Relaxed))
+            .snapshot(self.current_sequence.load(Ordering::Relaxed));
+        snapshot.database_epoch = Some(self.database_epoch.clone());
+        snapshot
+    }
+
+    pub fn database_epoch(&self) -> &str {
+        &self.database_epoch
     }
 
     pub fn aggregate_host_metrics(&self) -> Vec<HostMetricsAggregate> {
@@ -348,13 +359,66 @@ impl TrafficDbStore {
         Ok(new_conn)
     }
 
-    fn get_max_sequence(conn: &Connection) -> Option<u64> {
-        conn.query_row("SELECT MAX(sequence) FROM traffic_records", [], |row| {
-            row.get::<_, Option<i64>>(0)
-        })
-        .ok()
-        .flatten()
-        .map(|v| v as u64)
+    fn initialize_sequence_metadata(conn: &mut Connection) -> rusqlite::Result<(String, u64)> {
+        // Concurrent openers must observe the identity that won the insert.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('database_epoch', ?1)",
+            [uuid::Uuid::new_v4().to_string()],
+        )?;
+        let epoch: String = tx.query_row(
+            "SELECT value FROM metadata WHERE key = 'database_epoch'",
+            [],
+            |row| row.get(0),
+        )?;
+        if epoch.is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let high_water: Option<String> = tx
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'sequence_high_water'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let high_water = high_water
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?
+            .unwrap_or(0);
+        let max_sequence: u64 = tx.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM traffic_records",
+            [],
+            |row| row.get(0),
+        )?;
+        let current_sequence = high_water.max(max_sequence);
+        if current_sequence >= i64::MAX as u64 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.commit()?;
+        Ok((epoch, current_sequence))
+    }
+
+    fn preserve_sequence_high_water(&self, conn: &Connection) -> rusqlite::Result<()> {
+        // Retained rows already persist their sequences. Only removal needs an
+        // extra write, committed first so even a crash cannot reuse deleted IDs.
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES ('sequence_high_water', ?1)
+             ON CONFLICT(key) DO UPDATE SET value =
+             MAX(CAST(metadata.value AS INTEGER), CAST(excluded.value AS INTEGER))",
+            [self
+                .current_sequence
+                .load(Ordering::SeqCst)
+                .saturating_sub(1)
+                .to_string()],
+        )?;
+        Ok(())
     }
 
     fn serialize_detail_fields(record: &TrafficRecord) -> SerializedDetailFields {
@@ -1482,6 +1546,10 @@ impl TrafficDbStore {
 
     pub fn clear_with_active_ids(&self, active_connection_ids: &[String]) {
         let conn = self.write_conn.lock();
+        if let Err(error) = self.preserve_sequence_high_water(&conn) {
+            tracing::error!(%error, "[TRAFFIC_DB] Failed to preserve sequence before clear");
+            return;
+        }
 
         let active_ids_set: std::collections::HashSet<&str> =
             active_connection_ids.iter().map(|s| s.as_str()).collect();
@@ -1838,6 +1906,10 @@ impl TrafficDbStore {
         if ids.is_empty() {
             return 0;
         }
+        if let Err(error) = self.preserve_sequence_high_water(conn) {
+            tracing::error!(%error, "[TRAFFIC_DB] Failed to preserve sequence before deletion");
+            return 0;
+        }
         let mut deleted = 0usize;
         for chunk in ids.chunks(500) {
             let mut seen = std::collections::HashSet::with_capacity(chunk.len());
@@ -1886,7 +1958,11 @@ impl TrafficDbStore {
             if ids.is_empty() {
                 break;
             }
-            deleted += self.delete_by_ids_with_conn(conn, &ids);
+            let count = self.delete_by_ids_with_conn(conn, &ids);
+            if count == 0 {
+                break;
+            }
+            deleted += count;
             self.notify_cleanup(&ids);
             if ids.len() >= remaining {
                 break;
@@ -1914,7 +1990,11 @@ impl TrafficDbStore {
             if ids.is_empty() {
                 break;
             }
-            deleted += self.delete_by_ids_with_conn(conn, &ids);
+            let count = self.delete_by_ids_with_conn(conn, &ids);
+            if count == 0 {
+                break;
+            }
+            deleted += count;
             self.notify_cleanup(&ids);
         }
         deleted
@@ -2023,6 +2103,247 @@ mod tests {
 
     fn cleanup_test_dir(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn epoch_test_record(id: &str) -> TrafficRecord {
+        TrafficRecord::new(
+            id.to_string(),
+            "GET".to_string(),
+            "https://example.test/epoch".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_database_epoch_survives_reopen_and_changes_for_rebuilt_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        let epoch = store.database_epoch().to_string();
+        assert!(uuid::Uuid::parse_str(&epoch).is_ok());
+        assert_eq!(
+            store.traffic_statistics().database_epoch.as_deref(),
+            Some(epoch.as_str())
+        );
+        store.record(epoch_test_record("preserved"));
+        drop(store);
+
+        let reopened = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        assert_eq!(reopened.database_epoch(), epoch);
+        assert_eq!(reopened.get_by_id("preserved").unwrap().sequence, 1);
+        assert_eq!(reopened.current_sequence(), 2);
+        drop(reopened);
+
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = TrafficDbStore::new(other_dir.path().to_path_buf(), 100, 0, None).unwrap();
+        assert_ne!(other.database_epoch(), epoch);
+        fs::remove_file(dir.path().join("traffic.db")).unwrap();
+        let rebuilt = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        assert_ne!(rebuilt.database_epoch(), epoch);
+        assert_eq!(rebuilt.current_sequence(), 1);
+    }
+
+    #[test]
+    fn test_database_epoch_backfills_existing_database_without_losing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        store.record(epoch_test_record("legacy-preserved"));
+        store
+            .write_conn
+            .lock()
+            .execute("DELETE FROM metadata WHERE key != 'schema_version'", [])
+            .unwrap();
+        drop(store);
+
+        let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        let epoch = store.database_epoch().to_string();
+        assert!(!epoch.is_empty());
+        assert_eq!(store.get_by_id("legacy-preserved").unwrap().sequence, 1);
+        store.record(epoch_test_record("new-record"));
+        assert_eq!(store.get_by_id("new-record").unwrap().sequence, 2);
+        drop(store);
+        let reopened = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        assert_eq!(reopened.database_epoch(), epoch);
+        assert_eq!(reopened.traffic_statistics().total_requests, 2);
+    }
+
+    #[test]
+    fn test_database_epoch_metadata_error_does_not_reset_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        store.record(epoch_test_record("must-survive"));
+        store
+            .write_conn
+            .lock()
+            .execute_batch(
+                "DELETE FROM metadata WHERE key = 'database_epoch';
+             CREATE TRIGGER reject_epoch BEFORE INSERT ON metadata
+             WHEN NEW.key = 'database_epoch'
+             BEGIN SELECT RAISE(ABORT, 'metadata unavailable'); END;",
+            )
+            .unwrap();
+        drop(store);
+
+        assert!(TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).is_err());
+        let conn = Connection::open(dir.path().join("traffic.db")).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT id FROM traffic_records", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "must-survive"
+        );
+        conn.execute_batch("DROP TRIGGER reject_epoch").unwrap();
+        let reopened = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        assert!(reopened.get_by_id("must-survive").is_some());
+    }
+
+    #[test]
+    fn test_database_epoch_rejects_invalid_metadata_without_reset() {
+        for (key, value) in [
+            ("database_epoch", ""),
+            ("sequence_high_water", "invalid"),
+            ("sequence_high_water", "18446744073709551615"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+            store.record(epoch_test_record("must-survive"));
+            store
+                .write_conn
+                .lock()
+                .execute(
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+                    [key, value],
+                )
+                .unwrap();
+            drop(store);
+            assert!(TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).is_err());
+            let conn = Connection::open(dir.path().join("traffic.db")).unwrap();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM traffic_records", [], |row| row
+                    .get::<_, usize>(0))
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn test_database_epoch_concurrent_metadata_initialization_uses_one_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("traffic.db");
+        let mut conn = Connection::open(&db_path).unwrap();
+        init_database(&mut conn).unwrap();
+        drop(conn);
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let db_path = db_path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut conn = Connection::open(db_path).unwrap();
+                    barrier.wait();
+                    TrafficDbStore::initialize_sequence_metadata(&mut conn).unwrap()
+                })
+            })
+            .collect();
+        let identities: Vec<_> = handles
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(identities.iter().all(|identity| identity == &identities[0]));
+    }
+
+    #[test]
+    fn test_database_epoch_clear_and_tail_deletion_preserve_sequence_on_restart() {
+        for mode in ["tail", "clear", "active", "expired", "oldest"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+            store.record_batch(
+                (0..3)
+                    .map(|i| epoch_test_record(&format!("record-{i}")))
+                    .collect(),
+            );
+            let epoch = store.database_epoch().to_string();
+            let next_sequence = store.current_sequence();
+            match mode {
+                "tail" => store.delete_by_ids(&["record-2".to_string()]),
+                "clear" => store.clear(),
+                "active" => store.clear_with_active_ids(&["record-0".to_string()]),
+                "expired" => assert_eq!(
+                    store.delete_expired_by_cutoff(&store.write_conn.lock(), i64::MAX as u64),
+                    3
+                ),
+                "oldest" => {
+                    assert_eq!(store.delete_oldest_by_limit(&store.write_conn.lock(), 3), 3)
+                }
+                _ => unreachable!(),
+            }
+            drop(store);
+            let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+            assert_eq!(store.database_epoch(), epoch, "{mode}");
+            assert_eq!(store.current_sequence(), next_sequence, "{mode}");
+            store.record(epoch_test_record("after-restart"));
+            assert_eq!(
+                store.get_by_id("after-restart").unwrap().sequence,
+                next_sequence,
+                "{mode}"
+            );
+            store.clear();
+            drop(store);
+            let reopened = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+            assert_eq!(reopened.database_epoch(), epoch, "{mode}");
+            assert_eq!(reopened.current_sequence(), next_sequence + 1, "{mode}");
+        }
+    }
+
+    #[test]
+    fn test_database_epoch_failed_insert_does_not_change_identity_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        store.record(epoch_test_record("preserved"));
+        let epoch = store.database_epoch().to_string();
+        store.set_write_query_only(true).unwrap();
+        assert!(store
+            .try_record_batch(vec![epoch_test_record("failed")])
+            .is_err());
+        assert_eq!(store.current_sequence(), 3);
+        drop(store);
+        let reopened = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        assert_eq!(reopened.database_epoch(), epoch);
+        assert_eq!(reopened.current_sequence(), 2);
+        assert!(reopened.get_by_id("failed").is_none());
+        assert_eq!(reopened.get_by_id("preserved").unwrap().sequence, 1);
+    }
+
+    #[test]
+    fn test_database_epoch_high_water_failure_preserves_records_and_stops_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        store.record(epoch_test_record("must-survive"));
+        let epoch = store.database_epoch().to_string();
+        store
+            .write_conn
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER reject_high_water BEFORE INSERT ON metadata
+             WHEN NEW.key = 'sequence_high_water'
+             BEGIN SELECT RAISE(ABORT, 'metadata unavailable'); END;",
+            )
+            .unwrap();
+        store.clear();
+        store.clear_with_active_ids(&["other".to_string()]);
+        store.delete_by_ids(&["must-survive".to_string()]);
+        {
+            let conn = store.write_conn.lock();
+            assert_eq!(store.delete_expired_by_cutoff(&conn, i64::MAX as u64), 0);
+            assert_eq!(store.delete_oldest_by_limit(&conn, 1), 0);
+        }
+        assert!(store.get_by_id("must-survive").is_some());
+        assert_eq!(store.traffic_statistics().total_requests, 1);
+        assert_eq!(store.database_epoch(), epoch);
+        drop(store);
+        let reopened = TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap();
+        assert!(reopened.get_by_id("must-survive").is_some());
+        assert_eq!(reopened.database_epoch(), epoch);
+        assert_eq!(reopened.current_sequence(), 2);
     }
 
     fn create_legacy_v10_traffic_db(db_path: &PathBuf) {
@@ -2548,7 +2869,7 @@ mod tests {
                 "https://one.test/a".to_string(),
             );
             first.client_ip = "127.0.0.1".to_string();
-            first.listener_port = 9900;
+            first.listener_port = 9915;
             first.client_app = Some("Pending App".to_string());
             store.record(first);
 
@@ -2572,7 +2893,7 @@ mod tests {
             assert_eq!(snapshot.applications.get("Codex"), Some(&2));
             assert!(!snapshot.applications.contains_key("Pending App"));
             assert_eq!(snapshot.client_ips.get("127.0.0.1"), Some(&1));
-            assert_eq!(snapshot.proxy_ports.get("9900"), Some(&1));
+            assert_eq!(snapshot.proxy_ports.get("9915"), Some(&1));
             assert_eq!(snapshot.account_names.get("eden"), Some(&1));
             assert_eq!(snapshot.domains.get("one.test"), Some(&1));
 

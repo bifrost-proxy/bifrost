@@ -200,6 +200,7 @@ export interface TrafficUpdatesResponse {
 }
 
 export interface TrafficUpdatesResponseCompact {
+  database_epoch?: string;
   new_records: TrafficSummaryCompact[];
   updated_records: TrafficSummaryCompact[];
   has_more: boolean;
@@ -208,6 +209,7 @@ export interface TrafficUpdatesResponseCompact {
 }
 
 export interface TrafficStatistics {
+  database_epoch?: string;
   total_requests: number;
   server_sequence: number;
   client_ips: Record<string, number>;
@@ -401,6 +403,7 @@ export const REPLAY_LIMITS = {
 } as const;
 
 export interface TrafficDeltaData {
+  database_epoch?: string;
   inserts: TrafficSummaryCompact[];
   updates: TrafficSummaryCompact[];
   has_more: boolean;
