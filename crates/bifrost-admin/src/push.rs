@@ -2967,9 +2967,15 @@ mod tests {
         let manager = PushManager::new(state);
         let (client, mut receiver) =
             PushClient::new("epoch-client".to_string(), ClientSubscription::default());
+        // The legacy compact-record deserializer requires rp. A matched rule
+        // keeps that field present when the fixture is serialized.
+        let mut record = compact(1, "epoch-record");
+        record.flags |= crate::traffic_db::TrafficFlags::HAS_RULE_HIT;
+        record.rc = 1;
+        record.rp = vec!["host".to_string()];
         assert!(manager.send_traffic_delta_to_client(
             &Arc::new(client),
-            vec![compact(1, "epoch-record")],
+            vec![record],
             vec![],
             TrafficDeltaMetadata {
                 has_more: false,
@@ -2988,6 +2994,8 @@ mod tests {
         let legacy: TrafficDeltaData = serde_json::from_value(payload).unwrap();
         assert!(legacy.database_epoch.is_none());
         assert_eq!(legacy.inserts[0].id, "epoch-record");
+        assert_eq!(legacy.inserts[0].rp, ["host"]);
+        assert_eq!(legacy.inserts[0].rc, 1);
     }
 
     #[test]
