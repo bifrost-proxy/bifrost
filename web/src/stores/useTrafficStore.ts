@@ -144,6 +144,7 @@ let statisticsRequest: Promise<void> | null = null;
 let membershipRequest: Promise<void> | null = null;
 let membershipReconciliationRequired = false;
 let membershipFollowupRequired = false;
+let latestTrafficSequenceSinceResume = 0;
 const TRAFFIC_SELECTION_SYNC_CHANNEL = 'bifrost-traffic-selection-sync';
 const trafficSelectionSyncChannel =
   typeof BroadcastChannel !== 'undefined'
@@ -1022,8 +1023,11 @@ export const useTrafficStore = create<TrafficState>()(
         // still replace cached rows, so check IDs after the final backlog batch.
         const unsubscribeConnection = pushService.onConnectionChange(
           ({ connected }) => {
-            if (!connected && get().records.length > 0) {
-              membershipReconciliationRequired = true;
+            if (!connected) {
+              latestTrafficSequenceSinceResume = 0;
+              if (get().records.length > 0 || pendingBatch !== null) {
+                membershipReconciliationRequired = true;
+              }
             }
           },
         );
@@ -1048,7 +1052,8 @@ export const useTrafficStore = create<TrafficState>()(
 
       disablePush: () => {
         const state = get();
-        if (state.pushConnectionUnsubscribe && state.records.length > 0) {
+        latestTrafficSequenceSinceResume = 0;
+        if (state.pushConnectionUnsubscribe && (state.records.length > 0 || pendingBatch !== null)) {
           membershipReconciliationRequired = true;
         }
         state.pushConnectionUnsubscribe?.();
@@ -1083,6 +1088,10 @@ export const useTrafficStore = create<TrafficState>()(
       handleTrafficPush: (data: TrafficUpdatesData) => {
         const state = get();
         if (state.paused) return;
+        latestTrafficSequenceSinceResume = Math.max(
+          latestTrafficSequenceSinceResume,
+          data.server_sequence ?? 0,
+        );
         const hasRecordChanges =
           data.new_records.length > 0 || data.updated_records.length > 0;
         const hasMetadataChanges =
@@ -1453,6 +1462,24 @@ export const useTrafficStore = create<TrafficState>()(
 
       handleTrafficStatistics: (statistics: TrafficStatistics) => {
         set(snapshotServerStatistics(statistics));
+        // Empty storage sends initial statistics without a traffic delta, including
+        // when Traffic resumes on a shared socket. Reuse the normal batch path so
+        // its ID reconciliation and total update also run in that case, completing
+        // any queued backlog from before the interruption with the current total.
+        // Compare only this connection's traffic: empty storage can restart at 1.
+        if (
+          membershipReconciliationRequired &&
+          statistics.total_requests === 0 &&
+          statistics.server_sequence >= latestTrafficSequenceSinceResume
+        ) {
+          get().handleTrafficPush({
+            new_records: [],
+            updated_records: [],
+            has_more: false,
+            server_total: 0,
+            server_sequence: statistics.server_sequence,
+          });
+        }
       },
 
       fetchInitialData: async () => {
