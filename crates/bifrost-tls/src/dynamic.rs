@@ -2,13 +2,39 @@ use crate::ca::CertificateAuthority;
 use bifrost_core::error::{BifrostError, Result};
 use rcgen::{
     CertificateParams, DnType, ExtendedKeyUsagePurpose, Issuer, KeyPair, KeyUsagePurpose, SanType,
-    PKCS_ECDSA_P256_SHA256,
+    SerialNumber, PKCS_ECDSA_P256_SHA256,
 };
 use rustls::crypto::ring::sign::any_supported_type;
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
 use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
+
+const LEAF_SERIAL_LEN: usize = 20;
+
+fn generate_leaf_serial_number() -> Result<SerialNumber> {
+    let secure_random = match CryptoProvider::get_default() {
+        Some(provider) => provider.secure_random,
+        None => rustls::crypto::ring::default_provider().secure_random,
+    };
+
+    loop {
+        let mut serial = [0u8; LEAF_SERIAL_LEN];
+        secure_random
+            .fill(&mut serial)
+            .map_err(|_| BifrostError::Tls("Failed to generate certificate serial".to_string()))?;
+
+        // Keep the ASN.1 INTEGER positive without requiring a 21st sign octet.
+        serial[0] &= 0x7f;
+
+        // RFC 5280 requires a positive serial. Rejection sampling preserves
+        // random distribution across all non-zero values in this 159-bit space.
+        if serial.iter().any(|&byte| byte != 0) {
+            return Ok(SerialNumber::from_slice(&serial));
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct DynamicCertGenerator {
@@ -87,6 +113,7 @@ impl DynamicCertGenerator {
         ];
         params.not_before = OffsetDateTime::now_utc() - Duration::days(1);
         params.not_after = OffsetDateTime::now_utc() + Duration::days(90);
+        params.serial_number = Some(generate_leaf_serial_number()?);
 
         let (key_pair, signing_key) = if let (Some(pkcs8_der), Some(signing_key)) =
             (&self.leaf_keypair_pkcs8_der, &self.leaf_signing_key)
@@ -141,7 +168,32 @@ mod tests {
     use crate::init_crypto_provider;
     use std::fs;
     use tempfile::tempdir;
+    use x509_parser::extensions::GeneralName;
     use x509_parser::parse_x509_certificate;
+    use x509_parser::prelude::X509Certificate;
+
+    fn assert_dns_identity(cert: &X509Certificate<'_>, domain: &str) {
+        let common_name = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .expect("leaf certificate should contain a common name")
+            .as_str()
+            .expect("leaf common name should be valid UTF-8");
+        assert_eq!(common_name, domain);
+
+        let san = cert
+            .subject_alternative_name()
+            .expect("leaf SAN extension should parse")
+            .expect("leaf certificate should contain a SAN extension");
+        assert!(
+            san.value
+                .general_names
+                .iter()
+                .any(|name| matches!(name, GeneralName::DNSName(value) if *value == domain)),
+            "leaf certificate should contain DNS SAN {domain}"
+        );
+    }
 
     #[test]
     fn test_generate_for_domain() {
@@ -153,6 +205,63 @@ mod tests {
             .generate_for_domain("example.com")
             .expect("Failed to generate certificate");
         assert_eq!(cert_key.cert.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_for_different_domains_uses_distinct_serials_with_reused_leaf_key() {
+        init_crypto_provider();
+        let ca = Arc::new(generate_root_ca().expect("Failed to generate CA"));
+        let generator = DynamicCertGenerator::new(ca);
+
+        let first_cert_key = generator
+            .generate_for_domain("first.example.com")
+            .expect("Failed to generate first certificate");
+        let second_cert_key = generator
+            .generate_for_domain("second.example.com")
+            .expect("Failed to generate second certificate");
+
+        let first = parse_x509_certificate(first_cert_key.cert[0].as_ref())
+            .expect("Failed to parse first leaf certificate")
+            .1;
+        let second = parse_x509_certificate(second_cert_key.cert[0].as_ref())
+            .expect("Failed to parse second leaf certificate")
+            .1;
+
+        assert_eq!(
+            first.issuer(),
+            second.issuer(),
+            "leaf certificates should share the same issuer"
+        );
+        for (label, serial) in [
+            ("first", first.raw_serial()),
+            ("second", second.raw_serial()),
+        ] {
+            assert!(
+                !serial.is_empty() && serial.iter().any(|&byte| byte != 0),
+                "{label} leaf serial should be positive and non-zero"
+            );
+            assert!(
+                serial.len() <= LEAF_SERIAL_LEN,
+                "{label} leaf serial should be at most {LEAF_SERIAL_LEN} octets"
+            );
+            assert_eq!(
+                serial[0] & 0x80,
+                0,
+                "{label} leaf serial should be encoded as a positive INTEGER"
+            );
+        }
+        assert_ne!(
+            first.raw_serial(),
+            second.raw_serial(),
+            "leaf certificates issued by the same CA must have distinct serial numbers"
+        );
+        assert_eq!(
+            first.public_key().raw,
+            second.public_key().raw,
+            "DynamicCertGenerator should keep reusing the cached leaf keypair"
+        );
+        assert_dns_identity(&first, "first.example.com");
+        assert_dns_identity(&second, "second.example.com");
     }
 
     #[test]
