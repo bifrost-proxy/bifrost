@@ -504,6 +504,9 @@ impl Default for DnsResolver {
 }
 
 #[cfg(test)]
+mod security_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
