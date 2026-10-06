@@ -373,7 +373,7 @@ test("IM Gateway Provider 卡片展示继承后的默认工作目录", async ({ 
   await expect(workDirField).not.toContainText("Global default");
 });
 
-test("IM Gateway Provider 卡片单列展示并支持复制关键字段", async ({
+test("IM Gateway Provider 卡片响应式网格展示并支持复制关键字段", async ({
   page,
   request,
   context,
@@ -402,31 +402,55 @@ test("IM Gateway Provider 卡片单列展示并支持复制关键字段", async 
     });
     expect(seedResponse.ok()).toBeTruthy();
 
-    await openPage(page, "ai?aiSection=im-gateway-connections&imGatewaySection=connections");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await openPage(page, "ai/channels");
     const list = page.getByTestId("settings-im-provider-list");
     await expect(list).toBeVisible();
     const listBox = await list.boundingBox();
     expect(listBox).toBeTruthy();
-    expect(listBox!.width).toBeLessThanOrEqual(760);
+    expect(listBox!.width).toBeLessThanOrEqual(1120);
+    const grid = list.getByTestId("settings-im-card-grid");
+    await expect(grid).toHaveCSS("display", "grid");
+    const columnCount = () =>
+      grid.evaluate(
+        (node) => getComputedStyle(node).gridTemplateColumns.split(" ").length,
+      );
+    await expect.poll(columnCount).toBe(2);
     const centeredDelta = await list.evaluate((node) => {
       const box = node.getBoundingClientRect();
       const parentBox = node.parentElement?.getBoundingClientRect();
       if (!parentBox) return 0;
-      return Math.abs(box.x - (parentBox.x + (parentBox.width - box.width) / 2));
+      return Math.abs(
+        box.x - (parentBox.x + (parentBox.width - box.width) / 2),
+      );
     });
     expect(centeredDelta).toBeLessThan(8);
 
     const card = page.getByTestId(`settings-im-provider-card-${providerId}`);
     const header = card.locator(".ant-card-head");
     await expect(card).toBeVisible();
+    const cardBox = await card.boundingBox();
+    expect(cardBox).toBeTruthy();
+    expect(
+      Math.abs(cardBox!.width * 2 + 16 - listBox!.width),
+    ).toBeLessThanOrEqual(2);
     await expect(header).toContainText("Copyable Provider");
-    await expect(header).toContainText(/Connected|Unknown|Disconnected|Failed|connecting|reconnecting/);
-    await expect(header).toContainText("Enabled");
-    await expect(header).toContainText("Long Connection");
+    await expect(header).toContainText(
+      /Connected|Unknown|Disconnected|Failed|connecting|reconnecting/,
+    );
+    const body = card.locator(".ant-card-body");
+    await expect(body).toContainText("Enabled");
+    await expect(body).toContainText("Long Connection");
 
-    const appIdField = page.getByTestId(`settings-im-provider-${providerId}-app-id`);
-    const ownerField = page.getByTestId(`settings-im-provider-${providerId}-owner-id`);
-    const workDirField = page.getByTestId(`settings-im-provider-${providerId}-work-dir`);
+    const appIdField = page.getByTestId(
+      `settings-im-provider-${providerId}-app-id`,
+    );
+    const ownerField = page.getByTestId(
+      `settings-im-provider-${providerId}-owner-id`,
+    );
+    const workDirField = page.getByTestId(
+      `settings-im-provider-${providerId}-work-dir`,
+    );
     await expect(appIdField).toBeVisible();
     await expect(ownerField).toBeVisible();
     await expect(workDirField).toBeVisible();
@@ -440,25 +464,64 @@ test("IM Gateway Provider 卡片单列展示并支持复制关键字段", async 
     expect(ownerBox!.y).toBeGreaterThan(appIdBox!.y);
     expect(workDirBox!.y).toBeGreaterThan(ownerBox!.y);
 
-    const appIdCopy = page.getByTestId(`settings-im-provider-${providerId}-app-id-copy`);
+    const appIdCopy = page.getByTestId(
+      `settings-im-provider-${providerId}-app-id-copy`,
+    );
     await expect(appIdCopy).toHaveCSS("opacity", "0");
     await appIdField.hover();
     await expect(appIdCopy).toHaveCSS("opacity", "1");
     await appIdCopy.click();
     await expect
-      .poll(async () => page.evaluate(async () => navigator.clipboard.readText()))
+      .poll(async () =>
+        page.evaluate(async () => navigator.clipboard.readText()),
+      )
       .toBe(appId);
 
     await ownerField.hover();
-    await page.getByTestId(`settings-im-provider-${providerId}-owner-id-copy`).click();
+    await page
+      .getByTestId(`settings-im-provider-${providerId}-owner-id-copy`)
+      .click();
     await expect
-      .poll(async () => page.evaluate(async () => navigator.clipboard.readText()))
+      .poll(async () =>
+        page.evaluate(async () => navigator.clipboard.readText()),
+      )
       .toBe(ownerOpenId);
 
     await workDirField.hover();
-    await page.getByTestId(`settings-im-provider-${providerId}-work-dir-copy`).click();
+    await page
+      .getByTestId(`settings-im-provider-${providerId}-work-dir-copy`)
+      .click();
     await expect
-      .poll(async () => page.evaluate(async () => navigator.clipboard.readText()))
+      .poll(async () =>
+        page.evaluate(async () => navigator.clipboard.readText()),
+      )
+      .toBe(workDir);
+
+    await page.getByTestId("theme-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect.poll(columnCount).toBe(1);
+    await expect(card).toBeVisible();
+    await expect(body).toContainText("Enabled");
+    await expect(body).toContainText("Long Connection");
+    const narrowListBox = await list.boundingBox();
+    const narrowCardBox = await card.boundingBox();
+    expect(narrowListBox).toBeTruthy();
+    expect(narrowCardBox).toBeTruthy();
+    expect(
+      Math.abs(narrowCardBox!.width - narrowListBox!.width),
+    ).toBeLessThanOrEqual(2);
+    expect(narrowCardBox!.x).toBeGreaterThanOrEqual(0);
+    expect(narrowCardBox!.x + narrowCardBox!.width).toBeLessThanOrEqual(390);
+    await page.evaluate(async () => navigator.clipboard.writeText(""));
+    await workDirField.hover();
+    await page
+      .getByTestId(`settings-im-provider-${providerId}-work-dir-copy`)
+      .click();
+    await expect
+      .poll(async () =>
+        page.evaluate(async () => navigator.clipboard.readText()),
+      )
       .toBe(workDir);
   } finally {
     await request.delete(`${apiBase}/im-gateway/providers/${providerId}`);

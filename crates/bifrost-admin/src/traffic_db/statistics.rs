@@ -97,6 +97,8 @@ impl TrafficMetricsBucket {
 pub struct TrafficStatisticsSnapshot {
     pub total_requests: u64,
     pub server_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_epoch: Option<String>,
     pub client_ips: HashMap<String, u64>,
     pub proxy_ports: HashMap<String, u64>,
     pub applications: HashMap<String, u64>,
@@ -295,6 +297,7 @@ impl TrafficStatistics {
         TrafficStatisticsSnapshot {
             total_requests: self.total_requests,
             server_sequence,
+            database_epoch: None,
             client_ips: self.client_ips.clone(),
             proxy_ports: self.proxy_ports.clone(),
             applications: self
@@ -440,7 +443,7 @@ fn non_empty(value: String) -> Option<String> {
 mod tests {
     use rusqlite::Connection;
 
-    use super::{TrafficStatistics, TrafficStatisticsDimensions};
+    use super::{TrafficStatistics, TrafficStatisticsDimensions, TrafficStatisticsSnapshot};
 
     fn dimensions(
         ip: &str,
@@ -462,9 +465,27 @@ mod tests {
     }
 
     #[test]
+    fn statistics_epoch_is_additive_and_legacy_snapshots_still_deserialize() {
+        let mut snapshot = TrafficStatistics::default().snapshot(42);
+        let legacy = serde_json::to_value(&snapshot).unwrap();
+        assert!(legacy.get("database_epoch").is_none());
+        assert_eq!(
+            serde_json::from_value::<TrafficStatisticsSnapshot>(legacy).unwrap(),
+            snapshot
+        );
+        snapshot.database_epoch = Some("persistent-epoch".to_string());
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(encoded["database_epoch"], "persistent-epoch");
+        assert_eq!(
+            serde_json::from_value::<TrafficStatisticsSnapshot>(encoded).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
     fn statistics_track_insert_replace_and_remove_without_zero_buckets() {
-        let first = dimensions("127.0.0.1", "9900", Some("Pending App"), None, "one.test");
-        let resolved = dimensions("127.0.0.1", "9900", Some("Codex"), Some("eden"), "one.test");
+        let first = dimensions("127.0.0.1", "9915", Some("Pending App"), None, "one.test");
+        let resolved = dimensions("127.0.0.1", "9915", Some("Codex"), Some("eden"), "one.test");
         let second = dimensions("10.0.0.2", "8800", Some("Codex"), None, "two.test");
         let mut statistics = TrafficStatistics::default();
 
@@ -507,7 +528,7 @@ mod tests {
         let empty = dimensions("", "", None, None, "");
         let unknown = dimensions(
             "10.0.0.1",
-            "9900",
+            "9915",
             Some("unknown"),
             Some("nobody"),
             "none.test",

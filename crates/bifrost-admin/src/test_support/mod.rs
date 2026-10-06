@@ -57,6 +57,135 @@ pub struct TestAdminStateBuilder {
     port: u16,
 }
 
+#[cfg(test)]
+pub(crate) struct TrafficCleanupFixture {
+    pub harness: TestAdminState,
+    body: crate::BodyRef,
+    payload: crate::BodyRef,
+}
+
+#[cfg(test)]
+impl TrafficCleanupFixture {
+    pub const RECORD_ID: &'static str = "cleanup-record";
+    pub const ACTIVE_ID: &'static str = "cleanup-active";
+
+    pub fn new() -> Self {
+        let harness = TestAdminState::builder().build();
+        let body = harness
+            .body_store
+            .read()
+            .store_force_file(Self::RECORD_ID, "res", b"body survives")
+            .unwrap();
+        let payload = harness
+            .ws_payload_store
+            .append_bytes(Self::RECORD_ID, b"payload survives")
+            .unwrap();
+        let frame = crate::WebSocketFrameRecord::new_sse_event(1, b"frame survives", 256);
+        harness
+            .frame_store
+            .append_frame(Self::RECORD_ID, &frame)
+            .unwrap();
+        harness.frame_store.flush();
+        for id in [Self::RECORD_ID, Self::ACTIVE_ID] {
+            let mut record = crate::TrafficRecord::new(
+                id.to_string(),
+                "GET".to_string(),
+                "https://example.test/cleanup".to_string(),
+            );
+            record.status = 200;
+            if id == Self::RECORD_ID {
+                record.response_body_ref = Some(body.clone());
+            }
+            harness.traffic_db.record(record);
+        }
+        harness
+            .state()
+            .connection_monitor
+            .register_connection(Self::ACTIVE_ID);
+        Self {
+            harness,
+            body,
+            payload,
+        }
+    }
+
+    pub fn reject_metadata_writes(&self) {
+        rusqlite::Connection::open(self.harness.traffic_db.stats().db_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_cleanup_metadata BEFORE INSERT ON metadata
+             WHEN NEW.key = 'sequence_high_water'
+             BEGIN SELECT RAISE(ABORT, 'cleanup metadata unavailable'); END;",
+            )
+            .unwrap();
+    }
+
+    pub fn allow_metadata_writes(&self) {
+        rusqlite::Connection::open(self.harness.traffic_db.stats().db_path)
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_cleanup_metadata")
+            .unwrap();
+    }
+
+    pub fn assert_preserved(&self) {
+        assert!(self.harness.traffic_db.get_by_id(Self::RECORD_ID).is_some());
+        assert!(self.harness.traffic_db.get_by_id(Self::ACTIVE_ID).is_some());
+        assert_eq!(self.harness.traffic_db.count(), 2);
+        assert_eq!(
+            self.harness
+                .body_store
+                .read()
+                .load_bytes(&self.body)
+                .as_deref(),
+            Some(b"body survives".as_slice())
+        );
+        assert_eq!(
+            self.harness
+                .ws_payload_store
+                .read_range(&self.payload)
+                .as_deref(),
+            Some(b"payload survives".as_slice())
+        );
+        assert_eq!(
+            self.harness
+                .frame_store
+                .load_frames(Self::RECORD_ID, None, 10)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert!(self
+            .harness
+            .state()
+            .connection_monitor
+            .active_connection_ids()
+            .contains(&Self::ACTIVE_ID.to_string()));
+    }
+
+    pub fn assert_record_data_deleted(&self) {
+        assert!(self.harness.traffic_db.get_by_id(Self::RECORD_ID).is_none());
+        assert!(self
+            .harness
+            .body_store
+            .read()
+            .load_bytes(&self.body)
+            .is_none());
+        assert!(self
+            .harness
+            .ws_payload_store
+            .read_range(&self.payload)
+            .is_none());
+        assert!(self
+            .harness
+            .frame_store
+            .load_frames(Self::RECORD_ID, None, 10)
+            .unwrap()
+            .0
+            .is_empty());
+    }
+}
+
 impl TestAdminState {
     /// Start building a new tempdir-backed `AdminState` harness.
     pub fn builder() -> TestAdminStateBuilder {

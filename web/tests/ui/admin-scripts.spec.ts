@@ -20,6 +20,81 @@ async function createScriptFromHeaderMenu(
   await page.getByTestId(`scripts-create-${type}-item`).click();
 }
 
+// Diagnostics tests need the exact source, rather than keyboard insertText,
+// which Monaco treats as typing and may auto-indent or insert closing braces.
+async function setScriptDiagnosticSource(
+  page: import("@playwright/test").Page,
+  source: string,
+) {
+  const container = page.getByTestId("scripts-editor");
+  await expect(container.locator(".monaco-editor")).toBeVisible();
+  await container.evaluate((element, value) => {
+    const monaco = (
+      window as unknown as { monaco: typeof import("monaco-editor") }
+    ).monaco;
+    const editor = monaco.editor.getEditors().find((candidate) => {
+      const node = candidate.getDomNode();
+      return node && element.contains(node);
+    });
+    if (!editor?.getModel())
+      throw new Error("Scripts editor model is not ready");
+    editor.setValue(value);
+    if (editor.getValue() !== value)
+      throw new Error("Scripts editor source did not match fixture");
+  }, source);
+}
+
+async function scriptDiagnosticErrors(page: import("@playwright/test").Page) {
+  return page.getByTestId("scripts-editor").evaluate(async (element) => {
+    const monaco = (
+      window as unknown as { monaco: import("@monaco-editor/react").Monaco }
+    ).monaco;
+    const editor = monaco.editor.getEditors().find((candidate) => {
+      const node = candidate.getDomNode();
+      return node && element.contains(node);
+    });
+    const model = editor?.getModel();
+    if (!model) throw new Error("Scripts editor model is not ready");
+    const extraLibs =
+      monaco.languages.typescript.typescriptDefaults.getExtraLibs();
+    const libraryUris = Object.keys(extraLibs).map((filePath) => {
+      const uri = monaco.Uri.parse(filePath);
+      // Match the model Monaco opens for definition/related-information links.
+      if (!monaco.editor.getModel(uri)) {
+        monaco.editor.createModel(
+          extraLibs[filePath].content,
+          "typescript",
+          uri,
+        );
+      }
+      return uri;
+    });
+    const getWorker = await monaco.languages.typescript.getTypeScriptWorker();
+    const worker = await getWorker(model.uri, ...libraryUris);
+    const diagnostics = await Promise.all([
+      worker.getSyntacticDiagnostics(model.uri.toString()),
+      worker.getSemanticDiagnostics(model.uri.toString()),
+      ...Object.keys(extraLibs).flatMap((uri) => [
+        worker.getSyntacticDiagnostics(uri),
+        worker.getSemanticDiagnostics(uri),
+      ]),
+    ]);
+    return diagnostics.flat().map((diagnostic) => diagnostic.messageText);
+  });
+}
+
+async function scriptMarkerErrors(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    const monaco = (
+      window as unknown as { monaco: typeof import("monaco-editor") }
+    ).monaco;
+    return monaco.editor
+      .getModelMarkers({})
+      .filter((marker) => marker.severity === monaco.MarkerSeverity.Error)
+      .map((marker) => marker.message);
+  });
+}
+
 test.beforeEach(async ({ request }) => {
   await clearTraffic(request);
   await clearRules(request);
@@ -76,9 +151,8 @@ test("Scripts parser 编辑器识别 bp parser 运行时 ctx/request/response �
 }) => {
   await openPage(page, "scripts");
   await createScriptFromHeaderMenu(page, "parser");
-  await setMonacoEditor(
+  await setScriptDiagnosticSource(
     page,
-    page.getByTestId("scripts-editor"),
     `function bodyBase64() {
   if (ctx.phase === "request" || ctx.phase === "websocket_send") {
     return request && request.bodyBase64 ? request.bodyBase64 : "";
@@ -87,8 +161,9 @@ test("Scripts parser 编辑器识别 bp parser 运行时 ctx/request/response �
 }
 
 function currentRequest() {
-  if (ctx.phase === "request" || ctx.phase === "websocket_send") return request || {};
-  return response && response.request ? response.request : {};
+  var emptyRequest = { method: "", host: "", path: "", url: "" };
+  if (ctx.phase === "request" || ctx.phase === "websocket_send") return request || emptyRequest;
+  return response && response.request ? response.request : emptyRequest;
 }
 
 function requestPattern(params) {
@@ -123,21 +198,60 @@ function normalizeHttpRpc(endpointInfo, parsed, params) {
 ctx.output = { data: JSON.stringify(normalizeHttpRpc({}, {}, {})), code: "0", msg: bodyBase64() || requestPattern({}) };`,
   );
 
-  await page.waitForTimeout(1200);
-  const markerInfo = await page.evaluate(() => {
-    const monaco = (window as unknown as { monaco?: typeof import("monaco-editor") }).monaco;
-    if (!monaco?.editor) {
-      return { monacoReady: false, errors: [] as string[] };
-    }
-    const errors = monaco.editor
-      .getModelMarkers({})
-      .filter((marker) => marker.severity === monaco.MarkerSeverity.Error)
-      .map((marker) => marker.message);
-    return { monacoReady: true, errors };
-  });
+  expect(await scriptDiagnosticErrors(page)).toEqual([]);
+  await expect.poll(() => scriptMarkerErrors(page)).toEqual([]);
+});
 
-  expect(markerInfo.monacoReady).toBeTruthy();
-  expect(markerInfo.errors).toEqual([]);
+test("Scripts 编辑器反复切换类型后仍检查真实错误且不重复注入运行时声明", async ({
+  page,
+}) => {
+  await openPage(page, "scripts");
+  for (const mode of ["light", "dark"] as const) {
+    await page.evaluate((themeMode) => {
+      localStorage.setItem(
+        "bifrost-theme",
+        JSON.stringify({ state: { mode: themeMode }, version: 0 }),
+      );
+    }, mode);
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", mode);
+    for (const type of [
+      "request",
+      "response",
+      "decode",
+      "parser",
+      "request",
+      "parser",
+    ] as const) {
+      await createScriptFromHeaderMenu(page, type);
+      const source =
+        type === "request"
+          ? 'request.method = "POST"; console.info(request.path);'
+          : type === "response"
+            ? "response.status = 201; console.info(response.request.path);"
+            : 'ctx.output = { data: request.bodyBase64 || response.bodyBase64, code: "0", msg: response.request.path };';
+      await setScriptDiagnosticSource(page, source);
+      expect(await scriptDiagnosticErrors(page)).toEqual([]);
+      await expect.poll(() => scriptMarkerErrors(page)).toEqual([]);
+    }
+    await setScriptDiagnosticSource(page, "request.unknownField;");
+    expect(await scriptDiagnosticErrors(page)).toEqual([
+      expect.stringContaining("unknownField"),
+    ]);
+    await expect
+      .poll(() => scriptMarkerErrors(page))
+      .toEqual([expect.stringContaining("unknownField")]);
+    await setScriptDiagnosticSource(page, "const broken = ;");
+    expect(await scriptDiagnosticErrors(page)).toEqual([
+      expect.stringContaining("Expression expected"),
+    ]);
+    await expect
+      .poll(() => scriptMarkerErrors(page))
+      .toEqual([expect.stringContaining("Expression expected")]);
+    await setScriptDiagnosticSource(page, "console.info(ctx.phase);");
+    expect(await scriptDiagnosticErrors(page)).toEqual([]);
+    await expect.poll(() => scriptMarkerErrors(page)).toEqual([]);
+  }
 });
 
 test("Scripts 页面完成创建、测试、push 同步，并让请求脚本真实作用于代理流量", async ({
@@ -179,13 +293,17 @@ test("Scripts 页面完成创建、测试、push 同步，并让请求脚本真�
 
   const requestNode = page
     .getByTestId("script-item")
-    .filter({ hasText: requestScriptName.split("/").pop() || requestScriptName })
+    .filter({
+      hasText: requestScriptName.split("/").pop() || requestScriptName,
+    })
     .first();
   await expect(requestNode).toBeVisible();
   await expect(
     syncPage
       .getByTestId("script-item")
-      .filter({ hasText: requestScriptName.split("/").pop() || requestScriptName })
+      .filter({
+        hasText: requestScriptName.split("/").pop() || requestScriptName,
+      })
       .first(),
   ).toBeVisible();
 
@@ -241,7 +359,10 @@ test("Scripts 页面完成创建、测试、push 同步，并让请求脚本真�
   await saveDialog.getByRole("button", { name: "Save" }).click();
   await waitForToast(page, "Script created");
   await expect(
-    page.getByTestId("script-item").filter({ hasText: parserScriptName }).first(),
+    page
+      .getByTestId("script-item")
+      .filter({ hasText: parserScriptName })
+      .first(),
   ).toBeVisible();
   await expect(
     page.getByTestId("script-item").filter({ hasText: "PAR" }).first(),
@@ -267,15 +388,28 @@ test("Scripts 页面完成创建、测试、push 同步，并让请求脚本真�
   await waitForToast(page, "Script created");
 
   await expect(
-    page.getByTestId("script-item").filter({ hasText: pushedScriptName }).first(),
+    page
+      .getByTestId("script-item")
+      .filter({ hasText: pushedScriptName })
+      .first(),
   ).toBeVisible();
   await expect(
-    syncPage.getByTestId("script-item").filter({ hasText: pushedScriptName }).first(),
+    syncPage
+      .getByTestId("script-item")
+      .filter({ hasText: pushedScriptName })
+      .first(),
   ).toBeVisible();
 
-  await page.getByTestId("script-item").filter({ hasText: requestScriptName }).first().click();
+  await page
+    .getByTestId("script-item")
+    .filter({ hasText: requestScriptName })
+    .first()
+    .click();
   await page.getByTestId("scripts-delete-button").click();
-  await page.getByRole("dialog", { name: "Delete Script" }).getByRole("button", { name: "Delete" }).click();
+  await page
+    .getByRole("dialog", { name: "Delete Script" })
+    .getByRole("button", { name: "Delete" })
+    .click();
   await waitForToast(page, "Script deleted");
   await expect(
     page.getByTestId("script-item").filter({ hasText: requestScriptName }),
@@ -328,8 +462,14 @@ test("Scripts 列表在获得焦点后支持上下键切换选中项", async ({
 
   await expect(firstScriptItem).toBeVisible();
   await expect(secondScriptItem).toBeVisible();
-  await expect(firstScriptItem).toHaveAttribute("data-script-name", firstScriptName);
-  await expect(secondScriptItem).toHaveAttribute("data-script-name", secondScriptName);
+  await expect(firstScriptItem).toHaveAttribute(
+    "data-script-name",
+    firstScriptName,
+  );
+  await expect(secondScriptItem).toHaveAttribute(
+    "data-script-name",
+    secondScriptName,
+  );
 
   await firstScriptItem.click();
   await expect(firstScriptItem).toHaveAttribute("aria-selected", "true");

@@ -17,7 +17,7 @@ Bifrost Web/CLI 的 Traffic 列表左侧的行号(sequence/seq)必须是稳定�
 ### 必须实现
 
 - SQLite schema 里 `traffic_records.sequence INTEGER PRIMARY KEY` 保存全局递增序号。
-- 进程启动时通过 `SELECT MAX(sequence) FROM traffic_records` 恢复 `current_sequence`，下一条写入使用 `current_sequence.fetch_add(1)` 分配。
+- 进程启动时通过 `MAX(sequence)` 与持久化 `sequence_high_water` 的较大值恢复 `current_sequence`，下一条写入使用 `current_sequence.fetch_add(1)` 分配。
 - 插入 record 时 `record.sequence = seq` 由 store 层直接写库，不允许调用方指定。
 - Traffic API compact record 里 `seq = record.sequence` 直接透传给前端。
 - 前端 `useTrafficStore` 与 `useSearchStore` 排序/去重/比较全部按 `sequence` 字段，不使用数组下标。
@@ -41,10 +41,10 @@ Bifrost Web/CLI 的 Traffic 列表左侧的行号(sequence/seq)必须是稳定�
 
 ### seq 是持久化事实，不是展示规则
 
-`sequence` 是一次性分配、永不复用、进程启动时从磁盘恢复的全局单调整数：
+成功持久化的记录 `sequence` 不复用，进程启动时从磁盘恢复其上界：
 
-- 生成语义：`AtomicU64::fetch_add(1, SeqCst)`，即使并发写入也保证唯一。
-- 恢复语义：`SELECT MAX(sequence)`，遇到空库返回 0，`current_sequence = current_seq + 1`。
+- 生成语义：`AtomicU64::fetch_add(1, SeqCst)`，同一 store 并发分配时保证唯一；失败且未持久化的分配可以在重启后复用。
+- 恢复语义：`max(MAX(sequence), sequence_high_water) + 1`；仅全新空库从 1 开始。
 - 展示语义：Web / CLI / IM 卡片显示的 `#N` 就是数据库里的 `sequence`。
 
 清空、清理、压缩不会重新编号；被删除的序号会永久留空。历史 `#N` 引用要么命中同一 record，要么明确返回 not found。
@@ -81,9 +81,9 @@ CREATE INDEX IF NOT EXISTS idx_devtools_client_req_id
 ### Store (crates/bifrost-admin/src/traffic_db/store.rs)
 
 - 结构体字段：`current_sequence: AtomicU64`。
-- `TrafficDbStore::new(...)` 中 `current_seq = Self::get_max_sequence(&write_conn).unwrap_or(0);` 然后 `AtomicU64::new(current_seq + 1)`。
-- `get_max_sequence(conn)` 走 `SELECT MAX(sequence) FROM traffic_records`。
-- 写入路径 `insert_record` 与 `insert_records_batch`（约 store.rs:536 / 581）每条 record `let seq = current_sequence.fetch_add(1, Ordering::SeqCst); record.sequence = seq;`。
+- `TrafficDbStore::new(...)` 通过 `initialize_sequence_metadata` 读取持久化身份和序号上界，然后 `AtomicU64::new(current_seq + 1)`。
+- 删除前先持久化 `sequence_high_water`；同库正常重启、清空和清理保持 `database_epoch` 不变。详见 [启动与身份生命周期](./traffic-db-startup-resequence.md)。
+- 写入路径 `record` 与 `try_record_batch`每条 record `let seq = current_sequence.fetch_add(1, Ordering::SeqCst); record.sequence = seq;`。
 - 对外只读接口 `current_sequence(&self) -> u64` 用于 stats、push heartbeat。
 
 ### Query & 游标 (crates/bifrost-admin/src/traffic_db/query.rs)

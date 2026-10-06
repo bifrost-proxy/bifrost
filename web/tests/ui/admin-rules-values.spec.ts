@@ -703,6 +703,19 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
   const ruleName = uniqueName("alpha-rule");
   const latestRuleName = uniqueName("beta-rule");
   const server = await startMockHttpServer();
+  const expectRuleOrder = async (names: string[]) => {
+    await expect(page.getByTestId("rule-item")).toHaveCount(names.length + 1);
+    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
+      "data-rule-name",
+      "Default",
+    );
+    for (const [index, name] of names.entries()) {
+      await expect(page.getByTestId("rule-item").nth(index + 1)).toHaveAttribute(
+        "data-rule-name",
+        name,
+      );
+    }
+  };
 
   try {
     const resetUiConfigRes = await request.put(`${apiBase}/config/ui`, {
@@ -758,27 +771,14 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
     await page.getByTestId("rule-refresh-button").click();
 
     await changeSort(page, "rule-sort-select", "Updated");
-    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
-      "data-rule-name",
-      ruleName,
-    );
+    await expectRuleOrder([ruleName, latestRuleName]);
     await page.reload();
     await expect(page.getByTestId("rules-list")).toBeVisible();
     await expect(page.getByTestId("rule-sort-select")).toContainText("Updated");
-    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
-      "data-rule-name",
-      ruleName,
-    );
+    await expectRuleOrder([ruleName, latestRuleName]);
     await changeSort(page, "rule-sort-select", "Manual");
 
-    await expect(page.getByTestId("rule-item").nth(0)).toHaveAttribute(
-      "data-rule-name",
-      latestRuleName,
-    );
-    await expect(page.getByTestId("rule-item").nth(1)).toHaveAttribute(
-      "data-rule-name",
-      ruleName,
-    );
+    await expectRuleOrder([latestRuleName, ruleName]);
 
     await sendProxyRequest(`http://127.0.0.1:${server.port}/rules-check`);
     await expect.poll(() => server.requests.length).toBeGreaterThan(0);
@@ -788,14 +788,7 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
       targetPosition: { x: 20, y: 4 },
     });
 
-    await expect(page.getByTestId("rule-item").nth(0)).toHaveAttribute(
-      "data-rule-name",
-      ruleName,
-    );
-    await expect(page.getByTestId("rule-item").nth(1)).toHaveAttribute(
-      "data-rule-name",
-      latestRuleName,
-    );
+    await expectRuleOrder([ruleName, latestRuleName]);
 
     const requestsAfterReorder = server.requests.length;
     await sendProxyRequest(`http://127.0.0.1:${server.port}/rules-reordered`);
@@ -809,28 +802,22 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
 
     await openPage(page, "rules");
     await expect(ruleItem).toBeVisible();
-    await ruleItem.locator(".ant-switch").click();
+    // Row actions are intentionally pointer-disabled until hover/focus.
+    await ruleItem.hover();
+    await ruleItem.getByRole("switch").click();
+    await expect(ruleItem).toHaveAttribute("data-rule-enabled", "false");
 
     await page.getByTestId("rule-sort-select").click();
     await page.locator(".ant-select-dropdown").getByText("Name", { exact: true }).click();
-    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
-      "data-rule-name",
-      ruleName,
-    );
+    await expectRuleOrder([ruleName, latestRuleName]);
     await page.reload();
     await expect(page.getByTestId("rules-list")).toBeVisible();
     await expect(page.getByTestId("rule-sort-select")).toContainText("Name");
-    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
-      "data-rule-name",
-      ruleName,
-    );
+    await expectRuleOrder([ruleName, latestRuleName]);
 
     await page.getByTestId("rule-sort-select").click();
     await page.locator(".ant-select-dropdown").getByText("Manual", { exact: true }).click();
-    await expect(page.getByTestId("rule-item").first()).toHaveAttribute(
-      "data-rule-name",
-      ruleName,
-    );
+    await expectRuleOrder([ruleName, latestRuleName]);
 
     const requestsAfterManualRestore = server.requests.length;
     await sendProxyRequest(`http://127.0.0.1:${server.port}/rules-manual-restored`);
@@ -971,12 +958,20 @@ test("Rules Dynamic Island 展开的 Merged Rules 支持一键复制", async ({
   const mergedContent = page.getByTestId("rules-dynamic-island-merged-content");
   await expect(mergedContent).toContainText("x-merged-copy: ok");
 
-  const shownMergedRules = (await mergedContent.textContent())?.trim();
+  // The rendered code includes line-number gutters. Compare the clipboard to
+  // the complete source, including any enabled Default or group rules.
+  const summaryResponse = await request.get(`${apiBase}/rules/active-summary`);
+  expect(summaryResponse.ok()).toBeTruthy();
+  const summary = (await summaryResponse.json()) as { merged_content: string };
+  expect(summary.merged_content).toContain(ruleContent);
+  const expectedMergedRules = summary.merged_content.trim();
   await page.getByTestId("rules-dynamic-island-copy-merged").click();
   await waitForToast(page, "Merged rules copied");
 
-  const clipboardText = await page.evaluate(async () => navigator.clipboard.readText());
-  expect(clipboardText).toBe(shownMergedRules);
+  const clipboardText = await page.evaluate(async () =>
+    navigator.clipboard.readText(),
+  );
+  expect(clipboardText).toBe(expectedMergedRules);
 });
 
 test("Rules 列表支持按 / 分组的树状展开/折叠", async ({
@@ -1054,8 +1049,10 @@ test("Rules 列表在获得焦点后支持上下键切换选中项", async ({
   await openPage(page, "rules");
   await expect(page.getByTestId("rules-list")).toBeVisible();
 
-  const firstRuleItem = page.getByTestId("rule-item").nth(0);
-  const secondRuleItem = page.getByTestId("rule-item").nth(1);
+  const defaultRuleItem = page.getByTestId("rule-item").first();
+  await expect(defaultRuleItem).toHaveAttribute("data-rule-name", "Default");
+  const firstRuleItem = page.getByTestId("rule-item").nth(1);
+  const secondRuleItem = page.getByTestId("rule-item").nth(2);
 
   await expect(firstRuleItem).toBeVisible();
   await expect(secondRuleItem).toBeVisible();
@@ -1075,6 +1072,11 @@ test("Rules 列表在获得焦点后支持上下键切换选中项", async ({
   await page.keyboard.press("ArrowUp");
   await expect(firstRuleItem).toHaveAttribute("aria-selected", "true");
   await expect(secondRuleItem).toHaveAttribute("aria-selected", "false");
+
+  await page.keyboard.press("ArrowUp");
+  await expect(defaultRuleItem).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowDown");
+  await expect(firstRuleItem).toHaveAttribute("aria-selected", "true");
 });
 
 test("Values 列表在获得焦点后支持上下键切换选中项", async ({

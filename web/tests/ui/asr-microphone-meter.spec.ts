@@ -1,3 +1,5 @@
+// Legacy ASR suite: separate microphone, task, and retry fixtures incrementally
+// while retaining their shared capability and media setup contracts.
 import { expect, type Page, test } from "@playwright/test";
 import { openPage } from "./helpers/admin-helpers";
 
@@ -9,6 +11,44 @@ async function selectTaskAction(page: Page, name: string) {
 }
 
 async function installAsrMicrophoneMocks(page: Page) {
+  // Microphone and task UI fixtures need supported ASR regardless of the test host.
+  await page.route("**/_bifrost/api/asr/capabilities", async (route) => {
+    await route.fulfill({
+      json: {
+        platform: "macos",
+        arch: "aarch64",
+        supported_target: "macos-aarch64",
+        qwen3_asr: { enabled: true, hidden: false, platform_supported: true },
+        local_transcription: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        speech_workbench: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        directory_tasks: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        speaker_diarization: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        voiceprint: { enabled: true, hidden: false, platform_supported: true },
+        voice_wake_asr: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+      },
+    });
+  });
+
   await page.route("**/_bifrost/api/asr/status**", async (route) => {
     await route.fulfill({
       status: 200,
@@ -860,7 +900,12 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
     .click();
   const createDialog = page.getByRole("dialog", { name: "New Directory Task" });
   await expect(createDialog).toBeVisible();
-  await createDialog.getByTestId("asr-runtime-strategy-select").click({ force: true });
+  const runtimeSelect = createDialog.getByRole("combobox", {
+    name: "Runtime",
+    exact: true,
+  });
+  await runtimeSelect.click();
+  await expect(runtimeSelect).toHaveAttribute("aria-expanded", "true");
   const runtimeDropdown = page.locator(".ant-select-dropdown:visible");
   await expect(runtimeDropdown.getByText("Reuse / file")).toBeVisible();
   await expect(runtimeDropdown.getByText("Default for most offline tasks.")).toBeVisible();
@@ -873,6 +918,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(runtimeDropdown.getByText("Compare")).toBeVisible();
   await expect(runtimeDropdown.getByText("Diagnostic mode.")).toBeVisible();
   await page.keyboard.press("Escape");
+  await expect(runtimeSelect).toHaveAttribute("aria-expanded", "false");
   await expect(runtimeDropdown).toBeHidden();
   await createDialog.getByPlaceholder("Meeting audio watcher").fill("Recordings");
   await createDialog.getByPlaceholder("~/Recordings").fill("/tmp/asr-audio");
@@ -1004,7 +1050,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(page.getByText("Directory Tasks")).toBeVisible();
 
   await page
-    .getByTestId("ai-section-content")
+    .getByTestId("asr-home-tab-scheduled")
     .getByRole("button", { name: "Run" })
     .click();
   await expect(page.getByText("ASR task started")).toBeVisible();

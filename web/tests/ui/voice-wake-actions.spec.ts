@@ -113,6 +113,44 @@ async function installVoiceWakeMocks(page: Page, options: VoiceWakeMockOptions =
     trigger_count: 0,
   };
 
+  // Voice wake UI fixtures need supported ASR regardless of the test host.
+  await page.route("**/_bifrost/api/asr/capabilities", async (route) => {
+    await route.fulfill({
+      json: {
+        platform: "macos",
+        arch: "aarch64",
+        supported_target: "macos-aarch64",
+        qwen3_asr: { enabled: true, hidden: false, platform_supported: true },
+        local_transcription: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        speech_workbench: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        directory_tasks: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        speaker_diarization: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        voiceprint: { enabled: true, hidden: false, platform_supported: true },
+        voice_wake_asr: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+      },
+    });
+  });
+
   await page.route("**/_bifrost/api/asr/status**", async (route) => {
     await route.fulfill({
       json: {

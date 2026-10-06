@@ -15,6 +15,7 @@ import {
   startMockHttpServer,
   uniqueName,
 } from "./helpers/admin-helpers";
+import { stopTrackedProcess } from "./helpers/tracked-process";
 import { TLS_RECONNECT_NOTICE } from "../../src/utils/tlsInterceptionNotice";
 
 const BASE_PROXY_URL = process.env.PROXY_URL || `http://127.0.0.1:${backendPort}`;
@@ -23,6 +24,7 @@ const PUSH_RECORDER_KEY = "__bifrostPushRecorder";
 type PushRecorderSnapshot = {
   urls: string[];
   messages: string[];
+  readyStates: number[];
 };
 
 type RecordedTrafficDelta = {
@@ -38,15 +40,6 @@ const getRepoRoot = () => {
   return path.resolve(path.dirname(current), "../../..");
 };
 
-const isProcessAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 const isBackendReady = async () => {
   try {
     const res = await fetch(`${apiBase}/proxy/address`);
@@ -56,8 +49,9 @@ const isBackendReady = async () => {
   }
 };
 
-const waitForBackend = async () => {
+const waitForBackend = async (hasExited: () => boolean) => {
   for (let i = 0; i < 240; i += 1) {
+    if (hasExited()) return false;
     if (await isBackendReady()) {
       return true;
     }
@@ -69,22 +63,7 @@ const waitForBackend = async () => {
 const stopTrackedBackend = async () => {
   const pidFile =
     process.env.BIFROST_UI_TEST_PID_FILE || path.join(getRepoRoot(), ".ui-backend.pid");
-  try {
-    const pidText = await fs.readFile(pidFile, "utf-8");
-    const pid = Number(pidText);
-    if (Number.isNaN(pid) || !isProcessAlive(pid)) {
-      await fs.rm(pidFile, { force: true });
-      return;
-    }
-    try {
-      process.kill(-pid);
-    } catch {
-      process.kill(pid);
-    }
-    await fs.rm(pidFile, { force: true });
-  } catch {
-    void 0;
-  }
+  await stopTrackedProcess(pidFile);
 };
 
 const startTrackedBackend = async () => {
@@ -156,9 +135,15 @@ const startTrackedBackend = async () => {
     throw new Error("Failed to start tracked backend");
   }
   await fs.writeFile(pidFile, String(pid));
-  const ok = await waitForBackend();
+  const ok = await waitForBackend(
+    () => child.exitCode !== null || child.signalCode !== null,
+  );
   if (!ok) {
-    throw new Error("Tracked backend failed to start");
+    const logTail = await fs.readFile(logPath, "utf8")
+      .then((log) => log.slice(-3000)).catch(() => "");
+    throw new Error(
+      `Tracked backend failed to start (exit ${child.exitCode}, signal ${child.signalCode}): ${logTail}`,
+    );
   }
 };
 
@@ -315,6 +300,7 @@ async function installPushRecorder(page: Page) {
     const recorder = {
       urls: [] as string[],
       messages: [] as string[],
+      sockets: [] as WebSocket[],
     };
 
     class InstrumentedWebSocket extends nativeWebSocket {
@@ -325,6 +311,7 @@ async function installPushRecorder(page: Page) {
           return;
         }
         recorder.urls.push(urlString);
+        recorder.sockets.push(this);
         this.addEventListener("message", (event) => {
           if (typeof event.data === "string") {
             recorder.messages.push(event.data);
@@ -346,11 +333,14 @@ async function installPushRecorder(page: Page) {
 async function readPushRecorder(page: Page): Promise<PushRecorderSnapshot> {
   return page.evaluate((recorderKey) => {
     const recorder = (window as typeof window & {
-      [key: string]: PushRecorderSnapshot | undefined;
+      [key: string]:
+        | (Omit<PushRecorderSnapshot, "readyStates"> & { sockets: WebSocket[] })
+        | undefined;
     })[recorderKey];
     return {
       urls: [...(recorder?.urls || [])],
       messages: [...(recorder?.messages || [])],
+      readyStates: (recorder?.sockets || []).map((socket) => socket.readyState),
     };
   }, PUSH_RECORDER_KEY);
 }
@@ -407,6 +397,7 @@ test.describe.serial("traffic push regressions", () => {
     const server = await startMockHttpServer();
     const persistedPath = `/${uniqueName("restart-persisted")}`;
     const livePath = `/${uniqueName("restart-live")}`;
+    let failure: { error: unknown } | undefined;
 
     try {
       await sendProxyRequest(`http://127.0.0.1:${server.port}${persistedPath}`);
@@ -433,9 +424,26 @@ test.describe.serial("traffic push regressions", () => {
       } finally {
         await freshPage.close();
       }
+    } catch (error) {
+      failure = { error };
     } finally {
-      await server.close();
+      try {
+        // Keep one failed restart from cascading into every later Traffic case.
+        if (!(await isBackendReady())) {
+          await stopTrackedBackend();
+          await startTrackedBackend();
+        }
+      } catch (recoveryError) {
+        if (failure) {
+          console.error("Backend recovery also failed; preserving the original test error", recoveryError);
+        } else {
+          failure = { error: recoveryError };
+        }
+      } finally {
+        await server.close();
+      }
     }
+    if (failure) throw failure.error;
   });
 
   test("多个页面同时打开时都能完整收到实时流量", async ({ page, context, request }) => {
@@ -668,19 +676,51 @@ test.describe.serial("traffic push regressions", () => {
     }
   });
 
-  test("窗口隐藏后恢复时会通过批量 delta 补齐 backlog", async ({ page, request }) => {
+  test("窗口隐藏后恢复时会通过批量 delta 补齐 backlog", async ({
+    page,
+    request,
+  }) => {
     await clearTraffic(request);
     await installPushRecorder(page);
     const server = await startMockHttpServer();
-    const hiddenPaths = Array.from({ length: 5 }, () => `/${uniqueName("hidden-batch")}`);
+    const readyPath = `/${uniqueName("before-hidden-batch")}`;
+    const hiddenPaths = Array.from(
+      { length: 5 },
+      () => `/${uniqueName("hidden-batch")}`,
+    );
     const hiddenPathSet = new Set(hiddenPaths);
 
     try {
+      const initialTraffic = page.waitForResponse((response) =>
+        response.url().includes("/_bifrost/api/traffic/updates") && response.ok(),
+      );
       await openTrafficPageAndWaitForPush(page);
-      const initialRecorder = await readPushRecorder(page);
+      await (await initialTraffic).finished();
+      // Finish initial loading before testing a steady-state visibility change.
+      await sendProxyRequest(`http://127.0.0.1:${server.port}${readyPath}`);
+      await expect(
+        page.getByTestId("traffic-row").filter({ hasText: readyPath }).first(),
+      ).toBeVisible();
 
+      await expect
+        .poll(
+          async () =>
+            (await readPushRecorder(page)).readyStates.filter(
+              (state) => state === 1,
+            ).length,
+        )
+        .toBe(1);
       await setDocumentVisibility(page, "hidden");
-      await page.waitForTimeout(800);
+      // StrictMode may have closed a startup socket already. Check every
+      // recorded push socket, including the current one, instead of the first.
+      await expect
+        .poll(async () =>
+          (await readPushRecorder(page)).readyStates.every(
+            (state) => state === 3,
+          ),
+        )
+        .toBe(true);
+      const hiddenRecorder = await readPushRecorder(page);
 
       await Promise.all(
         hiddenPaths.map((requestPath) =>
@@ -688,7 +728,30 @@ test.describe.serial("traffic push regressions", () => {
         ),
       );
 
+      await expect
+        .poll(async () => {
+          const payload = await fetchTrafficList(request);
+          return (
+            payload.records?.filter(
+              (record) =>
+                typeof record.p === "string" && hiddenPathSet.has(record.p),
+            ).length ?? 0
+          );
+        })
+        .toBe(hiddenPaths.length);
+      const beforeResume = await readPushRecorder(page);
+      expect(beforeResume.urls).toEqual(hiddenRecorder.urls);
+      expect(
+        extractTrafficDelta(
+          beforeResume.messages.slice(hiddenRecorder.messages.length),
+          (delta) => countMatchingPaths(delta, hiddenPathSet) > 0,
+        ),
+      ).toBeNull();
+
       await setDocumentVisibility(page, "visible");
+      await expect
+        .poll(async () => (await readPushRecorder(page)).urls.length)
+        .toBeGreaterThan(beforeResume.urls.length);
 
       let resumedDelta: RecordedTrafficDelta | null = null;
       await expect
@@ -696,10 +759,12 @@ test.describe.serial("traffic push regressions", () => {
           async () => {
             const currentRecorder = await readPushRecorder(page);
             resumedDelta = extractTrafficDelta(
-              currentRecorder.messages.slice(initialRecorder.messages.length),
+              currentRecorder.messages.slice(beforeResume.messages.length),
               (delta) => countMatchingPaths(delta, hiddenPathSet) >= 2,
             );
-            return resumedDelta ? countMatchingPaths(resumedDelta, hiddenPathSet) : 0;
+            return resumedDelta
+              ? countMatchingPaths(resumedDelta, hiddenPathSet)
+              : 0;
           },
           { timeout: 15000 },
         )
@@ -707,7 +772,10 @@ test.describe.serial("traffic push regressions", () => {
 
       for (const requestPath of hiddenPaths) {
         await expect(
-          page.getByTestId("traffic-row").filter({ hasText: requestPath }).first(),
+          page
+            .getByTestId("traffic-row")
+            .filter({ hasText: requestPath })
+            .first(),
         ).toBeVisible();
       }
     } finally {

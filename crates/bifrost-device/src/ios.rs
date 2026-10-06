@@ -11,6 +11,9 @@ use crate::model::{
     MobilePlatform,
 };
 
+#[cfg(all(test, unix))]
+use crate::test_support::{test_env_lock, EnvVarGuard};
+
 use std::process::Output;
 
 /// Run an external command, retrying on `ETXTBSY` ("Text file busy").
@@ -671,11 +674,8 @@ mod tests {
 
     // --- Fake cfgutil harness (unix) ----------------------------------------
     //
-    // Serialized behind a lock: exec'ing a freshly-written executable while a
-    // sibling thread is still touching it can raise ETXTBSY ("Text file busy").
-
-    #[cfg(unix)]
-    static CFGUTIL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Share the environment/fixture lock with ADB tests, including their PATH
+    // changes and fake executable creation.
 
     #[cfg(unix)]
     fn write_fake_cfgutil(dir: &Path, script_body: &str) -> PathBuf {
@@ -697,7 +697,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn install_profile_succeeds_with_fake_cfgutil() {
-        let _guard = CFGUTIL_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfgutil = write_fake_cfgutil(&dir, "echo 'profile installed'; exit 0");
@@ -722,7 +722,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn install_profile_reports_user_interaction_on_code_625() {
-        let _guard = CFGUTIL_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfgutil = write_fake_cfgutil(&dir, "echo 'Code: 625' 1>&2; exit 1");
@@ -747,7 +747,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn install_profile_fails_cleanly_on_generic_error() {
-        let _guard = CFGUTIL_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfgutil = write_fake_cfgutil(&dir, "echo 'device locked' 1>&2; exit 1");
@@ -783,7 +783,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn install_profile_errors_when_profile_missing() {
-        let _guard = CFGUTIL_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfgutil = write_fake_cfgutil(&dir, "exit 0");
@@ -801,6 +801,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn is_executable_file_detects_regular_file() {
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-file-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let regular_file = dir.join("cfgutil");
@@ -815,7 +816,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn merge_cfgutil_adds_and_updates_devices() {
-        let _guard = CFGUTIL_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-m-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         // cfgutil list returns one device (UDID 0000...401C) with an ECID.
@@ -862,7 +863,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn merge_cfgutil_appends_new_device() {
-        let _guard = CFGUTIL_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-a-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let json =
@@ -900,7 +901,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn merge_cfgutil_noop_on_nonzero_exit() {
-        let _guard = CFGUTIL_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-e-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfgutil = write_fake_cfgutil(&dir, "exit 1");
@@ -919,14 +920,13 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn find_cfgutil_honors_env_override() {
-        let _guard = CFGUTIL_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let dir = std::env::temp_dir().join(format!("bifrost-ios-f-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfgutil = write_fake_cfgutil(&dir, "exit 0");
 
-        std::env::set_var("BIFROST_CFGUTIL_PATH", &cfgutil);
+        let _cfgutil_env = EnvVarGuard::set("BIFROST_CFGUTIL_PATH", &cfgutil);
         let found = find_cfgutil();
-        std::env::remove_var("BIFROST_CFGUTIL_PATH");
 
         assert_eq!(found.as_deref(), Some(cfgutil.as_path()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -939,7 +939,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         #[cfg(unix)]
         {
-            let _guard = CFGUTIL_LOCK.lock().unwrap();
+            let _guard = test_env_lock();
             let cfgutil = write_fake_cfgutil(&dir, "exit 0"); // no stdout
             let profile = dir.join("ca.mobileconfig");
             std::fs::write(&profile, b"<plist/>").unwrap();
@@ -1017,6 +1017,7 @@ mod more_tests {
     #[cfg(unix)]
     #[test]
     fn install_ios_profile_with_configurator_errors_when_profile_missing() {
+        let _guard = test_env_lock();
         use std::os::unix::fs::PermissionsExt;
 
         let test_dir =
@@ -1052,6 +1053,7 @@ mod more_tests {
     #[cfg(unix)]
     #[test]
     fn install_ios_profile_with_configurator_builds_sessions_for_success_and_user_interaction() {
+        let _guard = test_env_lock();
         use std::os::unix::fs::PermissionsExt;
 
         let test_dir = std::env::temp_dir().join(format!("bifrost-ios-install-{}", Uuid::new_v4()));
@@ -1079,7 +1081,7 @@ exit 0
         fs::set_permissions(&cfgutil_path, perms).expect("chmod fake cfgutil");
 
         // Successful non-interactive install.
-        std::env::remove_var("CFGUTIL_SHOULD_FAIL");
+        let _fail_env = EnvVarGuard::remove("CFGUTIL_SHOULD_FAIL");
         let session = install_ios_profile_with_configurator(IosConfiguratorInstallOptions {
             cfgutil_path: cfgutil_path.clone(),
             device_id: "ios-device-1".to_string(),
@@ -1100,7 +1102,7 @@ exit 0
         assert!(session.summary.contains("installed the Bifrost profile"));
 
         // Interactive flow where cfgutil reports Code 625.
-        std::env::set_var("CFGUTIL_SHOULD_FAIL", "1");
+        let _fail_env = EnvVarGuard::set("CFGUTIL_SHOULD_FAIL", "1");
         let interactive_session =
             install_ios_profile_with_configurator(IosConfiguratorInstallOptions {
                 cfgutil_path: cfgutil_path.clone(),
@@ -1125,6 +1127,7 @@ exit 0
     #[cfg(target_os = "macos")]
     #[test]
     fn merge_cfgutil_devices_enriches_and_adds_devices() {
+        let _guard = test_env_lock();
         use std::os::unix::fs::PermissionsExt;
 
         let test_dir =
@@ -1205,6 +1208,7 @@ exit 0
 #[cfg(target_os = "macos")]
 #[test]
 fn find_cfgutil_prefers_bifrost_env_when_executable_is_present() {
+    let _guard = test_env_lock();
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1219,18 +1223,18 @@ fn find_cfgutil_prefers_bifrost_env_when_executable_is_present() {
     perms.set_mode(0o755);
     fs::set_permissions(&cfgutil_path, perms).expect("chmod fake cfgutil env");
 
-    std::env::set_var("BIFROST_CFGUTIL_PATH", &cfgutil_path);
+    let _cfgutil_env = EnvVarGuard::set("BIFROST_CFGUTIL_PATH", &cfgutil_path);
 
     let found = find_cfgutil().expect("expected find_cfgutil to use BIFROST_CFGUTIL_PATH");
     assert_eq!(found, cfgutil_path);
 
-    std::env::remove_var("BIFROST_CFGUTIL_PATH");
     let _ = fs::remove_dir_all(&test_dir);
 }
 
 #[cfg(unix)]
 #[test]
 fn install_ios_profile_with_configurator_reports_failure_without_user_interaction_hint() {
+    let _guard = test_env_lock();
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1291,6 +1295,7 @@ fn install_ios_profile_with_configurator_reports_failure_without_user_interactio
 #[cfg(unix)]
 #[test]
 fn install_ios_profile_with_configurator_uses_default_message_when_stdout_is_empty() {
+    let _guard = test_env_lock();
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 

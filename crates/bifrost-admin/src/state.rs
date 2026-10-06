@@ -1028,8 +1028,14 @@ impl AdminState {
                 break;
             }
 
-            let round_deleted = ids_to_delete.len();
-            traffic_db_store.delete_by_ids(&ids_to_delete);
+            let round_deleted = match traffic_db_store.delete_by_ids(&ids_to_delete) {
+                Ok(0) => break,
+                Ok(deleted) => deleted,
+                Err(error) => {
+                    tracing::error!(%error, "[TRAFFIC] Failed to delete records for total size limit");
+                    break;
+                }
+            };
             if let Some(ref body_store) = self.body_store {
                 let _ = body_store.write().delete_by_ids(&ids_to_delete);
             }
@@ -1850,6 +1856,15 @@ mod tests {
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    fn failed_size_cleanup_preserves_related_record_data() {
+        let fixture = crate::test_support::TrafficCleanupFixture::new();
+        fixture.reject_metadata_writes();
+        fixture.harness.traffic_db.set_max_db_size_bytes(1);
+        fixture.harness.state().cleanup_total_disk_usage_if_needed();
+        fixture.assert_preserved();
+    }
+
+    #[test]
     fn group_cache_resolution_is_single_flight_and_backs_off_failures() {
         let now = std::time::Instant::now();
         let mut state = GroupCacheResolutionState::default();
@@ -1953,7 +1968,7 @@ mod tests {
 
     fn isolated_test_state(dir: &std::path::Path) -> AdminState {
         AdminState::new_for_test(
-            9900,
+            9915,
             RulesStorage::with_dir(dir.join("rules")).expect("test rules storage"),
         )
     }
@@ -2021,7 +2036,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let callback_calls = calls.clone();
         let state =
-            AdminState::new_for_test(9900, RulesStorage::with_dir(dir.join("rules")).unwrap())
+            AdminState::new_for_test(9915, RulesStorage::with_dir(dir.join("rules")).unwrap())
                 .with_tray_launch_callback(Arc::new(move || {
                     callback_calls.fetch_add(1, Ordering::SeqCst);
                 }));
@@ -2030,7 +2045,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         let state_without_callback = AdminState::new_for_test(
-            9900,
+            9915,
             RulesStorage::with_dir(dir.join("rules-no-callback")).unwrap(),
         );
         assert!(!state_without_callback.request_tray_launch());

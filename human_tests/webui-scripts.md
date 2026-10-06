@@ -8,7 +8,7 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持四种类型脚本：
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
+   BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 确保端口 8800 未被其他进程占用
 3. 浏览器已打开，可访问 `http://127.0.0.1:8800/_bifrost/`
@@ -183,12 +183,33 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持四种类型脚本：
    - `response.bodyBase64`
    - `response.request.path`
    - `req.method` / `req.host` / `req.path` / `req.url`
-4. 等待 Monaco diagnostics 刷新。
+4. `currentRequest()` 的空回退使用 `{ method: "", host: "", path: "", url: "" }`，确保回退值与调用者访问的字段一致。
+5. 等待 Monaco diagnostics 刷新。
 
 **预期结果**：
 - 编辑器类型系统识别 `ctx.phase` 的 request / response / websocket_send / websocket_recv 四种阶段。
 - Parser/Decode 脚本中 `request.bodyBase64`、`response.bodyBase64` 和 `response.request` 请求快照字段都有补全提示。
-- 类似 `build_in_bp` 的 `currentRequest()` 写法不会因为 `req.method`、`req.host`、`req.path`、`req.url` 被误报类型错误。
+- `currentRequest()` 使用包含上述字段的回退对象后，`req.method`、`req.host`、`req.path`、`req.url` 无类型错误。裸 `{}` 的回退推断丢失字段，仍应报告真实类型错误，不通过禁用诊断规避。
+- 编辑器完整内容与粘贴源一致，没有自动输入产生的尾部额外 `}`。
+
+---
+
+### TC-WSC-05B：运行时声明重复加载与脚本类型切换回归
+
+**操作步骤**：
+1. 在亮色主题的 Scripts 页面，依次创建 Request、Response、Decode、Parser、Request、Parser 脚本。
+2. Request 使用 `request.method = "POST"; console.info(request.path);`；Response 使用 `response.status = 201; console.info(response.request.path);`；Decode/Parser 使用 `ctx.output = { data: request.bodyBase64 || response.bodyBase64, code: "0", msg: response.request.path };`。
+3. 对脚本的 `console` 或 `request` 使用定义跳转，打开运行时声明，然后返回脚本。重复切换脚本类型后检查诊断。
+4. 在 Parser 输入 `request.unknownField;`，确认字段错误；改为 `const broken = ;`，确认语法错误；最后改为 `console.info(ctx.phase);`。
+5. 切换到暗色主题，重复上述步骤。
+
+**预期结果**：
+- 正确脚本和运行时声明没有重复标识符、重复变量或 DOM `console` 冲突；切换类型后字段提示随之更新。
+- 未知字段和语法错误均有错误标记；修正代码后标记清除。
+- 亮色、暗色主题诊断行为相同，代码与错误标记清晰可读。
+
+**本次执行记录**：
+- 2026-10-05：TC-WSC-05A/05B 浏览器执行受阻。当前隔离环境的 Chromium 启动被 AF_UNIX socket `EPERM` 限制，升级执行路径也被运行环境阻止。未将实际 Monaco worker 单测通过视为浏览器或主题验证通过，需在可运行浏览器的 UI CI/环境补验。
 
 ---
 
@@ -476,3 +497,5 @@ Scripts 页面用于管理 Bifrost 的脚本功能，支持四种类型脚本：
 ```bash
 rm -rf .bifrost-test
 ```
+
+- 2026-10-05 compatibility follow-up: ran the current CLI against a fresh isolated data directory for request, response, decode, and parser scripts; all four reported `Success: true`. Enumerated the actual runtime globals and executed `performance.now()`/read `performance.timeOrigin`; both returned numbers. Compared all 68 request-runtime global names in the old and fixed Monaco worker configurations: no newly missing names. This verifies runtime/type compatibility only; the browser interactions in 05A/05B remain blocked until hosted browser validation completes.

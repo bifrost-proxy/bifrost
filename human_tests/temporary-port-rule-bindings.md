@@ -31,7 +31,7 @@
    ```
 5. 请求主端口：
    ```bash
-   curl -sS -x "http://127.0.0.1:$MAIN_PORT" http://main-only.test/main-port
+   curl -sS --noproxy '' -x "http://127.0.0.1:$MAIN_PORT" http://main-only.test/main-port
    ```
 
 **预期结果**：
@@ -47,7 +47,7 @@
    ```
 2. 请求临时端口：
    ```bash
-   curl -sS -x "http://127.0.0.1:$TEMP_PORT" http://temp-only.test/temp-port
+   curl -sS --noproxy '' -x "http://127.0.0.1:$TEMP_PORT" http://temp-only.test/temp-port
    ```
 
 **预期结果**：
@@ -59,7 +59,7 @@
 **操作步骤**：
 1. 请求临时端口上的主规则 host：
    ```bash
-   curl -sS -x "http://127.0.0.1:$TEMP_PORT" http://main-only.test/not-bound
+   curl -sS --noproxy '' -x "http://127.0.0.1:$TEMP_PORT" http://main-only.test/not-bound
    ```
 
 **预期结果**：
@@ -74,7 +74,7 @@
    ./target/debug/bifrost rule disable main-default
    ./target/debug/bifrost rule enable main-default
    ./target/debug/bifrost port active "$TEMP_PORT"
-   curl -sS -x "http://127.0.0.1:$TEMP_PORT" http://temp-only.test/after-toggle
+   curl -sS --noproxy '' -x "http://127.0.0.1:$TEMP_PORT" http://temp-only.test/after-toggle
    ```
 
 **预期结果**：
@@ -173,7 +173,7 @@
 2. 执行：
    ```bash
    ./target/debug/bifrost port bind --port "$FILE_PORT" --rule-file "$TEST_DIR/file-rule.bifrost"
-   curl -sS -x "http://127.0.0.1:$FILE_PORT" http://file-only.test/from-file
+   curl -sS --noproxy '' -x "http://127.0.0.1:$FILE_PORT" http://file-only.test/from-file
    ```
 
 **预期结果**：
@@ -186,10 +186,10 @@
 1. 执行：
    ```bash
    ./target/debug/bifrost port bind --port "$INLINE_PORT" --rule-text "inline-only.test status://214 resBody://(inline-rule)"
-   curl -sS -x "http://127.0.0.1:$INLINE_PORT" http://inline-only.test/from-inline
+   curl -sS --noproxy '' -x "http://127.0.0.1:$INLINE_PORT" http://inline-only.test/from-inline
    ./target/debug/bifrost port bind --port "$UPDATE_PORT" --rule temp-bound
    ./target/debug/bifrost port update "$UPDATE_PORT" --rule-text "updated-only.test status://215 resBody://(updated-rule)"
-   curl -sS -x "http://127.0.0.1:$UPDATE_PORT" http://updated-only.test/after-update
+   curl -sS --noproxy '' -x "http://127.0.0.1:$UPDATE_PORT" http://updated-only.test/after-update
    ```
 
 **预期结果**：
@@ -222,11 +222,11 @@
 1. 启动一个本地 HTTP fixture，例如 `http://127.0.0.1:$HTML_PORT/direct-main`。
 2. 通过主端口请求该 fixture，且不配置匹配该 URL 的规则：
    ```bash
-   curl -sS -x "http://127.0.0.1:$MAIN_PORT" "http://127.0.0.1:$HTML_PORT/direct-main"
+   curl -sS --noproxy '' -x "http://127.0.0.1:$MAIN_PORT" "http://127.0.0.1:$HTML_PORT/direct-main"
    ```
 3. 通过临时端口请求同一 fixture 的另一路径，且不配置匹配该 URL 的规则：
    ```bash
-   curl -sS -x "http://127.0.0.1:$TEMP_PORT" "http://127.0.0.1:$HTML_PORT/direct-temp"
+   curl -sS --noproxy '' -x "http://127.0.0.1:$TEMP_PORT" "http://127.0.0.1:$HTML_PORT/direct-temp"
    ```
 4. 查询 Traffic compact API 和 detail API：
    ```bash
@@ -279,8 +279,8 @@
    ```
 5. 分别请求：
    ```bash
-   curl -sS -x "http://127.0.0.1:$MAIN_PORT" http://badge-main.test/badge-main
-   curl -sS -x "http://127.0.0.1:$TEMP_PORT" http://badge-temp.test/badge-temp
+   curl -sS --noproxy '' -x "http://127.0.0.1:$MAIN_PORT" http://badge-main.test/badge-main
+   curl -sS --noproxy '' -x "http://127.0.0.1:$TEMP_PORT" http://badge-temp.test/badge-temp
    ```
 
 **预期结果**：

@@ -3,6 +3,10 @@ pub mod ios;
 pub mod mobileconfig;
 pub mod model;
 
+#[cfg(unix)]
+#[cfg(test)]
+mod test_support;
+
 pub use adb::{
     check_android_ca_status, discover_android_devices, discover_android_devices_with_ca,
     install_android_ca, parse_adb_devices, AdbDiscovery, AndroidCaStatusOptions,

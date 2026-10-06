@@ -209,7 +209,7 @@ generate_traffic() {
     log_info "Generating $count traffic records..."
     
     for i in $(seq 1 "$count"); do
-        curl -sS --proxy "http://127.0.0.1:${PROXY_PORT}" \
+        curl -sS --noproxy '' --proxy "http://127.0.0.1:${PROXY_PORT}" \
             --connect-timeout 5 --max-time 10 \
             "http://127.0.0.1:${MOCK_HTTP_PORT}/get?test_id=persistence_test_$$_${i}" \
             -o /dev/null 2>/dev/null &

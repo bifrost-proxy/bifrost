@@ -163,6 +163,44 @@ async function installDailyAgentMocks(page: Page) {
     });
   });
 
+  // Daily Agent behavior is independent of the host running the browser tests.
+  await page.route("**/_bifrost/api/asr/capabilities", async (route) => {
+    await route.fulfill({
+      json: {
+        platform: "macos",
+        arch: "aarch64",
+        supported_target: "macos-aarch64",
+        qwen3_asr: { enabled: true, hidden: false, platform_supported: true },
+        local_transcription: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        speech_workbench: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        directory_tasks: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        speaker_diarization: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+        voiceprint: { enabled: true, hidden: false, platform_supported: true },
+        voice_wake_asr: {
+          enabled: true,
+          hidden: false,
+          platform_supported: true,
+        },
+      },
+    });
+  });
+
   await page.route("**/_bifrost/api/asr/status**", async (route) => {
     await route.fulfill({
       status: 200,

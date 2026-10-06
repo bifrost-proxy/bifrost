@@ -10,6 +10,14 @@ const backendPort = env.backendPort;
 export default defineConfig({
   testDir: "./tests/ui",
   timeout: 120000,
+  globalTimeout: Number(process.env.BIFROST_UI_TEST_GLOBAL_TIMEOUT_MS || 0),
+  reporter: process.env.CI
+    ? [
+        ["line"],
+        ["json", { outputFile: "test-results/results.json" }],
+        ["html", { open: "never" }],
+      ]
+    : "list",
   workers: 1,
   expect: {
     timeout: 15000,

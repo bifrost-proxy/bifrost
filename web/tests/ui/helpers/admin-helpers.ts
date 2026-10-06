@@ -376,6 +376,7 @@ export interface MockSyncServer {
   token: string;
   listEnvs: () => MockSyncEnv[];
   upsertEnv: (env: MockSyncEnv) => void;
+  setAvailable: (available: boolean) => void;
   close: () => Promise<void>;
 }
 
@@ -436,6 +437,7 @@ export async function startMockSyncServer(
   }
 
   const token = "mock-sync-token";
+  let available = true;
   const responseDelayMs = options.responseDelayMs ?? 0;
 
   const sendJson = (res: ServerResponse, statusCode: number, body: unknown) => {
@@ -461,6 +463,10 @@ export async function startMockSyncServer(
     const body = await readBody(req);
     if (responseDelayMs > 0 && url.pathname.startsWith("/v4/env")) {
       await new Promise((resolve) => setTimeout(resolve, responseDelayMs));
+    }
+    if (!available) {
+      sendJson(res, 503, { code: -1, message: "mock sync server unavailable" });
+      return;
     }
 
     if (url.pathname === "/v4/sso/check") {
@@ -579,6 +585,9 @@ export async function startMockSyncServer(
     listEnvs: () => [...envs.values()].map((env) => ({ ...env })),
     upsertEnv: (env) => {
       envs.set(env.id, { ...env });
+    },
+    setAvailable: (value) => {
+      available = value;
     },
     close: () =>
       new Promise<void>((resolve, reject) =>

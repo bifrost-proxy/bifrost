@@ -388,8 +388,10 @@ impl AdminQueryService {
             let db_store_clone = db_store.clone();
             let ids_for_db = ids_to_delete.clone();
             let delete_task = tokio::task::spawn_blocking(move || {
-                db_store_clone.delete_by_ids(&ids_for_db);
-                Ok(())
+                db_store_clone
+                    .delete_by_ids(&ids_for_db)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             });
             join_clear_task(delete_task, "traffic db delete-by-ids").await?;
         }
@@ -443,16 +445,15 @@ impl AdminQueryService {
     }
 
     async fn clear_all_traffic(&self) -> Result<String> {
-        self.state.connection_monitor.clear();
-
         if let Some(ref db_store) = self.state.traffic_db_store {
             let db_store_clone = db_store.clone();
             let clear_task = tokio::task::spawn_blocking(move || {
-                db_store_clone.clear();
-                Ok(())
+                db_store_clone.clear().map_err(|error| error.to_string())
             });
             join_clear_task(clear_task, "traffic db clear-all").await?;
         }
+
+        self.state.connection_monitor.clear();
 
         if let Some(ref body_store) = self.state.body_store {
             let body_store_clone = body_store.clone();
@@ -748,6 +749,47 @@ mod tests {
 
         assert_eq!(body["success"], false);
         assert!(body["data"].is_null());
+    }
+
+    #[tokio::test]
+    async fn failed_service_clear_preserves_related_data_and_sends_no_push() {
+        use crate::test_support::TrafficCleanupFixture;
+        for by_ids in [false, true] {
+            let fixture = TrafficCleanupFixture::new();
+            fixture.reject_metadata_writes();
+            let manager = fixture.harness.push_manager();
+            let (_, mut receiver) =
+                manager.register_client("failed-service-clear".to_string(), Default::default());
+            let service = AdminQueryService::with_push_manager(
+                fixture.harness.state(),
+                Some(manager.clone()),
+            );
+            let args = TrafficClearArgs {
+                ids: by_ids.then(|| {
+                    vec![
+                        TrafficCleanupFixture::RECORD_ID.to_string(),
+                        TrafficCleanupFixture::ACTIVE_ID.to_string(),
+                    ]
+                }),
+            };
+            assert!(service.clear_traffic(&args).await.is_err());
+            fixture.assert_preserved();
+            assert!(receiver.try_recv().is_err());
+            assert!(!manager.traffic_statistics_dirty_for_test());
+
+            fixture.allow_metadata_writes();
+            assert!(service.clear_traffic(&args).await.is_ok());
+            fixture.assert_record_data_deleted();
+            assert!(manager.traffic_statistics_dirty_for_test());
+            assert_eq!(
+                fixture
+                    .harness
+                    .traffic_db
+                    .get_by_id(TrafficCleanupFixture::ACTIVE_ID)
+                    .is_some(),
+                by_ids
+            );
+        }
     }
 
     #[tokio::test]

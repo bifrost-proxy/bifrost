@@ -1,5 +1,7 @@
+// Legacy serial suite: split by Settings capability as shared-state setup is
+// isolated; keep the existing end-to-end cases enabled during that migration.
 import { test, expect, type Route } from "@playwright/test";
-import { getDefaultRemoteBaseUrl } from "../../src/api/sync";
+import { getDefaultRemoteBaseUrl, type SyncStatus } from "../../src/api/sync";
 import {
   apiBase,
   backendPort,
@@ -507,19 +509,35 @@ test("Network 超级性能模式覆盖整个工作区并可跳转高亮 Performa
     traffic: { super_performance_mode: boolean };
   };
   const original = perf.traffic.super_performance_mode;
+  let releasePerformanceRequest = () => {};
 
   try {
     await request.put(`${apiBase}/config/performance`, {
       data: { super_performance_mode: true },
     });
 
-    let releasePerformanceRequest!: () => void;
     const performanceRequestGate = new Promise<void>((resolve) => {
       releasePerformanceRequest = resolve;
     });
     await page.route("**/_bifrost/api/config/performance", async (route) => {
       await performanceRequestGate;
       await route.continue();
+    });
+    // Initial performance state also arrives through push. Hold both transports
+    // so this assertion exercises unknown state, not a race with a valid snapshot.
+    await page.routeWebSocket(/\/api\/push/, (ws) => {
+      const server = ws.connectToServer();
+      ws.onMessage((message) => server.send(message));
+      server.onMessage(async (message) => {
+        const parsed = JSON.parse(String(message));
+        if (
+          parsed.type === "settings_update" &&
+          parsed.data?.scope === "performance_config"
+        ) {
+          await performanceRequestGate;
+        }
+        ws.send(message);
+      });
     });
 
     const navigation = openPage(page, "traffic");
@@ -608,6 +626,7 @@ test("Network 超级性能模式覆盖整个工作区并可跳转高亮 Performa
       )
       .not.toBe("none");
   } finally {
+    releasePerformanceRequest();
     await request.put(`${apiBase}/config/performance`, {
       data: { super_performance_mode: original },
     });
@@ -1126,20 +1145,31 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
   page,
   request,
 }) => {
-  const remoteServer = await startMockSyncServer([
-    {
-      id: uniqueName("remote-id"),
-      user_id: "ui-sync-user",
-      name: uniqueName("status-rule"),
-      rule: "status.example.com host://127.0.0.1:3010",
-      create_time: "2026-03-20T09:00:00Z",
-      update_time: "2026-03-20T09:00:00Z",
-    },
-  ], undefined, { responseDelayMs: 250 });
+  type SyncStatus = import("../../src/api/sync").SyncStatus;
+  const readSyncStatus = async (): Promise<SyncStatus> => {
+    const response = await request.get(`${apiBase}/sync/status`);
+    expect(response.ok()).toBeTruthy();
+    return response.json();
+  };
+  const remoteServer = await startMockSyncServer(
+    [
+      {
+        id: uniqueName("remote-id"),
+        user_id: "ui-sync-user",
+        name: uniqueName("status-rule"),
+        rule: "status.example.com host://127.0.0.1:3010",
+        create_time: "2026-03-20T09:00:00Z",
+        update_time: "2026-03-20T09:00:00Z",
+      },
+    ],
+    undefined,
+    { responseDelayMs: 250 },
+  );
 
   try {
-    await request.post(`${apiBase}/sync/logout`).catch(() => undefined);
-    await request.put(`${apiBase}/sync/config`, {
+    const resetResponse = await request.post(`${apiBase}/sync/logout`);
+    expect(resetResponse.ok()).toBeTruthy();
+    const configResponse = await request.put(`${apiBase}/sync/config`, {
       data: {
         enabled: true,
         auto_sync: true,
@@ -1149,22 +1179,29 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
       },
     });
 
+    expect(configResponse.ok()).toBeTruthy();
+
     await openPage(page, "settings");
     await page.getByRole("tab", { name: /Sync/ }).click({ force: true });
     await expect
       .poll(async () => {
-        const value = await page.getByTestId("statusbar-sync").getAttribute("data-sync-state");
+        const value = await page
+          .getByTestId("statusbar-sync")
+          .getAttribute("data-sync-state");
         return value === "unauthorized" || value === "unreachable";
       })
       .toBe(true);
     await expect(page.getByTestId("settings-sync-provider-grid")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: "Remote Sync" }),
+    ).toHaveCount(0);
 
     const loginUrlResponse = await request.get(
       `${apiBase}/sync/login-url?callback_url=${encodeURIComponent(
         `http://127.0.0.1:${backendPort}/login.html`,
       )}`,
     );
+    expect(loginUrlResponse.ok()).toBeTruthy();
     const { login_url: loginUrl } = (await loginUrlResponse.json()) as {
       login_url: string;
     };
@@ -1172,8 +1209,7 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
 
     await expect
       .poll(async () => {
-        const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { authorized: boolean; reachable: boolean };
+        const body = await readSyncStatus();
         return body.authorized && body.reachable;
       })
       .toBe(true);
@@ -1183,22 +1219,26 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
 
     await expect
       .poll(async () => {
-        const value = await page.getByTestId("statusbar-sync").getAttribute("data-sync-state");
-        return value === "connected" || value === "ready" || value === "syncing";
+        const value = await page
+          .getByTestId("statusbar-sync")
+          .getAttribute("data-sync-state");
+        return (
+          value === "connected" || value === "ready" || value === "syncing"
+        );
       })
       .toBe(true);
 
-    await request.post(`${apiBase}/sync/run`);
+    const runResponse = await request.post(`${apiBase}/sync/run`);
+    expect(runResponse.ok()).toBeTruthy();
 
     await expect
       .poll(async () => {
-        const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { syncing: boolean; reason: string };
+        const body = await readSyncStatus();
         return body.syncing && body.reason;
       })
       .toBe("syncing");
 
-    await request.put(`${apiBase}/sync/config`, {
+    const redirectedResponse = await request.put(`${apiBase}/sync/config`, {
       data: {
         enabled: true,
         auto_sync: true,
@@ -1208,10 +1248,95 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
       },
     });
 
+    expect(redirectedResponse.ok()).toBeTruthy();
+
+    // A config URL change does not affect the independently saved provider.
+    await expect.poll(readSyncStatus).toMatchObject({
+      remote_base_url: "http://127.0.0.1:9",
+      has_session: true,
+      reason: "ready",
+      reachable: true,
+      authorized: true,
+      syncing: false,
+      providers: expect.arrayContaining([
+        expect.objectContaining({
+          id: "bifrost_cloud",
+          remote_base_url: remoteServer.baseUrl,
+          connected: true,
+          reachable: true,
+          authorized: true,
+          reason: "ready",
+        }),
+      ]),
+    });
+    await expect(page.getByTestId("statusbar-sync")).toHaveAttribute(
+      "data-sync-state",
+      "ready",
+    );
+
+    // Probe the saved provider's actual URL, then fail it without logging out.
+    const restoreResponse = await request.put(`${apiBase}/sync/config`, {
+      data: { remote_base_url: remoteServer.baseUrl },
+    });
+    expect(restoreResponse.ok()).toBeTruthy();
+    await expect.poll(readSyncStatus).toMatchObject({
+      remote_base_url: remoteServer.baseUrl,
+      has_session: true,
+      reachable: true,
+      authorized: true,
+      reason: "ready",
+      syncing: false,
+    });
+    remoteServer.setAvailable(false);
+
+    await expect.poll(readSyncStatus).toMatchObject({
+      remote_base_url: remoteServer.baseUrl,
+      has_session: true,
+      reachable: false,
+      reason: "unreachable",
+      syncing: false,
+      providers: expect.arrayContaining([
+        expect.objectContaining({
+          id: "bifrost_cloud",
+          remote_base_url: remoteServer.baseUrl,
+          connected: true,
+          reachable: false,
+          reason: "unreachable",
+        }),
+      ]),
+    });
+    await expect(page.getByTestId("statusbar-sync")).toHaveAttribute(
+      "data-sync-state",
+      "unreachable",
+    );
+
+    const logoutResponse = await request.post(`${apiBase}/sync/logout`);
+    expect(logoutResponse.ok()).toBeTruthy();
     await expect
-      .poll(async () => page.getByTestId("statusbar-sync").getAttribute("data-sync-state"))
+      .poll(async () => {
+        const status = await readSyncStatus();
+        return {
+          hasSession: status.has_session,
+          reachable: status.reachable,
+          syncing: status.syncing,
+          connectedProviders: status.providers?.filter(
+            (provider) => provider.connected,
+          ).length,
+        };
+      })
+      .toEqual({
+        hasSession: false,
+        reachable: false,
+        syncing: false,
+        connectedProviders: 0,
+      });
+    await expect
+      .poll(async () =>
+        page.getByTestId("statusbar-sync").getAttribute("data-sync-state"),
+      )
       .toBe("unreachable");
   } finally {
+    await request.post(`${apiBase}/sync/logout`).catch(() => undefined);
     try {
       await request.put(`${apiBase}/sync/config`, {
         data: {
@@ -1334,9 +1459,14 @@ test("Settings Sync 打开时会轮询刷新页面与底部状态栏", async ({ 
     .toBe("ready");
 });
 
-test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", async ({ page }) => {
+test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", async ({
+  page,
+}) => {
   let signedIn = false;
+  let serverRemoteBaseUrl = "https://sync-poll.example.test";
   let savedRemoteBaseUrl = "";
+  const draftRemoteBaseUrl = "https://custom-sync.example.test/custom/";
+  const normalizedRemoteBaseUrl = "https://custom-sync.example.test/custom";
   const providers = (cloudUrl: string) => [
     {
       id: "bytedance_internal",
@@ -1355,7 +1485,11 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", 
             email: "poll-user@example.test",
           }
         : null,
-      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      capabilities: {
+        remote_invoke: true,
+        rules_sync: true,
+        config_sync: true,
+      },
       remote_invoke_registered: signedIn,
     },
     {
@@ -1368,7 +1502,11 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", 
       reachable: false,
       authorized: false,
       user: null,
-      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      capabilities: {
+        remote_invoke: true,
+        rules_sync: true,
+        config_sync: true,
+      },
       remote_invoke_registered: false,
     },
     {
@@ -1381,85 +1519,100 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", 
       reachable: false,
       authorized: false,
       user: null,
-      capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+      capabilities: {
+        remote_invoke: false,
+        rules_sync: true,
+        config_sync: true,
+      },
       remote_invoke_registered: false,
     },
   ];
-  await page.route("**/_bifrost/api/sync/status", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        enabled: true,
-        auto_sync: true,
-        remote_base_url: "https://sync-poll.example.test",
-        has_session: signedIn,
-        reachable: true,
-        authorized: signedIn,
-        syncing: false,
-        reason: signedIn ? "ready" : "unauthorized",
-        last_sync_at: signedIn ? "2026-06-19T08:00:00Z" : null,
-        last_sync_action: signedIn ? "no_change" : null,
-        last_error: null,
-        user: signedIn
-          ? {
-              user_id: "poll-user",
-              nickname: "Poll User",
-              avatar: "",
-              email: "poll-user@example.test",
-            }
-          : null,
-        providers: providers("https://sync-poll.example.test"),
-      }),
-    });
-  });
-  await page.route("**/_bifrost/api/sync/config", async (route) => {
-    const payload = route.request().postDataJSON() as { remote_base_url?: string };
-    savedRemoteBaseUrl = payload.remote_base_url ?? "";
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        enabled: true,
-        auto_sync: true,
-        remote_base_url: savedRemoteBaseUrl,
-        has_session: true,
-        reachable: true,
-        authorized: true,
-        syncing: false,
-        reason: "ready",
-        last_sync_at: "2026-06-19T08:00:00Z",
-        last_sync_action: "no_change",
-        last_error: null,
-        user: {
+  const syncStatus = () => ({
+    enabled: true,
+    auto_sync: true,
+    remote_base_url: serverRemoteBaseUrl,
+    has_session: signedIn,
+    reachable: true,
+    authorized: signedIn,
+    syncing: false,
+    reason: signedIn ? "ready" : "unauthorized",
+    last_sync_at: signedIn ? "2026-06-19T08:00:00Z" : null,
+    last_sync_action: signedIn ? "no_change" : null,
+    last_error: null,
+    user: signedIn
+      ? {
           user_id: "poll-user",
           nickname: "Poll User",
           avatar: "",
           email: "poll-user@example.test",
-        },
-        providers: providers(savedRemoteBaseUrl),
-      }),
+        }
+      : null,
+    providers: providers(serverRemoteBaseUrl),
+  });
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(syncStatus()),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/config", async (route) => {
+    const payload = route.request().postDataJSON() as {
+      remote_base_url?: string;
+    };
+    savedRemoteBaseUrl = payload.remote_base_url ?? "";
+    // A successful config update persists into every subsequent status poll.
+    serverRemoteBaseUrl = savedRemoteBaseUrl;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(syncStatus()),
     });
   });
 
   await openPage(page, "settings?tab=sync");
-  await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(0);
-  const remoteUrlInput = page.getByTestId("settings-sync-provider-bifrost-cloud-url-input");
-  await expect(remoteUrlInput).toHaveValue("https://sync-poll.example.test");
+  await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(
+    0,
+  );
+  const remoteUrlInput = page.getByTestId(
+    "settings-sync-provider-bifrost-cloud-url-input",
+  );
+  const internalProviderCard = page.getByTestId(
+    "settings-sync-provider-card-bytedance_internal",
+  );
+  await expect(remoteUrlInput).toHaveValue(serverRemoteBaseUrl);
+  await expect(internalProviderCard).toContainText("Not signed in");
 
-  await remoteUrlInput.fill("https://custom-sync.example.test/custom/");
+  await remoteUrlInput.fill(draftRemoteBaseUrl);
+  // Change the server value too: without the dirty guard this poll would
+  // overwrite the draft even though the user has not saved it.
+  serverRemoteBaseUrl = "https://sync-updated.example.test";
   signedIn = true;
+  await expect(internalProviderCard).toContainText("poll-user", {
+    timeout: 5_000,
+  });
   await expect
-    .poll(async () => page.getByTestId("statusbar-sync").getAttribute("data-sync-state"), {
-      timeout: 5_000,
-    })
+    .poll(
+      async () =>
+        page.getByTestId("statusbar-sync").getAttribute("data-sync-state"),
+      { timeout: 5_000 },
+    )
     .toBe("ready");
-  await expect(remoteUrlInput).toHaveValue("https://custom-sync.example.test/custom/");
+  await expect(remoteUrlInput).toHaveValue(draftRemoteBaseUrl);
 
-  await page.getByTestId("settings-sync-provider-bifrost-cloud-url-save").click();
+  await page
+    .getByTestId("settings-sync-provider-bifrost-cloud-url-save")
+    .click();
   await waitForToast(page, "Bifrost Cloud URL updated");
-  expect(savedRemoteBaseUrl).toBe("https://custom-sync.example.test/custom");
-  await expect(remoteUrlInput).toHaveValue("https://custom-sync.example.test/custom/");
+  expect(savedRemoteBaseUrl).toBe(normalizedRemoteBaseUrl);
+  await expect(remoteUrlInput).toHaveValue(normalizedRemoteBaseUrl);
+
+  // Observe another Settings poll after saving, not just the config response.
+  signedIn = false;
+  await expect(internalProviderCard).toContainText("Not signed in", {
+    timeout: 5_000,
+  });
+  await expect(remoteUrlInput).toHaveValue(normalizedRemoteBaseUrl);
 });
 
 test("Settings Sync Bifrost Cloud URL 必须先通过基础校验再连接", async ({ page }) => {
@@ -2427,7 +2580,9 @@ test("Settings IM Provider instructions 使用大窗口编辑后保存覆盖值"
     .toBe("Provider base edited from large modal");
 });
 
-test("AI 一级页整合 IM Gateway 子导航并按 URL 切换独立面板", async ({ page }) => {
+test("AI Channels 按 URL 选择独立面板并保留首页与历史导航", async ({
+  page,
+}) => {
   await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
     await route.fulfill({
       status: 200,
@@ -2439,13 +2594,16 @@ test("AI 一级页整合 IM Gateway 子导航并按 URL 切换独立面板", asy
       }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/providers/*/status", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ state: "disconnected", reconnect_count: 0 }),
-    });
-  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/providers/*/status",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "disconnected", reconnect_count: 0 }),
+      });
+    },
+  );
   await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
     await route.fulfill({
       status: 200,
@@ -2467,67 +2625,106 @@ test("AI 一级页整合 IM Gateway 子导航并按 URL 切换独立面板", asy
     });
   });
   await page.route("**/_bifrost/api/im-gateway/targets", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "[]",
+    });
   });
   await page.route("**/_bifrost/api/im-gateway/routes", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "[]",
+    });
   });
   await page.route("**/_bifrost/api/im-gateway/schedules", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "[]",
+    });
   });
-  await page.route("**/_bifrost/api/im-gateway/history/events", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-  });
-  await page.route("**/_bifrost/api/im-gateway/history/runs", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-  });
-
-  await openPage(page, "ai?aiSection=im-gateway-connections&imGatewaySection=connections");
-
-  await expect(page.getByTestId("ai-section-nav")).toBeVisible();
-  await expect(page.getByTestId("ai-nav-im-gateway-connections")).toHaveAttribute(
-    "aria-current",
-    "true",
+  await page.route(
+    "**/_bifrost/api/im-gateway/history/events",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      });
+    },
   );
-  await expect(page.getByTestId("im-gateway-section-connections")).toBeVisible();
+  await page.route("**/_bifrost/api/im-gateway/history/runs", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "[]",
+    });
+  });
+
+  // Legacy entry links normalize to the new module route.
+  await openPage(
+    page,
+    "ai?aiSection=im-gateway-connections&imGatewaySection=connections",
+  );
+  await expect(page).toHaveURL(/\/_bifrost\/ai\/channels$/);
+  await expect(
+    page.getByRole("heading", { name: "IM Channels", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("ai-section-nav")).toHaveCount(0);
+  await expect(page.getByTestId("im-gateway-section-nav")).toHaveCount(0);
+  await expect(
+    page.getByTestId("im-gateway-section-connections"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("settings-im-provider-card-provider-nav-1"),
+  ).toContainText("Nav Provider");
   await expect(page.getByTestId("im-gateway-section-routes")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: /Connections/ })).toHaveCount(0);
 
-  await page.getByTestId("ai-nav-im-gateway-routes").click();
-  await expect(page).toHaveURL(/aiSection=im-gateway-routes/);
-  await expect(page).toHaveURL(/imGatewaySection=routes/);
-  await expect(page.getByTestId("ai-nav-im-gateway-routes")).toHaveAttribute(
-    "aria-current",
-    "true",
+  await page.getByTestId("ai-home-link").click();
+  await expect(page).toHaveURL(/\/_bifrost\/ai$/);
+  await expect(page.getByTestId("ai-module-hub")).toBeVisible();
+  await page.getByTestId("ai-module-card-channels").click();
+  await expect(page).toHaveURL(/\/_bifrost\/ai\/channels$/);
+  await expect(
+    page.getByTestId("im-gateway-section-connections"),
+  ).toBeVisible();
+
+  await openPage(page, "ai/channels?imGatewaySection=routes");
+  await expect(page).toHaveURL(
+    /\/_bifrost\/ai\/channels\?imGatewaySection=routes$/,
   );
   await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
-  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
-
+  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(
+    0,
+  );
   await page.reload();
-  await expect(page.getByTestId("ai-nav-im-gateway-routes")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
   await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
 
-  await page.getByTestId("ai-nav-im-gateway-history").click();
-  await expect(page).toHaveURL(/aiSection=im-gateway-history/);
-  await expect(page).toHaveURL(/imGatewaySection=history/);
+  await openPage(page, "ai/channels?imGatewaySection=history");
+  await expect(page).toHaveURL(/imGatewaySection=history$/);
   await expect(page.getByTestId("im-gateway-section-history")).toBeVisible();
   await expect(page.getByTestId("im-gateway-section-routes")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: /Events/ })).toBeVisible();
 
+  await page.goBack();
+  await expect(page).toHaveURL(/imGatewaySection=routes$/);
+  await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-section-history")).toHaveCount(0);
+  await page.goForward();
+  await expect(page).toHaveURL(/imGatewaySection=history$/);
+  await expect(page.getByTestId("im-gateway-section-history")).toBeVisible();
+
   await page.getByTestId("theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await page.getByTestId("ai-nav-im-gateway-targets").click();
-  await expect(page).toHaveURL(/aiSection=im-gateway-targets/);
-  await expect(page).toHaveURL(/imGatewaySection=targets/);
-  await expect(page.getByTestId("ai-nav-im-gateway-targets")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
+  await openPage(page, "ai/channels?imGatewaySection=targets");
+  await expect(page).toHaveURL(/imGatewaySection=targets$/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(page.getByTestId("im-gateway-section-targets")).toBeVisible();
   await expect(page.getByTestId("im-gateway-section-history")).toHaveCount(0);
+  await expect(page.getByTestId("ai-home-link")).toBeVisible();
 });
 
 test("IM Schedule 先预览确认再创建，并在亮暗主题下展示可靠性配置", async ({ page }) => {
@@ -3352,6 +3549,9 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       rule: "local.example.com host://127.0.0.1:3100",
       update_time: "2026-03-20T12:00:00Z",
     });
+    // Remote-only edits do not wake the five-minute auto-sync loop.
+    const pullResponse = await request.post(`${apiBase}/sync/run`);
+    expect(pullResponse.ok()).toBeTruthy();
 
     await expect
       .poll(async () => {
@@ -3377,13 +3577,27 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       },
     });
 
+    // Disabling is a local modification, which takes priority over remote edits.
+    // Let that push finish before testing a separate remote-only overwrite.
     await expect
-      .poll(async () => {
-        const response = await request.get(`${apiBase}/rules/${encodeURIComponent(localRuleName)}`);
-        const body = (await response.json()) as { enabled: boolean };
-        return body.enabled;
-      })
-      .toBe(false);
+      .poll(
+        async () => {
+          const response = await request.get(
+            `${apiBase}/rules/${encodeURIComponent(localRuleName)}`,
+          );
+          return (await response.json()) as {
+            content: string;
+            enabled: boolean;
+            sync: { status: string };
+          };
+        },
+        { timeout: 10000 },
+      )
+      .toMatchObject({
+        content: expect.stringContaining("127.0.0.1:3100"),
+        enabled: false,
+        sync: { status: "synced" },
+      });
 
     const remoteOverwriteTime = new Date(Date.now() + 60_000).toISOString();
     remoteServer.upsertEnv({
@@ -3391,7 +3605,8 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       rule: "local.example.com host://127.0.0.1:3150",
       update_time: remoteOverwriteTime,
     });
-    await request.post(`${apiBase}/sync/run`);
+    const overwriteResponse = await request.post(`${apiBase}/sync/run`);
+    expect(overwriteResponse.ok()).toBeTruthy();
 
     await expect
       .poll(async () => {
@@ -3401,10 +3616,19 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       }, { timeout: 10000 })
       .toMatchObject({
         content: expect.stringContaining("127.0.0.1:3150"),
-        enabled: true,
+        // Pulling remote content preserves the user's local enabled state.
+        enabled: false,
       });
 
-    await page.waitForTimeout(1500);
+    await expect
+      .poll(
+        async () => {
+          const response = await request.get(`${apiBase}/sync/status`);
+          return (await response.json()) as SyncStatus;
+        },
+        { timeout: 10000 },
+      )
+      .toMatchObject({ syncing: false, reason: "ready" });
 
     await request.put(`${apiBase}/rules/${encodeURIComponent(localRuleName)}`, {
       data: {
@@ -3426,7 +3650,9 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
     await expect
       .poll(async () => {
         const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { last_sync_action?: string | null };
+        const body = (await response.json()) as {
+          last_sync_action?: string | null;
+        };
         return body.last_sync_action ?? null;
       })
       .toBe("local_pushed");
@@ -3438,29 +3664,40 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
 
     await expect
       .poll(async () => {
-        const response = await request.get(`${apiBase}/rules/${encodeURIComponent(localRuleName)}`);
+        const response = await request.get(
+          `${apiBase}/rules/${encodeURIComponent(localRuleName)}`,
+        );
         const body = (await response.json()) as { enabled: boolean };
         return body.enabled;
       })
       .toBe(true);
 
-    await request.put(`${apiBase}/sync/config`, {
-      data: {
-        enabled: true,
-        auto_sync: true,
-        remote_base_url: "http://127.0.0.1:9",
-        probe_interval_secs: 2,
-        connect_timeout_ms: 1000,
-      },
-    });
+    // Fail the saved provider itself without changing its URL or session.
+    remoteServer.setAvailable(false);
 
     await expect
-      .poll(async () => {
-        const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { reason: string };
-        return body.reason;
-      }, { timeout: 10000 })
-      .toBe("unreachable");
+      .poll(
+        async () => {
+          const response = await request.get(`${apiBase}/sync/status`);
+          return (await response.json()) as SyncStatus;
+        },
+        { timeout: 10000 },
+      )
+      .toMatchObject({
+        remote_base_url: remoteServer.baseUrl,
+        has_session: true,
+        reachable: false,
+        reason: "unreachable",
+        providers: expect.arrayContaining([
+          expect.objectContaining({
+            id: "bifrost_cloud",
+            remote_base_url: remoteServer.baseUrl,
+            connected: true,
+            reachable: false,
+            reason: "unreachable",
+          }),
+        ]),
+      });
 
     await expect
       .poll(async () => page.getByTestId("statusbar-sync").getAttribute("data-sync-state"))
@@ -3476,12 +3713,14 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       .listEnvs()
       .find((env) => env.name === localRuleName);
     expect(remoteBeforeReconnect).toBeTruthy();
+    expect(remoteBeforeReconnect?.rule).toContain("127.0.0.1:3200");
     remoteServer.upsertEnv({
       ...remoteBeforeReconnect!,
       update_time: "2026-03-20T00:00:00Z",
     });
 
-    await request.put(`${apiBase}/sync/config`, {
+    remoteServer.setAvailable(true);
+    const reconnectResponse = await request.put(`${apiBase}/sync/config`, {
       data: {
         enabled: true,
         auto_sync: true,
@@ -3490,6 +3729,7 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
         connect_timeout_ms: 1000,
       },
     });
+    expect(reconnectResponse.ok()).toBeTruthy();
 
     await expect
       .poll(
@@ -3505,10 +3745,41 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
     await expect
       .poll(async () => {
         const response = await request.get(`${apiBase}/sync/status`);
-        const body = (await response.json()) as { last_sync_action?: string | null };
+        const body = (await response.json()) as {
+          last_sync_action?: string | null;
+        };
         return body.last_sync_action ?? null;
       })
       .toBe("local_pushed");
+    await expect
+      .poll(
+        async () => {
+          const response = await request.get(`${apiBase}/sync/status`);
+          return (await response.json()) as SyncStatus;
+        },
+        { timeout: 10000 },
+      )
+      .toMatchObject({
+        remote_base_url: remoteServer.baseUrl,
+        has_session: true,
+        reachable: true,
+        authorized: true,
+        reason: "ready",
+        providers: expect.arrayContaining([
+          expect.objectContaining({
+            id: "bifrost_cloud",
+            remote_base_url: remoteServer.baseUrl,
+            connected: true,
+            reachable: true,
+            authorized: true,
+            reason: "ready",
+          }),
+        ]),
+      });
+    await expect(page.getByTestId("statusbar-sync")).toHaveAttribute(
+      "data-sync-state",
+      "ready",
+    );
 
   } finally {
     try {
@@ -3519,7 +3790,7 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
         },
       });
     } catch {
-      // Ignore cleanup errors when the test intentionally stops the mock remote.
+      // Ignore cleanup errors while the mock remote is unavailable.
     }
     await remoteServer.close();
   }

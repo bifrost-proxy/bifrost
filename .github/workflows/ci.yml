@@ -117,8 +117,18 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
         working-directory: web
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read project Rust version
+        id: rust_version
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          with open("mise.toml", "rb") as config:
+              print(f"version={tomllib.load(config)['tools']['rust']}")
+          PY
+      # Keep lint behavior aligned with local development, not floating stable.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust_version.outputs.version }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings

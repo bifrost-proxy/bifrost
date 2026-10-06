@@ -1031,6 +1031,32 @@
 **执行结果（2026-08-20，本地真实 Chromium + 隔离后端）**：
 - ✅ PASS：执行 `pnpm --dir web exec playwright test tests/ui/admin-rules-values.spec.ts --grep '清空末行后保持光标位置' --workers=1`，1/1 通过。用例创建首行非空、末尾无换行的隔离规则，在亮色和暗色主题下分别输入第二行 `probe` 并执行 `Cmd+Backspace`；两次均断言 Save 恢复禁用、Monaco 仍保留第二空行，且输入上下文的 `top` 大于 0，证明光标未跳回首行。
 
+### TC-WRU-52-回归：快速列表选择不被延迟的 URL 更新重置
+
+**前置条件**：
+1. 使用隔离测试实例，保留全局 `Default`，创建两条普通规则。
+2. 打开 `/_bifrost/rules?rule=Default&source=keyboard-regression`，按列表当前顺序记录两条普通规则。
+
+**操作步骤**：
+1. 点击第一条普通规则，立即聚焦 Rules 列表并按 ArrowDown。
+2. 按 ArrowUp 回到第一条普通规则，再按 ArrowUp 选中 `Default`，随后按 ArrowDown。
+3. 快速重复普通规则之间的鼠标选择与上下键选择。
+4. 直接打开指定普通规则的深链，并通过浏览器后退/前进切换已有 Rules 深链历史；同时检查带有 `#section?fragment=query` 的 Web 深链和带有第二个 `#section` 的桌面端 hash 深链。
+5. 在亮色、暗色主题和桌面端 hash 路由中重复以上操作。
+
+**预期结果**：
+- ArrowDown 选择下一条可见规则，不被旧 URL 中的 `Default` 或前一次选择覆盖。
+- ArrowUp、`Default` 边界导航、普通鼠标选择、初始深链和后退/前进选择均保持正常。
+- URL 的 `rule` 与最终选择一致，`source=keyboard-regression` 等无关参数保留。
+- 本用例不得通过等待固定时长、重试按键或弱化选中态断言掩盖回归。
+
+**执行状态（2026-10-05）**：
+- 浏览器验证受当前执行环境的 Chromium `AF_UNIX` / `EPERM` 限制阻塞，未执行，不能记为通过。
+- CI 失败 trace 已确认 ArrowDown 请求了下一条规则，随后同一时刻又请求 `Default` 并重置选中态。
+- `web/src/pages/Rules/index.test.tsx` 的组件回归在修复前复现 browser/hash 两种路由的重置，修复后覆盖延迟渲染、初始深链、普通选择、历史导航与无关 URL 参数保留。
+- `web/src/pages/Rules/routerNavigation.test.tsx` 使用真实 BrowserRouter/HashRouter 覆盖路由片段、编码规则名、无关参数、初始深链和实际 history 后退/前进；路由片段回归在 helper 修复前复现选中态错误。
+- 现有 `web/tests/ui/admin-rules-values.spec.ts` 中 Rules/Values 键盘用例及全部选中态断言保持不变，真实浏览器结果需由后续 CI 确认。
+
 ## 清理
 
 测试完成后清理临时数据：

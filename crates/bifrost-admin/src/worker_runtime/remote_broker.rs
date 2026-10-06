@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use base64::Engine;
 use bifrost_core::BifrostError;
 use bifrost_storage::RemoteShellStore;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
 
@@ -22,6 +23,7 @@ pub(crate) const BROKER_TOKEN_ENV: &str = "BIFROST_REMOTE_EXECUTION_BROKER_TOKEN
 const BROKER_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const BROKER_STDIN_CHUNK_BYTES: usize = 64 * 1024;
 const BROKER_MAX_CONNECTIONS: usize = 32;
+const BROKER_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 static SERVER: OnceLock<tokio::sync::Mutex<Option<BrokerServer>>> = OnceLock::new();
 static RUNTIME_STATE: OnceLock<parking_lot::RwLock<Option<BrokerRuntimeState>>> = OnceLock::new();
@@ -290,7 +292,8 @@ async fn serve_connection(
     };
     let relay_url = capabilities.read().relay_by_token.get(&token).cloned();
     let Some(relay_url) = relay_url else {
-        write_response(
+        write_terminal_response(
+            &mut reader,
             &mut write_half,
             &BrokerResponse::Error {
                 error: "invalid Remote Execution broker capability token".to_string(),
@@ -307,7 +310,12 @@ async fn serve_connection(
     let command = match reauthorize_intent(&relay_url, *envelope, &runtime) {
         Ok(command) => command,
         Err(error) => {
-            write_response(&mut write_half, &BrokerResponse::Error { error }).await?;
+            write_terminal_response(
+                &mut reader,
+                &mut write_half,
+                &BrokerResponse::Error { error },
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -424,8 +432,8 @@ async fn serve_connection(
                 // with an empty final output.
                 write_buffered_stdout(&mut write_half, &mut stdout_rx).await?;
                 match result {
-                    Ok(response) => write_response(&mut write_half, &BrokerResponse::Result { response }).await?,
-                    Err(error) => write_response(&mut write_half, &BrokerResponse::Error { error }).await?,
+                    Ok(response) => write_terminal_response(&mut reader, &mut write_half, &BrokerResponse::Result { response }).await?,
+                    Err(error) => write_terminal_response(&mut reader, &mut write_half, &BrokerResponse::Error { error }).await?,
                 }
                 return Ok(());
             }
@@ -571,6 +579,42 @@ where
     write_json_line(writer, frame).await
 }
 
+async fn write_terminal_response<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    frame: &BrokerResponse,
+) -> Result<(), String>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    write_response(writer, frame).await?;
+    // A command can finish before the worker's StdinClose (or remaining stdin)
+    // is read. Dropping a TCP socket with unread input sends RST on Linux and
+    // can discard response bytes that are still in flight. Send FIN first and
+    // drain input until the worker receives the result and closes its writer.
+    writer
+        .shutdown()
+        .await
+        .map_err(|error| format!("shutdown Remote Execution broker response: {error}"))?;
+    // A stalled or malformed peer must not hold a broker permit indefinitely.
+    match tokio::time::timeout(
+        BROKER_CLOSE_TIMEOUT,
+        tokio::io::copy(reader, &mut tokio::io::sink()),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            tracing::debug!(error = %error, "Remote Execution broker peer closed after result");
+        }
+        Err(_) => {
+            tracing::debug!("Remote Execution broker peer did not close after result");
+        }
+    }
+    Ok(())
+}
+
 async fn write_buffered_stdout<W>(
     writer: &mut W,
     receiver: &mut mpsc::Receiver<Vec<u8>>,
@@ -621,7 +665,8 @@ fn runtime_state() -> &'static parking_lot::RwLock<Option<BrokerRuntimeState>> {
 mod tests {
     use super::*;
 
-    static BROKER_TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(super) static BROKER_TEST_ENV_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
 
     fn active_grant() -> GrantInfo {
         use crate::remote_invoke::types::{AuthMethod, FileAccessScope, GrantMode, GrantScope};
@@ -1105,6 +1150,7 @@ mod tests {
         )
         .await
         .unwrap();
+        client.shutdown().await.unwrap();
         serve_connection(server, &capabilities).await.unwrap();
         let mut reader = BufReader::new(client);
         let line = super::super::read_limited_async_line(&mut reader, BROKER_MAX_FRAME_BYTES)
@@ -1134,6 +1180,7 @@ mod tests {
         )
         .await
         .unwrap();
+        client.shutdown().await.unwrap();
         serve_connection(server, &capabilities).await.unwrap();
         let mut reader = BufReader::new(client);
         let line = super::super::read_limited_async_line(&mut reader, BROKER_MAX_FRAME_BYTES)
@@ -1405,3 +1452,7 @@ mod tests {
         assert_eq!(persisted[&grant.grant_id].use_count, 1);
     }
 }
+
+#[cfg(test)]
+#[path = "remote_broker_close_tests.rs"]
+mod close_tests;
