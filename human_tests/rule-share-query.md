@@ -191,6 +191,15 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 预期：400 JSON 包含 hash mismatch；确认页面现有 status 逻辑能够显示 API error；没有规则写入、启用或禁用。正常 Apply 浏览器链路继续通过 TC-RSQ-10。
 
+### TC-RSQ-14 确认页目标 URL 不得闭合 script 标签
+
+1. 在独立数据目录启动代理，用 CLI 生成 `example.test` 的有效分享 payload。
+2. 直接请求确认页，把 target 的 query 设置为含 `</script><script>window.__share_probe=true</script>` 的有效 HTTPS URL。
+3. 浏览器打开确认页，检查页面正常显示 Apply、DOM 仅有原确认脚本且 probe 未执行；对照响应中 targetUrl 的 JSON 解码结果仍是原 target。
+4. 不点击 Apply，检查规则列表保持不变；再执行正常确认与 Apply 回归。
+
+预期：目标作为数据展示，不创建额外 script 或执行 probe。响应脚本里的 `<` 被编码成 `\u003c`，JSON 还原目标不变。正常分享仍可 Apply 并返回 clean URL。
+
 ## 清理步骤
 
 - 停止测试 Bifrost 进程。
@@ -323,3 +332,5 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 - TC-RSQ-07：通过。Codex 浏览器连接隔离实例，在 ui-share 上右键 Share → Create Link，生成含私有 query 的 URL，Copy 后 alert 为 Copied；截图保存为本地交付证据。
 - TC-RSQ-08：通过。复用真实 Chromium 确认脚本，在隔离 HTTPS 解包实例中生成含 @receiver-local 的分享链接；浏览器经代理打开后进入确认页，Apply 后返回 clean HTTPS 页面并获得预期 body，导入正文保留引用，shadow 变为 disabled。首次跨协议 HTTP 上游夹具未完成页面导航，改用用例目标所需的直接响应规则后全部断言通过，未修改生产代码或削弱确认/clean URL/引用断言。
 - TC-RSQ-09：通过。普通 Admin HTML 以浏览器的 gzip-capable 请求检查防嵌入头；确认页 CSP/cache/referrer/nosniff 通过；跨站请求 403、同源缺 token 403、合法同源 Apply 200。旧 curl 用例缺少 Accept-Encoding 导致 426，已对齐当前 WebUI 契约并复测通过。
+
+- TC-RSQ-14：通过。直接GET带闭合script标签的合法target，响应targetUrl使用\u003c且JSON还原完全一致；真实浏览器页面只有1个script、probeExecuted=false、Apply enabled；规则列表仅Default。随后正常确认/Apply和损坏载荷回归复跑通过，所有私有fixture清理。

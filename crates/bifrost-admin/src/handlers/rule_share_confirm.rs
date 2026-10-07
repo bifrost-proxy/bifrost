@@ -149,7 +149,10 @@ fn render_confirm_page(
     csrf_token: &str,
 ) -> String {
     let payload_json = serde_json::to_string(encoded_payload).unwrap_or_else(|_| "\"\"".into());
-    let target_json = serde_json::to_string(target_url).unwrap_or_else(|_| "\"\"".into());
+    // JSON string escaping alone does not protect an HTML script element.
+    let target_json = serde_json::to_string(target_url)
+        .unwrap_or_else(|_| "\"\"".into())
+        .replace('<', "\\u003c");
     let csrf_json = serde_json::to_string(csrf_token).unwrap_or_else(|_| "\"\"".into());
     let mode = match payload.mode {
         RuleShareMode::EnableExclusive => "enable_exclusive",
@@ -349,6 +352,21 @@ mod tests {
         assert!(html.contains(&payload.content_hash));
         assert!(!html.contains("confirmation:"));
         assert!(html.contains("fetch('/_bifrost/api/rules/share-confirm'"));
+    }
+
+    #[test]
+    fn render_confirm_page_keeps_target_inside_the_script_string() {
+        let payload = new_rule_share_payload("safe", "example.test status://200").unwrap();
+        let target = "https://example.test/?q=</script><script>window.__share_probe=true</script>";
+        let html = render_confirm_page(&payload, "payload", target, "csrf");
+        assert!(!html.contains("</script><script>window.__share_probe"));
+        assert!(html.contains("\\u003c/script>\\u003cscript>window.__share_probe"));
+        let json = html
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("const targetUrl = "))
+            .unwrap()
+            .trim_end_matches(';');
+        assert_eq!(serde_json::from_str::<String>(json).unwrap(), target);
     }
 
     #[test]

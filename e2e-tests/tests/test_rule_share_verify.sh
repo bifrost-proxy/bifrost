@@ -36,10 +36,10 @@ with tempfile.TemporaryDirectory(prefix='.bifrost-e2e-share-verify-', dir=root) 
     assert result.returncode != 0 and not list(data.iterdir())
     assert json.loads(result.stdout)['valid'] is False
     result = cli('rule', 'share', 'broken', 'https://example.test/', '--file',
-                 str(Path(root) / 'e2e-tests/rules/share/verify_invalid.txt'))
+                 str(Path(root) / 'e2e-tests/fixtures/rule-share/verify_invalid.txt'))
     assert result.returncode != 0 and not result.stdout.strip()
     assert 'line 2:' in result.stderr and 'Suggestion:' in result.stderr
-    url = share(file=str(Path(root) / 'e2e-tests/rules/share/verify_valid.txt'))
+    url = share(file=str(Path(root) / 'e2e-tests/fixtures/rule-share/verify_valid.txt'))
     result = cli('rule', 'verify', url, '--json')
     verified = json.loads(result.stdout)
     assert result.returncode == 0 and verified['valid'] is True
@@ -64,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix='.bifrost-e2e-share-verify-', dir=root) 
     print('PASS generation diagnostics and offline verify JSON/text/read-only checks')
     (data / 'config.toml').write_text('[sync]\nenabled = false\nauto_sync = false\n')
     result = cli('rule', 'add', 'stored-invalid', '--file',
-                 str(Path(root) / 'e2e-tests/rules/share/verify_invalid.txt'), '--allow-invalid')
+                 str(Path(root) / 'e2e-tests/fixtures/rule-share/verify_invalid.txt'), '--allow-invalid')
     assert result.returncode == 0, result.stderr
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))

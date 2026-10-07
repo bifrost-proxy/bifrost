@@ -227,7 +227,7 @@ Rust `crates/bifrost-e2e/src/tests/rule_share_query.rs` 未落地（planned as o
 
 - **是否允许 Group 分享**：第一版禁止，避免把远端协作规则静默改脏。若后续开放 Group 分享，需要单独 wire schema 位并明确 Group 权限模型。
 - **exclusive_scope = all**：暂只在 wire schema 保留扩展位；打开会牵扯 Group 与 Default 边界，第一版不做。
-- **分享链接被恶意投放**：确认页是唯一写入门槛，必须严格校验 CSRF token、target URL、payload content hash；`connect-src 'self'` 是同源确认 API 的必要条件。
+- **分享链接被恶意投放**：确认页是唯一写入门槛，必须严格校验 CSRF token、target URL、payload content hash；`connect-src 'self'` 是同源确认 API 的必要条件。target URL 嵌入 script 时除 JSON 序列化外，还必须将 `<` 转义为 `\u003c`，避免直接确认请求用 URL 数据闭合脚本标签；解码后的目标 URL 保持不变。
 - **OpenAPI 未补 `/api/rules/share-link`**：目前调用方需直接参考本文档；补齐后应同步补 UI 类型和 CLI help 引用。
 - **CLI 无 `bifrost rule share exit` 子命令**：目前只能通过 Admin API 触发 `exit_rule_share_env`；如果后续在 CLI 暴露，必须复用同一函数，避免和 Web 走出两条恢复路径。
 
