@@ -9,6 +9,7 @@ struct Fake {
     fail_write: Option<(usize, bool)>,
     fail_read_after_write: bool,
     ignore_writes: bool,
+    dormant_supported: bool,
 }
 
 fn key(service: &str, field: Field) -> (String, u8) {
@@ -40,6 +41,7 @@ impl Fake {
             fail_write: None,
             fail_read_after_write: false,
             ignore_writes: false,
+            dormant_supported: false,
         };
         for (service, http, https, bypass) in [
             (
@@ -64,6 +66,9 @@ impl Fake {
     }
 }
 impl Backend for Fake {
+    fn supports_dormant_restore(&self) -> bool {
+        self.dormant_supported
+    }
     fn services(&mut self) -> Result<Vec<Service>> {
         Ok(self.services.clone())
     }
@@ -99,6 +104,19 @@ impl Backend for Fake {
                         panic!("expected protocol")
                     };
                     proxy.enabled = *enabled;
+                }
+                Operation::DormantEndpoint {
+                    field,
+                    expected,
+                    desired,
+                } => {
+                    let key = (service.into(), *field as u8);
+                    if self.values.get(&key) != Some(&Value::Protocol(expected.clone())) {
+                        return Err(BifrostError::Config(
+                            "ProxyOwnershipChanged: mock compare failed".into(),
+                        ));
+                    }
+                    self.values.insert(key, Value::Protocol(desired.clone()));
                 }
                 Operation::Bypass(domains) => {
                     self.values
@@ -317,12 +335,20 @@ fn restored_empty_endpoint_stays_disabled_and_can_resume() {
         .insert(key("Wi-Fi", Field::Http), protocol(false, "", 0));
     let mut state = state(&mut fake);
     run(&mut state, &mut fake, Intent::Apply).unwrap();
-    run(&mut state, &mut fake, Intent::Suspend).unwrap();
-    assert!(matches!(
+    assert!(
+        run(&mut state, &mut fake, Intent::Suspend)
+            .unwrap()
+            .incomplete_baseline
+    );
+    assert_eq!(
         fake.values[&key("Wi-Fi", Field::Http)],
-        Value::Protocol(Protocol { enabled: false, .. })
-    ));
-    run(&mut state, &mut fake, Intent::Resume).unwrap();
+        protocol(false, "127.0.0.1", 18880)
+    );
+    assert!(
+        !run(&mut state, &mut fake, Intent::Resume)
+            .unwrap()
+            .incomplete_baseline
+    );
     assert_eq!(
         fake.values[&key("Wi-Fi", Field::Http)],
         protocol(true, "127.0.0.1", 18880)
@@ -633,3 +659,5 @@ fn new_explicit_disable_allows_approved_cleanup_after_cancelled_enable() {
 }
 
 mod edge_cases;
+
+mod dormant_tests;

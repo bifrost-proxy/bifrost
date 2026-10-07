@@ -342,7 +342,9 @@ mod tests {
             }
             assert!(os.writes.iter().all(|(_, operation)| {
                 let field = match operation {
-                    Operation::Endpoint { field, .. } | Operation::Enabled { field, .. } => *field,
+                    Operation::Endpoint { field, .. }
+                    | Operation::Enabled { field, .. }
+                    | Operation::DormantEndpoint { field, .. } => *field,
                     Operation::Bypass(_) => Field::Bypass,
                 };
                 !edited.contains(&field)

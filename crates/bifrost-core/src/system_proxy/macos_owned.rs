@@ -50,6 +50,9 @@ impl Value {
 pub(super) struct PendingWrite {
     pub before: Value,
     pub possible_after: Vec<Value>,
+    /// A committed SCPreferences value is not evidence that Apply succeeded.
+    #[serde(default)]
+    pub needs_apply: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +78,7 @@ pub(super) struct Service {
     pub enabled: bool,
 }
 
-/// Each operation is exactly one networksetup command. Endpoint setters may
+/// Each operation is one bounded OS transaction. Endpoint setters may
 /// enable a proxy on some OS releases; both documented/read-back states are
 /// journalled before the command, and the enable bit is corrected separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,12 +93,22 @@ pub(super) enum Operation {
         enabled: bool,
     },
     Bypass(Vec<String>),
+    /// Only disabled, unauthenticated HTTP(S); compare under the OS lock.
+    DormantEndpoint {
+        field: Field,
+        expected: Protocol,
+        desired: Protocol,
+    },
 }
 
 pub(super) trait Backend {
     /// Whether this backend may invoke an authorization flow. A persisted
     /// cancellation forbids another elevated attempt until explicit user intent.
     fn requires_authorization(&self) -> bool {
+        false
+    }
+    /// Older/fixture adapters retain the explicit incomplete-restore fallback.
+    fn supports_dormant_restore(&self) -> bool {
         false
     }
     /// Include disabled services: an owned disabled service still needs cleanup.
@@ -116,6 +129,8 @@ pub(super) enum Intent {
 pub(super) struct TransitionResult {
     pub changed: bool,
     pub ownership_changed: bool,
+    /// Routing is safe, but an empty/zero dormant endpoint was not restored.
+    pub incomplete_baseline: bool,
 }
 
 pub(super) fn bypass_domains(value: &str) -> Vec<String> {
@@ -141,10 +156,11 @@ pub(super) fn capture(backend: &mut impl Backend) -> Result<Vec<ServiceOwnership
             let mut fields = Vec::new();
             for field in [Field::Http, Field::Https, Field::Bypass] {
                 let before = backend.read(&service.name, field)?;
-                // networksetup does not expose proxy passwords. Replacing an
-                // authenticated corporate proxy would make faithful restoration
-                // impossible, so leave that protocol under its existing owner.
-                let relinquished = matches!(&before, Value::Protocol(proxy) if proxy.authenticated);
+                // Passwords and enabled empty/zero endpoints cannot be faithfully
+                // restored by this adapter. Preserve these existing owners; an
+                // invalid enabled proxy may intentionally block direct traffic.
+                let relinquished = matches!(&before, Value::Protocol(proxy)
+                    if proxy.authenticated || (proxy.enabled && (proxy.host.is_empty() || proxy.port == 0)));
                 fields.push(FieldOwnership {
                     field,
                     last_written: before.clone(),
@@ -155,7 +171,7 @@ pub(super) fn capture(backend: &mut impl Backend) -> Result<Vec<ServiceOwnership
             }
             if fields.iter().any(|field| field.relinquished) {
                 // Bypass is shared by both protocols. Preserve the entire service
-                // when one authenticated protocol cannot be faithfully restored.
+                // when one protocol cannot be faithfully restored.
                 for field in &mut fields {
                     field.relinquished = true;
                 }
@@ -326,12 +342,22 @@ fn next_operation(
     field: Field,
     current: &Value,
     desired: &Value,
+    intent: Intent,
+    supports_dormant: bool,
 ) -> Option<(Operation, Vec<Value>)> {
     match (current, desired) {
         (Value::Bypass(_), Value::Bypass(value)) if !current.equivalent(desired) => {
             Some((Operation::Bypass(value.clone()), vec![desired.clone()]))
         }
         (Value::Protocol(current), Value::Protocol(desired)) => {
+            let unsupported_restore = matches!(intent, Intent::Suspend | Intent::Restore)
+                && (desired.host.is_empty() || desired.port == 0);
+            if unsupported_restore && desired.enabled {
+                // Acquisition excludes these originals. A preexisting malformed
+                // journal cannot authorize either direct-connect or re-enabling
+                // a stale endpoint; report the unmatched baseline without writes.
+                return None;
+            }
             // Disable a dead target before attempting any baseline restoration.
             if !desired.enabled && current.enabled {
                 let mut after = current.clone();
@@ -344,9 +370,17 @@ fn next_operation(
                     vec![Value::Protocol(after)],
                 ));
             }
-            // An empty dormant endpoint cannot be represented by networksetup.
-            // Keep it disabled rather than enabling an invalid host/port. The
-            // actual dormant value remains the compare-before-resume baseline.
+            if unsupported_restore && supports_dormant && current != desired {
+                return Some((
+                    Operation::DormantEndpoint {
+                        field,
+                        expected: current.clone(),
+                        desired: desired.clone(),
+                    },
+                    vec![Value::Protocol(desired.clone())],
+                ));
+            }
+            // Unsupported adapters retain the explicitly incomplete fallback.
             if (current.host != desired.host || current.port != desired.port)
                 && !desired.host.is_empty()
                 && desired.port != 0
@@ -366,6 +400,9 @@ fn next_operation(
                     vec![Value::Protocol(after), Value::Protocol(enabled_after)],
                 ));
             }
+            if unsupported_restore {
+                return None;
+            }
             if current.enabled != desired.enabled {
                 let mut after = current.clone();
                 after.enabled = desired.enabled;
@@ -383,6 +420,14 @@ fn next_operation(
     }
 }
 
+/// The unsupported dormant restoration case is safe only with both flags off.
+pub(super) fn incomplete_dormant_endpoint(current: &Value, original: &Value) -> bool {
+    matches!((current, original), (Value::Protocol(current), Value::Protocol(original))
+        if !current.enabled && !original.enabled
+            && (original.host.is_empty() || original.port == 0)
+            && (current.host != original.host || current.port != original.port))
+}
+
 fn reconcile(field: &mut FieldOwnership, current: &Value) -> bool {
     if let Some(pending) = field.pending.take() {
         if pending
@@ -391,6 +436,9 @@ fn reconcile(field: &mut FieldOwnership, current: &Value) -> bool {
             .any(|after| current.equivalent(after))
         {
             field.last_written = current.clone();
+            if pending.needs_apply {
+                field.pending = Some(pending);
+            }
         } else if !current.equivalent(&pending.before) {
             field.relinquished = true;
         }
@@ -451,21 +499,67 @@ pub(super) fn transition(
                 for _ in 0..5 {
                     let current = backend.read(&service, field)?;
                     let entry = &mut state.macos_services[service_index].fields[field_index];
+                    let retry_apply = entry.pending.as_ref().is_some_and(|pending| {
+                        pending.needs_apply
+                            && pending
+                                .possible_after
+                                .iter()
+                                .any(|after| current.equivalent(after))
+                    });
                     if !reconcile(entry, &current) {
                         result.ownership_changed = true;
                         persist(state)?;
                         return Ok(());
                     }
-                    persist(state)?;
-                    let Some((operation, possible_after)) =
-                        next_operation(field, &current, &desired)
-                    else {
+                    // Do not persist away the pending Apply barrier before its
+                    // replacement is durable. A crash after commit must retry
+                    // Apply even when networksetup already reads the new value.
+                    let operation = if retry_apply {
+                        match &current {
+                            Value::Protocol(proxy) if backend.supports_dormant_restore() => Some((
+                                Operation::DormantEndpoint {
+                                    field,
+                                    expected: proxy.clone(),
+                                    desired: proxy.clone(),
+                                },
+                                vec![current.clone()],
+                            )),
+                            _ => {
+                                return Err(BifrostError::Config(
+                                    "Pending dormant proxy Apply requires a supported backend"
+                                        .into(),
+                                ))
+                            }
+                        }
+                    } else {
+                        persist(state)?;
+                        next_operation(
+                            field,
+                            &current,
+                            &desired,
+                            intent,
+                            backend.supports_dormant_restore(),
+                        )
+                    };
+                    let Some((operation, possible_after)) = operation else {
+                        if !current.equivalent(&desired) {
+                            if matches!(intent, Intent::Suspend | Intent::Restore)
+                                && incomplete_dormant_endpoint(&current, &desired)
+                            {
+                                result.incomplete_baseline = true;
+                            } else {
+                                return Err(BifrostError::Config(format!(
+                                    "Proxy baseline is not representable for {service} {field:?}"
+                                )));
+                            }
+                        }
                         return Ok(());
                     };
                     state.macos_services[service_index].fields[field_index].pending =
                         Some(PendingWrite {
                             before: current,
                             possible_after,
+                            needs_apply: matches!(operation, Operation::DormantEndpoint { .. }),
                         });
                     persist(state)?;
                     // On a nonzero result (including zero-exit textual errors),
@@ -484,7 +578,20 @@ pub(super) fn transition(
                         persist(state)?;
                         continue;
                     }
-                    backend.write(&service, &operation)?;
+                    if let Err(error) = backend.write(&service, &operation) {
+                        if matches!(operation, Operation::DormantEndpoint { .. })
+                            && error.to_string().contains("ProxyOwnershipChanged:")
+                        {
+                            let entry =
+                                &mut state.macos_services[service_index].fields[field_index];
+                            entry.relinquished = true;
+                            entry.pending = None;
+                            result.ownership_changed = true;
+                            persist(state)?;
+                            return Ok(());
+                        }
+                        return Err(error);
+                    }
                     result.changed = true;
                     let actual = backend.read(&service, field)?;
                     let entry = &mut state.macos_services[service_index].fields[field_index];

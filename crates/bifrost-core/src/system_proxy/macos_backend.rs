@@ -27,6 +27,13 @@ impl Backend for MacosBackend {
             Self::Mock { privilege, .. } => !matches!(privilege, Privilege::Direct),
         }
     }
+    fn supports_dormant_restore(&self) -> bool {
+        match self {
+            Self::Native(os) => os.supports_dormant_restore(),
+            #[cfg(test)]
+            Self::Mock { .. } => false,
+        }
+    }
     fn services(&mut self) -> Result<Vec<Service>> {
         match self {
             Self::Native(os) => os.services(),
@@ -192,6 +199,19 @@ impl MockMacosState {
                     return Err(BifrostError::Config("Invalid mock protocol".into()));
                 };
                 proxy.enabled = *enabled;
+            }
+            Operation::DormantEndpoint {
+                field,
+                expected,
+                desired,
+            } => {
+                let key = (service.into(), *field as u8);
+                if self.values.get(&key) != Some(&Value::Protocol(expected.clone())) {
+                    return Err(BifrostError::Config(
+                        "ProxyOwnershipChanged: mock compare failed".into(),
+                    ));
+                }
+                self.values.insert(key, Value::Protocol(desired.clone()));
             }
             Operation::Bypass(domains) => {
                 self.values.insert(

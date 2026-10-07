@@ -45,7 +45,7 @@ fn lock_profiles(path: &Path) -> Result<File> {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
             Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
+                if error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
                     && started.elapsed() < std::time::Duration::from_secs(2) =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(10))

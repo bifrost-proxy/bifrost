@@ -90,6 +90,8 @@ ISOLATED_AFTER_TESTS=(
   "test_traffic_db_e2e.sh"
   "test_openai_like_sse_search_e2e.sh"
   "test_stop_restart_shutdown_marker.sh"
+  "test_system_proxy_reconcile_stability.sh"
+  "test_system_proxy_nonroot_recovery.sh"
   "test_e2e_process_cleanup_isolation.sh"
 )
 

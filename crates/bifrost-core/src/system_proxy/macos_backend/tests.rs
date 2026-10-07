@@ -103,12 +103,16 @@ fn actual_macos_manager_uses_fake_for_explicit_pending_retarget_and_cleanup() {
         manager.resume_managed_if_generation(&generation).unwrap(),
         GuardedSystemProxyTransition::Applied
     );
-    assert_eq!(
+    assert!(matches!(
         manager
-            .disable_managed_explicit_if_generation_with_privilege_guarded(&generation, || Ok(true))
-            .unwrap(),
-        GuardedSystemProxyTransition::Applied
-    );
+            .disable_managed_explicit_if_generation_with_privilege_guarded(&generation, || Ok(true)),
+        Err(BifrostError::Config(message)) if message.starts_with("IncompleteRestore:")
+    ));
+    assert!(!manager.is_set());
+    assert!(manager
+        .data_dir
+        .join("system_proxy_incomplete_restores.json")
+        .exists());
     assert!(!manager.state_file_path().exists());
     assert!(
         manager

@@ -336,8 +336,45 @@ grep -Fq '"$is_startup_sensitive" -eq 1' "$runner"
 grep -Fq 'kill_bifrost_in_data_root "$shell_data_dir"' "$runner"
 grep -Fq 'kill_bifrost_in_data_root "$E2E_SANDBOX_DIR"' "$runner"
 grep -Fq 'trap cleanup_tracked_e2e_processes EXIT' "$shell_runner"
-grep -Fq 'BIFROST_E2E_JOB_PROCESS_BASELINE' "$shell_runner"
-grep -Fq 'baseline_pids' "$shell_job_cleanup"
+# The job cleanup must prove current ownership, never infer it from processes
+# that appeared after a machine-wide baseline (which includes new OS services).
+python3 - "$shell_runner" "$shell_job_cleanup" <<'PY_CLEANUP'
+import pathlib
+import re
+import sys
+
+entrypoint, cleanup = [pathlib.Path(path).read_text() for path in sys.argv[1:]]
+for required in (
+    'export BIFROST_E2E_JOB_ROOT_PID="$$"',
+    'export BIFROST_E2E_JOB_ROOT_START',
+    'LC_ALL=C ps -p "$$" -o lstart=',
+):
+    assert required in entrypoint, f"E2E entrypoint must record its live identity: {required}"
+for required in (
+    'root_pid="${BIFROST_E2E_JOB_ROOT_PID:-}"',
+    'root_start="${BIFROST_E2E_JOB_ROOT_START:-}"',
+    '"$root_pid" != "$PPID"',
+    '"$pid" != "$$"',
+    '"$process_uid" == "$current_uid"',
+    '"$process_start" == "$root_start"',
+    '"$candidate_start" == "$expected_start"',
+    'candidate_starts+=("$candidate_start")',
+):
+    assert required in cleanup, f"E2E cleanup must retain and verify ownership: {required}"
+for signal in ("TERM", "KILL"):
+    guarded_signal = (
+        r'(?m)^  if is_owned_descendant "\$pid" "\$\{candidate_starts\[\$i\]\}"; then\n'
+        r'(?:    (?!kill\b).*\n)*'
+        rf'    kill -{signal} "\$pid" 2>/dev/null \|\| true\n  fi$'
+    )
+    assert re.search(guarded_signal, cleanup), (
+        f"E2E cleanup must revalidate descendant identity before each {signal}"
+    )
+for unsafe in ("BIFROST_E2E_JOB_PROCESS_BASELINE", "baseline_pids", "ps -axo uid=,pid="):
+    assert unsafe not in entrypoint and unsafe not in cleanup, (
+        f"E2E cleanup must not restore the unowned same-user baseline sweep: {unsafe}"
+    )
+PY_CLEANUP
 BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 bash "$runner" \
   --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
   --shard 1/3 --check-shell-shard-balance

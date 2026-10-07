@@ -203,6 +203,11 @@ fn main() {
 }
 
 fn run_cli_main() {
+    #[cfg(target_os = "macos")]
+    if bifrost_core::system_proxy::run_macos_proxy_restore_helper() {
+        return;
+    }
+
     // If invoked as the hidden tray subcommand (`bifrost __tray ...`), run the
     // tray helper in this process and never return. Must run before clap
     // parsing and logging init (the tray installs its own tracing subscriber).

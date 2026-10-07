@@ -1,7 +1,7 @@
 //! Bounded process adapter and strict parsers for networksetup.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 use std::io::{Read, Seek, SeekFrom};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use super::macos_owned::{Backend, Field, Operation, Protocol, Service, Value};
@@ -37,12 +37,47 @@ impl NetworkSetup {
     }
 }
 
+/// Child::drop does not stop a process. Own termination/reaping on errors and
+/// unwinds too, before any caller can release its ownership-lock reference.
+struct BoundedChild {
+    child: Child,
+    reaped: bool,
+}
+impl BoundedChild {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        self.reaped |= status.is_some();
+        Ok(status)
+    }
+}
+impl Drop for BoundedChild {
+    fn drop(&mut self) {
+        if !self.reaped {
+            #[cfg(unix)]
+            // SAFETY: the freshly spawned child owns its isolated process group.
+            unsafe {
+                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 pub(super) fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Result<Output> {
     #[cfg(test)]
-    if matches!(
-        program,
-        "/usr/sbin/networksetup" | "/usr/sbin/scutil" | "/usr/bin/osascript" | "/usr/bin/sudo"
-    ) {
+    if args.first() == Some(&super::macos_preferences::HELPER_ARGUMENT)
+        || matches!(
+            program,
+            "/usr/sbin/networksetup" | "/usr/sbin/scutil" | "/usr/bin/osascript" | "/usr/bin/sudo"
+        )
+    {
         return Err(BifrostError::Config(
             "Native macOS proxy processes are forbidden in unit tests; inject a backend".into(),
         ));
@@ -71,28 +106,15 @@ pub(super) fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Re
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| BifrostError::Config(format!("Failed to execute {program}: {error}")))?;
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if started.elapsed() >= timeout {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(BifrostError::Config(format!(
-                "networksetup command timed out after {}ms: {program}",
-                timeout.as_millis()
-            )));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    #[cfg(all(target_os = "macos", not(any(test, bifrost_proxy_test_io))))]
+    if args.first() == Some(&super::macos_preferences::HELPER_ARGUMENT) {
+        command.stdin(Stdio::from(super::macos_operation_lock::clone_current()?));
+    }
+    let child =
+        BoundedChild::new(command.spawn().map_err(|error| {
+            BifrostError::Config(format!("Failed to execute {program}: {error}"))
+        })?);
+    let status = wait_child(child, program, timeout, BoundedChild::try_wait)?;
     stdout.seek(SeekFrom::Start(0))?;
     stderr.seek(SeekFrom::Start(0))?;
     let mut out = Vec::new();
@@ -106,6 +128,27 @@ pub(super) fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> Re
     };
     validate_output(&output)?;
     Ok(output)
+}
+
+fn wait_child(
+    mut child: BoundedChild,
+    program: &str,
+    timeout: Duration,
+    mut poll: impl FnMut(&mut BoundedChild) -> std::io::Result<Option<ExitStatus>>,
+) -> Result<ExitStatus> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = poll(&mut child)? {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            return Err(BifrostError::Config(format!(
+                "networksetup command timed out after {}ms: {program}",
+                timeout.as_millis()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn validate_output(output: &Output) -> Result<()> {
@@ -158,27 +201,39 @@ impl<R: Fn(&str, &[&str], Duration) -> Result<Output>> NetworkSetup<R> {
     }
 
     fn mutate(&self, args: &[&str]) -> Result<()> {
+        self.mutate_program("/usr/sbin/networksetup", args)
+            .map(|_| ())
+    }
+
+    fn mutate_program(&self, program: &str, args: &[&str]) -> Result<Output> {
         #[cfg(all(bifrost_proxy_test_io, not(test)))]
         {
             // A test binary never invokes native GUI/sudo executables. All
             // privilege modes use the same explicitly configured fake writer.
-            (self.runner)("/usr/sbin/networksetup", args, COMMAND_TIMEOUT)?;
-            Ok(())
+            if program != "/usr/sbin/networksetup" {
+                return Err(BifrostError::Config(
+                    "Native helper forbidden in proxy fixture binary".into(),
+                ));
+            }
+            (self.runner)(program, args, COMMAND_TIMEOUT)
         }
         #[cfg(any(not(bifrost_proxy_test_io), test))]
         {
             match self.privilege {
-                Privilege::Direct => {
-                    (self.runner)("/usr/sbin/networksetup", args, COMMAND_TIMEOUT)?;
-                }
+                Privilege::Direct => (self.runner)(program, args, COMMAND_TIMEOUT),
                 Privilege::Sudo => {
-                    let mut command = vec!["-n", "/usr/sbin/networksetup"];
+                    let mut command = vec!["-n", program];
                     command.extend_from_slice(args);
-                    (self.runner)("/usr/bin/sudo", &command, COMMAND_TIMEOUT)?;
+                    (self.runner)("/usr/bin/sudo", &command, COMMAND_TIMEOUT)
                 }
                 Privilege::Gui => {
                     let command = format!(
-                        "/usr/sbin/networksetup {}",
+                        "{} {}",
+                        if program == "/usr/sbin/networksetup" {
+                            program.to_owned()
+                        } else {
+                            shell_quote(program)
+                        },
                         args.iter()
                             .map(|value| shell_quote(value))
                             .collect::<Vec<_>>()
@@ -187,10 +242,9 @@ impl<R: Fn(&str, &[&str], Duration) -> Result<Output>> NetworkSetup<R> {
                     let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
                     let script =
                         format!("do shell script \"{escaped}\" with administrator privileges");
-                    (self.runner)("/usr/bin/osascript", &["-e", &script], AUTH_TIMEOUT)?;
+                    (self.runner)("/usr/bin/osascript", &["-e", &script], AUTH_TIMEOUT)
                 }
             }
-            Ok(())
         }
     }
 }
@@ -198,6 +252,20 @@ impl<R: Fn(&str, &[&str], Duration) -> Result<Output>> NetworkSetup<R> {
 impl<R: Fn(&str, &[&str], Duration) -> Result<Output>> Backend for NetworkSetup<R> {
     fn requires_authorization(&self) -> bool {
         !matches!(self.privilege, Privilege::Direct)
+    }
+    fn supports_dormant_restore(&self) -> bool {
+        if cfg!(bifrost_proxy_test_io) || !matches!(self.privilege, Privilege::Direct) {
+            return false;
+        }
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            // Only an already-root Direct process can pass the same ownership
+            // description. Delayed GUI/sudo elevation remains unsupported here.
+            (unsafe { libc::geteuid() }) == 0
+                && super::macos_operation_lock::clone_current().is_ok()
+        }
+        #[cfg(any(not(target_os = "macos"), test))]
+        true
     }
     fn services(&mut self) -> Result<Vec<Service>> {
         parse_services(&self.query(&["-listallnetworkservices"])?)
@@ -236,6 +304,45 @@ impl<R: Fn(&str, &[&str], Duration) -> Result<Output>> Backend for NetworkSetup<
                     }
                 };
                 self.mutate(&[command, service, if *enabled { "on" } else { "off" }])
+            }
+            Operation::DormantEndpoint {
+                field,
+                expected,
+                desired,
+            } => {
+                use super::macos_preferences::{
+                    monotonic_millis, Outcome, Request, HELPER_ARGUMENT,
+                };
+                if !self.supports_dormant_restore() {
+                    return Err(BifrostError::Config("Unsupported dormant endpoint restoration for this privilege mode; original snapshot retained".into()));
+                }
+                let timeout = match self.privilege {
+                    Privilege::Gui => Duration::from_secs(120),
+                    _ => COMMAND_TIMEOUT,
+                };
+                let request = Request {
+                    service: service.into(),
+                    owner: super::macos_preferences::originating_process()?,
+                    lock: super::macos_preferences::current_lock_identity()?,
+                    field: *field,
+                    expected: expected.clone(),
+                    desired: desired.clone(),
+                    deadline_millis: monotonic_millis()?
+                        .saturating_add(timeout.as_millis() as u64)
+                        .saturating_sub(1000),
+                };
+                request.validate()?;
+                let payload = serde_json::to_string(&request)
+                    .map_err(|error| BifrostError::Config(error.to_string()))?;
+                let executable = std::env::current_exe()?;
+                let program = executable.to_str().ok_or_else(|| {
+                    BifrostError::Config("Proxy helper executable path is not UTF-8".into())
+                })?;
+                let output = self.mutate_program(program, &[HELPER_ARGUMENT, &payload])?;
+                match serde_json::from_slice::<Outcome>(&output.stdout).map_err(|error| BifrostError::Config(format!("Invalid proxy helper result: {error}")))? {
+                    Outcome::Applied => Ok(()),
+                    Outcome::OwnershipChanged => Err(BifrostError::Config("ProxyOwnershipChanged: disabled endpoint changed under SystemConfiguration lock".into())),
+                }
             }
             Operation::Bypass(domains) => {
                 let mut args = vec!["-setproxybypassdomains", service];
@@ -482,3 +589,6 @@ mod tests {
 #[cfg(test)]
 #[cfg(unix)]
 mod adapter_tests;
+
+#[cfg(test)]
+mod dormant_adapter_tests;

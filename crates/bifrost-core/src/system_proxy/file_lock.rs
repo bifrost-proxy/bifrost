@@ -5,21 +5,11 @@ use super::{Path, Result};
 
 #[cfg(target_os = "macos")]
 pub(super) struct SystemProxyFileLock {
-    file: File,
-    context: &'static str,
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for SystemProxyFileLock {
-    fn drop(&mut self) {
-        if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } != 0 {
-            tracing::warn!(
-                context = self.context,
-                error = %std::io::Error::last_os_error(),
-                "failed to release system proxy cross-process file lock"
-            );
-        }
-    }
+    // Unregister before closing. No explicit LOCK_UN: a Direct one-shot child
+    // may still own a duplicate after parent death/timeout. Only the final
+    // close releases that open-file-description's lock.
+    _scope: super::macos_operation_lock::Scope,
+    _file: File,
 }
 
 #[cfg(target_os = "macos")]
@@ -52,7 +42,11 @@ pub(super) fn acquire_system_proxy_file_lock(
         context,
         "acquired system proxy cross-process file lock"
     );
-    Ok(SystemProxyFileLock { file, context })
+    let scope = super::macos_operation_lock::Scope::register(&file)?;
+    Ok(SystemProxyFileLock {
+        _scope: scope,
+        _file: file,
+    })
 }
 
 #[cfg(target_os = "macos")]

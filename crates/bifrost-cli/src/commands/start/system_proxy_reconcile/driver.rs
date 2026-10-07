@@ -16,6 +16,7 @@ pub(super) struct ReconcileState {
     last_intent_revision: u64,
     last_policy: (SystemProxyRecoveryMode, u64),
     cancelled_generation: Option<String>,
+    incomplete_restore_revision: Option<u64>,
 }
 
 impl ReconcileState {
@@ -27,12 +28,51 @@ impl ReconcileState {
             last_intent_revision: config.startup_intent_revision,
             last_policy: config.initial_policy,
             cancelled_generation: None,
+            incomplete_restore_revision: None,
         }
     }
 
     pub(super) fn wake(&mut self, now: Instant) {
         self.readiness = ReadinessWindow::default();
         self.next_inspection = now;
+    }
+
+    fn finish_incomplete_restore(&mut self, config: &SystemProxyReconcileConfig, now: Instant) {
+        let Some(revision) = self.incomplete_restore_revision.take() else {
+            return;
+        };
+        config.enabled_flag.store(false, Ordering::Release);
+        // The terminal error consumes only the intent that initiated cleanup.
+        // A newer explicit intent may already have authorized another acquire.
+        if self.last_intent_revision <= revision {
+            self.allow_initial_acquire = false;
+            *config.expected_generation.write() = None;
+            self.cancelled_generation = None;
+            self.next_inspection = now + system_proxy_reconcile_interval();
+        }
+    }
+
+    fn confirm_incomplete_restore(
+        &mut self,
+        config: &SystemProxyReconcileConfig,
+        backend: &mut impl ReconcileIo,
+        error: &bifrost_core::BifrostError,
+        now: Instant,
+    ) -> bool {
+        if !matches!(error, bifrost_core::BifrostError::Config(message) if message.starts_with("IncompleteRestore:"))
+        {
+            return false;
+        }
+        // Core has retired the lease after disabling owned routing. Keep this
+        // outcome pending if ownership cannot be read, and never replay acquire
+        // on readiness alone while waiting for confirmation.
+        self.incomplete_restore_revision = Some(self.last_intent_revision);
+        self.allow_initial_acquire = false;
+        if !matches!(backend.ownership(), Ok(None)) {
+            return false;
+        }
+        self.finish_incomplete_restore(config, now);
+        true
     }
 
     pub(super) fn observe_and_should_inspect(
@@ -103,6 +143,9 @@ impl ReconcileState {
             (Ok(before), Ok(current))
                 if generation(before.as_ref()) == generation(current.as_ref()) =>
             {
+                if current.is_none() {
+                    self.finish_incomplete_restore(config, now);
+                }
                 let fence = config.expected_generation.read().clone();
                 let owns_fence = fence.as_deref().is_none_or(|expected| {
                     !expected.is_empty() && generation(current.as_ref()) == Some(expected)
@@ -216,6 +259,14 @@ impl ReconcileState {
                                         Ok(outcome) if transition_applied(outcome) => {
                                             active = false
                                         }
+                                        Err(error)
+                                            if self.confirm_incomplete_restore(
+                                                config, backend, &error, now,
+                                            ) =>
+                                        {
+                                            active = false;
+                                            tracing::warn!(%error, "new disable retired proxy ownership with incomplete restoration");
+                                        }
                                         outcome => {
                                             self.next_inspection = now;
                                             tracing::warn!(?outcome, "new disable remains pending after in-flight proxy transition");
@@ -254,6 +305,10 @@ impl ReconcileState {
                         );
                     }
                     Err(error) => {
+                        if self.confirm_incomplete_restore(config, backend, &error, now) {
+                            tracing::warn!(%error, ?action, port, "proxy ownership retired with incomplete restoration; explicit intent retained");
+                            return;
+                        }
                         if error.to_string().contains("UserCancelled") {
                             self.allow_initial_acquire = false;
                             self.cancelled_generation = backend.cancellation_generation();

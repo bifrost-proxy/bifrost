@@ -50,7 +50,9 @@ impl ShutdownMarkerLock {
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(Self(file)),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error)
+                    if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
                     if started.elapsed() >= timeout {
                         return Err(crate::BifrostError::Config(
                             "Timed out waiting for shutdown marker lock".into(),
@@ -180,12 +182,34 @@ pub fn read_system_proxy_shutdown_mode_checked(
     data_dir: &Path,
 ) -> Result<Option<SystemProxyShutdownMode>> {
     match std::fs::symlink_metadata(data_dir.join(SHUTDOWN_MODE_FILE_NAME)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            validate_missing_marker_parent(data_dir)?;
+            return Ok(None);
+        }
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
     let _lock = ShutdownMarkerLock::acquire(data_dir)?;
     read_locked(data_dir)
+}
+
+fn validate_missing_marker_parent(data_dir: &Path) -> Result<()> {
+    // Windows also reports NotFound for a child beneath a regular file. Only
+    // treat this as absent intent if its existing ancestor is a directory;
+    // keep malformed parent paths fail-closed.
+    for parent in data_dir.ancestors() {
+        match std::fs::metadata(parent) {
+            Ok(metadata) if metadata.is_dir() => return Ok(()),
+            Ok(_) => {
+                return Err(crate::BifrostError::Config(
+                    "Shutdown marker parent is not a directory".into(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn consume_system_proxy_shutdown_mode(data_dir: &Path) -> Option<SystemProxyShutdownMode> {
@@ -300,14 +324,19 @@ mod tests {
     #[test]
     fn marker_lock_wait_is_bounded() {
         let dir = tempfile::tempdir().unwrap();
-        let _held = ShutdownMarkerLock::acquire(dir.path()).unwrap();
+        let held = ShutdownMarkerLock::acquire(dir.path()).unwrap();
         let started = std::time::Instant::now();
-        assert!(ShutdownMarkerLock::acquire_with_timeout(
+        let error = ShutdownMarkerLock::acquire_with_timeout(
             dir.path(),
-            std::time::Duration::from_millis(20)
+            std::time::Duration::from_millis(20),
         )
-        .is_err());
+        .err()
+        .expect("a held marker lock must time out");
+        assert!(error.to_string().contains("Timed out"));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(20));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        drop(held);
+        assert!(ShutdownMarkerLock::acquire(dir.path()).is_ok());
     }
 
     #[cfg(unix)]
@@ -384,8 +413,32 @@ mod tests {
         assert!(!marker.exists());
         let invalid_directory = dir.path().join("regular-file");
         std::fs::write(&invalid_directory, b"preserve").unwrap();
-        assert!(read_system_proxy_shutdown_mode_checked(&invalid_directory).is_err());
+        for invalid_path in [invalid_directory.clone(), invalid_directory.join("nested")] {
+            // Exercise the Windows NotFound validation on Unix as well, where
+            // the initial marker lookup ordinarily returns NotADirectory.
+            assert!(validate_missing_marker_parent(&invalid_path).is_err());
+            assert!(read_system_proxy_shutdown_mode_checked(&invalid_path).is_err());
+            assert_eq!(
+                read_system_proxy_shutdown_mode(&invalid_path),
+                Some(SystemProxyShutdownMode::ForegroundCleanup)
+            );
+        }
         assert_eq!(std::fs::read(invalid_directory).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn absent_marker_and_missing_parents_remain_absent_without_creating_files() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_system_proxy_shutdown_mode_checked(dir.path()).unwrap(),
+            None
+        );
+        let missing = dir.path().join("missing/nested");
+        assert_eq!(
+            read_system_proxy_shutdown_mode_checked(&missing).unwrap(),
+            None
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[cfg(unix)]

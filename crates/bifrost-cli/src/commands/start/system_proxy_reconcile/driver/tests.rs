@@ -44,6 +44,8 @@ struct FakeIo {
     verification_calls: Vec<String>,
     verification_outcomes: VecDeque<bifrost_core::Result<ManagedSystemProxyVerification>>,
     observations: usize,
+    retire_lease_on_error: bool,
+    intent_after_release: Option<(bifrost_storage::NewSystemProxyConfig, Arc<AtomicBool>)>,
 }
 
 impl FakeIo {
@@ -66,6 +68,8 @@ impl FakeIo {
             verification_calls: Vec::new(),
             verification_outcomes: VecDeque::new(),
             observations: 0,
+            retire_lease_on_error: false,
+            intent_after_release: None,
         }
     }
 
@@ -93,6 +97,9 @@ impl FakeIo {
                 Some(next.generation.clone())
             };
             self.lease = (action != "release").then_some(next);
+        } else if result.is_err() && self.retire_lease_on_error {
+            self.lease = None;
+            self.attached_generation = None;
         } else if action == "suspend" && result.is_err() {
             // A partial OS write is journaled before the error reaches the
             // coordinator. Retrying an unchanged Applied lease would miss the
@@ -126,7 +133,12 @@ impl ProxyTransitions for FakeIo {
     }
     fn release(&mut self, generation: &str) -> bifrost_core::Result<GuardedSystemProxyTransition> {
         assert_eq!(self.lease.as_ref().unwrap().generation, generation);
-        self.transition("release")
+        let result = self.transition("release");
+        if let Some((intent, desired_enabled)) = self.intent_after_release.take() {
+            desired_enabled.store(intent.enabled, Ordering::Release);
+            self.config = intent;
+        }
+        result
     }
     fn acquire(
         &mut self,
@@ -851,4 +863,262 @@ fn lease_disappearing_during_verification_clears_active_flag_without_reacquiring
     assert_eq!(io.calls, ["reconcile"]);
     assert!(!config.enabled_flag.load(Ordering::Acquire));
     assert!(!state.allow_initial_acquire);
+}
+
+#[test]
+fn incomplete_restore_retires_active_flag_without_repeating_cleanup() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    config.enabled_flag.store(true, Ordering::Release);
+    let mut io = FakeIo::new(Some(owned(false)));
+    io.config.enabled = false;
+    io.config.intent_revision = 1;
+    io.retire_lease_on_error = true;
+    io.outcomes.push_back(Err(error(
+        "IncompleteRestore: dormant endpoint unavailable",
+    )));
+
+    run(&mut state, &config, &mut io, now, true);
+    assert!(io.lease.is_none());
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+    assert!(!config.desired_enabled.load(Ordering::Acquire));
+    assert!(!state.allow_initial_acquire);
+    assert_eq!(state.incomplete_restore_revision, None);
+    assert_eq!(
+        state.next_inspection,
+        now + system_proxy_reconcile_interval()
+    );
+    for cycle in 1..=3 {
+        let next = now + system_proxy_reconcile_interval() * cycle;
+        healthy(&mut state, next);
+        assert!(state.observe_and_should_inspect(&config, 18745, true, next, Some(&io.config)));
+        run(&mut state, &config, &mut io, next, true);
+    }
+    assert_eq!(io.calls, ["release"]);
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn incomplete_acquisition_rollback_cannot_reacquire_from_readiness_alone() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    let mut io = FakeIo::new(None);
+    healthy(&mut state, now);
+    io.retire_lease_on_error = true;
+    io.outcomes
+        .push_back(Err(error("IncompleteRestore: rolled back acquisition")));
+    run(&mut state, &config, &mut io, now, true);
+    assert!(config.desired_enabled.load(Ordering::Acquire));
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+    assert!(!state.allow_initial_acquire);
+    for cycle in 1..=3 {
+        let next = now + system_proxy_reconcile_interval() * cycle;
+        healthy(&mut state, next);
+        run(&mut state, &config, &mut io, next, true);
+    }
+    assert_eq!(io.calls, ["acquire"]);
+}
+
+#[test]
+fn incomplete_restore_preserves_a_newer_on_intent_published_during_release() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    config.enabled_flag.store(true, Ordering::Release);
+    let mut io = FakeIo::new(Some(owned(false)));
+    io.config.enabled = false;
+    io.config.intent_revision = 1;
+    io.retire_lease_on_error = true;
+    io.intent_after_release = Some((
+        bifrost_storage::NewSystemProxyConfig {
+            enabled: true,
+            intent_revision: 2,
+            ..io.config.clone()
+        },
+        Arc::clone(&config.desired_enabled),
+    ));
+    io.outcomes.push_back(Err(error(
+        "IncompleteRestore: dormant endpoint unavailable",
+    )));
+
+    run(&mut state, &config, &mut io, now, true);
+    assert!(config.desired_enabled.load(Ordering::Acquire));
+    assert!(io.config.enabled);
+    assert_eq!(io.config.intent_revision, 2);
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+    assert!(!state.allow_initial_acquire);
+    let next = now + Duration::from_secs(1);
+    run(&mut state, &config, &mut io, next, true);
+    assert_eq!(state.last_intent_revision, 2);
+    assert!(state.allow_initial_acquire);
+    assert_eq!(io.calls, ["release"]);
+    healthy(&mut state, next + Duration::from_secs(3));
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        next + Duration::from_secs(3),
+        true,
+    );
+    assert_eq!(io.calls, ["release", "acquire"]);
+    assert!(config.enabled_flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn incomplete_restore_requires_confirmed_absence_of_active_ownership() {
+    for unreadable in [false, true] {
+        let now = Instant::now();
+        let (_dir, config, mut state) = fixture(now);
+        config.enabled_flag.store(true, Ordering::Release);
+        let mut io = FakeIo::new(Some(owned(false)));
+        io.config.enabled = false;
+        io.config.intent_revision = 1;
+        io.outcomes.push_back(Err(error(
+            "IncompleteRestore: dormant endpoint unavailable",
+        )));
+        if unreadable {
+            io.retire_lease_on_error = true;
+            io.ownership_reads.extend([
+                Ok(io.lease.clone()),
+                Err(error("cannot confirm retirement")),
+            ]);
+        }
+        run(&mut state, &config, &mut io, now, true);
+        assert!(config.enabled_flag.load(Ordering::Acquire));
+        assert_eq!(state.incomplete_restore_revision, Some(1));
+        assert!(!state.allow_initial_acquire);
+        assert_eq!(state.next_inspection, now + Duration::from_secs(2));
+        run(
+            &mut state,
+            &config,
+            &mut io,
+            now + Duration::from_secs(2),
+            true,
+        );
+        assert!(!config.enabled_flag.load(Ordering::Acquire));
+        assert_eq!(io.calls.len(), if unreadable { 1 } else { 2 });
+    }
+}
+
+#[test]
+fn deferred_incomplete_restore_confirmation_keeps_newer_acquisition_permission() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    config.enabled_flag.store(true, Ordering::Release);
+    let mut io = FakeIo::new(Some(owned(false)));
+    io.config.enabled = false;
+    io.config.intent_revision = 1;
+    io.retire_lease_on_error = true;
+    io.outcomes.push_back(Err(error(
+        "IncompleteRestore: dormant endpoint unavailable",
+    )));
+    io.ownership_reads.extend([
+        Ok(io.lease.clone()),
+        Err(error("cannot confirm retirement")),
+    ]);
+    run(&mut state, &config, &mut io, now, true);
+    assert!(config.enabled_flag.load(Ordering::Acquire));
+    io.config.enabled = true;
+    io.config.intent_revision = 2;
+    let next = now + Duration::from_secs(2);
+    run(&mut state, &config, &mut io, next, true);
+    assert!(config.desired_enabled.load(Ordering::Acquire));
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+    assert!(state.allow_initial_acquire);
+    assert_eq!(state.incomplete_restore_revision, None);
+    healthy(&mut state, next + Duration::from_secs(3));
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        next + Duration::from_secs(3),
+        true,
+    );
+    assert_eq!(io.calls, ["release", "acquire"]);
+    assert!(config.enabled_flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn ordinary_restore_error_retains_active_ownership_and_pending_cleanup() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    config.enabled_flag.store(true, Ordering::Release);
+    let mut io = FakeIo::new(Some(owned(false)));
+    io.config.enabled = false;
+    io.config.intent_revision = 1;
+    io.outcomes.push_back(Err(error("release interrupted")));
+    run(&mut state, &config, &mut io, now, true);
+    assert!(io.lease.is_some());
+    assert!(config.enabled_flag.load(Ordering::Acquire));
+    assert_eq!(state.incomplete_restore_revision, None);
+    assert_eq!(state.next_inspection, now + Duration::from_secs(2));
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        now + Duration::from_secs(2),
+        true,
+    );
+    assert_eq!(io.calls, ["release", "release"]);
+    assert!(io.lease.is_none());
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn compensating_disable_accepts_terminal_incomplete_restore() {
+    for publish_newer_on in [false, true] {
+        let now = Instant::now();
+        let (_dir, config, mut state) = fixture(now);
+        let mut io = FakeIo::new(Some(owned(true)));
+        healthy(&mut state, now);
+        io.reads.extend([
+            Ok(io.config.clone()),
+            Ok(bifrost_storage::NewSystemProxyConfig {
+                enabled: false,
+                intent_revision: 1,
+                ..io.config.clone()
+            }),
+        ]);
+        io.retire_lease_on_error = true;
+        if publish_newer_on {
+            io.intent_after_release = Some((
+                bifrost_storage::NewSystemProxyConfig {
+                    enabled: true,
+                    intent_revision: 2,
+                    ..io.config.clone()
+                },
+                Arc::clone(&config.desired_enabled),
+            ));
+        }
+        io.outcomes.extend([
+            Ok(GuardedSystemProxyTransition::Applied),
+            Err(error("IncompleteRestore: dormant endpoint unavailable")),
+        ]);
+        run(&mut state, &config, &mut io, now, true);
+        assert_eq!(io.calls, ["reconcile", "release"]);
+        assert!(io.lease.is_none());
+        assert!(!config.enabled_flag.load(Ordering::Acquire));
+        assert_eq!(
+            config.desired_enabled.load(Ordering::Acquire),
+            publish_newer_on
+        );
+        assert!(!state.allow_initial_acquire);
+        let next = now + system_proxy_reconcile_interval();
+        healthy(&mut state, next);
+        run(&mut state, &config, &mut io, next, true);
+        assert_eq!(io.calls, ["reconcile", "release"]);
+        assert!(!config.enabled_flag.load(Ordering::Acquire));
+        if publish_newer_on {
+            assert!(state.allow_initial_acquire);
+            healthy(&mut state, next + Duration::from_secs(3));
+            run(
+                &mut state,
+                &config,
+                &mut io,
+                next + Duration::from_secs(3),
+                true,
+            );
+            assert_eq!(io.calls, ["reconcile", "release", "acquire"]);
+            assert!(config.enabled_flag.load(Ordering::Acquire));
+        }
+    }
 }

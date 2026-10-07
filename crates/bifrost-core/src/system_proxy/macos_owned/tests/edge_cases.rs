@@ -35,6 +35,7 @@ fn ownership_audit_rejects_missing_services_pending_and_non_target_snapshots() {
     field.pending = Some(PendingWrite {
         before: field.before.clone(),
         possible_after: vec![field.last_written.clone()],
+        needs_apply: false,
     });
     assert!(!observed_owned(&state, &mut fake).unwrap());
     state.macos_services[0].fields[0].pending = None;

@@ -122,6 +122,7 @@ impl SystemProxyManager {
             {
                 return Ok(GuardedSystemProxyTransition::OwnershipChanged);
             }
+            self.reuse_incomplete_restore_baselines(&mut services)?;
             macos_owned::sanitize_original_targets(&mut services, &target);
             let original = services
                 .iter()
@@ -169,9 +170,9 @@ impl SystemProxyManager {
         let result = self.run_owned_transition(&mut state, &mut os, intent)?;
         if !macos_owned::has_active_owned_protocol(&state) {
             self.detach_in_place();
-            self.run_owned_transition(&mut state, &mut os, Intent::Restore)?;
-            self.remove_managed_files_checked()?;
-            return Err(BifrostError::Config("No macOS HTTP/HTTPS proxy protocols could be managed; authenticated or externally owned settings were preserved".into()));
+            let cleanup = self.run_owned_transition(&mut state, &mut os, Intent::Restore)?;
+            self.finish_macos_restore(&state, cleanup)?;
+            return Err(BifrostError::Config("No macOS HTTP/HTTPS proxy protocols could be managed; authenticated, unrepresentable, or externally owned settings were preserved".into()));
         }
         self.attach_managed_state(&state);
         self.record_system_proxy_action("system_proxy_enabled", "enable");
@@ -271,20 +272,6 @@ impl SystemProxyManager {
         )
     }
 
-    fn remove_managed_files_checked(&self) -> Result<()> {
-        for path in [self.backup_file_path(), self.state_file_path()] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        if self.data_dir.exists() {
-            persistence::sync_directory(&self.data_dir)?;
-        }
-        Ok(())
-    }
-
     fn restore_macos_locked(
         &mut self,
         os: &mut impl Backend,
@@ -307,7 +294,8 @@ impl SystemProxyManager {
                     self.detach_in_place();
                     return Ok(SystemProxyDisableOutcome::NotEnabled);
                 };
-                let fields = legacy_journal(os, &target)?;
+                let mut fields = legacy_journal(os, &target)?;
+                self.relinquish_archived_fields(&mut fields)?;
                 if !fields
                     .iter()
                     .flat_map(|s| &s.fields)
@@ -335,15 +323,7 @@ impl SystemProxyManager {
         }
         self.prepare_legacy_journal(&mut state, os)?;
         let outcome = self.run_owned_transition(&mut state, os, Intent::Restore)?;
-        self.remove_managed_files_checked()?;
-        self.detach_in_place();
-        Ok(if outcome.changed {
-            SystemProxyDisableOutcome::Disabled
-        } else if outcome.ownership_changed {
-            SystemProxyDisableOutcome::OwnedByOther
-        } else {
-            SystemProxyDisableOutcome::NotEnabled
-        })
+        self.finish_macos_restore(&state, outcome)
     }
 
     fn restore_macos(

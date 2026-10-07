@@ -7,7 +7,13 @@ mod macos_backend;
 mod macos_command;
 #[cfg(target_os = "macos")]
 mod macos_manager;
+#[cfg(any(target_os = "macos", all(unix, test)))]
+mod macos_operation_lock;
 mod macos_owned;
+#[cfg(any(target_os = "macos", test))]
+mod macos_preferences;
+#[cfg(any(target_os = "macos", test))]
+mod macos_restoration;
 #[cfg(any(all(target_os = "macos", bifrost_proxy_test_io), test))]
 mod macos_test_io;
 mod persistence;
@@ -17,6 +23,24 @@ pub use verification::ManagedSystemProxyVerification;
 mod retarget;
 #[cfg(target_os = "macos")]
 use macos_manager::*;
+
+/// Internal one-shot process mode used by the bounded macOS restoration adapter.
+/// Does not initialize the application, data directory, runtime or logging.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn run_macos_proxy_restore_helper() -> bool {
+    let Some(result) = macos_preferences::dispatch(std::env::args_os().skip(1)) else {
+        return false;
+    };
+    match result {
+        Ok(output) => println!("{output}"),
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    }
+    true
+}
 
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]

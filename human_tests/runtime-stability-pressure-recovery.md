@@ -151,3 +151,11 @@ cargo test -p bifrost-core lifecycle_events_rotate_before_append -- --nocapture
 
 | 2026-10-07 | TC-RSPR-05～08 | 阻塞，未执行原生动作 | 平台前置检查实际返回 Linux；本任务禁止修改任何真实主机代理配置，未使用用户 Mac。已停止在平台检查处，未把 fake-OS、headless 或 Darwin source-check 计为原生验证通过。 |
 | 2026-10-07 | TC-RSPR-02 shell/API 部分 | 部分验证通过 | 本次 CLI 构建实际运行 `test_runtime_pressure_degradation.sh`，critical 压力下转发、Replay、worker task、API 降级、payload 与 doctor 断言通过；使用临时目录、动态端口和 `--no-system-proxy`。本轮没有复跑该用例的浏览器 UI 部分，也没有运行原生 OS 代理动作。 |
+
+## Non-root CI recovery companion (native execution pending)
+
+- `e2e-tests/tests/test_system_proxy_nonroot_recovery.sh` reuses the guarded, serialized native fixture on an explicitly opted-in disposable GitHub macOS runner. Core and lifecycle helper run as the ordinary non-root runner UID, bound to loopback with isolated data and HOME.
+- The deterministic SIGSTOP point is taken only after the real ownership flock is free. This does not prove recovery can bypass a live core frozen while holding that lock; lock contention and partial-operation safety remain separate deterministic tests.
+- Product assertions require fail-open routing off, preserved intent and the same active lease, followed by stable automatic native resume without replacing the core. Present endpoints, bypass and out-of-scope SOCKS/PAC/autodiscovery are checked. Unsupported empty dormant metadata is reported explicitly, never counted as exact non-root restoration.
+- Only after those assertions, controlled lock-held fixture termination preserves the journal. A separate, narrowly scoped privileged cleanup restores the exact baseline. That cleanup is not evidence of ordinary-user product stop/restoration. The privileged exact-clear companion retains its stricter assertions.
+- No native companion execution has been performed by this test-only change; actual results must be recorded from the final candidate's GitHub macOS jobs.

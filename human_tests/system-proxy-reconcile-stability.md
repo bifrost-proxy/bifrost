@@ -85,6 +85,19 @@ lsof -nP -iTCP:18889 -sTCP:LISTEN || true
 - 9900 仍由测试前同一 PID 监听。
 - 18889 没有测试进程残留。
 
+## 空 dormant endpoint 恢复范围与验收限制
+
+- 已具备 root 权限、持有当前 ownership 文件锁的 Direct 路径，现通过受支持的 SystemConfiguration preferences API 尝试恢复 disabled HTTP/HTTPS 的空 host 或 0 port。只修改所选协议的 endpoint 键，持有 SCPreferences 锁完成比较、提交、请求 apply 和读回；不保证文件字节布局相同，也不承诺外网一定可用。`TC-SPRS-04` 与 E2E 的精确字段快照断言保持不变。
+- 原配置若已启用但 host 为空或 port 为 0，则与认证代理一样不接管该服务，保留其阻断或企业策略。已有异常 journal 无法精确恢复时保留活动证据并报错，不自行将此配置改为直连，也不重新启用残留端点。
+- 暂停用于 fail-open 时，HTTP/HTTPS 路由保持禁用，原始与最后写入的逐服务快照保留在活动 journal 中；正常恢复继续受 generation 与逐字段所有权检查约束。
+- 非 root Direct、Gui、Sudo 和纯假 I/O 适配器目前不执行此精确清空操作，仍保留安全禁用与不完整恢复分支。最终清理在无未完成写入时先将完整恢复证据原子、持久地保存到 `system_proxy_incomplete_restores.json`，再退出活动 ownership，并返回 `IncompleteRestore`；不能当作精确恢复成功。保存恢复证据失败、无法表达的认证元数据或原生事务部分失败时保留活动 journal。
+- 恢复记录按 generation 去重，相邻记录的原始与最后写入证据完全相同时合并为最新 generation；仅在最终清理与新 acquisition 时读取，不参与周期性协调。已有记录保留供后续恢复检查。新 acquisition 只在该服务字段最新记录中的最后写入值仍与当前值一致、且未放弃所有权时继承原始 baseline；手动或外部修改使用当前配置作为新 baseline。
+- Direct 的一次性同二进制子进程继承已持有 flock 的同一 open-file-description，验证 fd0 的文件身份后才访问 SystemConfiguration；父进程不显式 LOCK_UN，最后一个引用关闭才释放所有权。父进程退出不能让同数据目录的新 generation 越过仍在工作的子进程。子进程另有绝对截止时间、8 秒本地预算及来源 PID/启动身份检查，不安装持久 helper，也不新增 GUI/Sudo 授权路径。
+- Commit 已生效但 Apply 失败或崩溃时，pending 的 `needs_apply` 证据保留；后续不能仅凭配置读回相同就声称完成，必须重新请求 Apply 并读回。Apply 成功表示系统已接受应用请求，不代表所有应用即时完成动态更新。
+- 认证元数据采用保守拒绝：包括空的 HTTPUser/HTTPSUser 提示也保留活动证据而不清空。`networksetup` 在认证关闭时是否遗留这些空键，仍需原生验证；不能把纯模拟通过当作所有真实配置均可恢复。
+- 本次原生验收尚未执行。Linux 模拟与 Darwin metadata/type 检查不能替代已授权 GitHub macOS 临时 runner 的真实逐字段恢复；普通 GUI/Sudo 的精确清空仍是明确限制。测试必须在产品 suspension/stop 后、fallback cleanup 前取样，不能用清理脚本掩盖产品残留。
+- API 依据：[SCPreferences 锁/提交/应用](https://github.com/apple-oss-distributions/configd/blob/main/SystemConfiguration.fproj/SCPreferences.h)、[preferences path API](https://github.com/apple-oss-distributions/configd/blob/main/SystemConfiguration.fproj/SCPreferencesPath.h)、[flock 共享描述符语义](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/flock.2.html)。
+
 ## 清理步骤
 
 - 如脚本被外部终止，执行其 trap 并根据 snapshot 恢复系统代理。

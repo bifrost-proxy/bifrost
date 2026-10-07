@@ -268,6 +268,11 @@ struct DesktopUpgradeRelaunchMarker {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if bifrost_core::system_proxy::run_macos_proxy_restore_helper() {
+        return;
+    }
+
     if run_desktop_upgrade_relaunch_helper_from_env() {
         return;
     }
