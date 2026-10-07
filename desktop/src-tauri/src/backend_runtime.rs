@@ -1,7 +1,11 @@
 use super::*;
 
 mod port_retry;
+mod recovery;
+pub(super) use recovery::*;
 mod watchdog;
+mod watchdog_policy;
+pub(super) use watchdog_policy::*;
 
 pub(super) use port_retry::launch_backend_on_available_port;
 #[cfg(test)]
@@ -10,13 +14,9 @@ pub(super) use port_retry::{
     sidecar_stderr_reports_port_conflict_since,
 };
 
+pub(super) use watchdog::monitor_desktop_backend;
 #[cfg(test)]
-pub(super) use watchdog::{
-    confirms_managed_runtime_unresponsive, open_backend_recovery_circuit,
-    sustained_readiness_failure_action, BackendRecoveryBudget, BackendSignalSnapshot,
-    BackendWatchdogHealth, SustainedReadinessAction, WatchdogProbeDisposition,
-};
-pub(super) use watchdog::{monitor_desktop_backend, ManagedBackendExit};
+pub(super) use watchdog::open_backend_recovery_circuit;
 
 pub(super) fn ensure_backend_running(
     binary_path: &Path,
@@ -241,214 +241,6 @@ pub(super) fn show_native_launcher_startup_error(app: &AppHandle) {
     }
 }
 
-pub(super) struct BackendRecoveryGuard<'a> {
-    flag: &'a AtomicBool,
-}
-
-impl Drop for BackendRecoveryGuard<'_> {
-    fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
-    }
-}
-
-pub(super) fn begin_backend_recovery(state: &BackendState) -> Option<BackendRecoveryGuard<'_>> {
-    if state
-        .backend_recovery_in_progress
-        .swap(true, Ordering::SeqCst)
-    {
-        return None;
-    }
-
-    Some(BackendRecoveryGuard {
-        flag: &state.backend_recovery_in_progress,
-    })
-}
-
-pub(super) fn poll_managed_backend_exit(
-    state: &BackendState,
-) -> Result<Option<ManagedBackendExit>, String> {
-    let mut child_guard = state
-        .child
-        .lock()
-        .map_err(|_| "failed to access managed backend child".to_string())?;
-    let Some(child) = child_guard.as_mut() else {
-        return Ok(None);
-    };
-
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            let pid = child.id();
-            let _ = child_guard.take();
-            #[cfg(unix)]
-            let exit_signal = {
-                use std::os::unix::process::ExitStatusExt;
-                status.signal()
-            };
-            #[cfg(not(unix))]
-            let exit_signal = None;
-            Ok(Some(ManagedBackendExit {
-                pid,
-                exit_code: status.code(),
-                exit_signal,
-                detail: format!("managed backend child pid={pid} exited with status {status}"),
-            }))
-        }
-        Ok(None) => Ok(None),
-        Err(error) => {
-            let pid = child.id();
-            Err(format!(
-                "failed to poll managed backend child pid={pid}: {error}"
-            ))
-        }
-    }
-}
-
-pub(super) fn attempt_backend_recovery(app: &AppHandle, exited: &ManagedBackendExit) {
-    let Some(state) = app.try_state::<BackendState>() else {
-        return;
-    };
-
-    if state.shutdown_started.load(Ordering::SeqCst) || state.force_exit.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let Some(_recovery_guard) = begin_backend_recovery(&state) else {
-        return;
-    };
-
-    let recovery_started_at = Instant::now();
-    let mut exit_event = bifrost_core::SystemProxyLifecycleEvent::new(
-        "managed_child_exit_confirmed",
-        "desktop_watchdog",
-    );
-    exit_event.old_pid = Some(exited.pid);
-    exit_event.exit_code = exited.exit_code;
-    exit_event.exit_signal = exited.exit_signal;
-    exit_event.trigger = Some(exited.detail.clone());
-    if let Err(error) = bifrost_core::append_system_proxy_event(&state.data_dir, &exit_event) {
-        append_desktop_bootstrap_log(
-            &state.data_dir,
-            format!("failed to persist managed child exit event: {error}"),
-        );
-    }
-
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        format!(
-            "desktop backend watchdog triggering recovery for confirmed child exit; {}",
-            exited.detail
-        ),
-    );
-    state.startup_ready.store(false, Ordering::SeqCst);
-
-    if let Ok(mut startup_error) = state.startup_error.lock() {
-        *startup_error = None;
-    }
-
-    if let Err(error) =
-        cleanup_exited_managed_backend(&state.binary_path, &state.data_dir, exited.pid)
-    {
-        let message = format!(
-            "failed to consume exited managed backend runtime during recovery; refusing to start a replacement: {error}"
-        );
-        record_startup_error(&state, message);
-        try_start_native_handoff(app, "backend recovery failed");
-        return;
-    }
-
-    let preferred_port = match state.expected_port.lock() {
-        Ok(port) => *port,
-        Err(_) => {
-            record_startup_error(
-                &state,
-                "failed to read desktop expected proxy port during watchdog recovery".to_string(),
-            );
-            return;
-        }
-    };
-
-    match ensure_backend_running(
-        &state.binary_path,
-        &state.data_dir,
-        &state.startup_session_id,
-        preferred_port,
-        None,
-    ) {
-        Ok((child, port)) => {
-            let new_pid = child.as_ref().map(Child::id);
-            if let Ok(mut child_guard) = state.child.lock() {
-                *child_guard = child;
-            }
-
-            if let Ok(mut current_port) = state.port.lock() {
-                *current_port = port;
-            }
-
-            publish_startup_ready(&state);
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                format!("desktop backend watchdog recovery succeeded; active_port={port}"),
-            );
-            let mut event = bifrost_core::SystemProxyLifecycleEvent::new(
-                "managed_child_recovery_succeeded",
-                "desktop_watchdog",
-            );
-            event.old_pid = Some(exited.pid);
-            event.new_pid = new_pid;
-            event.exit_code = exited.exit_code;
-            event.exit_signal = exited.exit_signal;
-            event.recovery_elapsed_ms = Some(recovery_started_at.elapsed().as_millis() as u64);
-            let _ = bifrost_core::append_system_proxy_event(&state.data_dir, &event);
-            try_start_native_handoff(app, "backend watchdog recovery");
-        }
-        Err(error) => {
-            record_startup_error(&state, format!("desktop watchdog recovery failed: {error}"));
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                format!(
-                    "desktop backend watchdog recovery failed; automatic attempt stopped and manual recovery remains available after {:?}",
-                    BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY
-                ),
-            );
-            let mut event = bifrost_core::SystemProxyLifecycleEvent::new(
-                "managed_child_recovery_failed",
-                "desktop_watchdog",
-            );
-            event.old_pid = Some(exited.pid);
-            event.exit_code = exited.exit_code;
-            event.exit_signal = exited.exit_signal;
-            event.error = Some(error.to_string());
-            event.recovery_elapsed_ms = Some(recovery_started_at.elapsed().as_millis() as u64);
-            let _ = bifrost_core::append_system_proxy_event(&state.data_dir, &event);
-            std::thread::sleep(BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY);
-        }
-    }
-}
-
-fn cleanup_exited_managed_backend(
-    binary_path: &Path,
-    data_dir: &Path,
-    exited_pid: u32,
-) -> tauri::Result<()> {
-    if !runtime_markers_belong_to_exited_pid(data_dir, exited_pid)? {
-        append_desktop_bootstrap_log(
-            data_dir,
-            format!(
-                "confirmed managed backend pid={exited_pid} exited without remaining runtime markers"
-            ),
-        );
-        return Ok(());
-    }
-
-    append_desktop_bootstrap_log(
-        data_dir,
-        format!(
-            "consuming runtime markers for confirmed exited managed backend pid={exited_pid} with restart-preserving stop"
-        ),
-    );
-    stop_backend_for_restart_with_binary(binary_path, data_dir)
-}
-
 pub(super) fn schedule_desktop_cert_ready(data_dir: &Path) {
     let data_dir = data_dir.to_path_buf();
     std::thread::spawn(move || {
@@ -520,6 +312,21 @@ pub(super) fn refresh_upgrade_relaunch(
 }
 
 pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason: &str) -> bool {
+    let Some(guard) = begin_backend_recovery(state) else {
+        return false;
+    };
+    clear_backend_unavailable_if_healthy_guarded(state, &guard, reason)
+}
+
+fn clear_backend_unavailable_if_healthy_guarded(
+    state: &BackendState,
+    _guard: &BackendRecoveryGuard<'_>,
+    reason: &str,
+) -> bool {
+    if backend_shutdown_requested(state) {
+        return false;
+    }
+    let epoch = state.backend_lifecycle_epoch.load(Ordering::SeqCst);
     let upgrade_relaunch = refresh_upgrade_relaunch(state);
     let Ok(current_port) = state.port.lock().map(|port| *port) else {
         return false;
@@ -591,6 +398,11 @@ pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason:
         }
     }
 
+    if backend_shutdown_requested(state)
+        || state.backend_lifecycle_epoch.load(Ordering::SeqCst) != epoch
+    {
+        return false;
+    }
     clear_backend_unavailable_after_healthy_probe(state, current_port, reason)
 }
 
@@ -618,6 +430,12 @@ fn clear_backend_unavailable_after_healthy_probe(
     }
 
     if should_log {
+        // A trusted markerless/external runtime can appear while a failed owned
+        // replacement is waiting for retry. Its successful handoff supersedes
+        // that retry even when it reused the same port without a marker yet.
+        if state.child.lock().is_ok_and(|child| child.is_none()) {
+            state.backend_lifecycle_epoch.fetch_add(1, Ordering::SeqCst);
+        }
         append_desktop_bootstrap_log(
             &state.data_dir,
             format!("desktop backend recovered from manual-start state; reason={reason}; active_port={current_port}"),
@@ -676,6 +494,11 @@ pub(super) fn start_desktop_backend_now(
     let _recovery_guard = begin_backend_recovery(&state)
         .ok_or_else(|| "desktop backend start is already in progress".to_string())?;
 
+    if backend_shutdown_requested(&state) {
+        return Err("desktop shutdown is in progress".to_string());
+    }
+    state.backend_lifecycle_epoch.fetch_add(1, Ordering::SeqCst);
+
     append_desktop_bootstrap_log(
         &state.data_dir,
         format!("desktop backend start requested; reason={reason}"),
@@ -715,6 +538,9 @@ pub(super) fn start_desktop_backend_now(
             }
             if let Ok(mut current_port) = state.port.lock() {
                 *current_port = port;
+            }
+            if backend_shutdown_requested(&state) {
+                return Err("desktop shutdown cancelled backend start".into());
             }
             publish_startup_ready(&state);
             append_desktop_bootstrap_log(
@@ -1114,6 +940,12 @@ pub(super) fn update_desktop_proxy_port(
         }
     }
 
+    let recovery_guard = begin_backend_recovery(&state)
+        .ok_or_else(|| "desktop backend recovery is already in progress".to_string())?;
+    if backend_shutdown_requested(&state) {
+        return Err("desktop shutdown is in progress".to_string());
+    }
+    state.backend_lifecycle_epoch.fetch_add(1, Ordering::SeqCst);
     let current_port = *state
         .port
         .lock()
@@ -1123,10 +955,13 @@ pub(super) fn update_desktop_proxy_port(
     {
         BackendPortTransition::Rebound(runtime) => runtime,
         BackendPortTransition::RestartRequired => {
-            restart_backend_on_port(&state, current_port, port)
+            restart_backend_on_port(&state, &recovery_guard, current_port, port)
                 .map_err(|error| error.to_string())?
         }
     };
+    if backend_shutdown_requested(&state) {
+        return Err("desktop shutdown cancelled port change".into());
+    }
     save_desktop_config(&state.config_path, &DesktopConfig { proxy_port: port })
         .map_err(|error| error.to_string())?;
 
@@ -1270,12 +1105,10 @@ pub(super) fn write_clipboard(text: String) -> Result<(), String> {
 
 pub(super) fn restart_backend_on_port(
     state: &BackendState,
+    _recovery_guard: &BackendRecoveryGuard<'_>,
     current_port: u16,
     expected_port: u16,
 ) -> tauri::Result<DesktopPortUpdateResponse> {
-    let _recovery_guard = begin_backend_recovery(state)
-        .ok_or_else(|| anyhow("desktop backend recovery is already in progress".to_string()))?;
-
     append_desktop_bootstrap_log(
         &state.data_dir,
         format!(
@@ -1320,6 +1153,11 @@ pub(super) fn restart_backend_on_port(
         *child_guard = child;
     }
 
+    if backend_shutdown_requested(state) {
+        return Err(anyhow(
+            "desktop shutdown cancelled port-change restart".into(),
+        ));
+    }
     publish_startup_ready(state);
 
     Ok(DesktopPortUpdateResponse {

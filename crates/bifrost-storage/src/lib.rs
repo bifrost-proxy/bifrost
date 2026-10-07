@@ -1,4 +1,5 @@
 mod config;
+mod config_file;
 mod config_manager;
 mod data_dir;
 mod local_secrets;
@@ -9,6 +10,7 @@ mod unified_config;
 mod values;
 
 pub(crate) use config::BifrostConfig as LegacyBifrostConfig;
+pub use config_file::read_persisted_system_proxy_config;
 pub use config_manager::{
     ConfigChangeEvent, ConfigManager, RulesChangeOrigin, SharedConfigManager,
 };

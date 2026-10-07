@@ -153,9 +153,12 @@ pub struct CliProxyEnvironmentResult {
     pub changed_paths: Vec<PathBuf>,
 }
 
+mod runtime_cleanup;
+
 pub struct CliProxyEnvironmentManager {
     shell: CliProxyShell,
     config_paths: Vec<PathBuf>,
+    profile_lock_path: PathBuf,
 }
 
 impl CliProxyEnvironmentManager {
@@ -163,12 +166,14 @@ impl CliProxyEnvironmentManager {
         Ok(Self {
             shell,
             config_paths: shell.config_paths()?,
+            profile_lock_path: runtime_cleanup::current_home_profile_lock_path()?,
         })
     }
 
     fn with_paths(shell: CliProxyShell, config_paths: Vec<PathBuf>) -> Self {
         Self {
             shell,
+            profile_lock_path: runtime_cleanup::default_profile_lock_path(&config_paths),
             config_paths,
         }
     }
@@ -176,6 +181,7 @@ impl CliProxyEnvironmentManager {
     pub fn enable(&self, config: &CliProxyEnvironmentConfig) -> Result<CliProxyEnvironmentResult> {
         validate_environment_config(config)?;
         let block = generate_config_block(self.shell, config)?;
+        let _lock = self.lock_profiles()?;
         let prepared = self.prepare_updates(|_path, content| {
             let updated = replace_or_add_marked_block(&content, &block)?;
             if updated == content {
@@ -232,14 +238,16 @@ impl CliProxyEnvironmentManager {
     }
 
     fn disable_all_managed_for_home(home: &Path) -> Result<Vec<PathBuf>> {
-        let manager = Self::with_paths(
+        let mut manager = Self::with_paths(
             CliProxyShell::Bash,
             Self::all_supported_paths_for_home(home),
         );
+        manager.profile_lock_path = home.join(".bifrost_cli_proxy_profiles.lock");
         Ok(manager.disable()?.changed_paths)
     }
 
     pub fn disable(&self) -> Result<CliProxyEnvironmentResult> {
+        let _lock = self.lock_profiles()?;
         let prepared = self.prepare_updates(|_path, content| {
             let updated = remove_marked_block(&content)?;
             if updated == content {

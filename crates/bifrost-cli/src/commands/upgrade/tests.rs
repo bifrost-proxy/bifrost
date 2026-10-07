@@ -773,6 +773,7 @@ fn script_installs_use_the_target_aware_atomic_upgrade_path() {
 
 mod cli_alias;
 mod command_helpers;
+mod proxy_intent;
 mod review_comments;
 mod spawn_retry;
 mod upgrade_recovery;
@@ -804,11 +805,12 @@ fn test_build_restart_args_with_runtime_info() {
         restartable_runtime: false,
         binary_path: None,
         system_proxy_enabled: Some(false),
+        system_proxy_config_revision: None,
         system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         health_port: None,
     };
 
-    let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
+    let args = build_restart_args(RestartArgsSource::Runtime(&info), None);
     assert_eq!(
         args,
         vec![
@@ -839,11 +841,12 @@ fn test_build_restart_args_default_host_skipped() {
         restartable_runtime: false,
         binary_path: None,
         system_proxy_enabled: Some(false),
+        system_proxy_config_revision: None,
         system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         health_port: None,
     };
 
-    let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
+    let args = build_restart_args(RestartArgsSource::Runtime(&info), None);
     assert_eq!(
         args,
         vec![
@@ -861,12 +864,12 @@ fn test_build_restart_args_default_host_skipped() {
 #[test]
 fn test_build_restart_args_no_runtime_info_uses_default_config_system_proxy() {
     let default_system_proxy = RestartSystemProxyConfig {
+        intent_revision: 0,
         enabled: true,
         bypass: "localhost,127.0.0.1,::1,*.local".to_string(),
     };
     let args = build_restart_args(
         RestartArgsSource::DefaultConfig,
-        None,
         Some(&default_system_proxy),
     );
     assert_eq!(
@@ -886,12 +889,12 @@ fn test_build_restart_args_no_runtime_info_uses_default_config_system_proxy() {
 #[test]
 fn test_build_restart_args_no_runtime_info_preserves_disabled_default_config_system_proxy() {
     let default_system_proxy = RestartSystemProxyConfig {
+        intent_revision: 0,
         enabled: false,
         bypass: "localhost,127.0.0.1,::1,*.local".to_string(),
     };
     let args = build_restart_args(
         RestartArgsSource::DefaultConfig,
-        None,
         Some(&default_system_proxy),
     );
     assert_eq!(
@@ -923,6 +926,7 @@ fn upgrade_restart_ports_from_runtime_uses_runtime_ports() {
         restartable_runtime: false,
         binary_path: None,
         system_proxy_enabled: None,
+        system_proxy_config_revision: None,
         system_proxy_bypass: None,
         health_port: None,
     };
@@ -962,11 +966,12 @@ fn test_build_restart_args_no_host() {
         restartable_runtime: false,
         binary_path: None,
         system_proxy_enabled: Some(false),
+        system_proxy_config_revision: None,
         system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         health_port: None,
     };
 
-    let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
+    let args = build_restart_args(RestartArgsSource::Runtime(&info), None);
     assert_eq!(
         args,
         vec![
@@ -982,7 +987,7 @@ fn test_build_restart_args_no_host() {
 }
 
 #[test]
-fn test_build_restart_args_preserves_system_proxy_snapshot() {
+fn test_build_restart_args_latest_enabled_intent_overrides_suspended_startup_snapshot() {
     let info = crate::process::RuntimeInfo {
         pid: 12345,
         port: 19900,
@@ -993,14 +998,17 @@ fn test_build_restart_args_preserves_system_proxy_snapshot() {
         restartable_runtime: false,
         binary_path: None,
         system_proxy_enabled: Some(false),
+        system_proxy_config_revision: None,
         system_proxy_bypass: Some("runtime-bypass-ignored-by-snapshot".to_string()),
         health_port: None,
     };
-    let snapshot = RuntimeSystemProxySnapshot {
+    let intent = RestartSystemProxyConfig {
+        intent_revision: 0,
+        enabled: true,
         bypass: "localhost,127.0.0.1,*.local".to_string(),
     };
 
-    let args = build_restart_args(RestartArgsSource::Runtime(&info), Some(&snapshot), None);
+    let args = build_restart_args(RestartArgsSource::Runtime(&info), Some(&intent));
 
     assert_eq!(
         args,
@@ -1030,11 +1038,12 @@ fn test_build_restart_args_preserves_runtime_system_proxy_request() {
         restartable_runtime: false,
         binary_path: None,
         system_proxy_enabled: Some(true),
+        system_proxy_config_revision: None,
         system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         health_port: None,
     };
 
-    let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
+    let args = build_restart_args(RestartArgsSource::Runtime(&info), None);
 
     assert_eq!(
         args,
@@ -1064,11 +1073,12 @@ fn test_build_restart_args_defaults_to_no_system_proxy_for_legacy_runtime() {
         restartable_runtime: false,
         binary_path: None,
         system_proxy_enabled: None,
+        system_proxy_config_revision: None,
         system_proxy_bypass: None,
         health_port: None,
     };
 
-    let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
+    let args = build_restart_args(RestartArgsSource::Runtime(&info), None);
 
     assert_eq!(
         args,

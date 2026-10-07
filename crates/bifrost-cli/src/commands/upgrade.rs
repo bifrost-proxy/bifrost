@@ -36,13 +36,13 @@ use super::streamed_output::StreamedOutputCapture;
 use super::update_check::{get_latest_version, get_latest_version_fresh_with_diagnostics};
 use crate::config::get_bifrost_dir;
 use crate::process::{
-    capture_runtime_system_proxy_snapshot, find_process_on_port, is_process_running, read_pid,
-    read_runtime_info, write_runtime_info, RuntimeInfo, RuntimeStartMode,
-    RuntimeSystemProxySnapshot,
+    find_process_on_port, is_process_running, read_pid, read_runtime_info, write_runtime_info,
+    RuntimeInfo, RuntimeStartMode,
 };
 use bifrost_core::version_check::{
     is_newer_version, make_release_tag, VersionCache, GITHUB_RELEASE_URL,
 };
+#[cfg(test)]
 use bifrost_storage::ConfigManager;
 const GITHUB_BASE_URL: &str = "https://github.com";
 const DEFAULT_GITHUB_MIRROR_URLS: &[&str] = &[
@@ -144,6 +144,7 @@ enum TimedCommandStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RestartSystemProxyConfig {
+    intent_revision: u64,
     enabled: bool,
     bypass: String,
 }

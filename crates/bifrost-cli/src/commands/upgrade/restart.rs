@@ -60,6 +60,8 @@ pub(super) fn prepare_running_proxy_marker_with(
     recovered.started_at_ms = matching_runtime.and_then(|info| info.started_at_ms);
     recovered.binary_path = matching_runtime.and_then(|info| info.binary_path.clone());
     recovered.system_proxy_enabled = matching_runtime.and_then(|info| info.system_proxy_enabled);
+    recovered.system_proxy_config_revision =
+        matching_runtime.and_then(|info| info.system_proxy_config_revision);
     recovered.system_proxy_bypass =
         matching_runtime.and_then(|info| info.system_proxy_bypass.clone());
     write_runtime(&recovered)?;
@@ -99,12 +101,8 @@ pub(super) fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(
 
     println!("{}", "  Auto-restarting the running proxy...".bright_cyan());
 
-    let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
-    let default_system_proxy = if runtime_info.is_none() {
-        Some(default_restart_system_proxy_config()?)
-    } else {
-        None
-    };
+    // Reject unreadable preferences before stopping a working runtime.
+    restart_system_proxy_config(runtime_info.as_ref())?;
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
     crate::commands::upgrade_background::report_restarting_preserving_desktop_handoff(
@@ -117,14 +115,13 @@ pub(super) fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(
         .as_ref()
         .map(RestartArgsSource::Runtime)
         .unwrap_or(RestartArgsSource::DefaultConfig);
-    let args = build_restart_args(
-        restart_source,
-        system_proxy_snapshot.as_ref(),
-        default_system_proxy.as_ref(),
-    );
     let restart_ports = restart_ports_from_runtime(runtime_info.as_ref());
 
     wait_for_restart_ports_release(&restart_ports)?;
+    // Read again after shutdown so toggles accepted during the stop are not
+    // replaced by the startup snapshot. OS suspension is never user intent.
+    let restart_system_proxy = restart_system_proxy_config(runtime_info.as_ref())?;
+    let args = build_restart_args(restart_source, Some(&restart_system_proxy));
 
     println!(
         "{} {} {}",
@@ -133,7 +130,12 @@ pub(super) fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(
         args.join(" ")
     );
 
-    let status = Command::new(restart_executable)
+    let mut restart_command = Command::new(restart_executable);
+    set_restart_intent_revision(
+        &mut restart_command,
+        Some(restart_system_proxy.intent_revision),
+    );
+    let status = restart_command
         .args(&args)
         // The proxy we are restarting from may itself be a detached daemon child,
         // in which case it carries BIFROST_DETACHED_DAEMON_CHILD=1 in its env. That
@@ -198,7 +200,7 @@ fn restart_proxy_after_windows_deferred_install(
     let runtime_info = read_runtime_info();
     if !restart_proxy || !cli_owns_runtime_restart(runtime_info.as_ref()) {
         stop_tray_helper_before_windows_deferred_install(&data_dir);
-        schedule_windows_deferred_install(deferred_install, None)?;
+        schedule_windows_deferred_install(deferred_install, None, None)?;
         println!(
             "{}",
             "✓ Upgrade replacement scheduled; runtime restart remains owned by the desktop app."
@@ -218,7 +220,7 @@ fn restart_proxy_after_windows_deferred_install(
             ));
         }
         stop_tray_helper_before_windows_deferred_install(&data_dir);
-        schedule_windows_deferred_install(deferred_install, None)?;
+        schedule_windows_deferred_install(deferred_install, None, None)?;
         println!(
             "{}",
             "✓ Upgrade replacement scheduled and will finish after this process exits."
@@ -240,12 +242,8 @@ fn restart_proxy_after_windows_deferred_install(
         "  Auto-restarting the running proxy so Windows can replace bifrost.exe...".bright_cyan()
     );
 
-    let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
-    let default_system_proxy = if runtime_info.is_none() {
-        Some(default_restart_system_proxy_config()?)
-    } else {
-        None
-    };
+    // Reject unreadable preferences before stopping a working runtime.
+    restart_system_proxy_config(runtime_info.as_ref())?;
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
     crate::commands::upgrade_background::report_restarting_preserving_desktop_handoff(
@@ -258,14 +256,13 @@ fn restart_proxy_after_windows_deferred_install(
         .as_ref()
         .map(RestartArgsSource::Runtime)
         .unwrap_or(RestartArgsSource::DefaultConfig);
-    let args = build_restart_args(
-        restart_source,
-        system_proxy_snapshot.as_ref(),
-        default_system_proxy.as_ref(),
-    );
     let restart_ports = restart_ports_from_runtime(runtime_info.as_ref());
 
     wait_for_restart_ports_release(&restart_ports)?;
+    // Read again after shutdown so toggles accepted during the stop are not
+    // replaced by the startup snapshot. OS suspension is never user intent.
+    let restart_system_proxy = restart_system_proxy_config(runtime_info.as_ref())?;
+    let args = build_restart_args(restart_source, Some(&restart_system_proxy));
     stop_tray_helper_before_windows_deferred_install(&data_dir);
 
     println!(
@@ -275,7 +272,11 @@ fn restart_proxy_after_windows_deferred_install(
         args.join(" ")
     );
 
-    schedule_windows_deferred_install(deferred_install, Some(&args))?;
+    schedule_windows_deferred_install(
+        deferred_install,
+        Some(&args),
+        Some(restart_system_proxy.intent_revision),
+    )?;
     println!(
         "{}",
         "✓ Proxy restart scheduled with the new version after this process exits."
@@ -299,11 +300,13 @@ pub(super) fn stop_tray_helper_before_windows_deferred_install(data_dir: &Path) 
 pub(super) fn schedule_windows_deferred_install(
     deferred_install: WindowsDeferredInstall,
     restart_args: Option<&[String]>,
+    intent_revision: Option<u64>,
 ) -> Result<(), BifrostError> {
     let result = schedule_windows_deferred_install_via_staged_binary(
         &deferred_install,
         restart_args,
         std::process::id(),
+        intent_revision,
     );
     cleanup_staged_binary_after_schedule(&deferred_install.staged_binary, result)
 }
@@ -313,6 +316,7 @@ fn schedule_windows_deferred_install_via_staged_binary(
     deferred_install: &WindowsDeferredInstall,
     restart_args: Option<&[String]>,
     parent_pid: u32,
+    intent_revision: Option<u64>,
 ) -> Result<(), BifrostError> {
     let deferred_status_path = env::var_os(DESKTOP_MANAGED_DEFERRED_STATUS_ENV).map(PathBuf::from);
     let target_dir = deferred_install.target_path.parent().ok_or_else(|| {
@@ -332,6 +336,9 @@ fn schedule_windows_deferred_install_via_staged_binary(
         &handoff_ready_path,
     );
     let mut command = Command::new(&deferred_install.staged_binary);
+    // The staged helper, PowerShell and final start child inherit this exact
+    // source revision, so later user toggles supersede automatic restart flags.
+    set_restart_intent_revision(&mut command, intent_revision);
     command
         .args(&args)
         .stdin(Stdio::null())
@@ -1056,15 +1063,40 @@ try {
     Ok(())
 }
 
+pub(super) fn set_restart_intent_revision(command: &mut Command, revision: Option<u64>) {
+    if let Some(revision) = revision {
+        command.env(
+            crate::process::SYSTEM_PROXY_INTENT_REVISION_ENV,
+            revision.to_string(),
+        );
+    } else {
+        command.env_remove(crate::process::SYSTEM_PROXY_INTENT_REVISION_ENV);
+    }
+}
+
+#[cfg(test)]
 pub(super) fn default_restart_system_proxy_config() -> Result<RestartSystemProxyConfig, BifrostError>
 {
-    let bifrost_dir = get_bifrost_dir()?;
-    let config_manager = ConfigManager::new(bifrost_dir)?;
-    let config = futures::executor::block_on(config_manager.config());
-    Ok(RestartSystemProxyConfig {
-        enabled: config.system_proxy.enabled,
-        bypass: config.system_proxy.bypass,
-    })
+    restart_system_proxy_config(None)
+}
+
+fn restart_system_proxy_config(
+    runtime: Option<&RuntimeInfo>,
+) -> Result<RestartSystemProxyConfig, BifrostError> {
+    let config = bifrost_storage::read_persisted_system_proxy_config(&get_bifrost_dir()?)?;
+    Ok(resolved_restart_system_proxy_config(runtime, &config))
+}
+
+pub(super) fn resolved_restart_system_proxy_config(
+    runtime: Option<&RuntimeInfo>,
+    config: &bifrost_storage::NewSystemProxyConfig,
+) -> RestartSystemProxyConfig {
+    let (enabled, bypass) = crate::process::resolve_runtime_system_proxy_intent(runtime, config);
+    RestartSystemProxyConfig {
+        enabled,
+        bypass,
+        intent_revision: config.intent_revision,
+    }
 }
 
 pub(super) fn restart_ports_from_runtime(
@@ -1141,8 +1173,7 @@ pub(super) fn wait_for_restart_port_release(_port: u16) -> Result<(), BifrostErr
 
 pub(super) fn build_restart_args(
     source: RestartArgsSource<'_>,
-    system_proxy_snapshot: Option<&RuntimeSystemProxySnapshot>,
-    default_system_proxy: Option<&RestartSystemProxyConfig>,
+    desired_system_proxy: Option<&RestartSystemProxyConfig>,
 ) -> Vec<String> {
     let mut args = vec![
         "start".to_string(),
@@ -1168,27 +1199,21 @@ pub(super) fn build_restart_args(
         }
     }
 
-    if let Some(snapshot) = system_proxy_snapshot {
-        args.push("--system-proxy".to_string());
-        args.push("--proxy-bypass".to_string());
-        args.push(snapshot.bypass.clone());
+    let (enabled, bypass) = if let Some(intent) = desired_system_proxy {
+        (intent.enabled, Some(intent.bypass.clone()))
     } else if let RestartArgsSource::Runtime(info) = source {
-        if info.system_proxy_enabled.unwrap_or(false) {
-            args.push("--system-proxy".to_string());
-            if let Some(bypass) = info.system_proxy_bypass.as_ref() {
-                args.push("--proxy-bypass".to_string());
-                args.push(bypass.clone());
-            }
-        } else {
-            args.push("--no-system-proxy".to_string());
-        }
-    } else if let Some(config) = default_system_proxy {
-        if config.enabled {
-            args.push("--system-proxy".to_string());
+        (
+            info.system_proxy_enabled.unwrap_or(false),
+            info.system_proxy_bypass.clone(),
+        )
+    } else {
+        (false, None)
+    };
+    if enabled {
+        args.push("--system-proxy".to_string());
+        if let Some(bypass) = bypass {
             args.push("--proxy-bypass".to_string());
-            args.push(config.bypass.clone());
-        } else {
-            args.push("--no-system-proxy".to_string());
+            args.push(bypass);
         }
     } else {
         args.push("--no-system-proxy".to_string());

@@ -84,6 +84,61 @@ cargo test -p bifrost-core lifecycle_events_rotate_before_append -- --nocapture
 - stale generation 或外部代理已接管时拒绝写系统代理。
 - owner state 原子落盘，结构化 lifecycle events 可读取且有界轮转。
 
+### TC-RSPR-05：已接受的开启意图跨暂停与重启保留
+
+前置条件：仅在允许修改系统代理的隔离 macOS 测试机执行；先记录所有网络服务的代理基线，使用独立 data-dir 和非正式端口。
+
+操作步骤：
+
+1. 执行 `uname -s`。不是 Darwin 或未获得该测试机授权时停止，记录阻塞，不能在日常电脑替代执行。
+2. 启动本次构建，开启 System Proxy，记录 `bifrost system-proxy doctor --format json-pretty` 与 Settings 的 configured/effective 状态。
+3. 暂停 core 进程使 watchdog 进入故障恢复。观察 fail-open 后 OS 配置回到测试前基线，而 configured enabled 保持 true。
+4. 让替换 core 恢复，确认连续健康采样后恢复代理，无需再次点击开关。
+5. 在恢复等待中主动关闭代理，确认替换进程及后续采样都不重新开启。
+
+预期结果：临时暂停不改写意图；新关闭优先；无服务长期指向已退出的 Bifrost listener。恢复原配置不等于验证外部网络一定可达。
+
+### TC-RSPR-06：字段级原配置与人工改动
+
+前置条件与平台检查同 TC-RSPR-05。
+
+操作步骤：
+
+1. 在隔离网络服务中准备不同 HTTP/HTTPS 开关和 bypass，并保存完整原值。
+2. 开启 Bifrost，再只修改其中一个协议的 OS 设置；关闭 Bifrost。
+3. 检查被人工修改字段未被覆盖，其他仍由 Bifrost 管理的字段恢复原值。
+4. 重复测试：接管后禁用服务，再执行清理，然后重新启用该服务。
+5. 将接管服务重命名，触发恢复并查看 doctor/journal。该场景预期为明确的未完成恢复，而不是错误地宣称完成或猜测另一个服务。
+
+预期结果：v3 快照逐服务/逐字段恢复；独立人工修改被保留；服务禁用不丢失清理责任；名称变化保留未完成记录。测试后手动恢复预先保存的全部基线。
+
+### TC-RSPR-07：授权取消不会重复弹窗
+
+前置条件与平台检查同 TC-RSPR-05；使用确实需要权限的隔离 macOS 配置。
+
+操作步骤：
+
+1. 在 Settings 或 CLI 发起一次明确 enable，在授权对话框中取消。
+2. 等待至少两个普通 reconcile 周期，确认同 generation 不再弹出授权请求。
+3. 检查 desired 仍为用户选择，effective 状态/错误如实显示未应用，ownership 记录保留授权抑制。
+4. 再次明确选择 enable，确认这是一次新请求，允许重新授权；旧对话框的迟到结果不得抑制新 generation。
+
+预期结果：一次取消只终止当前授权尝试；不能自动循环询问，也不能把取消写成关闭偏好。
+
+### TC-RSPR-08：Desktop 替换与停止交接
+
+前置条件与平台检查同 TC-RSPR-05。
+
+操作步骤：
+
+1. 用 Desktop 启动 core 并记录 PID/start identity/端口/generation。
+2. 在 watchdog 正在探测时手动重启或切换端口；确认旧采样不会结束新 PID。
+3. 模拟一次启动失败后恢复启动条件，确认有界重试最终启动健康实例。
+4. 在等待重试时点击停止，确认后续自动任务不再次启动或修改代理。
+5. 切换端口，检查旧端口仅在 OS 配置不再引用它之后退役；未完成交接期间不能继续堆叠新端口切换。
+
+预期结果：进程/端口/代理所有权一致；正常关闭和外部 runtime 接管优先；失败和熔断状态不能虚报 ready。
+
 ## 执行记录
 
 | 日期 | 用例 | 结果 | 证据摘要 |
@@ -93,3 +148,6 @@ cargo test -p bifrost-core lifecycle_events_rotate_before_append -- --nocapture
 | 2026-08-22 | TC-RSPR-03 | 通过 | 临时数据目录中 fail-open 3 秒、fail-closed 5 秒持久化成功；2 秒参数被拒绝；最终配置字段校验通过，目录自动回收。 |
 | 2026-08-22 | TC-RSPR-04 | 通过 | generation guard、owner/events 原子落盘与 lifecycle rotation 三个定向单测全部通过。 |
 | 2026-08-23 | TC-RSPR-02 | 通过 | 使用隔离构建产物和脚本自动创建的临时 data-dir/动态端口执行：50+ 个 ASR/Voice/Speech、AI/IM、Remote Invoke、worker-jobs、Scripts、Replay API 均未出现 pressure 503/5xx；真实空目录 ASR task 在 `critical` 下成功创建 worker job；Scripts Test、Replay 请求及回放流量详情均为 200；Playwright 遍历 14 个页面且没有 Admin API 4xx/5xx（导航取消除外）或请求失败。另以全新正常压力实例确认 RSS 约 106 MiB 时 health `pressure=normal`。主服务 9900/9901 未操作。 |
+
+| 2026-10-07 | TC-RSPR-05～08 | 阻塞，未执行原生动作 | 平台前置检查实际返回 Linux；本任务禁止修改任何真实主机代理配置，未使用用户 Mac。已停止在平台检查处，未把 fake-OS、headless 或 Darwin source-check 计为原生验证通过。 |
+| 2026-10-07 | TC-RSPR-02 shell/API 部分 | 部分验证通过 | 本次 CLI 构建实际运行 `test_runtime_pressure_degradation.sh`，critical 压力下转发、Replay、worker task、API 降级、payload 与 doctor 断言通过；使用临时目录、动态端口和 `--no-system-proxy`。本轮没有复跑该用例的浏览器 UI 部分，也没有运行原生 OS 代理动作。 |

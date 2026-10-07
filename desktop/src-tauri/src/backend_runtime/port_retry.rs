@@ -7,6 +7,26 @@ pub(crate) fn launch_backend_on_available_port(
     preferred_port: u16,
     allow_port_fallback: bool,
 ) -> tauri::Result<(Option<Child>, u16)> {
+    launch_backend_on_available_port_observed(
+        binary_path,
+        data_dir,
+        startup_session_id,
+        preferred_port,
+        allow_port_fallback,
+        None,
+        &mut |_| {},
+    )
+}
+
+pub(super) fn launch_backend_on_available_port_observed(
+    binary_path: &Path,
+    data_dir: &Path,
+    startup_session_id: &str,
+    preferred_port: u16,
+    allow_port_fallback: bool,
+    recovery_generation: Option<&str>,
+    on_spawn: &mut impl FnMut(u32),
+) -> tauri::Result<(Option<Child>, u16)> {
     let max_offset = if allow_port_fallback {
         MAX_PORT_INCREMENT_ATTEMPTS
     } else {
@@ -22,7 +42,14 @@ pub(crate) fn launch_backend_on_available_port(
         }
 
         let stderr_offset = sidecar_stderr_offset(data_dir);
-        let mut child = start_backend(binary_path, data_dir, startup_session_id, port)?;
+        let mut child = start_backend(
+            binary_path,
+            data_dir,
+            startup_session_id,
+            port,
+            recovery_generation,
+        )?;
+        on_spawn(child.id());
         match wait_for_backend(&mut child, data_dir, port, Duration::from_secs(20)) {
             Ok(()) => {
                 append_desktop_bootstrap_log(

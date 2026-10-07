@@ -1,13 +1,10 @@
+// Legacy startup orchestration is being split incrementally; proxy reconciliation lives in start/system_proxy_reconcile.rs.
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
-use std::io::Read;
-use std::io::{self, IsTerminal, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
-use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 use bifrost_admin::push::{
@@ -50,8 +47,6 @@ use crate::runtime_health::{spawn_scheduler_heartbeat_task, RuntimeHealthLane};
 
 const ASYNC_TRAFFIC_BUFFER_SIZE: usize = MAX_TRAFFIC_MAX_RECORDS * 3;
 const MAX_PORT_INCREMENT_ATTEMPTS: u16 = 64;
-const PORT_REBIND_OLD_LISTENER_GRACE_PERIOD: Duration = Duration::from_millis(250);
-const SYSTEM_PROXY_FULL_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // Reconcile interval for the system-proxy watcher. Defaults to 30s in production;
 // overridable via BIFROST_SYSTEM_PROXY_RECONCILE_SECS so E2E tests can shorten the
 // wait (the dirty-backup reconcile case otherwise forces a >30s sleep per run).
@@ -92,10 +87,6 @@ where
         std::panic::resume_unwind(payload);
     }
 }
-#[cfg(target_os = "macos")]
-const SYSTEM_PROXY_WAKE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-#[cfg(target_os = "macos")]
-const SYSTEM_PROXY_WAKE_GAP_THRESHOLD: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
@@ -536,578 +527,8 @@ fn log_startup_phase(phase: &'static str, started_at: Instant) {
     );
 }
 
-struct SystemProxyReconcileConfig {
-    bifrost_dir: PathBuf,
-    system_proxy_manager: Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
-    desired_enabled: Arc<AtomicBool>,
-    proxy_host: String,
-    proxy_port: u16,
-    system_proxy_bypass: String,
-    enabled_flag: Arc<AtomicBool>,
-    stop_flag: Arc<AtomicBool>,
-    daemon_mode: bool,
-    defer_startup_recovery_for_restart_handoff: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SystemProxyOwnership {
-    Disabled,
-    ThisBifrost,
-    Other,
-}
-
-fn should_skip_system_proxy_full_reconcile(
-    ownership: SystemProxyOwnership,
-    should_enable: bool,
-    applied_by_this_runtime: bool,
-    since_last_full_reconcile: Option<Duration>,
-) -> bool {
-    ownership == SystemProxyOwnership::ThisBifrost
-        && should_enable
-        && applied_by_this_runtime
-        && since_last_full_reconcile
-            .is_some_and(|elapsed| elapsed < SYSTEM_PROXY_FULL_RECONCILE_INTERVAL)
-}
-
-fn wait_for_reconcile(stop_flag: &AtomicBool, bifrost_dir: &Path, interval: Duration) -> bool {
-    let sleep_until = Instant::now() + interval;
-    while Instant::now() < sleep_until {
-        if stop_flag.load(Ordering::Acquire)
-            || should_stop_system_proxy_reconcile_for_shutdown(bifrost_dir)
-        {
-            stop_flag.store(true, Ordering::Release);
-            return true;
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
-    false
-}
-
-fn wait_after_converged_system_proxy(stop_flag: &AtomicBool, bifrost_dir: &Path) -> bool {
-    tracing::debug!(
-        target: "bifrost_cli::startup",
-        "system proxy remains converged; full reconcile skipped"
-    );
-    wait_for_reconcile(stop_flag, bifrost_dir, system_proxy_reconcile_interval())
-}
-
-fn inspect_system_proxy_ownership(proxy_host: &str, proxy_port: u16) -> SystemProxyOwnership {
-    match bifrost_core::SystemProxyManager::get_current() {
-        Ok(current) if !current.enable => SystemProxyOwnership::Disabled,
-        Ok(current) if current.target_matches(proxy_host, proxy_port) => {
-            SystemProxyOwnership::ThisBifrost
-        }
-        Ok(_) => SystemProxyOwnership::Other,
-        Err(error) => {
-            tracing::warn!(
-                target: "bifrost_cli::startup",
-                error = %error,
-                host = %proxy_host,
-                port = proxy_port,
-                "failed to inspect current system proxy ownership"
-            );
-            SystemProxyOwnership::Disabled
-        }
-    }
-}
-
-fn system_proxy_target_is_ready(proxy_host: &str, proxy_port: u16) -> bool {
-    let host = if proxy_host == "0.0.0.0" {
-        "127.0.0.1"
-    } else {
-        proxy_host
-    };
-    let Ok(address) = format!("{host}:{proxy_port}").parse::<SocketAddr>() else {
-        return false;
-    };
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(400)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
-    if write!(
-        stream,
-        "GET http://bifrost-runtime-canary.invalid/__bifrost_runtime_canary HTTP/1.1\r\nHost: bifrost-runtime-canary.invalid\r\nConnection: close\r\n\r\n"
-    )
-    .is_err()
-    {
-        return false;
-    }
-    let mut response = [0_u8; 64];
-    let mut received = 0;
-    while received < response.len() {
-        match stream.read(&mut response[received..]) {
-            Ok(0) => break,
-            Ok(read) => {
-                received += read;
-                if response[..received]
-                    .windows(2)
-                    .any(|window| window == b"\r\n")
-                {
-                    break;
-                }
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                break;
-            }
-            Err(_) => return false,
-        }
-    }
-    received > 0 && response[..received].starts_with(b"HTTP/1.1 2")
-}
-
-#[rustfmt::skip]
-fn suspend_unready_owned_system_proxy(should_enable: bool, ownership: SystemProxyOwnership, target_ready: bool, enabled_flag: &AtomicBool,
-    manager: &tokio::sync::RwLock<bifrost_core::SystemProxyManager>,
-    _proxy_host: &str, _proxy_port: u16,
-) -> bool {
-    if !should_enable || ownership != SystemProxyOwnership::ThisBifrost || target_ready {
-        return false;
-    }
-    let mut manager = manager.blocking_write();
-    let transition = manager
-        .ensure_managed_ownership()
-        .and_then(|ownership| match ownership {
-            Some(ownership) => manager.suspend_managed_if_generation(&ownership.generation),
-            None => Ok(bifrost_core::GuardedSystemProxyTransition::NotManaged),
-        });
-    if let Err(error) = transition {
-        tracing::warn!(error = %error, "failed to suspend unready owned system proxy");
-        return false;
-    }
-    enabled_flag.store(false, Ordering::Release);
-    true
-}
-
-fn resume_ready_managed_system_proxy(
-    manager: &mut bifrost_core::SystemProxyManager,
-    proxy_host: &str,
-    proxy_port: u16,
-) -> bifrost_core::Result<bool> {
-    let Some(ownership) = manager.ensure_managed_ownership()? else {
-        return Ok(false);
-    };
-    if ownership.applied || !ownership.target.target_matches(proxy_host, proxy_port) {
-        return Ok(false);
-    }
-    interpret_managed_resume_transition(
-        manager.resume_managed_if_generation(&ownership.generation)?,
-    )
-}
-
-fn interpret_managed_resume_transition(
-    transition: bifrost_core::GuardedSystemProxyTransition,
-) -> bifrost_core::Result<bool> {
-    match transition {
-        bifrost_core::GuardedSystemProxyTransition::Applied
-        | bifrost_core::GuardedSystemProxyTransition::AlreadyInState => Ok(true),
-        bifrost_core::GuardedSystemProxyTransition::OwnershipChanged
-        | bifrost_core::GuardedSystemProxyTransition::NotManaged => {
-            Err(bifrost_core::BifrostError::Config(
-                "System proxy ownership changed while resuming fail-open recovery; preserving the current external configuration"
-                    .into(),
-            ))
-        }
-    }
-}
-
-fn complete_ready_system_proxy_reconcile(
-    resume_result: bifrost_core::Result<bool>,
-    enable: impl FnOnce() -> bifrost_core::Result<()>,
-) -> bifrost_core::Result<()> {
-    match resume_result {
-        Ok(true) => Ok(()),
-        Ok(false) => enable(),
-        Err(error) => Err(error),
-    }
-}
-
-fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
-    let SystemProxyReconcileConfig {
-        bifrost_dir,
-        system_proxy_manager,
-        desired_enabled,
-        proxy_host,
-        proxy_port,
-        system_proxy_bypass,
-        enabled_flag,
-        stop_flag,
-        daemon_mode,
-        defer_startup_recovery_for_restart_handoff,
-    } = config;
-
-    let _ = std::thread::Builder::new()
-        .name("bifrost-system-proxy-reconcile".to_string())
-        .spawn(move || {
-            let started_at = Instant::now();
-
-            if !should_run_system_proxy_reconcile_startup_recovery(
-                &bifrost_dir,
-                desired_enabled.load(Ordering::Acquire),
-                defer_startup_recovery_for_restart_handoff,
-            ) {
-                tracing::info!(
-                    target: "bifrost_cli::startup",
-                    data_dir = %bifrost_dir.display(),
-                    "system proxy reconcile startup recovery skipped for restart handoff"
-                );
-            } else if let Err(error) =
-                bifrost_core::SystemProxyManager::recover_from_crash(&bifrost_dir)
-            {
-                tracing::warn!(
-                    error = %error,
-                    "[SYSTEM_PROXY] Failed to recover system proxy from previous crash"
-                );
-            }
-
-            let mut applied_by_this_runtime = false;
-            let mut last_full_reconcile_at: Option<Instant> = None;
-            let mut startup_external_owner_logged = false;
-            let mut idle_logged = false;
-            while !stop_flag.load(Ordering::Acquire) {
-                if should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir) {
-                    stop_flag.store(true, Ordering::Release);
-                    return;
-                }
-                let should_enable = desired_enabled.load(Ordering::Acquire);
-                let ownership = inspect_system_proxy_ownership(&proxy_host, proxy_port);
-                let target_ready = system_proxy_target_is_ready(&proxy_host, proxy_port);
-                if suspend_unready_owned_system_proxy(should_enable, ownership, target_ready, &enabled_flag, &system_proxy_manager, &proxy_host, proxy_port) {
-                    applied_by_this_runtime = false;
-                    if wait_for_reconcile(&stop_flag, &bifrost_dir, Duration::from_secs(2)) {
-                        return;
-                    }
-                    continue;
-                }
-                if should_enable && !target_ready {
-                    enabled_flag.store(false, Ordering::Release);
-                    tracing::warn!(
-                        target: "bifrost_cli::startup",
-                        host = %proxy_host,
-                        port = proxy_port,
-                        "system proxy target is not ready; preserving direct connectivity before retry"
-                    );
-                    if wait_for_reconcile(&stop_flag, &bifrost_dir, Duration::from_secs(2)) {
-                        return;
-                    }
-                    continue;
-                }
-                let since_last_full_reconcile =
-                    last_full_reconcile_at.map(|instant| instant.elapsed());
-                let skip_full_reconcile = should_skip_system_proxy_full_reconcile(
-                    ownership,
-                    should_enable,
-                    applied_by_this_runtime,
-                    since_last_full_reconcile,
-                );
-                match ownership {
-                    SystemProxyOwnership::Other => {
-                        if applied_by_this_runtime || enabled_flag.load(Ordering::Acquire) {
-                            applied_by_this_runtime = false;
-                            enabled_flag.store(false, Ordering::Release);
-                            tracing::info!(
-                                target: "bifrost_cli::startup",
-                                host = %proxy_host,
-                                port = proxy_port,
-                                "system proxy no longer points to this Bifrost; pausing automatic reconcile"
-                            );
-                        } else if should_enable && !startup_external_owner_logged {
-                            startup_external_owner_logged = true;
-                            tracing::info!(
-                                target: "bifrost_cli::startup",
-                                host = %proxy_host,
-                                port = proxy_port,
-                                "system proxy is already owned by another proxy; startup auto-apply skipped"
-                            );
-                        }
-                        let sleep_until = Instant::now() + system_proxy_reconcile_interval();
-                        while Instant::now() < sleep_until {
-                            if stop_flag.load(Ordering::Acquire)
-                                || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
-                            {
-                                stop_flag.store(true, Ordering::Release);
-                                return;
-                            }
-                            std::thread::sleep(Duration::from_secs(1));
-                        }
-                        continue;
-                    }
-                    SystemProxyOwnership::ThisBifrost => {
-                        applied_by_this_runtime = true;
-                        enabled_flag.store(true, Ordering::Release);
-                        if skip_full_reconcile {
-                            if wait_after_converged_system_proxy(&stop_flag, &bifrost_dir) {
-                                return;
-                            }
-                            continue;
-                        }
-                    }
-                    SystemProxyOwnership::Disabled => {
-                        if !should_enable && !enabled_flag.load(Ordering::Acquire) {
-                            if !idle_logged {
-                                idle_logged = true;
-                                tracing::info!(
-                                    target: "bifrost_cli::startup",
-                                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                                    "system proxy reconcile is idle until system proxy is enabled"
-                                );
-                            }
-                            let sleep_until = Instant::now() + system_proxy_reconcile_interval();
-                            while Instant::now() < sleep_until {
-                                if stop_flag.load(Ordering::Acquire)
-                                    || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
-                                {
-                                    stop_flag.store(true, Ordering::Release);
-                                    return;
-                                }
-                                std::thread::sleep(Duration::from_secs(1));
-                            }
-                            continue;
-                        }
-                    }
-                }
-
-                if !should_enable {
-                    if applied_by_this_runtime || enabled_flag.load(Ordering::Acquire) {
-                        tracing::info!(
-                            target: "bifrost_cli::startup",
-                            host = %proxy_host,
-                            port = proxy_port,
-                            "system proxy reconcile skipped because runtime desired state is disabled"
-                        );
-                    }
-                    applied_by_this_runtime = false;
-                    enabled_flag.store(false, Ordering::Release);
-                    let sleep_until = Instant::now() + system_proxy_reconcile_interval();
-                    while Instant::now() < sleep_until {
-                        if stop_flag.load(Ordering::Acquire)
-                            || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
-                        {
-                            stop_flag.store(true, Ordering::Release);
-                            return;
-                        }
-                        std::thread::sleep(Duration::from_secs(1));
-                    }
-                    continue;
-                }
-
-                let mut manager = system_proxy_manager.blocking_write();
-                let resume_result = resume_ready_managed_system_proxy(
-                    &mut manager,
-                    &proxy_host,
-                    proxy_port,
-                );
-                let result = complete_ready_system_proxy_reconcile(resume_result, || {
-                    manager.enable(&proxy_host, proxy_port, Some(&system_proxy_bypass))
-                });
-
-                let final_result = match &result {
-                    Ok(()) => result,
-                    Err(error) => {
-                        let msg = error.to_string();
-                        if msg.contains("RequiresAdmin") {
-                            #[cfg(target_os = "macos")]
-                            {
-                                if daemon_mode {
-                                    println!("System proxy requires admin privileges; applying asynchronously via GUI authorization if approved...");
-                                } else {
-                                    println!("System proxy requires admin privileges, requesting authorization asynchronously...");
-                                }
-                                manager.enable_with_gui_auth(
-                                    &proxy_host,
-                                    proxy_port,
-                                    Some(&system_proxy_bypass),
-                                )
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                result
-                            }
-                        } else {
-                            result
-                        }
-                    }
-                };
-
-                match final_result {
-                    Ok(()) => {
-                        applied_by_this_runtime = true;
-                        last_full_reconcile_at = Some(Instant::now());
-                        enabled_flag.store(true, Ordering::Release);
-                        tracing::info!(
-                            target: "bifrost_cli::startup",
-                            elapsed_ms = started_at.elapsed().as_millis() as u64,
-                            host = %proxy_host,
-                            port = proxy_port,
-                            "system proxy full reconcile completed"
-                        );
-                    }
-                    Err(error) => {
-                        let msg = error.to_string();
-                        if msg.contains("UserCancelled") {
-                            println!("System proxy not enabled (authorization cancelled)");
-                        } else if msg.contains("RequiresAdmin") && daemon_mode {
-                            println!("System proxy requires administrator privileges; daemon will continue without changing system proxy. You can toggle it later via CLI or Admin UI.");
-                        } else if msg.contains("RequiresAdmin") {
-                            println!("System proxy requires administrator privileges and was not enabled.");
-                        } else {
-                            eprintln!("Failed to enable system proxy asynchronously: {}", error);
-                        }
-                        tracing::warn!(
-                            target: "bifrost_cli::startup",
-                            error = %error,
-                            elapsed_ms = started_at.elapsed().as_millis() as u64,
-                            "system proxy reconcile failed"
-                        );
-                        if msg.contains("UserCancelled") || msg.contains("RequiresAdmin") {
-                            return;
-                        }
-                    }
-                }
-
-                drop(manager);
-                let sleep_until = Instant::now() + system_proxy_reconcile_interval();
-                while Instant::now() < sleep_until {
-                    if stop_flag.load(Ordering::Acquire)
-                        || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
-                    {
-                        stop_flag.store(true, Ordering::Release);
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            }
-        });
-}
-
-#[cfg(target_os = "macos")]
-fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
-    let SystemProxyReconcileConfig {
-        bifrost_dir,
-        system_proxy_manager,
-        desired_enabled,
-        proxy_host,
-        proxy_port,
-        system_proxy_bypass,
-        enabled_flag,
-        stop_flag,
-        ..
-    } = config;
-
-    let _ = std::thread::Builder::new()
-        .name("bifrost-system-proxy-wake-reconcile".to_string())
-        .spawn(move || {
-            let mut last_monotonic_check = Instant::now();
-            let mut last_wall_check = SystemTime::now();
-            while !stop_flag.load(Ordering::Acquire) {
-                std::thread::sleep(SYSTEM_PROXY_WAKE_CHECK_INTERVAL);
-                if stop_flag.load(Ordering::Acquire)
-                    || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
-                {
-                    stop_flag.store(true, Ordering::Release);
-                    return;
-                }
-
-                let monotonic_gap = last_monotonic_check.elapsed();
-                let wall_now = SystemTime::now();
-                let wall_gap = wall_now
-                    .duration_since(last_wall_check)
-                    .unwrap_or_else(|_| Duration::from_secs(0));
-                last_monotonic_check = Instant::now();
-                last_wall_check = wall_now;
-                if monotonic_gap < SYSTEM_PROXY_WAKE_GAP_THRESHOLD
-                    && wall_gap < SYSTEM_PROXY_WAKE_GAP_THRESHOLD
-                {
-                    continue;
-                }
-
-                tracing::info!(
-                    target: "bifrost_cli::startup",
-                    trigger = "scheduler_wall_gap",
-                    monotonic_gap_ms = monotonic_gap.as_millis() as u64,
-                    wall_gap_ms = wall_gap.as_millis() as u64,
-                    "system proxy scheduler or wake gap detected; reconciling immediately"
-                );
-                let should_enable = desired_enabled.load(Ordering::Acquire);
-                if !should_enable {
-                    enabled_flag.store(false, Ordering::Release);
-                    tracing::info!(
-                        target: "bifrost_cli::startup",
-                        host = %proxy_host,
-                        port = proxy_port,
-                        "system proxy wake reconcile skipped because runtime desired state is disabled"
-                    );
-                    continue;
-                }
-                let target_ready = system_proxy_target_is_ready(&proxy_host, proxy_port);
-                if suspend_unready_owned_system_proxy(should_enable, SystemProxyOwnership::ThisBifrost, target_ready, &enabled_flag, &system_proxy_manager, &proxy_host, proxy_port) {
-                    tracing::warn!(
-                        target: "bifrost_cli::startup",
-                        host = %proxy_host,
-                        port = proxy_port,
-                        "system proxy wake reconcile skipped because target is unresponsive"
-                    );
-                    continue;
-                }
-                match inspect_system_proxy_ownership(&proxy_host, proxy_port) {
-                    SystemProxyOwnership::ThisBifrost => {
-                        enabled_flag.store(true, Ordering::Release);
-                    }
-                    SystemProxyOwnership::Other => {
-                        enabled_flag.store(false, Ordering::Release);
-                        tracing::info!(
-                            target: "bifrost_cli::startup",
-                            host = %proxy_host,
-                            port = proxy_port,
-                            "system proxy wake reconcile detected another proxy owner; leaving it unchanged"
-                        );
-                        continue;
-                    }
-                    SystemProxyOwnership::Disabled => {
-                        if !enabled_flag.load(Ordering::Acquire) {
-                            tracing::info!(
-                                target: "bifrost_cli::startup",
-                                host = %proxy_host,
-                                port = proxy_port,
-                                "system proxy wake reconcile skipped because this Bifrost is not managing system proxy"
-                            );
-                            continue;
-                        }
-                    }
-                }
-                let lock_started_at = Instant::now();
-                let mut manager = system_proxy_manager.blocking_write();
-                tracing::info!(
-                    target: "bifrost_cli::startup",
-                    wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
-                    "acquired_system_proxy_lock for wake reconcile"
-                );
-                match manager.enable(&proxy_host, proxy_port, Some(&system_proxy_bypass)) {
-                    Ok(()) => {
-                        enabled_flag.store(true, Ordering::Release);
-                        tracing::info!(
-                            target: "bifrost_cli::startup",
-                            host = %proxy_host,
-                            port = proxy_port,
-                            "system proxy wake reconcile completed"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bifrost_cli::startup",
-                            error = %error,
-                            "system proxy wake reconcile failed"
-                        );
-                    }
-                }
-            }
-        });
-}
+mod system_proxy_reconcile;
+use system_proxy_reconcile::*;
 
 #[cfg(target_os = "macos")]
 fn spawn_system_proxy_launchd_install_task(
@@ -1313,12 +734,30 @@ fn listener_task_error(
     }
 }
 
-fn abort_listener_after_grace_period(handle: tokio::task::JoinHandle<bifrost_core::Result<()>>) {
-    tokio::spawn(async move {
-        tokio::time::sleep(PORT_REBIND_OLD_LISTENER_GRACE_PERIOD).await;
-        handle.abort();
-    });
+fn preserve_listener_after_transfer(
+    next: tokio::task::JoinHandle<bifrost_core::Result<()>>,
+    result: bifrost_core::Result<()>,
+    observed: bifrost_core::Result<Option<bifrost_core::ManagedSystemProxyOwnership>>,
+    old_host: &str,
+    old_port: u16,
+) -> bifrost_core::Result<tokio::task::JoinHandle<bifrost_core::Result<()>>> {
+    if let Err(error) = result {
+        let definitely_uncommitted = observed
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .is_some_and(|lease| lease.target.target_matches(old_host, old_port));
+        if definitely_uncommitted {
+            next.abort();
+            return Err(error);
+        }
+        tracing::warn!(%error, old_port, "proxy handoff partially committed or uncertain; retaining both listeners until OS readback permits retirement");
+    }
+    Ok(next)
 }
+
+mod listener_retirement;
+use listener_retirement::RetiredProxyListeners;
 
 fn recover_proxy_state_before_start(bifrost_dir: &std::path::Path) {
     tracing::info!(
@@ -1348,53 +787,97 @@ fn recover_proxy_state_before_start(bifrost_dir: &std::path::Path) {
 struct RestartHandoffStartupGuard {
     bifrost_dir: PathBuf,
     active: bool,
+    generation: Option<String>,
+    runtime_snapshot: Option<Vec<u8>>,
 }
 
 impl RestartHandoffStartupGuard {
     fn new(bifrost_dir: PathBuf) -> Self {
+        let generation = bifrost_core::SystemProxyManager::new(bifrost_dir.clone())
+            .read_managed_ownership()
+            .ok()
+            .flatten()
+            .map(|lease| lease.generation);
+        let runtime_snapshot = std::fs::read(bifrost_dir.join("runtime.json")).ok();
         Self {
             bifrost_dir,
             active: true,
+            generation,
+            runtime_snapshot,
         }
     }
-
     fn disarm(&mut self) {
         self.active = false;
     }
+    fn still_owns_handoff(&self) -> bifrost_core::Result<bool> {
+        let current = match std::fs::read(self.bifrost_dir.join("runtime.json")) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error.into()),
+        };
+        let runtime: RuntimeInfo = serde_json::from_slice(&current).map_err(|error| {
+            bifrost_core::BifrostError::Config(format!(
+                "invalid runtime during aborted handoff: {error}"
+            ))
+        })?;
+        if runtime.pid == std::process::id()
+            && runtime.started_at_ms.is_some()
+            && runtime.started_at_ms == bifrost_core::current_process_start_time_ms()
+        {
+            return Ok(true);
+        }
+        Ok(self.runtime_snapshot.as_deref() == Some(current.as_slice())
+            && matches!(
+                crate::process::inspect_process_identity(runtime.pid, runtime.started_at_ms),
+                crate::process::ProcessIdentityStatus::Exited
+                    | crate::process::ProcessIdentityStatus::Reused
+            ))
+    }
 }
-
 impl Drop for RestartHandoffStartupGuard {
     fn drop(&mut self) {
-        if !self.active {
+        if !self.active || !self.still_owns_handoff().unwrap_or(false) {
             return;
         }
-        tracing::warn!(
-            target: "bifrost_cli::startup",
-            data_dir = %self.bifrost_dir.display(),
-            "restart handoff startup aborted before runtime adoption; running system proxy recovery"
-        );
-        if let Err(error) = bifrost_core::SystemProxyManager::recover_from_crash(&self.bifrost_dir)
+        let fail_open = bifrost_storage::read_persisted_system_proxy_config(&self.bifrost_dir)
+            .map(|config| {
+                config.recovery_mode == bifrost_storage::SystemProxyRecoveryMode::FailOpen
+            })
+            .unwrap_or(true);
+        if fail_open {
+            if let Some(generation) = &self.generation {
+                let mut manager = bifrost_core::SystemProxyManager::new(self.bifrost_dir.clone());
+                let result = manager.suspend_managed_if_generation_guarded(generation, || {
+                    self.still_owns_handoff()
+                });
+                manager.detach();
+                if let Err(error) = result {
+                    tracing::warn!(%error, "aborted startup proxy suspension remains incomplete");
+                }
+            }
+        }
+        if let Some(runtime) = self
+            .runtime_snapshot
+            .as_ref()
+            .and_then(|bytes| serde_json::from_slice::<RuntimeInfo>(bytes).ok())
         {
-            eprintln!("Failed to recover system proxy after aborted restart handoff: {error}");
-            tracing::warn!(
-                target: "bifrost_cli::startup",
-                error = %error,
-                data_dir = %self.bifrost_dir.display(),
-                "restart handoff startup recovery failed"
+            if let Err(error) =
+                bifrost_core::CliProxyEnvironmentManager::disable_for_runtime_guarded(
+                    &self.bifrost_dir,
+                    crate::process::runtime_system_proxy_host(runtime.host.as_deref()),
+                    runtime.port,
+                    || self.still_owns_handoff(),
+                )
+            {
+                tracing::warn!(%error, "aborted startup CLI proxy cleanup remains incomplete");
+            }
+        }
+        if self.still_owns_handoff().unwrap_or(false) {
+            let _ = bifrost_core::system_proxy_launchd::consume_system_proxy_shutdown_mode_if(
+                &self.bifrost_dir,
+                bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
             );
         }
-        if let Err(error) = bifrost_core::CliProxyEnvironmentManager::disable_all_managed() {
-            eprintln!(
-                "Failed to disable standalone CLI proxy environment after aborted restart handoff: {error}"
-            );
-            tracing::warn!(
-                target: "bifrost_cli::startup",
-                error = %error,
-                data_dir = %self.bifrost_dir.display(),
-                "restart handoff CLI proxy environment cleanup failed"
-            );
-        }
-        let _ = bifrost_core::consume_system_proxy_shutdown_mode(&self.bifrost_dir);
     }
 }
 
@@ -1437,6 +920,7 @@ fn should_defer_startup_proxy_recovery_for_restart_handoff(
     true
 }
 
+#[cfg(test)]
 fn should_run_system_proxy_startup_recovery(
     bifrost_dir: &std::path::Path,
     enable_system_proxy: bool,
@@ -1444,6 +928,7 @@ fn should_run_system_proxy_startup_recovery(
     !should_defer_startup_proxy_recovery_for_restart_handoff(bifrost_dir, enable_system_proxy)
 }
 
+#[cfg(test)]
 fn should_run_system_proxy_reconcile_startup_recovery(
     bifrost_dir: &std::path::Path,
     enable_system_proxy: bool,
@@ -1515,6 +1000,47 @@ impl SystemProxyRestoreGuard {
     }
 }
 
+fn runtime_still_owns_proxy(
+    data_dir: &Path,
+    ownership: &bifrost_core::ManagedSystemProxyOwnership,
+) -> bifrost_core::Result<bool> {
+    let bytes = match std::fs::read(data_dir.join("runtime.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let runtime: RuntimeInfo = serde_json::from_slice(&bytes).map_err(|error| {
+        bifrost_core::BifrostError::Config(format!(
+            "invalid runtime ownership at shutdown: {error}"
+        ))
+    })?;
+    Ok(runtime.pid == std::process::id()
+        && runtime.started_at_ms.is_some()
+        && runtime.started_at_ms == bifrost_core::current_process_start_time_ms()
+        && ownership.target.target_matches(
+            crate::process::runtime_system_proxy_host(runtime.host.as_deref()),
+            runtime.port,
+        ))
+}
+
+fn restore_runtime_owned_system_proxy(
+    manager: &mut bifrost_core::SystemProxyManager,
+    data_dir: &Path,
+) -> bifrost_core::Result<bifrost_core::GuardedSystemProxyTransition> {
+    let result = (|| {
+        let Some(ownership) = manager.read_managed_ownership()? else {
+            return Ok(bifrost_core::GuardedSystemProxyTransition::NotManaged);
+        };
+        manager.restore_managed_if_generation_guarded(&ownership.generation, || {
+            runtime_still_owns_proxy(data_dir, &ownership)
+        })
+    })();
+    // An old manager must not retry via its unconditional Drop after a rejected
+    // fence or OS failure. The durable lease remains for the lifecycle helper.
+    manager.detach_in_place();
+    result
+}
+
 impl Drop for SystemProxyRestoreGuard {
     fn drop(&mut self) {
         if should_skip_system_proxy_restore(&self.bifrost_dir, "restore guard") {
@@ -1538,7 +1064,7 @@ impl Drop for SystemProxyRestoreGuard {
             wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
             "acquired_system_proxy_lock in restore guard"
         );
-        if let Err(e) = manager.restore() {
+        if let Err(e) = restore_runtime_owned_system_proxy(&mut manager, &self.bifrost_dir) {
             eprintln!("Failed to restore system proxy: {}", e);
             tracing::warn!(
                 target: "bifrost_cli::shutdown",
@@ -1548,7 +1074,7 @@ impl Drop for SystemProxyRestoreGuard {
         } else {
             tracing::info!(
                 target: "bifrost_cli::shutdown",
-                "system proxy restore guard completed"
+                "system proxy restore guard finished with ownership fencing"
             );
         }
     }
@@ -1658,14 +1184,15 @@ async fn restore_system_proxy_on_shutdown(
         wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
         "acquired_system_proxy_lock"
     );
-    match manager.restore() {
-        Ok(()) => {
+    match restore_runtime_owned_system_proxy(&mut manager, bifrost_dir) {
+        Ok(transition) => {
             enabled_flag.store(false, Ordering::Release);
             tracing::info!(
                 target: "bifrost_cli::shutdown",
                 context,
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
-                "system proxy shutdown restore completed"
+                ?transition,
+                "system proxy shutdown ownership check completed"
             );
         }
         Err(error) => {
@@ -1718,6 +1245,8 @@ pub fn run_start(
 ) -> bifrost_core::Result<()> {
     let bifrost_dir = get_bifrost_dir()?;
     set_data_dir(bifrost_dir.clone());
+    let automatic_recovery = automatic_proxy_recovery_launch();
+    prepare_proxy_startup_markers(&bifrost_dir, automatic_recovery)?;
     let desktop_startup_session_id = std::env::var(DESKTOP_STARTUP_SESSION_ENV).unwrap_or_default();
     tracing::info!(
         target: "bifrost_cli::startup",
@@ -1812,6 +1341,10 @@ pub fn run_start(
     let _ = (&log_dir, log_retention_days);
 
     let phase_started_at = begin_startup_phase("config_manager.open");
+    if automatic_recovery {
+        bifrost_storage::read_persisted_system_proxy_config(&bifrost_dir)?;
+        ensure_automatic_recovery_not_stopped(&bifrost_dir, true)?;
+    }
     let config_manager = ConfigManager::new(bifrost_dir.clone())?;
     let stored_config = futures::executor::block_on(config_manager.config());
     log_startup_phase("config_manager.open", phase_started_at);
@@ -2008,16 +1541,16 @@ pub fn run_start(
         }
     }
 
-    let enable_system_proxy = if system_proxy {
-        true
-    } else if no_system_proxy {
-        false
-    } else {
-        stored_config.system_proxy.enabled
-    };
-
-    let system_proxy_bypass =
-        proxy_bypass.unwrap_or_else(|| stored_config.system_proxy.bypass.clone());
+    let source_intent_revision =
+        std::env::var("BIFROST_SYSTEM_PROXY_INTENT_REVISION_INTERNAL").ok();
+    let (enable_system_proxy, system_proxy_bypass) = resolve_startup_system_proxy_intent(
+        system_proxy,
+        no_system_proxy,
+        proxy_bypass,
+        &stored_config.system_proxy,
+        source_intent_revision.as_deref(),
+    );
+    let system_proxy_config_revision = stored_config.system_proxy.intent_revision;
 
     if enable_system_proxy {
         if bifrost_core::SystemProxyManager::is_supported() {
@@ -2028,7 +1561,8 @@ pub fn run_start(
     }
 
     let defer_startup_recovery_for_restart_handoff =
-        should_defer_startup_proxy_recovery_for_restart_handoff(&bifrost_dir, enable_system_proxy);
+        should_defer_startup_proxy_recovery_for_restart_handoff(&bifrost_dir, enable_system_proxy)
+            || std::env::var_os("BIFROST_SYSTEM_PROXY_RECOVERY_GENERATION_INTERNAL").is_some();
     let restart_handoff_requested = matches!(
         bifrost_core::read_system_proxy_shutdown_mode(&bifrost_dir),
         Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart)
@@ -2054,8 +1588,8 @@ pub fn run_start(
                 parsed_rules,
                 all_values.clone(),
                 enable_system_proxy,
+                system_proxy_config_revision,
                 system_proxy_bypass.clone(),
-                defer_startup_recovery_for_restart_handoff,
                 cli_proxy,
                 cli_proxy_no_proxy.clone(),
                 config_manager,
@@ -2093,8 +1627,8 @@ pub fn run_start(
             parsed_rules,
             all_values,
             enable_system_proxy,
+            system_proxy_config_revision,
             system_proxy_bypass,
-            defer_startup_recovery_for_restart_handoff,
             cli_proxy,
             cli_proxy_no_proxy,
             disconnect_on_config_change,
@@ -2125,8 +1659,8 @@ pub fn run_foreground(
     cli_rules: Vec<Rule>,
     cli_values: HashMap<String, String>,
     enable_system_proxy: bool,
+    system_proxy_config_revision: u64,
     system_proxy_bypass: String,
-    defer_startup_recovery_for_restart_handoff: bool,
     enable_cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
     disconnect_on_config_change: bool,
@@ -2136,6 +1670,8 @@ pub fn run_foreground(
     skip_cert_check: bool,
     yes: bool,
 ) -> bifrost_core::Result<()> {
+    let automatic_recovery = automatic_proxy_recovery_launch();
+    std::env::remove_var("BIFROST_SYSTEM_PROXY_INTENT_REVISION_INTERNAL");
     let pid = std::process::id();
 
     raise_fd_limit();
@@ -2157,6 +1693,12 @@ pub fn run_foreground(
         tracing::warn!("Failed to recover CLI proxy from previous crash: {}", e);
     }
 
+    let system_proxy_expected_generation = Arc::new(ParkingRwLock::new(
+        std::env::var("BIFROST_SYSTEM_PROXY_RECOVERY_GENERATION_INTERNAL").ok(),
+    ));
+    std::env::remove_var("BIFROST_SYSTEM_PROXY_RECOVERY_GENERATION_INTERNAL");
+    let system_proxy_target_port = Arc::new(AtomicU16::new(config.port));
+    let system_proxy_wake_requested = Arc::new(AtomicBool::new(false));
     let system_proxy_enabled = Arc::new(AtomicBool::new(false));
     let system_proxy_desired_enabled = Arc::new(AtomicBool::new(enable_system_proxy));
     let system_proxy_reconcile_stop = Arc::new(AtomicBool::new(false));
@@ -2677,9 +2219,11 @@ pub fn run_foreground(
             );
             log_startup_phase("rules_watcher.start", phase_started_at);
 
+            let mut retired_listeners = RetiredProxyListeners::default();
             let mut current_port = config.port;
             let base_config = config.clone();
             let phase_started_at = begin_startup_phase("proxy_listener.bind");
+            ensure_automatic_recovery_not_stopped(&bifrost_dir, automatic_recovery)?;
             let mut listener_task = spawn_managed_proxy_task(
                 config.clone(),
                 resolver.clone(),
@@ -2697,9 +2241,11 @@ pub fn run_foreground(
                 foreground_runtime_start_mode(),
             )
             .with_system_proxy(enable_system_proxy, system_proxy_bypass.clone())
+            .with_system_proxy_config_revision(system_proxy_config_revision)
             .with_health_port(health_port);
+            ensure_automatic_recovery_not_stopped(&bifrost_dir, automatic_recovery)?;
             write_runtime_info(&runtime_info)?;
-            let _ = bifrost_core::consume_system_proxy_shutdown_mode(&bifrost_dir);
+            let _ = bifrost_core::system_proxy_launchd::consume_system_proxy_shutdown_mode_if(&bifrost_dir, bifrost_core::SystemProxyShutdownMode::PreserveForRestart);
             #[cfg(target_os = "macos")]
             spawn_system_proxy_launchd_install_task(bifrost_dir.clone(), enable_system_proxy);
             log_startup_phase("proxy_listener.bind", phase_started_at);
@@ -2735,12 +2281,15 @@ pub fn run_foreground(
                 system_proxy_manager: system_proxy_manager.clone(),
                 desired_enabled: system_proxy_desired_enabled.clone(),
                 proxy_host: system_proxy_host.clone(),
-                proxy_port: current_port,
+                proxy_port: system_proxy_target_port.clone(),
+                wake_requested: system_proxy_wake_requested.clone(),
+                startup_intent_revision: system_proxy_config_revision,
+                initial_policy: (stored_config.system_proxy.recovery_mode, stored_config.system_proxy.recovery_grace_secs),
+                expected_generation: system_proxy_expected_generation.clone(),
                 system_proxy_bypass: system_proxy_bypass.clone(),
                 enabled_flag: system_proxy_enabled.clone(),
                 stop_flag: system_proxy_reconcile_stop.clone(),
                 daemon_mode: detached_daemon_child,
-                defer_startup_recovery_for_restart_handoff,
             });
 
             spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
@@ -2748,12 +2297,15 @@ pub fn run_foreground(
                 system_proxy_manager: system_proxy_manager.clone(),
                 desired_enabled: system_proxy_desired_enabled.clone(),
                 proxy_host: system_proxy_host,
-                proxy_port: current_port,
+                proxy_port: system_proxy_target_port.clone(),
+                wake_requested: system_proxy_wake_requested.clone(),
+                startup_intent_revision: system_proxy_config_revision,
+                initial_policy: (stored_config.system_proxy.recovery_mode, stored_config.system_proxy.recovery_grace_secs),
+                expected_generation: system_proxy_expected_generation.clone(),
                 system_proxy_bypass: system_proxy_bypass.clone(),
                 enabled_flag: system_proxy_enabled.clone(),
                 stop_flag: system_proxy_reconcile_stop.clone(),
                 daemon_mode: detached_daemon_child,
-                defer_startup_recovery_for_restart_handoff,
             });
 
             let shutdown_listener_context = if detached_daemon_child {
@@ -2766,8 +2318,15 @@ pub fn run_foreground(
             } else {
                 "foreground signal"
             };
+            let mut recovery_stop_poll = tokio::time::interval(Duration::from_millis(250));
             loop {
                 tokio::select! {
+                    _ = recovery_stop_poll.tick(), if automatic_recovery => {
+                        if ensure_automatic_recovery_not_stopped(&bifrost_dir, true).is_err() {
+                            restore_system_proxy_on_shutdown(&bifrost_dir, &system_proxy_manager, &system_proxy_enabled, &system_proxy_reconcile_stop, "automatic recovery cancelled").await;
+                            break;
+                        }
+                    }
                     listener_result = &mut listener_task => {
                         if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
                             restore_system_proxy_on_shutdown(
@@ -2800,6 +2359,11 @@ pub fn run_foreground(
                         let Some(PortRebindRequest { expected_port, response_tx }) = request else {
                             break;
                         };
+
+                        if retired_listeners.pending() {
+                            let _ = response_tx.send(Err("previous proxy port handoff is still restoring OS settings; retry after recovery".into()));
+                            continue;
+                        }
 
                         if base_config.socks5_port.is_some() {
                             let _ = response_tx.send(Err(
@@ -2842,10 +2406,58 @@ pub fn run_foreground(
                             }
                         };
 
+                        // Bind/serve the replacement before transferring the owned proxy.
+                        // Failed transfer keeps the old listener available and the original
+                        // ownership snapshot intact; never force-disable/re-snapshot.
+                        let proxy_host = crate::process::runtime_system_proxy_host(Some(&base_config.host)).to_string();
+                        let ready_host = proxy_host.clone();
+                        let next_ready = tokio::task::spawn_blocking(move || system_proxy_target_is_ready(&ready_host, actual_port)).await.unwrap_or(false);
+                        if !next_ready {
+                            next_task.abort();
+                            let _ = response_tx.send(Err("replacement proxy listener is not ready".into()));
+                            continue;
+                        }
+                        let mut manager = system_proxy_manager.write().await;
+                        let transfer = match manager.ensure_managed_ownership() {
+                            Ok(Some(ownership)) if ownership.target.target_matches(&proxy_host, current_port) => {
+                                if system_proxy_desired_enabled.load(Ordering::Acquire) {
+                                    manager.retarget_managed_if_generation(&ownership.generation, &proxy_host, actual_port, Some(&ownership.target.bypass)).and_then(|transition| {
+                                        match transition {
+                                            bifrost_core::GuardedSystemProxyTransition::Applied | bifrost_core::GuardedSystemProxyTransition::AlreadyInState => Ok(()),
+                                            _ => Err(bifrost_core::BifrostError::Config("system proxy ownership changed during port handoff".into())),
+                                        }
+                                    })
+                                } else {
+                                    manager.restore_managed_if_generation_guarded(&ownership.generation, || {
+                                        let latest = bifrost_storage::read_persisted_system_proxy_config(&bifrost_dir)?;
+                                        let desired = if latest.intent_revision == system_proxy_config_revision { system_proxy_desired_enabled.load(Ordering::Acquire) } else { latest.enabled };
+                                        Ok(!desired && runtime_still_owns_proxy(&bifrost_dir, &ownership)?)
+                                    }).and_then(|transition| match transition {
+                                        bifrost_core::GuardedSystemProxyTransition::Applied | bifrost_core::GuardedSystemProxyTransition::AlreadyInState => Ok(()),
+                                        _ => Err(bifrost_core::BifrostError::Config("proxy ownership changed while releasing old port".into())),
+                                    })
+                                }
+                            }
+                            Ok(_) => Ok(()),
+                            Err(error) => Err(error),
+                        };
+                        let next_task = match preserve_listener_after_transfer(next_task, transfer, manager.read_managed_ownership(), &proxy_host, current_port) {
+                            Ok(next_task) => next_task,
+                            Err(error) => {
+                                let _ = response_tx.send(Err(error.to_string()));
+                                continue;
+                            }
+                        };
+                        *system_proxy_expected_generation.write() = None;
+                        admin_state_arc.set_port(actual_port);
+                        system_proxy_target_port.store(actual_port, Ordering::Release);
+                        system_proxy_wake_requested.store(true, Ordering::Release);
+                        drop(manager);
+
                         let old_task = std::mem::replace(&mut listener_task, next_task);
 
+                        let previous_port = current_port;
                         current_port = actual_port;
-                        admin_state_arc.set_port(actual_port);
 
                         let runtime_info = RuntimeInfo::new(
                             std::process::id(),
@@ -2855,22 +2467,10 @@ pub fn run_foreground(
                             foreground_runtime_start_mode(),
                         )
                         .with_system_proxy(enable_system_proxy, system_proxy_bypass.clone())
+            .with_system_proxy_config_revision(system_proxy_config_revision)
                         .with_health_port(health_port);
                         if let Err(error) = write_runtime_info(&runtime_info) {
                             tracing::warn!("Failed to update runtime info after port rebind: {}", error);
-                        }
-
-                        if system_proxy_enabled.load(Ordering::Acquire) {
-                            let proxy_host = if base_config.host == "0.0.0.0" {
-                                "127.0.0.1".to_string()
-                            } else {
-                                base_config.host.clone()
-                            };
-                            let mut manager = system_proxy_manager.write().await;
-                            let _ = manager.force_disable();
-                            if let Err(error) = manager.enable(&proxy_host, actual_port, Some(&system_proxy_bypass)) {
-                                tracing::warn!("Failed to update system proxy after port rebind: {}", error);
-                            }
                         }
 
                         if cli_proxy_enabled {
@@ -2894,7 +2494,7 @@ pub fn run_foreground(
                             expected_port,
                             actual_port,
                         }));
-                        abort_listener_after_grace_period(old_task);
+                        retired_listeners.retire(old_task, proxy_host, previous_port);
                     }
                 }
             }
@@ -3343,8 +2943,8 @@ pub fn run_daemon(
     cli_rules: Vec<Rule>,
     cli_values: HashMap<String, String>,
     enable_system_proxy: bool,
+    system_proxy_config_revision: u64,
     system_proxy_bypass: String,
-    defer_startup_recovery_for_restart_handoff: bool,
     enable_cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
     config_manager: ConfigManager,
@@ -3356,6 +2956,7 @@ pub fn run_daemon(
         return run_daemon_via_exec(&config, &config_manager, &log_dir, log_retention_days);
     }
 
+    let automatic_recovery = automatic_proxy_recovery_launch();
     use nix::unistd::{chdir, dup2, fork, setsid, ForkResult};
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
@@ -3435,6 +3036,7 @@ pub fn run_daemon(
             }
         }
         Ok(ForkResult::Child) => {
+            std::env::remove_var("BIFROST_SYSTEM_PROXY_INTENT_REVISION_INTERNAL");
             drop(ready_rx);
             clear_external_cli_worker_marker_for_forked_daemon();
             setsid().map_err(|e| {
@@ -3526,6 +3128,12 @@ pub fn run_daemon(
             if let Err(e) = bifrost_core::ShellProxyManager::recover_from_crash(&bifrost_dir) {
                 tracing::warn!("Failed to recover CLI proxy from previous crash: {}", e);
             }
+            let system_proxy_expected_generation = Arc::new(ParkingRwLock::new(
+                std::env::var("BIFROST_SYSTEM_PROXY_RECOVERY_GENERATION_INTERNAL").ok(),
+            ));
+            std::env::remove_var("BIFROST_SYSTEM_PROXY_RECOVERY_GENERATION_INTERNAL");
+            let system_proxy_target_port = Arc::new(AtomicU16::new(config.port));
+            let system_proxy_wake_requested = Arc::new(AtomicBool::new(false));
             let system_proxy_enabled = Arc::new(AtomicBool::new(false));
             let system_proxy_desired_enabled = Arc::new(AtomicBool::new(enable_system_proxy));
             let system_proxy_reconcile_stop = Arc::new(AtomicBool::new(false));
@@ -3574,6 +3182,7 @@ pub fn run_daemon(
                     RuntimeStartMode::Daemon,
                 )
                 .with_system_proxy(enable_system_proxy, system_proxy_bypass.clone())
+            .with_system_proxy_config_revision(system_proxy_config_revision)
                 .with_health_port(health_port);
                 write_runtime_info(&runtime_info).expect("Failed to write runtime info");
                 #[cfg(target_os = "macos")]
@@ -3917,12 +3526,15 @@ pub fn run_daemon(
                         system_proxy_manager: system_proxy_manager.clone(),
                         desired_enabled: system_proxy_desired_enabled.clone(),
                         proxy_host: system_proxy_host.clone(),
-                        proxy_port: system_proxy_port,
+                        proxy_port: system_proxy_target_port.clone(),
+                        wake_requested: system_proxy_wake_requested.clone(),
+                        startup_intent_revision: system_proxy_config_revision,
+                initial_policy: (stored_config.system_proxy.recovery_mode, stored_config.system_proxy.recovery_grace_secs),
+                expected_generation: system_proxy_expected_generation.clone(),
                         system_proxy_bypass: system_proxy_bypass.clone(),
                         enabled_flag: system_proxy_enabled.clone(),
                         stop_flag: system_proxy_reconcile_stop.clone(),
                         daemon_mode: true,
-                        defer_startup_recovery_for_restart_handoff,
                     });
 
                     spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
@@ -3930,17 +3542,21 @@ pub fn run_daemon(
                         system_proxy_manager: system_proxy_manager.clone(),
                         desired_enabled: system_proxy_desired_enabled.clone(),
                         proxy_host: system_proxy_host,
-                        proxy_port: system_proxy_port,
+                        proxy_port: system_proxy_target_port.clone(),
+                        wake_requested: system_proxy_wake_requested.clone(),
+                        startup_intent_revision: system_proxy_config_revision,
+                initial_policy: (stored_config.system_proxy.recovery_mode, stored_config.system_proxy.recovery_grace_secs),
+                expected_generation: system_proxy_expected_generation.clone(),
                         system_proxy_bypass: system_proxy_bypass.clone(),
                         enabled_flag: system_proxy_enabled.clone(),
                         stop_flag: system_proxy_reconcile_stop.clone(),
                         daemon_mode: true,
-                        defer_startup_recovery_for_restart_handoff,
                     });
 
                     let listener_config = server.config().clone();
                     let listener_access_control = server.access_control().clone();
-                    let mut listener_task = spawn_managed_proxy_task(
+                    ensure_automatic_recovery_not_stopped(&bifrost_dir, automatic_recovery)?;
+            let mut listener_task = spawn_managed_proxy_task(
                         listener_config,
                         resolver.clone(),
                         tls_config.clone(),
@@ -3957,9 +3573,22 @@ pub fn run_daemon(
                         ))
                     })?;
                     drop(ready_tx);
-                    let _ = bifrost_core::consume_system_proxy_shutdown_mode(&bifrost_dir);
+                    let _ = bifrost_core::system_proxy_launchd::consume_system_proxy_shutdown_mode_if(&bifrost_dir, bifrost_core::SystemProxyShutdownMode::PreserveForRestart);
 
-                    let listener_result = (&mut listener_task).await;
+                    let listener_result = if automatic_recovery {
+                        tokio::select! {
+                            result = &mut listener_task => result,
+                            _ = async {
+                                loop {
+                                    if ensure_automatic_recovery_not_stopped(&bifrost_dir, true).is_err() { break; }
+                                    tokio::time::sleep(Duration::from_millis(250)).await;
+                                }
+                            } => {
+                                listener_task.abort();
+                                (&mut listener_task).await
+                            }
+                        }
+                    } else { (&mut listener_task).await };
                     if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
                         restore_system_proxy_on_shutdown(
                             &bifrost_dir,
@@ -4021,7 +3650,7 @@ pub fn run_daemon(
                     wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
                     "acquired_system_proxy_lock"
                 );
-                if let Err(e) = manager.restore() {
+                if let Err(e) = restore_runtime_owned_system_proxy(&mut manager, &bifrost_dir) {
                     eprintln!("Failed to restore system proxy: {}", e);
                 }
             }
@@ -4760,161 +4389,6 @@ mod tests {
     fn allocate_loopback_port() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.local_addr().unwrap().port()
-    }
-
-    #[test]
-    fn unresponsive_owned_proxy_is_suspended_but_other_owners_are_preserved() {
-        let dir = tempfile::tempdir().unwrap();
-        let manager = tokio::sync::RwLock::new(bifrost_core::SystemProxyManager::new(
-            dir.path().to_path_buf(),
-        ));
-        let enabled = AtomicBool::new(true);
-        assert!(suspend_unready_owned_system_proxy(
-            true,
-            SystemProxyOwnership::ThisBifrost,
-            false,
-            &enabled,
-            &manager,
-            "127.0.0.1",
-            allocate_loopback_port(),
-        ));
-        assert!(!enabled.load(Ordering::Acquire));
-
-        enabled.store(true, Ordering::Release);
-        assert!(!suspend_unready_owned_system_proxy(
-            true,
-            SystemProxyOwnership::Other,
-            false,
-            &enabled,
-            &manager,
-            "127.0.0.1",
-            allocate_loopback_port(),
-        ));
-        assert!(enabled.load(Ordering::Acquire));
-
-        assert!(!suspend_unready_owned_system_proxy(
-            false,
-            SystemProxyOwnership::ThisBifrost,
-            false,
-            &enabled,
-            &manager,
-            "127.0.0.1",
-            allocate_loopback_port(),
-        ));
-        assert!(!suspend_unready_owned_system_proxy(
-            true,
-            SystemProxyOwnership::ThisBifrost,
-            true,
-            &enabled,
-            &manager,
-            "127.0.0.1",
-            allocate_loopback_port(),
-        ));
-
-        std::fs::write(
-            dir.path().join("proxy_state.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "schema_version": 2,
-                "generation": "start-generation",
-                "original": {"enable": false, "host": "", "port": 0, "bypass": ""},
-                "target": {"enable": true, "host": "127.0.0.1", "port": 9900, "bypass": ""},
-                "applied": false
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        enabled.store(true, Ordering::Release);
-        assert!(suspend_unready_owned_system_proxy(
-            true,
-            SystemProxyOwnership::ThisBifrost,
-            false,
-            &enabled,
-            &manager,
-            "127.0.0.1",
-            9900,
-        ));
-        assert!(!enabled.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn managed_proxy_resume_preflight_handles_absent_applied_and_foreign_targets() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut manager = bifrost_core::SystemProxyManager::new(dir.path().to_path_buf());
-        assert!(!resume_ready_managed_system_proxy(&mut manager, "127.0.0.1", 9900).unwrap());
-
-        for (applied, port) in [(true, 9900_u16), (false, 9901_u16)] {
-            std::fs::write(
-                dir.path().join("proxy_state.json"),
-                serde_json::to_vec(&serde_json::json!({
-                    "schema_version": 2,
-                    "generation": "resume-generation",
-                    "original": {"enable": false, "host": "", "port": 0, "bypass": ""},
-                    "target": {"enable": true, "host": "127.0.0.1", "port": port, "bypass": ""},
-                    "applied": applied
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-            assert!(!resume_ready_managed_system_proxy(&mut manager, "127.0.0.1", 9900).unwrap());
-        }
-    }
-
-    #[test]
-    fn system_proxy_readiness_requires_a_successful_data_plane_canary() {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
-        let server = std::thread::spawn(move || {
-            ready_tx.send(()).unwrap();
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 256];
-            let read = stream.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..read]).contains("/__bifrost_runtime_canary"));
-            stream.write_all(b"HTTP/1.1 ").unwrap();
-            std::thread::sleep(Duration::from_millis(10));
-            stream
-                .write_all(b"200 OK\r\nContent-Length: 2\r\n\r\n{}")
-                .unwrap();
-        });
-
-        ready_rx.recv().unwrap();
-        assert!(system_proxy_target_is_ready("0.0.0.0", port));
-        server.join().unwrap();
-
-        let closed_port = allocate_loopback_port();
-        assert!(!system_proxy_target_is_ready("127.0.0.1", closed_port));
-        assert!(!system_proxy_target_is_ready("invalid host", 9900));
-    }
-
-    #[test]
-    fn system_proxy_readiness_rejects_empty_and_non_successful_canary_responses() {
-        let empty_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let empty_port = empty_listener.local_addr().unwrap().port();
-        let (empty_ready_tx, empty_ready_rx) = std::sync::mpsc::sync_channel(0);
-        let empty_server = std::thread::spawn(move || {
-            empty_ready_tx.send(()).unwrap();
-            let (stream, _) = empty_listener.accept().unwrap();
-            drop(stream);
-        });
-        empty_ready_rx.recv().unwrap();
-        assert!(!system_proxy_target_is_ready("127.0.0.1", empty_port));
-        empty_server.join().unwrap();
-
-        let rejected_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let rejected_port = rejected_listener.local_addr().unwrap().port();
-        let (rejected_ready_tx, rejected_ready_rx) = std::sync::mpsc::sync_channel(0);
-        let rejected_server = std::thread::spawn(move || {
-            rejected_ready_tx.send(()).unwrap();
-            let (mut stream, _) = rejected_listener.accept().unwrap();
-            let mut request = [0_u8; 256];
-            let _ = stream.read(&mut request).unwrap();
-            stream
-                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
-        });
-        rejected_ready_rx.recv().unwrap();
-        assert!(!system_proxy_target_is_ready("127.0.0.1", rejected_port));
-        rejected_server.join().unwrap();
     }
 
     #[test]
@@ -5830,89 +5304,6 @@ mod coverage_boost {
     }
 
     #[test]
-    fn converged_system_proxy_skips_only_high_frequency_full_reconcile() {
-        assert!(should_skip_system_proxy_full_reconcile(
-            SystemProxyOwnership::ThisBifrost,
-            true,
-            true,
-            Some(Duration::from_secs(30)),
-        ));
-        assert!(!should_skip_system_proxy_full_reconcile(
-            SystemProxyOwnership::ThisBifrost,
-            true,
-            true,
-            Some(SYSTEM_PROXY_FULL_RECONCILE_INTERVAL),
-        ));
-        assert!(!should_skip_system_proxy_full_reconcile(
-            SystemProxyOwnership::Other,
-            true,
-            true,
-            Some(Duration::from_secs(1)),
-        ));
-        assert!(!should_skip_system_proxy_full_reconcile(
-            SystemProxyOwnership::ThisBifrost,
-            false,
-            true,
-            Some(Duration::from_secs(1)),
-        ));
-        assert!(!should_skip_system_proxy_full_reconcile(
-            SystemProxyOwnership::ThisBifrost,
-            true,
-            false,
-            Some(Duration::from_secs(1)),
-        ));
-    }
-
-    #[test]
-    fn reconcile_wait_finishes_immediately_or_stops_on_request() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let stop_flag = AtomicBool::new(false);
-        assert!(!wait_for_reconcile(
-            &stop_flag,
-            temp_dir.path(),
-            Duration::ZERO,
-        ));
-
-        stop_flag.store(true, Ordering::Release);
-        assert!(wait_for_reconcile(
-            &stop_flag,
-            temp_dir.path(),
-            Duration::from_secs(1),
-        ));
-        assert!(stop_flag.load(Ordering::Acquire));
-
-        let stop_flag = AtomicBool::new(false);
-        assert!(!wait_for_reconcile(
-            &stop_flag,
-            temp_dir.path(),
-            Duration::from_millis(1),
-        ));
-
-        let stop_flag = AtomicBool::new(false);
-        bifrost_core::write_system_proxy_shutdown_mode(
-            temp_dir.path(),
-            bifrost_core::SystemProxyShutdownMode::ForegroundCleanup,
-        )
-        .unwrap();
-        assert!(wait_for_reconcile(
-            &stop_flag,
-            temp_dir.path(),
-            Duration::from_secs(1),
-        ));
-        assert!(stop_flag.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn converged_system_proxy_wait_preserves_stop_result() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let stop_flag = AtomicBool::new(true);
-        assert!(wait_after_converged_system_proxy(
-            &stop_flag,
-            temp_dir.path(),
-        ));
-    }
-
-    #[test]
     fn parse_yes_no_answer_accepts_yes_variants() {
         assert_eq!(parse_yes_no_answer("y"), Some(true));
         assert_eq!(parse_yes_no_answer("Y"), Some(true));
@@ -6757,43 +6148,93 @@ second content
         let snapshot = collect_rules_filesystem_snapshot(&dir).unwrap();
         assert!(snapshot.entries.is_empty());
     }
-
-    #[test]
-    fn managed_resume_transition_accepts_success_and_rejects_stale_ownership() {
-        for transition in [
-            bifrost_core::GuardedSystemProxyTransition::Applied,
-            bifrost_core::GuardedSystemProxyTransition::AlreadyInState,
-        ] {
-            assert!(interpret_managed_resume_transition(transition).unwrap());
-        }
-        for transition in [
-            bifrost_core::GuardedSystemProxyTransition::OwnershipChanged,
-            bifrost_core::GuardedSystemProxyTransition::NotManaged,
-        ] {
-            let error = interpret_managed_resume_transition(transition).unwrap_err();
-            assert!(error.to_string().contains("ownership changed"));
-        }
+    #[tokio::test]
+    async fn partially_committed_retarget_keeps_both_listener_tasks_alive() {
+        let old_listener = tokio::spawn(std::future::pending::<bifrost_core::Result<()>>());
+        let next_listener = tokio::spawn(std::future::pending::<bifrost_core::Result<()>>());
+        let new_lease: bifrost_core::ManagedSystemProxyOwnership =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 3, "generation": "new-port-generation",
+                "original": {"enable": false, "host": "", "port": 0, "bypass": ""},
+                "target": {"enable": true, "host": "127.0.0.1", "port": 18746, "bypass": ""},
+                "applied": false, "phase": "pending_apply"
+            }))
+            .unwrap();
+        let retained = preserve_listener_after_transfer(
+            next_listener,
+            Err(bifrost_core::BifrostError::Config(
+                "second service write failed".into(),
+            )),
+            Ok(Some(new_lease)),
+            "127.0.0.1",
+            18745,
+        )
+        .unwrap();
+        tokio::task::yield_now().await;
+        assert!(!old_listener.is_finished());
+        assert!(!retained.is_finished());
+        old_listener.abort();
+        retained.abort();
     }
 
+    #[tokio::test]
+    async fn uncertain_handoff_readback_never_aborts_potentially_owned_target() {
+        let candidate = tokio::spawn(std::future::pending::<bifrost_core::Result<()>>());
+        let retained = preserve_listener_after_transfer(
+            candidate,
+            Err(bifrost_core::BifrostError::Config(
+                "write interrupted".into(),
+            )),
+            Err(bifrost_core::BifrostError::Config(
+                "journal unavailable".into(),
+            )),
+            "127.0.0.1",
+            18745,
+        )
+        .unwrap();
+        assert!(!retained.is_finished());
+        retained.abort();
+    }
     #[test]
-    fn ready_system_proxy_reconcile_enables_only_when_resume_is_unavailable() {
-        let enabled = std::cell::Cell::new(false);
-        assert!(complete_ready_system_proxy_reconcile(Ok(true), || {
-            enabled.set(true);
-            Ok(())
-        })
-        .is_ok());
-        assert!(!enabled.get());
-
-        assert!(complete_ready_system_proxy_reconcile(Ok(false), || {
-            enabled.set(true);
-            Ok(())
-        })
-        .is_ok());
-        assert!(enabled.get());
-
-        let error = bifrost_core::BifrostError::Config("stale generation".into());
-        let result = complete_ready_system_proxy_reconcile(Err(error), || Ok(()));
-        assert!(result.unwrap_err().to_string().contains("stale generation"));
+    fn shutdown_guard_cannot_claim_newer_runtime_or_another_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let ownership: bifrost_core::ManagedSystemProxyOwnership =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 3, "generation": "newer-generation",
+                "original": {"enable": false, "host": "", "port": 0, "bypass": ""},
+                "target": {"enable": true, "host": "127.0.0.1", "port": 18745, "bypass": ""},
+                "applied": true, "phase": "applied"
+            }))
+            .unwrap();
+        let mut runtime = RuntimeInfo::new(
+            std::process::id().wrapping_add(1),
+            18745,
+            None,
+            Some("127.0.0.1".into()),
+            RuntimeStartMode::Daemon,
+        );
+        std::fs::write(
+            dir.path().join("runtime.json"),
+            serde_json::to_vec(&runtime).unwrap(),
+        )
+        .unwrap();
+        assert!(!runtime_still_owns_proxy(dir.path(), &ownership).unwrap());
+        runtime.pid = std::process::id();
+        runtime.port = 18746;
+        std::fs::write(
+            dir.path().join("runtime.json"),
+            serde_json::to_vec(&runtime).unwrap(),
+        )
+        .unwrap();
+        assert!(!runtime_still_owns_proxy(dir.path(), &ownership).unwrap());
+        runtime.port = 18745;
+        std::fs::write(
+            dir.path().join("runtime.json"),
+            serde_json::to_vec(&runtime).unwrap(),
+        )
+        .unwrap();
+        assert!(runtime_still_owns_proxy(dir.path(), &ownership).unwrap());
+        std::fs::remove_file(dir.path().join("runtime.json")).unwrap();
+        assert!(!runtime_still_owns_proxy(dir.path(), &ownership).unwrap());
     }
 }

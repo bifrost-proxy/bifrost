@@ -90,6 +90,10 @@
 
 压力守卫只拒绝主进程内的大型 Traffic 查询/统计/批处理、搜索和 app icon 提取。降级状态变化写 lifecycle event，不对每个请求刷日志。
 
+## 后续意图与所有权加固
+
+schema v3、持久意图版本、字段级 journal、权限取消、端口交接及 Desktop 恢复约束见 [系统代理意图与故障恢复](system-proxy-recovery-intent.md)。下方 schema v2 示例保留为兼容历史说明，不能再用单个 `applied` 布尔值解释暂停状态。
+
 ## System proxy ownership generation
 
 `proxy_state.json` 升级为兼容 schema：

@@ -102,6 +102,7 @@ fn poll_managed_backend_exit_reports_exited_child() {
         shutdown_started: AtomicBool::new(false),
         force_exit: AtomicBool::new(false),
         backend_recovery_in_progress: AtomicBool::new(false),
+        backend_lifecycle_epoch: std::sync::atomic::AtomicU64::new(0),
         startup_ready: AtomicBool::new(false),
         startup_error: Mutex::new(None),
         main_webview_loaded: AtomicBool::new(false),

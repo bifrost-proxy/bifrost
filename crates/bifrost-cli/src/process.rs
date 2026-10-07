@@ -1,3 +1,7 @@
+mod proxy_intent;
+pub use proxy_intent::resolve_runtime_system_proxy_intent;
+pub const SYSTEM_PROXY_INTENT_REVISION_ENV: &str = "BIFROST_SYSTEM_PROXY_INTENT_REVISION_INTERNAL";
+
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 
@@ -57,6 +61,9 @@ pub struct RuntimeInfo {
     pub binary_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub system_proxy_enabled: Option<bool>,
+    /// Config intent revision captured with the startup override.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub system_proxy_config_revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub system_proxy_bypass: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -101,6 +108,7 @@ impl RuntimeInfo {
             restartable_runtime: start_mode.is_restartable(),
             binary_path: std::env::current_exe().ok(),
             system_proxy_enabled: None,
+            system_proxy_config_revision: None,
             system_proxy_bypass: None,
             health_port: None,
         }
@@ -113,6 +121,11 @@ impl RuntimeInfo {
     pub fn with_system_proxy(mut self, enabled: bool, bypass: impl Into<String>) -> Self {
         self.system_proxy_enabled = Some(enabled);
         self.system_proxy_bypass = Some(bypass.into());
+        self
+    }
+
+    pub fn with_system_proxy_config_revision(mut self, revision: u64) -> Self {
+        self.system_proxy_config_revision = Some(revision);
         self
     }
 
@@ -260,6 +273,7 @@ fn runtime_info_from_admin_overview(
         restartable_runtime: false,
         binary_path: None,
         system_proxy_enabled: None,
+        system_proxy_config_revision: None,
         system_proxy_bypass: None,
         health_port: None,
     })
@@ -281,6 +295,7 @@ fn preserve_recorded_runtime_metadata(
     discovered.restartable_runtime = recorded.restartable_runtime;
     discovered.binary_path = recorded.binary_path.clone();
     discovered.system_proxy_enabled = recorded.system_proxy_enabled;
+    discovered.system_proxy_config_revision = recorded.system_proxy_config_revision;
     discovered.system_proxy_bypass = recorded.system_proxy_bypass.clone();
     discovered.health_port = recorded.health_port;
     discovered
@@ -969,6 +984,7 @@ mod tests {
             restartable_runtime: false,
             binary_path: Some(PathBuf::from("/Applications/Bifrost.app/bifrost")),
             system_proxy_enabled: Some(true),
+            system_proxy_config_revision: Some(42),
             system_proxy_bypass: Some("localhost".to_string()),
             health_port: Some(18890),
         };
@@ -982,6 +998,7 @@ mod tests {
             restartable_runtime: false,
             binary_path: None,
             system_proxy_enabled: None,
+            system_proxy_config_revision: None,
             system_proxy_bypass: None,
             health_port: None,
         };
@@ -995,6 +1012,7 @@ mod tests {
         assert_eq!(recovered.socks5_port, Some(18889));
         assert_eq!(recovered.health_port, Some(18890));
         assert_eq!(recovered.system_proxy_enabled, Some(true));
+        assert_eq!(recovered.system_proxy_config_revision, Some(42));
     }
 
     #[test]

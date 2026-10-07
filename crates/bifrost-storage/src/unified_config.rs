@@ -355,6 +355,8 @@ pub const MAX_SYSTEM_PROXY_RECOVERY_GRACE_SECS: u64 = 5;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SystemProxyConfig {
+    /// Advances on explicit user intent, independently of observed OS state.
+    pub intent_revision: u64,
     pub enabled: bool,
     pub bypass: String,
     pub auto_enable: bool,
@@ -365,6 +367,7 @@ pub struct SystemProxyConfig {
 impl Default for SystemProxyConfig {
     fn default() -> Self {
         Self {
+            intent_revision: 0,
             enabled: true,
             bypass: DEFAULT_SYSTEM_PROXY_BYPASS.to_string(),
             auto_enable: false,

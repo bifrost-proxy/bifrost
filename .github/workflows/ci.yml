@@ -753,6 +753,19 @@ jobs:
           path: target/aarch64-apple-darwin/release/bifrost
           retention-days: 1
 
+      # This second, explicitly opted-in binary is never a release artifact.
+      # Build-script cfg avoids enabling fake proxy I/O via --all-features.
+      - name: Build fixture-only proxy test binary
+        env:
+          BIFROST_BUILD_PROXY_TEST_IO: "1"
+        run: cargo build -p bifrost-cli --release --target aarch64-apple-darwin
+      - name: Upload fixture-only proxy test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-proxy-test-io-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/bifrost
+          retention-days: 1
+
   build-cli-macos-x86_64:
     name: Build macOS CLI (x86_64-apple-darwin)
     runs-on: macos-15
@@ -938,6 +951,17 @@ jobs:
           path: target/release
       - name: Make binary executable
         run: chmod +x target/release/bifrost
+      - name: Download fixture-only proxy test binary
+        if: matrix.shard == 1
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-proxy-test-io-aarch64-apple-darwin
+          path: target/proxy-test-io
+      - name: Prepare fixture-only proxy test binary
+        if: matrix.shard == 1
+        run: |
+          chmod +x target/proxy-test-io/bifrost
+          echo "BIFROST_PROXY_TEST_BIN=$GITHUB_WORKSPACE/target/proxy-test-io/bifrost" >> "$GITHUB_ENV"
       - name: Ensure FFmpeg for ASR source compression E2E
         if: matrix.shard == 3
         run: |

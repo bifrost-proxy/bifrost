@@ -602,6 +602,7 @@ fn gather_status(requested_port: u16) -> GatheredStatus {
         read_runtime_info(),
         requested_port,
         discover_bifrost_runtime,
+        read_system_proxy_status,
     )
 }
 
@@ -609,6 +610,7 @@ fn gather_status_with_runtime<F>(
     recorded_runtime: Option<RuntimeInfo>,
     requested_port: u16,
     discover_runtime: F,
+    read_system_proxy: impl FnOnce() -> SystemProxyStatus,
 ) -> GatheredStatus
 where
     F: FnMut(u16) -> Option<RuntimeInfo>,
@@ -630,7 +632,7 @@ where
         .as_ref()
         .map(|info| info.port)
         .unwrap_or(requested_port);
-    let system_proxy = read_system_proxy_status();
+    let system_proxy = read_system_proxy();
     let tls_config = if is_running {
         fetch_tls_config_from_api(runtime_port)
     } else {
@@ -1075,6 +1077,7 @@ mod tests {
             restartable_runtime: false,
             binary_path: None,
             system_proxy_enabled: None,
+            system_proxy_config_revision: None,
             system_proxy_bypass: None,
             health_port: None,
         };
@@ -1149,6 +1152,7 @@ mod tests {
             restartable_runtime: false,
             binary_path: None,
             system_proxy_enabled: None,
+            system_proxy_config_revision: None,
             system_proxy_bypass: None,
             health_port: None,
         };
@@ -1246,6 +1250,7 @@ mod tests {
             restartable_runtime: false,
             binary_path: None,
             system_proxy_enabled: None,
+            system_proxy_config_revision: None,
             system_proxy_bypass: None,
             health_port: None,
         };
@@ -1346,6 +1351,7 @@ mod tests {
             restartable_runtime: false,
             binary_path: None,
             system_proxy_enabled: None,
+            system_proxy_config_revision: None,
             system_proxy_bypass: None,
             health_port: None,
         }
@@ -1384,10 +1390,22 @@ mod tests {
         discovered_runtime.port = port;
         discovered_runtime.socks5_port = None;
 
-        let gathered = gather_status_with_runtime(None, port, move |candidate_port| {
-            (candidate_port == port).then(|| discovered_runtime.clone())
-        });
+        let observations = std::cell::Cell::new(0);
+        let gathered = gather_status_with_runtime(
+            None,
+            port,
+            move |candidate_port| (candidate_port == port).then(|| discovered_runtime.clone()),
+            || {
+                observations.set(observations.get() + 1);
+                SystemProxyStatus {
+                    host: "fixture.proxy.invalid".into(),
+                    ..sample_system_proxy()
+                }
+            },
+        );
 
+        assert_eq!(observations.get(), 1);
+        assert_eq!(gathered.system_proxy.host, "fixture.proxy.invalid");
         assert!(gathered.is_running);
         assert!(gathered.runtime_discovered);
         assert_eq!(gathered.runtime_port, port);
@@ -1403,8 +1421,22 @@ mod tests {
         stale_runtime.pid = 2_147_483_647;
         stale_runtime.port = 18888;
 
-        let gathered = gather_status_with_runtime(Some(stale_runtime), 18888, |_| None);
+        let observations = std::cell::Cell::new(0);
+        let gathered = gather_status_with_runtime(
+            Some(stale_runtime),
+            18888,
+            |_| None,
+            || {
+                observations.set(observations.get() + 1);
+                SystemProxyStatus {
+                    host: "fixture.proxy.invalid".into(),
+                    ..sample_system_proxy()
+                }
+            },
+        );
 
+        assert_eq!(observations.get(), 1);
+        assert_eq!(gathered.system_proxy.host, "fixture.proxy.invalid");
         assert!(!gathered.is_running);
         assert!(!gathered.runtime_discovered);
         assert_eq!(gathered.runtime_port, 18888);

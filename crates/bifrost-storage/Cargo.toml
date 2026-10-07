@@ -22,7 +22,9 @@ uuid.workspace = true
 sha2 = "0.10"
 base64 = "0.22"
 ring = "0.17"
+fs2 = "0.4"
+libc = "0.2"
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

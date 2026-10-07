@@ -64,7 +64,6 @@ use bifrost_core::Result as BifrostResult;
 use crate::process::{
     capture_runtime_system_proxy_snapshot, is_process_running, read_pid, read_runtime_info,
     recover_bifrost_runtime, runtime_system_proxy_host, wait_for_port_released, write_runtime_info,
-    RuntimeSystemProxySnapshot,
 };
 
 #[cfg(unix)]
@@ -317,6 +316,16 @@ fn spawn_orphan_and_return(opts: &RestartOptions) -> BifrostResult<u32> {
 /// - Parent shell.exec chain has long since torn down; we are owned by PID 1.
 #[cfg(unix)]
 fn run_orphan_work(forwarded: ForwardedRestart) {
+    run_orphan_work_with_proxy_snapshot(forwarded, capture_runtime_system_proxy_snapshot);
+}
+
+#[cfg(unix)]
+fn run_orphan_work_with_proxy_snapshot(
+    forwarded: ForwardedRestart,
+    capture_proxy_snapshot: impl FnOnce(
+        Option<&crate::process::RuntimeInfo>,
+    ) -> Option<crate::process::RuntimeSystemProxySnapshot>,
+) {
     use std::time::Duration;
 
     let log = orphan_log_path();
@@ -332,7 +341,25 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
     // Snapshot old port.
     let old_pid = read_pid();
     let old_runtime = read_runtime_info();
-    let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(old_runtime.as_ref());
+    let system_proxy_snapshot = capture_proxy_snapshot(old_runtime.as_ref());
+    let (system_proxy_desired, system_proxy_intent_revision) =
+        match crate::config::get_bifrost_dir()
+            .and_then(|dir| bifrost_storage::read_persisted_system_proxy_config(&dir))
+        {
+            Ok(config) => (
+                crate::process::resolve_runtime_system_proxy_intent(old_runtime.as_ref(), &config),
+                config.intent_revision,
+            ),
+            Err(error) => {
+                orphan_log(
+                    &log,
+                    &format!(
+                    "cannot read durable system proxy intent; leaving runtime unchanged: {error}"
+                ),
+                );
+                return;
+            }
+        };
     let old_port = old_runtime
         .as_ref()
         .map(|r| r.port)
@@ -454,7 +481,11 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
         argv.push("--log-level".into());
         argv.push(lvl.into());
     }
-    append_system_proxy_start_args(&mut argv, system_proxy_snapshot.as_ref());
+    append_system_proxy_start_args(&mut argv, &system_proxy_desired);
+    std::env::set_var(
+        "BIFROST_SYSTEM_PROXY_INTENT_REVISION_INTERNAL",
+        system_proxy_intent_revision.to_string(),
+    );
 
     orphan_log(&log, &format!("execvp argv: {:?}", argv));
 
@@ -521,15 +552,17 @@ fn redirect_stdio_to_devnull() {
 }
 
 #[cfg(unix)]
-fn append_system_proxy_start_args(
-    argv: &mut Vec<std::ffi::OsString>,
-    snapshot: Option<&RuntimeSystemProxySnapshot>,
-) {
-    if let Some(snapshot) = snapshot {
-        argv.push("--system-proxy".into());
-        argv.push("--proxy-bypass".into());
-        argv.push(snapshot.bypass.clone().into());
-    }
+fn append_system_proxy_start_args(argv: &mut Vec<std::ffi::OsString>, desired: &(bool, String)) {
+    argv.push(
+        if desired.0 {
+            "--system-proxy"
+        } else {
+            "--no-system-proxy"
+        }
+        .into(),
+    );
+    argv.push("--proxy-bypass".into());
+    argv.push(desired.1.clone().into());
 }
 
 #[cfg(unix)]
@@ -541,7 +574,10 @@ fn abort_restart_handoff(
 ) {
     orphan_log(log, &format!("aborting restart handoff: {reason}"));
     if let Ok(data_dir) = crate::config::get_bifrost_dir() {
-        let _ = bifrost_core::consume_system_proxy_shutdown_mode(&data_dir);
+        let _ = bifrost_core::consume_system_proxy_shutdown_mode_if(
+            &data_dir,
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        );
         let old_runtime_still_alive = old_pid.is_some_and(is_process_running);
         if preserved_system_proxy && !old_runtime_still_alive {
             match bifrost_core::SystemProxyManager::recover_from_crash(&data_dir) {
@@ -646,11 +682,8 @@ mod tests {
             std::ffi::OsString::from("start"),
             std::ffi::OsString::from("--daemon"),
         ];
-        let snapshot = RuntimeSystemProxySnapshot {
-            bypass: "localhost,127.0.0.1,*.local".to_string(),
-        };
-
-        append_system_proxy_start_args(&mut argv, Some(&snapshot));
+        let desired = (true, "localhost,127.0.0.1,*.local".to_string());
+        append_system_proxy_start_args(&mut argv, &desired);
 
         assert_eq!(
             argv,
@@ -662,6 +695,17 @@ mod tests {
                 std::ffi::OsString::from("--proxy-bypass"),
                 std::ffi::OsString::from("localhost,127.0.0.1,*.local"),
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_system_proxy_start_args_preserves_disabled_intent() {
+        let mut argv = Vec::new();
+        append_system_proxy_start_args(&mut argv, &(false, "new-bypass".into()));
+        assert_eq!(
+            argv,
+            ["--no-system-proxy", "--proxy-bypass", "new-bypass"].map(std::ffi::OsString::from)
         );
     }
 
@@ -728,6 +772,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("isolated Bifrost data dir");
         std::env::set_var("BIFROST_DATA_DIR", temp.path());
+        bifrost_storage::ConfigManager::new(temp.path().to_path_buf()).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve test port");
         let port = listener.local_addr().expect("test listener address").port();
         drop(listener);
@@ -745,14 +790,23 @@ mod tests {
         );
         write_runtime_info(&runtime).expect("write unverified runtime marker");
 
-        run_orphan_work(ForwardedRestart {
-            self_exe: std::path::PathBuf::from("/bin/false"),
-            port: Some(port),
-            host: None,
-            log_level: None,
-            force: false,
-        });
+        let observations = std::cell::Cell::new(0);
+        run_orphan_work_with_proxy_snapshot(
+            ForwardedRestart {
+                self_exe: std::path::PathBuf::from("/bin/false"),
+                port: Some(port),
+                host: None,
+                log_level: None,
+                force: false,
+            },
+            |observed_runtime| {
+                observations.set(observations.get() + 1);
+                assert_eq!(observed_runtime.map(|info| info.pid), Some(runtime.pid));
+                None
+            },
+        );
 
+        assert_eq!(observations.get(), 1);
         assert!(
             is_process_running(foreign_process.id()),
             "unverified process must remain alive"
@@ -762,6 +816,10 @@ mod tests {
         assert!(
             log.contains("aborting restart handoff: stop failed before restart handoff"),
             "unexpected log: {log}"
+        );
+        assert!(
+            log.contains("preserved_system_proxy=false old_runtime_still_alive=true"),
+            "the injected empty snapshot must leave native proxy recovery unused: {log}"
         );
 
         let _ = foreign_process.kill();
