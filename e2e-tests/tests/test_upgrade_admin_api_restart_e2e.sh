@@ -83,6 +83,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+dump_upgrade_failure_diagnostics() {
+    [[ -n "$TEST_ROOT" && -d "$TEST_ROOT" && -n "$TEST_DATA_DIR" && -d "$TEST_DATA_DIR" ]] || return 0
+    local file
+    for file in \
+        "$TEST_DATA_DIR/upgrade-progress.json" \
+        "$TEST_DATA_DIR/runtime.json" \
+        "$TEST_DATA_DIR/bifrost.pid" \
+        "$TEST_ROOT/worker-upgrade.log" \
+        "$TEST_DATA_DIR/logs/upgrade-background.log" \
+        "$TEST_DATA_DIR/logs/bifrost.log" \
+        "$TEST_DATA_DIR/logs/bifrost.err" \
+        "$TEST_ROOT/start.log" \
+        "$TEST_ROOT/stop.log" \
+        "$TEST_ROOT/already-latest-start.log" \
+        "$TEST_ROOT/already-latest-self-update.log" \
+        "$TEST_ROOT/already-latest-stop.log"; do
+        if [[ -f "$file" ]]; then
+            printf '\n=== upgrade diagnostic: %s ===\n' "${file#"$TEST_ROOT/"}"
+            tail -n 100 "$file"
+        fi
+    done
+}
+
 host_triple() {
     rustc -vV | awk '/^host:/ {print $2}'
 }
@@ -286,7 +309,7 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
     BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-desktop-app" \
     "$INSTALL_BIN" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
         --access-mode allow_all --skip-cert-check --no-system-proxy \
-        --no-intercept "${tray_args[@]}" -y >/tmp/bifrost-admin-upgrade-start.log 2>&1
+        --no-intercept "${tray_args[@]}" -y >"$TEST_ROOT/start.log" 2>&1
 
     local old_pid=""
     for _ in $(seq 1 50); do
@@ -295,7 +318,7 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
         sleep 0.1
     done
     if [[ -z "$old_pid" || ! "$old_pid" =~ ^[0-9]+$ ]] || ! pid_is_running "$old_pid"; then
-        _log_fail "daemon started" "running pid" "$(cat /tmp/bifrost-admin-upgrade-start.log 2>/dev/null)"
+        _log_fail "daemon started" "running pid" "$(cat "$TEST_ROOT/start.log" 2>/dev/null)"
         return 1
     fi
     wait_admin_ready || {
@@ -386,7 +409,7 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
 
     if [[ "$final_phase" != "completed" ]]; then
         _log_fail "upgrade progress reaches completed" "completed" "${final_phase:-timeout}"
-        echo "=== start log ==="; cat /tmp/bifrost-admin-upgrade-start.log 2>/dev/null
+        echo "=== start log ==="; cat "$TEST_ROOT/start.log" 2>/dev/null
         echo "=== progress file ==="; cat "${TEST_DATA_DIR}/upgrade-progress.json" 2>/dev/null
         return 1
     fi
@@ -435,8 +458,8 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
     _log_pass "new daemon runs from upgraded install path"
 
     # Clean shutdown + port release.
-    BIFROST_DATA_DIR="$TEST_DATA_DIR" "$INSTALL_BIN" stop >/tmp/bifrost-admin-upgrade-stop.log 2>&1 || {
-        _log_fail "upgraded daemon stops cleanly" "stop exits 0" "$(cat /tmp/bifrost-admin-upgrade-stop.log)"
+    BIFROST_DATA_DIR="$TEST_DATA_DIR" "$INSTALL_BIN" stop >"$TEST_ROOT/stop.log" 2>&1 || {
+        _log_fail "upgraded daemon stops cleanly" "stop exits 0" "$(cat "$TEST_ROOT/stop.log")"
         return 1
     }
     sleep 1
@@ -483,7 +506,7 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
     BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-desktop-app" \
     "$INSTALL_BIN" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
         --access-mode allow_all --skip-cert-check --no-system-proxy \
-        --no-intercept "${tray_args[@]}" -y >/tmp/bifrost-admin-upgrade-already-latest-start.log 2>&1
+        --no-intercept "${tray_args[@]}" -y >"$TEST_ROOT/already-latest-start.log" 2>&1
 
     local old_pid=""
     for _ in $(seq 1 50); do
@@ -492,7 +515,7 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
         sleep 0.1
     done
     if [[ -z "$old_pid" || ! "$old_pid" =~ ^[0-9]+$ ]] || ! pid_is_running "$old_pid"; then
-        _log_fail "daemon started" "running pid" "$(cat /tmp/bifrost-admin-upgrade-already-latest-start.log 2>/dev/null)"
+        _log_fail "daemon started" "running pid" "$(cat "$TEST_ROOT/already-latest-start.log" 2>/dev/null)"
         return 1
     fi
     wait_admin_ready || {
@@ -514,8 +537,8 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$current_version" \
     BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-desktop-app" \
     "$INSTALL_BIN" self-update --target "$current_version" --source admin \
-        >/tmp/bifrost-admin-upgrade-already-latest-self-update.log 2>&1 || {
-        _log_fail "background self-update exits 0" "success" "$(cat /tmp/bifrost-admin-upgrade-already-latest-self-update.log 2>/dev/null)"
+        >"$TEST_ROOT/already-latest-self-update.log" 2>&1 || {
+        _log_fail "background self-update exits 0" "success" "$(cat "$TEST_ROOT/already-latest-self-update.log" 2>/dev/null)"
         return 1
     }
 
@@ -531,7 +554,7 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
     fi
     if [[ "$new_pid" == "$old_pid" ]]; then
         _log_fail "already-latest background upgrade restarted daemon" "new PID != $old_pid" "$new_pid"
-        echo "=== self-update log ==="; cat /tmp/bifrost-admin-upgrade-already-latest-self-update.log 2>/dev/null
+        echo "=== self-update log ==="; cat "$TEST_ROOT/already-latest-self-update.log" 2>/dev/null
         return 1
     fi
     if ! pid_is_running "$new_pid"; then
@@ -544,16 +567,16 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
     progress_phase="$(json_field "$(cat "${TEST_DATA_DIR}/upgrade-progress.json" 2>/dev/null)" phase)"
     assert_equals "completed" "$progress_phase" "already-latest background upgrade writes completed progress" || return 1
 
-    BIFROST_DATA_DIR="$TEST_DATA_DIR" "$INSTALL_BIN" stop >/tmp/bifrost-admin-upgrade-already-latest-stop.log 2>&1 || {
-        _log_fail "already-latest restarted daemon stops cleanly" "stop exits 0" "$(cat /tmp/bifrost-admin-upgrade-already-latest-stop.log)"
+    BIFROST_DATA_DIR="$TEST_DATA_DIR" "$INSTALL_BIN" stop >"$TEST_ROOT/already-latest-stop.log" 2>&1 || {
+        _log_fail "already-latest restarted daemon stops cleanly" "stop exits 0" "$(cat "$TEST_ROOT/already-latest-stop.log")"
         return 1
     }
     _log_pass "already-latest restarted daemon stops cleanly"
 }
 
 main() {
-    test_admin_api_upgrade_restarts_daemon_with_new_binary || true
-    test_background_self_update_restarts_when_disk_binary_already_latest || true
+    test_admin_api_upgrade_restarts_daemon_with_new_binary || dump_upgrade_failure_diagnostics
+    test_background_self_update_restarts_when_disk_binary_already_latest || dump_upgrade_failure_diagnostics
     print_test_summary || exit 1
 }
 

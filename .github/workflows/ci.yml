@@ -192,10 +192,14 @@ jobs:
         run: pnpm run build
         working-directory: packages/bifrost-sync-server
       - name: Install FFmpeg for ASR source compression E2E
+        timeout-minutes: 15
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends ffmpeg
+            sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+              install --yes --no-install-recommends ffmpeg
           fi
           ffmpeg -version
       - uses: dtolnay/rust-toolchain@stable
@@ -383,10 +387,14 @@ jobs:
       - name: Make binary executable
         run: chmod +x target/release/bifrost
       - name: Install FFmpeg for ASR source compression E2E
+        timeout-minutes: 15
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends ffmpeg
+            sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+              install --yes --no-install-recommends ffmpeg
           fi
           ffmpeg -version
       - name: Build test-enabled native Weixin E2E binary

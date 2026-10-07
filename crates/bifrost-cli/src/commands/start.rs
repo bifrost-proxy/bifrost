@@ -2793,35 +2793,9 @@ fn detached_daemon_ready_timeout() -> Duration {
 }
 
 #[cfg(any(unix, windows))]
-fn wait_for_detached_daemon_ready(
-    child: &mut std::process::Child,
-    host: &str,
-    port: u16,
-    timeout: Duration,
-) -> bifrost_core::Result<()> {
-    let connect_host = detached_daemon_readiness_host(host);
-    let addr = format!("{connect_host}:{port}");
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if std::net::TcpStream::connect(&addr).is_ok() {
-            println!("Daemon started with PID: {}", child.id());
-            return Ok(());
-        }
-        if let Some(status) = child.try_wait().map_err(bifrost_core::BifrostError::Io)? {
-            return Err(bifrost_core::BifrostError::Network(format!(
-                "Daemon exited before the proxy listener became ready (PID: {}, status: {})",
-                child.id(),
-                status
-            )));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err(bifrost_core::BifrostError::Network(format!(
-        "Daemon did not become ready within {}s (PID: {})",
-        timeout.as_secs(),
-        child.id()
-    )))
-}
+mod daemon_readiness;
+#[cfg(any(unix, windows))]
+use daemon_readiness::wait_for_detached_daemon_ready;
 
 #[cfg(any(unix, windows))]
 fn configure_detached_daemon_environment(command: &mut std::process::Command, data_dir: &Path) {
@@ -2927,11 +2901,15 @@ fn run_daemon_via_exec(
         command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
     }
 
+    let runtime_file = crate::process::get_runtime_file()?;
+    let previous_runtime = std::fs::read(&runtime_file).ok();
     let mut child = command.spawn().map_err(bifrost_core::BifrostError::Io)?;
     wait_for_detached_daemon_ready(
         &mut child,
         &config.host,
         config.port,
+        &runtime_file,
+        previous_runtime.as_deref(),
         detached_daemon_ready_timeout(),
     )
 }

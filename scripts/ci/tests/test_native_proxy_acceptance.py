@@ -291,6 +291,14 @@ class NativeFixtureBootstrapTests(unittest.TestCase):
             # This launcher only works while the CI-selected directory is on PATH.
             shim.write_text('#!/bin/bash\nexec python-for-native-fixture "$@"\n')
             shim.chmod(0o755)
+            canonical_dir = root / "canonical shims"
+            canonical_dir.mkdir()
+            canonical_shim = canonical_dir / "python3"
+            # Framework Python can report its original executable rather than
+            # the symlink used to launch it. Exercise that behavior on Linux too.
+            canonical_shim.write_text('#!/bin/bash\n'
+                                      f'exec -a {shlex.quote(sys.executable)} python-for-native-fixture "$@"\n')
+            canonical_shim.chmod(0o755)
             selected = selected_dir / "python-for-native-fixture"
             selected.symlink_to(sys.executable)
             selected_python3 = selected_dir / "python3"
@@ -300,18 +308,21 @@ class NativeFixtureBootstrapTests(unittest.TestCase):
             unresolved = subprocess.run(["/usr/bin/env", "-i", f"PATH={clean_path}", str(shim),
                                          "-I", "-c", "import tomllib"], capture_output=True, timeout=5)
             self.assertNotEqual(unresolved.returncode, 0)
-            for launcher, interpreter in ((shim, selected), (ROOT / "e2e-tests/bin/python3", selected_python3)):
+            for launcher, interpreter in ((shim, selected), (canonical_shim, selected),
+                                          (ROOT / "e2e-tests/bin/python3", selected_python3)):
                 env = {"PATH": f"{launcher.parent}:{selected_dir}:/usr/bin:/bin", "PYTHONPATH": tmp}
                 for override in ({}, {"BIFROST_NATIVE_PYTHON": str(launcher)}):
                     with self.subTest(launcher=launcher, override=override):
                         result = self.resolve({**env, **override}, cwd=tmp)
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertEqual(result.stdout.strip(), str(interpreter))
+                        resolved = result.stdout.strip()
+                        self.assertTrue(Path(resolved).is_absolute(), resolved)
+                        self.assertTrue(Path(resolved).samefile(interpreter), resolved)
                         result = self.resolve({**env, **override}, cwd=tmp, command=(
                             f'/usr/bin/env -i PATH={clean_path} "$BIFROST_NATIVE_PYTHON" '
                             "-I -c 'import sys, tomllib; print(sys.executable)'"))
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertEqual(result.stdout.strip(), str(interpreter))
+                        self.assertEqual(result.stdout.strip(), resolved)
 
     def test_missing_stdlib_is_rejected_before_elevation_in_a_clean_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
