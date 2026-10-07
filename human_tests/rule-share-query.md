@@ -29,7 +29,7 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 - URL 保留目标网站地址。
 - URL query 中包含 `__bifrost_rule=`。
 - 裸域名输入 `a.com` 不报错，输出规范成 `http://a.com/...`。
-- 通过 Bifrost 代理打开 `http://a.com/...__bifrost_rule=...` 后，会导入并启用 `share/cli-share-test-bare`，随后重定向到不含私有 query 的 `http://a.com/`。
+- 通过 Bifrost 代理打开链接后先进入确认页；点击 Apply Rule 后才导入 `share/cli-share-test-bare` 并返回 clean URL。
 - 命令不需要运行中的 Bifrost 服务。
 
 ### TC-RSQ-02 代理 GET 导入并重定向 clean URL
@@ -42,15 +42,14 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 预期结果：
 - HTTP 响应为 `302`。
-- `Location` 指向不含 `__bifrost_rule` 的 clean URL。
-- 规则列表中出现 `share/<分享 payload 规则名>`。
-- 该规则处于 enabled 状态。
+- `Location` 指向本机 `/_bifrost/share/rule` 确认页，确认前规则列表没有新增分享规则。
+- 点击 Apply Rule（或携带同源 CSRF 提交确认 API）后才出现并启用 `share/<分享 payload 规则名>`，然后返回不含 `__bifrost_rule` 的 clean URL。
 
 ### TC-RSQ-03 同名同内容重复访问复用已有规则
 
 操作步骤：
 1. 在 TC-RSQ-02 的数据目录中再次访问同一个分享链接。
-2. 执行 `cargo run --bin bifrost -- rule list`。
+2. 再次在确认页点击 Apply Rule 后，执行 `cargo run --bin bifrost -- rule list`。
 
 预期结果：
 - 规则列表中只有一条对应规则。
@@ -61,7 +60,7 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 操作步骤：
 1. 生成第二条分享链接，规则名称与 TC-RSQ-02 相同，但规则内容不同。
 2. 通过代理访问第二条分享链接。
-3. 再次通过代理访问第二条分享链接。
+3. 两次访问后均在确认页点击 Apply Rule。
 4. 执行 `cargo run --bin bifrost -- rule list`。
 
 预期结果：
@@ -74,7 +73,7 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 操作步骤：
 1. 在 TC-RSQ-04 后，对 `share/规则名 2` 执行 `cargo run --bin bifrost -- rule share "share/规则名 2" http://127.0.0.1:<TARGET_PORT>/hello`。
-2. 通过代理访问生成的新分享链接。
+2. 通过代理访问生成的新分享链接，并在确认页点击 Apply Rule。
 3. 执行 `cargo run --bin bifrost -- rule list`。
 
 预期结果：
@@ -118,11 +117,11 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 2. 在临时规则集中创建一条 enabled 的普通个人规则，例如 `d`，内容为 `a.com status://200 resBody://(shadowed)`，确保如果分享 query 未被优先捕获，请求会走普通规则匹配。
 3. 生成一条 `https://a.com/?__bifrost_rule=...` 分享链接，payload 内容包含独立的规则引用行，例如 `@a`，以及至少一条有效转发规则。
 4. 使用真实 Chromium/Playwright 浏览器配置 HTTP 代理 `127.0.0.1:<PROXY_PORT>`，并开启忽略 HTTPS 证书错误，然后访问该分享链接。
-5. 查看浏览器响应、Bifrost 临时数据目录规则列表和导入规则正文。
+5. 在本机确认页点击 Apply Rule，返回 clean URL 后检查 Bifrost 临时数据目录规则列表和导入规则正文。
 
 预期结果：
-- 浏览器收到 `302` 响应。
-- `Location` 为不含 `__bifrost_rule` 的 `https://a.com/` clean URL，页面 JavaScript 不会看到私有 query。
+- 浏览器先收到 `302` 并进入本机确认页，此时尚未导入规则。
+- 点击 Apply Rule 后返回不含 `__bifrost_rule` 的 HTTPS clean URL，业务页面 JavaScript 不会看到私有 query。
 - 临时规则集中出现 `share/<payload name> [enabled]`。
 - 原 enabled 个人规则被禁用，说明导入后的 exclusive scope 生效。
 - 导入规则正文保留 `@a` 规则引用行，不因校验失败而拒绝导入。
@@ -132,7 +131,7 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 操作步骤：
 1. 使用临时数据目录启动 Bifrost 测试服务。
-2. 请求普通管理端页面 `http://127.0.0.1:<PROXY_PORT>/_bifrost/`，检查响应头。
+2. 请求普通管理端页面 `http://127.0.0.1:<PROXY_PORT>/_bifrost/`（发送 `Accept-Encoding: gzip`，与浏览器一致），检查响应头。
 3. 生成一条分享链接，目标 URL 指向本地 HTTP fixture。
 4. 通过代理访问分享链接，读取 302 `Location` 指向的 `/_bifrost/share/rule?...` 确认页。
 5. 对确认页执行 `curl -D -`，检查响应头和 HTML。
@@ -165,6 +164,32 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 - 点击后不出现 `Failed to fetch`；规则导入成功并启用 `share/<payload name>`。
 - 浏览器跳转到不含 `__bifrost_rule` 的 clean target URL。
 - 测试脚本对 Chrome profile 清理执行有界重试；即使 Chrome 后台 helper 短暂占用 `Default/`，也不会把已经通过的业务断言误报为 suite 失败。
+
+### TC-RSQ-11 生成阶段错误与最终链接 verify
+
+1. 使用独立数据目录，执行 `bifrost rule share broken https://example.test/app --file e2e-tests/rules/share/verify_invalid.txt`。
+2. 用 `verify_valid.txt` 重新生成，将最终完整链接传给 `bifrost rule verify '<url>' --json` 和文本模式。
+3. 对没有 `__bifrost_rule` 的 URL、非法 Base64/JSON、正文修改但 hash 不变、正文语法错误但 hash 正确的链接执行 verify。
+4. 保存一条 allow-invalid 的规则，调用 `/api/rules/share-link` 检查生成 API 也会拒绝。
+
+预期：错误生成无链接输出，非零退出并包含行号、原因、Suggestion；正常 verify 返回 `valid=true` 和 clean target，失败返回非零退出、`valid=false`、`error`、`next_action`。verify 不创建日志/规则目录、不访问目标。分享 API 返回 400 和语法行号。
+
+### TC-RSQ-12 HTTP/HTTPS 消费异常可见且不改规则
+
+1. 隔离启动代理，关闭系统代理、关闭同步，仅 TLS 解包 `example.test`。
+2. 分别以 HTTP/HTTPS 经该代理请求 TC-RSQ-11 的坏链接。
+3. 请求百分号编码的 `%5F%5Fbifrost_rule` 参数。
+4. 请求坏 payload 的本机确认页；对比失败前后规则列表。
+
+预期：返回 400 HTML，页面显示 Unable to apply、具体错误及 `bifrost rule verify` 修复指引。确认页也显示错误，规则列表保持不变。HTTPS 使用隔离实例 CA 验证证书，不修改系统 CA/系统代理。
+
+### TC-RSQ-13 Apply API 必须重新校验
+
+1. 打开正常确认页，取得同源 CSRF。
+2. 将 payload 正文修改但保留旧 hash，直接 POST 到 `/api/rules/share-confirm`。
+3. 对比提交前后规则列表。
+
+预期：400 JSON 包含 hash mismatch；确认页面现有 status 逻辑能够显示 API error；没有规则写入、启用或禁用。正常 Apply 浏览器链路继续通过 TC-RSQ-10。
 
 ## 清理步骤
 
@@ -277,3 +302,24 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 结果：
 - TC-RSQ-10：通过。脚本不再只依赖 macOS Google Chrome 默认路径；优先使用 `CHROME_BIN`，否则解析 Playwright Chromium executable，完整 Chromium 不存在时 fallback 到 Playwright headless shell cache，再 fallback 到系统 Chrome/Edge/Chromium。真实浏览器执行输出 `browser apply succeeded without hash`、规则列表包含 `share/rsq-browser [enabled]`、最终输出 `rule share browser confirmation E2E passed`；DevTools 端口未 ready 或浏览器提前退出时会打印 Chrome 日志并失败，避免无诊断的 curl 连接失败。
+
+
+### 2026-10-07 分享验证与错误反馈回归
+
+隔离 worktree 编译二进制，使用 `.bifrost-e2e-share-verify-*` 临时数据目录、随机端口、关闭同步和系统代理，HTTPS 仅对 `example.test` 解包并信任该测试实例 CA。
+
+- TC-RSQ-11：通过。真实 CLI 无效生成非零退出且提示行 2 和 Suggestion；正常链接 verify JSON/文本通过；缺参数、非法编码/JSON、hash 不一致及错误语法分别失败，JSON 包含 error/next_action。verify 执行前后空数据目录不变。真实 share-link API 返回 400 和语法行号。
+- TC-RSQ-12：通过。HTTP/HTTPS 四类坏载荷返回可见 400 页面和 verify 指引；百分号编码 query key 也被检测；确认页返回可见 hash 错误；规则列表逐字节保持不变。
+- TC-RSQ-13：通过。取得真实同源 CSRF 后直接提交坏 hash，Apply API 返回 400/hash mismatch，规则不变。
+- TC-RSQ-01～06 的既有 CLI/API 生成、首次确认导入、重复复用、不同内容后缀、再次分享流程：`test_rule_share_query.sh` 通过。
+- TC-RSQ-10 正常浏览器确认：`test_rule_share_confirm_browser.sh` 通过，真实 Chromium-family 点击 Apply 无需填写 hash，成功启用并返回目标。
+- 执行命令：`BIFROST_BIN=<本次编译二进制> bash e2e-tests/tests/test_rule_share_verify.sh`、`test_rule_share_query.sh`、`test_rule_share_confirm_browser.sh`。
+- 临时代理、浏览器 profile、数据目录均由脚本结束时清理；没有操作真实用户规则或系统代理。
+
+较早执行记录描述的是历史实现；本次以后以本文用例的确认页和错误页预期为准。
+
+- 错误页视觉复核：Codex 浏览器打开真实隔离 Admin 400 页，亮色模式黑字白底；同一响应临时 fixture 仅强制 color-scheme: dark 后检查暗色白字黑底。标题、完整诊断和 verify 指引均可读，无溢出；未修改系统主题。
+
+- TC-RSQ-07：通过。Codex 浏览器连接隔离实例，在 ui-share 上右键 Share → Create Link，生成含私有 query 的 URL，Copy 后 alert 为 Copied；截图保存为本地交付证据。
+- TC-RSQ-08：通过。复用真实 Chromium 确认脚本，在隔离 HTTPS 解包实例中生成含 @receiver-local 的分享链接；浏览器经代理打开后进入确认页，Apply 后返回 clean HTTPS 页面并获得预期 body，导入正文保留引用，shadow 变为 disabled。首次跨协议 HTTP 上游夹具未完成页面导航，改用用例目标所需的直接响应规则后全部断言通过，未修改生产代码或削弱确认/clean URL/引用断言。
+- TC-RSQ-09：通过。普通 Admin HTML 以浏览器的 gzip-capable 请求检查防嵌入头；确认页 CSP/cache/referrer/nosniff 通过；跨站请求 403、同源缺 token 403、合法同源 Apply 200。旧 curl 用例缺少 Accept-Encoding 导致 426，已对齐当前 WebUI 契约并复测通过。

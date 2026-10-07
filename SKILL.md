@@ -216,6 +216,21 @@ bifrost rule sync                          # 与远端服务器同步规则
 - 单次验证可直接用 `start --rules "..."`
 - 多条或长期规则优先放入规则文件，再用 `--rules-file`
 
+### 规则分享：生成后必须 verify
+
+分享方和 AI Agent 必须使用 CLI 生成链接，禁止手工拼接 Base64 payload 或手工填写 hash：
+
+```bash
+bifrost rule share debug https://example.com/app --file rules.txt
+bifrost rule verify '<生成的完整分享链接>' --json
+```
+
+- `rule share` 在生成前检查规则语法，返回行号、错误原因和修复建议；失败时不要交付链接。
+- **必须对准备交付的最终完整 URL 执行 `rule verify --json`，只有退出码为 0 且 `valid=true` 才允许交付。** 修改规则正文或链接后必须重新生成并重新 verify。
+- verify 是离线只读校验：检查 URL、payload、版本、内容 SHA-256 和规则语法；失败返回非零退出码，JSON 包含 `valid=false`、`error`、`next_action`。读取错误，修复后循环生成 → verify，直到通过。
+- verify 不证明目标服务可达、域名拼写符合需求、业务规则命中或消费方的 `@规则引用` 存在。交付前人工核对目标域名与预期环境；需要真实链路时追加浏览器/流量验证。不得把 verify 成功表述为业务 E2E 通过。
+- 消费方遇到校验异常会看到 Bifrost 错误页，不会静默应用；将页面错误反馈给分享方，由分享方修复和 verify 后重新发送。HTTPS URL 必须经过 TLS 解包，代理才可检查 query。
+
 ### 5. Group 管理
 
 ```bash

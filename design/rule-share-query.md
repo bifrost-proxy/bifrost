@@ -95,15 +95,15 @@ Query 参数固定 `__bifrost_rule`。payload 结构（`crates/bifrost-core/src/
 
 ```text
 raw_url = ctx.url or reconstruct https://<original_host><path_and_query>
-if !raw_url.contains("__bifrost_rule"):
+if !has_rule_share_query(raw_url):
     return None
-parts = extract_rule_share_query(raw_url)          # 失败 -> warn + None
+parts = extract_rule_share_query(raw_url)          # 失败 -> HTTP 400 可见错误页
 if parts.payload is None:
     return None
 if admin_state is Some:
     confirm_url = format!("http://127.0.0.1:{admin_port}/_bifrost/share/rule?payload={base64}&target={clean_url}");
     return Redirect(confirm_url)
-return Redirect(parts.clean_url)                   # admin 不可用时只清除私有 query
+return Invalid("confirmation unavailable")         # admin 不可用时展示错误
 ```
 
 ### 命名选择算法（`resolve_final_name`）
@@ -230,3 +230,13 @@ Rust `crates/bifrost-e2e/src/tests/rule_share_query.rs` 未落地（planned as o
 - **分享链接被恶意投放**：确认页是唯一写入门槛，必须严格校验 CSRF token、target URL、payload content hash；`connect-src 'self'` 是同源确认 API 的必要条件。
 - **OpenAPI 未补 `/api/rules/share-link`**：目前调用方需直接参考本文档；补齐后应同步补 UI 类型和 CLI help 引用。
 - **CLI 无 `bifrost rule share exit` 子命令**：目前只能通过 Admin API 触发 `exit_rule_share_env`；如果后续在 CLI 暴露，必须复用同一函数，避免和 Web 走出两条恢复路径。
+
+## 分享链接验证与错误反馈
+
+生成方使用 `bifrost rule share <name> <target-url> --file rules.txt`。生成前验证规则语法，失败返回非零退出码并提示行号、原因、修复建议。CLI 和 Web/Admin 分享接口使用同一套 payload、hash 和语法检查。
+
+生成后必须对最终 URL 执行 `bifrost rule verify '<share-url>' --json`。成功输出 `valid=true`、规则名、hash、clean target URL；失败输出 `valid=false`、`error`、`next_action` 并以非零退出码结束。verify 不访问目标、不应用规则，也不初始化本地规则目录；Client 模式仍执行相同的离线校验。重复 `__bifrost_rule`、非法 Base64/JSON、版本/算法错误、hash 不一致或语法错误均被拒绝。
+
+HTTP 或 TLS 解包后的 HTTPS 分享请求校验失败时返回 HTTP 400 的可见错误页，展示原因及重新生成/verify 的指引，不转发给业务网站、不修改规则。普通业务 query 中仅出现这个字符串不受影响。确认页也展示相同错误页；Apply API 会重新校验，失败仍通过页面 status 显示错误。Admin 不可用时显示错误，避免消费方误以为应用成功。
+
+校验不包含域名拼写的业务正确性、目标服务可达性、实际规则命中或消费方本地 `@规则引用` 的可用性。这些需要额外核对或真实链路验证；HTTPS 未被解包时无法读取 URL query。

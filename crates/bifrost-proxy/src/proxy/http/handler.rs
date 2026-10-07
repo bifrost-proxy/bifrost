@@ -10,7 +10,7 @@ use bifrost_admin::{
 };
 use bifrost_core::{
     protocol::Protocol,
-    rule_share::{encode_rule_share_payload, extract_rule_share_query, RULE_SHARE_QUERY_PARAM},
+    rule_share::{encode_rule_share_payload, extract_rule_share_query, has_rule_share_query},
     BifrostError, Result,
 };
 use bifrost_script::{RequestData, ResponseData};
@@ -1641,6 +1641,9 @@ pub async fn handle_http_request(
         RuleShareProxyAction::None => {}
         RuleShareProxyAction::Redirect(clean_url) => {
             return Ok(build_redirect_response(302, &clean_url));
+        }
+        RuleShareProxyAction::Invalid(error) => {
+            return Ok(bifrost_admin::rule_share_error_response(&error));
         }
     };
 
@@ -4562,6 +4565,7 @@ pub async fn handle_http_request(
 enum RuleShareProxyAction {
     None,
     Redirect(String),
+    Invalid(String),
 }
 
 async fn handle_rule_share_query(
@@ -4575,7 +4579,7 @@ async fn handle_rule_share_query(
     } else {
         ctx.url.clone()
     };
-    if !request_url.contains(RULE_SHARE_QUERY_PARAM) {
+    if !has_rule_share_query(&request_url) {
         return Ok(RuleShareProxyAction::None);
     }
 
@@ -4585,10 +4589,9 @@ async fn handle_rule_share_query(
             warn!(
                 target: "bifrost_proxy::rule_share",
                 error = %error,
-                url = %request_url,
                 "failed to decode rule share query"
             );
-            return Ok(RuleShareProxyAction::None);
+            return Ok(RuleShareProxyAction::Invalid(error.to_string()));
         }
     };
 
@@ -4611,7 +4614,7 @@ async fn handle_rule_share_query(
         target: "bifrost_proxy::rule_share",
         "rule share query was present but admin state is unavailable"
     );
-    Ok(RuleShareProxyAction::Redirect(parts.clean_url))
+    Ok(RuleShareProxyAction::Invalid("Bifrost rule confirmation is unavailable. Start the local Admin service and reopen the verified share link.".to_string()))
 }
 
 fn build_rule_share_confirm_url(
@@ -6056,7 +6059,7 @@ mod coverage_boost {
     use crate::server::{HeaderReplaceRule, HeaderReplaceTarget};
     use bifrost_core::rule_share::{
         append_rule_share_query, content_sha256, RuleSharePayload,
-        RULE_SHARE_CONTENT_HASH_ALGORITHM, RULE_SHARE_PROTOCOL_VERSION,
+        RULE_SHARE_CONTENT_HASH_ALGORITHM, RULE_SHARE_PROTOCOL_VERSION, RULE_SHARE_QUERY_PARAM,
     };
     use parking_lot::Mutex;
 
@@ -6901,7 +6904,7 @@ mod coverage_boost {
     }
 
     #[tokio::test]
-    async fn handle_http_request_rule_share_get_redirects_to_clean_url() {
+    async fn handle_http_request_rule_share_get_without_admin_returns_error() {
         let content = "example.test status://200";
         let content_hash = content_sha256(content);
         let payload = RuleSharePayload {
@@ -6934,18 +6937,14 @@ mod coverage_boost {
         let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver);
 
         let resp = run_handle_http_request_with_rules(rules, req).await;
-        assert_eq!(resp.status(), StatusCode::FOUND);
-
-        let location = resp
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .expect("location header");
-        assert_eq!(location, clean_url);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.headers().get(header::LOCATION).is_none());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("confirmation is unavailable"));
     }
 
     #[tokio::test]
-    async fn handle_http_request_rule_share_post_redirects_without_resolving() {
+    async fn handle_http_request_rule_share_post_without_admin_rejects_without_resolving() {
         let content = "example.test status://201";
         let content_hash = content_sha256(content);
         let payload = RuleSharePayload {
@@ -6961,7 +6960,7 @@ mod coverage_boost {
         let shared_url = append_rule_share_query("http://example.com/post-path?foo=1", &payload)
             .expect("append rule share query");
         let parts = extract_rule_share_query(&shared_url).expect("extract parts");
-        let clean_url = parts.clean_url;
+        assert!(!parts.clean_url.contains(RULE_SHARE_QUERY_PARAM));
 
         let uri: Uri = shared_url.parse().expect("valid URI");
         let req = Request::builder()
@@ -6974,14 +6973,10 @@ mod coverage_boost {
         let (rules, last_url) = RecordingResolver::new_arc();
 
         let resp = run_handle_http_request_with_rules(rules, req).await;
-        assert_eq!(resp.status(), StatusCode::FOUND);
-
-        let location = resp
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .expect("location header");
-        assert_eq!(location, clean_url);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.headers().get(header::LOCATION).is_none());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("confirmation is unavailable"));
         assert!(
             last_url.lock().is_none(),
             "share links must redirect before normal rule resolution"
@@ -6989,7 +6984,7 @@ mod coverage_boost {
     }
 
     #[tokio::test]
-    async fn handle_http_request_invalid_rule_share_payload_falls_back_to_normal_handling() {
+    async fn handle_http_request_invalid_rule_share_payload_returns_visible_error() {
         let shared_url = format!(
             "http://example.com/path?{}=not-valid-base64!",
             RULE_SHARE_QUERY_PARAM
@@ -7006,8 +7001,12 @@ mod coverage_boost {
         let rules: Arc<dyn RulesResolver> = Arc::new(DirectStatusResolver);
 
         let resp = run_handle_http_request_with_rules(rules, req).await;
-        // Invalid payload should not trigger redirect; we still get a direct 204 status response.
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Unable to apply shared Bifrost rule"));
+        assert!(html.contains("invalid rule share base64 payload"));
+        assert!(html.contains("bifrost rule verify"));
     }
 
     #[tokio::test]
