@@ -14,6 +14,7 @@ HTTPS Echo Server - 用于验证代理服务的 TLS 处理能力
 """
 
 import http.server
+import ipaddress
 import json
 import os
 import socketserver
@@ -61,7 +62,6 @@ def generate_self_signed_cert():
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
         from datetime import timedelta
-        import ipaddress
 
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
@@ -500,6 +500,18 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def server_bind(self):
+        # HTTPServer resolves server_name with getfqdn after bind. Numeric
+        # loopback fixtures must not wait on the host's reverse DNS service.
+        try:
+            loopback = ipaddress.ip_address(self.server_address[0]).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            return super().server_bind()
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     def get_request(self):
         try:
             return super().get_request()
@@ -525,6 +537,7 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
+    startup_started = time.monotonic()
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 3443
     host = '127.0.0.1'
 
@@ -550,13 +563,20 @@ def main():
     )
     print_banner(unicode_banner, ascii_banner)
 
-    print("Generating self-signed certificate...")
+    def startup_phase(message):
+        elapsed = time.monotonic() - startup_started
+        print(f"[startup +{elapsed:.3f}s] {message}", flush=True)
+
+    startup_phase("Generating self-signed certificate...")
     cert_path, key_path, cert_dir = generate_self_signed_cert()
 
+    startup_phase("Loading TLS certificate...")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert_path, key_path)
 
+    startup_phase(f"Binding HTTPS listener on {host}:{port}...")
     with ThreadedHTTPServer((host, port), EchoHandler) as httpd:
+        startup_phase("Wrapping HTTPS listener with TLS...")
         httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
         print(f"Starting HTTPS Echo Server on {host}:{port}...")
         print("READY")
