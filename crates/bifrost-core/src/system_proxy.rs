@@ -11,6 +11,8 @@ mod macos_owned;
 #[cfg(any(all(target_os = "macos", bifrost_proxy_test_io), test))]
 mod macos_test_io;
 mod persistence;
+mod verification;
+pub use verification::ManagedSystemProxyVerification;
 #[cfg(not(target_os = "macos"))]
 mod retarget;
 #[cfg(target_os = "macos")]
@@ -254,6 +256,7 @@ impl From<ProxyBackup> for Sysproxy {
 pub struct SystemProxyManager {
     original_proxy: Option<Sysproxy>,
     is_set: bool,
+    attached_generation: Option<String>,
     data_dir: PathBuf,
     #[cfg(test)]
     skip_os_proxy_io: bool,
@@ -266,6 +269,7 @@ impl SystemProxyManager {
         Self {
             original_proxy: None,
             is_set: false,
+            attached_generation: None,
             data_dir,
             #[cfg(test)]
             skip_os_proxy_io: false,
@@ -515,7 +519,9 @@ impl SystemProxyManager {
             self.mark_managed_state_applied()?;
         }
 
-        self.is_set = true;
+        // Preserve the live baseline selected above. A retained same-target
+        // journal can contain an older original than this explicit enable.
+        self.attach_managed_generation(&state.generation);
         tracing::info!(
             "System proxy enabled: {}:{} (bypass: {})",
             host,
@@ -921,8 +927,7 @@ impl SystemProxyManager {
             if !matches {
                 return Ok(GuardedSystemProxyTransition::OwnershipChanged);
             }
-            self.original_proxy = Some(state.original.into());
-            self.is_set = true;
+            self.attach_managed_state(&state);
             return Ok(GuardedSystemProxyTransition::AlreadyInState);
         }
         #[cfg(test)]
@@ -956,8 +961,7 @@ impl SystemProxyManager {
         state.phase = Some(ManagedSystemProxyPhase::Applied);
         state.schema_version = 3;
         self.write_managed_state(&state)?;
-        self.original_proxy = Some(state.original.clone().into());
-        self.is_set = true;
+        self.attach_managed_state(&state);
         self.record_system_proxy_action("system_proxy_generation_resumed", "resume");
         Ok(GuardedSystemProxyTransition::Applied)
     }
@@ -1311,11 +1315,11 @@ impl SystemProxyManager {
     }
 
     pub fn detach(mut self) {
-        self.is_set = false;
-        self.original_proxy = None;
+        self.detach_in_place();
     }
 
     pub fn detach_in_place(&mut self) {
+        self.attached_generation = None;
         self.is_set = false;
         self.original_proxy = None;
     }

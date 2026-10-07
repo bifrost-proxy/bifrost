@@ -1,6 +1,7 @@
 //! One OS-proxy writer per core. Wake events invalidate readiness rather than
 //! racing a second writer; every observation is fenced by the current target.
 use super::{should_stop_system_proxy_reconcile_for_shutdown, system_proxy_reconcile_interval};
+use bifrost_core::system_proxy::{ManagedSystemProxyPhase, ManagedSystemProxyVerification};
 use bifrost_core::{GuardedSystemProxyTransition, ManagedSystemProxyOwnership, SystemProxyManager};
 use bifrost_storage::SystemProxyRecoveryMode;
 use std::io::{Read, Write};
@@ -315,6 +316,7 @@ fn generation(lease: Option<&ManagedSystemProxyOwnership>) -> Option<&str> {
 }
 
 trait ProxyTransitions {
+    fn verify(&mut self, generation: &str) -> bifrost_core::Result<ManagedSystemProxyVerification>;
     fn suspend(&mut self, generation: &str) -> bifrost_core::Result<GuardedSystemProxyTransition>;
     fn reconcile(&mut self, generation: &str)
         -> bifrost_core::Result<GuardedSystemProxyTransition>;
@@ -332,6 +334,9 @@ struct LockedProxyBackend<'a> {
     config: &'a SystemProxyReconcileConfig,
 }
 impl ProxyTransitions for LockedProxyBackend<'_> {
+    fn verify(&mut self, generation: &str) -> bifrost_core::Result<ManagedSystemProxyVerification> {
+        self.manager.verify_managed_if_generation(generation)
+    }
     fn suspend(&mut self, generation: &str) -> bifrost_core::Result<GuardedSystemProxyTransition> {
         self.manager.suspend_managed_if_generation(generation)
     }
@@ -407,6 +412,9 @@ fn effective_desired(
 }
 
 impl driver::ReconcileIo for LockedProxyBackend<'_> {
+    fn is_attached(&self, generation: &str) -> bool {
+        self.manager.is_managed_generation_attached(generation)
+    }
     fn persisted_intent(&mut self) -> bifrost_core::Result<bifrost_storage::NewSystemProxyConfig> {
         bifrost_storage::read_persisted_system_proxy_config(&self.config.bifrost_dir)
     }
@@ -845,6 +853,9 @@ mod tests {
         reconcile_attempts: usize,
     }
     impl ProxyTransitions for FaultingBackend {
+        fn verify(&mut self, _: &str) -> bifrost_core::Result<ManagedSystemProxyVerification> {
+            panic!("this fixture only exercises interrupted transitions")
+        }
         fn suspend(&mut self, _: &str) -> bifrost_core::Result<GuardedSystemProxyTransition> {
             self.suspend_attempts += 1;
             self.lease.applied = false;

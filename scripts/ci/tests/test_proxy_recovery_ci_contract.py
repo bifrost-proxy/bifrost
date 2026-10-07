@@ -122,35 +122,60 @@ class ProxyRecoveryInventoryTests(unittest.TestCase):
 class SystemProxyStabilitySignalTests(unittest.TestCase):
     SCRIPT = ROOT / "e2e-tests/tests/test_system_proxy_reconcile_stability.sh"
     SIGNAL = "system proxy transition verified"
+    VERIFICATION_SIGNAL = "system proxy ownership verified without transition"
 
     def test_stability_uses_current_signal_and_preserves_ownership_and_snapshot_checks(self) -> None:
         source = self.SCRIPT.read_text()
         driver = (ROOT / "crates/bifrost-cli/src/commands/start/system_proxy_reconcile/driver.rs").read_text()
         self.assertIn(f'"{self.SIGNAL}"', driver)
+        self.assertIn(f'"{self.VERIFICATION_SIGNAL}"', driver)
         self.assertEqual(source.count(self.SIGNAL), 2)
+        self.assertEqual(source.count(self.VERIFICATION_SIGNAL), 1)
         self.assertNotIn("system proxy full reconcile completed", source)
         self.assertIn('if ! grep -q \'"managed_by_bifrost":true\' <<<"$status"; then', source)
         self.assertIn('if ! cmp -s "$SNAPSHOT_FILE" "$AFTER_SNAPSHOT_FILE"; then', source)
         self.assertIn('diff -u "$SNAPSHOT_FILE" "$AFTER_SNAPSHOT_FILE" || true', source)
 
-    def test_stability_requires_exactly_one_verified_transition(self) -> None:
+    def test_stability_requires_one_transition_and_two_completed_verifications(self) -> None:
         source = self.SCRIPT.read_text()
-        # Execute only the log assertion, never the native macOS setup/cleanup.
-        assertion = "verified_transition_count=" + source.split("verified_transition_count=", 1)[1]
+        # Run the real polling/counting assertions, never native setup/cleanup.
+        assertion = "verification_count=0" + source.split("verification_count=0", 1)[1]
         assertion = assertion.split('\nstatus=', 1)[0]
-        for count in (0, 1, 2):
-            with self.subTest(count=count), tempfile.TemporaryDirectory(prefix="bifrost-stability-") as tmp:
-                logs = Path(tmp) / "logs"
-                logs.mkdir()
-                log = logs / "bifrost.test.log"
-                log.write_text((self.SIGNAL + "\n") * count + "healthy no-op cycle\n" * 2)
-                result = subprocess.run(
-                    [BASH, "-c", "set -euo pipefail\n" + assertion],
-                    env=dict(os.environ, BIFROST_DATA_DIR=tmp, PROXY_LOG=str(log)),
-                    text=True, capture_output=True, timeout=10,
-                )
-                self.assertEqual(result.returncode, 0 if count == 1 else 1,
-                                 result.stdout + result.stderr)
+        # Advance the shell's elapsed-time clock on a wait so missing completion
+        # signals exercise the actual timeout path without a 36-second delay.
+        harness = "set -euo pipefail\nsleep() { SECONDS=$((SECONDS + 60)); }\n"
+        for transitions in (0, 1, 2):
+            for verifications in (0, 1, 2, 3):
+                with self.subTest(transitions=transitions, verifications=verifications):
+                    with tempfile.TemporaryDirectory(prefix="bifrost-stability-") as tmp:
+                        logs = Path(tmp) / "logs"
+                        logs.mkdir()
+                        log = logs / "bifrost.test.log"
+                        log.write_text(
+                            (self.SIGNAL + "\n") * transitions
+                            + (self.VERIFICATION_SIGNAL + "\n") * verifications
+                            + "healthy no-op cycle\n" * 2
+                        )
+                        result = subprocess.run(
+                            [BASH, "-c", harness + assertion],
+                            env=dict(os.environ, BIFROST_DATA_DIR=tmp, PROXY_LOG=str(log),
+                                     BIFROST_SYSTEM_PROXY_RECONCILE_SECS="3"),
+                            text=True, capture_output=True, timeout=10,
+                        )
+                        passed = transitions == 1 and verifications >= 2
+                        self.assertEqual(result.returncode, 0 if passed else 1,
+                                         result.stdout + result.stderr)
+                        self.assertNotIn("unbound variable", result.stderr)
+                        if transitions != 1:
+                            self.assertIn(
+                                "expected one verified system proxy transition across two short "
+                                f"cycles, got {transitions}", result.stdout,
+                            )
+                        elif verifications < 2:
+                            self.assertIn(
+                                "expected at least two read-only system proxy inspections, "
+                                f"got {verifications}", result.stdout,
+                            )
 
 
 if __name__ == "__main__":

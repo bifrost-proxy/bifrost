@@ -2,6 +2,7 @@
 use super::*;
 
 pub(super) trait ReconcileIo: ProxyTransitions {
+    fn is_attached(&self, generation: &str) -> bool;
     fn persisted_intent(&mut self) -> bifrost_core::Result<bifrost_storage::NewSystemProxyConfig>;
     fn ownership(&mut self) -> bifrost_core::Result<Option<ManagedSystemProxyOwnership>>;
     fn observed(&mut self, host: &str, port: u16) -> SystemProxyOwnership;
@@ -144,14 +145,44 @@ impl ReconcileState {
                     .filter(|value| value.intent_revision != config.startup_intent_revision)
                     .map(|value| value.bypass.as_str())
                     .unwrap_or(&config.system_proxy_bypass);
-                let result = perform_transition(
-                    backend,
-                    action,
-                    generation(current.as_ref()),
-                    &config.proxy_host,
-                    port,
-                    bypass,
-                );
+                // Verify only the generation attached to this manager. Drift
+                // within that generation needs per-field reconciliation, not a
+                // blanket loss of the remaining owned fields.
+                let verification = if action == ReconcileAction::Adopt {
+                    current
+                        .as_ref()
+                        .filter(|lease| {
+                            lease.phase == Some(ManagedSystemProxyPhase::Applied)
+                                && backend.is_attached(&lease.generation)
+                        })
+                        .map(|lease| backend.verify(&lease.generation))
+                } else {
+                    None
+                };
+                let (result, read_only) = match verification {
+                    Some(Ok(ManagedSystemProxyVerification::Verified)) => {
+                        (Ok(GuardedSystemProxyTransition::AlreadyInState), true)
+                    }
+                    Some(Ok(ManagedSystemProxyVerification::OwnershipChanged)) => {
+                        (Ok(GuardedSystemProxyTransition::OwnershipChanged), false)
+                    }
+                    Some(Ok(ManagedSystemProxyVerification::NotManaged)) => {
+                        // The lease disappeared after the locked snapshot.
+                        (Ok(GuardedSystemProxyTransition::OwnershipChanged), false)
+                    }
+                    Some(Err(error)) => (Err(error), false),
+                    None | Some(Ok(ManagedSystemProxyVerification::Drifted)) => (
+                        perform_transition(
+                            backend,
+                            action,
+                            generation(current.as_ref()),
+                            &config.proxy_host,
+                            port,
+                            bypass,
+                        ),
+                        false,
+                    ),
+                };
                 match result {
                     Ok(transition) if transition_applied(transition) => {
                         let mut active =
@@ -194,13 +225,20 @@ impl ReconcileState {
                             }
                         }
                         config.enabled_flag.store(active, Ordering::Release);
-                        tracing::info!(
-                            ?action,
-                            ?transition,
-                            port,
-                            active,
-                            "system proxy transition verified"
-                        );
+                        if read_only && active {
+                            tracing::debug!(
+                                port,
+                                "system proxy ownership verified without transition"
+                            );
+                        } else {
+                            tracing::info!(
+                                ?action,
+                                ?transition,
+                                port,
+                                active,
+                                "system proxy transition verified"
+                            );
+                        }
                     }
                     Ok(transition) => {
                         if transition == GuardedSystemProxyTransition::OwnershipChanged {

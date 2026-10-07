@@ -235,6 +235,31 @@ fn stop_system_proxy_mode_for_desktop_request(
     }
 }
 
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum StopSignalOutcome {
+    Sent,
+    AlreadyExited,
+}
+
+#[cfg(unix)]
+fn send_stop_signal(
+    pid: u32,
+    signal: impl FnOnce(u32) -> std::result::Result<(), nix::errno::Errno>,
+) -> bifrost_core::Result<StopSignalOutcome> {
+    match signal(pid) {
+        Ok(()) => Ok(StopSignalOutcome::Sent),
+        // Automatic recovery daemons also observe the shutdown marker. They
+        // can exit during foreground proxy cleanup, after our liveness check
+        // but before SIGTERM. Only ESRCH proves that no signal is needed.
+        Err(nix::errno::Errno::ESRCH) => Ok(StopSignalOutcome::AlreadyExited),
+        Err(error) => Err(bifrost_core::BifrostError::Config(format!(
+            "Failed to send SIGTERM: {}",
+            error
+        ))),
+    }
+}
+
 fn run_stop_with_system_proxy_mode(
     system_proxy_mode: StopSystemProxyMode,
     recovery_port: u16,
@@ -298,9 +323,14 @@ fn run_stop_with_system_proxy_mode(
         use nix::unistd::Pid;
 
         println!("Stopping Bifrost proxy (PID: {})...", pid);
-        kill(Pid::from_raw(pid as i32), Signal::SIGTERM).map_err(|e| {
-            bifrost_core::BifrostError::Config(format!("Failed to send SIGTERM: {}", e))
-        })?;
+        if send_stop_signal(pid, |pid| kill(Pid::from_raw(pid as i32), Signal::SIGTERM))?
+            == StopSignalOutcome::AlreadyExited
+        {
+            cleanup_tray_helper_after_cli_stop(&bifrost_dir);
+            remove_pid(pid)?;
+            println!("Bifrost proxy stopped.");
+            return Ok(());
+        }
 
         // Poll for the process to exit. The graceful shutdown usually completes
         // within tens of milliseconds, so probe with a fine 5ms granularity for
@@ -395,6 +425,39 @@ mod tests {
     use crate::process::{
         runtime_is_live_desktop_owned, write_runtime_info, RuntimeInfo, RuntimeStartMode,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_accepts_exit_between_foreground_cleanup_and_sigterm() {
+        let verified_pid = 42;
+        let outcome = send_stop_signal(verified_pid, |pid| {
+            assert_eq!(pid, verified_pid);
+            // The marker watcher has already exited the verified daemon.
+            Err(nix::errno::Errno::ESRCH)
+        })
+        .expect("an already-exited daemon is a successful stop");
+        assert_eq!(outcome, StopSignalOutcome::AlreadyExited);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_waits_for_exit_after_a_successful_sigterm() {
+        assert_eq!(
+            send_stop_signal(42, |_| Ok(())).unwrap(),
+            StopSignalOutcome::Sent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_preserves_signal_errors_other_than_a_missing_process() {
+        for errno in [nix::errno::Errno::EPERM, nix::errno::Errno::EINVAL] {
+            let error = send_stop_signal(42, |_| Err(errno))
+                .expect_err("signal failure must not claim that the daemon exited");
+            assert!(error.to_string().contains("Failed to send SIGTERM"));
+            assert!(error.to_string().contains(&errno.to_string()));
+        }
+    }
 
     #[test]
     fn host_matching_accepts_loopback_aliases() {

@@ -204,8 +204,7 @@ impl SystemProxyManager {
         self.apply_proxy_backup(&state.target)?;
         state.set_phase(ManagedSystemProxyPhase::Applied);
         self.write_managed_state(&state)?;
-        self.original_proxy = Some(state.original.into());
-        self.is_set = true;
+        self.attach_managed_state(&state);
         Ok(GuardedSystemProxyTransition::Applied)
     }
 
@@ -265,8 +264,7 @@ impl SystemProxyManager {
             self.apply_proxy_backup(&state.target)?;
             state.set_phase(ManagedSystemProxyPhase::Applied);
             self.write_managed_state(&state)?;
-            self.original_proxy = Some(state.original.into());
-            self.is_set = true;
+            self.attach_managed_state(&state);
         }
         self.record_system_proxy_action("system_proxy_generation_retargeted", "retarget");
         Ok(GuardedSystemProxyTransition::Applied)

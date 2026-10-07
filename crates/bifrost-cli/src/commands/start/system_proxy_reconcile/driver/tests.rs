@@ -40,6 +40,10 @@ struct FakeIo {
     outcomes: VecDeque<bifrost_core::Result<GuardedSystemProxyTransition>>,
     calls: Vec<&'static str>,
     acquired_bypass: Option<String>,
+    attached_generation: Option<String>,
+    verification_calls: Vec<String>,
+    verification_outcomes: VecDeque<bifrost_core::Result<ManagedSystemProxyVerification>>,
+    observations: usize,
 }
 
 impl FakeIo {
@@ -58,6 +62,10 @@ impl FakeIo {
             outcomes: VecDeque::new(),
             calls: Vec::new(),
             acquired_bypass: None,
+            attached_generation: None,
+            verification_calls: Vec::new(),
+            verification_outcomes: VecDeque::new(),
+            observations: 0,
         }
     }
 
@@ -74,11 +82,17 @@ impl FakeIo {
             .as_ref()
             .is_ok_and(|outcome| transition_applied(*outcome))
         {
-            self.lease = match action {
-                "release" => None,
-                "suspend" => Some(owned(true)),
-                _ => Some(owned(false)),
+            let mut next = owned(action == "suspend");
+            if let Some(current) = &self.lease {
+                next.generation = current.generation.clone();
+                next.target = current.target.clone();
+            }
+            self.attached_generation = if matches!(action, "release" | "suspend") {
+                None
+            } else {
+                Some(next.generation.clone())
             };
+            self.lease = (action != "release").then_some(next);
         } else if action == "suspend" && result.is_err() {
             // A partial OS write is journaled before the error reaches the
             // coordinator. Retrying an unchanged Applied lease would miss the
@@ -92,19 +106,26 @@ impl FakeIo {
 }
 
 impl ProxyTransitions for FakeIo {
+    fn verify(&mut self, generation: &str) -> bifrost_core::Result<ManagedSystemProxyVerification> {
+        assert_eq!(self.lease.as_ref().unwrap().generation, generation);
+        self.verification_calls.push(generation.into());
+        self.verification_outcomes
+            .pop_front()
+            .unwrap_or(Ok(ManagedSystemProxyVerification::Verified))
+    }
     fn suspend(&mut self, generation: &str) -> bifrost_core::Result<GuardedSystemProxyTransition> {
-        assert_eq!(generation, "lease-1");
+        assert_eq!(self.lease.as_ref().unwrap().generation, generation);
         self.transition("suspend")
     }
     fn reconcile(
         &mut self,
         generation: &str,
     ) -> bifrost_core::Result<GuardedSystemProxyTransition> {
-        assert_eq!(generation, "lease-1");
+        assert_eq!(self.lease.as_ref().unwrap().generation, generation);
         self.transition("reconcile")
     }
     fn release(&mut self, generation: &str) -> bifrost_core::Result<GuardedSystemProxyTransition> {
-        assert_eq!(generation, "lease-1");
+        assert_eq!(self.lease.as_ref().unwrap().generation, generation);
         self.transition("release")
     }
     fn acquire(
@@ -120,6 +141,9 @@ impl ProxyTransitions for FakeIo {
 }
 
 impl ReconcileIo for FakeIo {
+    fn is_attached(&self, generation: &str) -> bool {
+        self.attached_generation.as_deref() == Some(generation)
+    }
     fn persisted_intent(&mut self) -> bifrost_core::Result<bifrost_storage::NewSystemProxyConfig> {
         match self.reads.pop_front() {
             Some(Ok(value)) => {
@@ -136,6 +160,7 @@ impl ReconcileIo for FakeIo {
             .unwrap_or_else(|| Ok(self.lease.clone()))
     }
     fn observed(&mut self, _: &str, _: u16) -> SystemProxyOwnership {
+        self.observations += 1;
         self.observed
     }
     fn cancellation_generation(&mut self) -> Option<String> {
@@ -609,6 +634,10 @@ fn concrete_unsupported_backend_is_observational_and_cannot_acquire_or_release()
         SystemProxyOwnership::Unknown
     );
     assert_eq!(backend.cancellation_generation(), None);
+    assert_eq!(
+        backend.verify("unowned").unwrap(),
+        ManagedSystemProxyVerification::NotManaged
+    );
     for result in [
         backend.suspend("unowned"),
         backend.reconcile("unowned"),
@@ -620,4 +649,206 @@ fn concrete_unsupported_backend_is_observational_and_cannot_acquire_or_release()
     assert!(!config.bifrost_dir.join("proxy_state.json").exists());
     assert!(!config.bifrost_dir.join("proxy_backup.json").exists());
     assert!(!backend.persisted_intent().unwrap().enabled);
+}
+
+#[test]
+fn repeated_healthy_inspections_verify_without_repeating_acquire_adopt_or_resume() {
+    for initial_lease in [None, Some(owned(false)), Some(owned(true))] {
+        let now = Instant::now();
+        let (_dir, config, mut state) = fixture(now);
+        let expected_transition = if initial_lease.is_none() {
+            "acquire"
+        } else {
+            "reconcile"
+        };
+        let mut io = FakeIo::new(initial_lease);
+        io.observed = SystemProxyOwnership::ThisBifrost;
+        healthy(&mut state, now);
+        run(&mut state, &config, &mut io, now, true);
+        let acquired = io.lease.clone();
+        for cycle in 1..=3 {
+            let next = now + system_proxy_reconcile_interval() * cycle;
+            assert!(state.observe_and_should_inspect(&config, 18745, true, next, Some(&io.config)));
+            run(&mut state, &config, &mut io, next, true);
+            assert_eq!(io.lease, acquired);
+            assert!(config.enabled_flag.load(Ordering::Acquire));
+        }
+        assert_eq!(io.calls, [expected_transition]);
+        assert_eq!(io.verification_calls, ["lease-1", "lease-1", "lease-1"]);
+        assert_eq!(io.observations, 4);
+    }
+}
+
+#[test]
+fn detached_replaced_or_pending_lease_must_be_adopted_before_read_only_verification() {
+    for changed in ["detached", "generation", "pending"] {
+        let now = Instant::now();
+        let (_dir, config, mut state) = fixture(now);
+        let mut io = FakeIo::new(Some(owned(false)));
+        healthy(&mut state, now);
+        run(&mut state, &config, &mut io, now, true);
+        match changed {
+            "detached" => io.attached_generation = None,
+            "generation" => io.lease.as_mut().unwrap().generation = "lease-2".into(),
+            _ => {
+                let lease = io.lease.as_mut().unwrap();
+                lease.applied = false;
+                lease.phase =
+                    Some(bifrost_core::system_proxy::ManagedSystemProxyPhase::PendingApply);
+            }
+        }
+        run(
+            &mut state,
+            &config,
+            &mut io,
+            now + Duration::from_secs(10),
+            true,
+        );
+        assert_eq!(io.calls, ["reconcile", "reconcile"], "{changed}");
+        assert!(io.verification_calls.is_empty(), "{changed}");
+        run(
+            &mut state,
+            &config,
+            &mut io,
+            now + Duration::from_secs(20),
+            true,
+        );
+        assert_eq!(io.calls, ["reconcile", "reconcile"], "{changed}");
+        assert_eq!(
+            io.verification_calls,
+            [io.lease.as_ref().unwrap().generation.clone()]
+        );
+    }
+}
+
+#[test]
+fn read_only_verification_rejects_generation_replacement_despite_matching_aggregate_status() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    let mut io = FakeIo::new(Some(owned(false)));
+    io.observed = SystemProxyOwnership::ThisBifrost;
+    healthy(&mut state, now);
+    run(&mut state, &config, &mut io, now, true);
+    io.verification_outcomes
+        .push_back(Ok(ManagedSystemProxyVerification::OwnershipChanged));
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        now + Duration::from_secs(10),
+        true,
+    );
+    assert_eq!(io.calls, ["reconcile"]);
+    assert_eq!(io.verification_calls, ["lease-1"]);
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+    assert!(config.desired_enabled.load(Ordering::Acquire));
+    assert!(!state.allow_initial_acquire);
+}
+
+#[test]
+fn newer_disable_during_read_only_verification_still_releases_the_owned_generation() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    let mut io = FakeIo::new(Some(owned(false)));
+    healthy(&mut state, now);
+    run(&mut state, &config, &mut io, now, true);
+    io.reads.extend([
+        Ok(io.config.clone()),
+        Ok(bifrost_storage::NewSystemProxyConfig {
+            enabled: false,
+            intent_revision: 1,
+            ..io.config.clone()
+        }),
+    ]);
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        now + Duration::from_secs(10),
+        true,
+    );
+    assert_eq!(io.calls, ["reconcile", "release"]);
+    assert_eq!(io.verification_calls, ["lease-1"]);
+    assert!(io.lease.is_none());
+    assert!(!config.desired_enabled.load(Ordering::Acquire));
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn read_only_inspection_error_retries_without_reacquisition_or_losing_intent() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    let mut io = FakeIo::new(Some(owned(false)));
+    healthy(&mut state, now);
+    run(&mut state, &config, &mut io, now, true);
+    let before = io.lease.clone();
+    io.verification_outcomes
+        .push_back(Err(error("cannot read owned HTTPS field")));
+    let next = now + Duration::from_secs(10);
+    run(&mut state, &config, &mut io, next, true);
+    assert_eq!(state.next_inspection, next + Duration::from_secs(2));
+    assert!(config.desired_enabled.load(Ordering::Acquire));
+    assert_eq!(io.lease, before);
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        next + Duration::from_secs(2),
+        true,
+    );
+    assert_eq!(io.calls, ["reconcile"]);
+    assert_eq!(io.verification_calls, ["lease-1", "lease-1"]);
+    assert!(config.enabled_flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn same_generation_field_drift_reconciles_once_then_returns_to_read_only_inspections() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    let mut io = FakeIo::new(Some(owned(false)));
+    healthy(&mut state, now);
+    run(&mut state, &config, &mut io, now, true);
+    io.verification_outcomes
+        .push_back(Ok(ManagedSystemProxyVerification::Drifted));
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        now + Duration::from_secs(10),
+        true,
+    );
+    assert_eq!(io.calls, ["reconcile", "reconcile"]);
+    assert!(config.enabled_flag.load(Ordering::Acquire));
+    assert!(config.desired_enabled.load(Ordering::Acquire));
+    assert_eq!(io.lease.as_ref().unwrap().generation, "lease-1");
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        now + Duration::from_secs(20),
+        true,
+    );
+    assert_eq!(io.calls, ["reconcile", "reconcile"]);
+    assert_eq!(io.verification_calls, ["lease-1", "lease-1"]);
+}
+
+#[test]
+fn lease_disappearing_during_verification_clears_active_flag_without_reacquiring() {
+    let now = Instant::now();
+    let (_dir, config, mut state) = fixture(now);
+    let mut io = FakeIo::new(Some(owned(false)));
+    healthy(&mut state, now);
+    run(&mut state, &config, &mut io, now, true);
+    io.verification_outcomes
+        .push_back(Ok(ManagedSystemProxyVerification::NotManaged));
+    run(
+        &mut state,
+        &config,
+        &mut io,
+        now + Duration::from_secs(10),
+        true,
+    );
+    assert_eq!(io.calls, ["reconcile"]);
+    assert!(!config.enabled_flag.load(Ordering::Acquire));
+    assert!(!state.allow_initial_acquire);
 }

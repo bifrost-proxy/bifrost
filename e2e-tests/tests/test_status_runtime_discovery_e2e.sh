@@ -248,7 +248,11 @@ PY
 
     rm -f "${TEST_DATA_DIR}/runtime.json" "${TEST_DATA_DIR}/bifrost.pid"
     local stop_output
-    stop_output="$("$BIFROST_BIN" -p "$PROXY_PORT" stop 2>&1)"
+    if ! stop_output="$("$BIFROST_BIN" -p "$PROXY_PORT" stop 2>&1)"; then
+        _log_fail "stop should recover a markerless daemon on the selected port" \
+            "stop exits 0" "$stop_output"
+        exit 1
+    fi
     assert_body_contains "Bifrost proxy stopped" "$stop_output" \
         "stop should recover a markerless daemon on the selected port"
     for _ in $(seq 1 100); do

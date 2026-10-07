@@ -173,8 +173,7 @@ impl SystemProxyManager {
             self.remove_managed_files_checked()?;
             return Err(BifrostError::Config("No macOS HTTP/HTTPS proxy protocols could be managed; authenticated or externally owned settings were preserved".into()));
         }
-        self.original_proxy = Some(state.original.clone().into());
-        self.is_set = true;
+        self.attach_managed_state(&state);
         self.record_system_proxy_action("system_proxy_enabled", "enable");
         if result.ownership_changed {
             tracing::warn!("Some macOS proxy fields belong to another owner and were preserved");
@@ -484,8 +483,7 @@ impl SystemProxyManager {
             if !observed_owned(&state, &mut os)? {
                 return Ok(GuardedSystemProxyTransition::OwnershipChanged);
             }
-            self.original_proxy = Some(state.original.into());
-            self.is_set = true;
+            self.attach_managed_state(&state);
             return Ok(GuardedSystemProxyTransition::AlreadyInState);
         }
         if !matches!(
@@ -501,8 +499,7 @@ impl SystemProxyManager {
             self.detach_in_place();
             return Ok(GuardedSystemProxyTransition::OwnershipChanged);
         }
-        self.original_proxy = Some(state.original.into());
-        self.is_set = true;
+        self.attach_managed_state(&state);
         self.record_system_proxy_action("system_proxy_generation_resumed", "resume");
         Ok(if outcome.ownership_changed && !outcome.changed {
             GuardedSystemProxyTransition::OwnershipChanged
@@ -546,26 +543,63 @@ impl SystemProxyManager {
         if generation.is_empty() || state.generation != generation {
             return Ok(GuardedSystemProxyTransition::OwnershipChanged);
         }
-        if state.phase() != ManagedSystemProxyPhase::PendingApply {
+        if !matches!(
+            state.phase(),
+            ManagedSystemProxyPhase::Applied | ManagedSystemProxyPhase::PendingApply
+        ) {
             drop(lock);
             return self.resume_macos(generation, privilege);
         }
-        if state.macos_services.is_empty() || state.phase.is_none() {
+        let mut os = self.macos_backend(privilege)?;
+        if state.phase() == ManagedSystemProxyPhase::Applied {
+            let legacy = state.macos_services.is_empty();
+            if legacy {
+                // A failed legacy adoption must not persist a disabled matching
+                // endpoint as evidence for a later automatic Apply.
+                state.macos_services = legacy_journal(&mut os, &state.target)?;
+                state.schema_version = 3;
+            }
+            if !macos_owned::has_active_owned_protocol(&state) {
+                self.detach_in_place();
+                return Ok(GuardedSystemProxyTransition::OwnershipChanged);
+            }
+            if observed_owned(&state, &mut os)? {
+                if legacy {
+                    self.write_managed_state(&state)?;
+                }
+                self.attach_managed_state(&state);
+                return Ok(GuardedSystemProxyTransition::AlreadyInState);
+            }
+            if legacy
+                || state
+                    .macos_services
+                    .iter()
+                    .flat_map(|service| &service.fields)
+                    .any(|field| {
+                        !field.relinquished
+                            && matches!(&field.last_written, Value::Protocol(proxy)
+                    if !proxy.enabled || proxy.port != state.target.port
+                        || !proxy_hosts_match(&proxy.host, &state.target.host))
+                    })
+            {
+                // Older versions may already have persisted an unproven legacy
+                // migration. A disabled recorded endpoint is never Apply authority.
+                return Ok(GuardedSystemProxyTransition::OwnershipChanged);
+            }
+            // Same-generation manual edits relinquish only the changed fields.
+            // The shared engine compares again before every possible write.
+        } else if state.macos_services.is_empty() || state.phase.is_none() {
             return Ok(GuardedSystemProxyTransition::OwnershipChanged);
         }
-        let mut os = self.macos_backend(privilege)?;
-        let outcome = self.run_owned_transition(&mut state, &mut os, Intent::Apply)?;
+        self.run_owned_transition(&mut state, &mut os, Intent::Apply)?;
         if !macos_owned::has_active_owned_protocol(&state) {
             self.detach_in_place();
             return Ok(GuardedSystemProxyTransition::OwnershipChanged);
         }
-        self.original_proxy = Some(state.original.into());
-        self.is_set = true;
-        Ok(if outcome.ownership_changed && !outcome.changed {
-            GuardedSystemProxyTransition::OwnershipChanged
-        } else {
-            GuardedSystemProxyTransition::Applied
-        })
+        self.attach_managed_state(&state);
+        // Relinquishing an edited field is a completed journal transition even
+        // if the remaining owned protocols required no OS write.
+        Ok(GuardedSystemProxyTransition::Applied)
     }
 
     pub fn retarget_managed_if_generation(
@@ -605,8 +639,7 @@ impl SystemProxyManager {
         self.write_managed_state(&state)?;
         if !suspended {
             self.run_owned_transition(&mut state, &mut os, Intent::Apply)?;
-            self.original_proxy = Some(state.original.into());
-            self.is_set = true;
+            self.attach_managed_state(&state);
         }
         self.record_system_proxy_action("system_proxy_generation_retargeted", "retarget");
         Ok(GuardedSystemProxyTransition::Applied)

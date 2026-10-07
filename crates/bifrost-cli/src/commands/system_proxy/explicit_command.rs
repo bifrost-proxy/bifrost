@@ -316,7 +316,51 @@ pub(super) fn direct_disable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    fn read_http_request_body(reader: impl Read) -> Vec<u8> {
+        let mut reader = BufReader::new(reader);
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "request ended before its headers were complete"
+            );
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+        }
+        let mut body = vec![0; content_length.expect("request must have Content-Length")];
+        reader.read_exact(&mut body).unwrap();
+        body
+    }
+
+    #[test]
+    fn http_fixture_consumes_fragmented_headers_and_body() {
+        let body = b"{\"enabled\":false}";
+        let request = format!(
+            "PUT /_bifrost/api/proxy/system HTTP/1.1\r\ncOnTeNt-LeNgTh: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        // Force separate reads at every possible header/body split, including
+        // the boundary where ureq writes the request prelude before its body.
+        for split in 1..request.len() {
+            let (first, rest) = request.as_bytes().split_at(split);
+            assert_eq!(
+                read_http_request_body(first.chain(rest)),
+                body,
+                "request split at byte {split}"
+            );
+        }
+    }
 
     #[test]
     fn accepted_http_failure_after_newer_toggle_never_runs_direct_fallback() {
@@ -332,8 +376,11 @@ mod tests {
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                     .unwrap();
-                let mut request = [0; 4096];
-                let _ = stream.read(&mut request).unwrap();
+                // Drain the entire PUT before replying. A single TCP read can
+                // leave the body unread and closing can reset the response.
+                let body = read_http_request_body(&mut stream);
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["enabled"], enabled);
                 let config = ConfigManager::new(data_dir).unwrap();
                 persist_system_proxy_config(&config, !enabled, None).unwrap();
                 let body = serde_json::json!({"configured_enabled": !enabled, "message": "superseded while verifying"}).to_string();
@@ -349,7 +396,11 @@ mod tests {
                 },
             );
             server.join().unwrap();
-            assert!(result.unwrap_err().to_string().contains("superseded"));
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("superseded"),
+                "unexpected API error: {error}"
+            );
             assert_eq!(fallbacks, 0);
             assert_eq!(
                 read_system_proxy_config(dir.path()).unwrap().enabled,

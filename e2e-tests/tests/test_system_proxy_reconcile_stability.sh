@@ -5,6 +5,9 @@
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL
 export BIFROST_SYSTEM_PROXY_RECONCILE_SECS
+# Count completed read-only inspections as well as transitions, so a stalled
+# coordinator cannot satisfy the one-transition convergence assertion.
+export RUST_LOG="bifrost::commands::start::system_proxy_reconcile=debug,info"
 unset BIFROST_DESKTOP_CORE BIFROST_DESKTOP_APP
 
 set -euo pipefail
@@ -127,11 +130,28 @@ for _ in $(seq 1 90); do
     sleep 0.5
 done
 
-sleep "$((BIFROST_SYSTEM_PROXY_RECONCILE_SECS * 2 + 2))"
+# Wait for completed inspections, not just elapsed intervals: native readback
+# time grows with the number of network services on the host.
+verification_count=0
+verification_deadline="$((SECONDS + BIFROST_SYSTEM_PROXY_RECONCILE_SECS * 2 + 30))"
+while [[ "$SECONDS" -lt "$verification_deadline" ]]; do
+    verification_count="$({ grep -h "system proxy ownership verified without transition" \
+        "$BIFROST_DATA_DIR"/logs/bifrost.*.log 2>/dev/null || true; } | wc -l | tr -d ' ')"
+    if [[ "$verification_count" -ge 2 ]]; then
+        break
+    fi
+    sleep 0.5
+done
 verified_transition_count="$({ grep -h "system proxy transition verified" \
     "$BIFROST_DATA_DIR"/logs/bifrost.*.log 2>/dev/null || true; } | wc -l | tr -d ' ')"
 if [[ "$verified_transition_count" -ne 1 ]]; then
     echo "expected one verified system proxy transition across two short cycles, got $verified_transition_count"
+    tail -n 200 "$PROXY_LOG" "$BIFROST_DATA_DIR"/logs/*.log 2>/dev/null || true
+    exit 1
+fi
+
+if [[ "$verification_count" -lt 2 ]]; then
+    echo "expected at least two read-only system proxy inspections, got $verification_count"
     tail -n 200 "$PROXY_LOG" "$BIFROST_DATA_DIR"/logs/*.log 2>/dev/null || true
     exit 1
 fi
