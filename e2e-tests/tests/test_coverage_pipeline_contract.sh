@@ -112,7 +112,10 @@ grep -Fq -- '- name: Install sync-server dependencies' <<<"$coverage_job"
 grep -Fq 'working-directory: packages/bifrost-sync-server' <<<"$coverage_job"
 grep -Fq -- '- name: Build sync-server (TypeScript -> dist/cli.js)' <<<"$coverage_job"
 grep -Fq -- '- name: Install FFmpeg for ASR source compression E2E' <<<"$coverage_job"
-grep -Fq 'sudo apt-get install --yes --no-install-recommends ffmpeg' <<<"$coverage_job"
+# The fake-argv FFmpeg tests above verify sudo/apt-get, bounded acquisition
+# options, and failure handling. Keep this source guard independent of options
+# between apt-get and install while requiring the package and install flags.
+grep -Fq 'install --yes --no-install-recommends ffmpeg' <<<"$coverage_job"
 
 grep -Fq 'cargo llvm-cov show-env --sh' "$coverage_all"
 grep -Fq 'unit-integration.json' "$coverage_all"
