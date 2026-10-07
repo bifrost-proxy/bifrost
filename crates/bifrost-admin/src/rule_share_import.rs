@@ -2,9 +2,7 @@ use bifrost_core::rule_share::{
     content_sha256, imported_rule_content_hash, imported_rule_description, imported_rule_name,
     imported_rule_source_name, RuleShareExclusiveScope, RuleShareMode, RuleSharePayload,
 };
-use bifrost_core::{
-    normalize_rule_content, rule_reference_name, validate_rules, BifrostError, Result,
-};
+use bifrost_core::{normalize_rule_content, BifrostError, Result};
 use bifrost_storage::{RuleFile, RulesStorage, ShareEnvState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -219,32 +217,7 @@ fn validate_import_payload(payload: &RuleSharePayload) -> Result<()> {
         ));
     }
 
-    let validation_content = strip_rule_reference_lines_for_validation(&payload.content);
-    let errors = validate_rules(&validation_content);
-    if !errors.is_empty() {
-        let message = errors
-            .first()
-            .map(|error| error.message.clone())
-            .unwrap_or_else(|| "rule validation failed".to_string());
-        return Err(BifrostError::Rule(format!(
-            "invalid shared rule content: {message}"
-        )));
-    }
-    Ok(())
-}
-
-fn strip_rule_reference_lines_for_validation(content: &str) -> String {
-    content
-        .lines()
-        .map(|line| {
-            if rule_reference_name(line).is_some() {
-                ""
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    bifrost_core::rule_share::validate_payload(payload)
 }
 
 fn unique_rule_name(base_name: &str, rules: &[RuleFile]) -> String {

@@ -495,7 +495,9 @@ pub(super) fn restart_managed_runtime_with_generation(
 
     let mut readiness = StableReadiness::default();
     let mut closed_reported = false;
-    while started_at.elapsed() < ready_timeout {
+    // Stop and latest intent must also be checked after the readiness budget
+    // expires. Slow metadata I/O can exhaust it before the first probe.
+    loop {
         if explicit_stop_requested(data_dir) {
             return ManagedRuntimeRestartOutcome::Cancelled;
         }
@@ -506,6 +508,9 @@ pub(super) fn restart_managed_runtime_with_generation(
                 &config,
             ),
             Err(error) => {
+                if started_at.elapsed() >= ready_timeout {
+                    return ManagedRuntimeRestartOutcome::RecoveryFailed;
+                }
                 last_error = Some(error.to_string());
                 readiness.reset();
                 std::thread::sleep(std::time::Duration::from_millis(250));
@@ -529,6 +534,9 @@ pub(super) fn restart_managed_runtime_with_generation(
             } else {
                 ManagedRuntimeRestartOutcome::RecoveryFailed
             };
+        }
+        if started_at.elapsed() >= ready_timeout {
+            break;
         }
         let current = current.filter(|current| same_runtime_target(current, &runtime));
         let ready = current.as_ref().is_some_and(|current| {
@@ -662,9 +670,6 @@ pub(super) fn restart_managed_runtime_with_generation(
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    if read_system_proxy_config(data_dir).is_err() {
-        return ManagedRuntimeRestartOutcome::RecoveryFailed;
     }
     // Conditional consumption cannot delete a newer explicit stop request.
     consume_restart_handoff(data_dir);

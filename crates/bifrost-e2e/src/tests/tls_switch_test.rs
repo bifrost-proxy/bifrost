@@ -117,9 +117,13 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
 
     let mock = HttpsMockServer::start("localtest.me").await;
     let target_url = format!("https://localtest.me:{}/switch", mock.port);
-    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, vec![], true, true)
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    // Keep both routing modes local without depending on public DNS. Use an
+    // HTTPS target so interception still reaches the TLS mock on its dynamic port.
+    let upstream_rule = format!("localtest.me https://127.0.0.1:{}", mock.port);
+    let (proxy, admin_state) =
+        ProxyInstance::start_with_admin(port, vec![&upstream_rule], true, true)
+            .await
+            .map_err(|e| format!("Failed to start proxy: {}", e))?;
     admin_state.runtime_config.write().await.intercept_include = vec!["localtest.me".to_string()];
 
     println!("[SETUP] Proxy started with TLS interception ENABLED");
@@ -135,10 +139,21 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
         .map_err(|e| format!("Failed to create HTTPS client: {}", e))?;
 
     println!("\n[PHASE 1] Send HTTPS request with TLS interception ENABLED");
-    let _ = https_client
+    let response = https_client
         .get(format!("{target_url}?test=1"))
         .send()
-        .await;
+        .await
+        .map_err(|e| format!("Intercepted HTTPS request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Intercepted HTTPS request returned {}",
+            response.status()
+        ));
+    }
+    response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read intercepted HTTPS response: {e}"))?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let connections_before = admin_state.connection_registry.list_connections();
@@ -176,10 +191,21 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("Failed to create post-switch HTTPS client: {e}"))?;
-    let _ = tunnel_client
+    let response = tunnel_client
         .get(format!("{target_url}?test=2"))
         .send()
-        .await;
+        .await
+        .map_err(|e| format!("Tunneled HTTPS request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Tunneled HTTPS request returned {}",
+            response.status()
+        ));
+    }
+    response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read tunneled HTTPS response: {e}"))?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let traffic = get_traffic_as_json(&admin_state);

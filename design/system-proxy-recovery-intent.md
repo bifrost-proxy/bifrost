@@ -45,6 +45,7 @@ schema v3 区分 `pending_apply`、`applied`、`suspending`、`suspended`、`res
 - 未知意图不能授权 acquisition/resume；fail-closed 仍保持其策略。
 - 暂停过程中失败的 `suspending` / `resuming` / `pending_apply` 必须继续恢复，不能只检查 `applied` 布尔值。
 - 接受的关闭即使第一次 OS 操作失败，也要继续有界重试。
+- CLI helper 的 readiness 预算耗尽后仍先检查明确停止和最新意图；即使预算在首次探针前耗尽，disabled 也必须走 generation-guarded 暂停，并如实报告取消、所有权变化或失败，不能落入 fail-open/fail-closed 默认结果。未知意图在截止点返回失败，不继续无限等待。
 - 变化、拒绝、错误和实际应用结果分别记录，不能把尝试写入当成成功。
 
 canary 验证本地 accept/HTTP dispatch，不证明 DNS、上游 TLS 或公网可达。

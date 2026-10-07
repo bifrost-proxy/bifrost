@@ -158,6 +158,230 @@ fn live_recovery_disable_and_missing_intent_never_resume_and_report_truthful_res
     }
 }
 
+// ZERO deterministically exhausts the readiness budget before the first probe,
+// including on fast hosts. Every adapter is a mock, even on Windows/macOS.
+#[test]
+fn recovery_deadline_checks_disabled_intent_before_either_policy_fallback() {
+    use bifrost_core::GuardedSystemProxyTransition as Transition;
+
+    for mode in ["fail-open", "fail-closed"] {
+        for (transition, expected) in [
+            (
+                Some(Transition::Applied),
+                ManagedRuntimeRestartOutcome::Cancelled,
+            ),
+            (
+                Some(Transition::AlreadyInState),
+                ManagedRuntimeRestartOutcome::Cancelled,
+            ),
+            (
+                Some(Transition::OwnershipChanged),
+                ManagedRuntimeRestartOutcome::OwnershipChanged,
+            ),
+            (
+                Some(Transition::NotManaged),
+                ManagedRuntimeRestartOutcome::OwnershipChanged,
+            ),
+            (None, ManagedRuntimeRestartOutcome::RecoveryFailed),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = runtime_fixture(dir.path(), true);
+            persist_system_proxy_recovery_policy(
+                &ConfigManager::new(dir.path().into()).unwrap(),
+                mode,
+                3,
+            )
+            .unwrap();
+            let mut proxy = TestManagedProxyRecovery::new(runtime.port, true);
+            // Applied uses the mock's actual state transition.
+            if transition == Some(Transition::AlreadyInState) {
+                proxy = TestManagedProxyRecovery::new(runtime.port, false);
+                proxy.suspend_outcome = transition;
+            } else if transition.is_none() {
+                proxy.suspend_failures = 1;
+            } else if transition != Some(Transition::Applied) {
+                proxy.suspend_outcome = transition;
+            }
+            let data = dir.path().to_path_buf();
+            proxy.after_ensure = Some(Box::new(move || disabled(&data)));
+
+            assert_eq!(
+                restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                    dir.path(),
+                    Duration::ZERO,
+                    &mut proxy,
+                ),
+                expected,
+                "{mode}: {transition:?}",
+            );
+            assert_eq!(proxy.suspend_calls, ["generation-fixture"]);
+            assert!(proxy.resume_calls.is_empty());
+            assert_eq!(
+                proxy.ownership.as_ref().unwrap().applied,
+                expected != ManagedRuntimeRestartOutcome::Cancelled,
+            );
+            let config = read_system_proxy_config(dir.path()).unwrap();
+            assert!(!config.enabled);
+            assert_eq!(config.intent_revision, 1);
+            let events = bifrost_core::read_recent_system_proxy_events(dir.path(), 10).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].event, "helper_recovery_cancelled");
+            assert_eq!(
+                events[0].ownership_generation.as_deref(),
+                Some("generation-fixture")
+            );
+            assert_eq!(events[0].error.is_some(), transition.is_none());
+            let owner = bifrost_core::read_system_proxy_owner_state(dir.path())
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.phase.as_deref(), Some("desired_disabled"));
+            assert_eq!(owner.last_error.is_some(), transition.is_none());
+        }
+    }
+}
+
+#[test]
+fn recovery_deadline_stop_and_unknown_intent_never_apply_either_policy() {
+    for mode in ["fail-open", "fail-closed"] {
+        for case in [
+            "foreground_stop",
+            "background_stop",
+            "stop_and_corrupt",
+            "missing",
+            "corrupt",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = runtime_fixture(dir.path(), true);
+            persist_system_proxy_recovery_policy(
+                &ConfigManager::new(dir.path().into()).unwrap(),
+                mode,
+                3,
+            )
+            .unwrap();
+            let mut proxy = TestManagedProxyRecovery::new(runtime.port, true);
+            let data = dir.path().to_path_buf();
+            let stopping = case.contains("stop");
+            let shutdown_mode = if case == "background_stop" {
+                bifrost_core::SystemProxyShutdownMode::BackgroundCleanup
+            } else {
+                bifrost_core::SystemProxyShutdownMode::ForegroundCleanup
+            };
+            proxy.after_ensure = Some(Box::new(move || {
+                if case == "missing" {
+                    std::fs::remove_file(data.join("config.toml")).unwrap();
+                } else if case.contains("corrupt") {
+                    std::fs::write(data.join("config.toml"), "bad [toml").unwrap();
+                }
+                if stopping {
+                    bifrost_core::write_system_proxy_shutdown_mode(&data, shutdown_mode).unwrap();
+                }
+            }));
+
+            assert_eq!(
+                restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                    dir.path(),
+                    Duration::ZERO,
+                    &mut proxy,
+                ),
+                if stopping {
+                    ManagedRuntimeRestartOutcome::Cancelled
+                } else {
+                    ManagedRuntimeRestartOutcome::RecoveryFailed
+                },
+                "{mode}: {case}",
+            );
+            assert!(proxy.suspend_calls.is_empty());
+            assert!(proxy.resume_calls.is_empty());
+            assert!(proxy.ownership.as_ref().unwrap().applied);
+            assert!(
+                bifrost_core::read_recent_system_proxy_events(dir.path(), 10)
+                    .unwrap()
+                    .is_empty()
+            );
+            if stopping {
+                assert_eq!(
+                    bifrost_core::read_system_proxy_shutdown_mode(dir.path()),
+                    Some(shutdown_mode)
+                );
+            }
+            if case == "missing" {
+                assert!(!dir.path().join("config.toml").exists());
+            } else if case.contains("corrupt") {
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+                    "bad [toml"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn recovery_deadline_resolves_current_runtime_intent_before_fallback() {
+    for mode in ["fail-open", "fail-closed"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_fixture(dir.path(), true);
+        persist_system_proxy_recovery_policy(
+            &ConfigManager::new(dir.path().into()).unwrap(),
+            mode,
+            3,
+        )
+        .unwrap();
+        let mut proxy = TestManagedProxyRecovery::new(runtime.port, true);
+        runtime.system_proxy_enabled = Some(false);
+        proxy.replace_runtime_on_ensure = Some((dir.path().into(), runtime));
+
+        assert_eq!(
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                Duration::ZERO,
+                &mut proxy,
+            ),
+            ManagedRuntimeRestartOutcome::Cancelled,
+        );
+        assert_eq!(proxy.suspend_calls, ["generation-fixture"]);
+        assert!(proxy.resume_calls.is_empty());
+        assert!(!proxy.ownership.as_ref().unwrap().applied);
+        assert!(read_system_proxy_config(dir.path()).unwrap().enabled);
+    }
+}
+
+#[test]
+fn recovery_deadline_keeps_enabled_policy_fallback_without_resuming() {
+    for mode in ["fail-open", "fail-closed"] {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime_fixture(dir.path(), true);
+        persist_system_proxy_recovery_policy(
+            &ConfigManager::new(dir.path().into()).unwrap(),
+            mode,
+            3,
+        )
+        .unwrap();
+        let mut proxy = TestManagedProxyRecovery::new(runtime.port, true);
+        let fail_open = mode == "fail-open";
+
+        assert_eq!(
+            restart_managed_runtime_before_cleanup_with_timeout_and_proxy(
+                dir.path(),
+                Duration::ZERO,
+                &mut proxy,
+            ),
+            if fail_open {
+                ManagedRuntimeRestartOutcome::FailOpenSuspended
+            } else {
+                ManagedRuntimeRestartOutcome::FailClosedPreserved
+            },
+        );
+        assert_eq!(proxy.suspend_calls.len(), usize::from(fail_open));
+        assert!(proxy.resume_calls.is_empty());
+        assert_eq!(proxy.ownership.as_ref().unwrap().applied, !fail_open);
+        assert!(read_system_proxy_config(dir.path()).unwrap().enabled);
+        let events = bifrost_core::read_recent_system_proxy_events(dir.path(), 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "helper_runtime_restart_not_ready");
+    }
+}
+
 #[test]
 fn desktop_exit_preserves_fail_closed_stop_and_failed_suspend_states() {
     for case in ["closed", "stop", "lost", "failed"] {

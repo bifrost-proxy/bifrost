@@ -120,7 +120,7 @@ done
 curl -sf "http://127.0.0.1:$PROXY_PORT/_bifrost/api/system" >/dev/null
 
 for _ in $(seq 1 90); do
-    if grep -h -q "system proxy full reconcile completed" \
+    if grep -h -q "system proxy transition verified" \
         "$BIFROST_DATA_DIR"/logs/bifrost.*.log 2>/dev/null; then
         break
     fi
@@ -128,10 +128,10 @@ for _ in $(seq 1 90); do
 done
 
 sleep "$((BIFROST_SYSTEM_PROXY_RECONCILE_SECS * 2 + 2))"
-full_reconcile_count="$({ grep -h "system proxy full reconcile completed" \
+verified_transition_count="$({ grep -h "system proxy transition verified" \
     "$BIFROST_DATA_DIR"/logs/bifrost.*.log 2>/dev/null || true; } | wc -l | tr -d ' ')"
-if [[ "$full_reconcile_count" -ne 1 ]]; then
-    echo "expected one full system proxy reconcile across two short cycles, got $full_reconcile_count"
+if [[ "$verified_transition_count" -ne 1 ]]; then
+    echo "expected one verified system proxy transition across two short cycles, got $verified_transition_count"
     tail -n 200 "$PROXY_LOG" "$BIFROST_DATA_DIR"/logs/*.log 2>/dev/null || true
     exit 1
 fi
@@ -153,4 +153,4 @@ if ! cmp -s "$SNAPSHOT_FILE" "$AFTER_SNAPSHOT_FILE"; then
     exit 1
 fi
 
-echo "PASS: converged system proxy performed one full reconcile across two short cycles"
+echo "PASS: converged system proxy performed one verified transition across two short cycles"

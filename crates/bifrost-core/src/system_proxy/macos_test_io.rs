@@ -195,4 +195,60 @@ mod tests {
         fixture.state = outside.path().to_owned();
         assert!(fixture.command("/usr/sbin/scutil").is_err());
     }
+    #[test]
+    fn fixture_directory_marker_and_complete_script_header_are_required() {
+        let (_root, mut fixture) = fixture();
+        let directory = fixture.directory.clone();
+        fixture.directory = fixture.state.clone();
+        assert!(fixture
+            .command("/usr/sbin/scutil")
+            .unwrap_err()
+            .to_string()
+            .contains("real directory"));
+        fixture.directory = directory;
+        std::fs::write(
+            fixture.directory.join(".bifrost-proxy-test-io"),
+            "wrong version",
+        )
+        .unwrap();
+        assert!(fixture
+            .command("/usr/sbin/scutil")
+            .unwrap_err()
+            .to_string()
+            .contains("marker"));
+        std::fs::write(
+            fixture.directory.join(".bifrost-proxy-test-io"),
+            FIXTURE_TAG,
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.directory.join("scutil"),
+            vec![b'x'; SCRIPT_HEADER.len()],
+        )
+        .unwrap();
+        assert!(fixture
+            .command("/usr/sbin/scutil")
+            .unwrap_err()
+            .to_string()
+            .contains("tagged test script"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_fixture_command_is_rejected_before_process_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, fixture) = fixture();
+        std::fs::set_permissions(
+            fixture.directory.join("networksetup"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(fixture
+            .command("/usr/sbin/scutil")
+            .unwrap_err()
+            .to_string()
+            .contains("not executable"));
+        assert_eq!(std::fs::read(&fixture.state).unwrap(), b"disabled");
+        assert!(std::fs::read(&fixture.log).unwrap().is_empty());
+    }
 }

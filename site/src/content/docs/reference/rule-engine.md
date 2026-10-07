@@ -219,7 +219,7 @@ bifrost port active 18888
 
 Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 query 中，用于把规则分享给其他本机 Bifrost 用户或自动化 Agent。协议 query 名固定为 `__bifrost_rule`，内容是 URL-safe base64 编码的 JSON payload，包含规则名称、规则内容、版本号、内容 hash、导入模式和独占启用范围。
 
-第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，不会静默写入规则，而是重定向到本机 `/_bifrost/share/rule` 确认页面。确认页会展示规则名称、内容 hash、独占范围、返回目标和完整规则内容；content hash 仅用于人工核对，用户不需要手工输入。只有用户点击 Apply Rule 后，Bifrost 才会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。确认完成后会跳回移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容。
+第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，不会静默写入规则，而是重定向到本机 `/_bifrost/share/rule` 确认页面。确认页会展示规则名称、内容 hash、独占范围、返回目标和完整规则内容；content hash 用于完整性校验和人工核对，用户不需要手工输入。只有用户点击 Apply Rule 后，Bifrost 才会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。确认完成后会跳回移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容。
 
 生成分享链接时，目标网站支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `http://...`，确保普通 HTTP 代理请求能在不依赖 TLS 拦截的情况下看到并导入分享 query。显式输入 `https://...` 时会保持 HTTPS；显式非 HTTP(S) scheme 会被拒绝。
 
@@ -231,6 +231,16 @@ CLI 生成示例：
 bifrost rule share local-dev https://example.com/app
 bifrost rule share adhoc-debug https://example.com/app --content "api.example.com bp://127.0.0.1:3000"
 ```
+
+## 分享链接验证与错误反馈
+
+生成方使用 `bifrost rule share <name> <target-url> --file rules.txt`。生成前验证规则语法，失败返回非零退出码并提示行号、原因、修复建议。CLI 和 Web/Admin 分享接口使用同一套 payload、hash 和语法检查。
+
+生成后必须对最终 URL 执行 `bifrost rule verify '<share-url>' --json`。成功输出 `valid=true`、规则名、hash、clean target URL；失败输出 `valid=false`、`error`、`next_action` 并以非零退出码结束。verify 不访问目标、不应用规则，也不初始化本地规则目录；Client 模式仍执行相同的离线校验。重复 `__bifrost_rule`、非法 Base64/JSON、版本/算法错误、hash 不一致或语法错误均被拒绝。
+
+HTTP 或 TLS 解包后的 HTTPS 分享请求校验失败时返回 HTTP 400 的可见错误页，展示原因及重新生成/verify 的指引，不转发给业务网站、不修改规则。普通业务 query 中仅出现这个字符串不受影响。确认页也展示相同错误页；Apply API 会重新校验，失败仍通过页面 status 显示错误。Admin 不可用时显示错误，避免消费方误以为应用成功。
+
+校验不包含域名拼写的业务正确性、目标服务可达性、实际规则命中或消费方本地 `@规则引用` 的可用性。这些需要额外核对或真实链路验证；HTTPS 未被解包时无法读取 URL query。
 
 ## 注意事项
 

@@ -229,3 +229,60 @@ fn backup_and_applied_marker_are_atomic_round_trips_and_suspension_is_explicit()
         }
     }
 }
+
+#[test]
+fn rejected_or_failed_intent_predicates_leave_existing_ownership_untouched() {
+    let (_dir, mut manager) = fixture();
+    manager
+        .write_managed_state(&state(ManagedSystemProxyPhase::Applied))
+        .unwrap();
+    let before = std::fs::read(manager.state_file_path()).unwrap();
+    assert_eq!(
+        manager
+            .enable_guarded("127.0.0.1", 18887, None, || Ok(false))
+            .unwrap(),
+        GuardedSystemProxyTransition::OwnershipChanged
+    );
+    assert!(manager
+        .enable_guarded("127.0.0.1", 18887, None, || Err(BifrostError::Config(
+            "intent read failed".into()
+        )))
+        .is_err());
+    assert_eq!(
+        manager
+            .restore_managed_if_generation_guarded("lease", || Ok(false))
+            .unwrap(),
+        GuardedSystemProxyTransition::OwnershipChanged
+    );
+    assert!(manager
+        .restore_managed_if_generation_guarded("lease", || Err(BifrostError::Config(
+            "intent read failed".into()
+        )))
+        .is_err());
+    assert_eq!(std::fs::read(manager.state_file_path()).unwrap(), before);
+    assert!(manager.mock_macos_state.lock().unwrap().is_none());
+    assert!(!manager.is_set());
+}
+
+#[test]
+fn empty_generation_and_legacy_unapplied_state_cannot_authorize_reconcile() {
+    let (_dir, mut manager) = fixture();
+    let mut journal = state(ManagedSystemProxyPhase::PendingApply);
+    journal.phase = None;
+    manager.write_managed_state(&journal).unwrap();
+    let before = std::fs::read(manager.state_file_path()).unwrap();
+    for generation in ["", "lease"] {
+        assert_eq!(
+            manager.reconcile_managed_if_generation(generation).unwrap(),
+            GuardedSystemProxyTransition::OwnershipChanged
+        );
+        assert_eq!(
+            manager
+                .retarget_managed_if_generation(generation, "127.0.0.1", 18887, None)
+                .unwrap(),
+            GuardedSystemProxyTransition::OwnershipChanged
+        );
+    }
+    assert_eq!(std::fs::read(manager.state_file_path()).unwrap(), before);
+    assert!(manager.mock_macos_state.lock().unwrap().is_none());
+}

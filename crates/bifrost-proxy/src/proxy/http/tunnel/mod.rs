@@ -12,7 +12,7 @@ use bifrost_admin::{
     TrafficType, ADMIN_PATH_PREFIX,
 };
 use bifrost_core::{
-    rule_share::{encode_rule_share_payload, extract_rule_share_query, RULE_SHARE_QUERY_PARAM},
+    rule_share::{encode_rule_share_payload, extract_rule_share_query, has_rule_share_query},
     BifrostError, Protocol, Result,
 };
 use bifrost_script::{RequestData, ResponseData};
@@ -2125,6 +2125,9 @@ async fn handle_intercepted_request_with_protocol(
         InterceptedRuleShareAction::None => {}
         InterceptedRuleShareAction::Redirect(clean_url) => {
             return Ok(build_redirect_response(302, &clean_url));
+        }
+        InterceptedRuleShareAction::Invalid(error) => {
+            return Ok(bifrost_admin::rule_share_error_response(&error));
         }
     }
 
@@ -5982,6 +5985,7 @@ struct UpstreamWebSocketHandshake {
 enum InterceptedRuleShareAction {
     None,
     Redirect(String),
+    Invalid(String),
 }
 
 async fn handle_intercepted_rule_share_query(
@@ -5991,7 +5995,7 @@ async fn handle_intercepted_rule_share_query(
     admin_state: Option<&Arc<AdminState>>,
     _push_manager: Option<&SharedPushManager>,
 ) -> InterceptedRuleShareAction {
-    if !request_url.contains(RULE_SHARE_QUERY_PARAM) {
+    if !has_rule_share_query(request_url) {
         return InterceptedRuleShareAction::None;
     }
 
@@ -6002,10 +6006,9 @@ async fn handle_intercepted_rule_share_query(
                 target: "bifrost_proxy::rule_share",
                 req_id,
                 error = %error,
-                url = %request_url,
                 "failed to decode intercepted rule share query"
             );
-            return InterceptedRuleShareAction::None;
+            return InterceptedRuleShareAction::Invalid(error.to_string());
         }
     };
 
@@ -6032,7 +6035,7 @@ async fn handle_intercepted_rule_share_query(
                     error = %error,
                     "failed to build intercepted rule share confirmation URL"
                 );
-                return InterceptedRuleShareAction::None;
+                return InterceptedRuleShareAction::Invalid(error.to_string());
             }
         }
     }
@@ -6042,7 +6045,7 @@ async fn handle_intercepted_rule_share_query(
         req_id,
         "intercepted rule share query was present but admin state is unavailable"
     );
-    InterceptedRuleShareAction::Redirect(parts.clean_url)
+    InterceptedRuleShareAction::Invalid("Bifrost rule confirmation is unavailable. Start the local Admin service and reopen the verified share link.".to_string())
 }
 
 fn build_rule_share_confirm_url(
@@ -9857,7 +9860,7 @@ mod coverage_boost_v3 {
     // ---------------- handle_intercepted_rule_share_query ----------------
 
     #[tokio::test]
-    async fn test_handle_intercepted_rule_share_query_redirects_get() {
+    async fn test_handle_intercepted_rule_share_query_without_admin_returns_error() {
         let payload = new_rule_share_payload("demo", "example.com bp://127.0.0.1:3000").unwrap();
         let shared = append_rule_share_query("https://example.com/path?a=1", &payload).unwrap();
         let shared_for_server = shared.clone();
@@ -9889,6 +9892,7 @@ mod coverage_boost_v3 {
                                     .unwrap(),
                             );
                         }
+                        InterceptedRuleShareAction::Invalid(error) => error,
                         _ => "none".to_string(),
                     };
 
@@ -9923,8 +9927,7 @@ mod coverage_boost_v3 {
         let resp = sender.send_request(req).await.unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = std::str::from_utf8(&bytes).unwrap();
-        // Body should be the clean URL without the rule share query param.
-        assert!(body_str.starts_with("https://example.com/path"));
+        assert!(body_str.contains("confirmation is unavailable"));
         assert!(!body_str.contains("__bifrost_rule"));
 
         drop(sender);
@@ -10209,10 +10212,10 @@ mod coverage_boost_v4 {
     }
 
     #[tokio::test]
-    async fn test_handle_intercepted_rule_share_query_invalid_payload_returns_none_v4() {
+    async fn test_handle_intercepted_rule_share_query_invalid_payload_returns_error_v4() {
         let (client_side, server_side) = duplex(16 * 1024);
 
-        let request_url = "https://example.com/path?__bifrost_rule=not-valid-base64".to_string();
+        let request_url = "https://example.com/path?__bifrost_rule=not-valid-base64!".to_string();
 
         let server_task = tokio::spawn(async move {
             let io = TokioIo::new(server_side);
@@ -10228,7 +10231,11 @@ mod coverage_boost_v4 {
                     )
                     .await;
                     let marker = match action {
-                        InterceptedRuleShareAction::None => "none",
+                        InterceptedRuleShareAction::Invalid(error)
+                            if error.contains("invalid rule share base64 payload") =>
+                        {
+                            "invalid"
+                        }
                         _ => "other",
                     };
                     let body = Full::new(Bytes::from(marker));
@@ -10251,13 +10258,13 @@ mod coverage_boost_v4 {
 
         let req = Request::builder()
             .method(Method::GET)
-            .uri("/path?__bifrost_rule=not-valid-base64")
+            .uri("/path?__bifrost_rule=not-valid-base64!")
             .body(Empty::<Bytes>::new())
             .unwrap();
 
         let resp = sender.send_request(req).await.unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(bytes.as_ref(), b"none");
+        assert_eq!(bytes.as_ref(), b"invalid");
 
         drop(sender);
         client_task.await.unwrap().unwrap();

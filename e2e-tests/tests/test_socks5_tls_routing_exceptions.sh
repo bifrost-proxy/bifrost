@@ -18,7 +18,9 @@ SOCKS5_PORT="${SOCKS5_PORT:-$((18781 + ($$ % 500)))}"
 DOWNSTREAM_PROXY_PORT="${DOWNSTREAM_PROXY_PORT:-${ECHO_PROXY_PORT:-${MOCK_ECHO_PROXY_PORT:-$((PROXY_PORT + 7))}}}"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-$((13700 + ($$ % 500)))}"
 ECHO_HTTPS_PORT="${ECHO_HTTPS_PORT:-$((13743 + ($$ % 500)))}"
-SECONDARY_HTTPS_PORT="${SECONDARY_HTTPS_PORT:-$((14743 + ($$ % 500)))}"
+# run_all_e2e.sh reserves a stride-10 span; offsets 0-7 are already assigned.
+# Keep the extra upstream in this test's span, including under parallel CI.
+SECONDARY_HTTPS_PORT="${SECONDARY_HTTPS_PORT:-$((PROXY_PORT + 8))}"
 
 if [[ -n "${BIFROST_BIN:-}" ]]; then
     :
@@ -41,6 +43,8 @@ DOWNSTREAM_PROXY_PID=""
 SECONDARY_HTTPS_PID=""
 
 cleanup() {
+    # The secondary listener is owned by PID. A failed bind must never clean up
+    # another test's process that happens to be listening on the requested port.
     if [[ -n "${SECONDARY_HTTPS_PID:-}" ]]; then
         kill_pid "$SECONDARY_HTTPS_PID"
         wait "$SECONDARY_HTTPS_PID" 2>/dev/null || true
@@ -56,7 +60,6 @@ cleanup() {
     kill_bifrost_on_port "$PROXY_PORT"
     kill_bifrost_on_port "$SOCKS5_PORT"
     kill_bifrost_on_port "$DOWNSTREAM_PROXY_PORT"
-    kill_bifrost_on_port "$SECONDARY_HTTPS_PORT"
     MOCK_SERVERS="http,https" \
     HTTP_PORT="$ECHO_HTTP_PORT" \
     HTTPS_PORT="$ECHO_HTTPS_PORT" \
@@ -73,6 +76,15 @@ log_section() {
     echo "============================================================"
 }
 
+report_mock_startup_failure() {
+    echo "$1" >&2
+    echo "Mock ports: HTTP=${ECHO_HTTP_PORT}, HTTPS=${ECHO_HTTPS_PORT}, secondary HTTPS=${SECONDARY_HTTPS_PORT}" >&2
+    if [[ -f "$SECONDARY_HTTPS_LOG_FILE" ]]; then
+        echo "Secondary HTTPS server log:" >&2
+        tail -n 200 "$SECONDARY_HTTPS_LOG_FILE" >&2 || true
+    fi
+}
+
 start_mock_servers() {
     log_section "Starting mock servers"
     mkdir -p "$TEST_DATA_DIR"
@@ -80,15 +92,27 @@ start_mock_servers() {
     HTTP_PORT="$ECHO_HTTP_PORT" \
     HTTPS_PORT="$ECHO_HTTPS_PORT" \
         "$E2E_DIR/mock_servers/start_servers.sh" start-bg
-    python3 "$E2E_DIR/mock_servers/https_echo_server.py" "$SECONDARY_HTTPS_PORT" \
+    : >"$SECONDARY_HTTPS_LOG_FILE"
+    python3 -u "$E2E_DIR/mock_servers/https_echo_server.py" "$SECONDARY_HTTPS_PORT" \
         >"$SECONDARY_HTTPS_LOG_FILE" 2>&1 &
     SECONDARY_HTTPS_PID=$!
 
     local waited=0
     while [[ $waited -lt 30 ]]; do
-        if curl -sf "http://127.0.0.1:${ECHO_HTTP_PORT}/health" >/dev/null 2>&1 \
-            && curl -skf "https://127.0.0.1:${ECHO_HTTPS_PORT}/health" >/dev/null 2>&1 \
-            && curl -skf "https://127.0.0.1:${SECONDARY_HTTPS_PORT}/health" >/dev/null 2>&1; then
+        if ! kill -0 "$SECONDARY_HTTPS_PID" 2>/dev/null; then
+            local status=0
+            wait "$SECONDARY_HTTPS_PID" || status=$?
+            SECONDARY_HTTPS_PID=""
+            report_mock_startup_failure "Secondary HTTPS server exited before readiness (exit ${status})"
+            exit 1
+        fi
+        # A different listener can answer health while this child is still
+        # generating its certificate. READY is emitted only after its bind.
+        if grep -Eq $'^READY\r?$' "$SECONDARY_HTTPS_LOG_FILE" \
+            && curl -sf --noproxy '*' --connect-timeout 1 --max-time 2 "http://127.0.0.1:${ECHO_HTTP_PORT}/health" >/dev/null 2>&1 \
+            && curl -skf --noproxy '*' --connect-timeout 1 --max-time 2 "https://127.0.0.1:${ECHO_HTTPS_PORT}/health" >/dev/null 2>&1 \
+            && curl -skf --noproxy '*' --connect-timeout 1 --max-time 2 "https://127.0.0.1:${SECONDARY_HTTPS_PORT}/health" >/dev/null 2>&1 \
+            && kill -0 "$SECONDARY_HTTPS_PID" 2>/dev/null; then
             _log_pass "Mock HTTP/HTTPS servers are ready"
             return 0
         fi
@@ -96,7 +120,7 @@ start_mock_servers() {
         waited=$((waited + 1))
     done
 
-    echo "Mock servers failed to start" >&2
+    report_mock_startup_failure "Mock servers failed to become ready after ${waited} attempts"
     exit 1
 }
 

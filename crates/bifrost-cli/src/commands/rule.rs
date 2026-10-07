@@ -4,7 +4,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use bifrost_core::{
-    rule_share::{append_rule_share_query, new_rule_share_payload, share_payload_name_from_rule},
+    rule_share::{
+        append_rule_share_query, new_rule_share_payload, share_payload_name_from_rule,
+        verify_rule_share_url,
+    },
     RuleSyntaxReport, ValueStore,
 };
 use bifrost_storage::{
@@ -15,6 +18,10 @@ use bifrost_sync::{SyncAction, SyncManager};
 use crate::cli::RuleCommands;
 
 pub fn handle_rule_command(action: RuleCommands) -> bifrost_core::Result<()> {
+    // Verify must be read-only, including in Client mode: do not initialize storage.
+    if let RuleCommands::Verify { share_url, json } = &action {
+        return handle_rule_share_verify(share_url, *json);
+    }
     if super::client::is_active() {
         return handle_client_rule_command(
             action,
@@ -27,6 +34,38 @@ pub fn handle_rule_command(action: RuleCommands) -> bifrost_core::Result<()> {
         RuleCommands::Reorder { names } => handle_rule_reorder(&names),
         RuleCommands::Active => handle_rule_active(),
         other => handle_rule_local(other),
+    }
+}
+
+fn handle_rule_share_verify(share_url: &str, json: bool) -> bifrost_core::Result<()> {
+    match verify_rule_share_url(share_url) {
+        Ok(parts) => {
+            let payload = parts.payload.expect("verify requires a payload");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "valid": true, "name": payload.name, "content_hash": payload.content_hash,
+                        "target_url": parts.clean_url,
+                        "message": "Payload, content hash and rule syntax are valid. Target reachability and receiver-local references are not checked."
+                    })
+                );
+            } else {
+                println!("Valid rule share link: {}\nContent hash: {}\nTarget: {}\nTarget reachability and receiver-local references are not checked.",
+                    payload.name, payload.content_hash, parts.clean_url);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"valid": false, "error": error.to_string(),
+                    "next_action": "Fix the reported error, regenerate with bifrost rule share, then verify the final URL again."})
+                );
+            }
+            Err(error)
+        }
     }
 }
 
@@ -200,6 +239,7 @@ fn handle_client_rule_command(
             println!("{}", append_rule_share_query(&target_url, &payload)?);
             Ok(())
         }
+        RuleCommands::Verify { share_url, json } => handle_rule_share_verify(&share_url, json),
         RuleCommands::Sync => Err(bifrost_core::BifrostError::Config(
             "rule sync is not supported in Client mode; the command was not executed locally"
                 .to_string(),
@@ -313,7 +353,8 @@ fn handle_rule_local(action: RuleCommands) -> bifrost_core::Result<()> {
             let share_url = append_rule_share_query(&target_url, &payload)?;
             println!("{}", share_url);
         }
-        RuleCommands::Sync
+        RuleCommands::Verify { .. }
+        | RuleCommands::Sync
         | RuleCommands::Rename { .. }
         | RuleCommands::Reorder { .. }
         | RuleCommands::Active => {
@@ -929,4 +970,25 @@ fn handle_rule_active() -> bifrost_core::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod share_verify_tests {
+    use super::*;
+
+    #[test]
+    fn verify_command_reports_success_and_failure_in_both_formats() {
+        let payload = new_rule_share_payload("verify-test", "example.test status://200").unwrap();
+        let url = append_rule_share_query("https://example.com/path", &payload).unwrap();
+        for json in [true, false] {
+            handle_rule_command(RuleCommands::Verify {
+                share_url: url.clone(),
+                json,
+            })
+            .unwrap();
+            assert!(
+                handle_rule_share_verify("https://example.com/?__bifrost_rule=!", json).is_err()
+            );
+        }
+    }
 }
