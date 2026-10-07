@@ -8,8 +8,8 @@ set -uo pipefail
 # their fixture cleanup or disposable runner teardown, never guessed by name.
 root_pid="${BIFROST_E2E_JOB_ROOT_PID:-}"
 root_start="${BIFROST_E2E_JOB_ROOT_START:-}"
-if [[ "${GITHUB_ACTIONS:-}" != "true" || ! "$root_pid" =~ ^[0-9]+$ \
-  || "$root_pid" -le 1 || "$root_pid" != "$PPID" || -z "$root_start" ]]; then
+if [[ "${GITHUB_ACTIONS:-}" != "true" || ! "$root_pid" =~ ^[0-9]+$ ||
+  "$root_pid" -le 1 || "$root_pid" != "$PPID" || -z "$root_start" ]]; then
   exit 0
 fi
 case "$(uname -s 2>/dev/null)" in
@@ -26,11 +26,11 @@ read_process() {
   record="$(LC_ALL=C ps -p "$1" -o uid=,ppid=,lstart=,state= 2>/dev/null)" || return 1
   [[ "$record" != *$'\n'* ]] || return 1
   read -r process_uid process_ppid weekday month day clock year process_state extra <<<"$record"
-  [[ "$process_uid" =~ ^[0-9]+$ && "$process_ppid" =~ ^[0-9]+$ \
-    && "$weekday" =~ ^[A-Z][a-z][a-z]$ && "$month" =~ ^[A-Z][a-z][a-z]$ \
-    && "$day" =~ ^[0-9]+$ && "$clock" =~ ^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$ \
-    && "$year" =~ ^[0-9][0-9][0-9][0-9]$ && -n "$process_state" \
-    && "$process_state" =~ ^[DIRSTUWt] && -z "$extra" ]] || return 1
+  [[ "$process_uid" =~ ^[0-9]+$ && "$process_ppid" =~ ^[0-9]+$ &&
+    "$weekday" =~ ^[A-Z][a-z][a-z]$ && "$month" =~ ^[A-Z][a-z][a-z]$ &&
+    "$day" =~ ^[0-9]+$ && "$clock" =~ ^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$ &&
+    "$year" =~ ^[0-9][0-9][0-9][0-9]$ && -n "$process_state" &&
+    "$process_state" =~ ^[DIRSTUWt] && -z "$extra" ]] || return 1
   process_start="$weekday $month $day $clock $year"
 }
 

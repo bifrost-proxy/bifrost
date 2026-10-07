@@ -47,8 +47,8 @@ class EchoServerBindTests(unittest.TestCase):
                     self.assertEqual(server.server_address[1], server.server_port)
                     self.assertTrue(server.daemon_threads)
                     if hasattr(socket, "SO_REUSEADDR"):
-                        self.assertEqual(server.socket.getsockopt(
-                            socket.SOL_SOCKET, socket.SO_REUSEADDR), 1)
+                        self.assertNotEqual(server.socket.getsockopt(
+                            socket.SOL_SOCKET, socket.SO_REUSEADDR), 0)
                 lookup.assert_not_called()
 
     def test_numeric_loopback_variants_keep_bound_socket_metadata(self) -> None:
