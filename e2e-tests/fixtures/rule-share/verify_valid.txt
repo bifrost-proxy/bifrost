@@ -1,0 +1,2 @@
+# Verify generation, integrity, and consumption of a valid share payload.
+example.test status://200

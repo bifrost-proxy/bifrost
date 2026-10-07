@@ -1,0 +1,2 @@
+# Reject invalid syntax before producing a share link, with line diagnostics.
+example.test unknownProtocol://value

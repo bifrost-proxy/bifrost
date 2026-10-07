@@ -42,26 +42,23 @@ pub async fn handle_rule_share_confirm_page(
         .get("payload")
         .filter(|value| !value.trim().is_empty())
     else {
-        return error_response(StatusCode::BAD_REQUEST, "Missing rule share payload");
+        return rule_share_error_response("Missing rule share payload");
     };
     let Some(target_url) = params
         .get("target")
         .filter(|value| !value.trim().is_empty())
     else {
-        return error_response(StatusCode::BAD_REQUEST, "Missing target URL");
+        return rule_share_error_response("Missing target URL");
     };
 
     let payload = match decode_rule_share_payload(encoded_payload) {
         Ok(payload) => payload,
         Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid rule share payload: {error}"),
-            )
+            return rule_share_error_response(&format!("Invalid rule share payload: {error}"))
         }
     };
     if let Err(error) = validate_target_url(target_url) {
-        return error_response(StatusCode::BAD_REQUEST, &error);
+        return rule_share_error_response(&error);
     }
 
     html_response(render_confirm_page(
@@ -152,7 +149,10 @@ fn render_confirm_page(
     csrf_token: &str,
 ) -> String {
     let payload_json = serde_json::to_string(encoded_payload).unwrap_or_else(|_| "\"\"".into());
-    let target_json = serde_json::to_string(target_url).unwrap_or_else(|_| "\"\"".into());
+    // JSON string escaping alone does not protect an HTML script element.
+    let target_json = serde_json::to_string(target_url)
+        .unwrap_or_else(|_| "\"\"".into())
+        .replace('<', "\\u003c");
     let csrf_json = serde_json::to_string(csrf_token).unwrap_or_else(|_| "\"\"".into());
     let mode = match payload.mode {
         RuleShareMode::EnableExclusive => "enable_exclusive",
@@ -259,9 +259,34 @@ fn render_confirm_page(
     )
 }
 
+/// A visible, escaped diagnostic page shared by the proxy and local confirmation page.
+pub fn rule_share_error_response(error: &str) -> Response<BoxBody> {
+    html_response_with_status(
+        StatusCode::BAD_REQUEST,
+        format!(
+            r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bifrost Rule Share Error</title><style>
+:root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
+main {{ max-width: 800px; margin: 40px auto; padding: 24px; }}
+pre {{ white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; border: 1px solid #888; }}
+</style></head><body><main><h1>Unable to apply shared Bifrost rule</h1>
+<p role="alert">The share link failed validation. No shared rule was applied.</p>
+<pre>{}</pre><p>Ask the sender to fix the reported error, regenerate the link with
+<code>bifrost rule share</code>, and run <code>bifrost rule verify '&lt;share-url&gt;' --json</code>
+before sharing it again.</p></main></body></html>"#,
+            escape_html(error),
+        ),
+    )
+}
+
 fn html_response(body: String) -> Response<BoxBody> {
+    html_response_with_status(StatusCode::OK, body)
+}
+
+fn html_response_with_status(status: StatusCode, body: String) -> Response<BoxBody> {
     Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header("Content-Type", "text/html; charset=utf-8")
         .header("Cache-Control", "no-store")
         .header("Referrer-Policy", "no-referrer")
@@ -330,6 +355,21 @@ mod tests {
     }
 
     #[test]
+    fn render_confirm_page_keeps_target_inside_the_script_string() {
+        let payload = new_rule_share_payload("safe", "example.test status://200").unwrap();
+        let target = "https://example.test/?q=</script><script>window.__share_probe=true</script>";
+        let html = render_confirm_page(&payload, "payload", target, "csrf");
+        assert!(!html.contains("</script><script>window.__share_probe"));
+        assert!(html.contains("\\u003c/script>\\u003cscript>window.__share_probe"));
+        let json = html
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("const targetUrl = "))
+            .unwrap()
+            .trim_end_matches(';');
+        assert_eq!(serde_json::from_str::<String>(json).unwrap(), target);
+    }
+
+    #[test]
     fn html_response_sets_clickjacking_and_cache_headers() {
         let response = html_response("ok".to_string());
 
@@ -362,5 +402,84 @@ mod tests {
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("form-action 'none'"));
         assert!(csp.contains("connect-src 'self'"));
+    }
+    #[tokio::test]
+    async fn error_page_is_visible_escaped_and_not_cacheable() {
+        let response = rule_share_error_response("hash mismatch <script>alert('x')</script>");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("role=\"alert\""));
+        assert!(html.contains("hash mismatch &lt;script&gt;"));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("bifrost rule verify"));
+    }
+
+    #[tokio::test]
+    async fn confirmation_requests_report_each_validation_error_without_importing() {
+        use bytes::Bytes;
+        use http_body_util::Empty;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use std::{convert::Infallible, sync::Arc};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = bifrost_storage::RulesStorage::with_dir(dir.path().to_path_buf()).unwrap();
+        let state = Arc::new(crate::state::AdminState::new_for_test(0, storage));
+        let payload = new_rule_share_payload("checked", "example.test status://200").unwrap();
+        let encoded = encode_rule_share_payload(&payload).unwrap();
+        let cases = [
+            (String::new(), "Missing rule share payload"),
+            (format!("payload={encoded}"), "Missing target URL"),
+            (
+                "payload=bad!&target=https%3A%2F%2Fexample.test".into(),
+                "Invalid rule share payload",
+            ),
+            (
+                format!("payload={encoded}&target=ftp%3A%2F%2Fexample.test"),
+                "Unsupported target URL scheme",
+            ),
+        ];
+        for (query, expected) in cases {
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            let request_state = state.clone();
+            let server = tokio::spawn(async move {
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        TokioIo::new(server_io),
+                        service_fn(move |req| {
+                            let state = request_state.clone();
+                            async move {
+                                Ok::<_, Infallible>(
+                                    handle_rule_share_confirm_page(req, state).await,
+                                )
+                            }
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let (mut sender, connection) =
+                hyper::client::conn::http1::handshake(TokioIo::new(client_io))
+                    .await
+                    .unwrap();
+            let client = tokio::spawn(connection);
+            let request = Request::builder()
+                .uri(format!("/confirm?{query}"))
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            let response = sender.send_request(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let html = String::from_utf8_lossy(&body);
+            assert!(html.contains(expected), "{html}");
+            assert!(html.contains("bifrost rule verify"));
+            drop(sender);
+            client.await.unwrap().unwrap();
+            server.await.unwrap();
+        }
+        assert!(state.rules_storage.list().unwrap().is_empty());
     }
 }

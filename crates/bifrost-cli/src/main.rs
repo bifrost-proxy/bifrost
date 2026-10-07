@@ -213,6 +213,18 @@ fn run_cli_main() {
 
     let cli = Cli::parse();
 
+    // Offline verification must not initialize logs/storage or run update checks.
+    if let Some(Commands::Rule {
+        action: action @ cli::RuleCommands::Verify { .. },
+    }) = cli.command.as_ref()
+    {
+        if let Err(error) = handle_rule_command(action.clone()) {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Auxiliary workers must bind their isolated data directory before the
     // logger derives its file path. Applying it later would leak worker logs
     // into the user's default data directory and make isolated test/runtime

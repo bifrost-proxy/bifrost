@@ -2076,6 +2076,16 @@ pub enum RuleCommands {
         #[arg(long, default_value = "my_rules", value_parser = ["my_rules"], help = "Exclusive enable scope for the imported rule")]
         exclusive_scope: String,
     },
+    #[command(about = "Verify a rule share URL without applying it or contacting the website")]
+    Verify {
+        #[arg(help = "Complete share URL containing __bifrost_rule")]
+        share_url: String,
+        #[arg(
+            long,
+            help = "Print machine-readable validation results, including errors"
+        )]
+        json: bool,
+    },
     #[command(about = "Sync rules with remote server")]
     Sync,
     #[command(about = "Rename a rule")]

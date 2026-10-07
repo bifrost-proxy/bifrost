@@ -189,3 +189,5 @@ pub const MOBILE_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/mobile";
 pub const PROXY_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/proxy";
 pub const TRUST_PROBE_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/trust-probe";
 pub const TRUST_PROBE_SHORT_PUBLIC_PATH: &str = "/_bifrost/tp";
+
+pub use handlers::rule_share_confirm::rule_share_error_response;
