@@ -8,8 +8,10 @@ import json
 import importlib.util
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -265,6 +267,117 @@ class NativeReadbackTests(unittest.TestCase):
             path.write_text(text.replace("enabled=true", "enabled=false"))
             with self.assertRaisesRegex(AssertionError, "intent was lost"):
                 MODULE.intent(path)
+
+
+@unittest.skipUnless(BASH and os.name == "posix", "POSIX bash is required")
+class NativeFixtureBootstrapTests(unittest.TestCase):
+    def function(self, name):
+        text = SCRIPT.read_text()
+        return name + "() {" + text.split(name + "() {", 1)[1].split("\n}", 1)[0] + "\n}"
+
+    def resolve(self, env, command='printf "%s\\n" "$BIFROST_NATIVE_PYTHON"', cwd=None):
+        script = ("set -euo pipefail\n" + self.function("resolve_native_python")
+                  + '\nBIFROST_NATIVE_PYTHON="$(resolve_native_python)"\n' + command)
+        return subprocess.run([BASH, "-c", script], env={"PATH": os.environ["PATH"], **env},
+                              cwd=cwd, capture_output=True, text=True, timeout=5)
+
+    def test_python_shim_is_resolved_before_clean_path_execution(self):
+        with tempfile.TemporaryDirectory(prefix="native interpreter ") as tmp:
+            root = Path(tmp)
+            shim_dir, selected_dir = root / "shims", root / "selected python"
+            shim_dir.mkdir()
+            selected_dir.mkdir()
+            shim = shim_dir / "python3"
+            # This launcher only works while the CI-selected directory is on PATH.
+            shim.write_text('#!/bin/bash\nexec python-for-native-fixture "$@"\n')
+            shim.chmod(0o755)
+            selected = selected_dir / "python-for-native-fixture"
+            selected.symlink_to(sys.executable)
+            selected_python3 = selected_dir / "python3"
+            selected_python3.symlink_to(sys.executable)
+            (root / "tomllib.py").write_text('raise RuntimeError("user module must not load")\n')
+            clean_path = "/usr/bin:/bin:/usr/sbin:/sbin"
+            unresolved = subprocess.run(["/usr/bin/env", "-i", f"PATH={clean_path}", str(shim),
+                                         "-I", "-c", "import tomllib"], capture_output=True, timeout=5)
+            self.assertNotEqual(unresolved.returncode, 0)
+            for launcher, interpreter in ((shim, selected), (ROOT / "e2e-tests/bin/python3", selected_python3)):
+                env = {"PATH": f"{launcher.parent}:{selected_dir}:/usr/bin:/bin", "PYTHONPATH": tmp}
+                for override in ({}, {"BIFROST_NATIVE_PYTHON": str(launcher)}):
+                    with self.subTest(launcher=launcher, override=override):
+                        result = self.resolve({**env, **override}, cwd=tmp)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout.strip(), str(interpreter))
+                        result = self.resolve({**env, **override}, cwd=tmp, command=(
+                            f'/usr/bin/env -i PATH={clean_path} "$BIFROST_NATIVE_PYTHON" '
+                            "-I -c 'import sys, tomllib; print(sys.executable)'"))
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout.strip(), str(interpreter))
+
+    def test_missing_stdlib_is_rejected_before_elevation_in_a_clean_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected, candidate = root / "incompatible-python", root / "launcher"
+            selected.write_text('#!/bin/bash\n'
+                                '[[ "$PATH" == /usr/bin:/bin:/usr/sbin:/sbin ]] || exit 90\n'
+                                '[[ -z "${UNRELATED_CREDENTIAL+x}" ]] || exit 91\n'
+                                'printf "%s\\n" "ModuleNotFoundError: tomllib" >&2\nexit 42\n')
+            candidate.write_text(f"#!/bin/bash\nprintf '%s\\n' {shlex.quote(str(selected))}\n")
+            for executable in (selected, candidate):
+                executable.chmod(0o755)
+            result = self.resolve({"BIFROST_NATIVE_PYTHON": str(candidate),
+                                   "UNRELATED_CREDENTIAL": "never-forward"}, command="echo ELEVATION_REACHED")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ModuleNotFoundError: tomllib", result.stderr)
+            self.assertIn("REFUSING: native CI requires Python 3.11+", result.stderr)
+            self.assertNotIn("ELEVATION_REACHED", result.stdout)
+
+    def test_resolver_rejects_unusable_interpreters_and_runs_before_elevation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate = Path(tmp) / "launcher"
+            for reported in ("", "python3", str(Path(tmp) / "missing"), tmp):
+                with self.subTest(reported=reported):
+                    candidate.write_text(f"#!/bin/bash\nprintf '%s\\n' {shlex.quote(reported)}\n")
+                    candidate.chmod(0o755)
+                    result = self.resolve({"BIFROST_NATIVE_PYTHON": str(candidate)})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("absolute executable Python interpreter", result.stderr)
+            result = self.resolve({"BIFROST_NATIVE_PYTHON": str(Path(tmp) / "missing")})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("could not resolve its Python interpreter", result.stderr)
+        text = SCRIPT.read_text()
+        resolution = text.index('\nBIFROST_NATIVE_PYTHON="$(resolve_native_python)"')
+        self.assertLess(text.index("\nrequire_disposable_macos_ci\n"), resolution)
+        self.assertLess(resolution, text.index("\nelevate_native_fixture\n"))
+
+    def test_helper_wait_reads_production_logs_path_and_preserves_event_evidence(self):
+        text = SCRIPT.read_text()
+        wait = text.split("    deadline=$((SECONDS + 25))\n", 1)[1].split(
+            '    "$BIFROST_NATIVE_PYTHON" "$READBACK" capture "$TEST_ROOT/product-suspended.json"', 1)[0]
+        wait = ("wait_for_suspend() {\nlocal deadline=$((SECONDS + 25))\n" + wait + "\n}\n"
+                "sleep() { SECONDS=$((SECONDS + 26)); }; wait_for_suspend")
+        # Match bifrost-core system_proxy_diagnostics::event_path, not a fixture-only file.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data, reports = root / "data", root / "reports"
+            (data / "logs").mkdir(parents=True)
+            reports.mkdir()
+            events = data / "logs/system_proxy_events.jsonl"
+            stale = data / "system_proxy_events.jsonl"
+            event = '{"schema_version":1,"event":"helper_fail_open_applied","component":"lifecycle_helper"}\n'
+            stale.write_text(event)
+            env = {"PATH": os.environ["PATH"], "BIFROST_DATA_DIR": str(data),
+                   "TEST_ROOT": str(root / "fixture"), "EVIDENCE_DIR": str(reports)}
+            for actual, expected_status in ((None, 1), ('{"event":"helper_failed"}\n', 1), (event, 0)):
+                with self.subTest(actual=actual):
+                    if actual is not None:
+                        events.write_text(actual)
+                    result = subprocess.run([BASH, "-c", wait], env=env, capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, expected_status, result.stderr)
+            stale.write_text("wrong legacy path\n")
+            result = subprocess.run([BASH, "-c", self.function("save_fixture_evidence")
+                                     + "\nsave_fixture_evidence"], env=env, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((reports / events.name).read_text(), event)
 
 
 @unittest.skipUnless(BASH, "bash is required")

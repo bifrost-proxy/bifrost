@@ -1,6 +1,7 @@
 use super::*;
 
 mod download_helpers;
+mod windows_parent_wait;
 
 #[test]
 fn older_discovery_result_cannot_downgrade_the_desktop_companion() {

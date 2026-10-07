@@ -38,15 +38,36 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/test_system_proxy_reconcile_stability.sh"
 BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
-BIFROST_NATIVE_PYTHON="${BIFROST_NATIVE_PYTHON:-$(command -v python3)}"
 PROXY_PORT="${PROXY_PORT:-18889}"
 BIFROST_E2E_REPORT_DIR="${BIFROST_E2E_REPORT_DIR:-$ROOT_DIR/.e2e-reports}"
-if [[ ! -x "$BIFROST_BIN" || ! -x "$BIFROST_NATIVE_PYTHON" ]]; then
-    echo "REFUSING: native CI requires its already-built binary and Python interpreter" >&2
+if [[ ! -x "$BIFROST_BIN" ]]; then
+    echo "REFUSING: native CI requires its already-built binary" >&2
     exit 1
 fi
 BIFROST_BIN="$(cd "$(dirname "$BIFROST_BIN")" && pwd)/$(basename "$BIFROST_BIN")"
-BIFROST_NATIVE_PYTHON="$(cd "$(dirname "$BIFROST_NATIVE_PYTHON")" && pwd)/$(basename "$BIFROST_NATIVE_PYTHON")"
+resolve_native_python() {
+    # The E2E runner prepends a PATH-dependent python3 shim. Capture the actual
+    # interpreter before env -i removes its toolcache PATH, not the shim path.
+    local candidate="${BIFROST_NATIVE_PYTHON:-python3}" resolved
+    resolved="$("$candidate" -I -c 'import sys; print(sys.executable)')" || {
+        echo "REFUSING: native CI could not resolve its Python interpreter" >&2
+        return 1
+    }
+    [[ "$resolved" == /* && -f "$resolved" && -x "$resolved" ]] || {
+        echo "REFUSING: native CI requires an absolute executable Python interpreter" >&2
+        return 1
+    }
+    # Validate Python 3.11+ stdlib support with the same clean environment used
+    # after elevation. Missing tomllib must fail before any privileged work.
+    /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+        PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+        "$resolved" -I -c 'import tomllib' || {
+        echo "REFUSING: native CI requires Python 3.11+ with tomllib in its clean environment" >&2
+        return 1
+    }
+    printf '%s\n' "$resolved"
+}
+BIFROST_NATIVE_PYTHON="$(resolve_native_python)"
 require_native_test_port() {
     # Canonical, length-bounded decimal prevents octal parsing and overflow.
     [[ "$PROXY_PORT" =~ ^[1-9][0-9]{3,4}$ \
@@ -223,7 +244,7 @@ save_fixture_evidence() {
     if [[ "$EVIDENCE_DIR" != "$TEST_ROOT/"* ]]; then
         cp "$TEST_ROOT"/*.json "$TEST_ROOT"/*.tsv "$TEST_ROOT"/*.log "$EVIDENCE_DIR/" 2>/dev/null || true
         cp "$BIFROST_DATA_DIR"/system_proxy_incomplete_restores.json \
-            "$BIFROST_DATA_DIR"/system_proxy_events.jsonl "$BIFROST_DATA_DIR"/proxy_state.json \
+            "$BIFROST_DATA_DIR"/logs/system_proxy_events.jsonl "$BIFROST_DATA_DIR"/proxy_state.json \
             "$BIFROST_DATA_DIR"/proxy_backup.json "$EVIDENCE_DIR/" 2>/dev/null || true
     fi
 }
@@ -398,7 +419,7 @@ PYHELPER
     fi
     signal_owned_child "$HELPER_PID" "$HELPER_IDENTITY" TERM
     deadline=$((SECONDS + 25))
-    until grep -q 'helper_fail_open_applied' "$BIFROST_DATA_DIR/system_proxy_events.jsonl" 2>/dev/null; do
+    until grep -q 'helper_fail_open_applied' "$BIFROST_DATA_DIR/logs/system_proxy_events.jsonl" 2>/dev/null; do
         [[ "$SECONDS" -lt "$deadline" ]] || {
             echo "native helper did not report successful fail-open suspension" >&2
             return 1

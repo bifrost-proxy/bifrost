@@ -702,7 +702,7 @@ fn schedule_windows_deferred_install_inner(
 
         fs::write(
         &script_path,
-        r#"
+        concat!(r#"
 param(
   [int]$ParentPid,
   [string]$PendingPath,
@@ -830,6 +830,7 @@ function Wait-TargetPathWritable([string]$Path, [int]$TimeoutSeconds) {
   throw "target binary is still locked: $Path"
 }
 
+"#, include_str!("windows_parent_wait.ps1"), r#"
 $backupPath = "$TargetPath.upgrade-backup"
 $replacementVerified = $false
 
@@ -838,13 +839,7 @@ try {
   [System.IO.File]::WriteAllText($HandoffReadyPath, "scheduled", $utf8NoBom)
   Write-DeferredStatus "pending:$PID"
   Write-UpgradeLog "waiting for parent pid $ParentPid"
-  $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
-  if ($parent) {
-    $parent | Wait-Process -Timeout 120
-  }
-  if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
-    throw "parent process $ParentPid did not exit before timeout"
-  }
+  Wait-UpgradeParentExit $ParentPid 120000
 
   Write-UpgradeProgress "restarting" "Finalizing upgrade..." $null
   Write-UpgradeLog "waiting for target binary to become writable"
@@ -982,7 +977,7 @@ try {
     Remove-Item -LiteralPath $LogPath -Force -ErrorAction SilentlyContinue
   }
 }
-"#,
+"#),
         )
         .map_err(BifrostError::Io)?;
 
