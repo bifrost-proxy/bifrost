@@ -1,3 +1,11 @@
+mod admin_routing;
+use admin_routing::{admin_routing_decision, is_devtools_bridge_admin_path};
+#[cfg(test)]
+use admin_routing::{
+    is_admin_virtual_host_request, is_proxy_request_targeting_other,
+    is_proxy_request_to_other_for_admin_routing,
+};
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
@@ -1993,105 +2001,6 @@ fn redirect_response(location: &str) -> Response<BoxBody> {
         .header("Location", location)
         .body(empty_body())
         .unwrap()
-}
-
-fn is_admin_virtual_host_request<B>(req: &Request<B>) -> bool {
-    if req.method() == hyper::Method::CONNECT {
-        return false;
-    }
-
-    if let Some(uri_host) = req.uri().host() {
-        if uri_host.eq_ignore_ascii_case(ADMIN_VIRTUAL_HOST) {
-            return true;
-        }
-    }
-
-    if let Some(host_val) = req.headers().get("host").and_then(|h| h.to_str().ok()) {
-        let host_without_port = host_val.split(':').next().unwrap_or(host_val);
-        if host_without_port.eq_ignore_ascii_case(ADMIN_VIRTUAL_HOST) {
-            return true;
-        }
-    }
-
-    false
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AdminRoutingDecision {
-    is_admin_virtual_host: bool,
-    is_proxy_request_to_other_server: bool,
-    routes_to_admin: bool,
-}
-
-fn admin_routing_decision<B>(
-    req: &Request<B>,
-    self_port: u16,
-    self_host: &str,
-) -> AdminRoutingDecision {
-    let is_admin_virtual_host = is_admin_virtual_host_request(req);
-    let is_proxy_request_to_other_server =
-        is_proxy_request_to_other_for_admin_routing(req, self_port, self_host);
-    let path = req.uri().path();
-    let routes_to_admin = is_devtools_bridge_admin_path(path)
-        || (!is_proxy_request_to_other_server
-            && (path.starts_with(ADMIN_PATH_PREFIX) || is_admin_virtual_host));
-
-    AdminRoutingDecision {
-        is_admin_virtual_host,
-        is_proxy_request_to_other_server,
-        routes_to_admin,
-    }
-}
-
-fn is_proxy_request_to_other_for_admin_routing<B>(
-    req: &Request<B>,
-    self_port: u16,
-    self_host: &str,
-) -> bool {
-    if is_admin_virtual_host_request(req) {
-        return false;
-    }
-    is_proxy_request_targeting_other(req, self_port, self_host)
-}
-
-fn is_proxy_request_targeting_other<B>(req: &Request<B>, self_port: u16, self_host: &str) -> bool {
-    let uri = req.uri();
-    if uri.scheme().is_none() && uri.host().is_none() {
-        return false;
-    }
-
-    let target_host = match uri.host() {
-        Some(h) => h,
-        None => return false,
-    };
-    let target_port = uri.port_u16().unwrap_or(80);
-
-    if target_port != self_port {
-        return true;
-    }
-
-    let is_loopback_target =
-        target_host == "127.0.0.1" || target_host == "localhost" || target_host == "[::1]";
-    let self_is_loopback =
-        self_host == "127.0.0.1" || self_host == "localhost" || self_host == "[::1]";
-    let self_is_wildcard = self_host == "0.0.0.0" || self_host == "[::]";
-
-    if target_host == self_host {
-        return false;
-    }
-    if is_loopback_target && (self_is_loopback || self_is_wildcard) {
-        return false;
-    }
-    if self_is_wildcard {
-        return false;
-    }
-
-    true
-}
-
-fn is_devtools_bridge_admin_path(path: &str) -> bool {
-    path.strip_prefix(ADMIN_PATH_PREFIX)
-        .is_some_and(|rest| rest.starts_with("/api/devtools/bridge/"))
 }
 
 fn is_trust_probe_proxy_configured_request<B>(req: &Request<B>) -> bool {
