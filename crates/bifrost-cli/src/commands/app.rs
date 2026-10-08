@@ -586,7 +586,8 @@ fn wait_for_desktop_managed_deferred_install_with_artifacts(
                     )));
                 }
             }
-            status if let Some(error) = status.strip_prefix("error:") => {
+            status if status.starts_with("error:") => {
+                let error = &status["error:".len()..];
                 return Err(BifrostError::Config(format!(
                     "Windows upgrade helper failed: {}",
                     error.trim()
