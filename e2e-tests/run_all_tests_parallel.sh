@@ -202,6 +202,7 @@ FIXTURE_ONLY_RULES=(
     "devtools/page_bridge_control.txt"
     "devtools/page_bridge_control_allowlist.txt"
     "devtools/page_bridge_deny.txt"
+    "forwarding/admin_same_port.txt"
     "forwarding/nextoncall_rules.txt"
     "forwarding/pac.txt"
     "forwarding/proxy_chain_entry_auth.txt"
