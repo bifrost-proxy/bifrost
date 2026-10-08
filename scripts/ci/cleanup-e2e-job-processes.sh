@@ -2,80 +2,103 @@
 
 set -uo pipefail
 
-# Hosted runners execute one job per machine. The shell entrypoint snapshots the
-# runner user's PIDs immediately before E2E; reap only same-user processes that
-# appeared afterwards. This works on macOS where `ps` does not expose another
-# process's RUNNER_TRACKING_ID environment, while still protecting pre-existing
-# runner/system processes and this cleanup shell's complete ancestor chain.
-baseline_file="${BIFROST_E2E_JOB_PROCESS_BASELINE:-}"
-if [[ "${GITHUB_ACTIONS:-}" != "true" || -z "$baseline_file" || ! -f "$baseline_file" ]]; then
+# Being new and having the runner's UID is NOT proof of E2E ownership: macOS
+# launches user services during the job too. Only reap current descendants of
+# the still-running E2E entrypoint. Unverifiable/reparented orphans are left for
+# their fixture cleanup or disposable runner teardown, never guessed by name.
+root_pid="${BIFROST_E2E_JOB_ROOT_PID:-}"
+root_start="${BIFROST_E2E_JOB_ROOT_START:-}"
+if [[ "${GITHUB_ACTIONS:-}" != "true" || ! "$root_pid" =~ ^[0-9]+$ ||
+  "$root_pid" -le 1 || "$root_pid" != "$PPID" || -z "$root_start" ]]; then
   exit 0
 fi
-
 case "$(uname -s 2>/dev/null)" in
   Darwin | Linux) ;;
   *) exit 0 ;;
 esac
+current_uid="$(id -u 2>/dev/null)" || exit 0
+[[ "$current_uid" =~ ^[0-9]+$ ]] || exit 0
 
-protected_pids=" "
-current_pid="$$"
-while [[ "$current_pid" =~ ^[0-9]+$ && "$current_pid" -gt 1 ]]; do
-  protected_pids+="$current_pid "
-  current_pid="$(ps -p "$current_pid" -o ppid= 2>/dev/null | tr -d '[:space:]' || true)"
-done
+# lstart is supported on both Darwin and Linux. Keep it with the PID and check
+# it again before EACH individual signal, including escalation to KILL.
+read_process() {
+  local record weekday month day clock year extra
+  record="$(LC_ALL=C ps -p "$1" -o uid=,ppid=,lstart=,state= 2>/dev/null)" || return 1
+  [[ "$record" != *$'\n'* ]] || return 1
+  read -r process_uid process_ppid weekday month day clock year process_state extra <<<"$record"
+  [[ "$process_uid" =~ ^[0-9]+$ && "$process_ppid" =~ ^[0-9]+$ &&
+    "$weekday" =~ ^[A-Z][a-z][a-z]$ && "$month" =~ ^[A-Z][a-z][a-z]$ &&
+    "$day" =~ ^[0-9]+$ && "$clock" =~ ^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$ &&
+    "$year" =~ ^[0-9][0-9][0-9][0-9]$ && -n "$process_state" &&
+    "$process_state" =~ ^[DIRSTUWt] && -z "$extra" ]] || return 1
+  process_start="$weekday $month $day $clock $year"
+}
 
-baseline_pids=" "
-while IFS= read -r pid; do
-  [[ "$pid" =~ ^[0-9]+$ ]] && baseline_pids+="$pid "
-done <"$baseline_file"
+is_owned_descendant() {
+  local pid="$1" expected_start="${2:-}" visited=" "
+  candidate_start=""
+  # $$ and everything below this cleanup shell are never test candidates.
+  # Requiring a path to our direct caller also excludes that caller, all its
+  # ancestors, unrelated same-user services, and every foreign-UID process.
+  [[ "$pid" != "$root_pid" ]] || return 1
+  while [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; do
+    [[ "$pid" != "$$" && "$visited" != *" $pid "* ]] || return 1
+    visited+="$pid "
+    read_process "$pid" || return 1
+    [[ "$process_uid" == "$current_uid" ]] || return 1
+    if [[ "$pid" == "$root_pid" ]]; then
+      [[ "$process_start" == "$root_start" ]]
+      return
+    fi
+    if [[ -z "$candidate_start" ]]; then
+      candidate_start="$process_start"
+      [[ -z "$expected_start" || "$candidate_start" == "$expected_start" ]] || return 1
+    fi
+    pid="$process_ppid"
+  done
+  return 1
+}
 
-current_uid="$(id -u)"
 candidate_pids=()
-while read -r uid pid; do
-  [[ "$uid" == "$current_uid" ]] || continue
-  [[ "$pid" =~ ^[0-9]+$ ]] || continue
-  [[ "$baseline_pids" != *" $pid "* ]] || continue
-  [[ "$protected_pids" != *" $pid "* ]] || continue
-  candidate_pids+=("$pid")
-done < <(ps -axo uid=,pid= 2>/dev/null || true)
-
-rm -f "$baseline_file" 2>/dev/null || true
-
-# The `ps` used to build the snapshot can observe its own short-lived process.
-# Drop candidates that have already exited before logging or signalling.
-live_candidate_pids=()
-for pid in "${candidate_pids[@]}"; do
-  state="$(ps -p "$pid" -o state= 2>/dev/null | tr -d '[:space:]' || true)"
-  [[ -n "$state" && "$state" != Z* ]] && live_candidate_pids+=("$pid")
-done
-if [[ "${#live_candidate_pids[@]}" -gt 0 ]]; then
-  candidate_pids=("${live_candidate_pids[@]}")
-else
-  candidate_pids=()
-fi
+candidate_starts=()
+# Failure to list processes cannot authorize a partial/guessed cleanup.
+snapshot="$(ps -axo pid= 2>/dev/null)" || exit 0
+while read -r pid; do
+  if is_owned_descendant "$pid"; then
+    candidate_pids+=("$pid")
+    candidate_starts+=("$candidate_start")
+  fi
+done <<<"$snapshot"
 
 if [[ "${#candidate_pids[@]}" -eq 0 ]]; then
-  echo "[CLEANUP] no tracked E2E child processes remain"
+  echo "[CLEANUP] no proven E2E descendants remain"
   exit 0
 fi
 
-echo "[CLEANUP] terminating ${#candidate_pids[@]} tracked E2E child process(es)"
-for pid in "${candidate_pids[@]}"; do
-  command_name="$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\r' || true)"
-  echo "[CLEANUP] tracked pid=$pid command=${command_name:-unknown}"
+for i in "${!candidate_pids[@]}"; do
+  pid="${candidate_pids[$i]}"
+  if is_owned_descendant "$pid" "${candidate_starts[$i]}"; then
+    echo "[CLEANUP] terminating proven E2E descendant pid=$pid"
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
 done
-kill -TERM "${candidate_pids[@]}" 2>/dev/null || true
 
 for _ in 1 2 3 4 5; do
-  remaining=()
-  for pid in "${candidate_pids[@]}"; do
-    state="$(ps -p "$pid" -o state= 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ -n "$state" && "$state" != Z* ]] && remaining+=("$pid")
+  any_remaining=0
+  for i in "${!candidate_pids[@]}"; do
+    if is_owned_descendant "${candidate_pids[$i]}" "${candidate_starts[$i]}"; then
+      any_remaining=1
+      break
+    fi
   done
-  [[ "${#remaining[@]}" -eq 0 ]] && exit 0
-  candidate_pids=("${remaining[@]}")
+  [[ "$any_remaining" -eq 0 ]] && exit 0
   sleep 1
 done
 
-echo "[CLEANUP] force-killing ${#candidate_pids[@]} tracked E2E child process(es)"
-kill -KILL "${candidate_pids[@]}" 2>/dev/null || true
+for i in "${!candidate_pids[@]}"; do
+  pid="${candidate_pids[$i]}"
+  if is_owned_descendant "$pid" "${candidate_starts[$i]}"; then
+    echo "[CLEANUP] force-killing proven E2E descendant pid=$pid"
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+done

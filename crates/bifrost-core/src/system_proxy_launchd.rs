@@ -450,47 +450,12 @@ pub fn consume_stop_restore_suppression(data_dir: &Path) -> bool {
     is_recent
 }
 
-pub fn write_system_proxy_shutdown_mode(
-    data_dir: &Path,
-    mode: SystemProxyShutdownMode,
-) -> Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    std::fs::write(data_dir.join(SHUTDOWN_MODE_FILE_NAME), mode.as_str())?;
-    Ok(())
-}
-
-pub fn read_system_proxy_shutdown_mode(data_dir: &Path) -> Option<SystemProxyShutdownMode> {
-    read_system_proxy_shutdown_mode_inner(data_dir, false)
-}
-
-pub fn consume_system_proxy_shutdown_mode(data_dir: &Path) -> Option<SystemProxyShutdownMode> {
-    read_system_proxy_shutdown_mode_inner(data_dir, true)
-}
-
-fn read_system_proxy_shutdown_mode_inner(
-    data_dir: &Path,
-    consume: bool,
-) -> Option<SystemProxyShutdownMode> {
-    let marker = data_dir.join(SHUTDOWN_MODE_FILE_NAME);
-    let metadata = std::fs::metadata(&marker).ok()?;
-    let is_recent = metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|elapsed| elapsed.as_secs() <= SHUTDOWN_MODE_TTL_SECS);
-    if !is_recent {
-        let _ = std::fs::remove_file(&marker);
-        return None;
-    }
-
-    let mode = std::fs::read_to_string(&marker)
-        .ok()
-        .and_then(|value| SystemProxyShutdownMode::from_str(&value));
-    if consume {
-        let _ = std::fs::remove_file(&marker);
-    }
-    mode
-}
+mod shutdown_marker;
+pub use shutdown_marker::{
+    consume_system_proxy_shutdown_mode, consume_system_proxy_shutdown_mode_if,
+    read_system_proxy_shutdown_mode, read_system_proxy_shutdown_mode_checked,
+    try_write_system_proxy_restart_handoff, write_system_proxy_shutdown_mode,
+};
 
 fn runtime_pid_is_alive(data_dir: &Path) -> bool {
     let Some(identity) = load_runtime_identity(data_dir) else {

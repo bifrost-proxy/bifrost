@@ -308,6 +308,7 @@ fn cli_restart_stops_live_process_and_strips_detached_marker() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     std::env::set_var("BIFROST_DATA_DIR", temp.path());
+    ConfigManager::new(temp.path().to_path_buf()).expect("initialize running proxy config");
     std::env::set_var(crate::commands::start::DETACHED_DAEMON_CHILD_ENV, "1");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve restart port");

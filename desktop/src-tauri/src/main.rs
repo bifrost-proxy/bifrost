@@ -6,6 +6,7 @@ mod macos_menu;
 mod native_launcher;
 mod open_requests;
 mod runtime_ownership;
+mod shutdown;
 mod traffic_detail_window;
 mod upgrade_handoff;
 
@@ -13,6 +14,7 @@ use backend_runtime::*;
 #[cfg(target_os = "macos")]
 use macos_menu::*;
 use runtime_ownership::*;
+use shutdown::*;
 use traffic_detail_window::*;
 use upgrade_handoff::*;
 
@@ -35,7 +37,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex, OnceLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -179,6 +181,7 @@ struct BackendState {
     shutdown_started: AtomicBool,
     force_exit: AtomicBool,
     backend_recovery_in_progress: AtomicBool,
+    backend_lifecycle_epoch: AtomicU64,
     startup_ready: AtomicBool,
     startup_error: Mutex<Option<String>>,
     main_webview_loaded: AtomicBool,
@@ -265,6 +268,11 @@ struct DesktopUpgradeRelaunchMarker {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if bifrost_core::system_proxy::run_macos_proxy_restore_helper() {
+        return;
+    }
+
     if run_desktop_upgrade_relaunch_helper_from_env() {
         return;
     }
@@ -493,6 +501,7 @@ fn main() {
                 shutdown_started: AtomicBool::new(false),
                 force_exit: AtomicBool::new(false),
                 backend_recovery_in_progress: AtomicBool::new(false),
+                backend_lifecycle_epoch: AtomicU64::new(0),
                 startup_ready: AtomicBool::new(false),
                 startup_error: Mutex::new(None),
                 main_webview_loaded: AtomicBool::new(false),
@@ -911,6 +920,7 @@ fn start_backend(
     data_dir: &Path,
     startup_session_id: &str,
     port: u16,
+    recovery_generation: Option<&str>,
 ) -> tauri::Result<Child> {
     let stdout_log = open_sidecar_log_file(data_dir, "desktop-sidecar.out.log")?;
     let stderr_log = open_sidecar_log_file(data_dir, "desktop-sidecar.err.log")?;
@@ -931,9 +941,11 @@ fn start_backend(
     let mut command = Command::new(binary_path);
     command
         .args(desktop_backend_start_args(port))
+        .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
     configure_desktop_backend_environment(&mut command, data_dir, startup_session_id);
+    configure_backend_recovery_generation(&mut command, recovery_generation);
     hide_windows_child_console(&mut command);
     let child = command
         .spawn()
@@ -1044,125 +1056,6 @@ where
 {
     args.into_iter()
         .any(|arg| arg.as_ref() == OsStr::new(DESKTOP_UPGRADE_SHUTDOWN_ARG))
-}
-
-fn request_desktop_shutdown(app: &AppHandle) {
-    let Some(state) = app.try_state::<BackendState>() else {
-        app.exit(0);
-        return;
-    };
-
-    if state.shutdown_started.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        "desktop shutdown requested; hiding window and waiting for owned backend and tray to stop",
-    );
-    if let Some(window) = app.get_window(HOST_WINDOW_LABEL) {
-        let _ = window.hide();
-    }
-
-    let app_handle = app.clone();
-    if state.launcher_only {
-        state.force_exit.store(true, Ordering::SeqCst);
-        app.exit(0);
-    } else {
-        std::thread::spawn(move || {
-            complete_desktop_shutdown(&app_handle);
-        });
-    }
-}
-
-fn complete_desktop_shutdown(app: &AppHandle) {
-    let Some(state) = app.try_state::<BackendState>() else {
-        app.exit(0);
-        return;
-    };
-
-    match desktop_shutdown_backend_action_for_state(&state) {
-        DesktopShutdownBackendAction::StopOwnedRuntime => {
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                "desktop shutdown owns the active backend; requesting backend stop",
-            );
-            let stop_result = match spawn_backend_stop(&state.binary_path, &state.data_dir) {
-                Ok(mut child) => {
-                    let helper_pid = child.id();
-                    append_desktop_bootstrap_log(
-                        &state.data_dir,
-                        format!(
-                            "spawned backend stop helper pid={helper_pid}; waiting for owned backend and tray shutdown"
-                        ),
-                    );
-                    wait_for_backend_stop_helper(&mut child, DESKTOP_QUIT_STOP_TIMEOUT).map_err(
-                        |error| {
-                            format!(
-                                "backend stop helper pid={helper_pid} did not complete successfully: {error}"
-                            )
-                        },
-                    )
-                }
-                Err(error) => Err(format!("failed to spawn backend stop helper: {error}")),
-            };
-            if let Err(error) = stop_result {
-                cancel_desktop_shutdown(app, &state, &error);
-                return;
-            }
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                "backend stop helper completed successfully; owned backend and tray are stopped",
-            );
-        }
-        DesktopShutdownBackendAction::PreserveExternalRuntime => {
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                "desktop shutdown is preserving the external CLI-owned backend",
-            );
-        }
-    }
-
-    if let Ok(mut child_guard) = state.child.lock() {
-        if let Some(mut child) = child_guard.take() {
-            let child_pid = child.id();
-            match wait_for_child_exit(&mut child, BACKEND_KILL_WAIT_TIMEOUT) {
-                Ok(status) => append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    format!("reaped stopped backend child pid={child_pid}; status={status}"),
-                ),
-                Err(error) => append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    format!("failed to reap stopped backend child pid={child_pid}: {error}"),
-                ),
-            }
-        }
-    } else {
-        append_desktop_bootstrap_log(
-            &state.data_dir,
-            "failed to lock managed backend child after successful stop; continuing final Desktop exit",
-        );
-    }
-
-    state.force_exit.store(true, Ordering::SeqCst);
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        "desktop lifecycle group shutdown complete; requesting final app exit",
-    );
-    app.exit(0);
-}
-
-fn cancel_desktop_shutdown(app: &AppHandle, state: &BackendState, error: &str) {
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        format!(
-            "desktop shutdown cancelled because owned backend/tray stop failed; keeping Desktop alive: {error}"
-        ),
-    );
-    state.shutdown_started.store(false, Ordering::SeqCst);
-    if let Some(window) = app.get_window(HOST_WINDOW_LABEL) {
-        reveal_host_window(&window);
-    }
 }
 
 fn start_main_window_handoff(app: &AppHandle, reason: &str) -> tauri::Result<()> {

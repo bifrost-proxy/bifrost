@@ -14,6 +14,7 @@ HTTP Echo Server - 用于验证代理服务对请求的处理
 """
 
 import http.server
+import ipaddress
 import base64
 import json
 import socketserver
@@ -953,6 +954,18 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def server_bind(self):
+        # HTTPServer resolves server_name with getfqdn after bind. Numeric
+        # loopback fixtures must not wait on the host's reverse DNS service.
+        try:
+            loopback = ipaddress.ip_address(self.server_address[0]).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            return super().server_bind()
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 def _parse_args():
     import argparse
@@ -1016,6 +1029,7 @@ def main():
     )
     print_banner(unicode_banner, ascii_banner)
 
+    print(f"Binding HTTP listener on {host}:{port}...", flush=True)
     httpd, actual_port = _try_bind(host, port, args.retries)
     if actual_port != port:
         print(f"NOTE: Requested port {port} was busy; bound to {actual_port} instead", flush=True)

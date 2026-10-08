@@ -1,3 +1,6 @@
+mod system_intent;
+use system_intent::*;
+
 use std::time::Duration;
 
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
@@ -14,7 +17,7 @@ use bifrost_storage::{
     NewSystemProxyConfig as SystemProxyConfig, SystemProxyConfigUpdate, SystemProxyRecoveryMode,
 };
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct SystemProxyStatus {
     supported: bool,
     /// Current OS system proxy state.
@@ -240,15 +243,16 @@ where
         .map_err(|error| format!("System proxy {operation} worker failed: {error}"))?
 }
 
-type SystemProxyOperation = (SharedSystemProxyManager, bool, u16, String);
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+struct SystemProxyOperation {
+    state: SharedAdminState,
+    enabled: bool,
+    bypass: String,
+    intent_revision: u64,
+}
 
-async fn run_system_proxy_operation(
-    (manager, enabled, target_port, bypass): SystemProxyOperation,
-) -> Result<(), String> {
-    run_system_proxy_worker("operation", move || {
-        apply_system_proxy_blocking(manager, enabled, "127.0.0.1", target_port, bypass)
-    })
-    .await
+async fn run_system_proxy_operation(operation: SystemProxyOperation) -> Result<(), String> {
+    run_system_proxy_worker("operation", move || apply_system_proxy_blocking(operation)).await
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -286,56 +290,85 @@ fn system_proxy_status_response(
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn apply_system_proxy_blocking(
-    manager: SharedSystemProxyManager,
-    enabled: bool,
-    host: &'static str,
-    target_port: u16,
-    bypass: String,
-) -> Result<(), String> {
-    let mut manager = manager.blocking_write();
-    let result = if enabled {
-        manager.enable(host, target_port, Some(&bypass))
-    } else {
-        manager
-            .disable_if_matches_explicit(host, target_port)
-            .map(|_| ())
-    };
-
-    match &result {
-        Ok(()) => result.map_err(|error| error.to_string()),
-        Err(error) if error.to_string().contains("RequiresAdmin") => {
-            tracing::info!("Permission denied, trying GUI authorization...");
+fn apply_system_proxy_blocking(operation: SystemProxyOperation) -> Result<(), String> {
+    let enabled = operation.enabled;
+    let bypass = operation.bypass.clone();
+    let state = operation.state.clone();
+    let revision = operation.intent_revision;
+    let host = "127.0.0.1";
+    apply_system_proxy_operation_locked(operation, move |manager, target_port| {
+        // Core invokes this predicate after acquiring its cross-process OS
+        // writer lock, including each GUI retry. The local manager lock alone
+        // cannot fence a request that waited behind a different process.
+        let accepted =
+            || accepted_system_proxy_intent_is_current(&state, revision, enabled, target_port);
+        let generation = if enabled {
+            None
+        } else {
+            manager
+                .read_managed_ownership()
+                .map_err(|error| error.to_string())?
+                .filter(|owner| {
+                    !owner.generation.is_empty() && owner.target.target_matches(host, target_port)
+                })
+                .map(|owner| owner.generation)
+        };
+        let result = if enabled {
+            manager.enable_guarded(host, target_port, Some(&bypass), accepted)
+        } else if let Some(generation) = generation.as_deref() {
             #[cfg(target_os = "macos")]
             {
-                if enabled {
-                    manager
-                        .enable_with_gui_auth(host, target_port, Some(&bypass))
-                        .map_err(|error| error.to_string())
-                } else {
-                    manager
-                        .disable_if_matches_explicit_with_gui_auth(host, target_port)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
+                manager.disable_managed_explicit_if_generation_guarded(generation, accepted)
+            }
+            #[cfg(target_os = "windows")]
+            {
+                manager.restore_managed_if_generation_guarded(generation, accepted)
+            }
+        } else {
+            Ok(bifrost_core::GuardedSystemProxyTransition::NotManaged)
+        };
+
+        let result = match result {
+            Err(error) if error.to_string().contains("RequiresAdmin") => {
+                tracing::info!("Permission denied, trying guarded GUI authorization...");
+                #[cfg(target_os = "macos")]
+                {
+                    if enabled {
+                        manager.enable_with_gui_auth_guarded(
+                            host,
+                            target_port,
+                            Some(&bypass),
+                            accepted,
+                        )
+                    } else if let Some(generation) = generation.as_deref() {
+                        manager.disable_managed_explicit_if_generation_with_gui_auth_guarded(
+                            generation, accepted,
+                        )
+                    } else {
+                        Ok(bifrost_core::GuardedSystemProxyTransition::NotManaged)
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Err(error)
                 }
             }
-            #[cfg(not(target_os = "macos"))]
-            {
-                result.map_err(|error| error.to_string())
-            }
+            result => result,
+        };
+        match result.map_err(|error| error.to_string())? {
+            bifrost_core::GuardedSystemProxyTransition::Applied
+            | bifrost_core::GuardedSystemProxyTransition::AlreadyInState => Ok(()),
+            bifrost_core::GuardedSystemProxyTransition::NotManaged if !enabled => Ok(()),
+            _ => Err(
+                "System proxy request was superseded or ownership changed before OS mutation"
+                    .to_string(),
+            ),
         }
-        Err(_) => result.map_err(|error| error.to_string()),
-    }
+    })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn apply_system_proxy_blocking(
-    _manager: SharedSystemProxyManager,
-    _enabled: bool,
-    _host: &'static str,
-    _target_port: u16,
-    _bypass: String,
-) -> Result<(), String> {
+fn apply_system_proxy_blocking(_operation: SystemProxyOperation) -> Result<(), String> {
     Err("System proxy is not supported on this platform".to_string())
 }
 
@@ -376,27 +409,6 @@ async fn read_system_proxy_status(
     .map_err(|error| format!("System proxy verification worker failed: {error}"))?
 }
 
-async fn wait_for_system_proxy_status(
-    expected_enabled: bool,
-    expected_host: &str,
-    expected_port: u16,
-) -> Result<SystemProxyStatus, String> {
-    let mut latest = read_system_proxy_status(expected_host, expected_port).await?;
-    if matches_expected_system_proxy(&latest, expected_enabled, expected_host, expected_port) {
-        return Ok(latest);
-    }
-
-    for delay_ms in SYSTEM_PROXY_VERIFY_DELAYS_MS {
-        sleep(Duration::from_millis(delay_ms)).await;
-        latest = read_system_proxy_status(expected_host, expected_port).await?;
-        if matches_expected_system_proxy(&latest, expected_enabled, expected_host, expected_port) {
-            return Ok(latest);
-        }
-    }
-
-    Ok(latest)
-}
-
 fn matches_expected_system_proxy(
     status: &SystemProxyStatus,
     expected_enabled: bool,
@@ -408,21 +420,6 @@ fn matches_expected_system_proxy(
     }
 
     !status.enabled || !status.managed_by_bifrost
-}
-
-fn persisted_system_proxy_update(
-    status: &SystemProxyStatus,
-    recovery_mode: Option<bifrost_storage::SystemProxyRecoveryMode>,
-    recovery_grace_secs: Option<u64>,
-) -> SystemProxyConfigUpdate {
-    let enabled_by_bifrost = status.enabled && status.managed_by_bifrost;
-    SystemProxyConfigUpdate {
-        enabled: Some(enabled_by_bifrost),
-        bypass: enabled_by_bifrost.then(|| status.bypass.clone()),
-        auto_enable: None,
-        recovery_mode,
-        recovery_grace_secs,
-    }
 }
 
 async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
@@ -450,123 +447,53 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
 
-    let recovery_mode = request.recovery_mode;
-    let recovery_grace_secs = request.recovery_grace_secs;
-    let bypass = request
-        .bypass
-        .unwrap_or_else(|| "localhost,127.0.0.1,::1,*.local".to_string());
-
-    if let Some(ref manager) = state.system_proxy_manager {
-        let host = "127.0.0.1";
-        let target_port = state.port();
-        let previous_desired_enabled =
-            state.set_system_proxy_runtime_desired_enabled(request.enabled);
-
-        let operation = (manager.clone(), request.enabled, target_port, bypass);
-        let final_result = run_system_proxy_operation(operation).await;
-
-        match final_result {
-            Ok(()) => {
-                let mut status =
-                    match wait_for_system_proxy_status(request.enabled, host, target_port).await {
-                        Ok(status) => status,
-                        Err(e) => {
-                            return error_response(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                &format!("Failed to verify system proxy: {}", e),
-                            )
-                        }
-                    };
-
-                if let Some(ref config_manager) = state.config_manager {
-                    let enabled_by_bifrost = status.enabled && status.managed_by_bifrost;
-                    let update =
-                        persisted_system_proxy_update(&status, recovery_mode, recovery_grace_secs);
-                    if let Err(e) = config_manager.update_system_proxy_config(update).await {
-                        tracing::error!("Failed to persist system proxy config: {}", e);
-                    } else {
-                        tracing::info!(
-                            requested_enabled = request.enabled,
-                            verified_enabled = status.enabled,
-                            managed_by_bifrost = status.managed_by_bifrost,
-                            persisted_enabled = enabled_by_bifrost,
-                            "System proxy config persisted"
-                        );
-                    }
-
-                    let config = config_manager.config().await;
-                    status.apply_config(&config.system_proxy);
-                    state.store_system_proxy_runtime_managed(enabled_by_bifrost);
-
-                    if enabled_by_bifrost {
-                        start_system_proxy_lifecycle_helper_after_runtime_enable(&state);
+    // Keep the serialized mutation alive if the HTTP caller disconnects while
+    // the blocking OS worker is still running.
+    match tokio::spawn(async move {
+        apply_system_proxy_intent_with(
+            state,
+            request,
+            run_system_proxy_operation,
+            |enabled, port| async move {
+                wait_for_system_proxy_status(enabled, "127.0.0.1", port).await
+            },
+            |state, status| {
+                if status.enabled && status.managed_by_bifrost {
+                    start_system_proxy_lifecycle_helper_after_runtime_enable(state);
+                    if let Some(config_manager) = &state.config_manager {
                         spawn_system_proxy_launchd_install_task_from_config(config_manager);
-                    } else if !request.enabled {
-                        // Keep the lifecycle helper alive: standalone `cli-proxy enable` can be
-                        // installed while this runtime is already running, and the same helper
-                        // must remove that managed shell block when the runtime exits.
-                        keep_proxy_lifecycle_helper_after_runtime_system_proxy_disable(&state);
-                    } else {
-                        tracing::warn!(
-                            target: "bifrost_admin::proxy",
-                            requested_enable = request.enabled,
-                            status_enabled = status.enabled,
-                            managed_by_bifrost = status.managed_by_bifrost,
-                            "system proxy admin toggle did not converge to a clean state; lifecycle helper left running"
-                        );
                     }
+                } else {
+                    keep_proxy_lifecycle_helper_after_runtime_system_proxy_disable(state);
                 }
-
-                json_response(&status)
-            }
-            Err(msg) => {
-                if let Some(previous) = previous_desired_enabled {
-                    state.store_system_proxy_runtime_desired_enabled(previous);
-                }
-                system_proxy_operation_error_response(&msg)
-            }
-        }
-    } else {
-        error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "System proxy manager not initialized",
+            },
         )
-    }
-}
-
-fn system_proxy_operation_error_response(message: &str) -> Response<BoxBody> {
-    if message.contains("UserCancelled") {
-        #[derive(Serialize)]
-        struct UserCancelledError {
-            error: &'static str,
-            message: &'static str,
-        }
-        let body = UserCancelledError {
-            error: "user_cancelled",
-            message: "Authorization was cancelled by user.",
-        };
-        json_response_with_status(StatusCode::FORBIDDEN, &body)
-    } else if message.contains("RequiresAdmin") {
-        #[derive(Serialize)]
-        struct AdminError {
-            error: &'static str,
-            message: &'static str,
-        }
-        let body = AdminError {
-            error: "requires_admin",
-            message: "System proxy requires administrator privileges. Please run the CLI with sudo or grant permission.",
-        };
-        json_response_with_status(StatusCode::FORBIDDEN, &body)
-    } else {
-        error_response(
+        .await
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to set system proxy: {message}"),
-        )
+            &format!("System proxy update worker failed: {error}"),
+        ),
     }
 }
 
 async fn current_system_proxy_config(state: &SharedAdminState) -> SystemProxyConfig {
     if let Some(config_manager) = &state.config_manager {
+        let data_dir = config_manager.data_dir().to_path_buf();
+        match run_system_proxy_worker("intent read", move || {
+            bifrost_storage::read_persisted_system_proxy_config(&data_dir)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        {
+            Ok(config) => return config,
+            Err(error) => {
+                tracing::warn!(%error, "Unable to read latest system proxy intent; using last known config")
+            }
+        }
         return config_manager.config().await.system_proxy;
     }
 
@@ -932,39 +859,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_update_keeps_recovery_policy_and_only_saves_owned_bypass() {
-        let mut status = SystemProxyStatus {
-            supported: true,
-            enabled: true,
-            host: "127.0.0.1".into(),
-            port: 9900,
-            bypass: "localhost,127.0.0.1".into(),
-            managed_by_bifrost: true,
-            configured_enabled: true,
-            configured_bypass: String::new(),
-            recovery_mode: SystemProxyRecoveryMode::FailOpen,
-            recovery_grace_secs: 5,
-        };
-        let update = persisted_system_proxy_update(
-            &status,
-            Some(SystemProxyRecoveryMode::FailClosed),
-            Some(3),
-        );
-        assert_eq!(update.enabled, Some(true));
-        assert_eq!(update.bypass.as_deref(), Some("localhost,127.0.0.1"));
-        assert_eq!(
-            update.recovery_mode,
-            Some(SystemProxyRecoveryMode::FailClosed)
-        );
-        assert_eq!(update.recovery_grace_secs, Some(3));
-
-        status.managed_by_bifrost = false;
-        let update = persisted_system_proxy_update(&status, None, None);
-        assert_eq!(update.enabled, Some(false));
-        assert!(update.bypass.is_none());
-    }
-
-    #[test]
     fn disable_verification_rejects_bifrost_proxy_still_enabled() {
         let status = SystemProxyStatus {
             supported: true,
@@ -1083,7 +977,7 @@ mod tests {
                 "Failed to set system proxy: operation failed",
             ),
         ] {
-            let response = system_proxy_operation_error_response(message);
+            let response = system_proxy_operation_error_response(message, None, None);
             assert_eq!(response.status(), status);
             let body = response.into_body().collect().await.unwrap().to_bytes();
             assert!(String::from_utf8_lossy(&body).contains(marker));
@@ -1099,21 +993,29 @@ mod tests {
         let manager = std::sync::Arc::new(tokio::sync::RwLock::new(SystemProxyManager::new(
             tempfile::tempdir().unwrap().path().to_path_buf(),
         )));
-        assert!(apply_system_proxy_blocking(
-            manager.clone(),
-            true,
-            "127.0.0.1",
-            9900,
-            "localhost".to_string(),
-        )
-        .unwrap_err()
-        .contains("not supported"));
-        assert!(
-            run_system_proxy_operation((manager, true, 9900, "localhost".to_string(),))
-                .await
-                .unwrap_err()
-                .contains("not supported")
+        let state = std::sync::Arc::new(
+            crate::state::AdminState::new_for_test(
+                18891,
+                bifrost_storage::RulesStorage::with_dir(
+                    tempfile::tempdir().unwrap().path().join("rules"),
+                )
+                .unwrap(),
+            )
+            .with_system_proxy_manager_shared(manager),
         );
+        let operation = || SystemProxyOperation {
+            state: state.clone(),
+            enabled: true,
+            bypass: "localhost".to_string(),
+            intent_revision: 0,
+        };
+        assert!(apply_system_proxy_blocking(operation())
+            .unwrap_err()
+            .contains("not supported"));
+        assert!(run_system_proxy_operation(operation())
+            .await
+            .unwrap_err()
+            .contains("not supported"));
 
         let response = get_supported_system_proxy_status(None, SystemProxyConfig::default()).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -1126,7 +1028,8 @@ mod tests {
         assert!(!verified.supported);
         let retried = wait_for_system_proxy_status(true, "127.0.0.1", 9900)
             .await
-            .unwrap();
-        assert!(!retried.supported);
+            .unwrap_err();
+        assert!(retried.message.contains("did not converge"));
+        assert!(!retried.status.unwrap().supported);
     }
 }

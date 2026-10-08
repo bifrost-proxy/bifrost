@@ -725,6 +725,8 @@ async fn test_https_interception_retries_h2_body_failure_with_http1() {
     let upstream = start_flaky_h2_fallback_tls_server(expected_body.clone(), "image/png").await;
     let config = ProxyConfig {
         enable_tls_interception: true,
+        // Exercise MITM independently of platform-specific client process lookup.
+        intercept_include: vec!["intercepted.example.com".to_string()],
         unsafe_ssl: true,
         verbose_logging: true,
         ..Default::default()
@@ -1015,6 +1017,8 @@ async fn test_https_interception_websocket_applies_request_and_response_header_r
 
     let config = ProxyConfig {
         enable_tls_interception: true,
+        // Exercise MITM independently of platform-specific client process lookup.
+        intercept_include: vec!["intercepted.example.com".to_string()],
         unsafe_ssl: true,
         verbose_logging: true,
         ..Default::default()

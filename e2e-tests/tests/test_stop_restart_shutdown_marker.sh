@@ -19,6 +19,8 @@ PROXY_PORT=""
 FAKE_PROXY_BIN=""
 FAKE_PROXY_STATE=""
 FAKE_PROXY_COMMAND_LOG=""
+FAKE_PROXY_TEST_BINARY="${BIFROST_PROXY_TEST_BIN:-${PROJECT_DIR}/target/proxy-test-io/bifrost}"
+FAKE_PROXY_STARTED=0
 
 ensure_pid_stopped() {
     local pid="${1:-}"
@@ -66,11 +68,15 @@ cleanup() {
     if [[ -n "${TEST_DATA_DIR}" && -d "${TEST_DATA_DIR}" ]]; then
         local runtime_pid
         runtime_pid="$(read_runtime_pid)"
-        if [[ -n "${FAKE_PROXY_BIN:-}" && -d "${FAKE_PROXY_BIN:-}" ]]; then
-            PATH="${FAKE_PROXY_BIN}:$PATH" \
-            BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE:-}" \
-            BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG:-}" \
-            BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+        if [[ -n "${FAKE_PROXY_BIN:-}" ]]; then
+            # Until capability verification and start, cleanup may only remove
+            # fixture files. A wrong binary must never receive start or stop.
+            if [[ "${FAKE_PROXY_STARTED}" == "1" ]]; then
+                BIFROST_PROXY_TEST_IO_DIR="${FAKE_PROXY_BIN}" \
+                BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE:-}" \
+                BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG:-}" \
+                BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${FAKE_PROXY_TEST_BINARY}" stop >/dev/null 2>&1 || true
+            fi
         else
             BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
         fi
@@ -79,7 +85,6 @@ cleanup() {
     fi
     return 0
 }
-trap cleanup EXIT
 
 now_ms() {
     python3 - <<'PY'
@@ -135,6 +140,8 @@ setup_fake_macos_system_proxy() {
     FAKE_PROXY_STATE="${TEST_DATA_DIR}/fake-system-proxy.env"
     FAKE_PROXY_COMMAND_LOG="${TEST_DATA_DIR}/fake-system-proxy-commands.log"
     mkdir -p "${FAKE_PROXY_BIN}"
+    printf '%s\n' 'bifrost-proxy-test-io-v1' >"${FAKE_PROXY_BIN}/.bifrost-proxy-test-io"
+    : >"${FAKE_PROXY_COMMAND_LOG}"
     cat > "${FAKE_PROXY_STATE}" <<'EOF'
 WEB_ENABLED=No
 WEB_HOST=
@@ -147,6 +154,7 @@ EOF
 
     cat > "${FAKE_PROXY_BIN}/networksetup" <<'SH'
 #!/bin/bash
+# bifrost-proxy-test-io-v1
 set -euo pipefail
 state_file="${BIFROST_FAKE_SYSTEM_PROXY_STATE:?}"
 command_log="${BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG:-}"
@@ -189,6 +197,14 @@ case "$cmd" in
         read_state
         printf 'Enabled: %s\nServer: %s\nPort: %s\nAuthenticated Proxy Enabled: 0\n' "${SECURE_ENABLED:-No}" "${SECURE_HOST:-}" "${SECURE_PORT:-0}"
         ;;
+    -getproxybypassdomains)
+        read_state
+        if [[ -z "${BYPASS:-}" ]]; then
+            printf "There aren't any bypass domains set on Wi-Fi.\n"
+        else
+            printf '%s\n' "${BYPASS}" | tr ',' '\n'
+        fi
+        ;;
     -setwebproxy)
         read_state
         WEB_HOST="${3:?}"
@@ -214,7 +230,11 @@ case "$cmd" in
     -setproxybypassdomains)
         read_state
         shift 2
-        BYPASS="$(IFS=,; printf '%s' "$*")"
+        if [[ "$#" == "1" && "$1" == "Empty" ]]; then
+            BYPASS=""
+        else
+            BYPASS="$(IFS=,; printf '%s' "$*")"
+        fi
         write_state
         ;;
     *)
@@ -227,6 +247,7 @@ SH
 
     cat > "${FAKE_PROXY_BIN}/scutil" <<'SH'
 #!/bin/bash
+# bifrost-proxy-test-io-v1
 set -euo pipefail
 if [[ "${1:-}" != "--proxy" ]]; then
     echo "unsupported fake scutil args: $*" >&2
@@ -253,19 +274,67 @@ cat <<EOF
   HTTPSPort : ${SECURE_PORT:-0}
   ExceptionsList : <array> {
 EOF
-IFS=',' read -r -a bypass_items <<< "${BYPASS:-}"
-idx=0
-for item in "${bypass_items[@]}"; do
-    [[ -n "$item" ]] || continue
-    printf '    %s : %s\n' "$idx" "$item"
-    idx=$((idx + 1))
-done
+if [[ -n "${BYPASS:-}" ]]; then
+    IFS=',' read -r -a bypass_items <<< "${BYPASS}"
+    idx=0
+    for item in "${bypass_items[@]}"; do
+        [[ -n "$item" ]] || continue
+        printf '    %s : %s\n' "$idx" "$item"
+        idx=$((idx + 1))
+    done
+fi
 cat <<'EOF'
   }
 }
 EOF
 SH
     chmod +x "${FAKE_PROXY_BIN}/scutil"
+}
+
+require_fake_proxy_capability() {
+    if [[ ! -x "${FAKE_PROXY_TEST_BINARY}" ]]; then
+        _log_fail "fake proxy test binary is required" "build with BIFROST_BUILD_PROXY_TEST_IO=1 and set BIFROST_PROXY_TEST_BIN" "${FAKE_PROXY_TEST_BINARY}"
+        return 1
+    fi
+    # Inspect the compile-time-only signature before executing the candidate.
+    # A normal release must not even perform a native read during this probe.
+    if ! LC_ALL=C grep -aFq 'BIFROST_PROXY_TEST_IO_CAPABILITY_V1' "${FAKE_PROXY_TEST_BINARY}"; then
+        _log_fail "fake proxy binary capability" "explicit fixture-only build" "missing build signature; refusing execution"
+        return 1
+    fi
+    : >"${FAKE_PROXY_COMMAND_LOG}"
+    cp "${FAKE_PROXY_STATE}" "${FAKE_PROXY_STATE}.probe-before"
+    if ! BIFROST_PROXY_TEST_IO_DIR="${FAKE_PROXY_BIN}" \
+        BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE}" \
+        BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG}" \
+        BIFROST_DATA_DIR="${TEST_DATA_DIR}" \
+        "${FAKE_PROXY_TEST_BINARY}" system-proxy status >"${TEST_DATA_DIR}/fake-proxy-probe.log" 2>&1; then
+        _log_fail "fake proxy capability read" "successful fixture-only read" "$(cat "${TEST_DATA_DIR}/fake-proxy-probe.log")"
+        return 1
+    fi
+    if ! grep -q 'scutil --proxy' "${FAKE_PROXY_COMMAND_LOG}" \
+        || grep -q 'networksetup -set' "${FAKE_PROXY_COMMAND_LOG}" \
+        || ! cmp -s "${FAKE_PROXY_STATE}" "${FAKE_PROXY_STATE}.probe-before"; then
+        _log_fail "fake proxy capability read" "fresh read trace, unchanged fake state, and no setters" "wrong binary or unsafe fixture; refusing start"
+        return 1
+    fi
+    rm -f "${FAKE_PROXY_STATE}.probe-before"
+}
+
+preflight_fake_proxy_binary() {
+    [[ "$(uname -s)" == "Darwin" ]] || return 0
+    TEST_DATA_DIR="$(mktemp -d)"
+    setup_fake_macos_system_proxy
+    if ! require_fake_proxy_capability; then
+        remove_test_data_dir "${TEST_DATA_DIR}"
+        TEST_DATA_DIR=""
+        return 1
+    fi
+    remove_test_data_dir "${TEST_DATA_DIR}"
+    TEST_DATA_DIR=""
+    FAKE_PROXY_BIN=""
+    FAKE_PROXY_STATE=""
+    FAKE_PROXY_COMMAND_LOG=""
 }
 
 fake_proxy_points_to_bifrost() {
@@ -303,11 +372,13 @@ test_restart_handoff_with_fake_system_proxy() {
     PROXY_PORT="$(free_port)"
     export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
     setup_fake_macos_system_proxy
+    require_fake_proxy_capability
+    FAKE_PROXY_STARTED=1
 
-    PATH="${FAKE_PROXY_BIN}:$PATH" \
+    BIFROST_PROXY_TEST_IO_DIR="${FAKE_PROXY_BIN}" \
     BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE}" \
     BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG}" \
-    "${BIFROST_BIN}" start \
+    "${FAKE_PROXY_TEST_BINARY}" start \
         -p "${PROXY_PORT}" \
         -H 127.0.0.1 \
         --daemon \
@@ -328,10 +399,10 @@ test_restart_handoff_with_fake_system_proxy() {
     fi
 
     local restart_output
-    restart_output=$(PATH="${FAKE_PROXY_BIN}:$PATH" \
+    restart_output=$(BIFROST_PROXY_TEST_IO_DIR="${FAKE_PROXY_BIN}" \
         BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE}" \
         BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG}" \
-        "${BIFROST_BIN}" restart 2>&1)
+        "${FAKE_PROXY_TEST_BINARY}" restart 2>&1)
     local restart_code=$?
     if [[ "${restart_code}" -ne 0 ]]; then
         _log_fail "bifrost restart exits successfully" "exit 0" "code=${restart_code}; output=${restart_output}"
@@ -373,10 +444,10 @@ test_restart_handoff_with_fake_system_proxy() {
         _log_fail "bifrost restart preserves system proxy handoff without cleanup gap" "restart argv contains --system-proxy and fake proxy still points to Bifrost" "$(restart_debug)"
     fi
 
-    PATH="${FAKE_PROXY_BIN}:$PATH" \
+    BIFROST_PROXY_TEST_IO_DIR="${FAKE_PROXY_BIN}" \
     BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE}" \
     BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG}" \
-    "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+    "${FAKE_PROXY_TEST_BINARY}" stop >/dev/null 2>&1 || true
     ensure_pid_stopped "${new_pid}"
 }
 
@@ -452,6 +523,10 @@ test_restart_without_system_proxy_cross_platform() {
 
 main() {
     build_bifrost
+    # Verify the CI-only capability before installing a cleanup trap or starting
+    # any daemon. A normal release binary cannot silently bypass these fakes.
+    preflight_fake_proxy_binary
+    trap cleanup EXIT
 
     TEST_DATA_DIR="$(mktemp -d)"
     PROXY_PORT="$(free_port)"
@@ -505,4 +580,6 @@ main() {
     print_test_summary || exit 1
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

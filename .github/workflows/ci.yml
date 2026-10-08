@@ -192,10 +192,14 @@ jobs:
         run: pnpm run build
         working-directory: packages/bifrost-sync-server
       - name: Install FFmpeg for ASR source compression E2E
+        timeout-minutes: 15
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends ffmpeg
+            sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+              install --yes --no-install-recommends ffmpeg
           fi
           ffmpeg -version
       - uses: dtolnay/rust-toolchain@stable
@@ -383,10 +387,14 @@ jobs:
       - name: Make binary executable
         run: chmod +x target/release/bifrost
       - name: Install FFmpeg for ASR source compression E2E
+        timeout-minutes: 15
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends ffmpeg
+            sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+              install --yes --no-install-recommends ffmpeg
           fi
           ffmpeg -version
       - name: Build test-enabled native Weixin E2E binary
@@ -753,6 +761,19 @@ jobs:
           path: target/aarch64-apple-darwin/release/bifrost
           retention-days: 1
 
+      # This second, explicitly opted-in binary is never a release artifact.
+      # Build-script cfg avoids enabling fake proxy I/O via --all-features.
+      - name: Build fixture-only proxy test binary
+        env:
+          BIFROST_BUILD_PROXY_TEST_IO: "1"
+        run: cargo build -p bifrost-cli --release --target aarch64-apple-darwin
+      - name: Upload fixture-only proxy test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-proxy-test-io-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/bifrost
+          retention-days: 1
+
   build-cli-macos-x86_64:
     name: Build macOS CLI (x86_64-apple-darwin)
     runs-on: macos-15
@@ -888,6 +909,7 @@ jobs:
       BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
       BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_CAPABILITY_SHARDS: "1"
+      BIFROST_NATIVE_PROXY_CI: ${{ matrix.shard == 3 && '1' || '0' }}
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       # Allow cold macOS Rust/Desktop test builds to finish while still failing
@@ -938,6 +960,17 @@ jobs:
           path: target/release
       - name: Make binary executable
         run: chmod +x target/release/bifrost
+      - name: Download fixture-only proxy test binary
+        if: matrix.shard == 1
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-proxy-test-io-aarch64-apple-darwin
+          path: target/proxy-test-io
+      - name: Prepare fixture-only proxy test binary
+        if: matrix.shard == 1
+        run: |
+          chmod +x target/proxy-test-io/bifrost
+          echo "BIFROST_PROXY_TEST_BIN=$GITHUB_WORKSPACE/target/proxy-test-io/bifrost" >> "$GITHUB_ENV"
       - name: Ensure FFmpeg for ASR source compression E2E
         if: matrix.shard == 3
         run: |

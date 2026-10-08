@@ -104,9 +104,11 @@ pub use system_proxy_diagnostics::{
     update_system_proxy_owner_state, SystemProxyLifecycleEvent, SystemProxyOwnerState,
 };
 pub use system_proxy_launchd::{
-    consume_stop_restore_suppression, consume_system_proxy_shutdown_mode, install_launchd_cleanup,
+    consume_stop_restore_suppression, consume_system_proxy_shutdown_mode,
+    consume_system_proxy_shutdown_mode_if, install_launchd_cleanup,
     install_launchd_cleanup_with_gui_auth, launchd_status, launchd_status_for_config,
-    read_system_proxy_shutdown_mode, render_launchd_plist, uninstall_launchd_cleanup,
+    read_system_proxy_shutdown_mode, read_system_proxy_shutdown_mode_checked, render_launchd_plist,
+    try_write_system_proxy_restart_handoff, uninstall_launchd_cleanup,
     uninstall_launchd_cleanup_with_gui_auth, write_system_proxy_shutdown_mode,
     SystemProxyLaunchdConfig, SystemProxyLaunchdMode, SystemProxyLaunchdRecoveryOutcome,
     SystemProxyLaunchdStatus, SystemProxyShutdownMode,

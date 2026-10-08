@@ -1,10 +1,23 @@
-import { describe, expect, it } from "vitest";
-import type { SystemProxyStatus } from "../api/proxy";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  getSystemProxyStatus,
+  setSystemProxy,
+  type SystemProxyStatus,
+} from "../api/proxy";
 import {
   doesSystemProxyMatchRequest,
   isSystemProxyConfiguredEnabled,
   isSystemProxyLiveEnabledByBifrost,
+  useProxyStore,
 } from "./useProxyStore";
+
+vi.mock("../api/proxy", () => ({
+  getCliProxyStatus: vi.fn(),
+  getSystemProxyLaunchdStatus: vi.fn(),
+  getSystemProxyStatus: vi.fn(),
+  setSystemProxy: vi.fn(),
+  setSystemProxyLaunchd: vi.fn(),
+}));
 
 const status = (overrides: Partial<SystemProxyStatus>): SystemProxyStatus => ({
   supported: true,
@@ -82,5 +95,88 @@ describe("system proxy status helpers", () => {
         }),
       ),
     ).toBe(true);
+  });
+});
+
+describe("system proxy intent updates", () => {
+  const suspended = status({
+    configured_enabled: true,
+    managed_by_bifrost: false,
+  });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    useProxyStore.setState({
+      systemProxy: suspended,
+      loading: false,
+      error: null,
+    });
+  });
+
+  it("disables retained intent even when the OS proxy is already inactive", async () => {
+    const disabled = { ...suspended, configured_enabled: false };
+    vi.mocked(setSystemProxy).mockResolvedValue(disabled);
+
+    expect(await useProxyStore.getState().toggleSystemProxy(false)).toBe(true);
+
+    expect(setSystemProxy).toHaveBeenCalledWith({ enabled: false });
+    expect(useProxyStore.getState().systemProxy).toEqual(disabled);
+    expect(useProxyStore.getState().loading).toBe(false);
+    expect(useProxyStore.getState().error).toBeNull();
+  });
+
+  it("keeps retained intent when disabling fails without a newer snapshot", async () => {
+    vi.mocked(setSystemProxy).mockRejectedValue(new Error("Disable failed"));
+
+    expect(await useProxyStore.getState().toggleSystemProxy(false)).toBe(false);
+
+    expect(useProxyStore.getState().systemProxy).toBe(suspended);
+    expect(useProxyStore.getState().loading).toBe(false);
+    expect(useProxyStore.getState().error).toBe("Disable failed");
+  });
+
+  it.each(["push", "refresh"])(
+    "does not roll back newer %s intent when an earlier toggle fails",
+    async (source) => {
+      let rejectToggle!: (reason: Error) => void;
+      vi.mocked(setSystemProxy).mockReturnValue(
+        new Promise((_, reject) => {
+          rejectToggle = reject;
+        }),
+      );
+      const pendingToggle = useProxyStore.getState().toggleSystemProxy(false);
+      const disabled = { ...suspended, configured_enabled: false };
+
+      if (source === "push") {
+        useProxyStore.getState().applySystemProxySnapshot(disabled);
+      } else {
+        vi.mocked(getSystemProxyStatus).mockResolvedValue(disabled);
+        await useProxyStore.getState().fetchSystemProxy();
+      }
+      rejectToggle(new Error("Response lost"));
+      expect(await pendingToggle).toBe(false);
+
+      expect(useProxyStore.getState().systemProxy).toBe(disabled);
+      expect(useProxyStore.getState().loading).toBe(false);
+      expect(useProxyStore.getState().error).toBe("Response lost");
+    },
+  );
+
+  it("preserves newer intent when a status refresh fails", async () => {
+    let rejectRefresh!: (reason: Error) => void;
+    vi.mocked(getSystemProxyStatus).mockReturnValue(
+      new Promise((_, reject) => {
+        rejectRefresh = reject;
+      }),
+    );
+    const pendingRefresh = useProxyStore.getState().fetchSystemProxy();
+    const disabled = { ...suspended, configured_enabled: false };
+    useProxyStore.getState().applySystemProxySnapshot(disabled);
+
+    rejectRefresh(new Error("Refresh failed"));
+    await pendingRefresh;
+
+    expect(useProxyStore.getState().systemProxy).toBe(disabled);
+    expect(useProxyStore.getState().error).toBe("Refresh failed");
   });
 });

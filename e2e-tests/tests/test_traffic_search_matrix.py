@@ -16,7 +16,11 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 BIN = Path(os.environ.get("BIFROST_BIN", ROOT / "target/debug/bifrost"))
-ENV = dict(os.environ, BIFROST_DISABLE_TRAY="1", BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT="1", CI="1", NO_PROXY="*", no_proxy="*")
+# Traffic/search uses an explicit local proxy, not system-proxy recovery. The
+# independent lifecycle helper has its own process group and writes diagnostics
+# after the proxy exits, racing TemporaryDirectory removal despite killpg/wait.
+# Dedicated system-proxy and CLI-environment suites exercise that helper instead.
+ENV = dict(os.environ, BIFROST_DISABLE_TRAY="1", BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT="1", BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER="1", CI="1", NO_PROXY="*", no_proxy="*")
 RESULTS = []
 
 

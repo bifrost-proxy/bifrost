@@ -148,12 +148,35 @@ fn restart_and_download_helpers_cover_terminal_paths() {
     let _guard = crate::commands::UPGRADE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Other command modules use different environment locks. A subprocess keeps
+    // their concurrent BIFROST_DATA_DIR changes away from this default-path test.
+    const CHILD: &str = "BIFROST_TEST_RESTART_DOWNLOAD_HELPERS_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "commands::upgrade::tests::download_helpers::restart_and_download_helpers_cover_terminal_paths",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("BIFROST_UPGRADE_TEST_ARCHIVE")
+            .output()
+            .expect("run isolated default-path test");
+        assert!(
+            output.status.success(),
+            "isolated test failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
     let previous_archive = std::env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE");
     std::env::set_var("BIFROST_DATA_DIR", temp.path());
 
     wait_for_restart_ports_release(&[]).expect("no restart ports");
+    ConfigManager::new(temp.path().to_path_buf()).expect("initialize test config");
     default_restart_system_proxy_config().expect("default proxy config");
     assert!(!release_archive_ext_candidates().is_empty());
     let _ = tar_supports_xz();

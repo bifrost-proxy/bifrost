@@ -324,8 +324,10 @@ test_runtime_lifecycle_cleanup() {
   if [[ "$instrumented_linux" == false ]]; then
     local old_pid
     old_pid="$(tr -cd '0-9' < "$data_dir/bifrost.pid")"
-    HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" restart \
-      >"$TEST_ROOT/restart.log" 2>&1
+    if ! HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" restart \
+      >"$TEST_ROOT/restart.log" 2>&1; then
+      fail "daemon restart failed: $(tail -n 80 "$TEST_ROOT/restart.log")"
+    fi
     wait_for_runtime_pid_change "$data_dir/bifrost.pid" "$old_pid" \
       || fail "replacement daemon PID did not take ownership after restart: $(tail -n 80 "$TEST_ROOT/restart.log")"
     wait_for_listener "$port" || fail "replacement daemon did not become ready after restart"
@@ -334,8 +336,10 @@ test_runtime_lifecycle_cleanup() {
     echo "SKIP: daemon restart handoff is covered by the non-instrumented Linux shell job"
   fi
 
-  HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" stop \
-    >"$TEST_ROOT/stop.log" 2>&1
+  if ! HOME="$home" BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" stop \
+    >"$TEST_ROOT/stop.log" 2>&1; then
+    fail "normal stop failed: $(tail -n 80 "$TEST_ROOT/stop.log")"
+  fi
   if [[ -n "$PROXY_PID" ]]; then
     wait "$PROXY_PID" 2>/dev/null || true
     PROXY_PID=""

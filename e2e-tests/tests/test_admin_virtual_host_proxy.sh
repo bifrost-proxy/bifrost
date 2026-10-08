@@ -233,18 +233,35 @@ assert_direct_host_header_admin_html() {
 
 assert_default_system_proxy_bypass_keeps_virtual_host_routable() {
     local status
+    local configured_bypass
     if ! status="$(curl -fsS --connect-timeout 2 --max-time 10 "${ADMIN_BASE_URL}/api/proxy/system")"; then
         log_fail "Failed to load system proxy status"
         tail -120 "$DATA_DIR/proxy.log" || true
         return 1
     fi
 
-    if [[ "$status" == *"*.local"* ]]; then
-        log_fail "Default system proxy bypass must not include *.local: $status"
+    # With --no-system-proxy, bypass reports untouched OS settings. Check only
+    # Bifrost's configured default, which must keep bifrost.local proxy-routable.
+    if ! configured_bypass="$(python3 -c '
+import json
+import sys
+
+status = json.loads(sys.argv[1])
+configured_bypass = status["configured_bypass"]
+if not isinstance(configured_bypass, str):
+    raise SystemExit("configured_bypass must be a string")
+print(configured_bypass)
+' "$status")"; then
+        log_fail "Invalid configured_bypass in system proxy status: $status"
         return 1
     fi
-    if [[ "$status" != *"localhost,127.0.0.1,::1"* ]]; then
-        log_fail "Default system proxy bypass did not include loopback entries: $status"
+
+    if [[ "$configured_bypass" == *"*.local"* ]]; then
+        log_fail "Default configured system proxy bypass must not include *.local: $configured_bypass"
+        return 1
+    fi
+    if [[ "$configured_bypass" != *"localhost,127.0.0.1,::1"* ]]; then
+        log_fail "Default configured system proxy bypass did not include loopback entries: $configured_bypass"
         return 1
     fi
     log_info "Default system proxy bypass keeps bifrost.local proxy-routable"

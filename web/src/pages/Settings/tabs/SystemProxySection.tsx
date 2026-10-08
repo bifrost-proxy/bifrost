@@ -1,5 +1,16 @@
 import { useMemo } from "react";
-import { Alert, Card, Col, Divider, Row, Space, Switch, Tag, Tooltip, Typography } from "antd";
+import {
+  Alert,
+  Card,
+  Col,
+  Divider,
+  Row,
+  Space,
+  Switch,
+  Tag,
+  Tooltip,
+  Typography,
+} from "antd";
 import { ExclamationCircleOutlined, GlobalOutlined } from "@ant-design/icons";
 import type {
   CliProxyStatus,
@@ -51,7 +62,8 @@ export default function SystemProxySection({
       .slice(0, 2);
     const filesText =
       shortFiles.length > 0
-        ? shortFiles.join(", ") + ((cliProxy.config_files || []).length > 2 ? " ..." : "")
+        ? shortFiles.join(", ") +
+          ((cliProxy.config_files || []).length > 2 ? " ..." : "")
         : "-";
     return {
       tag,
@@ -76,6 +88,8 @@ export default function SystemProxySection({
     systemProxyConfiguredEnabled &&
     !systemProxyEnabledByBifrost &&
     !systemProxyOwnedByOther;
+  const systemProxyDisabledButActive =
+    !systemProxyConfiguredEnabled && systemProxyEnabledByBifrost;
 
   return (
     <Col xs={24}>
@@ -97,7 +111,7 @@ export default function SystemProxySection({
               {systemProxy ? (
                 systemProxy.supported ? (
                   <Switch
-                    checked={systemProxyEnabledByBifrost}
+                    checked={systemProxyConfiguredEnabled}
                     loading={systemProxyLoading}
                     onChange={onToggleSystemProxy}
                     data-testid="settings-system-proxy-switch"
@@ -117,7 +131,11 @@ export default function SystemProxySection({
               type="warning"
               showIcon
               message="System proxy is occupied by another proxy"
-              description={`Current system proxy points to ${systemProxy.host}:${systemProxy.port}. Turn this on to let Bifrost take over and restore it when turned off.`}
+              description={`Current system proxy points to ${systemProxy.host}:${systemProxy.port}. ${
+                systemProxyConfiguredEnabled
+                  ? "Bifrost is configured to enable system proxy, but is not currently active."
+                  : "Turn this on to let Bifrost take over and restore it when turned off."
+              }`}
             />
           ) : systemProxyConfiguredButInactive ? (
             <Alert
@@ -125,6 +143,13 @@ export default function SystemProxySection({
               showIcon
               message="System proxy is configured but not active"
               description="Bifrost will keep this preference and re-apply it when the runtime enables system proxy again."
+            />
+          ) : systemProxyDisabledButActive ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="System proxy is still active"
+              description="Bifrost's saved system proxy preference is off, but the OS is still using Bifrost as its system proxy."
             />
           ) : (
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -201,7 +226,8 @@ export default function SystemProxySection({
             </Col>
           </Row>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Only applies to HTML pages. Indicates that traffic is flowing through Bifrost proxy.
+            Only applies to HTML pages. Indicates that traffic is flowing
+            through Bifrost proxy.
           </Text>
 
           <Divider style={{ margin: "12px 0" }} />
@@ -217,7 +243,10 @@ export default function SystemProxySection({
             </Col>
             <Col>
               {cliProxyDisplay.tag ? (
-                <Tag color={cliProxyDisplay.tag.color} data-testid="settings-cli-proxy-tag">
+                <Tag
+                  color={cliProxyDisplay.tag.color}
+                  data-testid="settings-cli-proxy-tag"
+                >
                   {cliProxyDisplay.tag.text}
                 </Tag>
               ) : (

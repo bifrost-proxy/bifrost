@@ -403,18 +403,27 @@ test_windows_upgrade_defers_self_replacement_in_source() {
 
     local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
     local restart_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
+    local parent_wait_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/windows_parent_wait.ps1"
 
     if grep -q "DeferredWindows" "$source_file" \
         && grep -q "unique_pending_binary_path" "$source_file" \
         && grep -q "schedule_windows_deferred_install" "$restart_file" \
-        && grep -q "Wait-Process -Timeout 120" "$restart_file" \
+        && grep -Fq 'include_str!("windows_parent_wait.ps1")' "$restart_file" \
+        && grep -Fq 'Wait-UpgradeParentExit $ParentPid 120000' "$restart_file" \
+        && grep -Fq '$parent = Get-Process -Id $ParentPid' "$parent_wait_file" \
+        && grep -Fq 'if (-not $parent.WaitForExit($TimeoutMilliseconds))' "$parent_wait_file" \
+        && grep -Fq 'throw "parent process $ParentPid did not exit before timeout"' "$parent_wait_file" \
+        && grep -Fq '} finally {' "$parent_wait_file" \
+        && grep -Fq '$parent.Dispose()' "$parent_wait_file" \
+        && [ "$(grep -Fc 'Get-Process -Id $ParentPid' "$parent_wait_file")" -eq 1 ] \
+        && ! grep -Fq 'if (Get-Process -Id $ParentPid' "$restart_file" "$parent_wait_file" \
         && grep -Fq 'Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force' "$restart_file" \
         && grep -Fq 'Start-Process -FilePath $TargetPath -ArgumentList $restartArgs' "$restart_file" \
         && grep -q "Proxy restart scheduled with the new version" "$restart_file"; then
         _log_pass "Windows upgrade stages self replacement and restarts after the upgrade process exits"
     else
         _log_fail "Windows deferred self replacement" \
-            "DeferredWindows + pending exe + PowerShell wait/replace/start helper" \
+            "DeferredWindows + pending exe + captured parent exit/120s timeout/disposal + replace/start helper" \
             "Windows upgrade can still try to overwrite the running exe directly"
         return 1
     fi

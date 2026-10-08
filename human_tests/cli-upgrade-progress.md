@@ -97,6 +97,33 @@ stdout/stderr，而不是等子进程退出后一次性显示。
   用于错误摘要的 stderr。
 - 测试返回 `ok`，且 best-effort CLI 主流程语义保持不变。
 
+### TC-CUP-04 Admin 升级等待新 daemon 的完整运行标记
+
+操作步骤：
+
+1. 在 macOS CI 或隔离测试机上，使用本次构建的 CLI 执行：
+
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh
+   ```
+
+2. 确认后台更新完成后，Admin progress 为 `completed`、source 为 `admin`，
+   daemon PID 已更换，运行路径仍是测试创建的安装副本。
+3. 确认“磁盘二进制已是最新版本”的第二个场景也完成重启并停止。
+
+预期结果：
+
+- `start -d` 只有在新子进程写出完整且新鲜的 runtime 标记后才报告就绪；
+  标记中的 PID、启动时间（可读取时）、端口、绑定地址和 daemon 模式匹配。
+- 已绑定 socket 但标记缺失或只写了一部分时，不提前进入 Desktop 接续检查。
+- 原有就绪超时、升级完成断言及外部进程所有权保护保持有效。
+- 失败时，脚本在下一场景清理前输出该场景的 progress、runtime、后台更新和启动日志。
+  所有测试日志来自脚本自己的临时目录，不读取旧的共享临时日志。
+
+确定性回归可单独运行 `cargo test -p bifrost-cli daemon_readiness`；它只使用自有
+loopback socket、临时 runtime 文件和自有测试子进程，不改变系统代理设置。
+
 ## 清理步骤
 
 1. E2E 脚本通过 trap/显式清理移除临时 app、package、包装器和日志目录。

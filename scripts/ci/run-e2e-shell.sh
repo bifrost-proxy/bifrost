@@ -6,23 +6,22 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 cd "$ROOT_DIR"
 
-snapshot_e2e_job_processes() {
+record_e2e_job_root() {
   [[ "${GITHUB_ACTIONS:-}" == "true" ]] || return 0
-  local baseline_dir="${RUNNER_TEMP:-/tmp}"
-  local baseline_file="$baseline_dir/bifrost-e2e-process-baseline-${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-shell}-$$.txt"
-  local current_uid
-  current_uid="$(id -u)"
-  ps -axo uid=,pid= 2>/dev/null |
-    awk -v uid="$current_uid" '$1 == uid { print $2 }' \
-      >"$baseline_file"
-  export BIFROST_E2E_JOB_PROCESS_BASELINE="$baseline_file"
+  # Record this live entrypoint, not a machine-wide before/after PID list.
+  # Missing identity disables the best-effort job cleanup, not the tests.
+  export BIFROST_E2E_JOB_ROOT_PID="$$"
+  if ! BIFROST_E2E_JOB_ROOT_START="$(LC_ALL=C ps -p "$$" -o lstart= 2>/dev/null | awk '{$1=$1; print}')"; then
+    BIFROST_E2E_JOB_ROOT_START=""
+  fi
+  export BIFROST_E2E_JOB_ROOT_START
 }
 
 cleanup_tracked_e2e_processes() {
   bash "$ROOT_DIR/scripts/ci/cleanup-e2e-job-processes.sh" || true
 }
 
-snapshot_e2e_job_processes
+record_e2e_job_root
 trap cleanup_tracked_e2e_processes EXIT
 
 SHARD_ARGS=""

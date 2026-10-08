@@ -1,5 +1,9 @@
 import { create } from "zustand";
-import type { CliProxyStatus, SystemProxyLaunchdStatus, SystemProxyStatus } from "../api/proxy";
+import type {
+  CliProxyStatus,
+  SystemProxyLaunchdStatus,
+  SystemProxyStatus,
+} from "../api/proxy";
 import {
   getCliProxyStatus,
   getSystemProxyLaunchdStatus,
@@ -70,24 +74,21 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
   },
 
   toggleSystemProxy: async (enabled: boolean) => {
-    const currentState = get().systemProxy;
     set({ loading: true, error: null });
     try {
       const status = await setSystemProxy({ enabled });
       set({
         systemProxy: status,
         loading: false,
-        error:
-          doesSystemProxyMatchRequest(status, enabled)
-            ? null
-            : `System proxy is still ${status.enabled ? "enabled" : "disabled"}`,
+        error: doesSystemProxyMatchRequest(status, enabled)
+          ? null
+          : `System proxy is still ${status.enabled ? "enabled" : "disabled"}`,
       });
       return doesSystemProxyMatchRequest(status, enabled);
     } catch (e) {
       set({
         error: isConnectionIssueError(e) ? null : (e as Error).message,
         loading: false,
-        systemProxy: currentState,
       });
       return false;
     }
@@ -104,7 +105,10 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
       set({
         systemProxyLaunchd: status,
         launchdLoading: false,
-        error: matches ? null : status.message || "System cleanup fallback did not reach the requested state",
+        error: matches
+          ? null
+          : status.message ||
+            "System cleanup fallback did not reach the requested state",
       });
       return matches;
     } catch (e) {
@@ -131,10 +135,14 @@ export function doesSystemProxyMatchRequest(
   return !status.enabled || status.managed_by_bifrost === false;
 }
 
-export function isSystemProxyConfiguredEnabled(status: SystemProxyStatus): boolean {
+export function isSystemProxyConfiguredEnabled(
+  status: SystemProxyStatus,
+): boolean {
   return status.configured_enabled ?? isSystemProxyLiveEnabledByBifrost(status);
 }
 
-export function isSystemProxyLiveEnabledByBifrost(status: SystemProxyStatus): boolean {
+export function isSystemProxyLiveEnabledByBifrost(
+  status: SystemProxyStatus,
+): boolean {
   return status.enabled && status.managed_by_bifrost !== false;
 }
