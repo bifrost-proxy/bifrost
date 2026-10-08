@@ -1,0 +1,3 @@
+# Verify that a same-port remote admin path reaches ordinary proxy routing.
+# The documentation-only IP is mapped to an isolated HTTP target by the test.
+192.0.2.80 host://${env.BIFROST_ROUTING_TARGET}

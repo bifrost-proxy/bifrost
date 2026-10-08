@@ -18,6 +18,7 @@ tests/                      # E2E / Admin API / 回归测试脚本
 │   ├── test_proxy_admin_api.sh     # Proxy API 测试 (6 tests)
 │   ├── test_system_admin_api.sh    # System API 测试 (10 tests)
 │   ├── test_scripts_admin_api.sh   # Scripts API 测试 (12 tests)
+│   ├── test_admin_same_port_proxy.sh # 同端口远端 IP 管理路径转发与本机防伪回归
 │   ├── test_admin_cross_site_security.sh # Desktop/Tauri Admin CORS 与 CSRF 回归
 │   ├── test_replay_rules.sh        # Replay custom rules 回归测试
 │   ├── test_tls_logic_simple.sh    # TLS 逻辑测试脚本
