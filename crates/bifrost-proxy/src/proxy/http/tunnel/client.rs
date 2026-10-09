@@ -40,6 +40,9 @@ pub(in crate::proxy::http) struct UpstreamRequestErrorInfo {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ClientCacheKey {
+    // Pooled socket drivers run on the runtime that established them. Sharing
+    // them with another runtime can stall when their owning runtime stops polling.
+    runtime_id: tokio::runtime::Id,
     unsafe_ssl: bool,
     dns_servers: Vec<String>,
     pool_partition: String,
@@ -403,6 +406,7 @@ fn get_https_client(
     protocol: ClientProtocolPreference,
 ) -> Arc<HttpsPooledClient> {
     let key = ClientCacheKey {
+        runtime_id: tokio::runtime::Handle::current().id(),
         unsafe_ssl,
         dns_servers: dns_servers.to_vec(),
         pool_partition: pool_partition.to_string(),
@@ -813,12 +817,169 @@ mod tests {
     use super::*;
 
     fn test_cache_key(partition: &str) -> ClientCacheKey {
+        static TEST_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+        });
         ClientCacheKey {
+            runtime_id: TEST_RUNTIME.handle().id(),
             unsafe_ssl: false,
             dns_servers: Vec::new(),
             pool_partition: partition.to_string(),
             protocol: ClientProtocolPreference::Auto,
         }
+    }
+
+    #[test]
+    fn pooled_connections_are_isolated_from_an_alive_but_blocked_runtime() {
+        use http_body_util::BodyExt;
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server_stop = stop.clone();
+        let server_connections = connections.clone();
+        let server = std::thread::spawn(move || {
+            let mut workers = Vec::new();
+            while !server_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        server_connections.fetch_add(1, Ordering::SeqCst);
+                        socket
+                            .set_read_timeout(Some(Duration::from_millis(100)))
+                            .unwrap();
+                        socket
+                            .set_write_timeout(Some(Duration::from_millis(100)))
+                            .unwrap();
+                        let worker_stop = server_stop.clone();
+                        workers.push(std::thread::spawn(move || {
+                            let mut request = Vec::new();
+                            let mut bytes = [0u8; 1024];
+                            while !worker_stop.load(Ordering::SeqCst) {
+                                match socket.read(&mut bytes) {
+                                    Ok(0) => break,
+                                    Ok(len) => request.extend_from_slice(&bytes[..len]),
+                                    Err(error)
+                                        if matches!(
+                                            error.kind(),
+                                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                                        ) =>
+                                    {
+                                        continue
+                                    }
+                                    Err(_) => break,
+                                }
+                                while let Some(end) =
+                                    request.windows(4).position(|part| part == b"\r\n\r\n")
+                                {
+                                    request.drain(..end + 4);
+                                    if socket
+                                        .write_all(
+                                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+                                        )
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                        }));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("loopback accept failed: {error}"),
+                }
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+        let partition = format!("runtime-affinity-regression-{address}");
+        let uri = format!("http://{address}/keepalive");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_uri = uri.clone();
+        let first_partition = partition.clone();
+        let first_runtime = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let request = Request::builder()
+                        .uri(first_uri)
+                        .body(crate::server::full_body(Bytes::new()))
+                        .unwrap();
+                    let response =
+                        send_pooled_request_http1_only(request, false, &[], &first_partition)
+                            .await
+                            .unwrap();
+                    assert_eq!(
+                        response.into_body().collect().await.unwrap().to_bytes(),
+                        "ok"
+                    );
+                    // Allow the completed connection to return to the idle pool.
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                })
+                .await
+                .expect("first runtime request must finish within five seconds");
+            });
+            ready_tx.send(()).unwrap();
+            // Keep the runtime and its open socket alive without driving its tasks.
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    for _ in 0..2 {
+                        let request = Request::builder()
+                            .uri(&uri)
+                            .body(crate::server::full_body(Bytes::new()))
+                            .unwrap();
+                        let response =
+                            send_pooled_request_http1_only(request, false, &[], &partition)
+                                .await
+                                .unwrap();
+                        assert_eq!(
+                            response.into_body().collect().await.unwrap().to_bytes(),
+                            "ok"
+                        );
+                    }
+                })
+                .await
+            });
+            assert!(
+                result.is_ok(),
+                "second runtime must not wait for the blocked first runtime"
+            );
+        }));
+        // Cleanup also runs if readiness, transport, or body assertions panic.
+        let _ = release_tx.send(());
+        stop.store(true, Ordering::SeqCst);
+        let first_result = first_runtime.join();
+        let server_result = server.join();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        first_result.unwrap();
+        server_result.unwrap();
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            2,
+            "each runtime owns one connection, with reuse within the second runtime"
+        );
     }
 
     #[test]

@@ -8778,14 +8778,31 @@ mod coverage_90_wave {
         tokio::spawn(async move {
             let _ = server.await;
         });
-        sender.send_request(request).await.unwrap()
+        let request_uri = request.uri().to_string();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            sender.send_request(request),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!("handler fixture timed out awaiting response headers: {request_uri}")
+        })
+        .unwrap()
     }
 
     async fn response_body(response: Response<Incoming>) -> Bytes {
-        http_body_util::BodyExt::collect(response.into_body())
-            .await
-            .unwrap()
-            .to_bytes()
+        let status = response.status();
+        let headers = response.headers().clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            http_body_util::BodyExt::collect(response.into_body()),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!("handler fixture timed out reading response body: status={status}, headers={headers:?}")
+        })
+        .unwrap()
+        .to_bytes()
     }
 
     fn breakpoint_rule(value: &str) -> crate::server::RuleValue {
