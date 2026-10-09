@@ -250,8 +250,8 @@ def rust_non_executable_lines(source: str) -> set[int]:
             # The preceding `if` condition owns the control-flow region.
             excluded.add(line_no)
             continue
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*:\s*.+,", stripped):
-            excluded.add(line_no)
+        # Field declarations are handled by declaration_depth above. A field
+        # initializer can call code, so retain it for intersection with LCOV.
     return excluded
 
 
