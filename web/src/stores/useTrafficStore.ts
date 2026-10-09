@@ -2100,6 +2100,7 @@ export const useTrafficStore = create<TrafficState>()(
       fetchTrafficDetail: async (id: string) => {
         const generation = historyBackfillGeneration;
         const prevState = get();
+        if (prevState.selectedId !== id) return;
         const preserveBodies = prevState.currentRecord?.id === id;
         set({
           detailLoading: true,
@@ -2111,34 +2112,34 @@ export const useTrafficStore = create<TrafficState>()(
         });
         try {
           const record = await api.getTrafficDetail(id);
-          if (generation !== historyBackfillGeneration) return;
+          if (generation !== historyBackfillGeneration || get().selectedId !== id) return;
           const summary = get().recordsMap.get(id);
           const mergedRecord = mergeDetailWithSummary(record, summary);
           set({ currentRecord: mergedRecord, detailLoading: false, detailError: null });
 
           api.getRequestBody(id).then(body => {
-            if (generation === historyBackfillGeneration && get().currentRecord?.id === id) set({ requestBody: body });
+            if (generation === historyBackfillGeneration && get().selectedId === id && get().currentRecord?.id === id) set({ requestBody: body });
           }).catch(() => { });
 
           if (mergedRecord.raw_request_body_ref) {
             api.getRequestBodyContent(id, { raw: true, encoding: 'base64' }).then(body => {
-              if (generation === historyBackfillGeneration && get().currentRecord?.id === id) set({ requestRawBody: body });
+              if (generation === historyBackfillGeneration && get().selectedId === id && get().currentRecord?.id === id) set({ requestRawBody: body });
             }).catch(() => { });
           }
 
           const isOpenSse = !!mergedRecord.is_sse && !!mergedRecord.socket_status?.is_open;
           if (!isOpenSse) {
             api.getResponseBody(id).then(body => {
-              if (generation === historyBackfillGeneration && get().currentRecord?.id === id) set({ responseBody: body });
+              if (generation === historyBackfillGeneration && get().selectedId === id && get().currentRecord?.id === id) set({ responseBody: body });
             }).catch(() => { });
             if (mergedRecord.raw_response_body_ref) {
               api.getResponseBodyContent(id, { raw: true, encoding: 'base64' }).then(body => {
-                if (generation === historyBackfillGeneration && get().currentRecord?.id === id) set({ responseRawBody: body });
+                if (generation === historyBackfillGeneration && get().selectedId === id && get().currentRecord?.id === id) set({ responseRawBody: body });
               }).catch(() => { });
             }
           }
         } catch (e) {
-          if (generation !== historyBackfillGeneration) return;
+          if (generation !== historyBackfillGeneration || get().selectedId !== id) return;
           const error = e as { response?: { data?: { error?: string } }; message?: string };
           const message = error.response?.data?.error || error.message || 'Request detail not found';
           set({

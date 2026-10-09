@@ -167,6 +167,8 @@ export interface BreakpointPausedPushData {
   status?: number;
   headers: [string, string][];
   body?: string;
+  body_encoding?: "utf8" | "base64";
+  body_representation?: "decoded" | "raw";
   body_omitted?: boolean;
   body_size?: number;
   max_body_bytes?: number;

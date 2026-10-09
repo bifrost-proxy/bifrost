@@ -1,4 +1,13 @@
-import { Tag, Switch, Button, Space, theme, Tooltip, Popover } from "antd";
+import {
+  Checkbox,
+  Tag,
+  Switch,
+  Button,
+  Space,
+  theme,
+  Tooltip,
+  Popover,
+} from "antd";
 import type { CSSProperties } from "react";
 import {
   DeleteOutlined,
@@ -25,6 +34,8 @@ interface ToolbarProps {
   onDetailPanelToggle?: () => void;
   detailDetached?: boolean;
   onAttachDetailWindow?: () => void;
+  pendingOnly?: boolean;
+  onPendingOnlyChange?: (value: boolean) => void;
   breakpointEnabled?: boolean;
   breakpointLoading?: boolean;
   onBreakpointToggle?: (enabled: boolean) => void;
@@ -58,6 +69,8 @@ export default function Toolbar({
   onDetailPanelToggle,
   detailDetached,
   onAttachDetailWindow,
+  pendingOnly = false,
+  onPendingOnlyChange,
   breakpointEnabled = false,
   breakpointLoading,
   onBreakpointToggle,
@@ -208,6 +221,10 @@ export default function Toolbar({
                 This switch alone does not pause traffic. Choose request,
                 response, or both in the rule value.
               </div>
+              <div style={{ marginTop: 6 }}>
+                Matched HTTPS rules enable scoped TLS interception. The client
+                must trust the Bifrost CA certificate, including on custom ports.
+              </div>
             </div>
           }
         >
@@ -229,6 +246,13 @@ export default function Toolbar({
           onChange={onBreakpointToggle}
           data-testid="toolbar-breakpoint-toggle"
         />
+        <Checkbox
+          checked={pendingOnly}
+          onChange={(event) => onPendingOnlyChange?.(event.target.checked)}
+          data-testid="toolbar-breakpoint-pending-only"
+        >
+          Only breakpoint paused
+        </Checkbox>
         <div
           style={{
             width: 1,
@@ -279,7 +303,9 @@ export default function Toolbar({
                 <MenuFoldOutlined />
               )
             }
-            onClick={detailDetached ? onAttachDetailWindow : onDetailPanelToggle}
+            onClick={
+              detailDetached ? onAttachDetailWindow : onDetailPanelToggle
+            }
             data-testid="toolbar-detail-toggle"
           />
         </Tooltip>

@@ -11,6 +11,8 @@ export interface BreakpointEdit {
   status?: number;
   headers?: [string, string][];
   body?: string;
+  body_encoding?: "utf8" | "base64";
+  body_representation?: "decoded" | "raw";
 }
 
 export interface PendingBreakpoint {
@@ -21,6 +23,8 @@ export interface PendingBreakpoint {
   status?: number;
   headers: [string, string][];
   body?: string;
+  body_encoding?: "utf8" | "base64";
+  body_representation?: "decoded" | "raw";
   body_omitted: boolean;
   body_size?: number;
   max_body_bytes: number;
@@ -38,6 +42,8 @@ export interface BreakpointResumeRequest {
   status?: number;
   headers?: [string, string][];
   body?: string;
+  body_encoding?: "utf8" | "base64";
+  body_representation?: "decoded" | "raw";
 }
 
 export interface BreakpointResumeResponse {

@@ -27,12 +27,14 @@ Breakpoint 有双重门禁：
 2. 在 Toolbar 中打开 `Breakpoint` 开关。
 3. 进入 Rules 页面，为目标流量增加一条尽量精确的规则。
 4. 发送命中该规则的请求。
-5. 回到 Traffic 页面，打开对应请求的 TrafficDetail。
-6. Network 行会显示 request/response 暂停标识；选中后详情自动打开对应阶段。
+5. 回到 Traffic 页面。每次开启门禁后的第一次命中自动选中请求并展开对应阶段详情，只发生一次。
+6. 后续并发命中仅高亮行，不抢焦点。手动选择暂停项可继续编辑；同一暂停项的草稿在切换与 push 重连后保留。
 7. Request 可编辑 method、URL/query、headers 和可编辑 body；Response 可编辑 status、headers 和可编辑 body。
 8. 点击 `Resume unchanged` 原样放行，或点击 `Apply & Resume` 应用编辑后放行。
 
 pending 的 Network 行整行使用主题自适应的淡黄色警示背景；Fuzzy Search 结果保持相同的背景与 request/response 阶段标识。恢复、关闭 Breakpoint 或 timeout 自动放行后，背景立即消失。浅色和深色主题分别使用各自的 warning token，不使用固定浅色值。
+
+顶部“仅看断点暂停”复选框只显示当前 pending 行，并与普通筛选和 Fuzzy Search 条件组合。放行、超时或关闭门禁后，行立即退出该视图。
 
 Breakpoint 关闭后，新流量不会再暂停；已经 pending 的 breakpoint 会被释放。
 
@@ -63,7 +65,7 @@ api.example.com/v1/users breakpoint://request,response
 - 修改 body 后再发送给上游。
 - 验证客户端请求是否符合预期。
 
-Resume 后，上游会收到修改后的 method、URL/query、headers/body。若 body 因过大、非文本或无法在安全上限内完整读取，页面会提示 body 被省略，此时仍可修改 method、URL/query 和 headers，Resume 时不会替换原始 body。
+Resume 后，上游会收到修改后的 method、URL/query、headers/body。若 body 因过大或无法在安全上限内完整读取，页面会提示 body 被省略，此时仍可修改 method、URL/query 和 headers，Resume 时不会替换原始 body。
 
 ## Response Breakpoint
 
@@ -74,7 +76,13 @@ Resume 后，上游会收到修改后的 method、URL/query、headers/body。若
 - 修改响应 body，验证客户端展示或错误处理。
 - 模拟特殊状态或特殊响应内容。
 
-Resume 后，客户端会收到修改后的 status、headers/body。只有明确声明 `Content-Length`、长度在安全上限内且可完整解码为文本的响应体才允许编辑；未知长度、超限或持续流式响应会立即在响应头阶段以 header-only 状态暂停，恢复后保留原始 streaming。受支持的压缩正文会以解压文本编辑，并在放行前按最终 `Content-Encoding` 重新编码。若把 status 改为 1xx、204 或 304，Bifrost 会清空响应体并移除 `Content-Length` / `Transfer-Encoding`，避免产生非法 framing。
+Resume 后，客户端会收到修改后的 status、headers/body。明确声明 `Content-Length`、长度在安全上限内的完整响应体允许编辑，包括二进制；未知长度、超限或持续流式响应会立即在响应头阶段以 header-only 状态暂停，恢复后保留原始 streaming。受支持的压缩正文会解压后以 UTF-8 或 Base64 编辑，并在放行前按最终 `Content-Encoding` 重新编码。未知或无法解压的编码以原始字节 Base64 编辑，保留原始编码语义。响应状态允许编辑为 200–599；1xx 临时响应不能作为最终响应提交。若把 status 改为 204 或 304，Bifrost 会清空响应体并移除 `Content-Length` / `Transfer-Encoding`，避免产生非法 framing。
+
+## 正文格式与校验
+
+正文编辑器提供 UTF-8 / Base64 切换。Base64 表示正文原始字节，切换不会丢失有效字节；不能按 UTF-8 解码的字节保持 Base64。快照中的 `body_encoding` 为 `utf8` 或 `base64`，`body_representation` 为 `decoded` 或 `raw`。受支持的压缩格式使用 decoded；未知编码使用 raw。
+
+捕获和编辑受 `max_body_bytes` 的字节上限约束（默认 1 MiB，最大 10 MiB）。非法 Base64、超限正文、不可编辑正文的修改或不受支持的编码转换返回错误，暂停项保留供修正，不会静默忽略修改后放行。未知长度、超限或无限流明确显示仅能编辑头部；不会无限缓存正文。声明长度的流最多捕获 2 秒；发送方迟迟不完成时转为仅头部暂停，放行后重放已读取的前缀与剩余原始流。HEAD 响应不允许正文编辑；204、304 状态的正文在放行时清空，并遵守无正文语义。
 
 ## Timeout 配置
 
@@ -144,11 +152,11 @@ curl -sS http://127.0.0.1:8800/_bifrost/api/breakpoint/pending
 
 确认目标流量命中了包含 `breakpoint://request` 或 `breakpoint://response` 的规则。Toolbar 开关只是全局门禁，不会单独暂停流量。
 
-标准 TLS 端口上的 HTTPS 请求命中 Breakpoint 规则且全局开关开启时，会自动触发该连接的 scoped TLS interception；显式 `tlsIntercept://false` 仍优先。未协商 ALPN 的 HTTP/1.1 客户端（包括部分 Windows Schannel 场景）也会在解密后被正确识别。客户端必须信任 Bifrost CA，Toolbar 在全局 TLS interception 关闭时会提示这一点。
+包括非标准 TLS 端口的 HTTPS 请求命中 Breakpoint 规则且全局开关开启时，会自动触发该连接的 scoped TLS interception；显式 `tlsIntercept://false` 仍优先。未协商 ALPN 的 HTTP/1.1 客户端（包括部分 Windows Schannel 场景）也会在解密后被正确识别。客户端必须信任 Bifrost CA，Toolbar 在全局 TLS interception 关闭时会提示这一点。
 
 **为什么 body 不能编辑？**
 
-通常是 body 超过上限、不是 UTF-8 文本、属于二进制内容，或是未知长度 streaming body。此时 Bifrost 会保护性能，只允许 header-only pause 或直接保持 streaming。
+通常是 body 超过上限、响应必须保持 streaming，或属于 HEAD/204/304 等无正文响应。二进制可在字节上限内使用 Base64 编辑。此时 Bifrost 会保护性能，只允许 header-only pause 或直接保持 streaming。
 
 **请求一直等待怎么办？**
 

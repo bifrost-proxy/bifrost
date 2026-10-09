@@ -139,18 +139,33 @@ const columns: ColumnDef[] = [
       >
         <div
           data-testid={
-            breakpointPhase ? `breakpoint-${breakpointPhase}-indicator` : undefined
+            breakpointPhase
+              ? `breakpoint-${breakpointPhase}-indicator`
+              : undefined
           }
           style={{
-            width: breakpointPhase ? 10 : 8,
-            height: breakpointPhase ? 10 : 8,
-            borderRadius: "50%",
+            width: breakpointPhase ? 22 : 8,
+            height: breakpointPhase ? 18 : 8,
+            borderRadius: breakpointPhase ? 4 : "50%",
+            fontSize: 9,
+            fontWeight: 600,
+            lineHeight: "18px",
+            textAlign: "center",
+            color: "inherit",
             backgroundColor: breakpointPhase
-              ? "#faad14"
+              ? "transparent"
               : record._statusDotColor || DEFAULT_STATUS_DOT_COLOR,
-            boxShadow: breakpointPhase ? "0 0 0 3px rgba(250, 173, 20, 0.2)" : undefined,
+            boxShadow: breakpointPhase
+              ? `inset 0 0 0 1px ${_textSecondary}`
+              : undefined,
           }}
-        />
+        >
+          {breakpointPhase === "request"
+            ? "Req"
+            : breakpointPhase === "response"
+              ? "Res"
+              : null}
+        </div>
       </Tooltip>
     ),
   },

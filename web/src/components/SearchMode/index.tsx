@@ -46,6 +46,7 @@ interface SearchModeProps {
   onSelect: (record: TrafficSummary) => void;
   onDoubleClick: (record: TrafficSummary) => void;
   selectedId?: string;
+  pendingOnly?: boolean;
   breakpointPhases?: Map<string, "request" | "response">;
 }
 
@@ -54,6 +55,7 @@ export default function SearchMode({
   onDoubleClick,
   selectedId,
   breakpointPhases,
+  pendingOnly = false,
 }: SearchModeProps) {
   const { token } = theme.useToken();
 
@@ -446,7 +448,11 @@ export default function SearchMode({
           </div>
         ) : (
           <SearchResultsList
-            results={results}
+            results={
+              pendingOnly
+                ? results.filter((item) => breakpointPhases?.has(item.record.id))
+                : results
+            }
             keyword={keyword}
             selectedId={selectedId}
             breakpointPhases={breakpointPhases}

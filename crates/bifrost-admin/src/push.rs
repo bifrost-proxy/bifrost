@@ -304,6 +304,10 @@ pub struct BreakpointPausedPushData {
     pub status: Option<u16>,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
+    #[serde(default)]
+    pub body_encoding: String,
+    #[serde(default)]
+    pub body_representation: String,
     pub body_omitted: bool,
     pub body_size: Option<usize>,
     pub max_body_bytes: usize,
@@ -3913,6 +3917,8 @@ mod coverage_boost {
             status: None,
             headers: Vec::new(),
             body: None,
+            body_encoding: "utf8".into(),
+            body_representation: "decoded".into(),
             body_omitted: false,
             body_size: None,
             max_body_bytes: 0,

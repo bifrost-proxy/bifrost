@@ -1,3 +1,4 @@
+use base64::Engine;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -35,6 +36,10 @@ pub struct BreakpointEdit {
     pub headers: Option<Vec<(String, String)>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_encoding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_representation: Option<String>,
 }
 
 pub type PendingBreakpoint = crate::push::BreakpointPausedPushData;
@@ -50,6 +55,7 @@ type BreakpointReceiver = oneshot::Receiver<BreakpointEdit>;
 pub enum BreakpointResumeError {
     NotFound,
     PhaseMismatch,
+    InvalidEdit(String),
 }
 
 pub struct BreakpointManager {
@@ -57,6 +63,7 @@ pub struct BreakpointManager {
     max_body_bytes: AtomicUsize,
     timeout_ms: AtomicU64,
     pending: DashMap<String, BreakpointHandle>,
+    lifecycle: std::sync::Mutex<()>,
 }
 
 impl BreakpointManager {
@@ -66,6 +73,7 @@ impl BreakpointManager {
             max_body_bytes: AtomicUsize::new(DEFAULT_BREAKPOINT_MAX_BODY_BYTES),
             timeout_ms: AtomicU64::new(DEFAULT_BREAKPOINT_TIMEOUT_MS),
             pending: DashMap::new(),
+            lifecycle: std::sync::Mutex::new(()),
         }
     }
 
@@ -81,6 +89,10 @@ impl BreakpointManager {
     }
 
     pub fn update_settings(&self, settings: BreakpointSettings) {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.enabled.store(settings.enabled, Ordering::Relaxed);
         self.max_body_bytes.store(
             settings.max_body_bytes.min(MAX_BREAKPOINT_MAX_BODY_BYTES),
@@ -121,11 +133,24 @@ impl BreakpointManager {
         rx
     }
 
+    pub fn pause_if_enabled(
+        &self,
+        snapshot: PendingBreakpoint,
+        body_editable: bool,
+    ) -> Option<BreakpointReceiver> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.is_enabled()
+            .then(|| self.pause(snapshot, body_editable))
+    }
+
     pub fn resume(
         &self,
         request_id: &str,
         phase: &str,
-        mut edit: BreakpointEdit,
+        edit: BreakpointEdit,
     ) -> Result<(), BreakpointResumeError> {
         let mut entry = self
             .pending
@@ -135,12 +160,97 @@ impl BreakpointManager {
             return Err(BreakpointResumeError::PhaseMismatch);
         }
         if edit
-            .body
-            .as_ref()
-            .map(|body| !entry.body_editable || !self.body_within_capture_limit(body.len()))
-            .unwrap_or(false)
+            .status
+            .is_some_and(|status| !(200..=599).contains(&status))
         {
-            edit.body = None;
+            return Err(BreakpointResumeError::InvalidEdit(
+                "Final response status must be between 200 and 599".into(),
+            ));
+        }
+        if edit.body.is_none() && entry.snapshot.body_size != Some(0) {
+            if let Some(headers) = &edit.headers {
+                let encodings = |headers: &[(String, String)]| {
+                    headers
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+                        .map(|(_, value)| value.trim().to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                if encodings(headers) != encodings(&entry.snapshot.headers) {
+                    return Err(BreakpointResumeError::InvalidEdit("Changing Content-Encoding requires a body edit to keep wire bytes consistent".into()));
+                }
+            }
+        }
+        if edit.body.is_some()
+            && phase == "response"
+            && entry
+                .snapshot
+                .method
+                .as_deref()
+                .is_some_and(|method| method.eq_ignore_ascii_case("HEAD"))
+        {
+            return Err(BreakpointResumeError::InvalidEdit(
+                "HEAD responses cannot carry a body".into(),
+            ));
+        }
+        if let Some(body) = edit.body.as_ref() {
+            if !entry.body_editable {
+                return Err(BreakpointResumeError::InvalidEdit(
+                    "Body is unavailable or exceeds the capture limit".into(),
+                ));
+            }
+            let encoding = edit.body_encoding.as_deref().unwrap_or("utf8");
+            let len = match encoding {
+                "utf8" => body.len(),
+                "base64" => {
+                    if body.len() > self.max_body_bytes().saturating_add(2) / 3 * 4 {
+                        return Err(BreakpointResumeError::InvalidEdit(
+                            "Body exceeds the capture limit".into(),
+                        ));
+                    }
+                    base64::engine::general_purpose::STANDARD
+                        .decode(body)
+                        .map_err(|_| {
+                            BreakpointResumeError::InvalidEdit("Invalid Base64 body".into())
+                        })?
+                        .len()
+                }
+                _ => {
+                    return Err(BreakpointResumeError::InvalidEdit(
+                        "body_encoding must be utf8 or base64".into(),
+                    ))
+                }
+            };
+            if !self.body_within_capture_limit(len) {
+                return Err(BreakpointResumeError::InvalidEdit(
+                    "Body exceeds the capture limit".into(),
+                ));
+            }
+            let representation = edit.body_representation.as_deref().unwrap_or("decoded");
+            if !matches!(representation, "decoded" | "raw") {
+                return Err(BreakpointResumeError::InvalidEdit(
+                    "body_representation must be decoded or raw".into(),
+                ));
+            }
+            let effective_headers = edit.headers.as_ref().unwrap_or(&entry.snapshot.headers);
+            if representation == "decoded" {
+                for (_, encoding) in effective_headers
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+                {
+                    if encoding.split(',').any(|part| {
+                        !matches!(
+                            part.trim().to_ascii_lowercase().as_str(),
+                            "" | "identity" | "gzip" | "x-gzip" | "deflate" | "br" | "zstd"
+                        )
+                    }) {
+                        return Err(BreakpointResumeError::InvalidEdit(
+                            "Unsupported content-encoding; edit raw bytes instead".into(),
+                        ));
+                    }
+                }
+            }
         }
         let sender = entry.sender.take();
         drop(entry);
@@ -232,28 +342,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_drops_body_when_pause_was_header_only() {
+    async fn invalid_body_edits_leave_pause_available_for_correction() {
         let manager = BreakpointManager::new();
-        let rx = manager.pause(pending("req-1", "request"), false);
-
-        assert!(manager
-            .resume(
+        manager.update_settings(BreakpointSettings {
+            enabled: true,
+            max_body_bytes: 3,
+        });
+        let mut rx = manager.pause(pending("req-1", "request"), false);
+        assert!(matches!(
+            manager.resume(
                 "req-1",
                 "request",
                 BreakpointEdit {
-                    headers: Some(vec![("x-test".to_string(), "1".to_string())]),
-                    body: Some("blocked body edit".to_string()),
+                    body: Some("x".into()),
                     ..Default::default()
-                },
+                }
+            ),
+            Err(BreakpointResumeError::InvalidEdit(_))
+        ));
+        assert!(rx.try_recv().is_err());
+        assert!(manager.has_pending("req-1"));
+        manager
+            .resume("req-1", "request", BreakpointEdit::default())
+            .unwrap_or_else(|_| panic!("resume without edits"));
+        rx.await.unwrap();
+
+        let rx = manager.pause(pending("binary", "response"), true);
+        for status in [100, 101, 103, 199, 600] {
+            assert!(matches!(
+                manager.resume(
+                    "binary",
+                    "response",
+                    BreakpointEdit {
+                        status: Some(status),
+                        ..Default::default()
+                    }
+                ),
+                Err(BreakpointResumeError::InvalidEdit(_))
+            ));
+            assert!(manager.has_pending("binary"));
+        }
+        for body in ["not-base64", "AQIDBA=="] {
+            assert!(matches!(
+                manager.resume(
+                    "binary",
+                    "response",
+                    BreakpointEdit {
+                        body: Some(body.into()),
+                        body_encoding: Some("base64".into()),
+                        ..Default::default()
+                    }
+                ),
+                Err(BreakpointResumeError::InvalidEdit(_))
+            ));
+            assert!(manager.has_pending("binary"));
+        }
+        assert!(manager
+            .resume(
+                "binary",
+                "response",
+                BreakpointEdit {
+                    body: Some("AP/+".into()),
+                    body_encoding: Some("base64".into()),
+                    body_representation: Some("raw".into()),
+                    ..Default::default()
+                }
             )
             .is_ok());
-
-        let edit = rx.await.unwrap();
-        assert_eq!(
-            edit.headers,
-            Some(vec![("x-test".to_string(), "1".to_string())])
-        );
-        assert!(edit.body.is_none());
+        assert_eq!(rx.await.unwrap().body.as_deref(), Some("AP/+"));
     }
 
     fn pending(id: &str, phase: &str) -> PendingBreakpoint {
@@ -265,6 +421,8 @@ mod tests {
             status: None,
             headers: Vec::new(),
             body: None,
+            body_encoding: "utf8".into(),
+            body_representation: "decoded".into(),
             body_omitted: false,
             body_size: Some(0),
             max_body_bytes: DEFAULT_BREAKPOINT_MAX_BODY_BYTES,
@@ -337,6 +495,10 @@ mod tests {
                     ..Default::default()
                 },
             )
+            .is_err());
+        assert!(manager.has_pending("oversized"));
+        assert!(manager
+            .resume("oversized", "request", BreakpointEdit::default())
             .is_ok());
         assert!(rx.await.unwrap().body.is_none());
 
@@ -353,6 +515,31 @@ mod tests {
             manager.resume("senderless", "request", BreakpointEdit::default()),
             Err(BreakpointResumeError::NotFound)
         ));
+    }
+
+    #[test]
+    fn production_pause_rechecks_gate_after_rules_are_resolved() {
+        let manager = BreakpointManager::new();
+        assert!(manager
+            .pause_if_enabled(pending("disabled", "request"), true)
+            .is_none());
+        manager.update_settings(BreakpointSettings {
+            enabled: true,
+            max_body_bytes: 64,
+        });
+        let rx = manager
+            .pause_if_enabled(pending("enabled", "request"), true)
+            .unwrap();
+        assert!(manager.has_pending("enabled"));
+        manager.update_settings(BreakpointSettings {
+            enabled: false,
+            max_body_bytes: 64,
+        });
+        assert!(manager.pending().is_empty());
+        assert!(manager
+            .pause_if_enabled(pending("after-disable", "request"), true)
+            .is_none());
+        drop(rx);
     }
 
     #[test]
@@ -380,6 +567,8 @@ mod tests {
             status: Some(418),
             headers: vec![("set-cookie".to_string(), "a=1".to_string())],
             body: Some("teapot".to_string()),
+            body_encoding: "utf8".into(),
+            body_representation: "decoded".into(),
             body_omitted: false,
             body_size: Some(6),
             max_body_bytes: 10,
@@ -399,6 +588,7 @@ mod tests {
             status: Some(201),
             headers: Some(vec![("x-test".to_string(), "yes".to_string())]),
             body: Some("body".to_string()),
+            ..Default::default()
         };
         let encoded = serde_json::to_string(&edit).unwrap();
         assert_eq!(

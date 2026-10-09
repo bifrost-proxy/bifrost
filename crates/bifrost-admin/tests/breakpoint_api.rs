@@ -17,6 +17,8 @@ fn pending(request_id: &str, phase: &str) -> PendingBreakpoint {
         status: (phase == "response").then_some(200),
         headers: vec![],
         body: Some("old".to_string()),
+        body_encoding: "utf8".into(),
+        body_representation: "decoded".into(),
         body_omitted: false,
         body_size: Some(3),
         max_body_bytes: 1024,
@@ -137,6 +139,11 @@ async fn breakpoint_settings_and_resume_validate_bodies_and_apply_edits() {
         r#"{"request_id":"id","phase":"request","url":"/relative"}"#,
         r#"{"request_id":"id","phase":"response","method":"GET"}"#,
         r#"{"request_id":"id","phase":"response","status":99}"#,
+        r#"{"request_id":"id","phase":"response","status":100}"#,
+        r#"{"request_id":"id","phase":"response","status":101}"#,
+        r#"{"request_id":"id","phase":"response","status":103}"#,
+        r#"{"request_id":"id","phase":"response","status":199}"#,
+        r#"{"request_id":"id","phase":"response","status":999}"#,
     ] {
         assert_eq!(
             resume(&client, &base, json).await,
@@ -202,5 +209,82 @@ async fn breakpoint_settings_reject_invalid_json() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    server.abort();
+}
+
+#[tokio::test]
+async fn invalid_binary_edits_return_bad_request_and_keep_pending() {
+    let (base, manager, server) = start_admin().await;
+    let client = reqwest::Client::new();
+    manager.update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+        enabled: true,
+        max_body_bytes: 3,
+    });
+    let mut rx = manager.pause(pending("binary", "response"), true);
+    for edit in [
+        serde_json::json!({"status":100}),
+        serde_json::json!({"status":101}),
+        serde_json::json!({"status":103}),
+        serde_json::json!({"status":199}),
+        serde_json::json!({"body":"!", "body_encoding":"base64"}),
+        serde_json::json!({"body":"AQIDBA==", "body_encoding":"base64"}),
+        serde_json::json!({"body":"four"}),
+        serde_json::json!({"body":"x", "body_encoding":"hex"}),
+        serde_json::json!({"body":"x", "body_representation":"unknown"}),
+        serde_json::json!({"body":"x", "headers":[["content-encoding","unknown"]]}),
+        serde_json::json!({"body":"x", "headers":[["Content-Encoding","gzip"],["content-encoding","custom"]]}),
+    ] {
+        let mut value = edit;
+        value["request_id"] = "binary".into();
+        value["phase"] = "response".into();
+        assert_eq!(
+            resume(&client, &base, &value.to_string()).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(manager.has_pending("binary"));
+        assert!(rx.try_recv().is_err());
+    }
+    assert_eq!(resume(&client, &base, r#"{"request_id":"binary","phase":"response","body":"AP+A","body_encoding":"base64","body_representation":"raw","headers":[["content-encoding","unknown"],["set-cookie","a=1"],["set-cookie","b=2"]]}"#).await, StatusCode::OK);
+    let edit = rx.await.unwrap();
+    assert_eq!(edit.body.as_deref(), Some("AP+A"));
+    assert_eq!(edit.headers.unwrap().len(), 3);
+    let _rx = manager.pause(pending("omitted", "request"), false);
+    assert_eq!(
+        resume(
+            &client,
+            &base,
+            r#"{"request_id":"omitted","phase":"request","body":"x"}"#
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(manager.has_pending("omitted"));
+    let mut unknown = pending("unknown-stream", "response");
+    unknown.body_size = None;
+    unknown.headers = vec![("content-encoding".into(), "gzip".into())];
+    let _unknown_rx = manager.pause(unknown, false);
+    assert_eq!(
+        resume(
+            &client,
+            &base,
+            r#"{"request_id":"unknown-stream","phase":"response","headers":[]}"#
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(manager.has_pending("unknown-stream"));
+    let mut head = pending("head", "response");
+    head.method = Some("HEAD".into());
+    let _head_rx = manager.pause(head, true);
+    assert_eq!(
+        resume(
+            &client,
+            &base,
+            r#"{"request_id":"head","phase":"response","body":"x"}"#
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(manager.has_pending("head"));
     server.abort();
 }

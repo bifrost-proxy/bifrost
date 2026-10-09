@@ -55,7 +55,6 @@ import {
 import { openTrafficDetailWindow } from "./detailWindow";
 import pushService from "../../services/pushService";
 import { usePerformanceModeStore } from "../../stores/usePerformanceModeStore";
-import { getTlsConfig } from "../../api/config";
 import type {
   TrafficSummary,
   FilterCondition,
@@ -210,6 +209,8 @@ export default function Traffic() {
   const systemProxyLoading = useProxyStore((state) => state.loading);
   const toggleSystemProxy = useProxyStore((state) => state.toggleSystemProxy);
 
+  const pendingOnly = useBreakpointStore((state) => state.pendingOnly);
+  const setPendingOnly = useBreakpointStore((state) => state.setPendingOnly);
   const breakpointEnabled = useBreakpointStore((state) => state.enabled);
   const breakpointLoading = useBreakpointStore((state) => state.loading);
   const toggleBreakpoint = useBreakpointStore(
@@ -228,14 +229,7 @@ export default function Traffic() {
     async (enabled: boolean) => {
       try {
         await toggleBreakpoint(enabled);
-        if (!enabled) return;
-        const tls = await getTlsConfig();
-        if (!tls.enable_tls_interception) {
-          message.info(
-            "Matched HTTPS Breakpoint rules trigger scoped TLS interception automatically. The client must trust the Bifrost CA certificate.",
-            7,
-          );
-        }
+
       } catch (error) {
         message.error(
           error instanceof Error ? error.message : "Failed to update Breakpoint",
@@ -247,7 +241,6 @@ export default function Traffic() {
 
   useEffect(() => {
     useBreakpointStore.getState().connectPush();
-    useBreakpointStore.getState().fetchSettings();
   }, []);
 
   useEffect(() => {
@@ -1003,7 +996,12 @@ export default function Traffic() {
     filtersActive,
   ]);
 
-  const displayedRecords = filtersActive ? filteredRecords : records;
+  const displayedRecords = useMemo(() => {
+    const candidates = filtersActive ? filteredRecords : records;
+    return pendingOnly
+      ? candidates.filter((record) => breakpointPhases.has(record.id))
+      : candidates;
+  }, [filtersActive, filteredRecords, records, pendingOnly, breakpointPhases]);
 
   const styles = useMemo<Record<string, CSSProperties>>(
     () => {
@@ -1127,6 +1125,7 @@ export default function Traffic() {
             onDoubleClick={handleDoubleClick}
             selectedId={selectedId}
             breakpointPhases={breakpointPhases}
+            pendingOnly={pendingOnly}
           />
         ) : (
           <VirtualTrafficTable
@@ -1221,6 +1220,8 @@ export default function Traffic() {
         onDetailPanelToggle={handleDetailPanelToggle}
         detailDetached={detailDetached}
         onAttachDetailWindow={handleAttachDetailWindow}
+        pendingOnly={pendingOnly}
+        onPendingOnlyChange={setPendingOnly}
         breakpointEnabled={breakpointEnabled}
         breakpointLoading={breakpointLoading}
         onBreakpointToggle={handleBreakpointToggle}
