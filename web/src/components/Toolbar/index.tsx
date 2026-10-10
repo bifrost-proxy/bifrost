@@ -200,19 +200,9 @@ export default function Toolbar({
           }}
         />
         {renderFilterGroup("imported", filterGroups.imported)}
-        {breakpointEnabled && (
-          <Checkbox
-            checked={pendingOnly}
-            onChange={(event) => onPendingOnlyChange?.(event.target.checked)}
-            data-testid="toolbar-breakpoint-pending-only"
-            style={{ fontSize: 12 }}
-          >
-            Paused
-          </Checkbox>
-        )}
       </div>
 
-      <Space size={8}>
+      <Space size={8} data-testid="toolbar-controls">
         <Popover
           trigger="hover"
           content={
@@ -258,6 +248,16 @@ export default function Toolbar({
           onChange={onBreakpointToggle}
           data-testid="toolbar-breakpoint-toggle"
         />
+        {breakpointEnabled && (
+          <Checkbox
+            checked={pendingOnly}
+            onChange={(event) => onPendingOnlyChange?.(event.target.checked)}
+            data-testid="toolbar-breakpoint-pending-only"
+            style={{ fontSize: 12 }}
+          >
+            Paused
+          </Checkbox>
+        )}
         <div
           style={{
             width: 1,

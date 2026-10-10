@@ -529,8 +529,8 @@
 ### TC-BP-25: 仅看断点暂停、编码与安全限制
 
 **步骤：**
-1. 勾选 Network 顶部“仅看断点暂停”，确认普通已完成流量隐藏；切换 Fuzzy Search 并输入关键词，确认只显示同时符合搜索和 pending 的行。
-2. 分别手动恢复、等待 timeout、关闭 gate，确认 pending 行及时移出；切换浅深主题检查整行背景与阶段标记。
+1. 开启 Network 顶部 Breakpoint，确认开关右侧出现 Paused；勾选后普通已完成流量隐藏。切换 Fuzzy Search 并输入关键词，确认只显示同时符合搜索和 pending 的行。
+2. 分别手动恢复、等待 timeout、关闭 gate，确认 pending 行及时移出。关闭 gate 后 Paused 隐藏且暂停筛选清除，普通流量恢复；重开 gate 后 Paused 未勾选。切换浅深主题检查整行背景与阶段标记。
 3. 对 bounded gzip、二进制和未知 Content-Encoding 响应，在详情编辑 UTF-8 或 Base64；非法 Base64 必须拒绝，pending 保留。
 4. 检查 client 实际字节、gzip 解码内容、重复 Set-Cookie 和 Content-Length；未知编码使用原始字节并保留编码声明。
 5. 使用超限响应、不结束的 SSE 响应和不结束的 chunked request，确认及时暂停并明确显示 body 不可编辑，metadata/header 仍可编辑。

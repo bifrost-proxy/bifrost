@@ -100,9 +100,31 @@ test("Traffic toolbar exposes one global Breakpoint gate with rule-phase guidanc
     await expect(paused).toBeVisible();
     await expect(
       page
-        .getByTestId("toolbar-quick-filters")
+        .getByTestId("toolbar-controls")
         .getByRole("checkbox", { name: "Paused", exact: true }),
     ).toBeVisible();
+    await expect(
+      page
+        .getByTestId("toolbar-quick-filters")
+        .getByRole("checkbox", { name: "Paused", exact: true }),
+    ).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const gateBox = await page
+          .getByTestId("toolbar-breakpoint-toggle")
+          .boundingBox();
+        const pausedBox = await paused.boundingBox();
+        if (!gateBox || !pausedBox) return false;
+        const gap = pausedBox.x - (gateBox.x + gateBox.width);
+        return (
+          gap >= 0 &&
+          gap <= 24 &&
+          Math.abs(
+            pausedBox.y + pausedBox.height / 2 - gateBox.y - gateBox.height / 2,
+          ) < 6
+        );
+      })
+      .toBe(true);
     await paused.check();
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-checked", "false");
