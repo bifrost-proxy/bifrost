@@ -304,6 +304,10 @@ pub struct BreakpointPausedPushData {
     pub status: Option<u16>,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
+    #[serde(default)]
+    pub body_encoding: String,
+    #[serde(default)]
+    pub body_representation: String,
     pub body_omitted: bool,
     pub body_size: Option<usize>,
     pub max_body_bytes: usize,
@@ -3618,7 +3622,11 @@ mod coverage_boost {
             .save_script(ScriptType::Request, "cli-live", "function onRequest() {}")
             .await
             .unwrap();
-        let state = Arc::new(AdminState::new(0).with_script_manager(script_manager));
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        let state = Arc::new(
+            AdminState::new_for_test(0, rules_storage).with_script_manager(script_manager),
+        );
         let manager = Arc::new(PushManager::new(state));
         let (subscribed, mut subscribed_rx) = manager.register_client(
             "scripts-target".to_string(),
@@ -3913,6 +3921,8 @@ mod coverage_boost {
             status: None,
             headers: Vec::new(),
             body: None,
+            body_encoding: "utf8".into(),
+            body_representation: "decoded".into(),
             body_omitted: false,
             body_size: None,
             max_body_bytes: 0,

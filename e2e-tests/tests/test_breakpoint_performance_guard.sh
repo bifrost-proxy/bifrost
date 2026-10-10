@@ -485,6 +485,10 @@ assert_json_value "$event" ".body_size" "4096"
 assert_json_value "$event" ".max_body_bytes" "1024"
 
 resume_payload="$(jq -c '{request_id: .request_id, phase: .phase, headers: .headers, body: "mutated"}' "$EVENT_FILE")"
+resume_status="$(curl -sS -o "$TMP_DIR/invalid-edit.json" -w '%{http_code}' -X POST "$(resume_url)" -H 'Content-Type: application/json' --data "$resume_payload")"
+[[ "$resume_status" == 400 ]] || fail "unavailable body edits must be rejected, got $resume_status"
+kill -0 "$CURL_PID" 2>/dev/null || fail "invalid body edit released paused client"
+resume_payload="$(jq -c '{request_id: .request_id, phase: .phase, headers: .headers}' "$EVENT_FILE")"
 curl -fsS -X POST "$(resume_url)" -H 'Content-Type: application/json' --data "$resume_payload" >/dev/null
 wait "$CURL_PID"
 CURL_PID=""

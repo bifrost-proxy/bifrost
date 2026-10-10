@@ -95,6 +95,18 @@ def expect_ids(port, args, expected):
     require(actual == set(expected), f"{args}: expected={sorted(expected)}, actual={sorted(actual)}")
 
 
+def expect_latest_ids(port, args, records, duration_ms):
+    before_ms = int(time.time() * 1000)
+    actual = record_ids(load(port, *args))
+    after_ms = int(time.time() * 1000)
+    # The CLI samples its clock between these bounds. Records that expire
+    # during the invocation may be included or excluded; every other record
+    # must obey the requested window, regardless of matrix execution speed.
+    eligible = {r["id"] for r in records if r.get("ts", r.get("timestamp")) >= before_ms - duration_ms}
+    required = {r["id"] for r in records if r.get("ts", r.get("timestamp")) >= after_ms - duration_ms}
+    require(required <= actual <= eligible, f"{args}: required={sorted(required)}, eligible={sorted(eligible)}, actual={sorted(actual)}")
+
+
 def exercise(port, upstream):
     specifications = [("GET", p, None) for p in ["/api/a_b", "/api/axb", "/api/a%25b", "/api/a*b", "/api/UPPER", "/api/%E4%B8%AD%E6%96%87", "/api/query?q=a+b&tag=x%26y", "/api/quote'and%22", "/api/slash/", "/api/slash", "/status/204", "/status/302", "/status/404", "/status/500", "/sse"]]
     obj = {"user": {"id": 42, "name": "Alice", "active": True, "empty": "", "nil": None}, "items": [{"id": 7}, {"id": 9}], "x-y": {"a_b": "A=B"}, "text": "RequestOnly", "padding": "x" * 70000}
@@ -204,8 +216,8 @@ def exercise(port, upstream):
         check(f"header equals {expression}", lambda f=flag, x=expression: expect_ids(port, search(f, x), all_ids))
     for keyword, flag, expected in [("RequestOnly", "--req-body", json_ids), ("ResponseOnly", "--req-body", set()), ("RequestOnly", "--body", json_ids), ("RequestHeader", "--req-header", all_ids), ("RequestHeader", "--res-header", set()), ("ResponseHeader", "--res-header", all_ids), ("StreamNeedle", "--res-body", {by_path["/sse"]["id"]})]:
         check(f"scope {flag} {keyword}", lambda k=keyword, f=flag, e=expected: expect_ids(port, ["search", k, f], e))
-    for entry in ["30s", "5m", "2h", "1d", "1w"]:
-        check(f"latest {entry}", lambda x=entry: expect_ids(port, search("--latest", x), all_ids))
+    for entry, duration_ms in [("30s", 30_000), ("5m", 300_000), ("2h", 7_200_000), ("1d", 86_400_000), ("1w", 604_800_000)]:
+        check(f"latest {entry}", lambda x=entry, d=duration_ms: expect_latest_ids(port, search("--latest", x), records, d))
     check("timestamp bounds", lambda: expect_ids(port, search("--since", start_ms, "--until", int(time.time() * 1000)), all_ids))
     check("empty old time window", lambda: expect_ids(port, search("--until", "1970-01-01T00:00:00Z", "--max-scan", 1), set()))
     check("reversed time window", lambda: expect_ids(port, search("--since", "2030-01-01T00:00:00Z", "--until", "2020-01-01T00:00:00Z"), set()))

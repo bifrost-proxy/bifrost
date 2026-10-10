@@ -22,13 +22,10 @@ export default function Values() {
 
   const initRef = useRef(false);
   const urlParamRef = useRef(false);
-  const loadedRef = useRef(false);
 
   useEffect(() => {
-    if (loadedRef.current) return;
-    loadedRef.current = true;
-
-    if (values.length === 0) {
+    // Subscription lifetime follows the mounted page, not the list length.
+    if (useValuesStore.getState().values.length === 0) {
       void fetchValues();
     }
     pushService.connect({ need_values: true });
@@ -41,7 +38,7 @@ export default function Values() {
       pushService.updateSubscription({ need_values: false });
       pushService.disconnectIfIdle();
     };
-  }, [applyValuesSnapshot, fetchValues, values.length]);
+  }, [applyValuesSnapshot, fetchValues]);
 
   useEffect(() => {
     const nameParam = searchParams.get('name');

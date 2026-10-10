@@ -7830,7 +7830,12 @@ mod coverage_boost {
         let (_harness, worker) = make_ssh_test_worker();
         let now = now_millis();
         let stale_at = now.saturating_sub(STALE_GRANT_RETENTION_MS + 1);
-        let recent_at = now.saturating_sub(STALE_GRANT_RETENTION_MS - 1);
+        // Cleanup reads the clock again, so keep the live fixture comfortably
+        // inside the retention window even under instrumented parallel tests.
+        let recent_at = now.saturating_sub(STALE_GRANT_RETENTION_MS / 2);
+        let boundary = grant_fixture("boundary", now - STALE_GRANT_RETENTION_MS);
+        assert!(!is_grant_info_stale(&boundary, now));
+        assert!(is_grant_info_stale(&boundary, now + 1));
         let mut recently_used = grant_fixture("recently-used", stale_at);
         recently_used.last_command_at = Some(now);
 

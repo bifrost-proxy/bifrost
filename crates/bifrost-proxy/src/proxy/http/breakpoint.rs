@@ -1,3 +1,4 @@
+use base64::Engine;
 use bytes::Bytes;
 use hyper::HeaderMap;
 use tracing::{info, warn};
@@ -101,8 +102,144 @@ pub fn body_limit(state: &Option<Arc<AdminState>>, enabled: bool, fallback: usiz
         })
 }
 
+/// A declared length does not guarantee a finite peer. Keep the consumed prefix
+/// and fall back to header-only editing if capture stalls, without losing bytes.
+pub async fn read_breakpoint_body_bounded<B>(
+    mut body: B,
+    max_bytes: usize,
+) -> Result<(crate::utils::bounded::BoundedBody<B>, Option<HeaderMap>), hyper::Error>
+where
+    B: hyper::body::Body<Data = Bytes, Error = hyper::Error> + Unpin + Send + Sync + 'static,
+{
+    use crate::utils::bounded::{BoundedBody, PrefixReplayBody};
+    use http_body_util::BodyExt;
+    let mut frames = std::collections::VecDeque::new();
+    let mut seen = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let frame = match tokio::time::timeout_at(deadline, body.frame()).await {
+            Ok(Some(frame)) => frame?,
+            Ok(None) => break,
+            Err(_) => {
+                return Ok((
+                    BoundedBody::Exceeded(PrefixReplayBody::new(frames, body)),
+                    None,
+                ))
+            }
+        };
+        if let Some(data) = frame.data_ref() {
+            seen = seen.saturating_add(data.len());
+        }
+        frames.push_back(frame);
+        if seen > max_bytes {
+            return Ok((
+                BoundedBody::Exceeded(PrefixReplayBody::new(frames, body)),
+                None,
+            ));
+        }
+    }
+    let mut bytes = bytes::BytesMut::with_capacity(seen);
+    let mut trailers = HeaderMap::new();
+    for frame in frames {
+        match frame.into_data() {
+            Ok(data) => bytes.extend_from_slice(&data),
+            Err(frame) => {
+                if let Ok(fields) = frame.into_trailers() {
+                    for (name, value) in fields.iter() {
+                        trailers.append(name.clone(), value.clone());
+                    }
+                }
+            }
+        }
+    }
+    let trailers = (!trailers.is_empty()).then_some(trailers);
+    Ok((BoundedBody::Complete(bytes.freeze()), trailers))
+}
+
+/// Replay exactly one trailer frame. An unknown size hint permits HTTP/1 chunked
+/// framing after capture; a Full body's exact hint would suppress its trailers.
+pub fn replay_breakpoint_body(bytes: Bytes, trailers: Option<HeaderMap>) -> BoxBody {
+    use http_body_util::{BodyExt, StreamBody};
+    if let Some(trailers) = trailers {
+        let frames = vec![
+            Ok::<_, hyper::Error>(hyper::body::Frame::data(bytes)),
+            Ok(hyper::body::Frame::trailers(trailers)),
+        ];
+        StreamBody::new(futures_util::stream::iter(frames)).boxed()
+    } else {
+        full_body(bytes)
+    }
+}
+
+pub fn close_bodyless_sse(
+    state: &Option<Arc<AdminState>>,
+    record_id: &str,
+    writer: Option<bifrost_admin::BodyStreamWriter>,
+) {
+    if let Some(writer) = writer {
+        writer.finish();
+    }
+    if let Some(state) = state {
+        state.sse_hub.set_closed(record_id);
+        let status = state.sse_hub.get_socket_status(record_id);
+        state.update_traffic_by_id(record_id, move |record| {
+            if let Some(status) = status.as_ref() {
+                record.socket_status = Some(status.clone());
+            } else if let Some(status) = record.socket_status.as_mut() {
+                status.is_open = false;
+            }
+            record.response_body_ref = None;
+            record.derived_response_body_ref = None;
+            record.response_size = 0;
+            record.download_bytes = 0;
+        });
+        state.sse_hub.unregister(record_id);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BreakpointHostOverride;
+
+pub fn header_changed(
+    before: &HeaderMap,
+    after: &HeaderMap,
+    name: &hyper::header::HeaderName,
+) -> bool {
+    before.get_all(name).iter().collect::<Vec<_>>()
+        != after.get_all(name).iter().collect::<Vec<_>>()
+}
+
+/// Reapply only the user's changes after the normal forwarding header pipeline.
+/// Unchanged fields keep their normal rule-derived values.
+pub fn reapply_header_edits(target: &mut HeaderMap, before: &HeaderMap, after: &HeaderMap) {
+    let names = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    for name in names {
+        reapply_header_edit(target, before, after, &name);
+    }
+}
+
+pub fn reapply_header_edit(
+    target: &mut HeaderMap,
+    before: &HeaderMap,
+    after: &HeaderMap,
+    name: &hyper::header::HeaderName,
+) {
+    if header_changed(before, after, name) {
+        target.remove(name);
+        for value in after.get_all(name) {
+            target.append(name.clone(), value.clone());
+        }
+    }
+}
+
 struct BreakpointBodyPayload {
     body: Option<String>,
+    body_encoding: String,
+    body_representation: String,
     body_editable: bool,
     body_omitted: bool,
     body_size: Option<usize>,
@@ -129,33 +266,66 @@ fn breakpoint_body_payload(
 
     let decoded = if force_body_omitted {
         None
-    } else if source_body_empty {
-        Some(Bytes::new())
     } else if let Some(ref encoding) = content_encoding {
-        try_decompress_body_with_limit(body, encoding, max_body_bytes)
+        // Empty wire bytes still need encoding classification. A zero edit budget
+        // must not bypass the decoder's unsupported-encoding validation either.
+        try_decompress_body_with_limit(body, encoding, max_body_bytes.max(1))
             .ok()
             .map(Bytes::from)
     } else {
         Some(body.clone())
     };
-    let body = (!source_body_empty)
-        .then_some(decoded.as_ref())
-        .flatten()
-        .filter(|bytes| {
-            state
-                .breakpoint_manager
-                .body_within_capture_limit(bytes.len())
-        })
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .map(str::to_owned);
-    let body_editable = !force_body_omitted && (source_body_empty || body.is_some());
+    let (bytes, representation) = if force_body_omitted {
+        (None, "decoded")
+    } else if let Some(decoded) = decoded {
+        (Some(decoded), "decoded")
+    } else {
+        // Unknown encodings and malformed compressed payloads remain editable as exact wire bytes.
+        (Some(body.clone()), "raw")
+    };
+    let bytes = bytes.filter(|bytes| bytes.len() <= max_body_bytes);
+    let body_editable = bytes.is_some();
+    let (body, encoding) = match bytes {
+        Some(bytes) => match std::str::from_utf8(&bytes) {
+            Ok(text) if representation == "decoded" => (Some(text.to_owned()), "utf8"),
+            _ => (
+                Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+                "base64",
+            ),
+        },
+        None => (None, "utf8"),
+    };
     BreakpointBodyPayload {
         body,
+        body_encoding: encoding.into(),
+        body_representation: representation.into(),
         body_editable,
         body_omitted: !body_editable,
         body_size,
         max_body_bytes,
         content_encoding,
+    }
+}
+
+// A disconnected client can drop the entire proxy future while it is paused.
+// Remove that pause immediately instead of leaving a stale UI row until timeout.
+struct PendingGuard {
+    state: Arc<AdminState>,
+    push: Option<SharedPushManager>,
+    id: String,
+    phase: &'static str,
+}
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if self.state.breakpoint_manager.cancel(&self.id, self.phase) {
+            if let Some(push) = &self.push {
+                push.broadcast_breakpoint_resumed(
+                    self.id.clone(),
+                    self.phase.into(),
+                    "disconnected".into(),
+                );
+            }
+        }
     }
 }
 
@@ -186,6 +356,8 @@ fn pending_snapshot(
         status: metadata.status,
         headers: metadata.headers,
         body: body.body.clone(),
+        body_encoding: body.body_encoding.clone(),
+        body_representation: body.body_representation.clone(),
         body_omitted: body.body_omitted,
         body_size: body.body_size,
         max_body_bytes: body.max_body_bytes,
@@ -193,6 +365,39 @@ fn pending_snapshot(
         paused_at_ms,
         deadline_at_ms: paused_at_ms.saturating_add(state.breakpoint_manager.timeout_ms()),
         server_now_ms: paused_at_ms,
+    }
+}
+
+// HTTP field values are byte strings. Map opaque values to Latin-1 codepoints
+// instead of dropping legal obs-text when creating the editable snapshot.
+fn breakpoint_headers_to_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.to_string(),
+                value
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| char::from(*byte))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+fn edited_header_value(
+    value: &str,
+) -> Result<hyper::header::HeaderValue, hyper::header::InvalidHeaderValue> {
+    let bytes = value
+        .chars()
+        .map(|character| u8::try_from(u32::from(character)))
+        .collect::<Result<Vec<_>, _>>();
+    match bytes {
+        Ok(bytes) => hyper::header::HeaderValue::from_bytes(&bytes),
+        // Newly entered wider Unicode is encoded as UTF-8; the snapshot itself
+        // always uses byte-preserving Latin-1 characters.
+        Err(_) => hyper::header::HeaderValue::from_str(value),
     }
 }
 
@@ -204,7 +409,7 @@ fn apply_edited_headers(target: &mut HeaderMap, headers: Option<Vec<(String, Str
     for (key, value) in headers {
         if let (Ok(name), Ok(value)) = (
             hyper::header::HeaderName::from_bytes(key.as_bytes()),
-            hyper::header::HeaderValue::from_str(&value),
+            edited_header_value(&value),
         ) {
             edited.append(name, value);
         }
@@ -212,14 +417,26 @@ fn apply_edited_headers(target: &mut HeaderMap, headers: Option<Vec<(String, Str
     *target = edited;
 }
 
-fn encode_edited_body(headers: &HeaderMap, body: &str) -> Option<Bytes> {
+fn encode_edited_body(
+    headers: &HeaderMap,
+    edit: &bifrost_admin::breakpoint::BreakpointEdit,
+) -> Option<Bytes> {
+    let body = edit.body.as_ref()?;
+    let bytes = if edit.body_encoding.as_deref() == Some("base64") {
+        base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .ok()?
+    } else {
+        body.as_bytes().to_vec()
+    };
+    if edit.body_representation.as_deref() == Some("raw") {
+        return Some(Bytes::from(bytes));
+    }
     let encoding = header_content_encoding(headers)
         .filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
     match encoding {
-        Some(encoding) => compress_body(body.as_bytes(), &encoding)
-            .ok()
-            .map(Bytes::from),
-        None => Some(Bytes::copy_from_slice(body.as_bytes())),
+        Some(encoding) => compress_body(&bytes, &encoding).ok().map(Bytes::from),
+        None => Some(Bytes::from(bytes)),
     }
 }
 
@@ -244,7 +461,7 @@ pub fn apply_edited_response_status(
 #[rustfmt::skip] pub fn apply_edited_response_status_and_body(parts: &mut hyper::http::response::Parts, method: &str, edited: Option<u16>, body: &mut Bytes) -> bool { let no_body = apply_edited_response_status(parts, method, edited); if no_body { *body = Bytes::new(); } no_body }
 
 #[rustfmt::skip] pub fn apply_response_breakpoint_record_state(record: &mut bifrost_admin::TrafficRecord, status: u16, content_type: Option<String>, headers: Vec<(String, String)>, no_body: bool) { record.status = status; record.content_type = content_type; record.response_headers = Some(headers); if no_body { record.response_size = 0; record.download_bytes = 0; record.response_body_ref = None; } }
-#[rustfmt::skip] pub fn response_breakpoint_can_buffer_body(enabled: bool, is_websocket: bool, is_sse: bool, skip_binary_recording: bool, content_length: Option<usize>, max_body_bytes: usize) -> bool { enabled && !is_websocket && !is_sse && !skip_binary_recording && content_length.is_some_and(|len| len <= max_body_bytes) }
+#[rustfmt::skip] pub fn response_breakpoint_can_buffer_body(enabled: bool, is_websocket: bool, _is_sse: bool, _skip_binary_recording: bool, content_length: Option<usize>, max_body_bytes: usize) -> bool { enabled && !is_websocket && content_length.is_some_and(|len| len <= max_body_bytes) }
 
 pub fn body_read_error_response(error: impl std::fmt::Display) -> hyper::Response<BoxBody> {
     hyper::Response::builder()
@@ -294,7 +511,7 @@ pub async fn breakpoint_request_hook(
         body_payload.body_omitted,
     );
 
-    let req_headers = headers_to_pairs(parts_headers);
+    let req_headers = breakpoint_headers_to_pairs(parts_headers);
 
     let snapshot = pending_snapshot(
         state,
@@ -308,13 +525,22 @@ pub async fn breakpoint_request_hook(
         },
         &body_payload,
     );
-    let rx = state
+    let Some(rx) = state
         .breakpoint_manager
-        .pause(snapshot.clone(), body_payload.body_editable);
+        .pause_if_enabled(snapshot.clone(), body_payload.body_editable)
+    else {
+        return BreakpointHookOutcome::default();
+    };
     if let Some(ref pm) = push_manager {
         pm.broadcast_breakpoint_paused(snapshot.clone());
     }
 
+    let _pending_guard = PendingGuard {
+        state: state.clone(),
+        push: push_manager.clone(),
+        id: request_id.into(),
+        phase: "request",
+    };
     let timeout_ms = state.breakpoint_manager.timeout_ms();
     match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
         Err(_) => {
@@ -339,8 +565,8 @@ pub async fn breakpoint_request_hook(
             let original_content_encoding = header_content_encoding(parts_headers);
             apply_edited_headers(parts_headers, edit.headers.take());
 
-            if let Some(ref new_body) = edit.body {
-                if let Some(encoded) = encode_edited_body(parts_headers, new_body) {
+            if edit.body.is_some() {
+                if let Some(encoded) = encode_edited_body(parts_headers, &edit) {
                     *final_body = encoded;
                     let mut request_parts = hyper::Request::new(()).into_parts().0;
                     request_parts.headers = parts_headers.clone();
@@ -397,7 +623,7 @@ pub async fn breakpoint_response_hook(
         parts_headers,
         &body,
         body_size_hint,
-        force_body_omitted,
+        force_body_omitted || method.eq_ignore_ascii_case("HEAD"),
     );
 
     info!(
@@ -411,7 +637,7 @@ pub async fn breakpoint_response_hook(
         body_payload.body_omitted,
     );
 
-    let res_headers = headers_to_pairs(parts_headers);
+    let res_headers = breakpoint_headers_to_pairs(parts_headers);
 
     let snapshot = pending_snapshot(
         state,
@@ -425,13 +651,22 @@ pub async fn breakpoint_response_hook(
         },
         &body_payload,
     );
-    let rx = state
+    let Some(rx) = state
         .breakpoint_manager
-        .pause(snapshot.clone(), body_payload.body_editable);
+        .pause_if_enabled(snapshot.clone(), body_payload.body_editable)
+    else {
+        return BreakpointHookOutcome::default();
+    };
     if let Some(ref pm) = push_manager {
         pm.broadcast_breakpoint_paused(snapshot.clone());
     }
 
+    let _pending_guard = PendingGuard {
+        state: state.clone(),
+        push: push_manager.clone(),
+        id: request_id.into(),
+        phase: "response",
+    };
     let timeout_ms = state.breakpoint_manager.timeout_ms();
     match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
         Err(_) => {
@@ -454,8 +689,8 @@ pub async fn breakpoint_response_hook(
             let original_content_encoding = header_content_encoding(parts_headers);
             apply_edited_headers(parts_headers, edit.headers.take());
 
-            if let Some(ref new_body) = edit.body {
-                if let Some(encoded) = encode_edited_body(parts_headers, new_body) {
+            if edit.body.is_some() {
+                if let Some(encoded) = encode_edited_body(parts_headers, &edit) {
                     *final_body = encoded;
                     body_replaced = true;
                 } else {
@@ -463,6 +698,12 @@ pub async fn breakpoint_response_hook(
                     set_content_encoding_header(parts_headers, original);
                     warn!(request_id, "Breakpoint response body edit ignored");
                 }
+            }
+            let bodyless = hyper::StatusCode::from_u16(edited_status.unwrap_or(status))
+                .ok()
+                .is_some_and(|status| is_no_body_response(status, method));
+            if bodyless {
+                *final_body = Bytes::new();
             }
             let updated_headers = headers_to_pairs(parts_headers);
             let updated_content_type = parts_headers
@@ -484,6 +725,11 @@ pub async fn breakpoint_response_hook(
                     record.response_size = updated_response_size;
                     record.download_bytes = updated_response_size;
                 }
+                if bodyless {
+                    record.response_body_ref = None;
+                    record.response_size = 0;
+                    record.download_bytes = 0;
+                }
             });
             return BreakpointHookOutcome {
                 body_replaced,
@@ -501,6 +747,7 @@ pub async fn breakpoint_response_hook(
 mod tests {
     use super::*;
     use crate::server::{RuleValue, RulesResolver};
+    use futures_util::StreamExt;
     use hyper::header::HeaderValue;
     use std::collections::HashMap;
 
@@ -518,6 +765,76 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn opaque_header_snapshots_roundtrip_every_legal_byte_and_accept_new_unicode() {
+        let mut headers = HeaderMap::new();
+        let value = (128..=255).collect::<Vec<u8>>();
+        headers.append("x-opaque", HeaderValue::from_bytes(&value).unwrap());
+        headers.append("x-opaque", HeaderValue::from_static("ascii"));
+        let pairs = breakpoint_headers_to_pairs(&headers);
+        assert_eq!(
+            pairs[0].1.chars().map(u32::from).collect::<Vec<_>>(),
+            (128..=255).collect::<Vec<_>>()
+        );
+        let mut roundtrip = HeaderMap::new();
+        apply_edited_headers(&mut roundtrip, Some(pairs));
+        assert_eq!(headers, roundtrip);
+        assert_eq!(
+            edited_header_value("中文").unwrap().as_bytes(),
+            "中文".as_bytes()
+        );
+        assert!(edited_header_value("illegal\nvalue").is_err());
+    }
+
+    #[test]
+    fn header_edit_delta_preserves_duplicates_removes_fields_and_keeps_unchanged_rules() {
+        let mut before = HeaderMap::new();
+        before.insert("x-keep", HeaderValue::from_static("old"));
+        before.insert(
+            hyper::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("br"),
+        );
+        before.insert("x-remove", HeaderValue::from_static("old"));
+        before.insert("x-edit", HeaderValue::from_static("old"));
+        let mut after = before.clone();
+        after.remove("x-remove");
+        after.insert("x-edit", HeaderValue::from_static("one"));
+        after.append("x-edit", HeaderValue::from_static("two"));
+        after.insert(hyper::header::HOST, HeaderValue::from_static("edited.test"));
+        let mut target = before.clone();
+        target.insert("x-keep", HeaderValue::from_static("rule"));
+        target.insert(
+            hyper::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        target.insert("x-added-by-rule", HeaderValue::from_static("rule"));
+        reapply_header_edits(&mut target, &before, &after);
+        assert_eq!(target["x-keep"], "rule");
+        assert_eq!(target["x-added-by-rule"], "rule");
+        assert!(!target.contains_key("x-remove"));
+        assert_eq!(
+            target
+                .get_all("x-edit")
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
+        assert_eq!(target[hyper::header::HOST], "edited.test");
+        assert_eq!(target[hyper::header::ACCEPT_ENCODING], "identity");
+        after.insert(
+            hyper::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        reapply_header_edit(
+            &mut target,
+            &before,
+            &after,
+            &hyper::header::ACCEPT_ENCODING,
+        );
+        assert_eq!(target[hyper::header::ACCEPT_ENCODING], "gzip");
     }
 
     #[test]
@@ -708,12 +1025,23 @@ mod tests {
             Some(9),
             8,
         ));
-        assert!(!response_breakpoint_can_buffer_body(
+        assert!(response_breakpoint_can_buffer_body(
             true,
             false,
             true,
             false,
             Some(1),
+            8,
+        ));
+        assert!(!response_breakpoint_can_buffer_body(
+            true, false, true, false, None, 8,
+        ));
+        assert!(!response_breakpoint_can_buffer_body(
+            true,
+            false,
+            true,
+            false,
+            Some(9),
             8,
         ));
         assert!(!response_breakpoint_can_buffer_body(
@@ -732,7 +1060,7 @@ mod tests {
             Some(1),
             8,
         ));
-        assert!(!response_breakpoint_can_buffer_body(
+        assert!(response_breakpoint_can_buffer_body(
             true,
             false,
             false,
@@ -820,7 +1148,7 @@ mod tests {
         let body = Bytes::new();
 
         let payload = breakpoint_body_payload(&state, &headers, &body, Some(123), false);
-        assert!(payload.body.is_none());
+        assert_eq!(payload.body.as_deref(), Some(""));
         assert!(payload.body_editable);
         assert!(!payload.body_omitted);
         assert_eq!(payload.body_size, Some(123));
@@ -860,12 +1188,13 @@ mod tests {
         assert!(!payload.body_editable);
         assert!(payload.body_omitted);
 
-        // Invalid UTF-8 body is omitted even when small
+        // Binary bytes remain editable through Base64
         let body = Bytes::from_static(&[0xff, 0xfe]);
         let payload = breakpoint_body_payload(&state, &headers, &body, None, false);
-        assert!(payload.body.is_none());
-        assert!(!payload.body_editable);
-        assert!(payload.body_omitted);
+        assert_eq!(payload.body.as_deref(), Some("//4="));
+        assert_eq!(payload.body_encoding, "base64");
+        assert!(payload.body_editable);
+        assert!(!payload.body_omitted);
 
         let mut gzip_headers = HeaderMap::new();
         gzip_headers.insert(
@@ -879,7 +1208,7 @@ mod tests {
             None,
             false,
         );
-        assert!(invalid_gzip.body.is_none());
+        assert_eq!(invalid_gzip.body_representation, "raw");
         assert!(invalid_gzip.body_omitted);
 
         let compressed = Bytes::from(compress_body(b"zip", "gzip").unwrap());
@@ -900,6 +1229,8 @@ mod tests {
         let state = AdminState::new(0);
         let payload = BreakpointBodyPayload {
             body: Some("body".into()),
+            body_encoding: "utf8".into(),
+            body_representation: "decoded".into(),
             body_editable: true,
             body_omitted: false,
             body_size: Some(4),
@@ -938,14 +1269,28 @@ mod tests {
         );
         assert_eq!(headers.get_all("x-one").iter().count(), 2);
         assert_eq!(
-            encode_edited_body(&headers, "plain").unwrap(),
+            encode_edited_body(
+                &headers,
+                &bifrost_admin::breakpoint::BreakpointEdit {
+                    body: Some("plain".into()),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
             Bytes::from_static(b"plain")
         );
         headers.insert(
             hyper::header::CONTENT_ENCODING,
             HeaderValue::from_static("unsupported"),
         );
-        assert!(encode_edited_body(&headers, "plain").is_none());
+        assert!(encode_edited_body(
+            &headers,
+            &bifrost_admin::breakpoint::BreakpointEdit {
+                body: Some("plain".into()),
+                ..Default::default()
+            }
+        )
+        .is_none());
 
         let mut status = hyper::StatusCode::OK;
         apply_edited_status(&mut status, Some(218));
@@ -1100,108 +1445,77 @@ mod tests {
         assert_eq!(record.response_size, body.len());
     }
 
-    #[tokio::test]
-    async fn unsupported_edited_content_encoding_preserves_original_body_encoding() {
-        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
-        let state = Arc::new(AdminState::new(0));
+    #[test]
+    fn raw_binary_and_unknown_encoding_edits_preserve_exact_bytes() {
+        use bifrost_admin::breakpoint::BreakpointEdit;
+        let state = AdminState::new(0);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            hyper::header::CONTENT_ENCODING,
+            HeaderValue::from_static("custom"),
+        );
+        let empty = breakpoint_body_payload(&state, &headers, &Bytes::new(), Some(0), false);
+        assert_eq!(empty.body_representation, "raw");
+        assert_eq!(empty.body_encoding, "base64");
+        assert_eq!(empty.body.as_deref(), Some(""));
         state
             .breakpoint_manager
-            .update_settings(BreakpointSettings {
+            .update_settings(bifrost_admin::breakpoint::BreakpointSettings {
                 enabled: true,
-                max_body_bytes: 64,
+                max_body_bytes: 0,
             });
-
-        let task_state = state.clone();
-        let original = Bytes::from(compress_body(b"old", "gzip").unwrap());
-        let expected = original.clone();
-        let task = tokio::spawn(async move {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                hyper::header::CONTENT_ENCODING,
-                HeaderValue::from_static("gzip"),
-            );
-            let mut final_body = original;
-            let outcome = breakpoint_response_hook(
-                &Some(task_state),
-                &None,
-                "unsupported-encoding",
-                "GET",
-                "http://example.test/",
-                200,
-                &mut headers,
-                final_body.clone(),
-                Some(3),
-                false,
-                &mut final_body,
-            )
-            .await;
-            (outcome, headers, final_body)
-        });
-        wait_until_pending(&state, "unsupported-encoding").await;
-        assert!(state
+        let zero_budget = breakpoint_body_payload(&state, &headers, &Bytes::new(), Some(0), false);
+        assert_eq!(zero_budget.body_representation, "raw");
+        assert_eq!(zero_budget.body_encoding, "base64");
+        assert_eq!(zero_budget.body.as_deref(), Some(""));
+        state
             .breakpoint_manager
-            .resume(
-                "unsupported-encoding",
-                "response",
-                BreakpointEdit {
-                    headers: Some(vec![
-                        ("content-encoding".into(), "unsupported".into()),
-                        ("x-edited".into(), "yes".into()),
-                    ]),
-                    body: Some("new-body".into()),
+            .update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 1024,
+            });
+        assert_eq!(
+            encode_edited_body(
+                &headers,
+                &BreakpointEdit {
+                    body: empty.body,
+                    body_encoding: Some(empty.body_encoding),
+                    body_representation: Some(empty.body_representation),
                     ..Default::default()
-                },
+                }
             )
-            .is_ok());
-
-        let (outcome, headers, body) = task.await.unwrap();
-        assert!(!outcome.body_replaced);
-        assert_eq!(headers[hyper::header::CONTENT_ENCODING], "gzip");
-        assert_eq!(headers["x-edited"], "yes");
-        assert_eq!(body, expected);
-
-        let task_state = state.clone();
-        let original = Bytes::from(compress_body(b"old-request", "gzip").unwrap());
-        let expected = original.clone();
-        let request_task = tokio::spawn(async move {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                hyper::header::CONTENT_ENCODING,
-                HeaderValue::from_static("gzip"),
-            );
-            let mut final_body = original;
-            let outcome = breakpoint_request_hook(
-                &Some(task_state),
-                &None,
-                "unsupported-request-encoding",
-                "POST",
-                "http://example.test/",
-                &mut headers,
-                final_body.clone(),
-                Some(11),
-                false,
-                &mut final_body,
+            .unwrap(),
+            Bytes::new()
+        );
+        let original = Bytes::from_static(&[0, 255, 128]);
+        let payload = breakpoint_body_payload(&state, &headers, &original, None, false);
+        assert_eq!(payload.body_encoding, "base64");
+        assert_eq!(payload.body_representation, "raw");
+        let edit = BreakpointEdit {
+            body: payload.body,
+            body_encoding: Some(payload.body_encoding),
+            body_representation: Some(payload.body_representation),
+            ..Default::default()
+        };
+        assert_eq!(encode_edited_body(&headers, &edit).unwrap(), original);
+        headers.insert(
+            hyper::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        let edit = BreakpointEdit {
+            body: Some("AP+A".into()),
+            body_encoding: Some("base64".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            try_decompress_body_with_limit(
+                &encode_edited_body(&headers, &edit).unwrap(),
+                "gzip",
+                1024
             )
-            .await;
-            (outcome, headers, final_body)
-        });
-        wait_until_pending(&state, "unsupported-request-encoding").await;
-        assert!(state
-            .breakpoint_manager
-            .resume(
-                "unsupported-request-encoding",
-                "request",
-                BreakpointEdit {
-                    headers: Some(vec![("content-encoding".into(), "unsupported".into())]),
-                    body: Some("new-request".into()),
-                    ..Default::default()
-                },
-            )
-            .is_ok());
-        let (outcome, headers, body) = request_task.await.unwrap();
-        assert!(!outcome.body_replaced);
-        assert_eq!(headers[hyper::header::CONTENT_ENCODING], "gzip");
-        assert_eq!(body, expected);
+            .unwrap(),
+            &[0, 255, 128]
+        );
     }
 
     #[tokio::test]
@@ -1298,8 +1612,206 @@ mod tests {
                     ..Default::default()
                 }
             )
+            .is_err());
+        assert!(state.breakpoint_manager.has_pending("oversized"));
+        assert!(state
+            .breakpoint_manager
+            .resume("oversized", "response", BreakpointEdit::default())
             .is_ok());
         assert!(!task.await.unwrap().body_replaced);
+    }
+
+    #[tokio::test]
+    async fn capture_deadline_replays_prefix_and_limit_replays_all_bytes() {
+        use crate::utils::bounded::BoundedBody;
+        use http_body_util::{BodyExt, StreamBody};
+        let frames = futures_util::stream::iter(vec![Ok::<_, hyper::Error>(
+            hyper::body::Frame::data(Bytes::from_static(b"prefix")),
+        )])
+        .chain(futures_util::stream::pending());
+        let body = StreamBody::new(frames);
+        match read_breakpoint_body_bounded(body, 64).await.unwrap() {
+            (BoundedBody::Exceeded(mut body), None) => assert_eq!(
+                body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                "prefix"
+            ),
+            _ => panic!("stalled capture must be header-only"),
+        }
+        let frames = futures_util::stream::iter(vec![Ok::<_, hyper::Error>(
+            hyper::body::Frame::data(Bytes::from_static(b"oversize")),
+        )]);
+        match read_breakpoint_body_bounded(StreamBody::new(frames), 3)
+            .await
+            .unwrap()
+        {
+            (BoundedBody::Exceeded(body), None) => {
+                assert_eq!(body.collect().await.unwrap().to_bytes(), "oversize")
+            }
+            _ => panic!("oversize capture must be header-only"),
+        }
+        let frames = futures_util::stream::iter(vec![Ok::<_, hyper::Error>(
+            hyper::body::Frame::data(Bytes::from_static(b"ok")),
+        )]);
+        match read_breakpoint_body_bounded(StreamBody::new(frames), 3)
+            .await
+            .unwrap()
+        {
+            (BoundedBody::Complete(bytes), None) => assert_eq!(bytes, "ok"),
+            _ => panic!("finite bounded capture must be editable"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_capture_resume_preserves_duplicate_trailers() {
+        use crate::utils::bounded::BoundedBody;
+        use http_body_util::{BodyExt, StreamBody};
+        let mut trailers = HeaderMap::new();
+        trailers.append("grpc-status", "0".parse().unwrap());
+        trailers.append("x-metadata", "first".parse().unwrap());
+        trailers.append("x-metadata", "second".parse().unwrap());
+        let frames = futures_util::stream::iter(vec![
+            Ok::<_, hyper::Error>(hyper::body::Frame::data(Bytes::from_static(b"ok"))),
+            Ok(hyper::body::Frame::trailers(trailers.clone())),
+        ]);
+        let body = match read_breakpoint_body_bounded(StreamBody::new(frames), 3)
+            .await
+            .unwrap()
+        {
+            (BoundedBody::Complete(bytes), trailers) => replay_breakpoint_body(bytes, trailers),
+            _ => panic!("finite bounded capture must be editable"),
+        };
+        assert_eq!(hyper::body::Body::size_hint(&body).exact(), None);
+        let collected = body.collect().await.unwrap();
+        assert_eq!(collected.trailers(), Some(&trailers));
+        assert_eq!(collected.to_bytes(), "ok");
+    }
+
+    #[test]
+    fn bodyless_sse_closes_hub_and_record_and_releases_active_writer() {
+        close_bodyless_sse(&None, "no-state", None);
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-bodyless-sse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let db = Arc::new(
+                bifrost_admin::TrafficDbStore::new(dir.join("traffic"), 100, 0, None).unwrap(),
+            );
+            let store = Arc::new(parking_lot::RwLock::new(bifrost_admin::BodyStore::new(
+                dir.join("body"),
+                1024,
+                1,
+                64,
+                Duration::from_secs(1),
+            )));
+            let state = Arc::new(
+                AdminState::new(0)
+                    .with_traffic_db_store_shared(db.clone())
+                    .with_body_store(store.clone()),
+            );
+            let mut record = bifrost_admin::TrafficRecord::new(
+                "bodyless-sse".into(),
+                "GET".into(),
+                "http://loopback.test".into(),
+            );
+            record.set_sse();
+            record.response_size = 5;
+            record.download_bytes = 5;
+            state.record_traffic(record);
+            state.sse_hub.register("bodyless-sse");
+            let writer = store
+                .read()
+                .start_stream("bodyless-sse", "sse_raw")
+                .unwrap();
+            assert_eq!(store.read().stats().active_stream_writers, 1);
+            close_bodyless_sse(&Some(state.clone()), "bodyless-sse", Some(writer));
+            assert_eq!(state.sse_hub.connection_count(), 0);
+            assert_eq!(store.read().stats().active_stream_writers, 0);
+            let mut record = db.get_by_id("bodyless-sse").unwrap();
+            assert!(!record
+                .socket_status
+                .as_ref()
+                .is_some_and(|status| status.is_open));
+            state.reconcile_traffic_record(&mut record);
+            assert!(!record.socket_status.unwrap().is_open);
+            assert_eq!(record.response_size, 0);
+            assert_eq!(record.download_bytes, 0);
+            assert!(record.response_body_ref.is_none());
+            assert!(record.derived_response_body_ref.is_none());
+            // Finite TLS capture unregisters the hub before replacing its record.
+            state.update_traffic_by_id("bodyless-sse", |record| {
+                record.set_sse();
+                record.socket_status.as_mut().unwrap().receive_count = 1;
+            });
+            close_bodyless_sse(&Some(state.clone()), "bodyless-sse", None);
+            assert!(
+                !db.get_by_id("bodyless-sse")
+                    .unwrap()
+                    .socket_status
+                    .unwrap()
+                    .is_open
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborted_hook_removes_pause_without_waiting_for_timeout() {
+        let state = Arc::new(AdminState::new(0));
+        state
+            .breakpoint_manager
+            .update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 64,
+            });
+        for phase in ["request", "response"] {
+            let task_state = state.clone();
+            let task_push = Some(Arc::new(bifrost_admin::push::PushManager::new(
+                state.clone(),
+            )));
+            let task = tokio::spawn(async move {
+                let mut headers = HeaderMap::new();
+                let mut body = Bytes::new();
+                if phase == "request" {
+                    breakpoint_request_hook(
+                        &Some(task_state),
+                        &task_push,
+                        phase,
+                        "GET",
+                        "http://example.test/",
+                        &mut headers,
+                        Bytes::new(),
+                        Some(0),
+                        false,
+                        &mut body,
+                    )
+                    .await;
+                } else {
+                    breakpoint_response_hook(
+                        &Some(task_state),
+                        &task_push,
+                        phase,
+                        "GET",
+                        "http://example.test/",
+                        200,
+                        &mut headers,
+                        Bytes::new(),
+                        Some(0),
+                        false,
+                        &mut body,
+                    )
+                    .await;
+                }
+            });
+            wait_until_pending(&state, phase).await;
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert!(!state.breakpoint_manager.has_pending(phase));
+        }
     }
 
     #[tokio::test]

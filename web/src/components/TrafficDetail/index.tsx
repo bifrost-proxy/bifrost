@@ -507,7 +507,7 @@ export default function TrafficDetail({
             data={requestBodyForView}
             rawData={requestRawBody?.data}
             rawDataBase64={requestRawBody?.data_base64}
-            source={requestBodySource}
+            source={pausedRequest ? "decoded" : requestBodySource}
             onSourceChange={handleRequestBodySourceChange}
             contentType={requestPanelContentType}
             searchValue={requestSearch}
@@ -633,7 +633,8 @@ export default function TrafficDetail({
   const responseTabs = useMemo(() => {
     if (!record) return [];
     const responseBodyForView = pausedResponse ? pausedResponse.body : responseBody;
-    const responseBodyEditable = !!pausedResponse && !pausedResponse.bodyOmitted;
+    const responseBodyEditable =
+      !!pausedResponse && !pausedResponse.bodyOmitted && record.method !== "HEAD";
     const hasMessages = record.is_websocket || record.is_sse;
     const socketCount = record.socket_status?.frame_count ?? record.frame_count ?? 0;
     const messageCount = record.is_sse ? liveSseCount ?? socketCount : socketCount;
@@ -743,7 +744,7 @@ export default function TrafficDetail({
             data={responseBodyForView}
             rawData={responseRawBody?.data}
             rawDataBase64={responseRawBody?.data_base64}
-            source={responseBodySource}
+            source={pausedResponse ? "decoded" : responseBodySource}
             onSourceChange={handleResponseBodySourceChange}
             contentType={responsePanelContentType}
             rawContentType={record.content_type}

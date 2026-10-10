@@ -267,6 +267,48 @@ match value {
             )
         self.assertEqual(filtered, {"crates/a/src/lib.rs": {2}})
 
+    def test_field_initializers_are_executable_but_field_declarations_are_not(self) -> None:
+        source = """struct Key {
+    runtime_id: tokio::runtime::Id,
+}
+fn build() {
+    // Keep runtime ownership in the cache key.
+    let key = Key {
+        runtime_id: tokio::runtime::Handle::current().id(),
+        payload: encode(body),
+        count: 0,
+    };
+}
+"""
+        self.assertEqual(
+            coverage_diff.rust_non_executable_lines(source),
+            {1, 2, 3, 4, 5, 10, 11},
+        )
+
+    def test_uncovered_field_initializer_remains_in_changed_line_denominator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file = "crates/a/src/lib.rs"
+            path = root / file
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "struct Key {\n    runtime_id: Id,\n}\n"
+                "fn build() {\n    let key = Key {\n"
+                "        runtime_id: current_runtime_id(),\n"
+                "        payload: encode(body),\n    };\n}\n",
+                encoding="utf-8",
+            )
+            changed = coverage_diff.exclude_non_executable_rust_lines(
+                {file: set(range(1, 10))}, root
+            )
+            report = coverage_diff.evaluate_changed_coverage(
+                changed, {file: {2: 0, 6: 1, 7: 0}}
+            )
+        self.assertEqual(report["covered"], 1)
+        self.assertEqual(report["total"], 2)
+        self.assertEqual(report["percent"], 50.0)
+        self.assertEqual(report["files"][0]["missed_lines"], [7])
+
     def test_non_executable_rust_lines_exclude_formatter_only_continuations(self) -> None:
         source = """let result =
     run_worker(

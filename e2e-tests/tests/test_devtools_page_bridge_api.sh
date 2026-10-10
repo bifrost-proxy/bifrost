@@ -1963,8 +1963,70 @@ if (webuiNetworkRows.length !== 1) {
   throw new Error(`AV-CDP-44 failed: Network should dedupe fetch hook and PerformanceResourceTiming rows ${JSON.stringify(webuiNetworkRows)}`);
 }
 const devtoolsUrlBeforeNetworkDetail = adminPage.url();
-await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
-await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 15000 });
+const detailApiDiagnostics = [];
+const recordDetailApiEvent = (event) => {
+  if (detailApiDiagnostics.length < 100) detailApiDiagnostics.push({ ...event, at: Date.now() });
+};
+const isDetailApi = (url) => /\/_bifrost\/api\/(devtools\/network\/traffic\/|traffic\/)/.test(url);
+const onDetailRequest = (request) => {
+  if (isDetailApi(request.url())) recordDetailApiEvent({ kind: 'request', url: request.url().slice(0, 500) });
+};
+const onDetailResponse = (response) => {
+  if (isDetailApi(response.url())) recordDetailApiEvent({ kind: 'response', url: response.url().slice(0, 500), status: response.status() });
+};
+const onDetailRequestFailed = (request) => {
+  if (isDetailApi(request.url())) recordDetailApiEvent({ kind: 'failed', url: request.url().slice(0, 500), error: request.failure()?.errorText?.slice(0, 500) });
+};
+adminPage.on('request', onDetailRequest);
+adminPage.on('response', onDetailResponse);
+adminPage.on('requestfailed', onDetailRequestFailed);
+try {
+  await adminPage.evaluate(() => {
+    window.__bifrostDetailClicks = [];
+    window.__bifrostDetailClickListener = (event) => {
+      if (window.__bifrostDetailClicks.length >= 5) return;
+      window.__bifrostDetailClicks.push({
+        x: event.clientX,
+        y: event.clientY,
+        target: event.target?.tagName,
+        trusted: event.isTrusted,
+        rowId: event.target?.closest('[data-testid="traffic-row"]')?.getAttribute('data-record-id') || null,
+      });
+    };
+    document.addEventListener('click', window.__bifrostDetailClickListener, true);
+  });
+  await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
+  await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 15000 });
+} catch (error) {
+  const detailDebugState = await adminPage.evaluate(() => {
+    const detail = document.querySelector('[data-testid="devtools-network-detail"]');
+    const row = document.querySelector('[data-testid="devtools-network-panel"] [data-testid="traffic-row"]');
+    const table = document.querySelector('[data-testid="devtools-network-traffic-table"]');
+    return {
+      url: location.href,
+      viewport: { width: innerWidth, height: innerHeight },
+      clicks: window.__bifrostDetailClicks,
+      rowId: row?.getAttribute('data-record-id'),
+      rowRect: row?.getBoundingClientRect().toJSON(),
+      tableRect: table?.getBoundingClientRect().toJSON(),
+      detailRect: detail?.getBoundingClientRect().toJSON(),
+      detailText: detail?.textContent?.slice(0, 1500) || null,
+      loading: Boolean(detail?.querySelector('.ant-spin-spinning')),
+      fallback: Boolean(detail?.querySelector('[data-testid="devtools-network-fallback-detail"]')),
+      trafficDetail: Boolean(detail?.querySelector('[data-testid="traffic-detail"]')),
+    };
+  }).catch((diagnosticError) => ({ diagnosticError: diagnosticError.message }));
+  throw new Error(`AV-CDP-35 failed: Network detail did not become visible ${JSON.stringify({ state: detailDebugState, api: detailApiDiagnostics })} ${error.message}`);
+} finally {
+  adminPage.off('request', onDetailRequest);
+  adminPage.off('response', onDetailResponse);
+  adminPage.off('requestfailed', onDetailRequestFailed);
+  await adminPage.evaluate(() => {
+    document.removeEventListener('click', window.__bifrostDetailClickListener, true);
+    delete window.__bifrostDetailClickListener;
+    delete window.__bifrostDetailClicks;
+  }).catch(() => {});
+}
 await adminPage.getByTestId('devtools-network-detail').getByText(/webui-network-complete/).first().waitFor({ timeout: 8000 });
 const networkPanelBox = await adminPage.getByTestId('devtools-network-panel').boundingBox();
 const networkTableBox = await adminPage.getByTestId('devtools-network-traffic-table').boundingBox();

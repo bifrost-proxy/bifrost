@@ -52,6 +52,15 @@ fn pick_udp_port() -> u16 {
 }
 
 async fn start_h3_origin(port: u16, expected_connections: usize, ready_tx: oneshot::Sender<()>) {
+    start_h3_origin_with_host(port, expected_connections, ready_tx, None).await;
+}
+
+async fn start_h3_origin_with_host(
+    port: u16,
+    expected_connections: usize,
+    ready_tx: oneshot::Sender<()>,
+    expected_host: Option<&str>,
+) {
     init_crypto_provider();
 
     let ca = Arc::new(generate_root_ca().expect("failed to generate test CA"));
@@ -99,6 +108,16 @@ async fn start_h3_origin(port: u16, expected_connections: usize, ready_tx: onesh
 
         assert_eq!(req.method(), hyper::Method::GET);
         assert_eq!(req.uri().path(), "/upstream-h3");
+        if let Some(expected) = expected_host {
+            assert_eq!(
+                req.headers()
+                    .get_all(hyper::header::HOST)
+                    .iter()
+                    .collect::<Vec<_>>(),
+                vec![expected]
+            );
+            assert_eq!(req.uri().authority().unwrap().as_str(), expected);
+        }
 
         let response = hyper::Response::builder()
             .status(200)
@@ -271,4 +290,109 @@ async fn test_http_proxy_to_h3_origin_enabled_by_rule() {
     tokio::time::timeout(Duration::from_secs(20), test_future)
         .await
         .expect("upstream H3 rule-enabled E2E timed out");
+}
+
+struct BreakpointH3Rules;
+impl ProxyRulesResolver for BreakpointH3Rules {
+    fn resolve_with_context(
+        &self,
+        _url: &str,
+        _method: &str,
+        _headers: &std::collections::HashMap<String, String>,
+        _cookies: &std::collections::HashMap<String, String>,
+    ) -> ResolvedRules {
+        ResolvedRules {
+            upstream_http3: true,
+            upstream_unsafe_ssl: true,
+            rules: vec![bifrost_proxy::RuleValue {
+                pattern: "127.0.0.1".into(),
+                protocol: bifrost_core::Protocol::Breakpoint,
+                value: "request".into(),
+                options: Default::default(),
+                rule_name: None,
+                raw: None,
+                line: None,
+                auto_tls_intercept: false,
+            }],
+            ..Default::default()
+        }
+    }
+}
+
+#[tokio::test]
+async fn breakpoint_host_edit_reaches_actual_http3_peer_once() {
+    let _guard = UPSTREAM_HTTP3_E2E_LOCK.lock().await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let origin_port = pick_udp_port();
+        let proxy_port = pick_tcp_port().await;
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let origin = tokio::spawn(start_h3_origin_with_host(
+            origin_port,
+            1,
+            ready_tx,
+            Some("edited-host.test"),
+        ));
+        ready_rx.await.unwrap();
+        let state = Arc::new(bifrost_admin::AdminState::new(proxy_port));
+        state
+            .breakpoint_manager
+            .update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 1024,
+            });
+        let proxy = ProxyServer::new(ProxyConfig {
+            host: "127.0.0.1".into(),
+            port: proxy_port,
+            unsafe_ssl: true,
+            enable_socks: false,
+            ..Default::default()
+        })
+        .with_admin_state_shared(state.clone())
+        .with_rules(Arc::new(BreakpointH3Rules));
+        let proxy_task = tokio::spawn(async move {
+            proxy.run().await.unwrap();
+        });
+        for _ in 0..100 {
+            if TcpStream::connect(("127.0.0.1", proxy_port)).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let client = tokio::spawn(send_proxy_request(proxy_port, origin_port));
+        let pause = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(pause) = state.breakpoint_manager.pending().into_iter().next() {
+                    break pause;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !client.is_finished(),
+            "client must remain blocked at request breakpoint"
+        );
+        let mut headers = pause.headers;
+        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
+        headers.push(("Host".into(), "edited-host.test".into()));
+        assert!(state
+            .breakpoint_manager
+            .resume(
+                &pause.request_id,
+                "request",
+                bifrost_admin::breakpoint::BreakpointEdit {
+                    headers: Some(headers),
+                    ..Default::default()
+                },
+            )
+            .is_ok());
+        let response = client.await.unwrap();
+        proxy_task.abort();
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(response.contains("upstream-h3-ok"), "{response}");
+        origin.await.unwrap();
+    })
+    .await
+    .expect("bounded breakpoint HTTP/3 regression timed out");
 }

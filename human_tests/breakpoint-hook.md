@@ -9,10 +9,40 @@
 - WebUI 地址示例：`http://localhost:8800/_bifrost/`。
 - 至少有一个本地 mock HTTP server 可用；测试禁止依赖外网域名。
 - 性能防护用例可执行：`CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`。
-- UI 用例可执行：`pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts`。
+- UI 用例可执行：`pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts tests/ui/breakpoint-real-ui.spec.ts`。
 - OpenAPI 用例可执行：`cargo test -p bifrost-admin breakpoint_openapi --lib`。
 
-## 本轮执行记录（2026-08-07）
+## 第二轮复审与完整 critical 执行记录（2026-10-10）
+
+- 通过统一入口 `BIFROST_UI_TEST_PROFILE=critical bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner` 完整执行 **57/57，通过 676 秒**（Playwright 674.24 秒）；原 52 项与新增 5 项均执行，单 worker、零跳过、零失败、零重试，原 900 秒外层门禁不变。49 项 breakpoint 用例走真实 UI → 代理 → loopback upstream/client；其余 8 项既有 critical 包含 Rules、Values、Scripts、toolbar、sidebar 与 Traffic。
+- 前置生产前端构建 110 秒、调试 CLI 构建 227 秒，均在浏览器限时之外。setup 复用已验证的预构建后端，通过实际代理静态路由提供生产前端；没有 Vite/HMR 或测试期间 Cargo 重建，106 个 gzip 资源运行前后哈希一致。
+- 四条新 review 有旧代码负向证据：TLS H2 probe 两例、空未知编码两例、Fuzzy 首屏零/一命中两例、gate 开启消息竞态一例均失败。修复后的空编码、Fuzzy 和 gate 五项真实 UI 在完整批中通过；TLS H2 与追加规则/重复 trailers 的七项真实协议用例分别经普通与 instrumented 7/7 验证。小编辑预算 1、原 body 两字节的普通 HTTP/CONNECT 两例另在修复前失败，修后实际 wire 为 `okappend` 且重复 trailers 保留。
+- 最终 fresh-profile 全量：admin **3862 单元 + 7 集成**，proxy **1086 单元 + 28 集成**，零失败，各保留 1 项既有忽略。整个 Rust diff 相对 main `e8ed138e7319f572c012912113d97864f0100e68` 覆盖率 **90.53%（478/528）**，原 90% 门禁不变。LCOV SHA-256：`5d29197c455ea019d07b5dcfcdcce9fca2619b04bbf4a99c8ddf8fbc089cbda2`；报告提示一个损坏子进程 profraw 被忽略，完整测试与门禁仍通过，原始日志保留。
+- 完整前端单测 **63 文件、420/420，通过 169.29 秒**；Rust fmt、两个受影响 crate 的 all-targets/all-features Clippy（warnings denied）、前端类型、修改文件 lint/format 及生产构建通过。完整 critical 实际验证了 Values 双页面 push/排序与导入导出。
+- 保留失败历史：首轮 Vite critical 900 秒超时；首轮静态 critical 862 秒为 52 通过、4 失败、1 因 serial 前序失败未执行。分页夹具生成 1100 请求期间超时；改为停留 Rules、分批有界 100 并发并确认旧 pending 存活，保持原 client 45 秒、gate 60 秒、单例 120 秒及真实跨 1000 结果分页断言。Values 订阅随数量变化被清理且不恢复，两个独立旧代码回归失败，最小生命周期修正后 2/2 通过；Traffic curl 被 NO_PROXY 绕过显式代理，现使用 `--noproxy ''`。不把这些失败认定为 baseline 问题，不扩展无关功能。
+- 固定测试 CLI SHA-256：`57206a2b678f4c4bec5eb5e10df8ea1366e04f14726656a4091f8e7e93bf4a61`。日志、Playwright JSON、失败批证据、最终覆盖率及恢复补丁保留在本地审计目录；仅使用隔离 loopback 与测试 TLS，不改变设备代理、DNS、VPN 或证书信任。
+
+## 复审修复云环境执行记录（2026-10-10）
+
+- 完整 UI 单批 **48/48 通过，耗时 9.2 分钟**：44 个真实 UI → 代理 → loopback upstream/client 用例及 4 个既有页面/配置用例；未跳过、未重试。由固定调试 CLI 的静态路由提供生产前端构建，无 Vite/HMR、无接口响应 mock；运行前后 106 个前端资源哈希一致。浅深主题截图已检查。
+- 新增真实 HTTP 有限 SSE 与 CONNECT 后非标准 TLS 端口的有限、无限、声明长度后停滞 SSE 204/304 用例，均验证暂停期间客户端无响应、恢复后无 payload、pending 清空且 Network socket 状态关闭。
+- 真实 H2 trailers/停滞流 3/3、真实 H3 3/3、Breakpoint API 5/5 通过。覆盖重复请求/响应 trailers、HTTP/1 chunked framing、编辑 Host 与 H3 authority 一致，以及 UTF-8 NUL 的最坏 JSON 转义、decoded 与传输包络超限拒绝。
+- 完整 fresh-profile instrumented admin 测试通过：3862 单元 + 7 集成；proxy：1086 单元 + 24 集成，各保留 1 项既有忽略。最后收紧的 H2 计时夹具另经普通与 instrumented 3/3 验证：从真实上游准备响应的时间点起必须在 3.5 秒内观察到暂停，仍保留零响应断言。
+- 整个分支相对 main `e8ed138e7319f572c012912113d97864f0100e68` 的 Rust 改动行覆盖率 **90.43%（463/512）**，原 90% 门禁不变。最终 LCOV SHA-256：`9cda059c5dd83757b8ee68c5781ca1add0445cd50cf27262e3121972d8151cd6`。Rust fmt、两个受影响 crate 的 all-targets/all-features Clippy（warnings denied），以及前端类型、修改文件 lint/format 与生产构建通过。
+- 测试 CLI SHA-256：`0d0874f0ba6e8bcfc9a3cca3f6e561035395be97f6a6f8c81a154c3974355b7c`。原始失败证据保留：首批 UI 47/48 中 Rules 导航 404 与前端资源重建同时发生；早期 H2 计时把 TLS 建连计入 3.5 秒；一次 admin 测试在共享 RulesStorage 初始化失败，夹具已改用私有规则目录。以上均不认定为 baseline 问题，不替代本轮通过结果。
+- `p2-ui-clean.log`、`p2-coverage-clean-tests.log`、最终 LCOV/diff 报告及截图保存在本地任务审计产物中。只使用隔离 loopback 与测试 TLS；未改变用户设备代理、DNS、VPN 或证书信任，测试服务与临时数据已清理。
+
+## 首次云环境功能执行记录（2026-10-09）
+
+- 最终单批完整浏览器验证 **38/38 通过，耗时 7.3 分钟**：34 个真实 UI → 代理 → loopback upstream/client 用例，加 4 个既有页面/配置用例。使用不可变生产二进制内嵌的 WebUI，无 Vite/HMR、无接口响应 mock。
+- 经 Rules 页面创建并保存规则，再通过 Network 全局开关开启；覆盖 request/response/both/all、首命中自动选中、并发不抢焦点和独立草稿、普通/Fuzzy 与仅看暂停组合筛选，以及放行/超时/关闭后的及时移除。
+- 对真实 wire 验证 method、URL/query、重复 headers、Host/User-Agent/Cookie/Referer、body、最终 status 和长度；暂停期间 request 不向 upstream 发送 headers，response 不向 client 发送 headers 或 body。
+- 覆盖 UTF-8/Base64、gzip、未知编码原始字节、非法数据保留暂停、超限和无限流、已声明长度的 2 秒 capture 降级与 prefix 精确重放、HEAD/204/304、有限 SSE 编辑，以及非标准 TLS 端口初始 HEAD/204/304 SSE 无 Content-Length 的暂停与编辑。
+- 生命周期覆盖浏览器离线/重连保留草稿、浏览器关闭不放行、关闭 gate 放行和 client 断连有界清理。无限 chunked request 的原始 **3 秒 UI 暂停断言**保持不变并通过。
+- 固定工具链 Rust 1.95.0 / Node 22.22.0 / pnpm 10.30.3；最终二进制 SHA-256 为 `a7a8762c108cd0eae87d2cc5dfd349077fe7c1862a31a88f4ff9d70e940c3480`。源码及未跟踪文件快照 SHA-256 为 `f27117336c991cd3d93db68a428a5dfde7f722316a2517649b68b4f2d5ed8d44`（最终记录写入前）。
+- `ui-final-v4-full.log`、Playwright JSON、运行状态快照和 8 张四阶段浅/深主题截图保存在本地任务审计产物中。此前诊断批次发现并复核了 Monaco 离线加载、并发详情 ownership、prefix size_hint 及 SSE 边界问题；这些早期批次不替代本次最终完整结果。
+
+## 历史执行记录（2026-08-07）
 
 - TC-BP-01 至 TC-BP-22 已在隔离数据目录与本地 HTTP/HTTPS mock server 上逐条执行。
 - 浏览器链路：`pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts`，5/5 通过；覆盖真实 Rules 配置、pending 刷新恢复、浅色/深色等待背景、request method/URL/header/body 编辑、response status/header/body 编辑和 timeout 褪色。
@@ -377,14 +407,14 @@
 **目标：** 验证 request breakpoint 的编辑内容真实作用于 upstream，而非只改页面展示。
 
 **步骤：**
-1. 发起一个没有 `Content-Length` 的 chunked POST，使其命中 request breakpoint。
+1. 发起一个带明确 `Content-Length`、小于安全捕获上限的 POST，使其命中 request breakpoint。
 2. 在 Network 详情把 method 改为 `PUT`，URL/query 改到同一 mock server 的新路径。
 3. 新增 `X-Breakpoint-Request: edited`，保留 headers 的顺序与重复项能力，并把 body 改为 `edited-request-body`。
 4. 点击 `Apply & Resume`，等待请求完成。
 5. 检查 mock server 实际收到的 method、path/query、header 与 body。
 
 **预期结果：**
-- 未知长度但小于捕获上限的 request body 可以完整编辑。
+- 有界、已知长度且在捕获期限内完整读取的 request body 可以编辑；未知长度或停滞请求以仅 metadata/header 暂停，不等待无限 EOF。
 - upstream 收到 `PUT`、新 path/query、编辑后的 header/body。
 - `Resume unchanged` 不提交编辑；`Apply & Resume` 才应用当前编辑。
 
@@ -501,6 +531,58 @@
 - status 改为 1xx、204 或 304 时清空 payload，并移除 `Content-Length` / `Transfer-Encoding`；Traffic 记录同步为最终状态且无响应 body。
 
 **实际结果：** 2026-08-07 按步骤执行 5 个聚焦 proxy 回归测试与真实 Network Playwright，全部通过。Fuzzy Search 中暂停行保留 warning token 背景和阶段标签；浏览器 `Date.now()` 人为快 1 小时后倒计时仍显示服务端剩余时间而非 `0.0s`。未知长度响应以 header-only 状态及时暂停；定长响应在 Network 详情中完成 response status/header/body 编辑。编辑 URL 后请求到达新 upstream 且不再套用旧 host/path rule；小 Breakpoint capture limit 不降低 response rule buffer limit；无 body 状态会清空 payload 和 framing headers。
+
+
+### TC-BP-24: 首次实时命中自动展开与并发草稿隔离
+
+**目标：** 通过 Rules 可视化创建并保存规则、Network 全局开关和真实 loopback client/upstream，验证首个实时暂停自动选中并展开详情；同一开关会话后续命中不抢焦点。
+
+**步骤：**
+1. 在 Rules 页面创建并保存 `127.0.0.1:<port>/draft* breakpoint://request`，在 Network 打开 Breakpoint。
+2. 发起带明确 Content-Length 的第一个 POST，不刷新页面、不手动点击行，确认详情自动出现并能编辑 body。
+3. 保持第一个草稿，发起第二和第三个并发请求，确认焦点和草稿保持。
+4. 手动选择第二行编辑，再回第一行应用；分别恢复第二和第三行。
+5. 对照 upstream 实际字节，确认各请求草稿不串；恢复第一行后不自动跳到第三行。
+
+**自动化入口：** `web/tests/ui/breakpoint-real-ui.spec.ts` 中 concurrent hits 和 Rules → gate 四阶段用例。执行结果以当前任务测试日志为准，历史平台记录不构成本次验证。
+
+### TC-BP-25: 仅看断点暂停、编码与安全限制
+
+**步骤：**
+1. 开启 Network 顶部 Breakpoint，确认开关右侧出现 Paused；勾选后普通已完成流量隐藏。切换 Fuzzy Search 并输入关键词，确认只显示同时符合搜索和 pending 的行。
+2. 分别手动恢复、等待 timeout、关闭 gate，确认 pending 行及时移出。关闭 gate 后 Paused 隐藏且暂停筛选清除，普通流量恢复；重开 gate 后 Paused 未勾选。切换浅深主题检查整行背景与阶段标记。
+3. 对 bounded gzip、二进制和未知 Content-Encoding 响应，在详情编辑 UTF-8 或 Base64；非法 Base64 必须拒绝，pending 保留。
+4. 检查 client 实际字节、gzip 解码内容、重复 Set-Cookie 和 Content-Length；未知编码使用原始字节并保留编码声明。
+5. 使用超限响应、不结束的 SSE 响应和不结束的 chunked request，确认及时暂停并明确显示 body 不可编辑，metadata/header 仍可编辑。
+6. HEAD、204、304 恢复后不带 payload；非标准 TLS 端口使用仅测试 client 的证书绕过，不修改系统信任。
+7. 浏览器 offline/online 后草稿保留；关闭浏览器不会直接放行 pending；client 断开后 pending 在安全 timeout 内清理。
+
+**自动化入口：** `web/tests/ui/breakpoint-real-ui.spec.ts` 全部用例；`scripts/ci/run-ui-critical.sh` 包含该完整套件。所有 upstream 监听 `127.0.0.1`，代理独立数据目录、随机端口并带 `--no-system-proxy --skip-cert-check`。
+
+**首次云环境执行状态（2026-10-09）：** 34 个真实 UI 回归用例与 4 个既有 UI 用例单批 38/38 通过；后续变更以对应日期的云环境执行记录为准，不沿用过去覆盖率或其它机器结果。
+
+
+### TC-BP-26: 协议元数据与 bodyless SSE 回归
+
+1. 通过 CONNECT 和测试 TLS 发送带 Content-Length 及重复 request trailers 的 HTTP/2 请求，命中 request 断点时确认上游未收到请求；不修改放行后，真实 HTTP/2 上游收到原 body 和全部 trailers。
+2. 真实 HTTP/2 上游返回 `grpc-status` 和重复 trailers，response 断点暂停期间客户端不得收到响应头或 body；不修改放行后，HTTP/1 客户端收到 chunked body 与完整 trailers，不出现 Content-Length。
+3. 在 Network 将有限 SSE、无限 SSE、声明 Content-Length 后停止发送的 SSE 修改为 204/304，验证客户端无 payload、pending 清空且 socket 状态关闭；对普通 HTTP 和 CONNECT 后非标准 TLS 端口都执行。
+4. 编辑请求 Host 后放行至真实 HTTP/3 上游，确认仅一个 Host，URI authority 与编辑值一致；连接仍使用原测试上游地址。
+5. 在 decoded body 大小上限内提交含 NUL 的 UTF-8 编辑，确认 JSON 转义不会误拒绝；decoded 超限或 JSON 传输包络超限必须拒绝并保留暂停。
+
+**自动化入口：** `crates/bifrost-proxy/tests/breakpoint_trailers_e2e.rs`、`crates/bifrost-proxy/tests/upstream_http3_e2e.rs`、`crates/bifrost-admin/tests/breakpoint_api.rs` 和 `web/tests/ui/breakpoint-real-ui.spec.ts`。
+
+
+### TC-BP-27: TLS H2 probe、空编码、搜索分页与 gate 开启竞态
+
+1. 经 CONNECT 向 TLS HTTP/2 上游发送可重试的 GET，令响应经过早期 H2 probe。response 断点放行后核对真实重复 trailers；含 body rule 的停滞响应从上游准备时间起 3.5 秒内暂停，客户端仍不得收到响应头或 body。
+   对普通 HTTP 代理和 CONNECT 再分别设置断点 body 上限为 1，返回两字节 body 并配置 resAppend；确认断点明确省略 body，但真实放行字节应用追加规则且 trailers 保留。单次有界 probe 使用原规则缓冲上限，编辑上限独立生效。
+2. 分别暂停 Content-Encoding 为未知值、Content-Length 为 0 的请求和响应，确认编辑器显示 raw Base64，并实际应用 method/header 或 status/header 修改；放行后的 wire body 仍为空、编码声明保留。零 body 编辑预算也应识别为 raw。
+3. 在旧暂停之后生成 1100 条真实已完成流量；生成时切换至 Rules，分批有界 100 并发，回到 Network 前确认旧暂停仍在 pending；保持原 client 45 秒、gate 60 秒和单例 120 秒上限。勾选 Paused 并执行 Fuzzy 搜索。确认首个响应明确 has_more 且不包含旧暂停；分别保留零条或一条首屏可见暂停，不滚动、不点击 Load More 也能找到旧暂停。原始空搜索页且 has_more 为 true 时同样继续分页。
+4. 仅延迟真实 gate 开启的 HTTP 响应与 settings WebSocket 推送，让真实暂停推送先到。确认上游尚未收到请求，随后送达真实 settings 推送，页面恢复 pending 并仅第一次自动展开；放行后真实 client 完成。
+5. 在旧续页请求尚未返回时切换查询，旧响应不得覆盖新结果或清除新查询的 loading 状态。同一 cursor 失败或不前进时不得自动循环重试。
+
+**自动化入口：** `breakpoint_trailers_e2e.rs` 的七个真实 H2 用例、`breakpoint-real-ui.spec.ts` 新增五个真实 UI 用例，以及 SearchResultsList、useSearchStore、useBreakpointStore 回归单测。完整 critical 使用 `BIFROST_UI_TEST_PROFILE=critical bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner`，保持 900 秒外层限时和一个 worker；编排成功预构建后才允许 setup 复用同一二进制并通过代理静态路由提供生产前端。跳过前端构建的 Cargo 流程追踪 dist 更新以刷新 gzip 资产；独立 Playwright 运行仍默认构建后端并使用 Vite。
 
 ## 清理步骤
 - 结束测试脚本后确认临时 Bifrost 进程、mock server、WebSocket probe 均已退出。

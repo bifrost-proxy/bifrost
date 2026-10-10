@@ -31,7 +31,7 @@ wss.on("connection", (socket) => {
 });
 
 const run = async () => {
-  await new Promise((resolve) => httpServer.listen(0, resolve));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
   const httpPort = httpServer.address().port;
   await new Promise((resolve) => wss.on("listening", resolve));
   const wsPort = wss.address().port;

@@ -48,7 +48,10 @@ async fn update_settings(
     state: &SharedAdminState,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
-    let body_bytes = match req.into_body().collect().await {
+    let body_bytes = match http_body_util::Limited::new(req.into_body(), 64 * 1024)
+        .collect()
+        .await
+    {
         Ok(collected) => collected.to_bytes(),
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
     };
@@ -76,7 +79,19 @@ async fn resume(
     state: &SharedAdminState,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
-    let body_bytes = match req.into_body().collect().await {
+    // A UTF-8 source byte can become a six-byte JSON escape (e.g. \u0000).
+    // The manager still enforces the decoded byte limit before removing pending.
+    let body_bytes = match http_body_util::Limited::new(
+        req.into_body(),
+        state
+            .breakpoint_manager
+            .max_body_bytes()
+            .saturating_mul(6)
+            .saturating_add(64 * 1024),
+    )
+    .collect()
+    .await
+    {
         Ok(collected) => collected.to_bytes(),
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read body"),
     };
@@ -139,12 +154,15 @@ async fn resume(
         return bad_request("method and url can only be edited during a request breakpoint");
     }
     if let Some(status) = edit.status {
-        if StatusCode::from_u16(status).is_err() {
-            return error_response(StatusCode::BAD_REQUEST, "Invalid HTTP status");
+        if !(200..=599).contains(&status) || StatusCode::from_u16(status).is_err() {
+            return error_response(StatusCode::BAD_REQUEST, "Final response status must be between 200 and 599; informational responses cannot complete a paused HTTP exchange");
         }
     }
 
     if let Err(error) = state.breakpoint_manager.resume(&request_id, &phase, edit) {
+        if let BreakpointResumeError::InvalidEdit(message) = &error {
+            return bad_request(message);
+        }
         if matches!(error, BreakpointResumeError::PhaseMismatch) {
             return error_response(StatusCode::CONFLICT, "phase mismatch");
         }

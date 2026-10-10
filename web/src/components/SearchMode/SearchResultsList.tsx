@@ -1,6 +1,12 @@
 "use no memo";
 
-import { useRef, useCallback, useMemo, type CSSProperties } from "react";
+import {
+  useRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  type CSSProperties,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Tag, theme } from "antd";
 import { ThunderboltOutlined } from "@ant-design/icons";
@@ -11,6 +17,7 @@ import AppIcon from "../AppIcon";
 interface SearchResultsListProps {
   results: SearchResultItem[];
   keyword: string;
+  paginationKey?: string | null;
   selectedId?: string;
   breakpointPhases?: Map<string, "request" | "response">;
   onSelect: (item: SearchResultItem) => void;
@@ -56,7 +63,7 @@ const formatSize = (bytes: number): string => {
 const highlightText = (
   text: string,
   keyword: string,
-  highlightColor: string
+  highlightColor: string,
 ): React.ReactNode => {
   if (!keyword.trim()) return text;
 
@@ -112,7 +119,12 @@ const MatchPreview = ({
     >
       <Tag
         color="blue"
-        style={{ margin: 0, fontSize: 10, lineHeight: "16px", padding: "0 4px" }}
+        style={{
+          margin: 0,
+          fontSize: 10,
+          lineHeight: "16px",
+          padding: "0 4px",
+        }}
       >
         {fieldLabels[field] || field}
       </Tag>
@@ -133,6 +145,7 @@ const MatchPreview = ({
 export default function SearchResultsList({
   results,
   keyword,
+  paginationKey,
   selectedId,
   breakpointPhases,
   onSelect,
@@ -143,6 +156,7 @@ export default function SearchResultsList({
 }: SearchResultsListProps) {
   const { token } = theme.useToken();
   const parentRef = useRef<HTMLDivElement>(null);
+  const attemptedPages = useRef(new Set<string>());
 
   // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
@@ -160,6 +174,29 @@ export default function SearchResultsList({
       onLoadMore();
     }
   }, [hasMore, isLoadingMore, onLoadMore]);
+
+  useEffect(() => {
+    const container = parentRef.current;
+    if (!container) return;
+    const fillViewport = () => {
+      if (
+        !paginationKey ||
+        !hasMore ||
+        isLoadingMore ||
+        container.clientHeight === 0 ||
+        container.scrollHeight > container.clientHeight + 1 ||
+        attemptedPages.current.has(paginationKey)
+      )
+        return;
+      // A failed or non-advancing cursor must not trigger an automatic retry loop.
+      attemptedPages.current.add(paginationKey);
+      onLoadMore();
+    };
+    fillViewport();
+    const observer = new ResizeObserver(fillViewport);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [paginationKey, hasMore, isLoadingMore, onLoadMore, results.length]);
 
   const styles = useMemo<Record<string, CSSProperties>>(
     () => ({
@@ -199,7 +236,7 @@ export default function SearchResultsList({
         overflow: "hidden",
       },
     }),
-    [token, virtualizer]
+    [token, virtualizer],
   );
 
   return (
@@ -283,7 +320,8 @@ export default function SearchResultsList({
                     data-testid={`search-breakpoint-${breakpointPhase}-indicator`}
                     style={{ margin: 0, fontSize: 10, lineHeight: "16px" }}
                   >
-                    Breakpoint · {breakpointPhase === "request" ? "Request" : "Response"}
+                    Breakpoint ·{" "}
+                    {breakpointPhase === "request" ? "Request" : "Response"}
                   </Tag>
                 )}
                 <span
@@ -308,9 +346,7 @@ export default function SearchResultsList({
                 >
                   {record.st || "-"}
                 </span>
-                {record.capp && (
-                  <AppIcon appName={record.capp} size={14} />
-                )}
+                {record.capp && <AppIcon appName={record.capp} size={14} />}
               </div>
               <div style={styles.matchRow}>
                 {item.matches.slice(0, 2).map((match, idx) => (

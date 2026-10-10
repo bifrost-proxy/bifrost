@@ -386,6 +386,7 @@ describe("Persistent traffic database identity", () => {
     api.getResponseBody.mockReturnValueOnce(body.promise);
     api.getRequestBodyContent.mockReturnValueOnce(raw.promise);
     api.getResponseBodyContent.mockReturnValueOnce(raw.promise);
+    useTrafficStore.getState().setSelectedId(row.id);
     const pending = useTrafficStore.getState().fetchTrafficDetail(row.id);
     if (phase === "bodies") { detail.resolve(record); await pending; }
     api.getTrafficStatistics.mockResolvedValue(statistics(NEW));

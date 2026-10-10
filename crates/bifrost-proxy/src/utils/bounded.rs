@@ -54,7 +54,22 @@ where
     }
 
     fn size_hint(&self) -> hyper::body::SizeHint {
-        self.inner.size_hint()
+        let prefix_len = self
+            .prefix
+            .iter()
+            .filter_map(|frame| frame.data_ref())
+            .map(|data| data.len() as u64)
+            .sum::<u64>();
+        let inner = self.inner.size_hint();
+        let mut hint = hyper::body::SizeHint::new();
+        hint.set_lower(inner.lower().saturating_add(prefix_len));
+        if let Some(upper) = inner
+            .upper()
+            .and_then(|upper| upper.checked_add(prefix_len))
+        {
+            hint.set_upper(upper);
+        }
+        hint
     }
 }
 
@@ -170,5 +185,34 @@ mod tests {
         }
 
         assert_eq!(collected.as_slice(), b"helloworld");
+    }
+
+    #[tokio::test]
+    async fn prefix_replay_size_hint_includes_only_remaining_prefix_bytes() {
+        let prefix = VecDeque::from([
+            Frame::data(Bytes::from_static(b"captured")),
+            Frame::trailers(hyper::HeaderMap::new()),
+        ]);
+        let mut body = PrefixReplayBody::new(
+            prefix,
+            http_body_util::Full::new(Bytes::from_static(b"remaining"))
+                .map_err(|never| match never {}),
+        );
+        assert_eq!(body.size_hint().exact(), Some(17));
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().data_ref().unwrap(),
+            "captured"
+        );
+        assert_eq!(body.size_hint().exact(), Some(9));
+        assert!(body.frame().await.unwrap().unwrap().is_trailers());
+        assert_eq!(body.size_hint().exact(), Some(9));
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "remaining");
+
+        let unknown = PrefixReplayBody::new(
+            VecDeque::from([Frame::data(Bytes::from_static(b"prefix"))]),
+            TestBody::from_chunks(&[b"stream"]),
+        );
+        assert_eq!(unknown.size_hint().lower(), 6);
+        assert_eq!(unknown.size_hint().upper(), None);
     }
 }

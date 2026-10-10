@@ -1,8 +1,5 @@
 import { create } from "zustand";
-import type {
-  BreakpointSettings,
-  PendingBreakpoint,
-} from "../api/breakpoint";
+import type { BreakpointSettings, PendingBreakpoint } from "../api/breakpoint";
 import {
   getBreakpointSettings,
   getPendingBreakpoints,
@@ -15,6 +12,7 @@ import type {
   BreakpointSettingsPushData,
   BreakpointResumedPushData,
 } from "../services/pushService";
+import { useFilterPanelStore } from "./useFilterPanelStore";
 import { useTrafficStore } from "./useTrafficStore";
 
 export interface PausedBreakpoint {
@@ -30,6 +28,8 @@ export interface PausedBreakpoint {
   originalHeaders: [string, string][];
   body: string;
   originalBody: string;
+  bodyEncoding: "utf8" | "base64";
+  bodyRepresentation: "decoded" | "raw";
   bodyOmitted: boolean;
   bodySize?: number;
   maxBodyBytes: number;
@@ -49,13 +49,28 @@ interface BreakpointState {
   pausedRequests: Map<string, PausedBreakpoint>;
   pausedResponses: Map<string, PausedBreakpoint>;
   pendingRevision: number;
+  settingsRevision: number;
   pushInitialized: boolean;
+  autoSelected: boolean;
+  pendingOnly: boolean;
+  resumeError: string | null;
+  setPendingOnly: (value: boolean) => void;
+  updateBodyEncoding: (
+    requestId: string,
+    phase: BreakpointPhase,
+    encoding: "utf8" | "base64",
+    body: string,
+  ) => void;
 
   fetchSettings: () => Promise<void>;
   fetchPending: () => Promise<void>;
   toggleEnabled: (enabled: boolean) => Promise<void>;
   applySettings: (settings: BreakpointSettings) => void;
-  updatePausedBody: (requestId: string, phase: BreakpointPhase, body: string) => void;
+  updatePausedBody: (
+    requestId: string,
+    phase: BreakpointPhase,
+    body: string,
+  ) => void;
   updatePausedHeaders: (
     requestId: string,
     phase: BreakpointPhase,
@@ -78,7 +93,9 @@ interface BreakpointState {
 type SnapshotLike = PendingBreakpoint | BreakpointPausedPushData;
 
 const fromSnapshot = (data: SnapshotLike): PausedBreakpoint => {
-  const headers = data.headers.map(([name, value]) => [name, value] as [string, string]);
+  const headers = data.headers.map(
+    ([name, value]) => [name, value] as [string, string],
+  );
   const body = data.body ?? "";
   return {
     requestId: data.request_id,
@@ -93,6 +110,8 @@ const fromSnapshot = (data: SnapshotLike): PausedBreakpoint => {
     originalHeaders: headers.map(([name, value]) => [name, value]),
     body,
     originalBody: body,
+    bodyEncoding: data.body_encoding ?? "utf8",
+    bodyRepresentation: data.body_representation ?? "decoded",
     bodyOmitted: !!data.body_omitted,
     bodySize: data.body_size,
     maxBodyBytes: data.max_body_bytes ?? 1024 * 1024,
@@ -104,11 +123,35 @@ const fromSnapshot = (data: SnapshotLike): PausedBreakpoint => {
   };
 };
 
-const mapsFromSnapshots = (items: SnapshotLike[]) => {
+const mergeSnapshot = (data: SnapshotLike, previous: BreakpointState) => {
+  const incoming = fromSnapshot(data);
+  const existing = (
+    incoming.phase === "request"
+      ? previous.pausedRequests
+      : previous.pausedResponses
+  ).get(incoming.requestId);
+  return existing?.pausedAtMs === incoming.pausedAtMs
+    ? {
+        ...existing,
+        deadlineAtMs: incoming.deadlineAtMs,
+        localDeadlineAtMs: incoming.localDeadlineAtMs,
+      }
+    : incoming;
+};
+
+const selectFirstPaused = (paused: PausedBreakpoint) => {
+  useFilterPanelStore.getState().setDetailPanelCollapsed(false);
+  useTrafficStore.getState().setSelectedId(paused.requestId);
+};
+
+const mapsFromSnapshots = (
+  items: SnapshotLike[],
+  previous: BreakpointState,
+) => {
   const pausedRequests = new Map<string, PausedBreakpoint>();
   const pausedResponses = new Map<string, PausedBreakpoint>();
   for (const item of items) {
-    const paused = fromSnapshot(item);
+    const paused = mergeSnapshot(item, previous);
     (paused.phase === "request" ? pausedRequests : pausedResponses).set(
       paused.requestId,
       paused,
@@ -137,17 +180,23 @@ const applyPausedToTrafficDetail = (paused: PausedBreakpoint) => {
         status: paused.status ?? state.currentRecord.status,
         response_headers: paused.headers,
         original_response_headers:
-          state.currentRecord.original_response_headers ?? paused.originalHeaders,
+          state.currentRecord.original_response_headers ??
+          paused.originalHeaders,
       },
       responseBody: paused.bodyOmitted ? state.responseBody : paused.body,
     };
   });
 };
 
-const scheduleTrafficRefetch = (requestId: string, delay = 500, retries = 4) => {
+const scheduleTrafficRefetch = (
+  requestId: string,
+  delay = 500,
+  retries = 4,
+) => {
   setTimeout(() => {
     const state = useTrafficStore.getState();
-    if (state.currentRecord?.id !== requestId) return;
+    if (state.selectedId !== requestId || state.currentRecord?.id !== requestId)
+      return;
     void state.fetchTrafficDetail(requestId);
     if (retries > 1) scheduleTrafficRefetch(requestId, delay * 2, retries - 1);
   }, delay);
@@ -176,22 +225,36 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
   pausedRequests: new Map(),
   pausedResponses: new Map(),
   pendingRevision: 0,
+  settingsRevision: 0,
   pushInitialized: false,
+  autoSelected: false,
+  pendingOnly: false,
+  resumeError: null,
+  setPendingOnly: (pendingOnly) =>
+    set({ pendingOnly: get().enabled && pendingOnly }),
+  updateBodyEncoding: (requestId, phase, bodyEncoding, body) => {
+    updateMapItem(get, set, requestId, phase, (current) => ({
+      ...current,
+      bodyEncoding,
+      body,
+    }));
+  },
 
   fetchSettings: async () => {
+    if (get().loading) return;
+    const revision = get().settingsRevision;
     try {
       const settings = await getBreakpointSettings();
-      set({
-        enabled: settings.enabled,
-        maxBodyBytes: settings.max_body_bytes,
-        loading: false,
-      });
-    } catch {
+      if (revision !== get().settingsRevision) return;
+      get().applySettings(settings);
       set({ loading: false });
+    } catch {
+      if (revision === get().settingsRevision) set({ loading: false });
     }
   },
 
   fetchPending: async () => {
+    if (get().loading || get().pendingLoading || !get().enabled) return;
     const revision = get().pendingRevision;
     set({ pendingLoading: true });
     try {
@@ -201,45 +264,54 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
         queueMicrotask(() => void get().fetchPending());
         return;
       }
-      set({ ...mapsFromSnapshots(pending), pendingLoading: false });
-      for (const item of pending) applyPausedToTrafficDetail(fromSnapshot(item));
+      const maps = mapsFromSnapshots(pending, get());
+      set({ ...maps, pendingLoading: false });
+      const first =
+        maps.pausedRequests.values().next().value ??
+        maps.pausedResponses.values().next().value;
+      if (first && !get().autoSelected) {
+        set({ autoSelected: true });
+        selectFirstPaused(first);
+      }
+      for (const paused of [
+        ...maps.pausedRequests.values(),
+        ...maps.pausedResponses.values(),
+      ])
+        applyPausedToTrafficDetail(paused);
     } catch {
       set({ pendingLoading: false });
     }
   },
 
   toggleEnabled: async (enabled) => {
-    set({ loading: true });
+    const revision = get().settingsRevision + 1;
+    set({ loading: true, settingsRevision: revision });
     try {
       const settings = await updateBreakpointSettings({
         enabled,
         max_body_bytes: get().maxBodyBytes,
       });
-      set({
-        enabled: settings.enabled,
-        maxBodyBytes: settings.max_body_bytes,
-        loading: false,
-        ...(settings.enabled
-          ? {}
-          : {
-              pausedRequests: new Map(),
-              pausedResponses: new Map(),
-              pendingRevision: get().pendingRevision + 1,
-            }),
-      });
+      if (revision !== get().settingsRevision) return;
+      get().applySettings(settings);
+      if (settings.enabled) void get().fetchPending();
     } catch (error) {
-      set({ loading: false });
+      if (revision === get().settingsRevision) set({ loading: false });
       throw error;
     }
   },
 
   applySettings: (settings) => {
     set({
+      settingsRevision: get().settingsRevision + 1,
+      loading: false,
       enabled: settings.enabled,
+      autoSelected:
+        settings.enabled === get().enabled ? get().autoSelected : false,
       maxBodyBytes: settings.max_body_bytes,
       ...(settings.enabled
         ? {}
         : {
+            pendingOnly: false,
             pausedRequests: new Map(),
             pausedResponses: new Map(),
             pendingRevision: get().pendingRevision + 1,
@@ -287,6 +359,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
         ? get().pausedRequests.get(requestId)
         : get().pausedResponses.get(requestId);
     if (!paused) return false;
+    set({ resumeError: null });
     try {
       const result = await resumeBreakpoint({
         request_id: requestId,
@@ -298,6 +371,12 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
               status: phase === "response" ? paused.status : undefined,
               headers: paused.headers,
               body: paused.bodyOmitted ? undefined : paused.body,
+              body_encoding: paused.bodyOmitted
+                ? undefined
+                : paused.bodyEncoding,
+              body_representation: paused.bodyOmitted
+                ? undefined
+                : paused.bodyRepresentation,
             }
           : {}),
       });
@@ -306,7 +385,17 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
       get().removePaused(requestId, phase);
       scheduleTrafficRefetch(requestId);
       return true;
-    } catch {
+    } catch (error) {
+      const failure = error as {
+        response?: { data?: { error?: string } };
+        message?: string;
+      };
+      set({
+        resumeError:
+          failure.response?.data?.error ??
+          failure.message ??
+          "Unable to resume breakpoint",
+      });
       await get().fetchPending();
       return false;
     }
@@ -317,24 +406,36 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
     set({ pushInitialized: true });
 
     pushService.onBreakpointPaused((data) => {
-      const paused = fromSnapshot(data);
-      const key = paused.phase === "request" ? "pausedRequests" : "pausedResponses";
+      if (!get().enabled) return;
+      const paused = mergeSnapshot(data, get());
+      const key =
+        paused.phase === "request" ? "pausedRequests" : "pausedResponses";
       const next = new Map(get()[key]);
       next.set(paused.requestId, paused);
       set({
         [key]: next,
         pendingRevision: get().pendingRevision + 1,
       } as Partial<BreakpointState>);
+      if (!get().autoSelected) {
+        set({ autoSelected: true });
+        selectFirstPaused(paused);
+      }
       applyPausedToTrafficDetail(paused);
       void useTrafficStore.getState().reloadRecords();
     });
 
-    pushService.onBreakpointSettingsUpdated((data: BreakpointSettingsPushData) => {
-      get().applySettings({
-        enabled: data.enabled,
-        max_body_bytes: data.max_body_bytes,
-      });
-    });
+    pushService.onBreakpointSettingsUpdated(
+      (data: BreakpointSettingsPushData) => {
+        const wasEnabled = get().enabled;
+        get().applySettings({
+          enabled: data.enabled,
+          max_body_bytes: data.max_body_bytes,
+        });
+        // A pause can precede this settings push while the local gate is stale.
+        // Reconcile even when this push invalidates an in-flight toggle response.
+        if (data.enabled && !wasEnabled) void get().fetchPending();
+      },
+    );
 
     pushService.onBreakpointResumed((data: BreakpointResumedPushData) => {
       get().removePaused(data.request_id, data.phase);
@@ -343,11 +444,14 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
 
     pushService.onConnectionChange(({ connected }) => {
       if (connected) {
-        void get().fetchSettings();
-        void get().fetchPending();
+        void get()
+          .fetchSettings()
+          .then(() => get().fetchPending());
       }
     });
 
-    void get().fetchPending();
+    void get()
+      .fetchSettings()
+      .then(() => get().fetchPending());
   },
 }));

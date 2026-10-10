@@ -172,7 +172,7 @@ fn generate_components() -> serde_json::Value {
                     "phase": {"type": "string", "enum": ["request", "response"], "description": "Breakpoint phase"},
                     "method": {"type": "string", "nullable": true, "description": "Edited request method; accepted only for request phase"},
                     "url": {"type": "string", "format": "uri", "nullable": true, "description": "Edited absolute HTTP(S) request URL; accepted only for request phase"},
-                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "nullable": true, "description": "Edited response status; accepted only for response phase"},
+                    "status": {"type": "integer", "minimum": 200, "maximum": 599, "nullable": true, "description": "Edited final response status; accepted only for response phase. Informational statuses cannot complete the paused exchange."},
                     "headers": {
                         "type": "array",
                         "nullable": true,
@@ -187,8 +187,10 @@ fn generate_components() -> serde_json::Value {
                     "body": {
                         "type": "string",
                         "nullable": true,
-                        "description": "Edited body. null keeps the original body"
-                    }
+                        "description": "Edited body bounded by max_body_bytes after Base64 decoding. null keeps the original body; invalid edits return 400 and preserve the pause."
+                    },
+                    "body_encoding": {"type": "string", "enum": ["utf8", "base64"], "default": "utf8"},
+                    "body_representation": {"type": "string", "enum": ["decoded", "raw"], "default": "decoded", "description": "Decoded edits are recompressed using Content-Encoding; raw edits are exact wire bytes."}
                 }
             },
             "PendingBreakpoint": {
@@ -205,6 +207,8 @@ fn generate_components() -> serde_json::Value {
                         "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "string"}}
                     },
                     "body": {"type": "string", "nullable": true},
+                    "body_encoding": {"type": "string", "enum": ["utf8", "base64"]},
+                    "body_representation": {"type": "string", "enum": ["decoded", "raw"]},
                     "body_omitted": {"type": "boolean"},
                     "body_size": {"type": "integer", "nullable": true},
                     "max_body_bytes": {"type": "integer"},

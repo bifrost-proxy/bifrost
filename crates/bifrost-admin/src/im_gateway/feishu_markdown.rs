@@ -360,13 +360,17 @@ fn cache_image_key(key: String, image_key: String) {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        if cache.len() >= MAX_IMAGE_CACHE_ENTRIES && !cache.contains_key(&key) {
-            if let Some(eviction_key) = cache.keys().next().cloned() {
-                cache.remove(&eviction_key);
-            }
-        }
-        cache.insert(key, image_key);
+        insert_image_key(&mut cache, key, image_key);
     }
+}
+
+fn insert_image_key(cache: &mut HashMap<String, String>, key: String, image_key: String) {
+    if cache.len() >= MAX_IMAGE_CACHE_ENTRIES && !cache.contains_key(&key) {
+        if let Some(eviction_key) = cache.keys().next().cloned() {
+            cache.remove(&eviction_key);
+        }
+    }
+    cache.insert(key, image_key);
 }
 
 #[cfg(test)]
@@ -433,17 +437,45 @@ mod tests {
 
     #[test]
     fn image_cache_is_bounded_and_updates_existing_keys() {
+        // Capacity pressure must not evict images used by concurrent async tests.
+        let mut cache = HashMap::new();
         let prefix = format!("bounded-cache-{}", std::process::id());
         for index in 0..=MAX_IMAGE_CACHE_ENTRIES {
-            cache_image_key(format!("{prefix}-{index}"), format!("img_{index}"));
+            insert_image_key(
+                &mut cache,
+                format!("{prefix}-{index}"),
+                format!("img_{index}"),
+            );
         }
-        cache_image_key(format!("{prefix}-256"), "img_updated".to_string());
+        insert_image_key(
+            &mut cache,
+            format!("{prefix}-256"),
+            "img_updated".to_string(),
+        );
         assert_eq!(
-            cached_image_key(&format!("{prefix}-256")).as_deref(),
+            cache.get(&format!("{prefix}-256")).map(String::as_str),
             Some("img_updated")
         );
-        let cache = IMAGE_KEY_CACHE.get().unwrap().lock().unwrap();
-        assert!(cache.len() <= MAX_IMAGE_CACHE_ENTRIES);
+        assert_eq!(cache.len(), MAX_IMAGE_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn updating_image_key_at_capacity_preserves_other_images() {
+        let mut cache = HashMap::new();
+        for index in 0..MAX_IMAGE_CACHE_ENTRIES {
+            insert_image_key(&mut cache, format!("key-{index}"), format!("img_{index}"));
+        }
+        let before = cache.clone();
+        insert_image_key(&mut cache, "key-128".to_string(), "img_updated".to_string());
+        assert_eq!(cache.len(), MAX_IMAGE_CACHE_ENTRIES);
+        for (key, value) in before {
+            let expected = if key == "key-128" {
+                "img_updated"
+            } else {
+                value.as_str()
+            };
+            assert_eq!(cache.get(&key).map(String::as_str), Some(expected));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

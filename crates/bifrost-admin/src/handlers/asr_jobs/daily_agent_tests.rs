@@ -5848,6 +5848,10 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
         ],
     )
     .await;
+    let enqueue_reserved = DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains(&task.id);
     // The Windows full-suite job can take well over a minute to schedule the
     // spawned PowerShell mock under load. Bound the complete report + cleanup
     // lifecycle with one wall-clock deadline so scheduler delay is tolerated
@@ -5870,9 +5874,54 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .contains(&task.id);
+    let mut diagnostics = Vec::new();
+    if completion.is_err() {
+        // TempDir is removed during unwinding. Put bounded fixture diagnostics
+        // in the assertion output so Windows CI retains the actual runner error.
+        let read_excerpt = |path: &Path| {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            match std::fs::File::open(path)
+                .and_then(|file| file.take(8192).read_to_end(&mut bytes))
+            {
+                Ok(_) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(error) => format!("unavailable: {error}"),
+            }
+        };
+        let processed_path = daily_agent_processed_state_path(&task.id);
+        diagnostics.push(format!(
+            "processed_state={}",
+            read_excerpt(&processed_path)
+        ));
+        diagnostics.push(format!("data_dir={}", bifrost_storage::data_dir().display()));
+        for job in crate::worker_runtime::worker_jobs()
+            .into_iter()
+            .filter(|job| job.logical_job_id.as_deref().is_some_and(|id| id.contains(&task.id)))
+            .take(8)
+        {
+            diagnostics.push(format!(
+                "worker_job={} status={:?} error={}",
+                job.id,
+                job.status,
+                job.error.unwrap_or_default().chars().take(8192).collect::<String>()
+            ));
+        }
+        let runs_dir = temp.path().join("im_gateway/runs");
+        match std::fs::read_dir(&runs_dir) {
+            Ok(entries) => {
+                for entry in entries.flatten().take(8) {
+                    for name in ["result.json", "cli.stderr.log", "cli.stdout.log"] {
+                        let path = entry.path().join(name);
+                        diagnostics.push(format!("{}: {}", path.display(), read_excerpt(&path)));
+                    }
+                }
+            }
+            Err(error) => diagnostics.push(format!("runner artifacts unavailable: {error}")),
+        }
+    }
     assert!(
         completion.is_ok(),
-        "after-ASR daily agent did not finish within {completion_wait:?}: report_exists={}, running_marker={running}, report={}",
+        "after-ASR daily agent did not finish within {completion_wait:?}: enqueue_reserved={enqueue_reserved}, report_exists={}, running_marker={running}, report={}, diagnostics={diagnostics:?}",
         report.is_file(),
         report.display()
     );

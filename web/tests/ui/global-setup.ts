@@ -1,14 +1,15 @@
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { createWriteStream } from "node:fs";
+import { constants, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
 import { allocateUiTestEnv } from "./helpers/test-env";
 
 const env = await allocateUiTestEnv();
 const backendPort = env.backendPort;
-const BASE_PROXY_URL = process.env.PROXY_URL || `http://127.0.0.1:${backendPort}`;
+const BASE_PROXY_URL =
+  process.env.PROXY_URL || `http://127.0.0.1:${backendPort}`;
 const BACKEND_URL =
   process.env.ADMIN_STATUS_URL ||
   `${BASE_PROXY_URL.replace(/\/$/, "")}/_bifrost/api/proxy/address`;
@@ -50,20 +51,19 @@ const waitForBackend = async () => {
   return false;
 };
 
-const ensureBackendBinaryBuilt = async (repoRoot: string, targetDir: string) => {
-  await execFileAsync(
-    "cargo",
-    ["build", "--bin", "bifrost"],
-    {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        CARGO_TARGET_DIR: targetDir,
-      },
-      timeout: 15 * 60 * 1000,
-      maxBuffer: 20 * 1024 * 1024,
+const ensureBackendBinaryBuilt = async (
+  repoRoot: string,
+  targetDir: string,
+) => {
+  await execFileAsync("cargo", ["build", "--bin", "bifrost"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CARGO_TARGET_DIR: targetDir,
     },
-  );
+    timeout: 15 * 60 * 1000,
+    maxBuffer: 20 * 1024 * 1024,
+  });
 };
 
 const isProcessAlive = (pid: number) => {
@@ -94,7 +94,9 @@ const stopTrackedProcess = async (pidFile: string) => {
 };
 
 const startTrafficGenerator = async (repoRoot: string) => {
-  const trafficPidFile = process.env.BIFROST_UI_TEST_TRAFFIC_PID_FILE || path.join(repoRoot, ".ui-traffic.pid");
+  const trafficPidFile =
+    process.env.BIFROST_UI_TEST_TRAFFIC_PID_FILE ||
+    path.join(repoRoot, ".ui-traffic.pid");
   try {
     const pidText = await fs.readFile(trafficPidFile, "utf-8");
     const pid = Number(pidText);
@@ -105,15 +107,21 @@ const startTrafficGenerator = async (repoRoot: string) => {
     void 0;
   }
 
-  const generatorPath = path.join(repoRoot, "web", "tests", "ui", "traffic-generator.cjs");
+  const generatorPath = path.join(
+    repoRoot,
+    "web",
+    "tests",
+    "ui",
+    "traffic-generator.cjs",
+  );
   const child = spawn("node", [generatorPath], {
     cwd: path.join(repoRoot, "web"),
-      env: {
-        ...process.env,
-        PROXY_URL: BASE_PROXY_URL,
-      },
-      stdio: "ignore",
-      detached: true,
+    env: {
+      ...process.env,
+      PROXY_URL: BASE_PROXY_URL,
+    },
+    stdio: "ignore",
+    detached: true,
   });
   const pid = child.pid;
   if (!pid) {
@@ -124,46 +132,74 @@ const startTrafficGenerator = async (repoRoot: string) => {
 
 export default async () => {
   const repoRoot = getRepoRoot();
-  const pidFile = process.env.BIFROST_UI_TEST_PID_FILE || path.join(repoRoot, ".ui-backend.pid");
+  const pidFile =
+    process.env.BIFROST_UI_TEST_PID_FILE ||
+    path.join(repoRoot, ".ui-backend.pid");
   const ready = await isBackendReady();
   const accessConfigured = ready ? await hasAccessControlConfigured() : false;
 
   if (!ready || !accessConfigured) {
     await stopTrackedProcess(pidFile);
-    const dataDir = process.env.BIFROST_DATA_DIR || path.join(repoRoot, ".bifrost-ui-test");
-    const targetDir = process.env.BIFROST_UI_TEST_TARGET_DIR || path.join(repoRoot, ".bifrost-ui-target");
-    const binPath = path.join(targetDir, "debug", "bifrost");
-    const logPath = process.env.BIFROST_UI_TEST_LOG_FILE || path.join(repoRoot, ".ui-backend.log");
+    const dataDir =
+      process.env.BIFROST_DATA_DIR || path.join(repoRoot, ".bifrost-ui-test");
+    const targetDir =
+      process.env.BIFROST_UI_TEST_TARGET_DIR ||
+      path.join(repoRoot, ".bifrost-ui-target");
+    const prebuiltBinary = process.env.BIFROST_UI_TEST_PREBUILT_BINARY;
+    const binPath = prebuiltBinary
+      ? path.resolve(repoRoot, prebuiltBinary)
+      : path.join(
+          targetDir,
+          "debug",
+          process.platform === "win32" ? "bifrost.exe" : "bifrost",
+        );
+    const logPath =
+      process.env.BIFROST_UI_TEST_LOG_FILE ||
+      path.join(repoRoot, ".ui-backend.log");
     const logStream = createWriteStream(logPath, { flags: "a" });
 
-    await ensureBackendBinaryBuilt(repoRoot, targetDir);
+    if (prebuiltBinary) {
+      // The unified E2E entrypoint built this exact artifact immediately before
+      // Playwright. Validate it instead of triggering another frontend build.
+      await fs.access(binPath, constants.X_OK);
+      if (!(await fs.stat(binPath)).isFile()) {
+        throw new Error(`Prebuilt UI backend is not a file: ${binPath}`);
+      }
+      console.log(`[UI setup] Using prebuilt backend: ${binPath}`);
+    } else {
+      await ensureBackendBinaryBuilt(repoRoot, targetDir);
+    }
 
-    const child = spawn(binPath, [
-      "start",
-      "--host",
-      "127.0.0.1",
-      "-p",
-      String(backendPort),
-      "--unsafe-ssl",
-      "--no-system-proxy",
-      "--skip-cert-check",
-      "--access-mode",
-      "allow_all",
-    ], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PROXY_URL: BASE_PROXY_URL,
-        ADMIN_STATUS_URL: BACKEND_URL,
-        BIFROST_UI_TEST_PORT: String(backendPort),
-        BIFROST_DATA_DIR: dataDir,
-        BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1",
-        BIFROST_DISABLE_TRAY: "1",
-        CARGO_TARGET_DIR: targetDir,
+    const child = spawn(
+      binPath,
+      [
+        "start",
+        "--host",
+        "127.0.0.1",
+        "-p",
+        String(backendPort),
+        "--unsafe-ssl",
+        "--no-system-proxy",
+        "--skip-cert-check",
+        "--access-mode",
+        "allow_all",
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          PROXY_URL: BASE_PROXY_URL,
+          ADMIN_STATUS_URL: BACKEND_URL,
+          BIFROST_UI_TEST_PORT: String(backendPort),
+          BIFROST_DATA_DIR: dataDir,
+          BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1",
+          BIFROST_DISABLE_TRAY: "1",
+          CARGO_TARGET_DIR: targetDir,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
       },
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
-    });
+    );
     child.stdout?.pipe(logStream);
     child.stderr?.pipe(logStream);
     const pid = child.pid;
