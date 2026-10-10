@@ -68,6 +68,7 @@ beforeEach(() => {
   mocks.settings.mockResolvedValue({ enabled: true, max_body_bytes: 1024 });
   useBreakpointStore.setState({
     enabled: true,
+    pendingOnly: false,
     autoSelected: false,
     pendingRevision: 0,
     settingsRevision: 0,
@@ -77,6 +78,17 @@ beforeEach(() => {
   });
 });
 describe("breakpoint pending lifecycle", () => {
+  it("clears the paused filter on gate off and keeps it clear after re-enabling", () => {
+    const store = useBreakpointStore.getState();
+    store.setPendingOnly(true);
+    expect(useBreakpointStore.getState().pendingOnly).toBe(true);
+    store.applySettings({ enabled: false, max_body_bytes: 1024 });
+    expect(useBreakpointStore.getState().pendingOnly).toBe(false);
+    store.setPendingOnly(true);
+    expect(useBreakpointStore.getState().pendingOnly).toBe(false);
+    store.applySettings({ enabled: true, max_body_bytes: 1024 });
+    expect(useBreakpointStore.getState().pendingOnly).toBe(false);
+  });
   it("ignores an initial stale disabled GET after a settings push and preserves the first-hit latch", async () => {
     let resolveSettings!: (value: {
       enabled: boolean;

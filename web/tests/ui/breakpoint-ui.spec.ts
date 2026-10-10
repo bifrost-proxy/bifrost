@@ -68,6 +68,9 @@ test("Traffic toolbar exposes one global Breakpoint gate with rule-phase guidanc
     const toggle = page.getByTestId("toolbar-breakpoint-toggle");
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute("aria-checked", "false");
+    await expect(
+      page.getByRole("checkbox", { name: "Paused", exact: true }),
+    ).toHaveCount(0);
     await expect(page.locator("body")).not.toContainText("Hook Request");
     await expect(page.locator("body")).not.toContainText("Hook Response");
 
@@ -93,6 +96,20 @@ test("Traffic toolbar exposes one global Breakpoint gate with rule-phase guidanc
         return body.enabled;
       })
       .toBe(true);
+    const paused = page.getByRole("checkbox", { name: "Paused", exact: true });
+    await expect(paused).toBeVisible();
+    await expect(
+      page
+        .getByTestId("toolbar-quick-filters")
+        .getByRole("checkbox", { name: "Paused", exact: true }),
+    ).toBeVisible();
+    await paused.check();
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    await expect(paused).toHaveCount(0);
+    await toggle.click();
+    await expect(paused).toBeVisible();
+    await expect(paused).not.toBeChecked();
   } finally {
     await request.post(`${apiBase}/breakpoint/settings`, { data: original });
   }

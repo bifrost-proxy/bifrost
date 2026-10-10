@@ -7,6 +7,7 @@ import {
   waitForTrafficRow,
   waitForToast,
   setSelectValue,
+  openPage,
 } from "./helpers/admin-helpers";
 import {
   configureBreakpoint,
@@ -42,6 +43,61 @@ test.afterEach(async ({ request }) => {
     data: { enabled: false, max_body_bytes: 1048576 },
   });
 });
+
+for (const theme of ["light", "dark"] as const) {
+  test(`Breakpoint real UI Paused filter gate lifecycle in ${theme} theme`, async ({
+    page,
+  }, testInfo) => {
+    const upstream = await loopbackUpstream();
+    try {
+      await openPage(page, "traffic");
+      const paused = page.getByRole("checkbox", {
+        name: "Paused",
+        exact: true,
+      });
+      await expect(paused).toHaveCount(0);
+      await configureBreakpoint(
+        page,
+        `127.0.0.1:${upstream.port}/pause-only breakpoint://request`,
+      );
+      if ((await page.locator("html").getAttribute("data-theme")) !== theme) {
+        await page.getByTestId("theme-toggle").click();
+      }
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect(
+        page
+          .getByTestId("toolbar-quick-filters")
+          .getByRole("checkbox", { name: "Paused", exact: true }),
+      ).toBeVisible();
+      await expect(page.getByTestId("toolbar-quick-filters")).toContainText(
+        "Imported",
+      );
+      await expect(paused).not.toBeChecked();
+      await wireRequest(upstream.url("/ordinary-restores")).result;
+      const ordinary = await waitForTrafficRow(page, "/ordinary-restores");
+      await expect(ordinary).toBeVisible();
+      await paused.focus();
+      await page.keyboard.press("Space");
+      await expect(paused).toBeChecked();
+      await expect(ordinary).toHaveCount(0);
+      await page.screenshot({
+        path: testInfo.outputPath(`paused-${theme}.png`),
+        fullPage: true,
+      });
+      const gate = page.getByTestId("toolbar-breakpoint-toggle");
+      await gate.click();
+      await expect(gate).toHaveAttribute("aria-checked", "false");
+      await expect(paused).toHaveCount(0);
+      await expect(ordinary).toBeVisible();
+      await gate.click();
+      await expect(paused).toBeVisible();
+      await expect(paused).not.toBeChecked();
+      await expect(ordinary).toBeVisible();
+    } finally {
+      await upstream.close();
+    }
+  });
+}
 
 for (const phase of ["request", "response", "both", "all"] as const) {
   test(`Breakpoint real UI Rules → gate → ${phase} pauses and applies actual wire edits`, async ({
@@ -369,13 +425,28 @@ for (const resolution of ["resume", "timeout", "disable"] as const) {
         await page.getByTestId("toolbar-breakpoint-toggle").click();
       await client.result;
       await expect.poll(async () => (await pending(request)).length).toBe(0);
-      await expect(
-        page.getByTestId("traffic-row").filter({ hasText: "/pending" }),
-      ).toHaveCount(0);
-      if (resolution === "disable")
+      if (resolution === "disable") {
         await expect(
-          page.getByTestId("search-result-row").filter({ hasText: "/pending" }),
+          page.getByRole("checkbox", { name: "Paused", exact: true }),
         ).toHaveCount(0);
+        const result = page
+          .getByTestId("search-result-row")
+          .filter({ hasText: "/pending" });
+        await expect(result).toBeVisible();
+        await expect(result).not.toHaveAttribute(
+          "data-breakpoint-phase",
+          /request|response/,
+        );
+        await page.getByTestId("toolbar-breakpoint-toggle").click();
+        await expect(
+          page.getByRole("checkbox", { name: "Paused", exact: true }),
+        ).not.toBeChecked();
+        await expect(result).toBeVisible();
+      } else {
+        await expect(
+          page.getByTestId("traffic-row").filter({ hasText: "/pending" }),
+        ).toHaveCount(0);
+      }
     } finally {
       await upstream.close();
     }

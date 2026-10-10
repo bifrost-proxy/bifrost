@@ -230,7 +230,8 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
   autoSelected: false,
   pendingOnly: false,
   resumeError: null,
-  setPendingOnly: (pendingOnly) => set({ pendingOnly }),
+  setPendingOnly: (pendingOnly) =>
+    set({ pendingOnly: get().enabled && pendingOnly }),
   updateBodyEncoding: (requestId, phase, bodyEncoding, body) => {
     updateMapItem(get, set, requestId, phase, (current) => ({
       ...current,
@@ -310,6 +311,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
       ...(settings.enabled
         ? {}
         : {
+            pendingOnly: false,
             pausedRequests: new Map(),
             pausedResponses: new Map(),
             pendingRevision: get().pendingRevision + 1,

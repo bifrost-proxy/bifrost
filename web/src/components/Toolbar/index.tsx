@@ -157,6 +157,7 @@ export default function Toolbar({
       </Space>
 
       <div
+        data-testid="toolbar-quick-filters"
         style={{
           display: "flex",
           alignItems: "center",
@@ -199,6 +200,16 @@ export default function Toolbar({
           }}
         />
         {renderFilterGroup("imported", filterGroups.imported)}
+        {breakpointEnabled && (
+          <Checkbox
+            checked={pendingOnly}
+            onChange={(event) => onPendingOnlyChange?.(event.target.checked)}
+            data-testid="toolbar-breakpoint-pending-only"
+            style={{ fontSize: 12 }}
+          >
+            Paused
+          </Checkbox>
+        )}
       </div>
 
       <Space size={8}>
@@ -223,7 +234,8 @@ export default function Toolbar({
               </div>
               <div style={{ marginTop: 6 }}>
                 Matched HTTPS rules enable scoped TLS interception. The client
-                must trust the Bifrost CA certificate, including on custom ports.
+                must trust the Bifrost CA certificate, including on custom
+                ports.
               </div>
             </div>
           }
@@ -246,13 +258,6 @@ export default function Toolbar({
           onChange={onBreakpointToggle}
           data-testid="toolbar-breakpoint-toggle"
         />
-        <Checkbox
-          checked={pendingOnly}
-          onChange={(event) => onPendingOnlyChange?.(event.target.checked)}
-          data-testid="toolbar-breakpoint-pending-only"
-        >
-          Only breakpoint paused
-        </Checkbox>
         <div
           style={{
             width: 1,
