@@ -107,7 +107,7 @@ pub fn body_limit(state: &Option<Arc<AdminState>>, enabled: bool, fallback: usiz
 pub async fn read_breakpoint_body_bounded<B>(
     mut body: B,
     max_bytes: usize,
-) -> Result<crate::utils::bounded::BoundedBody<B>, hyper::Error>
+) -> Result<(crate::utils::bounded::BoundedBody<B>, Option<HeaderMap>), hyper::Error>
 where
     B: hyper::body::Body<Data = Bytes, Error = hyper::Error> + Unpin + Send + Sync + 'static,
 {
@@ -120,23 +120,81 @@ where
         let frame = match tokio::time::timeout_at(deadline, body.frame()).await {
             Ok(Some(frame)) => frame?,
             Ok(None) => break,
-            Err(_) => return Ok(BoundedBody::Exceeded(PrefixReplayBody::new(frames, body))),
+            Err(_) => {
+                return Ok((
+                    BoundedBody::Exceeded(PrefixReplayBody::new(frames, body)),
+                    None,
+                ))
+            }
         };
         if let Some(data) = frame.data_ref() {
             seen = seen.saturating_add(data.len());
         }
         frames.push_back(frame);
         if seen > max_bytes {
-            return Ok(BoundedBody::Exceeded(PrefixReplayBody::new(frames, body)));
+            return Ok((
+                BoundedBody::Exceeded(PrefixReplayBody::new(frames, body)),
+                None,
+            ));
         }
     }
     let mut bytes = bytes::BytesMut::with_capacity(seen);
+    let mut trailers = HeaderMap::new();
     for frame in frames {
-        if let Ok(data) = frame.into_data() {
-            bytes.extend_from_slice(&data);
+        match frame.into_data() {
+            Ok(data) => bytes.extend_from_slice(&data),
+            Err(frame) => {
+                if let Ok(fields) = frame.into_trailers() {
+                    for (name, value) in fields.iter() {
+                        trailers.append(name.clone(), value.clone());
+                    }
+                }
+            }
         }
     }
-    Ok(BoundedBody::Complete(bytes.freeze()))
+    let trailers = (!trailers.is_empty()).then_some(trailers);
+    Ok((BoundedBody::Complete(bytes.freeze()), trailers))
+}
+
+/// Replay exactly one trailer frame. An unknown size hint permits HTTP/1 chunked
+/// framing after capture; a Full body's exact hint would suppress its trailers.
+pub fn replay_breakpoint_body(bytes: Bytes, trailers: Option<HeaderMap>) -> BoxBody {
+    use http_body_util::{BodyExt, StreamBody};
+    if let Some(trailers) = trailers {
+        let frames = vec![
+            Ok::<_, hyper::Error>(hyper::body::Frame::data(bytes)),
+            Ok(hyper::body::Frame::trailers(trailers)),
+        ];
+        StreamBody::new(futures_util::stream::iter(frames)).boxed()
+    } else {
+        full_body(bytes)
+    }
+}
+
+pub fn close_bodyless_sse(
+    state: &Option<Arc<AdminState>>,
+    record_id: &str,
+    writer: Option<bifrost_admin::BodyStreamWriter>,
+) {
+    if let Some(writer) = writer {
+        writer.finish();
+    }
+    if let Some(state) = state {
+        state.sse_hub.set_closed(record_id);
+        let status = state.sse_hub.get_socket_status(record_id);
+        state.update_traffic_by_id(record_id, move |record| {
+            if let Some(status) = status.as_ref() {
+                record.socket_status = Some(status.clone());
+            } else if let Some(status) = record.socket_status.as_mut() {
+                status.is_open = false;
+            }
+            record.response_body_ref = None;
+            record.derived_response_body_ref = None;
+            record.response_size = 0;
+            record.download_bytes = 0;
+        });
+        state.sse_hub.unregister(record_id);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1540,7 +1598,7 @@ mod tests {
         .chain(futures_util::stream::pending());
         let body = StreamBody::new(frames);
         match read_breakpoint_body_bounded(body, 64).await.unwrap() {
-            BoundedBody::Exceeded(mut body) => assert_eq!(
+            (BoundedBody::Exceeded(mut body), None) => assert_eq!(
                 body.frame().await.unwrap().unwrap().into_data().unwrap(),
                 "prefix"
             ),
@@ -1553,7 +1611,7 @@ mod tests {
             .await
             .unwrap()
         {
-            BoundedBody::Exceeded(body) => {
+            (BoundedBody::Exceeded(body), None) => {
                 assert_eq!(body.collect().await.unwrap().to_bytes(), "oversize")
             }
             _ => panic!("oversize capture must be header-only"),
@@ -1565,9 +1623,107 @@ mod tests {
             .await
             .unwrap()
         {
-            BoundedBody::Complete(bytes) => assert_eq!(bytes, "ok"),
+            (BoundedBody::Complete(bytes), None) => assert_eq!(bytes, "ok"),
             _ => panic!("finite bounded capture must be editable"),
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_capture_resume_preserves_duplicate_trailers() {
+        use crate::utils::bounded::BoundedBody;
+        use http_body_util::{BodyExt, StreamBody};
+        let mut trailers = HeaderMap::new();
+        trailers.append("grpc-status", "0".parse().unwrap());
+        trailers.append("x-metadata", "first".parse().unwrap());
+        trailers.append("x-metadata", "second".parse().unwrap());
+        let frames = futures_util::stream::iter(vec![
+            Ok::<_, hyper::Error>(hyper::body::Frame::data(Bytes::from_static(b"ok"))),
+            Ok(hyper::body::Frame::trailers(trailers.clone())),
+        ]);
+        let body = match read_breakpoint_body_bounded(StreamBody::new(frames), 3)
+            .await
+            .unwrap()
+        {
+            (BoundedBody::Complete(bytes), trailers) => replay_breakpoint_body(bytes, trailers),
+            _ => panic!("finite bounded capture must be editable"),
+        };
+        assert_eq!(hyper::body::Body::size_hint(&body).exact(), None);
+        let collected = body.collect().await.unwrap();
+        assert_eq!(collected.trailers(), Some(&trailers));
+        assert_eq!(collected.to_bytes(), "ok");
+    }
+
+    #[test]
+    fn bodyless_sse_closes_hub_and_record_and_releases_active_writer() {
+        close_bodyless_sse(&None, "no-state", None);
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-bodyless-sse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let db = Arc::new(
+                bifrost_admin::TrafficDbStore::new(dir.join("traffic"), 100, 0, None).unwrap(),
+            );
+            let store = Arc::new(parking_lot::RwLock::new(bifrost_admin::BodyStore::new(
+                dir.join("body"),
+                1024,
+                1,
+                64,
+                Duration::from_secs(1),
+            )));
+            let state = Arc::new(
+                AdminState::new(0)
+                    .with_traffic_db_store_shared(db.clone())
+                    .with_body_store(store.clone()),
+            );
+            let mut record = bifrost_admin::TrafficRecord::new(
+                "bodyless-sse".into(),
+                "GET".into(),
+                "http://loopback.test".into(),
+            );
+            record.set_sse();
+            record.response_size = 5;
+            record.download_bytes = 5;
+            state.record_traffic(record);
+            state.sse_hub.register("bodyless-sse");
+            let writer = store
+                .read()
+                .start_stream("bodyless-sse", "sse_raw")
+                .unwrap();
+            assert_eq!(store.read().stats().active_stream_writers, 1);
+            close_bodyless_sse(&Some(state.clone()), "bodyless-sse", Some(writer));
+            assert_eq!(state.sse_hub.connection_count(), 0);
+            assert_eq!(store.read().stats().active_stream_writers, 0);
+            let mut record = db.get_by_id("bodyless-sse").unwrap();
+            assert!(!record
+                .socket_status
+                .as_ref()
+                .is_some_and(|status| status.is_open));
+            state.reconcile_traffic_record(&mut record);
+            assert!(!record.socket_status.unwrap().is_open);
+            assert_eq!(record.response_size, 0);
+            assert_eq!(record.download_bytes, 0);
+            assert!(record.response_body_ref.is_none());
+            assert!(record.derived_response_body_ref.is_none());
+            // Finite TLS capture unregisters the hub before replacing its record.
+            state.update_traffic_by_id("bodyless-sse", |record| {
+                record.set_sse();
+                record.socket_status.as_mut().unwrap().receive_count = 1;
+            });
+            close_bodyless_sse(&Some(state.clone()), "bodyless-sse", None);
+            assert!(
+                !db.get_by_id("bodyless-sse")
+                    .unwrap()
+                    .socket_status
+                    .unwrap()
+                    .is_open
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

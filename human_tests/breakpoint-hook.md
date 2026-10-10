@@ -12,7 +12,17 @@
 - UI 用例可执行：`pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts tests/ui/breakpoint-real-ui.spec.ts`。
 - OpenAPI 用例可执行：`cargo test -p bifrost-admin breakpoint_openapi --lib`。
 
-## 本次云环境执行记录（2026-10-09）
+## 复审修复云环境执行记录（2026-10-10）
+
+- 完整 UI 单批 **48/48 通过，耗时 9.2 分钟**：44 个真实 UI → 代理 → loopback upstream/client 用例及 4 个既有页面/配置用例；未跳过、未重试。由固定调试 CLI 的静态路由提供生产前端构建，无 Vite/HMR、无接口响应 mock；运行前后 106 个前端资源哈希一致。浅深主题截图已检查。
+- 新增真实 HTTP 有限 SSE 与 CONNECT 后非标准 TLS 端口的有限、无限、声明长度后停滞 SSE 204/304 用例，均验证暂停期间客户端无响应、恢复后无 payload、pending 清空且 Network socket 状态关闭。
+- 真实 H2 trailers/停滞流 3/3、真实 H3 3/3、Breakpoint API 5/5 通过。覆盖重复请求/响应 trailers、HTTP/1 chunked framing、编辑 Host 与 H3 authority 一致，以及 UTF-8 NUL 的最坏 JSON 转义、decoded 与传输包络超限拒绝。
+- 完整 fresh-profile instrumented admin 测试通过：3862 单元 + 7 集成；proxy：1086 单元 + 24 集成，各保留 1 项既有忽略。最后收紧的 H2 计时夹具另经普通与 instrumented 3/3 验证：从真实上游准备响应的时间点起必须在 3.5 秒内观察到暂停，仍保留零响应断言。
+- 整个分支相对 main `e8ed138e7319f572c012912113d97864f0100e68` 的 Rust 改动行覆盖率 **90.43%（463/512）**，原 90% 门禁不变。最终 LCOV SHA-256：`9cda059c5dd83757b8ee68c5781ca1add0445cd50cf27262e3121972d8151cd6`。Rust fmt、两个受影响 crate 的 all-targets/all-features Clippy（warnings denied），以及前端类型、修改文件 lint/format 与生产构建通过。
+- 测试 CLI SHA-256：`0d0874f0ba6e8bcfc9a3cca3f6e561035395be97f6a6f8c81a154c3974355b7c`。原始失败证据保留：首批 UI 47/48 中 Rules 导航 404 与前端资源重建同时发生；早期 H2 计时把 TLS 建连计入 3.5 秒；一次 admin 测试在共享 RulesStorage 初始化失败，夹具已改用私有规则目录。以上均不认定为 baseline 问题，不替代本轮通过结果。
+- `p2-ui-clean.log`、`p2-coverage-clean-tests.log`、最终 LCOV/diff 报告及截图保存在本地任务审计产物中。只使用隔离 loopback 与测试 TLS；未改变用户设备代理、DNS、VPN 或证书信任，测试服务与临时数据已清理。
+
+## 首次云环境功能执行记录（2026-10-09）
 
 - 最终单批完整浏览器验证 **38/38 通过，耗时 7.3 分钟**：34 个真实 UI → 代理 → loopback upstream/client 用例，加 4 个既有页面/配置用例。使用不可变生产二进制内嵌的 WebUI，无 Vite/HMR、无接口响应 mock。
 - 经 Rules 页面创建并保存规则，再通过 Network 全局开关开启；覆盖 request/response/both/all、首命中自动选中、并发不抢焦点和独立草稿、普通/Fuzzy 与仅看暂停组合筛选，以及放行/超时/关闭后的及时移除。
@@ -539,7 +549,18 @@
 
 **自动化入口：** `web/tests/ui/breakpoint-real-ui.spec.ts` 全部用例；`scripts/ci/run-ui-critical.sh` 包含该完整套件。所有 upstream 监听 `127.0.0.1`，代理独立数据目录、随机端口并带 `--no-system-proxy --skip-cert-check`。
 
-**本次执行状态：** 34 个真实 UI 回归用例与 4 个既有 UI 用例在最终不可变生产二进制上单批 38/38 通过；详见本次云环境执行记录。不沿用过去覆盖率或其它机器结果。
+**首次云环境执行状态（2026-10-09）：** 34 个真实 UI 回归用例与 4 个既有 UI 用例单批 38/38 通过；后续变更以对应日期的云环境执行记录为准，不沿用过去覆盖率或其它机器结果。
+
+
+### TC-BP-26: 协议元数据与 bodyless SSE 回归
+
+1. 通过 CONNECT 和测试 TLS 发送带 Content-Length 及重复 request trailers 的 HTTP/2 请求，命中 request 断点时确认上游未收到请求；不修改放行后，真实 HTTP/2 上游收到原 body 和全部 trailers。
+2. 真实 HTTP/2 上游返回 `grpc-status` 和重复 trailers，response 断点暂停期间客户端不得收到响应头或 body；不修改放行后，HTTP/1 客户端收到 chunked body 与完整 trailers，不出现 Content-Length。
+3. 在 Network 将有限 SSE、无限 SSE、声明 Content-Length 后停止发送的 SSE 修改为 204/304，验证客户端无 payload、pending 清空且 socket 状态关闭；对普通 HTTP 和 CONNECT 后非标准 TLS 端口都执行。
+4. 编辑请求 Host 后放行至真实 HTTP/3 上游，确认仅一个 Host，URI authority 与编辑值一致；连接仍使用原测试上游地址。
+5. 在 decoded body 大小上限内提交含 NUL 的 UTF-8 编辑，确认 JSON 转义不会误拒绝；decoded 超限或 JSON 传输包络超限必须拒绝并保留暂停。
+
+**自动化入口：** `crates/bifrost-proxy/tests/breakpoint_trailers_e2e.rs`、`crates/bifrost-proxy/tests/upstream_http3_e2e.rs`、`crates/bifrost-admin/tests/breakpoint_api.rs` 和 `web/tests/ui/breakpoint-real-ui.spec.ts`。
 
 
 ## 清理步骤

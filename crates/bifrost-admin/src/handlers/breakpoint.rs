@@ -79,12 +79,14 @@ async fn resume(
     state: &SharedAdminState,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
+    // A UTF-8 source byte can become a six-byte JSON escape (e.g. \u0000).
+    // The manager still enforces the decoded byte limit before removing pending.
     let body_bytes = match http_body_util::Limited::new(
         req.into_body(),
         state
             .breakpoint_manager
             .max_body_bytes()
-            .saturating_mul(2)
+            .saturating_mul(6)
             .saturating_add(64 * 1024),
     )
     .collect()

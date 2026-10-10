@@ -216,7 +216,13 @@ export async function addHeader(
 }
 
 export async function loopbackTlsUpstream(
-  mode: "text" | "gzip" | "stream" | "finite-sse" | "bodyless" = "text",
+  mode:
+    | "text"
+    | "gzip"
+    | "stream"
+    | "finite-sse"
+    | "stalled-sse"
+    | "bodyless" = "text",
   options: { status?: number } = {},
 ) {
   const { execFile } = await import("node:child_process");
@@ -269,6 +275,12 @@ export async function loopbackTlsUpstream(
         });
         res.flushHeaders();
         res.end();
+      } else if (mode === "stalled-sse") {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Content-Length": 100,
+        });
+        res.write("data: tls-stalled-stream\n\n");
       } else if (mode === "stream") {
         res.writeHead(200, { "Content-Type": "text/event-stream" });
         res.write("data: tls-open-stream\n\n");

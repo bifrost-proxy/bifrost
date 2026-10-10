@@ -3622,7 +3622,11 @@ mod coverage_boost {
             .save_script(ScriptType::Request, "cli-live", "function onRequest() {}")
             .await
             .unwrap();
-        let state = Arc::new(AdminState::new(0).with_script_manager(script_manager));
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        let state = Arc::new(
+            AdminState::new_for_test(0, rules_storage).with_script_manager(script_manager),
+        );
         let manager = Arc::new(PushManager::new(state));
         let (subscribed, mut subscribed_rx) = manager.register_client(
             "scripts-target".to_string(),

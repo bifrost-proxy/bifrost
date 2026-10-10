@@ -626,6 +626,60 @@ test("Breakpoint real UI finite SSE with known length remains editable on actual
 });
 
 for (const status of [204, 304]) {
+  test(`Breakpoint real UI finite SSE edit ${status} closes Network state`, async ({
+    page,
+    request,
+  }) => {
+    const original = "data: original\n\n";
+    const upstream = await loopbackUpstream((_req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Content-Length": Buffer.byteLength(original),
+      });
+      res.end(original);
+    });
+    try {
+      await configureBreakpoint(
+        page,
+        `127.0.0.1:${upstream.port}/finite-sse-bodyless breakpoint://response`,
+      );
+      const client = wireRequest(upstream.url("/finite-sse-bodyless"));
+      await expect(
+        page.getByTestId("breakpoint-editor-banner"),
+      ).toHaveAttribute("data-phase", "response");
+      const [pause] = await pending(request);
+      expect(pause).toBeTruthy();
+      await assertBlocked(
+        page,
+        client.completed,
+        client.responseStarted,
+        client.dataStarted,
+      );
+      await page.getByTestId("breakpoint-status-input").fill(String(status));
+      await page.getByTestId("breakpoint-apply-resume").click();
+      const result = await client.result;
+      expect(result.status).toBe(status);
+      expect(result.bytes.length).toBe(0);
+      await expect
+        .poll(async () => {
+          const response = await request.get(
+            `${apiBase}/traffic/${pause.request_id}`,
+          );
+          const record = await response.json();
+          return record.socket_status?.is_open;
+        })
+        .toBe(false);
+      const row = await waitForTrafficRow(page, "/finite-sse-bodyless");
+      await row.click();
+      await expect(page.getByTestId("breakpoint-editor-banner")).toHaveCount(0);
+      expect(await pending(request)).toHaveLength(0);
+    } finally {
+      await upstream.close();
+    }
+  });
+}
+
+for (const status of [204, 304]) {
   test(`Breakpoint real UI response edit ${status} enforces bodyless wire semantics`, async ({
     page,
     request,
@@ -1033,6 +1087,59 @@ for (const tlsCase of [
       await upstream.close();
     }
   });
+}
+
+for (const mode of ["finite-sse", "stream", "stalled-sse"] as const) {
+  for (const status of [204, 304]) {
+    test(`Breakpoint real UI TLS ${mode} edit ${status} closes Network state`, async ({
+      page,
+      request,
+    }) => {
+      const { loopbackTlsUpstream, tlsWireRequest } = await import(
+        "./helpers/breakpoint-real"
+      );
+      const upstream = await loopbackTlsUpstream(mode);
+      let completed = false;
+      let responseStarted = false;
+      try {
+        await configureBreakpoint(
+          page,
+          `127.0.0.1:${upstream.port}/tls-breakpoint breakpoint://response`,
+        );
+        const client = tlsWireRequest(upstream.port, () => {
+          responseStarted = true;
+        }).then((result) => {
+          completed = true;
+          return result;
+        });
+        await expect(
+          page.getByTestId("breakpoint-editor-banner"),
+        ).toHaveAttribute("data-phase", "response");
+        const [pause] = await pending(request);
+        await assertBlocked(
+          page,
+          () => completed,
+          () => responseStarted,
+        );
+        await page.getByTestId("breakpoint-status-input").fill(String(status));
+        await page.getByTestId("breakpoint-apply-resume").click();
+        expect((await client).stdout).toBe(`\n${status}`);
+        await expect
+          .poll(
+            async () =>
+              (
+                await (
+                  await request.get(`${apiBase}/traffic/${pause.request_id}`)
+                ).json()
+              ).socket_status?.is_open,
+          )
+          .toBe(false);
+        expect(await pending(request)).toHaveLength(0);
+      } finally {
+        await upstream.close();
+      }
+    });
+  }
 }
 
 for (const bodyless of ["HEAD", "204", "304"] as const) {

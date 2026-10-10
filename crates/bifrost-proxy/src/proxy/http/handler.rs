@@ -1206,6 +1206,30 @@ fn record_direct_status_traffic(
     state.record_traffic(record);
 }
 
+#[cfg(feature = "http3")]
+pub(super) fn build_http3_upstream_request(
+    parts: &hyper::http::request::Parts,
+    uri: Uri,
+    authority: &str,
+    body: Bytes,
+) -> std::result::Result<Request<Bytes>, hyper::http::Error> {
+    let uri = if let Some(host) = parts.headers.get(hyper::header::HOST) {
+        let mut uri_parts = uri.into_parts();
+        uri_parts.authority = Some(hyper::http::uri::Authority::try_from(host.as_bytes())?);
+        Uri::from_parts(uri_parts)?
+    } else {
+        uri
+    };
+    let mut builder = Request::builder().method(parts.method.clone()).uri(uri);
+    for (key, value) in parts.headers.iter() {
+        builder = builder.header(key, value);
+    }
+    if !parts.headers.contains_key(hyper::header::HOST) {
+        builder = builder.header(hyper::header::HOST, authority);
+    }
+    builder.body(body)
+}
+
 #[derive(Clone)]
 struct RetryableRequestBlueprint {
     method: hyper::Method,
@@ -2571,6 +2595,7 @@ pub async fn handle_http_request(
     let mut breakpoint_url_edited = false;
     let mut breakpoint_header_edits = None;
     let mut request_body_omitted_for_breakpoint = false;
+    let mut breakpoint_request_trailers = None;
     if request_hook_enabled && final_body.is_empty() {
         if let Some(body) = streaming_body.take() {
             let should_collect = admin_state
@@ -2584,10 +2609,11 @@ pub async fn handle_http_request(
             if should_collect {
                 let limit = body_limit(&admin_state, request_hook_enabled, max_body_buffer_size);
                 match super::breakpoint::read_breakpoint_body_bounded(body, limit).await {
-                    Ok(BoundedBody::Complete(bytes)) => {
+                    Ok((BoundedBody::Complete(bytes), trailers)) => {
                         final_body = bytes;
+                        breakpoint_request_trailers = trailers;
                     }
-                    Ok(BoundedBody::Exceeded(replay_body)) => {
+                    Ok((BoundedBody::Exceeded(replay_body), _)) => {
                         request_body_omitted_for_breakpoint = true;
                         streaming_body = Some(replay_body.boxed());
                     }
@@ -2599,7 +2625,10 @@ pub async fn handle_http_request(
                     }
                 }
                 if streaming_body.is_none() {
-                    let mode = BodyMode::Known(final_body.len());
+                    let mode = buffered_res_body_mode(
+                        final_body.len(),
+                        breakpoint_request_trailers.is_some(),
+                    );
                     let had_content_length = content_length.is_some();
                     normalize_req_headers(&mut parts, mode, had_content_length);
                 }
@@ -2702,7 +2731,7 @@ pub async fn handle_http_request(
         let mode = if streaming_body.is_some() {
             content_length.map_or(BodyMode::Stream, BodyMode::StreamWithLength)
         } else {
-            BodyMode::Known(final_body.len())
+            buffered_res_body_mode(final_body.len(), breakpoint_request_trailers.is_some())
         };
         normalize_req_headers(&mut parts, mode, content_length.is_some());
     }
@@ -2719,10 +2748,14 @@ pub async fn handle_http_request(
     } else {
         content_length.unwrap_or(0)
     };
-    let request_body_is_streaming = streaming_body.is_some();
+    let request_body_is_streaming =
+        streaming_body.is_some() || breakpoint_request_trailers.is_some();
     let outgoing_body = match streaming_body {
         Some(body) => body,
-        None => full_body(final_body.clone()),
+        None => super::breakpoint::replay_breakpoint_body(
+            final_body.clone(),
+            breakpoint_request_trailers,
+        ),
     };
     let outgoing_body = wrap_throttled_body(outgoing_body, resolved_rules.req_speed);
 
@@ -3012,14 +3045,12 @@ pub async fn handle_http_request(
 
     #[cfg(feature = "http3")]
     let h3_attempt = if should_try_http3_upstream {
-        let mut builder = Request::builder()
-            .method(parts.method.clone())
-            .uri(upstream_uri.clone());
-        for (key, value) in parts.headers.iter() {
-            builder = builder.header(key, value);
-        }
-        builder = builder.header("host", upstream_authority.clone());
-        match builder.body(final_body.clone()) {
+        match build_http3_upstream_request(
+            &parts,
+            upstream_uri.clone(),
+            &upstream_authority,
+            final_body.clone(),
+        ) {
             Ok(h3_req) => {
                 let start = Instant::now();
                 match try_send_http3_upstream(
@@ -3282,6 +3313,16 @@ pub async fn handle_http_request(
     let (mut res_parts, mut res_body_incoming, mut res_body_stream, mut pre_read_res, mut wait_ms) =
         upstream_result;
 
+    let response_breakpoint_enabled = admin_state
+        .as_ref()
+        .map(|state| {
+            state.breakpoint_manager.is_enabled()
+                && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
+        })
+        .unwrap_or(false);
+    let mut breakpoint_response_trailers = None;
+    let mut breakpoint_probe_exceeded = false;
+
     if res_body_stream.is_none() {
         let early_content_type = get_content_type(&res_parts);
         let early_content_length = res_parts
@@ -3304,13 +3345,31 @@ pub async fn handle_http_request(
             let body = res_body_incoming
                 .take()
                 .expect("upstream response body should exist");
-            match read_body_bounded(body, max_body_buffer_size).await {
+            // HTTP/2 recovery can consume the body before the breakpoint path.
+            // Preserve its trailers and share the breakpoint capture budget.
+            match if response_breakpoint_enabled {
+                super::breakpoint::read_breakpoint_body_bounded(
+                    body,
+                    body_limit(&admin_state, true, max_body_buffer_size),
+                )
+                .await
+                .map(|(body, trailers)| {
+                    breakpoint_response_trailers = trailers;
+                    body
+                })
+            } else {
+                read_body_bounded(body, max_body_buffer_size).await
+            } {
                 Ok(BoundedBody::Complete(bytes)) => {
                     let receive_ms = receive_start.elapsed().as_millis() as u64;
                     pre_read_res = Some((bytes.clone(), receive_ms));
-                    res_body_stream = Some(full_body(bytes));
+                    res_body_stream = Some(super::breakpoint::replay_breakpoint_body(
+                        bytes,
+                        breakpoint_response_trailers.clone(),
+                    ));
                 }
                 Ok(BoundedBody::Exceeded(replay_body)) => {
+                    breakpoint_probe_exceeded = response_breakpoint_enabled;
                     res_body_stream = Some(replay_body.boxed());
                 }
                 Err(e) => {
@@ -3538,13 +3597,6 @@ pub async fn handle_http_request(
             && !is_websocket
             && !is_sse
             && !base_needs_processing;
-    let response_breakpoint_enabled = admin_state
-        .as_ref()
-        .map(|state| {
-            state.breakpoint_manager.is_enabled()
-                && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
-        })
-        .unwrap_or(false);
     // Explicit debugging rules take precedence over the recording performance shortcut.
     skip_binary_recording &= !response_breakpoint_enabled;
     #[rustfmt::skip] let breakpoint_max_body_bytes = admin_state.as_ref().map_or(0, |state| state.breakpoint_manager.max_body_bytes());
@@ -3554,7 +3606,7 @@ pub async fn handle_http_request(
         } else {
             res_content_length
         };
-    #[rustfmt::skip] let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(response_breakpoint_enabled, is_websocket, is_sse, skip_binary_recording, breakpoint_capture_length, breakpoint_max_body_bytes);
+    #[rustfmt::skip] let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(response_breakpoint_enabled, is_websocket, is_sse, skip_binary_recording, breakpoint_capture_length, breakpoint_max_body_bytes) && !breakpoint_probe_exceeded;
     let response_breakpoint_header_only =
         response_breakpoint_enabled && !is_websocket && !response_breakpoint_can_buffer_body;
     let needs_processing = base_needs_processing || response_breakpoint_can_buffer_body;
@@ -3567,8 +3619,12 @@ pub async fn handle_http_request(
         is_websocket,
         is_sse,
     );
-    let mut res_body_too_large = false;
-    let mut res_body_limit = max_body_buffer_size;
+    let mut res_body_too_large = breakpoint_probe_exceeded;
+    let mut res_body_limit = body_limit(
+        &admin_state,
+        breakpoint_probe_exceeded,
+        max_body_buffer_size,
+    );
     if !is_sse && res_body_stream.is_none() {
         res_body_stream = Some(res_body_incoming.take().unwrap().boxed());
     }
@@ -3577,6 +3633,7 @@ pub async fn handle_http_request(
         && !is_sse
         && !skip_binary_recording
         && pre_read_res.is_none()
+        && !breakpoint_probe_exceeded
     {
         if let Some(len) = res_content_length {
             if len > max_body_buffer_size {
@@ -3599,7 +3656,12 @@ pub async fn handle_http_request(
                 };
                 res_body_limit = limit;
                 match if response_breakpoint_enabled {
-                    super::breakpoint::read_breakpoint_body_bounded(body, limit).await
+                    super::breakpoint::read_breakpoint_body_bounded(body, limit)
+                        .await
+                        .map(|(body, trailers)| {
+                            breakpoint_response_trailers = trailers;
+                            body
+                        })
                 } else {
                     read_body_bounded(body, limit).await
                 } {
@@ -3877,6 +3939,13 @@ pub async fn handle_http_request(
                 state.update_traffic_by_id(record_id, update_record);
             }
             if no_body {
+                if is_sse {
+                    super::breakpoint::close_bodyless_sse(
+                        &admin_state,
+                        record_id,
+                        sse_stream_writer.take(),
+                    );
+                }
                 return Ok(Response::from_parts(res_parts, full_body(Bytes::new())));
             }
         }
@@ -3890,7 +3959,7 @@ pub async fn handle_http_request(
                 )
                 .await
                 {
-                    Ok(BoundedBody::Complete(bytes)) => {
+                    Ok((BoundedBody::Complete(bytes), trailers)) => {
                         let mut final_body = bytes.clone();
                         let outcome = super::breakpoint::breakpoint_response_hook(
                             &admin_state,
@@ -3913,16 +3982,21 @@ pub async fn handle_http_request(
                             &mut final_body,
                         );
                         if no_body {
+                            super::breakpoint::close_bodyless_sse(
+                                &admin_state,
+                                record_id,
+                                sse_stream_writer.take(),
+                            );
                             return Ok(Response::from_parts(res_parts, full_body(Bytes::new())));
                         }
                         normalize_res_headers(
                             &mut res_parts,
-                            BodyMode::Known(final_body.len()),
+                            buffered_res_body_mode(final_body.len(), trailers.is_some()),
                             &method,
                         );
-                        res_body = full_body(final_body);
+                        res_body = super::breakpoint::replay_breakpoint_body(final_body, trailers);
                     }
-                    Ok(BoundedBody::Exceeded(replay)) => {
+                    Ok((BoundedBody::Exceeded(replay), _)) => {
                         let mut ignored = Bytes::new();
                         let outcome = super::breakpoint::breakpoint_response_hook(
                             &admin_state,
@@ -3939,6 +4013,11 @@ pub async fn handle_http_request(
                         )
                         .await;
                         if apply_edited_response_status(&mut res_parts, &method, outcome.status) {
+                            super::breakpoint::close_bodyless_sse(
+                                &admin_state,
+                                record_id,
+                                sse_stream_writer.take(),
+                            );
                             return Ok(Response::from_parts(res_parts, full_body(Bytes::new())));
                         }
                         normalize_res_headers(
@@ -4330,7 +4409,10 @@ pub async fn handle_http_request(
 
     normalize_res_headers(
         &mut res_parts,
-        buffered_res_body_mode(final_res_body.len(), !resolved_rules.trailers.is_empty()),
+        buffered_res_body_mode(
+            final_res_body.len(),
+            !resolved_rules.trailers.is_empty() || breakpoint_response_trailers.is_some(),
+        ),
         &method,
     );
 
@@ -4445,7 +4527,10 @@ pub async fn handle_http_request(
         if !no_body {
             normalize_res_headers(
                 &mut res_parts,
-                buffered_res_body_mode(final_res_body.len(), !resolved_rules.trailers.is_empty()),
+                buffered_res_body_mode(
+                    final_res_body.len(),
+                    !resolved_rules.trailers.is_empty() || breakpoint_response_trailers.is_some(),
+                ),
                 &method,
             );
         }
@@ -4681,7 +4766,13 @@ pub async fn handle_http_request(
         state.record_traffic(record);
     }
 
-    let response_body = wrap_throttled_body(full_body(final_res_body), resolved_rules.res_speed);
+    if is_no_body_response(res_parts.status, &method) {
+        breakpoint_response_trailers = None;
+    }
+    let response_body = wrap_throttled_body(
+        super::breakpoint::replay_breakpoint_body(final_res_body, breakpoint_response_trailers),
+        resolved_rules.res_speed,
+    );
     let body = with_trailers(response_body, &resolved_rules);
     Ok(Response::from_parts(res_parts, body))
 }
@@ -5485,6 +5576,44 @@ fn temporary_port_badge_rules_json(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "http3")]
+    #[test]
+    fn http3_breakpoint_host_override_is_not_duplicated_and_absent_host_is_derived() {
+        for (edited, expected) in [
+            (Some("edited.test"), "edited.test"),
+            (None, "upstream.test:8443"),
+        ] {
+            let (mut parts, _) = Request::builder()
+                .method(Method::POST)
+                .uri("https://upstream.test:8443/path")
+                .body(())
+                .unwrap()
+                .into_parts();
+            if let Some(host) = edited {
+                parts
+                    .headers
+                    .insert(hyper::header::HOST, HeaderValue::from_str(host).unwrap());
+            }
+            let request = build_http3_upstream_request(
+                &parts,
+                parts.uri.clone(),
+                "upstream.test:8443",
+                Bytes::from_static(b"body"),
+            )
+            .unwrap();
+            let hosts = request
+                .headers()
+                .get_all(hyper::header::HOST)
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(hosts, vec![expected]);
+            assert_eq!(request.uri().authority().unwrap().as_str(), expected);
+            assert_eq!(request.method(), Method::POST);
+            assert_eq!(request.body(), "body");
+        }
+    }
+
     use super::*;
     use crate::server::empty_body;
     use hyper::Method;
@@ -10081,12 +10210,23 @@ mod coverage_90_wave {
                 );
                 assert_eq!(response_body(response).await, body);
             }
-            let record = harness
+            let mut record = harness
                 .traffic_db
                 .get_by_id("REQ-handler-coverage")
                 .unwrap();
             assert_eq!(record.status, if bodyless { 204 } else { 218 });
             assert_eq!(record.response_size, if bodyless { 0 } else { body.len() });
+            assert!(!record
+                .socket_status
+                .as_ref()
+                .is_some_and(|status| status.is_open));
+            state.reconcile_traffic_record(&mut record);
+            assert!(!record.socket_status.as_ref().unwrap().is_open);
+            assert_eq!(state.sse_hub.connection_count(), 0);
+            if bodyless {
+                assert!(record.response_body_ref.is_none());
+                assert!(record.derived_response_body_ref.is_none());
+            }
         }
     }
 

@@ -288,3 +288,55 @@ async fn invalid_binary_edits_return_bad_request_and_keep_pending() {
     assert!(manager.has_pending("head"));
     server.abort();
 }
+
+#[tokio::test]
+async fn resume_accepts_worst_case_json_escaping_but_keeps_decoded_and_envelope_limits() {
+    let (base, manager, server) = start_admin().await;
+    let client = reqwest::Client::new();
+    let limit = 16 * 1024;
+    manager.update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+        enabled: true,
+        max_body_bytes: limit,
+    });
+    let mut rx = manager.pause(pending("escaped", "request"), true);
+    let escaped_body = "\0".repeat(limit);
+    let payload = serde_json::json!({
+        "request_id": "escaped", "phase": "request", "body": escaped_body,
+        "body_encoding": "utf8", "body_representation": "decoded",
+    });
+    assert!(payload.to_string().len() > limit * 2 + 64 * 1024);
+    assert_eq!(
+        resume(&client, &base, &payload.to_string()).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        rx.try_recv().unwrap().body.as_deref(),
+        Some(escaped_body.as_str())
+    );
+
+    let mut rx = manager.pause(pending("oversized-decoded", "request"), true);
+    let payload = serde_json::json!({
+        "request_id": "oversized-decoded", "phase": "request", "body": "\0".repeat(limit + 1),
+    });
+    assert_eq!(
+        resume(&client, &base, &payload.to_string()).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(manager.has_pending("oversized-decoded"));
+    assert!(rx.try_recv().is_err());
+
+    let response = client
+        .post(format!("{base}/api/breakpoint/resume"))
+        .body(" ".repeat(limit * 6 + 64 * 1024 + 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response
+        .text()
+        .await
+        .unwrap()
+        .contains("Failed to read body"));
+    assert!(manager.has_pending("oversized-decoded"));
+    server.abort();
+}
