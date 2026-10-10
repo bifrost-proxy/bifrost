@@ -19,7 +19,11 @@ import {
   waitForToast,
 } from "./admin-helpers";
 
-export async function configureBreakpoint(page: Page, content: string) {
+export async function configureBreakpoint(
+  page: Page,
+  content: string,
+  options: { enable?: boolean } = {},
+) {
   await openPage(page, "rules");
   await page.getByTestId("rule-new-button").click();
   const ruleName = uniqueName("real-breakpoint");
@@ -39,6 +43,7 @@ export async function configureBreakpoint(page: Page, content: string) {
   await page.getByTestId("rule-save-button").click();
   await waitForToast(page, "Saved");
   await openPage(page, "traffic");
+  if (options.enable === false) return;
   const gate = page.getByTestId("toolbar-breakpoint-toggle");
   await expect(gate).toHaveAttribute("aria-checked", "false");
   await gate.click();

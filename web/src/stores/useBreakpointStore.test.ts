@@ -78,6 +78,44 @@ beforeEach(() => {
   });
 });
 describe("breakpoint pending lifecycle", () => {
+  it("recovers a pause delivered before the enabling settings push even when that push invalidates the POST", async () => {
+    useBreakpointStore.setState({
+      enabled: false,
+      loading: false,
+      pendingLoading: false,
+    });
+    mocks.settings.mockResolvedValue({ enabled: false, max_body_bytes: 1024 });
+    useBreakpointStore.getState().connectPush();
+    await vi.waitFor(() => expect(mocks.settings).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    let resolveToggle!: (value: {
+      enabled: boolean;
+      max_body_bytes: number;
+    }) => void;
+    mocks.updateSettings.mockReturnValue(
+      new Promise((resolve) => {
+        resolveToggle = resolve;
+      }),
+    );
+    const toggle = useBreakpointStore.getState().toggleEnabled(true);
+    mocks.handlers.paused(snapshot("enable-race"));
+    expect(useBreakpointStore.getState().pausedRequests.size).toBe(0);
+    mocks.pending.mockResolvedValue([snapshot("enable-race")]);
+    mocks.handlers.settings({ enabled: true, max_body_bytes: 1024 });
+    resolveToggle({ enabled: true, max_body_bytes: 1024 });
+    await toggle;
+    await vi.waitFor(() =>
+      expect(
+        useBreakpointStore.getState().pausedRequests.has("enable-race"),
+      ).toBe(true),
+    );
+    expect(mocks.selected).toHaveBeenCalledWith("enable-race");
+    expect(mocks.selected).toHaveBeenCalledTimes(1);
+    mocks.handlers.settings({ enabled: false, max_body_bytes: 1024 });
+    mocks.handlers.paused(snapshot("late-after-disable"));
+    expect(useBreakpointStore.getState().pausedRequests.size).toBe(0);
+  });
+
   it("clears the paused filter on gate off and keeps it clear after re-enabling", () => {
     const store = useBreakpointStore.getState();
     store.setPendingOnly(true);

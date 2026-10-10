@@ -43,6 +43,8 @@ fn main() {
     );
 
     if env::var("SKIP_FRONTEND_BUILD").is_ok() {
+        // Prebuilt assets can change without any frontend source changing.
+        println!("cargo:rerun-if-changed={}", dist_dir.display());
         println!("cargo:warning=Skipping frontend build (SKIP_FRONTEND_BUILD is set)");
         ensure_dist_exists(&dist_dir);
         generate_gzip_dist(&dist_dir, &gzip_dist_dir);

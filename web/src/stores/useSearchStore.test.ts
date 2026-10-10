@@ -1,11 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { apiFetch } from '../api/apiFetch';
 import type { SearchResultItem, TrafficSummaryCompact } from '../types';
 import {
   coalesceLiveSearchMutation,
   createLiveSearchMutationAccumulator,
   MAX_LIVE_SEARCH_RECORD_IDS,
   mergeLiveSearchResults,
+  useSearchStore,
 } from './useSearchStore';
+
+vi.mock('../api/apiFetch', () => ({ apiFetch: vi.fn() }));
 
 const compact = (id: string, seq: number): TrafficSummaryCompact => ({
   id,
@@ -33,6 +37,64 @@ const compact = (id: string, seq: number): TrafficSummaryCompact => ({
 const result = (id: string, seq: number): SearchResultItem => ({
   record: compact(id, seq),
   matches: [{ field: 'url', preview: id, offset: 0 }],
+});
+
+it('does not let an aborted page overwrite a newer query or its pending loader', async () => {
+  const filters = {
+    protocols: [],
+    status_ranges: [],
+    content_types: [],
+    conditions: [],
+    client_ips: [],
+    client_apps: [],
+    account_names: [],
+    domains: [],
+  };
+  const pending: Array<(response: Response) => void> = [];
+  vi.mocked(apiFetch).mockImplementation(
+    () => new Promise<Response>((resolve) => pending.push(resolve)),
+  );
+  const page = (id: string) =>
+    new Response(
+      `event: result\ndata: ${JSON.stringify(result(id, 1))}\n\nevent: done\ndata: ${JSON.stringify({ total_searched: 1, total_matched: 1, has_more: false, next_cursor: null, search_id: id })}\n\n`,
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  const store = useSearchStore;
+  try {
+    store.getState().reset();
+    store.getState().setKeyword('old');
+    store.setState({
+      results: [result('old', 2)],
+      nextCursor: 50,
+      hasMore: true,
+      isSearching: false,
+    });
+    const oldPage = store.getState().loadMore(filters);
+    store.getState().setKeyword('new');
+    store.setState({
+      results: [result('new', 3)],
+      nextCursor: 40,
+      hasMore: true,
+      isSearching: false,
+    });
+    const newPage = store.getState().loadMore(filters);
+    pending[0](page('stale'));
+    await oldPage;
+    expect(store.getState().results.map((item) => item.record.id)).toEqual([
+      'new',
+    ]);
+    expect(store.getState().isLoadingMore).toBe(true);
+    pending[1](page('current'));
+    await newPage;
+    expect(store.getState().results.map((item) => item.record.id)).toEqual([
+      'new',
+      'current',
+    ]);
+    expect(store.getState().isLoadingMore).toBe(false);
+  } finally {
+    store.getState().reset();
+    vi.mocked(apiFetch).mockReset();
+  }
 });
 
 describe('mergeLiveSearchResults', () => {
@@ -69,7 +131,8 @@ describe('mergeLiveSearchResults', () => {
 
   it('keeps the live result window bounded to the newest 1000 records', () => {
     const replacements = Array.from({ length: 1200 }, (_, index) =>
-      result(`record-${index + 1}`, index + 1));
+      result(`record-${index + 1}`, index + 1),
+    );
     const merged = mergeLiveSearchResults([], [], replacements, []);
 
     expect(merged.results).toHaveLength(1000);
@@ -84,7 +147,10 @@ describe('coalesceLiveSearchMutation', () => {
       createLiveSearchMutationAccumulator(),
       {
         reset: false,
-        insertedIds: Array.from({ length: 1_200 }, (_, index) => `insert-${index}`),
+        insertedIds: Array.from(
+          { length: 1_200 },
+          (_, index) => `insert-${index}`,
+        ),
         updatedIds: [],
         deletedIds: [],
       },

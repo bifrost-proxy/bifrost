@@ -1861,9 +1861,13 @@ if [[ "$RUN_UI" -eq 1 ]]; then
   header "Running Playwright UI E2E suite"
   if [[ "$ui_build_ok" -eq 1 ]]; then
     if [[ "${BIFROST_UI_TEST_PROFILE:-full}" == "critical" ]]; then
-      run_and_capture "ui:playwright-critical" bash scripts/ci/run-ui-critical.sh
+      ui_backend_binary="$BIFROST_UI_TEST_TARGET_DIR/debug/bifrost"
+      if is_windows; then ui_backend_binary="${ui_backend_binary}.exe"; fi
+      run_and_capture "ui:playwright-critical" env BIFROST_UI_TEST_PREBUILT_BINARY="$ui_backend_binary" BIFROST_UI_TEST_SERVE_BUILT_FRONTEND=1 bash scripts/ci/run-ui-critical.sh
     else
-      run_and_capture "ui:playwright" "$PNPM_BIN" --dir web run test:ui
+      ui_backend_binary="$BIFROST_UI_TEST_TARGET_DIR/debug/bifrost"
+      if is_windows; then ui_backend_binary="${ui_backend_binary}.exe"; fi
+      run_and_capture "ui:playwright" env BIFROST_UI_TEST_PREBUILT_BINARY="$ui_backend_binary" BIFROST_UI_TEST_SERVE_BUILT_FRONTEND=1 "$PNPM_BIN" --dir web run test:ui
     fi
   else
     skip_suite "ui:playwright" "ui debug build failed"

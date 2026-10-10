@@ -1382,3 +1382,232 @@ test("Breakpoint real UI stalled declared request downgrades capture and preserv
     await upstream.close();
   }
 });
+
+for (const phase of ["request", "response"] as const) {
+  test(`Breakpoint real UI empty custom encoding ${phase} accepts metadata edits`, async ({
+    page,
+  }) => {
+    const upstream = await loopbackUpstream((_req, res) => {
+      res.writeHead(200, {
+        "Content-Encoding": "custom",
+        "Content-Length": "0",
+      });
+      res.end();
+    });
+    try {
+      await configureBreakpoint(
+        page,
+        `127.0.0.1:${upstream.port}/empty-custom breakpoint://${phase}`,
+      );
+      const client = wireRequest(upstream.url("/empty-custom"), {
+        body: "",
+        headers: { "Content-Encoding": "custom" },
+      });
+      await expect(
+        page.getByTestId("breakpoint-editor-banner"),
+      ).toHaveAttribute("data-phase", phase);
+      await expect(page.getByTestId("breakpoint-editor-banner")).toContainText(
+        "raw custom",
+      );
+      await assertBlocked(
+        page,
+        client.completed,
+        client.responseStarted,
+        client.dataStarted,
+      );
+      if (phase === "request")
+        await page.getByTestId("breakpoint-method-input").fill("PATCH");
+      else await page.getByTestId("breakpoint-status-input").fill("202");
+      await addHeader(page, phase, "X-Empty-Edit", "applied");
+      await page.getByTestId("breakpoint-apply-resume").click();
+      const result = await client.result;
+      expect(result.bytes).toHaveLength(0);
+      if (phase === "request") {
+        expect(upstream.records[0].method).toBe("PATCH");
+        expect(upstream.records[0].bytes).toHaveLength(0);
+        expect(upstream.records[0].headers["content-encoding"]).toBe("custom");
+        expect(upstream.records[0].headers["x-empty-edit"]).toBe("applied");
+      } else {
+        expect(result.status).toBe(202);
+        expect(result.headers["content-encoding"]).toBe("custom");
+        expect(result.headers["x-empty-edit"]).toBe("applied");
+      }
+    } finally {
+      await upstream.close();
+    }
+  });
+}
+
+for (const firstPageMatches of [0, 1]) {
+  test(`Breakpoint real UI Fuzzy Paused reaches older hits after ${firstPageMatches} visible first-page hits`, async ({
+    page,
+    request,
+  }) => {
+    const upstream = await loopbackUpstream();
+    const clients: ReturnType<typeof wireRequest>[] = [];
+    try {
+      await request.put(`${apiBase}/config/performance`, {
+        data: { breakpoint_timeout_ms: 60000 },
+      });
+      await configureBreakpoint(
+        page,
+        `127.0.0.1:${upstream.port}/reach-paused* breakpoint://request`,
+      );
+      clients.push(wireRequest(upstream.url("/reach-paused?older=1")));
+      await expect(
+        page.getByTestId("breakpoint-editor-banner"),
+      ).toHaveAttribute("data-phase", "request");
+      // Keep the real pause, but leave the live Network table while populating
+      // history so 1100 push updates do not dominate this bounded fixture.
+      await page
+        .locator('[data-testid="app-sidebar-nav-item"][data-nav-label="Rules"]')
+        .click();
+      await expect(page.getByTestId("rule-new-button")).toBeVisible();
+      // Streaming search caps a page at 1000 results (50 is its batch size).
+      // Populate real traffic beyond that cap without unbounded socket fan-out.
+      for (let offset = 0; offset < 1100; offset += 100) {
+        await Promise.all(
+          Array.from(
+            { length: 100 },
+            (_, i) =>
+              wireRequest(upstream.url(`/reach-completed-${offset + i}`))
+                .result,
+          ),
+        );
+      }
+      // The old hit must still be genuinely paused before testing pagination.
+      await expect.poll(async () => (await pending(request)).length).toBe(1);
+      await page
+        .locator(
+          '[data-testid="app-sidebar-nav-item"][data-nav-label="Network"]',
+        )
+        .click();
+      await expect(
+        page.getByTestId("toolbar-breakpoint-toggle"),
+      ).toHaveAttribute("aria-checked", "true");
+      if (firstPageMatches) {
+        clients.push(wireRequest(upstream.url("/reach-paused?newer=1")));
+        await expect.poll(async () => (await pending(request)).length).toBe(2);
+      }
+      await page.getByTestId("toolbar-breakpoint-pending-only").check();
+      await page.getByRole("button", { name: /Fuzzy Search/ }).click();
+      await page
+        .getByPlaceholder("Enter keyword to search all content...")
+        .fill("reach-");
+      const firstPage = page.waitForResponse(
+        (response) =>
+          response.url().includes("/api/search/stream") &&
+          response.request().postDataJSON()?.cursor === undefined,
+      );
+      await page.getByTestId("search-mode-submit").click();
+      const firstPageText = await (await firstPage).text();
+      expect(firstPageText).toContain('"has_more":true');
+      expect(firstPageText).not.toContain("older=1");
+      // No scroll or Load More click: a short filtered viewport must refill itself.
+      await expect(
+        page.getByTestId("search-result-row").filter({ hasText: "older=1" }),
+      ).toBeVisible();
+      await expect(page.getByTestId("search-result-row")).toHaveCount(
+        firstPageMatches + 1,
+      );
+      for (const client of clients)
+        await assertBlocked(
+          page,
+          client.completed,
+          client.responseStarted,
+          client.dataStarted,
+        );
+      await page.getByTestId("toolbar-breakpoint-toggle").click();
+      await Promise.all(clients.map((client) => client.result));
+    } finally {
+      clients.forEach((client) => client.abort());
+      await upstream.close();
+    }
+  });
+}
+
+test("Breakpoint real UI gate enable reconciles an earlier actual pause push", async ({
+  page,
+  request,
+}) => {
+  const upstream = await loopbackUpstream();
+  let client: ReturnType<typeof wireRequest> | undefined;
+  let heldSettings: string | Buffer | undefined;
+  let deliverSettings: ((message: string | Buffer) => void) | undefined;
+  let enableResponse!: () => void;
+  const enabledOnServer = new Promise<void>((resolve) => {
+    enableResponse = resolve;
+  });
+  let releaseResponse!: () => void;
+  const responseReleased = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+  let pauseForwarded!: () => void;
+  const actualPause = new Promise<void>((resolve) => {
+    pauseForwarded = resolve;
+  });
+  try {
+    await page.routeWebSocket("**/_bifrost/api/push**", (socket) => {
+      const server = socket.connectToServer();
+      socket.onMessage((message) => server.send(message));
+      server.onMessage((message) => {
+        const event = JSON.parse(message.toString()) as {
+          type: string;
+          data?: { enabled?: boolean };
+        };
+        if (
+          event.type === "breakpoint_settings_updated" &&
+          event.data?.enabled
+        ) {
+          heldSettings = message;
+          deliverSettings = (value) => socket.send(value);
+        } else {
+          socket.send(message);
+          if (event.type === "breakpoint_paused") pauseForwarded();
+        }
+      });
+    });
+    await configureBreakpoint(
+      page,
+      `127.0.0.1:${upstream.port}/enable-race breakpoint://request`,
+      { enable: false },
+    );
+    await page.route("**/_bifrost/api/breakpoint/settings", async (route) => {
+      if (
+        route.request().method() === "POST" &&
+        route.request().postDataJSON()?.enabled === true
+      ) {
+        const response = await route.fetch();
+        enableResponse();
+        await responseReleased;
+        await route.fulfill({ response });
+      } else await route.continue();
+    });
+    await page.getByTestId("toolbar-breakpoint-toggle").click();
+    await enabledOnServer;
+    client = wireRequest(upstream.url("/enable-race"));
+    await actualPause;
+    await expect.poll(async () => (await pending(request)).length).toBe(1);
+    expect(upstream.records).toHaveLength(0);
+    await expect(page.getByTestId("breakpoint-editor-banner")).toHaveCount(0);
+    expect(heldSettings).toBeDefined();
+    deliverSettings!(heldSettings!);
+    releaseResponse();
+    await expect(page.getByTestId("breakpoint-editor-banner")).toHaveAttribute(
+      "data-phase",
+      "request",
+    );
+    await assertBlocked(
+      page,
+      client.completed,
+      client.responseStarted,
+      client.dataStarted,
+    );
+    await page.getByTestId("breakpoint-resume-unchanged").click();
+    expect((await client.result).status).toBe(200);
+  } finally {
+    releaseResponse?.();
+    client?.abort();
+    await upstream.close();
+  }
+});

@@ -266,10 +266,10 @@ fn breakpoint_body_payload(
 
     let decoded = if force_body_omitted {
         None
-    } else if source_body_empty {
-        Some(Bytes::new())
     } else if let Some(ref encoding) = content_encoding {
-        try_decompress_body_with_limit(body, encoding, max_body_bytes)
+        // Empty wire bytes still need encoding classification. A zero edit budget
+        // must not bypass the decoder's unsupported-encoding validation either.
+        try_decompress_body_with_limit(body, encoding, max_body_bytes.max(1))
             .ok()
             .map(Bytes::from)
     } else {
@@ -1453,6 +1453,39 @@ mod tests {
         headers.insert(
             hyper::header::CONTENT_ENCODING,
             HeaderValue::from_static("custom"),
+        );
+        let empty = breakpoint_body_payload(&state, &headers, &Bytes::new(), Some(0), false);
+        assert_eq!(empty.body_representation, "raw");
+        assert_eq!(empty.body_encoding, "base64");
+        assert_eq!(empty.body.as_deref(), Some(""));
+        state
+            .breakpoint_manager
+            .update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 0,
+            });
+        let zero_budget = breakpoint_body_payload(&state, &headers, &Bytes::new(), Some(0), false);
+        assert_eq!(zero_budget.body_representation, "raw");
+        assert_eq!(zero_budget.body_encoding, "base64");
+        assert_eq!(zero_budget.body.as_deref(), Some(""));
+        state
+            .breakpoint_manager
+            .update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 1024,
+            });
+        assert_eq!(
+            encode_edited_body(
+                &headers,
+                &BreakpointEdit {
+                    body: empty.body,
+                    body_encoding: Some(empty.body_encoding),
+                    body_representation: Some(empty.body_representation),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            Bytes::new()
         );
         let original = Bytes::from_static(&[0, 255, 128]);
         let payload = breakpoint_body_payload(&state, &headers, &original, None, false);

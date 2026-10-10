@@ -3346,17 +3346,14 @@ pub async fn handle_http_request(
                 .take()
                 .expect("upstream response body should exist");
             // HTTP/2 recovery can consume the body before the breakpoint path.
-            // Preserve its trailers and share the breakpoint capture budget.
+            // Preserve trailers and the original rule buffer budget in one bounded probe.
             match if response_breakpoint_enabled {
-                super::breakpoint::read_breakpoint_body_bounded(
-                    body,
-                    body_limit(&admin_state, true, max_body_buffer_size),
-                )
-                .await
-                .map(|(body, trailers)| {
-                    breakpoint_response_trailers = trailers;
-                    body
-                })
+                super::breakpoint::read_breakpoint_body_bounded(body, max_body_buffer_size)
+                    .await
+                    .map(|(body, trailers)| {
+                        breakpoint_response_trailers = trailers;
+                        body
+                    })
             } else {
                 read_body_bounded(body, max_body_buffer_size).await
             } {
@@ -3620,11 +3617,7 @@ pub async fn handle_http_request(
         is_sse,
     );
     let mut res_body_too_large = breakpoint_probe_exceeded;
-    let mut res_body_limit = body_limit(
-        &admin_state,
-        breakpoint_probe_exceeded,
-        max_body_buffer_size,
-    );
+    let mut res_body_limit = max_body_buffer_size;
     if !is_sse && res_body_stream.is_none() {
         res_body_stream = Some(res_body_incoming.take().unwrap().boxed());
     }

@@ -12,6 +12,16 @@
 - UI 用例可执行：`pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts tests/ui/breakpoint-real-ui.spec.ts`。
 - OpenAPI 用例可执行：`cargo test -p bifrost-admin breakpoint_openapi --lib`。
 
+## 第二轮复审与完整 critical 执行记录（2026-10-10）
+
+- 通过统一入口 `BIFROST_UI_TEST_PROFILE=critical bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner` 完整执行 **57/57，通过 676 秒**（Playwright 674.24 秒）；原 52 项与新增 5 项均执行，单 worker、零跳过、零失败、零重试，原 900 秒外层门禁不变。49 项 breakpoint 用例走真实 UI → 代理 → loopback upstream/client；其余 8 项既有 critical 包含 Rules、Values、Scripts、toolbar、sidebar 与 Traffic。
+- 前置生产前端构建 110 秒、调试 CLI 构建 227 秒，均在浏览器限时之外。setup 复用已验证的预构建后端，通过实际代理静态路由提供生产前端；没有 Vite/HMR 或测试期间 Cargo 重建，106 个 gzip 资源运行前后哈希一致。
+- 四条新 review 有旧代码负向证据：TLS H2 probe 两例、空未知编码两例、Fuzzy 首屏零/一命中两例、gate 开启消息竞态一例均失败。修复后的空编码、Fuzzy 和 gate 五项真实 UI 在完整批中通过；TLS H2 与追加规则/重复 trailers 的七项真实协议用例分别经普通与 instrumented 7/7 验证。小编辑预算 1、原 body 两字节的普通 HTTP/CONNECT 两例另在修复前失败，修后实际 wire 为 `okappend` 且重复 trailers 保留。
+- 最终 fresh-profile 全量：admin **3862 单元 + 7 集成**，proxy **1086 单元 + 28 集成**，零失败，各保留 1 项既有忽略。整个 Rust diff 相对 main `e8ed138e7319f572c012912113d97864f0100e68` 覆盖率 **90.53%（478/528）**，原 90% 门禁不变。LCOV SHA-256：`5d29197c455ea019d07b5dcfcdcce9fca2619b04bbf4a99c8ddf8fbc089cbda2`；报告提示一个损坏子进程 profraw 被忽略，完整测试与门禁仍通过，原始日志保留。
+- 完整前端单测 **63 文件、420/420，通过 169.29 秒**；Rust fmt、两个受影响 crate 的 all-targets/all-features Clippy（warnings denied）、前端类型、修改文件 lint/format 及生产构建通过。完整 critical 实际验证了 Values 双页面 push/排序与导入导出。
+- 保留失败历史：首轮 Vite critical 900 秒超时；首轮静态 critical 862 秒为 52 通过、4 失败、1 因 serial 前序失败未执行。分页夹具生成 1100 请求期间超时；改为停留 Rules、分批有界 100 并发并确认旧 pending 存活，保持原 client 45 秒、gate 60 秒、单例 120 秒及真实跨 1000 结果分页断言。Values 订阅随数量变化被清理且不恢复，两个独立旧代码回归失败，最小生命周期修正后 2/2 通过；Traffic curl 被 NO_PROXY 绕过显式代理，现使用 `--noproxy ''`。不把这些失败认定为 baseline 问题，不扩展无关功能。
+- 固定测试 CLI SHA-256：`57206a2b678f4c4bec5eb5e10df8ea1366e04f14726656a4091f8e7e93bf4a61`。日志、Playwright JSON、失败批证据、最终覆盖率及恢复补丁保留在本地审计目录；仅使用隔离 loopback 与测试 TLS，不改变设备代理、DNS、VPN 或证书信任。
+
 ## 复审修复云环境执行记录（2026-10-10）
 
 - 完整 UI 单批 **48/48 通过，耗时 9.2 分钟**：44 个真实 UI → 代理 → loopback upstream/client 用例及 4 个既有页面/配置用例；未跳过、未重试。由固定调试 CLI 的静态路由提供生产前端构建，无 Vite/HMR、无接口响应 mock；运行前后 106 个前端资源哈希一致。浅深主题截图已检查。
@@ -562,6 +572,17 @@
 
 **自动化入口：** `crates/bifrost-proxy/tests/breakpoint_trailers_e2e.rs`、`crates/bifrost-proxy/tests/upstream_http3_e2e.rs`、`crates/bifrost-admin/tests/breakpoint_api.rs` 和 `web/tests/ui/breakpoint-real-ui.spec.ts`。
 
+
+### TC-BP-27: TLS H2 probe、空编码、搜索分页与 gate 开启竞态
+
+1. 经 CONNECT 向 TLS HTTP/2 上游发送可重试的 GET，令响应经过早期 H2 probe。response 断点放行后核对真实重复 trailers；含 body rule 的停滞响应从上游准备时间起 3.5 秒内暂停，客户端仍不得收到响应头或 body。
+   对普通 HTTP 代理和 CONNECT 再分别设置断点 body 上限为 1，返回两字节 body 并配置 resAppend；确认断点明确省略 body，但真实放行字节应用追加规则且 trailers 保留。单次有界 probe 使用原规则缓冲上限，编辑上限独立生效。
+2. 分别暂停 Content-Encoding 为未知值、Content-Length 为 0 的请求和响应，确认编辑器显示 raw Base64，并实际应用 method/header 或 status/header 修改；放行后的 wire body 仍为空、编码声明保留。零 body 编辑预算也应识别为 raw。
+3. 在旧暂停之后生成 1100 条真实已完成流量；生成时切换至 Rules，分批有界 100 并发，回到 Network 前确认旧暂停仍在 pending；保持原 client 45 秒、gate 60 秒和单例 120 秒上限。勾选 Paused 并执行 Fuzzy 搜索。确认首个响应明确 has_more 且不包含旧暂停；分别保留零条或一条首屏可见暂停，不滚动、不点击 Load More 也能找到旧暂停。原始空搜索页且 has_more 为 true 时同样继续分页。
+4. 仅延迟真实 gate 开启的 HTTP 响应与 settings WebSocket 推送，让真实暂停推送先到。确认上游尚未收到请求，随后送达真实 settings 推送，页面恢复 pending 并仅第一次自动展开；放行后真实 client 完成。
+5. 在旧续页请求尚未返回时切换查询，旧响应不得覆盖新结果或清除新查询的 loading 状态。同一 cursor 失败或不前进时不得自动循环重试。
+
+**自动化入口：** `breakpoint_trailers_e2e.rs` 的七个真实 H2 用例、`breakpoint-real-ui.spec.ts` 新增五个真实 UI 用例，以及 SearchResultsList、useSearchStore、useBreakpointStore 回归单测。完整 critical 使用 `BIFROST_UI_TEST_PROFILE=critical bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner`，保持 900 秒外层限时和一个 worker；编排成功预构建后才允许 setup 复用同一二进制并通过代理静态路由提供生产前端。跳过前端构建的 Cargo 流程追踪 dist 更新以刷新 gzip 资产；独立 Playwright 运行仍默认构建后端并使用 Vite。
 
 ## 清理步骤
 - 结束测试脚本后确认临时 Bifrost 进程、mock server、WebSocket probe 均已退出。

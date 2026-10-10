@@ -46,20 +46,45 @@ impl RulesResolver for ResponseBreakpoint {
 
 #[tokio::test]
 async fn unchanged_breakpoint_preserves_actual_h2_trailers_on_http1_wire() {
-    run_trailers_regression(false, false).await;
+    run_trailers_regression(false, false, false, false).await;
 }
 
 #[tokio::test]
 async fn unchanged_breakpoint_preserves_actual_request_and_response_trailers() {
-    run_trailers_regression(true, false).await;
+    run_trailers_regression(true, false, true, false).await;
 }
 
 #[tokio::test]
 async fn stalled_h2_probe_does_not_repeat_capture_for_body_rules() {
-    run_trailers_regression(false, true).await;
+    run_trailers_regression(false, true, false, false).await;
 }
 
-async fn run_trailers_regression(request_trailers: bool, stalled: bool) {
+#[tokio::test]
+async fn intercepted_h2_probe_preserves_actual_response_trailers() {
+    run_trailers_regression(false, false, true, false).await;
+}
+
+#[tokio::test]
+async fn intercepted_stalled_h2_probe_does_not_repeat_capture() {
+    run_trailers_regression(false, true, true, false).await;
+}
+
+#[tokio::test]
+async fn small_breakpoint_budget_preserves_body_rules_over_plain_h2() {
+    run_trailers_regression(false, false, false, true).await;
+}
+
+#[tokio::test]
+async fn small_breakpoint_budget_preserves_body_rules_over_intercepted_h2() {
+    run_trailers_regression(false, false, true, true).await;
+}
+
+async fn run_trailers_regression(
+    request_trailers: bool,
+    stalled: bool,
+    intercepted: bool,
+    small_budget: bool,
+) {
     tokio::time::timeout(Duration::from_secs(20), async {
         init_crypto_provider();
         let ca = Arc::new(generate_root_ca().unwrap());
@@ -113,7 +138,7 @@ async fn run_trailers_regression(request_trailers: bool, stalled: bool) {
         let proxy_port = reserve.local_addr().unwrap().port();
         drop(reserve);
         let state = Arc::new(AdminState::new(proxy_port));
-        state.breakpoint_manager.update_settings(BreakpointSettings { enabled:true,max_body_bytes:1024 });
+        state.breakpoint_manager.update_settings(BreakpointSettings { enabled:true,max_body_bytes:if small_budget { 1 } else { 1024 } });
         let proxy_tls = Arc::new(bifrost_proxy::TlsConfig {
             ca_cert: Some(ca.certificate_pem().as_bytes().to_vec()),
             ca_key: Some(ca.key_pair.serialize_pem().into_bytes()),
@@ -121,7 +146,7 @@ async fn run_trailers_regression(request_trailers: bool, stalled: bool) {
             sni_resolver: None,
         });
         let proxy = ProxyServer::new(ProxyConfig {host:"127.0.0.1".into(),port:proxy_port,unsafe_ssl:true,enable_socks:false,..Default::default()})
-            .with_tls_config(proxy_tls).with_admin_state_shared(state.clone()).with_rules(Arc::new(ResponseBreakpoint(if request_trailers { "both" } else { "response" }, stalled)));
+            .with_tls_config(proxy_tls).with_admin_state_shared(state.clone()).with_rules(Arc::new(ResponseBreakpoint(if request_trailers { "both" } else { "response" }, stalled || small_budget)));
         let proxy_task = tokio::spawn(async move { proxy.run().await.unwrap(); });
         for _ in 0..100 {
             if TcpStream::connect(("127.0.0.1", proxy_port)).await.is_ok() { break; }
@@ -131,7 +156,7 @@ async fn run_trailers_regression(request_trailers: bool, stalled: bool) {
         let client_received = received.clone();
         let client = tokio::spawn(async move {
             let mut socket = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
-            if request_trailers {
+            if intercepted {
                 socket.write_all(format!("CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\nHost: 127.0.0.1:{origin_port}\r\n\r\n").as_bytes()).await.unwrap();
                 let mut connect_response = Vec::new();
                 let mut byte = [0u8; 1];
@@ -151,20 +176,27 @@ async fn run_trailers_regression(request_trailers: bool, stalled: bool) {
                 let mut trailers = HeaderMap::new();
                 trailers.append("x-request-metadata", "first".parse().unwrap());
                 trailers.append("x-request-metadata", "second".parse().unwrap());
-                let frames = vec![Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"req"))), Ok(Frame::trailers(trailers))];
-                let request = hyper::Request::builder().method("POST")
+                let mut frames = Vec::<Result<Frame<Bytes>, std::convert::Infallible>>::new();
+                if request_trailers { frames.push(Ok(Frame::data(Bytes::from_static(b"req")))); }
+                if request_trailers { frames.push(Ok(Frame::trailers(trailers))); }
+                let request = hyper::Request::builder().method(if request_trailers { "POST" } else { "GET" })
                     .uri(format!("https://127.0.0.1:{origin_port}/trailers"))
                     .header("host", format!("127.0.0.1:{origin_port}"))
-                    .header("content-length", "3")
+                    .header("content-length", if request_trailers { "3" } else { "0" })
                     .body(StreamBody::new(futures_util::stream::iter(frames))).unwrap();
                 let response = sender.send_request(request).await.unwrap();
                 client_received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                assert_eq!(response.status(), 200);
+                assert_eq!(response.status(), if stalled { 204 } else { 200 });
                 let collected = response.into_body().collect().await.unwrap();
+                if stalled {
+                    assert!(collected.trailers().is_none());
+                    assert!(collected.to_bytes().is_empty());
+                } else {
                 let trailers = collected.trailers().expect("actual HTTP/2 response trailers");
                 assert_eq!(trailers["grpc-status"], "0");
                 assert_eq!(trailers.get_all("x-metadata").iter().map(|v| v.to_str().unwrap()).collect::<Vec<_>>(), vec!["first", "second"]);
-                assert_eq!(collected.to_bytes(), "ok");
+                assert_eq!(collected.to_bytes(), if small_budget { "okappend" } else { "ok" });
+                }
                 driver.abort();
                 None
             } else {
@@ -211,6 +243,9 @@ async fn run_trailers_regression(request_trailers: bool, stalled: bool) {
         if stalled {
             assert!(tokio::time::Instant::now() <= pause_deadline, "pause must be observed within 3.5s of actual upstream response readiness");
             assert!(pause.body_omitted, "a stalled probe must remain header-only");
+        } else if small_budget {
+            assert!(pause.body_omitted, "body editing must still obey the one-byte breakpoint budget");
+            assert!(pause.body.is_none());
         } else {
             assert_eq!(pause.body.as_deref(), Some("ok"));
         }
@@ -231,7 +266,7 @@ async fn run_trailers_regression(request_trailers: bool, stalled: bool) {
         let (headers, body) = response.split_once("\r\n\r\n").unwrap();
         assert!(headers.contains("transfer-encoding: chunked"), "{response}");
         assert!(!headers.contains("content-length:"), "{response}");
-        assert!(body.contains("ok"), "{response}");
+        assert!(body.contains(if small_budget { "okappend" } else { "ok" }), "{response}");
         assert!(body.contains("grpc-status: 0"), "{response}");
         assert!(body.contains("x-metadata: first"), "{response}");
         assert!(body.contains("x-metadata: second"), "{response}");

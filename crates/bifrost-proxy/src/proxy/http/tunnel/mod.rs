@@ -3708,6 +3708,16 @@ async fn handle_intercepted_request_with_protocol(
 
     let (mut res_parts, mut res_body, tls_ms, mut wait_ms, mut h3_buffered_body) = upstream_result;
 
+    let response_breakpoint_enabled = admin_state.as_ref().is_some_and(|state| {
+        state.breakpoint_manager.is_enabled()
+            && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
+    });
+    let breakpoint_max_body_bytes = admin_state
+        .as_ref()
+        .map_or(0, |state| state.breakpoint_manager.max_body_bytes());
+    let mut breakpoint_response_trailers = None;
+    let mut breakpoint_probe_exceeded = false;
+
     if h3_buffered_body.is_none() {
         let early_content_type = res_parts
             .headers
@@ -3734,11 +3744,23 @@ async fn handle_intercepted_request_with_protocol(
             let body = res_body
                 .take()
                 .expect("upstream response body should exist");
-            match read_body_bounded(body, max_body_buffer_size).await {
+            // Retryable H2 requests can reach this probe before normal breakpoint
+            // capture. Preserve trailers and the original rule buffer budget.
+            match if response_breakpoint_enabled {
+                super::breakpoint::read_breakpoint_body_bounded(body, max_body_buffer_size)
+                    .await
+                    .map(|(body, trailers)| {
+                        breakpoint_response_trailers = trailers;
+                        body
+                    })
+            } else {
+                read_body_bounded(body, max_body_buffer_size).await
+            } {
                 Ok(BoundedBody::Complete(bytes)) => {
                     h3_buffered_body = Some(bytes);
                 }
                 Ok(BoundedBody::Exceeded(replay_body)) => {
+                    breakpoint_probe_exceeded = response_breakpoint_enabled;
                     res_body = Some(replay_body.boxed());
                 }
                 Err(e) => {
@@ -4022,24 +4044,14 @@ async fn handle_intercepted_request_with_protocol(
         should_use_binary_performance_mode(&res_parts, binary_traffic_performance_mode)
             && !is_websocket
             && !is_sse;
-    let response_breakpoint_enabled = admin_state
-        .as_ref()
-        .map(|state| {
-            state.breakpoint_manager.is_enabled()
-                && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
-        })
-        .unwrap_or(false);
     skip_binary_recording &= !response_breakpoint_enabled;
-    let breakpoint_max_body_bytes = admin_state
-        .as_ref()
-        .map_or(0, |state| state.breakpoint_manager.max_body_bytes());
     let breakpoint_capture_length =
         if super::body_metadata::is_no_body_response(res_parts.status, &method_str) {
             Some(0)
         } else {
             res_content_length
         };
-    #[rustfmt::skip] let response_breakpoint_can_buffer_body = response_breakpoint_can_buffer_body(response_breakpoint_enabled, is_websocket, is_sse, skip_binary_recording, breakpoint_capture_length, breakpoint_max_body_bytes);
+    #[rustfmt::skip] let response_breakpoint_can_buffer_body = !breakpoint_probe_exceeded && response_breakpoint_can_buffer_body(response_breakpoint_enabled, is_websocket, is_sse, skip_binary_recording, breakpoint_capture_length, breakpoint_max_body_bytes);
     let response_breakpoint_header_only =
         response_breakpoint_enabled && !is_websocket && !response_breakpoint_can_buffer_body;
     let needs_processing = needs_body_rules_processing
@@ -4049,24 +4061,32 @@ async fn handle_intercepted_request_with_protocol(
     let has_res_body_override = response_resolved.res_body.is_some();
     let needs_res_body_read = needs_processing && !has_res_body_override;
 
-    let mut res_body_too_large = false;
+    let mut res_body_too_large = breakpoint_probe_exceeded;
     let mut res_body_limit = max_body_buffer_size;
     let mut res_body_incoming = res_body;
     let mut res_body_stream: Option<BoxBody> = None;
     if !is_sse {
         if let Some(ref body) = h3_buffered_body {
-            res_body_stream = Some(full_body(body.clone()));
+            res_body_stream = Some(super::breakpoint::replay_breakpoint_body(
+                body.clone(),
+                breakpoint_response_trailers.clone(),
+            ));
         } else {
             res_body_stream = Some(res_body_incoming.take().unwrap().boxed());
         }
     }
 
     let mut pre_read_res: Option<(Vec<u8>, u64)> = None;
-    let mut breakpoint_response_trailers = None;
     if let Some(body) = h3_buffered_body.clone() {
         pre_read_res = Some((body.to_vec(), 0));
     }
-    if needs_res_body_read && needs_processing && !is_sse && !skip_binary_recording {
+    if needs_res_body_read
+        && needs_processing
+        && !is_sse
+        && !skip_binary_recording
+        && pre_read_res.is_none()
+        && !breakpoint_probe_exceeded
+    {
         if let Some(len) = res_content_length {
             if len > max_body_buffer_size {
                 res_body_too_large = true;

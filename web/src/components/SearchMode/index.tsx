@@ -66,6 +66,9 @@ export default function SearchMode({
     totalSearched,
     totalMatched,
     hasMore,
+    nextCursor,
+    activeSearchKey,
+    searchId,
     isSearching,
     isLoadingMore,
     setKeyword,
@@ -132,7 +135,10 @@ export default function SearchMode({
   buildFiltersRef.current = buildFilters;
 
   const scheduleLiveRefresh = useCallback(() => {
-    if (liveRefreshInFlightRef.current || liveRefreshTimerRef.current !== null) {
+    if (
+      liveRefreshInFlightRef.current ||
+      liveRefreshTimerRef.current !== null
+    ) {
       return;
     }
     liveRefreshTimerRef.current = window.setTimeout(async () => {
@@ -187,11 +193,14 @@ export default function SearchMode({
     scheduleLiveRefresh();
   }, [recordsMutation, scheduleLiveRefresh]);
 
-  useEffect(() => () => {
-    if (liveRefreshTimerRef.current !== null) {
-      window.clearTimeout(liveRefreshTimerRef.current);
-    }
-  }, []);
+  useEffect(
+    () => () => {
+      if (liveRefreshTimerRef.current !== null) {
+        window.clearTimeout(liveRefreshTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const handleSearch = useCallback(() => {
     if (
@@ -365,11 +374,7 @@ export default function SearchMode({
             Search
           </Button>
           {(isSearching || isLoadingMore) && (
-            <Button
-              onClick={handleCancelSearch}
-              icon={<StopOutlined />}
-              danger
-            >
+            <Button onClick={handleCancelSearch} icon={<StopOutlined />} danger>
               Stop
             </Button>
           )}
@@ -431,12 +436,16 @@ export default function SearchMode({
             <Space direction="vertical" align="center" size={8}>
               <Spin indicator={<LoadingOutlined spin />} tip="Searching..." />
               <Text type="secondary">searched {totalSearched} records</Text>
-              <Button onClick={handleCancelSearch} icon={<StopOutlined />} danger>
+              <Button
+                onClick={handleCancelSearch}
+                icon={<StopOutlined />}
+                danger
+              >
                 Stop
               </Button>
             </Space>
           </div>
-        ) : results.length === 0 ? (
+        ) : results.length === 0 && !hasMore ? (
           <div style={styles.emptyWrapper}>
             <Empty
               description={
@@ -450,17 +459,24 @@ export default function SearchMode({
           <SearchResultsList
             results={
               pendingOnly
-                ? results.filter((item) => breakpointPhases?.has(item.record.id))
+                ? results.filter((item) =>
+                    breakpointPhases?.has(item.record.id),
+                  )
                 : results
             }
             keyword={keyword}
+            paginationKey={
+              activeSearchKey && nextCursor !== null
+                ? JSON.stringify([activeSearchKey, searchId, nextCursor])
+                : null
+            }
             selectedId={selectedId}
             breakpointPhases={breakpointPhases}
             onSelect={handleResultSelect}
             onDoubleClick={handleResultDoubleClick}
             onLoadMore={handleLoadMore}
             hasMore={hasMore}
-            isLoadingMore={isLoadingMore}
+            isLoadingMore={isLoadingMore || isSearching}
           />
         )}
       </div>

@@ -216,7 +216,7 @@ const startWsServer = async () => {
 const sendProxyRequest = async (url: string, targetProxyUrl = proxyUrl) => {
   await execFileAsync(
     "curl",
-    ["-sS", "--fail", "-x", targetProxyUrl, url],
+    ["-sS", "--fail", "--noproxy", "", "-x", targetProxyUrl, url],
     { timeout: 10000 },
   );
 };

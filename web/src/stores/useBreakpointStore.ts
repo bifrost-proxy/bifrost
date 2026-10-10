@@ -254,7 +254,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
   },
 
   fetchPending: async () => {
-    if (get().loading) return;
+    if (get().loading || get().pendingLoading || !get().enabled) return;
     const revision = get().pendingRevision;
     set({ pendingLoading: true });
     try {
@@ -426,10 +426,14 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
 
     pushService.onBreakpointSettingsUpdated(
       (data: BreakpointSettingsPushData) => {
+        const wasEnabled = get().enabled;
         get().applySettings({
           enabled: data.enabled,
           max_body_bytes: data.max_body_bytes,
         });
+        // A pause can precede this settings push while the local gate is stale.
+        // Reconcile even when this push invalidates an in-flight toggle response.
+        if (data.enabled && !wasEnabled) void get().fetchPending();
       },
     );
 

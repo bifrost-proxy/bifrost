@@ -495,10 +495,12 @@ export const useSearchStore = create<SearchState>()(
   },
 
   loadMore: async (filters) => {
-    const { keyword, scope, nextCursor, hasMore, isLoadingMore, results } = get();
+    const { keyword, scope, nextCursor, hasMore, isLoadingMore, results } =
+      get();
     if (
       (!keyword.trim() && !hasSearchFilters(filters)) ||
       !hasMore ||
+      get().isSearching ||
       isLoadingMore ||
       nextCursor === null
     ) {
@@ -506,7 +508,13 @@ export const useSearchStore = create<SearchState>()(
     }
 
     abortLoadMore();
-    currentLoadMoreAbort = new AbortController();
+    const controller = new AbortController();
+    currentLoadMoreAbort = controller;
+    const generation = liveSearchGeneration;
+    const isCurrent = () =>
+      generation === liveSearchGeneration &&
+      currentLoadMoreAbort === controller &&
+      !controller.signal.aborted;
 
     set({ isLoadingMore: true });
 
@@ -524,16 +532,22 @@ export const useSearchStore = create<SearchState>()(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
-        signal: currentLoadMoreAbort.signal,
+        signal: controller.signal,
       });
 
+      if (!isCurrent()) return;
       const ct = streamResp.headers.get('content-type') || '';
-      if (streamResp.ok && ct.includes('text/event-stream') && streamResp.body) {
+      if (
+        streamResp.ok &&
+        ct.includes('text/event-stream') &&
+        streamResp.body
+      ) {
         let accResults: SearchResultItem[] = results;
         const baseSearched = get().totalSearched;
         const baseMatched = get().totalMatched;
 
         for await (const ev of parseSseStream(streamResp.body)) {
+          if (!isCurrent()) return;
           if (ev.event === 'result') {
             accResults = [...accResults, ev.data];
             set({ results: accResults });
@@ -556,7 +570,7 @@ export const useSearchStore = create<SearchState>()(
           }
         }
 
-        set({ isLoadingMore: false });
+        if (isCurrent()) set({ isLoadingMore: false });
         return;
       }
 
@@ -564,14 +578,16 @@ export const useSearchStore = create<SearchState>()(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
-        signal: currentLoadMoreAbort.signal,
+        signal: controller.signal,
       });
 
+      if (!isCurrent()) return;
       if (!response.ok) {
         throw new Error(`Search failed: ${response.statusText}`);
       }
 
       const data: SearchResponse = await response.json();
+      if (!isCurrent()) return;
 
       set({
         results: [...results, ...data.results],
@@ -582,6 +598,7 @@ export const useSearchStore = create<SearchState>()(
         isLoadingMore: false,
       });
     } catch (error) {
+      if (!isCurrent()) return;
       if (isAbortError(error)) {
         set({ isLoadingMore: false });
         return;
