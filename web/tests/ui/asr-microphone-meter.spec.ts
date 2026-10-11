@@ -1326,7 +1326,11 @@ test("ASR task detail retries one failed file or all failed files", async ({ pag
   await expect.poll(() => retryRequests).toEqual(["single"]);
 
   await selectTaskAction(page, "Retry all failed files");
-  await page.getByRole("button", { name: "OK" }).click();
+  const bulkRetryDialog = page.getByRole("dialog").filter({
+    hasText: "Retry transcription for 1 failed file?",
+  });
+  await expect(bulkRetryDialog).toBeVisible();
+  await bulkRetryDialog.getByRole("button", { name: "OK", exact: true }).click();
   await expect.poll(() => retryRequests).toEqual(["single", "bulk"]);
 });
 

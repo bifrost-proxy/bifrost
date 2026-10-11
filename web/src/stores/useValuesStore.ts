@@ -90,9 +90,12 @@ export const useValuesStore = create<ValuesState>((set, get) => ({
       await api.createValue(name, value);
       set((state) => {
         const now = new Date().toISOString();
+        // A server push can arrive before the create response. Reuse that
+        // authoritative item so duplicate React keys cannot corrupt sorting.
+        const existingValue = state.values.find((item) => item.name === name);
         const values = sortValuesByCreatedAt([
-          ...state.values,
-          {
+          ...state.values.filter((item) => item.name !== name),
+          existingValue ?? {
             name,
             value,
             created_at: now,

@@ -90,7 +90,7 @@
 | [network-export.md](./network-export.md) | Network 导出与 Body 保真 | 5 | 默认端口与自定义端口 Network `.bifrost` 导出携带对应端口生效规则快照，保持空选择和旧文件兼容；标准 HTTP 压缩编码及多层编码在请求/响应侧展示明文，未知编码保留给自定义 decoder |
 | [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 52 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、Desktop 启动早期 syntax 请求失败后的补全恢复与 Tauri CORS 回归、树形视图、`@规则名称` 与 `@组名称/规则名称` 引用解析、候选检索、模糊补全、编辑器原位展开、缺失引用标红和 hover 错误提示、保存时后端语法错误反馈且不落盘、`commented-*` 规则名与注释内 `@` 边界、全局 Dynamic Island、空 active summary 不显示遮挡控件的 `0 active` 胶囊、Merged Rules 一键复制与生效/覆盖智能高亮、Group active summary 与代理运行时本地 fallback、远端失败和快速本地变更稳定性、Group name 深链不返回 502、退出/重新登录后 Group ID 跳转保持、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器恢复已保存语义后的末行光标稳定性与 Save 禁用回归、快速键盘/鼠标选择与延迟 URL 渲染竞态回归 |
 | [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 26 | 脚本创建（Req/Res/Dec/Parser）、顶部 + 创建菜单、... 更多操作菜单、真实 Import 文件选择器、编辑、保存、测试运行、日志查看、名称校验、树形目录、Parser/Decode 运行时上下文字段补全、亮暗主题下类型切换与声明重复加载诊断回归、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
-| [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
+| [webui-values.md](./webui-values.md) | Web UI Values 页面 | 21 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、创建响应与 push 交错去重排序 |
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 24 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、Replay WebSocket 规则头回归、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
 | [webui-settings.md](./webui-settings.md) | Web UI Settings 页面 | 43 | Proxy/Certificate/TLS/Performance/Access Control/Appearance/Metrics/Sync 各 Tab，含 Max Body Probe Size 刻度文本防重叠回归、Sync Provider 卡片、旧 Remote Sync 面板移除、Bifrost Cloud URL 编辑不被状态轮询回滚、GitHub Gist token 登录、真实 rules/config snapshot 同步，以及多 provider 同时连接时的防覆盖/防震荡机制 |
 | [skill-creator.md](./skill-creator.md) | Skill Creator WebUI 与外部 Agent 工作流 | 14 | Skill Creator crate、Admin CRUD、WebUI Skills 面板（只读详情/删除/导入 zip/固定分页）、E2E create-test-invoke-delete-import、executor 环境白名单、registry watcher 单 slug 热重载、checksum 缺失 manifest、packager import scope 保留、authoring.test 非法状态 |
@@ -165,7 +165,7 @@
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [group-cache-admin-stability.md](./group-cache-admin-stability.md) | Group 缓存与 Admin 稳定性 | 3 | 远端失败 single-flight/指数退避/generation、本地规则降级、active-summary 文件 I/O 隔离和 Admin readiness 回归 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |
-| [traffic-bounded-window.md](./traffic-bounded-window.md) | Network 有界窗口、权威统计与实时 Search | 8 | 1,000 条前端窗口、全历史筛选、服务端内存统计、1 秒合并推送、Search 定向增量重算、有界重连最后一包、数据库身份变化、同库重启与同 UUID 备份恢复、共享订阅恢复、滚动淘汰与三轮稳定性 |
+| [traffic-bounded-window.md](./traffic-bounded-window.md) | Network 有界窗口、权威统计与实时 Search | 9 | 1,000 条前端窗口、全历史筛选、服务端内存统计、1 秒合并推送、Search 定向增量重算、有界重连最后一包、数据库身份变化、同库重启与同 UUID 备份恢复、共享订阅恢复、离页未消费流量补回、滚动淘汰与三轮稳定性 |
 | [api-auth.md](./api-auth.md) | Auth API | 12 | 鉴权状态查询、登录、密码管理、远程访问开关、JWT 会话吊销 |
 | [admin-write-origin-guard.md](./admin-write-origin-guard.md) | Admin 写接口 Origin Guard 回归 | 8 | Mac 桌面壳可信 Origin 被 `Sec-Fetch-Site: cross-site` 误判导致写接口整体 403 的回归，覆盖外部跨站拦截、可信桌面 Origin 放行、CSRF 继续强制、WebSocket guard、真实 9900 写接口、Pending Authorization 弹窗关闭不依赖服务端成功、stale CSRF 次级恢复，以及 Runner/IM Channel 保存 PATCH 预检、写入和回读 |
 | [admin-cross-site-security.md](./admin-cross-site-security.md) | Admin Cross-Site Security | 10 | Admin API 跨站写请求、DNS rebinding Host、代理 absolute-form 伪造、代理 Admin Push WebSocket 伪造拒绝、DevTools page bridge 窄例外、Rule Share 确认页和 CSRF 防护回归 |

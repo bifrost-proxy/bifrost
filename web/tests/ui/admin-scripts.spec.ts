@@ -10,6 +10,8 @@ import {
   waitForToast,
 } from "./helpers/admin-helpers";
 
+import { getMonacoRuntime } from "./helpers/monaco-runtime";
+
 test.describe.configure({ mode: "serial" });
 
 async function createScriptFromHeaderMenu(
@@ -28,71 +30,75 @@ async function setScriptDiagnosticSource(
 ) {
   const container = page.getByTestId("scripts-editor");
   await expect(container.locator(".monaco-editor")).toBeVisible();
-  await container.evaluate((element, value) => {
-    const monaco = (
-      window as unknown as { monaco: typeof import("monaco-editor") }
-    ).monaco;
-    const editor = monaco.editor.getEditors().find((candidate) => {
-      const node = candidate.getDomNode();
-      return node && element.contains(node);
-    });
-    if (!editor?.getModel())
-      throw new Error("Scripts editor model is not ready");
-    editor.setValue(value);
-    if (editor.getValue() !== value)
-      throw new Error("Scripts editor source did not match fixture");
-  }, source);
+  const runtime = await getMonacoRuntime(page);
+  await container.evaluate(
+    (element, { monaco, value }) => {
+      const editor = monaco.editor.getEditors().find((candidate) => {
+        const node = candidate.getDomNode();
+        return node && element.contains(node);
+      });
+      if (!editor?.getModel())
+        throw new Error("Scripts editor model is not ready");
+      editor.setValue(value);
+      if (editor.getValue() !== value)
+        throw new Error("Scripts editor source did not match fixture");
+    },
+    { monaco: runtime, value: source },
+  );
+  await runtime.dispose();
 }
 
 async function scriptDiagnosticErrors(page: import("@playwright/test").Page) {
-  return page.getByTestId("scripts-editor").evaluate(async (element) => {
-    const monaco = (
-      window as unknown as { monaco: import("@monaco-editor/react").Monaco }
-    ).monaco;
-    const editor = monaco.editor.getEditors().find((candidate) => {
-      const node = candidate.getDomNode();
-      return node && element.contains(node);
-    });
-    const model = editor?.getModel();
-    if (!model) throw new Error("Scripts editor model is not ready");
-    const extraLibs =
-      monaco.languages.typescript.typescriptDefaults.getExtraLibs();
-    const libraryUris = Object.keys(extraLibs).map((filePath) => {
-      const uri = monaco.Uri.parse(filePath);
-      // Match the model Monaco opens for definition/related-information links.
-      if (!monaco.editor.getModel(uri)) {
-        monaco.editor.createModel(
-          extraLibs[filePath].content,
-          "typescript",
-          uri,
-        );
-      }
-      return uri;
-    });
-    const getWorker = await monaco.languages.typescript.getTypeScriptWorker();
-    const worker = await getWorker(model.uri, ...libraryUris);
-    const diagnostics = await Promise.all([
-      worker.getSyntacticDiagnostics(model.uri.toString()),
-      worker.getSemanticDiagnostics(model.uri.toString()),
-      ...Object.keys(extraLibs).flatMap((uri) => [
-        worker.getSyntacticDiagnostics(uri),
-        worker.getSemanticDiagnostics(uri),
-      ]),
-    ]);
-    return diagnostics.flat().map((diagnostic) => diagnostic.messageText);
-  });
+  const runtime = await getMonacoRuntime(page);
+  const errors = await page
+    .getByTestId("scripts-editor")
+    .evaluate(async (element, monaco) => {
+      const editor = monaco.editor.getEditors().find((candidate) => {
+        const node = candidate.getDomNode();
+        return node && element.contains(node);
+      });
+      const model = editor?.getModel();
+      if (!model) throw new Error("Scripts editor model is not ready");
+      const extraLibs =
+        monaco.languages.typescript.typescriptDefaults.getExtraLibs();
+      const libraryUris = Object.keys(extraLibs).map((filePath) => {
+        const uri = monaco.Uri.parse(filePath);
+        // Match the model Monaco opens for definition/related-information links.
+        if (!monaco.editor.getModel(uri)) {
+          monaco.editor.createModel(
+            extraLibs[filePath].content,
+            "typescript",
+            uri,
+          );
+        }
+        return uri;
+      });
+      const getWorker = await monaco.languages.typescript.getTypeScriptWorker();
+      const worker = await getWorker(model.uri, ...libraryUris);
+      const diagnostics = await Promise.all([
+        worker.getSyntacticDiagnostics(model.uri.toString()),
+        worker.getSemanticDiagnostics(model.uri.toString()),
+        ...Object.keys(extraLibs).flatMap((uri) => [
+          worker.getSyntacticDiagnostics(uri),
+          worker.getSemanticDiagnostics(uri),
+        ]),
+      ]);
+      return diagnostics.flat().map((diagnostic) => diagnostic.messageText);
+    }, runtime);
+  await runtime.dispose();
+  return errors;
 }
 
 async function scriptMarkerErrors(page: import("@playwright/test").Page) {
-  return page.evaluate(() => {
-    const monaco = (
-      window as unknown as { monaco: typeof import("monaco-editor") }
-    ).monaco;
+  const runtime = await getMonacoRuntime(page);
+  const errors = await page.evaluate((monaco) => {
     return monaco.editor
       .getModelMarkers({})
       .filter((marker) => marker.severity === monaco.MarkerSeverity.Error)
       .map((marker) => marker.message);
-  });
+  }, runtime);
+  await runtime.dispose();
+  return errors;
 }
 
 test.beforeEach(async ({ request }) => {
