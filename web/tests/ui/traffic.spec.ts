@@ -14,7 +14,7 @@ import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import WebSocket, { WebSocketServer } from "ws";
 import { HttpProxyAgent } from "http-proxy-agent";
-import createHttpsProxyAgent from "https-proxy-agent";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { createServer as createHttpsServer } from "node:https";
 
 const execFileAsync = promisify(execFile);
@@ -721,7 +721,7 @@ const streamSseViaProxy = async (url: string) => {
 const sendWsViaProxy = async (url: string) => {
   await new Promise<void>((resolve, reject) => {
     const agent = url.startsWith("wss:")
-      ? createHttpsProxyAgent(proxyUrl)
+      ? new HttpsProxyAgent(proxyUrl)
       : new HttpProxyAgent(proxyUrl);
     const ws = new WebSocket(url, { agent, rejectUnauthorized: false });
     ws.on("open", () => {
