@@ -110,6 +110,9 @@ importers:
       http-proxy-agent:
         specifier: ^7.0.2
         version: 7.0.2
+      https-proxy-agent:
+        specifier: 5.0.1
+        version: 5.0.1
       typescript:
         specifier: ~5.9.3
         version: 5.9.3

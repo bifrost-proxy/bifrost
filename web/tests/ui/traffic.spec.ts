@@ -14,6 +14,7 @@ import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import WebSocket, { WebSocketServer } from "ws";
 import { HttpProxyAgent } from "http-proxy-agent";
+import createHttpsProxyAgent from "https-proxy-agent";
 import { createServer as createHttpsServer } from "node:https";
 
 const execFileAsync = promisify(execFile);
@@ -719,7 +720,9 @@ const streamSseViaProxy = async (url: string) => {
 
 const sendWsViaProxy = async (url: string) => {
   await new Promise<void>((resolve, reject) => {
-    const agent = new HttpProxyAgent(proxyUrl);
+    const agent = url.startsWith("wss:")
+      ? createHttpsProxyAgent(proxyUrl)
+      : new HttpProxyAgent(proxyUrl);
     const ws = new WebSocket(url, { agent, rejectUnauthorized: false });
     ws.on("open", () => {
       ws.send("hello");
@@ -2002,6 +2005,7 @@ test("WebSocket loopback TLS 回显与 size 增长", async ({ page, request }) =
   await clearTraffic(request);
   const server = await startTlsWsServer();
   const ruleName = `wss-loopback-${server.port}`;
+  const echoPath = `/tls-ws-echo-${server.port}`;
   const repoRoot = path.resolve(path.dirname(currentFilePath), "../../..");
   const rule = (await fs.readFile(path.join(repoRoot, "e2e-tests/rules/tls/ui_ws_loopback.txt"), "utf8"))
     .replaceAll("__MOCK_WSS_PORT__", String(server.port));
@@ -2010,14 +2014,14 @@ test("WebSocket loopback TLS 回显与 size 增长", async ({ page, request }) =
       data: { name: ruleName, content: rule, enabled: true },
     });
     expect(ruleResponse.ok()).toBe(true);
-    await sendWsViaProxy(`wss://127.0.0.1:${server.port}/echo`);
+    await sendWsViaProxy(`wss://127.0.0.1:${server.port}${echoPath}`);
 
     await page.goto("/_bifrost/traffic");
     await expect(page.getByTestId("traffic-table")).toBeVisible();
 
     const wsRow = page
       .getByTestId("traffic-row")
-      .filter({ hasText: `127.0.0.1:${server.port}` })
+      .filter({ hasText: echoPath })
       .first();
     await expect(wsRow).toBeVisible();
 
