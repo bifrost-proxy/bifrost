@@ -12,6 +12,19 @@ verify_client_response_read() (
     else
         cc -shared -fPIC "$repo_root/e2e-tests/test_data/admin_response_reset_fault.c" -ldl -pthread -o "$library"
     fi
+    cc -Wall -Wextra -Werror "$repo_root/e2e-tests/test_data/admin_response_reset_probe.c" -o "$runtime/reset-probe"
+    cc -Wall -Wextra -Werror -DBIFROST_E2E_DARWIN_FORWARD_TEST \
+        "$repo_root/e2e-tests/test_data/admin_response_reset_probe.c" -o "$runtime/darwin-forward-probe"
+    "$runtime/darwin-forward-probe"
+    if [[ "$extension" == "dylib" ]]; then
+        DYLD_INSERT_LIBRARIES="$library" \
+            BIFROST_E2E_SOCKET_RESET_LIBRARY_LOADED="$runtime/probe-library-loaded" "$runtime/reset-probe"
+    else
+        LD_PRELOAD="$library" \
+            BIFROST_E2E_SOCKET_RESET_LIBRARY_LOADED="$runtime/probe-library-loaded" "$runtime/reset-probe"
+    fi
+    [[ -s "$runtime/probe-library-loaded" ]]
+    echo "[PASS] socket fault library loaded; forwarding and EINVAL injection verified"
     python3 "$repo_root/e2e-tests/mock_servers/admin_fragmented_response.py" \
         --port-file "$runtime/response-port" --request-file "$runtime/response-request" &
     server_pid=$!
