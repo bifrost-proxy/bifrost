@@ -1034,6 +1034,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_writes_preserve_http_method_json_body_and_bearer() {
+        use wiremock::matchers::body_json;
+        let server = MockServer::start().await;
+        let payload = json!({"value": "Unicode value 值"});
+        for verb in ["PUT", "PATCH", "DELETE"] {
+            Mock::given(method(verb))
+                .and(path("/_bifrost/api/write"))
+                .and(header("Authorization", "Bearer test-token"))
+                .and(header("Content-Type", "application/json"))
+                .and(body_json(&payload))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"method": verb})))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client =
+            ConfigApiClient::from_base_url(&server.uri(), Some("test-token".into())).unwrap();
+        let put: serde_json::Value = client.put("/write", &payload).unwrap();
+        let patch: serde_json::Value = client.patch("/write", &payload).unwrap();
+        let delete: serde_json::Value = client.delete_with_body_public("/write", &payload).unwrap();
+        assert_eq!(put["method"], "PUT");
+        assert_eq!(patch["method"], "PATCH");
+        assert_eq!(delete["method"], "DELETE");
+    }
+
+    #[tokio::test]
+    async fn admin_text_requests_and_raw_exports_preserve_wire_bodies() {
+        use wiremock::matchers::{body_json, body_string};
+        let server = MockServer::start().await;
+        let text = "bifrost-values\nUnicode 内容\n";
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/plain"))
+            .and(header("Content-Type", "text/plain"))
+            .and(body_string(text))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"accepted": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/export"))
+            .and(header("Content-Type", "application/json"))
+            .and(body_json(json!({"names": ["key"]})))
+            .respond_with(ResponseTemplate::new(200).set_body_string(text))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let accepted: serde_json::Value = client.post_text("/plain", text).unwrap();
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(
+            client
+                .post_text_response("/export", &json!({"names": ["key"]}))
+                .unwrap(),
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_text_and_export_errors_keep_status_and_endpoint() {
+        let server = MockServer::start().await;
+        for endpoint in ["/plain-error", "/export-error"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/_bifrost/api{endpoint}")))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": "denied"})))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let plain = client
+            .post_text::<serde_json::Value>("/plain-error", "input")
+            .unwrap_err();
+        let export = client
+            .post_text_response("/export-error", &json!({}))
+            .unwrap_err();
+        for (message, endpoint) in [(plain, "/plain-error"), (export, "/export-error")] {
+            assert!(message.contains("POST"));
+            assert!(message.contains(endpoint));
+            assert!(message.contains("HTTP 403: denied"));
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_malformed_json_is_reported_with_request_context() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/malformed"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{invalid JSON"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let error = client
+            .get_public::<serde_json::Value>("/malformed")
+            .unwrap_err();
+        assert!(error.contains("Failed to parse Admin API response for GET"));
+        assert!(error.contains("/malformed"));
+    }
+
+    #[tokio::test]
+    async fn admin_serialization_failure_does_not_send_a_write() {
+        struct InvalidBody;
+        impl serde::Serialize for InvalidBody {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("cannot encode body"))
+            }
+        }
+        let server = MockServer::start().await;
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let error = client
+            .post_public::<serde_json::Value, _>("/write", &InvalidBody)
+            .unwrap_err();
+        assert!(error.contains("Failed to encode Admin API request for POST"));
+        assert!(error.contains("/write"));
+        assert!(error.contains("cannot encode body"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn config_api_client_get_server_config_uses_wiremock() {
         let mock_server = MockServer::start().await;
 
