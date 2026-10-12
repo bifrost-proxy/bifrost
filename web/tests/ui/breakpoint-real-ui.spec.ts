@@ -1442,8 +1442,13 @@ for (const firstPageMatches of [0, 1]) {
   test(`Breakpoint real UI Fuzzy Paused reaches older hits after ${firstPageMatches} visible first-page hits`, async ({
     page,
     request,
-  }) => {
+  }, testInfo) => {
     const upstream = await loopbackUpstream();
+    const readiness: Array<{
+      expected: number;
+      searchable: number;
+      missing: number;
+    }> = [];
     const clients: ReturnType<typeof wireRequest>[] = [];
     try {
       await request.put(`${apiBase}/config/performance`, {
@@ -1465,15 +1470,52 @@ for (const firstPageMatches of [0, 1]) {
       await expect(page.getByTestId("rule-new-button")).toBeVisible();
       // Streaming search caps a page at 1000 results (50 is its batch size).
       // Populate real traffic beyond that cap without unbounded socket fan-out.
-      for (let offset = 0; offset < 1100; offset += 100) {
+      // A bounded 200-request batch also lets the DB writer combine records;
+      // avoid keeping the paused wire client idle through tiny write batches.
+      for (let offset = 0; offset < 1100; offset += 200) {
+        const batchSize = Math.min(200, 1100 - offset);
         await Promise.all(
           Array.from(
-            { length: 100 },
+            { length: batchSize },
             (_, i) =>
               wireRequest(upstream.url(`/reach-completed-${offset + i}`))
                 .result,
           ),
         );
+        // Wire completion precedes the async traffic writer's DB commit. Search
+        // reads that DB, so require every generated path to be searchable before
+        // producing another batch (and before testing the 1000-result page cap).
+        const expectedPaths = Array.from(
+          { length: offset + batchSize },
+          (_, i) => `/reach-completed-${i}`,
+        );
+        await expect
+          .poll(
+            async () => {
+              const response = await request.post(`${apiBase}/search`, {
+                data: {
+                  keyword: "reach-completed-",
+                  scope: { url: true, all: false },
+                  limit: 1100,
+                },
+              });
+              expect(response.ok()).toBeTruthy();
+              const payload = (await response.json()) as {
+                results: Array<{ record: { p: string } }>;
+                total_matched: number;
+              };
+              const paths = new Set(payload.results.map(({ record }) => record.p));
+              const missing = expectedPaths.filter((path) => !paths.has(path));
+              readiness.push({
+                expected: offset + batchSize,
+                searchable: payload.total_matched,
+                missing: missing.length,
+              });
+              return { missing, count: payload.total_matched, unique: paths.size };
+            },
+            { message: `all ${offset + batchSize} wire requests must be searchable` },
+          )
+          .toEqual({ missing: [], count: offset + batchSize, unique: offset + batchSize });
       }
       // The old hit must still be genuinely paused before testing pagination.
       await expect.poll(async () => (await pending(request)).length).toBe(1);
@@ -1488,6 +1530,17 @@ for (const firstPageMatches of [0, 1]) {
       if (firstPageMatches) {
         clients.push(wireRequest(upstream.url("/reach-paused?newer=1")));
         await expect.poll(async () => (await pending(request)).length).toBe(2);
+        await expect.poll(async () => {
+          const response = await request.post(`${apiBase}/search`, {
+            data: {
+              keyword: "reach-paused?newer=1",
+              scope: { url: true, all: false },
+              limit: 50,
+            },
+          });
+          expect(response.ok()).toBeTruthy();
+          return (await response.json()).total_matched;
+        }).toBe(1);
       }
       await page.getByTestId("toolbar-breakpoint-pending-only").check();
       await page.getByRole("button", { name: /Fuzzy Search/ }).click();
@@ -1503,6 +1556,7 @@ for (const firstPageMatches of [0, 1]) {
       const firstPageText = await (await firstPage).text();
       expect(firstPageText).toContain('"has_more":true');
       expect(firstPageText).not.toContain("older=1");
+      if (firstPageMatches) expect(firstPageText).toContain("newer=1");
       // No scroll or Load More click: a short filtered viewport must refill itself.
       await expect(
         page.getByTestId("search-result-row").filter({ hasText: "older=1" }),
@@ -1520,6 +1574,10 @@ for (const firstPageMatches of [0, 1]) {
       await page.getByTestId("toolbar-breakpoint-toggle").click();
       await Promise.all(clients.map((client) => client.result));
     } finally {
+      await testInfo.attach("search-fixture-readiness", {
+        body: JSON.stringify(readiness, null, 2),
+        contentType: "application/json",
+      });
       clients.forEach((client) => client.abort());
       await upstream.close();
     }

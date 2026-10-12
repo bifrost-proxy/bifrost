@@ -1,4 +1,12 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::io::Read;
+
+struct AdminApiResponse {
+    status: u16,
+    body: String,
+}
+
+const ADMIN_RESPONSE_LIMIT: u64 = 10 * 1024 * 1024;
 
 pub struct ConfigApiClient {
     base_url: String,
@@ -41,19 +49,8 @@ impl ConfigApiClient {
         format!("{}{}", self.base_url, path)
     }
 
-    pub fn request(&self, method: &str, path: &str) -> ureq::Request {
-        let agent = bifrost_core::direct_ureq_agent_builder()
-            .redirects(0)
-            .build();
-        let request = agent.request(method, &self.url(path));
-        match self.bearer_token() {
-            Some(token) => request.set("Authorization", &format!("Bearer {token}")),
-            None => request,
-        }
-    }
-
     pub fn get_public<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        self.read_json(self.request("GET", path).call(), "GET", path)
+        self.read_json(self.execute_request("GET", path, None), "GET", path)
     }
 
     pub fn post_public<T: DeserializeOwned, R: Serialize>(
@@ -61,7 +58,7 @@ impl ConfigApiClient {
         path: &str,
         body: &R,
     ) -> Result<T, String> {
-        self.read_json(self.request("POST", path).send_json(body), "POST", path)
+        self.read_json(self.execute_json_request("POST", path, body), "POST", path)
     }
 
     pub fn get_tls_config(&self) -> Result<TlsConfigResponse, String> {
@@ -411,7 +408,7 @@ impl ConfigApiClient {
     }
 
     pub(crate) fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        self.read_json(self.request("GET", path).call(), "GET", path)
+        self.read_json(self.execute_request("GET", path, None), "GET", path)
     }
 
     pub(crate) fn put<T: DeserializeOwned, R: Serialize>(
@@ -419,7 +416,7 @@ impl ConfigApiClient {
         path: &str,
         body: &R,
     ) -> Result<T, String> {
-        self.read_json(self.request("PUT", path).send_json(body), "PUT", path)
+        self.read_json(self.execute_json_request("PUT", path, body), "PUT", path)
     }
 
     pub(crate) fn post<T: DeserializeOwned, R: Serialize>(
@@ -427,15 +424,19 @@ impl ConfigApiClient {
         path: &str,
         body: &R,
     ) -> Result<T, String> {
-        self.read_json(self.request("POST", path).send_json(body), "POST", path)
+        self.read_json(self.execute_json_request("POST", path, body), "POST", path)
     }
 
     fn patch<T: DeserializeOwned, R: Serialize>(&self, path: &str, body: &R) -> Result<T, String> {
-        self.read_json(self.request("PATCH", path).send_json(body), "PATCH", path)
+        self.read_json(
+            self.execute_json_request("PATCH", path, body),
+            "PATCH",
+            path,
+        )
     }
 
     pub(crate) fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        self.read_json(self.request("DELETE", path).call(), "DELETE", path)
+        self.read_json(self.execute_request("DELETE", path, None), "DELETE", path)
     }
 
     fn delete_with_body<T: DeserializeOwned, R: Serialize>(
@@ -443,7 +444,11 @@ impl ConfigApiClient {
         path: &str,
         body: &R,
     ) -> Result<T, String> {
-        self.read_json(self.request("DELETE", path).send_json(body), "DELETE", path)
+        self.read_json(
+            self.execute_json_request("DELETE", path, body),
+            "DELETE",
+            path,
+        )
     }
 
     pub(crate) fn delete_with_body_public<T: DeserializeOwned, R: Serialize>(
@@ -455,56 +460,142 @@ impl ConfigApiClient {
     }
 
     fn post_text<T: DeserializeOwned>(&self, path: &str, text: &str) -> Result<T, String> {
-        let resp = self
-            .request("POST", path)
-            .set("Content-Type", "text/plain")
-            .send_string(text)
-            .map_err(|e| self.request_error("POST", path, e))?;
-        let body = resp
-            .into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-        serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))
+        let response =
+            self.execute_request("POST", path, Some(("text/plain", text.as_bytes().to_vec())))?;
+        if !(200..300).contains(&response.status) {
+            return Err(self.response_error("POST", path, response));
+        }
+        serde_json::from_str(&response.body)
+            .map_err(|error| format!("Failed to parse response: {error}"))
     }
 
     fn post_text_response<R: Serialize>(&self, path: &str, body: &R) -> Result<String, String> {
-        let resp = self
-            .request("POST", path)
-            .send_json(body)
-            .map_err(|e| self.request_error("POST", path, e))?;
-        resp.into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))
+        let response = self.execute_json_request("POST", path, body)?;
+        if !(200..300).contains(&response.status) {
+            return Err(self.response_error("POST", path, response));
+        }
+        Ok(response.body)
+    }
+
+    fn execute_json_request<R: Serialize>(
+        &self,
+        method: &str,
+        path: &str,
+        body: &R,
+    ) -> Result<AdminApiResponse, String> {
+        let bytes = serde_json::to_vec(body).map_err(|error| {
+            format!(
+                "Failed to encode Admin API request for {method} {}: {error}",
+                self.url(path)
+            )
+        })?;
+        self.execute_request(method, path, Some(("application/json", bytes)))
+    }
+
+    fn execute_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<(&'static str, Vec<u8>)>,
+    ) -> Result<AdminApiResponse, String> {
+        let url = self.url(path);
+        let method = method.to_string();
+        let token = self.bearer_token().map(str::to_owned);
+        // ureq 2 returns socket-reset/pool-retirement errors from the final
+        // body read, even after the complete response was received. Use the
+        // existing direct transport without replaying a possibly applied write.
+        // Own the blocking client's runtime here, outside callers' Tokio runtime.
+        std::thread::spawn(move || {
+            let context = format!("{method} {url}");
+            let client = bifrost_core::direct_blocking_reqwest_client_builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .http1_only()
+                .no_gzip()
+                .no_brotli()
+                .no_zstd()
+                .no_deflate()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .timeout(None)
+                .build()
+                .map_err(|error| {
+                    format!("Failed to create Admin API client for {context}: {error}")
+                })?;
+            let method = reqwest::Method::from_bytes(method.as_bytes())
+                .map_err(|error| format!("Invalid Admin API method for {context}: {error}"))?;
+            let mut request = client
+                .request(method, &url)
+                .header(reqwest::header::ACCEPT_ENCODING, "gzip");
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            if let Some((content_type, body)) = body {
+                request = request
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(body);
+            }
+            let response = request.send().map_err(|error| {
+                format!(
+                    "Failed to connect to Bifrost admin API for {context}: {}",
+                    bifrost_core::format_reqwest_error(&error)
+                )
+            })?;
+            let status = response.status().as_u16();
+            let gzip = response
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|encoding| matches!(encoding, "gzip" | "x-gzip"));
+            // Match ureq's gzip/x-gzip and concatenated member semantics locally;
+            // do not enable auto-decompression for unrelated workspace clients.
+            let reader: Box<dyn Read> = if gzip {
+                Box::new(flate2::read::MultiGzDecoder::new(response))
+            } else {
+                Box::new(response)
+            };
+            let mut bytes = Vec::new();
+            reader
+                .take(ADMIN_RESPONSE_LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| {
+                    format!(
+                        "Failed to read Admin API response for {context} (HTTP {status}): {error}"
+                    )
+                })?;
+            if bytes.len() as u64 > ADMIN_RESPONSE_LIMIT {
+                return Err(format!(
+                    "Admin API response exceeds {ADMIN_RESPONSE_LIMIT} bytes for {context}"
+                ));
+            }
+            Ok(AdminApiResponse {
+                status,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            })
+        })
+        .join()
+        .map_err(|_| "Admin API transport worker failed".to_string())?
     }
 
     fn read_json<T: DeserializeOwned>(
         &self,
-        response: Result<ureq::Response, ureq::Error>,
+        response: Result<AdminApiResponse, String>,
         method: &str,
         path: &str,
     ) -> Result<T, String> {
-        let response = response.map_err(|error| self.request_error(method, path, error))?;
-        if !(200..300).contains(&response.status()) {
+        let response = response?;
+        if !(200..300).contains(&response.status) {
             return Err(self.response_error(method, path, response));
         }
-        let body = response
-            .into_string()
-            .map_err(|error| format!("Failed to read Admin API response: {error}"))?;
-        serde_json::from_str(&body)
-            .map_err(|error| format!("Failed to parse Admin API response: {error}"))
-    }
-
-    fn request_error(&self, method: &str, path: &str, error: ureq::Error) -> String {
-        match error {
-            ureq::Error::Status(_, response) => self.response_error(method, path, response),
-            ureq::Error::Transport(error) => format!(
-                "Failed to connect to Bifrost admin API for {method} {}: {error}",
+        serde_json::from_str(&response.body).map_err(|error| {
+            format!(
+                "Failed to parse Admin API response for {method} {}: {error}",
                 self.url(path)
-            ),
-        }
+            )
+        })
     }
 
-    fn response_error(&self, method: &str, path: &str, response: ureq::Response) -> String {
-        let status = response.status();
-        let body = response.into_string().unwrap_or_default();
+    fn response_error(&self, method: &str, path: &str, response: AdminApiResponse) -> String {
+        let status = response.status;
+        let body = response.body;
         let message = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
             .and_then(|value| {
@@ -804,6 +895,262 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn fragmented_response_server(
+        status: &str,
+        headers: &str,
+        fragments: Vec<Vec<u8>>,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let response_head = format!("HTTP/1.1 {status}\r\n{headers}\r\n");
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 65536);
+            }
+            let head = String::from_utf8(request).unwrap();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|n| n.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            let mut body = vec![0; length];
+            socket.read_exact(&mut body).unwrap();
+            socket.write_all(response_head.as_bytes()).unwrap();
+            for fragment in fragments {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                if socket.write_all(&fragment).is_err() {
+                    break;
+                }
+            }
+            head + &String::from_utf8_lossy(&body)
+        });
+        (base_url, handle)
+    }
+
+    #[test]
+    fn fragmented_admin_json_is_read_completely() {
+        let json = br#"{"total":1,"items":[{"id":7}]}"#;
+        let (url, server) = fragmented_response_server(
+            "200 OK",
+            &format!(
+                "Content-Length: {}\r\nContent-Type: application/json\r\n",
+                json.len()
+            ),
+            vec![json[..8].to_vec(), json[8..].to_vec()],
+        );
+        let client = ConfigApiClient::from_base_url(&url, Some("test-token".into())).unwrap();
+        let response: serde_json::Value = client.get_public("/admin/audit").unwrap();
+        assert_eq!(response["total"], 1);
+        assert_eq!(response["items"][0]["id"], 7);
+        let sent = server.join().unwrap().to_lowercase();
+        assert!(sent.starts_with("get /_bifrost/api/admin/audit "));
+        assert!(sent.contains("authorization: bearer test-token"));
+    }
+
+    #[test]
+    fn truncated_admin_write_response_fails_without_replaying_request() {
+        let (url, server) = fragmented_response_server(
+            "200 OK",
+            "Content-Length: 20\r\nContent-Type: application/json\r\n",
+            vec![b"{\"ok\":".to_vec()],
+        );
+        let client = ConfigApiClient::from_base_url(&url, None).unwrap();
+        let error = client
+            .post_public::<serde_json::Value, _>("/auth/revoke-all", &json!({}))
+            .unwrap_err();
+        assert!(
+            error.contains("Failed to read Admin API response"),
+            "{error}"
+        );
+        assert!(error.contains("POST"));
+        assert!(error.contains("/auth/revoke-all"));
+        let sent = server.join().unwrap();
+        assert_eq!(
+            sent.matches("POST /_bifrost/api/auth/revoke-all ").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn admin_json_response_limit_is_preserved() {
+        let body = vec![b' '; 10 * 1024 * 1024 + 2];
+        let (url, server) = fragmented_response_server(
+            "200 OK",
+            &format!("Content-Length: {}\r\n", body.len()),
+            vec![body],
+        );
+        let client = ConfigApiClient::from_base_url(&url, None).unwrap();
+        let error = client
+            .get_public::<serde_json::Value>("/large")
+            .unwrap_err();
+        assert!(error.contains("exceeds 10485760 bytes"), "{error}");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_api_preserves_gzip_json_decoding() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/compressed"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Encoding", "gzip")
+                    .set_body_bytes(vec![
+                        31, 139, 8, 0, 0, 0, 0, 0, 2, 3, 171, 86, 202, 207, 86, 178, 42, 41, 42,
+                        77, 173, 5, 0, 144, 95, 212, 167, 11, 0, 0, 0,
+                    ]),
+            )
+            .mount(&server)
+            .await;
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let value: serde_json::Value = client.get_public("/compressed").unwrap();
+        assert_eq!(value, json!({ "ok": true }));
+    }
+
+    #[test]
+    fn admin_api_reads_fragmented_chunked_json() {
+        let (url, server) = fragmented_response_server(
+            "200 OK",
+            "Transfer-Encoding: chunked\r\n",
+            vec![
+                b"4\r\n{\"ok\r\n".to_vec(),
+                b"7\r\n\":true}\r\n0\r\n\r\n".to_vec(),
+            ],
+        );
+        let client = ConfigApiClient::from_base_url(&url, None).unwrap();
+        let value: serde_json::Value = client.get_public("/chunked").unwrap();
+        assert_eq!(value, json!({ "ok": true }));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_writes_preserve_http_method_json_body_and_bearer() {
+        use wiremock::matchers::body_json;
+        let server = MockServer::start().await;
+        let payload = json!({"value": "Unicode value 值"});
+        for verb in ["PUT", "PATCH", "DELETE"] {
+            Mock::given(method(verb))
+                .and(path("/_bifrost/api/write"))
+                .and(header("Authorization", "Bearer test-token"))
+                .and(header("Content-Type", "application/json"))
+                .and(body_json(&payload))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"method": verb})))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client =
+            ConfigApiClient::from_base_url(&server.uri(), Some("test-token".into())).unwrap();
+        let put: serde_json::Value = client.put("/write", &payload).unwrap();
+        let patch: serde_json::Value = client.patch("/write", &payload).unwrap();
+        let delete: serde_json::Value = client.delete_with_body_public("/write", &payload).unwrap();
+        assert_eq!(put["method"], "PUT");
+        assert_eq!(patch["method"], "PATCH");
+        assert_eq!(delete["method"], "DELETE");
+    }
+
+    #[tokio::test]
+    async fn admin_text_requests_and_raw_exports_preserve_wire_bodies() {
+        use wiremock::matchers::{body_json, body_string};
+        let server = MockServer::start().await;
+        let text = "bifrost-values\nUnicode 内容\n";
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/plain"))
+            .and(header("Content-Type", "text/plain"))
+            .and(body_string(text))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"accepted": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/export"))
+            .and(header("Content-Type", "application/json"))
+            .and(body_json(json!({"names": ["key"]})))
+            .respond_with(ResponseTemplate::new(200).set_body_string(text))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let accepted: serde_json::Value = client.post_text("/plain", text).unwrap();
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(
+            client
+                .post_text_response("/export", &json!({"names": ["key"]}))
+                .unwrap(),
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_text_and_export_errors_keep_status_and_endpoint() {
+        let server = MockServer::start().await;
+        for endpoint in ["/plain-error", "/export-error"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/_bifrost/api{endpoint}")))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": "denied"})))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let plain = client
+            .post_text::<serde_json::Value>("/plain-error", "input")
+            .unwrap_err();
+        let export = client
+            .post_text_response("/export-error", &json!({}))
+            .unwrap_err();
+        for (message, endpoint) in [(plain, "/plain-error"), (export, "/export-error")] {
+            assert!(message.contains("POST"));
+            assert!(message.contains(endpoint));
+            assert!(message.contains("HTTP 403: denied"));
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_malformed_json_is_reported_with_request_context() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/malformed"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{invalid JSON"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let error = client
+            .get_public::<serde_json::Value>("/malformed")
+            .unwrap_err();
+        assert!(error.contains("Failed to parse Admin API response for GET"));
+        assert!(error.contains("/malformed"));
+    }
+
+    #[tokio::test]
+    async fn admin_serialization_failure_does_not_send_a_write() {
+        struct InvalidBody;
+        impl serde::Serialize for InvalidBody {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("cannot encode body"))
+            }
+        }
+        let server = MockServer::start().await;
+        let client = ConfigApiClient::from_base_url(&server.uri(), None).unwrap();
+        let error = client
+            .post_public::<serde_json::Value, _>("/write", &InvalidBody)
+            .unwrap_err();
+        assert!(error.contains("Failed to encode Admin API request for POST"));
+        assert!(error.contains("/write"));
+        assert!(error.contains("cannot encode body"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn config_api_client_get_server_config_uses_wiremock() {

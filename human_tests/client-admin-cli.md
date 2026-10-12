@@ -111,6 +111,23 @@
 - 不使用正式 `9900`，不执行全机进程名清理。
 - 本次 PID 树结束且临时目录被删除，不影响正式 Bifrost。
 
+### TC-CLIENT-08 分片正文完成与 socket 收尾错误
+
+操作步骤：
+
+1. 从本次源码构建 CLI，设置 `BIFROST_BIN` 指向该产物。
+2. 在独立临时目录 source `e2e-tests/test_utils/process.sh` 与 `e2e-tests/test_utils/client_response_read.sh`，调用 `verify_client_response_read "$BIFROST_BIN" "$PWD" "$TEST_DIR"`。
+3. Linux 使用 `LD_PRELOAD`、macOS 使用 `DYLD_INSERT_LIBRARIES`，仅给该测试 CLI 子进程加载故障库；真实 loopback HTTP 服务先发 headers，再发完整 JSON。
+4. 原 Client Admin suite 继续执行 audit JSON、password stdin、revoke-all；阶段日志只标明命令，不输出密码或 token。
+
+预期结果：
+
+- 故障库加载标记存在，四个配置字段完整读回，没有正文读取 EINVAL。
+- 不通过重放请求规避错误；截断写响应必须失败并标明 method/endpoint。
+- gzip、chunked 正文以及原 10 MiB 上限由客户端回归覆盖。
+- 原 LAN 登录、Bearer、禁止重定向及 JWT 撤销断言全部保留。
+- mock 服务、故障库和调用端数据只属于本次临时目录，结束后按 PID 清理。
+
 ## 清理步骤
 
 测试脚本的 `EXIT` trap 按记录的 PID 终止 capture、echo server 和目标实例，然后删除带 E2E ownership 标记的临时目录。若测试异常退出，先按 PID 检查残留；禁止使用 `pkill -f bifrost`、`killall bifrost` 或按正式 `9900` 端口清理。

@@ -399,6 +399,7 @@ pub struct PushClient {
     pub client_key: String,
     pub sender: mpsc::Sender<PushMessage>,
     pub subscription: RwLock<ClientSubscription>,
+    traffic_bootstrap_subscription: Mutex<Option<ClientSubscription>>,
     traffic_statistics_last_sent: Mutex<Option<Instant>>,
     metrics_last_sent: Mutex<Option<Instant>>,
 }
@@ -413,6 +414,9 @@ impl PushClient {
             id: generate_client_id(),
             client_key,
             sender,
+            traffic_bootstrap_subscription: Mutex::new(
+                subscription.need_traffic.then(|| subscription.clone()),
+            ),
             subscription: RwLock::new(subscription),
             traffic_statistics_last_sent: Mutex::new(None),
             metrics_last_sent: Mutex::new(None),
@@ -427,6 +431,13 @@ impl PushClient {
     pub fn update_subscription(&self, subscription: ClientSubscription) {
         let mut current = self.subscription.write();
         let mut next = subscription;
+        if !next.need_traffic {
+            *self.traffic_bootstrap_subscription.lock() = None;
+        } else if !current.need_traffic {
+            // Bootstrap must use the browser's consumed cursor even if an old
+            // sender advances the shared send cursor after this update.
+            *self.traffic_bootstrap_subscription.lock() = Some(next.clone());
+        }
         if current.need_traffic && next.need_traffic {
             next.last_sequence = match (current.last_sequence, next.last_sequence) {
                 (Some(current), Some(incoming)) => Some(current.max(incoming)),
@@ -442,6 +453,16 @@ impl PushClient {
 
     pub fn get_subscription(&self) -> ClientSubscription {
         self.subscription.read().clone()
+    }
+
+    fn take_traffic_bootstrap_subscription(&self) -> ClientSubscription {
+        // Keep the same lock order as update_subscription. The captured replay
+        // snapshot is independent of cursor/pending updates from late senders.
+        let current = self.subscription.read();
+        self.traffic_bootstrap_subscription
+            .lock()
+            .take()
+            .unwrap_or_else(|| current.clone())
     }
 
     fn reserve_traffic_statistics_push(&self, now: Instant) -> bool {
@@ -795,10 +816,10 @@ impl PushManager {
         }
 
         let last_seq = inserts.last().map(|r| r.seq);
-        let next_pending_ids = {
-            let subscription = client.get_subscription();
-            self.update_pending_ids(&subscription.pending_ids, &inserts, &updates)
-        };
+        // Serialize queueing with cursor/pending changes so a competing sender
+        // cannot overwrite pending IDs computed from an obsolete subscription.
+        let mut sub = client.subscription.write();
+        let next_pending_ids = self.update_pending_ids(&sub.pending_ids, &inserts, &updates);
 
         let msg = PushMessage::TrafficDelta(TrafficDeltaData {
             inserts,
@@ -818,7 +839,6 @@ impl PushManager {
             return false;
         }
 
-        let mut sub = client.subscription.write();
         if let Some(seq) = last_seq {
             sub.last_sequence = Some(sub.last_sequence.map_or(seq, |current| current.max(seq)));
         }
@@ -1037,7 +1057,7 @@ impl PushManager {
     }
 
     pub fn send_initial_traffic(&self, client: &Arc<PushClient>) {
-        let subscription = client.get_subscription();
+        let subscription = client.take_traffic_bootstrap_subscription();
         if !subscription.need_traffic {
             return;
         }
@@ -1630,7 +1650,8 @@ impl PushManager {
 
         if subscription.need_traffic {
             if let Some(ref db_store) = self.state.traffic_db_store {
-                self.send_initial_traffic_delta(client, db_store, &subscription);
+                let traffic_subscription = client.take_traffic_bootstrap_subscription();
+                self.send_initial_traffic_delta(client, db_store, &traffic_subscription);
                 self.send_traffic_statistics_to_client(client);
             }
         }
@@ -3057,6 +3078,84 @@ mod tests {
                 cleanup_test_dir(&dir);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn traffic_resubscription_replays_gap_after_late_sender_advances_cursor() {
+        let dir = create_test_dir();
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(9913).with_traffic_db_store_shared(store.clone()));
+        let manager = PushManager::new(state);
+        store.record(TrafficRecord::new(
+            "consumed".into(),
+            "GET".into(),
+            "http://example.test/1".into(),
+        ));
+        let (client, mut receiver) = manager.register_client(
+            "resume-gap".into(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        manager.send_initial_traffic(&client);
+        let consumed = client.get_subscription().last_sequence.unwrap();
+        while receiver.try_recv().is_ok() {}
+        client.update_subscription(ClientSubscription::default());
+        for id in ["gap", "late"] {
+            store.record(TrafficRecord::new(
+                id.into(),
+                "GET".into(),
+                format!("http://example.test/{id}"),
+            ));
+        }
+        let late = store
+            .query_latest_window(10)
+            .records
+            .into_iter()
+            .find(|r| r.id == "late")
+            .unwrap();
+        // The old broadcaster captured this frame while the page was off.
+        // Deliver it AFTER resubscription reset and BEFORE bootstrap reads.
+        client.update_subscription(ClientSubscription {
+            need_traffic: true,
+            last_sequence: Some(consumed),
+            ..Default::default()
+        });
+        assert!(manager.send_traffic_delta_to_client(
+            &client,
+            vec![late],
+            vec![],
+            TrafficDeltaMetadata {
+                has_more: false,
+                server_total: 3,
+                server_sequence: store.current_sequence(),
+                oldest_sequence: store.oldest_sequence(),
+            }
+        ));
+        manager.send_initial_traffic(&client);
+        let mut delivered = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            if let PushMessage::TrafficDelta(delta) = message {
+                delivered.extend(delta.inserts.into_iter().map(|record| record.id));
+            }
+        }
+        assert!(
+            delivered.iter().any(|id| id == "gap"),
+            "missing unconsumed gap: {delivered:?}"
+        );
+        assert!(delivered.iter().any(|id| id == "late"));
+        assert!(!delivered.iter().any(|id| id == "consumed"));
+        assert_eq!(
+            delivered.iter().filter(|id| id.as_str() == "gap").count(),
+            1
+        );
+        // The late frame can be replayed; consumers keep their existing ID upsert.
+        assert_eq!(
+            delivered.iter().filter(|id| id.as_str() == "late").count(),
+            2
+        );
+        cleanup_test_dir(&dir);
     }
 
     #[test]

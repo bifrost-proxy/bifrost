@@ -46,7 +46,8 @@ urlencoding = "2.1"
 url.workspace = true
 regex = "1"
 futures = "0.3"
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json"] }
+flate2 = "1"
 ureq.workspace = true
 chrono.workspace = true
 colored = "2"
