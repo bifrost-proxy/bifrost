@@ -14,6 +14,8 @@ import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import WebSocket, { WebSocketServer } from "ws";
 import { HttpProxyAgent } from "http-proxy-agent";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { createServer as createHttpsServer } from "node:https";
 
 const execFileAsync = promisify(execFile);
 const proxyUrl =
@@ -38,7 +40,7 @@ const startMockServer = async () => {
     res.end(JSON.stringify({ path: req.url || "/" }));
   });
 
-  await new Promise<void>((resolve) => server.listen(0, resolve));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
 
   return {
@@ -213,6 +215,32 @@ const startWsServer = async () => {
   };
 };
 
+const startTlsWsServer = async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "bifrost-ui-wss-"));
+  const key = path.join(directory, "key.pem");
+  const cert = path.join(directory, "cert.pem");
+  await execFileAsync("openssl", [
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+    "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+    "-keyout", key, "-out", cert,
+  ]);
+  const server = createHttpsServer({ key: await fs.readFile(key), cert: await fs.readFile(cert) });
+  const wss = new WebSocketServer({ server });
+  wss.on("connection", (socket) => socket.on("message", (data, isBinary) => {
+    socket.send(data, { binary: isBinary });
+  }));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    port: (server.address() as AddressInfo).port,
+    close: async () => {
+      for (const socket of wss.clients) socket.terminate();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await fs.rm(directory, { recursive: true, force: true });
+    },
+  };
+};
+
 const sendProxyRequest = async (url: string, targetProxyUrl = proxyUrl) => {
   await execFileAsync(
     "curl",
@@ -281,7 +309,9 @@ const startIsolatedBackend = async () => {
   const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "bifrost-ui-traffic-"));
   const dataDir = path.join(runtimeDir, "data");
   const logPath = path.join(runtimeDir, "backend.log");
-  const binPath = path.join(repoRoot, ".bifrost-ui-target", "debug", "bifrost");
+  const binPath = process.env.BIFROST_UI_TEST_PREBUILT_BINARY
+    ? path.resolve(repoRoot, process.env.BIFROST_UI_TEST_PREBUILT_BINARY)
+    : path.join(process.env.BIFROST_UI_TEST_TARGET_DIR || path.join(repoRoot, ".bifrost-ui-target"), "debug", "bifrost");
   await fs.mkdir(dataDir, { recursive: true });
   const logStream = createWriteStream(logPath, { flags: "a" });
 
@@ -690,8 +720,10 @@ const streamSseViaProxy = async (url: string) => {
 
 const sendWsViaProxy = async (url: string) => {
   await new Promise<void>((resolve, reject) => {
-    const agent = new HttpProxyAgent(proxyUrl);
-    const ws = new WebSocket(url, { agent });
+    const agent = url.startsWith("wss:")
+      ? new HttpsProxyAgent(proxyUrl)
+      : new HttpProxyAgent(proxyUrl);
+    const ws = new WebSocket(url, { agent, rejectUnauthorized: false });
     ws.on("open", () => {
       ws.send("hello");
       ws.send(Buffer.from([1, 2, 3, 4, 5, 6]));
@@ -782,6 +814,8 @@ test("详情页 Copy as cURL 会包含 POST body", async ({ page, request }) => 
       [
         "-sS",
         "--fail",
+        "--noproxy",
+        "",
         "-x",
         proxyUrl,
         "-X",
@@ -840,6 +874,36 @@ test("切换页面后保留已加载流量并持续接收 push", async ({ page, 
   const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const firstPath = `/persist-first-${token}`;
   const secondPath = `/persist-second-${token}`;
+  let holdOffPageSubscription = false;
+  let releaseOffPageSubscription: (() => void) | undefined;
+  let offPageInsertReceived = false;
+  // Relay the real backend socket. Delay only the off-page subscription to
+  // deterministically exercise an insert sent before the server sees it, but
+  // after the browser has removed its traffic handlers. No frames are mocked.
+  await page.routeWebSocket(/\/_bifrost\/api\/push(?:\?|$)/, (socket) => {
+    const backend = socket.connectToServer();
+    const held: Array<string | Buffer> = [];
+    socket.onMessage((message) => {
+      const subscription = JSON.parse(message.toString());
+      if (holdOffPageSubscription && subscription.need_traffic === false) {
+        held.push(message);
+        releaseOffPageSubscription = () => {
+          holdOffPageSubscription = false;
+          for (const pending of held.splice(0)) backend.send(pending);
+        };
+      } else {
+        backend.send(message);
+      }
+    });
+    backend.onMessage((message) => {
+      const frame = JSON.parse(message.toString());
+      if (frame.type === "traffic_delta" &&
+          JSON.stringify(frame.data.inserts).includes(secondPath)) {
+        offPageInsertReceived = true;
+      }
+      socket.send(message);
+    });
+  });
 
   try {
     await page.goto("/_bifrost/settings");
@@ -856,11 +920,15 @@ test("切换页面后保留已加载流量并持续接收 push", async ({ page, 
       page.getByTestId("traffic-row").filter({ hasText: firstPath }).first(),
     ).toBeVisible();
 
+    holdOffPageSubscription = true;
     await page.getByText("Settings", { exact: true }).click();
     await expect(page).toHaveURL(/\/_bifrost\/settings$/);
+    await expect.poll(() => Boolean(releaseOffPageSubscription)).toBeTruthy();
 
     await sendProxyRequest(`http://127.0.0.1:${server.port}${secondPath}`);
     await waitForRecordedTraffic(request, secondPath);
+    await expect.poll(() => offPageInsertReceived).toBeTruthy();
+    releaseOffPageSubscription!();
 
     await page.getByText("Network", { exact: true }).click();
     await expect(page.getByTestId("traffic-table")).toBeVisible();
@@ -1933,32 +2001,47 @@ test("WebSocket 帧与 size 更新展示正确", async ({ page, request }) => {
   await server.close();
 });
 
-test("WebSocket 外部站点回显与 size 增长", async ({ page, request }) => {
+test("WebSocket loopback TLS 回显与 size 增长", async ({ page, request }) => {
   await clearTraffic(request);
-  await sendWsViaProxy("wss://echo.websocket.org/");
+  const server = await startTlsWsServer();
+  const ruleName = `wss-loopback-${server.port}`;
+  const echoPath = `/tls-ws-echo-${server.port}`;
+  const repoRoot = path.resolve(path.dirname(currentFilePath), "../../..");
+  const rule = (await fs.readFile(path.join(repoRoot, "e2e-tests/rules/tls/ui_ws_loopback.txt"), "utf8"))
+    .replaceAll("__MOCK_WSS_PORT__", String(server.port));
+  try {
+    const ruleResponse = await request.post(`${apiBase}/rules`, {
+      data: { name: ruleName, content: rule, enabled: true },
+    });
+    expect(ruleResponse.ok()).toBe(true);
+    await sendWsViaProxy(`wss://127.0.0.1:${server.port}${echoPath}`);
 
-  await page.goto("/_bifrost/traffic");
-  await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await page.goto("/_bifrost/traffic");
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
 
-  const wsRow = page
-    .getByTestId("traffic-row")
-    .filter({ hasText: "echo.websocket.org" })
-    .first();
-  await expect(wsRow).toBeVisible();
+    const wsRow = page
+      .getByTestId("traffic-row")
+      .filter({ hasText: echoPath })
+      .first();
+    await expect(wsRow).toBeVisible();
 
-  await expect
-    .poll(async () => {
-      const frameCountAttr = await wsRow.getAttribute("data-frame-count");
-      return Number(frameCountAttr ?? "0");
-    })
-    .toBeGreaterThanOrEqual(2);
+    await expect
+      .poll(async () => {
+        const frameCountAttr = await wsRow.getAttribute("data-frame-count");
+        return Number(frameCountAttr ?? "0");
+      })
+      .toBeGreaterThanOrEqual(2);
 
-  await wsRow.click();
-  await page.getByTestId("response-tab-messages").click();
+    await wsRow.click();
+    await page.getByTestId("response-tab-messages").click();
 
-  await expect(page.getByTestId("ws-frames-pane")).toBeVisible();
-  await expect(page.getByTestId("ws-frames-table")).toContainText("hello");
-  await expect(page.getByTestId("ws-frames-table")).toContainText("6 B");
+    await expect(page.getByTestId("ws-frames-pane")).toBeVisible();
+    await expect(page.getByTestId("ws-frames-table")).toContainText("hello");
+    await expect(page.getByTestId("ws-frames-table")).toContainText("6 B");
+  } finally {
+    await request.delete(`${apiBase}/rules/${ruleName}`);
+    await server.close();
+  }
 });
 
 test("WebSocket 详情 Messages 面板打开后可实时收到新消息", async ({ page, request }) => {
@@ -2227,6 +2310,8 @@ test("SSE 外部站点流式更新与 size 增长", async ({ page, request }) =>
       "-N",
       "--max-time",
       "6",
+      "--noproxy",
+      "",
       "-x",
       proxyUrl,
       `http://127.0.0.1:${port}${ssePath}`,
@@ -2319,6 +2404,8 @@ test("SSE 详情 Messages 面板打开后可实时收到新事件", async ({ pag
       "-N",
       "--max-time",
       "8",
+      "--noproxy",
+      "",
       "-x",
       proxyUrl,
       `http://127.0.0.1:${port}${ssePath}`,
@@ -2395,6 +2482,8 @@ test("SSE 详情切换 Response tab 后消息列表不应丢失", async ({ page,
       "-N",
       "--max-time",
       "8",
+      "--noproxy",
+      "",
       "-x",
       proxyUrl,
       `http://127.0.0.1:${port}${ssePath}`,
@@ -2481,6 +2570,8 @@ test("SSE 详情切到弹窗再附回右侧面板后消息列表不应丢失", a
       "-N",
       "--max-time",
       "10",
+      "--noproxy",
+      "",
       "-x",
       proxyUrl,
       `http://127.0.0.1:${port}${ssePath}`,

@@ -1627,11 +1627,15 @@ GET /api/push (WebSocket Upgrade)
 | 参数            | 类型    | 说明                   |
 | --------------- | ------- | ---------------------- |
 | last_traffic_id | string  | 最后获取的流量记录 ID  |
+| last_sequence   | number  | 浏览器已消费的流量序号 |
+| need_traffic    | boolean | 是否订阅流量增量       |
 | pending_ids     | string  | 待更新的记录 ID 列表   |
 | need_overview   | boolean | 是否需要系统概览       |
 | need_metrics    | boolean | 是否需要指标数据       |
 | need_history    | boolean | 是否需要历史指标       |
 | history_limit   | number  | 历史指标数量限制       |
+
+连接建立后可发送 JSON 更新订阅参数。持续启用流量订阅时游标保持单调；关闭再重新启用 `need_traffic` 时，使用客户端传入的已消费 `last_sequence` 补回有界最新窗口内离页期间未消费的记录。重新启用时省略游标则发送最新窗口。
 
 **推送消息类型**:
 

@@ -83,8 +83,9 @@ Bifrost WebUI Traffic 页在“刷新页面”或“首次进入”时，历史�
 
 ### push `last_sequence` 单调递增
 
-- Push 客户端订阅内 `subscription.last_sequence` 用 `.max()` 更新，避免首次补数与实时 delta 交错时游标回退（`push.rs:394-400, 667`）。
+- 持续启用 Traffic 订阅时，`subscription.last_sequence` 用 `.max()` 更新，避免首次补数与实时 delta 交错时游标回退。
 - 每次 push delta 完成后 `sub.last_sequence = Some(sub.last_sequence.map_or(seq, |c| c.max(seq)))`。
+- `need_traffic: false → true` 时以浏览器已消费的 `last_sequence` 为恢复游标；未携带游标时重新加载最新窗口。离页前发送或离页后迟到的帧可能没有被浏览器消费，不能用服务端已发送游标跳过这些记录。订阅更新在同一把写锁中完成。
 
 ## 技术细节
 

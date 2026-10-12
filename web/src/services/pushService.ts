@@ -650,8 +650,8 @@ class PushService {
     };
     if (!this.ws) return;
 
-    // The server keeps a monotonic cursor for each connection, so a fresh
-    // database requires a new socket. Preserve every other subscription owner.
+    // A fresh database requires a new socket to discard queued frames from the
+    // previous epoch. Preserve every other subscription owner.
     // Retire callbacks before closing: a late close/message must not affect the
     // replacement socket or restore the old connection's traffic state.
     this.disconnect();

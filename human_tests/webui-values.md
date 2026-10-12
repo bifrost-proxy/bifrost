@@ -350,6 +350,22 @@ Values 页面用于管理 Bifrost 的可复用变量，支持在规则中通过 
 
 ---
 
+### TC-WVA-21：创建响应与 push 交错时列表不重复且排序正确
+
+**操作步骤**：
+1. 在隔离 loopback 实例的两个浏览器页面打开 Values。
+2. 创建 `a-` 开头的 Value，重命名后创建 `z-` 开头的 Value。
+3. 确认两个页面自动同步新增记录；切换主页面排序为 Name，再为 Updated。
+
+**预期结果**：
+- 每个名称只出现一行，名称排序以 `a-` 开头记录为首。
+- 创建响应先后与 push 到达顺序不影响唯一性，已推送条目的服务端时间信息不被乐观追加覆盖。
+- API 更新后刷新及 Updated 排序仍正确，其他页面的并发新增记录不会丢失。
+
+自动化路径：`pnpm --dir web exec playwright test tests/ui/admin-rules-values.spec.ts --grep "Values 页面完成 CRUD"`；确定性竞态回归：`pnpm --dir web exec vitest run src/stores/useValuesStore.test.ts`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

@@ -425,14 +425,19 @@ impl PushClient {
     }
 
     pub fn update_subscription(&self, subscription: ClientSubscription) {
-        let current_last_sequence = self.subscription.read().last_sequence;
+        let mut current = self.subscription.write();
         let mut next = subscription;
-        next.last_sequence = match (current_last_sequence, next.last_sequence) {
-            (Some(current), Some(incoming)) => Some(current.max(incoming)),
-            (Some(current), None) => Some(current),
-            (None, incoming) => incoming,
-        };
-        *self.subscription.write() = next;
+        if current.need_traffic && next.need_traffic {
+            next.last_sequence = match (current.last_sequence, next.last_sequence) {
+                (Some(current), Some(incoming)) => Some(current.max(incoming)),
+                (Some(current), None) => Some(current),
+                (None, incoming) => incoming,
+            };
+        }
+        // Sent frames may arrive after an off-page client removes its handlers.
+        // On resubscription, replay from the browser's consumed cursor instead
+        // of retaining the server's larger send cursor, including late sends.
+        *current = next;
     }
 
     pub fn get_subscription(&self) -> ClientSubscription {
@@ -2960,6 +2965,98 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(client.get_subscription().last_sequence, Some(200));
+    }
+
+    #[tokio::test]
+    async fn traffic_resubscription_replays_inserts_not_consumed_by_page() {
+        for delayed_send in [false, true] {
+            for resume_without_cursor in [false, true] {
+                let dir = create_test_dir();
+                let store = Arc::new(TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap());
+                let state =
+                    Arc::new(AdminState::new(9913).with_traffic_db_store_shared(store.clone()));
+                let manager = PushManager::new(state);
+                store.record(TrafficRecord::new(
+                    "consumed".to_string(),
+                    "GET".to_string(),
+                    "http://example.test/consumed".to_string(),
+                ));
+                let (client, mut receiver) = manager.register_client(
+                    "page-navigation".to_string(),
+                    ClientSubscription {
+                        need_traffic: true,
+                        ..Default::default()
+                    },
+                );
+                manager.send_initial_traffic(&client);
+                let consumed_sequence = client.get_subscription().last_sequence.unwrap();
+                while receiver.try_recv().is_ok() {}
+
+                store.record(TrafficRecord::new(
+                    "not-consumed".to_string(),
+                    "GET".to_string(),
+                    "http://example.test/not-consumed".to_string(),
+                ));
+                let second = store
+                    .query_latest_window(10)
+                    .records
+                    .into_iter()
+                    .find(|record| record.id == "not-consumed")
+                    .unwrap();
+                manager
+                    .broadcast_traffic_events(
+                        vec![second.clone()],
+                        vec![],
+                        2,
+                        store.current_sequence(),
+                        store.oldest_sequence(),
+                    )
+                    .await;
+                // This frame was queued, but the page removed its handlers before
+                // consuming it. The server's send cursor is ahead of the browser.
+                while receiver.try_recv().is_ok() {}
+                client.update_subscription(ClientSubscription::default());
+                if delayed_send {
+                    // A broadcaster can have captured the old subscription before
+                    // the off-page update and enqueue its frame afterwards.
+                    assert!(manager.send_traffic_delta_to_client(
+                        &client,
+                        vec![second],
+                        vec![],
+                        TrafficDeltaMetadata {
+                            has_more: false,
+                            server_total: 2,
+                            server_sequence: store.current_sequence(),
+                            oldest_sequence: store.oldest_sequence(),
+                        },
+                    ));
+                    while receiver.try_recv().is_ok() {}
+                }
+                client.update_subscription(ClientSubscription {
+                    need_traffic: true,
+                    last_sequence: (!resume_without_cursor).then_some(consumed_sequence),
+                    ..Default::default()
+                });
+                manager.send_initial_traffic(&client);
+                let PushMessage::TrafficDelta(delta) = receiver.try_recv().unwrap() else {
+                    panic!("expected resumed traffic delta");
+                };
+                let ids: Vec<_> = delta
+                    .inserts
+                    .iter()
+                    .map(|record| record.id.as_str())
+                    .collect();
+                assert_eq!(
+                    ids,
+                    if resume_without_cursor {
+                        vec!["consumed", "not-consumed"]
+                    } else {
+                        vec!["not-consumed"]
+                    }
+                );
+                cleanup_test_dir(&dir);
+            }
+        }
     }
 
     #[test]

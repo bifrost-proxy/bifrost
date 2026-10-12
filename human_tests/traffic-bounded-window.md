@@ -151,6 +151,26 @@
 
 自动化等价路径：`pnpm --dir web test:unit -- trafficDatabaseEpoch.test.ts filterEpoch.test.tsx useTrafficStore.test.ts pushService.test.ts`。真实浏览器需要分别验证亮、暗主题；状态层测试不能代替浏览器操作证据。
 
+### TC-TBW-09：离页期间已发送但未消费的流量补回
+
+操作步骤：
+
+1. 使用上述隔离环境，执行：
+
+   ```bash
+   pnpm --dir web exec playwright test tests/ui/traffic.spec.ts --grep "切换页面后保留已加载流量" --workers=1
+   ```
+
+2. 用例经真实代理访问 loopback 上游，保留第一条流量后切换 Settings。
+3. WebSocket relay 只延迟离页订阅消息；第二条真实流量已由后端发送、浏览器却已移除 Network 处理器时，恢复订阅消息并返回 Network。
+
+预期结果：
+
+- API 确认第二条已录制，relay 确认真实后端已发送其 insert。
+- 不刷新页面，第一条仍可见，第二条由重新订阅增量补回。
+- 服务端在持续订阅期间保持游标单调；重新启用订阅时使用客户端已消费游标，包括没有游标时重新加载最新窗口。
+- 不修改系统代理、DNS、VPN 或证书信任，不连接共享 9900 服务。
+
 ## 清理步骤
 
 1. Playwright 用例在 `finally` 中停止各自动态端口后端和 mock server，并删除临时目录。
@@ -158,6 +178,12 @@
 3. 不删除 `.bifrost-ui-target` 构建缓存；它是仓库既有 UI 测试缓存，不含运行数据。
 
 ## 执行记录
+
+2026-10-11 云端隔离导航回归：
+
+- 在纯净 main `c5733112` 上，新 Rust 回归收到空 insert，真实代理/上游/浏览器用例也在第二条流量不可见的原断言处失败。
+- 修复后，TC-TBW-09 的真实 WebSocket relay 场景连续 3/3 通过；连同 Scripts 正负诊断和 ASR 批量确认路径共 12/12 通过（122.15s，零跳过、零重试）。
+- Rust 回归覆盖有/无客户端游标以及有/无离页后迟到发送四种组合；持续订阅的单调游标回归同时通过。测试只使用隔离 loopback，不改系统代理、DNS、VPN 或证书信任。
 
 2026-10-05 同 UUID 备份恢复 review 回归：
 

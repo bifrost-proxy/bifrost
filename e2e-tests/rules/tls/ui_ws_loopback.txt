@@ -1,0 +1,2 @@
+# 测试目标: 在隔离 loopback TLS 上游验证 WebSocket 回显、帧记录和 size 增长。
+127.0.0.1:__MOCK_WSS_PORT__ tlsIntercept://
