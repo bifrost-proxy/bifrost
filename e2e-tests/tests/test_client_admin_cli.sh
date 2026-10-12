@@ -474,8 +474,11 @@ set -e
 assert_contains "$remote_enable_output" "must be enabled locally" "Client cannot bootstrap target remote access"
 assert_contains "$(client admin audit)" "Admin login audit" "remote audit text output renders login records"
 assert_contains "$(client admin audit --offset 999999)" "No audit records" "remote audit empty page renders correctly"
+echo "[STEP] remote admin audit --json"
 client admin audit --json >/dev/null
+echo "[STEP] remote admin passwd --password-stdin"
 printf '%s\n' "$UPDATED_ADMIN_PASSWORD" | client admin passwd --password-stdin >/dev/null
+echo "[STEP] remote admin revoke-all"
 client admin revoke-all >/dev/null
 set +e
 revoked_output="$(client status --format json 2>&1)"
@@ -499,5 +502,9 @@ set -e
 assert_contains "$logout_output" "is not logged in" "logout removes only the caller's saved session"
 [[ "$disabled_login_rc" -ne 0 ]] || fail "login unexpectedly succeeded after remote access was disabled"
 assert_contains "$disabled_login_output" "remote Admin access is disabled" "Client remote disable closes subsequent LAN login"
+
+source "${ROOT_DIR}/e2e-tests/test_utils/client_response_read.sh"
+verify_client_response_read "$BIFROST_BIN" "$ROOT_DIR" "$RUN_ROOT"
+pass "complete fragmented Admin response survives socket retirement failure"
 
 echo "Client Admin CLI E2E passed (${pass_count} assertions) via ${TARGET_URL}"
