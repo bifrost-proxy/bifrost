@@ -167,6 +167,8 @@ let trafficResumeGeneration = 0;
 let trafficResumeStatisticsPending = false;
 let trafficEpochResetSuspected = false;
 interface LiveReconciliationRead {
+  historyGeneration: number;
+  resumeGeneration: number;
   invalidated: boolean;
   deletedLiveIds: Set<string>;
   liveRecords: Map<string, TrafficSummary>;
@@ -188,7 +190,11 @@ function observeReconciliationMetadata(
 ): void {
   for (const read of liveReconciliationReads) {
     read.latestSequence = Math.max(read.latestSequence, sequence ?? 0);
-    read.metadata = { total, sequence: sequence ?? 0 };
+    // A delayed positive statistics packet must not replace a newer push's
+    // totals. Zero still invalidates membership below, even when its cursor is
+    // older; the clear signal and the totals watermark are separate facts.
+    if (!read.metadata || (sequence ?? 0) >= read.metadata.sequence)
+      read.metadata = { total, sequence: sequence ?? 0 };
     if (oldestSequence != null && oldestSequence > (read.oldestSequence ?? 0)) {
       read.oldestSequence = oldestSequence;
       read.invalidated = true;
@@ -1241,8 +1247,25 @@ export const useTrafficStore = create<TrafficState>()(
         if (!hasRecordChanges && !hasMetadataChanges) return;
 
         observeReconciliationMetadata(data.server_total, data.server_sequence, data.oldest_sequence);
-        const preprocessedNew = preprocessTrafficRecords(data.new_records);
-        const preprocessedUpdated = preprocessTrafficRecords(data.updated_records);
+        // Deletion and traffic events use different server queues. Ignore a
+        // delayed row already deleted during any active reconciliation read.
+        const deletedIds = new Set<string>();
+        for (const read of liveReconciliationReads) {
+          if (
+            read.historyGeneration !== historyBackfillGeneration ||
+            read.resumeGeneration !== trafficResumeGeneration
+          )
+            continue;
+          for (const id of read.deletedLiveIds) deletedIds.add(id);
+        }
+        const survivesDeletion = (record: TrafficSummary) =>
+          !deletedIds.has(record.id);
+        const preprocessedNew = preprocessTrafficRecords(
+          data.new_records,
+        ).filter(survivesDeletion);
+        const preprocessedUpdated = preprocessTrafficRecords(
+          data.updated_records,
+        ).filter(survivesDeletion);
         for (const read of liveReconciliationReads) {
           if (
             data.server_total > 0 &&
@@ -1251,7 +1274,6 @@ export const useTrafficStore = create<TrafficState>()(
             read.positiveWrites = true;
           // Retain accepted writes even if their UI batch has not flushed yet.
           for (const record of preprocessedUpdated) {
-            read.deletedLiveIds.delete(record.id);
             read.liveTotals.set(record.id, data.server_total);
             const existing = read.liveRecords.get(record.id);
             const merged = mergeIncrementalRecord(existing, record);
@@ -1262,7 +1284,6 @@ export const useTrafficStore = create<TrafficState>()(
               read.liveRecords.set(record.id, merged);
           }
           for (const record of preprocessedNew) {
-            read.deletedLiveIds.delete(record.id);
             read.liveTotals.set(record.id, data.server_total);
             if (!read.liveRecords.has(record.id))
               read.liveRecords.set(record.id, record);
@@ -1287,9 +1308,13 @@ export const useTrafficStore = create<TrafficState>()(
           pendingBatch.updatedRecords = mergeBoundedTrafficWindow(
             pendingBatch.updatedRecords,
             preprocessedUpdated,
-            'newer',
+            "newer",
           ).records;
-          pendingBatch.serverTotal = data.server_total;
+          if (
+            (data.server_sequence ?? pendingBatch.serverSequence) >=
+            pendingBatch.serverSequence
+          )
+            pendingBatch.serverTotal = data.server_total;
           pendingBatch.serverSequence = Math.max(
             pendingBatch.serverSequence,
             data.server_sequence ?? 0,
@@ -2138,6 +2163,8 @@ export const useTrafficStore = create<TrafficState>()(
         const resumeGeneration = trafficResumeGeneration;
         const read: LiveReconciliationRead | null = preserveLiveRecords
           ? {
+              historyGeneration: generation,
+              resumeGeneration,
               invalidated: false,
               deletedLiveIds: new Set(),
               liveRecords: new Map(get().recordsMap),
@@ -2148,12 +2175,48 @@ export const useTrafficStore = create<TrafficState>()(
               emptyObserved: false,
               positiveWrites: false,
               implicitRemoval: false,
-              latestSequence: get().serverSequence,
-              oldestSequence: get().serverOldestSequence,
+              latestSequence: Math.max(
+                get().serverSequence,
+                pendingBatch?.serverSequence ?? 0,
+              ),
+              oldestSequence:
+                pendingBatch?.oldestSequence == null
+                  ? get().serverOldestSequence
+                  : Math.max(
+                      get().serverOldestSequence ?? 0,
+                      pendingBatch.oldestSequence,
+                    ),
               metadata: null,
             }
           : null;
-        if (read) liveReconciliationReads.add(read);
+        if (read) {
+          // Include writes queued before this read starts. Every accepted batch
+          // is then represented in the journal before the final GET consumes it.
+          if (pendingBatch) {
+            for (const record of pendingBatch.updatedRecords) {
+              read.liveRecords.set(
+                record.id,
+                mergeIncrementalRecord(read.liveRecords.get(record.id), record),
+              );
+              read.liveTotals.set(record.id, pendingBatch.serverTotal);
+            }
+            for (const record of pendingBatch.newRecords) {
+              if (!read.liveRecords.has(record.id))
+                read.liveRecords.set(record.id, record);
+              read.liveTotals.set(record.id, pendingBatch.serverTotal);
+            }
+          }
+          read.liveRecords = buildTrafficRecordsMap(
+            mergeBoundedTrafficWindow(
+              Array.from(read.liveRecords.values()),
+              [],
+              "newer",
+            ).records,
+          );
+          for (const id of read.liveTotals.keys())
+            if (!read.liveRecords.has(id)) read.liveTotals.delete(id);
+          liveReconciliationReads.add(read);
+        }
         try {
           const filter: TrafficUpdatesFilter = {
             limit: INITIAL_WINDOW_LIMIT,
@@ -2168,7 +2231,12 @@ export const useTrafficStore = create<TrafficState>()(
               // surviving writes remain in the bounded per-read journal.
               if (read.invalidated) clearPendingTrafficBatch();
               read.invalidated = false;
-              read.metadata = null;
+              read.metadata = pendingBatch
+                ? {
+                    total: pendingBatch.serverTotal,
+                    sequence: pendingBatch.serverSequence,
+                  }
+                : null;
               read.snapshotTotal = null;
               read.emptyObserved = false;
               read.positiveWrites = false;
@@ -2325,19 +2393,36 @@ export const useTrafficStore = create<TrafficState>()(
           }
           capPendingIds(newPendingIds);
 
-          if (read && pendingBatch) {
-            const survives = (record: TrafficSummary) =>
-              canKeepLive(record) &&
-              (oldestSequenceFloor == null ||
-                record.sequence >= oldestSequenceFloor);
-            pendingBatch.newRecords = pendingBatch.newRecords.filter(survives);
-            pendingBatch.updatedRecords =
-              pendingBatch.updatedRecords.filter(survives);
-          }
+          const currentRecord = get().currentRecord;
+          const pendingDetailUpdate =
+            read && currentRecord && pendingBatch
+              ? findLastRecordById(
+                  pendingBatch.updatedRecords,
+                  currentRecord.id,
+                )
+              : undefined;
+          const detailSummary =
+            read && currentRecord
+              ? (newRecordsMap.get(currentRecord.id) ?? pendingDetailUpdate)
+              : undefined;
+          const reconciledDetail =
+            currentRecord &&
+            detailSummary &&
+            canKeepLive(detailSummary) &&
+            (oldestSequenceFloor == null ||
+              detailSummary.sequence >= oldestSequenceFloor)
+              ? mergeDetailWithSummary(currentRecord, detailSummary)
+              : currentRecord;
+
+          // All surviving writes have been merged from the journal. Consume
+          // their batch too: a later animation-frame flush must not restore
+          // totals from before this GET (including an equal allocation cursor).
+          if (read) clearPendingTrafficBatch();
           const boundaries = getBoundaryState(retainedRecords);
           set({
             records: retainedRecords,
             recordsMap: newRecordsMap,
+            ...(read ? { currentRecord: reconciledDetail } : {}),
             serverTotal: preserveLiveRecords
               ? Math.max(
                   read?.metadata &&

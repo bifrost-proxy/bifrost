@@ -117,3 +117,61 @@ status/diff、范围、锁序、失败状态、push 游标、语义和门禁记�
 收敛问题。全套检测还发现过宽的错误重试标记会给普通 append/retention 增加成员查询；
 已收窄条件并保留原断言，复跑完整 440 项通过。严格 Chrome DevTools MCP 门禁仍未验证，
 本节的浏览器证据是实际 Chromium 自动测试，不把它声明为该 MCP 门禁通过。
+
+## P2 复查：异步事件、统计与待刷批次顺序
+
+本轮基线为 `da9ed88512579b79496bf69af9eebba39a467e78`，沿用干净的
+`fix/concurrent-traffic-clear` worktree。对应评论：
+
+- `https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4270946607`
+- `https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4270946622`
+- `https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4270946628`
+
+三条评论均独立验证成立。数据库的 update 进入订阅异步任务，删除直接广播，
+因此更新先提交但后送达是合法时序；事件未提供能证明更新晚于删除的行版本。
+确定性测试使用受控 Promise 和 fake timer/animation frame，无并发压力碰运气。
+三个核心用例在旧代码上全部失败：已删行恢复、701 总数退回 700、GET 的 702
+总数被旧批次退回 701。扩展的七个用例中六个在旧代码失败，另一个保护迟到零总数
+清空信号，不把它误判为应忽略的普通旧统计。
+
+修复内容：
+
+- 当前 reconciliation 的删除标记保持权威；迟到 insert/update 不能移除标记，
+  也不会进入 UI 待刷批次。保护只作用于当前 history/resume 代际，不阻挡已经取消
+  的旧 GET 尚未返回期间，新代际中恢复的行和新更新。
+- journal 的总数与 sequence 一起保持水位，迟到正数统计不能覆盖更新的 metadata。
+  零总数独立标记 clear，即使游标过期仍作废旧成员快照；保留期 floor 同样保持语义。
+- 批次总数不再与更早的事件游标混配。GET 合并完 journal 后消费批次，取消旧 timer/RAF，
+  防止旧总数在下一帧回退，包括删除不推进 allocation cursor 的相同游标场景。
+- 读取前已排队的 insert/update 先进入有界 journal；消费时同步保留已选详情的摘要更新，
+  不丢正文。成员查询、保留期、空读收敛及新流量保护原有断言保留。
+
+两轮 Review/Fix/Test 后继续复查：确认三个核心失败和组合顺序；发现取消批次会丢失
+详情更新，补保正文断言并修复；随后用新失败回归证明旧读的 tombstone 会污染新代际，
+加入代际约束并复测。八个本轮用例涵盖三项组合、迟到 clear 与正数统计、读取前批次、
+相同游标 metadata、详情、取消旧读的新代际更新。没有弱化既有断言或新增 skip/ignore。
+
+| 本轮最终验证 | 结果 |
+| --- | --- |
+| 新时序回归 | 8 项通过；store 文件共 98 项 |
+| 前端全套单元 | 64 文件、448 项通过 |
+| 强制 TypeScript、全量 ESLint | 通过；0 error、7 个既有 warning |
+| 格式与能力注册 | 修改片段使用独立 Prettier；git diff --check、shell 语法、10 项 E2E capability contract 通过；既有全量格式基线问题未改变 |
+| 官方 Rust 1.95.0 最终构建与静态前端 | cargo build --offline --bin bifrost --all-features 通过；最终确认构建 2 分 50 秒 |
+| 实际 Chromium、真实隔离代理/API/push | 4 项通过，48.5 秒；原 critical 用例加强了删除后的迟到 update 时序 |
+| 新 head CI | 由父会只读核验；本轮未通过其他凭据读取 Actions |
+
+浏览器在真实删除 frame 被消费之后，用真实旧行和旧 metadata 构造 update，经
+Playwright WebSocket route 受控投递，并暂挂 GET 检查下一 UI 批次是否短暂恢复旧行。
+该证据证明浏览器完整接收/状态/渲染路径，不声称此轮后端恰好产生同一随机队列乱序。
+严格 Chrome DevTools MCP 门禁仍未验证；本轮无生产 Rust、IM、依赖或 rustls 修改，
+不重复无关 Rust 单元/覆盖率。构建生成的 Cargo.lock workspace 版本同步不纳入提交。
+
+本轮进一步校正“嵌入前端”的验证边界：`rust-embed` 在本次 debug 构建下默认从
+生成的 `web/dist-gzip` 读取资源。Chromium 连到 Admin 提供的最终构建静态前端，
+没有使用 Vite；验证包含真实接收、暂挂 GET、删除后受控 update、UI 批次和最终计数。
+不能把 debug 二进制未变化的 SHA-256 当作前端内容证明，也未验证 release 模式的
+物理资源嵌入。此前“内嵌前端”的本地证据应按这个边界理解。最终二进制 SHA-256 为
+`e7e3ff5e042edca344bfb59080011b75a891cadbc896953221b1fd0874868e73`。
+最终页面入口 JS `web/dist/assets/index-BkwPNBvS.js` 的 SHA-256 为
+`95eb3fc894426ab9033ea125fc517e782a63e24cf5f968c52e92ee5d6f008263`。

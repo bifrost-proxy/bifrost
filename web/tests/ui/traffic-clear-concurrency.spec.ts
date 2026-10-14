@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type WebSocketRoute } from "@playwright/test";
+import type { TrafficUpdatesResponseCompact } from "../../src/types";
 import {
   apiBase,
   sendProxyRequest,
@@ -122,7 +123,7 @@ test("清空按钮等待结果，连点仅发一次，失败保留流量并允�
   }
 });
 
-test("清空同步读取期间另一客户端删除，不恢复旧快照且保留新流量", async ({
+test("清空同步读取期间另一客户端删除，迟到更新不恢复旧行且保留新流量", async ({
   page,
   request,
 }) => {
@@ -140,11 +141,15 @@ test("清空同步读取期间另一客户端删除，不恢复旧快照且保�
     snapshotReady = resolve;
   });
   const deletedFrames: string[] = [];
-  page.on("websocket", (socket) => {
-    if (socket.url().includes("/api/push"))
-      socket.on("framereceived", (frame) =>
-        deletedFrames.push(String(frame.payload)),
-      );
+  let pushSocket: WebSocketRoute | undefined;
+  let delayedUpdate: string | undefined;
+  await page.routeWebSocket("**/api/push*", (socket) => {
+    pushSocket = socket;
+    const serverSocket = socket.connectToServer();
+    serverSocket.onMessage((message) => {
+      deletedFrames.push(String(message));
+      socket.send(message);
+    });
   });
   try {
     const initialClear = await request.delete(`${apiBase}/traffic`);
@@ -171,14 +176,25 @@ test("清空同步读取期间另一客户端删除，不恢复旧快照且保�
     await page.route("**/_bifrost/api/traffic/updates*", async (route) => {
       if (!afterClear || snapshotHeld) return route.continue();
       const response = await route.fetch();
-      const body = (await response.json()) as {
-        new_records: Array<{ id: string; p: string }>;
-      };
+      const body = (await response.json()) as TrafficUpdatesResponseCompact;
       const record = body.new_records.find((record) =>
         record.p.includes(snapshotPath),
       );
       if (!record) return route.fulfill({ response });
       snapshotHeld = true;
+      // Reproduce the server's separate event queues with an update built from
+      // the real pre-delete row/metadata, delivered after the deletion frame.
+      delayedUpdate = JSON.stringify({
+        type: "traffic_delta",
+        data: {
+          inserts: [],
+          updates: [record],
+          has_more: false,
+          server_total: body.server_total,
+          server_sequence: body.server_sequence,
+          database_epoch: body.database_epoch,
+        },
+      });
       snapshotReady(record.id);
       await held;
       await route.fulfill({ response });
@@ -201,6 +217,15 @@ test("清空同步读取期间另一客户端删除，不恢复旧快照且保�
       () =>
         new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
     );
+    expect(pushSocket).toBeDefined();
+    expect(delayedUpdate).toBeDefined();
+    pushSocket!.send(delayedUpdate!);
+    // Give the throttled UI batch a chance to flush while the GET is held.
+    // This extra controlled read delay exposes temporary resurrection too.
+    await page.waitForTimeout(250);
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: snapshotPath }),
+    ).toHaveCount(0);
     await sendProxyRequest(`http://127.0.0.1:${server.port}/${livePath}`);
     release();
     await expect(page.getByTestId("toolbar-clear-all")).toBeEnabled();
