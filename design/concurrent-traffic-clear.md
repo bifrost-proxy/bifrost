@@ -280,8 +280,8 @@ debug 二进制 SHA-256 与上一轮相同，不作为前端物理嵌入证明�
 失败的四项，以及 active 行的权威恢复和后续更新。修复后全量前端 64 文件、468 项
 通过（store 118 项）；强制 TypeScript 通过，ESLint 0 error、7 个既有 warning。
 
-八条 review 的最终回归对应关系如下；测试均位于
-`web/src/stores/useTrafficStore.test.ts`，没有删除断言或新增 skip。
+八条 review 在该 head 的回归对应关系如下；当时测试位于
+`web/src/stores/useTrafficStore.test.ts`。后续按领域迁移见下文，没有删除断言或新增 skip。
 
 | 评论 discussion ID | 回归覆盖 |
 | --- | --- |
@@ -314,3 +314,72 @@ Playwright 总期限 50 分钟、外层阶段期限 60 分钟。首轮结果为�
 `a27584f496de1db4514875cf1f23740542ce9ad5051b75fc9e1956d98d097ecd`。
 严格 DevTools MCP、真实 WebKit 运行和 release 物理嵌入未验证。
 父会已独立确认基线提交的 CI run `38595495623` 成功，该结果不代表本次新提交。
+
+## P2 复查：存活连接完成与领域拆分
+
+本轮基线为 `237263c07b3859f2a7c9ba67291c2e915e21436e`。两条评论：
+
+- `https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4275333575`
+- `https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4275333566`
+
+第一条成立。将所有请求 ID 当作已确认删除，会丢弃后台实际保留的 active 行的
+合法完成事件。HTTP、SSE、CONNECT 三项受控 stale GET 回归在旧代码全部失败。
+扩展六项中五项在旧代码失败，一项确认删除保护原本通过；修复后六项全部通过。
+
+现在分别保存 confirmed deletion 与 unconfirmed selected-clear membership。实际
+删除帧仍过滤迟到事件；仅请求清空的 ID 保留其 live 完成字段，暂不发布未确认行。
+DELETE 在途和同步读期间收到的完成都进入 journal。GET 中的存活行或完整 ID 查询
+确认其成员后合入完成字段；窗口外缺失不直接推断删除，不完整查询不作为成员证据，明确删除仍不可恢复。API 成功、有限重试、deadline 与失败恢复的外部行为保留。
+
+原测试把没有确认删除的 status 299 更新断言为丢弃，与本条修复目标冲突；现在
+明确断言保留该完成更新及后续更新。新增断言覆盖 status 201、8192 字节、543ms、
+结束时间及 CONNECT 关闭标记。保留原确认删除、失败恢复和代际取消的断言。
+
+第二条的精确规则位于 `AGENTS.md` 的“单文件行数限制”：
+“禁止让单个代码文件超过 1500 行。超过此限制必须进行模块化拆分”。
+main/tag `4c056b22056c50e7dc7a75a71bfa03dd06bce45d` 已有 2391 行，
+本轮基线 store 为 2952 行，不能以历史超限为由继续扩张。格式化后的主 store 为
+1425 行。本轮 14 个 store/领域/测试 TypeScript 文件均不超过 1500 行，最长 1426 行。
+
+| 领域文件 | 职责 |
+| --- | --- |
+| `trafficCaptureCoordinator.ts` | 抓包代际、读取 journal、批次和订阅协调状态 |
+| `trafficReconciliation.ts` | 窗口与成员证据收尾、清空 API 协调 |
+| `trafficLiveCapture.ts` | 实时 delta 接收、journal 字段保留与 UI 批次发布 |
+| `trafficRecordModel.ts` | 记录转换、合并、展示字段与 mutation 构造 |
+| `trafficFilters.ts` | 记录筛选与增量筛选 |
+| `trafficStoreTypes.ts` | store 数据及协调器访问契约 |
+
+主 store 保留状态装配、现有轮询/历史/详情和选择逻辑；公开 helper 导出继续从原
+入口提供。提取保持原算法和调用行为，抓包相关代际统一使用同一个协调状态。
+原 3573 行测试文件按既有 describe 领域拆为六个测试文件，共用 fixture，保留全部
+118 个原回归；新加六项，合计 124 个 store 回归。Vitest mock 必须先于 store 加载，
+共享 fixture 显式先导入。最终前端全套为 69 文件、474 项通过；强制类型和 lint
+通过（0 error、7 个既有 warning），修改文件独立 Prettier 和行数检查通过。
+
+| 评论 ID | 当前测试文件及代表回归 |
+| --- | --- |
+| 4269700698 | `trafficClearOverlap.test.ts`：unseen snapshot deletion、另一客户端 clear、retention floor |
+| 4270946607 | `trafficDelayedDelivery.test.ts`：delayed pre-delete update、取消后新代际 |
+| 4270946622 | `trafficDelayedDelivery.test.ts`：newer positive metadata、delayed zero clear |
+| 4270946628 | `trafficDelayedDelivery.test.ts`：queued batch rollback、equal-cursor totals |
+| 4271355414 | `trafficCompletionRecovery.test.ts`：unrelated continuous deletions、deadline、retry budget |
+| 4271355423 | `trafficCompletionRecovery.test.ts`：selected deletion counted once、fresh count、active rows |
+| 4271355431 | `trafficCompletionRecovery.test.ts`：GET/member failure、取消、完整 chunk、低序号晚提交 |
+| 4273339945 | `trafficCompletionRecovery.test.ts`：四种 before-journal deletion 时序 |
+| 4275333575 | `trafficCompletionRecovery.test.ts`：HTTP/SSE/CONNECT stale GET 完成、API 响应前完成、窗口外确认、confirmed deletion |
+| 4275333566 | 生产/测试均按领域提取；124 个原/新 store 回归和 474 个前端测试验证行为；行数逐文件检查 |
+
+当前 UI 入口调用的是清空全部；selected-ID 精确时序由 store 回归覆盖，现有清空
+链路由真实 Chromium 场景及完整 audit 验证。完整 audit 使用同一 workflow 命令和
+默认 `.bifrost-ui-target` 预构建目录，最终结果另记录。
+
+此前云端 CONNECT 应用识别为空和大历史两分钟超时，仅在旧 PR head `e7a5b991`
+上做过对照，不能推广为 main 已有问题；main 的 2391 行只是行数证据。
+未使用用户电脑、用户数据库或系统代理；测试采用独立临时数据。没有生产 Rust、
+IM、rustls、依赖或门禁放宽。新 head CI 由父会独立读取，缺少 PAT 不阻塞本地工作。
+
+本轮完整 audit 首次尝试中，前端构建通过，Rust 链接时云盘耗尽（100%，linker
+Bus error），UI 阶段未执行。保留该失败日志后，仅清理本任务旧 `target/debug/deps`
+和 `incremental` 可重建缓存，保留有效二进制、源码和测试证据，恢复约 15GB 空间。
+随后以同一完整入口、默认预构建目录重跑；最终 audit 结果记录于本轮交付与 PR。
