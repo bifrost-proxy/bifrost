@@ -576,6 +576,124 @@ export function createTrafficReconciliation(
       }
     },
 
+    handleTrafficDeleted: (
+      ids: string[],
+      authoritativeTotal?: number,
+      confirmed = true,
+    ) => {
+      if (ids.length === 0) return;
+      const idsSet = new Set(ids);
+      if (
+        confirmed &&
+        captureCoordination.selectedClearDeletions?.generation ===
+          captureCoordination.historyBackfillGeneration
+      )
+        for (const id of idsSet) {
+          captureCoordination.selectedClearDeletions.ids.add(id);
+          captureCoordination.selectedClearDeletions.liveRecords.delete(id);
+        }
+      for (const read of captureCoordination.liveReconciliationReads) {
+        read.invalidated = true;
+        for (const id of idsSet) {
+          if (confirmed) {
+            read.deletedLiveIds.add(id);
+            read.unconfirmedClearIds.delete(id);
+            read.liveRecords.delete(id);
+            read.liveTotals.delete(id);
+          } else read.unconfirmedClearIds.add(id);
+        }
+      }
+      if (captureCoordination.pendingBatch) {
+        captureCoordination.pendingBatch.newRecords =
+          captureCoordination.pendingBatch.newRecords.filter(
+            (record) => !idsSet.has(record.id),
+          );
+        captureCoordination.pendingBatch.updatedRecords =
+          captureCoordination.pendingBatch.updatedRecords.filter(
+            (record) => !idsSet.has(record.id),
+          );
+      }
+
+      set((prevState) => {
+        const recordsMap = new Map(prevState.recordsMap);
+        const pendingIds = new Set(prevState.pendingIds);
+        let removedCount = 0;
+        let pendingChanged = false;
+
+        for (const id of idsSet) {
+          if (recordsMap.delete(id)) {
+            removedCount += 1;
+          }
+          if (
+            !confirmed &&
+            !captureCoordination.selectedClearDeletions?.ids.has(id)
+          ) {
+            if (!pendingIds.has(id)) pendingChanged = true;
+            pendingIds.add(id);
+          } else if (pendingIds.delete(id)) pendingChanged = true;
+        }
+
+        capPendingIds(pendingIds);
+        const currentDeleted =
+          prevState.currentRecord && idsSet.has(prevState.currentRecord.id);
+        const selectedDeleted =
+          prevState.selectedId && idsSet.has(prevState.selectedId);
+
+        if (
+          !currentDeleted &&
+          !selectedDeleted &&
+          removedCount === 0 &&
+          !pendingChanged
+        ) {
+          return {};
+        }
+
+        const records =
+          removedCount > 0
+            ? prevState.records.filter((record) => !idsSet.has(record.id))
+            : prevState.records;
+        const boundaries = getBoundaryState(records);
+
+        const detailRemoved = currentDeleted || !!selectedDeleted;
+        return {
+          records,
+          recordsMap,
+          pendingIds,
+          // A total snapshot may already include this deletion. Row removal
+          // proves membership, not an extra subtraction from snapshot totals.
+          serverTotal: authoritativeTotal ?? prevState.serverTotal,
+          oldestSequence: boundaries.oldestSequence,
+          lastId: prevState.lastId,
+          lastSequence: prevState.lastSequence,
+          currentRecord: detailRemoved ? null : prevState.currentRecord,
+          requestBody: detailRemoved ? null : prevState.requestBody,
+          responseBody: detailRemoved ? null : prevState.responseBody,
+          requestRawBody: detailRemoved ? null : prevState.requestRawBody,
+          responseRawBody: detailRemoved ? null : prevState.responseRawBody,
+          detailLoading: detailRemoved ? false : prevState.detailLoading,
+          detailError: detailRemoved
+            ? "Request was deleted"
+            : prevState.detailError,
+          selectedId: selectedDeleted ? undefined : prevState.selectedId,
+          filterVersion:
+            removedCount > 0
+              ? prevState.filterVersion + 1
+              : prevState.filterVersion,
+          recordsMutation:
+            removedCount > 0
+              ? createRecordsMutation({
+                  reset: false,
+                  inserted: [],
+                  updated: [],
+                  deletedIds: Array.from(idsSet),
+                })
+              : prevState.recordsMutation,
+        };
+      });
+      if (authoritativeTotal === undefined && get().serverTotal > 0)
+        void get().fetchTrafficStatistics(undefined, true);
+    },
+
     clearTraffic: async (ids?: string[]) => {
       if (get().clearing) return false;
       set({ error: null, clearing: true });

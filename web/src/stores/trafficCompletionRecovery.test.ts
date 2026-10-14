@@ -8,6 +8,7 @@ import type {
 } from "../types";
 import {
   apiMocks,
+  pushMocks,
   makeRecord,
   makePage,
   makeRecordRange,
@@ -493,17 +494,15 @@ describe("reconciliation bounded completion and failure recovery", () => {
     });
     const held = holdRead();
     const clear = clearAndSynchronizeForTest(["2"]);
-    useTrafficStore
-      .getState()
-      .handleTrafficPush({
-        new_records: [],
-        updated_records: [
-          { ...records[1], status: 201, response_size: 8192, duration_ms: 543 },
-        ],
-        has_more: false,
-        server_total: 3,
-        server_sequence: 4,
-      });
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [],
+      updated_records: [
+        { ...records[1], status: 201, response_size: 8192, duration_ms: 543 },
+      ],
+      has_more: false,
+      server_total: 3,
+      server_sequence: 4,
+    });
     finishDelete();
     await held.ready;
     held.resolve(snapshot(records, 3, 4));
@@ -548,15 +547,13 @@ describe("reconciliation bounded completion and failure recovery", () => {
     const clear = clearAndSynchronizeForTest(["2"]);
     await held.ready;
     useTrafficStore.getState().handleTrafficDeleted(["2"]);
-    useTrafficStore
-      .getState()
-      .handleTrafficPush({
-        new_records: [],
-        updated_records: [{ ...records[1], status: 201, response_size: 8192 }],
-        has_more: false,
-        server_total: 2,
-        server_sequence: 4,
-      });
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [],
+      updated_records: [{ ...records[1], status: 201, response_size: 8192 }],
+      has_more: false,
+      server_total: 2,
+      server_sequence: 4,
+    });
     await vi.advanceTimersByTimeAsync(200);
     expect(useTrafficStore.getState().recordsMap.has("2")).toBe(false);
     held.resolve(snapshot(records, 3, 4));
@@ -609,15 +606,13 @@ describe("reconciliation bounded completion and failure recovery", () => {
     });
     const clear = clearAndSynchronizeForTest(["2"]);
     await ready;
-    useTrafficStore
-      .getState()
-      .handleTrafficPush({
-        new_records: [],
-        updated_records: [{ ...records[1], status: 201, response_size: 8192 }],
-        has_more: false,
-        server_total: 3,
-        server_sequence: 4,
-      });
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [],
+      updated_records: [{ ...records[1], status: 201, response_size: 8192 }],
+      has_more: false,
+      server_total: 3,
+      server_sequence: 4,
+    });
     await vi.advanceTimersByTimeAsync(200);
     expect(useTrafficStore.getState().recordsMap.has("2")).toBe(false);
     finishMembership();
@@ -671,8 +666,12 @@ describe("reconciliation bounded completion and failure recovery", () => {
         domains: {},
       });
       const held = holdRead();
+      pushMocks.updateSubscription.mockClear();
       const clear = clearAndSynchronizeForTest(["2"]);
       await held.ready;
+      expect(pushMocks.updateSubscription).toHaveBeenLastCalledWith(
+        expect.objectContaining({ pending_ids: expect.arrayContaining(["2"]) }),
+      );
       const completion = {
         ...records[1],
         status: 201,
