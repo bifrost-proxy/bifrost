@@ -720,6 +720,13 @@ export function createTrafficReconciliation(
         return false;
       }
       try {
+        // The DELETE belongs to the database visible when it was issued.
+        // Never hand its buffered fields or subscription edits into a new one.
+        if (
+          deletions &&
+          deletions.generation !== captureCoordination.historyBackfillGeneration
+        )
+          return true;
         if (ids && ids.length > 0) {
           get().handleTrafficDeleted(ids, get().serverTotal, false);
           pushService.updateSubscription({
@@ -785,6 +792,8 @@ export function createTrafficReconciliation(
         void get().reloadRecords(true);
         return true;
       } finally {
+        if (captureCoordination.selectedClearDeletions === deletions)
+          captureCoordination.selectedClearDeletions = null;
         set({ clearing: false });
       }
     },

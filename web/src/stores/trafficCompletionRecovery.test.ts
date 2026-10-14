@@ -1024,4 +1024,79 @@ describe("reconciliation bounded completion and failure recovery", () => {
     ]);
     expect(useTrafficStore.getState().serverTotal).toBe(2);
   });
+  it("does not hand an old selected clear's live fields into a replacement database", async () => {
+    const records = makeRecordRange(1, 3);
+    records[1].status = 0;
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((r) => [r.id, r])),
+      serverTotal: 3,
+      serverSequence: 4,
+      trafficDatabaseEpoch: "old-db",
+    });
+    let finishDelete!: () => void;
+    apiMocks.clearTraffic.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          finishDelete = () => done({ success: true });
+        }),
+    );
+    const clear = clearAndSynchronizeForTest(["2"]);
+    useTrafficStore
+      .getState()
+      .handleTrafficPush({
+        database_epoch: "old-db",
+        new_records: [],
+        updated_records: [{ ...records[1], status: 201, response_size: 8192 }],
+        has_more: false,
+        server_total: 3,
+        server_sequence: 4,
+      });
+    await vi.advanceTimersByTimeAsync(200);
+    const stats = {
+      database_epoch: "new-db",
+      total_requests: 3,
+      server_sequence: 4,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    };
+    apiMocks.getTrafficStatistics.mockResolvedValue(stats);
+    useTrafficStore.getState().handleTrafficStatistics(stats);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().trafficDatabaseEpoch).toBe("new-db");
+    const fresh = records.map((r) => ({
+      ...r,
+      status: 204,
+      response_size: 16,
+    }));
+    useTrafficStore
+      .getState()
+      .handleTrafficPush({
+        database_epoch: "new-db",
+        new_records: fresh,
+        updated_records: [],
+        has_more: false,
+        server_total: 3,
+        server_sequence: 4,
+      });
+    await vi.advanceTimersByTimeAsync(200);
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce({
+      ...snapshot(fresh, 3, 4),
+      database_epoch: "new-db",
+    });
+    pushMocks.updateSubscription.mockClear();
+    finishDelete();
+    expect(await clear).toBe(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().recordsMap.get("2")).toMatchObject({
+      status: 204,
+      response_size: 16,
+    });
+    expect(apiMocks.getTrafficUpdates).not.toHaveBeenCalled();
+    expect(pushMocks.updateSubscription).not.toHaveBeenCalled();
+    expect(useTrafficStore.getState().clearing).toBe(false);
+  });
 });
