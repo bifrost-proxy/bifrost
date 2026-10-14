@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { TrafficSummary, TrafficRecord, ToolbarFilters, FilterCondition, TrafficUpdatesFilter, TrafficSummaryCompact, TrafficDeltaData, TrafficStatistics } from '../types';
 import * as api from '../api';
+import { getApiErrorPayload } from '../api/client';
 import type { TrafficBodyContent } from '../api';
 import pushService, { type TrafficUpdatesData } from '../services/pushService';
 import {
@@ -89,10 +90,11 @@ interface TrafficState {
   backfillHistory: () => Promise<void>;
   loadNewer: () => Promise<void>;
   catchUpUpdates: () => Promise<void>;
-  reloadRecords: () => Promise<void>;
+  reloadRecords: (preserveLiveRecords?: boolean) => Promise<void>;
   fetchTrafficDetail: (id: string) => Promise<void>;
   appendSseResponseBody: (recordId: string, payload: string) => void;
   setResponseBody: (recordId: string, body: string | null) => void;
+  clearing: boolean;
   clearTraffic: (ids?: string[]) => Promise<boolean>;
   setToolbarFilters: (filters: ToolbarFilters) => void;
   setFilterConditions: (conditions: FilterCondition[]) => void;
@@ -1015,6 +1017,7 @@ export const useTrafficStore = create<TrafficState>()(
       trafficStatisticsTotal: 0,
       trafficStatisticsSequence: 0,
       trafficStatisticsLoaded: false,
+      clearing: false,
       recordsMutation: createEmptyRecordsMutation(),
 
       fetchTrafficStatistics: async (expectedEpoch?: string) => {
@@ -2037,7 +2040,7 @@ export const useTrafficStore = create<TrafficState>()(
         }
       },
 
-      reloadRecords: async () => {
+      reloadRecords: async (preserveLiveRecords = false) => {
         const generation = historyBackfillGeneration;
         const resumeGeneration = trafficResumeGeneration;
         try {
@@ -2053,7 +2056,12 @@ export const useTrafficStore = create<TrafficState>()(
           ));
           if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
           const convertedRecords = response.new_records.map(compactTrafficSummaryToTrafficSummary);
-          const preprocessedRecords = preprocessTrafficRecords(convertedRecords);
+          const snapshotRecords = preprocessTrafficRecords(convertedRecords);
+          // Clear resets the window before this read. Keep live inserts and
+          // updates that arrived after the query's snapshot was taken.
+          const preprocessedRecords = preserveLiveRecords
+            ? mergeBoundedTrafficWindow(snapshotRecords, get().records, 'newer').records
+            : snapshotRecords;
 
           const newPendingIds = new Set<string>();
           const newRecordsMap = new Map<string, TrafficSummary>();
@@ -2069,8 +2077,8 @@ export const useTrafficStore = create<TrafficState>()(
           set({
             records: preprocessedRecords,
             recordsMap: newRecordsMap,
-            serverTotal: response.server_total,
-            serverSequence: response.server_sequence,
+            serverTotal: preserveLiveRecords ? Math.max(response.server_total, preprocessedRecords.length) : response.server_total,
+            serverSequence: preserveLiveRecords ? Math.max(response.server_sequence, get().serverSequence) : response.server_sequence,
             hasMore: response.has_more,
             hasNewer: false,
             oldestSequence: boundaries.oldestSequence,
@@ -2176,120 +2184,125 @@ export const useTrafficStore = create<TrafficState>()(
       },
 
       clearTraffic: async (ids?: string[]) => {
-        set({ error: null });
-
-        if (ids && ids.length > 0) {
-          const idsToRemove = new Set(ids);
-          let removedCount = 0;
-          let nextPendingIds: string[] | null = null;
-
-          set((state) => {
-            const newRecordsMap = new Map(state.recordsMap);
-            const newPendingIds = new Set(state.pendingIds);
-            const currentDeleted = state.currentRecord && idsToRemove.has(state.currentRecord.id);
-            const selectedDeleted = state.selectedId && idsToRemove.has(state.selectedId);
-
-            for (const id of idsToRemove) {
-              if (newRecordsMap.delete(id)) {
-                removedCount += 1;
-              }
-              newPendingIds.delete(id);
-            }
-
-            nextPendingIds = Array.from(newPendingIds);
-
-            const newRecords = removedCount > 0
-              ? state.records.filter((record) => !idsToRemove.has(record.id))
-              : state.records;
-            const boundaries = getBoundaryState(newRecords);
-            const detailRemoved = currentDeleted || !!selectedDeleted;
-
-            return {
-              records: newRecords,
-              recordsMap: newRecordsMap,
-              pendingIds: newPendingIds,
-              serverTotal: Math.max(state.serverTotal - removedCount, 0),
-              oldestSequence: boundaries.oldestSequence,
-              lastId: state.lastId,
-              lastSequence: state.lastSequence,
-              currentRecord: detailRemoved ? null : state.currentRecord,
-              requestBody: detailRemoved ? null : state.requestBody,
-              responseBody: detailRemoved ? null : state.responseBody,
-              detailLoading: detailRemoved ? false : state.detailLoading,
-              detailError: detailRemoved ? 'Request was deleted' : state.detailError,
-              selectedId: selectedDeleted ? undefined : state.selectedId,
-              filterVersion: removedCount > 0 ? state.filterVersion + 1 : state.filterVersion,
-              recordsMutation: removedCount > 0
-                ? createRecordsMutation({
-                  reset: false,
-                  inserted: [],
-                  updated: [],
-                  deletedIds: Array.from(idsToRemove),
-                })
-                : state.recordsMutation,
-            };
-          });
-
-          if (nextPendingIds) {
-            pushService.updateSubscription({ pending_ids: nextPendingIds });
+        if (get().clearing) return false;
+        set({ error: null, clearing: true });
+        try {
+          const result = await api.clearTraffic(ids && ids.length > 0 ? ids : undefined);
+          if (result?.success === false) {
+            throw new Error(result.message || 'Failed to clear traffic');
           }
+        } catch (e) {
+          set({ error: getApiErrorPayload(e).message, clearing: false });
+          return false;
+        }
+        try {
+          if (ids && ids.length > 0) {
+            const idsToRemove = new Set(ids);
+            let removedCount = 0;
+            let nextPendingIds: string[] | null = null;
 
-          api.clearTraffic(ids)
-            .catch((e) => {
-              const err = e as Error;
-              set({ error: err.message });
+            set((state) => {
+              const newRecordsMap = new Map(state.recordsMap);
+              const newPendingIds = new Set(state.pendingIds);
+              const currentDeleted = state.currentRecord && idsToRemove.has(state.currentRecord.id);
+              const selectedDeleted = state.selectedId && idsToRemove.has(state.selectedId);
+
+              for (const id of idsToRemove) {
+                if (newRecordsMap.delete(id)) {
+                  removedCount += 1;
+                }
+                newPendingIds.delete(id);
+              }
+
+              nextPendingIds = Array.from(newPendingIds);
+
+              const newRecords = removedCount > 0
+                ? state.records.filter((record) => !idsToRemove.has(record.id))
+                : state.records;
+              const boundaries = getBoundaryState(newRecords);
+              const detailRemoved = currentDeleted || !!selectedDeleted;
+
+              return {
+                records: newRecords,
+                recordsMap: newRecordsMap,
+                pendingIds: newPendingIds,
+                serverTotal: Math.max(state.serverTotal - removedCount, 0),
+                oldestSequence: boundaries.oldestSequence,
+                lastId: state.lastId,
+                lastSequence: state.lastSequence,
+                currentRecord: detailRemoved ? null : state.currentRecord,
+                requestBody: detailRemoved ? null : state.requestBody,
+                responseBody: detailRemoved ? null : state.responseBody,
+                detailLoading: detailRemoved ? false : state.detailLoading,
+                detailError: detailRemoved ? 'Request was deleted' : state.detailError,
+                selectedId: selectedDeleted ? undefined : state.selectedId,
+                filterVersion: removedCount > 0 ? state.filterVersion + 1 : state.filterVersion,
+                recordsMutation: removedCount > 0
+                  ? createRecordsMutation({
+                    reset: false,
+                    inserted: [],
+                    updated: [],
+                    deletedIds: Array.from(idsToRemove),
+                  })
+                  : state.recordsMutation,
+              };
             });
 
-          return true;
-        }
+            if (nextPendingIds) {
+              pushService.updateSubscription({ pending_ids: nextPendingIds });
+            }
 
-        historyBackfillGeneration += 1;
-        membershipReconciliationRequired = false;
-        membershipFollowupRequired = false;
-        trafficResumeStatisticsPending = false;
-        trafficEpochResetSuspected = false;
-        clearPendingTrafficBatch();
-        set({
-          records: [],
-          recordsMap: new Map(),
-          serverTotal: 0,
-          serverSequence: 0,
-          serverOldestSequence: null,
-          hasMore: false,
-          hasNewer: false,
-          oldestSequence: null,
-          lastId: null,
-          lastSequence: null,
-          pendingIds: new Set(),
-          currentRecord: null,
-          requestBody: null,
-          responseBody: null,
-          requestRawBody: null,
-          responseRawBody: null,
-          detailError: null,
-          loading: false,
-          filterVersion: 0,
-          initialized: false,
-          selectedId: undefined,
-          historyLoading: false,
-          catchingUp: false,
-          recordsMutation: createRecordsMutation({
-            reset: true,
-            inserted: [],
-            updated: [],
-            deletedIds: [],
-          }),
-        });
+            return true;
+          }
 
-        pushService.updateSubscription({ pending_ids: [] });
-
-        api.clearTraffic()
-          .catch((e) => {
-            const err = e as Error;
-            set({ error: err.message });
+          historyBackfillGeneration += 1;
+          membershipReconciliationRequired = false;
+          membershipFollowupRequired = false;
+          trafficResumeStatisticsPending = false;
+          trafficEpochResetSuspected = false;
+          clearPendingTrafficBatch();
+          set({
+            records: [],
+            recordsMap: new Map(),
+            serverTotal: 0,
+            serverSequence: 0,
+            serverOldestSequence: null,
+            hasMore: false,
+            hasNewer: false,
+            oldestSequence: null,
+            lastId: null,
+            lastSequence: null,
+            pendingIds: new Set(),
+            currentRecord: null,
+            requestBody: null,
+            responseBody: null,
+            requestRawBody: null,
+            responseRawBody: null,
+            detailError: null,
+            loading: false,
+            filterVersion: 0,
+            initialized: false,
+            selectedId: undefined,
+            historyLoading: false,
+            catchingUp: false,
+            recordsMutation: createRecordsMutation({
+              reset: true,
+              inserted: [],
+              updated: [],
+              deletedIds: [],
+            }),
           });
 
-        return true;
+          pushService.updateSubscription({ pending_ids: [] });
+
+          // Recover active connections and records written after the server's
+          // clear point, including pushes received while the API was pending.
+          pushService.resetTrafficCursor();
+          await get().reloadRecords(true);
+          return true;
+        } finally {
+          set({ clearing: false });
+        }
       },
 
       setToolbarFilters: (filters: ToolbarFilters) => {

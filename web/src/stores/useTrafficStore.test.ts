@@ -1792,3 +1792,107 @@ describe("Traffic detail selection races", () => {
     apiMocks.getTrafficDetail.mockReset();
   });
 });
+
+describe("clear API completion and recovery", () => {
+  afterEach(() => {
+    useTrafficStore.setState({ clearing: false });
+    apiMocks.clearTraffic.mockResolvedValue(undefined);
+  });
+
+  it("waits for the API, rejects overlapping calls and preserves rows on failure", async () => {
+    const records = [makeRecord("501", "/keep")];
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((r) => [r.id, r])),
+      clearing: false,
+    });
+    let reject!: (error: Error) => void;
+    apiMocks.clearTraffic.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, fail) => {
+          reject = fail;
+        }),
+    );
+    const count = apiMocks.clearTraffic.mock.calls.length;
+    let finished = false;
+    const pending = useTrafficStore
+      .getState()
+      .clearTraffic()
+      .then((result) => {
+        finished = true;
+        return result;
+      });
+    expect(useTrafficStore.getState().clearing).toBe(true);
+    expect(await useTrafficStore.getState().clearTraffic()).toBe(false);
+    expect(apiMocks.clearTraffic.mock.calls.length).toBe(count + 1);
+    expect(finished).toBe(false);
+    expect(useTrafficStore.getState().records).toEqual(records);
+    reject(new Error("clear failed"));
+    expect(await pending).toBe(false);
+    expect(useTrafficStore.getState().error).toBe("clear failed");
+    expect(useTrafficStore.getState().records).toEqual(records);
+    expect(useTrafficStore.getState().clearing).toBe(false);
+    expect(await useTrafficStore.getState().clearTraffic()).toBe(true);
+    expect(useTrafficStore.getState().clearing).toBe(false);
+  });
+
+  it("treats an unsuccessful API result as failure", async () => {
+    const records = [makeRecord("504", "/keep")];
+    useTrafficStore.setState({ records, recordsMap: new Map(records.map(r => [r.id, r])), clearing: false });
+    apiMocks.clearTraffic.mockResolvedValueOnce({ success: false, message: "clear rejected" });
+    expect(await useTrafficStore.getState().clearTraffic()).toBe(false);
+    expect(useTrafficStore.getState().records).toEqual(records);
+    expect(useTrafficStore.getState().error).toBe("clear rejected");
+    expect(useTrafficStore.getState().clearing).toBe(false);
+  });
+
+  it("keeps selected rows when deletion fails", async () => {
+    const records = [makeRecord("502", "/keep")];
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((r) => [r.id, r])),
+      selectedId: "502",
+      clearing: false,
+    });
+    apiMocks.clearTraffic.mockRejectedValueOnce(new Error("delete failed"));
+    expect(await useTrafficStore.getState().clearTraffic(["502"])).toBe(false);
+    expect(useTrafficStore.getState().records).toEqual(records);
+    expect(useTrafficStore.getState().selectedId).toBe("502");
+  });
+
+  it("reconciles records captured between server clear and API completion", async () => {
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce({
+      new_records: makePage(
+        [makeRecord("503", "/after-clear")],
+        false,
+        "forward",
+      ).records,
+      updated_records: [],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 504,
+    });
+    expect(await useTrafficStore.getState().clearTraffic()).toBe(true);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "503",
+    ]);
+    expect(pushMocks.resetTrafficCursor).toHaveBeenCalled();
+  });
+});
+
+
+it("retains live records arriving during the clear reconciliation read", async () => {
+  useTrafficStore.setState({ clearing: false });
+  let resolveRead!: (response: TrafficUpdatesResponseCompact) => void;
+  apiMocks.getTrafficUpdates.mockImplementationOnce(() => new Promise<TrafficUpdatesResponseCompact>(resolve => { resolveRead = resolve; }));
+  const clear = useTrafficStore.getState().clearTraffic();
+  await Promise.resolve();
+  await Promise.resolve();
+  const live = makeRecord("506", "/live-during-read");
+  useTrafficStore.setState({ records: [live], recordsMap: new Map([[live.id, live]]), serverSequence: 507 });
+  resolveRead({ new_records: makePage([makeRecord("505", "/snapshot")], false, "forward").records, updated_records: [], has_more: false, server_total: 1, server_sequence: 506 });
+  expect(await clear).toBe(true);
+  expect(useTrafficStore.getState().records.map(r => r.id)).toEqual(["505", "506"]);
+  expect(useTrafficStore.getState().lastSequence).toBe(506);
+  expect(useTrafficStore.getState().serverSequence).toBe(507);
+});

@@ -172,11 +172,11 @@ describe("Traffic filters across confirmed database epochs", () => {
     });
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame"] });
     useTrafficStore.getState().disablePush();
-    useTrafficStore.getState().clearTraffic();
+    await useTrafficStore.getState().clearTraffic();
     vi.clearAllMocks();
     vi.mocked(getTrafficPage).mockReset();
     vi.mocked(getTrafficStatistics).mockReset();

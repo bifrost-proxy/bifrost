@@ -1028,7 +1028,7 @@ test("Header 仅在存在差异时显示方向与来源", async ({ page, request
   }
 });
 
-test("清空流量时前端立即清理", async ({ page, request }) => {
+test("清空流量时前端等待服务端完成后清理", async ({ page, request }) => {
   await clearTraffic(request);
   const server = await startMockServer();
   const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -1054,9 +1054,11 @@ test("清空流量时前端立即清理", async ({ page, request }) => {
 
   await page.getByTestId("toolbar-clear-all").click();
 
-  await expect(row).toHaveCount(0, { timeout: 500 });
+  await expect(page.getByTestId("toolbar-clear-all")).toBeDisabled();
+  await expect(row).toBeVisible();
   await expect(localClientCount).toHaveText("1", { timeout: 500 });
   expect(deleteSeen).toBeTruthy();
+  await expect(row).toHaveCount(0, { timeout: 5000 });
   await expect(localClientCount).toHaveCount(0, { timeout: 5000 });
 
   await server.close();

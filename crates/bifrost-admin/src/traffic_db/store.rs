@@ -159,6 +159,10 @@ pub struct TrafficDbStore {
     cleanup_notifier: RwLock<Option<CleanupNotifier>>,
     traffic_statistics: RwLock<TrafficStatistics>,
     #[cfg(test)]
+    clear_before_cache: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    clear_before_compact: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
     query_calls: AtomicUsize,
     #[cfg(test)]
     get_by_ids_calls: AtomicUsize,
@@ -257,6 +261,10 @@ impl TrafficDbStore {
             write_count: AtomicU64::new(0),
             cleanup_notifier: RwLock::new(None),
             traffic_statistics: RwLock::new(traffic_statistics),
+            #[cfg(test)]
+            clear_before_cache: RwLock::new(None),
+            #[cfg(test)]
+            clear_before_compact: RwLock::new(None),
             #[cfg(test)]
             query_calls: AtomicUsize::new(0),
             #[cfg(test)]
@@ -1596,6 +1604,10 @@ impl TrafficDbStore {
             *self.traffic_statistics.write() = statistics;
         }
 
+        #[cfg(test)]
+        if let Some(hook) = self.clear_before_cache.read().as_ref() {
+            hook();
+        }
         let mut cache = self.recent_cache.write();
         let preserved_ids: Vec<String> = cache
             .iter()
@@ -1617,13 +1629,14 @@ impl TrafficDbStore {
         }
         *cache = new_cache;
 
-        if active_connection_ids.is_empty() {
-            drop(conn);
-            self.compact_db(true);
-        } else {
-            drop(conn);
-            self.compact_db(false);
+        // Keep the DB -> cache lock order throughout clear. Reacquiring the
+        // database lock while holding cache can deadlock with another writer.
+        drop(cache);
+        #[cfg(test)]
+        if let Some(hook) = self.clear_before_compact.read().as_ref() {
+            hook();
         }
+        Self::compact_with_conn(&conn, active_connection_ids.is_empty());
 
         tracing::info!("[TRAFFIC_DB] Traffic records cleared (active preserved)");
         Ok(())
@@ -3622,3 +3635,7 @@ mod tests {
         cleanup_test_dir(&dir);
     }
 }
+
+#[cfg(test)]
+#[path = "clear_concurrency_tests.rs"]
+mod clear_concurrency_tests;

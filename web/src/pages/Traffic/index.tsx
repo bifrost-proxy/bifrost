@@ -177,6 +177,7 @@ export default function Traffic() {
   const {
     fetchTrafficDetail,
     clearTraffic,
+    clearing,
     backfillHistory,
     loadNewer,
     reloadRecords,
@@ -191,6 +192,7 @@ export default function Traffic() {
     useShallow((state) => ({
       fetchTrafficDetail: state.fetchTrafficDetail,
       clearTraffic: state.clearTraffic,
+      clearing: state.clearing,
       backfillHistory: state.backfillHistory,
       loadNewer: state.loadNewer,
       reloadRecords: state.reloadRecords,
@@ -666,6 +668,8 @@ export default function Traffic() {
     if (success) {
       message.success("Traffic cleared");
       setSelectedId(undefined);
+    } else if (useTrafficStore.getState().error) {
+      message.error(useTrafficStore.getState().error);
     }
   }, [clearTraffic, setSelectedId]);
 
@@ -1207,6 +1211,7 @@ export default function Traffic() {
       <Toolbar
         filters={toolbarFilters}
         onClearAll={handleClearAll}
+        clearing={clearing}
         onFilterChange={setToolbarFilters}
         systemProxyEnabled={
           systemProxy ? isSystemProxyLiveEnabledByBifrost(systemProxy) : false
