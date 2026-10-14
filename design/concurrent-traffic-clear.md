@@ -262,3 +262,55 @@ Review/Fix/Test 不止两轮：先复现并统一提交路径，再验证失败/
 本轮 Admin 提供的页面入口 `web/dist/assets/index-CzuQD-SC.js` 的 SHA-256 为
 `c7b7c1e510689ed7e87cfd45236ef05623f32bff5f60a1dbc29d7f40d85eecca`；
 debug 二进制 SHA-256 与上一轮相同，不作为前端物理嵌入证明。
+
+## P2 复查：选中删除在 journal 建立前的证据交接
+
+基线为 `e7a5b991149e10250397c821324a72af580cc1e2`。评论
+`https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4273339945`
+成立：删除帧和成功响应均可在同步 journal 建立前到达，旧代码没有将删除证据
+交给新读，迟到的已排队 update 可重新插入被删行。
+
+选中 DELETE 在途期间用临时集合保存实际删除帧，并过滤这些 ID 的迟到 live 事件。
+响应成功后把这些证据和本次请求 ID 交给当前读的 live tombstone 集合，随后释放
+临时集合；失败时释放集合，不推断请求 ID 已删除。该集合不作为权威 GET 的删除
+过滤器：服务端保留的 active 行仍可从 GET 恢复，journal 结束后接受正常新更新。
+没有长期全局 tombstone，也没有改变后端或无关生产代码。
+
+新增五项测试全部在旧生产代码上失败：删除帧在响应前到达/未先到达各配 GET 成功/
+失败的四项，以及 active 行的权威恢复和后续更新。修复后全量前端 64 文件、468 项
+通过（store 118 项）；强制 TypeScript 通过，ESLint 0 error、7 个既有 warning。
+
+八条 review 的最终回归对应关系如下；测试均位于
+`web/src/stores/useTrafficStore.test.ts`，没有删除断言或新增 skip。
+
+| 评论 discussion ID | 回归覆盖 |
+| --- | --- |
+| 4269700698 | `does not resurrect an unseen snapshot row deleted by another client`；`does not restore snapshot or live rows after another client clears`；retention floor、post-delete inserts/updates、窗口外成员确认 |
+| 4270946607 | `keeps deletion authoritative over a delayed pre-delete update`；`combines deletion, delayed updates/statistics and a newer GET without resurrection or rollback`；取消后新代际写入 |
+| 4270946622 | `retains newer positive metadata when older statistics arrive during a bounded read`；迟到零清空信号；同 cursor 新计数 |
+| 4270946628 | `does not let a queued batch roll back metadata committed by a newer GET`；`consumes a pre-read batch while retaining its insert and updated fields`；equal-cursor stale totals |
+| 4271355414 | `finishes the successful clear and bounds reads under unrelated continuous deletions`；stalled GET deadline；retry budget |
+| 4271355423 | `counts a selected deletion once when a post-delete delta total arrives before its response`；广播不重复减数；旧统计在途被新读取替换；active 保留 |
+| 4271355431 | replacement GET/member 查询失败的 journal 恢复；暂停/恢复取消；完整 chunk 与未完成 chunk；低序号晚提交；已确认缺失跨重试保留 |
+| 4273339945 | 四项 `keeps selected deletion tombstones before journal creation`；`restores a preserved active selected row from GET and accepts its later live update` |
+
+完整 UI audit 使用 workflow 同一入口：
+`bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner`，
+Playwright 总期限 50 分钟、外层阶段期限 60 分钟。首轮结果为前端构建通过、
+官方 Rust debug 构建通过（3 分 58 秒）、UI 189 通过/30 失败/4 未运行（28 分钟）。
+规则、shell、自定义 runner 按此命令不执行，不能把完整 audit 声称为全绿。
+
+重启失败的日志显示：入口预构建了 `target/debug/bifrost`，但环境分配器把目标目录
+设回 `.bifrost-ui-target`；重启助手不采用 prebuilt 参数，转而冷编译并超时，引起
+后续 `ECONNREFUSED` 级联失败。相关 helper 本轮未改。把真实预构建二进制准备到
+测试默认目录后，重启测试 10.7 秒通过，串行组及普通 Traffic 流程恢复。没有改测试
+代码、增大期限、跳过用例或弱化断言。
+
+独立失败还包括大历史用例的 120 秒超时（trace 中没有 page.goto，前端尚未加载）
+以及统计推送用例收到 0→44→50 三帧但期望两帧。不能把全部失败直接认定为
+历史债；受影响文件及旧 head 对照验证的后续结果记录在本轮交付报告。
+
+本轮 Admin 前端入口为 `web/dist/assets/index-DB5J4awL.js`，SHA-256 为
+`a27584f496de1db4514875cf1f23740542ce9ad5051b75fc9e1956d98d097ecd`。
+严格 DevTools MCP、真实 WebKit 运行和 release 物理嵌入未验证。
+父会已独立确认基线提交的 CI run `38595495623` 成功，该结果不代表本次新提交。

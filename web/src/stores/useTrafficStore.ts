@@ -93,7 +93,10 @@ interface TrafficState {
   backfillHistory: () => Promise<void>;
   loadNewer: () => Promise<void>;
   catchUpUpdates: () => Promise<void>;
-  reloadRecords: (preserveLiveRecords?: boolean) => Promise<void>;
+  reloadRecords: (
+    preserveLiveRecords?: boolean,
+    deletedLiveIds?: ReadonlySet<string>,
+  ) => Promise<void>;
   fetchTrafficDetail: (id: string) => Promise<void>;
   appendSseResponseBody: (recordId: string, payload: string) => void;
   setResponseBody: (recordId: string, body: string | null) => void;
@@ -206,6 +209,8 @@ interface LiveReconciliationRead {
   metadata: { total: number; sequence: number } | null;
 }
 const liveReconciliationReads = new Set<LiveReconciliationRead>();
+// Bridge deletion evidence across the selected DELETE await, before its read exists.
+let selectedClearDeletions: { generation: number; ids: Set<string> } | null = null;
 
 function observeReconciliationMetadata(
   total: number,
@@ -1289,7 +1294,11 @@ export const useTrafficStore = create<TrafficState>()(
         observeReconciliationMetadata(data.server_total, data.server_sequence, data.oldest_sequence);
         // Deletion and traffic events use different server queues. Ignore a
         // delayed row already deleted during any active reconciliation read.
-        const deletedIds = new Set<string>();
+        const deletedIds = new Set<string>(
+          selectedClearDeletions?.generation === historyBackfillGeneration
+            ? selectedClearDeletions.ids
+            : [],
+        );
         for (const read of liveReconciliationReads) {
           if (
             read.historyGeneration !== historyBackfillGeneration ||
@@ -1642,6 +1651,8 @@ export const useTrafficStore = create<TrafficState>()(
       handleTrafficDeleted: (ids: string[], authoritativeTotal?: number) => {
         if (ids.length === 0) return;
         const idsSet = new Set(ids);
+        if (selectedClearDeletions?.generation === historyBackfillGeneration)
+          for (const id of idsSet) selectedClearDeletions.ids.add(id);
         for (const read of liveReconciliationReads) {
           read.invalidated = true;
           for (const id of idsSet) {
@@ -2211,7 +2222,10 @@ export const useTrafficStore = create<TrafficState>()(
         }
       },
 
-      reloadRecords: async (preserveLiveRecords = false) => {
+      reloadRecords: async (
+        preserveLiveRecords = false,
+        deletedLiveIds: ReadonlySet<string> = new Set(),
+      ) => {
         const generation = historyBackfillGeneration;
         const resumeGeneration = trafficResumeGeneration;
         const read: LiveReconciliationRead | null = preserveLiveRecords
@@ -2219,7 +2233,7 @@ export const useTrafficStore = create<TrafficState>()(
               historyGeneration: generation,
               resumeGeneration,
               invalidated: false,
-              deletedLiveIds: new Set(),
+              deletedLiveIds: new Set(deletedLiveIds),
               liveRecords: new Map(get().recordsMap),
               liveTotals: new Map(
                 get().records.map((record) => [record.id, get().serverTotal]),
@@ -2748,6 +2762,10 @@ export const useTrafficStore = create<TrafficState>()(
       clearTraffic: async (ids?: string[]) => {
         if (get().clearing) return false;
         set({ error: null, clearing: true });
+        const deletions = ids?.length
+          ? { generation: historyBackfillGeneration, ids: new Set<string>() }
+          : null;
+        selectedClearDeletions = deletions;
         try {
           const result = await api.clearTraffic(
             ids && ids.length > 0 ? ids : undefined,
@@ -2756,6 +2774,8 @@ export const useTrafficStore = create<TrafficState>()(
             throw new Error(result.message || "Failed to clear traffic");
           }
         } catch (e) {
+          if (selectedClearDeletions === deletions)
+            selectedClearDeletions = null;
           set({ error: getApiErrorPayload(e).message, clearing: false });
           return false;
         }
@@ -2768,7 +2788,15 @@ export const useTrafficStore = create<TrafficState>()(
             void get().fetchTrafficStatistics(undefined, true);
             // A successful ID clear may preserve active connections. Let the
             // authoritative read recover those rows and the post-delete count.
-            void get().reloadRecords(true);
+            // Requested IDs suppress delayed live events, not authoritative GET
+            // rows: the server can retain active connections. Actual deletion
+            // frames collected before this journal are handed over as well.
+            void get().reloadRecords(
+              true,
+              new Set([...ids, ...(deletions?.ids ?? [])]),
+            );
+            if (selectedClearDeletions === deletions)
+              selectedClearDeletions = null;
 
             return true;
           }
