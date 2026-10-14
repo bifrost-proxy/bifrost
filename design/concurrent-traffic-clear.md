@@ -49,7 +49,7 @@ Review/Fix/Test 第一轮重点复核锁顺序和失败恢复，第二轮重点�
 | workspace all-targets/all-features Clippy | 通过，使用 `-D warnings` |
 | 前端强制类型检查、全量 ESLint | 通过；ESLint 有 7 个既有 warning、0 error |
 | E2E capability contract、shell CI coverage guard | 通过；新增 UI 回归已注册到 critical matrix |
-| 完整 coverage-changed | 3862 项通过、4 个无关 IM 失败、1 个既有 ignore，退出 101 |
+| 完整 coverage-changed | 3862 项通过、4 个 IM 模块失败、1 个既有 ignore，退出 101 |
 | 失败套件产生的变更行覆盖率 | 官方同源 coverage-diff 算法为 100%（8/8），无未测文件；不等同于完整 preflight 通过 |
 | workspace all-features 测试 | 在 admin crate 的 3 个 IM 失败处停止：3863 项通过、1 个既有 ignore；后续 crate 未执行 |
 | 前端格式门禁 | 仓库未提供 Prettier；独立 Prettier 检查时新旧基线同三个文件均不合格 |
@@ -60,11 +60,12 @@ Review/Fix/Test 第一轮重点复核锁顺序和失败恢复，第二轮重点�
 完整 coverage-changed 的 4 个失败均在未修改的 IM 代码：
 
 - `mock_inbound_validates_and_injects_group_message`：5 秒内事件未被消费；独立旧基线和新版本分别复跑均失败。
-- `group_event_loop_busy_session_falls_back_to_agent_workdir`：busy fallback 事件循环超时；非插桩 workspace 运行通过。
-- `group_event_loop_routes_concurrent_context_to_the_active_external_session`：group runner 未进入 active。
-- `group_event_loop_uses_group_workdir_for_busy_default_and_route_paths`：busy group 事件循环超时。
+- `group_event_loop_busy_session_falls_back_to_agent_workdir`：仅全套插桩运行超时；非插桩 workspace 运行通过，旧基线单独运行 10.22 秒通过，修复版插桩二进制单独运行 10.23 秒通过。原因未确认，不能判定为已证实的基线失败。
+- `group_event_loop_routes_concurrent_context_to_the_active_external_session`：group runner 未进入 active；旧基线单独运行也在 10.23 秒超时失败。
+- `group_event_loop_uses_group_workdir_for_busy_default_and_route_paths`：busy group 事件循环超时；旧基线单独运行也在 20.27 秒超时失败。
 
-后三个测试未做完整旧基线对照，不能声称已证明其根因；它们所在生产代码未变更。
+三个失败已逐例在旧基线复现；fallback 用例未在旧基线单独运行复现。
+所有这些用例所在的 IM 生产代码未变更；没有修复无关 IM 问题或弱化测试。
 唯一既有 ignored 用例读取当前用户真实 CLI session stores；本任务没有启用它，
 也没有新增 ignore、删除测试或弱化断言。
 
@@ -76,3 +77,7 @@ status/diff、范围、锁序、失败状态、push 游标、语义和门禁记�
 最终 `cargo build --bin bifrost --all-features` 通过；构建产物 SHA-256 为
 `e7e3ff5e042edca344bfb59080011b75a891cadbc896953221b1fd0874868e73`。
 本次提交未包含构建自动产生的 Cargo.lock workspace 版本同步。
+
+远端草稿 PR 为 `https://github.com/bifrost-proxy/bifrost/pull/547`。
+按父会明确的分工，本任务保持仓库既有 PAT 路径限制；远端 CI 由父会通过其会话
+中的已连接 GitHub 只读工具独立核验，本任务未绕过 403 或改用其他凭据读取 CI。
