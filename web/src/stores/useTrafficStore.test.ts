@@ -218,6 +218,26 @@ const makeDelta = (
 const flushTrafficBatch = () =>
   new Promise<void>((resolve) => window.setTimeout(resolve, 180));
 
+// Clear reports the DELETE result independently of background reconciliation.
+// Existing membership assertions explicitly wait for that separate read.
+const clearAndSynchronizeForTest = async (ids?: string[]) => {
+  const reload = useTrafficStore.getState().reloadRecords;
+  let synchronization = Promise.resolve();
+  useTrafficStore.setState({
+    reloadRecords: (...args) => {
+      synchronization = reload(...args);
+      return synchronization;
+    },
+  });
+  try {
+    const result = await useTrafficStore.getState().clearTraffic(ids);
+    await synchronization;
+    return result;
+  } finally {
+    useTrafficStore.setState({ reloadRecords: reload });
+  }
+};
+
 describe("Traffic store bounded history paging", () => {
   it("uses the authoritative server snapshot for filter and Activity counts", async () => {
     apiMocks.getTrafficStatistics.mockResolvedValueOnce({
@@ -275,7 +295,7 @@ describe("Traffic store bounded history paging", () => {
       domains: { "api.example.test": 2 },
     });
 
-    await useTrafficStore.getState().clearTraffic();
+    await clearAndSynchronizeForTest();
 
     const state = useTrafficStore.getState();
     expect(state.records).toEqual([]);
@@ -483,7 +503,7 @@ describe("Traffic store rolling retention and burst catch-up", () => {
 describe("Traffic store missed-deletion reconciliation", () => {
   beforeEach(async () => {
     useTrafficStore.getState().disablePush();
-    await useTrafficStore.getState().clearTraffic();
+    await clearAndSynchronizeForTest();
     useTrafficStore.setState(useTrafficStore.getInitialState());
     apiMocks.queryTraffic.mockReset();
     pushMocks.resetTrafficCursor.mockClear();
@@ -1641,7 +1661,7 @@ describe("Traffic store missed-deletion reconciliation", () => {
         }),
     );
     const pending = useTrafficStore.getState().reconcileTrafficWindow();
-    await useTrafficStore.getState().clearTraffic();
+    await clearAndSynchronizeForTest();
     seed();
     resolveQuery({ ...makePage([keep], false, "forward"), total: 1 });
     await pending;
@@ -1872,7 +1892,7 @@ describe("clear API completion and recovery", () => {
       server_total: 1,
       server_sequence: 504,
     });
-    expect(await useTrafficStore.getState().clearTraffic()).toBe(true);
+    expect(await clearAndSynchronizeForTest()).toBe(true);
     expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
       "503",
     ]);
@@ -1885,7 +1905,7 @@ it("retains live records arriving during the clear reconciliation read", async (
   useTrafficStore.setState({ clearing: false });
   let resolveRead!: (response: TrafficUpdatesResponseCompact) => void;
   apiMocks.getTrafficUpdates.mockImplementationOnce(() => new Promise<TrafficUpdatesResponseCompact>(resolve => { resolveRead = resolve; }));
-  const clear = useTrafficStore.getState().clearTraffic();
+  const clear = clearAndSynchronizeForTest();
   await Promise.resolve();
   await Promise.resolve();
   const live = makeRecord("506", "/live-during-read");
@@ -1902,7 +1922,7 @@ describe("clear reconciliation overlapping membership changes", () => {
     useTrafficStore.getState().disablePush();
     apiMocks.getTrafficUpdates.mockReset();
     apiMocks.clearTraffic.mockResolvedValue(undefined);
-    await useTrafficStore.getState().clearTraffic();
+    await clearAndSynchronizeForTest();
     useTrafficStore.setState({
       paused: false,
       serverOldestSequence: null,
@@ -1938,7 +1958,7 @@ describe("clear reconciliation overlapping membership changes", () => {
         }),
     );
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(response([]));
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficDeleted(["601"]);
     resolveRead(response([makeRecord("601", "/deleted")]));
@@ -1957,7 +1977,7 @@ describe("clear reconciliation overlapping membership changes", () => {
         }),
     );
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(response([]));
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     const live = makeRecord("602", "/cleared-live");
     useTrafficStore.setState({
@@ -1991,7 +2011,7 @@ describe("clear reconciliation overlapping membership changes", () => {
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(
       response([makeRecord("605", "/retained")], 1, 706),
     );
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore
       .getState()
@@ -2026,7 +2046,7 @@ describe("clear reconciliation overlapping membership changes", () => {
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(
       response([makeRecord("605", "/updated", { status: 200 })], 1, 706),
     );
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficDeleted(["601"]);
     useTrafficStore.getState().handleTrafficPush({
@@ -2065,7 +2085,7 @@ describe("clear reconciliation overlapping membership changes", () => {
         }),
     );
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(response([]));
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficPush({
       new_records: [makeRecord("601", "/queued-deleted")],
@@ -2093,7 +2113,7 @@ describe("clear reconciliation overlapping membership changes", () => {
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(
       response([makeRecord("605", "/survives")], 1),
     );
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficStatistics({
       total_requests: 1,
@@ -2129,7 +2149,7 @@ describe("clear reconciliation overlapping membership changes", () => {
     apiMocks.getTrafficUpdates.mockRejectedValueOnce(
       new Error("replacement unavailable"),
     );
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficDeleted(["601"]);
     resolveRead(response([makeRecord("601", "/deleted")]));
@@ -2156,7 +2176,7 @@ describe("clear reconciliation overlapping membership changes", () => {
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(
       response([makeRecord("700", "/after-peer-clear")], 1, 701),
     );
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficPush({
       new_records: [makeRecord("700", "/after-peer-clear")],
@@ -2204,7 +2224,7 @@ describe("clear reconciliation overlapping membership changes", () => {
       });
     });
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(response([]));
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficDeleted(["601"]);
     resolveFirst(response([makeRecord("601", "/first-delete")]));
@@ -2238,7 +2258,7 @@ describe("clear reconciliation overlapping membership changes", () => {
       has_more: false,
       server_sequence: 700,
     });
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficPush({
       new_records: [makeRecord("601", "/removed")],
@@ -2298,7 +2318,7 @@ describe("clear reconciliation overlapping membership changes", () => {
         resolveMembership = resolve;
       });
     });
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficPush({
       new_records: [],
@@ -2361,7 +2381,7 @@ describe("clear reconciliation overlapping membership changes", () => {
       });
       return Promise.resolve(response([]));
     });
-    expect(await useTrafficStore.getState().clearTraffic()).toBe(true);
+    expect(await clearAndSynchronizeForTest()).toBe(true);
     expect(apiMocks.getTrafficUpdates).toHaveBeenCalledTimes(1);
     expect(useTrafficStore.getState().records).toEqual([]);
     expect(useTrafficStore.getState().clearing).toBe(false);
@@ -2387,7 +2407,7 @@ describe("clear reconciliation overlapping membership changes", () => {
         resolveMembership = resolve;
       });
     });
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore.getState().handleTrafficPush({
       new_records: [],
@@ -2436,7 +2456,7 @@ describe("clear reconciliation overlapping membership changes", () => {
         }),
     );
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(response([]));
-    const clear = useTrafficStore.getState().clearTraffic();
+    const clear = clearAndSynchronizeForTest();
     await Promise.resolve();
     useTrafficStore
       .getState()
@@ -2462,7 +2482,7 @@ describe("reconciliation delayed delivery ordering", () => {
     useTrafficStore.getState().disablePush();
     apiMocks.getTrafficUpdates.mockReset();
     apiMocks.clearTraffic.mockResolvedValue(undefined);
-    await useTrafficStore.getState().clearTraffic();
+    await clearAndSynchronizeForTest();
     useTrafficStore.setState(useTrafficStore.getInitialState());
     apiMocks.getTrafficUpdates.mockReset();
     vi.useFakeTimers({
@@ -2739,6 +2759,8 @@ describe("reconciliation delayed delivery ordering", () => {
   });
 
   it("consumes equal-cursor stale totals when the GET reflects a deletion", async () => {
+    apiMocks.queryTraffic.mockResolvedValueOnce({ records: [makeRecord("700", "/live")], total: 1, has_more: false, server_sequence: 701 });
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({ total_requests: 700, server_sequence: 701, client_ips: {}, proxy_ports: {}, applications: {}, account_names: {}, domains: {} });
     const held = holdRead();
     const reload = useTrafficStore.getState().reloadRecords(true);
     await held.ready;
@@ -2764,7 +2786,7 @@ describe("reconciliation delayed delivery ordering", () => {
     apiMocks.getTrafficUpdates.mockResolvedValueOnce(
       snapshot([makeRecord("601", "/restored")], 1, 700),
     );
-    expect(await useTrafficStore.getState().clearTraffic()).toBe(true);
+    expect(await clearAndSynchronizeForTest()).toBe(true);
     useTrafficStore.getState().handleTrafficPush({
       new_records: [],
       updated_records: [makeRecord("601", "/restored", { response_size: 999 })],
@@ -2781,5 +2803,648 @@ describe("reconciliation delayed delivery ordering", () => {
     expect(
       useTrafficStore.getState().recordsMap.get("601")?.response_size,
     ).toBe(999);
+  });
+});
+
+describe("reconciliation bounded completion and failure recovery", () => {
+  beforeEach(async () => {
+    useTrafficStore.getState().disablePush();
+    apiMocks.getTrafficUpdates.mockReset();
+    apiMocks.clearTraffic.mockResolvedValue(undefined);
+    await clearAndSynchronizeForTest();
+    useTrafficStore.setState(useTrafficStore.getInitialState());
+    apiMocks.getTrafficUpdates.mockReset();
+    apiMocks.queryTraffic.mockReset();
+    vi.useFakeTimers({
+      toFake: [
+        "setTimeout",
+        "clearTimeout",
+        "requestAnimationFrame",
+        "cancelAnimationFrame",
+      ],
+    });
+  });
+  afterEach(() => {
+    useTrafficStore.getState().disablePush();
+    vi.useRealTimers();
+  });
+  const snapshot = (
+    records: TrafficSummary[],
+    total = records.length,
+    sequence = 700,
+  ): TrafficUpdatesResponseCompact => ({
+    new_records: makePage(records, false, "forward").records,
+    updated_records: [],
+    has_more: false,
+    server_total: total,
+    server_sequence: sequence,
+  });
+  const holdRead = () => {
+    let resolve!: (value: TrafficUpdatesResponseCompact) => void;
+    let started!: () => void;
+    const ready = new Promise<void>((done) => {
+      started = done;
+    });
+    apiMocks.getTrafficUpdates.mockImplementationOnce(() => {
+      started();
+      return new Promise((done) => {
+        resolve = done;
+      });
+    });
+    return {
+      ready,
+      resolve: (value: TrafficUpdatesResponseCompact) => resolve(value),
+    };
+  };
+
+  it("finishes the successful clear and bounds reads under unrelated continuous deletions", async () => {
+    let release!: (value: TrafficUpdatesResponseCompact) => void;
+    let deleting = true;
+    let reads = 0;
+    const stalled = new Promise<TrafficUpdatesResponseCompact>((done) => {
+      release = done;
+    });
+    apiMocks.getTrafficUpdates.mockImplementation(() => {
+      reads++;
+      if (deleting)
+        useTrafficStore.getState().handleTrafficDeleted([String(9000 + reads)]);
+      return reads <= 8 ? Promise.resolve(snapshot([])) : stalled;
+    });
+    let finished = false;
+    const clear = useTrafficStore
+      .getState()
+      .clearTraffic()
+      .then((value) => {
+        finished = true;
+        return value;
+      });
+    try {
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+      expect(finished).toBe(true);
+      expect(useTrafficStore.getState().clearing).toBe(false);
+      expect(reads).toBeLessThanOrEqual(3);
+      expect(await clear).toBe(true);
+    } finally {
+      deleting = false;
+      release(snapshot([]));
+      await clear;
+    }
+  });
+
+  it("counts a selected deletion once when a post-delete delta total arrives before its response", async () => {
+    const records = makeRecordRange(1, 3);
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((r) => [r.id, r])),
+      serverTotal: 3,
+      serverSequence: 4,
+    });
+    let finishDelete!: () => void;
+    apiMocks.clearTraffic.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          finishDelete = () => done(undefined);
+        }),
+    );
+    let finishMembership!: () => void;
+    apiMocks.queryTraffic.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          finishMembership = () =>
+            done({
+              records: records.filter((r) => r.id !== "2"),
+              total: 2,
+              has_more: false,
+              server_sequence: 4,
+            });
+        }),
+    );
+    const clear = useTrafficStore.getState().clearTraffic(["2"]);
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [],
+      updated_records: [],
+      has_more: false,
+      server_total: 2,
+      server_sequence: 4,
+    });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().serverTotal).toBe(2);
+    finishDelete();
+    expect(await clear).toBe(true);
+    useTrafficStore.getState().handleTrafficDeleted(["2"]);
+    finishMembership();
+    await useTrafficStore.getState().reconcileTrafficWindow();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "1",
+      "3",
+    ]);
+    expect(useTrafficStore.getState().serverTotal).toBe(2);
+  });
+
+  it("commits journaled inserts and updates when the replacement GET fails while idle", async () => {
+    const first = holdRead();
+    apiMocks.getTrafficUpdates.mockRejectedValueOnce(
+      new Error("replacement failed"),
+    );
+    const reload = useTrafficStore.getState().reloadRecords(true);
+    await first.ready;
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [makeRecord("700", "/insert")],
+      updated_records: [makeRecord("700", "/insert", { response_size: 999 })],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 701,
+    });
+    useTrafficStore.getState().handleTrafficDeleted(["601"]);
+    first.resolve(snapshot([makeRecord("601", "/deleted")]));
+    await reload;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(
+      useTrafficStore.getState().recordsMap.get("700")?.response_size,
+    ).toBe(999);
+    expect(useTrafficStore.getState().recordsMap.has("601")).toBe(false);
+    expect(useTrafficStore.getState().serverTotal).toBe(1);
+    expect(useTrafficStore.getState().serverSequence).toBe(701);
+  });
+
+  it("commits journaled post-clear writes when the membership query fails while idle", async () => {
+    const first = holdRead();
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce(snapshot([], 0));
+    apiMocks.queryTraffic.mockRejectedValueOnce(new Error("membership failed"));
+    const reload = useTrafficStore.getState().reloadRecords(true);
+    await first.ready;
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [makeRecord("700", "/after-clear")],
+      updated_records: [],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 701,
+    });
+    useTrafficStore.getState().handleTrafficStatistics({
+      total_requests: 0,
+      server_sequence: 700,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    });
+    first.resolve(snapshot([makeRecord("601", "/before-clear")], 1));
+    await reload;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(1);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "700",
+    ]);
+    expect(useTrafficStore.getState().serverSequence).toBe(701);
+  });
+  it("preserves large authoritative totals and live writes when the retry budget is exhausted", async () => {
+    let reads = 0;
+    apiMocks.getTrafficUpdates.mockImplementation(() => {
+      reads++;
+      if (reads === 1)
+        useTrafficStore.getState().handleTrafficPush({
+          new_records: [makeRecord("700", "/keep")],
+          updated_records: [],
+          has_more: false,
+          server_total: 1_000,
+          server_sequence: 701,
+        });
+      useTrafficStore
+        .getState()
+        .handleTrafficDeleted([reads === 2 ? "601" : String(9000 + reads)]);
+      return Promise.resolve(snapshot([makeRecord("601", "/obsolete")], 1));
+    });
+    await useTrafficStore.getState().reloadRecords(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(reads).toBe(3);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "700",
+    ]);
+    expect(useTrafficStore.getState().serverTotal).toBe(1_000);
+    expect(useTrafficStore.getState().serverSequence).toBe(701);
+  });
+
+  it("returns clear success before a stalled GET and retains writes at the deadline", async () => {
+    const held = holdRead();
+    const reload = useTrafficStore.getState().reloadRecords;
+    let synchronization!: Promise<void>;
+    useTrafficStore.setState({
+      reloadRecords: (...args) => (synchronization = reload(...args)),
+    });
+    try {
+      expect(await useTrafficStore.getState().clearTraffic()).toBe(true);
+      expect(useTrafficStore.getState().clearing).toBe(false);
+      await held.ready;
+      useTrafficStore.getState().handleTrafficPush({
+        new_records: [makeRecord("700", "/deadline-write")],
+        updated_records: [],
+        has_more: false,
+        server_total: 1,
+        server_sequence: 701,
+      });
+      useTrafficStore.getState().handleTrafficDeleted(["601"]);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await synchronization;
+      expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+        "700",
+      ]);
+      held.resolve(snapshot([makeRecord("601", "/late-obsolete")], 1));
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+        "700",
+      ]);
+    } finally {
+      held.resolve(snapshot([]));
+      useTrafficStore.setState({ reloadRecords: reload });
+    }
+  });
+
+  it("preserves accepted writes across pause/resume cancellation without applying the obsolete GET", async () => {
+    const first = holdRead();
+    const replacement = holdRead();
+    const reload = useTrafficStore.getState().reloadRecords(true);
+    await first.ready;
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [makeRecord("700", "/before-pause")],
+      updated_records: [],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 701,
+    });
+    useTrafficStore.getState().handleTrafficDeleted(["601"]);
+    first.resolve(snapshot([makeRecord("601", "/obsolete")], 1));
+    await replacement.ready;
+    useTrafficStore.getState().disablePush();
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [makeRecord("701", "/after-resume")],
+      updated_records: [
+        makeRecord("700", "/before-pause", { response_size: 999 }),
+      ],
+      has_more: false,
+      server_total: 2,
+      server_sequence: 702,
+    });
+    replacement.resolve(snapshot([makeRecord("601", "/obsolete")], 1));
+    await reload;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "700",
+      "701",
+    ]);
+    expect(
+      useTrafficStore.getState().recordsMap.get("700")?.response_size,
+    ).toBe(999);
+    expect(useTrafficStore.getState().serverTotal).toBe(2);
+    expect(useTrafficStore.getState().serverSequence).toBe(702);
+  });
+
+  it("uses only completed membership chunks on failure and retains unqueried live rows", async () => {
+    const first = holdRead();
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce(snapshot([], 0, 400));
+    const records = makeRecordRange(401, 1000);
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      records: records.slice(0, 499),
+      total: 499,
+      has_more: false,
+      server_sequence: 1001,
+    });
+    apiMocks.queryTraffic.mockRejectedValueOnce(
+      new Error("second chunk failed"),
+    );
+    const reload = useTrafficStore.getState().reloadRecords(true);
+    await first.ready;
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: records,
+      updated_records: [],
+      has_more: false,
+      server_total: 600,
+      server_sequence: 1001,
+    });
+    useTrafficStore.getState().handleTrafficStatistics({
+      total_requests: 0,
+      server_sequence: 400,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    });
+    first.resolve(snapshot([makeRecord("399", "/pre-clear")], 1, 400));
+    await reload;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(2);
+    expect(useTrafficStore.getState().records).toHaveLength(599);
+    expect(useTrafficStore.getState().recordsMap.has("900")).toBe(false);
+    expect(useTrafficStore.getState().recordsMap.has("1000")).toBe(true);
+    expect(useTrafficStore.getState().recordsMap.has("399")).toBe(false);
+  });
+
+  it("does not deduct a deletion broadcast from an already post-delete snapshot total", async () => {
+    const records = makeRecordRange(1, 3);
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((r) => [r.id, r])),
+      serverTotal: 3,
+      serverSequence: 4,
+    });
+    let finishMembership!: () => void;
+    apiMocks.queryTraffic.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          finishMembership = () =>
+            done({
+              records: records.filter((r) => r.id !== "2"),
+              total: 2,
+              has_more: false,
+              server_sequence: 4,
+            });
+        }),
+    );
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [],
+      updated_records: [],
+      has_more: false,
+      server_total: 2,
+      server_sequence: 4,
+    });
+    await vi.advanceTimersByTimeAsync(200);
+    useTrafficStore.getState().handleTrafficDeleted(["2"]);
+    finishMembership();
+    await useTrafficStore.getState().reconcileTrafficWindow();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "1",
+      "3",
+    ]);
+    expect(useTrafficStore.getState().serverTotal).toBe(2);
+  });
+
+  it("retains active rows preserved by a selected clear's authoritative response", async () => {
+    const records = makeRecordRange(1, 3);
+    records[1].status = 0;
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((r) => [r.id, r])),
+      serverTotal: 3,
+      serverSequence: 4,
+    });
+    apiMocks.clearTraffic.mockResolvedValueOnce({
+      success: true,
+      message: "No traffic records to clear (all are active connections)",
+    });
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce(snapshot(records, 3, 4));
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({
+      total_requests: 3,
+      server_sequence: 4,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    });
+    expect(await clearAndSynchronizeForTest(["2"])).toBe(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "1",
+      "2",
+      "3",
+    ]);
+    expect(useTrafficStore.getState().pendingIds.has("2")).toBe(true);
+    expect(useTrafficStore.getState().serverTotal).toBe(3);
+  });
+  it("supersedes a pre-delete statistics request with a fresh count read", async () => {
+    const records = makeRecordRange(1, 3);
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((r) => [r.id, r])),
+      serverTotal: 3,
+      serverSequence: 4,
+    });
+    let oldStatistics!: (value: TrafficStatistics) => void;
+    apiMocks.getTrafficStatistics.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          oldStatistics = done;
+        }),
+    );
+    const oldRead = useTrafficStore.getState().fetchTrafficStatistics();
+    const fields = {
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    };
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({
+      ...fields,
+      total_requests: 2,
+      server_sequence: 4,
+    });
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce(
+      snapshot(
+        records.filter((r) => r.id !== "2"),
+        2,
+        4,
+      ),
+    );
+    expect(await clearAndSynchronizeForTest(["2"])).toBe(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().serverTotal).toBe(2);
+    expect(useTrafficStore.getState().trafficStatisticsTotal).toBe(2);
+    oldStatistics({ ...fields, total_requests: 3, server_sequence: 4 });
+    await oldRead;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().serverTotal).toBe(2);
+    expect(useTrafficStore.getState().trafficStatisticsTotal).toBe(2);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "1",
+      "3",
+    ]);
+  });
+  it("retains a post-clear commit whose sequence was allocated before the clear cursor", async () => {
+    const first = holdRead();
+    const record = makeRecord(
+      "605",
+      "/allocated-before-lock-committed-after-clear",
+    );
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce(snapshot([], 0, 700));
+    apiMocks.queryTraffic.mockRejectedValueOnce(new Error("membership failed"));
+    apiMocks.queryTraffic.mockResolvedValue({
+      records: [record],
+      total: 1,
+      has_more: false,
+      server_sequence: 700,
+    });
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({
+      total_requests: 1,
+      server_sequence: 700,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    });
+    const reload = useTrafficStore.getState().reloadRecords(true);
+    await first.ready;
+    // record() allocates sequence before acquiring write_conn. A writer may
+    // persist after clear even though its sequence is below clear's cursor.
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [record],
+      updated_records: [],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 700,
+    });
+    useTrafficStore.getState().handleTrafficStatistics({
+      total_requests: 0,
+      server_sequence: 700,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    });
+    first.resolve(snapshot([makeRecord("601", "/obsolete-snapshot")], 1, 700));
+    await reload;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "605",
+    ]);
+    expect(useTrafficStore.getState().serverTotal).toBe(1);
+  });
+  it("retains confirmed membership misses across a later retry and query failure", async () => {
+    const first = holdRead();
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce(snapshot([], 0));
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce(snapshot([], 0));
+    let finishMembership!: () => void;
+    let queryStarted!: () => void;
+    const ready = new Promise<void>((done) => {
+      queryStarted = done;
+    });
+    apiMocks.queryTraffic.mockImplementationOnce(() => {
+      queryStarted();
+      return new Promise((done) => {
+        finishMembership = () =>
+          done({
+            records: [],
+            total: 0,
+            has_more: false,
+            server_sequence: 701,
+          });
+      });
+    });
+    apiMocks.queryTraffic.mockRejectedValueOnce(
+      new Error("later membership failed"),
+    );
+    const reload = useTrafficStore.getState().reloadRecords(true);
+    await first.ready;
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [makeRecord("700", "/subsequently-deleted")],
+      updated_records: [],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 701,
+    });
+    useTrafficStore.getState().handleTrafficStatistics({
+      total_requests: 0,
+      server_sequence: 700,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    });
+    first.resolve(snapshot([makeRecord("601", "/obsolete")], 1));
+    await ready;
+    useTrafficStore.getState().handleTrafficDeleted(["601"]);
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [makeRecord("701", "/survivor")],
+      updated_records: [],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 702,
+    });
+    finishMembership();
+    await reload;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(apiMocks.getTrafficUpdates).toHaveBeenCalledTimes(3);
+    expect(apiMocks.queryTraffic).toHaveBeenCalledTimes(2);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "701",
+    ]);
+    expect(useTrafficStore.getState().serverTotal).toBe(1);
+  });
+  it("settles equal-cursor count disagreement with a fresh read after a live commit", async () => {
+    const held = holdRead();
+    const live = makeRecord("605", "/same-cursor-later-commit");
+    apiMocks.queryTraffic.mockResolvedValue({
+      records: [live],
+      total: 1,
+      has_more: false,
+      server_sequence: 700,
+    });
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({
+      total_requests: 1,
+      server_sequence: 700,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    });
+    const reload = useTrafficStore.getState().reloadRecords(true);
+    await held.ready;
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [live],
+      updated_records: [],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 700,
+    });
+    held.resolve(snapshot([], 0, 700));
+    await reload;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "605",
+    ]);
+    expect(useTrafficStore.getState().serverTotal).toBe(1);
+  });
+
+  it("does not let metadata received before a replacement GET repeatedly invalidate its fresh rows", async () => {
+    const held = holdRead();
+    const fresh = [
+      makeRecord("605", "/known"),
+      makeRecord("606", "/newly-committed"),
+    ];
+    apiMocks.getTrafficUpdates.mockResolvedValueOnce(snapshot(fresh, 2, 700));
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({
+      total_requests: 2,
+      server_sequence: 700,
+      client_ips: {},
+      proxy_ports: {},
+      applications: {},
+      account_names: {},
+      domains: {},
+    });
+    const reload = useTrafficStore.getState().reloadRecords(true);
+    await held.ready;
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [fresh[0]],
+      updated_records: [],
+      has_more: false,
+      server_total: 1,
+      server_sequence: 700,
+    });
+    held.resolve(snapshot(fresh, 2, 700));
+    await reload;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(apiMocks.getTrafficUpdates).toHaveBeenCalledTimes(2);
+    expect(useTrafficStore.getState().records.map((r) => r.id)).toEqual([
+      "605",
+      "606",
+    ]);
+    expect(useTrafficStore.getState().serverTotal).toBe(2);
   });
 });

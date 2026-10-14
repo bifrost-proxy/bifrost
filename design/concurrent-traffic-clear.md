@@ -173,5 +173,92 @@ Playwright WebSocket route 受控投递，并暂挂 GET 检查下一 UI 批次�
 不能把 debug 二进制未变化的 SHA-256 当作前端内容证明，也未验证 release 模式的
 物理资源嵌入。此前“内嵌前端”的本地证据应按这个边界理解。最终二进制 SHA-256 为
 `e7e3ff5e042edca344bfb59080011b75a891cadbc896953221b1fd0874868e73`。
-最终页面入口 JS `web/dist/assets/index-BkwPNBvS.js` 的 SHA-256 为
+上一轮页面入口 JS `web/dist/assets/index-BkwPNBvS.js` 的 SHA-256 为
 `95eb3fc894426ab9033ea125fc517e782a63e24cf5f968c52e92ee5d6f008263`。
+
+## P2 复查：清空完成、有限同步与失败收尾
+
+本轮基线为 `b3f5e3f8b3e9ed22d7abd8b006fe3be48f30066b`，任务开始时
+`fix/concurrent-traffic-clear` 工作区干净，继续现有分支，无并行代码任务。
+对应评论：
+
+- `https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4271355414`
+- `https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4271355423`
+- `https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4271355431`
+
+三项独立成立：无关删除可不断作废 GET，使 DELETE 已成功的 UI 仍等待同步；
+选中删除响应对已含删除结果的总数再次扣减；失效读取取消待刷批次后，GET 或成员
+查询失败会丢 journal，而 idle 连接不会重放已推进游标的写入。六个定向回归在旧
+`b3f5e3f8` 上全部失败，覆盖这三项及删除广播重复扣数、选中清空保留 active 行。
+
+本轮围绕收尾不变量重构，而非增加按钮拦截：
+
+1. `clearTraffic` 的结果与 `clearing` 只等待 DELETE；重叠 API 请求仍拒绝，失败仍保留
+   原记录并恢复按钮。成功后的窗口同步独立运行，最多三次 GET，整个读取/成员查询
+   过程有五秒 deadline，不因持续删除或永不返回的 GET 锁住清空按钮。
+2. 快照提交与 journal-only 提交使用同一条路径。失败、deadline、重试超限、暂停/恢复
+   取消不应用旧快照，但提交当前数据库代际的有效已接收写入，保留后续字段更新和
+   详情正文；被更新的清空/数据库代际 supersede 的旧读取不能恢复旧数据。
+3. 只有完整成员查询的已完成 chunk 能证明缺失；失败/未完成 chunk 不推断删除。
+   已确认缺失进入读取的删除标记，并跨后续重试保留。查询快照后的新写入继续由
+   journal 引用变化保护。明确删除与真实 retention floor 仍过滤数据及待刷批次。
+4. 删除 ID 改变成员，不从 snapshot total 再推导一次减法。选中响应与删除广播使用
+   相同规则，独立请求删除后的计数；该请求替换删除前在途的统计请求，旧结果不能
+   覆盖它。保留 active 的选中清空由权威 GET 恢复成员。总数不以本地保留行数补高。
+5. 保留最新 metadata 供失败恢复，但读取前已有的旧 metadata 不反复作废在它之后
+   发起的 GET。同一 allocation cursor 下计数不同不构成时间顺序证明，先确认窗口外
+   live 候选的成员，再发起两次观察之后的计数读取，解决 idle 下的计数分歧。
+6. 无快照且无数据变化的收尾不重置过滤缓存；有恢复数据时发布增量 mutation，保留
+   当前历史窗口、filterVersion 与新记录计数。原 filter/epoch/pagination 断言未改。
+
+源码复核发现 `record()` 在获得写锁前分配 sequence，因此不能把清空统计的 allocation
+cursor 当成删除 floor。新增低序号晚提交回归先证明这会丢真实 post-clear 写入，再撤销
+该推断；最终只使用真实 retention floor、明确删除和完整成员证据。另两个回归证明
+同 cursor 的旧 metadata 可反复作废新 GET、并令正确 live 行的总数停在零，已修正。
+
+新增十五个确定性回归涵盖有限结束、GET/成员失败、deadline、取消、未完成 chunk、
+跨重试缺失证据、API/广播计数、active 保留、旧统计请求、低序号晚提交与同游标分歧。
+已有成员/空库/新插入与更新保护断言保留。清空成功与同步断开后，既有清空测试明确
+等待单独同步 Promise 才断言窗口内容；直接 API 结果的新回归验证它不等待同步。
+
+### Critical UI 删除 frame 失败复核
+
+父会提供的旧 head 失败为 run `38570618070`、job `115875338975`：critical UI
+63 项通过、1 项失败，失败在等待 `traffic_deleted` frame，尚未投递迟到 update。
+本容器用明确暂挂替换 WebSocket 注册的方式，移除等待注册/订阅的屏障，在旧 store
+上复现同一点的 15000ms `Expected true / Received false`。该运行还确认按 ID DELETE
+实际清除一条、后续数据库 GET 为 404，故本地重现不是“active 连接未清除”。
+
+修复用例继续检查真实广播，并等待替换 socket 的 `connected` 与 `need_traffic` 订阅，
+而不把 HTTP 快照就绪等同于 push 注册。保留原 frame、迟到更新及新流量断言，新增
+实际清除数量与 404 断言。另一真实 Chromium 场景冻结 RAF，使写入确定性滞留批次，
+在删除令 GET 重试后注入替代 GET 500，确认清空成功/按钮已恢复、有效新行不丢失；
+该场景加入原 critical matrix。
+
+真实失败 ZIP 的消费仍有明确限制：当前 cloud skill catalog 为空，Library 的文档化
+`prepare_materialize` 工具可调用且验证了指定文件，返回签名下载地址而非本地文件。
+默认和一次授权网络下载均报代理 `Tunnel connection failed: 403 Forbidden`，本容器
+检查 ZIP 不存在，未声称已读、已校验完整性或见到当次 trace。未改代理、凭据或改走
+GitHub CI 读取。已请父会直接提供清空到 frame 超时之间各 socket 创建/关闭、注册、
+订阅时间线及 DELETE 响应正文。因此本地证明的是该失败机制，尚不能认定远端当次
+必然是相同连接间隙。没有重复上传或创建 Library 副本。
+
+| 本轮最终验证 | 结果 |
+| --- | --- |
+| 旧 head 六项定向回归 | 六项失败；核心四项涵盖三条评论 |
+| 最终前端单元 | 64 文件、463 项通过；store 113 项、原 filter/epoch 10 项通过 |
+| TypeScript、ESLint | 强制类型检查通过；0 error、7 个既有 warning |
+| 格式、注册、脚本 | 修改片段独立 Prettier，UI 文件 check、git diff --check、shell 语法和 10 项 capability contract 通过；既有全量格式债未扩大 |
+| 官方 Rust 1.95.0 最终构建 | all-features offline debug 构建通过，2 分 51 秒 |
+| 完整 critical UI matrix | 最终代码 65 项通过，8.7 分钟；包含四项清空并发/失败恢复流程 |
+| 严格 MCP / release 物理嵌入 | 未验证；实际 UI 使用 Admin 提供的 debug 构建静态资源，不使用 Vite |
+| 最终 head CI / 当次远端 trace | CI 由父会核验；当次 trace 的 Library 下载受代理 403 阻断 |
+
+Review/Fix/Test 不止两轮：先复现并统一提交路径，再验证失败/取消和分块查询；全套
+发现过滤缓存无效重置后用生产修复保留原断言；最后核查序号分配位置和同 cursor
+时间顺序，补失败回归后修正。没有新 ignore/skip、删用例或削弱门禁。当前 follow-up
+不含生产 Rust、IM、依赖或 rustls 改动，未重复无关 Rust coverage/workspace 测试。
+
+本轮 Admin 提供的页面入口 `web/dist/assets/index-CzuQD-SC.js` 的 SHA-256 为
+`c7b7c1e510689ed7e87cfd45236ef05623f32bff5f60a1dbc29d7f40d85eecca`；
+debug 二进制 SHA-256 与上一轮相同，不作为前端物理嵌入证明。
