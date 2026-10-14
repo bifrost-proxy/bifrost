@@ -121,3 +121,96 @@ test("清空按钮等待结果，连点仅发一次，失败保留流量并允�
     await server.close();
   }
 });
+
+test("清空同步读取期间另一客户端删除，不恢复旧快照且保留新流量", async ({
+  page,
+  request,
+}) => {
+  const server = await startMockHttpServer();
+  const snapshotPath = uniqueName("read-deleted");
+  const livePath = uniqueName("read-live");
+  let afterClear = false;
+  let snapshotHeld = false;
+  let release!: () => void;
+  let snapshotReady!: (id: string) => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const ready = new Promise<string>((resolve) => {
+    snapshotReady = resolve;
+  });
+  const deletedFrames: string[] = [];
+  page.on("websocket", (socket) => {
+    if (socket.url().includes("/api/push"))
+      socket.on("framereceived", (frame) =>
+        deletedFrames.push(String(frame.payload)),
+      );
+  });
+  try {
+    const initialClear = await request.delete(`${apiBase}/traffic`);
+    expect(initialClear.ok()).toBe(true);
+    await page.goto("/_bifrost/traffic");
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await page.route("**/_bifrost/api/traffic", async (route) => {
+      if (route.request().method() !== "DELETE" || afterClear)
+        return route.continue();
+      const response = await route.fetch();
+      expect(response.ok()).toBe(true);
+      await sendProxyRequest(`http://127.0.0.1:${server.port}/${snapshotPath}`);
+      await expect
+        .poll(async () => {
+          const response = await request.get(
+            `${apiBase}/traffic/updates?limit=1000`,
+          );
+          return (await response.text()).includes(snapshotPath);
+        })
+        .toBe(true);
+      afterClear = true;
+      await route.fulfill({ response });
+    });
+    await page.route("**/_bifrost/api/traffic/updates*", async (route) => {
+      if (!afterClear || snapshotHeld) return route.continue();
+      const response = await route.fetch();
+      const body = (await response.json()) as {
+        new_records: Array<{ id: string; p: string }>;
+      };
+      const record = body.new_records.find((record) =>
+        record.p.includes(snapshotPath),
+      );
+      if (!record) return route.fulfill({ response });
+      snapshotHeld = true;
+      snapshotReady(record.id);
+      await held;
+      await route.fulfill({ response });
+    });
+    await page.getByTestId("toolbar-clear-all").click();
+    const deletedId = await ready;
+    const deletion = await request.delete(`${apiBase}/traffic`, {
+      data: { ids: [deletedId] },
+    });
+    expect(deletion.ok()).toBe(true);
+    await expect
+      .poll(() =>
+        deletedFrames.some(
+          (frame) =>
+            frame.includes("traffic_deleted") && frame.includes(deletedId),
+        ),
+      )
+      .toBe(true);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    await sendProxyRequest(`http://127.0.0.1:${server.port}/${livePath}`);
+    release();
+    await expect(page.getByTestId("toolbar-clear-all")).toBeEnabled();
+    await waitForTrafficRow(page, livePath);
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: snapshotPath }),
+    ).toHaveCount(0);
+    await expect(page.getByLabel("Local (127.0.0.1) count")).toHaveText("1");
+  } finally {
+    release?.();
+    await server.close();
+  }
+});

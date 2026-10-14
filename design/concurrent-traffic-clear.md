@@ -81,3 +81,39 @@ status/diff、范围、锁序、失败状态、push 游标、语义和门禁记�
 远端草稿 PR 为 `https://github.com/bifrost-proxy/bifrost/pull/547`。
 按父会明确的分工，本任务保持仓库既有 PAT 路径限制；远端 CI 由父会通过其会话
 中的已连接 GitHub 只读工具独立核验，本任务未绕过 403 或改用其他凭据读取 CI。
+
+## P2 复查：同步读取与成员删除重叠
+
+对应评论：`https://github.com/bifrost-proxy/bifrost/pull/547#discussion_r4269700698`。
+基线 head 为 `76835aac6e137bf9dbc183a6a0f7da43de5feae0`。评论成立：
+读取得到旧快照后，删除通知中的 ID 尚不在本地窗口，旧处理器忽略它；随后 additive merge
+将这个已删除快照行和旧总数重新带回。删除、另一客户端清空、保留期 floor、插入/更新
+交错的四个确定性回归，在修改前全部失败。
+
+本次只修改前端状态逻辑、相关测试和验证文档：
+
+- 每次清空后的同步读建立临时 journal。即使本地没有相应 ID，删除也会作废该读；清空
+  统计与保留期 floor 同样参与失效检测。受影响的快照重新读取，结束后释放 journal。
+- 接收清空统计时，即使更晚的插入令它不适合更新全局总数，它仍能作废更早的读取。
+- 重读取消旧待刷批次，但在有界 journal 中保留已接收的新插入/更新；不把零总数的
+  缓存旧更新当成新的数据库记录，也不因持续的空库统计令空读永远无法结束。
+- 有限 latest window 中缺少 ID 不等于删除。对隐式清理下窗口外的较早 live 候选，
+  只使用完整 ID 查询确认成员；保留成员查询期间的新写入，不从不完整结果推断删除。
+- 保留既有普通 append/retention 路径的查询策略；对失败后的重试标记只作用于已知隐式
+  删除且仍有可见记录的情形。未修改无关 IM 或 rustls，也未新增 ignore 或弱化断言。
+
+| 本次验证 | 结果 |
+| --- | --- |
+| 原四个确定性 P2 回归 | 修改前 4 个失败；修改后通过 |
+| 新增 store 回归 | 14 项；覆盖删除/清空/floor、未刷批次、过期水位、再次删除、失败释放、窗口外成员、成员查询期间写入、空库收敛和零总数旧行 |
+| 前端全套单元测试 | 64 个文件，440 项通过；其中 store 文件 90 项 |
+| 强制 TypeScript 检查、全量 ESLint | 通过；ESLint 保留 7 个既有 warning、0 error |
+| 格式与脚本检查 | 新增/修改片段使用独立 Prettier 格式化，git diff --check、bash -n、E2E capability contract 均通过；仓库全量 Prettier 基线阻塞不变 |
+| 最终 Rust 1.95.0 二进制构建 | cargo build --bin bifrost --all-features 通过，内嵌本次前端 |
+| 最终内嵌前端真实 Chromium UI/API/push | 4 项通过，含跨客户端删除与暂挂 GET 旧快照，并保留其后新请求；该新增用例已进入 critical matrix |
+| Rust/IM/覆盖率门禁 | 本次没有生产 Rust 变更，未重复运行无关 Rust/IM/覆盖率；保留此前准确结果，远端 CI 由父会核验 |
+
+两轮 Review/Fix/Test 及后续复查关闭了旧快照、待刷批次、过期统计、窗口外成员和空库
+收敛问题。全套检测还发现过宽的错误重试标记会给普通 append/retention 增加成员查询；
+已收窄条件并保留原断言，复跑完整 440 项通过。严格 Chrome DevTools MCP 门禁仍未验证，
+本节的浏览器证据是实际 Chromium 自动测试，不把它声明为该 MCP 门禁通过。

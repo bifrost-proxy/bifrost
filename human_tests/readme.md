@@ -196,7 +196,7 @@
 | [rule-operators-audit-fix.md](./rule-operators-audit-fix.md) | 规则操作符审计修复 | 6 | forwardedFor/responseFor applier 实现、pac 未实现标记、test_rules.sh fake-pass 清理回归 |
 | [mock-file-serving.md](./mock-file-serving.md) | Mock File Serving | 6 | file://协议二进制文件（PNG/图片）返回、JSON/HTML 文本文件、tpl://模板变量替换、Content-Type 自动检测、HTTPS TLS 拦截路径回归 |
 | [traffic-cleanup.md](./traffic-cleanup.md) | 流量记录清理逻辑 | 8 | 记录数超 115% 触发清理到 80% 水位、清理期间新流量落盘、Body 缓存文件清理、磁盘总量清理 body 同步、过度删除回归验证、不兼容旧 Traffic DB 启动自动重建 |
-| [traffic-clear-concurrency.md](./traffic-clear-concurrency.md) | 并发清空抓包 | 2 | 持续转发与 32 路清空、后续落盘/推送、按钮连点与失败重试 |
+| [traffic-clear-concurrency.md](./traffic-clear-concurrency.md) | 并发清空抓包 | 3 | 持续转发与 32 路清空、后续落盘/推送、按钮连点与失败重试、同步读取与跨客户端删除重叠 |
 | [async-traffic.md](./async-traffic.md) | Async Traffic Writer | 2 | 异步流量记录写入、更新合并和跨批次处理的 CLI 驱动回归验证 |
 
 ### 网络与访问控制测试

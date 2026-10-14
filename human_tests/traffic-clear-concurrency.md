@@ -40,6 +40,15 @@ pnpm exec playwright test tests/ui/traffic-clear-concurrency.spec.ts --workers=1
 5. 确认错误可见、原记录仍可见、按钮恢复 enabled。
 6. 再次点击，放行真实 DELETE；确认成功消息、记录消失、按钮恢复，DELETE 共两次。
 
+### TC-CLEAR-回归-03：同步读取与另一客户端删除重叠
+
+1. 打开 Traffic，在浏览器清空按钮对应 DELETE 完成后，通过本机 mock 代理请求生成一条带唯一 path 的记录。
+2. 截取随后 `traffic/updates` GET 的真实响应快照，暂挂该响应，取得该记录的 ID。
+3. 通过另一 API 客户端按 ID 删除这条记录，确认成功，并确认浏览器收到包含该 ID 的 `traffic_deleted` WebSocket frame。
+4. 再发送一条带不同唯一 path 的代理请求；放行此前暂挂的旧 GET 响应。
+5. 确认清空按钮恢复 enabled，新记录可见，旧记录没有恢复，Local 客户端计数为 1。
+6. 对照旧 additive merge：旧快照记录会被重新加入；修复后读取失效并恢复最新成员信息。
+
 ## 清理与工具边界
 
 Playwright 全局 teardown 停止隔离代理和流量生成器；删除本次运行的临时数据目录。
