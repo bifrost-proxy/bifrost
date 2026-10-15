@@ -667,11 +667,12 @@ export default function Traffic() {
     const success = await clearTraffic();
     if (success) {
       message.success("Traffic cleared");
-      setSelectedId(undefined);
+      // The store clears selection within the DELETE's database generation.
+      // A newer selection must survive this page callback's delayed response.
     } else if (useTrafficStore.getState().error) {
       message.error(useTrafficStore.getState().error);
     }
-  }, [clearTraffic, setSelectedId]);
+  }, [clearTraffic]);
 
   const handleFilterConditionsChange = useCallback(
     (conditions: FilterCondition[]) => {

@@ -520,7 +520,7 @@ CONNECT client_app 独立探针使用相同 netstat2 0.11.2：建立并保持本
 
 | discussion ID | 当前代码/确定性回归证据 |
 | --- | --- |
-| 4269700698 | `trafficMembership.test.ts`：跨客户端删除、隐式清空、floor、有界窗口外 membership 与更新时序 |
+| 4269700698 | `trafficClearOverlap.test.ts`：跨客户端删除、隐式清空、floor、有界窗口外 membership 与更新时序 |
 | 4270946607 | `trafficDelayedDelivery.test.ts`：删除优先于迟到更新；取消后新代际不受旧 tombstone 污染 |
 | 4270946622 | `trafficDelayedDelivery.test.ts`：较新正数 metadata 与迟到零清空信号分别协调 |
 | 4270946628 | `trafficDelayedDelivery.test.ts`：GET 消费旧批次，包括 equal-cursor，防总数回退 |
@@ -529,9 +529,9 @@ CONNECT client_app 独立探针使用相同 netstat2 0.11.2：建立并保持本
 | 4271355431 | `trafficCompletionRecovery.test.ts`：GET/member 失败保留 journal、完整 chunk 证据及后续重试 |
 | 4273339945 | `trafficCompletionRecovery.test.ts`：DELETE collector 创建 reconciliation 前的四种已确认删除时序 |
 | 4275333575 | `trafficCompletionRecovery.test.ts`：HTTP/SSE/CONNECT completion，窗口外 active 与读取失败期间字段保护 |
-| 4275333566 | 生产/测试按领域提取；全部 36 个改动代码模块均不超过 1500 行；原断言保留 |
+| 4275333566 | 生产/测试按领域提取；截至页面回调补充，37 个改动代码模块均不超过 1500 行；原断言保留 |
 | 4276350645 | `retains confirmed tombstones after a failed DELETE response`：失败返回前交接 tombstone，迟到更新不复活 |
-| 4276350665 | `does not apply an old clear response to a replacement database`：full 和 selected 两个分支 |
+| 4276350665 | store 跨库回归的 full/selected 两分支，加 `clearSelection.test.tsx` 实际页面回调的新库/较新选择保护，见后节 |
 | 4276350672 | `filterEpoch.test.tsx`：非空 reset、在途重扫、同 render 的 reset+增量；13/13 |
 | 4277858363 | `traffic_db/store/`：根 466 行；66 个方法体保持；writes/reads/maintenance 与测试领域拆分 |
 | 4277858368 | `trafficDetailReconciliation.test.ts`：12 项，确认删除清详情/四类正文，拒绝迟到 GET，保留有界窗口裁剪及较新选择 |
@@ -573,7 +573,7 @@ socket 枚举缺失导致重试，这些证据支持准备阶段受解析等待�
 - 正常 workspace all-features `--no-fail-fast` 全部目标执行完成，exit 101。按每个 Cargo
   目标的最后主 harness 汇总（排除嵌套子进程重复输出）为 10495 通过、6 失败、9 项既有
   ignore；没有新增 ignore。三项 admin IM 超时、两项 CLI daemon 停止时只读 shell 代理
-  配置清理失败、一项 external_runner_worker_stop 脚本失败（stdout/stderr 为空，未归因）。
+  配置清理失败、一项 external_runner_worker_stop 脚本失败（初轮输出为空；保留日志的独立诊断确认同样在 service stop 的只读配置清理处失败，见下节）。
 - 正常 admin 为 3864 通过、3 项 IM 失败、1 项既有 ignore；受影响 `traffic_db` 55/55，
   包含首提交前零读反例与首提交后全部 160 次成功读取。Windows 仍需跨平台 CI 复验。
 - 不带 test filter 的默认 `make coverage-changed` 已完整执行：插桩 admin 同样
@@ -588,3 +588,130 @@ socket 枚举缺失导致重试，这些证据支持准备阶段受解析等待�
 保持 IM、CLI、rustls 与依赖代码不变。按父会要求，在保存当前修复到同一 PR 后，再以
 已获取的 main `4c056b22056c50e7dc7a75a71bfa03dd06bce45d` 做同环境 CONNECT/默认历史
 原用例对照；结果由 PR 最终检查点及归档报告补充，不盲目 resolve 评审线程。
+
+### main 对照的准确命令、失败分类及评审操作边界
+
+本节 main 对照与前轮验证对应代码 SHA `d50a01656938900bfe65fb89e442f226637cf340`。
+后续页面回调修复另列于下节。main 在同一云端、Node 22.22.0、
+Rust 1.95.0、系统 Chromium、debug=0、incremental=0、单编译 worker 下构建，
+默认进程解析并发为 4，运行浏览器时没有并行 Rust 编译。
+
+本次按实际执行顺序的主要命令（环境文件的副本已归档）：
+
+```bash
+git -C /workspace/bifrost fetch origin main
+git -C /workspace/bifrost worktree add --detach /workspace/bifrost-main-baseline 4c056b22056c50e7dc7a75a71bfa03dd06bce45d
+ln -s /workspace/bifrost/web/node_modules /workspace/bifrost-main-baseline/web/node_modules
+source /tmp/bifrost-ui-env.sh
+cd /workspace/bifrost-main-baseline/web
+pnpm build
+cd /workspace/bifrost-main-baseline
+CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/workspace/bifrost/.bifrost-ui-target SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost --all-features
+cp /workspace/bifrost/.bifrost-ui-target/debug/bifrost /workspace/bifrost/.e2e-reports/cloud-clear/main-baseline/bifrost
+git show HEAD:Cargo.lock > Cargo.lock
+BIFROST_UI_TEST_PREBUILT_BINARY=/workspace/bifrost/.e2e-reports/cloud-clear/main-baseline/bifrost env -u BIFROST_PROCESS_RESOLUTION_CONCURRENCY web/node_modules/.bin/playwright test --config web/playwright.config.ts --grep 'CONNECT 详情的 Response 面板|Network 大历史使用 1000' --workers=1
+```
+
+main 前端 exit 0（1m15s），真实后端 exit 0（6m02s）；两个原 UI 用例 exit 1，
+0 通过、2 失败、0 skipped、0 flaky，173.957s。CONNECT 仍为 client_app=null 的
+15 秒轮询失败；历史仍在 seed 阶段 120 秒超时，超时后只读查询为 1807/2300，
+尚未进入 page.goto 与窗口断言。进程解析代码与 CONNECT 测试文件逐字相同；
+历史函数唯一差异是 page 解构参数的可选尾逗号，规范化后所有语句相同。
+这些证据仅证明这两项在本轮同环境 main 也复现；不等于全部环境根因已经证明，
+更不等于默认完整 UI 已通过。
+
+本地六项 workspace 失败的分类依据：
+
+| 失败项 | 本轮直接证据与分类 |
+| --- | --- |
+| `mock_inbound_validates_and_injects_group_message` | normal 与插桩均报 `mock inbound event was not consumed: Elapsed(())`，debug_inbound.rs:729。分类为未修改 IM 模块的事件消费超时。 |
+| `group_event_loop_routes_concurrent_context_to_the_active_external_session` | normal 与插桩均报 `group runner did not become active: Elapsed(())`，group_flow_tests.rs:1979。分类为未修改 IM runner 启动超时。 |
+| `group_event_loop_uses_group_workdir_for_busy_default_and_route_paths` | normal 与插桩均报 `busy group event loop timed out: Elapsed(())`，group_flow_tests.rs:1735。分类为未修改 IM busy 流程超时。 |
+| `unix_tests::start_recreates_missing_expected_data_directories` | daemon_shutdown.rs:210 的 stop 失败，直接包含 `Failed to disable standalone CLI proxy environment: IO error: Read-only file system (os error 30)`。分类为本地只读 shell 配置清理阻塞。 |
+| `unix_tests::stop_triggers_graceful_shutdown_in_daemon_mode` | daemon_shutdown.rs:106，stop 同样在 managed proxy cleanup 处因只读失败。分类同上。 |
+| `isolated_external_runner_stop_interrupts_native_transport` | 初次 wrapper 输出为空；下述保留日志的独立重跑确认脚本第312行的 service stop 报相同只读错误。此前 native stop/clear 检查已执行，但最终 shutdown interrupt 断言未完成，不能记测试通过。 |
+
+本轮**没有**在 main 上独立运行这三项 IM 或三项 CLI 测试；因此不把它们称为本轮
+已验证的 main 基线失败。相关模块未修改也不单独构成排除回归的因果证明。
+历史阶段记录不能替代这里列出的本轮分类依据；未按要求范围混入 IM/CLI 修复。
+
+外部 runner 的独立诊断命令为：
+
+```bash
+cd /workspace/bifrost
+source /tmp/bifrost-ui-env.sh
+exec 9> /tmp/bifrost-external-stop-xtrace.log
+KEEP_TEST_DIR=true SKIP_BUILD=true BIFROST_BIN=/workspace/bifrost/.e2e-reports/cloud-clear/final-pr-binary/bifrost BASH_XTRACEFD=9 bash -x e2e-tests/tests/test_external_runner_worker_stop.sh > /tmp/bifrost-external-stop-diagnostic.log 2>&1
+```
+
+该重跑 exit 1，保留的 service-stop.log 明确给出同一 ReadOnlyFilesystem 和
+`Managed proxy cleanup failed before stopping Bifrost`；证据已移入
+`.e2e-reports/cloud-clear/external-stop-diagnostic/`。main 的报告、trace、截图、
+原环境、比较 JSON 与只读记录分别在 `main-baseline/`、`review-closure/environment.sh`。
+PR 二进制已恢复，SHA-256 与最终完整 UI 所用版本一致；活动测试后端已清理。
+
+16 条评审已逐条核对本地代码与测试锚点，并生成固定代码 SHA 的可审核回复草稿
+`review-closure/review-replies.md` / `review-replies.json`。4269700698 的核心回归索引
+已纠正为 trafficClearOverlap。远端原文、当前 resolved/outdated 状态、GraphQL thread_id
+尚未读取，不能仅依据本地摘要或 outdated 状态 resolve。
+
+实际鉴权入口为：
+
+```bash
+GH_REPO=bifrost-proxy/bifrost python3 .agents/skills/github-actions-pat/scripts/gh_review.py 547
+```
+
+该入口实际 exit 2：`ERROR: set GITHUB_TOKEN before running this skill`，未执行远端
+review API。AGENTS.md:591/605 与
+[github-actions-pat skill](../.agents/skills/github-actions-pat/SKILL.md) 明确规定
+“auth 唯一路径：PAT 从 `GITHUB_TOKEN` 环境变量读取”，并禁止其他认证回退。
+当前变量未设置；用户要求不请求 PAT，因此未请求，也未用连接工具绕过该入口。
+已发现 list_pull_request_review_threads、reply_to_review_comment、resolve_review_thread
+工具，但它们不能替代仓库规定的环境 PAT skill 路径。**本执行环境已发布回复 0、已 resolve 0**；这是该环境的具体鉴权阻塞，不是工具不存在
+或用户未授权。随后父会通过其已授权 connector 独立核验原文、逐条回复并 resolve
+了 15 条，且已回读确认；仅 4276350665 / PRRT_kwDORa0X2c6shdsn 保持 open，等待
+下节页面回调修复的独立复核。这里不把本执行环境的零操作误写为整个 PR 无评审回复。
+
+### 页面 clear 回调不能清退较新选择（4276350665）
+
+父会独立复核发现：store 对旧数据库的 clear 成功响应会直接返回 true，虽不修改
+新库记录/订阅，页面 handleClearAll 仍在 await 后无条件 setSelectedId(undefined)。
+因此用户在新数据库选中的详情选择会被页面回调清退。store 层跨库测试没有覆盖该调用方。
+
+移除页面重复选择清理及其无用 callback dependency，选择清理统一由 store 在对应
+数据库 generation 内执行；保留成功/失败通知。正常 full-clear 的 store 清理语义不变。
+
+新增 `clearSelection.test.tsx` 实际挂载 Traffic，点击传给 Toolbar 的 onClearAll，
+通过实际表格 onSelect、真实 store action 和 API Promise 控制时序，断言选择 ID、
+详情与两类正文。四项分别覆盖：旧 clear 响应后保留新库选择；store clear 已完成但
+页面仍等待结果时保留同库新选择；普通成功仍清理；失败仍保留原选择。
+
+使用同一最终测试夹具，只将页面 index.tsx 恢复为 d50a016：旧代码 **2 失败/2 通过**，
+两个失败都在迟到页面回调后把新 selectedId 清为 undefined。恢复修复后，页面四项及
+相关 filter/store 回归合计 **67/67**。没有修改断言或增加超时；测试夹具使用受控
+Promise 与假 timer，不依赖并发压力碰运气。最终类型检查与全量 ESLint 通过，
+ESLint 为 0 error、7 条原有 warning。
+
+本轮仅修改页面、该页面测试和本文档；Rust 实现与 d50a016 逐字不变，不重复无关
+Rust/IM/coverage 测试。前轮完整 workspace、完整 UI、main 对照与覆盖率的失败状态
+继续按上述准确结果保留，不冒充本轮完整 UI 或完整门禁通过。新前端全套、真实构建
+和相关真实 UI 的最终结果以本轮交付检查点为准。4276350665 保持 open，由父会独立
+核验新提交及本页面回归后再决定闭环；不重复操作已关闭的 15 条线程。
+
+页面回调修复的最终验证：前端 72 文件 **505/505**（151.76s），相关回归 **67/67**，
+强制类型 exit 0、全量 ESLint exit 0（7 条原有 warning）。生产前端构建通过；
+从 PR 根目录 fresh 后端构建 exit 0（5m45s），相关真实 UI **6/6**（1.1 分钟），
+覆盖原四项并发 clear、列表详情加载和切页后持续 push。没有重跑未改动的 Rust/IM
+套件，也不把 d50a016 的完整 223 UI 结果冒充本次新页面版本的完整套件通过；
+新 SHA 的标准 CI 与实际 full_ui outcome 继续由父会核验。
+
+构建核对额外发现基线共享 target 的缓存残留：首次 cargo 成功返回，但实际 HTTP
+仍提供 main 的 index-SMyOlwPo，而新 PR dist 为 index-D7rdxSPQ。该次构建没有用于
+UI 验证。清理本地 workspace 包缓存（保留 registry 与原报告）后单 worker 重建，
+生成路径为 PR 根目录，实际 gzip HTTP index 已确认提供 D7rdxSPQ，才运行上述六项。
+debug 下 RustEmbed 可能读取编译目录的 dist-gzip，不能只靠二进制哈希冻结 UI；
+本轮同时保存 dist、dist-gzip、实际 HTTP 指纹及二进制哈希。后续跨 worktree 复跑应
+隔离 target，或显式清理本地包缓存并核对资源，避免复用错目录。
+
+本轮证据归档于 `.e2e-reports/cloud-clear/page-clear-selection/`；旧页面与修复页面
+使用同一最终测试夹具的日志分别为 page-clear-old-final 与 page-clear-final-targeted。
