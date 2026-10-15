@@ -177,6 +177,7 @@ export default function Traffic() {
   const {
     fetchTrafficDetail,
     clearTraffic,
+    clearing,
     backfillHistory,
     loadNewer,
     reloadRecords,
@@ -191,6 +192,7 @@ export default function Traffic() {
     useShallow((state) => ({
       fetchTrafficDetail: state.fetchTrafficDetail,
       clearTraffic: state.clearTraffic,
+      clearing: state.clearing,
       backfillHistory: state.backfillHistory,
       loadNewer: state.loadNewer,
       reloadRecords: state.reloadRecords,
@@ -665,9 +667,12 @@ export default function Traffic() {
     const success = await clearTraffic();
     if (success) {
       message.success("Traffic cleared");
-      setSelectedId(undefined);
+      // The store clears selection within the DELETE's database generation.
+      // A newer selection must survive this page callback's delayed response.
+    } else if (useTrafficStore.getState().error) {
+      message.error(useTrafficStore.getState().error);
     }
-  }, [clearTraffic, setSelectedId]);
+  }, [clearTraffic]);
 
   const handleFilterConditionsChange = useCallback(
     (conditions: FilterCondition[]) => {
@@ -825,6 +830,24 @@ export default function Traffic() {
   const filterGenerationRef = useRef(0);
   const appliedMutationVersionRef = useRef(recordsMutation.version);
 
+  const [filterResetVersion, setFilterResetVersion] = useState(
+    recordsMutation.version,
+  );
+  useEffect(
+    () =>
+      useTrafficStore.subscribe((state, previous) => {
+        // React may coalesce a reset and the following incremental batch. Keep
+        // the reset signal before a later mutation replaces the store's journal.
+        if (
+          state.recordsMutation.reset &&
+          state.records.length > 0 &&
+          state.recordsMutation.version !== previous.recordsMutation.version
+        )
+          setFilterResetVersion(state.recordsMutation.version);
+      }),
+    [],
+  );
+
   useEffect(() => {
     const generation = ++filterGenerationRef.current;
     // This scan owns the current reset, including a confirmed database epoch
@@ -890,6 +913,7 @@ export default function Traffic() {
     filtersActive,
     trafficEpochVersion,
     trafficDatabaseEpoch,
+    filterResetVersion,
   ]);
 
   useEffect(() => {
@@ -1207,6 +1231,7 @@ export default function Traffic() {
       <Toolbar
         filters={toolbarFilters}
         onClearAll={handleClearAll}
+        clearing={clearing}
         onFilterChange={setToolbarFilters}
         systemProxyEnabled={
           systemProxy ? isSystemProxyLiveEnabledByBifrost(systemProxy) : false

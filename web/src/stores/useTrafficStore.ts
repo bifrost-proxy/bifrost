@@ -1,2020 +1,953 @@
-// Legacy store: bounded-window helpers are extracted. Continue separating fetch,
-// selection, and push-reconciliation responsibilities through focused changes.
-import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
-import type { TrafficSummary, TrafficRecord, ToolbarFilters, FilterCondition, TrafficUpdatesFilter, TrafficSummaryCompact, TrafficDeltaData, TrafficStatistics } from '../types';
-import * as api from '../api';
-import type { TrafficBodyContent } from '../api';
-import pushService, { type TrafficUpdatesData } from '../services/pushService';
+import { createTrafficLiveCapture } from "./trafficLiveCapture";
+// Traffic state wiring; domain logic lives in capture, reconciliation, record and filter modules.
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import type {
+  TrafficSummary,
+  ToolbarFilters,
+  FilterCondition,
+  TrafficUpdatesFilter,
+  TrafficStatistics,
+} from "../types";
+import * as api from "../api";
+import pushService from "../services/pushService";
+import type { TrafficState } from "./trafficStoreTypes";
+import {
+  captureCoordination,
+  createTrafficCaptureCoordinator,
+  POLL_INTERVAL,
+  POLL_MIN_INTERVAL,
+  HAS_MORE_BURST_LIMIT,
+  HAS_MORE_BACKOFF_INTERVAL,
+  INITIAL_WINDOW_LIMIT,
+  HISTORY_BATCH_LIMIT,
+  UPDATE_BATCH_LIMIT,
+  MEMBERSHIP_QUERY_LIMIT,
+} from "./trafficCaptureCoordinator";
+import { createTrafficReconciliation } from "./trafficReconciliation";
+import {
+  mergeSseBody,
+  SSE_RESPONSE_BODY_CHAR_LIMIT,
+  isPendingRecord,
+  preprocessTrafficRecords,
+  mergeDetailWithSummary,
+  getBoundaryState,
+  createRecordsMutation,
+  createEmptyRecordsMutation,
+  snapshotServerStatistics,
+  compactTrafficSummaryToTrafficSummary,
+} from "./trafficRecordModel";
+
 import {
   buildTrafficRecordsMap,
   getTrafficWindowBoundaries,
-  MAX_TRAFFIC_WINDOW_RECORDS,
   mergeBoundedTrafficWindow,
-} from './trafficWindow';
-
-export interface TrafficRecordsMutation {
-  version: number;
-  reset: boolean;
-  inserted: TrafficSummary[];
-  updated: TrafficSummary[];
-  deletedIds: string[];
-  oldestSequenceFloor?: number | null;
-  incomplete?: boolean;
-}
-
-interface TrafficState {
-  records: TrafficSummary[];
-  recordsMap: Map<string, TrafficSummary>;
-  currentRecord: TrafficRecord | null;
-  requestBody: string | null;
-  responseBody: string | null;
-  requestRawBody: TrafficBodyContent | null;
-  responseRawBody: TrafficBodyContent | null;
-  serverTotal: number;
-  serverSequence: number;
-  serverOldestSequence: number | null;
-  trafficEpochVersion: number;
-  trafficDatabaseEpoch: string | null;
-  hasMore: boolean;
-  hasNewer: boolean;
-  oldestSequence: number | null;
-  lastId: string | null;
-  lastSequence: number | null;
-  pendingIds: Set<string>;
-  toolbarFilters: ToolbarFilters;
-  filterConditions: FilterCondition[];
-  paused: boolean;
-  loading: boolean;
-  detailLoading: boolean;
-  polling: boolean;
-  error: string | null;
-  detailError: string | null;
-  pollTimeoutId: number | null;
-  autoScroll: boolean;
-  newRecordsCount: number;
-  scrollTop: number;
-  usePush: boolean;
-  pushUnsubscribe: (() => void) | null;
-  pushDeltaUnsubscribe: (() => void) | null;
-  pushDeletedUnsubscribe: (() => void) | null;
-  pushStatisticsUnsubscribe: (() => void) | null;
-  pushConnectionUnsubscribe: (() => void) | null;
-  filterVersion: number;
-  initialized: boolean;
-  selectedId: string | undefined;
-  useDbMode: boolean;
-  historyLoading: boolean;
-  catchingUp: boolean;
-  availableClientApps: string[];
-  availableAccountNames: string[];
-  availableClientIps: string[];
-  availableProxyPorts: string[];
-  availableDomains: string[];
-  clientAppCounts: Map<string, number>;
-  accountNameCounts: Map<string, number>;
-  clientIpCounts: Map<string, number>;
-  proxyPortCounts: Map<string, number>;
-  domainCounts: Map<string, number>;
-  trafficStatisticsTotal: number;
-  trafficStatisticsSequence: number;
-  trafficStatisticsLoaded: boolean;
-  recordsMutation: TrafficRecordsMutation;
-
-  startPolling: () => void;
-  stopPolling: () => void;
-  fetchUpdates: () => Promise<void>;
-  fetchInitialData: () => Promise<void>;
-  fetchTrafficStatistics: (expectedEpoch?: string) => Promise<void>;
-  backfillHistory: () => Promise<void>;
-  loadNewer: () => Promise<void>;
-  catchUpUpdates: () => Promise<void>;
-  reloadRecords: () => Promise<void>;
-  fetchTrafficDetail: (id: string) => Promise<void>;
-  appendSseResponseBody: (recordId: string, payload: string) => void;
-  setResponseBody: (recordId: string, body: string | null) => void;
-  clearTraffic: (ids?: string[]) => Promise<boolean>;
-  setToolbarFilters: (filters: ToolbarFilters) => void;
-  setFilterConditions: (conditions: FilterCondition[]) => void;
-  setPaused: (paused: boolean) => void;
-  setAutoScroll: (autoScroll: boolean) => void;
-  clearNewRecordsCount: () => void;
-  clearError: () => void;
-  clearCurrentRecord: () => void;
-  initFromUrl: (filters: FilterCondition[], toolbar: ToolbarFilters | null) => void;
-  setScrollTop: (scrollTop: number) => void;
-  setSelectedId: (id: string | undefined) => void;
-  handleTrafficPush: (data: TrafficUpdatesData) => void;
-  handleTrafficDelta: (data: TrafficDeltaData) => void;
-  handleTrafficDeleted: (ids: string[], authoritativeTotal?: number) => void;
-  reconcileTrafficWindow: () => Promise<void>;
-  handleTrafficStatistics: (statistics: TrafficStatistics) => void;
-  enablePush: () => void;
-  disablePush: () => void;
-}
-
-const POLL_INTERVAL = 1000;
-const POLL_MIN_INTERVAL = 200;
-const HAS_MORE_BURST_LIMIT = 3;
-const HAS_MORE_BACKOFF_INTERVAL = 500;
-const INITIAL_WINDOW_LIMIT = 500;
-const HISTORY_BATCH_LIMIT = 500;
-const UPDATE_BATCH_LIMIT = 1000;
-const UPDATE_THROTTLE_MS = 100;
-const MAX_PENDING_IDS = 500;
-const MEMBERSHIP_QUERY_LIMIT = 500;
-
-interface BatchedUpdate {
-  newRecords: TrafficSummary[];
-  updatedRecords: TrafficSummary[];
-  serverTotal: number;
-  serverSequence: number;
-  oldestSequence: number | null;
-  sourceNewRecordCount: number;
-  sourceUpdatedRecordCount: number;
-  hasMore: boolean;
-}
-
-let pendingBatch: BatchedUpdate | null = null;
-let rafId: number | null = null;
-let updateTimerId: number | null = null;
-let lastUpdateTime = 0;
-let hasMoreBurst = 0;
-let historyBackfillGeneration = 0;
-let recordsMutationVersion = 0;
-let statisticsRequest: {
-  historyGeneration: number;
-  resumeGeneration: number;
-  databaseEpoch: string | undefined;
-  promise: Promise<void>;
-} | null = null;
-let trafficEpochRequest: {
-  historyGeneration: number;
-  resumeGeneration: number;
-  statisticsSequence: number;
-  latestRecordSequence: number;
-  databaseEpoch: string | undefined;
-  followup: TrafficStatistics | null;
-  promise: Promise<void>;
-} | null = null;
-let membershipRequest: Promise<void> | null = null;
-let membershipReconciliationRequired = false;
-let membershipFollowupRequired = false;
-let latestTrafficSequenceSinceResume = 0;
-let trafficResumeGeneration = 0;
-let trafficResumeStatisticsPending = false;
-let trafficEpochResetSuspected = false;
-const TRAFFIC_SELECTION_SYNC_CHANNEL = 'bifrost-traffic-selection-sync';
+} from "./trafficWindow";
+export type { TrafficRecordsMutation } from "./trafficStoreTypes";
+export type { PanelFilters } from "./trafficFilters";
+export {
+  preprocessTrafficRecord,
+  preprocessTrafficRecords,
+  compareTrafficRecordsBySequence,
+  mergeSortedTrafficRecords,
+  replaceUpdatedTrafficRecordsInList,
+  compactTrafficSummaryToTrafficSummary,
+} from "./trafficRecordModel";
+export {
+  isFilterConditionApplicable,
+  hasAnyTrafficFilters,
+  matchesTrafficFilters,
+  filterRecords,
+  applyTrafficRecordsMutationToFilteredRecords,
+} from "./trafficFilters";
+const TRAFFIC_SELECTION_SYNC_CHANNEL = "bifrost-traffic-selection-sync";
 const trafficSelectionSyncChannel =
-  typeof BroadcastChannel !== 'undefined'
+  typeof BroadcastChannel !== "undefined"
     ? new BroadcastChannel(TRAFFIC_SELECTION_SYNC_CHANNEL)
     : null;
 
-function observeTrafficRecordSequence(epoch: string | undefined, sequence: number) {
-  if (trafficEpochRequest && (!epoch || epoch === trafficEpochRequest.databaseEpoch)) {
-    trafficEpochRequest.latestRecordSequence = Math.max(trafficEpochRequest.latestRecordSequence, sequence);
-  }
-}
-
-function getConsumedTrafficSequence(): number {
-  const state = useTrafficStore.getState();
-  return Math.max(
-    state.lastSequence ?? 0,
-    state.records.at(-1)?.sequence ?? 0,
-    pendingBatch?.newRecords.at(-1)?.sequence ?? 0,
-    pendingBatch?.updatedRecords.at(-1)?.sequence ?? 0,
-  );
-}
-
-function acceptTrafficDatabaseEpoch(epoch?: string, serverSequence?: number): boolean {
-  if (!epoch) return true; // Older backends retain sequence rollback fallback.
-  const state = useTrafficStore.getState();
-  if (!state.trafficDatabaseEpoch) {
-    const previousSequence = Math.max(state.serverSequence, state.lastSequence ?? 0, pendingBatch?.serverSequence ?? 0);
-    if (serverSequence !== undefined && serverSequence < previousSequence) {
-      // An older backend may have populated this window without identity. Keep
-      // legacy rollback evidence until a fresh read decides its provenance.
-      trafficResumeStatisticsPending = true;
-      void state.fetchTrafficStatistics(epoch);
-      return false;
-    }
-    useTrafficStore.setState({ trafficDatabaseEpoch: epoch });
-    return true;
-  }
-  if (state.trafficDatabaseEpoch === epoch) {
-    if (serverSequence === undefined || serverSequence > getConsumedTrafficSequence()) return true;
-    // Restoring a backup preserves its UUID but can roll back persisted rows.
-    // An allocation-only high-water regression is safe while real rows remain.
-    trafficResumeStatisticsPending = true;
-    void state.fetchTrafficStatistics(epoch);
-    return false;
-  }
-  // Do not mix rows or retention floors across databases while confirmation is
-  // pending. Cursor-free replay retrieves these arrivals after the reset.
-  void state.fetchTrafficStatistics(epoch);
-  return false;
-}
-
-function capPendingIds(ids: Set<string>) {
-  while (ids.size > MAX_PENDING_IDS) {
-    const first = ids.values().next().value as string | undefined;
-    if (!first) break;
-    ids.delete(first);
-  }
-}
-
-function clearPendingTrafficBatch() {
-  pendingBatch = null;
-  if (rafId !== null) {
-    window.cancelAnimationFrame(rafId);
-    rafId = null;
-  }
-  if (updateTimerId !== null) {
-    window.clearTimeout(updateTimerId);
-    updateTimerId = null;
-  }
-}
-
-const contentTypeMap: Record<string, string[]> = {
-  'JSON': ['json', 'application/json'],
-  'Form': ['form', 'x-www-form-urlencoded', 'multipart/form-data'],
-  'XML': ['xml', 'application/xml', 'text/xml'],
-  'JS': ['javascript', 'text/javascript', 'application/javascript'],
-  'CSS': ['css', 'text/css'],
-  'Font': ['font', 'woff', 'woff2', 'ttf', 'otf', 'eot'],
-  'Doc': ['html', 'text/html'],
-  'Media': ['image', 'video', 'audio', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp4', 'webm', 'mp3', 'wav'],
-  'SSE': ['event-stream', 'text/event-stream'],
-};
-
-const METHOD_COLORS: Record<string, string> = {
-  GET: "green",
-  POST: "blue",
-  PUT: "orange",
-  DELETE: "red",
-  PATCH: "purple",
-  OPTIONS: "default",
-  HEAD: "cyan",
-  CONNECT: "magenta",
-};
-
-const STATUS_DOT_COLORS: Record<string, string> = {
-  pending: "#d9d9d9",
-  info: "#73d13d",
-  success: "#52c41a",
-  redirect: "#faad14",
-  clientError: "#fa8c16",
-  serverError: "#f5222d",
-};
-
-const getStatusDotColor = (status: number): string => {
-  if (status === 0) return STATUS_DOT_COLORS.pending;
-  if (status >= 100 && status < 200) return STATUS_DOT_COLORS.info;
-  if (status >= 200 && status < 300) return STATUS_DOT_COLORS.success;
-  if (status >= 300 && status < 400) return STATUS_DOT_COLORS.redirect;
-  if (status >= 400 && status < 500) return STATUS_DOT_COLORS.clientError;
-  if (status >= 500) return STATUS_DOT_COLORS.serverError;
-  return STATUS_DOT_COLORS.pending;
-};
-
-const getStatusColor = (status: number): string => {
-  if (status >= 500) return "error";
-  if (status >= 400) return "warning";
-  if (status >= 300) return "processing";
-  if (status >= 200) return "success";
-  return "default";
-};
-
-const formatSize = (bytes: number): string => {
-  if (bytes === 0) return "-";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-};
-
-const mergeSseBody = (prev: string | null, payload: string): string => {
-  const trimmed = payload.replace(/\n+$/, '');
-  if (!trimmed) return prev || '';
-  if (!prev || prev.length === 0) return trimmed;
-  if (prev.endsWith('\n\n')) return `${prev}${trimmed}`;
-  if (prev.endsWith('\n')) return `${prev}\n${trimmed}`;
-  return `${prev}\n\n${trimmed}`;
-};
-
-const SSE_RESPONSE_BODY_CHAR_LIMIT = 2_000_000;
-
-const getDisplaySizeBytes = (record: TrafficSummary | undefined): number => {
-  if (!record) return 0;
-  if (record.socket_status && (record.response_size === 0 || record.socket_status.is_open)) {
-    return record.socket_status.send_bytes + record.socket_status.receive_bytes;
-  }
-  return record.response_size;
-};
-
-const isPendingRecord = (record: TrafficSummary): boolean => {
-  return record.status === 0 || record.socket_status?.is_open === true;
-};
-
-const shouldReplaceRecord = (
-  existing: TrafficSummary | undefined,
-  next: TrafficSummary,
-): boolean => {
-  if (!existing) return true;
-
-  return (
-    existing.client_app !== next.client_app ||
-    existing.client_pid !== next.client_pid ||
-    existing.account_name !== next.account_name ||
-    existing.has_rule_hit !== next.has_rule_hit ||
-    existing.matched_rule_count !== next.matched_rule_count ||
-    existing.matched_protocols.join('|') !== next.matched_protocols.join('|') ||
-    existing.status !== next.status ||
-    existing.request_size !== next.request_size ||
-    existing.response_size !== next.response_size ||
-    existing.duration_ms !== next.duration_ms ||
-    existing.frame_count !== next.frame_count ||
-    existing.content_type !== next.content_type ||
-    existing.socket_status?.is_open !== next.socket_status?.is_open ||
-    existing.socket_status?.send_bytes !== next.socket_status?.send_bytes ||
-    existing.socket_status?.receive_bytes !== next.socket_status?.receive_bytes ||
-    existing.socket_status?.frame_count !== next.socket_status?.frame_count ||
-    getDisplaySizeBytes(existing) !== getDisplaySizeBytes(next)
-  );
-};
-
-const mergeIncrementalRecord = (
-  existing: TrafficSummary | undefined,
-  next: TrafficSummary,
-): TrafficSummary => {
-  if (!existing) {
-    return next;
-  }
-
-  // Keep sticky identity fields when incremental updates arrive without them.
-  // This avoids filtered rows disappearing until a full refresh reconstructs them.
-  const merged: TrafficSummary = {
-    ...next,
-    method: next.method || existing.method,
-    host: next.host || existing.host,
-    path: next.path || existing.path,
-    protocol: next.protocol || existing.protocol,
-    client_ip: next.client_ip || existing.client_ip,
-    client_app: next.client_app ?? existing.client_app,
-    client_pid: next.client_pid ?? existing.client_pid,
-    account_name: next.account_name ?? existing.account_name,
-  };
-
-  return preprocessTrafficRecord(merged);
-};
-
-export const preprocessTrafficRecord = (record: TrafficSummary): TrafficSummary => {
-  const isH3 = record.is_h3 || record.protocol === 'h3' || record.protocol === 'h3s';
-  const displayProtocol = isH3
-    ? 'H3'
-    : record.protocol?.replace("HTTP/", "").toUpperCase() || "-";
-
-  const methodColor = METHOD_COLORS[record.method?.toUpperCase()] || "default";
-  const statusColor = getStatusColor(record.status);
-  const statusDotColor = getStatusDotColor(record.status);
-
-  const size = getDisplaySizeBytes(record);
-  const displaySize = formatSize(size);
-
-  const contentTypeShort = record.content_type?.split(";")[0]?.split("/").pop() || "-";
-
-  const clientApp = record.client_app || "";
-  const clientIp = record.client_ip || "";
-  const hasApp = Boolean(clientApp);
-  const clientDisplay = clientApp || clientIp || "-";
-  const clientTooltip = hasApp
-    ? `${clientApp} (PID: ${record.client_pid || "?"}, IP: ${clientIp || "?"})`
-    : clientIp || "-";
-
-  record._displayProtocol = displayProtocol;
-  record._methodColor = methodColor;
-  record._statusColor = statusColor;
-  record._statusDotColor = statusDotColor;
-  record._displaySize = displaySize;
-  record._contentTypeShort = contentTypeShort;
-  record._clientDisplay = clientDisplay;
-  record._clientTooltip = clientTooltip;
-
-  return record;
-};
-
-export const preprocessTrafficRecords = (records: TrafficSummary[]): TrafficSummary[] => {
-  for (let i = 0; i < records.length; i++) {
-    preprocessTrafficRecord(records[i]);
-  }
-  return records;
-};
-
-const mergeDetailWithSummary = (
-  detail: TrafficRecord,
-  summary?: TrafficSummary,
-): TrafficRecord => {
-  if (!summary || summary.id !== detail.id) return detail;
-
-  return {
-    ...detail,
-    request_size: summary.request_size,
-    response_size: summary.response_size,
-    duration_ms: summary.duration_ms,
-    frame_count: summary.frame_count,
-    socket_status: summary.socket_status ?? detail.socket_status,
-    end_time: summary.end_time ?? detail.end_time,
-  };
-};
-
-export const compareTrafficRecordsBySequence = (left: TrafficSummary, right: TrafficSummary): number => {
-  if (left.sequence !== right.sequence) {
-    return left.sequence - right.sequence;
-  }
-  if (left.timestamp !== right.timestamp) {
-    return left.timestamp - right.timestamp;
-  }
-  return left.id.localeCompare(right.id);
-};
-
-export const mergeSortedTrafficRecords = (
-  current: TrafficSummary[],
-  incoming: TrafficSummary[],
-): TrafficSummary[] => {
-  if (incoming.length === 0) return current;
-  if (current.length === 0) return incoming.slice();
-
-  const incomingFirst = incoming[0]!;
-  const incomingLast = incoming[incoming.length - 1]!;
-  const currentFirst = current[0]!;
-  const currentLast = current[current.length - 1]!;
-
-  if (compareTrafficRecordsBySequence(incomingLast, currentFirst) < 0) {
-    return [...incoming, ...current];
-  }
-  if (compareTrafficRecordsBySequence(incomingFirst, currentLast) > 0) {
-    return [...current, ...incoming];
-  }
-
-  const merged: TrafficSummary[] = [];
-  let leftIndex = 0;
-  let rightIndex = 0;
-
-  while (leftIndex < current.length && rightIndex < incoming.length) {
-    const left = current[leftIndex]!;
-    const right = incoming[rightIndex]!;
-    if (compareTrafficRecordsBySequence(left, right) <= 0) {
-      merged.push(left);
-      leftIndex += 1;
-    } else {
-      merged.push(right);
-      rightIndex += 1;
-    }
-  }
-
-  if (leftIndex < current.length) {
-    merged.push(...current.slice(leftIndex));
-  }
-  if (rightIndex < incoming.length) {
-    merged.push(...incoming.slice(rightIndex));
-  }
-
-  return merged;
-};
-
-const mergeNewRecordsIntoList = (
-  current: TrafficSummary[],
-  incoming: TrafficSummary[],
-): TrafficSummary[] => mergeSortedTrafficRecords(current, incoming);
-
-export const replaceUpdatedTrafficRecordsInList = (
-  current: TrafficSummary[],
-  updatedRecords: TrafficSummary[],
-): TrafficSummary[] => {
-  if (updatedRecords.length === 0 || current.length === 0) {
-    return current;
-  }
-
-  const updatedById = new Map(updatedRecords.map((record) => [record.id, record]));
-  let changed = false;
-  const next = current.map((record) => {
-    const updated = updatedById.get(record.id);
-    if (!updated) {
-      return record;
-    }
-    changed = true;
-    return updated;
-  });
-
-  return changed ? next : current;
-};
-
-const findLastRecordById = (
-  records: TrafficSummary[],
-  id: string,
-): TrafficSummary | undefined => {
-  for (let i = records.length - 1; i >= 0; i -= 1) {
-    const record = records[i];
-    if (record?.id === id) {
-      return record;
-    }
-  }
-  return undefined;
-};
-
-const hasRecordInList = (
-  records: TrafficSummary[],
-  id: string,
-): boolean => {
-  for (let i = 0; i < records.length; i += 1) {
-    if (records[i]?.id === id) {
-      return true;
-    }
-  }
-  return false;
-};
-
-const getBoundaryState = (records: TrafficSummary[]) => {
-  const oldestRecord = records[0];
-  const latestRecord = records[records.length - 1];
-  return {
-    oldestSequence: oldestRecord?.sequence ?? null,
-    lastSequence: latestRecord?.sequence ?? null,
-    lastId: latestRecord?.id ?? null,
-  };
-};
-
-const createRecordsMutation = (
-  mutation: Omit<TrafficRecordsMutation, 'version'>,
-): TrafficRecordsMutation => ({
-  version: ++recordsMutationVersion,
-  ...mutation,
-});
-
-const createEmptyRecordsMutation = (): TrafficRecordsMutation => ({
-  version: recordsMutationVersion,
-  reset: false,
-  inserted: [],
-  updated: [],
-  deletedIds: [],
-});
-
-const buildSortedKeys = (counts: Map<string, number>): string[] => (
-  Array.from(counts.keys()).sort()
-);
-
-const snapshotServerStatistics = (statistics: TrafficStatistics) => {
-  const clientIpCounts = new Map(Object.entries(statistics.client_ips));
-  const proxyPortCounts = new Map(Object.entries(statistics.proxy_ports));
-  const clientAppCounts = new Map(Object.entries(statistics.applications));
-  const accountNameCounts = new Map(Object.entries(statistics.account_names));
-  const domainCounts = new Map(Object.entries(statistics.domains));
-
-  return {
-    clientIpCounts,
-    proxyPortCounts,
-    clientAppCounts,
-    accountNameCounts,
-    domainCounts,
-    availableClientIps: buildSortedKeys(clientIpCounts),
-    availableProxyPorts: buildSortedKeys(proxyPortCounts),
-    availableClientApps: buildSortedKeys(clientAppCounts),
-    availableAccountNames: buildSortedKeys(accountNameCounts),
-    availableDomains: buildSortedKeys(domainCounts),
-    trafficStatisticsTotal: statistics.total_requests,
-    trafficStatisticsSequence: statistics.server_sequence,
-    trafficStatisticsLoaded: true,
-  };
-};
-
-export const isFilterConditionApplicable = (
-  condition: FilterCondition,
-): boolean => {
-  return (
-    condition.enabled !== false &&
-    (condition.operator === 'is_empty' ||
-      condition.operator === 'is_not_empty' ||
-      condition.value.trim().length > 0)
-  );
-};
-
-const hasActiveFilters = (toolbar: ToolbarFilters, conditions: FilterCondition[]): boolean => {
-  return toolbar.rule.length > 0 ||
-    toolbar.protocol.length > 0 ||
-    toolbar.status.length > 0 ||
-    toolbar.type.length > 0 ||
-    toolbar.imported.length > 0 ||
-    conditions.some(isFilterConditionApplicable);
-};
-
-interface CompiledCondition {
-  field: string;
-  operator: string;
-  valueLower: string;
-  regex: RegExp | null;
-}
-
-const compileConditions = (conditions: FilterCondition[]): CompiledCondition[] => {
-  return conditions
-    .filter(isFilterConditionApplicable)
-    .map(c => {
-      let regex: RegExp | null = null;
-      if (c.operator === 'regex') {
-        try {
-          regex = new RegExp(c.value, 'i');
-        } catch {
-          regex = null;
-        }
-      }
-      return {
-        field: c.field,
-        operator: c.operator,
-        valueLower: c.value.toLowerCase(),
-        regex,
-      };
-    });
-};
-
-const matchRecord = (
-  record: TrafficSummary,
-  toolbar: ToolbarFilters,
-  compiledConditions: CompiledCondition[],
-  protocolSet: Set<string>,
-  statusSet: Set<string>,
-  typeSet: Set<string>
-): boolean => {
-  if (toolbar.rule.length > 0 && !record.has_rule_hit) {
-    return false;
-  }
-
-  if (toolbar.imported.length > 0) {
-    const isImported = record.id.startsWith('OUT-') || record.client_app === 'Bifrost Import';
-    if (!isImported) {
-      return false;
-    }
-  }
-
-  if (protocolSet.size > 0) {
-    const protocol = record.protocol?.toUpperCase() || '';
-    let matched = false;
-    if (protocolSet.has('H2') && protocol.includes('HTTP/2')) matched = true;
-    else if (protocolSet.has('HTTP') && (protocol === 'HTTP/1.0' || protocol === 'HTTP/1.1')) matched = true;
-    else if (protocolSet.has('HTTPS') && protocol === 'HTTPS') matched = true;
-    else if (protocolSet.has('WS') && record.is_websocket && protocol === 'WS') matched = true;
-    else if (protocolSet.has('WSS') && record.is_websocket && protocol === 'WSS') matched = true;
-    else if (protocolSet.has('H3') && (record.is_h3 || protocol === 'H3')) matched = true;
-    if (!matched) return false;
-  }
-
-  if (statusSet.size > 0) {
-    const status = record.status;
-    let matched = false;
-    if (statusSet.has('error') && (status === 0 || status >= 500)) matched = true;
-    else if (statusSet.has('1xx') && status >= 100 && status < 200) matched = true;
-    else if (statusSet.has('2xx') && status >= 200 && status < 300) matched = true;
-    else if (statusSet.has('3xx') && status >= 300 && status < 400) matched = true;
-    else if (statusSet.has('4xx') && status >= 400 && status < 500) matched = true;
-    else if (statusSet.has('5xx') && status >= 500 && status < 600) matched = true;
-    if (!matched) return false;
-  }
-
-  if (typeSet.size > 0) {
-    const resContentType = (record.content_type || '').toLowerCase();
-    const reqContentType = (record.request_content_type || '').toLowerCase();
-    let matched = false;
-    for (const t of typeSet) {
-      const patterns = contentTypeMap[t] || [t.toLowerCase()];
-      if (patterns.some(pattern => resContentType.includes(pattern) || reqContentType.includes(pattern))) {
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) return false;
-  }
-
-  for (const cond of compiledConditions) {
-    let fieldValue = '';
-    switch (cond.field) {
-      case 'url':
-        fieldValue = `${record.host || ''}${record.path || ''}`;
-        break;
-      case 'host':
-        fieldValue = record.host || '';
-        break;
-      case 'path':
-        fieldValue = record.path || '';
-        break;
-      case 'method':
-        fieldValue = record.method || '';
-        break;
-      case 'content_type':
-        fieldValue = record.content_type || '';
-        break;
-      case 'client_app':
-        fieldValue = record.client_app || '';
-        break;
-      case 'account_name':
-        fieldValue = record.account_name || '';
-        break;
-      case 'client_ip':
-        fieldValue = record.client_ip || '';
-        break;
-      case 'listener_port':
-      case 'port':
-        fieldValue = record.listener_port ? String(record.listener_port) : '';
-        break;
-      default:
-        continue;
-    }
-
-    const fieldValueLower = fieldValue.toLowerCase();
-    let matched = false;
-
-    switch (cond.operator) {
-      case 'contains':
-        matched = fieldValueLower.includes(cond.valueLower);
-        break;
-      case 'equals':
-        matched = fieldValueLower === cond.valueLower;
-        break;
-      case 'regex':
-        matched = cond.regex ? cond.regex.test(fieldValue) : false;
-        break;
-      case 'not_contains':
-        matched = !fieldValueLower.includes(cond.valueLower);
-        break;
-      case 'is_empty':
-        matched = fieldValue.trim().length === 0;
-        break;
-      case 'is_not_empty':
-        matched = fieldValue.trim().length > 0;
-        break;
-      default:
-        matched = fieldValueLower.includes(cond.valueLower);
-    }
-
-    if (!matched) return false;
-  }
-
-  return true;
-};
-
-export interface PanelFilters {
-  clientIps: string[];
-  proxyPorts: string[];
-  clientApps: string[];
-  accountNames: string[];
-  domains: string[];
-}
-
-const hasPanelFilters = (panel: PanelFilters): boolean => {
-  return (
-    panel.clientIps.length > 0 ||
-    panel.proxyPorts.length > 0 ||
-    panel.clientApps.length > 0 ||
-    panel.accountNames.length > 0 ||
-    panel.domains.length > 0
-  );
-};
-
-export const hasAnyTrafficFilters = (
-  toolbar: ToolbarFilters,
-  conditions: FilterCondition[],
-  panel: PanelFilters,
-): boolean => hasActiveFilters(toolbar, conditions) || hasPanelFilters(panel);
-
-const matchPanelFilters = (record: TrafficSummary, panel: PanelFilters): boolean => {
-  const clientIpMatch = panel.clientIps.length === 0
-    || panel.clientIps.includes(record.client_ip || '');
-
-  const proxyPortMatch = panel.proxyPorts.length === 0
-    || panel.proxyPorts.includes(record.listener_port ? String(record.listener_port) : '');
-
-  const clientAppMatch = panel.clientApps.length === 0
-    || panel.clientApps.includes(record.client_app || '');
-
-  const accountNameMatch = panel.accountNames.length === 0
-    || panel.accountNames.includes(record.account_name || '');
-
-  const domainMatch = panel.domains.length === 0
-    || panel.domains.some(domain => (record.host || '').includes(domain));
-
-  return clientIpMatch && proxyPortMatch && clientAppMatch && accountNameMatch && domainMatch;
-};
-
-export const matchesTrafficFilters = (
-  record: TrafficSummary,
-  toolbar: ToolbarFilters,
-  conditions: FilterCondition[],
-  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], accountNames: [], domains: [] },
-): boolean => {
-  const hasToolbarOrConditions = hasActiveFilters(toolbar, conditions);
-  const hasPanelActive = hasPanelFilters(panel);
-
-  if (!hasToolbarOrConditions && !hasPanelActive) {
-    return true;
-  }
-
-  const compiledConditions = compileConditions(conditions);
-  const protocolSet = new Set(toolbar.protocol.map((p) => p.toUpperCase()));
-  const statusSet = new Set(toolbar.status);
-  const typeSet = new Set(toolbar.type);
-
-  const toolbarMatch = !hasToolbarOrConditions
-    || matchRecord(record, toolbar, compiledConditions, protocolSet, statusSet, typeSet);
-  const panelMatch = !hasPanelActive || matchPanelFilters(record, panel);
-  return toolbarMatch && panelMatch;
-};
-
-export const filterRecords = (
-  records: TrafficSummary[],
-  toolbar: ToolbarFilters,
-  conditions: FilterCondition[],
-  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], accountNames: [], domains: [] }
-): TrafficSummary[] => {
-  const hasToolbarOrConditions = hasActiveFilters(toolbar, conditions);
-  const hasPanelActive = hasPanelFilters(panel);
-
-  if (!hasToolbarOrConditions && !hasPanelActive) {
-    return records;
-  }
-
-  const compiledConditions = compileConditions(conditions);
-  const protocolSet = new Set(toolbar.protocol.map(p => p.toUpperCase()));
-  const statusSet = new Set(toolbar.status);
-  const typeSet = new Set(toolbar.type);
-
-  const result: TrafficSummary[] = [];
-  for (const record of records) {
-    const toolbarMatch = !hasToolbarOrConditions || matchRecord(record, toolbar, compiledConditions, protocolSet, statusSet, typeSet);
-    const panelMatch = !hasPanelActive || matchPanelFilters(record, panel);
-
-    if (toolbarMatch && panelMatch) {
-      result.push(record);
-    }
-  }
-  return result;
-};
-
-export const applyTrafficRecordsMutationToFilteredRecords = (
-  current: TrafficSummary[],
-  mutation: TrafficRecordsMutation,
-  toolbar: ToolbarFilters,
-  conditions: FilterCondition[],
-  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], accountNames: [], domains: [] },
-): TrafficSummary[] => {
-  if (mutation.reset) {
-    return current;
-  }
-
-  const oldestSequenceFloor = mutation.oldestSequenceFloor;
-  let next = oldestSequenceFloor !== undefined && oldestSequenceFloor !== null
-    ? current.filter((record) => record.sequence >= oldestSequenceFloor)
-    : current;
-
-  next = mutation.deletedIds.length > 0
-    ? next.filter((record) => !mutation.deletedIds.includes(record.id))
-    : next;
-
-  if (mutation.updated.length > 0) {
-    const updatedById = new Map(mutation.updated.map((record) => [record.id, record]));
-    const rebuilt: TrafficSummary[] = [];
-    const promotedUpdates: TrafficSummary[] = [];
-
-    for (const record of next) {
-      const updated = updatedById.get(record.id);
-      if (!updated) {
-        rebuilt.push(record);
-        continue;
-      }
-
-      if (matchesTrafficFilters(updated, toolbar, conditions, panel)) {
-        rebuilt.push(updated);
-      }
-      updatedById.delete(record.id);
-    }
-
-    for (const updated of updatedById.values()) {
-      if (matchesTrafficFilters(updated, toolbar, conditions, panel)) {
-        promotedUpdates.push(updated);
-      }
-    }
-
-    next = promotedUpdates.length > 0
-      ? mergeSortedTrafficRecords(rebuilt, promotedUpdates)
-      : rebuilt;
-  }
-
-  if (mutation.inserted.length === 0) {
-    return next;
-  }
-
-  const matchingInserted = mutation.inserted.filter((record) =>
-    matchesTrafficFilters(record, toolbar, conditions, panel),
-  );
-
-  if (matchingInserted.length === 0) {
-    return next;
-  }
-
-  return mergeSortedTrafficRecords(next, matchingInserted);
-};
-
-export const compactTrafficSummaryToTrafficSummary = (c: TrafficSummaryCompact): TrafficSummary => {
-  const FLAGS = { IS_TUNNEL: 1, IS_WEBSOCKET: 2, IS_SSE: 4, IS_H3: 8, HAS_RULE_HIT: 16 };
-  return {
-    id: c.id,
-    sequence: c.seq,
-    timestamp: c.ts,
-    method: c.m,
-    host: c.h,
-    path: c.p,
-    status: c.s,
-    content_type: c.ct || null,
-    request_content_type: c.req_ct || null,
-    request_size: c.req_sz,
-    response_size: c.res_sz,
-    upload_bytes: c.up ?? c.req_sz,
-    download_bytes: c.down ?? c.res_sz,
-    duration_ms: c.dur,
-    listener_port: c.lp || undefined,
-    protocol: c.proto,
-    client_ip: c.cip,
-    client_app: c.capp || undefined,
-    client_pid: c.cpid || undefined,
-    account_name: c.acct || undefined,
-    is_tunnel: (c.flags & FLAGS.IS_TUNNEL) !== 0,
-    is_websocket: (c.flags & FLAGS.IS_WEBSOCKET) !== 0,
-    is_sse: (c.flags & FLAGS.IS_SSE) !== 0,
-    is_h3: (c.flags & FLAGS.IS_H3) !== 0,
-    has_rule_hit: (c.flags & FLAGS.HAS_RULE_HIT) !== 0,
-    matched_rule_count: c.rc || 0,
-    matched_protocols: c.rp || [],
-    frame_count: c.fc,
-    socket_status: c.ss || undefined,
-    url: `${c.proto === 'https' ? 'https' : 'http'}://${c.h}${c.p}`,
-    start_time: c.st,
-    end_time: c.et || undefined,
-  };
-};
-
 export const useTrafficStore = create<TrafficState>()(
   persist(
-    (set, get) => ({
-      records: [],
-      recordsMap: new Map(),
-      currentRecord: null,
-      requestBody: null,
-      responseBody: null,
-      requestRawBody: null,
-      responseRawBody: null,
-      serverTotal: 0,
-      serverSequence: 0,
-      serverOldestSequence: null,
-      trafficEpochVersion: 0,
-      trafficDatabaseEpoch: null,
-      hasMore: false,
-      hasNewer: false,
-      oldestSequence: null,
-      lastId: null,
-      lastSequence: null,
-      pendingIds: new Set(),
-      toolbarFilters: { rule: [], protocol: [], type: [], status: [], imported: [] },
-      filterConditions: [],
-      paused: false,
-      loading: false,
-      detailLoading: false,
-      polling: false,
-      error: null,
-      detailError: null,
-      pollTimeoutId: null,
-      autoScroll: true,
-      newRecordsCount: 0,
-      scrollTop: 0,
-      usePush: true,
-      pushUnsubscribe: null,
-      pushDeltaUnsubscribe: null,
-      pushDeletedUnsubscribe: null,
-      pushStatisticsUnsubscribe: null,
-      pushConnectionUnsubscribe: null,
-      filterVersion: 0,
-      initialized: false,
-      selectedId: undefined,
-      useDbMode: true,
-      historyLoading: false,
-      catchingUp: false,
-      availableClientApps: [],
-      availableAccountNames: [],
-      availableClientIps: [],
-      availableProxyPorts: [],
-      availableDomains: [],
-      clientAppCounts: new Map(),
-      accountNameCounts: new Map(),
-      clientIpCounts: new Map(),
-      proxyPortCounts: new Map(),
-      domainCounts: new Map(),
-      trafficStatisticsTotal: 0,
-      trafficStatisticsSequence: 0,
-      trafficStatisticsLoaded: false,
-      recordsMutation: createEmptyRecordsMutation(),
+    (set, get) => {
+      const coordination = createTrafficCaptureCoordinator({ get, set });
+      const {
+        observeReconciliationMetadata,
+        observeTrafficRecordSequence,
+        getConsumedTrafficSequence,
+        acceptTrafficDatabaseEpoch,
+        capPendingIds,
+        clearPendingTrafficBatch,
+      } = coordination;
+      return {
+        records: [],
+        recordsMap: new Map(),
+        currentRecord: null,
+        requestBody: null,
+        responseBody: null,
+        requestRawBody: null,
+        responseRawBody: null,
+        serverTotal: 0,
+        serverSequence: 0,
+        serverOldestSequence: null,
+        trafficEpochVersion: 0,
+        trafficDatabaseEpoch: null,
+        hasMore: false,
+        hasNewer: false,
+        oldestSequence: null,
+        lastId: null,
+        lastSequence: null,
+        pendingIds: new Set(),
+        toolbarFilters: {
+          rule: [],
+          protocol: [],
+          type: [],
+          status: [],
+          imported: [],
+        },
+        filterConditions: [],
+        paused: false,
+        loading: false,
+        detailLoading: false,
+        polling: false,
+        error: null,
+        detailError: null,
+        pollTimeoutId: null,
+        autoScroll: true,
+        newRecordsCount: 0,
+        scrollTop: 0,
+        usePush: true,
+        pushUnsubscribe: null,
+        pushDeltaUnsubscribe: null,
+        pushDeletedUnsubscribe: null,
+        pushStatisticsUnsubscribe: null,
+        pushConnectionUnsubscribe: null,
+        filterVersion: 0,
+        initialized: false,
+        selectedId: undefined,
+        useDbMode: true,
+        historyLoading: false,
+        catchingUp: false,
+        availableClientApps: [],
+        availableAccountNames: [],
+        availableClientIps: [],
+        availableProxyPorts: [],
+        availableDomains: [],
+        clientAppCounts: new Map(),
+        accountNameCounts: new Map(),
+        clientIpCounts: new Map(),
+        proxyPortCounts: new Map(),
+        domainCounts: new Map(),
+        trafficStatisticsTotal: 0,
+        trafficStatisticsSequence: 0,
+        trafficStatisticsLoaded: false,
+        clearing: false,
+        recordsMutation: createEmptyRecordsMutation(),
 
-      fetchTrafficStatistics: async (expectedEpoch?: string) => {
-        const generation = historyBackfillGeneration;
-        const resumeGeneration = trafficResumeGeneration;
-        if (!statisticsRequest || statisticsRequest.historyGeneration !== generation ||
-          statisticsRequest.resumeGeneration !== resumeGeneration ||
-          statisticsRequest.databaseEpoch !== expectedEpoch) {
-          const request = api.getTrafficStatistics()
-            .then((statistics) => {
-              if (statisticsRequest?.promise !== request ||
-                generation !== historyBackfillGeneration ||
-                resumeGeneration !== trafficResumeGeneration) return;
+        fetchTrafficStatistics: async (
+          expectedEpoch?: string,
+          reconcileTotal = false,
+        ) => {
+          const generation = captureCoordination.historyBackfillGeneration;
+          const resumeGeneration = captureCoordination.trafficResumeGeneration;
+          // A count read issued after a deletion must supersede an older in-flight
+          // read; coalescing that older request would not prove post-delete totals.
+          if (
+            reconcileTotal ||
+            !captureCoordination.statisticsRequest ||
+            captureCoordination.statisticsRequest.historyGeneration !==
+              generation ||
+            captureCoordination.statisticsRequest.resumeGeneration !==
+              resumeGeneration ||
+            captureCoordination.statisticsRequest.databaseEpoch !==
+              expectedEpoch
+          ) {
+            const request = api
+              .getTrafficStatistics()
+              .then((statistics) => {
+                if (
+                  captureCoordination.statisticsRequest?.promise !== request ||
+                  generation !==
+                    captureCoordination.historyBackfillGeneration ||
+                  resumeGeneration !==
+                    captureCoordination.trafficResumeGeneration
+                )
+                  return;
+                get().handleTrafficStatistics(statistics, reconcileTotal);
+              })
+              .catch(() => {
+                // Statistics are refreshed independently from the traffic window.
+                // Keep the last authoritative snapshot if a transient request fails.
+              })
+              .finally(() => {
+                if (captureCoordination.statisticsRequest?.promise === request)
+                  captureCoordination.statisticsRequest = null;
+              });
+            captureCoordination.statisticsRequest = {
+              historyGeneration: generation,
+              resumeGeneration,
+              databaseEpoch: expectedEpoch,
+              promise: request,
+            };
+          }
+          await captureCoordination.statisticsRequest.promise;
+        },
+
+        startPolling: () => {
+          const state = get();
+          if (state.polling) return;
+
+          set({ polling: true });
+
+          if (state.usePush) {
+            get().enablePush();
+          } else {
+            get().fetchUpdates();
+          }
+        },
+
+        stopPolling: () => {
+          const state = get();
+          if (state.pollTimeoutId) {
+            clearTimeout(state.pollTimeoutId);
+          }
+          captureCoordination.hasMoreBurst = 0;
+          if (state.usePush) {
+            get().disablePush();
+          }
+          set({ polling: false, pollTimeoutId: null });
+        },
+
+        enablePush: () => {
+          const state = get();
+          if (
+            state.pushUnsubscribe ||
+            state.pushDeltaUnsubscribe ||
+            state.pushDeletedUnsubscribe ||
+            state.pushStatisticsUnsubscribe ||
+            state.pushConnectionUnsubscribe
+          )
+            return;
+
+          const unsubscribe = pushService.onTrafficUpdates((data) => {
+            get().handleTrafficPush(data);
+          });
+
+          const unsubscribeDelta = pushService.onTrafficDelta((data) => {
+            get().handleTrafficDelta(data);
+          });
+
+          const unsubscribeDeleted = pushService.onTrafficDeleted((data) => {
+            get().handleTrafficDeleted(data.ids);
+          });
+
+          const unsubscribeStatistics = pushService.onTrafficStatistics(
+            (statistics) => {
               get().handleTrafficStatistics(statistics);
-            })
-            .catch(() => {
-              // Statistics are refreshed independently from the traffic window.
-              // Keep the last authoritative snapshot if a transient request fails.
-            })
-            .finally(() => {
-              if (statisticsRequest?.promise === request) statisticsRequest = null;
-            });
-          statisticsRequest = {
-            historyGeneration: generation, resumeGeneration,
-            databaseEpoch: expectedEpoch, promise: request,
-          };
-        }
-        await statisticsRequest.promise;
-      },
-
-      startPolling: () => {
-        const state = get();
-        if (state.polling) return;
-
-        set({ polling: true });
-
-        if (state.usePush) {
-          get().enablePush();
-        } else {
-          get().fetchUpdates();
-        }
-      },
-
-      stopPolling: () => {
-        const state = get();
-        if (state.pollTimeoutId) {
-          clearTimeout(state.pollTimeoutId);
-        }
-        hasMoreBurst = 0;
-        if (state.usePush) {
-          get().disablePush();
-        }
-        set({ polling: false, pollTimeoutId: null });
-      },
-
-      enablePush: () => {
-        const state = get();
-        if (
-          state.pushUnsubscribe ||
-          state.pushDeltaUnsubscribe ||
-          state.pushDeletedUnsubscribe ||
-          state.pushStatisticsUnsubscribe ||
-          state.pushConnectionUnsubscribe
-        ) return;
-
-        const unsubscribe = pushService.onTrafficUpdates((data) => {
-          get().handleTrafficPush(data);
-        });
-
-        const unsubscribeDelta = pushService.onTrafficDelta((data) => {
-          get().handleTrafficDelta(data);
-        });
-
-        const unsubscribeDeleted = pushService.onTrafficDeleted((data) => {
-          get().handleTrafficDeleted(data.ids);
-        });
-
-        const unsubscribeStatistics = pushService.onTrafficStatistics((statistics) => {
-          get().handleTrafficStatistics(statistics);
-        });
-
-        // Deletion notifications are not replayed. Equal-total reconnects can
-        // still replace cached rows; statistics also finish bounded backlogs.
-        const unsubscribeConnection = pushService.onConnectionChange(
-          ({ connected }) => {
-            if (!connected) {
-              latestTrafficSequenceSinceResume = 0;
-              trafficResumeGeneration += 1;
-              trafficEpochResetSuspected = false;
-              if (get().records.length > 0 || get().lastSequence !== null || pendingBatch !== null) {
-                membershipReconciliationRequired = true;
-                trafficResumeStatisticsPending = true;
-              }
-            }
-          },
-        );
-
-        set({
-          pushUnsubscribe: unsubscribe,
-          pushDeltaUnsubscribe: unsubscribeDelta,
-          pushDeletedUnsubscribe: unsubscribeDeleted,
-          pushStatisticsUnsubscribe: unsubscribeStatistics,
-          pushConnectionUnsubscribe: unsubscribeConnection,
-        });
-
-        const subscription = {
-          last_traffic_id: state.lastId || undefined,
-          last_sequence: state.lastSequence || undefined,
-          pending_ids: Array.from(state.pendingIds),
-          need_traffic: true,
-        };
-
-        pushService.connect(subscription);
-      },
-
-      disablePush: () => {
-        const state = get();
-        latestTrafficSequenceSinceResume = 0;
-        trafficResumeGeneration += 1;
-        trafficEpochResetSuspected = false;
-        if (state.pushConnectionUnsubscribe &&
-          (state.records.length > 0 || state.lastSequence !== null || pendingBatch !== null)) {
-          membershipReconciliationRequired = true;
-          trafficResumeStatisticsPending = true;
-        }
-        state.pushConnectionUnsubscribe?.();
-        if (state.pushUnsubscribe) {
-          state.pushUnsubscribe();
-        }
-        if (state.pushDeltaUnsubscribe) {
-          state.pushDeltaUnsubscribe();
-        }
-        if (state.pushDeletedUnsubscribe) {
-          state.pushDeletedUnsubscribe();
-        }
-        if (state.pushStatisticsUnsubscribe) {
-          state.pushStatisticsUnsubscribe();
-        }
-        set({
-          pushUnsubscribe: null,
-          pushDeltaUnsubscribe: null,
-          pushDeletedUnsubscribe: null,
-          pushStatisticsUnsubscribe: null,
-          pushConnectionUnsubscribe: null,
-        });
-        pushService.updateSubscription({
-          need_traffic: false,
-          last_traffic_id: undefined,
-          last_sequence: undefined,
-          pending_ids: [],
-        });
-        pushService.disconnectIfIdle();
-      },
-
-      handleTrafficPush: (data: TrafficUpdatesData) => {
-        const state = get();
-        if (state.paused) return;
-        const accepted = acceptTrafficDatabaseEpoch(data.database_epoch, data.server_sequence);
-        // Restored rows withheld by an old cursor still prove that an earlier
-        // confirmation is stale. Keep their freshness separate from merging.
-        observeTrafficRecordSequence(data.database_epoch, Math.max(
-          data.new_records.reduce((sequence, record) => Math.max(sequence, record.sequence), 0),
-          data.updated_records.reduce((sequence, record) => Math.max(sequence, record.sequence), 0),
-        ));
-        if (!accepted) return;
-        latestTrafficSequenceSinceResume = Math.max(
-          latestTrafficSequenceSinceResume,
-          data.server_sequence ?? 0,
-        );
-        const hasRecordChanges =
-          data.new_records.length > 0 || data.updated_records.length > 0;
-        const hasMetadataChanges =
-          membershipReconciliationRequired ||
-          state.records.length > data.server_total ||
-          data.server_total !== state.serverTotal ||
-          (data.server_sequence !== undefined && data.server_sequence !== state.serverSequence) ||
-          (data.oldest_sequence !== undefined &&
-            data.oldest_sequence !== null &&
-            data.oldest_sequence > (state.serverOldestSequence ?? 0));
-        if (!hasRecordChanges && !hasMetadataChanges) return;
-
-        const preprocessedNew = preprocessTrafficRecords(data.new_records);
-        const preprocessedUpdated = preprocessTrafficRecords(data.updated_records);
-
-        if (pendingBatch) {
-          pendingBatch.newRecords = mergeBoundedTrafficWindow(
-            pendingBatch.newRecords,
-            preprocessedNew,
-            'newer',
-          ).records;
-          pendingBatch.updatedRecords = mergeBoundedTrafficWindow(
-            pendingBatch.updatedRecords,
-            preprocessedUpdated,
-            'newer',
-          ).records;
-          pendingBatch.serverTotal = data.server_total;
-          pendingBatch.serverSequence = Math.max(
-            pendingBatch.serverSequence,
-            data.server_sequence ?? 0,
+            },
           );
-          if (data.oldest_sequence !== undefined && data.oldest_sequence !== null) {
-            pendingBatch.oldestSequence = Math.max(
-              pendingBatch.oldestSequence ?? 0,
-              data.oldest_sequence,
+
+          // Deletion notifications are not replayed. Equal-total reconnects can
+          // still replace cached rows; statistics also finish bounded backlogs.
+          const unsubscribeConnection = pushService.onConnectionChange(
+            ({ connected }) => {
+              if (!connected) {
+                captureCoordination.latestTrafficSequenceSinceResume = 0;
+                captureCoordination.trafficResumeGeneration += 1;
+                captureCoordination.trafficEpochResetSuspected = false;
+                if (
+                  get().records.length > 0 ||
+                  get().lastSequence !== null ||
+                  captureCoordination.pendingBatch !== null
+                ) {
+                  captureCoordination.membershipReconciliationRequired = true;
+                  captureCoordination.trafficResumeStatisticsPending = true;
+                }
+              }
+            },
+          );
+
+          set({
+            pushUnsubscribe: unsubscribe,
+            pushDeltaUnsubscribe: unsubscribeDelta,
+            pushDeletedUnsubscribe: unsubscribeDeleted,
+            pushStatisticsUnsubscribe: unsubscribeStatistics,
+            pushConnectionUnsubscribe: unsubscribeConnection,
+          });
+
+          const subscription = {
+            last_traffic_id: state.lastId || undefined,
+            last_sequence: state.lastSequence || undefined,
+            pending_ids: Array.from(state.pendingIds),
+            need_traffic: true,
+          };
+
+          pushService.connect(subscription);
+        },
+
+        disablePush: () => {
+          const state = get();
+          captureCoordination.latestTrafficSequenceSinceResume = 0;
+          captureCoordination.trafficResumeGeneration += 1;
+          captureCoordination.trafficEpochResetSuspected = false;
+          if (
+            state.pushConnectionUnsubscribe &&
+            (state.records.length > 0 ||
+              state.lastSequence !== null ||
+              captureCoordination.pendingBatch !== null)
+          ) {
+            captureCoordination.membershipReconciliationRequired = true;
+            captureCoordination.trafficResumeStatisticsPending = true;
+          }
+          state.pushConnectionUnsubscribe?.();
+          if (state.pushUnsubscribe) {
+            state.pushUnsubscribe();
+          }
+          if (state.pushDeltaUnsubscribe) {
+            state.pushDeltaUnsubscribe();
+          }
+          if (state.pushDeletedUnsubscribe) {
+            state.pushDeletedUnsubscribe();
+          }
+          if (state.pushStatisticsUnsubscribe) {
+            state.pushStatisticsUnsubscribe();
+          }
+          set({
+            pushUnsubscribe: null,
+            pushDeltaUnsubscribe: null,
+            pushDeletedUnsubscribe: null,
+            pushStatisticsUnsubscribe: null,
+            pushConnectionUnsubscribe: null,
+          });
+          pushService.updateSubscription({
+            need_traffic: false,
+            last_traffic_id: undefined,
+            last_sequence: undefined,
+            pending_ids: [],
+          });
+          pushService.disconnectIfIdle();
+        },
+
+        ...createTrafficLiveCapture({ get, set }, coordination),
+
+        reconcileTrafficWindow: async () => {
+          if (!captureCoordination.membershipRequest) {
+            captureCoordination.membershipReconciliationRequired = false;
+            const generation = captureCoordination.historyBackfillGeneration;
+            const recordIds = get().records.map((record) => record.id);
+            if (recordIds.length === 0) return;
+            captureCoordination.membershipRequest = (async () => {
+              const existingIds = new Set<string>();
+              for (
+                let offset = 0;
+                offset < recordIds.length;
+                offset += MEMBERSHIP_QUERY_LIMIT
+              ) {
+                const ids = recordIds.slice(
+                  offset,
+                  offset + MEMBERSHIP_QUERY_LIMIT,
+                );
+                const response = await api.queryTraffic({
+                  record_ids: ids,
+                  limit: ids.length,
+                });
+                // Never infer deletions from an incomplete/failed query snapshot.
+                if (
+                  generation !== captureCoordination.historyBackfillGeneration
+                )
+                  return;
+                if (
+                  response.has_more ||
+                  response.total !== response.records.length
+                ) {
+                  captureCoordination.membershipReconciliationRequired = true;
+                  return;
+                }
+                for (const record of response.records)
+                  existingIds.add(record.id);
+              }
+              if (generation !== captureCoordination.historyBackfillGeneration)
+                return;
+              const deletedIds = recordIds.filter((id) => !existingIds.has(id));
+              // Delta metadata already included these deletions in the global total.
+              // Remove only queried IDs, preserving concurrent arrivals and paging.
+              get().handleTrafficDeleted(deletedIds, get().serverTotal);
+            })()
+              .catch(() => {
+                // Keep the visible window on transient errors. A later delta can retry.
+                if (
+                  generation === captureCoordination.historyBackfillGeneration
+                ) {
+                  captureCoordination.membershipReconciliationRequired = true;
+                }
+              })
+              .finally(() => {
+                captureCoordination.membershipRequest = null;
+                if (captureCoordination.membershipFollowupRequired) {
+                  captureCoordination.membershipFollowupRequired = false;
+                  void get().reconcileTrafficWindow();
+                }
+              });
+          }
+          await captureCoordination.membershipRequest;
+        },
+
+        handleTrafficStatistics: (
+          statistics: TrafficStatistics,
+          reconcileTotal = false,
+        ) => {
+          const state = get();
+          const identityChanged =
+            !!statistics.database_epoch &&
+            !!state.trafficDatabaseEpoch &&
+            statistics.database_epoch !== state.trafficDatabaseEpoch;
+          const identityMatches =
+            !!statistics.database_epoch &&
+            statistics.database_epoch === state.trafficDatabaseEpoch;
+          const previousSequence = Math.max(
+            state.serverSequence,
+            state.lastSequence ?? 0,
+            captureCoordination.pendingBatch?.serverSequence ?? 0,
+          );
+          const consumedRecordSequence = getConsumedTrafficSequence();
+          // server_sequence is the next allocation, so it must exceed every row
+          // already consumed. UUIDs survive backup restore; unused allocations
+          // alone (serverSequence) cannot establish that persisted rows rolled back.
+          const sameIdentityRecordRollback =
+            identityMatches &&
+            statistics.server_sequence <= consumedRecordSequence;
+          const unprovenLegacyIdentity =
+            !state.trafficDatabaseEpoch &&
+            !!statistics.database_epoch &&
+            statistics.server_sequence < previousSequence;
+          // Sequence watermarks only have meaning within one database. A queued
+          // old-epoch delta must not suppress a lower new-epoch statistics push.
+          if (
+            !identityChanged &&
+            !unprovenLegacyIdentity &&
+            !sameIdentityRecordRollback
+          ) {
+            observeReconciliationMetadata(
+              statistics.total_requests,
+              statistics.server_sequence,
             );
           }
-          pendingBatch.sourceNewRecordCount += preprocessedNew.length;
-          pendingBatch.sourceUpdatedRecordCount += preprocessedUpdated.length;
-          pendingBatch.hasMore = data.has_more;
-        } else {
-          pendingBatch = {
-            newRecords: mergeBoundedTrafficWindow([], preprocessedNew, 'newer').records,
-            updatedRecords: mergeBoundedTrafficWindow([], preprocessedUpdated, 'newer').records,
-            serverTotal: data.server_total,
-            serverSequence: data.server_sequence ?? state.serverSequence,
-            oldestSequence: data.oldest_sequence ?? state.serverOldestSequence,
-            sourceNewRecordCount: preprocessedNew.length,
-            sourceUpdatedRecordCount: preprocessedUpdated.length,
-            hasMore: data.has_more,
-          };
-        }
+          if (
+            !identityChanged &&
+            !unprovenLegacyIdentity &&
+            !sameIdentityRecordRollback &&
+            statistics.server_sequence <
+              captureCoordination.latestTrafficSequenceSinceResume
+          )
+            return;
+          if (!identityChanged) {
+            set({
+              ...snapshotServerStatistics(statistics),
+              trafficDatabaseEpoch: unprovenLegacyIdentity
+                ? state.trafficDatabaseEpoch
+                : (statistics.database_epoch ?? state.trafficDatabaseEpoch),
+            });
+          }
+          // Initial statistics follow all reconnect chunks. has_more can remain
+          // true on the final chunk because older history lies outside the bounded
+          // tail, so use this snapshot to finish membership reconciliation too.
+          // Compare only this connection's traffic: empty storage can restart at 1.
+          if (
+            !state.paused &&
+            (reconcileTotal ||
+              statistics.total_requests === 0 ||
+              identityChanged ||
+              sameIdentityRecordRollback ||
+              unprovenLegacyIdentity ||
+              captureCoordination.membershipReconciliationRequired ||
+              captureCoordination.trafficResumeStatisticsPending)
+          ) {
+            if (
+              identityChanged ||
+              sameIdentityRecordRollback ||
+              (!identityMatches &&
+                statistics.server_sequence < previousSequence)
+            ) {
+              captureCoordination.trafficEpochResetSuspected = true;
+              const generation = captureCoordination.historyBackfillGeneration;
+              const resumeGeneration =
+                captureCoordination.trafficResumeGeneration;
+              if (
+                captureCoordination.trafficEpochRequest?.historyGeneration !==
+                  generation ||
+                captureCoordination.trafficEpochRequest.resumeGeneration !==
+                  resumeGeneration ||
+                captureCoordination.trafficEpochRequest.databaseEpoch !==
+                  statistics.database_epoch
+              ) {
+                // A periodic push may have been captured before this reconnect.
+                // Confirm a new identity (or legacy counter rollback) with a fresh
+                // read before discarding the current database's window.
+                const request = api
+                  .getTrafficStatistics()
+                  .then((current) => {
+                    if (
+                      captureCoordination.trafficEpochRequest?.promise !==
+                        request ||
+                      state.trafficDatabaseEpoch !==
+                        get().trafficDatabaseEpoch ||
+                      generation !==
+                        captureCoordination.historyBackfillGeneration ||
+                      resumeGeneration !==
+                        captureCoordination.trafficResumeGeneration ||
+                      get().paused
+                    )
+                      return;
+                    if (
+                      (identityChanged ||
+                        sameIdentityRecordRollback ||
+                        unprovenLegacyIdentity) &&
+                      current.database_epoch !== statistics.database_epoch
+                    ) {
+                      // A response naming another database cannot confirm this
+                      // candidate. A third identity needs its own fresh read.
+                      if (current.database_epoch)
+                        get().handleTrafficStatistics(current);
+                      return;
+                    }
+                    if (sameIdentityRecordRollback) {
+                      // A confirmation captured before newer delivered rows is
+                      // stale, even if those rows have not reached the render batch.
+                      if (
+                        current.server_sequence <=
+                        captureCoordination.trafficEpochRequest
+                          .latestRecordSequence
+                      )
+                        return;
+                    } else if (
+                      !identityChanged &&
+                      !unprovenLegacyIdentity &&
+                      current.server_sequence <
+                        captureCoordination.latestTrafficSequenceSinceResume
+                    )
+                      return;
+                    const confirmedSameIdentity =
+                      !!state.trafficDatabaseEpoch &&
+                      current.database_epoch === state.trafficDatabaseEpoch;
+                    const rollbackDisproved = confirmedSameIdentity
+                      ? current.server_sequence > consumedRecordSequence
+                      : current.server_sequence >= previousSequence;
+                    if (!identityChanged && rollbackDisproved) {
+                      get().handleTrafficStatistics(current);
+                      return;
+                    }
 
-        const now = performance.now();
-        const timeSinceLastUpdate = now - lastUpdateTime;
+                    // The new epoch may already contain arrivals. Reopen with no
+                    // cursor so initial replay recovers them, even if the old server
+                    // subscription filtered them out. Clear the old window first:
+                    // its high sequences must not evict the new epoch's low rows.
+                    captureCoordination.historyBackfillGeneration += 1;
+                    captureCoordination.latestTrafficSequenceSinceResume = 0;
+                    clearPendingTrafficBatch();
+                    captureCoordination.membershipReconciliationRequired = false;
+                    captureCoordination.membershipFollowupRequired = false;
+                    captureCoordination.trafficResumeStatisticsPending = false;
+                    captureCoordination.trafficEpochResetSuspected = false;
+                    set((latest) => ({
+                      ...snapshotServerStatistics(current),
+                      trafficDatabaseEpoch: current.database_epoch ?? null,
+                      records: [],
+                      recordsMap: new Map(),
+                      currentRecord: null,
+                      selectedId: undefined,
+                      requestBody: null,
+                      responseBody: null,
+                      requestRawBody: null,
+                      responseRawBody: null,
+                      detailLoading: false,
+                      detailError: null,
+                      serverTotal: current.total_requests,
+                      lastId: null,
+                      lastSequence: null,
+                      oldestSequence: null,
+                      serverSequence: current.server_sequence,
+                      serverOldestSequence: null,
+                      trafficEpochVersion: latest.trafficEpochVersion + 1,
+                      pendingIds: new Set(),
+                      hasMore: current.total_requests > INITIAL_WINDOW_LIMIT,
+                      hasNewer: false,
+                      newRecordsCount: 0,
+                      loading: false,
+                      historyLoading: false,
+                      catchingUp: false,
+                      filterVersion: latest.filterVersion + 1,
+                      recordsMutation: createRecordsMutation({
+                        reset: true,
+                        inserted: [],
+                        updated: [],
+                        deletedIds: [],
+                      }),
+                    }));
+                    pushService.resetTrafficCursor();
+                    if (!get().usePush && get().polling) {
+                      const timeoutId = get().pollTimeoutId;
+                      if (timeoutId !== null) window.clearTimeout(timeoutId);
+                      set({ pollTimeoutId: null });
+                      void get().fetchUpdates();
+                    }
+                  })
+                  .catch(() => {
+                    // Preserve the window and retry on the next statistics push.
+                  })
+                  .finally(() => {
+                    if (
+                      captureCoordination.trafficEpochRequest?.promise !==
+                      request
+                    )
+                      return;
+                    const followup =
+                      captureCoordination.trafficEpochRequest.followup;
+                    captureCoordination.trafficEpochRequest = null;
+                    if (
+                      followup &&
+                      captureCoordination.trafficEpochResetSuspected &&
+                      generation ===
+                        captureCoordination.historyBackfillGeneration &&
+                      resumeGeneration ===
+                        captureCoordination.trafficResumeGeneration
+                    ) {
+                      get().handleTrafficStatistics(followup);
+                    }
+                  });
+                captureCoordination.trafficEpochRequest = {
+                  historyGeneration: generation,
+                  resumeGeneration,
+                  statisticsSequence: statistics.server_sequence,
+                  latestRecordSequence: 0,
+                  databaseEpoch: statistics.database_epoch,
+                  followup: null,
+                  promise: request,
+                };
+              } else if (
+                statistics.server_sequence >
+                captureCoordination.trafficEpochRequest.statisticsSequence
+              ) {
+                // Do not lose a newer snapshot while confirmation is pending: an
+                // idle server may never push it again after this read returns.
+                captureCoordination.trafficEpochRequest.followup = statistics;
+              }
+              return;
+            }
+            captureCoordination.trafficResumeStatisticsPending = false;
+            captureCoordination.trafficEpochResetSuspected = false;
+            get().handleTrafficPush({
+              new_records: [],
+              updated_records: [],
+              has_more: false,
+              server_total: statistics.total_requests,
+              server_sequence: statistics.server_sequence,
+            });
+          }
+        },
 
-        if (rafId !== null || updateTimerId !== null) {
-          return;
-        }
+        fetchInitialData: async () => {
+          const state = get();
+          if (state.loading || state.initialized) {
+            return;
+          }
 
-        const scheduleUpdate = () => {
-          updateTimerId = null;
-          rafId = requestAnimationFrame(() => {
-            rafId = null;
-            const batch = pendingBatch;
-            if (!batch) return;
-            pendingBatch = null;
-            lastUpdateTime = performance.now();
-            let needsMembershipReconciliation = false;
+          const generation = ++captureCoordination.historyBackfillGeneration;
+          const resumeGeneration = captureCoordination.trafficResumeGeneration;
+          captureCoordination.membershipReconciliationRequired = false;
+          captureCoordination.membershipFollowupRequired = false;
+          captureCoordination.trafficResumeStatisticsPending = false;
+          captureCoordination.trafficEpochResetSuspected = false;
+          set({ loading: true, error: null });
+          try {
+            const filter: TrafficUpdatesFilter = {
+              limit: INITIAL_WINDOW_LIMIT,
+            };
+            const response = await api.getTrafficUpdates(filter);
+            if (generation !== captureCoordination.historyBackfillGeneration)
+              return;
+            if (
+              resumeGeneration !== captureCoordination.trafficResumeGeneration
+            ) {
+              set({ loading: false });
+              return;
+            }
+            observeTrafficRecordSequence(
+              response.database_epoch,
+              Math.max(
+                response.new_records.reduce(
+                  (sequence, record) => Math.max(sequence, record.seq),
+                  0,
+                ),
+                response.updated_records.reduce(
+                  (sequence, record) => Math.max(sequence, record.seq),
+                  0,
+                ),
+              ),
+            );
+            if (
+              !acceptTrafficDatabaseEpoch(
+                response.database_epoch,
+                response.server_sequence,
+              )
+            ) {
+              set({ loading: false });
+              return;
+            }
+
+            const convertedRecords = response.new_records.map(
+              compactTrafficSummaryToTrafficSummary,
+            );
+            const preprocessedRecords =
+              preprocessTrafficRecords(convertedRecords);
+
+            const newPendingIds = new Set<string>();
+            const newRecordsMap = new Map<string, TrafficSummary>();
+            for (const r of preprocessedRecords) {
+              newRecordsMap.set(r.id, r);
+              if (isPendingRecord(r)) {
+                newPendingIds.add(r.id);
+              }
+            }
+            capPendingIds(newPendingIds);
+
+            const boundaries = getBoundaryState(preprocessedRecords);
+            set({
+              records: preprocessedRecords,
+              recordsMap: newRecordsMap,
+              serverTotal: response.server_total,
+              serverSequence: response.server_sequence,
+              hasMore: response.has_more,
+              hasNewer: false,
+              oldestSequence: boundaries.oldestSequence,
+              lastId: boundaries.lastId,
+              lastSequence: boundaries.lastSequence,
+              pendingIds: newPendingIds,
+              loading: false,
+              filterVersion: 0,
+              initialized: true,
+              catchingUp: false,
+              recordsMutation: createRecordsMutation({
+                reset: true,
+                inserted: preprocessedRecords,
+                updated: [],
+                deletedIds: [],
+              }),
+            });
+            await get().fetchTrafficStatistics();
+          } catch (e) {
+            if (generation === captureCoordination.historyBackfillGeneration) {
+              set({
+                loading: false,
+                ...(resumeGeneration ===
+                captureCoordination.trafficResumeGeneration
+                  ? { error: (e as Error).message }
+                  : {}),
+              });
+            }
+          }
+        },
+
+        backfillHistory: async () => {
+          const state = get();
+          if (
+            state.historyLoading ||
+            !state.hasMore ||
+            state.oldestSequence === null
+          ) {
+            return;
+          }
+
+          const generation = captureCoordination.historyBackfillGeneration;
+          set({ historyLoading: true });
+
+          try {
+            const response = await api.getTrafficPage({
+              cursor: state.oldestSequence,
+              limit: HISTORY_BATCH_LIMIT,
+              direction: "backward",
+            });
+
+            if (generation !== captureCoordination.historyBackfillGeneration) {
+              return;
+            }
+
+            const olderRecords = preprocessTrafficRecords(
+              response.records
+                .map(compactTrafficSummaryToTrafficSummary)
+                .reverse(),
+            );
 
             set((prevState) => {
-              const recordsMap = new Map(prevState.recordsMap);
-              let hasChanges = false;
-              const uniqueNewRecords: TrafficSummary[] = [];
-              const replacedRecords: TrafficSummary[] = [];
-              let promotedUpdateCount = 0;
-
-              for (const r of batch.updatedRecords) {
-                const existing = recordsMap.get(r.id);
-                const mergedRecord = mergeIncrementalRecord(existing, r);
-                if (shouldReplaceRecord(existing, mergedRecord)) {
-                  recordsMap.set(r.id, mergedRecord);
-                  hasChanges = true;
-                  if (hasRecordInList(prevState.records, r.id)) {
-                    replacedRecords.push(mergedRecord);
-                  } else {
-                    uniqueNewRecords.push(mergedRecord);
-                    promotedUpdateCount += 1;
-                  }
-                }
+              if (
+                generation !== captureCoordination.historyBackfillGeneration
+              ) {
+                return {};
               }
 
-              let actualNewCount = 0;
-              for (const r of batch.newRecords) {
-                if (!recordsMap.has(r.id)) {
-                  recordsMap.set(r.id, r);
-                  hasChanges = true;
-                  actualNewCount++;
-                  uniqueNewRecords.push(r);
-                }
-              }
-
-              const newPendingIds = new Set(prevState.pendingIds);
-
-              for (const r of batch.updatedRecords) {
-                const isPending = isPendingRecord(r);
-                if (!isPending) {
-                  newPendingIds.delete(r.id);
-                }
-              }
-
-              for (const r of batch.newRecords) {
-                const isPending = isPendingRecord(r);
-                if (isPending) {
-                  newPendingIds.add(r.id);
-                }
-              }
-              capPendingIds(newPendingIds);
-
-              let allRecords: TrafficSummary[];
-              if (hasChanges) {
-                allRecords = replaceUpdatedTrafficRecordsInList(prevState.records, replacedRecords);
-                if (!prevState.hasNewer) {
-                  allRecords = mergeNewRecordsIntoList(allRecords, uniqueNewRecords);
-                }
-              } else {
-                allRecords = prevState.records;
-              }
-              const serverOldestSequence = batch.oldestSequence === null
-                ? prevState.serverOldestSequence
-                : Math.max(
-                  prevState.serverOldestSequence ?? 0,
-                  batch.oldestSequence,
-                );
-              const countBeforeRetention = allRecords.length;
-              if (serverOldestSequence !== null) {
-                allRecords = allRecords.filter(
-                  (record) => record.sequence >= serverOldestSequence,
-                );
-              }
-              const retainedRemovals = countBeforeRetention - allRecords.length;
-              needsMembershipReconciliation =
-                allRecords.length > batch.serverTotal ||
-                (serverOldestSequence === prevState.serverOldestSequence &&
-                  prevState.serverTotal - batch.serverTotal > retainedRemovals);
-              // A smaller total does not identify deleted rows. Keep the bounded
-              // window intact until an authoritative ID query reconciles misses.
-              const bounded = mergeBoundedTrafficWindow(
-                allRecords,
-                [],
-                'newer',
-                MAX_TRAFFIC_WINDOW_RECORDS,
+              const merged = mergeBoundedTrafficWindow(
+                prevState.records,
+                olderRecords,
+                "older",
               );
-              allRecords = bounded.records;
-              const boundaries = getBoundaryState(allRecords);
-              const visibleRecordsMap = buildTrafficRecordsMap(allRecords);
-              for (const pendingId of newPendingIds) {
-                if (!visibleRecordsMap.has(pendingId)) {
-                  newPendingIds.delete(pendingId);
-                }
-              }
-              const sourceLatest = [...batch.updatedRecords, ...batch.newRecords]
-                .reduce<TrafficSummary | null>((latest, record) => (
-                  !latest || record.sequence > latest.sequence ? record : latest
-                ), null);
-              const sourceLastSequence = Math.max(
-                prevState.lastSequence ?? 0,
-                sourceLatest?.sequence ?? 0,
-              ) || null;
-              const sourceLastId = sourceLatest && sourceLatest.sequence >= (prevState.lastSequence ?? 0)
-                ? sourceLatest.id
-                : prevState.lastId;
-
-              const updatedNewRecordsCount = prevState.autoScroll && !prevState.hasNewer
-                ? 0
-                : prevState.newRecordsCount
-                  + Math.max(actualNewCount, batch.sourceNewRecordCount)
-                  + promotedUpdateCount;
-
-              pushService.updateSubscription({
-                last_traffic_id: sourceLastId || undefined,
-                last_sequence: sourceLastSequence || undefined,
-                pending_ids: Array.from(newPendingIds),
-              });
-
-              let updatedCurrentRecord = prevState.currentRecord;
-              if (updatedCurrentRecord) {
-                const updatedSummary = findLastRecordById(
-                  batch.updatedRecords,
-                  updatedCurrentRecord.id,
-                );
-                if (updatedSummary) {
-                  updatedCurrentRecord = mergeDetailWithSummary(
-                    updatedCurrentRecord,
-                    updatedSummary,
-                  );
-                }
-              }
+              const records = merged.records;
+              const boundaries = getTrafficWindowBoundaries(records);
+              const pendingIds = new Set(
+                records.filter(isPendingRecord).map((record) => record.id),
+              );
+              capPendingIds(pendingIds);
 
               return {
-                records: allRecords,
-                recordsMap: visibleRecordsMap,
-                serverTotal: batch.serverTotal,
-                serverSequence: Math.max(prevState.serverSequence, batch.serverSequence),
-                serverOldestSequence,
-                hasMore: prevState.hasMore || bounded.trimmedSide === 'older',
+                records,
+                recordsMap: buildTrafficRecordsMap(records),
+                serverTotal: response.total,
+                serverSequence: Math.max(
+                  prevState.serverSequence,
+                  response.server_sequence,
+                ),
+                hasMore: response.has_more && olderRecords.length > 0,
+                hasNewer: prevState.hasNewer || merged.trimmedSide === "newer",
                 oldestSequence: boundaries.oldestSequence,
-                lastId: sourceLastId,
-                lastSequence: sourceLastSequence,
-                pendingIds: newPendingIds,
-                newRecordsCount: updatedNewRecordsCount,
-                currentRecord: updatedCurrentRecord,
-                recordsMutation: hasChanges || serverOldestSequence !== prevState.serverOldestSequence
-                  ? createRecordsMutation({
-                    reset: false,
-                    inserted: uniqueNewRecords,
-                    updated: replacedRecords,
-                    deletedIds: [],
-                    oldestSequenceFloor: serverOldestSequence,
-                    incomplete: batch.hasMore ||
-                      batch.sourceNewRecordCount > batch.newRecords.length ||
-                      batch.sourceUpdatedRecordCount > batch.updatedRecords.length,
-                  })
-                  : prevState.recordsMutation,
+                pendingIds,
+                recordsMutation: createRecordsMutation({
+                  reset: true,
+                  inserted: records,
+                  updated: [],
+                  deletedIds: [],
+                }),
               };
             });
-            membershipReconciliationRequired ||= needsMembershipReconciliation;
-            if (membershipReconciliationRequired && !batch.hasMore) {
-              if (membershipRequest) {
-                membershipFollowupRequired = true;
-              } else {
-                void get().reconcileTrafficWindow();
-              }
+          } catch (e) {
+            if (generation === captureCoordination.historyBackfillGeneration) {
+              set({ error: (e as Error).message });
             }
-          });
-        };
+          } finally {
+            if (generation === captureCoordination.historyBackfillGeneration) {
+              set({ historyLoading: false });
+            }
+          }
+        },
 
-        if (timeSinceLastUpdate >= UPDATE_THROTTLE_MS) {
-          scheduleUpdate();
-        } else {
-          updateTimerId = window.setTimeout(
-            scheduleUpdate,
-            UPDATE_THROTTLE_MS - timeSinceLastUpdate,
-          );
-        }
-      },
+        loadNewer: async () => {
+          const state = get();
+          const newestSequence = state.records.at(-1)?.sequence ?? null;
+          if (
+            state.historyLoading ||
+            !state.hasNewer ||
+            newestSequence === null
+          ) {
+            return;
+          }
 
-      handleTrafficDelta: (data: TrafficDeltaData) => {
-        get().handleTrafficPush({
-          database_epoch: data.database_epoch,
-          new_records: data.inserts.map(compactTrafficSummaryToTrafficSummary),
-          updated_records: data.updates.map(compactTrafficSummaryToTrafficSummary),
-          has_more: data.has_more,
-          server_total: data.server_total,
-          server_sequence: data.server_sequence,
-          oldest_sequence: data.oldest_sequence,
-        });
-      },
+          const generation = captureCoordination.historyBackfillGeneration;
+          set({ historyLoading: true });
 
-      reconcileTrafficWindow: async () => {
-        if (!membershipRequest) {
-          membershipReconciliationRequired = false;
-          const generation = historyBackfillGeneration;
-          const recordIds = get().records.map((record) => record.id);
-          if (recordIds.length === 0) return;
-          membershipRequest = (async () => {
-            const existingIds = new Set<string>();
-            for (
-              let offset = 0;
-              offset < recordIds.length;
-              offset += MEMBERSHIP_QUERY_LIMIT
-            ) {
-              const ids = recordIds.slice(
-                offset,
-                offset + MEMBERSHIP_QUERY_LIMIT,
+          try {
+            const response = await api.getTrafficPage({
+              cursor: newestSequence,
+              limit: HISTORY_BATCH_LIMIT,
+              direction: "forward",
+            });
+
+            if (generation !== captureCoordination.historyBackfillGeneration) {
+              return;
+            }
+
+            const newerRecords = preprocessTrafficRecords(
+              response.records.map(compactTrafficSummaryToTrafficSummary),
+            );
+
+            set((prevState) => {
+              if (
+                generation !== captureCoordination.historyBackfillGeneration
+              ) {
+                return {};
+              }
+
+              const merged = mergeBoundedTrafficWindow(
+                prevState.records,
+                newerRecords,
+                "newer",
               );
-              const response = await api.queryTraffic({
-                record_ids: ids,
-                limit: ids.length,
-              });
-              // Never infer deletions from an incomplete/failed query snapshot.
-              if (generation !== historyBackfillGeneration) return;
-              if (response.has_more || response.total !== response.records.length) {
-                membershipReconciliationRequired = true;
-                return;
-              }
-              for (const record of response.records) existingIds.add(record.id);
-            }
-            if (generation !== historyBackfillGeneration) return;
-            const deletedIds = recordIds.filter((id) => !existingIds.has(id));
-            // Delta metadata already included these deletions in the global total.
-            // Remove only queried IDs, preserving concurrent arrivals and paging.
-            get().handleTrafficDeleted(deletedIds, get().serverTotal);
-          })()
-            .catch(() => {
-              // Keep the visible window on transient errors. A later delta can retry.
-              if (generation === historyBackfillGeneration) {
-                membershipReconciliationRequired = true;
-              }
-            })
-            .finally(() => {
-              membershipRequest = null;
-              if (membershipFollowupRequired) {
-                membershipFollowupRequired = false;
-                void get().reconcileTrafficWindow();
-              }
-            });
-        }
-        await membershipRequest;
-      },
+              const records = merged.records;
+              const boundaries = getTrafficWindowBoundaries(records);
+              const pendingIds = new Set(
+                records.filter(isPendingRecord).map((record) => record.id),
+              );
+              capPendingIds(pendingIds);
 
-      handleTrafficDeleted: (ids: string[], authoritativeTotal?: number) => {
-        if (ids.length === 0) return;
-        const idsSet = new Set(ids);
-        set((prevState) => {
-          const recordsMap = new Map(prevState.recordsMap);
-          const pendingIds = new Set(prevState.pendingIds);
-          let removedCount = 0;
-
-          for (const id of idsSet) {
-            if (recordsMap.delete(id)) {
-              removedCount += 1;
-            }
-            pendingIds.delete(id);
-          }
-
-          const currentDeleted = prevState.currentRecord && idsSet.has(prevState.currentRecord.id);
-          const selectedDeleted = prevState.selectedId && idsSet.has(prevState.selectedId);
-
-          if (!currentDeleted && !selectedDeleted && removedCount === 0) {
-            return {};
-          }
-
-          const records = removedCount > 0
-            ? prevState.records.filter((record) => !idsSet.has(record.id))
-            : prevState.records;
-          const boundaries = getBoundaryState(records);
-
-
-          const detailRemoved = currentDeleted || !!selectedDeleted;
-          return {
-            records,
-            recordsMap,
-            pendingIds,
-            serverTotal: authoritativeTotal ?? Math.max(prevState.serverTotal - removedCount, 0),
-            oldestSequence: boundaries.oldestSequence,
-            lastId: prevState.lastId,
-            lastSequence: prevState.lastSequence,
-            currentRecord: detailRemoved ? null : prevState.currentRecord,
-            requestBody: detailRemoved ? null : prevState.requestBody,
-            responseBody: detailRemoved ? null : prevState.responseBody,
-            requestRawBody: detailRemoved ? null : prevState.requestRawBody,
-            responseRawBody: detailRemoved ? null : prevState.responseRawBody,
-            detailLoading: detailRemoved ? false : prevState.detailLoading,
-            detailError: detailRemoved ? 'Request was deleted' : prevState.detailError,
-            selectedId: selectedDeleted ? undefined : prevState.selectedId,
-            filterVersion: removedCount > 0 ? prevState.filterVersion + 1 : prevState.filterVersion,
-            recordsMutation: removedCount > 0
-              ? createRecordsMutation({
-                reset: false,
-                inserted: [],
-                updated: [],
-                deletedIds: Array.from(idsSet),
-              })
-              : prevState.recordsMutation,
-          };
-        });
-      },
-
-      handleTrafficStatistics: (statistics: TrafficStatistics) => {
-        const state = get();
-        const identityChanged = !!statistics.database_epoch &&
-          !!state.trafficDatabaseEpoch && statistics.database_epoch !== state.trafficDatabaseEpoch;
-        const identityMatches = !!statistics.database_epoch &&
-          statistics.database_epoch === state.trafficDatabaseEpoch;
-        const previousSequence = Math.max(
-          state.serverSequence, state.lastSequence ?? 0, pendingBatch?.serverSequence ?? 0,
-        );
-        const consumedRecordSequence = getConsumedTrafficSequence();
-        // server_sequence is the next allocation, so it must exceed every row
-        // already consumed. UUIDs survive backup restore; unused allocations
-        // alone (serverSequence) cannot establish that persisted rows rolled back.
-        const sameIdentityRecordRollback = identityMatches &&
-          statistics.server_sequence <= consumedRecordSequence;
-        const unprovenLegacyIdentity = !state.trafficDatabaseEpoch &&
-          !!statistics.database_epoch && statistics.server_sequence < previousSequence;
-        // Sequence watermarks only have meaning within one database. A queued
-        // old-epoch delta must not suppress a lower new-epoch statistics push.
-        if (!identityChanged && !unprovenLegacyIdentity && !sameIdentityRecordRollback && statistics.server_sequence < latestTrafficSequenceSinceResume) return;
-        if (!identityChanged) {
-          set({
-            ...snapshotServerStatistics(statistics),
-            trafficDatabaseEpoch: unprovenLegacyIdentity
-              ? state.trafficDatabaseEpoch
-              : statistics.database_epoch ?? state.trafficDatabaseEpoch,
-          });
-        }
-        // Initial statistics follow all reconnect chunks. has_more can remain
-        // true on the final chunk because older history lies outside the bounded
-        // tail, so use this snapshot to finish membership reconciliation too.
-        // Compare only this connection's traffic: empty storage can restart at 1.
-        if (
-          !state.paused &&
-          (identityChanged || sameIdentityRecordRollback || unprovenLegacyIdentity || membershipReconciliationRequired || trafficResumeStatisticsPending)
-        ) {
-          if (identityChanged || sameIdentityRecordRollback || (!identityMatches && statistics.server_sequence < previousSequence)) {
-            trafficEpochResetSuspected = true;
-            const generation = historyBackfillGeneration;
-            const resumeGeneration = trafficResumeGeneration;
-            if (trafficEpochRequest?.historyGeneration !== generation ||
-              trafficEpochRequest.resumeGeneration !== resumeGeneration ||
-              trafficEpochRequest.databaseEpoch !== statistics.database_epoch) {
-              // A periodic push may have been captured before this reconnect.
-              // Confirm a new identity (or legacy counter rollback) with a fresh
-              // read before discarding the current database's window.
-              const request = api.getTrafficStatistics()
-                .then((current) => {
-                  if (trafficEpochRequest?.promise !== request ||
-                    state.trafficDatabaseEpoch !== get().trafficDatabaseEpoch ||
-                    generation !== historyBackfillGeneration ||
-                    resumeGeneration !== trafficResumeGeneration || get().paused) return;
-                  if ((identityChanged || sameIdentityRecordRollback || unprovenLegacyIdentity) && current.database_epoch !== statistics.database_epoch) {
-                    // A response naming another database cannot confirm this
-                    // candidate. A third identity needs its own fresh read.
-                    if (current.database_epoch) get().handleTrafficStatistics(current);
-                    return;
-                  }
-                  if (sameIdentityRecordRollback) {
-                    // A confirmation captured before newer delivered rows is
-                    // stale, even if those rows have not reached the render batch.
-                    if (current.server_sequence <= trafficEpochRequest.latestRecordSequence) return;
-                  } else if (!identityChanged && !unprovenLegacyIdentity && current.server_sequence < latestTrafficSequenceSinceResume) return;
-                  const confirmedSameIdentity = !!state.trafficDatabaseEpoch &&
-                    current.database_epoch === state.trafficDatabaseEpoch;
-                  const rollbackDisproved = confirmedSameIdentity
-                    ? current.server_sequence > consumedRecordSequence
-                    : current.server_sequence >= previousSequence;
-                  if (!identityChanged && rollbackDisproved) {
-                    get().handleTrafficStatistics(current);
-                    return;
-                  }
-
-                  // The new epoch may already contain arrivals. Reopen with no
-                  // cursor so initial replay recovers them, even if the old server
-                  // subscription filtered them out. Clear the old window first:
-                  // its high sequences must not evict the new epoch's low rows.
-                  historyBackfillGeneration += 1;
-                  latestTrafficSequenceSinceResume = 0;
-                  clearPendingTrafficBatch();
-                  membershipReconciliationRequired = false;
-                  membershipFollowupRequired = false;
-                  trafficResumeStatisticsPending = false;
-                  trafficEpochResetSuspected = false;
-                  set((latest) => ({
-                    ...snapshotServerStatistics(current),
-                    trafficDatabaseEpoch: current.database_epoch ?? null,
-                    records: [],
-                    recordsMap: new Map(),
-                    currentRecord: null,
-                    selectedId: undefined,
-                    requestBody: null,
-                    responseBody: null,
-                    requestRawBody: null,
-                    responseRawBody: null,
-                    detailLoading: false,
-                    detailError: null,
-                    serverTotal: current.total_requests,
-                    lastId: null,
-                    lastSequence: null,
-                    oldestSequence: null,
-                    serverSequence: current.server_sequence,
-                    serverOldestSequence: null,
-                    trafficEpochVersion: latest.trafficEpochVersion + 1,
-                    pendingIds: new Set(),
-                    hasMore: current.total_requests > INITIAL_WINDOW_LIMIT,
-                    hasNewer: false,
-                    newRecordsCount: 0,
-                    loading: false,
-                    historyLoading: false,
-                    catchingUp: false,
-                    filterVersion: latest.filterVersion + 1,
-                    recordsMutation: createRecordsMutation({
-                      reset: true, inserted: [], updated: [], deletedIds: [],
-                    }),
-                  }));
-                  pushService.resetTrafficCursor();
-                  if (!get().usePush && get().polling) {
-                    const timeoutId = get().pollTimeoutId;
-                    if (timeoutId !== null) window.clearTimeout(timeoutId);
-                    set({ pollTimeoutId: null });
-                    void get().fetchUpdates();
-                  }
-                })
-                .catch(() => {
-                  // Preserve the window and retry on the next statistics push.
-                })
-                .finally(() => {
-                  if (trafficEpochRequest?.promise !== request) return;
-                  const followup = trafficEpochRequest.followup;
-                  trafficEpochRequest = null;
-                  if (followup && trafficEpochResetSuspected &&
-                    generation === historyBackfillGeneration &&
-                    resumeGeneration === trafficResumeGeneration) {
-                    get().handleTrafficStatistics(followup);
-                  }
-                });
-              trafficEpochRequest = {
-                historyGeneration: generation,
-                resumeGeneration,
-                statisticsSequence: statistics.server_sequence,
-                latestRecordSequence: 0,
-                databaseEpoch: statistics.database_epoch,
-                followup: null,
-                promise: request,
+              return {
+                records,
+                recordsMap: buildTrafficRecordsMap(records),
+                serverTotal: response.total,
+                serverSequence: Math.max(
+                  prevState.serverSequence,
+                  response.server_sequence,
+                ),
+                hasMore: prevState.hasMore || merged.trimmedSide === "older",
+                hasNewer: response.has_more && newerRecords.length > 0,
+                oldestSequence: boundaries.oldestSequence,
+                pendingIds,
+                recordsMutation: createRecordsMutation({
+                  reset: true,
+                  inserted: records,
+                  updated: [],
+                  deletedIds: [],
+                }),
               };
-            } else if (statistics.server_sequence > trafficEpochRequest.statisticsSequence) {
-              // Do not lose a newer snapshot while confirmation is pending: an
-              // idle server may never push it again after this read returns.
-              trafficEpochRequest.followup = statistics;
-            }
-            return;
-          }
-          trafficResumeStatisticsPending = false;
-          trafficEpochResetSuspected = false;
-          get().handleTrafficPush({
-            new_records: [],
-            updated_records: [],
-            has_more: false,
-            server_total: statistics.total_requests,
-            server_sequence: statistics.server_sequence,
-          });
-        }
-      },
-
-      fetchInitialData: async () => {
-        const state = get();
-        if (state.loading || state.initialized) {
-          return;
-        }
-
-        const generation = ++historyBackfillGeneration;
-        const resumeGeneration = trafficResumeGeneration;
-        membershipReconciliationRequired = false;
-        membershipFollowupRequired = false;
-        trafficResumeStatisticsPending = false;
-        trafficEpochResetSuspected = false;
-        set({ loading: true, error: null });
-        try {
-          const filter: TrafficUpdatesFilter = {
-            limit: INITIAL_WINDOW_LIMIT,
-          };
-          const response = await api.getTrafficUpdates(filter);
-          if (generation !== historyBackfillGeneration) return;
-          if (resumeGeneration !== trafficResumeGeneration) {
-            set({ loading: false });
-            return;
-          }
-          observeTrafficRecordSequence(response.database_epoch, Math.max(
-            response.new_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
-            response.updated_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
-          ));
-          if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) {
-            set({ loading: false });
-            return;
-          }
-
-          const convertedRecords = response.new_records.map(compactTrafficSummaryToTrafficSummary);
-          const preprocessedRecords = preprocessTrafficRecords(convertedRecords);
-
-
-          const newPendingIds = new Set<string>();
-          const newRecordsMap = new Map<string, TrafficSummary>();
-          for (const r of preprocessedRecords) {
-            newRecordsMap.set(r.id, r);
-            if (isPendingRecord(r)) {
-              newPendingIds.add(r.id);
-            }
-          }
-          capPendingIds(newPendingIds);
-
-          const boundaries = getBoundaryState(preprocessedRecords);
-          set({
-            records: preprocessedRecords,
-            recordsMap: newRecordsMap,
-            serverTotal: response.server_total,
-            serverSequence: response.server_sequence,
-            hasMore: response.has_more,
-            hasNewer: false,
-            oldestSequence: boundaries.oldestSequence,
-            lastId: boundaries.lastId,
-            lastSequence: boundaries.lastSequence,
-            pendingIds: newPendingIds,
-            loading: false,
-            filterVersion: 0,
-            initialized: true,
-            catchingUp: false,
-            recordsMutation: createRecordsMutation({
-              reset: true,
-              inserted: preprocessedRecords,
-              updated: [],
-              deletedIds: [],
-            }),
-          });
-          await get().fetchTrafficStatistics();
-        } catch (e) {
-          if (generation === historyBackfillGeneration) {
-            set({
-              loading: false,
-              ...(resumeGeneration === trafficResumeGeneration ? { error: (e as Error).message } : {}),
             });
-          }
-        }
-      },
-
-      backfillHistory: async () => {
-        const state = get();
-        if (state.historyLoading || !state.hasMore || state.oldestSequence === null) {
-          return;
-        }
-
-        const generation = historyBackfillGeneration;
-        set({ historyLoading: true });
-
-        try {
-          const response = await api.getTrafficPage({
-            cursor: state.oldestSequence,
-            limit: HISTORY_BATCH_LIMIT,
-            direction: 'backward',
-          });
-
-          if (generation !== historyBackfillGeneration) {
-            return;
-          }
-
-          const olderRecords = preprocessTrafficRecords(
-            response.records.map(compactTrafficSummaryToTrafficSummary).reverse(),
-          );
-
-          set((prevState) => {
-            if (generation !== historyBackfillGeneration) {
-              return {};
+          } catch (e) {
+            if (generation === captureCoordination.historyBackfillGeneration) {
+              set({ error: (e as Error).message });
             }
-
-            const merged = mergeBoundedTrafficWindow(
-              prevState.records,
-              olderRecords,
-              'older',
-            );
-            const records = merged.records;
-            const boundaries = getTrafficWindowBoundaries(records);
-            const pendingIds = new Set(
-              records.filter(isPendingRecord).map((record) => record.id),
-            );
-            capPendingIds(pendingIds);
-
-            return {
-              records,
-              recordsMap: buildTrafficRecordsMap(records),
-              serverTotal: response.total,
-              serverSequence: Math.max(prevState.serverSequence, response.server_sequence),
-              hasMore: response.has_more && olderRecords.length > 0,
-              hasNewer: prevState.hasNewer || merged.trimmedSide === 'newer',
-              oldestSequence: boundaries.oldestSequence,
-              pendingIds,
-              recordsMutation: createRecordsMutation({
-                reset: true,
-                inserted: records,
-                updated: [],
-                deletedIds: [],
-              }),
-            };
-          });
-        } catch (e) {
-          if (generation === historyBackfillGeneration) {
-            set({ error: (e as Error).message });
-          }
-        } finally {
-          if (generation === historyBackfillGeneration) {
-            set({ historyLoading: false });
-          }
-        }
-      },
-
-      loadNewer: async () => {
-        const state = get();
-        const newestSequence = state.records.at(-1)?.sequence ?? null;
-        if (state.historyLoading || !state.hasNewer || newestSequence === null) {
-          return;
-        }
-
-        const generation = historyBackfillGeneration;
-        set({ historyLoading: true });
-
-        try {
-          const response = await api.getTrafficPage({
-            cursor: newestSequence,
-            limit: HISTORY_BATCH_LIMIT,
-            direction: 'forward',
-          });
-
-          if (generation !== historyBackfillGeneration) {
-            return;
-          }
-
-          const newerRecords = preprocessTrafficRecords(
-            response.records.map(compactTrafficSummaryToTrafficSummary),
-          );
-
-          set((prevState) => {
-            if (generation !== historyBackfillGeneration) {
-              return {};
+          } finally {
+            if (generation === captureCoordination.historyBackfillGeneration) {
+              set({ historyLoading: false });
             }
+          }
+        },
 
-            const merged = mergeBoundedTrafficWindow(
-              prevState.records,
-              newerRecords,
-              'newer',
+        fetchUpdates: async () => {
+          const state = get();
+          if (state.paused || !state.polling || state.catchingUp) return;
+          const generation = captureCoordination.historyBackfillGeneration;
+          const resumeGeneration = captureCoordination.trafficResumeGeneration;
+          let nextDelay = POLL_INTERVAL;
+          try {
+            const pendingIdsArray = Array.from(state.pendingIds);
+            const response = await api.getTrafficUpdates({
+              after_id: state.lastId || undefined,
+              after_seq: state.lastSequence || undefined,
+              pending_ids:
+                pendingIdsArray.length > 0
+                  ? pendingIdsArray.join(",")
+                  : undefined,
+              limit: UPDATE_BATCH_LIMIT,
+            });
+            if (
+              generation !== captureCoordination.historyBackfillGeneration ||
+              resumeGeneration !== captureCoordination.trafficResumeGeneration
+            )
+              return;
+            observeTrafficRecordSequence(
+              response.database_epoch,
+              Math.max(
+                response.new_records.reduce(
+                  (sequence, record) => Math.max(sequence, record.seq),
+                  0,
+                ),
+                response.updated_records.reduce(
+                  (sequence, record) => Math.max(sequence, record.seq),
+                  0,
+                ),
+              ),
             );
-            const records = merged.records;
-            const boundaries = getTrafficWindowBoundaries(records);
-            const pendingIds = new Set(
-              records.filter(isPendingRecord).map((record) => record.id),
-            );
-            capPendingIds(pendingIds);
+            if (
+              !acceptTrafficDatabaseEpoch(
+                response.database_epoch,
+                response.server_sequence,
+              )
+            )
+              return;
 
-            return {
-              records,
-              recordsMap: buildTrafficRecordsMap(records),
-              serverTotal: response.total,
-              serverSequence: Math.max(prevState.serverSequence, response.server_sequence),
-              hasMore: prevState.hasMore || merged.trimmedSide === 'older',
-              hasNewer: response.has_more && newerRecords.length > 0,
-              oldestSequence: boundaries.oldestSequence,
-              pendingIds,
-              recordsMutation: createRecordsMutation({
-                reset: true,
-                inserted: records,
-                updated: [],
-                deletedIds: [],
-              }),
-            };
-          });
-        } catch (e) {
-          if (generation === historyBackfillGeneration) {
-            set({ error: (e as Error).message });
-          }
-        } finally {
-          if (generation === historyBackfillGeneration) {
-            set({ historyLoading: false });
-          }
-        }
-      },
-
-      fetchUpdates: async () => {
-        const state = get();
-        if (state.paused || !state.polling || state.catchingUp) return;
-        const generation = historyBackfillGeneration;
-        const resumeGeneration = trafficResumeGeneration;
-        let nextDelay = POLL_INTERVAL;
-        try {
-          const pendingIdsArray = Array.from(state.pendingIds);
-          const response = await api.getTrafficUpdates({
-            after_id: state.lastId || undefined,
-            after_seq: state.lastSequence || undefined,
-            pending_ids: pendingIdsArray.length > 0 ? pendingIdsArray.join(',') : undefined,
-            limit: UPDATE_BATCH_LIMIT,
-          });
-          if (generation !== historyBackfillGeneration ||
-            resumeGeneration !== trafficResumeGeneration) return;
-          observeTrafficRecordSequence(response.database_epoch, Math.max(
-            response.new_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
-            response.updated_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
-          ));
-          if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
-
-          get().handleTrafficDelta({
-            database_epoch: response.database_epoch,
-            inserts: response.new_records,
-            updates: response.updated_records,
-            has_more: response.has_more,
-            server_total: response.server_total,
-            server_sequence: response.server_sequence,
-          });
-          hasMoreBurst = response.has_more ? hasMoreBurst + 1 : 0;
-          nextDelay = response.has_more
-            ? (hasMoreBurst > HAS_MORE_BURST_LIMIT ? HAS_MORE_BACKOFF_INTERVAL : POLL_MIN_INTERVAL)
-            : POLL_INTERVAL;
-        } catch (e) {
-          if (generation === historyBackfillGeneration) set({ error: (e as Error).message });
-        } finally {
-          // A failed identity confirmation must not terminate polling. A reset
-          // starts its own cursor-free poll; the prior generation cannot reschedule.
-          if (generation === historyBackfillGeneration && get().polling) {
-            const timeoutId = window.setTimeout(() => {
-              get().fetchUpdates();
-            }, nextDelay);
-            set({ pollTimeoutId: timeoutId });
-          }
-        }
-      },
-
-      catchUpUpdates: async () => {
-        const state = get();
-        if (state.paused || !state.polling || state.catchingUp) return;
-        const generation = historyBackfillGeneration;
-        const resumeGeneration = trafficResumeGeneration;
-
-        set({ catchingUp: true });
-        try {
-          const pendingIdsArray = Array.from(get().pendingIds);
-          const filter: TrafficUpdatesFilter = {
-            after_id: get().lastId || undefined,
-            after_seq: get().lastSequence || undefined,
-            pending_ids: pendingIdsArray.length > 0 ? pendingIdsArray.join(',') : undefined,
-            limit: UPDATE_BATCH_LIMIT,
-          };
-          const response = await api.getTrafficUpdates(filter);
-          if (generation !== historyBackfillGeneration ||
-            resumeGeneration !== trafficResumeGeneration) return;
-          observeTrafficRecordSequence(response.database_epoch, Math.max(
-            response.new_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
-            response.updated_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
-          ));
-          if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
-
-          set((prev) => ({
-            serverTotal: response.server_total,
-            serverSequence: response.server_sequence ?? prev.serverSequence,
-          }));
-
-          if (response.new_records.length > 0 || response.updated_records.length > 0) {
             get().handleTrafficDelta({
               database_epoch: response.database_epoch,
               inserts: response.new_records,
@@ -2023,325 +956,315 @@ export const useTrafficStore = create<TrafficState>()(
               server_total: response.server_total,
               server_sequence: response.server_sequence,
             });
-          }
-        } catch (e) {
-          if (generation !== historyBackfillGeneration) return;
-          set({ error: (e as Error).message });
-        } finally {
-          if (generation === historyBackfillGeneration) set({ catchingUp: false });
-        }
-
-        const afterState = get();
-        if (afterState.records.length > 0 && afterState.serverTotal < afterState.records.length) {
-          await get().reloadRecords();
-        }
-      },
-
-      reloadRecords: async () => {
-        const generation = historyBackfillGeneration;
-        const resumeGeneration = trafficResumeGeneration;
-        try {
-          const filter: TrafficUpdatesFilter = {
-            limit: INITIAL_WINDOW_LIMIT,
-          };
-          const response = await api.getTrafficUpdates(filter);
-          if (generation !== historyBackfillGeneration ||
-            resumeGeneration !== trafficResumeGeneration) return;
-          observeTrafficRecordSequence(response.database_epoch, Math.max(
-            response.new_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
-            response.updated_records.reduce((sequence, record) => Math.max(sequence, record.seq), 0),
-          ));
-          if (!acceptTrafficDatabaseEpoch(response.database_epoch, response.server_sequence)) return;
-          const convertedRecords = response.new_records.map(compactTrafficSummaryToTrafficSummary);
-          const preprocessedRecords = preprocessTrafficRecords(convertedRecords);
-
-          const newPendingIds = new Set<string>();
-          const newRecordsMap = new Map<string, TrafficSummary>();
-          for (const r of preprocessedRecords) {
-            newRecordsMap.set(r.id, r);
-            if (isPendingRecord(r)) {
-              newPendingIds.add(r.id);
+            captureCoordination.hasMoreBurst = response.has_more
+              ? captureCoordination.hasMoreBurst + 1
+              : 0;
+            nextDelay = response.has_more
+              ? captureCoordination.hasMoreBurst > HAS_MORE_BURST_LIMIT
+                ? HAS_MORE_BACKOFF_INTERVAL
+                : POLL_MIN_INTERVAL
+              : POLL_INTERVAL;
+          } catch (e) {
+            if (generation === captureCoordination.historyBackfillGeneration)
+              set({ error: (e as Error).message });
+          } finally {
+            // A failed identity confirmation must not terminate polling. A reset
+            // starts its own cursor-free poll; the prior generation cannot reschedule.
+            if (
+              generation === captureCoordination.historyBackfillGeneration &&
+              get().polling
+            ) {
+              const timeoutId = window.setTimeout(() => {
+                get().fetchUpdates();
+              }, nextDelay);
+              set({ pollTimeoutId: timeoutId });
             }
           }
-          capPendingIds(newPendingIds);
+        },
 
-          const boundaries = getBoundaryState(preprocessedRecords);
+        catchUpUpdates: async () => {
+          const state = get();
+          if (state.paused || !state.polling || state.catchingUp) return;
+          const generation = captureCoordination.historyBackfillGeneration;
+          const resumeGeneration = captureCoordination.trafficResumeGeneration;
+
+          set({ catchingUp: true });
+          try {
+            const pendingIdsArray = Array.from(get().pendingIds);
+            const filter: TrafficUpdatesFilter = {
+              after_id: get().lastId || undefined,
+              after_seq: get().lastSequence || undefined,
+              pending_ids:
+                pendingIdsArray.length > 0
+                  ? pendingIdsArray.join(",")
+                  : undefined,
+              limit: UPDATE_BATCH_LIMIT,
+            };
+            const response = await api.getTrafficUpdates(filter);
+            if (
+              generation !== captureCoordination.historyBackfillGeneration ||
+              resumeGeneration !== captureCoordination.trafficResumeGeneration
+            )
+              return;
+            observeTrafficRecordSequence(
+              response.database_epoch,
+              Math.max(
+                response.new_records.reduce(
+                  (sequence, record) => Math.max(sequence, record.seq),
+                  0,
+                ),
+                response.updated_records.reduce(
+                  (sequence, record) => Math.max(sequence, record.seq),
+                  0,
+                ),
+              ),
+            );
+            if (
+              !acceptTrafficDatabaseEpoch(
+                response.database_epoch,
+                response.server_sequence,
+              )
+            )
+              return;
+
+            set((prev) => ({
+              serverTotal: response.server_total,
+              serverSequence: response.server_sequence ?? prev.serverSequence,
+            }));
+
+            if (
+              response.new_records.length > 0 ||
+              response.updated_records.length > 0
+            ) {
+              get().handleTrafficDelta({
+                database_epoch: response.database_epoch,
+                inserts: response.new_records,
+                updates: response.updated_records,
+                has_more: response.has_more,
+                server_total: response.server_total,
+                server_sequence: response.server_sequence,
+              });
+            }
+          } catch (e) {
+            if (generation !== captureCoordination.historyBackfillGeneration)
+              return;
+            set({ error: (e as Error).message });
+          } finally {
+            if (generation === captureCoordination.historyBackfillGeneration)
+              set({ catchingUp: false });
+          }
+
+          const afterState = get();
+          if (
+            afterState.records.length > 0 &&
+            afterState.serverTotal < afterState.records.length
+          ) {
+            await get().reloadRecords();
+          }
+        },
+
+        ...createTrafficReconciliation({ get, set }, coordination),
+
+        fetchTrafficDetail: async (id: string) => {
+          const generation = captureCoordination.historyBackfillGeneration;
+          const prevState = get();
+          if (prevState.selectedId !== id) return;
+          const preserveBodies = prevState.currentRecord?.id === id;
           set({
-            records: preprocessedRecords,
-            recordsMap: newRecordsMap,
-            serverTotal: response.server_total,
-            serverSequence: response.server_sequence,
-            hasMore: response.has_more,
-            hasNewer: false,
-            oldestSequence: boundaries.oldestSequence,
-            lastId: boundaries.lastId,
-            lastSequence: boundaries.lastSequence,
-            pendingIds: newPendingIds,
-            newRecordsCount: 0,
-            filterVersion: get().filterVersion + 1,
-            recordsMutation: createRecordsMutation({
-              reset: true,
-              inserted: preprocessedRecords,
-              updated: [],
-              deletedIds: [],
-            }),
+            detailLoading: true,
+            detailError: null,
+            requestBody: preserveBodies ? prevState.requestBody : null,
+            responseBody: preserveBodies ? prevState.responseBody : null,
+            requestRawBody: preserveBodies ? prevState.requestRawBody : null,
+            responseRawBody: preserveBodies ? prevState.responseRawBody : null,
           });
-          pushService.updateSubscription({
-            last_traffic_id: boundaries.lastId || undefined,
-            last_sequence: boundaries.lastSequence || undefined,
-            pending_ids: Array.from(newPendingIds),
-          });
+          try {
+            const record = await api.getTrafficDetail(id);
+            if (
+              generation !== captureCoordination.historyBackfillGeneration ||
+              get().selectedId !== id
+            )
+              return;
+            const summary = get().recordsMap.get(id);
+            const mergedRecord = mergeDetailWithSummary(record, summary);
+            set({
+              currentRecord: mergedRecord,
+              detailLoading: false,
+              detailError: null,
+            });
 
-        } catch {
-          // reload is best-effort; errors are non-fatal
-        }
-      },
+            api
+              .getRequestBody(id)
+              .then((body) => {
+                if (
+                  generation ===
+                    captureCoordination.historyBackfillGeneration &&
+                  get().selectedId === id &&
+                  get().currentRecord?.id === id
+                )
+                  set({ requestBody: body });
+              })
+              .catch(() => {});
 
-      fetchTrafficDetail: async (id: string) => {
-        const generation = historyBackfillGeneration;
-        const prevState = get();
-        if (prevState.selectedId !== id) return;
-        const preserveBodies = prevState.currentRecord?.id === id;
-        set({
-          detailLoading: true,
-          detailError: null,
-          requestBody: preserveBodies ? prevState.requestBody : null,
-          responseBody: preserveBodies ? prevState.responseBody : null,
-          requestRawBody: preserveBodies ? prevState.requestRawBody : null,
-          responseRawBody: preserveBodies ? prevState.responseRawBody : null,
-        });
-        try {
-          const record = await api.getTrafficDetail(id);
-          if (generation !== historyBackfillGeneration || get().selectedId !== id) return;
-          const summary = get().recordsMap.get(id);
-          const mergedRecord = mergeDetailWithSummary(record, summary);
-          set({ currentRecord: mergedRecord, detailLoading: false, detailError: null });
-
-          api.getRequestBody(id).then(body => {
-            if (generation === historyBackfillGeneration && get().selectedId === id && get().currentRecord?.id === id) set({ requestBody: body });
-          }).catch(() => { });
-
-          if (mergedRecord.raw_request_body_ref) {
-            api.getRequestBodyContent(id, { raw: true, encoding: 'base64' }).then(body => {
-              if (generation === historyBackfillGeneration && get().selectedId === id && get().currentRecord?.id === id) set({ requestRawBody: body });
-            }).catch(() => { });
-          }
-
-          const isOpenSse = !!mergedRecord.is_sse && !!mergedRecord.socket_status?.is_open;
-          if (!isOpenSse) {
-            api.getResponseBody(id).then(body => {
-              if (generation === historyBackfillGeneration && get().selectedId === id && get().currentRecord?.id === id) set({ responseBody: body });
-            }).catch(() => { });
-            if (mergedRecord.raw_response_body_ref) {
-              api.getResponseBodyContent(id, { raw: true, encoding: 'base64' }).then(body => {
-                if (generation === historyBackfillGeneration && get().selectedId === id && get().currentRecord?.id === id) set({ responseRawBody: body });
-              }).catch(() => { });
+            if (mergedRecord.raw_request_body_ref) {
+              api
+                .getRequestBodyContent(id, { raw: true, encoding: "base64" })
+                .then((body) => {
+                  if (
+                    generation ===
+                      captureCoordination.historyBackfillGeneration &&
+                    get().selectedId === id &&
+                    get().currentRecord?.id === id
+                  )
+                    set({ requestRawBody: body });
+                })
+                .catch(() => {});
             }
+
+            const isOpenSse =
+              !!mergedRecord.is_sse && !!mergedRecord.socket_status?.is_open;
+            if (!isOpenSse) {
+              api
+                .getResponseBody(id)
+                .then((body) => {
+                  if (
+                    generation ===
+                      captureCoordination.historyBackfillGeneration &&
+                    get().selectedId === id &&
+                    get().currentRecord?.id === id
+                  )
+                    set({ responseBody: body });
+                })
+                .catch(() => {});
+              if (mergedRecord.raw_response_body_ref) {
+                api
+                  .getResponseBodyContent(id, { raw: true, encoding: "base64" })
+                  .then((body) => {
+                    if (
+                      generation ===
+                        captureCoordination.historyBackfillGeneration &&
+                      get().selectedId === id &&
+                      get().currentRecord?.id === id
+                    )
+                      set({ responseRawBody: body });
+                  })
+                  .catch(() => {});
+              }
+            }
+          } catch (e) {
+            if (
+              generation !== captureCoordination.historyBackfillGeneration ||
+              get().selectedId !== id
+            )
+              return;
+            const error = e as {
+              response?: { data?: { error?: string } };
+              message?: string;
+            };
+            const message =
+              error.response?.data?.error ||
+              error.message ||
+              "Request detail not found";
+            set({
+              currentRecord: null,
+              requestBody: null,
+              responseBody: null,
+              requestRawBody: null,
+              responseRawBody: null,
+              detailError: message,
+              detailLoading: false,
+            });
           }
-        } catch (e) {
-          if (generation !== historyBackfillGeneration || get().selectedId !== id) return;
-          const error = e as { response?: { data?: { error?: string } }; message?: string };
-          const message = error.response?.data?.error || error.message || 'Request detail not found';
+        },
+
+        appendSseResponseBody: (recordId: string, payload: string) => {
+          set((state) => {
+            if (!payload) return {};
+            if (state.currentRecord?.id !== recordId) return {};
+            const prev = state.responseBody || "";
+            if (prev.length >= SSE_RESPONSE_BODY_CHAR_LIMIT) return {};
+            let next = mergeSseBody(prev, payload);
+            if (next.length > SSE_RESPONSE_BODY_CHAR_LIMIT) {
+              next = `${next.slice(0, SSE_RESPONSE_BODY_CHAR_LIMIT)}\n\n... (truncated)`;
+            }
+            return { responseBody: next };
+          });
+        },
+
+        setResponseBody: (recordId: string, body: string | null) => {
+          set((state) => {
+            if (state.currentRecord?.id !== recordId) return {};
+            return { responseBody: body };
+          });
+        },
+
+        setToolbarFilters: (filters: ToolbarFilters) => {
+          set((state) => ({
+            toolbarFilters: filters,
+            filterVersion: state.filterVersion + 1,
+          }));
+        },
+
+        setFilterConditions: (conditions: FilterCondition[]) => {
+          set((state) => ({
+            filterConditions: conditions,
+            filterVersion: state.filterVersion + 1,
+          }));
+        },
+
+        setPaused: (paused: boolean) => {
+          set({ paused });
+          if (paused) {
+            get().stopPolling();
+          } else {
+            get().startPolling();
+          }
+        },
+
+        setAutoScroll: (autoScroll: boolean) => {
+          set({ autoScroll });
+          if (autoScroll) {
+            set({ newRecordsCount: 0 });
+          }
+        },
+
+        clearNewRecordsCount: () => set({ newRecordsCount: 0 }),
+
+        clearError: () => set({ error: null }),
+
+        clearCurrentRecord: () =>
           set({
             currentRecord: null,
             requestBody: null,
             responseBody: null,
             requestRawBody: null,
             responseRawBody: null,
-            detailError: message,
-            detailLoading: false,
-          });
-        }
-      },
-
-      appendSseResponseBody: (recordId: string, payload: string) => {
-        set((state) => {
-          if (!payload) return {};
-          if (state.currentRecord?.id !== recordId) return {};
-          const prev = state.responseBody || '';
-          if (prev.length >= SSE_RESPONSE_BODY_CHAR_LIMIT) return {};
-          let next = mergeSseBody(prev, payload);
-          if (next.length > SSE_RESPONSE_BODY_CHAR_LIMIT) {
-            next = `${next.slice(0, SSE_RESPONSE_BODY_CHAR_LIMIT)}\n\n... (truncated)`;
-          }
-          return { responseBody: next };
-        });
-      },
-
-      setResponseBody: (recordId: string, body: string | null) => {
-        set((state) => {
-          if (state.currentRecord?.id !== recordId) return {};
-          return { responseBody: body };
-        });
-      },
-
-      clearTraffic: async (ids?: string[]) => {
-        set({ error: null });
-
-        if (ids && ids.length > 0) {
-          const idsToRemove = new Set(ids);
-          let removedCount = 0;
-          let nextPendingIds: string[] | null = null;
-
-          set((state) => {
-            const newRecordsMap = new Map(state.recordsMap);
-            const newPendingIds = new Set(state.pendingIds);
-            const currentDeleted = state.currentRecord && idsToRemove.has(state.currentRecord.id);
-            const selectedDeleted = state.selectedId && idsToRemove.has(state.selectedId);
-
-            for (const id of idsToRemove) {
-              if (newRecordsMap.delete(id)) {
-                removedCount += 1;
-              }
-              newPendingIds.delete(id);
-            }
-
-            nextPendingIds = Array.from(newPendingIds);
-
-            const newRecords = removedCount > 0
-              ? state.records.filter((record) => !idsToRemove.has(record.id))
-              : state.records;
-            const boundaries = getBoundaryState(newRecords);
-            const detailRemoved = currentDeleted || !!selectedDeleted;
-
-            return {
-              records: newRecords,
-              recordsMap: newRecordsMap,
-              pendingIds: newPendingIds,
-              serverTotal: Math.max(state.serverTotal - removedCount, 0),
-              oldestSequence: boundaries.oldestSequence,
-              lastId: state.lastId,
-              lastSequence: state.lastSequence,
-              currentRecord: detailRemoved ? null : state.currentRecord,
-              requestBody: detailRemoved ? null : state.requestBody,
-              responseBody: detailRemoved ? null : state.responseBody,
-              detailLoading: detailRemoved ? false : state.detailLoading,
-              detailError: detailRemoved ? 'Request was deleted' : state.detailError,
-              selectedId: selectedDeleted ? undefined : state.selectedId,
-              filterVersion: removedCount > 0 ? state.filterVersion + 1 : state.filterVersion,
-              recordsMutation: removedCount > 0
-                ? createRecordsMutation({
-                  reset: false,
-                  inserted: [],
-                  updated: [],
-                  deletedIds: Array.from(idsToRemove),
-                })
-                : state.recordsMutation,
-            };
-          });
-
-          if (nextPendingIds) {
-            pushService.updateSubscription({ pending_ids: nextPendingIds });
-          }
-
-          api.clearTraffic(ids)
-            .catch((e) => {
-              const err = e as Error;
-              set({ error: err.message });
-            });
-
-          return true;
-        }
-
-        historyBackfillGeneration += 1;
-        membershipReconciliationRequired = false;
-        membershipFollowupRequired = false;
-        trafficResumeStatisticsPending = false;
-        trafficEpochResetSuspected = false;
-        clearPendingTrafficBatch();
-        set({
-          records: [],
-          recordsMap: new Map(),
-          serverTotal: 0,
-          serverSequence: 0,
-          serverOldestSequence: null,
-          hasMore: false,
-          hasNewer: false,
-          oldestSequence: null,
-          lastId: null,
-          lastSequence: null,
-          pendingIds: new Set(),
-          currentRecord: null,
-          requestBody: null,
-          responseBody: null,
-          requestRawBody: null,
-          responseRawBody: null,
-          detailError: null,
-          loading: false,
-          filterVersion: 0,
-          initialized: false,
-          selectedId: undefined,
-          historyLoading: false,
-          catchingUp: false,
-          recordsMutation: createRecordsMutation({
-            reset: true,
-            inserted: [],
-            updated: [],
-            deletedIds: [],
+            detailError: null,
           }),
-        });
 
-        pushService.updateSubscription({ pending_ids: [] });
-
-        api.clearTraffic()
-          .catch((e) => {
-            const err = e as Error;
-            set({ error: err.message });
+        initFromUrl: (
+          filters: FilterCondition[],
+          toolbar: ToolbarFilters | null,
+        ) => {
+          set({
+            filterConditions: filters,
+            toolbarFilters: toolbar || {
+              rule: [],
+              protocol: [],
+              type: [],
+              status: [],
+              imported: [],
+            },
           });
+        },
 
-        return true;
-      },
+        setScrollTop: (scrollTop: number) => set({ scrollTop }),
 
-      setToolbarFilters: (filters: ToolbarFilters) => {
-        set((state) => ({ toolbarFilters: filters, filterVersion: state.filterVersion + 1 }));
-      },
-
-      setFilterConditions: (conditions: FilterCondition[]) => {
-        set((state) => ({ filterConditions: conditions, filterVersion: state.filterVersion + 1 }));
-      },
-
-      setPaused: (paused: boolean) => {
-        set({ paused });
-        if (paused) {
-          get().stopPolling();
-        } else {
-          get().startPolling();
-        }
-      },
-
-      setAutoScroll: (autoScroll: boolean) => {
-        set({ autoScroll });
-        if (autoScroll) {
-          set({ newRecordsCount: 0 });
-        }
-      },
-
-      clearNewRecordsCount: () => set({ newRecordsCount: 0 }),
-
-      clearError: () => set({ error: null }),
-
-      clearCurrentRecord: () => set({
-        currentRecord: null,
-        requestBody: null,
-        responseBody: null,
-        requestRawBody: null,
-        responseRawBody: null,
-        detailError: null,
-      }),
-
-      initFromUrl: (filters: FilterCondition[], toolbar: ToolbarFilters | null) => {
-        set({
-          filterConditions: filters,
-          toolbarFilters: toolbar || { rule: [], protocol: [], type: [], status: [], imported: [] },
-        });
-      },
-
-      setScrollTop: (scrollTop: number) => set({ scrollTop }),
-
-      setSelectedId: (id: string | undefined) => set({ selectedId: id }),
-    }),
+        setSelectedId: (id: string | undefined) => set({ selectedId: id }),
+      };
+    },
     {
-      name: 'bifrost-traffic-ui',
+      name: "bifrost-traffic-ui",
       partialize: (state) => ({
         toolbarFilters: state.toolbarFilters,
         filterConditions: state.filterConditions,
@@ -2363,29 +1286,35 @@ function applyExternalSelectedId(id: string | undefined) {
 }
 
 function initializeTrafficSelectionSync() {
-  if (trafficSelectionSyncInitialized || typeof window === 'undefined') {
+  if (trafficSelectionSyncInitialized || typeof window === "undefined") {
     return;
   }
   trafficSelectionSyncInitialized = true;
 
   useTrafficStore.subscribe((state, prevState) => {
-    if (isApplyingExternalSelectedId || state.selectedId === prevState.selectedId) {
+    if (
+      isApplyingExternalSelectedId ||
+      state.selectedId === prevState.selectedId
+    ) {
       return;
     }
 
     trafficSelectionSyncChannel?.postMessage({
-      type: 'selected-id',
+      type: "selected-id",
       id: state.selectedId,
     });
   });
 
-  trafficSelectionSyncChannel?.addEventListener('message', (event: MessageEvent) => {
-    const data = event.data as { type?: string; id?: string } | undefined;
-    if (data?.type !== 'selected-id') {
-      return;
-    }
-    applyExternalSelectedId(data.id);
-  });
+  trafficSelectionSyncChannel?.addEventListener(
+    "message",
+    (event: MessageEvent) => {
+      const data = event.data as { type?: string; id?: string } | undefined;
+      if (data?.type !== "selected-id") {
+        return;
+      }
+      applyExternalSelectedId(data.id);
+    },
+  );
 }
 
 initializeTrafficSelectionSync();

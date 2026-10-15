@@ -23,6 +23,7 @@ import { isMacDesktopShell } from "../../runtime";
 interface ToolbarProps {
   filters: ToolbarFilters;
   onClearAll: () => void;
+  clearing?: boolean;
   onFilterChange: (filters: ToolbarFilters) => void;
   systemProxyEnabled?: boolean;
   systemProxySupported?: boolean;
@@ -58,6 +59,7 @@ const quickFilterTagStyle: CSSProperties = {
 export default function Toolbar({
   filters,
   onClearAll,
+  clearing = false,
   onFilterChange,
   systemProxyEnabled,
   systemProxySupported = true,
@@ -143,6 +145,8 @@ export default function Toolbar({
             size="small"
             icon={<DeleteOutlined />}
             onClick={onClearAll}
+            loading={clearing}
+            disabled={clearing}
             data-testid="toolbar-clear-all"
           />
         </Tooltip>

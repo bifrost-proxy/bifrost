@@ -4,13 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-critical_pattern='Rules 页面置顶并保护全局 Default|Rules 编辑器在首次 syntax 请求失败后恢复协议智能提示|Values 页面完成 CRUD|Values 页面支持 bifrost-file|Scripts 页面完成创建、测试、push|Scripts parser 编辑器识别|Scripts 编辑器反复切换类型|ASR task detail retries one failed file or all failed files|加载流量列表并显示详情|切换页面后保留已加载流量并持续接收 push|Traffic toolbar exposes one global Breakpoint|Breakpoint real UI|AI new chat landing sends pasted images|WebKit 与 Chromium 中侧栏内容完整且小窗口可滚动'
+critical_pattern='Rules 页面置顶并保护全局 Default|Rules 编辑器在首次 syntax 请求失败后恢复协议智能提示|Values 页面完成 CRUD|Values 页面支持 bifrost-file|Scripts 页面完成创建、测试、push|Scripts parser 编辑器识别|Scripts 编辑器反复切换类型|ASR task detail retries one failed file or all failed files|加载流量列表并显示详情|切换页面后保留已加载流量并持续接收 push|并发清空期间转发持续可用|清空按钮等待结果|清空同步读取期间另一客户端删除|清空成功后同步读取失败|Traffic toolbar exposes one global Breakpoint|Breakpoint real UI|AI new chat landing sends pasted images|WebKit 与 Chromium 中侧栏内容完整且小窗口可滚动'
 
 exec pnpm --dir web exec playwright test \
   tests/ui/admin-rules-values.spec.ts \
   tests/ui/admin-scripts.spec.ts \
   tests/ui/asr-microphone-meter.spec.ts \
   tests/ui/traffic.spec.ts \
+  tests/ui/traffic-clear-concurrency.spec.ts \
   tests/ui/breakpoint-ui.spec.ts \
   tests/ui/breakpoint-real-ui.spec.ts \
   tests/ui/agent-chat.spec.ts \
