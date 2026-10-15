@@ -402,7 +402,7 @@ lint 再次通过。该修复前的 audit 在 112 项通过时主动停止并保
 ## 新云任务续接：失败恢复与筛选 reset
 
 本轮从 `94838f6c4dfc754cd4b55b61fa4c850a82024498` 的干净云端 checkout 续接，
-没有使用用户设备、数据库或系统代理。只修改前端状态、组件和对应回归。
+没有使用用户设备、数据库或系统代理。最初阶段修改前端状态、组件和对应回归；后续追加评审要求的 Rust store 领域拆分见末节。
 远端 CI 由父会独立核验，本任务按明确分工不查询 CI、不寻找或替换凭据。
 
 | 问题 / 评审 | 修复和确定性证据 |
@@ -454,3 +454,137 @@ ERR_STREAM_WRITE_AFTER_END 并遗留隔离进程；统计三次复测未再出�
 
 正式 critical UI 为 65/65 通过，包含四项并发清空真实链路。
 完整单测与完整 UI 的最终结果以本任务交付记录为准，未通过项不得归为已完成。
+
+### 追加评审 4277858363 / 4277858368
+
+`discussion_r4277858363` 成立：PR 修改的 Rust store 文件为 3641 行，超过仓库 1500 行限制。
+保留 store 根部的类型、连接池、初始化及 metadata 协调，按写入、读取、清理领域提取
+impl 方法；测试按 database/schema/reads/statistics/retention/read_pool 分组。根文件
+466 行，最大领域文件约 626 行。66 个方法体在忽略格式后相同，40 个内联测试名
+无遗漏，外部 clear concurrency 回归模块不变。仅将移入子模块的原私有项恢复到
+父 store 模块可见，并调整一处测试 schema 常量路径；锁顺序、事务、SQL、cache、
+active-ID 保留、epoch、序列及所有公开接口保持不变。首轮编译发现的清理常量可见性
+已修正，Rust 1.95.0 的受影响 traffic_db 回归 54/54 通过。
+
+`discussion_r4277858368` 成立：reconciliation 的已确认 membership miss 以及 retention
+floor 可移除列表行，却保留已选详情及正文。现在只有确认删除/成员缺失、或权威 floor
+证据才清除 selectedId、详情、四类正文和 loading；延迟 detail/body 响应由既有 ID
+校验拒绝。仅被 1000 行有界窗口裁剪、仍可能存在于数据库的详情继续保留。
+另补复查发现的 no-op 路径：列表已空且替代 GET 失败时，也必须提交 pending-ID
+变化并更新订阅，不能继续订阅已确认不存在的 ID。
+
+新增 trafficDetailReconciliation 回归覆盖成员缺失、后续读取失败、迟到详情响应、
+retention floor、有界窗口保留，以及空列表 pending 清退。前五项在旧独立 worktree
+为 4 失败/1 通过；pending 清退在首版详情修复上另复现失败后通过。与原清空和筛选
+回归合计 52 项通过。类型、相关 ESLint、格式检查与最新前端生产构建通过。
+
+追加改动使本轮验证路由升级为 Rust + 前端；必须重新执行适用 Rust fmt/clippy、
+coverage-changed、真实构建和最终 UI，不沿用此前 SHA 的门禁结果。此前完整 UI
+在处理新增评审时主动停止，实际报告为 64 通过/159 未运行，不是完整通过证据。
+
+### 追加评审 4277948726 与 Windows 读压力
+
+`discussion_r4277948726` 成立：full-clear 没有 selected-clear evidence，DELETE 已提交但
+响应丢失时原 catch 不启动恢复。现在相同数据库 generation 下以强制 membership
+的 journal 读取服务端实际状态，并重置推送 cursor；仍返回原失败，不先假定删除成功。
+暂停/断开推送也能恢复，未提交的 DELETE 保留原行，恢复中的新写入保留；独立选中、
+位于列表窗口外的详情也加入 membership。新增 5 项回归；旧代码前四项为 2 失败/2 通过，
+修复后前四项及详情 11 项全部通过，第五项另确认窗口外详情及正文清退。
+
+父会提供 Windows CI 的 reader=0 / written=1 失败。旧测试用 50ms sleep 猜测写入已提交，
+存在全部读取先于首个提交结束的合法调度。新增 channel 控制的反例确定性复现该次序；
+压力测试等待首条实际持久化后开始读，写线程直到读完才退出，保留原 8x20 次压力读取，
+并将要求加强为全部 160 次成功。Linux 本地和 Windows CI 结果分别报告，不能相互替代。
+
+CONNECT client_app 独立探针使用相同 netstat2 0.11.2：建立并保持本地 TCP 连接后，
+/proc/net/tcp 显示已建立两端，但 get_sockets_info(IPV4|IPV6,TCP) 返回 0 条。
+证据位于云端 /tmp/bifrost-netstat-probe.log，属于该云端 socket 枚举能力限制；
+原 UI 应用识别断言保留，不混入进程识别改造。历史 2300 条准备超时仍须最终复测。
+
+第二轮详情检查补充：当前选中 ID 的独立 detail GET 尚未返回、列表也没有该 ID 时，
+完整 replacement snapshot 同样能证明缺失。新增合法选中状态的测试在首版条件下
+1 失败/11 通过；将读取开始时的 selectedId 纳入证据后，迟到 GET 不能恢复旧详情。
+最终协调三模块 50/50、filterEpoch 13/13，共 63 项通过。最终冻结前端生产构建通过。
+并行 Rust 编译曾触及 16 GiB cgroup 上限（oom_kill=2，SIGKILL），该轮不是断言结果；
+后续按 jobs=1 顺序重跑，最终结果另记，不能把已开始执行当作通过。
+
+最终无 Rust 编译竞争的前端全套：71 文件、501/501，--maxWorkers=1，158.66s；
+此前三个 ASR 超时均通过，未修改 ASR 代码、断言或超时。最终前端生产构建 exit 0，
+最终 cargo build --bin bifrost --all-features 单编译 worker 构建 exit 0（4m00s）。
+完整 UI 随后使用该新二进制执行，结果必须以最终报告为准。
+
+### 16 条评审的当前证据索引
+
+下表供逐条回复引用，不代表线程已经 resolve，也不代替最终 Rust/完整 UI/CI 门禁。
+前端相关项包含在最终 501 项完整单测中；Rust 拆分及压力测试的最终检查单独报告。
+
+| discussion ID | 当前代码/确定性回归证据 |
+| --- | --- |
+| 4269700698 | `trafficMembership.test.ts`：跨客户端删除、隐式清空、floor、有界窗口外 membership 与更新时序 |
+| 4270946607 | `trafficDelayedDelivery.test.ts`：删除优先于迟到更新；取消后新代际不受旧 tombstone 污染 |
+| 4270946622 | `trafficDelayedDelivery.test.ts`：较新正数 metadata 与迟到零清空信号分别协调 |
+| 4270946628 | `trafficDelayedDelivery.test.ts`：GET 消费旧批次，包括 equal-cursor，防总数回退 |
+| 4271355414 | `trafficCompletionRecovery.test.ts`：持续无关删除、deadline、重试预算，确保读取有界结束 |
+| 4271355423 | `trafficCompletionRecovery.test.ts`：selected 删除计数只应用一次，保留 active 行及最新计数 |
+| 4271355431 | `trafficCompletionRecovery.test.ts`：GET/member 失败保留 journal、完整 chunk 证据及后续重试 |
+| 4273339945 | `trafficCompletionRecovery.test.ts`：DELETE collector 创建 reconciliation 前的四种已确认删除时序 |
+| 4275333575 | `trafficCompletionRecovery.test.ts`：HTTP/SSE/CONNECT completion，窗口外 active 与读取失败期间字段保护 |
+| 4275333566 | 生产/测试按领域提取；全部 36 个改动代码模块均不超过 1500 行；原断言保留 |
+| 4276350645 | `retains confirmed tombstones after a failed DELETE response`：失败返回前交接 tombstone，迟到更新不复活 |
+| 4276350665 | `does not apply an old clear response to a replacement database`：full 和 selected 两个分支 |
+| 4276350672 | `filterEpoch.test.tsx`：非空 reset、在途重扫、同 render 的 reset+增量；13/13 |
+| 4277858363 | `traffic_db/store/`：根 466 行；66 个方法体保持；writes/reads/maintenance 与测试领域拆分 |
+| 4277858368 | `trafficDetailReconciliation.test.ts`：12 项，确认删除清详情/四类正文，拒绝迟到 GET，保留有界窗口裁剪及较新选择 |
+| 4277948726 | `trafficAmbiguousClear.test.ts`：5 项，full DELETE 响应丢失后暂停/断开恢复、未提交保留、新写入、窗口外选中详情 |
+
+Windows 压力测试另见 `traffic_db/store/tests/read_pool.rs`：确定性首次提交前空读反例，
+以及等待真实首提交后全部 160 次读取成功的原压力测试。Windows 结果由父会 CI 确认。
+
+### 最终完整 UI 与历史准备对照
+
+冻结代码、新二进制（SHA-256 `308acc50ca9726a04746b375b0cb3bdb523d5a5f14c6898e2194942fbd34a985`）
+默认配置完整 223 项：220 通过、2 失败、1 未运行，38.3 分钟，exit 1。
+按 `run-ui-critical.sh` 相同文件集合和 grep 从该报告精确提取的 65 项均通过，
+包含四项并发清空真实链路。统计测试同连接 0→28→50，50 条准备耗时 1992ms，
+帧间隔 2796.9/1989.3ms，空闲段及最终精确计数断言通过。
+
+两项失败及实际阶段：
+
+- CONNECT `client_app=null`，15 秒轮询失败；第三方相同 netstat2 的独立 TCP 探针为
+  0 sockets，/proc/net/tcp 则显示真实已建立连接。没有改进程识别生产代码。
+- 2300 条历史在 `seedTrafficBatch` 准备阶段 120 秒超时，落库 1833 条；平均已记录
+  转发耗时 1.44ms，最大 25ms。页面 `goto`、1000 行窗口与统计断言尚未执行。
+  03:02:10 为 683 条，03:03:18 为 1648 条。未改用例断言或 timeout。
+- 1 个未运行项是 CONNECT 失败后同一串行组的 backlog 用例，不能记为通过。
+
+为区分独立运行与配置变化，追加同一最终代码的两次单项对照：只使用项目已有
+`BIFROST_PROCESS_RESOLUTION_CONCURRENCY=40` 时原历史用例完整通过（1.6 分钟）；
+恢复默认配置独立运行再次 120 秒超时，最终 1913/2300。默认解析槽为 4，云端
+socket 枚举缺失导致重试，这些证据支持准备阶段受解析等待影响，但不是完整根因
+证明，也不能把默认完整 UI 或基线状态改记为通过。没有改动无关 resolver 或弱化断言。
+
+报告分别归档于 `.e2e-reports/cloud-clear/full-final-default/`、`history-concurrency40/`、
+`history-default-control/`，包含 JSON、trace、截图、视频和只读采样；超时残留后端已清理。
+
+### 最终 Rust 与提交前门禁
+
+- workspace/desktop fmt、强制 TypeScript、全量 ESLint 均通过；ESLint 0 error、7 条原有 warning。
+- 最终 workspace all-targets/all-features Clippy 使用 `-D warnings`，exit 0，10m18s。
+- 正常 workspace all-features `--no-fail-fast` 全部目标执行完成，exit 101。按每个 Cargo
+  目标的最后主 harness 汇总（排除嵌套子进程重复输出）为 10495 通过、6 失败、9 项既有
+  ignore；没有新增 ignore。三项 admin IM 超时、两项 CLI daemon 停止时只读 shell 代理
+  配置清理失败、一项 external_runner_worker_stop 脚本失败（stdout/stderr 为空，未归因）。
+- 正常 admin 为 3864 通过、3 项 IM 失败、1 项既有 ignore；受影响 `traffic_db` 55/55，
+  包含首提交前零读反例与首提交后全部 160 次成功读取。Windows 仍需跨平台 CI 复验。
+- 不带 test filter 的默认 `make coverage-changed` 已完整执行：插桩 admin 同样
+  3864 通过、上述同三项 IM 失败、1 项既有 ignore，419.74s；cargo 退出 101，make 退出 2。
+  因此完整 preflight 未通过，没有以忽略失败的参数重跑或修改阈值。
+- 从本轮实际 profile 单独生成 LCOV，再运行官方 `coverage-diff.py --worktree --threshold 90`
+  得到 changed-lines **100%（17/17）**、无 unmeasured file。官方算法自动识别并排除
+  1619 行未变更的搬迁代码；root 2/2，maintenance 15/15。该结果仅证明变更行门禁，
+  不把含三项 IM 失败的完整 preflight 改记为通过。
+
+日志、同源 JSON 和完整主 harness 汇总保存在 `.e2e-reports/cloud-clear/final-review-evidence/`。
+保持 IM、CLI、rustls 与依赖代码不变。按父会要求，在保存当前修复到同一 PR 后，再以
+已获取的 main `4c056b22056c50e7dc7a75a71bfa03dd06bce45d` 做同环境 CONNECT/默认历史
+原用例对照；结果由 PR 最终检查点及归档报告补充，不盲目 resolve 评审线程。

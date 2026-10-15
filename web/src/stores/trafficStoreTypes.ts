@@ -8,7 +8,7 @@ import type {
 } from "../types";
 import type { TrafficBodyContent } from "../api";
 import type { TrafficUpdatesData } from "../services/pushService";
-import type { SelectedClearEvidence } from "./trafficCaptureCoordinator";
+import type { ClearReconciliationEvidence } from "./trafficCaptureCoordinator";
 export interface TrafficRecordsMutation {
   version: number;
   reset: boolean;
@@ -90,7 +90,7 @@ export interface TrafficState {
   catchUpUpdates: () => Promise<void>;
   reloadRecords: (
     preserveLiveRecords?: boolean,
-    clearEvidence?: SelectedClearEvidence,
+    clearEvidence?: ClearReconciliationEvidence,
   ) => Promise<void>;
   fetchTrafficDetail: (id: string) => Promise<void>;
   appendSseResponseBody: (recordId: string, payload: string) => void;

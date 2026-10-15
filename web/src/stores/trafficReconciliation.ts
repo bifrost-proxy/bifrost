@@ -14,7 +14,7 @@ import {
   INITIAL_WINDOW_LIMIT,
 } from "./trafficCaptureCoordinator";
 import type {
-  SelectedClearEvidence,
+  ClearReconciliationEvidence,
   LiveReconciliationRead,
   TrafficCaptureCoordinator,
 } from "./trafficCaptureCoordinator";
@@ -60,10 +60,11 @@ export function createTrafficReconciliation(
   return {
     reloadRecords: async (
       preserveLiveRecords = false,
-      clearEvidence?: SelectedClearEvidence,
+      clearEvidence?: ClearReconciliationEvidence,
     ) => {
       const generation = captureCoordination.historyBackfillGeneration;
       const resumeGeneration = captureCoordination.trafficResumeGeneration;
+      const stateAtReadStart = get();
       const read: LiveReconciliationRead | null = preserveLiveRecords
         ? {
             historyGeneration: generation,
@@ -88,7 +89,7 @@ export function createTrafficReconciliation(
             snapshotTotal: null,
             emptyObserved: false,
             positiveWrites: false,
-            implicitRemoval: false,
+            implicitRemoval: clearEvidence?.reconcileMembership ?? false,
             latestSequence: Math.max(
               get().serverSequence,
               captureCoordination.pendingBatch?.serverSequence ?? 0,
@@ -263,14 +264,88 @@ export function createTrafficReconciliation(
           read && currentRecord
             ? (newRecordsMap.get(currentRecord.id) ?? pendingDetailUpdate)
             : undefined;
-        const reconciledDetail =
-          currentRecord &&
-          detailSummary &&
-          canKeepLive(detailSummary) &&
-          (oldestSequenceFloor == null ||
-            detailSummary.sequence >= oldestSequenceFloor)
+        const removedByReconciliation = (id: string, sequence?: number) => {
+          if (read)
+            return (
+              read.deletedLiveIds.has(id) ||
+              (oldestSequenceFloor != null &&
+                sequence !== undefined &&
+                sequence < oldestSequenceFloor) ||
+              (read.liveRecords.has(id) &&
+                !canKeepLive(read.liveRecords.get(id)!))
+            );
+          // A complete replacement snapshot proves absence only for the same
+          // selected state we read. Bounded windows and later accepted writes
+          // cannot establish deletion of an independently loaded detail.
+          const pending = captureCoordination.pendingBatch;
+          const queuedWrite =
+            pending &&
+            (findLastRecordById(pending.newRecords, id) ||
+              findLastRecordById(pending.updatedRecords, id));
+          return (
+            !!snapshot &&
+            !response.has_more &&
+            response.server_total === snapshotRecords.length &&
+            response.updated_records.every((record) =>
+              snapshotIds.has(record.id),
+            ) &&
+            !snapshotIds.has(id) &&
+            !queuedWrite &&
+            (stateAtReadStart.selectedId === id ||
+              stateAtReadStart.recordsMap.has(id) ||
+              stateAtReadStart.currentRecord?.id === id) &&
+            stateAtReadStart.selectedId === state.selectedId &&
+            stateAtReadStart.recordsMap.get(id) === state.recordsMap.get(id)
+          );
+        };
+        const selectionRemoved =
+          !!state.selectedId &&
+          removedByReconciliation(
+            state.selectedId,
+            state.recordsMap.get(state.selectedId)?.sequence ??
+              (currentRecord?.id === state.selectedId
+                ? currentRecord.sequence
+                : undefined),
+          );
+        const detailRemoved =
+          selectionRemoved ||
+          (!!currentRecord &&
+            removedByReconciliation(currentRecord.id, currentRecord.sequence));
+        const reconciledDetail = detailRemoved
+          ? null
+          : currentRecord &&
+              detailSummary &&
+              canKeepLive(detailSummary) &&
+              (oldestSequenceFloor == null ||
+                detailSummary.sequence >= oldestSequenceFloor)
             ? mergeDetailWithSummary(currentRecord, detailSummary)
             : currentRecord;
+
+        const detailState =
+          read || detailRemoved
+            ? {
+                currentRecord: reconciledDetail,
+                ...(detailRemoved
+                  ? {
+                      selectedId: selectionRemoved
+                        ? undefined
+                        : state.selectedId,
+                      requestBody: null,
+                      responseBody: null,
+                      requestRawBody: null,
+                      responseRawBody: null,
+                      detailLoading:
+                        selectionRemoved || !state.selectedId
+                          ? false
+                          : state.detailLoading,
+                      detailError:
+                        selectionRemoved || !state.selectedId
+                          ? "Request was deleted"
+                          : state.detailError,
+                    }
+                  : {}),
+              }
+            : {};
 
         // All surviving writes have been merged from the journal. Consume
         // their batch too: a later animation-frame flush must not restore
@@ -307,21 +382,25 @@ export function createTrafficReconciliation(
           .map((record) => record.id);
         const rowsChanged =
           inserted.length > 0 || updated.length > 0 || deletedIds.length > 0;
+        const pendingChanged =
+          newPendingIds.size !== state.pendingIds.size ||
+          Array.from(newPendingIds).some((id) => !state.pendingIds.has(id));
         if (
           !snapshot &&
           !rowsChanged &&
+          !pendingChanged &&
           serverTotal === state.serverTotal &&
           serverSequence === state.serverSequence &&
           oldestSequenceFloor === state.serverOldestSequence
         ) {
-          if (reconciledDetail !== state.currentRecord)
-            set({ currentRecord: reconciledDetail });
+          if (detailRemoved || reconciledDetail !== state.currentRecord)
+            set(detailState);
           return false;
         }
         set({
           records: retainedRecords,
           recordsMap: newRecordsMap,
-          ...(read ? { currentRecord: reconciledDetail } : {}),
+          ...detailState,
           serverTotal,
           ...(read ? { serverOldestSequence: oldestSequenceFloor } : {}),
           serverSequence,
@@ -448,7 +527,14 @@ export function createTrafficReconciliation(
                 )
                 .map((record) => record.id)
                 .concat(
-                  Array.from(read.unconfirmedClearIds).filter(
+                  [
+                    ...read.unconfirmedClearIds,
+                    ...(read.implicitRemoval
+                      ? [get().selectedId, get().currentRecord?.id].filter(
+                          (id): id is string => Boolean(id),
+                        )
+                      : []),
+                  ].filter(
                     (id) =>
                       !snapshotIds.has(id) && !read.deletedLiveIds.has(id),
                   ),
@@ -723,11 +809,18 @@ export function createTrafficReconciliation(
         // A failed response cannot undo deletion frames already confirmed by
         // the server. Hand their tombstones and accepted writes to recovery
         // before releasing the DELETE journal.
-        if (
-          deletions &&
-          clearGeneration === captureCoordination.historyBackfillGeneration
-        )
-          void get().reloadRecords(true, deletions);
+        if (clearGeneration === captureCoordination.historyBackfillGeneration) {
+          void get().reloadRecords(
+            true,
+            deletions ?? {
+              ids: new Set(),
+              requestedIds: new Set(),
+              liveRecords: new Map(),
+              reconcileMembership: true,
+            },
+          );
+          if (!deletions) pushService.resetTrafficCursor();
+        }
         if (captureCoordination.selectedClearDeletions === deletions)
           captureCoordination.selectedClearDeletions = null;
         set({ error: getApiErrorPayload(e).message, clearing: false });

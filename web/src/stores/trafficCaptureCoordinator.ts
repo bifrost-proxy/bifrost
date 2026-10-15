@@ -23,7 +23,8 @@ export interface BatchedUpdate {
   sourceUpdatedRecordCount: number;
   hasMore: boolean;
 }
-export interface SelectedClearEvidence {
+export interface ClearReconciliationEvidence {
+  reconcileMembership?: boolean;
   requestedIds: Set<string>;
   ids: Set<string>;
   liveRecords: Map<string, TrafficSummary>;
@@ -75,7 +76,7 @@ export const captureCoordination = {
   trafficEpochResetSuspected: false,
   liveReconciliationReads: new Set<LiveReconciliationRead>(),
   selectedClearDeletions: null as
-    | (SelectedClearEvidence & { generation: number })
+    | (ClearReconciliationEvidence & { generation: number })
     | null,
 };
 export function createTrafficCaptureCoordinator({
