@@ -829,6 +829,24 @@ export default function Traffic() {
   const filterGenerationRef = useRef(0);
   const appliedMutationVersionRef = useRef(recordsMutation.version);
 
+  const [filterResetVersion, setFilterResetVersion] = useState(
+    recordsMutation.version,
+  );
+  useEffect(
+    () =>
+      useTrafficStore.subscribe((state, previous) => {
+        // React may coalesce a reset and the following incremental batch. Keep
+        // the reset signal before a later mutation replaces the store's journal.
+        if (
+          state.recordsMutation.reset &&
+          state.records.length > 0 &&
+          state.recordsMutation.version !== previous.recordsMutation.version
+        )
+          setFilterResetVersion(state.recordsMutation.version);
+      }),
+    [],
+  );
+
   useEffect(() => {
     const generation = ++filterGenerationRef.current;
     // This scan owns the current reset, including a confirmed database epoch
@@ -894,6 +912,7 @@ export default function Traffic() {
     filtersActive,
     trafficEpochVersion,
     trafficDatabaseEpoch,
+    filterResetVersion,
   ]);
 
   useEffect(() => {

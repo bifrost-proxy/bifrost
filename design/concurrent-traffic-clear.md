@@ -397,3 +397,30 @@ lint 再次通过。该修复前的 audit 在 112 项通过时主动停止并保
 文件、475 项通过，类型与 lint 通过。语法树复核确认模型/筛选的 38 个变量初始化
 与提取前等价，算法保持不变。第二轮 audit 在 131 项通过时为此修复主动停止；
 保存诊断后重新在最终代码构建并完整执行，最终结果以 PR 和交付报告为准。
+
+
+## 新云任务续接：失败恢复与筛选 reset
+
+本轮从 `94838f6c4dfc754cd4b55b61fa4c850a82024498` 的干净云端 checkout 续接，
+没有使用用户设备、数据库或系统代理。只修改前端状态、组件和对应回归。
+远端 CI 由父会独立核验，本任务按明确分工不查询 CI、不寻找或替换凭据。
+
+| 问题 / 评审 | 修复和确定性证据 |
+| --- | --- |
+| selected clear 的 GET / membership 失败丢失 active completion（补充 4275333575、4271355431） | DELETE journal 保留请求前的行；失败回退不把未确认 ID 当作已删除，保留 completion 并标记后续 membership 重试。`retains a selected active completion when snapshot/membership fails` 两项在原生产代码失败；没有新 push 时保留 active 行与 pending 订阅的两项回归也在原代码失败。已确认删除和完整 membership miss 仍具有优先权。 |
+| 4276350645：DELETE 响应失败丢失 tombstone | 在释放 DELETE collector 前同步把删除证据与字段移交 reconciliation；`retains confirmed tombstones after a failed DELETE response` 在原生产代码发生实际行复活，修复后保持删除。 |
+| 4276350665：过期 full clear 擦除新数据库 | 对 full / selected clear 统一捕获并检查发起时的 history generation；跨库后不执行旧清理或订阅编辑。扩展既有跨库回归为两种 clear，原 full-clear 分支失败。 |
+| 4276350672：非空 reset 未更新 active filters | store 通知同步保留 reset 版本并触发服务端筛选重扫，取消过期扫描。已完成扫描、在途扫描两项在原代码失败；第二轮发现 reset 紧接增量可被同一 React render 合并，另补先失败再通过的专门回归。普通增量不改变该 reset 版本。 |
+
+原有删除时序测试补齐实际 `traffic_deleted` 证据；统计请求时序测试提供完整 ID
+membership miss。成功 DELETE 本身不再被错误当作 active 行已删除的证据。
+所有删除、字段、成员与总数断言均保留，没有删除用例、ignore 或放宽期限。
+
+本轮第一轮 Review/Fix/Test 覆盖四类缺陷与失败回退；第二轮发现并修复 React
+合并渲染遗漏 reset，第三轮复查同步 store 订阅的释放、普通增量路径、跨库代际、
+confirmed tombstone 与未完成成员查询的边界。针对 store / Traffic 组件的 46 项通过。
+同一测试组在隔离副本中使用原生产代码执行：9 失败、37 通过；合并渲染新增用例
+单独在第一版修复上失败，最终通过。测试副本不参与产品构建。
+
+本轮完整验证结果和剩余门禁以本任务最终交付记录为准，不把旧运行结果作为新代码
+已通过的证据，也不把此前 UI 统计帧数不稳定直接归类为既有问题。

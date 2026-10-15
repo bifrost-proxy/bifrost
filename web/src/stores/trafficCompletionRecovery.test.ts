@@ -149,6 +149,8 @@ describe("reconciliation bounded completion and failure recovery", () => {
       finishDelete();
       expect(await clear).toBe(true);
       await held.ready;
+      if (!frameBeforeResponse)
+        useTrafficStore.getState().handleTrafficDeleted(["2"], 2);
       useTrafficStore.getState().handleTrafficPush({
         new_records: [],
         updated_records: [{ ...records[1], status: 299 }],
@@ -826,6 +828,12 @@ describe("reconciliation bounded completion and failure recovery", () => {
         4,
       ),
     );
+    apiMocks.queryTraffic.mockResolvedValueOnce({
+      records: [],
+      total: 0,
+      has_more: false,
+      server_sequence: 4,
+    });
     expect(await clearAndSynchronizeForTest(["2"])).toBe(true);
     await vi.advanceTimersByTimeAsync(200);
     expect(useTrafficStore.getState().serverTotal).toBe(2);
@@ -1024,27 +1032,27 @@ describe("reconciliation bounded completion and failure recovery", () => {
     ]);
     expect(useTrafficStore.getState().serverTotal).toBe(2);
   });
-  it("does not hand an old selected clear's live fields into a replacement database", async () => {
-    const records = makeRecordRange(1, 3);
-    records[1].status = 0;
-    useTrafficStore.setState({
-      records,
-      recordsMap: new Map(records.map((r) => [r.id, r])),
-      serverTotal: 3,
-      serverSequence: 4,
-      trafficDatabaseEpoch: "old-db",
-    });
-    let finishDelete!: () => void;
-    apiMocks.clearTraffic.mockImplementationOnce(
-      () =>
-        new Promise((done) => {
-          finishDelete = () => done({ success: true });
-        }),
-    );
-    const clear = clearAndSynchronizeForTest(["2"]);
-    useTrafficStore
-      .getState()
-      .handleTrafficPush({
+  it.each([undefined, ["2"]])(
+    "does not apply an old clear response to a replacement database (%j)",
+    async (ids) => {
+      const records = makeRecordRange(1, 3);
+      records[1].status = 0;
+      useTrafficStore.setState({
+        records,
+        recordsMap: new Map(records.map((r) => [r.id, r])),
+        serverTotal: 3,
+        serverSequence: 4,
+        trafficDatabaseEpoch: "old-db",
+      });
+      let finishDelete!: () => void;
+      apiMocks.clearTraffic.mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            finishDelete = () => done({ success: true });
+          }),
+      );
+      const clear = clearAndSynchronizeForTest(ids);
+      useTrafficStore.getState().handleTrafficPush({
         database_epoch: "old-db",
         new_records: [],
         updated_records: [{ ...records[1], status: 201, response_size: 8192 }],
@@ -1052,29 +1060,27 @@ describe("reconciliation bounded completion and failure recovery", () => {
         server_total: 3,
         server_sequence: 4,
       });
-    await vi.advanceTimersByTimeAsync(200);
-    const stats = {
-      database_epoch: "new-db",
-      total_requests: 3,
-      server_sequence: 4,
-      client_ips: {},
-      proxy_ports: {},
-      applications: {},
-      account_names: {},
-      domains: {},
-    };
-    apiMocks.getTrafficStatistics.mockResolvedValue(stats);
-    useTrafficStore.getState().handleTrafficStatistics(stats);
-    await vi.advanceTimersByTimeAsync(200);
-    expect(useTrafficStore.getState().trafficDatabaseEpoch).toBe("new-db");
-    const fresh = records.map((r) => ({
-      ...r,
-      status: 204,
-      response_size: 16,
-    }));
-    useTrafficStore
-      .getState()
-      .handleTrafficPush({
+      await vi.advanceTimersByTimeAsync(200);
+      const stats = {
+        database_epoch: "new-db",
+        total_requests: 3,
+        server_sequence: 4,
+        client_ips: {},
+        proxy_ports: {},
+        applications: {},
+        account_names: {},
+        domains: {},
+      };
+      apiMocks.getTrafficStatistics.mockResolvedValue(stats);
+      useTrafficStore.getState().handleTrafficStatistics(stats);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(useTrafficStore.getState().trafficDatabaseEpoch).toBe("new-db");
+      const fresh = records.map((r) => ({
+        ...r,
+        status: 204,
+        response_size: 16,
+      }));
+      useTrafficStore.getState().handleTrafficPush({
         database_epoch: "new-db",
         new_records: fresh,
         updated_records: [],
@@ -1082,21 +1088,126 @@ describe("reconciliation bounded completion and failure recovery", () => {
         server_total: 3,
         server_sequence: 4,
       });
-    await vi.advanceTimersByTimeAsync(200);
-    apiMocks.getTrafficUpdates.mockResolvedValueOnce({
-      ...snapshot(fresh, 3, 4),
-      database_epoch: "new-db",
+      await vi.advanceTimersByTimeAsync(200);
+      apiMocks.getTrafficUpdates.mockResolvedValueOnce({
+        ...snapshot(fresh, 3, 4),
+        database_epoch: "new-db",
+      });
+      pushMocks.updateSubscription.mockClear();
+      finishDelete();
+      expect(await clear).toBe(true);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(useTrafficStore.getState().recordsMap.get("2")).toMatchObject({
+        status: 204,
+        response_size: 16,
+      });
+      expect(apiMocks.getTrafficUpdates).not.toHaveBeenCalled();
+      expect(pushMocks.updateSubscription).not.toHaveBeenCalled();
+      expect(useTrafficStore.getState().clearing).toBe(false);
+    },
+  );
+  it.each(["snapshot", "membership"])(
+    "retains a selected active completion when %s fails",
+    async (failure) => {
+      const records = makeRecordRange(1, 3);
+      records[1].status = 0;
+      useTrafficStore.setState({
+        records,
+        recordsMap: new Map(records.map((r) => [r.id, r])),
+        serverTotal: 3,
+        serverSequence: 4,
+      });
+      const held = holdRead();
+      const clear = clearAndSynchronizeForTest(["2"]);
+      await held.ready;
+      useTrafficStore.getState().handleTrafficPush({
+        new_records: [],
+        updated_records: [{ ...records[1], status: 201, response_size: 8192 }],
+        has_more: false,
+        server_total: 3,
+        server_sequence: 4,
+      });
+      if (failure === "snapshot")
+        held.reject(new Error("snapshot unavailable"));
+      else {
+        apiMocks.queryTraffic.mockRejectedValueOnce(
+          new Error("membership unavailable"),
+        );
+        held.resolve(snapshot([records[0], records[2]], 3, 4));
+      }
+      expect(await clear).toBe(true);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(useTrafficStore.getState().recordsMap.get("2")).toMatchObject({
+        status: 201,
+        response_size: 8192,
+      });
+    },
+  );
+
+  it.each(["snapshot", "membership"])(
+    "retains an active selected row without a new push when %s fails",
+    async (failure) => {
+      const active = makeRecord("2", "/active", { status: 0 });
+      useTrafficStore.setState({
+        records: [active],
+        recordsMap: new Map([[active.id, active]]),
+        serverTotal: 1,
+        serverSequence: 3,
+      });
+      const held = holdRead();
+      const clear = clearAndSynchronizeForTest([active.id]);
+      await held.ready;
+      if (failure === "snapshot")
+        held.reject(new Error("snapshot unavailable"));
+      else {
+        apiMocks.queryTraffic.mockRejectedValueOnce(
+          new Error("membership unavailable"),
+        );
+        held.resolve(snapshot([], 1, 3));
+      }
+      expect(await clear).toBe(true);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(useTrafficStore.getState().recordsMap.get(active.id)?.status).toBe(
+        0,
+      );
+      expect(useTrafficStore.getState().pendingIds.has(active.id)).toBe(true);
+    },
+  );
+
+  it("retains confirmed tombstones after a failed DELETE response", async () => {
+    const records = makeRecordRange(1, 3);
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((r) => [r.id, r])),
+      serverTotal: 3,
+      serverSequence: 4,
     });
-    pushMocks.updateSubscription.mockClear();
-    finishDelete();
-    expect(await clear).toBe(true);
-    await vi.advanceTimersByTimeAsync(200);
-    expect(useTrafficStore.getState().recordsMap.get("2")).toMatchObject({
-      status: 204,
-      response_size: 16,
+    let failDelete!: () => void;
+    apiMocks.clearTraffic.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          failDelete = () => reject(new Error("response lost"));
+        }),
+    );
+    const held = holdRead();
+    const clear = clearAndSynchronizeForTest(["2"]);
+    useTrafficStore.getState().handleTrafficDeleted(["2"], 2);
+    failDelete();
+    // The failure must hand confirmed deletion evidence to recovery before
+    // delayed traffic frames can be accepted again.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    useTrafficStore.getState().handleTrafficPush({
+      new_records: [records[1]],
+      updated_records: [{ ...records[1], status: 299 }],
+      has_more: false,
+      server_total: 2,
+      server_sequence: 4,
     });
-    expect(apiMocks.getTrafficUpdates).not.toHaveBeenCalled();
-    expect(pushMocks.updateSubscription).not.toHaveBeenCalled();
-    expect(useTrafficStore.getState().clearing).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().recordsMap.has("2")).toBe(false);
+    held.resolve(snapshot([records[0], records[2]], 2, 4));
+    expect(await clear).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(useTrafficStore.getState().recordsMap.has("2")).toBe(false);
   });
 });

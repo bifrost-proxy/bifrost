@@ -434,4 +434,63 @@ describe("Traffic filters across confirmed database epochs", () => {
       container.querySelector('[data-testid="traffic-filter-loading"]'),
     ).toBeNull();
   });
+  it.each([false, true])(
+    "rescans active filters after a nonempty reconciliation reset (pending=%s)",
+    async (pending) => {
+      const oldScan = deferredPage();
+      vi.mocked(getTrafficPage)
+        .mockImplementationOnce(() =>
+          pending ? oldScan.promise : Promise.resolve(page([record(1)])),
+        )
+        .mockResolvedValueOnce(page([record(2)]));
+      await render();
+      expect(displayedIds()).toEqual(pending ? [] : ["record-1"]);
+      await act(async () => {
+        useTrafficStore.setState((state) => ({
+          records: [record(2)],
+          recordsMap: new Map([["record-2", record(2)]]),
+          recordsMutation: {
+            version: state.recordsMutation.version + 1,
+            reset: true,
+            inserted: [record(2)],
+            updated: [],
+            deletedIds: [],
+          },
+        }));
+      });
+      expect(getTrafficPage).toHaveBeenCalledTimes(2);
+      await act(async () => oldScan.resolve(page([record(1)])));
+      expect(displayedIds()).toEqual(["record-2"]);
+    },
+  );
+  it("retains reset invalidation when an incremental batch arrives in the same render", async () => {
+    vi.mocked(getTrafficPage)
+      .mockResolvedValueOnce(page([record(1)]))
+      .mockResolvedValueOnce(page([record(2), record(3)]));
+    await render();
+    await act(async () => {
+      useTrafficStore.setState((state) => ({
+        records: [record(2)],
+        recordsMutation: {
+          version: state.recordsMutation.version + 1,
+          reset: true,
+          inserted: [record(2)],
+          updated: [],
+          deletedIds: [],
+        },
+      }));
+      useTrafficStore.setState((state) => ({
+        records: [record(2), record(3)],
+        recordsMutation: {
+          version: state.recordsMutation.version + 1,
+          reset: false,
+          inserted: [record(3)],
+          updated: [],
+          deletedIds: [],
+        },
+      }));
+    });
+    expect(getTrafficPage).toHaveBeenCalledTimes(2);
+    expect(displayedIds()).toEqual(["record-2", "record-3"]);
+  });
 });

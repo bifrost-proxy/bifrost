@@ -192,7 +192,8 @@ export function createTrafficReconciliation(
         const canKeepLive = (record: TrafficSummary) =>
           !read ||
           (!read.deletedLiveIds.has(record.id) &&
-            (!read.unconfirmedClearIds.has(record.id) ||
+            (!snapshot ||
+              !read.unconfirmedClearIds.has(record.id) ||
               snapshotIds.has(record.id) ||
               confirmedLiveIds.has(record.id)) &&
             !(
@@ -563,7 +564,7 @@ export function createTrafficReconciliation(
         ) {
           const restored = commit();
           captureCoordination.membershipReconciliationRequired ||=
-            read.implicitRemoval;
+            read.implicitRemoval || read.unconfirmedClearIds.size > 0;
           // Idle connections need not emit another delta. Refresh the count
           // independently once, rather than wait for an event to repair it.
           if (
@@ -697,12 +698,17 @@ export function createTrafficReconciliation(
     clearTraffic: async (ids?: string[]) => {
       if (get().clearing) return false;
       set({ error: null, clearing: true });
+      const clearGeneration = captureCoordination.historyBackfillGeneration;
       const deletions = ids?.length
         ? {
             generation: captureCoordination.historyBackfillGeneration,
             ids: new Set<string>(),
             requestedIds: new Set(ids),
-            liveRecords: new Map<string, TrafficSummary>(),
+            liveRecords: new Map(
+              get()
+                .records.filter((record) => ids.includes(record.id))
+                .map((record) => [record.id, record]),
+            ),
           }
         : null;
       captureCoordination.selectedClearDeletions = deletions;
@@ -714,6 +720,14 @@ export function createTrafficReconciliation(
           throw new Error(result.message || "Failed to clear traffic");
         }
       } catch (e) {
+        // A failed response cannot undo deletion frames already confirmed by
+        // the server. Hand their tombstones and accepted writes to recovery
+        // before releasing the DELETE journal.
+        if (
+          deletions &&
+          clearGeneration === captureCoordination.historyBackfillGeneration
+        )
+          void get().reloadRecords(true, deletions);
         if (captureCoordination.selectedClearDeletions === deletions)
           captureCoordination.selectedClearDeletions = null;
         set({ error: getApiErrorPayload(e).message, clearing: false });
@@ -722,10 +736,7 @@ export function createTrafficReconciliation(
       try {
         // The DELETE belongs to the database visible when it was issued.
         // Never hand its buffered fields or subscription edits into a new one.
-        if (
-          deletions &&
-          deletions.generation !== captureCoordination.historyBackfillGeneration
-        )
+        if (clearGeneration !== captureCoordination.historyBackfillGeneration)
           return true;
         if (ids && ids.length > 0) {
           get().handleTrafficDeleted(ids, get().serverTotal, false);
