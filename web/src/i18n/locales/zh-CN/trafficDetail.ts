@@ -177,6 +177,7 @@ const zhCN: Record<keyof typeof en, string> = {
   "bodyType.media": "媒体",
   "bodyType.tree": "树形",
   "bodyType.text": "文本",
+  "bodyType.other": "其他",
   "bodyType.view": "视图",
   "body.copiedToClipboard": "已复制到剪贴板",
   "body.copyFailed": "复制失败",

@@ -3449,7 +3449,7 @@ export default function RemoteInvokeTab({
                     ...prev,
                     {
                       id: nextId,
-                      name: t("remoteInvoke.shellEditor.defaultProfileName", { index: nextIndex }),
+                      name: `Profile ${nextIndex}`,
                       description: "",
                       enabled: true,
                       cwd_allowlist: [],
@@ -3704,8 +3704,8 @@ export default function RemoteInvokeTab({
                       ...prev,
                       {
                         id: profileId,
-                        name: t("remoteInvoke.shellEditor.defaultProfileName", { index: nextIndex }),
-                        description: t("remoteInvoke.shellEditor.autoCreatedProfile"),
+                        name: `Profile ${nextIndex}`,
+                        description: "Auto-created for command group",
                         enabled: true,
                         cwd_allowlist: [],
                         env_allowlist: [...DEFAULT_SANDBOX_ENV_KEYS],
@@ -3721,7 +3721,7 @@ export default function RemoteInvokeTab({
                     ...prev,
                     {
                       id: nextId,
-                      name: t("remoteInvoke.shellEditor.defaultPolicyName", { index: nextIndex }),
+                      name: `Policy ${nextIndex}`,
                       description: "",
                       enabled: true,
                       profile_id: profileIdForNewGroup,

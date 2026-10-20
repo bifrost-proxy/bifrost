@@ -279,7 +279,6 @@ const zhCN: Record<keyof typeof en, string> = {
   "shellEditor.allowInteractive": "允许交互",
   "shellEditor.commandGroups": "命令组",
   "shellEditor.policiesHint": "（策略）",
-  "shellEditor.autoCreatedProfile": "为命令组自动创建",
   "shellEditor.defaultPolicyName": "策略 {index}",
   "shellEditor.addCommandGroup": "添加命令组",
   "shellEditor.policiesDescription": "策略定义调用方可以执行的内容以及适用的配置档。",

@@ -32,7 +32,7 @@ const zhCN: Record<keyof typeof en, string> = {
   // Breakpoint body
   "breakpoint.invalidBase64": "请输入带填充且不含空白字符的有效 Base64",
   "breakpoint.nonCanonicalBase64": "请输入规范的 Base64",
-  "breakpoint.resumeFailed": "无法恢复断点",
+  "breakpoint.resumeFailed": "无法放行断点",
 
   // Rule effectiveness analysis
   "ruleEffect.noActiveRules": "# 暂无生效的规则",

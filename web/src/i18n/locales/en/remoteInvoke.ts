@@ -277,7 +277,6 @@ const en = {
   "shellEditor.allowInteractive": "Allow interactive",
   "shellEditor.commandGroups": "Command groups",
   "shellEditor.policiesHint": " (policies)",
-  "shellEditor.autoCreatedProfile": "Auto-created for command group",
   "shellEditor.defaultPolicyName": "Policy {index}",
   "shellEditor.addCommandGroup": "Add command group",
   "shellEditor.policiesDescription": "Policies define what callers may execute and which profile applies.",

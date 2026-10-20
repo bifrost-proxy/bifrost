@@ -11,6 +11,7 @@ import type {
   SpeechPipelinesStatus,
   VoiceRealtimeTranscriptSegment,
 } from "../../../api/asr";
+import { useI18n } from "../../../i18n";
 import SpeechTab from "../../Settings/tabs/SpeechTab";
 import type { WorkState } from "../asrUtils";
 import DiarizationSetupCard from "./DiarizationSetupCard";
@@ -110,6 +111,7 @@ export default function ASRHomeTabs({
   onStopService,
   onCancel,
 }: ASRHomeTabsProps) {
+  const { t } = useI18n();
   return (
     <div style={{ height: "100%", overflow: "auto" }} data-testid="asr-home-tabs">
       <Tabs
@@ -123,7 +125,7 @@ export default function ASRHomeTabs({
         items={[
           {
             key: "scheduled",
-            label: "Scheduled Tasks",
+            label: t("asr.homeTabs.scheduled"),
             children: (
               <div data-testid="asr-home-tab-scheduled">
                 <DirectoryTasksPanel
@@ -146,7 +148,7 @@ export default function ASRHomeTabs({
           },
           {
             key: "management",
-            label: "ASR Management",
+            label: t("asr.homeTabs.management"),
             children: (
               <div data-testid="asr-home-tab-management">
                 <SpeechTab />
@@ -185,7 +187,7 @@ export default function ASRHomeTabs({
           },
           {
             key: "voice",
-            label: "Voiceprint & Wake",
+            label: t("asr.homeTabs.voice"),
             children: (
               <div data-testid="asr-home-tab-voice">
                 <DiarizationSetupCard />

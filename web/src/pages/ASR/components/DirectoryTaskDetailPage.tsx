@@ -67,6 +67,7 @@ import {
   isDirectoryTaskDetailTabKey,
   type DirectoryTaskDetailTabKey,
 } from "./taskDetailRoute";
+import { useI18n, type TFunction } from "../../../i18n";
 
 const { Text } = Typography;
 const DEFAULT_TASK_FILE_PAGE_SIZE = 8;
@@ -75,14 +76,20 @@ const TASK_FILE_TABLE_SCROLL_X = 1920;
 const DAILY_DOCUMENT_PAGE_SIZE = 8;
 const DAILY_DOCUMENT_TABLE_SCROLL_X = 900;
 
-function pauseStatusLabel(task: AsrDirectoryTaskDetail): string {
+function pauseStatusLabel(t: TFunction, task: AsrDirectoryTaskDetail): string {
   if (!task.paused) {
-    return task.summary.running ? "Running" : task.last_error ? "Error" : "Ready";
+    return task.summary.running
+      ? t("asrTasks.status.running")
+      : task.last_error
+        ? t("asrTasks.status.error")
+        : t("asrTasks.status.ready");
   }
   if (task.summary.running) {
-    return "Pausing";
+    return t("asrTasks.status.pausing");
   }
-  return task.next_run_at_ms ? "Paused until schedule" : "Paused";
+  return task.next_run_at_ms
+    ? t("asrTasks.status.pausedUntilSchedule")
+    : t("asrTasks.status.paused");
 }
 
 type FileStatusFilter = "processing" | "pending" | "completed" | "failed" | "all";
@@ -146,18 +153,25 @@ function matchesFileStatusFilter(
 }
 
 function compressionDisplayForFile(
+  t: TFunction,
   record: AsrTaskFileRecord,
   compression?: AsrSourceAudioCompressionState,
 ): { label: string; color?: string; detail?: string } {
   if (record.source_compression) {
     return {
-      label: "Compressed",
+      label: t("asrTasks.compression.compressed"),
       color: "success",
-      detail: `FLAC · saved ${formatBytes(record.source_compression.saved_bytes)}`,
+      detail: t("asrTasks.compression.flacSaved", {
+        size: formatBytes(record.source_compression.saved_bytes),
+      }),
     };
   }
   if (compression?.current_source_path === record.source_path) {
-    return { label: "Compressing", color: "processing", detail: "Current file" };
+    return {
+      label: t("asrTasks.compression.compressing"),
+      color: "processing",
+      detail: t("asrTasks.compression.currentFile"),
+    };
   }
   const result = compression?.results.find(
     (candidate) =>
@@ -165,20 +179,27 @@ function compressionDisplayForFile(
       candidate.compressed_path === record.source_path,
   );
   if (result?.status === "failed") {
-    return { label: "Failed", color: "error", detail: result.message };
+    return { label: t("common.failed"), color: "error", detail: result.message };
   }
   if (result?.status === "skipped") {
-    return { label: "Skipped", color: "warning", detail: result.message };
+    return { label: t("asrTasks.compression.skipped"), color: "warning", detail: result.message };
   }
   if (record.source_compression_eligible) {
-    return { label: "Uncompressed", color: "blue", detail: "Ready to compress" };
+    return {
+      label: t("asrTasks.compression.uncompressed"),
+      color: "blue",
+      detail: t("asrTasks.compression.readyToCompress"),
+    };
   }
   if (record.status !== "success") {
-    return { label: "Not eligible", detail: "Transcription is not complete" };
+    return {
+      label: t("asrTasks.compression.notEligible"),
+      detail: t("asrTasks.compression.transcriptionIncomplete"),
+    };
   }
   return {
-    label: "Not eligible",
-    detail: "Source or transcript artifacts are incomplete",
+    label: t("asrTasks.compression.notEligible"),
+    detail: t("asrTasks.compression.artifactsIncomplete"),
   };
 }
 
@@ -237,6 +258,7 @@ export default function DirectoryTaskDetailPage({
   onOpenDailyAgentReport,
   onChangeTaskTab,
 }: DirectoryTaskDetailPageProps) {
+  const { t } = useI18n();
   const [retryingFileKey, setRetryingFileKey] = useState<string | null>(null);
   const [startingBulkRetry, setStartingBulkRetry] = useState(false);
   const [retryingFailedFileKey, setRetryingFailedFileKey] = useState<string | null>(null);
@@ -321,19 +343,22 @@ export default function DirectoryTaskDetailPage({
         const result = await retryFailedChunks(taskDetail.id, fileKey);
         if (result.still_failed > 0) {
           message.warning(
-            `Recovered ${result.recovered} chunks, ${result.still_failed} still failed`,
+            t("asrTasks.detail.chunksPartiallyRecovered", {
+              recovered: result.recovered,
+              stillFailed: result.still_failed,
+            }),
           );
         } else {
-          message.success(`All ${result.recovered} failed chunks recovered successfully`);
+          message.success(t("asrTasks.detail.chunksRecovered", { count: result.recovered }));
         }
         onRefreshTask(taskDetail.id);
       } catch (error) {
-        message.error(error instanceof Error ? error.message : "Failed to retry chunks");
+        message.error(error instanceof Error ? error.message : t("asrTasks.detail.retryChunksFailed"));
       } finally {
         setRetryingFileKey(null);
       }
     },
-    [taskDetail, onRefreshTask],
+    [taskDetail, onRefreshTask, t],
   );
 
   const handleRetryAllFailedChunks = useCallback(async () => {
@@ -345,12 +370,12 @@ export default function DirectoryTaskDetailPage({
       onRefreshTask(taskDetail.id);
     } catch (error) {
       message.error(
-        error instanceof Error ? error.message : "Failed to retry failed chunks",
+        error instanceof Error ? error.message : t("asrTasks.detail.retryFailedChunksFailed"),
       );
     } finally {
       setStartingBulkRetry(false);
     }
-  }, [taskDetail, onRefreshTask]);
+  }, [taskDetail, onRefreshTask, t]);
 
   const handleRetryFailedFile = useCallback(
     async (fileKey: string) => {
@@ -361,12 +386,12 @@ export default function DirectoryTaskDetailPage({
         message.success(result.message);
         onRefreshTask(taskDetail.id);
       } catch (error) {
-        message.error(error instanceof Error ? error.message : "Failed to retry transcription");
+        message.error(error instanceof Error ? error.message : t("asrTasks.detail.retryTranscriptionFailed"));
       } finally {
         setRetryingFailedFileKey(null);
       }
     },
-    [taskDetail, onRefreshTask],
+    [taskDetail, onRefreshTask, t],
   );
 
   const handleRetryAllFailedFiles = useCallback(async () => {
@@ -378,11 +403,11 @@ export default function DirectoryTaskDetailPage({
       else message.info(result.message);
       onRefreshTask(taskDetail.id);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to retry failed files");
+      message.error(error instanceof Error ? error.message : t("asrTasks.detail.retryFailedFilesFailed"));
     } finally {
       setStartingFailedFilesRetry(false);
     }
-  }, [taskDetail, onRefreshTask]);
+  }, [taskDetail, onRefreshTask, t]);
 
   const handleCleanupSourceAudio = useCallback(async () => {
     if (!taskDetail || cleanupConfirmName !== taskDetail.name) return;
@@ -391,13 +416,17 @@ export default function DirectoryTaskDetailPage({
       const result = await cleanupAsrSourceAudio(taskDetail.id, cleanupConfirmName);
       if (result.failed_files.length > 0) {
         message.warning(
-          `Deleted ${result.deleted_files} source file(s), ${result.failed_files.length} failed`,
+          t("asrTasks.detail.cleanupPartial", {
+            deleted: result.deleted_files,
+            failed: result.failed_files.length,
+          }),
         );
       } else {
         message.success(
-          `Deleted ${result.deleted_files} source file(s), freed ${formatBytes(
-            result.deleted_bytes,
-          )}`,
+          t("asrTasks.detail.cleanupSuccess", {
+            deleted: result.deleted_files,
+            size: formatBytes(result.deleted_bytes),
+          }),
         );
       }
       setCleanupConfirmOpen(false);
@@ -405,55 +434,55 @@ export default function DirectoryTaskDetailPage({
       onRefreshTask(taskDetail.id);
     } catch (error) {
       message.error(
-        error instanceof Error ? error.message : "Failed to clean source audio",
+        error instanceof Error ? error.message : t("asrTasks.detail.cleanupFailed"),
       );
     } finally {
       setCleaningSourceAudio(false);
     }
-  }, [cleanupConfirmName, taskDetail, onRefreshTask]);
+  }, [cleanupConfirmName, taskDetail, onRefreshTask, t]);
 
   const handleStartSourceCompression = useCallback(async () => {
     if (!taskDetail) return;
     setChangingSourceCompression(true);
     try {
       const result = await startAsrSourceAudioCompression(taskDetail.id);
-      message.info(result.compression?.message || "Source-audio compression started");
+      message.info(result.compression?.message || t("asrTasks.detail.compressionStarted"));
       onRefreshTask(taskDetail.id);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to start compression");
+      message.error(error instanceof Error ? error.message : t("asrTasks.detail.startCompressionFailed"));
     } finally {
       setChangingSourceCompression(false);
     }
-  }, [taskDetail, onRefreshTask]);
+  }, [taskDetail, onRefreshTask, t]);
 
   const handleCancelSourceCompression = useCallback(async () => {
     if (!taskDetail) return;
     setChangingSourceCompression(true);
     try {
       const result = await cancelAsrSourceAudioCompression(taskDetail.id);
-      message.info(result.compression?.message || "Compression cancellation requested");
+      message.info(result.compression?.message || t("asrTasks.detail.compressionCancelRequested"));
       onRefreshTask(taskDetail.id);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to cancel compression");
+      message.error(error instanceof Error ? error.message : t("asrTasks.detail.cancelCompressionFailed"));
     } finally {
       setChangingSourceCompression(false);
     }
-  }, [taskDetail, onRefreshTask]);
+  }, [taskDetail, onRefreshTask, t]);
 
   const dailyAgentRunMenuItems = useMemo(() => {
     const agents = taskDetail?.daily_agent?.agents || [];
     return [
       {
         key: "__all__",
-        label: "Run All Agents",
+        label: t("asrTasks.field.runAllAgents"),
       },
       ...agents.map((agent) => ({
         key: agent.id,
-        label: `Run ${agent.name || agent.id}`,
+        label: t("asrTasks.detail.runAgent", { name: agent.name || agent.id }),
         disabled: !agent.enabled,
       })),
     ];
-  }, [taskDetail?.daily_agent?.agents]);
+  }, [taskDetail?.daily_agent?.agents, t]);
 
   const handleRunDailyAgentForDocument = useCallback(
     async (date: string, agentId?: string) => {
@@ -466,24 +495,26 @@ export default function DirectoryTaskDetailPage({
           agentId,
         });
         if (result.status === "already_running") {
-          message.warning(result.message || "A Daily Agent run is already in progress");
+          message.warning(result.message || t("asrTasks.detail.dailyAgentAlreadyRunning"));
           return;
         }
         message.success(
           result.message ||
             (agentId
-              ? `Daily Agent ${agentId} run queued for ${date}`
-              : `All Daily Agents queued for ${date}`),
+              ? t("asrTasks.detail.dailyAgentQueued", { agent: agentId, date })
+              : t("asrTasks.detail.allDailyAgentsQueued", { date })),
         );
       } catch (error) {
         message.error(
-          `Daily Agent run failed: ${error instanceof Error ? error.message : String(error)}`,
+          t("asrTasks.detail.dailyAgentRunFailed", {
+            error: error instanceof Error ? error.message : String(error),
+          }),
         );
       } finally {
         setDailyAgentRunDate(null);
       }
     },
-    [dailyAgentRunDate, taskDetail],
+    [dailyAgentRunDate, taskDetail, t],
   );
 
   if (selectedFileKey) {
@@ -519,7 +550,7 @@ export default function DirectoryTaskDetailPage({
               <Button
                 icon={<ArrowLeftOutlined />}
                 onClick={onBackToDailyDocuments}
-                aria-label="Back to daily docs"
+                aria-label={t("asrTasks.detail.backToDailyDocs")}
               />
               <span>{selectedDailyDate}</span>
             </Space>
@@ -533,11 +564,11 @@ export default function DirectoryTaskDetailPage({
                 style={{ width: "100%", minWidth: 0, overflowX: "auto", overflowY: "hidden" }}
               >
                 <Descriptions size="small" bordered column={2} style={{ minWidth: 720 }}>
-                  <Descriptions.Item label="Task">
+                  <Descriptions.Item label={t("asrTasks.field.task")}>
                     {taskDailyDocument.task_name}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Date">{taskDailyDocument.date}</Descriptions.Item>
-                  <Descriptions.Item label="Path" span={2}>
+                  <Descriptions.Item label={t("asrTasks.field.date")}>{taskDailyDocument.date}</Descriptions.Item>
+                  <Descriptions.Item label={t("asrTasks.field.path")} span={2}>
                     <Text
                       style={{ display: "inline-block", fontSize: 12, whiteSpace: "nowrap" }}
                       ellipsis={{ tooltip: taskDailyDocument.path }}
@@ -545,10 +576,10 @@ export default function DirectoryTaskDetailPage({
                       {taskDailyDocument.path}
                     </Text>
                   </Descriptions.Item>
-                  <Descriptions.Item label="Size">
+                  <Descriptions.Item label={t("asrTasks.field.size")}>
                     {formatBytes(taskDailyDocument.size)}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Modified">
+                  <Descriptions.Item label={t("asrTasks.field.modified")}>
                     {formatTime(taskDailyDocument.modified_ms)}
                   </Descriptions.Item>
                 </Descriptions>
@@ -575,8 +606,8 @@ export default function DirectoryTaskDetailPage({
           ) : (
             <Text type="secondary">
               {taskDailyDocumentLoading
-                ? "Loading daily document..."
-                : "Daily document not found."}
+                ? t("asrTasks.detail.loadingDailyDocument")
+                : t("asrTasks.detail.dailyDocumentNotFound")}
             </Text>
           )}
         </Card>
@@ -597,7 +628,7 @@ export default function DirectoryTaskDetailPage({
               <Button
                 icon={<ArrowLeftOutlined />}
                 onClick={onBackToDailyAgentReports}
-                aria-label="Back to Daily Agent reports"
+                aria-label={t("asrTasks.detail.backToDailyAgentReports")}
               />
               <span>{selectedDailyAgentReportDate}-report.md</span>
             </Space>
@@ -611,23 +642,23 @@ export default function DirectoryTaskDetailPage({
                 style={{ width: "100%", minWidth: 0, overflowX: "auto", overflowY: "hidden" }}
               >
                 <Descriptions size="small" bordered column={2} style={{ minWidth: 900 }}>
-                  <Descriptions.Item label="Task">
+                  <Descriptions.Item label={t("asrTasks.field.task")}>
                     {taskDailyAgentReport.task_name}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Date">
+                  <Descriptions.Item label={t("asrTasks.field.date")}>
                     {taskDailyAgentReport.date}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Agent">
+                  <Descriptions.Item label={t("asrTasks.field.agent")}>
                     <Tag>
                       {taskDailyAgentReport.agent_name ||
                         taskDailyAgentReport.agent_id ||
                         "daily_report"}
                     </Tag>
                   </Descriptions.Item>
-                  <Descriptions.Item label="Output Dir">
+                  <Descriptions.Item label={t("asrTasks.field.outputDir")}>
                     <Text code>{taskDailyAgentReport.output_dir || "report"}</Text>
                   </Descriptions.Item>
-                  <Descriptions.Item label="Path" span={2}>
+                  <Descriptions.Item label={t("asrTasks.field.path")} span={2}>
                     <Text
                       style={{ display: "inline-block", fontSize: 12, whiteSpace: "nowrap" }}
                       ellipsis={{ tooltip: taskDailyAgentReport.path }}
@@ -635,16 +666,16 @@ export default function DirectoryTaskDetailPage({
                       {taskDailyAgentReport.path}
                     </Text>
                   </Descriptions.Item>
-                  <Descriptions.Item label="Size">
+                  <Descriptions.Item label={t("asrTasks.field.size")}>
                     {formatBytes(taskDailyAgentReport.size)}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Modified">
+                  <Descriptions.Item label={t("asrTasks.field.modified")}>
                     {formatTime(taskDailyAgentReport.modified_ms)}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Processed At">
+                  <Descriptions.Item label={t("asrTasks.field.processedAt")}>
                     {formatTime(taskDailyAgentReport.processed_at_ms)}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Runner">
+                  <Descriptions.Item label={t("asrTasks.field.runner")}>
                     {taskDailyAgentReport.runner ? (
                       <Tag>{taskDailyAgentReport.runner}</Tag>
                     ) : (
@@ -662,8 +693,8 @@ export default function DirectoryTaskDetailPage({
           ) : (
             <Text type="secondary">
               {taskDailyAgentReportLoading
-                ? "Loading Daily Agent report..."
-                : "Daily Agent report not found."}
+                ? t("asrTasks.detail.loadingDailyAgentReport")
+                : t("asrTasks.detail.dailyAgentReportNotFound")}
             </Text>
           )}
         </Card>
@@ -713,7 +744,7 @@ export default function DirectoryTaskDetailPage({
       showIcon
       message={
         <Space wrap>
-          <Text strong>Lossless source compression</Text>
+          <Text strong>{t("asrTasks.detail.losslessCompression")}</Text>
           <Tag
             color={
               sourceCompression?.status === "completed"
@@ -723,30 +754,41 @@ export default function DirectoryTaskDetailPage({
                   : "default"
             }
           >
-            {sourceCompression?.status ?? "ready"}
+            {sourceCompression?.status ?? t("asrTasks.detail.compressionStatusReady")}
           </Tag>
-          <Text>Compressed {compressedSourceFileCount}</Text>
-          <Text>Uncompressed eligible {compressibleSourceFileCount}</Text>
+          <Text>{t("asrTasks.detail.compressedCount", { count: compressedSourceFileCount })}</Text>
           <Text>
-            {compressedSourceFileCount}/{compressionTrackedFileCount} compressed
+            {t("asrTasks.detail.uncompressedEligibleCount", { count: compressibleSourceFileCount })}
           </Text>
-          <Text>Saved {formatBytes(summary?.compression_saved_bytes ?? 0)}</Text>
+          <Text>
+            {t("asrTasks.detail.compressedRatio", {
+              compressed: compressedSourceFileCount,
+              total: compressionTrackedFileCount,
+            })}
+          </Text>
+          <Text>
+            {t("asrTasks.detail.savedSize", {
+              size: formatBytes(summary?.compression_saved_bytes ?? 0),
+            })}
+          </Text>
         </Space>
       }
       description={
         <Space direction="vertical" size={6} style={{ width: "100%" }}>
           <Text type="secondary">
-            {sourceCompression?.message ??
-              "Only successfully transcribed WAV files with complete artifacts can be compressed."}
+            {sourceCompression?.message ?? t("asrTasks.detail.compressionDefaultMessage")}
           </Text>
           {sourceCompression?.current_source_path ? (
             <Text ellipsis={{ tooltip: sourceCompression.current_source_path }}>
-              Current: {sourceCompression.current_source_path}
+              {t("asrTasks.detail.currentPath", { path: sourceCompression.current_source_path })}
             </Text>
           ) : null}
           {sourceCompression ? (
             <Text type="secondary">
-              {sourceCompression.processed_files}/{sourceCompression.queued_files} this run
+              {t("asrTasks.detail.thisRun", {
+                processed: sourceCompression.processed_files,
+                queued: sourceCompression.queued_files,
+              })}
             </Text>
           ) : null}
           <Progress
@@ -764,13 +806,13 @@ export default function DirectoryTaskDetailPage({
   const overviewTabContent = taskDetail ? (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Descriptions size="small" bordered column={2}>
-        <Descriptions.Item label="Directory" span={2}>
+        <Descriptions.Item label={t("asrTasks.detail.directory")} span={2}>
           {taskDetail.audio_dir}
         </Descriptions.Item>
-        <Descriptions.Item label="Schedule">
-          {taskDetail.enabled ? formatSchedule(taskDetail.schedule) : "Disabled"}
+        <Descriptions.Item label={t("asrTasks.field.schedule")}>
+          {taskDetail.enabled ? formatSchedule(taskDetail.schedule) : t("common.disabled")}
         </Descriptions.Item>
-        <Descriptions.Item label="Run State">
+        <Descriptions.Item label={t("asrTasks.detail.runState")}>
           <Tag
             color={
               taskDetail.paused
@@ -780,91 +822,97 @@ export default function DirectoryTaskDetailPage({
                   : "success"
             }
           >
-            {pauseStatusLabel(taskDetail)}
+            {pauseStatusLabel(t, taskDetail)}
           </Tag>
         </Descriptions.Item>
-        <Descriptions.Item label="Next Run">
+        <Descriptions.Item label={t("asrTasks.detail.nextRun")}>
           {formatTime(taskDetail.next_run_at_ms)}
         </Descriptions.Item>
-        <Descriptions.Item label="Last Run">
+        <Descriptions.Item label={t("asrTasks.field.lastRun")}>
           {formatTime(taskDetail.last_run_at_ms)}
         </Descriptions.Item>
-        <Descriptions.Item label="Mode">
-          {taskDetail.recursive ? "Recursive" : "Flat"}
+        <Descriptions.Item label={t("asrTasks.field.mode")}>
+          {taskDetail.recursive ? t("asrTasks.detail.recursive") : t("asrTasks.detail.flat")}
         </Descriptions.Item>
-        <Descriptions.Item label="Runtime">
+        <Descriptions.Item label={t("asrTasks.field.runtime")}>
           {taskDetail.runtime_strategy}
         </Descriptions.Item>
-        <Descriptions.Item label="Speaker Diarization">
+        <Descriptions.Item label={t("asrTasks.field.speakerDiarization")}>
           {taskDetail.diarization?.enabled ? (
             <Space wrap>
               <Tag color={taskDetail.summary.diarization_ready ? "purple" : "warning"}>
-                {taskDetail.summary.diarization_ready ? "Ready" : "Needs setup"}
+                {taskDetail.summary.diarization_ready
+                  ? t("asrTasks.field.ready")
+                  : t("asrTasks.detail.needsSetup")}
               </Tag>
               <Text>{taskDetail.diarization.profile}</Text>
             </Space>
           ) : (
-            "Disabled"
+            t("common.disabled")
           )}
         </Descriptions.Item>
-        <Descriptions.Item label="Speakers">
-          {taskDetail.summary.diarized_files ?? 0} files,{" "}
-          {taskDetail.summary.speaker_count ?? 0} speakers
+        <Descriptions.Item label={t("asrTasks.field.speakers")}>
+          {t("asrTasks.detail.speakersSummary", {
+            files: taskDetail.summary.diarized_files ?? 0,
+            speakers: taskDetail.summary.speaker_count ?? 0,
+          })}
         </Descriptions.Item>
-        <Descriptions.Item label="Processed">
+        <Descriptions.Item label={t("asrTasks.field.processed")}>
           {taskDetail.summary.processed}
         </Descriptions.Item>
-        <Descriptions.Item label="Pending">
+        <Descriptions.Item label={t("asrTasks.field.pending")}>
           {taskDetail.summary.pending}
         </Descriptions.Item>
-        <Descriptions.Item label="Failed">{taskDetail.summary.failed}</Descriptions.Item>
-        <Descriptions.Item label="Audio Files">
+        <Descriptions.Item label={t("asrTasks.detail.failed")}>{taskDetail.summary.failed}</Descriptions.Item>
+        <Descriptions.Item label={t("asrTasks.detail.audioFiles")}>
           <Space>
             <Text>{formatBytes(taskDetail.summary.audio_source_bytes)}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              ({taskDetail.summary.audio_source_file_count} files)
+              {t("asrTasks.detail.filesCountParen", { count: taskDetail.summary.audio_source_file_count })}
             </Text>
           </Space>
         </Descriptions.Item>
-        <Descriptions.Item label="Cleanable Originals">
+        <Descriptions.Item label={t("asrTasks.detail.cleanableOriginals")}>
           <Space>
             <Text>{formatBytes(cleanableSourceBytes)}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              ({cleanableSourceFileCount} files)
+              {t("asrTasks.detail.filesCountParen", { count: cleanableSourceFileCount })}
             </Text>
           </Space>
         </Descriptions.Item>
-        <Descriptions.Item label="Compressible WAV">
+        <Descriptions.Item label={t("asrTasks.detail.compressibleWav")}>
           <Space>
             <Text>{formatBytes(compressibleSourceBytes)}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              ({compressibleSourceFileCount} files)
+              {t("asrTasks.detail.filesCountParen", { count: compressibleSourceFileCount })}
             </Text>
           </Space>
         </Descriptions.Item>
-        <Descriptions.Item label="Compression Saved">
+        <Descriptions.Item label={t("asrTasks.detail.compressionSaved")}>
           <Space>
             <Text>{formatBytes(summary?.compression_saved_bytes ?? 0)}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              ({summary?.compressed_source_file_count ?? 0} files)
+              {t("asrTasks.detail.filesCountParen", {
+                count: summary?.compressed_source_file_count ?? 0,
+              })}
             </Text>
           </Space>
         </Descriptions.Item>
         {summary && summary.partial_success > 0 ? (
-          <Descriptions.Item label="Partial Success">
+          <Descriptions.Item label={t("asrTasks.detail.partialSuccess")}>
             <Space>
               <Tag color="warning">{summary.partial_success}</Tag>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                ({summary.failed_chunk_count} failed chunks)
+                {t("asrTasks.detail.failedChunksParen", { count: summary.failed_chunk_count })}
               </Text>
             </Space>
           </Descriptions.Item>
         ) : (
-          <Descriptions.Item label="Deleted After Processing">
+          <Descriptions.Item label={t("asrTasks.detail.deletedAfterProcessing")}>
             {taskDetail.summary.deleted_after_processing}
           </Descriptions.Item>
         )}
-        <Descriptions.Item label="Last Error" span={2}>
+        <Descriptions.Item label={t("asrTasks.field.lastError")} span={2}>
           {taskDetail.last_error || "-"}
         </Descriptions.Item>
       </Descriptions>
@@ -881,7 +929,7 @@ export default function DirectoryTaskDetailPage({
           showIcon
           message={
             <Space wrap>
-              <Text strong>Bulk chunk retry</Text>
+              <Text strong>{t("asrTasks.detail.bulkChunkRetry")}</Text>
               <Tag
                 color={
                   bulkRetry.status === "failed"
@@ -894,13 +942,21 @@ export default function DirectoryTaskDetailPage({
                 {bulkRetry.status}
               </Tag>
               <Text>
-                {bulkRetry.processed_files}/{bulkRetry.queued_files} files
+                {t("asrTasks.detail.filesRatio", {
+                  processed: bulkRetry.processed_files,
+                  queued: bulkRetry.queued_files,
+                })}
               </Text>
               <Text>
-                {bulkRetry.recovered_chunks}/{bulkRetry.total_failed_chunks} chunks recovered
+                {t("asrTasks.detail.chunksRecoveredRatio", {
+                  recovered: bulkRetry.recovered_chunks,
+                  total: bulkRetry.total_failed_chunks,
+                })}
               </Text>
               {bulkRetry.still_failed_chunks > 0 ? (
-                <Text type="warning">{bulkRetry.still_failed_chunks} still failed</Text>
+                <Text type="warning">
+                  {t("asrTasks.detail.stillFailed", { count: bulkRetry.still_failed_chunks })}
+                </Text>
               ) : null}
             </Space>
           }
@@ -912,7 +968,7 @@ export default function DirectoryTaskDetailPage({
                   style={{ fontSize: 12, width: "100%" }}
                   ellipsis={{ tooltip: bulkRetry.current_source_path }}
                 >
-                  Current: {bulkRetry.current_source_path}
+                  {t("asrTasks.detail.currentPath", { path: bulkRetry.current_source_path })}
                 </Text>
               ) : null}
               {bulkRetryActive ? (
@@ -925,7 +981,7 @@ export default function DirectoryTaskDetailPage({
               ) : null}
               {bulkRetry.results.length > 0 ? (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Last file: {bulkRetry.results.at(-1)?.message}
+                  {t("asrTasks.detail.lastFile", { message: bulkRetry.results.at(-1)?.message })}
                 </Text>
               ) : null}
             </Space>
@@ -940,14 +996,14 @@ export default function DirectoryTaskDetailPage({
     ? [
         {
           type: "group",
-          label: "Status",
+          label: t("common.status"),
           children: [
             {
               key: "task-status",
               disabled: true,
               label: (
                 <Space data-testid="asr-task-actions-status">
-                  <Text type="secondary">Task</Text>
+                  <Text type="secondary">{t("asrTasks.field.task")}</Text>
                   <Tag
                     color={
                       taskDetail.last_error && !taskDetail.summary.running
@@ -959,7 +1015,7 @@ export default function DirectoryTaskDetailPage({
                             : "default"
                     }
                   >
-                    {pauseStatusLabel(taskDetail)}
+                    {pauseStatusLabel(t, taskDetail)}
                   </Tag>
                 </Space>
               ),
@@ -971,7 +1027,7 @@ export default function DirectoryTaskDetailPage({
                     disabled: true,
                     label: (
                       <Space>
-                        <Text type="secondary">Bulk retry</Text>
+                        <Text type="secondary">{t("asrTasks.detail.bulkRetry")}</Text>
                         <Tag color={bulkRetryActive ? "processing" : "default"}>
                           {bulkRetry.status}
                         </Tag>
@@ -987,7 +1043,7 @@ export default function DirectoryTaskDetailPage({
                     disabled: true,
                     label: (
                       <Space>
-                        <Text type="secondary">Compression</Text>
+                        <Text type="secondary">{t("asrTasks.field.compression")}</Text>
                         <Tag color={sourceCompressionActive ? "processing" : "default"}>
                           {sourceCompression.status}
                         </Tag>
@@ -1002,7 +1058,7 @@ export default function DirectoryTaskDetailPage({
         {
           key: "refresh",
           icon: <ReloadOutlined />,
-          label: "Refresh",
+          label: t("common.refresh"),
           onClick: () => onRefreshTask(taskDetail.id),
         },
         { type: "divider" },
@@ -1013,8 +1069,8 @@ export default function DirectoryTaskDetailPage({
               icon: changingSourceCompression ? <LoadingOutlined /> : <StopOutlined />,
               label:
                 sourceCompression?.status === "cancelling"
-                  ? "Cancelling compression..."
-                  : "Cancel compression",
+                  ? t("asrTasks.detail.cancellingCompression")
+                  : t("asrTasks.detail.cancelCompression"),
               disabled:
                 changingSourceCompression || sourceCompression?.status === "cancelling",
               onClick: () => void handleCancelSourceCompression(),
@@ -1022,7 +1078,7 @@ export default function DirectoryTaskDetailPage({
           : {
               key: "compress-wavs",
               icon: changingSourceCompression ? <LoadingOutlined /> : <FileZipOutlined />,
-              label: "Compress WAVs",
+              label: t("asrTasks.detail.compressWavs"),
               disabled:
                 compressibleSourceFileCount === 0 ||
                 changingSourceCompression ||
@@ -1030,9 +1086,13 @@ export default function DirectoryTaskDetailPage({
                 bulkRetryActive,
               onClick: () => {
                 Modal.confirm({
-                  title: `Losslessly compress ${compressibleSourceFileCount} completed WAV file${compressibleSourceFileCount === 1 ? "" : "s"}?`,
-                  content:
-                    "Each WAV is replaced with FLAC only after decoded PCM verification succeeds. Transcripts are kept and partial/failed files are skipped.",
+                  title: t(
+                    compressibleSourceFileCount === 1
+                      ? "asrTasks.detail.compressConfirmTitleOne"
+                      : "asrTasks.detail.compressConfirmTitleOther",
+                    { count: compressibleSourceFileCount },
+                  ),
+                  content: t("asrTasks.detail.compressConfirmContent"),
                   onOk: handleStartSourceCompression,
                 });
               },
@@ -1041,7 +1101,7 @@ export default function DirectoryTaskDetailPage({
           key: "clean-originals",
           danger: true,
           icon: cleaningSourceAudio ? <LoadingOutlined /> : <DeleteOutlined />,
-          label: "Clean originals",
+          label: t("asrTasks.detail.cleanOriginals"),
           disabled:
             cleanableSourceFileCount === 0 ||
             cleaningSourceAudio ||
@@ -1050,10 +1110,14 @@ export default function DirectoryTaskDetailPage({
             sourceCompressionActive,
           onClick: () => {
             Modal.confirm({
-              title: `First confirmation: clean ${cleanableSourceFileCount} original audio file${cleanableSourceFileCount === 1 ? "" : "s"}?`,
-              content:
-                "You will need to type the task name in a final confirmation. Transcript and timeline outputs are kept.",
-              okText: "Continue",
+              title: t(
+                cleanableSourceFileCount === 1
+                  ? "asrTasks.detail.cleanFirstConfirmTitleOne"
+                  : "asrTasks.detail.cleanFirstConfirmTitleOther",
+                { count: cleanableSourceFileCount },
+              ),
+              content: t("asrTasks.detail.cleanFirstConfirmContent"),
+              okText: t("asrTasks.detail.continue"),
               onOk: () => setCleanupConfirmOpen(true),
             });
           },
@@ -1062,8 +1126,8 @@ export default function DirectoryTaskDetailPage({
           key: "retry-failed-files",
           icon: startingFailedFilesRetry ? <LoadingOutlined /> : <ReloadOutlined />,
           label: startingFailedFilesRetry
-            ? "Retrying failed files..."
-            : "Retry all failed files",
+            ? t("asrTasks.detail.retryingFailedFiles")
+            : t("asrTasks.detail.retryAllFailedFiles"),
           disabled:
             failedFileCount === 0 ||
             startingFailedFilesRetry ||
@@ -1074,8 +1138,13 @@ export default function DirectoryTaskDetailPage({
             sourceCompressionActive,
           onClick: () => {
             Modal.confirm({
-              title: `Retry transcription for ${failedFileCount} failed file${failedFileCount === 1 ? "" : "s"}?`,
-              content: "Only failed files with available source audio will be queued.",
+              title: t(
+                failedFileCount === 1
+                  ? "asrTasks.detail.retryFilesConfirmTitleOne"
+                  : "asrTasks.detail.retryFilesConfirmTitleOther",
+                { count: failedFileCount },
+              ),
+              content: t("asrTasks.detail.retryFilesConfirmContent"),
               onOk: handleRetryAllFailedFiles,
             });
           },
@@ -1083,7 +1152,9 @@ export default function DirectoryTaskDetailPage({
         {
           key: "retry-failed-chunks",
           icon: startingBulkRetry || bulkRetryActive ? <LoadingOutlined /> : <ReloadOutlined />,
-          label: bulkRetryActive ? "Retrying failed chunks..." : "Retry all failed chunks",
+          label: bulkRetryActive
+            ? t("asrTasks.detail.retryingFailedChunks")
+            : t("asrTasks.detail.retryAllFailedChunks"),
           disabled:
             failedChunkCount === 0 ||
             bulkRetryActive ||
@@ -1091,8 +1162,13 @@ export default function DirectoryTaskDetailPage({
             sourceCompressionActive,
           onClick: () => {
             Modal.confirm({
-              title: `Retry all ${failedChunkCount} failed chunk${failedChunkCount > 1 ? "s" : ""}?`,
-              content: "Files are queued and retried one at a time.",
+              title: t(
+                failedChunkCount > 1
+                  ? "asrTasks.detail.retryAllChunksConfirmTitleOther"
+                  : "asrTasks.detail.retryAllChunksConfirmTitleOne",
+                { count: failedChunkCount },
+              ),
+              content: t("asrTasks.detail.retryAllChunksConfirmContent"),
               onOk: handleRetryAllFailedChunks,
             });
           },
@@ -1101,7 +1177,7 @@ export default function DirectoryTaskDetailPage({
         {
           key: "run",
           icon: taskDetail.summary.running ? <LoadingOutlined /> : <PlayCircleOutlined />,
-          label: "Run",
+          label: t("asrTasks.field.run"),
           disabled:
             taskDetail.summary.running ||
             Boolean(taskDetail.paused) ||
@@ -1112,24 +1188,24 @@ export default function DirectoryTaskDetailPage({
           ? {
               key: "resume",
               icon: <PlayCircleOutlined />,
-              label: "Resume",
+              label: t("common.resume"),
               onClick: () => onResumeTask(taskDetail.id),
             }
           : {
               key: "pause",
               icon: <PauseCircleOutlined />,
-              label: "Pause",
+              label: t("common.pause"),
               children: [
                 {
                   key: "pause-temporary",
                   icon: <PauseCircleOutlined />,
-                  label: "Pause until next schedule",
+                  label: t("asrTasks.pause.untilNextSchedule"),
                   onClick: () => onPauseTask(taskDetail.id, false, "temporary"),
                 },
                 {
                   key: "pause-long-term",
                   icon: <StopOutlined />,
-                  label: "Pause indefinitely",
+                  label: t("asrTasks.pause.indefinitely"),
                   onClick: () => onPauseTask(taskDetail.id, false, "long_term"),
                 },
               ],
@@ -1140,13 +1216,12 @@ export default function DirectoryTaskDetailPage({
                 key: "force-pause",
                 danger: true,
                 icon: <StopOutlined />,
-                label: "Force Pause",
+                label: t("asrTasks.pause.force"),
                 onClick: () => {
                   Modal.confirm({
-                    title: "Force pause this ASR task?",
-                    content:
-                      "The current native ASR process will be terminated and the file will resume from pending later.",
-                    okText: "Force Pause",
+                    title: t("asrTasks.pause.forceConfirmTitle"),
+                    content: t("asrTasks.pause.forceConfirmDescription"),
+                    okText: t("asrTasks.pause.force"),
                     okType: "danger",
                     onOk: () => onPauseTask(taskDetail.id, true, "long_term"),
                   });
@@ -1166,12 +1241,14 @@ export default function DirectoryTaskDetailPage({
             <Button
               icon={<ArrowLeftOutlined />}
               onClick={onBackToTasks}
-              aria-label="Back to directory tasks"
+              aria-label={t("asrTasks.detail.backToDirectoryTasks")}
             />
             <span
               style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
             >
-              {taskDetail ? `Directory Task: ${taskDetail.name}` : "Directory Task"}
+              {taskDetail
+                ? t("asrTasks.detail.titleWithName", { name: taskDetail.name })
+                : t("asrTasks.detail.title")}
             </span>
           </Space>
         }
@@ -1182,8 +1259,8 @@ export default function DirectoryTaskDetailPage({
                 type="text"
                 size="small"
                 icon={<MoreOutlined />}
-                aria-label="More task actions"
-                title="More task actions"
+                aria-label={t("asrTasks.detail.moreActions")}
+                title={t("asrTasks.detail.moreActions")}
                 data-testid="asr-task-actions-menu-button"
               />
             </Dropdown>
@@ -1207,12 +1284,12 @@ export default function DirectoryTaskDetailPage({
               items={[
                 {
                   key: "overview",
-                  label: "Overview",
+                  label: t("asrTasks.detail.tab.overview"),
                   children: <div data-testid="asr-task-overview-tab">{overviewTabContent}</div>,
                 },
                 {
                   key: "files",
-                  label: `Files (${taskDetail.files.length})`,
+                  label: t("asrTasks.detail.tab.files", { count: taskDetail.files.length }),
                   children: (
                     <div data-testid="asr-task-files-table">
                       <div style={{ marginBottom: 12 }}>{sourceCompressionPanel}</div>
@@ -1230,20 +1307,36 @@ export default function DirectoryTaskDetailPage({
                           onChange={(value) => setFileStatusFilter(value)}
                           options={[
                             {
-                              label: `Processing (${fileStatusCounts.processing})`,
+                              label: t("asrTasks.detail.filter.processing", {
+                                count: fileStatusCounts.processing,
+                              }),
                               value: "processing",
                             },
-                            { label: `Pending (${fileStatusCounts.pending})`, value: "pending" },
                             {
-                              label: `Completed (${fileStatusCounts.completed})`,
+                              label: t("asrTasks.detail.filter.pending", { count: fileStatusCounts.pending }),
+                              value: "pending",
+                            },
+                            {
+                              label: t("asrTasks.detail.filter.completed", {
+                                count: fileStatusCounts.completed,
+                              }),
                               value: "completed",
                             },
-                            { label: `Failed (${fileStatusCounts.failed})`, value: "failed" },
-                            { label: `All (${fileStatusCounts.all})`, value: "all" },
+                            {
+                              label: t("asrTasks.detail.filter.failed", { count: fileStatusCounts.failed }),
+                              value: "failed",
+                            },
+                            {
+                              label: t("asrTasks.detail.filter.all", { count: fileStatusCounts.all }),
+                              value: "all",
+                            },
                           ]}
                         />
                         <Text type="secondary" style={{ fontSize: 12 }}>
-                          Showing {filteredTaskFiles.length} of {fileStatusCounts.all} files
+                          {t("asrTasks.detail.showingFiles", {
+                            shown: filteredTaskFiles.length,
+                            total: fileStatusCounts.all,
+                          })}
                         </Text>
                       </Space>
                       <Table<AsrTaskFileRecord>
@@ -1266,7 +1359,7 @@ export default function DirectoryTaskDetailPage({
                 }}
                 columns={[
                   {
-                    title: "File",
+                    title: t("asrTasks.field.file"),
                     dataIndex: "source_path",
                     width: 360,
                     render: (value, record) => (
@@ -1281,14 +1374,14 @@ export default function DirectoryTaskDetailPage({
                             style={{ padding: 0, height: "auto", alignSelf: "flex-start" }}
                             onClick={() => onOpenFile(record)}
                           >
-                            Open transcript
+                            {t("asrTasks.detail.openTranscript")}
                           </Button>
                         ) : null}
                       </Space>
                     ),
                   },
                   {
-                    title: "Status",
+                    title: t("common.status"),
                     dataIndex: "status",
                     width: 180,
                     render: (value, record) => {
@@ -1331,8 +1424,8 @@ export default function DirectoryTaskDetailPage({
                           <Space direction="vertical" size={4} style={{ width: "100%" }}>
                             {tag}
                             <Popconfirm
-                              title="Retry transcription for this file?"
-                              description="The previous failed outputs will be cleared and this file will be transcribed again."
+                              title={t("asrTasks.detail.retryFileConfirmTitle")}
+                              description={t("asrTasks.detail.retryFileConfirmDescription")}
                               onConfirm={() => handleRetryFailedFile(record.key)}
                             >
                               <Button
@@ -1348,7 +1441,7 @@ export default function DirectoryTaskDetailPage({
                                 disabled={retryDisabled}
                                 style={{ padding: 0, height: "auto" }}
                               >
-                                Retry transcription
+                                {t("asrTasks.detail.retryTranscription")}
                               </Button>
                             </Popconfirm>
                           </Space>
@@ -1363,8 +1456,12 @@ export default function DirectoryTaskDetailPage({
                                 <div>
                                   {failedChunks.map((fc) => (
                                     <div key={fc.chunk_index} style={{ fontSize: 11 }}>
-                                      Chunk {fc.chunk_index}: {fc.offset_secs}s–
-                                      {fc.offset_secs + fc.duration_secs}s ({fc.attempts} attempts)
+                                      {t("asrTasks.detail.chunkTooltip", {
+                                        index: fc.chunk_index,
+                                        start: fc.offset_secs,
+                                        end: fc.offset_secs + fc.duration_secs,
+                                        attempts: fc.attempts,
+                                      })}
                                       <br />
                                       <span style={{ color: "#ff7875" }}>{fc.error}</span>
                                     </div>
@@ -1373,13 +1470,23 @@ export default function DirectoryTaskDetailPage({
                               }
                             >
                               <Text type="warning" style={{ fontSize: 12, cursor: "help" }}>
-                                <WarningOutlined /> {failedChunks.length} failed chunk
-                                {failedChunks.length > 1 ? "s" : ""}
+                                <WarningOutlined />{" "}
+                                {t(
+                                  failedChunks.length > 1
+                                    ? "asrTasks.detail.failedChunksOther"
+                                    : "asrTasks.detail.failedChunksOne",
+                                  { count: failedChunks.length },
+                                )}
                               </Text>
                             </Tooltip>
                             <Popconfirm
-                              title={`Retry ${failedChunks.length} failed chunk${failedChunks.length > 1 ? "s" : ""}?`}
-                              description="This will re-transcribe only the failed segments."
+                              title={t(
+                                failedChunks.length > 1
+                                  ? "asrTasks.detail.retryChunksConfirmTitleOther"
+                                  : "asrTasks.detail.retryChunksConfirmTitleOne",
+                                { count: failedChunks.length },
+                              )}
+                              description={t("asrTasks.detail.retryChunksConfirmDescription")}
                               onConfirm={() => handleRetryChunks(record.key)}
                             >
                               <Button
@@ -1395,7 +1502,7 @@ export default function DirectoryTaskDetailPage({
                                 disabled={retryingFileKey !== null}
                                 style={{ padding: 0, height: "auto" }}
                               >
-                                Retry chunks
+                                {t("asrTasks.detail.retryChunks")}
                               </Button>
                             </Popconfirm>
                           </Space>
@@ -1405,10 +1512,10 @@ export default function DirectoryTaskDetailPage({
                     },
                   },
                   {
-                    title: "Compression",
+                    title: t("asrTasks.field.compression"),
                     width: 170,
                     render: (_value, record) => {
-                      const display = compressionDisplayForFile(record, sourceCompression);
+                      const display = compressionDisplayForFile(t, record, sourceCompression);
                       return (
                         <Space direction="vertical" size={2} style={{ width: "100%" }}>
                           <Tag color={display.color}>{display.label}</Tag>
@@ -1426,7 +1533,7 @@ export default function DirectoryTaskDetailPage({
                     },
                   },
                   {
-                    title: "Diarization",
+                    title: t("asrTasks.detail.diarization"),
                     width: 150,
                     render: (_value, record) =>
                       record.diarization_status ? (
@@ -1436,7 +1543,7 @@ export default function DirectoryTaskDetailPage({
                           </Tag>
                           {record.speaker_count ? (
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              {record.speaker_count} speakers
+                              {t("asrTasks.detail.speakerCount", { count: record.speaker_count })}
                             </Text>
                           ) : null}
                         </Space>
@@ -1445,13 +1552,13 @@ export default function DirectoryTaskDetailPage({
                       ),
                   },
                   {
-                    title: "Text",
+                    title: t("asrTasks.field.text"),
                     dataIndex: "text_chars",
                     width: 90,
-                    render: (value) => `${value} chars`,
+                    render: (value) => t("asrTasks.detail.chars", { count: value }),
                   },
                   {
-                    title: "Runtime",
+                    title: t("asrTasks.field.runtime"),
                     width: 180,
                     render: (_value, record) => {
                       const metrics = record.chunk_metrics ?? [];
@@ -1461,8 +1568,11 @@ export default function DirectoryTaskDetailPage({
                           <Tag>{record.runtime_strategy ?? taskDetail.runtime_strategy}</Tag>
                           {last ? (
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              {metrics.length} metrics, last {last.runner} RTF{" "}
-                              {last.rtf.toFixed(3)}
+                              {t("asrTasks.detail.metricsSummary", {
+                                count: metrics.length,
+                                runner: last.runner,
+                                rtf: last.rtf.toFixed(3),
+                              })}
                             </Text>
                           ) : null}
                           {record.fallback_reason ? (
@@ -1475,7 +1585,7 @@ export default function DirectoryTaskDetailPage({
                     },
                   },
                   {
-                    title: "Recorded",
+                    title: t("asrTasks.field.recorded"),
                     dataIndex: "source_created_at_ms",
                     width: 190,
                     render: (value, record) => (
@@ -1490,36 +1600,36 @@ export default function DirectoryTaskDetailPage({
                     ),
                   },
                   {
-                    title: "Audio",
+                    title: t("asrTasks.detail.audio"),
                     dataIndex: "media_duration_ms",
                     width: 110,
                     render: (value) => formatDuration(value),
                   },
                   {
-                    title: "Source Size",
+                    title: t("asrTasks.detail.sourceSize"),
                     dataIndex: "source_size",
                     width: 110,
                     render: (value) => formatBytes(value),
                   },
                   {
-                    title: "Started",
+                    title: t("asrTasks.detail.started"),
                     dataIndex: "started_at_ms",
                     width: 180,
                     render: (value) => formatTime(value),
                   },
                   {
-                    title: "Elapsed",
+                    title: t("asrTasks.detail.elapsed"),
                     width: 110,
                     render: (_value, record) => formatDuration(fileElapsedMs(record, nowMs)),
                   },
                   {
-                    title: "Finished",
+                    title: t("asrTasks.detail.finished"),
                     dataIndex: "finished_at_ms",
                     width: 180,
                     render: (value) => formatTime(value),
                   },
                   {
-                    title: "Result",
+                    title: t("asrTasks.detail.result"),
                     width: 260,
                     render: (_value, record) => (
                       <Space direction="vertical" size={0}>
@@ -1544,7 +1654,7 @@ export default function DirectoryTaskDetailPage({
                 },
                 {
                   key: "daily",
-                  label: `Daily Docs (${dailyDocuments.length})`,
+                  label: t("asrTasks.detail.tab.dailyDocs", { count: dailyDocuments.length }),
                   children: (
                     <div data-testid="asr-task-daily-docs-tab">
                       <style>
@@ -1572,13 +1682,13 @@ export default function DirectoryTaskDetailPage({
                           }}
                           columns={[
                             {
-                              title: "Date",
+                              title: t("asrTasks.field.date"),
                               dataIndex: "date",
                               width: 140,
                               render: (value) => <Text strong>{value}</Text>,
                             },
                             {
-                              title: "Document",
+                              title: t("asrTasks.detail.document"),
                               dataIndex: "path",
                               render: (value) => (
                                 <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: value }}>
@@ -1587,25 +1697,25 @@ export default function DirectoryTaskDetailPage({
                               ),
                             },
                             {
-                              title: "Size",
+                              title: t("asrTasks.field.size"),
                               dataIndex: "size",
                               width: 110,
                               render: (value) => formatBytes(value),
                             },
                             {
-                              title: "Text",
+                              title: t("asrTasks.field.text"),
                               dataIndex: "text_chars",
                               width: 110,
-                              render: (value) => `${value} chars`,
+                              render: (value) => t("asrTasks.detail.chars", { count: value }),
                             },
                             {
-                              title: "Modified",
+                              title: t("asrTasks.field.modified"),
                               dataIndex: "modified_ms",
                               width: 180,
                               render: (value) => formatTime(value),
                             },
                             {
-                              title: "Action",
+                              title: t("asrTasks.detail.action"),
                               width: 220,
                               render: (_value, record) => (
                                 <Space size={8} wrap>
@@ -1615,7 +1725,7 @@ export default function DirectoryTaskDetailPage({
                                     style={{ padding: 0 }}
                                     onClick={() => onOpenDailyDocument(record.date)}
                                   >
-                                    Open document
+                                    {t("asrTasks.detail.openDocument")}
                                   </Button>
                                   <Dropdown.Button
                                     type="link"
@@ -1636,7 +1746,7 @@ export default function DirectoryTaskDetailPage({
                                       handleRunDailyAgentForDocument(record.date)
                                     }
                                   >
-                                    Run All Agents
+                                    {t("asrTasks.field.runAllAgents")}
                                   </Dropdown.Button>
                                 </Space>
                               ),
@@ -1644,23 +1754,23 @@ export default function DirectoryTaskDetailPage({
                           ]}
                         />
                       ) : dailyDocumentsUnavailable ? (
-                        <Empty description="Daily documents are available after the ASR backend is updated" />
+                        <Empty description={t("asrTasks.detail.dailyDocsUnavailable")} />
                       ) : (
-                        <Empty description="No daily documents yet" />
+                        <Empty description={t("asrTasks.detail.noDailyDocs")} />
                       )}
                     </div>
                   ),
                 },
                 {
                   key: "daily-agent",
-                  label: "Daily Agent",
+                  label: t("asrTasks.detail.tab.dailyAgent"),
                   children: taskDetail ? (
                     <DailyAgentTab taskId={taskDetail.id} />
                   ) : null,
                 },
                 {
                   key: "daily-agent-records",
-                  label: "Daily Agent Records",
+                  label: t("asrTasks.detail.tab.dailyAgentRecords"),
                   children: taskDetail ? (
                     <DailyAgentRecordsTab
                       taskId={taskDetail.id}
@@ -1674,16 +1784,16 @@ export default function DirectoryTaskDetailPage({
         ) : (
           <Text type="secondary">
             {taskDetailLoading
-              ? "Loading directory task..."
-              : "Select a task to view progress and file results."}
+              ? t("asrTasks.detail.loadingTask")
+              : t("asrTasks.detail.selectTask")}
           </Text>
         )}
       </Card>
       <Modal
-        title="Final confirmation: clean originals"
+        title={t("asrTasks.detail.cleanFinalTitle")}
         open={cleanupConfirmOpen}
-        okText="Clean originals"
-        cancelText="Cancel"
+        okText={t("asrTasks.detail.cleanOriginals")}
+        cancelText={t("common.cancel")}
         confirmLoading={cleaningSourceAudio}
         okButtonProps={{
           danger: true,
@@ -1701,15 +1811,22 @@ export default function DirectoryTaskDetailPage({
           <Alert
             type="error"
             showIcon
-            message={`Permanently delete ${cleanableSourceFileCount} source audio file${cleanableSourceFileCount === 1 ? "" : "s"} (${formatBytes(cleanableSourceBytes)})`}
-            description="This cannot be undone. Successful transcript and timeline outputs are kept; the original audio resources are deleted."
+            message={t(
+              cleanableSourceFileCount === 1
+                ? "asrTasks.detail.cleanFinalMessageOne"
+                : "asrTasks.detail.cleanFinalMessageOther",
+              { count: cleanableSourceFileCount, size: formatBytes(cleanableSourceBytes) },
+            )}
+            description={t("asrTasks.detail.cleanFinalDescription")}
           />
           <Text>
-            Type the task name <Text code>{taskDetail?.name ?? ""}</Text> to continue.
+            {t("asrTasks.detail.typeTaskNameBefore")}
+            <Text code>{taskDetail?.name ?? ""}</Text>
+            {t("asrTasks.detail.typeTaskNameAfter")}
           </Text>
           <Input
             autoFocus
-            placeholder="Type task name"
+            placeholder={t("asrTasks.field.typeTaskName")}
             value={cleanupConfirmName}
             disabled={cleaningSourceAudio}
             onChange={(event) => setCleanupConfirmName(event.target.value)}

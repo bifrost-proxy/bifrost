@@ -48,7 +48,9 @@ export const BodyTypeMenu = ({
               ? disableJsonStructuredView
                 ? t('trafficDetail.bodyType.text')
                 : 'JSON'
-              : contentType}
+              : contentType === 'Other'
+                ? t('trafficDetail.bodyType.other')
+                : contentType}
           </Space>
         ),
       });
@@ -86,7 +88,9 @@ export const BodyTypeMenu = ({
           ? disableJsonStructuredView
             ? t('trafficDetail.bodyType.text')
             : 'JSON'
-          : contentType;
+          : contentType === 'Other'
+            ? t('trafficDetail.bodyType.other')
+            : contentType;
       case DisplayFormat.Hex:
         return 'Hex';
       case DisplayFormat.Tree:

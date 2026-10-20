@@ -175,6 +175,7 @@ const en = {
   "bodyType.media": "Media",
   "bodyType.tree": "Tree",
   "bodyType.text": "Text",
+  "bodyType.other": "Other",
   "bodyType.view": "View",
   "body.copiedToClipboard": "Copied to clipboard",
   "body.copyFailed": "Failed to copy",
