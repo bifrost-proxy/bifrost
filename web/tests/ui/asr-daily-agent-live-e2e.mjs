@@ -161,7 +161,12 @@ async function runWebUiConfigE2e(chatConfig, providers) {
   }
 
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  // The admin UI defaults to zh-CN; these checks assert the English copy.
+  await context.addInitScript(() => {
+    localStorage.setItem("bifrost-locale", JSON.stringify({ state: { locale: "en" }, version: 0 }));
+  });
+  const page = await context.newPage();
   const clickVisibleOption = async (nameOrRegex) => {
     await page.waitForTimeout(300);
     const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last();
