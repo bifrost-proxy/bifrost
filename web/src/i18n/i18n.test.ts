@@ -48,3 +48,16 @@ describe("i18n", () => {
     }
   });
 });
+
+describe("localizeBackendMessage", () => {
+  it("localizes known backend device text only for zh-CN", async () => {
+    const { localizeBackendMessage } = await import("./backendMessages");
+    expect(localizeBackendMessage("zh-CN", "Installed and trusted")).toBe("已安装并信任");
+    expect(localizeBackendMessage("zh-CN", "ADB found 2 Android device(s).")).toBe(
+      "ADB 发现 2 台 Android 设备。",
+    );
+    expect(localizeBackendMessage("en", "Installed and trusted")).toBe("Installed and trusted");
+    expect(localizeBackendMessage("zh-CN", "something new")).toBe("something new");
+    expect(localizeBackendMessage("zh-CN", undefined)).toBeUndefined();
+  });
+});

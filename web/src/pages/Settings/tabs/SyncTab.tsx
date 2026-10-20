@@ -23,7 +23,12 @@ import {
   type SyncProviderStatus,
   type SyncStatus,
 } from "../../../api/sync";
-import { t as translateGlobal, useI18n, type TFunction } from "../../../i18n";
+import {
+  t as translateGlobal,
+  useI18n,
+  type TFunction,
+  type TranslationKey,
+} from "../../../i18n";
 
 const { Text } = Typography;
 const GITHUB_GIST_TOKEN_URL =
@@ -212,6 +217,25 @@ const getFallbackProviders = (t: TFunction): SyncProviderStatus[] => [
   },
 ];
 
+// Provider descriptions come from the backend in English; show the
+// translated copy for the known built-in providers.
+const PROVIDER_DESCRIPTION_KEYS: Record<string, TranslationKey> = {
+  "Internal trusted sync and Remote Invoke provider.":
+    "settings.sync.fallbackBytedance",
+  "Custom Bifrost sync service for teams and self-hosting.":
+    "settings.sync.fallbackBifrostCloud",
+  "Public GitHub Gist-backed portable sync provider.":
+    "settings.sync.fallbackGithubGist",
+};
+
+function localizeProviderDescription(
+  description: string,
+  t: TFunction,
+): string {
+  const key = PROVIDER_DESCRIPTION_KEYS[description];
+  return key ? t(key) : description;
+}
+
 export default function SyncTab({
   syncStatus,
   syncLoading,
@@ -352,7 +376,9 @@ export default function SyncTab({
               extra={providerStatusTag(provider, t)}
             >
               <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                <Text type="secondary">{provider.description}</Text>
+                <Text type="secondary">
+                  {localizeProviderDescription(provider.description, t)}
+                </Text>
                 {provider.id === "github_gist" ? (
                   <Alert
                     type={actionableError ? "error" : "info"}

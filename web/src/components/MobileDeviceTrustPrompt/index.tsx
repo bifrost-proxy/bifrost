@@ -1,7 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Alert, Button, List, Modal, Space, Tag, Typography, message } from "antd";
-import { AndroidOutlined, AppleOutlined, MobileOutlined, SendOutlined } from "@ant-design/icons";
+import {
+  Alert,
+  Button,
+  List,
+  Modal,
+  Space,
+  Tag,
+  Typography,
+  message,
+} from "antd";
+import {
+  AndroidOutlined,
+  AppleOutlined,
+  MobileOutlined,
+  SendOutlined,
+} from "@ant-design/icons";
 import {
   installMobileCa,
   type InstallMode,
@@ -11,6 +25,7 @@ import {
 import { normalizeApiErrorMessage } from "../../api/client";
 import { pushService, type SettingsScope } from "../../services/pushService";
 import { useI18n, type TFunction } from "../../i18n";
+import { useBackendMessage } from "../../i18n/backendMessages";
 
 const { Text } = Typography;
 
@@ -18,7 +33,10 @@ function deviceDisplayName(device: MobileDevice): string {
   return device.name?.trim() || device.id;
 }
 
-function certificateStateLabel(t: TFunction, device: MobileDevice): string | null {
+function certificateStateLabel(
+  t: TFunction,
+  device: MobileDevice,
+): string | null {
   switch (device.certificate_status?.state) {
     case "installed":
       return t("app.mobileTrust.caInstalled");
@@ -48,7 +66,9 @@ function withSettingsScope(scope: SettingsScope): SettingsScope[] {
   );
 }
 
-function mobileDevicesFromPushData(data: unknown): MobileDevicesResponse | null {
+function mobileDevicesFromPushData(
+  data: unknown,
+): MobileDevicesResponse | null {
   if (!data || typeof data !== "object") {
     return null;
   }
@@ -59,10 +79,17 @@ export default function MobileDeviceTrustPrompt() {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useI18n();
-  const [mobileInfo, setMobileInfo] = useState<MobileDevicesResponse | null>(null);
+  const bm = useBackendMessage();
+  const [mobileInfo, setMobileInfo] = useState<MobileDevicesResponse | null>(
+    null,
+  );
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
-  const [dismissedDeviceIds, setDismissedDeviceIds] = useState<Set<string>>(() => new Set());
-  const [installingDeviceId, setInstallingDeviceId] = useState<string | null>(null);
+  const [dismissedDeviceIds, setDismissedDeviceIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [installingDeviceId, setInstallingDeviceId] = useState<string | null>(
+    null,
+  );
   const [suppressPrompt, setSuppressPrompt] = useState(false);
 
   const devices = useMemo(() => connectedDevices(mobileInfo), [mobileInfo]);
@@ -71,14 +98,19 @@ export default function MobileDeviceTrustPrompt() {
     [devices, dismissedDeviceIds],
   );
   const selectedDevice =
-    visibleDevices.find((device) => device.id === selectedDeviceId) ?? visibleDevices[0] ?? null;
-  const browserPath = typeof window === "undefined" ? "" : window.location.pathname;
-  const browserSearch = typeof window === "undefined" ? "" : window.location.search;
+    visibleDevices.find((device) => device.id === selectedDeviceId) ??
+    visibleDevices[0] ??
+    null;
+  const browserPath =
+    typeof window === "undefined" ? "" : window.location.pathname;
+  const browserSearch =
+    typeof window === "undefined" ? "" : window.location.search;
   const isCertificateSettingsPage =
     `${location.pathname} ${browserPath}`.includes("/settings") &&
     (new URLSearchParams(location.search).get("tab") === "certificate" ||
       new URLSearchParams(browserSearch).get("tab") === "certificate");
-  const promptOpen = visibleDevices.length > 0 && !isCertificateSettingsPage && !suppressPrompt;
+  const promptOpen =
+    visibleDevices.length > 0 && !isCertificateSettingsPage && !suppressPrompt;
 
   useEffect(() => {
     setSuppressPrompt(isCertificateSettingsPage);
@@ -104,7 +136,7 @@ export default function MobileDeviceTrustPrompt() {
       setSelectedDeviceId((current) =>
         current && candidates.some((device) => device.id === current)
           ? current
-          : candidates[0]?.id ?? null,
+          : (candidates[0]?.id ?? null),
       );
     });
     return () => {
@@ -144,7 +176,13 @@ export default function MobileDeviceTrustPrompt() {
     if (`${location.pathname}${location.search}` !== target) {
       navigate(target);
     }
-  }, [location.pathname, location.search, navigate, selectedDevice, visibleDevices]);
+  }, [
+    location.pathname,
+    location.search,
+    navigate,
+    selectedDevice,
+    visibleDevices,
+  ]);
 
   const handleInstallSelected = useCallback(async () => {
     if (!selectedDevice) {
@@ -161,15 +199,17 @@ export default function MobileDeviceTrustPrompt() {
       } else if (session.requires_user_confirmation) {
         message.warning(t("app.mobileTrust.finishOnPhone"));
       } else {
-        message.warning(session.summary);
+        message.warning(bm(session.summary));
       }
       handleOpenGuide();
     } catch (error) {
-      message.error(normalizeApiErrorMessage(error, t("app.mobileTrust.installFailed")));
+      message.error(
+        normalizeApiErrorMessage(error, t("app.mobileTrust.installFailed")),
+      );
     } finally {
       setInstallingDeviceId(null);
     }
-  }, [handleOpenGuide, selectedDevice, t]);
+  }, [bm, handleOpenGuide, selectedDevice, t]);
 
   const selectedInstallDisabled =
     !selectedDevice ||
@@ -177,7 +217,8 @@ export default function MobileDeviceTrustPrompt() {
     (selectedDevice.platform === "ios" &&
       !mobileInfo?.ios.configurator.cfgutil_available);
   const selectedInstallTooltip =
-    selectedDevice?.platform === "ios" && !mobileInfo?.ios.configurator.cfgutil_available
+    selectedDevice?.platform === "ios" &&
+    !mobileInfo?.ios.configurator.cfgutil_available
       ? t("app.mobileTrust.installConfiguratorFirst")
       : selectedDevice?.platform === "ios"
         ? t("app.mobileTrust.installIosTooltip")
@@ -249,14 +290,22 @@ export default function MobileDeviceTrustPrompt() {
                   cursor: "pointer",
                   borderRadius: 6,
                   paddingInline: 8,
-                  background: selected ? "var(--ant-color-primary-bg)" : undefined,
+                  background: selected
+                    ? "var(--ant-color-primary-bg)"
+                    : undefined,
                   border: selected
                     ? "1px solid var(--ant-color-primary)"
                     : "1px solid transparent",
                 }}
               >
                 <List.Item.Meta
-                  avatar={device.platform === "ios" ? <AppleOutlined /> : <AndroidOutlined />}
+                  avatar={
+                    device.platform === "ios" ? (
+                      <AppleOutlined />
+                    ) : (
+                      <AndroidOutlined />
+                    )
+                  }
                   title={
                     <Space wrap>
                       <Text>{deviceDisplayName(device)}</Text>
@@ -264,7 +313,13 @@ export default function MobileDeviceTrustPrompt() {
                         {device.platform}
                       </Tag>
                       {caStateLabel ? <Tag>{caStateLabel}</Tag> : null}
-                      <Tag color={device.capability === "managed_auto_trust" ? "purple" : "gold"}>
+                      <Tag
+                        color={
+                          device.capability === "managed_auto_trust"
+                            ? "purple"
+                            : "gold"
+                        }
+                      >
                         {device.capability === "managed_auto_trust"
                           ? "Configurator"
                           : t("app.mobileTrust.guided")}
@@ -278,16 +333,17 @@ export default function MobileDeviceTrustPrompt() {
                         {device.managed_install_target ? (
                           <>
                             {" "}
-                            ECID: <Text code>{device.managed_install_target}</Text>
+                            ECID:{" "}
+                            <Text code>{device.managed_install_target}</Text>
                           </>
                         ) : null}
                       </Text>
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        {device.status_message}
+                        {bm(device.status_message)}
                       </Text>
                       {device.certificate_status ? (
                         <Text type="secondary" style={{ fontSize: 12 }}>
-                          {device.certificate_status.message}
+                          {bm(device.certificate_status.message)}
                         </Text>
                       ) : null}
                     </Space>
@@ -297,9 +353,7 @@ export default function MobileDeviceTrustPrompt() {
             );
           }}
         />
-        <Text type="secondary">
-          {t("app.mobileTrust.footnote")}
-        </Text>
+        <Text type="secondary">{t("app.mobileTrust.footnote")}</Text>
       </Space>
     </Modal>
   );

@@ -15,6 +15,8 @@ import settings from "./settings";
 import imGateway from "./imGateway";
 import remoteInvoke from "./remoteInvoke";
 import shared from "./shared";
+import asr from "./asr";
+import asrTasks from "./asrTasks";
 
 const messages = {
   common,
@@ -34,6 +36,8 @@ const messages = {
   imGateway,
   remoteInvoke,
   shared,
+  asr,
+  asrTasks,
 };
 
 export default messages;
