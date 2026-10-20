@@ -21,6 +21,7 @@ import {
 } from "@ant-design/icons";
 import { usePairingRequestStore } from "../../stores/usePairingRequestStore";
 import type { GrantMode, PairingRequest } from "../../api/remoteInvoke";
+import { useI18n, type TranslationKey } from "../../i18n";
 
 const { Text } = Typography;
 
@@ -30,12 +31,12 @@ function formatFingerprint(fp: string): string {
   return `${short.slice(0, 4)}:${short.slice(4, 8)}:${short.slice(8, 12)}:${short.slice(12, 16)}`;
 }
 
-const GRANT_MENU_ITEMS: { key: GrantMode; label: string }[] = [
-  { key: "once", label: "This Time Only" },
-  { key: "30m", label: "30 Minutes" },
-  { key: "1h", label: "1 Hour" },
-  { key: "1d", label: "1 Day" },
-  { key: "permanent", label: "Permanent" },
+const GRANT_MENU_ITEMS: { key: GrantMode; labelKey: TranslationKey }[] = [
+  { key: "once", labelKey: "app.pairing.grantOnce" },
+  { key: "30m", labelKey: "app.pairing.grant30m" },
+  { key: "1h", labelKey: "app.pairing.grant1h" },
+  { key: "1d", labelKey: "app.pairing.grant1d" },
+  { key: "permanent", labelKey: "app.pairing.grantPermanent" },
 ];
 
 function PairingItem({
@@ -50,6 +51,7 @@ function PairingItem({
   onIgnore: (pairingId: string) => void;
 }) {
   const [loading, setLoading] = useState(false);
+  const { t } = useI18n();
 
   const handleApprove = async (mode: GrantMode) => {
     setLoading(true);
@@ -86,11 +88,11 @@ function PairingItem({
             </Tag>
           </Tooltip>
           <Text strong>
-            {pairing.caller_info.display_name || "Unknown Caller"}
+            {pairing.caller_info.display_name || t("app.pairing.unknownCaller")}
           </Text>
           {pairing.caller_info.source_ip && (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              from {pairing.caller_info.source_ip}
+              {t("app.pairing.fromIp", { ip: pairing.caller_info.source_ip })}
             </Text>
           )}
         </div>
@@ -117,7 +119,7 @@ function PairingItem({
               menu={{
                 items: GRANT_MENU_ITEMS.map((item) => ({
                   key: item.key,
-                  label: item.label,
+                  label: t(item.labelKey),
                 })),
                 onClick: ({ key }) => handleApprove(key as GrantMode),
               }}
@@ -130,7 +132,7 @@ function PairingItem({
                 loading={loading}
                 data-testid={`pairing-approve-${pairing.pairing_id}`}
               >
-                Authorize
+                {t("app.pairing.authorize")}
               </Button>
             </Dropdown>
             <Button
@@ -141,7 +143,7 @@ function PairingItem({
               onClick={handleReject}
               data-testid={`pairing-reject-${pairing.pairing_id}`}
             >
-              Reject
+              {t("app.pairing.reject")}
             </Button>
             <Button
               size="small"
@@ -149,7 +151,7 @@ function PairingItem({
               onClick={() => onIgnore(pairing.pairing_id)}
               data-testid={`pairing-ignore-${pairing.pairing_id}`}
             >
-              Dismiss
+              {t("app.pairing.dismiss")}
             </Button>
           </Space>
         </div>
@@ -166,6 +168,7 @@ export default function PairingApprovalModal() {
   const storeIgnore = usePairingRequestStore((s) => s.ignorePairing);
   const storeIgnoreAll = usePairingRequestStore((s) => s.ignoreAll);
   const navigate = useNavigate();
+  const { t } = useI18n();
 
   const activePairings = useMemo(
     () => pendingList.filter((p) => !ignoredIds.includes(p.pairing_id)),
@@ -176,24 +179,24 @@ export default function PairingApprovalModal() {
     async (pairingId: string, grantMode: GrantMode) => {
       const ok = await storeApprove(pairingId, grantMode);
       if (ok) {
-        message.success("Authorization granted");
+        message.success(t("app.pairing.authorizationGranted"));
       } else {
-        message.warning("Request may have expired and was removed");
+        message.warning(t("app.pairing.requestExpired"));
       }
     },
-    [storeApprove],
+    [storeApprove, t],
   );
 
   const handleReject = useCallback(
     async (pairingId: string) => {
       const ok = await storeReject(pairingId);
       if (ok) {
-        message.success("Request rejected");
+        message.success(t("app.pairing.requestRejected"));
       } else {
-        message.warning("Request may have expired and was removed");
+        message.warning(t("app.pairing.requestExpired"));
       }
     },
-    [storeReject],
+    [storeReject, t],
   );
 
   const handleIgnore = useCallback(
@@ -222,7 +225,7 @@ export default function PairingApprovalModal() {
       title={
         <Space>
           <WarningOutlined style={{ color: "#faad14" }} />
-          <span>Remote Command Authorization</span>
+          <span>{t("app.pairing.approvalTitle")}</span>
           <Badge
             count={activePairings.length}
             style={{ backgroundColor: "#faad14" }}
@@ -236,14 +239,14 @@ export default function PairingApprovalModal() {
             onClick={handleClose}
             data-testid="pairing-modal-dismiss-all"
           >
-            Dismiss All
+            {t("app.pairing.dismissAll")}
           </Button>
           <Button
             icon={<SettingOutlined />}
             onClick={handleGoToSettings}
             data-testid="pairing-modal-settings"
           >
-            Remote Invoke Settings
+            {t("app.pairing.remoteInvokeSettings")}
           </Button>
         </Space>
       }
@@ -255,14 +258,12 @@ export default function PairingApprovalModal() {
     >
       <div data-testid="pairing-approval-modal-content">
         <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
-          A remote caller is requesting permission to execute commands on this
-          Bifrost instance. Review the details below and choose to authorize,
-          reject, or dismiss each request.
+          {t("app.pairing.approvalDescription")}
         </Text>
         <List
           size="small"
           dataSource={activePairings}
-          locale={{ emptyText: "No pending requests" }}
+          locale={{ emptyText: t("app.pairing.noPendingRequests") }}
           renderItem={(item) => (
             <PairingItem
               key={item.pairing_id}

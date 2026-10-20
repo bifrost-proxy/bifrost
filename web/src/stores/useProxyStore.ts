@@ -12,6 +12,7 @@ import {
   setSystemProxyLaunchd,
 } from "../api/proxy";
 import { isConnectionIssueError } from "../api/client";
+import { t } from "../i18n";
 
 interface ProxyState {
   systemProxy: SystemProxyStatus | null;
@@ -82,7 +83,9 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
         loading: false,
         error: doesSystemProxyMatchRequest(status, enabled)
           ? null
-          : `System proxy is still ${status.enabled ? "enabled" : "disabled"}`,
+          : status.enabled
+            ? t("shared.proxy.stillEnabled")
+            : t("shared.proxy.stillDisabled"),
       });
       return doesSystemProxyMatchRequest(status, enabled);
     } catch (e) {
@@ -107,8 +110,7 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
         launchdLoading: false,
         error: matches
           ? null
-          : status.message ||
-            "System cleanup fallback did not reach the requested state",
+          : status.message || t("shared.proxy.cleanupFallbackMismatch"),
       });
       return matches;
     } catch (e) {

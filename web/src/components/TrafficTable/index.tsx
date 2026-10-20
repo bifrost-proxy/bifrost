@@ -10,6 +10,7 @@ import {
 } from "../../utils/duration";
 import { formatTimestamp } from "../../utils/datetime";
 import { useLiveNow } from "../../hooks/useLiveNow";
+import { useI18n } from "../../i18n";
 
 const { Text } = Typography;
 
@@ -26,6 +27,7 @@ export default function TrafficTable({
   onSelect,
   selectedId,
 }: TrafficTableProps) {
+  const { t } = useI18n();
   const hasLiveDuration = data.some((record) => isLiveStreamingTraffic(record));
   const liveNow = useLiveNow(hasLiveDuration);
 
@@ -69,8 +71,11 @@ export default function TrafficTable({
         <Tooltip
           title={
             hit
-              ? `${record.matched_rule_count} rule(s): ${record.matched_protocols?.join(", ") || ""}`
-              : "No rules matched"
+              ? t("traffic.table.ruleHitTooltip", {
+                  count: record.matched_rule_count,
+                  protocols: record.matched_protocols?.join(", ") || "",
+                })
+              : t("traffic.table.noRulesMatched")
           }
         >
           <Badge
@@ -81,7 +86,7 @@ export default function TrafficTable({
       ),
     },
     {
-      title: "Protocol",
+      title: t("traffic.column.protocol"),
       dataIndex: "protocol",
       key: "protocol",
       width: 60,
@@ -92,7 +97,7 @@ export default function TrafficTable({
       ),
     },
     {
-      title: "Method",
+      title: t("traffic.column.method"),
       dataIndex: "method",
       key: "method",
       width: 70,
@@ -103,7 +108,7 @@ export default function TrafficTable({
       ),
     },
     {
-      title: "Status",
+      title: t("traffic.column.status"),
       dataIndex: "status",
       key: "status",
       width: 55,
@@ -121,7 +126,7 @@ export default function TrafficTable({
         ),
     },
     {
-      title: "Client",
+      title: t("traffic.column.client"),
       dataIndex: "client_app",
       key: "client",
       width: 100,
@@ -141,7 +146,7 @@ export default function TrafficTable({
       },
     },
     {
-      title: "Account",
+      title: t("traffic.column.account"),
       dataIndex: "account_name",
       key: "account_name",
       width: 100,
@@ -158,7 +163,7 @@ export default function TrafficTable({
         ),
     },
     {
-      title: "Rules",
+      title: t("traffic.column.rules"),
       dataIndex: "has_rule_hit",
       key: "rules",
       width: 60,
@@ -168,7 +173,7 @@ export default function TrafficTable({
           <Tooltip
             title={
               <div>
-                <div>{record.matched_rule_count} rule(s) matched</div>
+                <div>{t("traffic.table.rulesMatched", { count: record.matched_rule_count })}</div>
                 {record.matched_protocols.length > 0 && (
                   <div style={{ marginTop: 4 }}>
                     {record.matched_protocols.join(", ")}
@@ -186,7 +191,7 @@ export default function TrafficTable({
         ),
     },
     {
-      title: "Host",
+      title: t("traffic.column.host"),
       dataIndex: "host",
       key: "host",
       width: 160,
@@ -198,7 +203,7 @@ export default function TrafficTable({
       ),
     },
     {
-      title: "Path",
+      title: t("traffic.column.path"),
       dataIndex: "path",
       key: "path",
       width: 250,
@@ -210,7 +215,7 @@ export default function TrafficTable({
       ),
     },
     {
-      title: "Type",
+      title: t("traffic.column.type"),
       dataIndex: "content_type",
       key: "content_type",
       width: 80,
@@ -225,7 +230,7 @@ export default function TrafficTable({
       },
     },
     {
-      title: "Size",
+      title: t("traffic.column.size"),
       dataIndex: "response_size",
       key: "response_size",
       width: 65,
@@ -242,7 +247,7 @@ export default function TrafficTable({
       },
     },
     {
-      title: "Time",
+      title: t("traffic.column.time"),
       dataIndex: "duration_ms",
       key: "duration_ms",
       width: 55,
@@ -263,7 +268,7 @@ export default function TrafficTable({
       },
     },
     {
-      title: "Start Time",
+      title: t("traffic.column.startTime"),
       dataIndex: "timestamp",
       key: "start_time",
       width: 160,
@@ -279,7 +284,7 @@ export default function TrafficTable({
       },
     },
     {
-      title: "End Time",
+      title: t("traffic.column.endTime"),
       dataIndex: "timestamp",
       key: "end_time",
       width: 160,

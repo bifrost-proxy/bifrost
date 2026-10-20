@@ -46,6 +46,8 @@ import { copyToClipboard } from '../../../../utils/clipboard';
 hljs.registerLanguage("json", json);
 hljs.registerLanguage("plaintext", plaintext);
 
+import { useI18n } from "../../../../i18n";
+
 const { Text } = Typography;
 
 const MAX_SSE_EVENTS = 20_000;
@@ -112,6 +114,7 @@ const WsMessageList = ({
   onOpenDetail,
   onCopy,
 }: WsMessageListProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const parentRef = useRef<HTMLDivElement>(null);
   const [isAtTop, setIsAtTop] = useState(true);
@@ -214,7 +217,7 @@ const WsMessageList = ({
           color: token.colorTextSecondary,
         }}
       >
-        {loading ? "Loading..." : "No frames"}
+        {loading ? t("common.loading") : t("trafficDetail.messages.noFrames")}
       </div>
     );
   }
@@ -224,10 +227,10 @@ const WsMessageList = ({
       <div style={headerStyle}>
         <span>#</span>
         <span />
-        <span>Type</span>
-        <span>Size</span>
-        <span>Time</span>
-        <span>Preview</span>
+        <span>{t("common.type")}</span>
+        <span>{t("trafficDetail.messages.colSize")}</span>
+        <span>{t("trafficDetail.messages.colTime")}</span>
+        <span>{t("trafficDetail.messages.colPreview")}</span>
         <span />
       </div>
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
@@ -290,7 +293,7 @@ const WsMessageList = ({
                   )}
                 </div>
                 <Space size={4}>
-                  <Tooltip title="Copy">
+                  <Tooltip title={t("common.copy")}>
                     <Button
                       type="text"
                       size="small"
@@ -302,7 +305,7 @@ const WsMessageList = ({
                       disabled={!canOpen}
                     />
                   </Tooltip>
-                  <Tooltip title="Expand">
+                  <Tooltip title={t("trafficDetail.messages.expand")}>
                     <Button
                       type="text"
                       size="small"
@@ -477,6 +480,7 @@ export const Messages = ({
   responseBodyOverride,
   onResponseBodyChange,
 }: MessagesProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [frames, setFrames] = useState<WebSocketFrame[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1114,7 +1118,9 @@ export const Messages = ({
         }}
       >
         <Empty
-          description={`No ${isWebSocket ? "WebSocket" : "SSE"} messages yet`}
+          description={t("trafficDetail.messages.noMessagesYet", {
+            type: isWebSocket ? "WebSocket" : "SSE",
+          })}
         />
       </div>
     );
@@ -1233,7 +1239,7 @@ export const Messages = ({
                 }}
                 disabled={!selectedSsePayload}
               >
-                Copy
+                {t("common.copy")}
               </Button>
               <Button
                 onClick={() => {
@@ -1241,7 +1247,7 @@ export const Messages = ({
                   setSelectedSseEvent(null);
                 }}
               >
-                Close
+                {t("common.close")}
               </Button>
             </Space>
           }
@@ -1301,11 +1307,11 @@ export const Messages = ({
         }}
       >
         <Text type="secondary" data-testid="ws-frames-summary">
-          {filteredWsFrames.length} of {frames.length} frames
-          {hasMore && " (more available)"}
+          {t("trafficDetail.messages.frameCount", { shown: filteredWsFrames.length, total: frames.length })}
+          {hasMore && t("trafficDetail.messages.moreAvailable")}
         </Text>
         <Space>
-          <Tooltip title="Fullscreen">
+          <Tooltip title={t("trafficDetail.messages.fullscreen")}>
             <Button
               size="small"
               icon={<FullscreenOutlined />}
@@ -1319,10 +1325,10 @@ export const Messages = ({
               onClick={() => fetchFrames(lastFetchedFrameId)}
               loading={loading}
             >
-              Load More
+              {t("trafficDetail.messages.loadMore")}
             </Button>
           )}
-          <Tooltip title="Refresh">
+          <Tooltip title={t("common.refresh")}>
             <Button
               size="small"
               icon={<ReloadOutlined />}
@@ -1373,9 +1379,9 @@ export const Messages = ({
               }}
               disabled={!selectedPayload || wsDetailLoading}
             >
-              Copy
+              {t("common.copy")}
             </Button>
-            <Button onClick={() => setDetailModalOpen(false)}>Close</Button>
+            <Button onClick={() => setDetailModalOpen(false)}>{t("common.close")}</Button>
           </Space>
         }
         width={700}
@@ -1386,7 +1392,7 @@ export const Messages = ({
           },
         }}
       >
-        {wsDetailLoading && <Text type="secondary">Loading...</Text>}
+        {wsDetailLoading && <Text type="secondary">{t("common.loading")}</Text>}
         {!!selectedPayload && (
           <pre
             style={{
@@ -1418,7 +1424,7 @@ export const Messages = ({
         title={
           <Space>
             <Tag color="purple">WebSocket</Tag>
-            <Text type="secondary">{frames.length} frames</Text>
+            <Text type="secondary">{t("trafficDetail.messages.framesTotal", { count: frames.length })}</Text>
           </Space>
         }
         initialQuery={searchValue.value}

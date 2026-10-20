@@ -1,6 +1,7 @@
 import { languages, editor, Position } from 'monaco-editor';
 import type { IRange } from 'monaco-editor';
 import { getRuleReferenceCompletionContext } from './ruleReference';
+import { t } from '../../../i18n';
 
 export type ReferenceType =
   | 'value'
@@ -52,8 +53,8 @@ const createValueSuggestions = (range: IRange): languages.CompletionItem[] => {
   const globalSuggestions = dynamicData.values.map((name) => ({
     label: `{${name}}`,
     kind: languages.CompletionItemKind.Variable,
-    detail: `Global Value: ${name}`,
-    documentation: `Reference to global value "${name}"`,
+    detail: t('rules.monaco.globalValueDetail', { name }),
+    documentation: t('rules.monaco.globalValueDoc', { name }),
     insertText: `{${name}}`,
     range,
     sortText: `1_${name}`,
@@ -63,8 +64,8 @@ const createValueSuggestions = (range: IRange): languages.CompletionItem[] => {
   const localSuggestions = localVars.map(({ name, line }) => ({
     label: `{${name}}`,
     kind: languages.CompletionItemKind.Variable,
-    detail: `Local Variable: ${name} (line ${line})`,
-    documentation: `Reference to local variable "${name}" defined at line ${line}`,
+    detail: t('rules.monaco.localVariableDetail', { name, line }),
+    documentation: t('rules.monaco.localVariableDoc', { name, line }),
     insertText: `{${name}}`,
     range,
     sortText: `0_${name}`,
@@ -84,8 +85,14 @@ const createScriptSuggestions = (
   return scripts.map((name) => ({
     label: `${prefix}://${name}`,
     kind: languages.CompletionItemKind.Reference,
-    detail: `${type === 'request' ? 'Request' : 'Response'} Script: ${name}`,
-    documentation: `Execute ${type} script "${name}"`,
+    detail: t(
+      type === 'request' ? 'rules.monaco.requestScriptDetail' : 'rules.monaco.responseScriptDetail',
+      { name }
+    ),
+    documentation: t(
+      type === 'request' ? 'rules.monaco.requestScriptDoc' : 'rules.monaco.responseScriptDoc',
+      { name }
+    ),
     insertText: `${prefix}://${name}`,
     range,
     sortText: `0_${name}`,
@@ -159,8 +166,8 @@ export const dynamicProvider: languages.CompletionItemProvider = {
         suggestions: filteredRules.map((name) => ({
           label: `@${name}`,
           kind: languages.CompletionItemKind.Reference,
-          detail: `Rule Reference: ${name}`,
-          documentation: `Inline-expand rule "${name}" at this position`,
+          detail: t('rules.monaco.ruleReferenceDetail', { name }),
+          documentation: t('rules.monaco.ruleReferenceDoc', { name }),
           insertText: name,
           range: ruleRange,
           sortText: ruleSuggestionRank(typedText, name),
@@ -183,8 +190,8 @@ export const dynamicProvider: languages.CompletionItemProvider = {
         suggestions: filteredScripts.map((name) => ({
           label: name,
           kind: languages.CompletionItemKind.Reference,
-          detail: `Request Script: ${name}`,
-          documentation: `Execute request script "${name}"`,
+          detail: t('rules.monaco.requestScriptDetail', { name }),
+          documentation: t('rules.monaco.requestScriptDoc', { name }),
           insertText: name,
           range: scriptRange,
           sortText: `0_${name}`,
@@ -207,8 +214,8 @@ export const dynamicProvider: languages.CompletionItemProvider = {
         suggestions: filteredScripts.map((name) => ({
           label: name,
           kind: languages.CompletionItemKind.Reference,
-          detail: `Response Script: ${name}`,
-          documentation: `Execute response script "${name}"`,
+          detail: t('rules.monaco.responseScriptDetail', { name }),
+          documentation: t('rules.monaco.responseScriptDoc', { name }),
           insertText: name,
           range: scriptRange,
           sortText: `0_${name}`,
@@ -231,8 +238,8 @@ export const dynamicProvider: languages.CompletionItemProvider = {
         suggestions: filteredScripts.map((name) => ({
           label: name,
           kind: languages.CompletionItemKind.Reference,
-          detail: `Response Stream Script: ${name}`,
-          documentation: `Transform SSE events with response script "${name}"`,
+          detail: t('rules.monaco.responseStreamScriptDetail', { name }),
+          documentation: t('rules.monaco.responseStreamScriptDoc', { name }),
           insertText: name,
           range: scriptRange,
           sortText: `1_${name}`,
@@ -251,8 +258,8 @@ export const dynamicProvider: languages.CompletionItemProvider = {
       const localSuggestions = localVars.map(({ name, line }) => ({
         label: `{${name}}`,
         kind: languages.CompletionItemKind.Variable,
-        detail: `Local Variable: ${name} (line ${line})`,
-        documentation: `Reference to local variable "${name}" defined at line ${line}`,
+        detail: t('rules.monaco.localVariableDetail', { name, line }),
+        documentation: t('rules.monaco.localVariableDoc', { name, line }),
         insertText: `{${name}}`,
         range: valueRange,
         sortText: `0_${name}`,
@@ -261,8 +268,8 @@ export const dynamicProvider: languages.CompletionItemProvider = {
       const globalSuggestions = dynamicData.values.map((name) => ({
         label: `{${name}}`,
         kind: languages.CompletionItemKind.Variable,
-        detail: `Global Value: ${name}`,
-        documentation: `Reference to global value "${name}"`,
+        detail: t('rules.monaco.globalValueDetail', { name }),
+        documentation: t('rules.monaco.globalValueDoc', { name }),
         insertText: `{${name}}`,
         range: valueRange,
         sortText: `1_${name}`,

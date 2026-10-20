@@ -5,6 +5,7 @@ import {
   FormatPainterOutlined,
 } from "@ant-design/icons";
 import hljs from "highlight.js/lib/core";
+import { useI18n } from "../../../i18n";
 import json from "highlight.js/lib/languages/json";
 import xml from "highlight.js/lib/languages/xml";
 import javascript from "highlight.js/lib/languages/javascript";
@@ -70,6 +71,7 @@ export default function CodeViewer({
   maxHeight,
   showLineNumbers = true,
 }: CodeViewerProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const { uiState, updateUIState } = useReplayStore();
   const viewMode = uiState.responseViewMode;
@@ -116,11 +118,11 @@ export default function CodeViewer({
   const handleCopy = useCallback(async () => {
     try {
       await copyToClipboard(content);
-      message.success("Copied to clipboard");
+      message.success(t("replay.code.copiedToClipboard"));
     } catch {
-      message.error("Failed to copy");
+      message.error(t("replay.code.copyFailed"));
     }
-  }, [content]);
+  }, [content, t]);
 
   const styles: Record<string, CSSProperties> = {
     container: {
@@ -225,13 +227,13 @@ export default function CodeViewer({
           srcDoc={content}
           style={styles.previewFrame}
           sandbox="allow-same-origin"
-          title="Preview"
+          title={t("replay.code.preview")}
         />
       );
     }
     return (
       <div style={styles.previewFallback}>
-        Preview not available for this content type
+        {t("replay.code.previewUnavailable")}
       </div>
     );
   };
@@ -239,7 +241,7 @@ export default function CodeViewer({
   if (!content) {
     return (
       <div style={styles.empty}>
-        No content to display
+        {t("replay.code.noContent")}
       </div>
     );
   }
@@ -254,9 +256,9 @@ export default function CodeViewer({
               value={viewMode}
               onChange={(v) => setViewMode(v as ViewMode)}
               options={[
-                { label: "Pretty", value: "pretty" },
-                { label: "Raw", value: "raw" },
-                { label: "Preview", value: "preview" },
+                { label: t("replay.code.pretty"), value: "pretty" },
+                { label: t("replay.code.raw"), value: "raw" },
+                { label: t("replay.code.preview"), value: "preview" },
               ]}
             />
             <Select
@@ -270,13 +272,13 @@ export default function CodeViewer({
                 { label: "HTML", value: "html" },
                 { label: "JavaScript", value: "javascript" },
                 { label: "CSS", value: "css" },
-                { label: "Text", value: "text" },
+                { label: t("replay.code.text"), value: "text" },
               ]}
             />
           </div>
           <div style={styles.toolbarRight}>
             {contentType === "json" && (
-              <Tooltip title={viewMode === "pretty" ? "Raw" : "Format"}>
+              <Tooltip title={viewMode === "pretty" ? t("replay.code.raw") : t("replay.code.format")}>
                 <Button
                   type="text"
                   size="small"
@@ -286,7 +288,7 @@ export default function CodeViewer({
                 />
               </Tooltip>
             )}
-            <Tooltip title="Copy">
+            <Tooltip title={t("common.copy")}>
               <Button
                 type="text"
                 size="small"

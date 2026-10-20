@@ -10,6 +10,7 @@ import {
 import { PlusOutlined, DeleteOutlined, SearchOutlined } from "@ant-design/icons";
 import { useMemo } from "react";
 import type { FilterCondition } from "../../types";
+import { useI18n, type TFunction } from "../../i18n";
 
 interface FilterBarProps {
   filters: FilterCondition[];
@@ -20,24 +21,24 @@ interface FilterBarProps {
   isSearchMode?: boolean;
 }
 
-const fieldOptions = [
+const getFieldOptions = (t: TFunction) => [
   { value: "url", label: "URL" },
-  { value: "host", label: "Host" },
-  { value: "path", label: "Path" },
-  { value: "method", label: "Method" },
-  { value: "client_app", label: "Client App" },
-  { value: "client_ip", label: "Client IP" },
-  { value: "listener_port", label: "Port" },
+  { value: "host", label: t("traffic.filterBar.field.host") },
+  { value: "path", label: t("traffic.filterBar.field.path") },
+  { value: "method", label: t("traffic.filterBar.field.method") },
+  { value: "client_app", label: t("traffic.filterBar.field.clientApp") },
+  { value: "client_ip", label: t("traffic.filterBar.field.clientIp") },
+  { value: "listener_port", label: t("traffic.filterBar.field.port") },
   { value: "content_type", label: "Content-Type" },
 ];
 
-const operatorOptions = [
-  { value: "contains", label: "Contains" },
-  { value: "equals", label: "Equals" },
-  { value: "regex", label: "Regex" },
-  { value: "not_contains", label: "Not Contains" },
-  { value: "is_empty", label: "Is Empty" },
-  { value: "is_not_empty", label: "Is Not Empty" },
+const getOperatorOptions = (t: TFunction) => [
+  { value: "contains", label: t("traffic.filterBar.operator.contains") },
+  { value: "equals", label: t("traffic.filterBar.operator.equals") },
+  { value: "regex", label: t("traffic.filterBar.operator.regex") },
+  { value: "not_contains", label: t("traffic.filterBar.operator.notContains") },
+  { value: "is_empty", label: t("traffic.filterBar.operator.isEmpty") },
+  { value: "is_not_empty", label: t("traffic.filterBar.operator.isNotEmpty") },
 ];
 
 const styles = {
@@ -77,6 +78,9 @@ export default function FilterBar({
   onSearchModeToggle,
   isSearchMode = false,
 }: FilterBarProps) {
+  const { t } = useI18n();
+  const fieldOptions = useMemo(() => getFieldOptions(t), [t]);
+  const operatorOptions = useMemo(() => getOperatorOptions(t), [t]);
   const generateId = () =>
     `filter_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
@@ -143,7 +147,7 @@ export default function FilterBar({
           value=""
           disabled
           style={styles.valueInput}
-          placeholder="No value needed"
+          placeholder={t("traffic.filterBar.noValueNeeded")}
           size="small"
         />
       );
@@ -156,7 +160,7 @@ export default function FilterBar({
           options={clientAppOptions}
           onChange={(value) => handleChange(filter.id, "value", value)}
           style={styles.valueInput}
-          placeholder="Select or enter app name..."
+          placeholder={t("traffic.filterBar.appPlaceholder")}
           size="small"
           disabled={disabled}
           filterOption={(inputValue, option) =>
@@ -174,7 +178,7 @@ export default function FilterBar({
           options={clientIpOptions}
           onChange={(value) => handleChange(filter.id, "value", value)}
           style={styles.valueInput}
-          placeholder="Select or enter IP address..."
+          placeholder={t("traffic.filterBar.ipPlaceholder")}
           size="small"
           disabled={disabled}
           filterOption={(inputValue, option) =>
@@ -191,7 +195,7 @@ export default function FilterBar({
           value={filter.value}
           onChange={(e) => handleChange(filter.id, "value", e.target.value)}
           style={styles.valueInput}
-          placeholder="Enter proxy port..."
+          placeholder={t("traffic.filterBar.portPlaceholder")}
           size="small"
           disabled={disabled}
           inputMode="numeric"
@@ -204,7 +208,7 @@ export default function FilterBar({
         value={filter.value}
         onChange={(e) => handleChange(filter.id, "value", e.target.value)}
         style={styles.valueInput}
-        placeholder="Enter value..."
+        placeholder={t("traffic.filterBar.valuePlaceholder")}
         size="small"
         disabled={disabled}
       />
@@ -225,8 +229,8 @@ export default function FilterBar({
           <Tooltip
             title={
               filter.enabled === false
-                ? "Enable this filter"
-                : "Temporarily disable this filter"
+                ? t("traffic.filterBar.enableThisFilter")
+                : t("traffic.filterBar.disableThisFilter")
             }
           >
             <Checkbox
@@ -234,7 +238,7 @@ export default function FilterBar({
               onChange={(e) =>
                 handleChange(filter.id, "enabled", e.target.checked)
               }
-              aria-label="Enable filter"
+              aria-label={t("traffic.filterBar.enableFilterAria")}
               data-testid="traffic-filter-enabled-checkbox"
               style={styles.enabledCheckbox}
             />
@@ -244,7 +248,7 @@ export default function FilterBar({
             options={fieldOptions}
             onChange={(value) => handleFieldChange(filter.id, value)}
             style={styles.fieldSelect}
-            placeholder="Field"
+            placeholder={t("traffic.filterBar.fieldPlaceholder")}
             size="small"
             disabled={filter.enabled === false}
           />
@@ -253,7 +257,7 @@ export default function FilterBar({
             options={operatorOptions}
             onChange={(value) => handleChange(filter.id, "operator", value)}
             style={styles.operatorSelect}
-            placeholder="Operator"
+            placeholder={t("traffic.filterBar.operatorPlaceholder")}
             size="small"
             disabled={filter.enabled === false}
           />
@@ -286,20 +290,20 @@ export default function FilterBar({
             onClick={handleAdd}
             style={{ flex: 1 }}
           >
-            Add Filter
+            {t("traffic.filterBar.addFilter")}
           </Button>
         ) : (
           <div />
         )}
         {onSearchModeToggle && (
-          <Tooltip title="Search in body, headers, and URL content">
+          <Tooltip title={t("traffic.filterBar.fuzzySearchTooltip")}>
             <Button
               type={isSearchMode ? "primary" : "default"}
               size="small"
               icon={<SearchOutlined />}
               onClick={onSearchModeToggle}
             >
-              Fuzzy Search
+              {t("traffic.filterBar.fuzzySearch")}
             </Button>
           </Tooltip>
         )}

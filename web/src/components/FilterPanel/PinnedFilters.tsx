@@ -3,6 +3,7 @@ import { theme, Tooltip } from "antd";
 import { CloseOutlined, CheckOutlined } from "@ant-design/icons";
 import { useFilterPanelStore, isFilterSelected } from "../../stores/useFilterPanelStore";
 import AppIcon from "../AppIcon";
+import { useI18n } from "../../i18n";
 
 interface PinnedFiltersProps {
   clientIpCounts: Map<string, number>;
@@ -91,6 +92,7 @@ function PinnedFilterItem({
   onRemove,
   count,
 }: PinnedFilterItemProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [isHovering, setIsHovering] = useState(false);
 
@@ -165,17 +167,23 @@ function PinnedFilterItem({
       case "client_ip":
         return "IP";
       case "proxy_port":
-        return "Port";
+        return t("traffic.pinned.typePort");
       case "client_app":
-        return "App";
+        return t("traffic.pinned.typeApp");
       case "account_name":
-        return "Account";
+        return t("traffic.pinned.typeAccount");
       case "domain":
-        return "Host";
+        return t("traffic.pinned.typeHost");
       default:
         return filterType;
     }
   };
+
+  // The localhost label is stored when pinned; re-translate it for display.
+  const displayLabel =
+    type === "client_ip" && value === "127.0.0.1"
+      ? t("traffic.filterPanel.localIp")
+      : label;
 
   const renderIcon = () => {
     if (type === "client_app") {
@@ -195,19 +203,19 @@ function PinnedFilterItem({
       onClick={onToggle}
     >
       <span style={styles.icon}>{renderIcon()}</span>
-      <Tooltip title={label} placement="right" mouseEnterDelay={0.5}>
-        <span style={styles.label}>{label}</span>
+      <Tooltip title={displayLabel} placement="right" mouseEnterDelay={0.5}>
+        <span style={styles.label}>{displayLabel}</span>
       </Tooltip>
       <span
         style={styles.count}
         data-testid={`pinned-filter-count-${type}`}
-        aria-label={`${label} count`}
+        aria-label={t("traffic.filterPanel.countAria", { label: displayLabel })}
       >
         {count.toLocaleString()}
       </span>
       <span style={styles.typeTag}>{getTypeLabel(type)}</span>
       {selected && <CheckOutlined style={styles.checkIcon} />}
-      <Tooltip title="Unpin">
+      <Tooltip title={t("traffic.pinned.unpin")}>
         <span
           style={styles.closeBtn}
           onClick={(e) => {

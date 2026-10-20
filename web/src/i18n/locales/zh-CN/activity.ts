@@ -1,0 +1,38 @@
+import type en from "../en/activity";
+
+const zhCN: Record<keyof typeof en, string> = {
+  title: "活动",
+  metricsAria: "活动指标",
+  statActiveConnections: "活跃连接",
+  statApps: "{count} 个应用",
+  statUpload: "上传",
+  statDownload: "下载",
+  statRequests: "请求",
+  statRules: "规则",
+  statCurrentRuleSet: "当前规则集",
+  statSystemProxy: "系统代理",
+  activeRuleAnalysis: "生效规则分析",
+  activeRuleAnalysisSubtitle: "代理端口当前使用的规则集",
+  activeCount: "{count} 个生效",
+  mergedRules: "合并后的规则",
+  copyMergedRules: "复制合并后的规则",
+  copyMergedRulesTooltip: "复制选中的文本；未选中文本时复制全部合并后的规则",
+  lineCount: "{count} 行",
+  activeRulesAria: "参与合并的生效规则",
+  entryCount: "{count} 条",
+  noActiveRules: "暂无生效规则",
+  temporaryPorts: "临时端口",
+  temporaryPortsSubtitle: "按端口生效的监听及其启用的规则详情",
+  boundRules: "绑定的规则",
+  noBoundRuleSets: "未绑定规则集",
+  activeRules: "生效规则",
+  noActiveRulesResolved: "未解析到生效规则",
+  missing: "缺失：{refs}",
+  inlineRule: "内联规则",
+  unknownRuleRef: "未知",
+  trafficDistribution: "流量分布",
+  byApplication: "按应用",
+  noAppTraffic: "暂无应用流量",
+};
+
+export default zhCN;

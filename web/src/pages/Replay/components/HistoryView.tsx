@@ -5,6 +5,9 @@ import { useReplayStore } from "../../../stores/useReplayStore";
 import TrafficDetail from "../../../components/TrafficDetail";
 import type { ReplayHistory } from "../../../types";
 import { formatDurationCompact } from "../../../utils/duration";
+import { useI18n } from "../../../i18n";
+
+type TFunc = ReturnType<typeof useI18n>["t"];
 
 const { useToken } = theme;
 const { Text } = Typography;
@@ -27,7 +30,7 @@ const statusColors = (status?: number) => {
   return "default";
 };
 
-const formatTime = (timestamp: number) => {
+const formatTime = (timestamp: number, t: TFunc) => {
   const date = new Date(timestamp);
   const now = new Date();
   const diff = now.getTime() - date.getTime();
@@ -35,10 +38,10 @@ const formatTime = (timestamp: number) => {
   const hours = Math.floor(diff / 3600000);
   const days = Math.floor(diff / 86400000);
 
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  if (days < 7) return `${days}d ago`;
+  if (minutes < 1) return t("replay.history.justNow");
+  if (minutes < 60) return t("replay.history.minutesAgo", { count: minutes });
+  if (hours < 24) return t("replay.history.hoursAgo", { count: hours });
+  if (days < 7) return t("replay.history.daysAgo", { count: days });
   return date.toLocaleDateString();
 };
 
@@ -58,6 +61,7 @@ interface HistoryItemProps {
 }
 
 const HistoryItem = ({ item, isSelected, onClick }: HistoryItemProps) => {
+  const { t } = useI18n();
   const { token } = useToken();
 
   return (
@@ -127,7 +131,7 @@ const HistoryItem = ({ item, isSelected, onClick }: HistoryItemProps) => {
           color={statusColors(item.status)}
           style={{ margin: 0, fontSize: 10, lineHeight: "16px" }}
         >
-          {item.status || "Pending"}
+          {item.status || t("replay.history.pending")}
         </Tag>
         <Text type="secondary" style={{ fontSize: 10 }}>
           {formatDurationCompact(item.duration_ms)}
@@ -136,7 +140,7 @@ const HistoryItem = ({ item, isSelected, onClick }: HistoryItemProps) => {
           type="secondary"
           style={{ fontSize: 10, marginLeft: "auto", flexShrink: 0 }}
         >
-          {formatTime(item.executed_at)}
+          {formatTime(item.executed_at, t)}
         </Text>
       </div>
     </div>
@@ -144,6 +148,7 @@ const HistoryItem = ({ item, isSelected, onClick }: HistoryItemProps) => {
 };
 
 export const HistoryView = () => {
+  const { t } = useI18n();
   const { token } = useToken();
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -202,20 +207,23 @@ export const HistoryView = () => {
 
   const filterLabel = useMemo(() => {
     if (historyFilter.type === "request") {
-      return currentRequest?.name || "Unnamed";
+      return currentRequest?.name || t("replay.history.unnamed");
     }
     if (historyFilter.type === "unbound") {
-      return "Unbound replay history";
+      return t("replay.history.scopeUnbound");
     }
-    return "All replay history";
-  }, [currentRequest?.name, historyFilter]);
+    return t("replay.history.scopeAll");
+  }, [currentRequest?.name, historyFilter, t]);
 
   const pageSummary = useMemo(() => {
     if (searchText) {
-      return `${filteredHistory.length} matches on this page · ${allHistoryTotal} total`;
+      return t("replay.history.summaryMatches", {
+        matches: filteredHistory.length,
+        total: allHistoryTotal,
+      });
     }
-    return `${allHistoryTotal} total records`;
-  }, [allHistoryTotal, filteredHistory.length, searchText]);
+    return t("replay.history.summaryTotal", { total: allHistoryTotal });
+  }, [allHistoryTotal, filteredHistory.length, searchText, t]);
 
   return (
     <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
@@ -246,7 +254,7 @@ export const HistoryView = () => {
             }}
           >
             <Text type="secondary" style={{ fontSize: 10 }}>
-              Scope:
+              {t("replay.history.scope")}
             </Text>
             <div style={{ fontWeight: 500 }} data-testid="replay-history-scope">
               {filterLabel}
@@ -254,7 +262,7 @@ export const HistoryView = () => {
           </div>
           <Input
             prefix={<SearchOutlined />}
-            placeholder="Search history..."
+            placeholder={t("replay.history.searchPlaceholder")}
             allowClear
             value={searchText}
             onChange={handleSearchChange}
@@ -288,7 +296,7 @@ export const HistoryView = () => {
           ) : filteredHistory.length === 0 ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="No history records"
+              description={t("replay.history.empty")}
               style={{ marginTop: 40 }}
             />
           ) : (
@@ -355,7 +363,7 @@ export const HistoryView = () => {
                 onClick={reuseSelectedHistory}
                 data-testid="replay-history-reuse-button"
               >
-                Reuse in Replay
+                {t("replay.history.reuse")}
               </Button>
             </div>
             <div style={{ flex: 1, overflow: "hidden" }}>
@@ -368,7 +376,7 @@ export const HistoryView = () => {
           </div>
         ) : (
           <Empty
-            description="Select a history record to view details"
+            description={t("replay.history.selectRecord")}
             style={{
               display: "flex",
               flexDirection: "column",

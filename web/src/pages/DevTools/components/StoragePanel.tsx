@@ -4,6 +4,7 @@ import { Button, Empty, Input, Space, Typography } from "antd";
 import type { DebugStorageSnapshot } from "../../../api/devtools";
 import { HighlightedText } from "./shared";
 import { filterBySearch } from "./sharedUtils";
+import { useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 const STORAGE_ROW_HEIGHT = 37;
@@ -42,6 +43,7 @@ export function StorageView({
   onDelete: (area: string, key: string) => void;
   onSave: () => void;
 }) {
+  const { t } = useI18n();
   const rowsViewportRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
@@ -74,25 +76,30 @@ export function StorageView({
     return () => observer.disconnect();
   }, []);
 
-  if (!storage) return <Empty description="No storage snapshot yet" />;
+  if (!storage) return <Empty description={t("devtools.storage.noSnapshot")} />;
   return (
     <div style={storageShellStyle}>
       <div style={storageToolbarStyle}>
-        <Text type="secondary">{filteredRows.length} / {activeRows.length} item{activeRows.length === 1 ? "" : "s"}</Text>
+        <Text type="secondary">
+          {t(activeRows.length === 1 ? "devtools.storage.countOne" : "devtools.storage.countOther", {
+            filtered: filteredRows.length,
+            total: activeRows.length,
+          })}
+        </Text>
         <Button
           size="small"
           icon={<PlusOutlined />}
           data-testid="devtools-storage-add"
           onClick={() => onStartAdd(area)}
         >
-          Add
+          {t("common.add")}
         </Button>
       </div>
       <div style={storageTableStyle}>
         <div style={storageHeaderRowStyle}>
-          <Text strong>Key</Text>
-          <Text strong>Value</Text>
-          <Text strong>Actions</Text>
+          <Text strong>{t("devtools.storage.key")}</Text>
+          <Text strong>{t("common.value")}</Text>
+          <Text strong>{t("common.actions")}</Text>
         </div>
         <div style={{ ...storageBodyStyle, gridTemplateRows: editingKey === "" ? "auto minmax(0, 1fr)" : "minmax(0, 1fr)" }}>
           {editingKey === "" ? (
@@ -131,9 +138,9 @@ export function StorageView({
                           <Text code ellipsis title={key}><HighlightedText text={key} query={searchQuery} /></Text>
                           <Text ellipsis title={value}><HighlightedText text={value} query={searchQuery} /></Text>
                           <Space size={4}>
-                            <Button size="small" type="text" icon={<DeleteOutlined />} aria-label={`Delete ${key}`} onClick={() => onDelete(area, key)} />
-                            <Button size="small" type="text" icon={<CopyOutlined />} aria-label={`Copy ${key}`} onClick={() => onCopy(value)} />
-                            <Button size="small" type="text" icon={<EditOutlined />} aria-label={`Edit ${key}`} onClick={() => onStartEdit(area, key, value)} />
+                            <Button size="small" type="text" icon={<DeleteOutlined />} aria-label={t("devtools.storage.deleteAria", { key })} onClick={() => onDelete(area, key)} />
+                            <Button size="small" type="text" icon={<CopyOutlined />} aria-label={t("devtools.storage.copyAria", { key })} onClick={() => onCopy(value)} />
+                            <Button size="small" type="text" icon={<EditOutlined />} aria-label={t("devtools.storage.editAria", { key })} onClick={() => onStartEdit(area, key, value)} />
                           </Space>
                         </div>
                       )}
@@ -143,7 +150,7 @@ export function StorageView({
               </div>
             </div>
           ) : editingKey === "" ? null : (
-            <div style={storageEmptyStyle}><Empty description="Empty" /></div>
+            <div style={storageEmptyStyle}><Empty description={t("devtools.storage.empty")} /></div>
           )}
         </div>
       </div>
@@ -170,25 +177,26 @@ function StorageEditRow({
   onCancel: () => void;
   onCopy: (value: string) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div data-testid="devtools-storage-edit-row" style={storageRowStyle}>
       <Input
         data-testid="devtools-storage-key"
         value={storageKey}
         onChange={(event) => onKeyChange(event.target.value)}
-        placeholder="Key"
+        placeholder={t("devtools.storage.key")}
       />
       <Input
         data-testid="devtools-storage-value"
         value={storageValue}
         onChange={(event) => onValueChange(event.target.value)}
-        placeholder="Value"
+        placeholder={t("common.value")}
         onPressEnter={onSave}
       />
       <Space size={4}>
-        <Button size="small" icon={<CopyOutlined />} aria-label={`Copy ${storageKey}`} onClick={() => onCopy(storageValue)} />
-        <Button size="small" type="primary" icon={<CheckOutlined />} loading={saving} data-testid="devtools-storage-save" aria-label="Save storage" onClick={onSave} />
-        <Button size="small" icon={<CloseOutlined />} aria-label="Cancel storage edit" onClick={onCancel} />
+        <Button size="small" icon={<CopyOutlined />} aria-label={t("devtools.storage.copyAria", { key: storageKey })} onClick={() => onCopy(storageValue)} />
+        <Button size="small" type="primary" icon={<CheckOutlined />} loading={saving} data-testid="devtools-storage-save" aria-label={t("devtools.storage.saveAria")} onClick={onSave} />
+        <Button size="small" icon={<CloseOutlined />} aria-label={t("devtools.storage.cancelAria")} onClick={onCancel} />
       </Space>
     </div>
   );

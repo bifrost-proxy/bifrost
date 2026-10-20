@@ -53,6 +53,7 @@ import {
   openDesktopTrafficDetailWindow,
 } from "../../desktop/tauri";
 import { openTrafficDetailWindow } from "./detailWindow";
+import { useI18n } from "../../i18n";
 import pushService from "../../services/pushService";
 import { usePerformanceModeStore } from "../../stores/usePerformanceModeStore";
 import type {
@@ -118,6 +119,7 @@ const deserializeToolbar = (str: string): ToolbarFilters | null => {
 };
 
 export default function Traffic() {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -234,11 +236,11 @@ export default function Traffic() {
 
       } catch (error) {
         message.error(
-          error instanceof Error ? error.message : "Failed to update Breakpoint",
+          error instanceof Error ? error.message : t("traffic.page.breakpointUpdateFailed"),
         );
       }
     },
-    [toggleBreakpoint],
+    [toggleBreakpoint, t],
   );
 
   useEffect(() => {
@@ -429,14 +431,16 @@ export default function Traffic() {
       const success = await toggleSystemProxy(enabled);
       if (success) {
         message.success(
-          enabled ? "System proxy enabled" : "System proxy disabled",
+          enabled
+            ? t("traffic.page.systemProxyEnabled")
+            : t("traffic.page.systemProxyDisabled"),
         );
       } else {
         const proxyError = useProxyStore.getState().error;
-        message.error(proxyError || "Failed to toggle system proxy");
+        message.error(proxyError || t("traffic.page.systemProxyToggleFailed"));
       }
     },
-    [toggleSystemProxy],
+    [toggleSystemProxy, t],
   );
 
   useEffect(() => {
@@ -666,13 +670,13 @@ export default function Traffic() {
   const handleClearAll = useCallback(async () => {
     const success = await clearTraffic();
     if (success) {
-      message.success("Traffic cleared");
+      message.success(t("traffic.page.trafficCleared"));
       // The store clears selection within the DELETE's database generation.
       // A newer selection must survive this page callback's delayed response.
     } else if (useTrafficStore.getState().error) {
       message.error(useTrafficStore.getState().error);
     }
-  }, [clearTraffic]);
+  }, [clearTraffic, t]);
 
   const handleFilterConditionsChange = useCallback(
     (conditions: FilterCondition[]) => {
@@ -740,7 +744,7 @@ export default function Traffic() {
 
         if (result.kind === "browser") {
           if (!result.popup) {
-            message.error("Failed to open detail window");
+            message.error(t("traffic.page.openDetailWindowFailed"));
             return;
           }
           detachedPopupRef.current = result.popup;
@@ -752,10 +756,10 @@ export default function Traffic() {
         nativeDetachedWindowRef.current = false;
         attachDetailWindow();
         console.error("Failed to open native traffic detail window", error);
-        message.error("Failed to open detail window");
+        message.error(t("traffic.page.openDetailWindowFailed"));
       }
     },
-    [attachDetailWindow, detachDetailWindow, setSelectedId],
+    [attachDetailWindow, detachDetailWindow, setSelectedId, t],
   );
 
   const handleAttachDetailWindow = useCallback(() => {
@@ -1186,7 +1190,7 @@ export default function Traffic() {
               background: token.colorBgContainer,
             }}
           >
-            <Spin size="small" tip="Filtering history..." />
+            <Spin size="small" tip={t("traffic.page.filteringHistory")} />
           </div>
         )}
       </div>
@@ -1277,7 +1281,7 @@ export default function Traffic() {
           data-testid="traffic-performance-loading"
           style={styles.performanceModeLoading}
         >
-          <Spin size="large" tip="Loading Network..." />
+          <Spin size="large" tip={t("traffic.page.loadingNetwork")} />
         </div>
       )}
       {superPerformanceMode === true && (
@@ -1290,19 +1294,17 @@ export default function Traffic() {
               <ThunderboltOutlined />
             </div>
             <div style={styles.superPerformanceTitle}>
-              Super performance mode is enabled
+              {t("traffic.page.superPerformanceTitle")}
             </div>
             <div style={styles.superPerformanceDescription}>
-              Bifrost is still processing proxy rules, but traffic records, bodies,
-              WebSocket frames, and database updates are not being stored. Turn the mode
-              off to inspect Network traffic again.
+              {t("traffic.page.superPerformanceDescription")}
             </div>
             <Button
               type="primary"
               onClick={handleOpenPerformanceSettings}
               data-testid="traffic-super-performance-disable-button"
             >
-              Open Performance Settings
+              {t("traffic.page.openPerformanceSettings")}
             </Button>
           </div>
         </div>

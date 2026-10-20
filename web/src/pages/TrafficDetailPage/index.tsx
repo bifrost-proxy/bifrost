@@ -17,8 +17,10 @@ import { useTrafficStore } from "../../stores/useTrafficStore";
 import { useTrafficDetailWindowStore } from "../../stores/useTrafficDetailWindowStore";
 import { isDesktopShell } from "../../runtime";
 import { closeDesktopTrafficDetailWindow } from "../../desktop/tauri";
+import { useI18n } from "../../i18n";
 
 export default function TrafficDetailPage() {
+  const { t } = useI18n();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { token } = theme.useToken();
@@ -100,7 +102,7 @@ export default function TrafficDetailPage() {
       setResponseBody(null);
       setRequestRawBody(null);
       setResponseRawBody(null);
-      setError("Missing traffic id");
+      setError(t("trafficDetail.page.missingId"));
       return;
     }
 
@@ -132,11 +134,11 @@ export default function TrafficDetailPage() {
       setResponseBody(null);
       setRequestRawBody(null);
       setResponseRawBody(null);
-      setError(normalizeApiErrorMessage(nextError, "Failed to load request detail"));
+      setError(normalizeApiErrorMessage(nextError, t("trafficDetail.page.loadFailed")));
     } finally {
       setLoading(false);
     }
-  }, [recordId]);
+  }, [recordId, t]);
 
   useEffect(() => {
     void fetchDetail();
@@ -198,7 +200,7 @@ export default function TrafficDetailPage() {
               data-testid="traffic-detail-attach-back"
               style={{ fontSize: 12 }}
             >
-              Attach Back
+              {t("trafficDetail.page.attachBack")}
             </Button>
           ) : (
             <Button
@@ -207,11 +209,11 @@ export default function TrafficDetailPage() {
               onClick={() => navigate("/traffic")}
               style={{ fontSize: 12 }}
             >
-              Back to Network
+              {t("trafficDetail.page.backToNetwork")}
             </Button>
           )}
           <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>
-            {recordId ? `Request ID: ${recordId}` : "Traffic Detail"}
+            {recordId ? t("trafficDetail.page.requestId", { id: recordId }) : t("trafficDetail.page.title")}
           </span>
         </div>
         <Button
@@ -222,7 +224,7 @@ export default function TrafficDetailPage() {
           disabled={!recordId}
           style={{ fontSize: 12 }}
         >
-          Refresh
+          {t("common.refresh")}
         </Button>
       </div>
 
@@ -231,8 +233,8 @@ export default function TrafficDetailPage() {
           <Empty
             description={
               detachedMode
-                ? "Select a request in the main window to view details"
-                : "Missing traffic id"
+                ? t("trafficDetail.page.selectInMainWindow")
+                : t("trafficDetail.page.missingId")
             }
           />
         </div>

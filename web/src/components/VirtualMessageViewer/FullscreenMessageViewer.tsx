@@ -23,6 +23,7 @@ import type { MessageItem } from "./types";
 import { VirtualMessageList } from "./VirtualMessageList";
 import { useMessageSearch } from "./useMessageSearch";
 import { MessageItemCard } from "./MessageItemCard";
+import { useI18n } from "../../i18n";
 
 const { Search } = Input;
 const { Text } = Typography;
@@ -48,6 +49,7 @@ export function FullscreenMessageViewer({
   followTail = true,
   onFollowTailChange,
 }: FullscreenMessageViewerProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const {
@@ -107,7 +109,7 @@ export function FullscreenMessageViewer({
 
   return (
     <Modal
-      title={title || "Messages"}
+      title={title || t("trafficDetail.viewer.title")}
       open={open}
       onCancel={onClose}
       footer={null}
@@ -135,7 +137,7 @@ export function FullscreenMessageViewer({
     >
       <div style={headerStyle}>
         <Search
-          placeholder="Search messages (space-separated tokens)..."
+          placeholder={t("trafficDetail.viewer.searchPlaceholder")}
           allowClear
           value={searchState.query}
           onChange={(e) => setQuery(e.target.value)}
@@ -145,7 +147,14 @@ export function FullscreenMessageViewer({
         />
 
         <Space size="small">
-          <Tooltip title={`Current mode: ${searchState.matchMode}`}>
+          <Tooltip
+            title={t("trafficDetail.viewer.currentMode", {
+              mode:
+                searchState.matchMode === "filter"
+                  ? t("trafficDetail.viewer.modeFilter")
+                  : t("trafficDetail.viewer.modeHighlight"),
+            })}
+          >
             <Button.Group>
               <Button
                 size="small"
@@ -155,7 +164,7 @@ export function FullscreenMessageViewer({
                 icon={<HighlightOutlined />}
                 onClick={() => handleMatchModeChange("highlight")}
               >
-                Highlight
+                {t("trafficDetail.viewer.highlight")}
               </Button>
               <Button
                 size="small"
@@ -165,34 +174,36 @@ export function FullscreenMessageViewer({
                 icon={<FilterOutlined />}
                 onClick={() => handleMatchModeChange("filter")}
               >
-                Filter
+                {t("trafficDetail.viewer.filter")}
               </Button>
             </Button.Group>
           </Tooltip>
 
           {searchState.total > 0 && (
             <>
-              <Tag color="blue">{matchInfo} matched</Tag>
+              <Tag color="blue">
+                {t("trafficDetail.viewer.matched", { info: matchInfo })}
+              </Tag>
               <Button.Group size="small">
                 <Button
                   icon={<ArrowUpOutlined />}
                   onClick={goToPrev}
                   disabled={searchState.total === 0}
                 >
-                  Prev
+                  {t("trafficDetail.viewer.prev")}
                 </Button>
                 <Button
                   icon={<ArrowDownOutlined />}
                   onClick={goToNext}
                   disabled={searchState.total === 0}
                 >
-                  Next
+                  {t("trafficDetail.viewer.next")}
                 </Button>
               </Button.Group>
             </>
           )}
 
-          <Tooltip title="Follow latest messages">
+          <Tooltip title={t("trafficDetail.viewer.followLatest")}>
             <Space size={4}>
               <VerticalAlignBottomOutlined style={{ fontSize: 12 }} />
               <Switch
@@ -204,10 +215,12 @@ export function FullscreenMessageViewer({
           </Tooltip>
 
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {searchState.matchMode === "filter"
-              ? filteredItems.length
-              : items.length}{" "}
-            messages
+            {t("trafficDetail.viewer.messageCount", {
+              count:
+                searchState.matchMode === "filter"
+                  ? filteredItems.length
+                  : items.length,
+            })}
           </Text>
         </Space>
       </div>
@@ -241,8 +254,8 @@ export function FullscreenMessageViewer({
               }}
             >
               {searchState.matchMode === "filter" && searchState.query
-                ? "No messages match your search"
-                : "No messages"}
+                ? t("trafficDetail.viewer.noMatch")
+                : t("trafficDetail.viewer.noMessages")}
             </div>
           }
           style={{ padding: "8px 16px" }}

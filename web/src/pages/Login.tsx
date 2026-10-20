@@ -10,6 +10,7 @@ import {
   setAdminToken,
   type AdminAuthStatus,
 } from '../services/adminAuth';
+import { useI18n } from '../i18n';
 
 type LoginResponse = {
   token: string;
@@ -27,6 +28,7 @@ type LoginErrorResponse = {
 
 export default function Login() {
   const [form] = Form.useForm();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [status, setStatus] = useState<AdminAuthStatus | null>(null);
@@ -71,25 +73,25 @@ export default function Login() {
           <div className="bifrost-login__logo" aria-hidden="true" />
           <div>
             <Typography.Title level={3} style={{ margin: 0 }}>
-              Bifrost Admin
+              {t('app.login.title')}
             </Typography.Title>
             <Typography.Text type="secondary">
-              Remote Management / Authentication
+              {t('app.login.subtitle')}
             </Typography.Text>
           </div>
         </div>
 
         {status && !status.remote_access_enabled ? (
           <Typography.Paragraph type="warning" style={{ marginTop: 12 }}>
-            Remote access is not enabled. Please run `bifrost admin remote enable` on the server first and set a login password.
+            {t('app.login.remoteAccessDisabled')}
           </Typography.Paragraph>
         ) : null}
 
         {status?.locked_out ? (
           <Alert
             type="error"
-            message="Account Locked"
-            description="Remote access has been disabled and the password has been cleared due to multiple failed login attempts. Please reset the password and re-enable remote access on localhost."
+            message={t('app.login.accountLocked')}
+            description={t('app.login.lockedOutStatus')}
             showIcon
             style={{ marginTop: 12 }}
           />
@@ -107,8 +109,8 @@ export default function Login() {
         {loginError?.locked_out ? (
           <Alert
             type="error"
-            message="Account Locked"
-            description="Too many login attempts. Remote access has been disabled. Please reset the password on localhost."
+            message={t('app.login.accountLocked')}
+            description={t('app.login.lockedOutAttempts')}
             showIcon
             style={{ marginTop: 12 }}
           />
@@ -131,7 +133,7 @@ export default function Login() {
                 throw new Error('Missing token');
               }
               setAdminToken(res.token);
-              message.success('Login successful');
+              message.success(t('app.login.success'));
               navigate(nextPath || '/traffic', { replace: true });
             } catch (err) {
               let errData: LoginErrorResponse = {};
@@ -144,7 +146,7 @@ export default function Login() {
                 void fetchAdminAuthStatus().then(setStatus).catch(() => {});
               } else {
                 const errMsg = errData.error
-                  || (err instanceof Error ? err.message : 'Login failed. Please check your username or password');
+                  || (err instanceof Error ? err.message : t('app.login.failed'));
                 message.error(errMsg);
               }
             } finally {
@@ -154,8 +156,8 @@ export default function Login() {
         >
           <Form.Item
             name="username"
-            label="Username"
-            rules={[{ required: true, message: 'Please enter username' }]}
+            label={t('app.login.username')}
+            rules={[{ required: true, message: t('app.login.usernameRequired') }]}
           >
             <Input
               size="large"
@@ -166,13 +168,13 @@ export default function Login() {
           </Form.Item>
           <Form.Item
             name="password"
-            label="Password"
-            rules={[{ required: true, message: 'Please enter password' }]}
+            label={t('app.login.password')}
+            rules={[{ required: true, message: t('app.login.passwordRequired') }]}
           >
             <Input.Password
               size="large"
               autoComplete="current-password"
-              placeholder="Enter password"
+              placeholder={t('app.login.passwordPlaceholder')}
             />
           </Form.Item>
           <Button
@@ -183,11 +185,11 @@ export default function Login() {
             loading={submitting}
             disabled={!!status && (!status.remote_access_enabled || status.locked_out)}
           >
-            Login
+            {t('app.login.submit')}
           </Button>
 
           <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-            Token lifetime is fixed at 7 days. To force logout all sessions, run `bifrost admin revoke-all` on the server.
+            {t('app.login.tokenLifetimeHint')}
           </Typography.Paragraph>
         </Form>
       </div>

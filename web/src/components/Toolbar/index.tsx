@@ -19,6 +19,7 @@ import {
 } from "@ant-design/icons";
 import type { ToolbarFilters } from "../../types";
 import { isMacDesktopShell } from "../../runtime";
+import { useI18n, type TranslationKey } from "../../i18n";
 
 interface ToolbarProps {
   filters: ToolbarFilters;
@@ -50,6 +51,17 @@ const filterGroups = {
   imported: ["Imported"],
 };
 
+// Filter values stay English (they are filter identifiers); only the label shown is translated.
+const filterTagLabelKeys: Partial<Record<string, TranslationKey>> = {
+  "Hit Rule": "app.toolbar.tagHitRule",
+  Form: "app.toolbar.tagForm",
+  Font: "app.toolbar.tagFont",
+  Doc: "app.toolbar.tagDoc",
+  Media: "app.toolbar.tagMedia",
+  error: "app.toolbar.tagError",
+  Imported: "app.toolbar.tagImported",
+};
+
 const quickFilterTagStyle: CSSProperties = {
   marginInlineEnd: 0,
   paddingInline: 4,
@@ -78,6 +90,7 @@ export default function Toolbar({
   onBreakpointToggle,
 }: ToolbarProps) {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const macDesktopShell = isMacDesktopShell();
 
   const handleTagClick = (group: keyof ToolbarFilters, tag: string) => {
@@ -95,7 +108,7 @@ export default function Toolbar({
           onChange={() => handleTagClick(group, tag)}
           style={quickFilterTagStyle}
         >
-          {tag}
+          {filterTagLabelKeys[tag] ? t(filterTagLabelKeys[tag]) : tag}
         </Tag.CheckableTag>
       ))}
     </Space>
@@ -116,7 +129,9 @@ export default function Toolbar({
       <Space size={4}>
         <Tooltip
           title={
-            filterPanelCollapsed ? "Show filter panel" : "Hide filter panel"
+            filterPanelCollapsed
+              ? t("app.toolbar.showFilterPanel")
+              : t("app.toolbar.hideFilterPanel")
           }
         >
           <Button
@@ -139,7 +154,7 @@ export default function Toolbar({
             margin: "0 4px",
           }}
         />
-        <Tooltip title="Clear all traffic">
+        <Tooltip title={t("app.toolbar.clearAllTraffic")}>
           <Button
             type="text"
             size="small"
@@ -212,24 +227,23 @@ export default function Toolbar({
           content={
             <div style={{ maxWidth: 320, fontSize: 12, lineHeight: 1.5 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                Breakpoint global gate
+                {t("app.toolbar.breakpointGateTitle")}
               </div>
               <div>
-                On: matched rules using <code>breakpoint://request</code> or{" "}
-                <code>breakpoint://response</code> can pause traffic.
+                {t("app.toolbar.breakpointGateOnPrefix")}
+                <code>breakpoint://request</code>
+                {t("app.toolbar.breakpointGateOnOr")}
+                <code>breakpoint://response</code>
+                {t("app.toolbar.breakpointGateOnSuffix")}
               </div>
               <div style={{ marginTop: 6 }}>
-                Off: no new traffic pauses, and pending breakpoint requests are
-                released.
+                {t("app.toolbar.breakpointGateOff")}
               </div>
               <div style={{ marginTop: 6 }}>
-                This switch alone does not pause traffic. Choose request,
-                response, or both in the rule value.
+                {t("app.toolbar.breakpointGateNote")}
               </div>
               <div style={{ marginTop: 6 }}>
-                Matched HTTPS rules enable scoped TLS interception. The client
-                must trust the Bifrost CA certificate, including on custom
-                ports.
+                {t("app.toolbar.breakpointGateTls")}
               </div>
             </div>
           }
@@ -242,7 +256,7 @@ export default function Toolbar({
               fontSize: 12,
             }}
           >
-            Breakpoint
+            {t("app.toolbar.breakpoint")}
           </span>
         </Popover>
         <Switch
@@ -259,7 +273,7 @@ export default function Toolbar({
             data-testid="toolbar-breakpoint-pending-only"
             style={{ fontSize: 12 }}
           >
-            Paused
+            {t("app.toolbar.paused")}
           </Checkbox>
         )}
         <div
@@ -270,7 +284,7 @@ export default function Toolbar({
           }}
         />
         <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>
-          System Proxy
+          {t("app.statusBar.systemProxy")}
         </span>
         {systemProxySupported ? (
           <Switch
@@ -280,7 +294,7 @@ export default function Toolbar({
             onChange={onSystemProxyToggle}
           />
         ) : (
-          <Tooltip title="System proxy is not supported on this platform">
+          <Tooltip title={t("app.statusBar.systemProxyUnsupported")}>
             <Switch size="small" disabled />
           </Tooltip>
         )}
@@ -294,10 +308,10 @@ export default function Toolbar({
         <Tooltip
           title={
             detailDetached
-              ? "Attach detail window"
+              ? t("app.toolbar.attachDetailWindow")
               : detailPanelCollapsed
-                ? "Show detail panel"
-                : "Hide detail panel"
+                ? t("app.toolbar.showDetailPanel")
+                : t("app.toolbar.hideDetailPanel")
           }
         >
           <Button
@@ -319,7 +333,7 @@ export default function Toolbar({
           />
         </Tooltip>
         {detailDetached ? (
-          <Tooltip title="Detail is detached to a separate window">
+          <Tooltip title={t("app.toolbar.detailDetached")}>
             <ExportOutlined
               style={{ color: token.colorPrimary, fontSize: 14 }}
             />

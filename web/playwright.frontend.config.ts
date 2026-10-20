@@ -31,6 +31,21 @@ export default defineConfig({
   },
   use: {
     baseURL: `http://127.0.0.1:${webPort}`,
+    // UI specs assert the English copy; the app defaults to zh-CN.
+    storageState: {
+      cookies: [],
+      origins: [
+        {
+          origin: `http://127.0.0.1:${webPort}`,
+          localStorage: [
+            {
+              name: "bifrost-locale",
+              value: JSON.stringify({ state: { locale: "en" }, version: 0 }),
+            },
+          ],
+        },
+      ],
+    },
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Input, Modal, Space, Typography, theme } from "antd";
 import { EditOutlined, EyeOutlined } from "@ant-design/icons";
+import { useI18n } from "../../../../i18n";
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -16,10 +17,14 @@ interface LongTextModalFieldProps {
   copyPlaceholderLabel?: string;
 }
 
-function previewText(value: string | null | undefined, placeholder?: string): string {
+function previewText(
+  value: string | null | undefined,
+  emptyText: string,
+  placeholder?: string,
+): string {
   const normalized = value?.trim();
   if (normalized) return normalized;
-  return placeholder || "Empty";
+  return placeholder || emptyText;
 }
 
 export default function LongTextModalField({
@@ -33,6 +38,7 @@ export default function LongTextModalField({
   copyPlaceholderLabel,
 }: LongTextModalFieldProps) {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const normalizedValue = value ?? "";
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(normalizedValue);
@@ -43,9 +49,10 @@ export default function LongTextModalField({
     }
   }, [normalizedValue, open]);
 
+  const emptyText = t("ai.longText.empty");
   const preview = useMemo(
-    () => previewText(normalizedValue, placeholder),
-    [normalizedValue, placeholder],
+    () => previewText(normalizedValue, emptyText, placeholder),
+    [normalizedValue, emptyText, placeholder],
   );
 
   const handleOpen = () => {
@@ -68,7 +75,7 @@ export default function LongTextModalField({
           size="small"
           data-testid={testId ? `${testId}-button` : undefined}
         >
-          {readOnly ? "View" : "Edit"}
+          {readOnly ? t("ai.longText.view") : t("common.edit")}
         </Button>
       </Space>
       <div

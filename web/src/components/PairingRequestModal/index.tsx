@@ -30,6 +30,7 @@ import {
   type RemoteShellSet,
   type FileAccessScope,
 } from "../../api/remoteInvoke";
+import { useI18n, type TranslationKey } from "../../i18n";
 
 const { Text } = Typography;
 const DEFAULT_SSH_KEY_SHELL_POLICY_ID = "ssh-key-full-access";
@@ -47,12 +48,12 @@ function formatFingerprint(fp: string): string {
   return `${short.slice(0, 4)}:${short.slice(4, 8)}:${short.slice(8, 12)}:${short.slice(12, 16)}`;
 }
 
-const GRANT_OPTIONS: { label: string; value: GrantMode; color: string }[] = [
-  { label: "This Time Only", value: "once", color: "default" },
-  { label: "Allow 30m", value: "30m", color: "blue" },
-  { label: "Allow 1h", value: "1h", color: "cyan" },
-  { label: "Allow 1d", value: "1d", color: "green" },
-  { label: "Allow Permanently", value: "permanent", color: "gold" },
+const GRANT_OPTIONS: { labelKey: TranslationKey; value: GrantMode; color: string }[] = [
+  { labelKey: "app.pairing.grantOnce", value: "once", color: "default" },
+  { labelKey: "app.pairingRequest.allow30m", value: "30m", color: "blue" },
+  { labelKey: "app.pairingRequest.allow1h", value: "1h", color: "cyan" },
+  { labelKey: "app.pairingRequest.allow1d", value: "1d", color: "green" },
+  { labelKey: "app.pairingRequest.allowPermanently", value: "permanent", color: "gold" },
 ];
 
 type AccessPreset = "query" | "full" | "shell_only" | "file_only" | "custom";
@@ -63,6 +64,7 @@ export default function PairingRequestModal({
   shellConfig,
   onClose,
 }: PairingRequestModalProps) {
+  const { t } = useI18n();
   const [loading, setLoading] = useState(false);
   const [preset, setPreset] = useState<AccessPreset>("full");
 
@@ -154,11 +156,11 @@ export default function PairingRequestModal({
         grant_mode: mode,
         ...params,
       });
-      message.success("Pairing approved");
+      message.success(t("app.pairingRequest.approved"));
       onClose();
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to approve pairing",
+        e instanceof Error ? e.message : t("app.pairingRequest.approveFailed"),
       );
     } finally {
       setLoading(false);
@@ -169,11 +171,11 @@ export default function PairingRequestModal({
     setLoading(true);
     try {
       await rejectPairing(pairing.pairing_id);
-      message.success("Pairing rejected");
+      message.success(t("app.pairingRequest.rejected"));
       onClose();
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to reject pairing",
+        e instanceof Error ? e.message : t("app.pairingRequest.rejectFailed"),
       );
     } finally {
       setLoading(false);
@@ -191,7 +193,7 @@ export default function PairingRequestModal({
       title={
         <Space>
           <WarningOutlined style={{ color: "#faad14" }} />
-          <span>A remote device wants to connect</span>
+          <span>{t("app.pairingRequest.title")}</span>
         </Space>
       }
       onCancel={onClose}
@@ -202,18 +204,18 @@ export default function PairingRequestModal({
     >
       <Space direction="vertical" size={16} style={{ width: "100%" }}>
         <Descriptions size="small" column={1} bordered>
-          <Descriptions.Item label="Device Fingerprint">
+          <Descriptions.Item label={t("app.pairingRequest.deviceFingerprint")}>
             <Text code style={{ fontFamily: "monospace" }}>
               {formatFingerprint(pairing.caller_info.fingerprint)}
             </Text>
           </Descriptions.Item>
-          <Descriptions.Item label="Display Name">
+          <Descriptions.Item label={t("app.pairingRequest.displayName")}>
             {pairing.caller_info.display_name || "-"}
           </Descriptions.Item>
-          <Descriptions.Item label="Source IP">
+          <Descriptions.Item label={t("app.pairingRequest.sourceIp")}>
             {pairing.caller_info.source_ip || "-"}
           </Descriptions.Item>
-          <Descriptions.Item label="Platform">
+          <Descriptions.Item label={t("app.pairingRequest.platform")}>
             {pairing.caller_info.platform || "-"}
           </Descriptions.Item>
           <Descriptions.Item label="User Agent">
@@ -224,7 +226,7 @@ export default function PairingRequestModal({
               {pairing.caller_info.user_agent || "-"}
             </Text>
           </Descriptions.Item>
-          <Descriptions.Item label="Command">
+          <Descriptions.Item label={t("app.pairingRequest.command")}>
             <Tag color="blue">
               {pairing.command_summary.command_preview || pairing.command.command}
             </Tag>
@@ -232,23 +234,23 @@ export default function PairingRequestModal({
         </Descriptions>
 
         <Tag icon={<WarningOutlined />} color="warning">
-          New device — please confirm this is your own operation
+          {t("app.pairingRequest.newDeviceWarning")}
         </Tag>
 
         <div>
           <Text strong style={{ display: "block", marginBottom: 8 }}>
-            How much access to grant
+            {t("app.pairingRequest.accessTitle")}
           </Text>
           <Text type="secondary" style={{ display: "block", marginBottom: 8, fontSize: 12 }}>
-            Pick the smallest scope that lets the remote agent do its job.
+            {t("app.pairingRequest.accessHint")}
           </Text>
           {!hasShellPolicies && (
             <Alert
               showIcon
               type="warning"
               style={{ marginBottom: 12 }}
-              message="No command groups enabled on this device"
-              description="Full trust will use the built-in Full Access command group. Custom command-group selection still requires adding a group first."
+              message={t("app.pairingRequest.noCommandGroups")}
+              description={t("app.pairingRequest.noCommandGroupsDescription")}
             />
           )}
           <Radio.Group
@@ -260,45 +262,45 @@ export default function PairingRequestModal({
               <Radio value="full">
                 <Space>
                   <ThunderboltOutlined />
-                  <span><b>Full trust</b></span>
+                  <span><b>{t("app.pairingRequest.presetFull")}</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Run any command, read &amp; write files, open interactive terminals
+                    {t("app.pairingRequest.presetFullDescription")}
                   </Text>
                 </Space>
               </Radio>
               <Radio value="shell_only">
                 <Space>
                   <CodeOutlined />
-                  <span><b>Run commands &amp; read/write files</b></span>
+                  <span><b>{t("app.pairingRequest.presetShell")}</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Execute allowed commands and edit files. No interactive shells.
+                    {t("app.pairingRequest.presetShellDescription")}
                   </Text>
                 </Space>
               </Radio>
               <Radio value="file_only">
                 <Space>
                   <FileOutlined />
-                  <span><b>Files only</b></span>
+                  <span><b>{t("app.pairingRequest.presetFile")}</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Read &amp; write files. Cannot run any shell commands.
+                    {t("app.pairingRequest.presetFileDescription")}
                   </Text>
                 </Space>
               </Radio>
               <Radio value="query">
                 <Space>
                   <SearchOutlined />
-                  <span><b>Read-only watch</b></span>
+                  <span><b>{t("app.pairingRequest.presetQuery")}</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Can see status and traffic. No commands, no file writes.
+                    {t("app.pairingRequest.presetQueryDescription")}
                   </Text>
                 </Space>
               </Radio>
               <Radio value="custom">
                 <Space>
                   <SettingOutlined />
-                  <span><b>Custom</b></span>
+                  <span><b>{t("app.pairingRequest.presetCustom")}</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Pick shell + file + terminal access individually
+                    {t("app.pairingRequest.presetCustomDescription")}
                   </Text>
                 </Space>
               </Radio>
@@ -315,7 +317,7 @@ export default function PairingRequestModal({
                 : "info"
             }
             style={{ marginBottom: 16 }}
-            message="Preview — what this device will be able to do"
+            message={t("app.pairingRequest.previewTitle")}
             description={
               <ul style={{ margin: 0, paddingLeft: 18 }}>
                 {(() => {
@@ -339,44 +341,44 @@ export default function PairingRequestModal({
 
                   if (shellAllowed) {
                     if (preset === "full" || preset === "shell_only") {
-                      bullets.push("Run commands from any of: Full Access");
+                      bullets.push(t("app.pairingRequest.previewRunFromAny", { names: "Full Access" }));
                     } else if (preset === "custom" && shellMode === "selected") {
                       const names = enabledPolicies
                         .filter((p) => selectedPolicies.includes(p.id))
                         .map((p) => p.name || p.id);
                       bullets.push(
                         names.length
-                          ? "Run commands from: " + names.join(", ")
-                          : "Run commands from: (none selected yet)"
+                          ? t("app.pairingRequest.previewRunFrom", { names: names.join(", ") })
+                          : t("app.pairingRequest.previewRunFromNone")
                       );
                     } else {
                       const names = enabledPolicies.map((p) => p.name || p.id);
                       bullets.push(
                         names.length
-                          ? "Run commands from any of: " + names.join(", ")
-                          : "No command groups enabled on this device"
+                          ? t("app.pairingRequest.previewRunFromAny", { names: names.join(", ") })
+                          : t("app.pairingRequest.noCommandGroups")
                       );
                     }
                     bullets.push(
                       isInteractive
-                        ? "Can open an interactive terminal"
+                        ? t("app.pairingRequest.previewInteractive")
                         : acceptsStdin
-                        ? "Can send stdin to commands, but no interactive terminal"
-                        : "No stdin, no interactive terminal"
+                        ? t("app.pairingRequest.previewStdinOnly")
+                        : t("app.pairingRequest.previewNoStdin")
                     );
                   } else {
-                    bullets.push("Cannot run any shell commands");
+                    bullets.push(t("app.pairingRequest.previewNoShell"));
                   }
 
                   if (fileScope === "read_write") {
-                    bullets.push("Can read and write files on this device");
+                    bullets.push(t("app.pairingRequest.previewReadWrite"));
                   } else if (fileScope === "read") {
-                    bullets.push("Can read files but cannot modify them");
+                    bullets.push(t("app.pairingRequest.previewReadOnly"));
                   } else {
-                    bullets.push("No file access");
+                    bullets.push(t("app.pairingRequest.previewNoFileAccess"));
                   }
 
-                  bullets.push("Can always see status and inspect traffic records");
+                  bullets.push(t("app.pairingRequest.previewAlwaysStatus"));
                   return bullets.map((b, i) => <li key={i}>{b}</li>);
                 })()}
               </ul>
@@ -394,21 +396,21 @@ export default function PairingRequestModal({
             >
               <Space direction="vertical" size={8} style={{ width: "100%" }}>
                 <div>
-                  <Text type="secondary" style={{ fontSize: 12 }}>What commands can this device run?</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{t("app.pairingRequest.customShellQuestion")}</Text>
                   <Select
                     value={shellMode}
                     onChange={setShellMode}
                     style={{ width: "100%", marginTop: 4 }}
                     options={[
-                      { value: "none", label: "No commands at all" },
+                      { value: "none", label: t("app.pairingRequest.shellNone") },
                       {
                         value: "selected",
-                        label: "Only commands from selected groups",
+                        label: t("app.pairingRequest.shellSelected"),
                         disabled: !hasShellPolicies,
                       },
                       {
                         value: "all",
-                        label: "Any command from enabled groups",
+                        label: t("app.pairingRequest.shellAll"),
                         disabled: !hasShellPolicies,
                       },
                     ]}
@@ -417,7 +419,7 @@ export default function PairingRequestModal({
                 {shellMode === "selected" && (
                   <Select
                     mode="multiple"
-                    placeholder="Choose shell policies"
+                    placeholder={t("app.pairingRequest.choosePolicies")}
                     value={selectedPolicies}
                     onChange={setSelectedPolicies}
                     style={{ width: "100%" }}
@@ -429,12 +431,12 @@ export default function PairingRequestModal({
                 )}
                 {shellMode !== "none" && (
                   <Space>
-                    <Text type="secondary">Allow stdin (piped input)</Text>
+                    <Text type="secondary">{t("app.pairingRequest.allowStdin")}</Text>
                     <Switch
                       checked={stdinAllowed}
                       onChange={setStdinAllowed}
                     />
-                    <Text type="secondary">Interactive terminal</Text>
+                    <Text type="secondary">{t("app.pairingRequest.interactiveTerminal")}</Text>
                     <Switch
                       checked={interactiveAllowed}
                       onChange={setInteractiveAllowed}
@@ -442,15 +444,15 @@ export default function PairingRequestModal({
                   </Space>
                 )}
                 <div>
-                  <Text type="secondary" style={{ fontSize: 12 }}>What file access to grant?</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{t("app.pairingRequest.customFileQuestion")}</Text>
                   <Select
                     value={fileAccess}
                     onChange={setFileAccess}
                     style={{ width: "100%", marginTop: 4 }}
                     options={[
-                      { value: "none", label: "No file access (cannot read or write files)" },
-                      { value: "read", label: "Read-only (can open files, cannot modify)" },
-                      { value: "read_write", label: "Read & write (can modify files)" },
+                      { value: "none", label: t("app.pairingRequest.fileNone") },
+                      { value: "read", label: t("app.pairingRequest.fileRead") },
+                      { value: "read_write", label: t("app.pairingRequest.fileReadWrite") },
                     ]}
                   />
                 </div>
@@ -459,7 +461,7 @@ export default function PairingRequestModal({
           )}
 
           <Text strong style={{ display: "block", marginBottom: 8 }}>
-            Grant Duration
+            {t("app.pairingRequest.grantDuration")}
           </Text>
           <Space wrap>
             {GRANT_OPTIONS.map((opt) => (
@@ -472,7 +474,7 @@ export default function PairingRequestModal({
                 onClick={() => handleApprove(opt.value)}
                 data-testid={`pairing-approve-${opt.value}`}
               >
-                {opt.label}
+                {t(opt.labelKey)}
               </Button>
             ))}
           </Space>
@@ -486,7 +488,7 @@ export default function PairingRequestModal({
           block
           data-testid="pairing-reject"
         >
-          Reject
+          {t("app.pairing.reject")}
         </Button>
       </Space>
     </Modal>

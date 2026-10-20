@@ -4,6 +4,7 @@ import * as api from "../api";
 import { getClientId } from "../services/clientId";
 import { buildApiUrl } from "../runtime";
 import { isConnectionIssueError } from "../api/client";
+import { t } from "../i18n";
 
 interface PendingAuthEvent {
   event_type: "new" | "approved" | "rejected";
@@ -128,8 +129,8 @@ export const usePendingAuthStore = create<PendingAuthState>((set, get) => ({
                 pendingCount: data.total_pending,
               });
               showNotification(
-                "New Device Connection Request",
-                `Device ${data.pending_auth.ip} is requesting proxy access`,
+                t("shared.pendingAuth.notifyTitle"),
+                t("shared.pendingAuth.notifyBody", { ip: data.pending_auth.ip }),
               );
             }
             break;

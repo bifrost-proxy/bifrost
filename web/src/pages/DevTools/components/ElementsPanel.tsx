@@ -14,6 +14,7 @@ import {
   visibleDomChildren,
 } from "./domUtils";
 import { includesSearch } from "./sharedUtils";
+import { t as translate, useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 const PREVIEW_LIMIT = 120;
@@ -40,6 +41,7 @@ export function DomTree({
   onHighlight: (nodeId: number) => void;
   onToggle: (key: string) => void;
 }) {
+  const { t } = useI18n();
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const showDetail = (title: string, value: string) => setDetail({ title, value });
   if (node) {
@@ -60,11 +62,11 @@ export function DomTree({
               data-testid="devtools-elements-detail-copy"
               onClick={() => {
                 void navigator.clipboard.writeText(detail?.value ?? "").then(() => {
-                  void message.success("Copied");
+                  void message.success(t("common.copied"));
                 });
               }}
             >
-              Copy
+              {t("common.copy")}
             </Button>
           )}
           onCancel={() => setDetail(null)}
@@ -77,7 +79,7 @@ export function DomTree({
   if (html) {
     return <pre style={codeBlockStyle}>{html}</pre>;
   }
-  return <Empty description="No DOM snapshot yet" />;
+  return <Empty description={t("devtools.elements.noSnapshot")} />;
 }
 
 function renderDomNode(
@@ -110,7 +112,7 @@ function renderDomNode(
         <button
           type="button"
           data-testid="devtools-dom-disclosure"
-          aria-label={expanded ? "Collapse node" : "Expand node"}
+          aria-label={expanded ? translate("devtools.elements.collapseNode") : translate("devtools.elements.expandNode")}
           disabled={!hasChildren}
           onClick={(event) => {
             event.stopPropagation();
@@ -160,7 +162,7 @@ function renderDomNode(
           {children.slice(0, 250).map((child, index) =>
             renderDomNode(child, `${path}.${index}`, selectedNodeId, expandedKeys, searchQuery, onHighlight, onToggle, onShowDetail),
           )}
-          {children.length > 250 ? <Text type="secondary">... {children.length - 250} more nodes</Text> : null}
+          {children.length > 250 ? <Text type="secondary">{translate("devtools.elements.moreNodes", { count: children.length - 250 })}</Text> : null}
           {isElement ? (
             <div style={domClosingTagStyle}>
               <span>&lt;/</span>
@@ -238,11 +240,12 @@ function TextNodePreview({
   searchQuery: string;
   onShowDetail: (title: string, value: string) => void;
 }) {
+  const { t } = useI18n();
   const text = formatTextNode(value);
   if (!text) return null;
   return (
     <span style={domTextNodeStyle}>
-      <PreviewValue title="Text node" value={text} searchQuery={searchQuery} quote onShowDetail={onShowDetail} />
+      <PreviewValue title={t("devtools.elements.textNode")} value={text} searchQuery={searchQuery} quote onShowDetail={onShowDetail} />
     </span>
   );
 }
@@ -262,6 +265,7 @@ function PreviewValue({
   quote?: boolean;
   onShowDetail: (title: string, value: string) => void;
 }) {
+  const { t } = useI18n();
   const preview = value.length > PREVIEW_LIMIT ? `${value.slice(0, PREVIEW_LIMIT)}...` : value;
   const display = quote ? `"${preview}"` : preview;
   return (
@@ -277,7 +281,7 @@ function PreviewValue({
             onShowDetail(title, value);
           }}
         >
-          view
+          {t("devtools.elements.view")}
         </button>
       ) : null}
     </span>

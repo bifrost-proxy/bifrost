@@ -12,6 +12,7 @@ import { getActiveSummary, type ActiveRuleItem, type VariableConflict } from "..
 import RuleEffectivenessCode from "../../components/RuleEffectivenessCode";
 import { useRulesStore } from "../../stores/useRulesStore";
 import { copyToClipboard } from "../../utils/clipboard";
+import { useI18n } from "../../i18n";
 
 interface Props {
   onNavigateRule: (name: string, groupId: string | null) => void;
@@ -25,6 +26,7 @@ type IslandPosition = { x: number; y: number };
 
 export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: Props) {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [position, setPosition] = useState<IslandPosition | null>(null);
@@ -177,7 +179,7 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
     const ok = await copyToClipboard(text);
     if (ok) {
       setCopiedMergedContent(mergedContent);
-      message.success("Merged rules copied");
+      message.success(t("rules.island.mergedCopied"));
       if (copiedTimerRef.current !== null) {
         window.clearTimeout(copiedTimerRef.current);
       }
@@ -186,9 +188,9 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
         copiedTimerRef.current = null;
       }, 1600);
     } else {
-      message.error("Failed to copy merged rules");
+      message.error(t("rules.island.mergedCopyFailed"));
     }
-  }, [mergedContent]);
+  }, [mergedContent, t]);
 
   const positionStyle: CSSProperties =
     position !== null
@@ -278,10 +280,17 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
             color: token.colorText,
           }}
         >
-          {activeRules.length} active
+          {t("rules.island.activeCount", { count: activeRules.length })}
         </span>
         {variableConflicts.length > 0 && (
-          <Tooltip title={`${variableConflicts.length} variable conflict${variableConflicts.length > 1 ? "s" : ""}`}>
+          <Tooltip
+            title={t(
+              variableConflicts.length > 1
+                ? "rules.island.variableConflictOther"
+                : "rules.island.variableConflictOne",
+              { count: variableConflicts.length },
+            )}
+          >
             <WarningOutlined
               style={{
                 fontSize: 13,
@@ -338,7 +347,7 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
                 }}
               >
                 <WarningOutlined style={{ fontSize: 12 }} />
-                Variable Conflicts
+                {t("rules.island.variableConflicts")}
               </div>
               {variableConflicts.map((conflict) => (
                 <div key={conflict.variable_name} style={{ marginTop: 4 }}>
@@ -387,7 +396,7 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
                   letterSpacing: 0.5,
                 }}
               >
-                My Rules
+                {t("rules.list.myRules")}
               </div>
               {ownRules.map((rule) => (
                 <RuleRow
@@ -461,7 +470,7 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
                 }}
               >
                 <CodeOutlined style={{ fontSize: 11 }} />
-                {showMerged ? "Hide" : "Show"} Merged Rules
+                {showMerged ? t("rules.island.hideMerged") : t("rules.island.showMerged")}
               </div>
               {showMerged && (
                 <div
@@ -470,9 +479,9 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
                     position: "relative",
                   }}
                 >
-                  <Tooltip title={mergedCopied ? "Copied" : "Copy merged rules"}>
+                  <Tooltip title={mergedCopied ? t("common.copied") : t("rules.island.copyMerged")}>
                     <Button
-                      aria-label="Copy merged rules"
+                      aria-label={t("rules.island.copyMerged")}
                       data-testid="rules-dynamic-island-copy-merged"
                       type="text"
                       size="small"
@@ -525,6 +534,7 @@ function RuleRow({
   token: ReturnType<typeof theme.useToken>["token"];
   onClick: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div
       data-testid="rules-dynamic-island-rule-row"
@@ -572,7 +582,7 @@ function RuleRow({
           flexShrink: 0,
         }}
       >
-        {rule.rule_count} rules
+        {t("rules.island.ruleCount", { count: rule.rule_count })}
       </span>
     </div>
   );

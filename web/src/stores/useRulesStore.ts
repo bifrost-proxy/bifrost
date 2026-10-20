@@ -14,6 +14,7 @@ import {
   disableGroupRule,
   type GroupRuleInfo,
 } from '../api/group';
+import { t } from '../i18n';
 
 function isGlobalDefaultRule(
   rule: Pick<RuleFile, 'name' | 'is_global_default'>,
@@ -72,9 +73,15 @@ function formatRuleMutationError(error: unknown, fallback: string): string {
     return syntax?.guidance?.summary ? `${base}: ${syntax.guidance.summary}` : base;
   }
   const code = first.code ? `${first.code} ` : '';
-  const line = first.line ? `line ${first.line}${first.start_column ? `:${first.start_column}` : ''}` : 'rule';
-  const suggestion = first.suggestion ? ` Suggestion: ${first.suggestion}` : '';
-  return `${base}: ${code}${line}: ${first.message || 'syntax validation failed'}.${suggestion}`;
+  const line = first.line
+    ? t('shared.rules.syntaxLine', {
+        line: `${first.line}${first.start_column ? `:${first.start_column}` : ''}`,
+      })
+    : t('shared.rules.syntaxRule');
+  const suggestion = first.suggestion
+    ? t('shared.rules.syntaxSuggestion', { suggestion: first.suggestion })
+    : '';
+  return `${base}: ${code}${line}: ${first.message || t('shared.rules.syntaxFailed')}.${suggestion}`;
 }
 
 interface RulesState {
@@ -189,7 +196,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         }));
       } catch (e) {
         if (isNotFoundError(e)) {
-          message.warning(`Rule "${name}" no longer exists, refreshing list`);
+          message.warning(t('shared.rules.notExists', { name }));
           await get().fetchRules();
           const rules = get().rules;
           const nextRule = rules.length > 0 ? rules[0].name : null;
@@ -211,7 +218,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       }));
     } catch (e) {
       if (isNotFoundError(e)) {
-        message.warning(`Rule "${name}" no longer exists, refreshing list`);
+        message.warning(t('shared.rules.notExists', { name }));
         await get().fetchRules();
         const rules = get().rules;
         const nextRule = rules.length > 0 ? rules[0].name : null;
@@ -249,7 +256,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         }));
       } catch (e) {
         if (isNotFoundError(e)) {
-          message.warning(`Rule "${name}" no longer exists, refreshing list`);
+          message.warning(t('shared.rules.notExists', { name }));
           await get().fetchRules();
           const rules = get().rules;
           const nextRule = rules.length > 0 ? rules[0].name : null;
@@ -271,7 +278,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       }));
     } catch (e) {
       if (isNotFoundError(e)) {
-        message.warning(`Rule "${name}" no longer exists, refreshing list`);
+        message.warning(t('shared.rules.notExists', { name }));
         await get().fetchRules();
         const rules = get().rules;
         const nextRule = rules.length > 0 ? rules[0].name : null;
@@ -297,7 +304,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         return true;
       } catch (e) {
         set({
-          error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to create rule'),
+          error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, t('shared.rules.createFailed')),
           loading: false,
         });
         return false;
@@ -305,7 +312,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     }
 
     if (isGlobalDefaultRule({ name })) {
-      message.warning('Rule name "Default" is reserved for the global default rule');
+      message.warning(t('shared.rules.defaultNameReserved'));
       return false;
     }
 
@@ -318,7 +325,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       return true;
     } catch (e) {
       set({
-        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to create rule'),
+        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, t('shared.rules.createFailed')),
         loading: false,
       });
       return false;
@@ -336,7 +343,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       return true;
     } catch (e) {
       set({
-        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to update rule'),
+        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, t('shared.rules.updateFailed')),
         loading: false,
       });
       return false;
@@ -390,7 +397,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         return true;
       } catch (e) {
         set({
-          error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to save rule'),
+          error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, t('shared.rules.saveFailed')),
           saving: false,
         });
         return false;
@@ -431,7 +438,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       return true;
     } catch (e) {
       set({
-        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to save rule'),
+        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, t('shared.rules.saveFailed')),
         saving: false,
       });
       return false;
@@ -442,7 +449,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     const { isGroupMode, groupWritable, activeGroupId } = get();
     const rule = get().rules.find((item) => item.name === name);
     if (!isGroupMode && (isGlobalDefaultRule(rule ?? { name }) || rule?.can_delete === false)) {
-      message.warning('Default rule cannot be deleted');
+      message.warning(t('shared.rules.defaultCannotDelete'));
       return false;
     }
 
@@ -461,7 +468,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         }
         return true;
       } catch (e) {
-        const msg = normalizeApiErrorMessage(e, 'Failed to delete rule');
+        const msg = normalizeApiErrorMessage(e, t('shared.rules.deleteFailed'));
         if (!isConnectionIssueError(e)) {
           message.error(msg);
         }
@@ -498,7 +505,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       }
       return true;
     } catch (e) {
-      const msg = normalizeApiErrorMessage(e, 'Failed to delete rule');
+      const msg = normalizeApiErrorMessage(e, t('shared.rules.deleteFailed'));
       if (!isConnectionIssueError(e)) {
         message.error(msg);
       }
@@ -515,7 +522,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       !enabled &&
       (isGlobalDefaultRule(currentRule ?? { name }) || currentRule?.can_disable === false)
     ) {
-      message.warning('Default rule is always enabled');
+      message.warning(t('shared.rules.defaultAlwaysEnabled'));
       return false;
     }
     const previousRules = get().rules;
@@ -563,7 +570,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       return true;
     } catch (e) {
       if (isNotFoundError(e)) {
-        message.warning(`Rule "${name}" no longer exists, refreshing list`);
+        message.warning(t('shared.rules.notExists', { name }));
         await get().fetchRules();
         const rules = get().rules;
         const nextRule = rules.length > 0 ? rules[0].name : null;
@@ -580,11 +587,11 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     const { isGroupMode } = get();
     const rule = get().rules.find((item) => item.name === oldName);
     if (!isGroupMode && (isGlobalDefaultRule(rule ?? { name: oldName }) || rule?.can_rename === false)) {
-      message.warning('Default rule cannot be renamed');
+      message.warning(t('shared.rules.defaultCannotRename'));
       return false;
     }
     if (!isGroupMode && isGlobalDefaultRule({ name: newName })) {
-      message.warning('Rule name "Default" is reserved for the global default rule');
+      message.warning(t('shared.rules.defaultNameReserved'));
       return false;
     }
     set({ loading: true, error: null });

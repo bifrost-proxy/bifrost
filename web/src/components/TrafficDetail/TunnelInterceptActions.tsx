@@ -3,11 +3,9 @@ import { AppstoreOutlined, LockOutlined, SafetyCertificateOutlined } from "@ant-
 import { Button, message, Modal, Typography, theme } from "antd";
 import { useTlsConfigStore } from "../../stores/useTlsConfigStore";
 import { useWhitelistStore } from "../../stores/useWhitelistStore";
-import {
-  showTlsWhitelistChangeSuccess,
-  TLS_RECONNECT_NOTICE,
-} from "../../utils/tlsInterceptionNotice";
+import { showTlsWhitelistChangeSuccess } from "../../utils/tlsInterceptionNotice";
 import { isClientIpWhitelisted, isLoopbackClientIp } from "./clientIp";
+import { useI18n } from "../../i18n";
 
 const { Text } = Typography;
 
@@ -24,8 +22,9 @@ export function TunnelInterceptActions({
   host,
   clientApp,
   clientIp,
-  emptyText = "No response data for tunnel connection",
+  emptyText,
 }: TunnelInterceptActionsProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const {
     config: tlsConfig,
@@ -63,91 +62,91 @@ export function TunnelInterceptActions({
 
   const handleAddDomain = useCallback(() => {
     if (!host) {
-      message.error("No host found for this request");
+      message.error(t("trafficDetail.tunnel.noHost"));
       return;
     }
 
     Modal.confirm({
-      title: "Add Domain to Intercept List",
-      content: `Add "${host}" to TLS intercept list? This will enable HTTPS inspection for this domain and disconnect existing tunnel connections.`,
-      okText: "Add",
-      cancelText: "Cancel",
+      title: t("trafficDetail.tunnel.addDomainTitle"),
+      content: t("trafficDetail.tunnel.addDomainContent", { host }),
+      okText: t("common.add"),
+      cancelText: t("common.cancel"),
       onOk: async () => {
         const success = await addDomainToIntercept(host);
         if (success) {
-          showTlsWhitelistChangeSuccess(`Added "${host}" to intercept list`);
+          showTlsWhitelistChangeSuccess(t("trafficDetail.tunnel.addDomainSuccess", { host }));
         } else {
-          message.error("Failed to add domain to intercept list");
+          message.error(t("trafficDetail.tunnel.addDomainFailed"));
         }
       },
     });
-  }, [addDomainToIntercept, host]);
+  }, [addDomainToIntercept, host, t]);
 
   const handleAddApp = useCallback(() => {
     if (!clientApp) {
-      message.error("No app found for this request");
+      message.error(t("trafficDetail.tunnel.noApp"));
       return;
     }
 
     Modal.confirm({
-      title: "Add App to Intercept List",
-      content: `Add "${clientApp}" to app intercept list? This will enable HTTPS inspection for this app.`,
-      okText: "Add",
-      cancelText: "Cancel",
+      title: t("trafficDetail.tunnel.addAppTitle"),
+      content: t("trafficDetail.tunnel.addAppContent", { app: clientApp }),
+      okText: t("common.add"),
+      cancelText: t("common.cancel"),
       onOk: async () => {
         const success = await addAppToIntercept(clientApp);
         if (success) {
-          showTlsWhitelistChangeSuccess(`Added "${clientApp}" to app intercept list`);
+          showTlsWhitelistChangeSuccess(t("trafficDetail.tunnel.addAppSuccess", { app: clientApp }));
         } else {
-          message.error("Failed to add app to intercept list");
+          message.error(t("trafficDetail.tunnel.addAppFailed"));
         }
       },
     });
-  }, [addAppToIntercept, clientApp]);
+  }, [addAppToIntercept, clientApp, t]);
 
   const handleAddIp = useCallback(() => {
     if (!clientIp) {
-      message.error("No client IP found for this request");
+      message.error(t("trafficDetail.tunnel.noClientIp"));
       return;
     }
 
     Modal.confirm({
-      title: "Add Client IP to Intercept List",
-      content: `Add "${clientIp}" to IP TLS intercept list? This will enable HTTPS inspection for traffic from this client IP.`,
-      okText: "Add",
-      cancelText: "Cancel",
+      title: t("trafficDetail.tunnel.addIpTitle"),
+      content: t("trafficDetail.tunnel.addIpContent", { ip: clientIp }),
+      okText: t("common.add"),
+      cancelText: t("common.cancel"),
       onOk: async () => {
         const success = await addIpToIntercept(clientIp);
         if (success) {
-          showTlsWhitelistChangeSuccess(`Added "${clientIp}" to IP intercept list`);
+          showTlsWhitelistChangeSuccess(t("trafficDetail.tunnel.addIpSuccess", { ip: clientIp }));
         } else {
-          message.error("Failed to add client IP to intercept list");
+          message.error(t("trafficDetail.tunnel.addIpFailed"));
         }
       },
     });
-  }, [addIpToIntercept, clientIp]);
+  }, [addIpToIntercept, clientIp, t]);
 
   const handleAddClientWhitelist = useCallback(() => {
     if (!clientIp) {
-      message.error("No client IP found for this request");
+      message.error(t("trafficDetail.tunnel.noClientIp"));
       return;
     }
 
     Modal.confirm({
-      title: "Add Client to Whitelist",
-      content: `Add "${clientIp}" to the proxy access whitelist? This allows this non-local device to use Bifrost when access control requires whitelisted clients.`,
-      okText: "Add",
-      cancelText: "Cancel",
+      title: t("trafficDetail.tunnel.addWhitelistTitle"),
+      content: t("trafficDetail.tunnel.addWhitelistContent", { ip: clientIp }),
+      okText: t("common.add"),
+      cancelText: t("common.cancel"),
       onOk: async () => {
         const success = await addToWhitelist(clientIp);
         if (success) {
-          message.success(`Added "${clientIp}" to client whitelist`);
+          message.success(t("trafficDetail.tunnel.addWhitelistSuccess", { ip: clientIp }));
         } else {
-          message.error("Failed to add client to whitelist");
+          message.error(t("trafficDetail.tunnel.addWhitelistFailed"));
         }
       },
     });
-  }, [addToWhitelist, clientIp]);
+  }, [addToWhitelist, clientIp, t]);
 
   const hasTlsButton = showDomainButton || showAppButton || showIpInterceptButton;
   const hasAnyButton = hasTlsButton || showClientWhitelistButton;
@@ -164,7 +163,7 @@ export function TunnelInterceptActions({
                 onClick={handleAddDomain}
                 size="large"
               >
-                Intercept this domain
+                {t("trafficDetail.tunnel.interceptDomain")}
               </Button>
             )}
             {showAppButton && (
@@ -174,7 +173,7 @@ export function TunnelInterceptActions({
                 onClick={handleAddApp}
                 size="large"
               >
-                Intercept this app
+                {t("trafficDetail.tunnel.interceptApp")}
               </Button>
             )}
             {showIpInterceptButton && (
@@ -184,7 +183,7 @@ export function TunnelInterceptActions({
                 onClick={handleAddIp}
                 size="large"
               >
-                Intercept this client
+                {t("trafficDetail.tunnel.interceptClient")}
               </Button>
             )}
             {showClientWhitelistButton && (
@@ -193,7 +192,7 @@ export function TunnelInterceptActions({
                 onClick={handleAddClientWhitelist}
                 size="large"
               >
-                Allow this client
+                {t("trafficDetail.tunnel.allowClient")}
               </Button>
             )}
           </div>
@@ -202,12 +201,12 @@ export function TunnelInterceptActions({
               type="secondary"
               style={{ maxWidth: 560, textAlign: "center", padding: "0 16px" }}
             >
-              {TLS_RECONNECT_NOTICE}
+              {t("shared.tls.reconnectNotice")}
             </Text>
           )}
         </>
       ) : (
-        <div style={{ color: token.colorTextSecondary }}>{emptyText}</div>
+        <div style={{ color: token.colorTextSecondary }}>{emptyText ?? t("trafficDetail.tunnel.emptyText")}</div>
       )}
     </>
   );

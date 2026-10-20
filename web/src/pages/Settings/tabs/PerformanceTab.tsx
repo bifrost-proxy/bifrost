@@ -14,6 +14,7 @@ import type {
   ResourceAlertStatus,
   TrafficConfig,
 } from "../../../api/config";
+import { useI18n, type TFunction } from "../../../i18n";
 
 const { Text } = Typography;
 type SliderMarks = NonNullable<ComponentProps<typeof Slider>["marks"]>;
@@ -30,14 +31,14 @@ const resourceAlertType: Record<ResourceAlertLevel, "success" | "warning" | "err
   critical: "error",
 };
 
-function alertTitle(level: ResourceAlertLevel): string {
+function alertTitle(level: ResourceAlertLevel, t: TFunction): string {
   switch (level) {
     case "critical":
-      return "Open-file pressure is critically high";
+      return t("settings.perf.alertCritical");
     case "warn":
-      return "Open-file usage is approaching the limit";
+      return t("settings.perf.alertWarn");
     case "ok":
-      return "Open-file usage is healthy";
+      return t("settings.perf.alertOk");
   }
 }
 
@@ -120,6 +121,7 @@ export default function PerformanceTab({
   handleClearBodyCache,
   formatBytes,
 }: PerformanceTabProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const resourceAlerts = performanceConfig?.resource_alerts;
   const overallAlertLevel = resourceAlerts?.overall_level ?? "ok";
@@ -136,7 +138,7 @@ export default function PerformanceTab({
           title={
             <Space>
               <ThunderboltOutlined />
-              <span>Performance</span>
+              <span>{t("settings.tabPerformance")}</span>
             </Space>
           }
           size="small"
@@ -148,7 +150,7 @@ export default function PerformanceTab({
                 <Alert
                   type={resourceAlertType[overallAlertLevel]}
                   showIcon
-                  message={alertTitle(overallAlertLevel)}
+                  message={alertTitle(overallAlertLevel, t)}
                   description={
                     <Space direction="vertical" size={4}>
                       {alertMessages.map((message) => (
@@ -172,8 +174,8 @@ export default function PerformanceTab({
                 <Alert
                   type={trafficDraft?.super_performance_mode ? "warning" : "info"}
                   showIcon
-                  message="Super Performance Mode"
-                  description="When enabled, Bifrost still processes proxy rules but records no traffic entries, request or response bodies, WebSocket frames, or traffic database updates. Network will show no traffic history while this mode is on."
+                  message={t("settings.perf.superMode")}
+                  description={t("settings.perf.superModeDescription")}
                   action={
                     <Switch
                       checked={trafficDraft?.super_performance_mode ?? false}
@@ -189,11 +191,9 @@ export default function PerformanceTab({
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>
                   <Space direction="vertical" size={0} style={{ width: "100%" }}>
-                    <Text>Max Records</Text>
+                    <Text>{t("settings.perf.maxRecords")}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Traffic retention is controlled by your configured record
-                      limit. Older entries are pruned first, and the allowed
-                      upper bound is 100,000.
+                      {t("settings.perf.maxRecordsHint")}
                     </Text>
                     <Slider
                       min={maxRecordsMin}
@@ -224,14 +224,9 @@ export default function PerformanceTab({
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>
                   <Space direction="vertical" size={0} style={{ width: "100%" }}>
-                    <Text>Breakpoint Auto-Resume Timeout</Text>
+                    <Text>{t("settings.perf.breakpointTimeout")}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Applies when a matched breakpoint rule pauses traffic
-                      and nobody clicks Resume. The request or response is
-                      automatically released after this timeout to avoid
-                      long network stalls and connection buildup. Lower
-                      values reduce latency risk; higher values give more
-                      time for manual debugging.
+                      {t("settings.perf.breakpointTimeoutHint")}
                     </Text>
                     <div data-testid="settings-performance-breakpoint-timeout">
                       <Slider
@@ -259,38 +254,34 @@ export default function PerformanceTab({
                       }}
                     >
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        Min:{" "}
-                        {breakpointDraft
-                          ? `${formatTimeoutLabel(breakpointDraft.timeout_min_ms)} (${breakpointDraft.timeout_min_ms}ms)`
-                          : "Loading"}
+                        {t("settings.perf.min", {
+                          value: breakpointDraft
+                            ? `${formatTimeoutLabel(breakpointDraft.timeout_min_ms)} (${breakpointDraft.timeout_min_ms}ms)`
+                            : t("settings.perf.loading"),
+                        })}
                       </Text>
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        Max:{" "}
-                        {breakpointDraft
-                          ? `${formatTimeoutLabel(breakpointDraft.timeout_max_ms)} (${breakpointDraft.timeout_max_ms}ms)`
-                          : "Loading"}
+                        {t("settings.perf.max", {
+                          value: breakpointDraft
+                            ? `${formatTimeoutLabel(breakpointDraft.timeout_max_ms)} (${breakpointDraft.timeout_max_ms}ms)`
+                            : t("settings.perf.loading"),
+                        })}
                       </Text>
                     </div>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      {breakpointDraft ? (
-                        <>
-                          Fixed safety range:{" "}
-                          {formatTimeoutLabel(breakpointDraft.timeout_min_ms)}
-                          {" - "}
-                          {formatTimeoutLabel(breakpointDraft.timeout_max_ms)}.
-                          Values outside this range are rejected to avoid long
-                          paused connections.
-                        </>
-                      ) : (
-                        "Loading fixed safety range..."
-                      )}
+                      {breakpointDraft
+                        ? t("settings.perf.safetyRange", {
+                            min: formatTimeoutLabel(breakpointDraft.timeout_min_ms),
+                            max: formatTimeoutLabel(breakpointDraft.timeout_max_ms),
+                          })
+                        : t("settings.perf.safetyRangeLoading")}
                     </Text>
                   </Space>
                 </Col>
                 <Col>
                   <Space direction="vertical" size={4} align="end">
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Current
+                      {t("settings.perf.current")}
                     </Text>
                     <div data-testid="settings-performance-breakpoint-timeout-input">
                       <InputNumber
@@ -311,7 +302,7 @@ export default function PerformanceTab({
                     <Text code>
                       {breakpointDraft
                         ? formatTimeoutLabel(breakpointDraft.timeout_ms)
-                        : "Loading"}
+                        : t("settings.perf.loading")}
                     </Text>
                   </Space>
                 </Col>
@@ -322,13 +313,9 @@ export default function PerformanceTab({
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>
                   <Space direction="vertical" size={0} style={{ width: "100%" }}>
-                    <Text>Enable Binary File Capture and Decoding</Text>
+                    <Text>{t("settings.perf.binaryCapture")}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Record and decode binary downloads and media streams in traffic details.
-                      This setting has higher priority than DB size, inline size, and body buffer
-                      limits, and can noticeably reduce proxy throughput while increasing CPU,
-                      memory, and disk usage. It is disabled by default, which keeps binary traffic
-                      in performance mode.
+                      {t("settings.perf.binaryCaptureHint")}
                     </Text>
                   </Space>
                 </Col>
@@ -345,10 +332,9 @@ export default function PerformanceTab({
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>
                   <Space direction="vertical" size={0} style={{ width: "100%" }}>
-                    <Text>Max DB Size</Text>
+                    <Text>{t("settings.perf.maxDbSize")}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Caps traffic.db + body_cache + frames + ws_payload on
-                      disk; when exceeded, the oldest data is deleted first.
+                      {t("settings.perf.maxDbSizeHint")}
                     </Text>
                     <Slider
                       min={256 * 1024 * 1024}
@@ -376,10 +362,9 @@ export default function PerformanceTab({
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>
                   <Space direction="vertical" size={0} style={{ width: "100%" }}>
-                    <Text>Max Body Inline Size (DB)</Text>
+                    <Text>{t("settings.perf.maxBodyInline")}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Bodies up to this size are stored inline in SQLite; larger
-                      bodies are stored as files in body_cache.
+                      {t("settings.perf.maxBodyInlineHint")}
                     </Text>
                     <Slider
                       min={64 * 1024}
@@ -406,10 +391,9 @@ export default function PerformanceTab({
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>
                   <Space direction="vertical" size={0} style={{ width: "100%" }}>
-                    <Text>Max Body Buffer Size</Text>
+                    <Text>{t("settings.perf.maxBodyBuffer")}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Maximum body size to capture; larger bodies are truncated
-                      and forwarded as streams (rules may skip).
+                      {t("settings.perf.maxBodyBufferHint")}
                     </Text>
                     <Slider
                       min={1 * 1024 * 1024}
@@ -441,14 +425,9 @@ export default function PerformanceTab({
                     size={0}
                     style={{ width: "100%" }}
                   >
-                    <Text>Max Body Probe Size</Text>
+                    <Text>{t("settings.perf.maxBodyProbe")}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Default 64 KB. For non-text or suspected large bodies,
-                      only pre-read up to this size; if exceeded, body
-                      processing (rules/scripts) is skipped and the body is
-                      forwarded as a stream. Lower values reduce memory/CPU but
-                      may skip more body-based processing; higher values improve
-                      processing coverage at higher cost.
+                      {t("settings.perf.maxBodyProbeHint")}
                     </Text>
                     <Slider
                       min={0}
@@ -461,7 +440,7 @@ export default function PerformanceTab({
                         formatter: (value) =>
                           value !== null && value !== undefined
                             ? value === 0
-                              ? "Off"
+                              ? t("common.off")
                               : formatBytes(value)
                             : "",
                       }}
@@ -471,7 +450,7 @@ export default function PerformanceTab({
                 <Col>
                   <Text code>
                     {trafficDraft?.max_body_probe_size === 0
-                      ? "Off"
+                      ? t("common.off")
                       : formatBytes(trafficDraft?.max_body_probe_size || 0)}
                   </Text>
                 </Col>
@@ -482,10 +461,9 @@ export default function PerformanceTab({
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>
                   <Space direction="vertical" size={0} style={{ width: "100%" }}>
-                    <Text>File Retention Days</Text>
+                    <Text>{t("settings.perf.fileRetention")}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Files older than this are deleted (body and WebSocket
-                      payload cache).
+                      {t("settings.perf.fileRetentionHint")}
                     </Text>
                     <Slider
                       min={1}
@@ -498,7 +476,9 @@ export default function PerformanceTab({
                   </Space>
                 </Col>
                 <Col>
-                  <Text code>{trafficDraft?.file_retention_days || 0} days</Text>
+                  <Text code>
+                    {t("settings.perf.days", { count: trafficDraft?.file_retention_days || 0 })}
+                  </Text>
                 </Col>
               </Row>
 
@@ -516,16 +496,16 @@ export default function PerformanceTab({
                       <Col flex="auto">
                         <Space>
                           <FolderOutlined />
-                          <Text strong>File Storage Statistics</Text>
+                          <Text strong>{t("settings.perf.storageStats")}</Text>
                         </Space>
                       </Col>
                       <Col>
                         <Popconfirm
-                          title="Clear all cache files?"
-                          description="This will delete all cached data including body files, traffic records, WebSocket frames, and WebSocket payloads."
+                          title={t("settings.perf.clearCacheTitle")}
+                          description={t("settings.perf.clearCacheDescription")}
                           onConfirm={handleClearBodyCache}
-                          okText="Clear"
-                          cancelText="Cancel"
+                          okText={t("common.clear")}
+                          cancelText={t("common.cancel")}
                           okButtonProps={{ danger: true }}
                         >
                           <Button
@@ -535,7 +515,7 @@ export default function PerformanceTab({
                             loading={perfLoading}
                             data-testid="settings-performance-clear-cache"
                           >
-                            Clear Cache
+                            {t("settings.perf.clearCache")}
                           </Button>
                         </Popconfirm>
                       </Col>
@@ -546,15 +526,15 @@ export default function PerformanceTab({
                           <Space size={6}>
                             <Badge status={resourceAlertBadgeStatus[bodyAlert?.level ?? "ok"]} />
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              Body Cache
+                              {t("settings.perf.bodyCache")}
                             </Text>
                           </Space>
                           <Space>
                             <FileOutlined />
                             <Text>
-                              {performanceConfig.body_store_stats?.file_count ??
-                                0}{" "}
-                              files
+                              {t("settings.perf.files", {
+                                count: performanceConfig.body_store_stats?.file_count ?? 0,
+                              })}
                             </Text>
                           </Space>
                           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -573,26 +553,24 @@ export default function PerformanceTab({
                               ),
                             }}
                           >
-                            Active streams{" "}
-                            {performanceConfig.body_store_stats
-                              ?.active_stream_writers ?? 0}
-                            /
-                            {performanceConfig.body_store_stats
-                              ?.max_open_stream_writers ?? 0}
+                            {t("settings.perf.activeStreams", {
+                              active: performanceConfig.body_store_stats?.active_stream_writers ?? 0,
+                              max: performanceConfig.body_store_stats?.max_open_stream_writers ?? 0,
+                            })}
                           </Text>
                         </Space>
                       </Col>
                       <Col xs={24} md={8}>
                         <Space direction="vertical" size={0}>
                           <Text type="secondary" style={{ fontSize: 12 }}>
-                            WebSocket Frames
+                            {t("settings.perf.wsFrames")}
                           </Text>
                           <Space>
                             <SwapOutlined />
                             <Text>
-                              {performanceConfig.frame_store_stats
-                                ?.connection_count ?? 0}{" "}
-                              connections
+                              {t("settings.perf.connections", {
+                                count: performanceConfig.frame_store_stats?.connection_count ?? 0,
+                              })}
                             </Text>
                           </Space>
                           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -608,15 +586,15 @@ export default function PerformanceTab({
                           <Space size={6}>
                             <Badge status={resourceAlertBadgeStatus[wsAlert?.level ?? "ok"]} />
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              WebSocket Payloads
+                              {t("settings.perf.wsPayloads")}
                             </Text>
                           </Space>
                           <Space>
                             <SwapOutlined />
                             <Text>
-                              {performanceConfig.ws_payload_store_stats
-                                ?.file_count ?? 0}{" "}
-                              files
+                              {t("settings.perf.files", {
+                                count: performanceConfig.ws_payload_store_stats?.file_count ?? 0,
+                              })}
                             </Text>
                           </Space>
                           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -635,12 +613,10 @@ export default function PerformanceTab({
                               ),
                             }}
                           >
-                            Open writers{" "}
-                            {performanceConfig.ws_payload_store_stats
-                              ?.active_writers ?? 0}
-                            /
-                            {performanceConfig.ws_payload_store_stats
-                              ?.max_open_files ?? 0}
+                            {t("settings.perf.openWriters", {
+                              active: performanceConfig.ws_payload_store_stats?.active_writers ?? 0,
+                              max: performanceConfig.ws_payload_store_stats?.max_open_files ?? 0,
+                            })}
                           </Text>
                         </Space>
                       </Col>
@@ -649,7 +625,7 @@ export default function PerformanceTab({
                     <Row>
                       <Col>
                         <Space>
-                          <Text type="secondary">Total Storage:</Text>
+                          <Text type="secondary">{t("settings.perf.totalStorage")}</Text>
                           <Text strong>
                             {formatBytes(
                               (performanceConfig.body_store_stats?.total_size ??

@@ -46,3 +46,12 @@ if (typeof window !== "undefined") {
     });
   }
 }
+
+// Existing assertions are written against the English copy. Pin unit tests to
+// English unless a test explicitly switches the locale.
+if (typeof window !== "undefined" && window.localStorage) {
+  window.localStorage.setItem(
+    "bifrost-locale",
+    JSON.stringify({ state: { locale: "en" }, version: 0 }),
+  );
+}

@@ -18,16 +18,17 @@ import {
   SettingOutlined,
 } from "@ant-design/icons";
 import { usePendingIpTlsStore } from "../../stores/usePendingIpTlsStore";
+import { useI18n, type TFunction } from "../../i18n";
 
 const { Text } = Typography;
 
-function formatTimeAgo(timestamp: number) {
+function formatTimeAgo(t: TFunction, timestamp: number) {
   const now = Math.floor(Date.now() / 1000);
   const diff = now - timestamp;
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
+  if (diff < 60) return t("app.timeAgo.seconds", { n: diff });
+  if (diff < 3600) return t("app.timeAgo.minutes", { n: Math.floor(diff / 60) });
+  if (diff < 86400) return t("app.timeAgo.hours", { n: Math.floor(diff / 3600) });
+  return t("app.timeAgo.days", { n: Math.floor(diff / 86400) });
 }
 
 export default function PendingIpTlsModal() {
@@ -37,39 +38,40 @@ export default function PendingIpTlsModal() {
   const skipPending = usePendingIpTlsStore((s) => s.skipPending);
   const clearPending = usePendingIpTlsStore((s) => s.clearPending);
   const navigate = useNavigate();
+  const { t } = useI18n();
 
   const handleApprove = useCallback(
     async (ip: string) => {
       const ok = await approvePending(ip);
       if (ok) {
-        message.success(`Enabled TLS interception for ${ip}`);
+        message.success(t("app.pendingIpTls.enabled", { ip }));
       } else {
-        message.error(`Failed to enable TLS interception for ${ip}`);
+        message.error(t("app.pendingIpTls.enableFailed", { ip }));
       }
     },
-    [approvePending],
+    [approvePending, t],
   );
 
   const handleSkip = useCallback(
     async (ip: string) => {
       const ok = await skipPending(ip);
       if (ok) {
-        message.success(`Skipped TLS interception for ${ip}`);
+        message.success(t("app.pendingIpTls.skipped", { ip }));
       } else {
-        message.error(`Failed to skip TLS interception for ${ip}`);
+        message.error(t("app.pendingIpTls.skipFailed", { ip }));
       }
     },
-    [skipPending],
+    [skipPending, t],
   );
 
   const handleClearAll = useCallback(async () => {
     const ok = await clearPending();
     if (ok) {
-      message.success("Cleared all pending IP TLS decisions");
+      message.success(t("app.pendingIpTls.cleared"));
     } else {
-      message.error("Failed to clear pending IP TLS decisions");
+      message.error(t("app.pendingIpTls.clearFailed"));
     }
-  }, [clearPending]);
+  }, [clearPending, t]);
 
   const handleGoToSettings = useCallback(() => {
     navigate("/settings?tab=tls");
@@ -81,7 +83,7 @@ export default function PendingIpTlsModal() {
       title={
         <Space>
           <SafetyCertificateOutlined style={{ color: "#1890ff" }} />
-          <span>IP TLS Interception Requests</span>
+          <span>{t("app.pendingIpTls.title")}</span>
           <Badge
             count={pendingCount}
             style={{ backgroundColor: "#1890ff" }}
@@ -92,14 +94,14 @@ export default function PendingIpTlsModal() {
         <Space>
           {pendingList.length > 0 && (
             <Popconfirm
-              title="Clear all pending IP TLS decisions?"
-              description="Pending IPs will need to reconnect to trigger a new prompt."
+              title={t("app.pendingIpTls.clearConfirmTitle")}
+              description={t("app.pendingIpTls.clearConfirmDescription")}
               onConfirm={handleClearAll}
-              okText="Yes"
-              cancelText="No"
+              okText={t("common.yes")}
+              cancelText={t("common.no")}
             >
               <Button icon={<ClearOutlined />}>
-                Clear All
+                {t("app.pending.clearAll")}
               </Button>
             </Popconfirm>
           )}
@@ -107,7 +109,7 @@ export default function PendingIpTlsModal() {
             icon={<SettingOutlined />}
             onClick={handleGoToSettings}
           >
-            TLS Settings
+            {t("app.pendingIpTls.tlsSettings")}
           </Button>
         </Space>
       }
@@ -120,13 +122,12 @@ export default function PendingIpTlsModal() {
     >
       <div>
         <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
-          New IP addresses are connecting through this proxy. Choose whether to
-          enable TLS interception (decrypt HTTPS traffic) or skip for each IP.
+          {t("app.pendingIpTls.description")}
         </Text>
         <List
           size="small"
           dataSource={pendingList}
-          locale={{ emptyText: "No pending requests" }}
+          locale={{ emptyText: t("app.pairing.noPendingRequests") }}
           renderItem={(item) => (
             <List.Item
               actions={[
@@ -137,7 +138,7 @@ export default function PendingIpTlsModal() {
                   icon={<CheckOutlined />}
                   onClick={() => handleApprove(item.ip)}
                 >
-                  Enable TLS
+                  {t("app.pendingIpTls.enableTls")}
                 </Button>,
                 <Button
                   key="skip"
@@ -145,7 +146,7 @@ export default function PendingIpTlsModal() {
                   icon={<StopOutlined />}
                   onClick={() => handleSkip(item.ip)}
                 >
-                  Skip
+                  {t("app.pendingIpTls.skip")}
                 </Button>,
               ]}
             >
@@ -153,8 +154,10 @@ export default function PendingIpTlsModal() {
                 title={<Text code>{item.ip}</Text>}
                 description={
                   <Text type="secondary">
-                    First seen: {formatTimeAgo(item.first_seen)} · Attempts:{" "}
-                    {item.attempt_count}
+                    {t("app.pending.firstSeenAttempts", {
+                      time: formatTimeAgo(t, item.first_seen),
+                      count: item.attempt_count,
+                    })}
                   </Text>
                 }
               />

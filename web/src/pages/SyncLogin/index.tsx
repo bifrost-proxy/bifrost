@@ -6,6 +6,7 @@ import {
   saveSyncSession,
   type SyncStatus,
 } from "../../api/sync";
+import { t as translate, useI18n } from "../../i18n";
 
 function getTokenFromHash(): string | null {
   const { hash } = window.location;
@@ -55,7 +56,7 @@ async function exchangeTokenFromRemote(remoteBaseUrl: string): Promise<string> {
   const payload = await response.json().catch(() => null);
   const token = extractToken(payload);
   if (!response.ok || !token) {
-    throw new Error("Remote service did not return a login token");
+    throw new Error(translate("app.syncLogin.noToken"));
   }
 
   return token;
@@ -65,6 +66,7 @@ type SyncLoginPhase = "loading" | "success" | "error";
 
 export default function SyncLogin() {
   const [searchParams] = useSearchParams();
+  const { t } = useI18n();
   const token = useMemo(
     () => searchParams.get("token") || getTokenFromHash(),
     [searchParams],
@@ -105,7 +107,7 @@ export default function SyncLogin() {
         setErrorMessage(
           error instanceof Error && error.message
             ? error.message
-            : "Please close this window and try signing in again.",
+            : translate("app.syncLogin.retryHint"),
         );
       }
     };
@@ -128,7 +130,7 @@ export default function SyncLogin() {
       }}
     >
       <Card style={{ width: "100%", maxWidth: 460 }}>
-        <Typography.Title level={3}>Remote Sign-In</Typography.Title>
+        <Typography.Title level={3}>{t("app.syncLogin.title")}</Typography.Title>
         {phase === "loading" ? (
           <div style={{ display: "grid", placeItems: "center", padding: "12px 0" }}>
             <Spin size="large" />
@@ -138,18 +140,18 @@ export default function SyncLogin() {
           <Alert
             showIcon
             type="success"
-            message="Login completed"
-            description={`Signed in as ${status?.user?.user_id || "remote user"}. This window can be closed now.`}
+            message={t("app.syncLogin.completed")}
+            description={t("app.syncLogin.signedInAs", {
+              user: status?.user?.user_id || t("app.syncLogin.remoteUser"),
+            })}
           />
         ) : null}
         {phase === "error" ? (
           <Alert
             showIcon
             type="error"
-            message="Remote sign-in failed"
-            description={
-              errorMessage || "Please close this window and try signing in again."
-            }
+            message={t("app.syncLogin.failed")}
+            description={errorMessage || t("app.syncLogin.retryHint")}
           />
         ) : null}
       </Card>

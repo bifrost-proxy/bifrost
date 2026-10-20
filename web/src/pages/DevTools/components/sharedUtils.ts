@@ -1,8 +1,16 @@
-export function tabSearchLabel(key: string): string {
-  if (key === "local_storage") return "LocalStorage";
-  if (key === "session_storage") return "SessionStorage";
-  if (key === "cookie") return "Cookies";
-  return key.replace(/^\w/, (value) => value.toUpperCase());
+import type { TranslationKey } from "../../../i18n";
+
+const TAB_SEARCH_PLACEHOLDER_KEYS: Record<string, TranslationKey> = {
+  elements: "devtools.search.elements",
+  network: "devtools.search.network",
+  cookie: "devtools.search.cookies",
+  local_storage: "devtools.search.localStorage",
+  session_storage: "devtools.search.sessionStorage",
+  console: "devtools.search.console",
+};
+
+export function tabSearchPlaceholderKey(key: string): TranslationKey {
+  return TAB_SEARCH_PLACEHOLDER_KEYS[key] ?? "devtools.search.elements";
 }
 
 export function filterBySearch<T>(items: T[], query: string, stringify: (item: T) => string): T[] {

@@ -7,6 +7,8 @@ const { Text } = Typography;
 
 interface FilterSectionProps {
   title: string;
+  /** Stable, locale-independent id used for the data-testid. */
+  sectionId?: string;
   icon?: string;
   collapsed: boolean;
   onToggle: () => void;
@@ -16,6 +18,7 @@ interface FilterSectionProps {
 
 export default function FilterSection({
   title,
+  sectionId,
   icon,
   collapsed,
   onToggle,
@@ -23,7 +26,7 @@ export default function FilterSection({
   children,
 }: FilterSectionProps) {
   const { token } = theme.useToken();
-  const testId = `filter-section-${title.toLowerCase().replace(/\s+/g, "-")}`;
+  const testId = `filter-section-${(sectionId ?? title).toLowerCase().replace(/\s+/g, "-")}`;
 
   const styles = useMemo<Record<string, CSSProperties>>(
     () => ({

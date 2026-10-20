@@ -52,6 +52,7 @@ import {
   type RawType,
   type RuleMode,
 } from "../../../types";
+import { useI18n } from "../../../i18n";
 
 const HTTP_METHODS = [
   "GET",
@@ -115,6 +116,7 @@ function isValidUrl(url: string): boolean {
 }
 
 export default function RequestPanel() {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const {
     currentRequest,
@@ -220,10 +222,10 @@ export default function RequestPanel() {
           updates.body = parsed.body;
         }
         updateCurrentRequest(updates);
-        message.success("cURL command imported successfully");
+        message.success(t("replay.request.curlImported"));
       }
     },
-    [updateCurrentRequest],
+    [updateCurrentRequest, t],
   );
 
   const handleUrlBlur = useCallback(() => {
@@ -391,7 +393,7 @@ export default function RequestPanel() {
 
   const handleSave = useCallback(async () => {
     if (!currentRequest?.url) {
-      message.warning("Please enter a URL first");
+      message.warning(t("replay.request.enterUrlFirst"));
       return;
     }
     if (currentRequest.is_saved) {
@@ -400,18 +402,20 @@ export default function RequestPanel() {
       setSaveName(currentRequest.name || "");
       setSaveModalVisible(true);
     }
-  }, [currentRequest, saveRequest, setSaveName, setSaveModalVisible]);
+  }, [currentRequest, saveRequest, setSaveName, setSaveModalVisible, t]);
 
   const handleSaveConfirm = useCallback(async () => {
-    const success = await saveRequest(saveName || `Request ${Date.now()}`);
+    const success = await saveRequest(
+      saveName || t("replay.request.defaultName", { timestamp: Date.now() }),
+    );
     if (success) {
       setSaveModalVisible(false);
     }
-  }, [saveRequest, saveName, setSaveModalVisible]);
+  }, [saveRequest, saveName, setSaveModalVisible, t]);
 
   const handleSend = useCallback(() => {
     if (!currentRequest?.url) {
-      message.warning("Please enter a URL");
+      message.warning(t("replay.request.enterUrl"));
       return;
     }
 
@@ -422,9 +426,7 @@ export default function RequestPanel() {
     }
 
     if (!isValidUrl(urlToUse)) {
-      message.warning(
-        "Please enter a valid URL with protocol (http://, https://, ws://, or wss://)",
-      );
+      message.warning(t("replay.request.invalidUrl"));
       return;
     }
 
@@ -434,7 +436,7 @@ export default function RequestPanel() {
     } else {
       executeRequest();
     }
-  }, [currentRequest, executeRequest, updateCurrentRequest, connectWebSocket]);
+  }, [currentRequest, executeRequest, updateCurrentRequest, connectWebSocket, t]);
 
   const handleRuleModeChange = useCallback(
     (mode: RuleMode) => {
@@ -458,20 +460,22 @@ export default function RequestPanel() {
   const getRuleModeLabel = () => {
     switch (ruleConfig.mode) {
       case "enabled":
-        return "Enabled Rules";
+        return t("replay.request.ruleMode.enabled");
       case "selected":
-        return `${ruleConfig.selected_rules?.length || 0} Rules`;
+        return t("replay.request.ruleMode.selected", {
+          count: ruleConfig.selected_rules?.length || 0,
+        });
       case "none":
-        return "No Rules";
+        return t("replay.request.ruleMode.none");
       default:
-        return "Rules";
+        return t("replay.request.ruleMode.default");
     }
   };
 
   const ruleMenuItems: MenuProps["items"] = [
-    { key: "enabled", label: "Use Enabled Rules" },
-    { key: "selected", label: "Select Rules..." },
-    { key: "none", label: "No Rules" },
+    { key: "enabled", label: t("replay.request.ruleMenu.useEnabled") },
+    { key: "selected", label: t("replay.request.ruleMenu.select") },
+    { key: "none", label: t("replay.request.ruleMode.none") },
   ];
 
   const enabledHeadersCount = (currentRequest?.headers || []).filter(
@@ -517,31 +521,40 @@ export default function RequestPanel() {
   const tabItems = [
     {
       key: "params",
-      label: `Params${enabledParamsCount > 0 ? ` (${enabledParamsCount})` : ""}`,
+      label:
+        enabledParamsCount > 0
+          ? t("replay.request.tab.paramsCount", { count: enabledParamsCount })
+          : t("replay.request.tab.params"),
       children: (
         <KeyValueEditor
           items={queryParams}
           onChange={handleQueryParamsChange}
-          keyPlaceholder="Parameter"
-          valuePlaceholder="Value"
+          keyPlaceholder={t("replay.request.parameter")}
+          valuePlaceholder={t("replay.keyValue.value")}
         />
       ),
     },
     {
       key: "headers",
-      label: `Headers${enabledHeadersCount > 0 ? ` (${enabledHeadersCount})` : ""}`,
+      label:
+        enabledHeadersCount > 0
+          ? t("replay.request.tab.headersCount", { count: enabledHeadersCount })
+          : t("replay.request.tab.headers"),
       children: (
         <KeyValueEditor
           items={currentRequest?.headers || []}
           onChange={handleHeadersChange}
-          keyPlaceholder="Header"
-          valuePlaceholder="Value"
+          keyPlaceholder={t("replay.request.header")}
+          valuePlaceholder={t("replay.keyValue.value")}
         />
       ),
     },
     {
       key: "cookies",
-      label: `Cookies${cookieCount > 0 ? ` (${cookieCount})` : ""}`,
+      label:
+        cookieCount > 0
+          ? t("replay.request.tab.cookiesCount", { count: cookieCount })
+          : t("replay.request.tab.cookies"),
       children: (
         <CookieEditor
           headers={currentRequest?.headers || []}
@@ -551,7 +564,7 @@ export default function RequestPanel() {
     },
     {
       key: "body",
-      label: "Body",
+      label: t("replay.request.tab.body"),
       children: (
         <BodyEditor
           body={currentRequest?.body}
@@ -588,7 +601,7 @@ export default function RequestPanel() {
           }))}
         />
         <Input
-          placeholder="Enter request URL or paste cURL"
+          placeholder={t("replay.request.urlPlaceholder")}
           value={currentRequest?.url || ""}
           onChange={handleUrlChange}
           onPaste={handleUrlPaste}
@@ -610,7 +623,7 @@ export default function RequestPanel() {
           </Button>
         </Dropdown>
         {requestType !== "websocket" && (
-          <Tooltip title="Request Timeout (ms)">
+          <Tooltip title={t("replay.request.timeoutTooltip")}>
             <InputNumber
               prefix={
                 <ClockCircleOutlined
@@ -628,9 +641,9 @@ export default function RequestPanel() {
             />
           </Tooltip>
         )}
-        <Tooltip title="Save Request">
+        <Tooltip title={t("replay.request.saveRequest")}>
           <Button icon={<SaveOutlined />} onClick={handleSave} size="small" data-testid="replay-save-button">
-            Save
+            {t("common.save")}
           </Button>
         </Tooltip>
         {requestType === "websocket" ? (
@@ -641,7 +654,7 @@ export default function RequestPanel() {
               onClick={disconnectWebSocket}
               size="small"
             >
-              Disconnect
+              {t("replay.request.disconnect")}
             </Button>
           ) : isConnecting ? (
             <Button
@@ -650,7 +663,7 @@ export default function RequestPanel() {
               onClick={cancelRequest}
               size="small"
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
           ) : (
             <Button
@@ -660,7 +673,7 @@ export default function RequestPanel() {
               size="small"
               data-testid="replay-connect-button"
             >
-              Connect
+              {t("replay.request.connect")}
             </Button>
           )
         ) : isConnected ? (
@@ -670,7 +683,7 @@ export default function RequestPanel() {
             onClick={disconnectSSE}
             size="small"
           >
-            Disconnect
+            {t("replay.request.disconnect")}
           </Button>
         ) : executing ? (
           <Button
@@ -679,7 +692,7 @@ export default function RequestPanel() {
             onClick={cancelRequest}
             size="small"
           >
-            Cancel
+            {t("common.cancel")}
           </Button>
         ) : (
           <Button
@@ -689,7 +702,7 @@ export default function RequestPanel() {
             size="small"
             data-testid="replay-send-button"
           >
-            Send
+            {t("common.send")}
           </Button>
         )}
       </div>
@@ -711,14 +724,14 @@ export default function RequestPanel() {
       </div>
 
       <Modal
-        title="Save Request"
+        title={t("replay.request.saveRequest")}
         open={saveModalVisible}
         onOk={handleSaveConfirm}
         onCancel={() => setSaveModalVisible(false)}
-        okText="Save"
+        okText={t("common.save")}
       >
         <Input
-          placeholder="Request name"
+          placeholder={t("replay.request.namePlaceholder")}
           value={saveName}
           onChange={(e) => setSaveName(e.target.value)}
           onPressEnter={handleSaveConfirm}
@@ -727,7 +740,7 @@ export default function RequestPanel() {
       </Modal>
 
       <Modal
-        title="Select Rules"
+        title={t("replay.request.selectRulesTitle")}
         open={ruleSelectVisible}
         onOk={() => setRuleSelectVisible(false)}
         onCancel={() => setRuleSelectVisible(false)}
@@ -735,14 +748,14 @@ export default function RequestPanel() {
       >
         <Select
           mode="multiple"
-          placeholder="Select rules to apply"
+          placeholder={t("replay.request.selectRulesPlaceholder")}
           style={{ width: "100%" }}
           value={ruleConfig.selected_rules || []}
           onChange={(values) =>
             setRuleConfig({ mode: "selected", selected_rules: values })
           }
           options={rules.map((r) => ({
-            label: r.enabled ? r.name : `${r.name} (disabled)`,
+            label: r.enabled ? r.name : t("replay.request.ruleDisabled", { name: r.name }),
             value: r.name,
           }))}
         />
@@ -765,10 +778,13 @@ interface KeyValueTableItem extends ReplayKeyValueItem {
 function KeyValueEditor({
   items,
   onChange,
-  keyPlaceholder = "Key",
-  valuePlaceholder = "Value",
+  keyPlaceholder: keyPlaceholderProp,
+  valuePlaceholder: valuePlaceholderProp,
 }: KeyValueEditorProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
+  const keyPlaceholder = keyPlaceholderProp ?? t("replay.keyValue.key");
+  const valuePlaceholder = valuePlaceholderProp ?? t("replay.keyValue.value");
 
   const handleAdd = useCallback(() => {
     onChange([
@@ -855,14 +871,14 @@ function KeyValueEditor({
       ),
     },
     {
-      title: "Description",
+      title: t("common.description"),
       dataIndex: "description",
       key: "description",
       width: 180,
       render: (_: string, record: KeyValueTableItem) => (
         <Input
           size="small"
-          placeholder="Description"
+          placeholder={t("common.description")}
           value={record.description || ""}
           onChange={(e) =>
             handleChange(record.id, "description", e.target.value)
@@ -919,7 +935,7 @@ function KeyValueEditor({
         onClick={handleAdd}
         style={{ marginTop: 8, color: token.colorTextSecondary, fontSize: 12 }}
       >
-        Add
+        {t("common.add")}
       </Button>
     </div>
   );
@@ -966,6 +982,7 @@ function stringifyCookieItems(items: ReplayKeyValueItem[]): string {
 }
 
 function CookieEditor({ headers, onChange }: CookieEditorProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const cookieHeaderIndex = useMemo(() => {
     return headers.findIndex((h) => h.key.trim().toLowerCase() === "cookie");
@@ -1080,13 +1097,13 @@ function CookieEditor({ headers, onChange }: CookieEditorProps) {
       ),
     },
     {
-      title: "Name",
+      title: t("common.name"),
       dataIndex: "key",
       key: "key",
       render: (_: string, record: CookieEditorItem) => (
         <Input
           size="small"
-          placeholder="Cookie name"
+          placeholder={t("replay.cookie.namePlaceholder")}
           value={record.key}
           onChange={(e) => handleChange(record.id, "key", e.target.value)}
           variant="borderless"
@@ -1095,13 +1112,13 @@ function CookieEditor({ headers, onChange }: CookieEditorProps) {
       ),
     },
     {
-      title: "Value",
+      title: t("common.value"),
       dataIndex: "value",
       key: "value",
       render: (_: string, record: CookieEditorItem) => (
         <Input
           size="small"
-          placeholder="Cookie value"
+          placeholder={t("replay.cookie.valuePlaceholder")}
           value={record.value}
           onChange={(e) => handleChange(record.id, "value", e.target.value)}
           variant="borderless"
@@ -1143,7 +1160,7 @@ function CookieEditor({ headers, onChange }: CookieEditorProps) {
             onChange={handleHeaderEnabledChange}
           />
           <span style={{ fontSize: 12, color: token.colorTextSecondary }}>
-            Send cookies
+            {t("replay.cookie.send")}
           </span>
         </Space>
         <Segmented
@@ -1151,8 +1168,8 @@ function CookieEditor({ headers, onChange }: CookieEditorProps) {
           value={mode}
           onChange={(v) => setMode(v as "table" | "raw")}
           options={[
-            { label: "Table", value: "table" },
-            { label: "Raw", value: "raw" },
+            { label: t("replay.cookie.modeTable"), value: "table" },
+            { label: t("replay.cookie.modeRaw"), value: "raw" },
           ]}
         />
       </div>
@@ -1205,7 +1222,7 @@ function CookieEditor({ headers, onChange }: CookieEditorProps) {
             onClick={handleAdd}
             style={{ marginTop: 8, color: token.colorTextSecondary, fontSize: 12 }}
           >
-            Add Cookie
+            {t("replay.cookie.add")}
           </Button>
         </>
       )}
@@ -1233,6 +1250,7 @@ function BodyEditor({
   onContentChange,
   onFormDataChange,
 }: BodyEditorProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const bodyType = body?.type || "none";
 
@@ -1307,7 +1325,7 @@ function BodyEditor({
             size="small"
             style={{ width: 100 }}
             options={[
-              { label: "Text", value: "text" },
+              { label: t("replay.body.rawText"), value: "text" },
               { label: "JSON", value: "json" },
               { label: "XML", value: "xml" },
             ]}
@@ -1317,7 +1335,7 @@ function BodyEditor({
 
       <div style={styles.content}>
         {bodyType === "none" && (
-          <div style={styles.noBody}>This request does not have a body</div>
+          <div style={styles.noBody}>{t("replay.body.none")}</div>
         )}
         {bodyType === "raw" && (
           <CodeEditor
@@ -1330,7 +1348,7 @@ function BodyEditor({
                   ? "xml"
                   : "plaintext"
             }
-            placeholder="Enter request body"
+            placeholder={t("replay.body.placeholder")}
             minHeight={250}
           />
         )}
@@ -1342,8 +1360,8 @@ function BodyEditor({
               ]
             }
             onChange={onFormDataChange}
-            keyPlaceholder="Key"
-            valuePlaceholder="Value"
+            keyPlaceholder={t("replay.keyValue.key")}
+            valuePlaceholder={t("replay.keyValue.value")}
           />
         )}
       </div>

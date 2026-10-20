@@ -4,6 +4,7 @@ import { theme, Button, Tooltip, Space, message } from "antd";
 import { FormatPainterOutlined, CopyOutlined } from "@ant-design/icons";
 import { useThemeStore } from "../../../stores/useThemeStore";
 import { copyToClipboard } from "../../../utils/clipboard";
+import { useI18n } from "../../../i18n";
 
 interface CodeEditorProps {
   value: string;
@@ -46,9 +47,11 @@ export default function CodeEditor({
   value,
   onChange,
   language = "json",
-  placeholder = "Enter content...",
+  placeholder: placeholderProp,
   minHeight = 200,
 }: CodeEditorProps) {
+  const { t } = useI18n();
+  const placeholder = placeholderProp ?? t("replay.code.placeholder");
   const { token } = theme.useToken();
   const { resolvedTheme } = useThemeStore();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -126,6 +129,10 @@ export default function CodeEditor({
     });
   }, [resolvedTheme]);
 
+  useEffect(() => {
+    editorRef.current?.updateOptions({ placeholder });
+  }, [placeholder]);
+
   const handleFormat = useCallback(() => {
     if (!editorRef.current) return;
     const currentValue = editorRef.current.getValue();
@@ -143,20 +150,20 @@ export default function CodeEditor({
       editorRef.current.setValue(formatted);
       isSettingValueRef.current = false;
       onChangeRef.current(formatted);
-      message.success("Formatted");
+      message.success(t("replay.code.formatted"));
     }
-  }, [language]);
+  }, [language, t]);
 
   const handleCopy = useCallback(async () => {
     if (!editorRef.current) return;
     const currentValue = editorRef.current.getValue();
     try {
       await copyToClipboard(currentValue);
-      message.success("Copied");
+      message.success(t("replay.code.copied"));
     } catch {
-      message.error("Failed to copy");
+      message.error(t("replay.code.copyFailed"));
     }
-  }, []);
+  }, [t]);
 
   const styles: Record<string, CSSProperties> = {
     wrapper: {
@@ -190,7 +197,7 @@ export default function CodeEditor({
       <div style={styles.toolbar}>
         <Space size={4}>
           {canFormat && (
-            <Tooltip title="Format">
+            <Tooltip title={t("replay.code.format")}>
               <Button
                 type="text"
                 size="small"
@@ -199,7 +206,7 @@ export default function CodeEditor({
               />
             </Tooltip>
           )}
-          <Tooltip title="Copy">
+          <Tooltip title={t("common.copy")}>
             <Button
               type="text"
               size="small"

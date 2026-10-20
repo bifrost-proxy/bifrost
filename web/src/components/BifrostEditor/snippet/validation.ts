@@ -1,6 +1,7 @@
 import { editor, MarkerSeverity } from 'monaco-editor';
 import { setFixesForMarker, clearFixesCache, type CodeFix } from './codeAction';
 import { apiFetch } from '../../../api/apiFetch';
+import { t } from '../../../i18n';
 
 const MARKER_OWNER = 'bifrost-validation';
 
@@ -102,7 +103,7 @@ export function setValidationMarkers(
     return {
       severity: severityToMarkerSeverity(error.severity),
       message: error.suggestion
-        ? `${error.message}\n\nSuggestion: ${error.suggestion}`
+        ? `${error.message}\n\n${t('rules.monaco.suggestion', { suggestion: error.suggestion })}`
         : error.message,
       startLineNumber: error.line,
       startColumn: error.start_column,

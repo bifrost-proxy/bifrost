@@ -17,6 +17,7 @@ import {
   SafetyOutlined,
   ApiOutlined,
   AppstoreOutlined,
+  TranslationOutlined,
 } from "@ant-design/icons";
 import { useMetricsStore } from "../../stores/useMetricsStore";
 import { useProxyStore } from "../../stores/useProxyStore";
@@ -71,6 +72,8 @@ import SyncTab from "./tabs/SyncTab";
 import TrayTab from "./tabs/TrayTab";
 import RemoteAccessTab from "./tabs/RemoteAccessTab";
 import RemoteInvokeTab from "./tabs/RemoteInvokeTab";
+import LanguageTab from "./tabs/LanguageTab";
+import { useI18n } from "../../i18n";
 import { updateDesktopProxyPort } from "../../desktop/tauri";
 import {
   getDesktopPlatform,
@@ -98,6 +101,7 @@ const VALID_TABS = [
   "sync",
   "remote",
   "remote-invoke",
+  "language",
 ];
 
 const maxBodyProbeLeftMarkStyle: CSSProperties = {
@@ -138,6 +142,7 @@ function getErrorMessage(error: unknown, fallback: string): string {
 }
 
 export default function Settings() {
+  const { t } = useI18n();
   const { overview, history, loading, error, fetchOverview, fetchHistory } =
     useMetricsStore(
       useShallow((state) => ({
@@ -378,11 +383,11 @@ export default function Settings() {
     const success = await toggleSystemProxy(enabled);
     if (success) {
       message.success(
-        enabled ? "System proxy enabled" : "System proxy disabled",
+        enabled ? t("settings.msg.systemProxyEnabled") : t("settings.msg.systemProxyDisabled"),
       );
     } else {
       const proxyError = useProxyStore.getState().error;
-      message.error(proxyError || "Failed to toggle system proxy");
+      message.error(proxyError || t("settings.msg.systemProxyToggleFailed"));
     }
   };
 
@@ -391,12 +396,12 @@ export default function Settings() {
     if (success) {
       message.success(
         enabled
-          ? "System proxy cleanup fallback installed"
-          : "System proxy cleanup fallback removed",
+          ? t("settings.msg.cleanupFallbackInstalled")
+          : t("settings.msg.cleanupFallbackRemoved"),
       );
     } else {
       const proxyError = useProxyStore.getState().error;
-      message.error(proxyError || "Failed to update cleanup fallback");
+      message.error(proxyError || t("settings.msg.cleanupFallbackFailed"));
     }
   };
 
@@ -405,9 +410,9 @@ export default function Settings() {
     try {
       const tray = await updateTrayConfig({ enabled });
       setProxySettings((prev) => (prev ? { ...prev, tray } : prev));
-      message.success(enabled ? "Tray icon enabled" : "Tray icon disabled");
+      message.success(enabled ? t("settings.msg.trayIconEnabled") : t("settings.msg.trayIconDisabled"));
     } catch {
-      message.error("Failed to update tray setting");
+      message.error(t("settings.msg.trayUpdateFailed"));
       void fetchProxySettings();
     } finally {
       setTrayLoading(false);
@@ -420,10 +425,10 @@ export default function Settings() {
       const tray = await updateTrayConfig({ show_system_stats: enabled });
       setProxySettings((prev) => (prev ? { ...prev, tray } : prev));
       message.success(
-        enabled ? "Tray system stats enabled" : "Tray system stats disabled",
+        enabled ? t("settings.msg.traySystemStatsEnabled") : t("settings.msg.traySystemStatsDisabled"),
       );
     } catch {
-      message.error("Failed to update tray system stats setting");
+      message.error(t("settings.msg.traySystemStatsFailed"));
       void fetchProxySettings();
     } finally {
       setTrayLoading(false);
@@ -440,9 +445,9 @@ export default function Settings() {
         system_stats_items: { [item]: enabled },
       });
       setProxySettings((prev) => (prev ? { ...prev, tray } : prev));
-      message.success("Tray system status item updated");
+      message.success(t("settings.msg.traySystemStatsItemUpdated"));
     } catch {
-      message.error("Failed to update tray system status item");
+      message.error(t("settings.msg.traySystemStatsItemFailed"));
       void fetchProxySettings();
     } finally {
       setTrayLoading(false);
@@ -457,10 +462,10 @@ export default function Settings() {
       });
       setTlsConfig(result);
       message.success(
-        enabled ? "HTTPS interception enabled" : "HTTPS interception disabled",
+        enabled ? t("settings.msg.httpsInterceptionEnabled") : t("settings.msg.httpsInterceptionDisabled"),
       );
     } catch {
-      message.error("Failed to update TLS config");
+      message.error(t("settings.msg.tlsConfigFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -473,11 +478,11 @@ export default function Settings() {
       setTlsConfig(result);
       message.success(
         enabled
-          ? "Certificate verification disabled"
-          : "Certificate verification enabled",
+          ? t("settings.msg.certVerificationDisabled")
+          : t("settings.msg.certVerificationEnabled"),
       );
     } catch {
-      message.error("Failed to update TLS config");
+      message.error(t("settings.msg.tlsConfigFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -492,11 +497,11 @@ export default function Settings() {
       setTlsConfig(result);
       message.success(
         enabled
-          ? "Auto-disconnect on config change enabled"
-          : "Auto-disconnect on config change disabled",
+          ? t("settings.msg.autoDisconnectEnabled")
+          : t("settings.msg.autoDisconnectDisabled"),
       );
     } catch {
-      message.error("Failed to update TLS config");
+      message.error(t("settings.msg.tlsConfigFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -504,13 +509,13 @@ export default function Settings() {
 
   const handleAddExcludePattern = async () => {
     if (!newExcludePattern.trim()) {
-      message.warning("Please enter a pattern");
+      message.warning(t("settings.msg.enterPattern"));
       return;
     }
 
     const pattern = newExcludePattern.trim();
     if (tlsConfig?.intercept_exclude.includes(pattern)) {
-      message.warning("Pattern already exists");
+      message.warning(t("settings.msg.patternExists"));
       return;
     }
 
@@ -520,9 +525,9 @@ export default function Settings() {
       const result = await updateTlsConfig({ intercept_exclude: newList });
       setTlsConfig(result);
       setNewExcludePattern("");
-      message.success(`Added ${pattern} to exclude list`);
+      message.success(t("settings.msg.addedToExclude", { pattern }));
     } catch {
-      message.error("Failed to add pattern");
+      message.error(t("settings.msg.addPatternFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -536,9 +541,9 @@ export default function Settings() {
       );
       const result = await updateTlsConfig({ intercept_exclude: newList });
       setTlsConfig(result);
-      message.success(`Removed ${pattern} from exclude list`);
+      message.success(t("settings.msg.removedFromExclude", { pattern }));
     } catch {
-      message.error("Failed to remove pattern");
+      message.error(t("settings.msg.removePatternFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -546,13 +551,13 @@ export default function Settings() {
 
   const handleAddIncludePattern = async () => {
     if (!newIncludePattern.trim()) {
-      message.warning("Please enter a pattern");
+      message.warning(t("settings.msg.enterPattern"));
       return;
     }
 
     const pattern = newIncludePattern.trim();
     if (tlsConfig?.intercept_include.includes(pattern)) {
-      message.warning("Pattern already exists");
+      message.warning(t("settings.msg.patternExists"));
       return;
     }
 
@@ -562,9 +567,9 @@ export default function Settings() {
       const result = await updateTlsConfig({ intercept_include: newList });
       setTlsConfig(result);
       setNewIncludePattern("");
-      showTlsWhitelistChangeSuccess(`Added ${pattern} to include list`);
+      showTlsWhitelistChangeSuccess(t("settings.msg.addedToInclude", { pattern }));
     } catch {
-      message.error("Failed to add pattern");
+      message.error(t("settings.msg.addPatternFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -578,9 +583,9 @@ export default function Settings() {
       );
       const result = await updateTlsConfig({ intercept_include: newList });
       setTlsConfig(result);
-      showTlsWhitelistChangeSuccess(`Removed ${pattern} from include list`);
+      showTlsWhitelistChangeSuccess(t("settings.msg.removedFromInclude", { pattern }));
     } catch {
-      message.error("Failed to remove pattern");
+      message.error(t("settings.msg.removePatternFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -588,13 +593,13 @@ export default function Settings() {
 
   const handleAddAppExcludePattern = async () => {
     if (!newAppExcludePattern.trim()) {
-      message.warning("Please enter a pattern");
+      message.warning(t("settings.msg.enterPattern"));
       return;
     }
 
     const pattern = newAppExcludePattern.trim();
     if (tlsConfig?.app_intercept_exclude.includes(pattern)) {
-      message.warning("Pattern already exists");
+      message.warning(t("settings.msg.patternExists"));
       return;
     }
 
@@ -604,9 +609,9 @@ export default function Settings() {
       const result = await updateTlsConfig({ app_intercept_exclude: newList });
       setTlsConfig(result);
       setNewAppExcludePattern("");
-      message.success(`Added ${pattern} to app exclude list`);
+      message.success(t("settings.msg.addedToAppExclude", { pattern }));
     } catch {
-      message.error("Failed to add pattern");
+      message.error(t("settings.msg.addPatternFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -620,9 +625,9 @@ export default function Settings() {
       );
       const result = await updateTlsConfig({ app_intercept_exclude: newList });
       setTlsConfig(result);
-      message.success(`Removed ${pattern} from app exclude list`);
+      message.success(t("settings.msg.removedFromAppExclude", { pattern }));
     } catch {
-      message.error("Failed to remove pattern");
+      message.error(t("settings.msg.removePatternFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -630,13 +635,13 @@ export default function Settings() {
 
   const handleAddAppIncludePattern = async () => {
     if (!newAppIncludePattern.trim()) {
-      message.warning("Please enter a pattern");
+      message.warning(t("settings.msg.enterPattern"));
       return;
     }
 
     const pattern = newAppIncludePattern.trim();
     if (tlsConfig?.app_intercept_include.includes(pattern)) {
-      message.warning("Pattern already exists");
+      message.warning(t("settings.msg.patternExists"));
       return;
     }
 
@@ -646,9 +651,9 @@ export default function Settings() {
       const result = await updateTlsConfig({ app_intercept_include: newList });
       setTlsConfig(result);
       setNewAppIncludePattern("");
-      showTlsWhitelistChangeSuccess(`Added ${pattern} to app include list`);
+      showTlsWhitelistChangeSuccess(t("settings.msg.addedToAppInclude", { pattern }));
     } catch {
-      message.error("Failed to add pattern");
+      message.error(t("settings.msg.addPatternFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -662,9 +667,9 @@ export default function Settings() {
       );
       const result = await updateTlsConfig({ app_intercept_include: newList });
       setTlsConfig(result);
-      showTlsWhitelistChangeSuccess(`Removed ${pattern} from app include list`);
+      showTlsWhitelistChangeSuccess(t("settings.msg.removedFromAppInclude", { pattern }));
     } catch {
-      message.error("Failed to remove pattern");
+      message.error(t("settings.msg.removePatternFailed"));
     } finally {
       setTlsLoading(false);
     }
@@ -719,8 +724,8 @@ export default function Settings() {
     schedulePerformanceUpdate(
       "max_records",
       { max_records: value },
-      `Max records updated to ${value}`,
-      "Failed to update max records",
+      t("settings.msg.maxRecordsUpdated", { value }),
+      t("settings.msg.maxRecordsFailed"),
     );
   };
 
@@ -729,8 +734,8 @@ export default function Settings() {
     schedulePerformanceUpdate(
       "max_db_size_bytes",
       { max_db_size_bytes: value },
-      "Max DB size updated",
-      "Failed to update max DB size",
+      t("settings.msg.maxDbSizeUpdated"),
+      t("settings.msg.maxDbSizeFailed"),
     );
   };
 
@@ -739,8 +744,8 @@ export default function Settings() {
     schedulePerformanceUpdate(
       "max_body_memory_size",
       { max_body_memory_size: value },
-      "Max body inline size updated",
-      "Failed to update max body inline size",
+      t("settings.msg.maxBodyInlineUpdated"),
+      t("settings.msg.maxBodyInlineFailed"),
     );
   };
 
@@ -749,8 +754,8 @@ export default function Settings() {
     schedulePerformanceUpdate(
       "max_body_buffer_size",
       { max_body_buffer_size: value },
-      "Max body buffer size updated",
-      "Failed to update max body buffer size",
+      t("settings.msg.maxBodyBufferUpdated"),
+      t("settings.msg.maxBodyBufferFailed"),
     );
   };
 
@@ -759,8 +764,8 @@ export default function Settings() {
     schedulePerformanceUpdate(
       "max_body_probe_size",
       { max_body_probe_size: value },
-      "Max body probe size updated",
-      "Failed to update max body probe size",
+      t("settings.msg.maxBodyProbeUpdated"),
+      t("settings.msg.maxBodyProbeFailed"),
     );
   };
 
@@ -770,9 +775,9 @@ export default function Settings() {
       "super_performance_mode",
       { super_performance_mode: enabled },
       enabled
-        ? "Super performance mode enabled"
-        : "Super performance mode disabled",
-      "Failed to update super performance mode",
+        ? t("settings.msg.superPerfEnabled")
+        : t("settings.msg.superPerfDisabled"),
+      t("settings.msg.superPerfFailed"),
     );
   };
 
@@ -785,9 +790,9 @@ export default function Settings() {
       "binary_traffic_performance_mode",
       { binary_traffic_performance_mode: performanceModeEnabled },
       checked
-        ? "Binary file capture and decoding enabled"
-        : "Binary traffic performance mode enabled",
-      "Failed to update binary traffic capture setting",
+        ? t("settings.msg.binaryCaptureEnabled")
+        : t("settings.msg.binaryPerfModeEnabled"),
+      t("settings.msg.binaryCaptureFailed"),
     );
   };
 
@@ -796,8 +801,8 @@ export default function Settings() {
     schedulePerformanceUpdate(
       "inject_bifrost_badge",
       { inject_bifrost_badge: enabled },
-      enabled ? "Bifrost badge enabled" : "Bifrost badge disabled",
-      "Failed to update Bifrost badge setting",
+      enabled ? t("settings.msg.badgeEnabled") : t("settings.msg.badgeDisabled"),
+      t("settings.msg.badgeFailed"),
     );
   };
 
@@ -806,8 +811,8 @@ export default function Settings() {
     schedulePerformanceUpdate(
       "file_retention_days",
       { file_retention_days: value },
-      `File retention updated to ${value} days`,
-      "Failed to update file retention days",
+      t("settings.msg.fileRetentionUpdated", { value }),
+      t("settings.msg.fileRetentionFailed"),
     );
   };
 
@@ -820,8 +825,8 @@ export default function Settings() {
     schedulePerformanceUpdate(
       "breakpoint_timeout_ms",
       { breakpoint_timeout_ms: value },
-      `Breakpoint timeout updated to ${value}ms`,
-      "Failed to update breakpoint timeout",
+      t("settings.msg.breakpointTimeoutUpdated", { value }),
+      t("settings.msg.breakpointTimeoutFailed"),
     );
   };
 
@@ -832,7 +837,7 @@ export default function Settings() {
       message.success(result.message);
       fetchPerformanceConfig();
     } catch {
-      message.error("Failed to clear body cache");
+      message.error(t("settings.msg.clearBodyCacheFailed"));
     } finally {
       setPerfLoading(false);
     }
@@ -936,7 +941,7 @@ export default function Settings() {
     const config = `HTTP Proxy: 127.0.0.1:${overview?.server.port || 9900}
 HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     copyToClipboard(config);
-    message.success("Proxy config copied to clipboard");
+    message.success(t("settings.msg.proxyConfigCopied"));
   };
 
   const normalizeBifrostCloudUrl = useCallback((value?: string | null) => {
@@ -944,7 +949,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     if (!trimmed) {
       return {
         ok: false as const,
-        message: "Please enter your self-hosted Bifrost Sync Server URL",
+        message: t("settings.msg.syncUrlRequired"),
       };
     }
     let parsed: URL;
@@ -953,19 +958,19 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     } catch {
       return {
         ok: false as const,
-        message: "Please enter a valid HTTPS URL",
+        message: t("settings.msg.syncUrlInvalid"),
       };
     }
     if (parsed.protocol !== "https:") {
       return {
         ok: false as const,
-        message: "Bifrost Cloud URL must start with https://",
+        message: t("settings.msg.syncUrlHttps"),
       };
     }
     if (!parsed.hostname) {
       return {
         ok: false as const,
-        message: "Please enter a URL with a hostname",
+        message: t("settings.msg.syncUrlHostname"),
       };
     }
     parsed.hash = "";
@@ -974,7 +979,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       ok: true as const,
       value: parsed.toString().replace(/\/$/, ""),
     };
-  }, []);
+  }, [t]);
 
   const handleSyncProviderRemoteBaseUrlSave = useCallback(async (
     provider: SyncProviderStatus,
@@ -989,31 +994,31 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     try {
       const status = await updateSyncConfig({ remote_base_url: normalized.value });
       applySyncStatus(status);
-      message.success(`${provider.name} URL updated`);
+      message.success(t("settings.msg.providerUrlUpdated", { name: provider.name }));
     } catch {
-      message.error(`Failed to update ${provider.name} URL`);
+      message.error(t("settings.msg.providerUrlFailed", { name: provider.name }));
     } finally {
       setSyncLoading(false);
     }
-  }, [applySyncStatus, normalizeBifrostCloudUrl]);
+  }, [applySyncStatus, normalizeBifrostCloudUrl, t]);
 
   const handleSyncSignIn = useCallback(async () => {
     try {
       const status = await openSyncLogin();
       applySyncStatus(status);
-      message.success("Remote sign-in window opened");
+      message.success(t("settings.msg.remoteSignInOpened"));
     } catch (error) {
       message.error(
-        normalizeApiErrorMessage(error, "Failed to open remote sign-in page"),
+        normalizeApiErrorMessage(error, t("settings.msg.remoteSignInFailed")),
       );
     }
-  }, [applySyncStatus]);
+  }, [applySyncStatus, t]);
 
   const handleSyncProviderSignIn = useCallback(
     async (provider: SyncProviderStatus, options?: { token?: string }) => {
       if (provider.id === "github_gist") {
         if (!options?.token?.trim()) {
-          message.warning("Please enter a GitHub token with the gist scope");
+          message.warning(t("settings.msg.githubTokenRequired"));
           return;
         }
         setSyncLoading(true);
@@ -1023,10 +1028,10 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
             token: options.token.trim(),
           });
           applySyncStatus(status);
-          message.success("GitHub Gist connected");
+          message.success(t("settings.msg.githubGistConnected"));
         } catch (error) {
           message.error(
-            normalizeApiErrorMessage(error, "Failed to connect GitHub Gist"),
+            normalizeApiErrorMessage(error, t("settings.msg.githubGistFailed")),
           );
         } finally {
           setSyncLoading(false);
@@ -1055,19 +1060,19 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
         }
         const status = await openSyncLogin();
         applySyncStatus(status);
-        message.success(`${provider.name} sign-in window opened`);
+        message.success(t("settings.msg.providerSignInOpened", { name: provider.name }));
       } catch (error) {
         message.error(
           normalizeApiErrorMessage(
             error,
-            `Failed to open ${provider.name} sign-in page`,
+            t("settings.msg.providerSignInFailed", { name: provider.name }),
           ),
         );
       } finally {
         setSyncLoading(false);
       }
     },
-    [applySyncStatus, normalizeBifrostCloudUrl],
+    [applySyncStatus, normalizeBifrostCloudUrl, t],
   );
 
   const handleSyncSignOut = useCallback(async () => {
@@ -1075,13 +1080,13 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     try {
       const status = await logoutSyncSession();
       applySyncStatus(status);
-      message.success("Sync session cleared");
+      message.success(t("settings.msg.syncSessionCleared"));
     } catch {
-      message.error("Failed to sign out from remote sync");
+      message.error(t("settings.msg.syncSignOutFailed"));
     } finally {
       setSyncLoading(false);
     }
-  }, [applySyncStatus]);
+  }, [applySyncStatus, t]);
 
   const handleSyncProviderSignOut = useCallback(
     async (provider: SyncProviderStatus) => {
@@ -1089,14 +1094,14 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       try {
         const status = await logoutSyncProvider(provider.id);
         applySyncStatus(status);
-        message.success(`${provider.name} signed out`);
+        message.success(t("settings.msg.providerSignedOut", { name: provider.name }));
       } catch {
-        message.error(`Failed to sign out from ${provider.name}`);
+        message.error(t("settings.msg.providerSignOutFailed", { name: provider.name }));
       } finally {
         setSyncLoading(false);
       }
     },
-    [applySyncStatus],
+    [applySyncStatus, t],
   );
 
   const handleDesktopProxyPortApply = useCallback(async () => {
@@ -1109,26 +1114,26 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       desktopPortDraft <= 0 ||
       desktopPortDraft > 65535
     ) {
-      message.error("Port must be between 1 and 65535");
+      message.error(t("settings.msg.portRange"));
       return;
     }
 
     if (desktopPortDraft === desktopExpectedProxyPort) {
-      message.info("Proxy port is unchanged");
+      message.info(t("settings.msg.portUnchanged"));
       return;
     }
 
     setDesktopPortSaving(true);
     try {
       beginDesktopCoreRestart(desktopPortDraft);
-      setDesktopCorePhase("restarting", "Rebinding the proxy listener to the requested port.");
+      setDesktopCorePhase("restarting", t("settings.msg.portRebinding"));
       const runtime = await updateDesktopProxyPort(desktopPortDraft);
       setDesktopProxyPort(runtime.proxyPort);
       setDesktopExpectedProxyPort(runtime.expectedProxyPort);
       setDesktopActualProxyPort(runtime.proxyPort);
       setDesktopPortDraft(runtime.expectedProxyPort);
       await waitForDesktopBackendReady(runtime.proxyPort);
-      setDesktopCorePhase("reconnecting", "Refreshing proxy state and reconnecting live data streams.");
+      setDesktopCorePhase("reconnecting", t("settings.msg.portReconnecting"));
       const subscription = pushService.getSubscription();
       pushService.disconnect();
       pushService.connect(subscription);
@@ -1141,14 +1146,14 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       ]);
       message.success(
         runtime.expectedProxyPort === runtime.proxyPort
-          ? `Proxy listener moved to port ${runtime.proxyPort}`
-          : `Preferred port ${runtime.expectedProxyPort} was busy, switched to ${runtime.proxyPort}`,
+          ? t("settings.msg.portMoved", { port: runtime.proxyPort })
+          : t("settings.msg.portBusySwitched", { expected: runtime.expectedProxyPort, port: runtime.proxyPort }),
       );
       window.setTimeout(() => {
         hideDesktopCoreRestart();
       }, 600);
     } catch (error) {
-      const text = getErrorMessage(error, "Failed to switch proxy port");
+      const text = getErrorMessage(error, t("settings.msg.portSwitchFailed"));
       failDesktopCoreRestart(text);
       message.error(text);
       await Promise.all([fetchProxySettings(), fetchDesktopRuntime()]);
@@ -1166,6 +1171,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     fetchProxySettings,
     hideDesktopCoreRestart,
     setDesktopCorePhase,
+    t,
   ]);
 
   const appSuggestions = useMemo(
@@ -1185,7 +1191,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     return (
       <Alert
         type="error"
-        message="Failed to load system info"
+        message={t("settings.loadSystemInfoFailed")}
         description={error}
       />
     );
@@ -1262,7 +1268,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
   );
   const maxBodyProbeMarks = {
     0: {
-      label: "Off",
+      label: t("common.off"),
       style: maxBodyProbeLeftMarkStyle,
     },
     [16 * 1024]: {
@@ -1296,7 +1302,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "proxy",
       label: (
         <span>
-          <GlobalOutlined /> Proxy
+          <GlobalOutlined /> {t("settings.tabProxy")}
         </span>
       ),
       children: (
@@ -1352,7 +1358,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "certificate",
       label: (
         <span>
-          <SafetyCertificateOutlined /> Certificate
+          <SafetyCertificateOutlined /> {t("settings.tabCertificate")}
         </span>
       ),
       children: (
@@ -1368,7 +1374,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "metrics",
       label: (
         <span>
-          <DashboardOutlined /> Metrics
+          <DashboardOutlined /> {t("settings.tabMetrics")}
         </span>
       ),
       children: (
@@ -1393,7 +1399,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "access",
       label: (
         <span>
-          <SafetyOutlined /> Access Control
+          <SafetyOutlined /> {t("settings.tabAccessControl")}
         </span>
       ),
       children: <AccessControlTab />,
@@ -1402,7 +1408,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "performance",
       label: (
         <span>
-          <ThunderboltOutlined /> Performance
+          <ThunderboltOutlined /> {t("settings.tabPerformance")}
         </span>
       ),
       children: (
@@ -1443,7 +1449,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "tray",
       label: (
         <span>
-          <AppstoreOutlined /> Tray
+          <AppstoreOutlined /> {t("settings.tabTray")}
         </span>
       ),
       children: (
@@ -1460,7 +1466,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "sync",
       label: (
         <span>
-          <CloudOutlined /> Sync
+          <CloudOutlined /> {t("settings.tabSync")}
         </span>
       ),
       children: (
@@ -1479,7 +1485,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "remote",
       label: (
         <span>
-          <KeyOutlined /> Remote Access
+          <KeyOutlined /> {t("settings.tabRemoteAccess")}
         </span>
       ),
       children: <RemoteAccessTab />,
@@ -1488,7 +1494,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       key: "remote-invoke",
       label: (
         <span>
-          <ApiOutlined /> Remote Invoke
+          <ApiOutlined /> {t("settings.tabRemoteInvoke")}
         </span>
       ),
       children: (
@@ -1498,6 +1504,15 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           onSyncSignIn={handleSyncSignIn}
         />
       ),
+    },
+    {
+      key: "language",
+      label: (
+        <span>
+          <TranslationOutlined /> {t("settings.tabLanguage")}
+        </span>
+      ),
+      children: <LanguageTab />,
     },
   ];
 

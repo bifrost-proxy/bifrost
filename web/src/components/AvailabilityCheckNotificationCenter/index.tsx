@@ -4,6 +4,7 @@ import { Badge, Button, Card, Space, Tag, Typography, theme } from "antd";
 import { BellOutlined, CloseOutlined, MobileOutlined, RightOutlined } from "@ant-design/icons";
 import type { TrustProbeDevice, TrustProbeSession } from "../../api/cert";
 import { pushService, type SettingsScope } from "../../services/pushService";
+import { useI18n, type TranslationKey } from "../../i18n";
 import {
   NOTIFICATION_BUBBLE_DEFAULT_TOP,
   NOTIFICATION_BUBBLE_MARGIN,
@@ -33,20 +34,20 @@ function deviceLabel(device: TrustProbeDevice) {
   return device.platformHint || device.clientIp || device.deviceId;
 }
 
-function deviceStatus(device: TrustProbeDevice) {
+function deviceStatus(device: TrustProbeDevice): { labelKey: TranslationKey; color: string } {
   if (device.tlsTrusted) {
-    return { label: "Browser HTTPS passed", color: "green" };
+    return { labelKey: "notify.center.httpsPassed", color: "green" };
   }
   if (device.status === "tls_failed") {
-    return { label: "Browser HTTPS failed", color: "orange" };
+    return { labelKey: "notify.center.httpsFailed", color: "orange" };
   }
   if (device.networkReachable) {
-    return { label: "Checking HTTPS", color: "blue" };
+    return { labelKey: "notify.center.checkingHttps", color: "blue" };
   }
   if (device.opened) {
-    return { label: "Opened page", color: "blue" };
+    return { labelKey: "notify.center.openedPage", color: "blue" };
   }
-  return { label: "Waiting", color: "default" };
+  return { labelKey: "notify.center.waiting", color: "default" };
 }
 
 function notificationSignature(sessions: TrustProbeSession[]) {
@@ -70,6 +71,7 @@ function trustProbeSessionsFromPushData(data: unknown): TrustProbeSession[] {
 
 export default function AvailabilityCheckNotificationCenter() {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
@@ -289,13 +291,13 @@ export default function AvailabilityCheckNotificationCenter() {
           title={
             <Space size={8}>
               <MobileOutlined />
-              <span>Availability Check</span>
+              <span>{t("notify.center.title")}</span>
               <Badge count={devices.length} size="small" />
             </Space>
           }
           extra={
             <Button
-              aria-label="Close availability check notifications"
+              aria-label={t("notify.center.closeAria")}
               icon={<CloseOutlined />}
               size="small"
               type="text"
@@ -311,8 +313,7 @@ export default function AvailabilityCheckNotificationCenter() {
         >
           <Space direction="vertical" size="small" style={{ width: "100%" }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              A device opened the availability check page. Review proxy access, browser HTTPS
-              probe, and proxy configuration from the certificate page.
+              {t("notify.center.desc")}
             </Text>
             {devices.slice(0, 4).map(({ session, device }) => {
               const status = deviceStatus(device);
@@ -337,10 +338,12 @@ export default function AvailabilityCheckNotificationCenter() {
                     <Space wrap size={[6, 4]}>
                       <Text strong>{deviceLabel(device)}</Text>
                       {device.clientIp ? <Text code>{device.clientIp}</Text> : null}
-                      <Tag color={status.color}>{status.label}</Tag>
+                      <Tag color={status.color}>{t(status.labelKey)}</Tag>
                     </Space>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Last seen {new Date(device.lastSeen).toLocaleTimeString()}
+                      {t("notify.center.lastSeen", {
+                        time: new Date(device.lastSeen).toLocaleTimeString(),
+                      })}
                     </Text>
                   </Space>
                 </button>
@@ -353,7 +356,7 @@ export default function AvailabilityCheckNotificationCenter() {
               onClick={openCertificatePage}
               data-testid="availability-check-notification-open"
             >
-              Open Availability Check
+              {t("notify.center.open")}
             </Button>
           </Space>
         </Card>
@@ -366,7 +369,12 @@ export default function AvailabilityCheckNotificationCenter() {
             onClick={handleBubbleClick}
             data-testid="availability-check-notification-bubble"
             className="availability-check-notification-bubble"
-            aria-label={`${devices.length} availability check notification${devices.length === 1 ? "" : "s"}`}
+            aria-label={t(
+              devices.length === 1
+                ? "notify.center.bubbleAriaOne"
+                : "notify.center.bubbleAriaOther",
+              { count: devices.length },
+            )}
             style={{
               width: NOTIFICATION_BUBBLE_SIZE,
               height: NOTIFICATION_BUBBLE_SIZE,

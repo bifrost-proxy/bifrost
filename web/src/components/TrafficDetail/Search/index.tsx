@@ -3,6 +3,7 @@ import { Input, Space, Typography } from 'antd';
 import { CloseOutlined, UpOutlined, DownOutlined } from '@ant-design/icons';
 import type { InputRef } from 'antd';
 import type { SessionTargetSearchState } from '../../../types';
+import { useI18n } from '../../../i18n';
 
 interface SearchProps {
   value: SessionTargetSearchState;
@@ -10,6 +11,7 @@ interface SearchProps {
 }
 
 export const Search = ({ value: searchValue, onSearch }: SearchProps) => {
+  const { t: tr } = useI18n();
   const inputRef = useRef<InputRef>(null);
   const { value, show, total, next = 1 } = searchValue;
 
@@ -65,7 +67,7 @@ export const Search = ({ value: searchValue, onSearch }: SearchProps) => {
       <Input
         ref={inputRef}
         size="small"
-        placeholder="Search..."
+        placeholder={tr("trafficDetail.search.placeholder")}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onPressEnter={onPressEnter}

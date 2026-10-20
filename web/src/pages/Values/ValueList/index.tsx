@@ -15,14 +15,15 @@ import { useValuesStore } from "../../../stores/useValuesStore";
 import { ImportBifrostButton } from "../../../components/ImportBifrostButton";
 import { useExportBifrost } from "../../../hooks/useExportBifrost";
 import { copyToClipboard } from "../../../utils/clipboard";
+import { useI18n, type TFunction } from "../../../i18n";
 import styles from "./index.module.css";
 
 type ValueSortMode = "created_desc" | "updated_desc" | "name_asc";
 
-const valueSortOptions = [
-  { label: "Newest", value: "created_desc" },
-  { label: "Updated", value: "updated_desc" },
-  { label: "Name", value: "name_asc" },
+const getValueSortOptions = (t: TFunction) => [
+  { label: t("values.list.sortNewest"), value: "created_desc" },
+  { label: t("values.list.sortUpdated"), value: "updated_desc" },
+  { label: t("values.list.sortName"), value: "name_asc" },
 ];
 
 function getValueItemId(name: string) {
@@ -30,6 +31,8 @@ function getValueItemId(name: string) {
 }
 
 export default function ValueList() {
+  const { t } = useI18n();
+  const valueSortOptions = useMemo(() => getValueSortOptions(t), [t]);
   const {
     values,
     selectedValueName,
@@ -83,12 +86,12 @@ export default function ValueList() {
 
   const handleCreate = async () => {
     if (!newValueName.trim()) {
-      message.error("Value name is required");
+      message.error(t("values.list.nameRequired"));
       return;
     }
     const success = await createValue(newValueName.trim(), "");
     if (success) {
-      message.success("Value created");
+      message.success(t("values.list.created"));
       setCreateModalVisible(false);
       setNewValueName("");
     }
@@ -96,15 +99,15 @@ export default function ValueList() {
 
   const handleDelete = async (name: string) => {
     Modal.confirm({
-      title: "Delete Value",
-      content: `Are you sure to delete "${name}"?`,
-      okText: "Delete",
+      title: t("values.deleteTitle"),
+      content: t("values.deleteContent", { name }),
+      okText: t("common.delete"),
       okType: "danger",
-      cancelText: "Cancel",
+      cancelText: t("common.cancel"),
       onOk: async () => {
         const success = await deleteValue(name);
         if (success) {
-          message.success("Value deleted");
+          message.success(t("values.deleted"));
         }
       },
     });
@@ -117,11 +120,11 @@ export default function ValueList() {
       return;
     }
     Modal.confirm({
-      title: "Delete Values",
-      content: `Are you sure to delete ${names.length} values?`,
-      okText: "Delete",
+      title: t("values.list.bulkDeleteTitle"),
+      content: t("values.list.bulkDeleteContent", { count: names.length }),
+      okText: t("common.delete"),
       okType: "danger",
-      cancelText: "Cancel",
+      cancelText: t("common.cancel"),
       onOk: async () => {
         let successCount = 0;
         for (const name of names) {
@@ -130,7 +133,12 @@ export default function ValueList() {
         }
         if (successCount > 0) {
           message.success(
-            `${successCount} value${successCount > 1 ? "s" : ""} deleted`,
+            t(
+              successCount > 1
+                ? "values.list.bulkDeletedOther"
+                : "values.list.bulkDeletedOne",
+              { count: successCount },
+            ),
           );
           setSelectedValues([]);
         }
@@ -146,7 +154,7 @@ export default function ValueList() {
     }
     const success = await renameValue(renameTarget, newName.trim());
     if (success) {
-      message.success("Value renamed");
+      message.success(t("values.list.renamed"));
       setRenameModalVisible(false);
       setRenameTarget(null);
       setNewName("");
@@ -156,9 +164,9 @@ export default function ValueList() {
   const handleCopy = async (name: string, value: string) => {
     try {
       await copyToClipboard(value);
-      message.success(`Copied "${name}" to clipboard`);
+      message.success(t("values.list.copiedToClipboard", { name }));
     } catch {
-      message.error("Failed to copy");
+      message.error(t("values.copyFailed"));
     }
   };
 
@@ -222,13 +230,13 @@ export default function ValueList() {
       {
         key: "copy",
         icon: <CopyOutlined />,
-        label: "Copy Value",
+        label: t("values.list.menuCopyValue"),
         onClick: () => handleCopy(name, value),
       },
       {
         key: "rename",
         icon: <EditOutlined />,
-        label: "Rename",
+        label: t("common.rename"),
         onClick: () => {
           setRenameTarget(name);
           setNewName(name);
@@ -241,7 +249,10 @@ export default function ValueList() {
       {
         key: "export",
         icon: <ExportOutlined />,
-        label: `Export${bulkNames.length > 1 ? ` (${bulkNames.length})` : ""}`,
+        label:
+          bulkNames.length > 1
+            ? t("values.list.menuExportCount", { count: bulkNames.length })
+            : t("common.export"),
         onClick: () => handleExport(bulkNames),
       },
       {
@@ -250,7 +261,10 @@ export default function ValueList() {
       {
         key: "delete",
         icon: <DeleteOutlined />,
-        label: `Delete${bulkNames.length > 1 ? ` (${bulkNames.length})` : ""}`,
+        label:
+          bulkNames.length > 1
+            ? t("values.list.menuDeleteCount", { count: bulkNames.length })
+            : t("common.delete"),
         danger: true,
         onClick: () => handleBulkDelete(bulkNames),
       },
@@ -313,9 +327,9 @@ export default function ValueList() {
   return (
     <div className={styles.container} data-testid="values-list">
       <div className={styles.header}>
-        <span className={styles.headerTitle}>Values</span>
+        <span className={styles.headerTitle}>{t("values.list.title")}</span>
         <div className={styles.headerActions}>
-          <Tooltip title="New Value">
+          <Tooltip title={t("values.list.newValue")}>
             <Button
               type="text"
               size="small"
@@ -324,7 +338,7 @@ export default function ValueList() {
               data-testid="value-new-button"
             />
           </Tooltip>
-          <Tooltip title="Refresh">
+          <Tooltip title={t("common.refresh")}>
             <Button
               type="text"
               size="small"
@@ -341,7 +355,7 @@ export default function ValueList() {
             size="small"
             testId="value-import-button"
           />
-          <Tooltip title="Export All">
+          <Tooltip title={t("values.list.exportAll")}>
             <Button
               type="text"
               size="small"
@@ -355,7 +369,7 @@ export default function ValueList() {
       <div className={styles.searchBox}>
         <Input
           size="small"
-          placeholder="Search values..."
+          placeholder={t("values.list.searchPlaceholder")}
           prefix={<SearchOutlined style={{ color: "#999" }} />}
           value={searchKeyword}
           onChange={(e) => setSearchKeyword(e.target.value)}
@@ -378,7 +392,7 @@ export default function ValueList() {
         className={styles.listContainer}
         tabIndex={0}
         role="listbox"
-        aria-label="Values list"
+        aria-label={t("values.list.ariaLabel")}
         aria-activedescendant={
           selectedValueName ? getValueItemId(selectedValueName) : undefined
         }
@@ -422,7 +436,7 @@ export default function ValueList() {
                       </span>
                       <div className={styles.itemMeta}>
                         {hasChanges && (
-                          <Tooltip title="Unsaved changes">
+                          <Tooltip title={t("values.list.unsavedChanges")}>
                             <span className={styles.unsavedDot} />
                           </Tooltip>
                         )}
@@ -451,7 +465,9 @@ export default function ValueList() {
             })}
             {filteredValues.length === 0 && !loading && (
               <div className={styles.empty}>
-                {searchKeyword ? "No matching values" : "No values yet"}
+                {searchKeyword
+                  ? t("values.list.emptyNoMatch")
+                  : t("values.list.emptyNoValues")}
               </div>
             )}
           </div>
@@ -459,22 +475,24 @@ export default function ValueList() {
       </div>
 
       <div className={styles.footer}>
-        <span className={styles.stats}>{values.length} values</span>
+        <span className={styles.stats}>
+          {t("values.list.stats", { count: values.length })}
+        </span>
       </div>
 
       <Modal
-        title="New Value"
+        title={t("values.list.newValue")}
         open={createModalVisible}
         onCancel={() => {
           setCreateModalVisible(false);
           setNewValueName("");
         }}
         onOk={handleCreate}
-        okText="Create"
-        cancelText="Cancel"
+        okText={t("common.create")}
+        cancelText={t("common.cancel")}
       >
         <Input
-          placeholder="Value name (e.g., api_key, auth_token)"
+          placeholder={t("values.list.namePlaceholder")}
           value={newValueName}
           onChange={(e) => setNewValueName(e.target.value)}
           onPressEnter={handleCreate}
@@ -483,7 +501,7 @@ export default function ValueList() {
       </Modal>
 
       <Modal
-        title="Rename Value"
+        title={t("values.list.renameTitle")}
         open={renameModalVisible}
         onCancel={() => {
           setRenameModalVisible(false);
@@ -491,11 +509,11 @@ export default function ValueList() {
           setNewName("");
         }}
         onOk={handleRename}
-        okText="Rename"
-        cancelText="Cancel"
+        okText={t("common.rename")}
+        cancelText={t("common.cancel")}
       >
         <Input
-          placeholder="New name"
+          placeholder={t("values.list.newNamePlaceholder")}
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onPressEnter={handleRename}

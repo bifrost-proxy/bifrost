@@ -28,6 +28,7 @@ import hljs from 'highlight.js/lib/core';
 import json from 'highlight.js/lib/languages/json';
 import '../../../../styles/hljs-github-theme.css';
 import { copyToClipboard } from '../../../../utils/clipboard';
+import { useI18n, type TranslationKey } from '../../../../i18n';
 
 hljs.registerLanguage('json', json);
 
@@ -61,6 +62,7 @@ const COLLAPSIBLE_MAX_LINES = 10;
 const INVISIBLE_CHARS_RE = /[\s\u200B-\u200D\u2060\u2063\uFEFF]/g;
 
 const CopyButton = memo(({ text }: { text: string }) => {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const { token } = theme.useToken();
   const handleCopy = useCallback(async () => {
@@ -71,7 +73,7 @@ const CopyButton = memo(({ text }: { text: string }) => {
     }
   }, [text]);
   return (
-    <Tooltip title={copied ? 'Copied!' : 'Copy'}>
+    <Tooltip title={copied ? t('trafficDetail.messages.copiedBang') : t('common.copy')}>
       <Button
         type="text"
         size="small"
@@ -125,15 +127,16 @@ const JsonBlock = memo(({ data }: { data: string }) => {
 });
 
 const CollapsibleContent = memo(({ text, title }: { text: string; title?: string }) => {
+  const { t } = useI18n();
   const [modalOpen, setModalOpen] = useState(false);
   const { token } = theme.useToken();
   const lines = useMemo(() => text.split('\n'), [text]);
   const needsTruncation = lines.length > COLLAPSIBLE_MAX_LINES;
   const previewText = needsTruncation ? lines.slice(0, COLLAPSIBLE_MAX_LINES).join('\n') : text;
-  const modalTitle = title ?? 'Full Content';
+  const modalTitle = title ?? t('trafficDetail.ai.fullContent');
 
   if (!text.trim()) {
-    return <Text type="secondary" italic style={{ fontSize: 12 }}>(empty)</Text>;
+    return <Text type="secondary" italic style={{ fontSize: 12 }}>{t('trafficDetail.ai.empty')}</Text>;
   }
 
   return (
@@ -166,7 +169,7 @@ const CollapsibleContent = memo(({ text, title }: { text: string; title?: string
             onClick={() => setModalOpen(true)}
             style={{ padding: 0, fontSize: 11, height: 'auto', marginTop: 2 }}
           >
-            Show all ({lines.length} lines, {formatCharCount(text.length)} chars)
+            {t('trafficDetail.ai.showAllLines', { lines: lines.length, chars: formatCharCount(text.length) })}
           </Button>
         )}
       </div>
@@ -174,7 +177,7 @@ const CollapsibleContent = memo(({ text, title }: { text: string; title?: string
         <Modal
           title={
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 24 }}>
-              <span>{modalTitle} ({lines.length} lines)</span>
+              <span>{t('trafficDetail.ai.titleWithLines', { title: modalTitle, lines: lines.length })}</span>
               <CopyButton text={text} />
             </div>
           }
@@ -283,6 +286,7 @@ const MetaRow = memo(({ label, value }: {
 });
 
 const ToolCallCard = memo(({ toolCall, index }: { toolCall: Msg; index: number }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const fn = toolCall.function as Msg | undefined;
@@ -320,7 +324,7 @@ const ToolCallCard = memo(({ toolCall, index }: { toolCall: Msg; index: number }
           <Tag style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>{toolType}</Tag>
         )}
         {!!requireLocal && (
-          <Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>local</Tag>
+          <Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>{t('trafficDetail.sse.local')}</Tag>
         )}
         {id && (
           <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace', opacity: 0.7, marginLeft: 'auto' }}>{id}</Text>
@@ -330,7 +334,7 @@ const ToolCallCard = memo(({ toolCall, index }: { toolCall: Msg; index: number }
         <div style={{ padding: '6px 10px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
             <SwapRightOutlined style={{ fontSize: 10, color: '#1677ff' }} />
-            <Text type="secondary" style={{ fontSize: 11 }}>Arguments</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.ai.arguments')}</Text>
           </div>
           <JsonBlock data={args} />
         </div>
@@ -340,6 +344,7 @@ const ToolCallCard = memo(({ toolCall, index }: { toolCall: Msg; index: number }
 });
 
 const TokenUsageSection = memo(({ usage }: { usage: Msg }) => {
+  const { t } = useI18n();
   const promptTokens = (usage.prompt_tokens as number) ?? (usage.input_tokens as number) ?? 0;
   const completionTokens = (usage.completion_tokens as number) ?? (usage.output_tokens as number) ?? 0;
   const totalTokens = (usage.total_tokens as number) ?? (promptTokens + completionTokens);
@@ -360,27 +365,27 @@ const TokenUsageSection = memo(({ usage }: { usage: Msg }) => {
   const rejectedPredictionTokens = completionDetails?.rejected_prediction_tokens as number | undefined;
 
   const items: Array<{ label: string; value: number; color: string }> = [
-    { label: 'Prompt', value: promptTokens, color: '#1677ff' },
-    { label: 'Completion', value: completionTokens, color: '#52c41a' },
+    { label: t('trafficDetail.sse.tokenPrompt'), value: promptTokens, color: '#1677ff' },
+    { label: t('trafficDetail.sse.tokenCompletion'), value: completionTokens, color: '#52c41a' },
   ];
 
-  const addIf = (label: string, val: number | undefined, color: string) => {
-    if (val && val > 0) items.push({ label, value: val, color });
+  const addIf = (labelKey: TranslationKey, val: number | undefined, color: string) => {
+    if (val && val > 0) items.push({ label: t(labelKey), value: val, color });
   };
-  addIf('Cached', cachedTokens, '#13c2c2');
-  addIf('Cache Creation', cacheCreationTokens, '#fa8c16');
-  addIf('Reasoning', reasoningTokens, '#722ed1');
-  addIf('Audio (In)', audioInputTokens, '#eb2f96');
-  addIf('Audio (Out)', audioOutputTokens, '#eb2f96');
-  addIf('Accepted Prediction', acceptedPredictionTokens, '#389e0d');
-  addIf('Rejected Prediction', rejectedPredictionTokens, '#cf1322');
+  addIf('trafficDetail.sse.tokenCached', cachedTokens, '#13c2c2');
+  addIf('trafficDetail.sse.tokenCacheCreation', cacheCreationTokens, '#fa8c16');
+  addIf('trafficDetail.ai.reasoning', reasoningTokens, '#722ed1');
+  addIf('trafficDetail.sse.tokenAudioIn', audioInputTokens, '#eb2f96');
+  addIf('trafficDetail.sse.tokenAudioOut', audioOutputTokens, '#eb2f96');
+  addIf('trafficDetail.sse.tokenAcceptedPrediction', acceptedPredictionTokens, '#389e0d');
+  addIf('trafficDetail.sse.tokenRejectedPrediction', rejectedPredictionTokens, '#cf1322');
 
   const { token: antToken } = theme.useToken();
 
   return (
     <SectionCard
       icon={<DashboardOutlined style={{ color: '#fa8c16', fontSize: 13 }} />}
-      title="Token Usage"
+      title={t('trafficDetail.sse.tokenUsage')}
       headerBg="rgba(250,140,22,0.06)"
       extra={
         <Space size={6}>
@@ -413,17 +418,18 @@ const TokenUsageSection = memo(({ usage }: { usage: Msg }) => {
 });
 
 const TimingSection = memo(({ timing }: { timing: Msg }) => {
+  const { t } = useI18n();
   const serverTime = (timing.server_processing_time as number) ?? (timing.gateway_server_processing_time as number) ?? 0;
   const firstToken = (timing.platform_first_token_timing as number) ?? (timing.first_sse_event_time as number) ?? 0;
 
   const rows: Array<{ label: string; value: number | undefined; color: string }> = [
-    { label: 'Server Processing', value: timing.server_processing_time as number | undefined, color: '#1677ff' },
-    { label: 'First Token', value: timing.platform_first_token_timing as number | undefined, color: '#52c41a' },
-    { label: 'First SSE Event', value: timing.first_sse_event_time as number | undefined, color: '#13c2c2' },
-    { label: 'Gateway Preprocess', value: timing.gateway_preprocess_timing as number | undefined, color: '#fa8c16' },
-    { label: 'Preprocess', value: timing.preprocess_timing as number | undefined, color: '#722ed1' },
-    { label: 'Middleware', value: timing.middleware_processing_time as number | undefined, color: '#eb2f96' },
-    { label: 'Queue', value: timing.queue_timing as number | undefined, color: '#8c8c8c' },
+    { label: t('trafficDetail.sse.timingServerProcessing'), value: timing.server_processing_time as number | undefined, color: '#1677ff' },
+    { label: t('trafficDetail.sse.timingFirstToken'), value: timing.platform_first_token_timing as number | undefined, color: '#52c41a' },
+    { label: t('trafficDetail.sse.timingFirstSseEvent'), value: timing.first_sse_event_time as number | undefined, color: '#13c2c2' },
+    { label: t('trafficDetail.sse.timingGatewayPreprocess'), value: timing.gateway_preprocess_timing as number | undefined, color: '#fa8c16' },
+    { label: t('trafficDetail.sse.timingPreprocess'), value: timing.preprocess_timing as number | undefined, color: '#722ed1' },
+    { label: t('trafficDetail.sse.timingMiddleware'), value: timing.middleware_processing_time as number | undefined, color: '#eb2f96' },
+    { label: t('trafficDetail.sse.timingQueue'), value: timing.queue_timing as number | undefined, color: '#8c8c8c' },
   ].filter(r => r.value !== undefined && r.value !== null && (r.value as number) > 0);
 
   const { token: antToken } = theme.useToken();
@@ -433,11 +439,11 @@ const TimingSection = memo(({ timing }: { timing: Msg }) => {
   return (
     <SectionCard
       icon={<ClockCircleOutlined style={{ color: '#13c2c2', fontSize: 13 }} />}
-      title="Timing"
+      title={t('trafficDetail.sse.timing')}
       headerBg="rgba(19,194,194,0.06)"
       extra={
         <Space size={8}>
-          {serverTime > 0 && <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>Total: {formatMs(serverTime)}</Tag>}
+          {serverTime > 0 && <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>{t('trafficDetail.sse.total', { value: formatMs(serverTime) })}</Tag>}
           {firstToken > 0 && <Tag color="green" style={{ margin: 0, fontSize: 11 }}>TTFT: {formatMs(firstToken)}</Tag>}
         </Space>
       }
@@ -463,13 +469,13 @@ const TimingSection = memo(({ timing }: { timing: Msg }) => {
       })}
       {providerModel && (
         <div style={{ padding: '4px 0' }}>
-          <Text type="secondary" style={{ fontSize: 11 }}>Provider: </Text>
+          <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.provider')} </Text>
           <Text style={{ fontSize: 11, fontFamily: 'monospace' }}>{providerModel}</Text>
         </div>
       )}
       {configName && (
         <div style={{ padding: '2px 0' }}>
-          <Text type="secondary" style={{ fontSize: 11 }}>Config: </Text>
+          <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.config')} </Text>
           <Tag style={{ margin: 0, fontSize: 10 }}>{configName}</Tag>
         </div>
       )}
@@ -768,7 +774,9 @@ const parseDouBaoBody = (obj: Msg): DouBaoData => {
   };
 };
 
-const ErrorBlock = memo(({ error }: { error: Msg }) => (
+const ErrorBlock = memo(({ error }: { error: Msg }) => {
+  const { t } = useI18n();
+  return (
   <div
     style={{
       padding: '6px 8px',
@@ -779,19 +787,21 @@ const ErrorBlock = memo(({ error }: { error: Msg }) => (
   >
     <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
       <CloseCircleOutlined style={{ fontSize: 11, color: '#ff4d4f' }} />
-      <Text strong style={{ fontSize: 11, color: '#ff4d4f' }}>Error</Text>
+      <Text strong style={{ fontSize: 11, color: '#ff4d4f' }}>{t('common.error')}</Text>
     </div>
     <JsonBlock data={JSON.stringify(error, null, 2)} />
   </div>
-));
+  );
+});
 
 const AnnotationsBlock = memo(({ annotations }: { annotations: Msg[] }) => {
+  const { t } = useI18n();
   if (annotations.length === 0) return null;
   return (
     <div style={{ padding: '4px 0' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
         <TagOutlined style={{ fontSize: 11, color: '#8c8c8c' }} />
-        <Text type="secondary" style={{ fontSize: 11 }}>Annotations ({annotations.length})</Text>
+        <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.annotations', { count: annotations.length })}</Text>
       </div>
       <JsonBlock data={JSON.stringify(annotations, null, 2)} />
     </div>
@@ -811,6 +821,7 @@ const LogprobsBlock = memo(({ logprobs }: { logprobs: Msg }) => (
 ));
 
 const OpenAiResponsePanel = memo(({ data, rawBody }: { data: OpenAiData; rawBody: string }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const hasModelInfo = data.model || data.id || data.created || data.systemFingerprint || data.serviceTier;
 
@@ -821,7 +832,7 @@ const OpenAiResponsePanel = memo(({ data, rawBody }: { data: OpenAiData; rawBody
       {data.incompleteDetails && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0' }}>
           <ExclamationCircleOutlined style={{ color: '#fa8c16', fontSize: 12 }} />
-          <Text type="secondary" style={{ fontSize: 12 }}>Incomplete:</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{t('trafficDetail.sse.incomplete')}</Text>
           <Text style={{ fontSize: 12 }}>{JSON.stringify(data.incompleteDetails)}</Text>
         </div>
       )}
@@ -829,7 +840,7 @@ const OpenAiResponsePanel = memo(({ data, rawBody }: { data: OpenAiData; rawBody
       {hasModelInfo && (
         <SectionCard
           icon={<RobotOutlined style={{ color: '#1677ff', fontSize: 13 }} />}
-          title={data.mode === 'responses' ? 'Response Info' : 'Model Info'}
+          title={data.mode === 'responses' ? t('trafficDetail.sse.responseInfo') : t('trafficDetail.sse.modelInfo')}
           headerBg="rgba(22,119,255,0.06)"
           extra={
             <Space size={4}>
@@ -847,11 +858,11 @@ const OpenAiResponsePanel = memo(({ data, rawBody }: { data: OpenAiData; rawBody
             </Space>
           }
         >
-          {data.model && <MetaRow label="Model" value={<Text strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{data.model}</Text>} />}
+          {data.model && <MetaRow label={t('trafficDetail.ai.model')} value={<Text strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{data.model}</Text>} />}
           {data.id && <MetaRow label="ID" value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{data.id}</Text>} />}
           {data.created !== undefined && (
             <MetaRow
-              label="Created"
+              label={t('trafficDetail.sse.created')}
               value={
                 <Space size={4}>
                   <CalendarOutlined style={{ fontSize: 10, color: '#8c8c8c' }} />
@@ -860,8 +871,8 @@ const OpenAiResponsePanel = memo(({ data, rawBody }: { data: OpenAiData; rawBody
               }
             />
           )}
-          {data.systemFingerprint && <MetaRow label="Fingerprint" value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{data.systemFingerprint}</Text>} />}
-          {data.serviceTier && <MetaRow label="Service Tier" value={<Tag style={{ margin: 0, fontSize: 10 }}>{data.serviceTier}</Tag>} />}
+          {data.systemFingerprint && <MetaRow label={t('trafficDetail.sse.fingerprint')} value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{data.systemFingerprint}</Text>} />}
+          {data.serviceTier && <MetaRow label={t('trafficDetail.ai.paramLabel.serviceTier')} value={<Tag style={{ margin: 0, fontSize: 10 }}>{data.serviceTier}</Tag>} />}
         </SectionCard>
       )}
 
@@ -884,17 +895,17 @@ const OpenAiResponsePanel = memo(({ data, rawBody }: { data: OpenAiData; rawBody
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
                 <BulbOutlined style={{ fontSize: 11, color: '#722ed1' }} />
-                <Text type="secondary" style={{ fontSize: 11 }}>Reasoning Config</Text>
+                <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.reasoningConfig')}</Text>
               </div>
               {effort && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>Effort:</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.effort')}</Text>
                   <Tag style={{ margin: 0, fontSize: 10 }}>{effort}</Tag>
                 </div>
               )}
               {summary && (
                 <div style={{ marginTop: 4 }}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>Summary:</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.summary')}</Text>
                   <Paragraph style={{ margin: 0, fontSize: 12, marginTop: 2 }}>{summary}</Paragraph>
                 </div>
               )}
@@ -911,7 +922,7 @@ const OpenAiResponsePanel = memo(({ data, rawBody }: { data: OpenAiData; rawBody
         size="small"
         items={[{
           key: 'raw',
-          label: <Text type="secondary" style={{ fontSize: 11 }}>Raw JSON</Text>,
+          label: <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.rawJson')}</Text>,
           children: <JsonBlock data={rawBody} />,
         }]}
         style={{ backgroundColor: 'transparent', borderColor: token.colorBorderSecondary }}
@@ -925,6 +936,7 @@ const ChoicePanel = memo(({ choice, totalChoices, isResponses }: {
   totalChoices: number;
   isResponses?: boolean;
 }) => {
+  const { t } = useI18n();
   const hasContent = choice.content.trim().length > 0;
   const hasReasoning = choice.reasoningContent.replace(INVISIBLE_CHARS_RE, '').length > 0;
   const hasRefusal = choice.refusal.trim().length > 0;
@@ -942,8 +954,10 @@ const ChoicePanel = memo(({ choice, totalChoices, isResponses }: {
     : 'default';
 
   const title = totalChoices > 1
-    ? (isResponses ? `Output #${choice.index}` : `Choice #${choice.index}`)
-    : 'Assistant Output';
+    ? (isResponses
+      ? t('trafficDetail.sse.outputN', { index: choice.index })
+      : t('trafficDetail.sse.choiceN', { index: choice.index }))
+    : t('trafficDetail.sse.assistantOutput');
 
   return (
     <SectionCard
@@ -971,7 +985,7 @@ const ChoicePanel = memo(({ choice, totalChoices, isResponses }: {
         )}
 
         {hasContent && (
-          <CollapsibleContent text={choice.content} title="Assistant Content" />
+          <CollapsibleContent text={choice.content} title={t('trafficDetail.sse.assistantContent')} />
         )}
 
         {hasRefusal && (
@@ -987,7 +1001,7 @@ const ChoicePanel = memo(({ choice, totalChoices, isResponses }: {
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <ToolOutlined style={{ fontSize: 12, color: '#fa8c16' }} />
               <Text strong style={{ fontSize: 12, color: '#fa8c16' }}>
-                Tool Calls ({choice.toolCalls.length})
+                {t('trafficDetail.sse.toolCallsCount', { count: choice.toolCalls.length })}
               </Text>
             </div>
             {choice.toolCalls.map((tc, i) => (
@@ -1001,14 +1015,16 @@ const ChoicePanel = memo(({ choice, totalChoices, isResponses }: {
         {hasLogprobs && <LogprobsBlock logprobs={choice.logprobs!} />}
 
         {!hasContent && !hasReasoning && !hasRefusal && !hasToolCalls && !hasFunctionCall && (
-          <Text type="secondary" italic style={{ fontSize: 12 }}>(empty response)</Text>
+          <Text type="secondary" italic style={{ fontSize: 12 }}>{t('trafficDetail.sse.emptyResponse')}</Text>
         )}
       </div>
     </SectionCard>
   );
 });
 
-const ReasoningBlock = memo(({ text }: { text: string }) => (
+const ReasoningBlock = memo(({ text }: { text: string }) => {
+  const { t } = useI18n();
+  return (
   <div
     style={{
       padding: '6px 8px',
@@ -1019,16 +1035,19 @@ const ReasoningBlock = memo(({ text }: { text: string }) => (
   >
     <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
       <BulbOutlined style={{ fontSize: 11, color: '#722ed1' }} />
-      <Text type="secondary" style={{ fontSize: 11 }}>Reasoning</Text>
+      <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.ai.reasoning')}</Text>
       <Tag style={{ margin: 0, fontSize: 10, fontFamily: 'monospace' }}>
         {formatCharCount(text.length)}
       </Tag>
     </div>
-    <CollapsibleContent text={text} title="Reasoning Content" />
+    <CollapsibleContent text={text} title={t('trafficDetail.sse.reasoningContent')} />
   </div>
-));
+  );
+});
 
-const RefusalBlock = memo(({ text }: { text: string }) => (
+const RefusalBlock = memo(({ text }: { text: string }) => {
+  const { t } = useI18n();
+  return (
   <div
     style={{
       padding: '6px 8px',
@@ -1039,13 +1058,15 @@ const RefusalBlock = memo(({ text }: { text: string }) => (
   >
     <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
       <WarningOutlined style={{ fontSize: 11, color: '#ff4d4f' }} />
-      <Text type="secondary" style={{ fontSize: 11 }}>Refusal</Text>
+      <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.ai.refusal')}</Text>
     </div>
     <Text style={{ fontSize: 12 }}>{text}</Text>
   </div>
-));
+  );
+});
 
 const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: string }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const model = typeof (data.metadata as Msg)?.model === 'string' ? (data.metadata as Msg).model as string : undefined;
   const sessionId = typeof (data.metadata as Msg)?.session_id === 'string' ? (data.metadata as Msg).session_id as string : undefined;
@@ -1071,16 +1092,16 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
       {data.metadata && (
         <SectionCard
           icon={<RobotOutlined style={{ color: '#1677ff', fontSize: 13 }} />}
-          title="Model Info"
+          title={t('trafficDetail.sse.modelInfo')}
           headerBg="rgba(22,119,255,0.06)"
           extra={data.agentName ? <Tag style={{ margin: 0, fontSize: 10 }}>{data.agentName}</Tag> : undefined}
         >
-          {model && <MetaRow label="Model" value={<Text strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{model}</Text>} />}
+          {model && <MetaRow label={t('trafficDetail.ai.model')} value={<Text strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{model}</Text>} />}
           {metaId && <MetaRow label="ID" value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{metaId}</Text>} />}
-          {sessionId && <MetaRow label="Session" value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{sessionId}</Text>} />}
-          {data.agentType && <MetaRow label="Agent Type" value={<Tag style={{ margin: 0, fontSize: 10 }}>{data.agentType}</Tag>} />}
+          {sessionId && <MetaRow label={t('trafficDetail.sse.session')} value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{sessionId}</Text>} />}
+          {data.agentType && <MetaRow label={t('trafficDetail.sse.agentType')} value={<Tag style={{ margin: 0, fontSize: 10 }}>{data.agentType}</Tag>} />}
           {typeof metaConfig === 'string' && metaConfig && (
-            <MetaRow label="Config" value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{metaConfig}</Text>} />
+            <MetaRow label={t('trafficDetail.sse.configLabel')} value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{metaConfig}</Text>} />
           )}
         </SectionCard>
       )}
@@ -1094,18 +1115,18 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
       {hasThought && (
         <SectionCard
           icon={<BulbOutlined style={{ color: '#722ed1', fontSize: 13 }} />}
-          title="Thought"
+          title={t('trafficDetail.sse.thought')}
           headerBg="rgba(114,46,209,0.06)"
           extra={<Tag style={{ margin: 0, fontSize: 10, fontFamily: 'monospace' }}>{formatCharCount(data.thought.length)}</Tag>}
         >
-          <CollapsibleContent text={data.thought} title="Thought Content" />
+          <CollapsibleContent text={data.thought} title={t('trafficDetail.sse.thoughtContent')} />
         </SectionCard>
       )}
 
       {hasContent && (
         <SectionCard
           icon={<RobotOutlined style={{ color: '#52c41a', fontSize: 13 }} />}
-          title="Assistant Output"
+          title={t('trafficDetail.sse.assistantOutput')}
           headerBg="rgba(82,196,26,0.06)"
           extra={
             <Space size={6}>
@@ -1118,14 +1139,14 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
             </Space>
           }
         >
-          <CollapsibleContent text={data.content} title="Assistant Content" />
+          <CollapsibleContent text={data.content} title={t('trafficDetail.sse.assistantContent')} />
         </SectionCard>
       )}
 
       {hasToolCalls && (
         <SectionCard
           icon={<ToolOutlined style={{ color: '#fa8c16', fontSize: 13 }} />}
-          title="Tool Calls"
+          title={t('trafficDetail.sse.toolCalls')}
           headerBg="rgba(250,140,22,0.06)"
           extra={<Tag color="orange" style={{ margin: 0, fontSize: 11 }}>{data.toolCalls.length}</Tag>}
         >
@@ -1143,9 +1164,9 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
             ? <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 12 }} />
             : <FlagOutlined style={{ color: '#8c8c8c', fontSize: 12 }} />
           }
-          <Text type="secondary" style={{ fontSize: 12 }}>Turn Completion:</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{t('trafficDetail.sse.turnCompletion')}</Text>
           <Tag color={taskCompletion ? 'green' : 'default'} style={{ margin: 0, fontSize: 11 }}>
-            {taskCompletion ? 'Task Complete' : 'Pending'}
+            {taskCompletion ? t('trafficDetail.sse.taskComplete') : t('trafficDetail.sse.pending')}
           </Tag>
         </div>
       )}
@@ -1153,7 +1174,7 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
       {data.done && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0' }}>
           <CheckCircleOutlined style={{ color: doneWith === 'end' ? '#52c41a' : '#8c8c8c', fontSize: 12 }} />
-          <Text type="secondary" style={{ fontSize: 12 }}>Done:</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{t('trafficDetail.sse.done')}</Text>
           {doneWith && <Tag color={doneWith === 'end' ? 'green' : 'default'} style={{ margin: 0, fontSize: 11 }}>{doneWith}</Tag>}
           {doneMessage && <Text type="secondary" style={{ fontSize: 11 }}>{doneMessage}</Text>}
         </div>
@@ -1162,7 +1183,7 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
       {data.requiredContexts.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', flexWrap: 'wrap' }}>
           <InfoCircleOutlined style={{ color: '#8c8c8c', fontSize: 12 }} />
-          <Text type="secondary" style={{ fontSize: 12 }}>Required Contexts:</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{t('trafficDetail.sse.requiredContexts')}</Text>
           {data.requiredContexts.map((ctx, i) => (
             <Tag key={i} style={{ margin: 0, fontSize: 11 }}>{ctx}</Tag>
           ))}
@@ -1177,7 +1198,7 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
             label: (
               <Space size={6}>
                 <ThunderboltOutlined style={{ color: '#8c8c8c' }} />
-                <Text type="secondary" style={{ fontSize: 11 }}>Progress Notices ({data.progressNotices.length})</Text>
+                <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.progressNotices', { count: data.progressNotices.length })}</Text>
               </Space>
             ),
             children: (
@@ -1196,7 +1217,7 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
         size="small"
         items={[{
           key: 'raw',
-          label: <Text type="secondary" style={{ fontSize: 11 }}>Raw JSON</Text>,
+          label: <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.rawJson')}</Text>,
           children: <JsonBlock data={rawBody} />,
         }]}
         style={{ backgroundColor: 'transparent', borderColor: token.colorBorderSecondary }}
@@ -1206,6 +1227,7 @@ const TraeResponsePanel = memo(({ data, rawBody }: { data: TraeData; rawBody: st
 });
 
 const DouBaoResponsePanel = memo(({ data, rawBody }: { data: DouBaoData; rawBody: string }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const hasContent = data.content.trim().length > 0;
   const hasThinking = data.thinkingSteps.length > 0;
@@ -1216,16 +1238,16 @@ const DouBaoResponsePanel = memo(({ data, rawBody }: { data: DouBaoData; rawBody
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '8px 4px' }}>
       <SectionCard
         icon={<RobotOutlined style={{ color: '#1677ff', fontSize: 13 }} />}
-        title="Model Info"
+        title={t('trafficDetail.sse.modelInfo')}
         headerBg="rgba(22,119,255,0.06)"
         extra={data.agentName ? <Tag style={{ margin: 0, fontSize: 10 }}>{data.agentName}</Tag> : undefined}
       >
-        {data.modelType && <MetaRow label="Model Type" value={<Text strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{data.modelType}</Text>} />}
-        {data.conversationId && <MetaRow label="Conversation" value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{data.conversationId}</Text>} />}
-        {data.messageId && <MetaRow label="Message ID" value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{data.messageId}</Text>} />}
-        <MetaRow label="Deep Thinking" value={
+        {data.modelType && <MetaRow label={t('trafficDetail.sse.modelType')} value={<Text strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{data.modelType}</Text>} />}
+        {data.conversationId && <MetaRow label={t('trafficDetail.ai.conversation')} value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{data.conversationId}</Text>} />}
+        {data.messageId && <MetaRow label={t('trafficDetail.sse.messageId')} value={<Text style={{ fontFamily: 'monospace', fontSize: 11, opacity: 0.8 }}>{data.messageId}</Text>} />}
+        <MetaRow label={t('trafficDetail.sse.deepThinking')} value={
           <Tag color={data.isDeepThinking ? 'purple' : 'default'} style={{ margin: 0, fontSize: 10 }}>
-            {data.isDeepThinking ? 'Enabled' : 'Disabled'}
+            {data.isDeepThinking ? t('common.enabled') : t('common.disabled')}
           </Tag>
         } />
       </SectionCard>
@@ -1233,9 +1255,9 @@ const DouBaoResponsePanel = memo(({ data, rawBody }: { data: DouBaoData; rawBody
       {hasThinking && (
         <SectionCard
           icon={<BulbOutlined style={{ color: '#722ed1', fontSize: 13 }} />}
-          title={data.thinkingFinishTitle || data.thinkingTitle || 'Thinking'}
+          title={data.thinkingFinishTitle || data.thinkingTitle || t('trafficDetail.sse.thinking')}
           headerBg="rgba(114,46,209,0.06)"
-          extra={<Tag style={{ margin: 0, fontSize: 10, fontFamily: 'monospace' }}>{data.thinkingSteps.length} steps</Tag>}
+          extra={<Tag style={{ margin: 0, fontSize: 10, fontFamily: 'monospace' }}>{t('trafficDetail.sse.steps', { count: data.thinkingSteps.length })}</Tag>}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {data.thinkingSteps.map((step, i) => (
@@ -1258,7 +1280,7 @@ const DouBaoResponsePanel = memo(({ data, rawBody }: { data: DouBaoData; rawBody
       {hasSearch && (
         <SectionCard
           icon={<SearchOutlined style={{ color: '#13c2c2', fontSize: 13 }} />}
-          title="Search Queries"
+          title={t('trafficDetail.sse.searchQueries')}
           headerBg="rgba(19,194,194,0.06)"
           extra={<Tag color="cyan" style={{ margin: 0, fontSize: 10 }}>{data.searchQueries.length}</Tag>}
         >
@@ -1276,7 +1298,7 @@ const DouBaoResponsePanel = memo(({ data, rawBody }: { data: DouBaoData; rawBody
       {hasContent && (
         <SectionCard
           icon={<CommentOutlined style={{ color: '#52c41a', fontSize: 13 }} />}
-          title="Assistant Output"
+          title={t('trafficDetail.sse.assistantOutput')}
           headerBg="rgba(82,196,26,0.06)"
           extra={
             <Space size={6}>
@@ -1289,14 +1311,14 @@ const DouBaoResponsePanel = memo(({ data, rawBody }: { data: DouBaoData; rawBody
             </Space>
           }
         >
-          <CollapsibleContent text={data.content} title="Assistant Content" />
+          <CollapsibleContent text={data.content} title={t('trafficDetail.sse.assistantContent')} />
         </SectionCard>
       )}
 
       {hasBrief && !hasContent && (
         <SectionCard
           icon={<CommentOutlined style={{ color: '#52c41a', fontSize: 13 }} />}
-          title="Brief"
+          title={t('trafficDetail.sse.brief')}
           headerBg="rgba(82,196,26,0.06)"
         >
           <Text style={{ fontSize: 12 }}>{data.brief}</Text>
@@ -1306,7 +1328,7 @@ const DouBaoResponsePanel = memo(({ data, rawBody }: { data: DouBaoData; rawBody
       {data.finishType && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0' }}>
           <CheckCircleOutlined style={{ color: data.finishType === 'msg_finish' ? '#52c41a' : '#8c8c8c', fontSize: 12 }} />
-          <Text type="secondary" style={{ fontSize: 12 }}>Finish:</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{t('trafficDetail.sse.finish')}</Text>
           <Tag color={data.finishType === 'msg_finish' ? 'green' : 'default'} style={{ margin: 0, fontSize: 11 }}>{data.finishType}</Tag>
         </div>
       )}
@@ -1315,7 +1337,7 @@ const DouBaoResponsePanel = memo(({ data, rawBody }: { data: DouBaoData; rawBody
         size="small"
         items={[{
           key: 'raw',
-          label: <Text type="secondary" style={{ fontSize: 11 }}>Raw JSON</Text>,
+          label: <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.sse.rawJson')}</Text>,
           children: <JsonBlock data={rawBody} />,
         }]}
         style={{ backgroundColor: 'transparent', borderColor: token.colorBorderSecondary }}

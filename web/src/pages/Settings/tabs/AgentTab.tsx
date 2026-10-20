@@ -27,12 +27,27 @@ import type {
 } from "../../../api/imGateway";
 import LongTextModalField from "./agent/LongTextModalField";
 import ExternalCliPanel from "./imGateway/ExternalCliPanel";
+import { useI18n, type TFunction, type TranslationKey } from "../../../i18n";
 
 const { Text } = Typography;
+
+const AGENT_FIELD_LABEL_KEYS: Record<string, TranslationKey> = {
+  runner: "ai.agent.field.runner",
+  work_dir: "ai.agent.field.workDir",
+  base_instructions: "ai.agent.field.baseInstructions",
+  developer_instructions: "ai.agent.field.developerInstructions",
+  user_instructions: "ai.agent.field.userInstructions",
+};
+
+function agentFieldLabel(field: string, t: TFunction): string {
+  const key = AGENT_FIELD_LABEL_KEYS[field];
+  return key ? t(key) : field.replace(/_/g, " ");
+}
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function AgentTab() {
+  const { t } = useI18n();
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [runnerConfig, setRunnerConfig] =
@@ -49,11 +64,11 @@ export default function AgentTab() {
       const data = await get<AgentConfig>(`${BASE}/agent`);
       setConfig(data);
     } catch {
-      message.error("Failed to load agent config");
+      message.error(t("ai.agent.loadFailed"));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const fetchRunnerConfig = useCallback(async () => {
     try {
@@ -81,30 +96,37 @@ export default function AgentTab() {
     };
   }, []);
 
-  const patchField = useCallback(async (field: string, value: unknown) => {
-    pendingFieldValues.current[field] = value;
-    try {
-      const updated = await patch<AgentConfig>(`${BASE}/agent`, {
-        [field]: value,
-      });
-      setConfig((prev) => {
-        const next = { ...updated } as AgentConfig;
-        if (Object.is(pendingFieldValues.current[field], value)) {
-          delete pendingFieldValues.current[field];
-        }
-        for (const [pendingField, pendingValue] of Object.entries(
-          pendingFieldValues.current,
-        )) {
-          (next as unknown as Record<string, unknown>)[pendingField] =
-            pendingValue === null ? undefined : pendingValue;
-        }
-        return prev ? next : updated;
-      });
-      message.success(`Updated ${field.replace(/_/g, " ")}`);
-    } catch {
-      message.error(`Failed to update ${field.replace(/_/g, " ")}`);
-    }
-  }, []);
+  const patchField = useCallback(
+    async (field: string, value: unknown) => {
+      pendingFieldValues.current[field] = value;
+      try {
+        const updated = await patch<AgentConfig>(`${BASE}/agent`, {
+          [field]: value,
+        });
+        setConfig((prev) => {
+          const next = { ...updated } as AgentConfig;
+          if (Object.is(pendingFieldValues.current[field], value)) {
+            delete pendingFieldValues.current[field];
+          }
+          for (const [pendingField, pendingValue] of Object.entries(
+            pendingFieldValues.current,
+          )) {
+            (next as unknown as Record<string, unknown>)[pendingField] =
+              pendingValue === null ? undefined : pendingValue;
+          }
+          return prev ? next : updated;
+        });
+        message.success(
+          t("ai.agent.updated", { field: agentFieldLabel(field, t) }),
+        );
+      } catch {
+        message.error(
+          t("ai.agent.updateFailed", { field: agentFieldLabel(field, t) }),
+        );
+      }
+    },
+    [t],
+  );
 
   const debouncedPatch = useCallback(
     (field: string, value: unknown, delay = 600) => {
@@ -142,7 +164,7 @@ export default function AgentTab() {
         });
         setRunnerConfig(saved);
       } catch {
-        message.error("Failed to update default runner");
+        message.error(t("ai.agent.defaultRunnerUpdateFailed"));
       }
     }
   };
@@ -152,7 +174,7 @@ export default function AgentTab() {
   }
 
   if (!config) {
-    return <Empty description="Unable to load agent configuration" />;
+    return <Empty description={t("ai.agent.loadEmpty")} />;
   }
 
   return (
@@ -199,7 +221,7 @@ export default function AgentTab() {
               title={
                 <Space>
                   <RobotOutlined />
-                  <span>General</span>
+                  <span>{t("ai.agent.general")}</span>
                 </Space>
               }
               size="small"
@@ -210,14 +232,14 @@ export default function AgentTab() {
                   loading={loading}
                   size="small"
                 >
-                  Refresh
+                  {t("common.refresh")}
                 </Button>
               }
             >
               <Space direction="vertical" style={{ width: "100%" }}>
                 <Row justify="space-between" align="middle" gutter={16}>
                   <Col flex="none">
-                    <Text>Default Runner</Text>
+                    <Text>{t("ai.agent.defaultRunner")}</Text>
                   </Col>
                   <Col flex="auto" style={{ textAlign: "right" }}>
                     <Select
@@ -230,15 +252,14 @@ export default function AgentTab() {
                   </Col>
                 </Row>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Selects the default runner for IM agent messages. Custom
-                  runners are managed in this Agent Runners section.
+                  {t("ai.agent.defaultRunnerHelp")}
                 </Text>
 
                 <Divider style={{ margin: "12px 0" }} />
 
                 <Row justify="space-between" align="middle" gutter={16}>
                   <Col flex="none">
-                    <Text>Working Directory</Text>
+                    <Text>{t("ai.agent.workDir")}</Text>
                   </Col>
                   <Col flex="auto" style={{ textAlign: "right" }}>
                     <Input
@@ -253,45 +274,45 @@ export default function AgentTab() {
                   </Col>
                 </Row>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Default working directory passed to external runners
+                  {t("ai.agent.workDirHelp")}
                 </Text>
 
                 <Divider style={{ margin: "12px 0" }} />
 
                 <LongTextModalField
-                  label="Base Instructions / System Prompt"
+                  label={t("ai.agent.baseInstructions")}
                   value={config.base_instructions ?? ""}
                   onChange={(value) =>
                     handleStringChange("base_instructions", value)
                   }
-                  placeholder="Optional instructions for external runners"
-                  description="Sent only with the first message of a new external-runner session. When empty, Bifrost adds nothing."
+                  placeholder={t("ai.agent.baseInstructionsPlaceholder")}
+                  description={t("ai.agent.baseInstructionsHelp")}
                   testId="settings-agent-base-instructions"
                 />
 
                 <Divider style={{ margin: "12px 0" }} />
 
                 <LongTextModalField
-                  label="Developer Instructions"
+                  label={t("ai.agent.developerInstructions")}
                   value={config.developer_instructions || ""}
                   onChange={(value) =>
                     handleStringChange("developer_instructions", value)
                   }
-                  placeholder="Optional developer-level instructions"
-                  description="Sent with every external-runner message after the optional base instructions. Empty values add nothing."
+                  placeholder={t("ai.agent.developerInstructionsPlaceholder")}
+                  description={t("ai.agent.developerInstructionsHelp")}
                   testId="settings-agent-developer-instructions"
                 />
 
                 <Divider style={{ margin: "12px 0" }} />
 
                 <LongTextModalField
-                  label="User Instructions"
+                  label={t("ai.agent.userInstructions")}
                   value={config.user_instructions || ""}
                   onChange={(value) =>
                     handleStringChange("user_instructions", value)
                   }
-                  placeholder="Optional user-level instructions"
-                  description="Sent with every external-runner message after developer instructions. Empty values add nothing."
+                  placeholder={t("ai.agent.userInstructionsPlaceholder")}
+                  description={t("ai.agent.userInstructionsHelp")}
                   testId="settings-agent-user-instructions"
                 />
               </Space>

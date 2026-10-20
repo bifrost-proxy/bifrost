@@ -18,6 +18,7 @@ import { useThemeStore } from "../../../stores/useThemeStore";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { isDesktopShell } from "../../../runtime";
 import { registerDesktopMonacoCommands } from "../../../components/MonacoDesktopCommands";
+import { t as tNow, useI18n } from "../../../i18n";
 import styles from "./index.module.css";
 
 function detectLanguage(content: string): "json" | "xml" | "plaintext" {
@@ -75,6 +76,7 @@ function formatXML(content: string): string {
 }
 
 export default function ValueEditor() {
+  const { t } = useI18n();
   const {
     currentValue,
     selectedValueName,
@@ -124,7 +126,7 @@ export default function ValueEditor() {
     if (!saveRef.current) return;
     const success = await saveRef.current();
     if (success) {
-      message.success("Saved");
+      message.success(tNow("common.saved"));
     }
   }, []);
 
@@ -240,70 +242,71 @@ export default function ValueEditor() {
       editorRef.current.setValue(formatted);
       isSettingValueRef.current = false;
       handleChange();
-      message.success("Formatted");
+      message.success(t("values.editor.formatted"));
     }
-  }, [handleChange]);
+  }, [handleChange, t]);
 
   const handleCopy = useCallback(async () => {
     if (!editorRef.current) return;
     const content = editorRef.current.getValue();
     try {
       await copyToClipboard(content);
-      message.success("Copied");
+      message.success(t("common.copied"));
     } catch {
-      message.error("Failed to copy");
+      message.error(t("values.copyFailed"));
     }
-  }, []);
+  }, [t]);
 
   const handleDelete = useCallback(() => {
     if (!currentValue?.name) return;
     Modal.confirm({
-      title: "Delete Value",
-      content: `Are you sure to delete "${currentValue.name}"?`,
-      okText: "Delete",
+      title: t("values.deleteTitle"),
+      content: t("values.deleteContent", { name: currentValue.name }),
+      okText: t("common.delete"),
       okType: "danger",
-      cancelText: "Cancel",
+      cancelText: t("common.cancel"),
       onOk: async () => {
         const success = await deleteValue(currentValue.name);
         if (success) {
-          message.success("Value deleted");
+          message.success(tNow("values.deleted"));
         }
       },
     });
-  }, [currentValue, deleteValue]);
+  }, [currentValue, deleteValue, t]);
 
   if (!selectedValueName) {
     return (
       <div className={styles.empty}>
-        <Empty description="Select a value to edit" />
+        <Empty description={t("values.editor.selectToEdit")} />
         <div className={styles.usageGuide}>
-          <h4>What are Values?</h4>
-          <p>
-            Values are reusable variables that can be referenced in your rules.
-            Store sensitive data like API keys, tokens, or frequently used
-            content here.
-          </p>
-          <h4>How to Use</h4>
+          <h4>{t("values.editor.guideWhatTitle")}</h4>
+          <p>{t("values.editor.guideWhatBody")}</p>
+          <h4>{t("values.editor.guideHowTitle")}</h4>
           <ul>
             <li>
-              Create a value with a unique name (e.g., <code>api_key</code>)
+              {t("values.editor.guideHowCreatePrefix")}
+              <code>api_key</code>
+              {t("values.editor.guideHowCreateSuffix")}
             </li>
             <li>
-              Reference it in rules using <code>{"{name}"}</code> syntax
+              {t("values.editor.guideHowReferencePrefix")}
+              <code>{"{name}"}</code>
+              {t("values.editor.guideHowReferenceSuffix")}
             </li>
             <li>
-              Example: <code>{"{api_key}"}</code> will be replaced with the
-              actual value
+              {t("values.editor.guideHowExamplePrefix")}
+              <code>{"{api_key}"}</code>
+              {t("values.editor.guideHowExampleSuffix")}
             </li>
           </ul>
-          <h4>Tips</h4>
+          <h4>{t("values.editor.guideTipsTitle")}</h4>
           <ul>
-            <li>Use descriptive names for easy identification</li>
+            <li>{t("values.editor.guideTipNames")}</li>
+            <li>{t("values.editor.guideTipHighlight")}</li>
             <li>
-              JSON and XML content will be auto-detected and syntax highlighted
-            </li>
-            <li>
-              Press <code>Cmd+S</code> to save changes quickly
+              {t("values.editor.guideTipSavePrefix")}
+              <code>Cmd+S</code>
+              {t("values.editor.guideTipSaveSuffix")}
             </li>
           </ul>
         </div>
@@ -338,7 +341,7 @@ export default function ValueEditor() {
               onClick={handleFormat}
               data-testid="value-format-button"
             >
-              Format
+              {t("values.editor.format")}
             </Button>
           )}
           <Button
@@ -347,7 +350,7 @@ export default function ValueEditor() {
             onClick={handleCopy}
             data-testid="value-copy-button"
           >
-            Copy
+            {t("common.copy")}
           </Button>
           <Button
             type="primary"
@@ -358,7 +361,7 @@ export default function ValueEditor() {
             loading={saving}
             data-testid="value-save-button"
           >
-            Save
+            {t("common.save")}
           </Button>
           <Button
             size="small"
@@ -367,15 +370,16 @@ export default function ValueEditor() {
             onClick={handleDelete}
             data-testid="value-delete-button"
           >
-            Delete
+            {t("common.delete")}
           </Button>
         </Space>
       </div>
       <div className={styles.editorContainer} ref={setContainerElement} data-testid="value-editor-container" />
       <div className={styles.statusBar}>
         <span className={styles.hint}>
-          Use <code>{"{" + (currentValue?.name || "name") + "}"}</code> to
-          reference this value in rules
+          {t("values.editor.hintPrefix")}
+          <code>{"{" + (currentValue?.name || "name") + "}"}</code>
+          {t("values.editor.hintSuffix")}
         </span>
         <span className={styles.language}>
           {detectedLanguage.toUpperCase()}

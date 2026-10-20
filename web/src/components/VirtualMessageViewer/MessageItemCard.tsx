@@ -15,6 +15,7 @@ import '../../styles/hljs-github-theme.css';
 import type { MessageItem } from './types';
 import { highlightText } from './useMessageSearch';
 import { copyToClipboard } from '../../utils/clipboard';
+import { useI18n, type TFunction } from '../../i18n';
 
 hljs.registerLanguage('json', json);
 
@@ -62,14 +63,14 @@ const getDirectionColor = (direction: MessageItem['direction'], token: ReturnTyp
   }
 };
 
-const getDirectionLabel = (direction: MessageItem['direction']) => {
+const getDirectionLabel = (direction: MessageItem['direction'], t: TFunction) => {
   switch (direction) {
     case 'send':
-      return 'SENT';
+      return t('trafficDetail.viewer.dirSent');
     case 'receive':
-      return 'RECEIVED';
+      return t('trafficDetail.viewer.dirReceived');
     case 'event':
-      return 'EVENT';
+      return t('trafficDetail.viewer.dirEvent');
   }
 };
 
@@ -101,6 +102,7 @@ export function MessageItemCard({
   caseSensitive = false,
   onHeightChange,
 }: MessageItemCardProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -191,7 +193,7 @@ export function MessageItemCard({
             color={message.direction === 'send' ? 'blue' : message.direction === 'receive' ? 'green' : 'orange'}
             style={{ margin: 0, fontSize: 11, lineHeight: '18px', padding: '0 6px' }}
           >
-            {getDirectionLabel(message.direction)}
+            {getDirectionLabel(message.direction, t)}
           </Tag>
           <Tag
             color={getTypeColor(message.type)}
@@ -216,7 +218,7 @@ export function MessageItemCard({
           )}
         </Space>
         <Space size={4}>
-          <Tooltip title={copied ? 'Copied!' : 'Copy'}>
+          <Tooltip title={copied ? t('trafficDetail.messages.copiedBang') : t('common.copy')}>
             <Button
               type="text"
               size="small"
@@ -227,7 +229,7 @@ export function MessageItemCard({
             />
           </Tooltip>
           {formattedContent.split('\n').length > 8 && (
-            <Tooltip title={expanded ? 'Collapse' : 'Expand'}>
+            <Tooltip title={expanded ? t('trafficDetail.header.collapse') : t('trafficDetail.header.expand')}>
               <Button
                 type="text"
                 size="small"
@@ -298,7 +300,7 @@ export function MessageItemCard({
           )
         ) : (
           <Text type="secondary" style={{ fontSize: 12, fontStyle: 'italic' }}>
-            (empty data)
+            {t('trafficDetail.messages.emptyData')}
           </Text>
         )}
       </div>

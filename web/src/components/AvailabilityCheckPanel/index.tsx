@@ -16,14 +16,17 @@ import {
   createTrustProbeSession,
   getCertInfo,
   type CertInfo,
+  type DeviceStatus,
   type MobileDevice,
   type MobileDevicesResponse,
   type TrustProbeDevice,
+  type TrustProbeProxyAccessStatus,
   type TrustProbeSession,
 } from "../../api/cert";
 import { normalizeApiErrorMessage } from "../../api/client";
 import { pushService, type SettingsScope } from "../../services/pushService";
 import { buildBackendUrl } from "../../runtime";
+import { useI18n, type TFunction, type TranslationKey } from "../../i18n";
 
 const { Text, Paragraph } = Typography;
 
@@ -56,17 +59,33 @@ function mobileDeviceDisplayName(device: MobileDevice) {
   return device.name?.trim() || device.id;
 }
 
-function mobileDeviceCertificateLabel(device: MobileDevice): string {
+const DEVICE_STATUS_LABEL_KEYS: Record<DeviceStatus, TranslationKey> = {
+  connected: "notify.check.deviceConnected",
+  unauthorized: "notify.check.deviceUnauthorized",
+  offline: "notify.check.deviceOffline",
+  unsupported: "notify.check.deviceUnsupported",
+};
+
+const ACCESS_STATUS_LABEL_KEYS: Record<TrustProbeProxyAccessStatus, TranslationKey> = {
+  allowed: "notify.check.accessAllowed",
+  pending: "notify.check.accessPending",
+  denied: "notify.check.accessDenied",
+  unavailable: "notify.check.accessUnavailable",
+};
+
+function mobileDeviceCertificateLabel(device: MobileDevice, t: TFunction): string {
   switch (device.certificate_status?.state) {
     case "installed":
-      return device.certificate_status.trusted ? "CA trusted" : "CA installed";
+      return device.certificate_status.trusted
+        ? t("notify.check.caTrusted")
+        : t("notify.check.caInstalled");
     case "pushed_to_device":
-      return "CA pushed";
+      return t("notify.check.caPushed");
     case "not_installed":
-      return "CA not installed";
+      return t("notify.check.caNotInstalled");
     case "unknown":
     default:
-      return "CA unknown";
+      return t("notify.check.caUnknown");
   }
 }
 
@@ -85,19 +104,23 @@ function mobileDeviceCertificateColor(device: MobileDevice): string {
 }
 
 function DeviceStatusTags({ device }: { device: TrustProbeDevice }) {
+  const { t } = useI18n();
   return (
     <Space wrap size={[4, 4]}>
       <Tag color={device.opened ? "green" : "default"}>
-        Page {device.opened ? "opened" : "waiting"}
+        {device.opened ? t("notify.check.pageOpened") : t("notify.check.pageWaiting")}
       </Tag>
       <Tag color={device.networkReachable ? "green" : "default"}>
-        Network {device.networkReachable ? "ok" : "pending"}
+        {device.networkReachable ? t("notify.check.networkOk") : t("notify.check.networkPending")}
       </Tag>
       <Tag
         color={device.tlsTrusted ? "green" : device.status === "tls_failed" ? "red" : "default"}
       >
-        Browser HTTPS{" "}
-        {device.tlsTrusted ? "passed" : device.status === "tls_failed" ? "failed" : "pending"}
+        {device.tlsTrusted
+          ? t("notify.check.httpsPassed")
+          : device.status === "tls_failed"
+            ? t("notify.check.httpsFailed")
+            : t("notify.check.httpsPending")}
       </Tag>
       <Tag
         color={
@@ -108,7 +131,10 @@ function DeviceStatusTags({ device }: { device: TrustProbeDevice }) {
               : "default"
         }
       >
-        Access {device.proxyAccessStatus ?? "pending"}
+        {t(
+          ACCESS_STATUS_LABEL_KEYS[device.proxyAccessStatus ?? "pending"] ??
+            "notify.check.accessPending",
+        )}
       </Tag>
       <Tag
         color={
@@ -119,12 +145,11 @@ function DeviceStatusTags({ device }: { device: TrustProbeDevice }) {
               : "default"
         }
       >
-        Proxy{" "}
         {device.proxyConfigured
-          ? "configured"
+          ? t("notify.check.proxyConfigured")
           : device.proxyConfigurationMessage
-            ? "missing"
-            : "pending"}
+            ? t("notify.check.proxyMissing")
+            : t("notify.check.proxyPending")}
       </Tag>
     </Space>
   );
@@ -170,6 +195,7 @@ export default function AvailabilityCheckPanel({
   mobileInfo,
   testIdPrefix = "availability-check",
 }: AvailabilityCheckPanelProps) {
+  const { t } = useI18n();
   const [loadedCertInfo, setLoadedCertInfo] = useState<CertInfo | null>(null);
   const [trustProbeHost, setTrustProbeHost] = useState<string>("");
   const [trustProbeSession, setTrustProbeSession] = useState<TrustProbeSession | null>(null);
@@ -243,7 +269,7 @@ export default function AvailabilityCheckPanel({
     async (silent = false) => {
       if (!trustProbeHost) {
         if (!silent) {
-          message.warning("Select a local network address first.");
+          message.warning(t("notify.check.selectHostFirst"));
         }
         return;
       }
@@ -252,17 +278,17 @@ export default function AvailabilityCheckPanel({
         const session = await createTrustProbeSession(trustProbeHost);
         setTrustProbeSession(session);
         if (!silent) {
-          message.success("Availability check link and QR code are ready.");
+          message.success(t("notify.check.created"));
         }
       } catch (error) {
         if (!silent) {
-          message.error(normalizeApiErrorMessage(error, "Failed to create availability check"));
+          message.error(normalizeApiErrorMessage(error, t("notify.check.createFailed")));
         }
       } finally {
         setCreatingTrustProbe(false);
       }
     },
-    [trustProbeHost],
+    [trustProbeHost, t],
   );
 
   useEffect(() => {
@@ -293,11 +319,11 @@ export default function AvailabilityCheckPanel({
     }
     try {
       await navigator.clipboard.writeText(trustProbeSession.landingUrl);
-      message.success("Availability check link copied.");
+      message.success(t("notify.check.linkCopied"));
     } catch {
-      message.warning("Select and copy the link manually.");
+      message.warning(t("notify.check.copyManually"));
     }
-  }, [trustProbeSession?.landingUrl]);
+  }, [trustProbeSession?.landingUrl, t]);
 
   const qrSize = compact ? 112 : 180;
   const detectedMobileDevices = connectedMobileDevices(mobileInfo);
@@ -307,11 +333,9 @@ export default function AvailabilityCheckPanel({
       <Alert
         type="info"
         showIcon
-        message={compact ? "Use Availability Check when this device cannot use the proxy" : "Check whether a phone can use Bifrost"}
+        message={compact ? t("notify.check.compactTitle") : t("notify.check.title")}
         description={
-          compact
-            ? "Scan the QR code or open the link from the device. Bifrost will check proxy authorization, probe reachability, and HTTPS CA trust."
-            : "Share the link or scan the QR code from the target device. The page checks proxy authorization, probe port reachability, and a real HTTPS request signed by the current Bifrost CA."
+          compact ? t("notify.check.compactDesc") : t("notify.check.desc")
         }
       />
 
@@ -320,13 +344,13 @@ export default function AvailabilityCheckPanel({
           <Space direction="vertical" size={6} style={{ width: "100%" }}>
             <Space wrap size={[8, 4]}>
               <Text strong style={{ fontSize: 13 }}>
-                Devices to check
+                {t("notify.check.devicesToCheck")}
               </Text>
               <Tag color={detectedMobileDevices.length ? "blue" : "default"}>
                 {detectedMobileDevices.length}
               </Tag>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Connected phones are shown here before you scan the availability link.
+                {t("notify.check.devicesToCheckHint")}
               </Text>
             </Space>
             {detectedMobileDevices.length ? (
@@ -342,14 +366,17 @@ export default function AvailabilityCheckPanel({
                         <Tag color={device.platform === "ios" ? "purple" : "blue"}>
                           {device.platform === "ios" ? "iOS" : "Android"}
                         </Tag>
-                        <Tag color="green">{device.status}</Tag>
+                        <Tag color="green">
+                          {DEVICE_STATUS_LABEL_KEYS[device.status]
+                            ? t(DEVICE_STATUS_LABEL_KEYS[device.status])
+                            : device.status}
+                        </Tag>
                         <Tag color={mobileDeviceCertificateColor(device)}>
-                          {mobileDeviceCertificateLabel(device)}
+                          {mobileDeviceCertificateLabel(device, t)}
                         </Tag>
                       </Space>
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        Open the link or scan the QR code below from this device. Bifrost will
-                        track the browser with a local device ID after the check page opens.
+                        {t("notify.check.deviceHint")}
                       </Text>
                     </Space>
                   </List.Item>
@@ -359,8 +386,8 @@ export default function AvailabilityCheckPanel({
               <Alert
                 type="info"
                 showIcon
-                message="No connected phone detected yet"
-                description="Connect an iPhone or Android device over USB, or share the availability link with any phone on the same LAN. Devices that open the check page will appear in the live status list."
+                message={t("notify.check.noPhoneTitle")}
+                description={t("notify.check.noPhoneDesc")}
               />
             )}
           </Space>
@@ -370,12 +397,12 @@ export default function AvailabilityCheckPanel({
       <Row gutter={[12, 12]} align="bottom">
         <Col xs={24} sm={compact || autoCreate ? 24 : 12} md={compact ? 24 : autoCreate ? 12 : 10}>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Local network address
+            {t("notify.check.localAddress")}
           </Text>
           <Select
             style={{ width: "100%", marginTop: 4 }}
             value={trustProbeHost || undefined}
-            placeholder="Select a LAN IP"
+            placeholder={t("notify.check.selectLanIp")}
             onChange={(value) => {
               setTrustProbeHost(value);
               setTrustProbeSession(null);
@@ -399,7 +426,7 @@ export default function AvailabilityCheckPanel({
               onClick={() => void handleCreateTrustProbe()}
               data-testid={`${testIdPrefix}-create`}
             >
-              {trustProbeSession ? "Regenerate Availability Check" : "Generate Availability Check"}
+              {trustProbeSession ? t("notify.check.regenerate") : t("notify.check.generate")}
             </Button>
           </Col>
         ) : null}
@@ -407,7 +434,7 @@ export default function AvailabilityCheckPanel({
 
       {effectiveCertInfo?.sha256_fingerprint && !compact ? (
         <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
-          CA SHA-256 fingerprint: <Text code>{effectiveCertInfo.sha256_fingerprint}</Text>
+          {t("notify.check.fingerprint")}<Text code>{effectiveCertInfo.sha256_fingerprint}</Text>
         </Paragraph>
       ) : null}
 
@@ -417,7 +444,7 @@ export default function AvailabilityCheckPanel({
             <div style={{ textAlign: compact ? "left" : "center" }}>
               <img
                 src={backendResourceUrl(trustProbeSession.qrCodeUrl)}
-                alt="Availability Check QR Code"
+                alt={t("notify.check.qrAlt")}
                 width={qrSize}
                 height={qrSize}
                 style={{
@@ -440,7 +467,7 @@ export default function AvailabilityCheckPanel({
                   rel="noreferrer"
                   data-testid={`${testIdPrefix}-link`}
                 >
-                  Open availability check page
+                  {t("notify.check.openPage")}
                 </a>
                 <Button
                   size="small"
@@ -448,7 +475,7 @@ export default function AvailabilityCheckPanel({
                   onClick={() => void copyLandingUrl()}
                   data-testid={`${testIdPrefix}-copy`}
                 >
-                  Copy link
+                  {t("notify.check.copyLink")}
                 </Button>
               </Space>
             </div>
@@ -461,7 +488,7 @@ export default function AvailabilityCheckPanel({
                   header={
                     <Space size={6}>
                       <Text strong style={{ fontSize: 12 }}>
-                        Connected devices
+                        {t("notify.check.connectedDevices")}
                       </Text>
                       <Tag>{trustProbeSession.devices.length}</Tag>
                     </Space>
@@ -486,7 +513,9 @@ export default function AvailabilityCheckPanel({
                             </Text>
                           ) : null}
                           <Text type="secondary" style={{ fontSize: 12 }}>
-                            last seen {new Date(device.lastSeen).toLocaleTimeString()}
+                            {t("notify.check.lastSeenLower", {
+                              time: new Date(device.lastSeen).toLocaleTimeString(),
+                            })}
                           </Text>
                         </Space>
                         <DeviceStatusTags device={device} />
@@ -501,8 +530,7 @@ export default function AvailabilityCheckPanel({
                 />
               ) : (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  No device has opened this availability check link yet. Multiple devices can use
-                  the same fixed link; Bifrost will track each browser by a local device ID.
+                  {t("notify.check.noDeviceYet")}
                 </Text>
               )}
 
@@ -510,18 +538,18 @@ export default function AvailabilityCheckPanel({
                 <Alert
                   type="warning"
                   showIcon
-                  message="Proxy is not configured on this device yet"
+                  message={t("notify.check.proxyNotConfiguredTitle")}
                   description={
                     <Space direction="vertical" size={4}>
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         {trustProbeSession.proxyConfigurationMessage}
                       </Text>
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        On iPhone, manually set the current Wi-Fi HTTP Proxy to{" "}
+                        {t("notify.check.proxyManualPrefix")}{" "}
                         <Text code>
                           {trustProbeSession.host}:{trustProbeSession.adminPort}
                         </Text>
-                        .
+                        {t("notify.check.proxyManualSuffix")}
                       </Text>
                     </Space>
                   }
@@ -532,23 +560,20 @@ export default function AvailabilityCheckPanel({
                 <Alert
                   type="success"
                   showIcon
-                  message="Browser HTTPS probe passed"
+                  message={t("notify.check.httpsPassedTitle")}
                   description={
                     <Space direction="vertical" size={4}>
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        This confirms this browser completed the dedicated HTTPS probe with a
-                        certificate signed by Bifrost CA. It does not prove Android has installed
-                        the CA for every app; apps can still reject Bifrost through Android user CA
-                        policy, certificate pinning, or custom TLS policy.
+                        {t("notify.check.httpsPassedDesc")}
                       </Text>
                       <Text>
-                        Proxy:{" "}
+                        {t("notify.check.proxyLabel")}{" "}
                         <Text code>
                           {trustProbeSession.host}:{trustProbeSession.adminPort}
                         </Text>
                       </Text>
                       <a href={trustProbeSession.proxyQrCodeUrl} target="_blank" rel="noreferrer">
-                        Open proxy QR code
+                        {t("notify.check.openProxyQr")}
                       </a>
                     </Space>
                   }
@@ -557,26 +582,25 @@ export default function AvailabilityCheckPanel({
                 <Alert
                   type="warning"
                   showIcon
-                  message="Browser HTTPS probe failed"
-                  description="The device reached the probe port, but the browser could not complete the HTTPS handshake. Install the CA, enable full trust on iOS, check device time, then fully restart the browser and retry. Some browsers keep old certificate trust decisions until restart."
+                  message={t("notify.check.httpsFailedTitle")}
+                  description={t("notify.check.httpsFailedDesc")}
                 />
               ) : trustProbeSession.status === "network_failed" ? (
                 <Alert
                   type="error"
                   showIcon
-                  message="Probe port is not reachable"
-                  description="The phone opened the landing page but could not reach the probe port. Check firewall rules, local network isolation, and the selected IP address."
+                  message={t("notify.check.networkFailedTitle")}
+                  description={t("notify.check.networkFailedDesc")}
                 />
               ) : (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Scan the QR code from the target device. Bifrost updates this status over the
-                  live connection when the device opens the page or completes a check step.
+                  {t("notify.check.waitingHint")}
                 </Text>
               )}
 
               {trustProbeSession.lastError ? (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Last error: {trustProbeSession.lastError}
+                  {t("notify.check.lastError", { error: trustProbeSession.lastError })}
                 </Text>
               ) : null}
 

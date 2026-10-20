@@ -6,6 +6,7 @@ import {
   disconnectByDomain,
   type TlsConfig,
 } from "../api/config";
+import { t } from "../i18n";
 
 interface TlsConfigState {
   config: TlsConfig | null;
@@ -49,7 +50,7 @@ export const useTlsConfigStore = create<TlsConfigState>((set, get) => ({
       set({ config, loading: false });
     } catch (e) {
       set({
-        error: e instanceof Error ? e.message : "Failed to fetch TLS config",
+        error: e instanceof Error ? e.message : t("shared.tlsConfig.fetchFailed"),
         loading: false,
       });
     }

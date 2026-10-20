@@ -10,6 +10,7 @@ import {
 } from "../../api/cert";
 import { normalizeApiErrorMessage } from "../../api/client";
 import { pushService, type SettingsScope } from "../../services/pushService";
+import { useI18n, type TFunction } from "../../i18n";
 
 const { Text } = Typography;
 
@@ -17,16 +18,16 @@ function deviceDisplayName(device: MobileDevice): string {
   return device.name?.trim() || device.id;
 }
 
-function certificateStateLabel(device: MobileDevice): string | null {
+function certificateStateLabel(t: TFunction, device: MobileDevice): string | null {
   switch (device.certificate_status?.state) {
     case "installed":
-      return "CA installed";
+      return t("app.mobileTrust.caInstalled");
     case "pushed_to_device":
-      return "CA pushed";
+      return t("app.mobileTrust.caPushed");
     case "not_installed":
-      return "CA not installed";
+      return t("app.mobileTrust.caNotInstalled");
     case "unknown":
-      return "CA unknown";
+      return t("app.mobileTrust.caUnknown");
     default:
       return null;
   }
@@ -57,6 +58,7 @@ function mobileDevicesFromPushData(data: unknown): MobileDevicesResponse | null 
 export default function MobileDeviceTrustPrompt() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { t } = useI18n();
   const [mobileInfo, setMobileInfo] = useState<MobileDevicesResponse | null>(null);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [dismissedDeviceIds, setDismissedDeviceIds] = useState<Set<string>>(() => new Set());
@@ -155,19 +157,19 @@ export default function MobileDeviceTrustPrompt() {
     try {
       const session = await installMobileCa(selectedDevice.id, mode);
       if (session.completed && !session.requires_user_confirmation) {
-        message.success("Bifrost started the certificate install flow for the selected device.");
+        message.success(t("app.mobileTrust.installStarted"));
       } else if (session.requires_user_confirmation) {
-        message.warning("Finish the confirmation on the selected phone.");
+        message.warning(t("app.mobileTrust.finishOnPhone"));
       } else {
         message.warning(session.summary);
       }
       handleOpenGuide();
     } catch (error) {
-      message.error(normalizeApiErrorMessage(error, "Failed to install CA on selected device"));
+      message.error(normalizeApiErrorMessage(error, t("app.mobileTrust.installFailed")));
     } finally {
       setInstallingDeviceId(null);
     }
-  }, [handleOpenGuide, selectedDevice]);
+  }, [handleOpenGuide, selectedDevice, t]);
 
   const selectedInstallDisabled =
     !selectedDevice ||
@@ -176,23 +178,23 @@ export default function MobileDeviceTrustPrompt() {
       !mobileInfo?.ios.configurator.cfgutil_available);
   const selectedInstallTooltip =
     selectedDevice?.platform === "ios" && !mobileInfo?.ios.configurator.cfgutil_available
-      ? "Install Apple Configurator on this Mac first."
+      ? t("app.mobileTrust.installConfiguratorFirst")
       : selectedDevice?.platform === "ios"
-        ? "Install the profile on this selected iPhone/iPad through Apple Configurator."
-        : "Push the CA to this selected Android device and open the installer.";
+        ? t("app.mobileTrust.installIosTooltip")
+        : t("app.mobileTrust.installAndroidTooltip");
 
   return (
     <Modal
       open={promptOpen}
       title={
         visibleDevices.length > 1
-          ? `Install Bifrost CA on one of ${visibleDevices.length} connected devices?`
+          ? t("app.mobileTrust.titleMultiple", { count: visibleDevices.length })
           : selectedDevice?.platform === "ios"
-            ? "Install Bifrost CA profile on connected iPhone?"
-            : "Install Bifrost CA on connected Android device?"
+            ? t("app.mobileTrust.titleIos")
+            : t("app.mobileTrust.titleAndroid")
       }
-      okText="Open Certificate Setup"
-      cancelText="Not now"
+      okText={t("app.mobileTrust.openCertificateSetup")}
+      cancelText={t("app.mobileTrust.notNow")}
       onOk={handleOpenGuide}
       onCancel={dismissVisibleDevices}
       footer={(_, { OkBtn, CancelBtn }) => (
@@ -205,7 +207,7 @@ export default function MobileDeviceTrustPrompt() {
             onClick={() => void handleInstallSelected()}
             title={selectedInstallTooltip}
           >
-            Install Selected
+            {t("app.mobileTrust.installSelected")}
           </Button>
           <OkBtn />
         </Space>
@@ -225,13 +227,13 @@ export default function MobileDeviceTrustPrompt() {
               <MobileOutlined />
             )
           }
-          message="Bifrost detected connected mobile devices"
+          message={t("app.mobileTrust.detected")}
           description={
             visibleDevices.length > 1
-              ? "Select the device that should receive the Bifrost CA. You can install directly from this dialog or open the Certificate settings page with that device highlighted."
+              ? t("app.mobileTrust.descriptionMultiple")
               : selectedDevice?.platform === "ios"
-                ? "Install directly through Apple Configurator when available, or open Certificate settings for the iOS profile and QR fallback."
-                : "Install directly through ADB, or open Certificate settings to review the Android guided install steps."
+                ? t("app.mobileTrust.descriptionIos")
+                : t("app.mobileTrust.descriptionAndroid")
           }
         />
         <List
@@ -239,7 +241,7 @@ export default function MobileDeviceTrustPrompt() {
           dataSource={visibleDevices}
           renderItem={(device) => {
             const selected = selectedDevice?.id === device.id;
-            const caStateLabel = certificateStateLabel(device);
+            const caStateLabel = certificateStateLabel(t, device);
             return (
               <List.Item
                 onClick={() => setSelectedDeviceId(device.id)}
@@ -265,7 +267,7 @@ export default function MobileDeviceTrustPrompt() {
                       <Tag color={device.capability === "managed_auto_trust" ? "purple" : "gold"}>
                         {device.capability === "managed_auto_trust"
                           ? "Configurator"
-                          : "Guided"}
+                          : t("app.mobileTrust.guided")}
                       </Tag>
                     </Space>
                   }
@@ -296,8 +298,7 @@ export default function MobileDeviceTrustPrompt() {
           }}
         />
         <Text type="secondary">
-          Personal phones still require phone-side confirmation before the CA is installed or
-          trusted. Configurator targets the selected iOS device by ECID.
+          {t("app.mobileTrust.footnote")}
         </Text>
       </Space>
     </Modal>

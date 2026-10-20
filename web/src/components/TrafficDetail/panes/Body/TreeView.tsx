@@ -3,6 +3,7 @@ import { Tree, Typography, theme, ConfigProvider } from 'antd';
 import type { DataNode } from 'antd/es/tree';
 import type { SessionTargetSearchState } from '../../../../types';
 import { MAX_JSON_FORMAT_HIGHLIGHT_LENGTH } from '../../helper/contentType';
+import { useI18n } from '../../../../i18n';
 
 const { Text } = Typography;
 
@@ -216,6 +217,7 @@ const parseJsonSafe = (data: string): { parsed: unknown; error: boolean } => {
 };
 
 export const TreeView = ({ data, searchValue, onSearch }: TreeViewProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [manualExpandedKeys, setManualExpandedKeys] = useState<React.Key[]>([
     'root',
@@ -237,13 +239,13 @@ export const TreeView = ({ data, searchValue, onSearch }: TreeViewProps) => {
     return [
       {
         key: 'root',
-        label: 'Root',
+        label: t('trafficDetail.tree.root'),
         value: rootLabel,
         isExpandable: true,
         children: buildTreeNodeData(parsed, 'root'),
       },
     ];
-  }, [parsedData]);
+  }, [parsedData, t]);
 
   const currentIndex = useMemo(() => {
     const next = searchValue.next ?? 1;
@@ -331,7 +333,7 @@ export const TreeView = ({ data, searchValue, onSearch }: TreeViewProps) => {
   if (data.length > MAX_JSON_FORMAT_HIGHLIGHT_LENGTH) {
     return (
       <div style={{ padding: 12, color: token.colorTextSecondary }}>
-        JSON view is disabled for large bodies. Switched to text mode to keep the page responsive.
+        {t('trafficDetail.tree.tooLarge')}
       </div>
     );
   }
@@ -339,7 +341,7 @@ export const TreeView = ({ data, searchValue, onSearch }: TreeViewProps) => {
   if (parsedData.error || treeData.length === 0) {
     return (
       <div style={{ padding: 12, color: token.colorTextSecondary }}>
-        Unable to parse as JSON
+        {t('trafficDetail.tree.parseFailed')}
       </div>
     );
   }

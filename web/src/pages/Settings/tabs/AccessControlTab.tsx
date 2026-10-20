@@ -32,33 +32,36 @@ import {
 import { useWhitelistStore } from "../../../stores/useWhitelistStore";
 import type { AccessMode, UserPassStatus } from "../../../types";
 import { notifyApiBusinessError } from "../../../api/client";
+import { useI18n, type TFunction } from "../../../i18n";
 
 const { Text } = Typography;
 
-const accessModeOptions: {
+const getAccessModeOptions = (
+  t: TFunction,
+): {
   value: AccessMode;
   label: string;
   description: string;
-}[] = [
+}[] => [
   {
     value: "allow_all",
-    label: "Allow All",
-    description: "Allow all connections (no restriction)",
+    label: t("settings.access.modeAllowAll"),
+    description: t("settings.access.modeAllowAllDescription"),
   },
   {
     value: "local_only",
-    label: "Local Only",
-    description: "Only allow localhost connections (127.0.0.1, ::1)",
+    label: t("settings.access.modeLocalOnly"),
+    description: t("settings.access.modeLocalOnlyDescription"),
   },
   {
     value: "whitelist",
-    label: "Whitelist",
-    description: "Only allow whitelisted IPs/CIDRs",
+    label: t("settings.access.modeWhitelist"),
+    description: t("settings.access.modeWhitelistDescription"),
   },
   {
     value: "interactive",
-    label: "Interactive",
-    description: "Prompt for unknown IPs (not implemented)",
+    label: t("settings.access.modeInteractive"),
+    description: t("settings.access.modeInteractiveDescription"),
   },
 ];
 
@@ -166,6 +169,8 @@ export const mergeUserPassRuntimeState = (
 };
 
 export default function AccessControlTab() {
+  const { t } = useI18n();
+  const accessModeOptions = useMemo(() => getAccessModeOptions(t), [t]);
   const {
     status,
     loading,
@@ -235,12 +240,12 @@ export default function AccessControlTab() {
 
   const handleAdd = async () => {
     if (!newIpOrCidr.trim()) {
-      message.warning("Please enter an IP address or CIDR");
+      message.warning(t("settings.access.enterIpOrCidr"));
       return;
     }
     const success = await addToWhitelist(newIpOrCidr.trim());
     if (success) {
-      message.success(`Added ${newIpOrCidr} to whitelist`);
+      message.success(t("settings.access.addedToWhitelist", { ip: newIpOrCidr }));
       setNewIpOrCidr("");
     }
   };
@@ -248,18 +253,18 @@ export default function AccessControlTab() {
   const handleRemove = async (ipOrCidr: string) => {
     const success = await removeFromWhitelist(ipOrCidr);
     if (success) {
-      message.success(`Removed ${ipOrCidr} from whitelist`);
+      message.success(t("settings.access.removedFromWhitelist", { ip: ipOrCidr }));
     }
   };
 
   const handleAddTemp = async () => {
     if (!newTempIp.trim()) {
-      message.warning("Please enter an IP address");
+      message.warning(t("settings.access.enterIp"));
       return;
     }
     const success = await addTemporary(newTempIp.trim());
     if (success) {
-      message.success(`Added ${newTempIp} to temporary whitelist`);
+      message.success(t("settings.access.addedToTempWhitelist", { ip: newTempIp }));
       setNewTempIp("");
     }
   };
@@ -267,35 +272,37 @@ export default function AccessControlTab() {
   const handleRemoveTemp = async (ip: string) => {
     const success = await removeTemporary(ip);
     if (success) {
-      message.success(`Removed ${ip} from temporary whitelist`);
+      message.success(t("settings.access.removedFromTempWhitelist", { ip }));
     }
   };
 
   const handleRemoveSessionDenied = async (ip: string) => {
     const success = await removeSessionDenied(ip);
     if (success) {
-      message.success(`Removed ${ip} from denied list`);
+      message.success(t("settings.access.removedFromDenied", { ip }));
     }
   };
 
   const handleClearSessionDenied = async () => {
     const success = await clearSessionDenied();
     if (success) {
-      message.success("Cleared all denied IPs");
+      message.success(t("settings.access.clearedDenied"));
     }
   };
 
   const handleModeChange = async (mode: AccessMode) => {
     const success = await setMode(mode);
     if (success) {
-      message.success(`Access mode changed to ${mode}`);
+      message.success(t("settings.access.modeChanged", { mode }));
     }
   };
 
   const handleAllowLanChange = async (allow: boolean) => {
     const success = await setAllowLan(allow);
     if (success) {
-      message.success(`LAN access ${allow ? "enabled" : "disabled"}`);
+      message.success(
+        allow ? t("settings.access.lanEnabled") : t("settings.access.lanDisabled"),
+      );
     }
   };
 
@@ -335,7 +342,7 @@ export default function AccessControlTab() {
         (account) => !account.username.trim() || (!account.hasPassword && !account.password.trim()),
       )
     ) {
-      message.warning("New accounts require both username and password");
+      message.warning(t("settings.access.accountRequired"));
       return;
     }
     const success = await setUserPassConfig(
@@ -355,7 +362,7 @@ export default function AccessControlTab() {
           hasPassword: true,
         })),
       );
-      message.success("Updated user/password proxy authentication");
+      message.success(t("settings.access.userPassUpdated"));
     }
   };
 
@@ -367,19 +374,19 @@ export default function AccessControlTab() {
       render: (ip: string) => <Text code>{ip}</Text>,
     },
     {
-      title: "Actions",
+      title: t("common.actions"),
       key: "actions",
       width: 100,
       align: "center",
       render: (_, record) => (
         <Popconfirm
-          title="Remove from whitelist"
-          description={`Remove ${record.ip}?`}
+          title={t("settings.access.removeFromWhitelist")}
+          description={t("settings.access.removeIpConfirm", { ip: record.ip })}
           onConfirm={() => handleRemove(record.ip)}
-          okText="Yes"
-          cancelText="No"
+          okText={t("common.yes")}
+          cancelText={t("common.no")}
         >
-          <Tooltip title="Remove">
+          <Tooltip title={t("common.remove")}>
             <Button type="text" size="small" danger icon={<DeleteOutlined />} />
           </Tooltip>
         </Popconfirm>
@@ -389,25 +396,25 @@ export default function AccessControlTab() {
 
   const tempColumns: ColumnsType<{ ip: string }> = [
     {
-      title: "IP Address",
+      title: t("settings.access.ipAddress"),
       dataIndex: "ip",
       key: "ip",
       render: (ip: string) => <Text code>{ip}</Text>,
     },
     {
-      title: "Actions",
+      title: t("common.actions"),
       key: "actions",
       width: 100,
       align: "center",
       render: (_, record) => (
         <Popconfirm
-          title="Remove from temporary whitelist"
-          description={`Remove ${record.ip}?`}
+          title={t("settings.access.removeFromTempWhitelist")}
+          description={t("settings.access.removeIpConfirm", { ip: record.ip })}
           onConfirm={() => handleRemoveTemp(record.ip)}
-          okText="Yes"
-          cancelText="No"
+          okText={t("common.yes")}
+          cancelText={t("common.no")}
         >
-          <Tooltip title="Remove">
+          <Tooltip title={t("common.remove")}>
             <Button type="text" size="small" danger icon={<DeleteOutlined />} />
           </Tooltip>
         </Popconfirm>
@@ -417,25 +424,25 @@ export default function AccessControlTab() {
 
   const sessionDeniedColumns: ColumnsType<{ ip: string }> = [
     {
-      title: "IP Address",
+      title: t("settings.access.ipAddress"),
       dataIndex: "ip",
       key: "ip",
       render: (ip: string) => <Text code>{ip}</Text>,
     },
     {
-      title: "Actions",
+      title: t("common.actions"),
       key: "actions",
       width: 100,
       align: "center",
       render: (_, record) => (
         <Popconfirm
-          title="Remove from denied list"
-          description={`Allow ${record.ip} to connect again?`}
+          title={t("settings.access.removeFromDenied")}
+          description={t("settings.access.allowAgainConfirm", { ip: record.ip })}
           onConfirm={() => handleRemoveSessionDenied(record.ip)}
-          okText="Yes"
-          cancelText="No"
+          okText={t("common.yes")}
+          cancelText={t("common.no")}
         >
-          <Tooltip title="Remove">
+          <Tooltip title={t("common.remove")}>
             <Button type="text" size="small" danger icon={<DeleteOutlined />} />
           </Tooltip>
         </Popconfirm>
@@ -447,8 +454,8 @@ export default function AccessControlTab() {
     return (
       <Alert
         type="warning"
-        message="Access Control Not Configured"
-        description="The access control feature is not configured on the server. Start the proxy with --access-mode option to enable it."
+        message={t("settings.access.notConfigured")}
+        description={t("settings.access.notConfiguredDescription")}
         showIcon
       />
     );
@@ -463,12 +470,12 @@ export default function AccessControlTab() {
               {accessModeOptions.find((o) => o.value === status.mode)?.label ||
                 status.mode}
             </Tag>
-            {status.allow_lan && (status.mode === "whitelist" || status.mode === "interactive") && <Tag color="cyan">LAN Allowed</Tag>}
+            {status.allow_lan && (status.mode === "whitelist" || status.mode === "interactive") && <Tag color="cyan">{t("settings.access.lanAllowed")}</Tag>}
           </Space>
         </Col>
         <Col>
           <Button icon={<ReloadOutlined />} onClick={() => fetchStatus()} data-testid="settings-access-refresh-button">
-            Refresh
+            {t("common.refresh")}
           </Button>
         </Col>
       </Row>
@@ -479,7 +486,7 @@ export default function AccessControlTab() {
             title={
               <Space>
                 <SafetyOutlined />
-                <span>Access Settings</span>
+                <span>{t("settings.access.settingsTitle")}</span>
               </Space>
             }
             size="small"
@@ -487,7 +494,7 @@ export default function AccessControlTab() {
             <Row gutter={[16, 16]}>
               <Col span={24}>
                 <Space direction="vertical" style={{ width: "100%" }}>
-                  <Text type="secondary">Access Mode</Text>
+                  <Text type="secondary">{t("settings.access.mode")}</Text>
                   <Select
                     value={status.mode}
                     onChange={handleModeChange}
@@ -518,12 +525,11 @@ export default function AccessControlTab() {
                     onChange={handleAllowLanChange}
                     data-testid="settings-access-allow-lan"
                   />
-                  <Text>Allow LAN Connections</Text>
+                  <Text>{t("settings.access.allowLan")}</Text>
                 </Space>
                 <br />
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  When enabled, private network IPs (192.168.x.x, 10.x.x.x,
-                  172.16-31.x.x) are allowed
+                  {t("settings.access.allowLanHint")}
                 </Text>
               </Col>
               )}
@@ -536,7 +542,7 @@ export default function AccessControlTab() {
                       onChange={setUserPassEnabled}
                       data-testid="settings-access-userpass-enabled"
                     />
-                    <Text>Enable User/Password Auth</Text>
+                    <Text>{t("settings.access.enableUserPass")}</Text>
                   </Space>
                   <Space>
                     <Switch
@@ -544,13 +550,13 @@ export default function AccessControlTab() {
                       onChange={setLoopbackRequiresAuth}
                       data-testid="settings-access-loopback-requires-auth"
                     />
-                    <Text>Require Auth for Localhost</Text>
+                    <Text>{t("settings.access.requireLocalhostAuth")}</Text>
                   </Space>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    When enabled, loopback (127.0.0.1) connections also need username/password authentication.
+                    {t("settings.access.requireLocalhostAuthHint")}
                   </Text>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    When IP-based access does not pass, configured accounts can still authenticate over HTTP and SOCKS5.
+                    {t("settings.access.userPassHint")}
                   </Text>
                   <Space direction="vertical" style={{ width: "100%" }} size="middle">
                     {userPassAccounts.map((account) => (
@@ -564,12 +570,12 @@ export default function AccessControlTab() {
                               gap: 12,
                             }}
                           >
-                            <Text strong>Account</Text>
+                            <Text strong>{t("settings.access.account")}</Text>
                             <Space size={10} align="start" style={{ flexShrink: 0 }}>
                               <Space direction="vertical" size={2} align="end">
                                 <Space size={6}>
                                   <Text type="secondary" style={{ fontSize: 12 }}>
-                                    Enabled
+                                    {t("common.enabled")}
                                   </Text>
                                   <Switch
                                     size="small"
@@ -580,7 +586,7 @@ export default function AccessControlTab() {
                                   />
                                 </Space>
                                 <Text type="secondary" style={{ fontSize: 12 }}>
-                                  Last Connected: {account.lastConnectedAt ?? "-"}
+                                  {t("settings.access.lastConnected", { time: account.lastConnectedAt ?? "-" })}
                                 </Text>
                               </Space>
                               <Button
@@ -589,12 +595,12 @@ export default function AccessControlTab() {
                                 size="small"
                                 icon={<DeleteOutlined />}
                                 onClick={() => handleRemoveUserPassAccount(account.key)}
-                                aria-label="Remove account"
+                                aria-label={t("settings.access.removeAccount")}
                               />
                             </Space>
                           </div>
                           <Input
-                            placeholder="Username"
+                            placeholder={t("settings.access.username")}
                             value={account.username}
                             onChange={(e) =>
                               handleUpdateUserPassAccount(account.key, "username", e.target.value)
@@ -602,7 +608,11 @@ export default function AccessControlTab() {
                             data-testid={`settings-access-userpass-username-${account.key}`}
                           />
                           <Input.Password
-                            placeholder={account.hasPassword ? "Leave blank to keep current password" : "Password"}
+                            placeholder={
+                              account.hasPassword
+                                ? t("settings.access.keepPassword")
+                                : t("settings.access.password")
+                            }
                             value={account.password}
                             onChange={(e) =>
                               handleUpdateUserPassAccount(account.key, "password", e.target.value)
@@ -618,14 +628,14 @@ export default function AccessControlTab() {
                         onClick={handleAddUserPassAccount}
                         data-testid="settings-access-userpass-add-button"
                       >
-                        Add Account
+                        {t("settings.access.addAccount")}
                       </Button>
                       <Button
                         type="primary"
                         onClick={handleSaveUserPassConfig}
                         data-testid="settings-access-userpass-save-button"
                       >
-                        Save User/Password Auth
+                        {t("settings.access.saveUserPass")}
                       </Button>
                     </Space>
                   </Space>
@@ -640,14 +650,14 @@ export default function AccessControlTab() {
             title={
               <Space>
                 <SafetyOutlined />
-                <span>Permanent Whitelist ({status.whitelist.length})</span>
+                <span>{t("settings.access.permanentWhitelist", { count: status.whitelist.length })}</span>
               </Space>
             }
             size="small"
             extra={
               <Space.Compact>
                 <Input
-                  placeholder="IP or CIDR (e.g., 192.168.1.0/24)"
+                  placeholder={t("settings.access.ipOrCidrPlaceholder")}
                   value={newIpOrCidr}
                   onChange={(e) => setNewIpOrCidr(e.target.value)}
                   onPressEnter={handleAdd}
@@ -662,7 +672,7 @@ export default function AccessControlTab() {
                   size="small"
                   data-testid="settings-whitelist-add-button"
                 >
-                  Add
+                  {t("common.add")}
                 </Button>
               </Space.Compact>
             }
@@ -685,7 +695,7 @@ export default function AccessControlTab() {
               <Space>
                 <SafetyOutlined />
                 <span>
-                  Temporary Whitelist ({status.temporary_whitelist.length})
+                  {t("settings.access.temporaryWhitelist", { count: status.temporary_whitelist.length })}
                 </span>
               </Space>
             }
@@ -693,7 +703,7 @@ export default function AccessControlTab() {
             extra={
               <Space.Compact>
                 <Input
-                  placeholder="Temporary IP"
+                  placeholder={t("settings.access.temporaryIp")}
                   value={newTempIp}
                   onChange={(e) => setNewTempIp(e.target.value)}
                   onPressEnter={handleAddTemp}
@@ -708,7 +718,7 @@ export default function AccessControlTab() {
                   size="small"
                   data-testid="settings-temp-whitelist-add-button"
                 >
-                  Add
+                  {t("common.add")}
                 </Button>
               </Space.Compact>
             }
@@ -732,18 +742,18 @@ export default function AccessControlTab() {
               <Space>
                 <StopOutlined />
                 <span>
-                  Session Denied IPs ({status.session_denied.length})
+                  {t("settings.access.sessionDenied", { count: status.session_denied.length })}
                 </span>
               </Space>
             }
             size="small"
             extra={
               <Popconfirm
-                title="Clear all denied IPs"
-                description="This will allow all previously denied IPs to connect again."
+                title={t("settings.access.clearDeniedTitle")}
+                description={t("settings.access.clearDeniedDescription")}
                 onConfirm={handleClearSessionDenied}
-                okText="Yes"
-                cancelText="No"
+                okText={t("common.yes")}
+                cancelText={t("common.no")}
               >
                 <Button
                   icon={<ClearOutlined />}
@@ -751,14 +761,14 @@ export default function AccessControlTab() {
                   danger
                   data-testid="settings-session-denied-clear-button"
                 >
-                  Clear All
+                  {t("settings.access.clearAll")}
                 </Button>
               </Popconfirm>
             }
           >
             <Alert
               type="info"
-              message="These IPs were denied during this session. They will be blocked until removed or the service restarts."
+              message={t("settings.access.sessionDeniedHint")}
               style={{ marginBottom: 12 }}
               showIcon
             />

@@ -13,6 +13,7 @@ import {
 import type { BifrostFileType, ImportResponse } from '../../api/bifrost-file';
 import { useTrafficStore } from '../../stores/useTrafficStore';
 import { confirmBifrostFileImport } from '../BifrostFilePreview';
+import { useI18n } from '../../i18n';
 
 interface ImportBifrostButtonProps {
   expectedType?: BifrostFileType;
@@ -27,16 +28,17 @@ interface ImportBifrostButtonProps {
 export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
   expectedType,
   onImportSuccess,
-  buttonText = 'Import',
+  buttonText,
   buttonType = 'default',
   size = 'middle',
   icon = <ImportOutlined />,
   testId,
 }) => {
+  const { t } = useI18n();
   const handleBeforeUpload: UploadProps['beforeUpload'] = useCallback(
     async (file: RcFile) => {
       if (!file.name.endsWith('.bifrost')) {
-        message.error('Please select a .bifrost file');
+        message.error(t('app.import.selectBifrostFile'));
         return Upload.LIST_IGNORE;
       }
 
@@ -46,7 +48,10 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
 
         if (expectedType && preview.file_type !== expectedType) {
           message.error(
-            `File type mismatch: expected ${expectedType}, got ${preview.file_type}`
+            t('app.import.fileTypeMismatch', {
+              expected: expectedType,
+              actual: preview.file_type,
+            })
           );
           return Upload.LIST_IGNORE;
         }
@@ -63,7 +68,7 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
           message.warning(formatImportSuccessMessage(result, file.name));
           return Upload.LIST_IGNORE;
         } else if (result.warnings && result.warnings.length > 0) {
-          message.warning(`Import completed with ${result.warnings.length} warning(s)`);
+          message.warning(t('app.import.completedWithWarnings', { count: result.warnings.length }));
         } else {
           message.success(formatImportSuccessMessage(result, file.name));
         }
@@ -78,12 +83,12 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
 
         onImportSuccess?.(result);
       } catch (error) {
-        message.error(`Import failed: ${formatBifrostFileError(error)}`);
+        message.error(t('app.import.failed', { error: formatBifrostFileError(error) }));
       }
 
       return Upload.LIST_IGNORE;
     },
-    [expectedType, onImportSuccess]
+    [expectedType, onImportSuccess, t]
   );
 
   return (
@@ -95,7 +100,7 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
       data-testid={testId}
     >
       <Button type={buttonType} size={size} icon={icon} data-testid={testId ? `${testId}-button` : undefined}>
-        {buttonText}
+        {buttonText ?? t('common.import')}
       </Button>
     </Upload>
   );

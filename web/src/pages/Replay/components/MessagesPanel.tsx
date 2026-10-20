@@ -23,6 +23,7 @@ import {
   normalizeWSMessage,
   type MessageItem,
 } from "../../../components/VirtualMessageViewer";
+import { useI18n, type TranslationKey } from "../../../i18n";
 
 const { Text } = Typography;
 const { Search } = Input;
@@ -34,7 +35,15 @@ function formatDuration(startedAt: number, endedAt?: number): string {
   return `${Math.floor(duration / 60000)}m ${Math.floor((duration % 60000) / 1000)}s`;
 }
 
+const STATUS_LABEL_KEYS: Record<string, TranslationKey> = {
+  connecting: "replay.messages.status.connecting",
+  connected: "replay.messages.status.connected",
+  disconnected: "replay.messages.status.disconnected",
+  error: "replay.messages.status.error",
+};
+
 export default function MessagesPanel() {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const {
     streamingConnection,
@@ -191,7 +200,7 @@ export default function MessagesPanel() {
       <div style={styles.container}>
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="No active connection"
+          description={t("replay.messages.noConnection")}
           style={{ margin: "auto" }}
         />
       </div>
@@ -223,7 +232,9 @@ export default function MessagesPanel() {
             {isSSE ? "SSE" : "WebSocket"}
           </Tag>
           <Tag color={statusColors[streamingConnection.status]}>
-            {streamingConnection.status}
+            {STATUS_LABEL_KEYS[streamingConnection.status]
+              ? t(STATUS_LABEL_KEYS[streamingConnection.status])
+              : streamingConnection.status}
           </Tag>
           <Tooltip title={streamingConnection.url}>
             <Text
@@ -243,7 +254,7 @@ export default function MessagesPanel() {
           </Text>
         </div>
         <div style={{ display: "flex", gap: 4 }}>
-          <Tooltip title="Fullscreen">
+          <Tooltip title={t("replay.messages.fullscreen")}>
             <Button
               size="small"
               icon={<FullscreenOutlined />}
@@ -251,7 +262,7 @@ export default function MessagesPanel() {
               disabled={normalizedMessages.length === 0}
             />
           </Tooltip>
-          <Tooltip title="Clear messages">
+          <Tooltip title={t("replay.messages.clear")}>
             <Button
               size="small"
               icon={<DeleteOutlined />}
@@ -259,7 +270,7 @@ export default function MessagesPanel() {
             />
           </Tooltip>
           {isConnected && (
-            <Tooltip title="Disconnect">
+            <Tooltip title={t("replay.request.disconnect")}>
               <Button
                 size="small"
                 danger
@@ -273,7 +284,7 @@ export default function MessagesPanel() {
 
       <div style={styles.toolbar}>
         <Search
-          placeholder="Search messages..."
+          placeholder={t("replay.messages.searchPlaceholder")}
           allowClear
           value={searchQuery}
           onChange={(e) => handleSearchChange(e.target.value)}
@@ -284,14 +295,14 @@ export default function MessagesPanel() {
         />
 
         <Button.Group size="small">
-          <Tooltip title="Highlight matches">
+          <Tooltip title={t("replay.messages.highlightMatches")}>
             <Button
               type={searchMode === 'highlight' ? 'primary' : 'default'}
               icon={<HighlightOutlined />}
               onClick={() => handleModeChange('highlight')}
             />
           </Tooltip>
-          <Tooltip title="Filter matches only">
+          <Tooltip title={t("replay.messages.filterMatches")}>
             <Button
               type={searchMode === 'filter' ? 'primary' : 'default'}
               icon={<FilterOutlined />}
@@ -310,7 +321,7 @@ export default function MessagesPanel() {
           </>
         )}
 
-        <Tooltip title="Follow latest">
+        <Tooltip title={t("replay.messages.followLatest")}>
           <Space size={4}>
             <VerticalAlignBottomOutlined style={{ fontSize: 12, color: token.colorTextSecondary }} />
             <Switch
@@ -322,7 +333,7 @@ export default function MessagesPanel() {
         </Tooltip>
 
         <Text type="secondary" style={{ fontSize: 11, marginLeft: 'auto' }}>
-          {displayItems.length} messages
+          {t("replay.messages.count", { count: displayItems.length })}
         </Text>
       </div>
 
@@ -345,10 +356,10 @@ export default function MessagesPanel() {
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={
                 searchMode === 'filter' && searchQuery
-                  ? "No messages match your search"
-                  : isConnected 
-                    ? "Waiting for messages..." 
-                    : "No messages"
+                  ? t("replay.messages.noMatch")
+                  : isConnected
+                    ? t("replay.messages.waiting")
+                    : t("replay.messages.empty")
               }
               style={{ marginTop: 40 }}
             />
@@ -360,7 +371,7 @@ export default function MessagesPanel() {
       {isWebSocket && isConnected && (
         <div style={styles.inputArea}>
           <Input.TextArea
-            placeholder="Type a message..."
+            placeholder={t("replay.messages.inputPlaceholder")}
             autoSize={{ minRows: 1, maxRows: 4 }}
             value={messageInput}
             onChange={(e) => updateUIState({ wsMessageInput: e.target.value })}
@@ -373,7 +384,7 @@ export default function MessagesPanel() {
             onClick={handleSendMessage}
             disabled={!messageInput.trim()}
           >
-            Send
+            {t("common.send")}
           </Button>
         </div>
       )}
@@ -387,7 +398,7 @@ export default function MessagesPanel() {
             fontSize: 12,
           }}
         >
-          Error: {streamingConnection.error}
+          {t("replay.messages.error", { error: streamingConnection.error })}
         </div>
       )}
 

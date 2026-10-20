@@ -18,6 +18,7 @@ import {
 import { useTrafficStore } from "../../stores/useTrafficStore";
 import { copyToClipboard } from "../../utils/clipboard";
 import RuleEffectivenessCode from "../../components/RuleEffectivenessCode";
+import { useI18n, type TFunction } from "../../i18n";
 import styles from "./index.module.css";
 
 interface ActivityStat {
@@ -42,7 +43,7 @@ const countLines = (content: string): number => {
   return content.split(/\r?\n/).length;
 };
 
-const formatRuleRef = (ref: TemporaryPortRuleSetRef): string => {
+const formatRuleRef = (t: TFunction, ref: TemporaryPortRuleSetRef): string => {
   switch (ref.type) {
     case "local_rule":
       return ref.name;
@@ -51,14 +52,15 @@ const formatRuleRef = (ref: TemporaryPortRuleSetRef): string => {
     case "rule_file":
       return ref.path;
     case "inline_rule":
-      return ref.content.split(/\r?\n/).find((line) => line.trim()) || "inline rule";
+      return ref.content.split(/\r?\n/).find((line) => line.trim()) || t("activity.inlineRule");
     default:
-      return "unknown";
+      return t("activity.unknownRuleRef");
   }
 };
 
 export default function Activity() {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const requestIdRef = useRef(0);
   const mergedCodeRef = useRef<HTMLPreElement>(null);
   const [activeRules, setActiveRules] = useState<ActiveRuleItem[]>([]);
@@ -198,42 +200,44 @@ export default function Activity() {
   const serverPort = overview?.server.port ?? 9900;
 
   const systemProxyEnabled = systemProxy ? isSystemProxyLiveEnabledByBifrost(systemProxy) : false;
-  const serviceState = systemProxyEnabled ? "Enabled" : "Disabled";
+  const serviceState = systemProxyEnabled ? t("common.enabled") : t("common.disabled");
   const serviceCaption = `http://${systemProxy?.host || "127.0.0.1"}:${systemProxy?.port || serverPort}`;
 
   const stats: ActivityStat[] = [
     {
-      label: "Active Connections",
+      label: t("activity.statActiveConnections"),
       value: liveConnections.toLocaleString(),
-      caption: `${traffic.availableClientApps.length.toLocaleString()} apps`,
+      caption: t("activity.statApps", {
+        count: traffic.availableClientApps.length.toLocaleString(),
+      }),
       color: "#ff8a2a",
     },
     {
-      label: "Upload",
+      label: t("activity.statUpload"),
       value: formatRate(metricSnapshot?.bytes_sent_rate ?? 0),
       caption: formatBytes(totalUpload),
       color: "#6256ff",
     },
     {
-      label: "Download",
+      label: t("activity.statDownload"),
       value: formatRate(metricSnapshot?.bytes_received_rate ?? 0),
       caption: formatBytes(totalDownload),
       color: "#14b8d5",
     },
     {
-      label: "Requests",
+      label: t("activity.statRequests"),
       value: totalRequests.toLocaleString(),
       caption: `${(metricSnapshot?.qps ?? 0).toFixed(2)} QPS`,
       color: "#32c766",
     },
     {
-      label: "Rules",
+      label: t("activity.statRules"),
       value: `${rulesEnabled}/${Math.max(rulesTotal, rulesEnabled)}`,
-      caption: "Current rule set",
+      caption: t("activity.statCurrentRuleSet"),
       color: "#cf3be9",
     },
     {
-      label: "System Proxy",
+      label: t("activity.statSystemProxy"),
       value: serviceState,
       caption: serviceCaption,
       color: systemProxyEnabled ? "#32c766" : "#168cff",
@@ -243,9 +247,9 @@ export default function Activity() {
   return (
     <main className={styles.activityPage} data-testid="activity-page">
       <div className={styles.activityShell}>
-        <h1 className={styles.pageTitle}>Activity</h1>
+        <h1 className={styles.pageTitle}>{t("activity.title")}</h1>
 
-        <section className={styles.statGrid} aria-label="Activity metrics">
+        <section className={styles.statGrid} aria-label={t("activity.metricsAria")}>
           {stats.map((stat) => (
             <article className={styles.statCard} key={stat.label} data-testid="activity-stat-card">
               <div className={styles.statHeader}>
@@ -268,8 +272,8 @@ export default function Activity() {
         <section className={`${styles.panel} ${styles.rulesPanel}`} data-testid="activity-rules-panel">
           <div className={styles.panelHeader}>
             <div className={styles.activeRulesColumn}>
-              <h2 className={styles.panelTitle}>Active Rule Analysis</h2>
-              <div className={styles.panelSubtitle}>Rule sets currently used by the proxy port</div>
+              <h2 className={styles.panelTitle}>{t("activity.activeRuleAnalysis")}</h2>
+              <div className={styles.panelSubtitle}>{t("activity.activeRuleAnalysisSubtitle")}</div>
             </div>
             <button
               type="button"
@@ -278,30 +282,32 @@ export default function Activity() {
               data-testid="activity-rules-open-button"
             >
               <span className={styles.statDot} style={{ color: "#32c766", backgroundColor: "#32c766" }} />
-              {activeRules.length.toLocaleString()} active
+              {t("activity.activeCount", { count: activeRules.length.toLocaleString() })}
             </button>
           </div>
 
           <div className={styles.rulesLayout}>
             <div className={styles.mergedColumn}>
               <div className={styles.mergedHeader}>
-                <div className={styles.sectionLabel}>Merged Rules</div>
+                <div className={styles.sectionLabel}>{t("activity.mergedRules")}</div>
                 <div className={styles.mergedActions}>
                   <button
                     type="button"
                     className={styles.copyButton}
                     onClick={handleCopyMergedRules}
                     data-testid="activity-copy-merged-rules"
-                    aria-label="Copy merged rules"
-                    title="Copy selected text, or all merged rules when no text is selected"
+                    aria-label={t("activity.copyMergedRules")}
+                    title={t("activity.copyMergedRulesTooltip")}
                   >
                     {copied ? <CheckOutlined /> : <CopyOutlined />}
                   </button>
-                  <div className={styles.lineCount}>{countLines(mergedContent).toLocaleString()} lines</div>
+                  <div className={styles.lineCount}>
+                    {t("activity.lineCount", { count: countLines(mergedContent).toLocaleString() })}
+                  </div>
                 </div>
               </div>
               {activeRules.length > 0 ? (
-                <div className={styles.ruleList} aria-label="Active rules used by merged rules">
+                <div className={styles.ruleList} aria-label={t("activity.activeRulesAria")}>
                   {activeRules.map((rule) => (
                     <button
                       type="button"
@@ -314,14 +320,14 @@ export default function Activity() {
                     >
                       <span className={styles.rulePillName}>{rule.name}</span>
                       <span className={styles.rulePillMeta}>
-                        {rule.rule_count.toLocaleString()} entries
+                        {t("activity.entryCount", { count: rule.rule_count.toLocaleString() })}
                         {rule.group_name ? ` · ${rule.group_name}` : ""}
                       </span>
                     </button>
                   ))}
                 </div>
               ) : (
-                <div className={styles.emptyState}>No active rules</div>
+                <div className={styles.emptyState}>{t("activity.noActiveRules")}</div>
               )}
               <RuleEffectivenessCode
                 ref={mergedCodeRef}
@@ -337,10 +343,12 @@ export default function Activity() {
           <section className={`${styles.panel} ${styles.temporaryPortsPanel}`} data-testid="activity-temporary-ports-panel">
             <div className={styles.distributionHeader}>
               <div>
-                <h2 className={styles.panelTitle}>Temporary Ports</h2>
-                <div className={styles.panelSubtitle}>Port-scoped listeners and their enabled rule details</div>
+                <h2 className={styles.panelTitle}>{t("activity.temporaryPorts")}</h2>
+                <div className={styles.panelSubtitle}>{t("activity.temporaryPortsSubtitle")}</div>
               </div>
-              <div className={styles.distributionMode}>{temporaryPorts.length.toLocaleString()} active</div>
+              <div className={styles.distributionMode}>
+                {t("activity.activeCount", { count: temporaryPorts.length.toLocaleString() })}
+              </div>
             </div>
             <div className={styles.temporaryPortGrid}>
               {temporaryPorts.map((port) => {
@@ -366,21 +374,21 @@ export default function Activity() {
                     </div>
                     <div className={styles.tempPortMetaGrid}>
                       <div>
-                        <div className={styles.sectionLabel}>Bound Rules</div>
+                        <div className={styles.sectionLabel}>{t("activity.boundRules")}</div>
                         <div className={styles.ruleChipList}>
                           {port.rule_refs.length > 0 ? (
                             port.rule_refs.map((ref, index) => (
-                              <span className={styles.ruleChip} key={`${ref.type}-${index}`} title={formatRuleRef(ref)}>
-                                {formatRuleRef(ref)}
+                              <span className={styles.ruleChip} key={`${ref.type}-${index}`} title={formatRuleRef(t, ref)}>
+                                {formatRuleRef(t, ref)}
                               </span>
                             ))
                           ) : (
-                            <span className={styles.mutedText}>No bound rule sets</span>
+                            <span className={styles.mutedText}>{t("activity.noBoundRuleSets")}</span>
                           )}
                         </div>
                       </div>
                       <div>
-                        <div className={styles.sectionLabel}>Active Rules</div>
+                        <div className={styles.sectionLabel}>{t("activity.activeRules")}</div>
                         <div className={styles.ruleChipList}>
                           {summary?.rules.length ? (
                             summary.rules.map((rule) => (
@@ -394,20 +402,24 @@ export default function Activity() {
                               </span>
                             ))
                           ) : (
-                            <span className={styles.mutedText}>No active rules resolved</span>
+                            <span className={styles.mutedText}>{t("activity.noActiveRulesResolved")}</span>
                           )}
                         </div>
                       </div>
                     </div>
                     {port.missing_refs.length > 0 ? (
                       <div className={styles.missingRules}>
-                        Missing: {port.missing_refs.map(formatRuleRef).join(", ")}
+                        {t("activity.missing", {
+                          refs: port.missing_refs.map((ref) => formatRuleRef(t, ref)).join(", "),
+                        })}
                       </div>
                     ) : null}
                     <div className={styles.tempMergedHeader}>
-                      <div className={styles.sectionLabel}>Merged Rules</div>
+                      <div className={styles.sectionLabel}>{t("activity.mergedRules")}</div>
                       <div className={styles.lineCount}>
-                        {countLines(summary?.merged_content ?? "").toLocaleString()} lines
+                        {t("activity.lineCount", {
+                          count: countLines(summary?.merged_content ?? "").toLocaleString(),
+                        })}
                       </div>
                     </div>
                     <RuleEffectivenessCode
@@ -424,8 +436,8 @@ export default function Activity() {
 
         <section className={styles.panel} data-testid="activity-distribution-panel">
           <div className={styles.distributionHeader}>
-            <h2 className={styles.panelTitle}>Traffic Distribution</h2>
-            <div className={styles.distributionMode}>By application</div>
+            <h2 className={styles.panelTitle}>{t("activity.trafficDistribution")}</h2>
+            <div className={styles.distributionMode}>{t("activity.byApplication")}</div>
           </div>
           {appDistribution.length > 0 ? (
             <div className={styles.barList}>
@@ -445,7 +457,7 @@ export default function Activity() {
               ))}
             </div>
           ) : (
-            <div className={styles.emptyState}>No application traffic yet</div>
+            <div className={styles.emptyState}>{t("activity.noAppTraffic")}</div>
           )}
         </section>
       </div>

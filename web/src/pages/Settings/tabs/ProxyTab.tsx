@@ -56,6 +56,7 @@ import {
 } from "../../../api/system";
 import { useTlsConfigStore } from "../../../stores/useTlsConfigStore";
 import SystemProxySection from "./SystemProxySection";
+import { t as translateGlobal, useI18n, type TFunction } from "../../../i18n";
 
 const { Text } = Typography;
 
@@ -67,17 +68,20 @@ export interface CliInstallActionState {
 
 export function getCliInstallActionState(
   status: CliInstallStatus | null,
+  t: TFunction = translateGlobal,
 ): CliInstallActionState {
   const cliInstalled = status?.installed === true;
   return {
     showInstallCli: !cliInstalled,
     showInstallSkills: cliInstalled,
     skillsButtonLabel:
-      status?.skills_installed === true ? "Reinstall AI Skills" : "Install AI Skills",
+      status?.skills_installed === true
+        ? t("settings.proxy.reinstallAiSkills")
+        : t("settings.proxy.installAiSkills"),
   };
 }
 
-function formatRuleRef(ref: TemporaryPortRuleSetRef): string {
+function formatRuleRef(ref: TemporaryPortRuleSetRef, t: TFunction): string {
   switch (ref.type) {
     case "local_rule":
       return ref.name;
@@ -86,9 +90,9 @@ function formatRuleRef(ref: TemporaryPortRuleSetRef): string {
     case "rule_file":
       return ref.path;
     case "inline_rule":
-      return ref.content.split(/\r?\n/).find((line) => line.trim()) || "inline rule";
+      return ref.content.split(/\r?\n/).find((line) => line.trim()) || t("settings.proxy.inlineRule");
     default:
-      return "unknown";
+      return t("settings.proxy.unknownRuleRef");
   }
 }
 
@@ -112,6 +116,7 @@ interface TemporaryProxyPortsSectionProps {
 }
 
 function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [ports, setPorts] = useState<TemporaryPortBinding[]>([]);
   const [summaries, setSummaries] = useState<Record<number, TemporaryPortActiveSummary>>({});
@@ -141,11 +146,11 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
     } catch (err) {
       setPorts([]);
       setSummaries({});
-      setError(err instanceof Error ? err.message : "Failed to load temporary ports");
+      setError(err instanceof Error ? err.message : t("settings.proxy.tempPortsLoadFailed"));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void fetchPorts();
@@ -156,7 +161,7 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
       title={
         <Space>
           <ApiOutlined />
-          <span>Temporary Proxy Ports</span>
+          <span>{t("settings.proxy.tempPortsTitle")}</span>
           <Tag color={ports.length > 0 ? "blue" : "default"}>{ports.length}</Tag>
         </Space>
       }
@@ -169,7 +174,7 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
           onClick={fetchPorts}
           data-testid="settings-temporary-ports-refresh"
         >
-          Refresh
+          {t("common.refresh")}
         </Button>
       }
     >
@@ -178,7 +183,7 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
           <Alert
             type="warning"
             showIcon
-            message="Temporary proxy ports are unavailable"
+            message={t("settings.proxy.tempPortsUnavailable")}
             description={error}
             data-testid="settings-temporary-ports-error"
           />
@@ -186,8 +191,7 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
 
         {!error && !loading && ports.length === 0 ? (
           <Text type="secondary" data-testid="settings-temporary-ports-empty">
-            Main proxy port {mainPort} is using the default active rules. Temporary
-            ports created with bifrost port bind will appear here.
+            {t("settings.proxy.tempPortsEmpty", { port: mainPort })}
           </Text>
         ) : null}
 
@@ -198,7 +202,7 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
             <div key={port.port} data-testid={`settings-temporary-port-card-${port.port}`}>
               {index > 0 ? <Divider style={{ margin: "16px 0" }} /> : null}
               <Descriptions column={1} size="small">
-                <Descriptions.Item label="Port">
+                <Descriptions.Item label={t("settings.proxy.port")}>
                   <Space wrap>
                     <Text code>
                       {port.host}:{port.port}
@@ -209,33 +213,33 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
                   </Space>
                 </Descriptions.Item>
                 {port.name ? (
-                  <Descriptions.Item label="Name">{port.name}</Descriptions.Item>
+                  <Descriptions.Item label={t("common.name")}>{port.name}</Descriptions.Item>
                 ) : null}
-                <Descriptions.Item label="Bound Rules">
+                <Descriptions.Item label={t("settings.proxy.boundRules")}>
                   {port.rule_refs.length > 0 ? (
                     <Space wrap>
                       {port.rule_refs.map((ref, refIndex) => (
-                        <Tooltip key={`${ref.type}-${refIndex}`} title={formatRuleRef(ref)}>
-                          <Tag color={ruleRefColor(ref)}>{formatRuleRef(ref)}</Tag>
+                        <Tooltip key={`${ref.type}-${refIndex}`} title={formatRuleRef(ref, t)}>
+                          <Tag color={ruleRefColor(ref)}>{formatRuleRef(ref, t)}</Tag>
                         </Tooltip>
                       ))}
                     </Space>
                   ) : (
-                    <Text type="secondary">No bound rule sets</Text>
+                    <Text type="secondary">{t("settings.proxy.noBoundRuleSets")}</Text>
                   )}
                 </Descriptions.Item>
                 {port.missing_refs.length > 0 ? (
-                  <Descriptions.Item label="Missing Rules">
+                  <Descriptions.Item label={t("settings.proxy.missingRules")}>
                     <Space wrap>
                       {port.missing_refs.map((ref, refIndex) => (
                         <Tag key={`${ref.type}-${refIndex}`} color="orange">
-                          {formatRuleRef(ref)}
+                          {formatRuleRef(ref, t)}
                         </Tag>
                       ))}
                     </Space>
                   </Descriptions.Item>
                 ) : null}
-                <Descriptions.Item label="Active Rules">
+                <Descriptions.Item label={t("settings.proxy.activeRules")}>
                   {summary ? (
                     summary.rules.length > 0 ? (
                       <Space wrap>
@@ -250,10 +254,10 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
                         ))}
                       </Space>
                     ) : (
-                      <Text type="secondary">No active rules resolved</Text>
+                      <Text type="secondary">{t("settings.proxy.noActiveRules")}</Text>
                     )
                   ) : (
-                    <Text type="secondary">Loading active rules...</Text>
+                    <Text type="secondary">{t("settings.proxy.loadingActiveRules")}</Text>
                   )}
                 </Descriptions.Item>
               </Descriptions>
@@ -266,7 +270,7 @@ function TemporaryProxyPortsSection({ mainPort }: TemporaryProxyPortsSectionProp
                   marginBottom: 12,
                 }}
               >
-                Merged Rules for this temporary proxy port
+                {t("settings.proxy.mergedRules")}
               </Text>
               <pre
                 style={{
@@ -338,6 +342,7 @@ function TlsInterceptionPatternsCard({
   handleRemoveAppExcludePattern,
   appSuggestions,
 }: TlsInterceptionPatternsCardProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const config = useTlsConfigStore((s) => s.config);
   const [newIpInclude, setNewIpInclude] = useState("");
@@ -414,7 +419,7 @@ function TlsInterceptionPatternsCard({
       title={
         <Space>
           <SwapOutlined />
-          <span>TLS Interception Patterns</span>
+          <span>{t("settings.tlsPatterns.title")}</span>
         </Space>
       }
       size="small"
@@ -424,14 +429,12 @@ function TlsInterceptionPatternsCard({
         style={{ display: "block", marginBottom: 16, fontSize: 12 }}
         data-testid="settings-tls-priority"
       >
-        Configure TLS interception behavior by domain, application, or IP.
-        Priority: Rules &gt; Domain &gt; App &gt; Client IP &gt; Global. Within
-        each scope, Passthrough takes priority over Force Intercept.
+        {t("settings.tlsPatterns.description")}
       </Text>
 
       <Divider titlePlacement="left" style={{ margin: "0 0 16px 0" }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Domain-based Filtering
+          {t("settings.tlsPatterns.domainFiltering")}
         </Text>
       </Divider>
       <Row gutter={[16, 16]}>
@@ -454,7 +457,7 @@ function TlsInterceptionPatternsCard({
               <Space>
                 <LockOutlined style={{ color: token.colorSuccess }} />
                 <Text strong style={{ color: token.colorSuccessText }}>
-                  Force Intercept
+                  {t("settings.tlsPatterns.forceIntercept")}
                 </Text>
                 <Tag color="green">
                   {tlsConfig?.intercept_include.length || 0}
@@ -469,8 +472,7 @@ function TlsInterceptionPatternsCard({
                 fontSize: 12,
               }}
             >
-              Always intercept these domains, even when global interception is
-              OFF.
+              {t("settings.tlsPatterns.domainIncludeHint")}
             </Text>
             <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
               <Input
@@ -493,12 +495,12 @@ function TlsInterceptionPatternsCard({
                   borderColor: token.colorSuccess,
                 }}
               >
-                Add
+                {t("common.add")}
               </Button>
             </Space.Compact>
             <div>
               {tlsConfig?.intercept_include.length === 0 ? (
-                <Text type="secondary">No patterns configured</Text>
+                <Text type="secondary">{t("settings.tlsPatterns.noPatterns")}</Text>
               ) : (
                 <Space wrap>
                   {tlsConfig?.intercept_include.map((pattern) => (
@@ -535,7 +537,7 @@ function TlsInterceptionPatternsCard({
               <Space>
                 <SafetyCertificateOutlined style={{ color: token.colorWarning }} />
                 <Text strong style={{ color: token.colorWarningText }}>
-                  Passthrough
+                  {t("settings.tlsPatterns.passthrough")}
                 </Text>
                 <Tag color="orange">
                   {tlsConfig?.intercept_exclude.length || 0}
@@ -550,8 +552,7 @@ function TlsInterceptionPatternsCard({
                 fontSize: 12,
               }}
             >
-              Never intercept these domains, even when global interception is
-              ON.
+              {t("settings.tlsPatterns.domainExcludeHint")}
             </Text>
             <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
               <Input
@@ -574,12 +575,12 @@ function TlsInterceptionPatternsCard({
                   borderColor: token.colorWarning,
                 }}
               >
-                Add
+                {t("common.add")}
               </Button>
             </Space.Compact>
             <div>
               {tlsConfig?.intercept_exclude.length === 0 ? (
-                <Text type="secondary">No patterns configured</Text>
+                <Text type="secondary">{t("settings.tlsPatterns.noPatterns")}</Text>
               ) : (
                 <Space wrap>
                   {tlsConfig?.intercept_exclude.map((pattern) => (
@@ -601,7 +602,7 @@ function TlsInterceptionPatternsCard({
 
       <Divider titlePlacement="left" style={{ margin: "16px 0" }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Application-based Filtering
+          {t("settings.tlsPatterns.appFiltering")}
         </Text>
       </Divider>
       <Row gutter={[16, 16]}>
@@ -624,7 +625,7 @@ function TlsInterceptionPatternsCard({
               <Space>
                 <LockOutlined style={{ color: token.colorSuccess }} />
                 <Text strong style={{ color: token.colorSuccessText }}>
-                  Force Intercept
+                  {t("settings.tlsPatterns.forceIntercept")}
                 </Text>
                 <Tag color="green">
                   {tlsConfig?.app_intercept_include.length || 0}
@@ -639,8 +640,7 @@ function TlsInterceptionPatternsCard({
                 fontSize: 12,
               }}
             >
-              Always intercept traffic from these apps. Supports: exact match,
-              prefix*, *suffix.
+              {t("settings.tlsPatterns.appIncludeHint")}
             </Text>
             <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
               <AutoComplete
@@ -673,12 +673,12 @@ function TlsInterceptionPatternsCard({
                   borderColor: token.colorSuccess,
                 }}
               >
-                Add
+                {t("common.add")}
               </Button>
             </Space.Compact>
             <div>
               {tlsConfig?.app_intercept_include.length === 0 ? (
-                <Text type="secondary">No patterns configured</Text>
+                <Text type="secondary">{t("settings.tlsPatterns.noPatterns")}</Text>
               ) : (
                 <Space wrap>
                   {tlsConfig?.app_intercept_include.map((pattern) => (
@@ -715,7 +715,7 @@ function TlsInterceptionPatternsCard({
               <Space>
                 <SafetyCertificateOutlined style={{ color: token.colorWarning }} />
                 <Text strong style={{ color: token.colorWarningText }}>
-                  Passthrough
+                  {t("settings.tlsPatterns.passthrough")}
                 </Text>
                 <Tag color="orange">
                   {tlsConfig?.app_intercept_exclude.length || 0}
@@ -730,8 +730,7 @@ function TlsInterceptionPatternsCard({
                 fontSize: 12,
               }}
             >
-              Never intercept traffic from these apps. Supports: exact match,
-              prefix*, *suffix.
+              {t("settings.tlsPatterns.appExcludeHint")}
             </Text>
             <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
               <AutoComplete
@@ -764,12 +763,12 @@ function TlsInterceptionPatternsCard({
                   borderColor: token.colorWarning,
                 }}
               >
-                Add
+                {t("common.add")}
               </Button>
             </Space.Compact>
             <div>
               {tlsConfig?.app_intercept_exclude.length === 0 ? (
-                <Text type="secondary">No patterns configured</Text>
+                <Text type="secondary">{t("settings.tlsPatterns.noPatterns")}</Text>
               ) : (
                 <Space wrap>
                   {tlsConfig?.app_intercept_exclude.map((pattern) => (
@@ -791,7 +790,7 @@ function TlsInterceptionPatternsCard({
 
       <Divider titlePlacement="left" style={{ margin: "16px 0" }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          IP-based Filtering
+          {t("settings.tlsPatterns.ipFiltering")}
         </Text>
       </Divider>
       <Row gutter={[16, 16]}>
@@ -808,7 +807,7 @@ function TlsInterceptionPatternsCard({
               <Space>
                 <LockOutlined style={{ color: token.colorSuccess }} />
                 <Text strong style={{ color: token.colorSuccessText }}>
-                  Force Intercept
+                  {t("settings.tlsPatterns.forceIntercept")}
                 </Text>
                 <Tag color="green">
                   {config?.ip_intercept_include?.length || 0}
@@ -816,11 +815,11 @@ function TlsInterceptionPatternsCard({
               </Space>
             </Space>
             <Text type="secondary" style={{ display: "block", marginBottom: 12, fontSize: 12 }}>
-              Always intercept TLS traffic from these IPs.
+              {t("settings.tlsPatterns.ipIncludeHint")}
             </Text>
             <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
               <Input
-                placeholder="192.168.1.100 or 10.0.0.0/8"
+                placeholder={t("settings.tlsPatterns.ipPlaceholder")}
                 value={newIpInclude}
                 onChange={(e) => setNewIpInclude(e.target.value)}
                 onPressEnter={handleAddIpInclude}
@@ -837,12 +836,12 @@ function TlsInterceptionPatternsCard({
                   borderColor: token.colorSuccess,
                 }}
               >
-                Add
+                {t("common.add")}
               </Button>
             </Space.Compact>
             <div>
               {(config?.ip_intercept_include?.length || 0) === 0 ? (
-                <Text type="secondary">No IPs configured</Text>
+                <Text type="secondary">{t("settings.tlsPatterns.noIps")}</Text>
               ) : (
                 <Space wrap>
                   {config?.ip_intercept_include?.map((ip) => (
@@ -868,7 +867,7 @@ function TlsInterceptionPatternsCard({
               <Space>
                 <SafetyCertificateOutlined style={{ color: token.colorWarning }} />
                 <Text strong style={{ color: token.colorWarningText }}>
-                  Passthrough
+                  {t("settings.tlsPatterns.passthrough")}
                 </Text>
                 <Tag color="orange">
                   {config?.ip_intercept_exclude?.length || 0}
@@ -876,11 +875,11 @@ function TlsInterceptionPatternsCard({
               </Space>
             </Space>
             <Text type="secondary" style={{ display: "block", marginBottom: 12, fontSize: 12 }}>
-              Never intercept TLS traffic from these IPs.
+              {t("settings.tlsPatterns.ipExcludeHint")}
             </Text>
             <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
               <Input
-                placeholder="192.168.1.100 or 10.0.0.0/8"
+                placeholder={t("settings.tlsPatterns.ipPlaceholder")}
                 value={newIpExclude}
                 onChange={(e) => setNewIpExclude(e.target.value)}
                 onPressEnter={handleAddIpExclude}
@@ -894,12 +893,12 @@ function TlsInterceptionPatternsCard({
                 loading={ipLoading}
                 style={{ background: token.colorWarning, borderColor: token.colorWarning }}
               >
-                Add
+                {t("common.add")}
               </Button>
             </Space.Compact>
             <div>
               {(config?.ip_intercept_exclude?.length || 0) === 0 ? (
-                <Text type="secondary">No IPs configured</Text>
+                <Text type="secondary">{t("settings.tlsPatterns.noIps")}</Text>
               ) : (
                 <Space wrap>
                   {config?.ip_intercept_exclude?.map((ip) => (
@@ -1019,6 +1018,7 @@ export default function ProxyTab({
   handleRemoveAppExcludePattern,
   appSuggestions,
 }: ProxyTabProps) {
+  const { t } = useI18n();
   const [cliInstallStatus, setCliInstallStatus] = useState<CliInstallStatus | null>(null);
   const [cliInstallLoading, setCliInstallLoading] = useState(false);
 
@@ -1037,20 +1037,20 @@ export default function ProxyTab({
     void refreshCliInstallStatus();
   }, [refreshCliInstallStatus]);
 
-  const cliInstallActions = getCliInstallActionState(cliInstallStatus);
+  const cliInstallActions = getCliInstallActionState(cliInstallStatus, t);
 
   const handleInstallCli = useCallback(async () => {
     setCliInstallLoading(true);
     try {
       const status = await installCliFromDesktop({ install_skills: false });
       setCliInstallStatus(status);
-      message.success("CLI installed");
+      message.success(t("settings.proxy.cliInstalled"));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to install CLI");
+      message.error(error instanceof Error ? error.message : t("settings.proxy.cliInstallFailed"));
     } finally {
       setCliInstallLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const handleInstallSkills = useCallback(async () => {
     setCliInstallLoading(true);
@@ -1058,16 +1058,16 @@ export default function ProxyTab({
       const status = await installCliFromDesktop({ install_skills: true });
       setCliInstallStatus(status);
       if (status.skills_installed === false) {
-        message.warning(status.skills_message || "AI skill setup needs a retry");
+        message.warning(status.skills_message || t("settings.proxy.aiSkillsRetry"));
       } else {
-        message.success("AI skills installed");
+        message.success(t("settings.proxy.aiSkillsInstalled"));
       }
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to install AI skills");
+      message.error(error instanceof Error ? error.message : t("settings.proxy.aiSkillsInstallFailed"));
     } finally {
       setCliInstallLoading(false);
     }
-  }, []);
+  }, [t]);
 
   return (
     <div>
@@ -1078,7 +1078,7 @@ export default function ProxyTab({
               title={
                 <Space>
                   <ApiOutlined />
-                  <span>Desktop Proxy Core</span>
+                  <span>{t("settings.proxy.desktopCoreTitle")}</span>
                 </Space>
               }
               size="small"
@@ -1087,17 +1087,17 @@ export default function ProxyTab({
                 <Alert
                   type="info"
                   showIcon
-                  message="Changing the port rebinds the embedded bifrost core listener"
+                  message={t("settings.proxy.desktopCoreAlert")}
                   description={
                     desktopPlatform === "macos"
-                      ? "The bundled UI stays in place while the local proxy listener switches ports and reconnects."
-                      : "The desktop shell updates the local proxy listener in place and then restores the live desktop connection."
+                      ? t("settings.proxy.desktopCoreMacos")
+                      : t("settings.proxy.desktopCoreOther")
                   }
                 />
                 <Row gutter={16} align="bottom" data-testid="settings-desktop-port-row">
                   <Col flex="220px">
                     <Space direction="vertical" style={{ width: "100%" }} size={4}>
-                      <Text>Proxy Port</Text>
+                      <Text>{t("settings.proxy.proxyPort")}</Text>
                       <InputNumber
                         data-testid="settings-desktop-port-input"
                         min={1}
@@ -1135,19 +1135,24 @@ export default function ProxyTab({
                       onClick={onApplyDesktopProxyPort}
                       data-testid="settings-desktop-port-apply"
                     >
-                      Apply & Restart
+                      {t("settings.proxy.applyRestart")}
                     </Button>
                   </Col>
                 </Row>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Platform: {desktopPlatform} · Expected port:{" "}
-                  {desktopExpectedProxyPort ?? proxySettings?.port ?? 9900} · Actual
-                  port: {desktopProxyPort ?? proxySettings?.port ?? 9900}
+                  {t("settings.proxy.portSummary", {
+                    platform: desktopPlatform,
+                    expected: desktopExpectedProxyPort ?? proxySettings?.port ?? 9900,
+                    actual: desktopProxyPort ?? proxySettings?.port ?? 9900,
+                  })}
                 </Text>
                 {desktopExpectedProxyPort !== null &&
                 desktopPortDraft !== desktopExpectedProxyPort ? (
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    Pending change: {desktopExpectedProxyPort} → {desktopPortDraft}
+                    {t("settings.proxy.pendingChange", {
+                      from: desktopExpectedProxyPort,
+                      to: desktopPortDraft,
+                    })}
                   </Text>
                 ) : null}
                 {desktopExpectedProxyPort !== null &&
@@ -1156,8 +1161,11 @@ export default function ProxyTab({
                   <Alert
                     type="warning"
                     showIcon
-                    message={`Expected ${desktopExpectedProxyPort}, running on ${desktopProxyPort}`}
-                    description="The preferred startup port was unavailable, so the embedded core automatically moved to the next available port."
+                    message={t("settings.proxy.portMismatch", {
+                      expected: desktopExpectedProxyPort,
+                      actual: desktopProxyPort,
+                    })}
+                    description={t("settings.proxy.portMismatchDescription")}
                   />
                 ) : null}
                 <Divider style={{ margin: "4px 0" }} />
@@ -1165,22 +1173,22 @@ export default function ProxyTab({
                   <Col flex="auto">
                     <Space direction="vertical" size={4} style={{ width: "100%" }}>
                       <Space wrap>
-                        <Text strong>Command Line & AI Tools</Text>
+                        <Text strong>{t("settings.proxy.cliTitle")}</Text>
                         {cliInstallStatus?.installed ? (
                           <Tag color="green" icon={<CheckCircleOutlined />}>
-                            CLI installed
+                            {t("settings.proxy.cliInstalled")}
                           </Tag>
                         ) : (
-                          <Tag>CLI not installed</Tag>
+                          <Tag>{t("settings.proxy.cliNotInstalled")}</Tag>
                         )}
                         {cliInstallStatus?.skills_installed ? (
-                          <Tag color="blue">AI skills installed</Tag>
+                          <Tag color="blue">{t("settings.proxy.aiSkillsInstalled")}</Tag>
                         ) : null}
                       </Space>
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         {cliInstallStatus?.install_path
-                          ? `CLI path: ${cliInstallStatus.install_path}`
-                          : "Install the bundled CLI so terminals and AI coding tools can call bifrost directly."}
+                          ? t("settings.proxy.cliPath", { path: cliInstallStatus.install_path })
+                          : t("settings.proxy.cliInstallHint")}
                       </Text>
                       {cliInstallStatus?.path_hint ? (
                         <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1201,7 +1209,7 @@ export default function ProxyTab({
                         loading={cliInstallLoading}
                         onClick={refreshCliInstallStatus}
                       >
-                        Refresh
+                        {t("common.refresh")}
                       </Button>
                       {cliInstallActions.showInstallCli ? (
                         <Button
@@ -1211,7 +1219,7 @@ export default function ProxyTab({
                           onClick={handleInstallCli}
                           data-testid="settings-install-cli"
                         >
-                          Install CLI
+                          {t("settings.proxy.installCli")}
                         </Button>
                       ) : null}
                       {cliInstallActions.showInstallSkills ? (
@@ -1255,21 +1263,21 @@ export default function ProxyTab({
             title={
               <Space>
                 <ApiOutlined />
-                <span>Proxy Address</span>
+                <span>{t("settings.proxy.addressTitle")}</span>
               </Space>
             }
             size="small"
             extra={
               <Button icon={<CopyOutlined />} size="small" onClick={copyProxyConfig}>
-                Copy
+                {t("common.copy")}
               </Button>
             }
           >
             <Descriptions column={1} size="small">
-              <Descriptions.Item label="Port">
+              <Descriptions.Item label={t("settings.proxy.port")}>
                 <Text code>{overview?.server.port || 9900}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="Admin URL">
+              <Descriptions.Item label={t("settings.proxy.adminUrl")}>
                 <a
                   href={overview?.server.admin_url}
                   target="_blank"
@@ -1290,7 +1298,7 @@ export default function ProxyTab({
                     marginBottom: 12,
                   }}
                 >
-                  Available Network Addresses — scan QR code with your device
+                  {t("settings.proxy.networkAddresses")}
                 </Text>
                 <Row gutter={[16, 16]} justify="start">
                   {proxyAddressInfo.addresses.map((addr, index) => (
@@ -1318,7 +1326,7 @@ export default function ProxyTab({
                         </div>
                         {addr.is_preferred && (
                           <Tag color="green" style={{ marginTop: 4, fontSize: 11 }}>
-                            Recommended
+                            {t("settings.proxy.recommended")}
                           </Tag>
                         )}
                       </div>
@@ -1335,7 +1343,7 @@ export default function ProxyTab({
             title={
               <Space>
                 <LockOutlined />
-                <span>TLS/HTTPS Settings</span>
+                <span>{t("settings.tls.title")}</span>
               </Space>
             }
             size="small"
@@ -1348,7 +1356,7 @@ export default function ProxyTab({
             >
               <Row justify="space-between" align="middle">
                 <Col>
-                  <Text>Enable HTTPS Interception</Text>
+                  <Text>{t("settings.tls.enableInterception")}</Text>
                 </Col>
                 <Col>
                   <Switch
@@ -1360,8 +1368,7 @@ export default function ProxyTab({
                 </Col>
               </Row>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Intercept and inspect HTTPS traffic. Requires CA certificate
-                installed.
+                {t("settings.tls.enableInterceptionHint")}
               </Text>
 
               <Divider style={{ margin: "12px 0" }} />
@@ -1369,8 +1376,8 @@ export default function ProxyTab({
               <Row justify="space-between" align="middle">
                 <Col>
                   <Space>
-                    <Text>Skip Certificate Verification</Text>
-                    <Tooltip title="Warning: This makes connections insecure">
+                    <Text>{t("settings.tls.skipVerification")}</Text>
+                    <Tooltip title={t("settings.tls.skipVerificationTooltip")}>
                       <ExclamationCircleOutlined style={{ color: "#faad14" }} />
                     </Tooltip>
                   </Space>
@@ -1387,8 +1394,8 @@ export default function ProxyTab({
               {tlsConfig?.unsafe_ssl && (
                 <Alert
                   type="warning"
-                  message="Certificate verification is disabled"
-                  description="Only use this in development environments"
+                  message={t("settings.tls.verificationDisabled")}
+                  description={t("settings.tls.verificationDisabledHint")}
                   showIcon
                   style={{ marginTop: 8 }}
                 />
@@ -1398,8 +1405,8 @@ export default function ProxyTab({
 
               <Row justify="space-between" align="middle">
                 <Col>
-                  <Tooltip title="Automatically disconnect affected connections when TLS config changes">
-                    <Text>Auto-disconnect on Config Change</Text>
+                  <Tooltip title={t("settings.tls.autoDisconnectTooltip")}>
+                    <Text>{t("settings.tls.autoDisconnect")}</Text>
                   </Tooltip>
                 </Col>
                 <Col>
@@ -1412,8 +1419,7 @@ export default function ProxyTab({
                 </Col>
               </Row>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                When enabled, existing connections will be closed when TLS
-                settings change.
+                {t("settings.tls.autoDisconnectHint")}
               </Text>
             </Space>
           </Card>
@@ -1446,18 +1452,18 @@ export default function ProxyTab({
         
 
         <Col xs={24}>
-          <Card title="System Information" size="small">
+          <Card title={t("settings.proxy.systemInfo")} size="small">
             <Descriptions column={1} size="small">
-              <Descriptions.Item label="Version">
+              <Descriptions.Item label={t("settings.proxy.version")}>
                 <Text code>v{overview?.system.version}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="OS">
+              <Descriptions.Item label={t("settings.proxy.os")}>
                 {overview?.system.os} ({overview?.system.arch})
               </Descriptions.Item>
               <Descriptions.Item label="PID">
                 {overview?.system.pid}
               </Descriptions.Item>
-              <Descriptions.Item label="Uptime">
+              <Descriptions.Item label={t("settings.proxy.uptime")}>
                 {overview ? formatUptime(overview.system.uptime_secs) : "-"}
               </Descriptions.Item>
             </Descriptions>

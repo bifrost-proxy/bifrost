@@ -17,6 +17,7 @@ import {
 import { useEffect, type CSSProperties } from "react";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { useSyncStore } from "../../stores/useSyncStore";
+import { useI18n } from "../../i18n";
 
 interface MenuItem {
   key: string;
@@ -26,6 +27,7 @@ interface MenuItem {
 }
 
 export default function IconSidebar() {
+  const { t } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
@@ -45,16 +47,16 @@ export default function IconSidebar() {
   }, [startSyncPolling, stopSyncPolling]);
 
   const menuItems: MenuItem[] = [
-    { key: "/traffic", icon: <GlobalOutlined />, label: "Network" },
-    { key: "/replay", icon: <ThunderboltOutlined />, label: "Replay" },
-    { key: "/rules", icon: <FileTextOutlined />, label: "Rules" },
-    { key: "/scripts", icon: <CodeOutlined />, label: "Scripts" },
-    { key: "/ai", icon: <RobotOutlined />, label: "AI" },
-    { key: "/devtools", icon: <BugOutlined />, label: "DevTools" },
-    { key: "/values", icon: <TeamOutlined />, label: "Values" },
-    { key: "/groups", icon: <UsergroupAddOutlined />, label: "Groups", hidden: !showGroups },
-    { key: "/notifications", icon: <BellOutlined />, label: "Notifications" },
-    { key: "/settings", icon: <SettingOutlined />, label: "Settings" },
+    { key: "/traffic", icon: <GlobalOutlined />, label: t("app.navTraffic") },
+    { key: "/replay", icon: <ThunderboltOutlined />, label: t("app.navReplay") },
+    { key: "/rules", icon: <FileTextOutlined />, label: t("app.navRules") },
+    { key: "/scripts", icon: <CodeOutlined />, label: t("app.navScripts") },
+    { key: "/ai", icon: <RobotOutlined />, label: t("app.navAi") },
+    { key: "/devtools", icon: <BugOutlined />, label: t("app.navDevtools") },
+    { key: "/values", icon: <TeamOutlined />, label: t("app.navValues") },
+    { key: "/groups", icon: <UsergroupAddOutlined />, label: t("app.navGroups"), hidden: !showGroups },
+    { key: "/notifications", icon: <BellOutlined />, label: t("app.navNotifications") },
+    { key: "/settings", icon: <SettingOutlined />, label: t("app.navSettings") },
   ];
 
   const handleThemeToggle = () => {
@@ -122,7 +124,7 @@ export default function IconSidebar() {
           </Tooltip>
         );
       })}
-      <Tooltip title={isDark ? "Switch to Light" : "Switch to Dark"} placement="right">
+      <Tooltip title={isDark ? t("app.switchToLight") : t("app.switchToDark")} placement="right">
         <div
           data-testid="theme-toggle"
           style={{

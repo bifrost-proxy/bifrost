@@ -30,18 +30,22 @@ import VersionModal from "../VersionModal";
 import AiSkillAssistant from "../AiSkillAssistant";
 import { getTlsInterceptionIndicator } from "./statusIndicators";
 import { isDesktopShell } from "../../runtime";
+import { useI18n, type TFunction } from "../../i18n";
 import "./index.css";
 
-function formatSyncAction(action?: SyncStatus["last_sync_action"]): string | null {
+function formatSyncAction(
+  t: TFunction,
+  action?: SyncStatus["last_sync_action"],
+): string | null {
   switch (action) {
     case "local_pushed":
-      return "Last sync pushed local changes to remote";
+      return t("app.statusBar.syncActionLocalPushed");
     case "remote_pulled":
-      return "Last sync pulled newer remote changes";
+      return t("app.statusBar.syncActionRemotePulled");
     case "bidirectional":
-      return "Last sync exchanged local and remote changes";
+      return t("app.statusBar.syncActionBidirectional");
     case "no_change":
-      return "Last sync found no changes";
+      return t("app.statusBar.syncActionNoChange");
     default:
       return null;
   }
@@ -59,17 +63,21 @@ function formatBytesRate(bytesPerSecond: number): string {
   return `${formatBytes(bytesPerSecond)}/s`;
 }
 
-function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+function formatUptime(t: TFunction, seconds: number): string {
+  if (seconds < 60) return t("app.statusBar.uptimeSeconds", { s: seconds });
+  if (seconds < 3600) return t("app.statusBar.uptimeMinutes", { m: Math.floor(seconds / 60) });
   if (seconds < 86400) {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
-    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    return m > 0
+      ? t("app.statusBar.uptimeHoursMinutes", { h, m })
+      : t("app.statusBar.uptimeHours", { h });
   }
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
-  return h > 0 ? `${d}d ${h}h` : `${d}d`;
+  return h > 0
+    ? t("app.statusBar.uptimeDaysHours", { d, h })
+    : t("app.statusBar.uptimeDays", { d });
 }
 
 function withSettingsScope(scope: SettingsScope): SettingsScope[] {
@@ -91,6 +99,7 @@ function tlsConfigFromPushData(data: unknown): TlsConfig | null {
 const StatusBar = memo(function StatusBar() {
   const navigate = useNavigate();
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const { overview, current, enablePush, disablePush } = useMetricsStore(
     useShallow((state) => ({
       overview: state.overview,
@@ -165,8 +174,10 @@ const StatusBar = memo(function StatusBar() {
       }
       if (lastDesktopNotificationVersion.current !== versionState.latestVersion) {
         notification.info({
-          message: `Bifrost Desktop v${versionState.latestVersion} is available`,
-          description: "Install the desktop update when you are ready. The CLI will be updated too if it is installed.",
+          message: t("app.statusBar.desktopUpdateAvailable", {
+            version: versionState.latestVersion,
+          }),
+          description: t("app.statusBar.desktopUpdateDescription"),
           placement: "bottomRight",
           duration: 8,
           onClick: () => setModalVisible(true),
@@ -182,7 +193,7 @@ const StatusBar = memo(function StatusBar() {
       DESKTOP_CHECK_INTERVAL_MS,
     );
     return () => window.clearInterval(timer);
-  }, [checkVersion, setModalVisible]);
+  }, [checkVersion, setModalVisible, t]);
 
   const metrics = current || overview?.metrics;
 
@@ -213,22 +224,26 @@ const StatusBar = memo(function StatusBar() {
 
   const uptime = useMemo(() => {
     if (!overview?.system) return "-";
-    return formatUptime(overview.system.uptime_secs);
-  }, [overview]);
+    return formatUptime(t, overview.system.uptime_secs);
+  }, [overview, t]);
 
   const proxyStatus = useMemo(() => {
-    if (!systemProxy) return { text: "Unknown", running: false };
+    if (!systemProxy) return { text: t("common.unknown"), running: false };
     const configured = isSystemProxyConfiguredEnabled(systemProxy);
     const managedByCurrentBifrost = isSystemProxyLiveEnabledByBifrost(systemProxy);
     return {
-      text: managedByCurrentBifrost ? "Running" : configured ? "Not Applied" : "Stopped",
+      text: managedByCurrentBifrost
+        ? t("app.statusBar.proxyRunning")
+        : configured
+          ? t("app.statusBar.proxyNotApplied")
+          : t("app.statusBar.proxyStopped"),
       running: managedByCurrentBifrost,
     };
-  }, [systemProxy]);
+  }, [systemProxy, t]);
 
   const tlsIndicator = useMemo(
-    () => getTlsInterceptionIndicator(tlsConfig),
-    [tlsConfig],
+    () => getTlsInterceptionIndicator(tlsConfig, t),
+    [tlsConfig, t],
   );
 
   const handleToggleSystemProxy = useCallback(
@@ -247,7 +262,7 @@ const StatusBar = memo(function StatusBar() {
     if (!systemProxy.supported) {
       return (
         <div style={{ fontSize: 12, color: token.colorTextSecondary }}>
-          System proxy is not supported on this platform
+          {t("app.statusBar.systemProxyUnsupported")}
         </div>
       );
     }
@@ -260,7 +275,7 @@ const StatusBar = memo(function StatusBar() {
             alignItems: "center",
           }}
         >
-          <span style={{ fontSize: 12 }}>System Proxy</span>
+          <span style={{ fontSize: 12 }}>{t("app.statusBar.systemProxy")}</span>
           <Switch
             size="small"
             checked={managedByCurrentBifrost}
@@ -280,7 +295,9 @@ const StatusBar = memo(function StatusBar() {
               marginTop: 6,
             }}
           >
-            Managed by another proxy: {systemProxy.host}:{systemProxy.port}
+            {t("app.statusBar.managedByOtherProxy", {
+              address: `${systemProxy.host}:${systemProxy.port}`,
+            })}
           </div>
         ) : managedByCurrentBifrost ? (
           <div
@@ -305,18 +322,18 @@ const StatusBar = memo(function StatusBar() {
               marginTop: 6,
             }}
           >
-            Configured on, not currently applied
+            {t("app.statusBar.configuredNotApplied")}
           </div>
         ) : null}
       </div>
     );
-  }, [systemProxy, proxyLoading, handleToggleSystemProxy, token]);
+  }, [systemProxy, proxyLoading, handleToggleSystemProxy, token, t]);
 
   const syncIndicator = useMemo(() => {
     if (!syncStatus || !syncStatus.enabled) {
       return {
-        text: "Off",
-        detail: "Sync disabled",
+        text: t("common.off"),
+        detail: t("app.statusBar.syncDisabled"),
         color: token.colorTextQuaternary,
         pulse: false,
         state: "disabled",
@@ -333,8 +350,8 @@ const StatusBar = memo(function StatusBar() {
 
     if (syncStatus.syncing) {
       return {
-        text: "Syncing",
-        detail: "Connected and syncing rules",
+        text: t("app.statusBar.syncing"),
+        detail: t("app.statusBar.syncingDetail"),
         color: token.colorWarning,
         pulse: true,
         state: "syncing",
@@ -343,8 +360,8 @@ const StatusBar = memo(function StatusBar() {
 
     if (!readyProvider && !syncStatus.reachable) {
       return {
-        text: "Local",
-        detail: "Remote service unreachable, using local rules only",
+        text: t("app.statusBar.syncLocal"),
+        detail: t("app.statusBar.syncLocalDetail"),
         color: token.colorWarning,
         pulse: false,
         state: "unreachable",
@@ -353,8 +370,8 @@ const StatusBar = memo(function StatusBar() {
 
     if (!readyProvider && !syncStatus.authorized) {
       return {
-        text: "Sign in",
-        detail: "Remote reachable but login required",
+        text: t("app.statusBar.syncSignIn"),
+        detail: t("app.statusBar.syncSignInDetail"),
         color: token.colorInfo,
         pulse: false,
         state: "unauthorized",
@@ -362,17 +379,22 @@ const StatusBar = memo(function StatusBar() {
     }
 
     return {
-      text: effectiveLastSyncAt ? "Synced" : "Connected",
+      text: effectiveLastSyncAt ? t("app.statusBar.synced") : t("app.statusBar.connected"),
       detail: effectiveLastSyncAt
-        ? `${formatSyncAction(effectiveLastSyncAction) ?? "Last sync completed"} at ${new Date(effectiveLastSyncAt).toLocaleString()}`
+        ? t("app.statusBar.syncActionAt", {
+            action:
+              formatSyncAction(t, effectiveLastSyncAction) ??
+              t("app.statusBar.syncActionCompleted"),
+            time: new Date(effectiveLastSyncAt).toLocaleString(),
+          })
         : readyProvider
-          ? `Connected to ${readyProvider.name}`
-          : "Connected to remote service",
+          ? t("app.statusBar.connectedTo", { name: readyProvider.name })
+          : t("app.statusBar.connectedToRemote"),
       color: token.colorSuccess,
       pulse: false,
       state: effectiveLastSyncAt ? "ready" : "connected",
     };
-  }, [syncStatus, token.colorInfo, token.colorSuccess, token.colorTextQuaternary, token.colorWarning]);
+  }, [syncStatus, token.colorInfo, token.colorSuccess, token.colorTextQuaternary, token.colorWarning, t]);
 
   const handleVersionClick = useCallback(() => {
     checkVersion({ forceRefresh: true });
@@ -542,8 +564,8 @@ const StatusBar = memo(function StatusBar() {
   };
 
   const versionTooltip = hasUpdate
-    ? `New version available: v${latestVersion}`
-    : "Click to view version info";
+    ? t("app.statusBar.newVersionAvailable", { version: latestVersion ?? "" })
+    : t("app.statusBar.clickToViewVersion");
 
   return (
     <>
@@ -556,7 +578,7 @@ const StatusBar = memo(function StatusBar() {
         >
           <div style={{ ...styles.item, cursor: "pointer" }}>
             <div style={styles.statusDot} />
-            <span style={styles.label}>Proxy:</span>
+            <span style={styles.label}>{t("app.statusBar.proxyLabel")}</span>
             <span style={styles.valueStatus}>{proxyStatus.text}</span>
           </div>
         </Popover>
@@ -566,7 +588,7 @@ const StatusBar = memo(function StatusBar() {
             style={{ ...styles.item, ...styles.tlsButton }}
             role="button"
             tabIndex={0}
-            aria-label="Open TLS interception settings"
+            aria-label={t("app.statusBar.openTlsSettings")}
             data-testid="statusbar-tls-interception"
             data-tls-state={tlsIndicator.state}
             onClick={() => navigate("/settings?tab=tls")}
@@ -590,7 +612,7 @@ const StatusBar = memo(function StatusBar() {
               }`}
               style={styles.tlsDot}
             />
-            <span style={styles.label}>TLS:</span>
+            <span style={styles.label}>{t("app.statusBar.tlsLabel")}</span>
             <span
               className={
                 tlsIndicator.active ? "statusbar-tls-value--active" : undefined
@@ -607,7 +629,7 @@ const StatusBar = memo(function StatusBar() {
             style={{ ...styles.item, ...styles.syncButton }}
             role="button"
             tabIndex={0}
-            aria-label="Open sync settings"
+            aria-label={t("app.statusBar.openSyncSettings")}
             data-testid="statusbar-sync"
             data-sync-state={syncIndicator.state}
             data-sync-action={syncStatus?.last_sync_action ?? "unknown"}
@@ -621,7 +643,7 @@ const StatusBar = memo(function StatusBar() {
             }}
           >
             <div style={styles.syncDot} />
-            <span style={styles.label}>Sync:</span>
+            <span style={styles.label}>{t("app.statusBar.syncLabel")}</span>
             <span style={styles.valueStatus}>{syncIndicator.text}</span>
           </div>
         </Tooltip>
@@ -641,40 +663,40 @@ const StatusBar = memo(function StatusBar() {
         <div style={styles.separator} />
 
         <div style={styles.item}>
-          <span style={styles.label}>Total:</span>
+          <span style={styles.label}>{t("app.statusBar.totalLabel")}</span>
           <span style={styles.valueTraffic}>{totalTraffic}</span>
         </div>
 
         <div style={styles.separator} />
 
         <div style={styles.item}>
-          <span style={styles.label}>Conn:</span>
+          <span style={styles.label}>{t("app.statusBar.connLabel")}</span>
           <span style={styles.valueNumber}>
             {metrics?.active_connections ?? 0}
           </span>
         </div>
 
         <div style={styles.item}>
-          <span style={styles.label}>Req:</span>
+          <span style={styles.label}>{t("app.statusBar.reqLabel")}</span>
           <span style={styles.valueNumber}>{metrics?.total_requests ?? 0}</span>
         </div>
 
         <div style={styles.separator} />
 
         <div style={styles.item}>
-          <span style={styles.label}>Mem:</span>
+          <span style={styles.label}>{t("app.statusBar.memLabel")}</span>
           <span style={styles.valueMem}>{memoryUsage}</span>
         </div>
 
         <div style={styles.item}>
-          <span style={styles.label}>CPU:</span>
+          <span style={styles.label}>{t("app.statusBar.cpuLabel")}</span>
           <span style={styles.valueCpu}>{cpuUsage}</span>
         </div>
 
         <div style={styles.separator} />
 
         <div style={styles.item}>
-          <span style={styles.label}>Uptime:</span>
+          <span style={styles.label}>{t("app.statusBar.uptimeLabel")}</span>
           <span style={styles.valueUptime}>{uptime}</span>
         </div>
 

@@ -13,11 +13,13 @@ import { copyToClipboard } from "../../utils/clipboard";
 import { useVersionStore } from "../../stores/useVersionStore";
 import { useMetricsStore } from "../../stores/useMetricsStore";
 import { isDesktopShell } from "../../runtime";
+import { useI18n } from "../../i18n";
 
 const { Text, Link } = Typography;
 
 export default function VersionModal() {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const modalVisible = useVersionStore((state) => state.modalVisible);
   const setModalVisible = useVersionStore((state) => state.setModalVisible);
   const hasUpdate = useVersionStore((state) => state.hasUpdate);
@@ -61,11 +63,11 @@ export default function VersionModal() {
   const handleCopyCommand = useCallback(async () => {
     const ok = await copyToClipboard(upgradeCommand);
     if (ok) {
-      message.success("Command copied to clipboard");
+      message.success(t("app.version.commandCopied"));
     } else {
-      message.error("Failed to copy command");
+      message.error(t("app.version.copyCommandFailed"));
     }
-  }, [upgradeCommand]);
+  }, [upgradeCommand, t]);
 
   const styles = useMemo<Record<string, CSSProperties>>(
     () => ({
@@ -205,25 +207,25 @@ export default function VersionModal() {
       <div style={styles.header}>
         <RocketOutlined style={styles.headerIcon} />
         <div style={styles.headerText}>
-          <p style={styles.headerTitle}>New Version Available</p>
+          <p style={styles.headerTitle}>{t("app.version.newVersionAvailable")}</p>
           <p style={styles.headerSubtitle}>
             {desktopMode
-              ? "A Bifrost update is ready to install"
-              : "A newer version of Bifrost is ready to install"}
+              ? t("app.version.desktopUpdateReady")
+              : t("app.version.newerVersionReady")}
           </p>
         </div>
       </div>
 
       <div style={styles.versionRow}>
         <div style={{ textAlign: "center" }}>
-          <div style={styles.versionLabel}>Current</div>
+          <div style={styles.versionLabel}>{t("app.version.current")}</div>
           <div style={{ ...styles.versionValue, ...styles.versionCurrent }}>
             v{currentVersion}
           </div>
         </div>
         <span style={styles.arrow}>→</span>
         <div style={{ textAlign: "center" }}>
-          <div style={styles.versionLabel}>Latest</div>
+          <div style={styles.versionLabel}>{t("app.version.latest")}</div>
           <div style={{ ...styles.versionValue, ...styles.versionLatest }}>
             v{latestVersion}
           </div>
@@ -234,7 +236,7 @@ export default function VersionModal() {
         <div style={styles.section}>
           <div style={styles.sectionTitle}>
             <span>✨</span>
-            <span>What's New</span>
+            <span>{t("app.version.whatsNew")}</span>
           </div>
           <ul style={styles.highlightList}>
             {releaseHighlights.map((highlight, index) => (
@@ -251,7 +253,7 @@ export default function VersionModal() {
       <div style={styles.section}>
         <div style={styles.sectionTitle}>
           <span>📦</span>
-          <span>Upgrade Command</span>
+          <span>{t("app.version.upgradeCommand")}</span>
         </div>
         <div style={styles.commandBox}>
           <Text style={styles.command} copyable={false}>
@@ -264,7 +266,7 @@ export default function VersionModal() {
             onClick={handleCopyCommand}
             data-testid="version-upgrade-copy-button"
           >
-            Copy
+            {t("common.copy")}
           </Button>
         </div>
       </div>
@@ -272,7 +274,7 @@ export default function VersionModal() {
       {releaseUrl && (
         <div style={styles.releaseLink}>
           <Link href={releaseUrl} target="_blank">
-            <ExportOutlined /> View Full Release Notes
+            <ExportOutlined /> {t("app.version.viewFullReleaseNotes")}
           </Link>
         </div>
       )}
@@ -287,14 +289,14 @@ export default function VersionModal() {
         <div style={styles.header}>
           <InfoCircleOutlined style={styles.headerIcon} />
           <div style={styles.headerText}>
-            <p style={styles.headerTitle}>Version Information</p>
-            <p style={styles.headerSubtitle}>Current installation details</p>
+            <p style={styles.headerTitle}>{t("app.version.versionInformation")}</p>
+            <p style={styles.headerSubtitle}>{t("app.version.installationDetails")}</p>
           </div>
         </div>
 
         <div style={styles.versionRow}>
           <div style={{ textAlign: "center" }}>
-            <div style={styles.versionLabel}>Version</div>
+            <div style={styles.versionLabel}>{t("app.version.version")}</div>
             <div style={{ ...styles.versionValue, ...styles.versionCurrent }}>
               v{currentVersion || systemInfo?.version}
             </div>
@@ -305,7 +307,7 @@ export default function VersionModal() {
           <div style={styles.section}>
             <div style={styles.infoRow}>
               <div style={styles.infoItem}>
-                <span style={styles.infoLabel}>OS:</span>
+                <span style={styles.infoLabel}>{t("app.version.os")}</span>
                 <span style={styles.infoValue}>
                   {systemInfo.os} ({systemInfo.arch})
                 </span>
@@ -316,7 +318,7 @@ export default function VersionModal() {
 
         <div style={styles.successBadge}>
           <CheckCircleOutlined />
-          <span>You are running the latest version</span>
+          <span>{t("app.version.runningLatest")}</span>
         </div>
 
         {releaseHighlights.length > 0 && (
@@ -325,7 +327,7 @@ export default function VersionModal() {
             <div style={styles.section}>
               <div style={styles.sectionTitle}>
                 <span>✨</span>
-                <span>Release Highlights</span>
+                <span>{t("app.version.releaseHighlights")}</span>
               </div>
               <ul style={styles.highlightList}>
                 {releaseHighlights.map((highlight, index) => (
@@ -345,7 +347,7 @@ export default function VersionModal() {
             }
             target="_blank"
           >
-            <ExportOutlined /> View Release History
+            <ExportOutlined /> {t("app.version.viewReleaseHistory")}
           </Link>
         </div>
       </div>
@@ -373,14 +375,14 @@ export default function VersionModal() {
           )}
           <div style={styles.headerText}>
             <p style={styles.headerTitle}>
-              {isFailed ? "Update Failed" : "Updating Bifrost"}
+              {isFailed ? t("app.version.updateFailed") : t("app.version.updating")}
             </p>
             <p style={styles.headerSubtitle}>
               {isFailed
-                ? "The previous version is still available"
+                ? t("app.version.previousStillAvailable")
                 : desktopMode
-                  ? `Installing desktop v${latestVersion} and updating CLI if present…`
-                  : `Installing v${latestVersion}…`}
+                  ? t("app.version.installingDesktop", { version: String(latestVersion) })
+                  : t("app.version.installing", { version: String(latestVersion) })}
             </p>
           </div>
         </div>
@@ -389,7 +391,7 @@ export default function VersionModal() {
           <div style={styles.section}>
             <div style={styles.sectionTitle}>
               <span>⬇️</span>
-              <span>Download</span>
+              <span>{t("common.download")}</span>
             </div>
             <Progress
               percent={downloading ? (percent ?? 0) : upgradePhase === "checking" ? 0 : 100}
@@ -405,7 +407,7 @@ export default function VersionModal() {
           <div style={styles.section}>
             <div style={styles.sectionTitle}>
               <span>📦</span>
-              <span>Install</span>
+              <span>{t("app.version.install")}</span>
             </div>
             <Progress
               percent={
@@ -429,8 +431,8 @@ export default function VersionModal() {
           }}
         >
           {isFailed
-            ? upgradeError || "Upgrade failed. Please try again."
-            : upgradeMessage || "Working…"}
+            ? upgradeError || t("app.version.upgradeFailedRetry")
+            : upgradeMessage || t("app.version.working")}
         </div>
       </div>
     );
@@ -440,7 +442,7 @@ export default function VersionModal() {
     if (!hasUpdate) {
       return (
         <Button type="primary" onClick={handleClose}>
-          Got it
+          {t("app.version.gotIt")}
         </Button>
       );
     }
@@ -451,13 +453,13 @@ export default function VersionModal() {
     if (isFailed) {
       return (
         <>
-          <Button onClick={handleClose}>Close</Button>
+          <Button onClick={handleClose}>{t("common.close")}</Button>
           <Button
             type="primary"
             onClick={handleUpdateNow}
             data-testid="version-retry-button"
           >
-            Retry
+            {t("common.retry")}
           </Button>
         </>
       );
@@ -468,14 +470,14 @@ export default function VersionModal() {
           onClick={handleRemindLater}
           data-testid="version-remind-later-button"
         >
-          Remind Later
+          {t("app.version.remindLater")}
         </Button>
         <Button
           type="primary"
           onClick={handleUpdateNow}
           data-testid="version-update-now-button"
         >
-          Update Now
+          {t("app.version.updateNow")}
         </Button>
       </>
     );

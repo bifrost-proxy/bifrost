@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+
 export function breakpointBodyBytes(
   body: string,
   encoding: "utf8" | "base64",
@@ -8,9 +10,10 @@ export function breakpointBodyBytes(
       body,
     )
   )
-    throw new Error("Enter valid padded Base64 without whitespace");
+    throw new Error(t("shared.breakpoint.invalidBase64"));
   const decoded = atob(body);
-  if (btoa(decoded) !== body) throw new Error("Enter canonical Base64");
+  if (btoa(decoded) !== body)
+    throw new Error(t("shared.breakpoint.nonCanonicalBase64"));
   return Uint8Array.from(decoded, (value) => value.charCodeAt(0));
 }
 export function convertBreakpointBody(

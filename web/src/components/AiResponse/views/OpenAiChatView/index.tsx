@@ -33,6 +33,7 @@ import '../../../../styles/hljs-github-theme.css';
 import type { OpenAiRequestParsed } from '../../parsers/openAiLikeRequest';
 import { stringifyContent, formatToolArgs } from '../../parsers/openAiLikeRequest';
 import { copyToClipboard } from '../../../../utils/clipboard';
+import { t as translate, useI18n, type TFunction, type TranslationKey } from '../../../../i18n';
 
 hljs.registerLanguage('json', json);
 
@@ -98,13 +99,13 @@ const buildConversationGroups = (messages: Msg[]): ConversationGroup[] => {
   return groups;
 };
 
-const ROLE_STYLES: Record<string, { color: string; label: string; bg: string }> = {
-  system: { color: '#722ed1', label: 'System', bg: 'rgba(114,46,209,0.06)' },
-  user: { color: '#1677ff', label: 'User', bg: 'rgba(22,119,255,0.06)' },
-  assistant: { color: '#52c41a', label: 'Assistant', bg: 'rgba(82,196,26,0.06)' },
-  tool: { color: '#fa8c16', label: 'Tool', bg: 'rgba(250,140,22,0.06)' },
-  function: { color: '#13c2c2', label: 'Function', bg: 'rgba(19,194,194,0.06)' },
-  developer: { color: '#eb2f96', label: 'Developer', bg: 'rgba(235,47,150,0.06)' },
+const ROLE_STYLES: Record<string, { color: string; label: TranslationKey; bg: string }> = {
+  system: { color: '#722ed1', label: 'trafficDetail.ai.roleSystem', bg: 'rgba(114,46,209,0.06)' },
+  user: { color: '#1677ff', label: 'trafficDetail.ai.roleUser', bg: 'rgba(22,119,255,0.06)' },
+  assistant: { color: '#52c41a', label: 'trafficDetail.ai.roleAssistant', bg: 'rgba(82,196,26,0.06)' },
+  tool: { color: '#fa8c16', label: 'trafficDetail.ai.roleTool', bg: 'rgba(250,140,22,0.06)' },
+  function: { color: '#13c2c2', label: 'trafficDetail.ai.roleFunction', bg: 'rgba(19,194,194,0.06)' },
+  developer: { color: '#eb2f96', label: 'trafficDetail.ai.roleDeveloper', bg: 'rgba(235,47,150,0.06)' },
 };
 
 const ROLE_ICONS: Record<string, React.ComponentType> = {
@@ -116,9 +117,12 @@ const ROLE_ICONS: Record<string, React.ComponentType> = {
   developer: BulbOutlined,
 };
 
-const DEFAULT_ROLE_STYLE = { color: '#8c8c8c', label: 'Unknown', bg: 'rgba(140,140,140,0.06)' };
+const DEFAULT_ROLE_STYLE = { color: '#8c8c8c', bg: 'rgba(140,140,140,0.06)' };
 
-const getRoleStyle = (role: string) => ROLE_STYLES[role] ?? { ...DEFAULT_ROLE_STYLE, label: role };
+const getRoleStyle = (role: string, t: TFunction): { color: string; label: string; bg: string } => {
+  const known = ROLE_STYLES[role];
+  return known ? { ...known, label: t(known.label) } : { ...DEFAULT_ROLE_STYLE, label: role };
+};
 const getRoleIcon = (role: string) => ROLE_ICONS[role] ?? MessageOutlined;
 
 const formatCharCount = (n: number): string => {
@@ -162,6 +166,7 @@ const MAX_HIGHLIGHT_SIZE = 50_000;
 const INVISIBLE_CHARS_RE = /[\s\u200B-\u200D\u2060\u2063\uFEFF]/g;
 
 const CopyButton = memo(({ text }: { text: string }) => {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const { token } = theme.useToken();
   const handleCopy = useCallback(async () => {
@@ -172,7 +177,7 @@ const CopyButton = memo(({ text }: { text: string }) => {
     }
   }, [text]);
   return (
-    <Tooltip title={copied ? 'Copied!' : 'Copy'}>
+    <Tooltip title={copied ? t('trafficDetail.messages.copiedBang') : t('common.copy')}>
       <Button
         type="text"
         size="small"
@@ -235,15 +240,16 @@ const JsonBlock = memo(({ data, label }: { data: string; label?: string }) => {
 const COLLAPSIBLE_MAX_LINES = 10;
 
 const CollapsibleContent = memo(({ text, title }: { text: string; title?: string }) => {
+  const { t } = useI18n();
   const [modalOpen, setModalOpen] = useState(false);
   const { token } = theme.useToken();
   const lines = useMemo(() => text.split('\n'), [text]);
   const needsTruncation = lines.length > COLLAPSIBLE_MAX_LINES;
   const previewText = needsTruncation ? lines.slice(0, COLLAPSIBLE_MAX_LINES).join('\n') : text;
-  const modalTitle = title ?? 'Full Content';
+  const modalTitle = title ?? t('trafficDetail.ai.fullContent');
 
   if (!text.trim()) {
-    return <Text type="secondary" italic style={{ fontSize: 12 }}>(empty)</Text>;
+    return <Text type="secondary" italic style={{ fontSize: 12 }}>{t('trafficDetail.ai.empty')}</Text>;
   }
 
   return (
@@ -276,7 +282,7 @@ const CollapsibleContent = memo(({ text, title }: { text: string; title?: string
             onClick={() => setModalOpen(true)}
             style={{ padding: 0, fontSize: 11, height: 'auto', marginTop: 2 }}
           >
-            Show all ({lines.length} lines, {formatCharCount(text.length)} chars)
+            {t('trafficDetail.ai.showAllLines', { lines: lines.length, chars: formatCharCount(text.length) })}
           </Button>
         )}
       </div>
@@ -284,7 +290,7 @@ const CollapsibleContent = memo(({ text, title }: { text: string; title?: string
         <Modal
           title={
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 24 }}>
-              <span>{modalTitle} ({lines.length} lines)</span>
+              <span>{t('trafficDetail.ai.titleWithLines', { title: modalTitle, lines: lines.length })}</span>
               <CopyButton text={text} />
             </div>
           }
@@ -318,15 +324,16 @@ const CollapsibleContent = memo(({ text, title }: { text: string; title?: string
 });
 
 const ContentBlock = memo(({ content }: { content: unknown }) => {
+  const { t } = useI18n();
   if (content === null || content === undefined) {
-    return <Text type="secondary" italic style={{ fontSize: 12 }}>(empty)</Text>;
+    return <Text type="secondary" italic style={{ fontSize: 12 }}>{t('trafficDetail.ai.empty')}</Text>;
   }
 
   if (typeof content === 'string') {
     if (!content.trim()) {
-      return <Text type="secondary" italic style={{ fontSize: 12 }}>(empty)</Text>;
+      return <Text type="secondary" italic style={{ fontSize: 12 }}>{t('trafficDetail.ai.empty')}</Text>;
     }
-    return <CollapsibleContent text={content} title="Message Content" />;
+    return <CollapsibleContent text={content} title={t('trafficDetail.ai.messageContent')} />;
   }
 
   if (Array.isArray(content)) {
@@ -347,7 +354,7 @@ const ContentBlock = memo(({ content }: { content: unknown }) => {
                 : p.image_url;
               return (
                 <Tag key={i} color="purple" style={{ margin: 0 }}>
-                  🖼 Image: {typeof url === 'string' ? (url.length > 60 ? url.slice(0, 60) + '…' : url) : 'embedded'}
+                  🖼 {t('trafficDetail.ai.image')}: {typeof url === 'string' ? (url.length > 60 ? url.slice(0, 60) + '…' : url) : t('trafficDetail.ai.embedded')}
                 </Tag>
               );
             }
@@ -363,6 +370,7 @@ const ContentBlock = memo(({ content }: { content: unknown }) => {
 });
 
 const ToolRoundtripCard = memo(({ roundtrip }: { roundtrip: ToolRoundtrip }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const { name, args, callId, response } = roundtrip;
   const responseContent = response?.content;
@@ -401,7 +409,7 @@ const ToolRoundtripCard = memo(({ roundtrip }: { roundtrip: ToolRoundtrip }) => 
           <div style={{ padding: '6px 10px', borderBottom: response ? `1px dashed ${token.colorBorderSecondary}` : undefined }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
               <SwapRightOutlined style={{ fontSize: 10, color: '#1677ff' }} />
-              <Text type="secondary" style={{ fontSize: 11 }}>Arguments</Text>
+              <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.ai.arguments')}</Text>
             </div>
             <JsonBlock data={args} />
           </div>
@@ -411,7 +419,7 @@ const ToolRoundtripCard = memo(({ roundtrip }: { roundtrip: ToolRoundtrip }) => 
           <div style={{ padding: '6px 10px', backgroundColor: 'rgba(82,196,26,0.03)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
               <CheckOutlined style={{ fontSize: 10, color: '#52c41a' }} />
-              <Text type="secondary" style={{ fontSize: 11 }}>Result</Text>
+              <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.ai.result')}</Text>
               {responseName && responseName !== name && (
                 <Tag style={{ margin: 0, fontSize: 10 }}>{responseName}</Tag>
               )}
@@ -420,7 +428,7 @@ const ToolRoundtripCard = memo(({ roundtrip }: { roundtrip: ToolRoundtrip }) => 
           </div>
         ) : (
           <div style={{ padding: '4px 10px', backgroundColor: 'rgba(140,140,140,0.04)' }}>
-            <Text type="secondary" italic style={{ fontSize: 11 }}>No response in context</Text>
+            <Text type="secondary" italic style={{ fontSize: 11 }}>{t('trafficDetail.ai.noResponseInContext')}</Text>
           </div>
         )}
       </div>
@@ -429,10 +437,11 @@ const ToolRoundtripCard = memo(({ roundtrip }: { roundtrip: ToolRoundtrip }) => 
 });
 
 const MessageCard = memo(({ group }: { group: ConversationGroup }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const { message, index, toolRoundtrips } = group;
   const role = (message.role as string) ?? 'unknown';
-  const style = getRoleStyle(role);
+  const style = getRoleStyle(role, t);
   const roleIcon = useMemo(() => createElement(getRoleIcon(role)), [role]);
   const content = message.content;
   const functionCall = message.function_call as Record<string, unknown> | undefined;
@@ -496,12 +505,14 @@ const MessageCard = memo(({ group }: { group: ConversationGroup }) => {
           )}
           {toolRoundtrips.length > 0 && (
             <Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
-              🔧 {toolRoundtrips.length} tool{toolRoundtrips.length > 1 ? 's' : ''}
+              🔧 {toolRoundtrips.length > 1
+                ? t('trafficDetail.ai.toolsOther', { count: toolRoundtrips.length })
+                : t('trafficDetail.ai.toolsOne', { count: toolRoundtrips.length })}
             </Tag>
           )}
         </Space>
         <Space size={4} align="center">
-          <Tooltip title={`${charCount.toLocaleString()} chars`}>
+          <Tooltip title={t('trafficDetail.ai.chars', { count: charCount.toLocaleString() })}>
             <Tag
               style={{
                 margin: 0,
@@ -531,9 +542,9 @@ const MessageCard = memo(({ group }: { group: ConversationGroup }) => {
             }}
           >
             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 2 }}>
-              💭 Reasoning
+              💭 {t('trafficDetail.ai.reasoning')}
             </Text>
-            <CollapsibleContent text={reasoningContent!} title="Reasoning" />
+            <CollapsibleContent text={reasoningContent!} title={t('trafficDetail.ai.reasoning')} />
           </div>
         )}
 
@@ -549,7 +560,7 @@ const MessageCard = memo(({ group }: { group: ConversationGroup }) => {
             }}
           >
             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 2 }}>
-              🚫 Refusal
+              🚫 {t('trafficDetail.ai.refusal')}
             </Text>
             <Text style={{ fontSize: 12 }}>{refusal}</Text>
           </div>
@@ -558,7 +569,7 @@ const MessageCard = memo(({ group }: { group: ConversationGroup }) => {
         {functionCall && (
           <div>
             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
-              ⚡ Function Call
+              ⚡ {t('trafficDetail.ai.functionCall')}
             </Text>
             <ToolRoundtripCard
               roundtrip={{
@@ -576,7 +587,7 @@ const MessageCard = memo(({ group }: { group: ConversationGroup }) => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <ToolOutlined style={{ fontSize: 12, color: '#fa8c16' }} />
               <Text strong style={{ fontSize: 12, color: '#fa8c16' }}>
-                Tool Execution ({toolRoundtrips.length})
+                {t('trafficDetail.ai.toolExecution', { count: toolRoundtrips.length })}
               </Text>
             </div>
             {toolRoundtrips.map((rt, i) => (
@@ -590,7 +601,7 @@ const MessageCard = memo(({ group }: { group: ConversationGroup }) => {
             size="small"
             items={[{
               key: 'extras',
-              label: <Text type="secondary" style={{ fontSize: 11 }}>Extra fields</Text>,
+              label: <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.ai.extraFields')}</Text>,
               children: <JsonBlock data={JSON.stringify(extras, null, 2)} />,
             }]}
             style={{ backgroundColor: 'transparent' }}
@@ -602,6 +613,7 @@ const MessageCard = memo(({ group }: { group: ConversationGroup }) => {
 });
 
 const ToolDefinitionCard = memo(({ tool, index }: { tool: Record<string, unknown>; index: number }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const fn = tool.function as Record<string, unknown> | undefined;
   const name = fn?.name as string | undefined;
@@ -646,7 +658,7 @@ const ToolDefinitionCard = memo(({ tool, index }: { tool: Record<string, unknown
             size="small"
             items={[{
               key: 'params',
-              label: <Text type="secondary" style={{ fontSize: 11 }}>Parameters Schema</Text>,
+              label: <Text type="secondary" style={{ fontSize: 11 }}>{t('trafficDetail.ai.parametersSchema')}</Text>,
               children: <JsonBlock data={formattedParams} />,
             }]}
             style={{ backgroundColor: 'transparent' }}
@@ -660,8 +672,8 @@ const ToolDefinitionCard = memo(({ tool, index }: { tool: Record<string, unknown
 interface ParamMeta {
   iconType: React.ComponentType<{ style?: React.CSSProperties }>;
   iconColor: string;
-  label: string;
-  desc: string;
+  label: TranslationKey;
+  desc: TranslationKey;
   render?: (value: unknown) => React.ReactNode;
 }
 
@@ -688,13 +700,13 @@ const strTag = (val: unknown): React.ReactNode => (
 );
 
 const KNOWN_PARAMS: Record<string, ParamMeta> = {
-  temperature: { iconType: DashboardOutlined, iconColor: '#fa541c', label: 'Temperature', desc: 'Sampling randomness (0-2). Higher = more creative, lower = more deterministic', render: numTag },
-  top_p: { iconType: ExperimentOutlined, iconColor: '#13c2c2', label: 'Top P', desc: 'Nucleus sampling. Model considers tokens with top_p cumulative probability', render: numTag },
-  max_tokens: { iconType: NumberOutlined, iconColor: '#1677ff', label: 'Max Tokens', desc: 'Maximum number of tokens to generate in the completion', render: numTag },
-  max_completion_tokens: { iconType: NumberOutlined, iconColor: '#1677ff', label: 'Max Completion Tokens', desc: 'Upper bound on tokens generated, including reasoning tokens', render: numTag },
-  n: { iconType: NumberOutlined, iconColor: '#722ed1', label: 'N (Completions)', desc: 'Number of completions to generate for each prompt', render: numTag },
+  temperature: { iconType: DashboardOutlined, iconColor: '#fa541c', label: 'trafficDetail.ai.paramLabel.temperature', desc: 'trafficDetail.ai.paramDesc.temperature', render: numTag },
+  top_p: { iconType: ExperimentOutlined, iconColor: '#13c2c2', label: 'trafficDetail.ai.paramLabel.topP', desc: 'trafficDetail.ai.paramDesc.topP', render: numTag },
+  max_tokens: { iconType: NumberOutlined, iconColor: '#1677ff', label: 'trafficDetail.ai.paramLabel.maxTokens', desc: 'trafficDetail.ai.paramDesc.maxTokens', render: numTag },
+  max_completion_tokens: { iconType: NumberOutlined, iconColor: '#1677ff', label: 'trafficDetail.ai.paramLabel.maxCompletionTokens', desc: 'trafficDetail.ai.paramDesc.maxCompletionTokens', render: numTag },
+  n: { iconType: NumberOutlined, iconColor: '#722ed1', label: 'trafficDetail.ai.paramLabel.n', desc: 'trafficDetail.ai.paramDesc.n', render: numTag },
   stop: {
-    iconType: StopOutlined, iconColor: '#ff4d4f', label: 'Stop Sequences', desc: 'Sequences where the model will stop generating further tokens',
+    iconType: StopOutlined, iconColor: '#ff4d4f', label: 'trafficDetail.ai.paramLabel.stop', desc: 'trafficDetail.ai.paramDesc.stop',
     render: (val) => {
       if (Array.isArray(val)) {
         return <Space size={4} wrap>{val.map((s, i) => <Tag key={i} style={{ margin: 0, fontSize: 11, fontFamily: 'monospace' }}>{String(s)}</Tag>)}</Space>;
@@ -702,27 +714,27 @@ const KNOWN_PARAMS: Record<string, ParamMeta> = {
       return strTag(val);
     },
   },
-  presence_penalty: { iconType: ControlOutlined, iconColor: '#eb2f96', label: 'Presence Penalty', desc: 'Penalize new tokens based on whether they appear in text so far (-2 to 2)', render: numTag },
-  frequency_penalty: { iconType: ControlOutlined, iconColor: '#fa8c16', label: 'Frequency Penalty', desc: 'Penalize new tokens based on their frequency in text so far (-2 to 2)', render: numTag },
-  logit_bias: { iconType: ControlOutlined, iconColor: '#8c8c8c', label: 'Logit Bias', desc: 'Modify likelihood of specified tokens appearing in completion', render: jsonTag },
-  logprobs: { iconType: DatabaseOutlined, iconColor: '#722ed1', label: 'Logprobs', desc: 'Whether to return log probabilities of output tokens', render: boolTag },
-  top_logprobs: { iconType: DatabaseOutlined, iconColor: '#722ed1', label: 'Top Logprobs', desc: 'Number of most likely tokens to return at each position (0-20)', render: numTag },
+  presence_penalty: { iconType: ControlOutlined, iconColor: '#eb2f96', label: 'trafficDetail.ai.paramLabel.presencePenalty', desc: 'trafficDetail.ai.paramDesc.presencePenalty', render: numTag },
+  frequency_penalty: { iconType: ControlOutlined, iconColor: '#fa8c16', label: 'trafficDetail.ai.paramLabel.frequencyPenalty', desc: 'trafficDetail.ai.paramDesc.frequencyPenalty', render: numTag },
+  logit_bias: { iconType: ControlOutlined, iconColor: '#8c8c8c', label: 'trafficDetail.ai.paramLabel.logitBias', desc: 'trafficDetail.ai.paramDesc.logitBias', render: jsonTag },
+  logprobs: { iconType: DatabaseOutlined, iconColor: '#722ed1', label: 'trafficDetail.ai.paramLabel.logprobs', desc: 'trafficDetail.ai.paramDesc.logprobs', render: boolTag },
+  top_logprobs: { iconType: DatabaseOutlined, iconColor: '#722ed1', label: 'trafficDetail.ai.paramLabel.topLogprobs', desc: 'trafficDetail.ai.paramDesc.topLogprobs', render: numTag },
   response_format: {
-    iconType: FileTextOutlined, iconColor: '#52c41a', label: 'Response Format', desc: 'Output format: text, json_object, or json_schema',
+    iconType: FileTextOutlined, iconColor: '#52c41a', label: 'trafficDetail.ai.paramLabel.responseFormat', desc: 'trafficDetail.ai.paramDesc.responseFormat',
     render: (val) => {
       if (typeof val === 'object' && val !== null) {
         const v = val as Record<string, unknown>;
         if (v.type) {
-          return <Space size={4}><Tag color="blue" style={{ margin: 0, fontSize: 11 }}>{String(v.type)}</Tag>{!!v.json_schema && <Text type="secondary" style={{ fontSize: 10 }}>(with schema)</Text>}</Space>;
+          return <Space size={4}><Tag color="blue" style={{ margin: 0, fontSize: 11 }}>{String(v.type)}</Tag>{!!v.json_schema && <Text type="secondary" style={{ fontSize: 10 }}>{translate('trafficDetail.ai.withSchema')}</Text>}</Space>;
         }
       }
       return jsonTag(val);
     },
   },
-  seed: { iconType: KeyOutlined, iconColor: '#faad14', label: 'Seed', desc: 'Deterministic sampling seed for reproducible outputs', render: numTag },
-  user: { iconType: UserOutlined, iconColor: '#8c8c8c', label: 'User', desc: 'Unique identifier for the end-user, for abuse monitoring', render: strTag },
+  seed: { iconType: KeyOutlined, iconColor: '#faad14', label: 'trafficDetail.ai.paramLabel.seed', desc: 'trafficDetail.ai.paramDesc.seed', render: numTag },
+  user: { iconType: UserOutlined, iconColor: '#8c8c8c', label: 'trafficDetail.ai.paramLabel.user', desc: 'trafficDetail.ai.paramDesc.user', render: strTag },
   reasoning: {
-    iconType: BulbOutlined, iconColor: '#722ed1', label: 'Reasoning', desc: 'Reasoning/thinking configuration for o-series and reasoning models',
+    iconType: BulbOutlined, iconColor: '#722ed1', label: 'trafficDetail.ai.paramLabel.reasoning', desc: 'trafficDetail.ai.paramDesc.reasoning',
     render: (val) => {
       if (typeof val === 'object' && val !== null) {
         const v = val as Record<string, unknown>;
@@ -735,14 +747,14 @@ const KNOWN_PARAMS: Record<string, ParamMeta> = {
     },
   },
   reasoning_effort: {
-    iconType: BulbOutlined, iconColor: '#722ed1', label: 'Reasoning Effort', desc: 'How much effort the model should put into reasoning (low/medium/high)',
+    iconType: BulbOutlined, iconColor: '#722ed1', label: 'trafficDetail.ai.paramLabel.reasoningEffort', desc: 'trafficDetail.ai.paramDesc.reasoningEffort',
     render: (val) => {
       const c: Record<string, string> = { low: 'default', medium: 'blue', high: 'orange' };
       return <Tag color={c[String(val)] ?? 'default'} style={{ margin: 0, fontSize: 11 }}>{String(val)}</Tag>;
     },
   },
   tool_choice: {
-    iconType: ToolOutlined, iconColor: '#fa8c16', label: 'Tool Choice', desc: 'Controls which tool the model calls: auto, none, required, or specific function',
+    iconType: ToolOutlined, iconColor: '#fa8c16', label: 'trafficDetail.ai.paramLabel.toolChoice', desc: 'trafficDetail.ai.paramDesc.toolChoice',
     render: (val) => {
       if (typeof val === 'string') {
         const c: Record<string, string> = { auto: 'blue', none: 'default', required: 'orange' };
@@ -751,9 +763,9 @@ const KNOWN_PARAMS: Record<string, ParamMeta> = {
       return jsonTag(val);
     },
   },
-  parallel_tool_calls: { iconType: ThunderboltOutlined, iconColor: '#fa8c16', label: 'Parallel Tool Calls', desc: 'Whether the model can make multiple tool calls in one turn', render: boolTag },
+  parallel_tool_calls: { iconType: ThunderboltOutlined, iconColor: '#fa8c16', label: 'trafficDetail.ai.paramLabel.parallelToolCalls', desc: 'trafficDetail.ai.paramDesc.parallelToolCalls', render: boolTag },
   stream_options: {
-    iconType: CloudOutlined, iconColor: '#1677ff', label: 'Stream Options', desc: 'Streaming configuration (e.g. include_usage for token counting)',
+    iconType: CloudOutlined, iconColor: '#1677ff', label: 'trafficDetail.ai.paramLabel.streamOptions', desc: 'trafficDetail.ai.paramDesc.streamOptions',
     render: (val) => {
       if (typeof val === 'object' && val !== null) {
         const entries = Object.entries(val as Record<string, unknown>);
@@ -762,21 +774,21 @@ const KNOWN_PARAMS: Record<string, ParamMeta> = {
       return jsonTag(val);
     },
   },
-  service_tier: { iconType: SafetyOutlined, iconColor: '#52c41a', label: 'Service Tier', desc: 'Quality of service tier (auto, default, flex)', render: (val) => <Tag style={{ margin: 0, fontSize: 11 }}>{String(val)}</Tag> },
-  store: { iconType: DatabaseOutlined, iconColor: '#8c8c8c', label: 'Store', desc: 'Whether to store the output for model distillation or evals', render: boolTag },
-  metadata: { iconType: InfoCircleOutlined, iconColor: '#8c8c8c', label: 'Metadata', desc: 'Developer-defined tags and values for filtering completions', render: jsonTag },
-  prediction: { iconType: ExperimentOutlined, iconColor: '#722ed1', label: 'Prediction', desc: 'Predicted output to speed up generation with speculative decoding', render: jsonTag },
-  audio: { iconType: SettingOutlined, iconColor: '#13c2c2', label: 'Audio', desc: 'Audio output configuration (voice, format)', render: jsonTag },
+  service_tier: { iconType: SafetyOutlined, iconColor: '#52c41a', label: 'trafficDetail.ai.paramLabel.serviceTier', desc: 'trafficDetail.ai.paramDesc.serviceTier', render: (val) => <Tag style={{ margin: 0, fontSize: 11 }}>{String(val)}</Tag> },
+  store: { iconType: DatabaseOutlined, iconColor: '#8c8c8c', label: 'trafficDetail.ai.paramLabel.store', desc: 'trafficDetail.ai.paramDesc.store', render: boolTag },
+  metadata: { iconType: InfoCircleOutlined, iconColor: '#8c8c8c', label: 'trafficDetail.ai.paramLabel.metadata', desc: 'trafficDetail.ai.paramDesc.metadata', render: jsonTag },
+  prediction: { iconType: ExperimentOutlined, iconColor: '#722ed1', label: 'trafficDetail.ai.paramLabel.prediction', desc: 'trafficDetail.ai.paramDesc.prediction', render: jsonTag },
+  audio: { iconType: SettingOutlined, iconColor: '#13c2c2', label: 'trafficDetail.ai.paramLabel.audio', desc: 'trafficDetail.ai.paramDesc.audio', render: jsonTag },
   modalities: {
-    iconType: SettingOutlined, iconColor: '#eb2f96', label: 'Modalities', desc: 'Output modalities to generate (text, audio)',
+    iconType: SettingOutlined, iconColor: '#eb2f96', label: 'trafficDetail.ai.paramLabel.modalities', desc: 'trafficDetail.ai.paramDesc.modalities',
     render: (val) => {
       if (Array.isArray(val)) return <Space size={4}>{val.map((v, i) => <Tag key={i} style={{ margin: 0, fontSize: 11 }}>{String(v)}</Tag>)}</Space>;
       return strTag(val);
     },
   },
-  functions: { iconType: CodeOutlined, iconColor: '#13c2c2', label: 'Functions (Deprecated)', desc: 'Legacy function definitions (deprecated, use tools instead)', render: (val) => <Tag style={{ margin: 0, fontSize: 10 }}>{Array.isArray(val) ? `${val.length} functions` : 'set'}</Tag> },
+  functions: { iconType: CodeOutlined, iconColor: '#13c2c2', label: 'trafficDetail.ai.paramLabel.functions', desc: 'trafficDetail.ai.paramDesc.functions', render: (val) => <Tag style={{ margin: 0, fontSize: 10 }}>{Array.isArray(val) ? translate('trafficDetail.ai.functionsCount', { count: val.length }) : translate('trafficDetail.ai.set')}</Tag> },
   function_call: {
-    iconType: CodeOutlined, iconColor: '#13c2c2', label: 'Function Call (Deprecated)', desc: 'Legacy function call mode (deprecated, use tool_choice instead)',
+    iconType: CodeOutlined, iconColor: '#13c2c2', label: 'trafficDetail.ai.paramLabel.functionCall', desc: 'trafficDetail.ai.paramDesc.functionCall',
     render: (val) => {
       if (typeof val === 'string') return <Tag style={{ margin: 0, fontSize: 11 }}>{val}</Tag>;
       return jsonTag(val);
@@ -785,13 +797,14 @@ const KNOWN_PARAMS: Record<string, ParamMeta> = {
 };
 
 const ConfigRow = memo(({ label, desc, iconType: Icon, iconColor, value, render }: {
-  label: string;
-  desc: string;
+  label: TranslationKey;
+  desc: TranslationKey;
   iconType: React.ComponentType<{ style?: React.CSSProperties }>;
   iconColor: string;
   value: unknown;
   render?: (value: unknown) => React.ReactNode;
 }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   return (
     <div
@@ -806,9 +819,9 @@ const ConfigRow = memo(({ label, desc, iconType: Icon, iconColor, value, render 
     >
       <Space size={6} style={{ flexShrink: 0 }}>
         <Icon style={{ color: iconColor, fontSize: 12 }} />
-        <Tooltip title={desc}>
+        <Tooltip title={t(desc)}>
           <Text type="secondary" style={{ fontSize: 12, cursor: 'help', borderBottom: '1px dashed', borderColor: token.colorBorderSecondary }}>
-            {label}
+            {t(label)}
           </Text>
         </Tooltip>
       </Space>
@@ -820,6 +833,7 @@ const ConfigRow = memo(({ label, desc, iconType: Icon, iconColor, value, render 
 });
 
 const ConfigPanel = memo(({ model, stream, config }: { model: string; stream: boolean | null; config: Record<string, unknown> }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const { knownItems, unknownItems } = useMemo(() => {
@@ -856,7 +870,7 @@ const ConfigPanel = memo(({ model, stream, config }: { model: string; stream: bo
         }}
       >
         <ThunderboltOutlined style={{ color: '#1677ff', fontSize: 13 }} />
-        <Text strong style={{ fontSize: 13 }}>Model Configuration</Text>
+        <Text strong style={{ fontSize: 13 }}>{t('trafficDetail.ai.modelConfig')}</Text>
       </div>
 
       <div style={{ padding: '6px 10px', display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -871,7 +885,7 @@ const ConfigPanel = memo(({ model, stream, config }: { model: string; stream: bo
         >
           <Space size={6}>
             <RobotOutlined style={{ color: '#52c41a', fontSize: 12 }} />
-            <Text type="secondary" style={{ fontSize: 12 }}>Model</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>{t('trafficDetail.ai.model')}</Text>
           </Space>
           <Text strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{model}</Text>
         </div>
@@ -888,14 +902,14 @@ const ConfigPanel = memo(({ model, stream, config }: { model: string; stream: bo
           >
             <Space size={6}>
               <CloudOutlined style={{ color: '#1677ff', fontSize: 12 }} />
-              <Tooltip title="Whether to stream partial responses as server-sent events">
+              <Tooltip title={t('trafficDetail.ai.streamDesc')}>
                 <Text type="secondary" style={{ fontSize: 12, cursor: 'help', borderBottom: '1px dashed', borderColor: token.colorBorderSecondary }}>
-                  Stream
+                  {t('trafficDetail.ai.stream')}
                 </Text>
               </Tooltip>
             </Space>
             <Tag color={stream ? 'green' : 'default'} style={{ margin: 0, fontSize: 11 }}>
-              {stream ? 'Enabled' : 'Disabled'}
+              {stream ? t('common.enabled') : t('common.disabled')}
             </Tag>
           </div>
         )}
@@ -955,6 +969,7 @@ interface OpenAiChatViewProps {
 }
 
 export const OpenAiChatView = memo(({ parsed }: OpenAiChatViewProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const groups = useMemo(
@@ -990,7 +1005,7 @@ export const OpenAiChatView = memo(({ parsed }: OpenAiChatViewProps) => {
         >
           <WarningOutlined style={{ color: '#faad14', fontSize: 13 }} />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Body too large for full JSON parse — extracted via regex scan. Some fields may be incomplete.
+            {t('trafficDetail.ai.truncated')}
           </Text>
         </div>
       )}
@@ -1006,7 +1021,7 @@ export const OpenAiChatView = memo(({ parsed }: OpenAiChatViewProps) => {
             label: (
               <Space size={6}>
                 <ToolOutlined style={{ color: '#13c2c2' }} />
-                <Text strong style={{ fontSize: 13 }}>Tool Definitions</Text>
+                <Text strong style={{ fontSize: 13 }}>{t('trafficDetail.ai.toolDefinitions')}</Text>
                 <Tag style={{ margin: 0, fontSize: 11 }}>{parsed.tools.length}</Tag>
               </Space>
             ),
@@ -1036,12 +1051,12 @@ export const OpenAiChatView = memo(({ parsed }: OpenAiChatViewProps) => {
       >
         <Space size={6}>
           <MessageOutlined style={{ color: token.colorTextSecondary, fontSize: 13 }} />
-          <Text strong style={{ fontSize: 13 }}>Conversation</Text>
+          <Text strong style={{ fontSize: 13 }}>{t('trafficDetail.ai.conversation')}</Text>
           <Tag style={{ margin: 0, fontSize: 11 }}>{parsed.messages.length}</Tag>
         </Space>
-        <Tooltip title={`Total: ${totalChars.toLocaleString()} chars`}>
+        <Tooltip title={t('trafficDetail.ai.totalChars', { count: totalChars.toLocaleString() })}>
           <Tag style={{ margin: 0, fontSize: 10, fontFamily: 'monospace', cursor: 'default' }}>
-            Σ {formatCharCount(totalChars)} chars
+            Σ {t('trafficDetail.ai.chars', { count: formatCharCount(totalChars) })}
           </Tag>
         </Tooltip>
       </div>

@@ -20,6 +20,7 @@ import {
 } from "@ant-design/icons";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo } from "react";
+import { useI18n } from "../../i18n";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
 import { usePendingIpTlsStore } from "../../stores/usePendingIpTlsStore";
 import { usePairingRequestStore } from "../../stores/usePairingRequestStore";
@@ -47,6 +48,8 @@ import {
 interface MenuItem {
   key: string;
   icon: React.ReactNode;
+  /** Stable English identifier exposed as `data-nav-label` (not translated). */
+  navId: string;
   label: string;
   hidden?: boolean;
 }
@@ -55,6 +58,7 @@ export default function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const {
     pendingCount,
     startSSE,
@@ -102,19 +106,19 @@ export default function AppLayout() {
 
   const menuItems: MenuItem[] = useMemo(
     () => [
-      { key: "/activity", icon: <DashboardOutlined />, label: "Activity" },
-      { key: "/traffic", icon: <GlobalOutlined />, label: "Network" },
-      { key: "/replay", icon: <ThunderboltOutlined />, label: "Replay" },
-      { key: "/rules", icon: <FileTextOutlined />, label: "Rules" },
-      { key: "/values", icon: <DatabaseOutlined />, label: "Values" },
-      { key: "/scripts", icon: <CodeOutlined />, label: "Scripts" },
-      { key: "/ai", icon: <RobotOutlined />, label: "AI" },
-      { key: "/devtools", icon: <BugOutlined />, label: "DevTools" },
-      { key: "/groups", icon: <UsergroupAddOutlined />, label: "Groups", hidden: !showGroups },
-      { key: "/notifications", icon: <BellOutlined />, label: "Notify" },
-      { key: "/settings", icon: <SettingOutlined />, label: "Settings" },
+      { key: "/activity", icon: <DashboardOutlined />, navId: "Activity", label: t("app.navActivity") },
+      { key: "/traffic", icon: <GlobalOutlined />, navId: "Network", label: t("app.navTraffic") },
+      { key: "/replay", icon: <ThunderboltOutlined />, navId: "Replay", label: t("app.navReplay") },
+      { key: "/rules", icon: <FileTextOutlined />, navId: "Rules", label: t("app.navRules") },
+      { key: "/values", icon: <DatabaseOutlined />, navId: "Values", label: t("app.navValues") },
+      { key: "/scripts", icon: <CodeOutlined />, navId: "Scripts", label: t("app.navScripts") },
+      { key: "/ai", icon: <RobotOutlined />, navId: "AI", label: t("app.navAi") },
+      { key: "/devtools", icon: <BugOutlined />, navId: "DevTools", label: t("app.navDevtools") },
+      { key: "/groups", icon: <UsergroupAddOutlined />, navId: "Groups", label: t("app.navGroups"), hidden: !showGroups },
+      { key: "/notifications", icon: <BellOutlined />, navId: "Notify", label: t("app.navNotify") },
+      { key: "/settings", icon: <SettingOutlined />, navId: "Settings", label: t("app.navSettings") },
     ],
-    [showGroups],
+    [showGroups, t],
   );
 
   useEffect(() => {
@@ -440,8 +444,8 @@ export default function AppLayout() {
           <button
             type="button"
             data-testid="desktop-window-minimize"
-            aria-label="Minimize window"
-            title="Minimize"
+            aria-label={t("app.window.minimizeAria")}
+            title={t("app.window.minimize")}
             style={styles.windowsWindowControlButton}
             onClick={() => handleWindowsWindowAction("minimize")}
           >
@@ -450,8 +454,8 @@ export default function AppLayout() {
           <button
             type="button"
             data-testid="desktop-window-maximize"
-            aria-label="Maximize window"
-            title="Maximize"
+            aria-label={t("app.window.maximizeAria")}
+            title={t("app.window.maximize")}
             style={styles.windowsWindowControlButton}
             onClick={() => handleWindowsWindowAction("maximize")}
           >
@@ -460,8 +464,8 @@ export default function AppLayout() {
           <button
             type="button"
             data-testid="desktop-window-close"
-            aria-label="Close window"
-            title="Close"
+            aria-label={t("app.window.closeAria")}
+            title={t("common.close")}
             style={{
               ...styles.windowsWindowControlButton,
               color: isDark ? "rgba(248, 113, 113, 0.92)" : "rgba(185, 28, 28, 0.88)",
@@ -501,7 +505,7 @@ export default function AppLayout() {
                 <div
                   key={item.key}
                   data-testid="app-sidebar-nav-item"
-                  data-nav-label={item.label}
+                  data-nav-label={item.navId}
                   data-nav-key={item.key}
                   style={{
                     ...styles.menuItem,
@@ -524,7 +528,7 @@ export default function AppLayout() {
             data-testid="app-sidebar-openapi"
             style={styles.openApiLink}
             onClick={handleOpenApiClick}
-            title="Open OpenAPI documentation"
+            title={t("app.openApiTooltip")}
           >
             OpenAPI
           </div>

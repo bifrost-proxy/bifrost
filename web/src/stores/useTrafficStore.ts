@@ -43,6 +43,7 @@ import {
   getTrafficWindowBoundaries,
   mergeBoundedTrafficWindow,
 } from "./trafficWindow";
+import { t } from "../i18n";
 export type { TrafficRecordsMutation } from "./trafficStoreTypes";
 export type { PanelFilters } from "./trafficFilters";
 export {
@@ -1164,7 +1165,7 @@ export const useTrafficStore = create<TrafficState>()(
             const message =
               error.response?.data?.error ||
               error.message ||
-              "Request detail not found";
+              t("shared.traffic.detailNotFound");
             set({
               currentRecord: null,
               requestBody: null,

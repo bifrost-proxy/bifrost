@@ -13,6 +13,7 @@ import {
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { SSEEvent } from '../../../../types';
 import { SseEventCard } from './SseEventCard';
+import { useI18n } from '../../../../i18n';
 
 const { Text } = Typography;
 const { Search } = Input;
@@ -53,6 +54,7 @@ export const SseMessageList = ({
   onMatchNavigate,
   onOpenDetail,
 }: SseMessageListProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const parentRef = useRef<HTMLDivElement>(null);
   const [currentMatch, setCurrentMatch] = useState<number>(-1);
@@ -227,11 +229,11 @@ export const SseMessageList = ({
     : null;
 
   const stateLabel = (() => {
-    if (connectionState === 'open') return 'Live';
-    if (connectionState === 'closed') return 'Closed';
-    if (connectionState === 'error') return 'Error';
-    if (connectionState === 'connecting') return 'Connecting';
-    return 'Idle';
+    if (connectionState === 'open') return t('trafficDetail.messages.stateLive');
+    if (connectionState === 'closed') return t('trafficDetail.messages.stateClosed');
+    if (connectionState === 'error') return t('trafficDetail.messages.stateError');
+    if (connectionState === 'connecting') return t('trafficDetail.messages.stateConnecting');
+    return t('trafficDetail.messages.stateIdle');
   })();
 
   const stateColor = (() => {
@@ -266,7 +268,7 @@ export const SseMessageList = ({
       >
         <Space size="small">
           <Search
-            placeholder="Search events..."
+            placeholder={t('trafficDetail.messages.searchEvents')}
             allowClear
             value={searchQuery}
             onChange={(e) => handleSearchChange(e.target.value)}
@@ -277,14 +279,14 @@ export const SseMessageList = ({
           />
 
           <Button.Group size="small">
-            <Tooltip title="Highlight matches">
+            <Tooltip title={t('trafficDetail.messages.highlightMatches')}>
               <Button
                 type={searchMode === 'highlight' ? 'primary' : 'default'}
                 icon={<HighlightOutlined />}
                 onClick={() => handleModeChange('highlight')}
               />
             </Tooltip>
-            <Tooltip title="Filter matches only">
+            <Tooltip title={t('trafficDetail.messages.filterMatchesOnly')}>
               <Button
                 type={searchMode === 'filter' ? 'primary' : 'default'}
                 icon={<FilterOutlined />}
@@ -319,14 +321,14 @@ export const SseMessageList = ({
             style={{ fontSize: 11 }}
             data-testid="sse-message-count"
           >
-            {displayEvents.length} of {events.length} events
+            {t('trafficDetail.messages.eventCount', { shown: displayEvents.length, total: events.length })}
             {hasMore && ' (+)'}
           </Text>
         </Space>
 
         <Space size="small">
           {onFullscreenOpen && (
-            <Tooltip title="Fullscreen">
+            <Tooltip title={t('trafficDetail.messages.fullscreen')}>
               <Button
                 size="small"
                 icon={<FullscreenOutlined />}
@@ -336,10 +338,10 @@ export const SseMessageList = ({
           )}
           {hasMore && (
             <Button size="small" onClick={onLoadMore} loading={loading}>
-              Load More
+              {t('trafficDetail.messages.loadMore')}
             </Button>
           )}
-          <Tooltip title="Refresh">
+          <Tooltip title={t('common.refresh')}>
             <Button
               size="small"
               icon={<ReloadOutlined />}
@@ -360,8 +362,8 @@ export const SseMessageList = ({
             }}
           >
             {searchMode === 'filter' && searchQuery
-              ? 'No events match your search'
-              : 'No events'}
+              ? t('trafficDetail.messages.noEventsMatch')
+              : t('trafficDetail.messages.noEvents')}
           </div>
         ) : (
           <div

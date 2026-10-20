@@ -56,10 +56,11 @@ import { resolveLegacyAiRedirect } from "./aiLayout";
 import {
   formatRunDuration,
   liveRunDuration,
-  RUN_SOURCE_LABELS,
-  RUN_STATUS_LABELS,
+  getRunSourceLabels,
+  getRunStatusLabels,
   runSourceLabel,
 } from "./runSummary";
+import { useI18n } from "../../i18n";
 import styles from "./index.module.css";
 
 const { Text, Title, Paragraph } = Typography;
@@ -93,6 +94,7 @@ function ModuleCard({
   badge,
 }: ModuleCardProps) {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const cssVars = {
     "--ai-card-bg": token.colorBgContainer,
     "--ai-card-border": token.colorBorderSecondary,
@@ -113,7 +115,7 @@ function ModuleCard({
       className={styles.moduleCard}
       style={cssVars}
       data-testid={testId}
-      aria-label={`Open ${title}`}
+      aria-label={t("ai.hub.openModule", { title })}
     >
       <div className={styles.moduleCardHeader}>
         <span className={styles.moduleIcon} aria-hidden="true">
@@ -126,13 +128,11 @@ function ModuleCard({
         <div className={styles.moduleTitle}>{title}</div>
         <div className={styles.moduleDescription}>{description}</div>
       </div>
-      <div className={styles.moduleMetrics} aria-label={`${title} summary`}>
+      <div className={styles.moduleMetrics} aria-label={t("ai.hub.moduleSummary", { title })}>
         {loading ? (
           <Skeleton active paragraph={{ rows: 1 }} title={false} />
         ) : error ? (
-          <Text type="secondary">
-            Summary unavailable. Open the module to continue managing it.
-          </Text>
+          <Text type="secondary">{t("ai.hub.summaryUnavailable")}</Text>
         ) : (
           metrics.map((metric) => (
             <div className={styles.moduleMetric} key={metric.label}>
@@ -150,13 +150,14 @@ interface HubSnapshot {
   loading: boolean;
   asr?: { available: boolean; taskCount: number; runningCount: number };
   channels?: { enabledCount: number; connectedCount: number };
-  agents?: { enabledRunnerCount: number; defaultRunner: string };
+  agents?: { enabledRunnerCount: number; defaultRunner: string | null };
   runs?: AgentRunSummaryResponse["summary"];
   errors: Set<"asr" | "channels" | "agents" | "runs">;
 }
 
 function AIHubPage() {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<HubSnapshot>({
     loading: true,
     errors: new Set(),
@@ -214,7 +215,7 @@ function AIHubPage() {
               enabledRunnerCount: Object.values(
                 agentResult.value.runners || {},
               ).filter((runner) => runner.enabled !== false).length,
-              defaultRunner: agentResult.value.defaultRunnerId || "Not set",
+              defaultRunner: agentResult.value.defaultRunnerId || null,
             }
           : undefined,
       runs:
@@ -231,7 +232,7 @@ function AIHubPage() {
   const activeRunnerText =
     snapshot.runs?.active_runners
       .map((runner) => `${runner.runner_id} × ${runner.count}`)
-      .join(", ") || "None";
+      .join(", ") || t("ai.hub.none");
 
   return (
     <main
@@ -243,11 +244,10 @@ function AIHubPage() {
         <div className={styles.hubHeading}>
           <div>
             <Title level={2} style={{ margin: 0 }}>
-              AI Center
+              {t("ai.hub.title")}
             </Title>
             <Paragraph type="secondary" style={{ margin: "8px 0 0" }}>
-              Manage speech, messaging channels, external agents, and run
-              summaries.
+              {t("ai.hub.description")}
             </Paragraph>
           </div>
           <Button
@@ -255,7 +255,7 @@ function AIHubPage() {
             onClick={() => void loadSnapshot()}
             loading={snapshot.loading}
           >
-            Refresh summaries
+            {t("ai.hub.refreshSummaries")}
           </Button>
         </div>
 
@@ -264,34 +264,45 @@ function AIHubPage() {
             to="/ai/asr"
             testId="ai-module-card-asr"
             icon={<SoundOutlined />}
-            title="ASR"
-            description="Manage local speech recognition, transcription tasks, and speech resources."
+            title={t("ai.module.asr.title")}
+            description={t("ai.module.asr.cardDescription")}
             loading={snapshot.loading}
             error={snapshot.errors.has("asr")}
             badge={
               snapshot.asr && (
                 <Tag color={snapshot.asr.available ? "success" : "default"}>
-                  {snapshot.asr.available ? "Available" : "Unavailable"}
+                  {snapshot.asr.available
+                    ? t("ai.hub.available")
+                    : t("ai.hub.unavailable")}
                 </Tag>
               )
             }
             metrics={[
-              { label: "Tasks", value: snapshot.asr?.taskCount ?? 0 },
-              { label: "Running", value: snapshot.asr?.runningCount ?? 0 },
+              {
+                label: t("ai.hub.metric.tasks"),
+                value: snapshot.asr?.taskCount ?? 0,
+              },
+              {
+                label: t("ai.hub.metric.running"),
+                value: snapshot.asr?.runningCount ?? 0,
+              },
             ]}
           />
           <ModuleCard
             to="/ai/channels"
             testId="ai-module-card-channels"
             icon={<MessageOutlined />}
-            title="IM Channels"
-            description="Configure Feishu, Weixin, destinations, routing, and schedules."
+            title={t("ai.module.channels.title")}
+            description={t("ai.module.channels.cardDescription")}
             loading={snapshot.loading}
             error={snapshot.errors.has("channels")}
             metrics={[
-              { label: "Enabled", value: snapshot.channels?.enabledCount ?? 0 },
               {
-                label: "Connected",
+                label: t("ai.hub.metric.enabled"),
+                value: snapshot.channels?.enabledCount ?? 0,
+              },
+              {
+                label: t("ai.hub.metric.connected"),
                 value: snapshot.channels?.connectedCount ?? 0,
               },
             ]}
@@ -300,18 +311,20 @@ function AIHubPage() {
             to="/ai/agents"
             testId="ai-module-card-agents"
             icon={<RobotOutlined />}
-            title="Agent Configuration"
-            description="Configure external runners, working directories, and instructions."
+            title={t("ai.module.agents.title")}
+            description={t("ai.module.agents.description")}
             loading={snapshot.loading}
             error={snapshot.errors.has("agents")}
             metrics={[
               {
-                label: "Available runners",
+                label: t("ai.hub.metric.availableRunners"),
                 value: snapshot.agents?.enabledRunnerCount ?? 0,
               },
               {
-                label: "Default runner",
-                value: snapshot.agents?.defaultRunner ?? "—",
+                label: t("ai.hub.metric.defaultRunner"),
+                value: snapshot.agents
+                  ? (snapshot.agents.defaultRunner ?? t("ai.hub.notSet"))
+                  : "—",
               },
             ]}
           />
@@ -319,21 +332,32 @@ function AIHubPage() {
             to="/ai/runs"
             testId="ai-module-card-runs"
             icon={<FieldTimeOutlined />}
-            title="Agent Runs"
-            description="Review basic external agent thread summaries in chronological order."
+            title={t("ai.module.runs.title")}
+            description={t("ai.module.runs.cardDescription")}
             loading={snapshot.loading}
             error={snapshot.errors.has("runs")}
             badge={
               snapshot.runs && snapshot.runs.running_count > 0 ? (
                 <Tag color="processing">
-                  {snapshot.runs.running_count} running
+                  {t("ai.hub.runningCount", {
+                    count: snapshot.runs.running_count,
+                  })}
                 </Tag>
               ) : undefined
             }
             metrics={[
-              { label: "Running", value: snapshot.runs?.running_count ?? 0 },
-              { label: "Total runs", value: snapshot.runs?.total_count ?? 0 },
-              { label: "Active runners", value: activeRunnerText },
+              {
+                label: t("ai.hub.metric.running"),
+                value: snapshot.runs?.running_count ?? 0,
+              },
+              {
+                label: t("ai.hub.metric.totalRuns"),
+                value: snapshot.runs?.total_count ?? 0,
+              },
+              {
+                label: t("ai.hub.metric.activeRunners"),
+                value: activeRunnerText,
+              },
             ]}
           />
         </div>
@@ -354,6 +378,7 @@ function AIDetailPage({
   scroll?: boolean;
 }) {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   return (
     <main
       className={styles.detailPage}
@@ -386,7 +411,7 @@ function AIDetailPage({
               to="/ai"
               data-testid="ai-home-link"
             >
-              <ArrowLeftOutlined /> AI Home
+              <ArrowLeftOutlined /> {t("ai.detail.home")}
             </Link>
             <Text type="secondary" className={styles.detailCrumbCurrent}>
               / {title}
@@ -412,6 +437,10 @@ function AIDetailPage({
 
 function RunRecordsPage() {
   const screens = useBreakpoint();
+  const { t, locale } = useI18n();
+  const dateLocale = locale === "zh-CN" ? "zh-CN" : "en-US";
+  const runStatusLabels = useMemo(() => getRunStatusLabels(t), [t]);
+  const runSourceLabels = useMemo(() => getRunSourceLabels(t), [t]);
   const [searchParams, setSearchParams] = useSearchParams();
   const [response, setResponse] = useState<AgentRunSummaryResponse | null>(
     null,
@@ -505,49 +534,49 @@ function RunRecordsPage() {
               : "default"
       }
     >
-      {RUN_STATUS_LABELS[status]}
+      {runStatusLabels[status]}
     </Tag>
   );
 
   const columns: ColumnsType<AgentRunSummaryItem> = [
     {
-      title: "Status",
+      title: t("ai.runs.column.status"),
       dataIndex: "status",
       width: 92,
       render: statusTag,
     },
     {
-      title: "Thread title",
+      title: t("ai.runs.column.title"),
       dataIndex: "title",
       ellipsis: true,
       render: (title: string) => <Text strong>{title}</Text>,
     },
-    { title: "Runner", dataIndex: "runner_id", width: 140 },
+    { title: t("ai.runs.column.runner"), dataIndex: "runner_id", width: 140 },
     {
-      title: "Duration",
+      title: t("ai.runs.column.duration"),
       width: 132,
       render: (_, item) =>
         formatRunDuration(liveRunDuration(item, nowSeconds)),
     },
     {
-      title: "User messages",
+      title: t("ai.runs.column.userMessages"),
       dataIndex: "user_message_count",
       width: 104,
       render: (count: number) => count,
     },
     {
-      title: "Source",
+      title: t("ai.runs.column.source"),
       dataIndex: "source",
       width: 100,
-      render: runSourceLabel,
+      render: (source: string) => runSourceLabel(source, t),
     },
     {
-      title: "Started",
+      title: t("ai.runs.column.started"),
       dataIndex: "start_time",
       width: 180,
       render: (timestamp: number) =>
         timestamp
-          ? new Date(timestamp * 1000).toLocaleString("en-US", {
+          ? new Date(timestamp * 1000).toLocaleString(dateLocale, {
               hour12: false,
             })
           : "—",
@@ -556,26 +585,32 @@ function RunRecordsPage() {
 
   return (
     <AIDetailPage
-      title="Agent Runs"
-      description="Thread summaries only. Messages, reasoning, and execution details are not retained here."
+      title={t("ai.module.runs.title")}
+      description={t("ai.module.runs.description")}
       scroll
     >
       <div className={styles.runPage} data-testid="agent-run-summaries">
-        <section className={styles.runOverview} aria-label="Run overview">
+        <section className={styles.runOverview} aria-label={t("ai.runs.overview")}>
           <div>
             <span className={styles.overviewValue}>
               {response?.summary.running_count ?? "—"}
             </span>
-            <span className={styles.overviewLabel}>Running now</span>
+            <span className={styles.overviewLabel}>
+              {t("ai.runs.runningNow")}
+            </span>
           </div>
           <div>
             <span className={styles.overviewValue}>
               {response?.summary.total_count ?? "—"}
             </span>
-            <span className={styles.overviewLabel}>Matching runs</span>
+            <span className={styles.overviewLabel}>
+              {t("ai.runs.matchingRuns")}
+            </span>
           </div>
           <div className={styles.activeRunners}>
-            <span className={styles.overviewLabel}>Active runners</span>
+            <span className={styles.overviewLabel}>
+              {t("ai.runs.activeRunners")}
+            </span>
             <Space size={[4, 4]} wrap>
               {response?.summary.active_runners.length ? (
                 response.summary.active_runners.map((runner) => (
@@ -584,27 +619,27 @@ function RunRecordsPage() {
                   </Tag>
                 ))
               ) : (
-                <Text type="secondary">No active threads</Text>
+                <Text type="secondary">{t("ai.runs.noActiveThreads")}</Text>
               )}
             </Space>
           </div>
         </section>
 
-        <section className={styles.runFilters} aria-label="Run filters">
+        <section className={styles.runFilters} aria-label={t("ai.runs.filters")}>
           <Input.Search
             allowClear
             value={searchDraft}
-            placeholder="Search title, runner, or source"
+            placeholder={t("ai.runs.searchPlaceholder")}
             onChange={(event) => setSearchDraft(event.target.value)}
             onSearch={(value) => updateFilter("q", value.trim() || undefined)}
             className={styles.searchInput}
           />
           <Select
             allowClear
-            placeholder="All statuses"
+            placeholder={t("ai.runs.allStatuses")}
             value={searchParams.get("status") || undefined}
             onChange={(value) => updateFilter("status", value)}
-            options={Object.entries(RUN_STATUS_LABELS).map(
+            options={Object.entries(runStatusLabels).map(
               ([value, label]) => ({
                 value,
                 label,
@@ -614,17 +649,17 @@ function RunRecordsPage() {
           <Select
             allowClear
             showSearch
-            placeholder="All runners"
+            placeholder={t("ai.runs.allRunners")}
             value={searchParams.get("runner") || undefined}
             onChange={(value) => updateFilter("runner", value)}
             options={runnerOptions}
           />
           <Select
             allowClear
-            placeholder="All sources"
+            placeholder={t("ai.runs.allSources")}
             value={searchParams.get("source") || undefined}
             onChange={(value) => updateFilter("source", value)}
-            options={Object.entries(RUN_SOURCE_LABELS).map(
+            options={Object.entries(runSourceLabels).map(
               ([value, label]) => ({
                 value,
                 label,
@@ -632,7 +667,7 @@ function RunRecordsPage() {
             )}
           />
           <Button icon={<ReloadOutlined />} onClick={() => void requestPage()}>
-            Refresh
+            {t("common.refresh")}
           </Button>
         </section>
 
@@ -640,8 +675,12 @@ function RunRecordsPage() {
           <Alert
             type="error"
             showIcon
-            message="Failed to load run summaries"
-            action={<Button onClick={() => void requestPage()}>Retry</Button>}
+            message={t("ai.runs.loadFailed")}
+            action={
+              <Button onClick={() => void requestPage()}>
+                {t("common.retry")}
+              </Button>
+            }
           />
         )}
 
@@ -652,7 +691,7 @@ function RunRecordsPage() {
             columns={columns}
             loading={loading}
             pagination={false}
-            locale={{ emptyText: "No run records" }}
+            locale={{ emptyText: t("ai.runs.empty") }}
             data-testid="agent-run-summary-table"
           />
         ) : (
@@ -676,11 +715,11 @@ function RunRecordsPage() {
                   </div>
                   <dl className={styles.mobileRunFacts}>
                     <div>
-                      <dt>Runner</dt>
+                      <dt>{t("ai.runs.column.runner")}</dt>
                       <dd>{item.runner_id}</dd>
                     </div>
                     <div>
-                      <dt>Duration</dt>
+                      <dt>{t("ai.runs.column.duration")}</dt>
                       <dd>
                         {formatRunDuration(
                           liveRunDuration(item, nowSeconds),
@@ -688,19 +727,19 @@ function RunRecordsPage() {
                       </dd>
                     </div>
                     <div>
-                      <dt>User messages</dt>
+                      <dt>{t("ai.runs.column.userMessages")}</dt>
                       <dd>{item.user_message_count}</dd>
                     </div>
                     <div>
-                      <dt>Source</dt>
-                      <dd>{runSourceLabel(item.source)}</dd>
+                      <dt>{t("ai.runs.column.source")}</dt>
+                      <dd>{runSourceLabel(item.source, t)}</dd>
                     </div>
                     <div>
-                      <dt>Started</dt>
+                      <dt>{t("ai.runs.column.started")}</dt>
                       <dd>
                         {item.start_time
                           ? new Date(item.start_time * 1000).toLocaleString(
-                              "en-US",
+                              dateLocale,
                               {
                                 hour12: false,
                               },
@@ -712,7 +751,7 @@ function RunRecordsPage() {
                 </article>
               ))
             ) : (
-              <Text type="secondary">No run records</Text>
+              <Text type="secondary">{t("ai.runs.empty")}</Text>
             )}
           </div>
         )}
@@ -725,7 +764,7 @@ function RunRecordsPage() {
                 void requestPage(response.next_cursor || undefined, true)
               }
             >
-              Load more
+              {t("ai.runs.loadMore")}
             </Button>
           </div>
         )}
@@ -743,6 +782,7 @@ function LegacyAIEntry() {
 
 export default function AI() {
   const location = useLocation();
+  const { t } = useI18n();
   return (
     <Routes location={location}>
       <Route index element={<LegacyAIEntry />} />
@@ -750,8 +790,8 @@ export default function AI() {
         path="asr"
         element={
           <AIDetailPage
-            title="ASR"
-            description="Manage local speech recognition, directory transcription tasks, and speech resources."
+            title={t("ai.module.asr.title")}
+            description={t("ai.module.asr.description")}
           >
             <ASR />
           </AIDetailPage>
@@ -761,8 +801,8 @@ export default function AI() {
         path="channels"
         element={
           <AIDetailPage
-            title="IM Channels"
-            description="Configure messaging entry points, destinations, routing, and schedules."
+            title={t("ai.module.channels.title")}
+            description={t("ai.module.channels.description")}
           >
             <ImGatewayTab hideSectionNav cardGrid />
           </AIDetailPage>
@@ -772,8 +812,8 @@ export default function AI() {
         path="agents"
         element={
           <AIDetailPage
-            title="Agent Configuration"
-            description="Configure external runners, working directories, and instructions."
+            title={t("ai.module.agents.title")}
+            description={t("ai.module.agents.description")}
           >
             <AgentTab />
           </AIDetailPage>

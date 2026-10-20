@@ -19,10 +19,12 @@ import {
 } from "../../utils/breakpointBody";
 import { isFinalBreakpointStatus } from "../../utils/breakpointValidation";
 import { useLiveNow } from "../../hooks/useLiveNow";
+import { useI18n } from "../../i18n";
 
 const { Text } = Typography;
 
 export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const now = useLiveNow(true, 250);
   const updateMetadata = useBreakpointStore(
@@ -48,10 +50,16 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
             breakpointBodyBytes(paused.body, paused.bodyEncoding).length >
               paused.maxBodyBytes
           )
-            throw new Error(`Body exceeds ${paused.maxBodyBytes} bytes`);
+            throw new Error(
+              t("trafficDetail.breakpoint.bodyExceeds", {
+                bytes: paused.maxBodyBytes,
+              }),
+            );
         } catch (error) {
           message.error(
-            error instanceof Error ? error.message : "Invalid body",
+            error instanceof Error
+              ? error.message
+              : t("trafficDetail.breakpoint.invalidBody"),
           );
           return;
         }
@@ -61,7 +69,11 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
             /[\r\n]/.test(value),
         );
         if (invalidHeader) {
-          message.error(`Invalid header: ${invalidHeader[0] || "empty name"}`);
+          message.error(
+            t("trafficDetail.breakpoint.invalidHeader", {
+              name: invalidHeader[0] || t("trafficDetail.breakpoint.emptyName"),
+            }),
+          );
           return;
         }
         if (paused.phase === "request") {
@@ -69,7 +81,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
             !paused.method ||
             !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(paused.method)
           ) {
-            message.error("Enter a valid HTTP method");
+            message.error(t("trafficDetail.breakpoint.invalidMethod"));
             return;
           }
           try {
@@ -77,11 +89,11 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
             if (url.protocol !== "http:" && url.protocol !== "https:")
               throw new Error();
           } catch {
-            message.error("Enter an absolute HTTP(S) URL");
+            message.error(t("trafficDetail.breakpoint.invalidUrl"));
             return;
           }
         } else if (!isFinalBreakpointStatus(paused.status)) {
-          message.error("Enter a final response status between 200 and 599");
+          message.error(t("trafficDetail.breakpoint.invalidStatus"));
           return;
         }
       }
@@ -91,17 +103,17 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
       if (ok) {
         message.success(
           applyEdits
-            ? "Breakpoint edits applied"
-            : "Breakpoint resumed unchanged",
+            ? t("trafficDetail.breakpoint.editsApplied")
+            : t("trafficDetail.breakpoint.resumedUnchanged"),
         );
       } else {
         message.error(
           useBreakpointStore.getState().resumeError ??
-            "Breakpoint is no longer pending; state has been refreshed",
+            t("trafficDetail.breakpoint.noLongerPending"),
         );
       }
     },
-    [paused, resume],
+    [paused, resume, t],
   );
 
   return (
@@ -123,18 +135,25 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
         style={{ margin: 0 }}
         data-testid="breakpoint-phase-badge"
       >
-        Breakpoint · {paused.phase === "request" ? "Request" : "Response"}
+        {t("trafficDetail.breakpoint.badge", {
+          phase:
+            paused.phase === "request"
+              ? t("trafficDetail.breakpoint.phaseRequest")
+              : t("trafficDetail.breakpoint.phaseResponse"),
+        })}
       </Tag>
       <Text
         type="secondary"
         style={{ fontSize: 12 }}
         data-testid="breakpoint-countdown"
       >
-        Auto-resume in {remainingLabel}
+        {t("trafficDetail.breakpoint.autoResumeIn", { time: remainingLabel })}
       </Text>
       {paused.contentEncoding ? (
         <Tag style={{ margin: 0 }} data-testid="breakpoint-content-encoding">
-          {paused.bodyRepresentation === "raw" ? "raw" : "decoded"}{" "}
+          {paused.bodyRepresentation === "raw"
+            ? t("trafficDetail.breakpoint.encodingRaw")
+            : t("trafficDetail.breakpoint.encodingDecoded")}{" "}
           {paused.contentEncoding}
         </Tag>
       ) : null}
@@ -143,8 +162,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
         (paused.status !== undefined &&
           (paused.status === 204 || paused.status === 304))) ? (
         <Text type="warning" data-testid="breakpoint-bodyless-warning">
-          HTTP bodyless semantics: body edits are discarded for HEAD, 204 and
-          304.
+          {t("trafficDetail.breakpoint.bodylessWarning")}
         </Text>
       ) : null}
       {paused.bodyOmitted ? (
@@ -153,8 +171,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
           style={{ fontSize: 12 }}
           data-testid="breakpoint-body-omitted"
         >
-          Body is unavailable for editing (safe size limit, streaming, or
-          bodyless response); metadata and headers remain editable.
+          {t("trafficDetail.breakpoint.bodyOmitted")}
         </Text>
       ) : null}
       {paused.phase === "request" ? (
@@ -162,7 +179,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
           <Input
             size="small"
             value={paused.method}
-            aria-label="Breakpoint request method"
+            aria-label={t("trafficDetail.breakpoint.ariaMethod")}
             data-testid="breakpoint-method-input"
             onChange={(event) =>
               updateMetadata(paused.requestId, paused.phase, {
@@ -174,7 +191,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
           <Input
             size="small"
             value={paused.url}
-            aria-label="Breakpoint request URL"
+            aria-label={t("trafficDetail.breakpoint.ariaUrl")}
             data-testid="breakpoint-url-input"
             onChange={(event) =>
               updateMetadata(paused.requestId, paused.phase, {
@@ -190,7 +207,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
           min={100}
           max={599}
           value={paused.status}
-          aria-label="Breakpoint response status"
+          aria-label={t("trafficDetail.breakpoint.ariaStatus")}
           data-testid="breakpoint-status-input"
           onChange={(value) =>
             updateMetadata(paused.requestId, paused.phase, {
@@ -203,7 +220,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
       {!paused.bodyOmitted ? (
         <Select
           size="small"
-          aria-label="Breakpoint body encoding"
+          aria-label={t("trafficDetail.breakpoint.ariaBodyEncoding")}
           data-testid="breakpoint-body-encoding"
           value={paused.bodyEncoding}
           options={[
@@ -223,16 +240,18 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
                 ),
               );
             } catch {
-              message.error(
-                "These bytes are not valid UTF-8; keep Base64 to edit losslessly",
-              );
+              message.error(t("trafficDetail.breakpoint.notValidUtf8"));
             }
           }}
         />
       ) : null}
       <Text type="secondary" style={{ fontSize: 12 }}>
-        Body limit: {paused.maxBodyBytes.toLocaleString()} bytes
-        {paused.bodyRepresentation === "raw" ? " · raw bytes" : ""}
+        {t("trafficDetail.breakpoint.bodyLimit", {
+          bytes: paused.maxBodyBytes.toLocaleString(),
+        })}
+        {paused.bodyRepresentation === "raw"
+          ? t("trafficDetail.breakpoint.rawBytesSuffix")
+          : ""}
       </Text>
       <Space.Compact>
         <Button
@@ -242,7 +261,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
           data-testid="breakpoint-resume-unchanged"
           onClick={() => void handleResume(false)}
         >
-          Resume unchanged
+          {t("trafficDetail.breakpoint.resumeUnchanged")}
         </Button>
         <Button
           size="small"
@@ -252,7 +271,7 @@ export function BreakpointBanner({ paused }: { paused: PausedBreakpoint }) {
           data-testid="breakpoint-apply-resume"
           onClick={() => void handleResume(true)}
         >
-          Apply & Resume
+          {t("trafficDetail.breakpoint.applyResume")}
         </Button>
       </Space.Compact>
     </div>

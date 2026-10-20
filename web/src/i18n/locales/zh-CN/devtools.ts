@@ -1,0 +1,113 @@
+import type en from "../en/devtools";
+
+const zhCN: Record<keyof typeof en, string> = {
+  // Page list
+  title: "DevTools",
+  subtitle: "命中 devtools:// 规则的在线页面",
+  searchPages: "搜索在线页面",
+  refreshPages: "刷新页面列表",
+  noOnlinePages: "暂无在线页面",
+  untitled: "（无标题）",
+  stateAttached: "已附加",
+  stateOnline: "在线",
+  controlEnabled: " · 已启用控制",
+
+  // Detail header
+  trafficLink: "流量 {id}",
+  copyUrl: "复制 URL",
+  copyTargetUrlAria: "复制目标 URL",
+  copyFailed: "复制失败",
+  urlCopied: "URL 已复制",
+  copyUrlFailed: "复制 URL 失败",
+  inspectElement: "从目标页面中选择元素",
+  "search.elements": "搜索元素",
+  "search.network": "搜索网络请求",
+  "search.cookies": "搜索 Cookie",
+  "search.localStorage": "搜索 LocalStorage",
+  "search.sessionStorage": "搜索 SessionStorage",
+  "search.console": "搜索控制台",
+
+  // Tabs
+  "tab.elements": "元素",
+  "tab.network": "网络",
+  "tab.cookies": "Cookie",
+  "tab.localStorage": "LocalStorage",
+  "tab.sessionStorage": "SessionStorage",
+  "tab.console": "控制台",
+
+  // Messages
+  refreshFailed: "刷新 DevTools 数据失败",
+  bridgeDisconnected: "目标页面的 DevTools 桥接已断开",
+  openSessionFailed: "打开 DevTools 会话失败",
+  highlightFailed: "高亮元素失败",
+  pickerHint: "在目标页面中点击元素即可选中",
+  pickerFailed: "启动元素选择器失败",
+  storageKeyRequired: "请输入存储键名",
+  storageUpdated: "存储已更新",
+  storageUpdateFailed: "更新存储失败",
+  storageDeleted: "存储项已删除",
+  storageDeleteFailed: "删除存储项失败",
+  trafficDetailNotFound: "未找到流量详情，可能已被删除，或仅作为 CONNECT 隧道被捕获。",
+  noMatchingTraffic: "没有匹配的流量记录，可能已被删除，或仅作为 CONNECT 隧道被捕获。",
+  detailRequestReplaced: "网络详情请求已被替换。",
+
+  // Network event detail
+  "network.selectRequest": "选择一个网络请求",
+  "network.method": "方法",
+  "network.status": "状态码",
+  "network.type": "类型",
+  "network.fromCache": "来自缓存",
+  "network.yes": "是",
+  "network.no": "否",
+  "network.host": "主机",
+  "network.path": "路径",
+  "network.protocol": "协议",
+  "network.clientRequestId": "客户端请求 ID",
+  "network.trafficId": "流量 ID",
+  "network.trafficMatch": "流量匹配",
+  "network.time": "时间",
+  "network.detailTitle": "网络详情",
+  "network.query": "查询参数",
+  "network.requestHeaders": "请求头",
+  "network.responseHeaders": "响应头",
+  "network.noCapturedQuery": "未捕获到查询参数",
+  "network.noCapturedRequestHeaders": "未捕获到请求头",
+  "network.noCapturedResponseHeaders": "未捕获到响应头",
+  "network.noEvents": "暂无网络事件",
+  "network.clientRequestTooltip": "DevTools 客户端请求 ID：{id}",
+  "network.capturedFromBridge": "从目标页面桥接捕获",
+  "network.clientPage": "页面",
+
+  // Storage
+  "storage.noSnapshot": "暂无存储快照",
+  "storage.countOne": "{filtered} / {total} 项",
+  "storage.countOther": "{filtered} / {total} 项",
+  "storage.key": "键",
+  "storage.empty": "空",
+  "storage.deleteAria": "删除 {key}",
+  "storage.copyAria": "复制 {key}",
+  "storage.editAria": "编辑 {key}",
+  "storage.saveAria": "保存存储项",
+  "storage.cancelAria": "取消编辑存储项",
+
+  // Console
+  "console.noMessages": "暂无控制台消息",
+  "console.placeholder": "在远程页面中运行 JavaScript",
+  "console.openEditorAria": "打开全屏 JavaScript 编辑器",
+  "console.run": "运行",
+  "console.editorTitle": "JavaScript 控制台",
+  "console.copyRaw": "复制原始控制台内容",
+  "console.collapseValue": "折叠控制台值",
+  "console.expandValue": "展开控制台值",
+  "console.overflowMore": "……还有 {count} 项",
+
+  // Elements
+  "elements.noSnapshot": "暂无 DOM 快照",
+  "elements.collapseNode": "折叠节点",
+  "elements.expandNode": "展开节点",
+  "elements.moreNodes": "……还有 {count} 个节点",
+  "elements.textNode": "文本节点",
+  "elements.view": "查看",
+};
+
+export default zhCN;

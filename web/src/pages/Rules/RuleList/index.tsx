@@ -40,6 +40,7 @@ import { createRuleShareLink as createRuleShareLinkApi } from '../../../api/rule
 import { isConnectionIssueError } from '../../../api/client';
 import { copyToClipboard } from '../../../utils/clipboard';
 import type { RuleFile } from '../../../types';
+import { useI18n, type TFunction } from '../../../i18n';
 import styles from './index.module.css';
 import {
   buildRuleTree,
@@ -52,10 +53,10 @@ import {
 
 type RuleSortMode = 'manual' | 'updated_desc' | 'name_asc';
 
-const ruleSortOptions = [
-  { label: 'Manual', value: 'manual' },
-  { label: 'Updated', value: 'updated_desc' },
-  { label: 'Name', value: 'name_asc' },
+const getRuleSortOptions = (t: TFunction) => [
+  { label: t('rules.list.sortManual'), value: 'manual' },
+  { label: t('rules.list.sortUpdated'), value: 'updated_desc' },
+  { label: t('rules.list.sortName'), value: 'name_asc' },
 ];
 
 function isRuleSortMode(value: string | undefined): value is RuleSortMode {
@@ -85,6 +86,8 @@ function compareDefaultFirst(left: RuleFile, right: RuleFile, rootRulesMode: boo
 }
 
 export default function RuleList() {
+  const { t } = useI18n();
+  const ruleSortOptions = useMemo(() => getRuleSortOptions(t), [t]);
   const {
     rules,
     selectedRuleName,
@@ -217,7 +220,7 @@ export default function RuleList() {
 
   const groupSwitcherOptions = useMemo(() => {
     const options: { label: ReactNode; value: string; searchText: string }[] = [
-      { label: 'My Rules', value: '__my__', searchText: 'My Rules' },
+      { label: t('rules.list.myRules'), value: '__my__', searchText: t('rules.list.myRules') },
     ];
 
     const sorted = [...(userGroups ?? [])].sort((a, b) => {
@@ -230,10 +233,10 @@ export default function RuleList() {
     });
 
     const levelTag = (g: Group) => {
-      if (g.level === 2) return <Tag color="gold" style={{ marginLeft: 'auto', marginRight: 0, lineHeight: '18px', fontSize: 11, padding: '0 4px' }}>Owner</Tag>;
-      if (g.level === 1) return <Tag color="blue" style={{ marginLeft: 'auto', marginRight: 0, lineHeight: '18px', fontSize: 11, padding: '0 4px' }}>Master</Tag>;
-      if (g.level === 0) return <Tag color="cyan" style={{ marginLeft: 'auto', marginRight: 0, lineHeight: '18px', fontSize: 11, padding: '0 4px' }}>Member</Tag>;
-      return <Tag style={{ marginLeft: 'auto', marginRight: 0, lineHeight: '18px', fontSize: 11, padding: '0 4px' }}>Public</Tag>;
+      if (g.level === 2) return <Tag color="gold" style={{ marginLeft: 'auto', marginRight: 0, lineHeight: '18px', fontSize: 11, padding: '0 4px' }}>{t('rules.list.groupLevelOwner')}</Tag>;
+      if (g.level === 1) return <Tag color="blue" style={{ marginLeft: 'auto', marginRight: 0, lineHeight: '18px', fontSize: 11, padding: '0 4px' }}>{t('rules.list.groupLevelMaster')}</Tag>;
+      if (g.level === 0) return <Tag color="cyan" style={{ marginLeft: 'auto', marginRight: 0, lineHeight: '18px', fontSize: 11, padding: '0 4px' }}>{t('rules.list.groupLevelMember')}</Tag>;
+      return <Tag style={{ marginLeft: 'auto', marginRight: 0, lineHeight: '18px', fontSize: 11, padding: '0 4px' }}>{t('rules.list.groupLevelPublic')}</Tag>;
     };
 
     for (const g of sorted) {
@@ -249,7 +252,7 @@ export default function RuleList() {
       });
     }
     return options;
-  }, [userGroups]);
+  }, [t, userGroups]);
 
   const stopAutoScroll = useCallback(() => {
     if (autoScrollFrameRef.current !== null) {
@@ -372,12 +375,12 @@ export default function RuleList() {
 
   const handleCreate = async () => {
     if (!newRuleName.trim()) {
-      message.error('Rule name is required');
+      message.error(t('rules.list.nameRequired'));
       return;
     }
     const success = await createRule(newRuleName.trim(), '# New rule\n');
     if (success) {
-      message.success('Rule created');
+      message.success(t('rules.list.created'));
       setCreateModalVisible(false);
       setNewRuleName('');
     }
@@ -386,19 +389,19 @@ export default function RuleList() {
   const handleDelete = async (name: string) => {
     const rule = rulesByName.get(name);
     if (isProtectedRule(rule, !isGroupMode) || rule?.can_delete === false) {
-      message.warning('Default rule cannot be deleted');
+      message.warning(t('rules.list.defaultCannotDelete'));
       return;
     }
     Modal.confirm({
-      title: 'Delete Rule',
-      content: `Are you sure to delete "${name}"?`,
-      okText: 'Delete',
+      title: t('rules.deleteTitle'),
+      content: t('rules.deleteContent', { name }),
+      okText: t('common.delete'),
       okType: 'danger',
-      cancelText: 'Cancel',
+      cancelText: t('common.cancel'),
       onOk: async () => {
         const success = await deleteRule(name);
         if (success) {
-          message.success('Rule deleted');
+          message.success(t('rules.deleted'));
         }
       },
     });
@@ -410,7 +413,7 @@ export default function RuleList() {
       return !isProtectedRule(rule, !isGroupMode) && rule?.can_delete !== false;
     });
     if (deletableNames.length !== names.length) {
-      message.warning('Default rule cannot be deleted');
+      message.warning(t('rules.list.defaultCannotDelete'));
     }
     if (deletableNames.length === 0) return;
     if (deletableNames.length === 1) {
@@ -418,11 +421,11 @@ export default function RuleList() {
       return;
     }
     Modal.confirm({
-      title: 'Delete Rules',
-      content: `Are you sure to delete ${deletableNames.length} rules?`,
-      okText: 'Delete',
+      title: t('rules.list.bulkDeleteTitle'),
+      content: t('rules.list.bulkDeleteContent', { count: deletableNames.length }),
+      okText: t('common.delete'),
       okType: 'danger',
-      cancelText: 'Cancel',
+      cancelText: t('common.cancel'),
       onOk: async () => {
         let successCount = 0;
         for (const name of deletableNames) {
@@ -430,7 +433,11 @@ export default function RuleList() {
           if (success) successCount++;
         }
         if (successCount > 0) {
-          message.success(`${successCount} rule${successCount > 1 ? 's' : ''} deleted`);
+          message.success(
+            t(successCount > 1 ? 'rules.list.bulkDeletedOther' : 'rules.list.bulkDeletedOne', {
+              count: successCount,
+            })
+          );
           setSelectedRules([]);
         }
       },
@@ -440,16 +447,16 @@ export default function RuleList() {
   const handleToggle = async (name: string, enabled: boolean) => {
     const rule = rulesByName.get(name);
     if (isProtectedRule(rule, !isGroupMode) && !enabled) {
-      message.warning('Default rule is always enabled');
+      message.warning(t('rules.list.defaultAlwaysEnabled'));
       return;
     }
     if (rule?.can_disable === false && !enabled) {
-      message.warning('This rule cannot be disabled');
+      message.warning(t('rules.list.cannotDisable'));
       return;
     }
     const success = await toggleRule(name, enabled);
     if (success) {
-      message.success(`Rule ${enabled ? 'enabled' : 'disabled'}`);
+      message.success(t(enabled ? 'rules.list.ruleEnabled' : 'rules.list.ruleDisabled'));
     }
   };
 
@@ -457,7 +464,7 @@ export default function RuleList() {
     if (!renameTarget || !newName.trim()) return;
     const rule = rulesByName.get(renameTarget);
     if (isProtectedRule(rule, !isGroupMode) || rule?.can_rename === false) {
-      message.warning('Default rule cannot be renamed');
+      message.warning(t('rules.list.defaultCannotRename'));
       setRenameModalVisible(false);
       return;
     }
@@ -467,7 +474,7 @@ export default function RuleList() {
     }
     const success = await renameRule(renameTarget, newName.trim());
     if (success) {
-      message.success('Rule renamed');
+      message.success(t('rules.list.renamed'));
       setRenameModalVisible(false);
       setRenameTarget(null);
       setNewName('');
@@ -501,7 +508,7 @@ export default function RuleList() {
     if (!shareTarget) return;
     const targetUrl = shareTargetUrl.trim();
     if (!targetUrl) {
-      message.error('Target URL is required');
+      message.error(t('rules.list.shareTargetUrlRequired'));
       return;
     }
 
@@ -509,26 +516,26 @@ export default function RuleList() {
     try {
       const response = await createRuleShareLinkApi(shareTarget, targetUrl);
       setShareLink(response.url);
-      message.success('Share link created');
+      message.success(t('rules.list.shareLinkCreated'));
     } catch (err) {
       if (!isConnectionIssueError(err)) {
         console.error('Failed to create rule share link:', err);
       }
-      message.error(err instanceof Error ? err.message : 'Failed to create share link');
+      message.error(err instanceof Error ? err.message : t('rules.list.shareLinkCreateFailed'));
     } finally {
       setShareLoading(false);
     }
-  }, [shareTarget, shareTargetUrl]);
+  }, [shareTarget, shareTargetUrl, t]);
 
   const handleCopyShareLink = useCallback(async () => {
     if (!shareLink) return;
     const copied = await copyToClipboard(shareLink);
     if (copied) {
-      message.success('Copied');
+      message.success(t('common.copied'));
     } else {
-      message.error('Copy failed');
+      message.error(t('common.copyFailed'));
     }
-  }, [shareLink]);
+  }, [shareLink, t]);
 
   const handleSelect = useCallback(
     (name: string, e: React.MouseEvent) => {
@@ -563,6 +570,10 @@ export default function RuleList() {
   );
 
   const getContextMenuItems = (name: string, enabled: boolean): MenuProps['items'] => {
+    const exportLabel = (count: number) =>
+      count > 1 ? t('rules.list.menuExportCount', { count }) : t('common.export');
+    const deleteLabel = (count: number) =>
+      count > 1 ? t('rules.list.menuDeleteCount', { count }) : t('common.delete');
     const rule = rulesByName.get(name);
     const isSelected = selectedRules.includes(name);
     const bulkNames = isSelected && selectedRules.length > 0 ? selectedRules : [name];
@@ -574,7 +585,7 @@ export default function RuleList() {
       {
         key: 'export',
         icon: <ExportOutlined />,
-        label: `Export${bulkNames.length > 1 ? ` (${bulkNames.length})` : ''}`,
+        label: exportLabel(bulkNames.length),
         onClick: () => handleExport(bulkNames),
       },
     ];
@@ -583,7 +594,7 @@ export default function RuleList() {
       exportItems.push({
         key: 'share',
         icon: <ShareAltOutlined />,
-        label: 'Share',
+        label: t('rules.list.menuShare'),
         onClick: () => openShareModal(name),
       });
     }
@@ -597,7 +608,7 @@ export default function RuleList() {
         {
           key: 'toggle',
           icon: enabled ? <PoweroffOutlined /> : <CheckOutlined />,
-          label: enabled ? 'Disable' : 'Enable',
+          label: enabled ? t('common.disable') : t('common.enable'),
           onClick: () => handleToggle(name, !enabled),
         },
         {
@@ -606,7 +617,7 @@ export default function RuleList() {
         {
           key: 'export',
           icon: <ExportOutlined />,
-          label: `Export${bulkNames.length > 1 ? ` (${bulkNames.length})` : ''}`,
+          label: exportLabel(bulkNames.length),
           onClick: () => handleExport(bulkNames),
         },
       ];
@@ -617,7 +628,7 @@ export default function RuleList() {
         {
           key: 'toggle',
           icon: enabled ? <PoweroffOutlined /> : <CheckOutlined />,
-          label: enabled ? 'Disable' : 'Enable',
+          label: enabled ? t('common.disable') : t('common.enable'),
           onClick: () => handleToggle(name, !enabled),
         },
         {
@@ -626,7 +637,7 @@ export default function RuleList() {
         {
           key: 'export',
           icon: <ExportOutlined />,
-          label: `Export${bulkNames.length > 1 ? ` (${bulkNames.length})` : ''}`,
+          label: exportLabel(bulkNames.length),
           onClick: () => handleExport(bulkNames),
         },
         {
@@ -635,7 +646,7 @@ export default function RuleList() {
         {
           key: 'delete',
           icon: <DeleteOutlined />,
-          label: `Delete${deletableBulkNames.length > 1 ? ` (${deletableBulkNames.length})` : ''}`,
+          label: deleteLabel(deletableBulkNames.length),
           danger: true,
           disabled: deletableBulkNames.length === 0,
           onClick: () => handleBulkDelete(deletableBulkNames),
@@ -647,13 +658,13 @@ export default function RuleList() {
       {
         key: 'toggle',
         icon: enabled ? <PoweroffOutlined /> : <CheckOutlined />,
-        label: enabled ? 'Disable' : 'Enable',
+        label: enabled ? t('common.disable') : t('common.enable'),
         onClick: () => handleToggle(name, !enabled),
       },
       {
         key: 'rename',
         icon: <EditOutlined />,
-        label: 'Rename',
+        label: t('common.rename'),
         onClick: () => {
           setRenameTarget(name);
           setNewName(name);
@@ -666,13 +677,13 @@ export default function RuleList() {
       {
         key: 'export',
         icon: <ExportOutlined />,
-        label: `Export${bulkNames.length > 1 ? ` (${bulkNames.length})` : ''}`,
+        label: exportLabel(bulkNames.length),
         onClick: () => handleExport(bulkNames),
       },
       {
         key: 'share',
         icon: <ShareAltOutlined />,
-        label: 'Share',
+        label: t('rules.list.menuShare'),
         onClick: () => openShareModal(name),
       },
       {
@@ -681,7 +692,7 @@ export default function RuleList() {
       {
         key: 'delete',
         icon: <DeleteOutlined />,
-        label: `Delete${deletableBulkNames.length > 1 ? ` (${deletableBulkNames.length})` : ''}`,
+        label: deleteLabel(deletableBulkNames.length),
         danger: true,
         disabled: deletableBulkNames.length === 0,
         onClick: () => handleBulkDelete(deletableBulkNames),
@@ -788,10 +799,10 @@ export default function RuleList() {
 
       const success = await reorderRules(reordered.map((r) => r.name));
       if (success) {
-        message.success('Rule order updated');
+        message.success(t('rules.list.orderUpdated'));
       }
     },
-    [draggedRuleName, isGroupMode, reorderRules, rules, rulesByName, stopAutoScroll]
+    [draggedRuleName, isGroupMode, reorderRules, rules, rulesByName, stopAutoScroll, t]
   );
 
   const handleListKeyDown = useCallback(
@@ -978,13 +989,13 @@ export default function RuleList() {
           >
             <div className={styles.itemContent}>
               {!isGroupMode && sortMode === 'manual' && canReorderRule && (
-                <Tooltip title="Drag to reorder">
+                <Tooltip title={t('rules.list.dragToReorder')}>
                   <HolderOutlined className={styles.dragHandle} />
                 </Tooltip>
               )}
               {globalDefaultRule ? (
                 <Tooltip
-                  title="Default applies globally with the highest priority. It cannot be disabled; clear its content if you do not need global rules."
+                  title={t('rules.list.globalDefaultTooltip')}
                   placement="right"
                 >
                   {ruleNameNode}
@@ -994,12 +1005,12 @@ export default function RuleList() {
               )}
               <div className={styles.itemMeta}>
                 {hasChanges && (
-                  <Tooltip title="Unsaved changes">
+                  <Tooltip title={t('rules.list.unsavedChanges')}>
                     <span className={styles.unsavedDot} />
                   </Tooltip>
                 )}
                 {rule.enabled && (
-                  <Tooltip title="Enabled">
+                  <Tooltip title={t('common.enabled')}>
                     <CheckOutlined className={styles.enabledIcon} />
                   </Tooltip>
                 )}
@@ -1051,10 +1062,10 @@ export default function RuleList() {
         </div>
       )}
       <div className={styles.header}>
-        <span className={styles.headerTitle}>Rules</span>
+        <span className={styles.headerTitle}>{t('rules.list.title')}</span>
         <div className={styles.headerActions}>
           {canEdit && (
-            <Tooltip title="New Rule">
+            <Tooltip title={t('rules.list.newRule')}>
               <Button
                 type="text"
                 size="small"
@@ -1064,7 +1075,7 @@ export default function RuleList() {
               />
             </Tooltip>
           )}
-          <Tooltip title="Refresh">
+          <Tooltip title={t('common.refresh')}>
             <Button
               type="text"
               size="small"
@@ -1088,7 +1099,7 @@ export default function RuleList() {
       <div className={styles.searchBox}>
         <Input
           size="small"
-          placeholder="Search rules..."
+          placeholder={t('rules.list.searchPlaceholder')}
           prefix={<SearchOutlined style={{ color: '#999' }} />}
           value={searchKeyword}
           onChange={(e) => setSearchKeyword(e.target.value)}
@@ -1117,7 +1128,7 @@ export default function RuleList() {
           className={styles.listContainer}
         tabIndex={0}
         role="listbox"
-        aria-label="Rules list"
+        aria-label={t('rules.list.ariaLabel')}
         aria-activedescendant={selectedRuleName ? getRuleItemId(selectedRuleName) : undefined}
         onKeyDown={handleListKeyDown}
         onDragOver={(e) => {
@@ -1150,7 +1161,7 @@ export default function RuleList() {
             {renderTreeNodes(ruleTree, 0)}
             {filteredRules.length === 0 && !loading && (
               <div className={styles.empty}>
-                {searchKeyword ? 'No matching rules' : 'No rules yet'}
+                {searchKeyword ? t('rules.list.emptyNoMatch') : t('rules.list.emptyNoRules')}
               </div>
             )}
           </div>
@@ -1160,24 +1171,27 @@ export default function RuleList() {
 
       <div className={styles.footer}>
         <span className={styles.stats}>
-          {rules.length} rules, {rules.filter((r) => r.enabled).length} enabled
-          {isReadOnlyGroup && ' (Read-only)'}
+          {t('rules.list.stats', {
+            total: rules.length,
+            enabled: rules.filter((r) => r.enabled).length,
+          })}
+          {isReadOnlyGroup && t('rules.list.readOnlySuffix')}
         </span>
       </div>
 
       <Modal
-        title="New Rule"
+        title={t('rules.list.newRule')}
         open={createModalVisible}
         onCancel={() => {
           setCreateModalVisible(false);
           setNewRuleName('');
         }}
         onOk={handleCreate}
-        okText="Create"
-        cancelText="Cancel"
+        okText={t('common.create')}
+        cancelText={t('common.cancel')}
       >
         <Input
-          placeholder="Rule name"
+          placeholder={t('rules.list.ruleNamePlaceholder')}
           value={newRuleName}
           onChange={(e) => setNewRuleName(e.target.value)}
           onPressEnter={handleCreate}
@@ -1186,7 +1200,7 @@ export default function RuleList() {
       </Modal>
 
       <Modal
-        title="Rename Rule"
+        title={t('rules.list.renameTitle')}
         open={renameModalVisible}
         onCancel={() => {
           setRenameModalVisible(false);
@@ -1194,11 +1208,11 @@ export default function RuleList() {
           setNewName('');
         }}
         onOk={handleRename}
-        okText="Rename"
-        cancelText="Cancel"
+        okText={t('common.rename')}
+        cancelText={t('common.cancel')}
       >
         <Input
-          placeholder="New name"
+          placeholder={t('rules.list.newNamePlaceholder')}
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onPressEnter={handleRename}
@@ -1207,7 +1221,7 @@ export default function RuleList() {
       </Modal>
 
       <Modal
-        title="Share Rule"
+        title={t('rules.list.shareTitle')}
         open={shareModalVisible}
         onCancel={() => {
           setShareModalVisible(false);
@@ -1216,8 +1230,8 @@ export default function RuleList() {
           setShareLink('');
         }}
         onOk={handleCreateShareLink}
-        okText="Create Link"
-        cancelText="Cancel"
+        okText={t('rules.list.shareCreateLink')}
+        cancelText={t('common.cancel')}
         confirmLoading={shareLoading}
       >
         <Input
@@ -1239,7 +1253,7 @@ export default function RuleList() {
               onClick={handleCopyShareLink}
               style={{ marginTop: 8 }}
             >
-              Copy
+              {t('common.copy')}
             </Button>
           </div>
         )}

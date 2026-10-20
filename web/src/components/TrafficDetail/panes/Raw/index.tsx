@@ -5,6 +5,7 @@ import { useTextSelection } from '../../hooks/useTextSelection';
 import { useMarkSearch } from '../../hooks/useMarkSearch';
 import { DEFAULT_SHOW_MAX_SIZE } from '../../helper/contentType';
 import { TunnelInterceptActions } from '../../TunnelInterceptActions';
+import { useI18n } from '../../../../i18n';
 
 interface RawProps {
   type: 'request' | 'response';
@@ -63,6 +64,7 @@ export const Raw = ({
   clientApp,
   clientIp,
 }: RawProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [showAll, setShowAll] = useState(false);
   const wrapperRef = useTextSelection(true);
@@ -172,7 +174,9 @@ export const Raw = ({
             background: token.colorBgContainer,
           }}
         >
-          Show All ({Math.round(((body?.length ?? 0) - DEFAULT_SHOW_MAX_SIZE) / 1024)}KB more)
+          {t('trafficDetail.body.showAll', {
+            size: Math.round(((body?.length ?? 0) - DEFAULT_SHOW_MAX_SIZE) / 1024),
+          })}
         </Button>
       )}
     </div>
